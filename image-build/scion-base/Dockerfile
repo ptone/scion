@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libexpat1-dev \
     zlib1g-dev \
     gettext \
+    ncurses-term \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -91,6 +92,7 @@ RUN mkdir -p /usr/local/share/npm-global \
     && chown -R node:node /usr/local/share/npm-global
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
 ENV PATH=/usr/local/share/npm-global/bin:/usr/local/go/bin:$PATH
+ENV LC_ALL C.UTF-8
 
 USER node
 
