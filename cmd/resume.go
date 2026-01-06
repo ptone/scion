@@ -15,6 +15,7 @@ preserving its previous state.
 The agent-name is required as the first argument. All subsequent arguments
 form the task prompt to be added to the resumed session (if supported by the harness).`,
 	Args: cobra.MinimumNArgs(1),
+	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return RunAgent(cmd, args, true)
 	},

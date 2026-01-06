@@ -18,6 +18,7 @@ var deleteCmd = &cobra.Command{
 	Aliases: []string{"rm"},
 	Short:   "Delete an agent",
 	Long:    `Stop and remove an agent container and its associated files and worktree.`,
+	ValidArgsFunction: getAgentNames,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if deleteStopped {
 			if len(args) > 0 {

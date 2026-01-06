@@ -16,6 +16,7 @@ var stopCmd = &cobra.Command{
 	Use:   "stop <agent>",
 	Short: "Stop an agent",
 	Args:  cobra.ExactArgs(1),
+	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		agentName := args[0]
 

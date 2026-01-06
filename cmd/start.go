@@ -16,6 +16,7 @@ The agent-name is required as the first argument. All subsequent arguments
 form the task prompt. If no task arguments are provided, the agent will 
 look for a prompt.md file in its root directory.`,
 	Args: cobra.MinimumNArgs(1),
+	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return RunAgent(cmd, args, false)
 	},
