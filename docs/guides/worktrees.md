@@ -21,23 +21,37 @@ This behavior is automatic and ensures that agents always have access to your co
 
 ## Non-Git Projects
 
-When working in a project that is not a Git repository, Scion provides access to your code by bind-mounting your project root directly.
+When working in a project that is not a Git repository, Scion provides access to your code by bind-mounting a host directory directly into the container's `/workspace`.
 
 ### Workspace Behavior
 
 In a non-git project:
-1. **Direct Mount**: Instead of creating an isolated copy of your files, Scion mounts the host project directory directly into the container's `/workspace`.
+1. **Direct Mount**: Instead of creating an isolated copy of your files, Scion mounts a host directory directly into the container's `/workspace`.
 2. **Shared Access**: Unlike Git worktrees (which provide isolated branches), all agents in a non-git project share the **same host files**.
-3. **Global Groves**: If you are using a global grove (e.g., in your home directory), Scion mounts the **current working directory** (where you ran `scion start`) as the workspace.
+3. **Default Location**: 
+   - For **project-local groves**, Scion defaults to mounting the project root (the parent of the `.scion` directory).
+   - For the **global grove**, Scion defaults to mounting the **current working directory** (CWD) where you ran the command.
+
+### The `--workdir` Flag
+
+You can override the default host directory by using the `--workdir` flag with the `start` or `create` commands:
+
+```bash
+scion start my-agent --workdir ./my-subproject "do something"
+```
+
+- **Custom Path**: Specifies the host directory to be mounted as `/workspace` in the container.
+- **Relative Paths**: Supports relative paths (e.g., `.` or `./src`), which are resolved to absolute paths during provisioning.
+- **Git Restriction**: The `--workdir` flag **cannot** be used when working inside a Git repository. In Git projects, Scion always uses isolated worktrees.
 
 ### Configuration
 
-This behavior is configured during the provisioning phase. You can see the mount configuration in the agent's `scion-agent.json` file:
+The mount configuration is stored in the agent's `scion-agent.json` file:
 
 ```json
 "volumes": [
   {
-    "source": "/Users/you/dev/my-project",
+    "source": "/Users/you/dev/my-project/custom-path",
     "target": "/workspace",
     "read_only": false
   }
