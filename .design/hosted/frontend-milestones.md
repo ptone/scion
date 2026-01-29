@@ -472,7 +472,298 @@ Browser WS → Koa WS Proxy → Hub API WS → Runtime Host
 
 ---
 
-## Milestone 10: Production Hardening
+## Milestone 10: Template Management UI
+
+**Goal:** Implement the template browser, viewer, and upload functionality for managing agent templates.
+
+### Deliverables
+
+1. **Template list page**
+   - `<scion-template-list>` - filterable template browser
+   - Scope filtering (global/grove/user)
+   - Harness type filtering
+   - Search functionality
+
+2. **Template detail/viewer**
+   - `<scion-template-detail>` - template configuration viewer
+   - File manifest display
+   - Version history (future)
+
+3. **Template card component**
+   - `<scion-template-card>` - template summary card
+   - Scope badge display
+   - Action buttons (view, clone, delete)
+
+4. **Template upload wizard**
+   - `<scion-template-upload>` - multi-step upload form
+   - Metadata entry (name, description, harness)
+   - File selection and upload
+   - Signed URL upload integration
+   - Finalization step
+
+5. **Template scope selector**
+   - `<scion-scope-selector>` - reusable scope picker
+   - Support for user/grove scopes
+
+6. **Template clone dialog**
+   - Clone to different scope
+   - Rename on clone
+
+### Test Criteria
+
+| Test | Method | Expected Result |
+|------|--------|-----------------|
+| Template list loads | Visit `/templates` | Templates displayed |
+| Scope filter | Select "Global" | Only global templates shown |
+| Search | Type in search box | Templates filtered by name |
+| View template | Click "View" | Navigate to detail page |
+| Clone template | Click "Clone" | Clone dialog opens |
+| Upload template | Complete upload wizard | Template created, files uploaded |
+| Delete template | Click "Delete" (non-global) | Template removed |
+
+### Routes
+
+| Route | Page | SSR Data |
+|-------|------|----------|
+| `/templates` | Template list | Templates (scoped) |
+| `/templates/:templateId` | Template detail | Template + files |
+| `/templates/new` | Template upload | None (form) |
+
+---
+
+## Milestone 11: User & Group Management UI
+
+**Goal:** Implement user listing, group management, and membership functionality.
+
+### Deliverables
+
+1. **User list page**
+   - `<scion-user-list>` - user directory
+   - Role/status badges
+   - Search and filtering
+   - Role modification (admin only)
+
+2. **User detail page**
+   - `<scion-user-detail>` - user profile view
+   - Group memberships
+   - Recent activity
+
+3. **User avatar component**
+   - `<scion-user-avatar>` - avatar with fallback
+   - Status indicator
+
+4. **Group list page**
+   - `<scion-group-list>` - group directory
+   - Member count display
+   - Create group button
+
+5. **Group detail page**
+   - `<scion-group-detail>` - group management
+   - Member list with add/remove
+   - Group metadata editing
+   - Nested group support (display)
+
+6. **Member list component**
+   - `<scion-member-list>` - reusable member table
+   - User and group members
+   - Role column
+   - Remove action
+
+7. **Group badge component**
+   - `<scion-group-badge>` - group indicator
+
+### Test Criteria
+
+| Test | Method | Expected Result |
+|------|--------|-----------------|
+| User list | Visit `/users` | Users displayed |
+| User search | Type in search | Users filtered |
+| View user | Click user row | Navigate to user detail |
+| Group list | Visit `/groups` | Groups displayed |
+| Create group | Click "New Group" | Group created |
+| Add member | Click "Add Member" | Member added |
+| Remove member | Click "Remove" | Member removed |
+| Edit group | Modify group name | Group updated |
+
+### Routes
+
+| Route | Page | SSR Data |
+|-------|------|----------|
+| `/users` | User list | Users (paginated) |
+| `/users/:userId` | User detail | User + memberships |
+| `/groups` | Group list | Groups |
+| `/groups/:groupId` | Group detail | Group + members |
+
+---
+
+## Milestone 12: Permissions & Policy Management UI
+
+**Goal:** Implement policy creation, editing, and access evaluation debugging tools.
+
+### Deliverables
+
+1. **Policy list page**
+   - `<scion-policy-list>` - policy directory
+   - Scope/effect filtering
+   - Principal count display
+
+2. **Policy detail/editor**
+   - `<scion-policy-editor>` - policy form
+   - Scope type selection
+   - Resource type selection
+   - Action checkboxes
+   - Effect radio (allow/deny)
+   - Priority input
+
+3. **Principal selector**
+   - `<scion-principal-selector>` - user/group picker
+   - Multi-select support
+   - Search within selector
+
+4. **Permission badge component**
+   - `<scion-permission-badge>` - permission indicator
+   - Allow/deny styling
+
+5. **Access evaluation tool**
+   - `<scion-access-evaluator>` - debug interface
+   - Principal selection
+   - Resource selection
+   - Action selection
+   - Evaluate button
+   - Result display with explanation
+   - Matched policy display
+
+### Test Criteria
+
+| Test | Method | Expected Result |
+|------|--------|-----------------|
+| Policy list | Visit `/policies` | Policies displayed |
+| Create policy | Click "New Policy" | Policy form opens |
+| Add principal | Use principal selector | Principal added |
+| Save policy | Submit form | Policy created |
+| Evaluate access | Use evaluator | Result shown |
+| Denied result | Evaluate denied access | Red denied badge, explanation |
+| Matched policy | Evaluate access | Matching policy displayed |
+
+### Routes
+
+| Route | Page | SSR Data |
+|-------|------|----------|
+| `/policies` | Policy list | Policies |
+| `/policies/:policyId` | Policy editor | Policy + bindings |
+| `/policies/new` | Policy creator | None (form) |
+
+---
+
+## Milestone 13: Environment Variables & Secrets UI
+
+**Goal:** Implement scoped environment variable and secret management.
+
+### Deliverables
+
+1. **Environment settings page**
+   - `<scion-settings-env>` - env/secrets management
+   - Tab: Environment Variables
+   - Tab: Secrets
+   - Scope selector (user/grove/host)
+
+2. **Env var table**
+   - Key/value display
+   - Sensitive value masking
+   - Edit/delete actions
+
+3. **Secret table**
+   - Key/metadata display (no values)
+   - Version tracking
+   - Update/delete actions
+
+4. **Scope selector component**
+   - Scope type dropdown
+   - Grove/host selector when applicable
+
+5. **Env var editor dialog**
+   - `<scion-env-var-editor>` - create/edit form
+   - Key validation (UPPER_SNAKE_CASE)
+   - Sensitive toggle
+   - Description field
+
+6. **Secret editor dialog**
+   - `<scion-secret-editor>` - create/update form
+   - Write-only value field
+   - Description field
+   - "Keep current value" option on edit
+
+### Test Criteria
+
+| Test | Method | Expected Result |
+|------|--------|-----------------|
+| List env vars | Visit settings page | Env vars displayed |
+| Switch scope | Select "Grove" | Grove env vars shown |
+| Add env var | Click "Add Variable" | Dialog opens |
+| Edit env var | Click "Edit" | Dialog with current value |
+| Delete env var | Click "Delete" | Variable removed |
+| List secrets | Switch to Secrets tab | Secrets displayed (no values) |
+| Add secret | Click "Add Secret" | Dialog opens |
+| Update secret | Click "Update" | New value saved |
+| Secret not shown | View secret row | Only metadata, no value |
+
+### Routes
+
+| Route | Page | SSR Data |
+|-------|------|----------|
+| `/settings/env` | Env settings (user) | User env vars + secrets |
+| `/groves/:groveId/settings/env` | Env settings (grove) | Grove env vars + secrets |
+
+---
+
+## Milestone 14: API Key Management UI
+
+**Goal:** Implement API key creation, listing, and revocation.
+
+### Deliverables
+
+1. **API keys page**
+   - `<scion-api-keys>` - key management
+   - Key list table
+   - Key prefix display
+   - Last used timestamp
+   - Expiry display
+
+2. **Create key dialog**
+   - Key name input
+   - Expiry option
+   - Scope selection (future)
+
+3. **Key display alert**
+   - One-time key display
+   - Copy button
+   - Warning about single display
+
+4. **Revoke confirmation**
+   - Confirmation dialog
+   - Key name display
+
+### Test Criteria
+
+| Test | Method | Expected Result |
+|------|--------|-----------------|
+| List keys | Visit `/settings/api-keys` | Keys displayed |
+| Create key | Click "Create API Key" | Dialog opens |
+| Key shown once | After creation | Full key displayed |
+| Copy key | Click copy button | Key copied to clipboard |
+| Key hidden | View list after creation | Only prefix shown |
+| Revoke key | Click "Revoke" | Key removed |
+| Revoked key fails | Use revoked key | 401 Unauthorized |
+
+### Routes
+
+| Route | Page | SSR Data |
+|-------|------|----------|
+| `/settings/api-keys` | API keys | Key metadata (no values) |
+
+---
+
+## Milestone 15: Production Hardening
 
 **Goal:** Prepare for production deployment with security, performance, and observability improvements.
 
@@ -519,7 +810,7 @@ Browser WS → Koa WS Proxy → Hub API WS → Runtime Host
 
 ---
 
-## Milestone 11: Cloud Run Deployment
+## Milestone 16: Cloud Run Deployment
 
 **Goal:** Deploy the web frontend to Cloud Run with full CI/CD pipeline.
 
@@ -587,9 +878,17 @@ gcloud run deploy scion-web \
 ```
 M1 ──► M2 ──► M3 ──┬──► M4 ──► M5 ──► M6 ──┬──► M7 ──► M8
                    │                        │
-                   │                        └──► M9
+                   │                        ├──► M9
+                   │                        │
+                   │                        ├──► M10 (Template Mgmt)
+                   │                        │
+                   │                        ├──► M11 (User/Group) ──► M12 (Permissions)
+                   │                        │
+                   │                        ├──► M13 (Env/Secrets)
+                   │                        │
+                   │                        └──► M14 (API Keys)
                    │
-                   └──────────────────────────────────► M10 ──► M11
+                   └──────────────────────────────────► M15 ──► M16
 ```
 
 | Milestone | Depends On | Can Parallelize With |
@@ -600,11 +899,16 @@ M1 ──► M2 ──► M3 ──┬──► M4 ──► M5 ──► M6 ─
 | M4: Authentication | M3 | - |
 | M5: Hub API Proxy | M4 | - |
 | M6: Grove & Agent Pages | M5 | - |
-| M7: SSE + NATS | M6 | M9 |
+| M7: SSE + NATS | M6 | M9, M10-M14 |
 | M8: Terminal | M7 | - |
-| M9: Agent Creation | M6 | M7, M8 |
-| M10: Production Hardening | M3+ | M7-M9 |
-| M11: Cloud Run Deployment | M10 | - |
+| M9: Agent Creation | M6 | M7, M8, M10-M14 |
+| M10: Template Management | M6 | M7-M9, M11-M14 |
+| M11: User & Group Mgmt | M6 | M7-M10, M13-M14 |
+| M12: Permissions & Policy | M11 | M7-M10, M13-M14 |
+| M13: Env & Secrets | M6 | M7-M12, M14 |
+| M14: API Key Mgmt | M4 | M7-M13 |
+| M15: Production Hardening | M3+ | M7-M14 |
+| M16: Cloud Run Deployment | M15 | - |
 
 ---
 
@@ -621,8 +925,13 @@ M1 ──► M2 ──► M3 ──┬──► M4 ──► M5 ──► M6 ─
 | M7: SSE + NATS | High | Connection management, race conditions |
 | M8: Terminal | Medium | xterm.js SSR compatibility |
 | M9: Agent Creation | Medium | Form complexity |
-| M10: Production Hardening | Medium | Security review |
-| M11: Cloud Run Deployment | Medium | Infrastructure setup |
+| M10: Template Management | Medium | File upload UX, signed URL handling |
+| M11: User & Group Mgmt | Medium | Member list UX, nested groups |
+| M12: Permissions & Policy | High | Policy model complexity, evaluation logic |
+| M13: Env & Secrets | Low | Scope switching UX |
+| M14: API Key Mgmt | Low | Key display security |
+| M15: Production Hardening | Medium | Security review |
+| M16: Cloud Run Deployment | Medium | Infrastructure setup |
 
 ---
 
@@ -655,3 +964,7 @@ M1 ──► M2 ──► M3 ──┬──► M4 ──► M5 ──► M6 ─
 - **Web Frontend Design:** `web-frontend-design.md`
 - **Hub API:** `hub-api.md`
 - **Server Implementation:** `server-implementation-design.md`
+- **Hosted Architecture:** `hosted-architecture.md`
+- **Authentication Design:** `authentication-design.md`
+- **Permissions Design:** `permissions-design.md`
+- **Hosted Templates:** `hosted-templates.md`

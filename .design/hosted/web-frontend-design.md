@@ -86,7 +86,127 @@ The Scion Web Frontend provides a browser-based dashboard for managing agents, g
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 Snapshot + Delta Pattern
+### 2.2 Data Models
+
+The web frontend interacts with the following core data models from the Hub API. See `hub-api.md` for complete specifications.
+
+#### Core Resources
+
+| Model | Description | Key Operations |
+|-------|-------------|----------------|
+| **Agent** | Running or stopped agent instance | List, Create, Start, Stop, Delete, Attach PTY |
+| **Grove** | Project grouping of agents | List, View, Settings, Contributors |
+| **Template** | Agent configuration blueprint | List, Create, Upload, Clone, Delete |
+| **User** | Registered user account | Profile, Preferences |
+| **Group** | Collection of users for access control | List, Create, Manage Members |
+| **Policy** | Access control rules | List, Create, Evaluate |
+| **EnvVar** | Environment variable (scoped) | List, Set, Delete |
+| **Secret** | Write-only secret value (scoped) | List, Set, Delete |
+
+#### Identity & Access Models
+
+```typescript
+// User identity
+interface User {
+  id: string;
+  email: string;
+  displayName: string;
+  avatarUrl?: string;
+  role: 'admin' | 'member' | 'viewer';
+  status: 'active' | 'suspended';
+  created: string;
+  lastLogin: string;
+}
+
+// Group for access control
+interface Group {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  parentId?: string;
+  memberCount: number;
+  created: string;
+  updated: string;
+}
+
+// Policy for authorization
+interface Policy {
+  id: string;
+  name: string;
+  description?: string;
+  scopeType: 'hub' | 'grove' | 'resource';
+  scopeId?: string;
+  resourceType: string;
+  actions: string[];
+  effect: 'allow' | 'deny';
+  priority: number;
+  created: string;
+  updated: string;
+}
+```
+
+#### Template Model
+
+```typescript
+interface Template {
+  id: string;
+  name: string;
+  slug: string;
+  displayName: string;
+  description?: string;
+  harness: 'claude' | 'gemini' | 'codex' | 'opencode' | 'generic';
+  contentHash: string;
+  scope: 'global' | 'grove' | 'user';
+  scopeId?: string;
+  storageUri?: string;
+  config: TemplateConfig;
+  files: TemplateFile[];
+  visibility: 'private' | 'grove' | 'public';
+  ownerId: string;
+  status: 'pending' | 'active' | 'archived';
+  created: string;
+  updated: string;
+  updatedBy: string;
+}
+
+interface TemplateFile {
+  path: string;
+  size: number;
+  hash: string;
+  mode: string;
+}
+```
+
+#### Environment & Secrets Models
+
+```typescript
+interface EnvVar {
+  id: string;
+  key: string;
+  value: string;
+  scope: 'user' | 'grove' | 'runtime_host';
+  scopeId: string;
+  description?: string;
+  sensitive: boolean;
+  created: string;
+  updated: string;
+}
+
+interface Secret {
+  id: string;
+  key: string;
+  scope: 'user' | 'grove' | 'runtime_host';
+  scopeId: string;
+  description?: string;
+  version: number;
+  created: string;
+  updated: string;
+  // Note: value is never returned from API
+}
+```
+
+### 2.3 Snapshot + Delta Pattern
 
 This pattern provides efficient real-time updates with minimal data transfer:
 
@@ -202,12 +322,35 @@ web/
 │   │   │   ├── grove-detail.ts
 │   │   │   ├── agent-list.ts
 │   │   │   ├── agent-detail.ts
-│   │   │   └── terminal.ts
+│   │   │   ├── terminal.ts
+│   │   │   ├── template-list.ts
+│   │   │   ├── template-detail.ts
+│   │   │   ├── template-upload.ts
+│   │   │   ├── user-list.ts
+│   │   │   ├── user-detail.ts
+│   │   │   ├── group-list.ts
+│   │   │   ├── group-detail.ts
+│   │   │   ├── policy-list.ts
+│   │   │   ├── policy-detail.ts
+│   │   │   ├── settings-env.ts
+│   │   │   ├── settings-secrets.ts
+│   │   │   └── api-keys.ts
 │   │   ├── shared/
 │   │   │   ├── agent-card.ts
 │   │   │   ├── status-badge.ts
 │   │   │   ├── grove-selector.ts
-│   │   │   └── action-menu.ts
+│   │   │   ├── action-menu.ts
+│   │   │   ├── template-card.ts
+│   │   │   ├── template-selector.ts
+│   │   │   ├── user-avatar.ts
+│   │   │   ├── group-badge.ts
+│   │   │   ├── permission-badge.ts
+│   │   │   ├── scope-selector.ts
+│   │   │   ├── env-var-editor.ts
+│   │   │   ├── secret-editor.ts
+│   │   │   ├── policy-editor.ts
+│   │   │   ├── member-list.ts
+│   │   │   └── file-upload.ts
 │   │   └── terminal/
 │   │       ├── pty-viewer.ts
 │   │       └── xterm-wrapper.ts
@@ -1282,9 +1425,1075 @@ export class ScionTerminal extends LitElement {
 
 ---
 
-## 6. NATS Integration
+## 6. Template Management UI
 
-### 6.1 NATS Subject Schema
+### 6.1 Template Browser
+
+The template browser allows users to discover, view, and manage templates across scopes.
+
+```typescript
+// src/components/pages/template-list.ts
+import { LitElement, html, css } from 'lit';
+import { customElement, property, state } from 'lit/decorators.js';
+import type { Template } from '../types';
+
+@customElement('scion-template-list')
+export class TemplateList extends LitElement {
+  @property({ type: String }) scope: 'global' | 'grove' | 'user' | 'all' = 'all';
+  @property({ type: String }) groveId?: string;
+  @state() private templates: Template[] = [];
+  @state() private loading = true;
+
+  static styles = css`
+    :host {
+      display: block;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.5rem;
+    }
+
+    .filters {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    .template-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 1rem;
+    }
+
+    .scope-badge {
+      font-size: 0.75rem;
+      padding: 0.25rem 0.5rem;
+      border-radius: var(--wa-border-radius-small);
+    }
+
+    .scope-global { background: var(--wa-color-primary-100); }
+    .scope-grove { background: var(--wa-color-success-100); }
+    .scope-user { background: var(--wa-color-warning-100); }
+  `;
+
+  render() {
+    return html`
+      <div class="header">
+        <h1>Templates</h1>
+        <wa-button variant="primary" @click=${this.handleCreate}>
+          <wa-icon slot="prefix" name="plus"></wa-icon>
+          New Template
+        </wa-button>
+      </div>
+
+      <div class="filters">
+        <wa-select label="Scope" @wa-change=${this.handleScopeChange}>
+          <wa-option value="all">All Templates</wa-option>
+          <wa-option value="global">Global</wa-option>
+          <wa-option value="grove">Grove</wa-option>
+          <wa-option value="user">Personal</wa-option>
+        </wa-select>
+
+        <wa-select label="Harness">
+          <wa-option value="">All Harnesses</wa-option>
+          <wa-option value="claude">Claude</wa-option>
+          <wa-option value="gemini">Gemini</wa-option>
+          <wa-option value="codex">Codex</wa-option>
+          <wa-option value="opencode">OpenCode</wa-option>
+        </wa-select>
+
+        <wa-input
+          placeholder="Search templates..."
+          @wa-input=${this.handleSearch}
+        >
+          <wa-icon slot="prefix" name="search"></wa-icon>
+        </wa-input>
+      </div>
+
+      ${this.loading ? html`
+        <wa-spinner></wa-spinner>
+      ` : html`
+        <div class="template-grid">
+          ${this.templates.map(template => html`
+            <scion-template-card
+              .template=${template}
+              @template-action=${this.handleTemplateAction}
+            ></scion-template-card>
+          `)}
+        </div>
+      `}
+    `;
+  }
+}
+```
+
+### 6.2 Template Card Component
+
+```typescript
+// src/components/shared/template-card.ts
+@customElement('scion-template-card')
+export class TemplateCard extends LitElement {
+  @property({ type: Object }) template!: Template;
+
+  private getScopeLabel(scope: string): string {
+    return { global: 'Global', grove: 'Grove', user: 'Personal' }[scope] || scope;
+  }
+
+  private handleAction(action: string) {
+    this.dispatchEvent(new CustomEvent('template-action', {
+      detail: { templateId: this.template.id, action },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
+  render() {
+    const { template } = this;
+
+    return html`
+      <wa-card>
+        <div slot="header">
+          <div class="header-content">
+            <wa-icon name="file-code"></wa-icon>
+            <div>
+              <div class="title">${template.displayName || template.name}</div>
+              <div class="harness">${template.harness}</div>
+            </div>
+            <span class="scope-badge scope-${template.scope}">
+              ${this.getScopeLabel(template.scope)}
+            </span>
+          </div>
+        </div>
+
+        <p class="description">${template.description || 'No description'}</p>
+
+        <div class="meta">
+          <span>Files: ${template.files?.length || 0}</span>
+          <span>Updated: ${new Date(template.updated).toLocaleDateString()}</span>
+        </div>
+
+        <div slot="footer" class="actions">
+          <wa-button size="small" @click=${() => this.handleAction('view')}>
+            View
+          </wa-button>
+          <wa-button size="small" @click=${() => this.handleAction('clone')}>
+            Clone
+          </wa-button>
+          ${template.scope !== 'global' ? html`
+            <wa-button size="small" variant="danger" @click=${() => this.handleAction('delete')}>
+              Delete
+            </wa-button>
+          ` : ''}
+        </div>
+      </wa-card>
+    `;
+  }
+}
+```
+
+### 6.3 Template Upload Flow
+
+Template upload uses a multi-step wizard with signed URL uploads.
+
+```typescript
+// src/components/pages/template-upload.ts
+@customElement('scion-template-upload')
+export class TemplateUpload extends LitElement {
+  @state() private step: 'metadata' | 'files' | 'confirm' = 'metadata';
+  @state() private metadata: Partial<Template> = {};
+  @state() private files: File[] = [];
+  @state() private uploadUrls: { path: string; url: string }[] = [];
+  @state() private uploading = false;
+  @state() private uploadProgress: Map<string, number> = new Map();
+
+  render() {
+    return html`
+      <wa-card>
+        <h2 slot="header">Create Template</h2>
+
+        <wa-stepper .active=${this.step}>
+          <wa-step name="metadata" label="Details"></wa-step>
+          <wa-step name="files" label="Files"></wa-step>
+          <wa-step name="confirm" label="Confirm"></wa-step>
+        </wa-stepper>
+
+        ${this.step === 'metadata' ? this.renderMetadataStep() : ''}
+        ${this.step === 'files' ? this.renderFilesStep() : ''}
+        ${this.step === 'confirm' ? this.renderConfirmStep() : ''}
+      </wa-card>
+    `;
+  }
+
+  private renderMetadataStep() {
+    return html`
+      <form @submit=${this.handleMetadataSubmit}>
+        <wa-input
+          label="Template Name"
+          required
+          @wa-input=${(e: Event) => this.metadata.name = (e.target as HTMLInputElement).value}
+        ></wa-input>
+
+        <wa-textarea
+          label="Description"
+          @wa-input=${(e: Event) => this.metadata.description = (e.target as HTMLTextAreaElement).value}
+        ></wa-textarea>
+
+        <wa-select
+          label="Harness"
+          required
+          @wa-change=${(e: Event) => this.metadata.harness = (e.target as HTMLSelectElement).value as any}
+        >
+          <wa-option value="claude">Claude</wa-option>
+          <wa-option value="gemini">Gemini</wa-option>
+          <wa-option value="codex">Codex</wa-option>
+          <wa-option value="opencode">OpenCode</wa-option>
+          <wa-option value="generic">Generic</wa-option>
+        </wa-select>
+
+        <wa-select
+          label="Scope"
+          @wa-change=${(e: Event) => this.metadata.scope = (e.target as HTMLSelectElement).value as any}
+        >
+          <wa-option value="user">Personal</wa-option>
+          <wa-option value="grove">Grove</wa-option>
+        </wa-select>
+
+        <wa-button type="submit" variant="primary">Continue</wa-button>
+      </form>
+    `;
+  }
+
+  private renderFilesStep() {
+    return html`
+      <scion-file-upload
+        multiple
+        accept=".yaml,.yml,.md,.txt,.json,.sh"
+        @files-selected=${this.handleFilesSelected}
+      ></scion-file-upload>
+
+      ${this.files.length > 0 ? html`
+        <ul class="file-list">
+          ${this.files.map(file => html`
+            <li>
+              ${file.name} (${this.formatSize(file.size)})
+              ${this.uploadProgress.has(file.name) ? html`
+                <wa-progress-bar
+                  value=${this.uploadProgress.get(file.name)}
+                ></wa-progress-bar>
+              ` : ''}
+            </li>
+          `)}
+        </ul>
+      ` : ''}
+
+      <div class="actions">
+        <wa-button @click=${() => this.step = 'metadata'}>Back</wa-button>
+        <wa-button
+          variant="primary"
+          ?disabled=${this.files.length === 0}
+          @click=${() => this.step = 'confirm'}
+        >Continue</wa-button>
+      </div>
+    `;
+  }
+
+  private async handleUpload() {
+    this.uploading = true;
+
+    // 1. Create template and get upload URLs
+    const response = await fetch('/api/templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...this.metadata,
+        files: this.files.map(f => ({ path: f.name, size: f.size }))
+      }),
+      credentials: 'include'
+    });
+
+    const { template, uploadUrls } = await response.json();
+
+    // 2. Upload files to signed URLs
+    for (const { path, url } of uploadUrls) {
+      const file = this.files.find(f => f.name === path);
+      if (file) {
+        await this.uploadFile(file, url);
+      }
+    }
+
+    // 3. Finalize template
+    await fetch(`/api/templates/${template.id}/finalize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ manifest: await this.buildManifest() }),
+      credentials: 'include'
+    });
+
+    this.uploading = false;
+    // Navigate to template detail
+  }
+}
+```
+
+---
+
+## 7. User & Group Management UI
+
+### 7.1 User List Page
+
+```typescript
+// src/components/pages/user-list.ts
+@customElement('scion-user-list')
+export class UserList extends LitElement {
+  @state() private users: User[] = [];
+  @state() private loading = true;
+
+  render() {
+    return html`
+      <div class="header">
+        <h1>Users</h1>
+        <wa-input placeholder="Search users...">
+          <wa-icon slot="prefix" name="search"></wa-icon>
+        </wa-input>
+      </div>
+
+      <wa-table>
+        <wa-table-header>
+          <wa-table-row>
+            <wa-table-cell header>User</wa-table-cell>
+            <wa-table-cell header>Email</wa-table-cell>
+            <wa-table-cell header>Role</wa-table-cell>
+            <wa-table-cell header>Status</wa-table-cell>
+            <wa-table-cell header>Last Login</wa-table-cell>
+            <wa-table-cell header>Actions</wa-table-cell>
+          </wa-table-row>
+        </wa-table-header>
+        <wa-table-body>
+          ${this.users.map(user => html`
+            <wa-table-row>
+              <wa-table-cell>
+                <div class="user-cell">
+                  <scion-user-avatar .user=${user}></scion-user-avatar>
+                  <span>${user.displayName}</span>
+                </div>
+              </wa-table-cell>
+              <wa-table-cell>${user.email}</wa-table-cell>
+              <wa-table-cell>
+                <wa-badge variant=${this.getRoleVariant(user.role)}>
+                  ${user.role}
+                </wa-badge>
+              </wa-table-cell>
+              <wa-table-cell>
+                <wa-badge variant=${user.status === 'active' ? 'success' : 'warning'}>
+                  ${user.status}
+                </wa-badge>
+              </wa-table-cell>
+              <wa-table-cell>${this.formatDate(user.lastLogin)}</wa-table-cell>
+              <wa-table-cell>
+                <wa-dropdown>
+                  <wa-button slot="trigger" size="small">
+                    <wa-icon name="more-vertical"></wa-icon>
+                  </wa-button>
+                  <wa-menu>
+                    <wa-menu-item @click=${() => this.viewUser(user)}>View</wa-menu-item>
+                    <wa-menu-item @click=${() => this.editUser(user)}>Edit Role</wa-menu-item>
+                    <wa-divider></wa-divider>
+                    <wa-menu-item variant="danger" @click=${() => this.suspendUser(user)}>
+                      ${user.status === 'active' ? 'Suspend' : 'Activate'}
+                    </wa-menu-item>
+                  </wa-menu>
+                </wa-dropdown>
+              </wa-table-cell>
+            </wa-table-row>
+          `)}
+        </wa-table-body>
+      </wa-table>
+    `;
+  }
+}
+```
+
+### 7.2 Group Management Page
+
+```typescript
+// src/components/pages/group-list.ts
+@customElement('scion-group-list')
+export class GroupList extends LitElement {
+  @state() private groups: Group[] = [];
+
+  render() {
+    return html`
+      <div class="header">
+        <h1>Groups</h1>
+        <wa-button variant="primary" @click=${this.handleCreate}>
+          <wa-icon slot="prefix" name="plus"></wa-icon>
+          New Group
+        </wa-button>
+      </div>
+
+      <div class="group-grid">
+        ${this.groups.map(group => html`
+          <wa-card>
+            <div slot="header">
+              <wa-icon name="users"></wa-icon>
+              <span>${group.name}</span>
+            </div>
+
+            <p>${group.description || 'No description'}</p>
+
+            <div class="meta">
+              <span>${group.memberCount} members</span>
+              ${group.parentId ? html`
+                <span>Parent: ${this.getGroupName(group.parentId)}</span>
+              ` : ''}
+            </div>
+
+            <div slot="footer">
+              <wa-button size="small" @click=${() => this.viewGroup(group)}>
+                Manage Members
+              </wa-button>
+              <wa-button size="small" @click=${() => this.editGroup(group)}>
+                Edit
+              </wa-button>
+            </div>
+          </wa-card>
+        `)}
+      </div>
+    `;
+  }
+}
+```
+
+### 7.3 Group Detail with Member Management
+
+```typescript
+// src/components/pages/group-detail.ts
+@customElement('scion-group-detail')
+export class GroupDetail extends LitElement {
+  @property({ type: String }) groupId = '';
+  @state() private group: Group | null = null;
+  @state() private members: (User | Group)[] = [];
+
+  render() {
+    if (!this.group) return html`<wa-spinner></wa-spinner>`;
+
+    return html`
+      <div class="header">
+        <div class="title-row">
+          <wa-icon name="users"></wa-icon>
+          <h1>${this.group.name}</h1>
+          <scion-group-badge .group=${this.group}></scion-group-badge>
+        </div>
+        <p>${this.group.description}</p>
+      </div>
+
+      <wa-tabs>
+        <wa-tab slot="nav" panel="members">Members</wa-tab>
+        <wa-tab slot="nav" panel="policies">Policies</wa-tab>
+        <wa-tab slot="nav" panel="settings">Settings</wa-tab>
+
+        <wa-tab-panel name="members">
+          <div class="members-header">
+            <h3>Members (${this.members.length})</h3>
+            <wa-button @click=${this.handleAddMember}>
+              <wa-icon slot="prefix" name="user-plus"></wa-icon>
+              Add Member
+            </wa-button>
+          </div>
+
+          <scion-member-list
+            .members=${this.members}
+            @member-remove=${this.handleRemoveMember}
+            @member-role-change=${this.handleRoleChange}
+          ></scion-member-list>
+        </wa-tab-panel>
+
+        <wa-tab-panel name="policies">
+          <scion-policy-list
+            scopeType="group"
+            scopeId=${this.groupId}
+          ></scion-policy-list>
+        </wa-tab-panel>
+
+        <wa-tab-panel name="settings">
+          <!-- Group settings form -->
+        </wa-tab-panel>
+      </wa-tabs>
+    `;
+  }
+}
+```
+
+---
+
+## 8. Permissions & Policy Management UI
+
+### 8.1 Policy List Page
+
+```typescript
+// src/components/pages/policy-list.ts
+@customElement('scion-policy-list')
+export class PolicyList extends LitElement {
+  @property({ type: String }) scopeType?: string;
+  @property({ type: String }) scopeId?: string;
+  @state() private policies: Policy[] = [];
+
+  render() {
+    return html`
+      <div class="header">
+        <h1>Policies</h1>
+        <wa-button variant="primary" @click=${this.handleCreate}>
+          <wa-icon slot="prefix" name="shield-plus"></wa-icon>
+          New Policy
+        </wa-button>
+      </div>
+
+      <div class="filters">
+        <wa-select label="Scope" @wa-change=${this.handleScopeFilter}>
+          <wa-option value="">All Scopes</wa-option>
+          <wa-option value="hub">Hub</wa-option>
+          <wa-option value="grove">Grove</wa-option>
+          <wa-option value="resource">Resource</wa-option>
+        </wa-select>
+
+        <wa-select label="Effect">
+          <wa-option value="">All</wa-option>
+          <wa-option value="allow">Allow</wa-option>
+          <wa-option value="deny">Deny</wa-option>
+        </wa-select>
+      </div>
+
+      <wa-table>
+        <wa-table-header>
+          <wa-table-row>
+            <wa-table-cell header>Policy</wa-table-cell>
+            <wa-table-cell header>Scope</wa-table-cell>
+            <wa-table-cell header>Resource</wa-table-cell>
+            <wa-table-cell header>Actions</wa-table-cell>
+            <wa-table-cell header>Effect</wa-table-cell>
+            <wa-table-cell header>Principals</wa-table-cell>
+            <wa-table-cell header></wa-table-cell>
+          </wa-table-row>
+        </wa-table-header>
+        <wa-table-body>
+          ${this.policies.map(policy => html`
+            <wa-table-row>
+              <wa-table-cell>
+                <div>
+                  <div class="policy-name">${policy.name}</div>
+                  <div class="policy-desc">${policy.description}</div>
+                </div>
+              </wa-table-cell>
+              <wa-table-cell>
+                <wa-badge>${policy.scopeType}</wa-badge>
+              </wa-table-cell>
+              <wa-table-cell>${policy.resourceType}</wa-table-cell>
+              <wa-table-cell>
+                ${policy.actions.map(a => html`
+                  <wa-badge size="small">${a}</wa-badge>
+                `)}
+              </wa-table-cell>
+              <wa-table-cell>
+                <wa-badge variant=${policy.effect === 'allow' ? 'success' : 'danger'}>
+                  ${policy.effect}
+                </wa-badge>
+              </wa-table-cell>
+              <wa-table-cell>
+                <span>${this.getPrincipalCount(policy)} principals</span>
+              </wa-table-cell>
+              <wa-table-cell>
+                <wa-button size="small" @click=${() => this.editPolicy(policy)}>
+                  Edit
+                </wa-button>
+              </wa-table-cell>
+            </wa-table-row>
+          `)}
+        </wa-table-body>
+      </wa-table>
+    `;
+  }
+}
+```
+
+### 8.2 Policy Editor Component
+
+```typescript
+// src/components/shared/policy-editor.ts
+@customElement('scion-policy-editor')
+export class PolicyEditor extends LitElement {
+  @property({ type: Object }) policy: Partial<Policy> = {};
+  @state() private selectedPrincipals: { type: string; id: string }[] = [];
+
+  render() {
+    return html`
+      <form @submit=${this.handleSubmit}>
+        <wa-input
+          label="Policy Name"
+          required
+          .value=${this.policy.name || ''}
+          @wa-input=${this.updateField('name')}
+        ></wa-input>
+
+        <wa-textarea
+          label="Description"
+          .value=${this.policy.description || ''}
+          @wa-input=${this.updateField('description')}
+        ></wa-textarea>
+
+        <wa-select
+          label="Scope Type"
+          required
+          .value=${this.policy.scopeType || 'hub'}
+          @wa-change=${this.updateField('scopeType')}
+        >
+          <wa-option value="hub">Hub (Global)</wa-option>
+          <wa-option value="grove">Grove</wa-option>
+          <wa-option value="resource">Specific Resource</wa-option>
+        </wa-select>
+
+        ${this.policy.scopeType !== 'hub' ? html`
+          <scion-scope-selector
+            .scopeType=${this.policy.scopeType}
+            .scopeId=${this.policy.scopeId}
+            @scope-change=${this.handleScopeChange}
+          ></scion-scope-selector>
+        ` : ''}
+
+        <wa-select
+          label="Resource Type"
+          .value=${this.policy.resourceType || '*'}
+          @wa-change=${this.updateField('resourceType')}
+        >
+          <wa-option value="*">All Resources</wa-option>
+          <wa-option value="agent">Agents</wa-option>
+          <wa-option value="grove">Groves</wa-option>
+          <wa-option value="template">Templates</wa-option>
+          <wa-option value="user">Users</wa-option>
+          <wa-option value="group">Groups</wa-option>
+        </wa-select>
+
+        <fieldset>
+          <legend>Actions</legend>
+          <div class="action-checkboxes">
+            ${['create', 'read', 'update', 'delete', 'list', 'manage'].map(action => html`
+              <wa-checkbox
+                ?checked=${this.policy.actions?.includes(action)}
+                @wa-change=${(e: Event) => this.toggleAction(action, (e.target as HTMLInputElement).checked)}
+              >${action}</wa-checkbox>
+            `)}
+          </div>
+        </fieldset>
+
+        <wa-radio-group
+          label="Effect"
+          .value=${this.policy.effect || 'allow'}
+          @wa-change=${this.updateField('effect')}
+        >
+          <wa-radio value="allow">Allow</wa-radio>
+          <wa-radio value="deny">Deny</wa-radio>
+        </wa-radio-group>
+
+        <fieldset>
+          <legend>Principals</legend>
+          <scion-principal-selector
+            .selected=${this.selectedPrincipals}
+            @principals-change=${this.handlePrincipalsChange}
+          ></scion-principal-selector>
+        </fieldset>
+
+        <div class="actions">
+          <wa-button type="button" @click=${this.handleCancel}>Cancel</wa-button>
+          <wa-button type="submit" variant="primary">Save Policy</wa-button>
+        </div>
+      </form>
+    `;
+  }
+}
+```
+
+### 8.3 Access Evaluation Debug Tool
+
+```typescript
+// src/components/shared/access-evaluator.ts
+@customElement('scion-access-evaluator')
+export class AccessEvaluator extends LitElement {
+  @state() private principal: { type: string; id: string } | null = null;
+  @state() private resource: { type: string; id: string } | null = null;
+  @state() private action = '';
+  @state() private result: AccessEvalResult | null = null;
+  @state() private evaluating = false;
+
+  render() {
+    return html`
+      <wa-card>
+        <h3 slot="header">Access Evaluation (Debug)</h3>
+
+        <div class="eval-form">
+          <scion-principal-selector
+            single
+            label="Principal"
+            @principal-select=${this.handlePrincipalSelect}
+          ></scion-principal-selector>
+
+          <wa-select
+            label="Resource Type"
+            @wa-change=${(e: Event) => this.resource = { ...this.resource!, type: (e.target as HTMLSelectElement).value }}
+          >
+            <wa-option value="agent">Agent</wa-option>
+            <wa-option value="grove">Grove</wa-option>
+            <wa-option value="template">Template</wa-option>
+          </wa-select>
+
+          <wa-input
+            label="Resource ID"
+            @wa-input=${(e: Event) => this.resource = { ...this.resource!, id: (e.target as HTMLInputElement).value }}
+          ></wa-input>
+
+          <wa-select
+            label="Action"
+            @wa-change=${(e: Event) => this.action = (e.target as HTMLSelectElement).value}
+          >
+            <wa-option value="create">create</wa-option>
+            <wa-option value="read">read</wa-option>
+            <wa-option value="update">update</wa-option>
+            <wa-option value="delete">delete</wa-option>
+          </wa-select>
+
+          <wa-button
+            variant="primary"
+            ?loading=${this.evaluating}
+            @click=${this.evaluate}
+          >Evaluate</wa-button>
+        </div>
+
+        ${this.result ? html`
+          <div class="result ${this.result.allowed ? 'allowed' : 'denied'}">
+            <wa-icon name=${this.result.allowed ? 'check-circle' : 'x-circle'}></wa-icon>
+            <span>${this.result.allowed ? 'Access Allowed' : 'Access Denied'}</span>
+            <span class="reason">${this.result.reason}</span>
+          </div>
+
+          ${this.result.matchedPolicy ? html`
+            <div class="matched-policy">
+              <h4>Matched Policy</h4>
+              <dl>
+                <dt>Name</dt><dd>${this.result.matchedPolicy.name}</dd>
+                <dt>Scope</dt><dd>${this.result.matchedPolicy.scopeType}</dd>
+                <dt>Effect</dt><dd>${this.result.matchedPolicy.effect}</dd>
+              </dl>
+            </div>
+          ` : ''}
+
+          ${this.result.effectiveGroups?.length ? html`
+            <div class="effective-groups">
+              <h4>Effective Groups</h4>
+              <ul>
+                ${this.result.effectiveGroups.map(g => html`<li>${g}</li>`)}
+              </ul>
+            </div>
+          ` : ''}
+        ` : ''}
+      </wa-card>
+    `;
+  }
+
+  private async evaluate() {
+    this.evaluating = true;
+    const response = await fetch('/api/policies/evaluate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        principalType: this.principal?.type,
+        principalId: this.principal?.id,
+        resourceType: this.resource?.type,
+        resourceId: this.resource?.id,
+        action: this.action
+      }),
+      credentials: 'include'
+    });
+    this.result = await response.json();
+    this.evaluating = false;
+  }
+}
+```
+
+---
+
+## 9. Environment Variables & Secrets UI
+
+### 9.1 Environment Settings Page
+
+```typescript
+// src/components/pages/settings-env.ts
+@customElement('scion-settings-env')
+export class SettingsEnv extends LitElement {
+  @property({ type: String }) scope: 'user' | 'grove' | 'runtime_host' = 'user';
+  @property({ type: String }) scopeId?: string;
+  @state() private envVars: EnvVar[] = [];
+  @state() private secrets: Secret[] = [];
+
+  render() {
+    return html`
+      <div class="header">
+        <h1>Environment & Secrets</h1>
+        <scion-scope-selector
+          .scope=${this.scope}
+          .scopeId=${this.scopeId}
+          @scope-change=${this.handleScopeChange}
+        ></scion-scope-selector>
+      </div>
+
+      <wa-tabs>
+        <wa-tab slot="nav" panel="env">Environment Variables</wa-tab>
+        <wa-tab slot="nav" panel="secrets">Secrets</wa-tab>
+
+        <wa-tab-panel name="env">
+          <div class="panel-header">
+            <p>Environment variables are visible to agents at runtime.</p>
+            <wa-button @click=${this.addEnvVar}>
+              <wa-icon slot="prefix" name="plus"></wa-icon>
+              Add Variable
+            </wa-button>
+          </div>
+
+          <wa-table>
+            <wa-table-header>
+              <wa-table-row>
+                <wa-table-cell header>Key</wa-table-cell>
+                <wa-table-cell header>Value</wa-table-cell>
+                <wa-table-cell header>Sensitive</wa-table-cell>
+                <wa-table-cell header>Updated</wa-table-cell>
+                <wa-table-cell header></wa-table-cell>
+              </wa-table-row>
+            </wa-table-header>
+            <wa-table-body>
+              ${this.envVars.map(env => html`
+                <wa-table-row>
+                  <wa-table-cell><code>${env.key}</code></wa-table-cell>
+                  <wa-table-cell>
+                    ${env.sensitive ? '••••••••' : env.value}
+                  </wa-table-cell>
+                  <wa-table-cell>
+                    ${env.sensitive ? html`<wa-icon name="eye-off"></wa-icon>` : ''}
+                  </wa-table-cell>
+                  <wa-table-cell>${this.formatDate(env.updated)}</wa-table-cell>
+                  <wa-table-cell>
+                    <wa-button size="small" @click=${() => this.editEnvVar(env)}>Edit</wa-button>
+                    <wa-button size="small" variant="danger" @click=${() => this.deleteEnvVar(env)}>Delete</wa-button>
+                  </wa-table-cell>
+                </wa-table-row>
+              `)}
+            </wa-table-body>
+          </wa-table>
+        </wa-tab-panel>
+
+        <wa-tab-panel name="secrets">
+          <div class="panel-header">
+            <p>Secrets are write-only and cannot be retrieved after creation.</p>
+            <wa-button @click=${this.addSecret}>
+              <wa-icon slot="prefix" name="key"></wa-icon>
+              Add Secret
+            </wa-button>
+          </div>
+
+          <wa-table>
+            <wa-table-header>
+              <wa-table-row>
+                <wa-table-cell header>Key</wa-table-cell>
+                <wa-table-cell header>Description</wa-table-cell>
+                <wa-table-cell header>Version</wa-table-cell>
+                <wa-table-cell header>Updated</wa-table-cell>
+                <wa-table-cell header></wa-table-cell>
+              </wa-table-row>
+            </wa-table-header>
+            <wa-table-body>
+              ${this.secrets.map(secret => html`
+                <wa-table-row>
+                  <wa-table-cell><code>${secret.key}</code></wa-table-cell>
+                  <wa-table-cell>${secret.description || '-'}</wa-table-cell>
+                  <wa-table-cell>v${secret.version}</wa-table-cell>
+                  <wa-table-cell>${this.formatDate(secret.updated)}</wa-table-cell>
+                  <wa-table-cell>
+                    <wa-button size="small" @click=${() => this.updateSecret(secret)}>Update</wa-button>
+                    <wa-button size="small" variant="danger" @click=${() => this.deleteSecret(secret)}>Delete</wa-button>
+                  </wa-table-cell>
+                </wa-table-row>
+              `)}
+            </wa-table-body>
+          </wa-table>
+        </wa-tab-panel>
+      </wa-tabs>
+    `;
+  }
+}
+```
+
+### 9.2 Env/Secret Editor Dialog
+
+```typescript
+// src/components/shared/env-var-editor.ts
+@customElement('scion-env-var-editor')
+export class EnvVarEditor extends LitElement {
+  @property({ type: Object }) envVar?: EnvVar;
+  @property({ type: Boolean }) isSecret = false;
+  @property({ type: String }) scope: string = 'user';
+  @property({ type: String }) scopeId?: string;
+
+  render() {
+    const isNew = !this.envVar?.id;
+
+    return html`
+      <wa-dialog label="${isNew ? 'Add' : 'Edit'} ${this.isSecret ? 'Secret' : 'Variable'}">
+        <form @submit=${this.handleSubmit}>
+          <wa-input
+            label="Key"
+            required
+            pattern="[A-Z][A-Z0-9_]*"
+            .value=${this.envVar?.key || ''}
+            ?disabled=${!isNew}
+            @wa-input=${this.updateKey}
+          >
+            <span slot="help-text">Use UPPER_SNAKE_CASE (e.g., API_KEY)</span>
+          </wa-input>
+
+          <wa-input
+            label="Value"
+            required
+            type=${this.isSecret ? 'password' : 'text'}
+            .value=${isNew || !this.isSecret ? (this.envVar as EnvVar)?.value || '' : ''}
+            @wa-input=${this.updateValue}
+          >
+            ${this.isSecret && !isNew ? html`
+              <span slot="help-text">Leave empty to keep current value</span>
+            ` : ''}
+          </wa-input>
+
+          <wa-textarea
+            label="Description"
+            .value=${this.envVar?.description || ''}
+            @wa-input=${this.updateDescription}
+          ></wa-textarea>
+
+          ${!this.isSecret ? html`
+            <wa-checkbox
+              ?checked=${(this.envVar as EnvVar)?.sensitive}
+              @wa-change=${this.updateSensitive}
+            >Mask value in UI</wa-checkbox>
+          ` : ''}
+
+          <div class="actions" slot="footer">
+            <wa-button @click=${this.close}>Cancel</wa-button>
+            <wa-button type="submit" variant="primary">Save</wa-button>
+          </div>
+        </form>
+      </wa-dialog>
+    `;
+  }
+}
+```
+
+---
+
+## 10. API Key Management UI
+
+### 10.1 API Keys Page
+
+```typescript
+// src/components/pages/api-keys.ts
+@customElement('scion-api-keys')
+export class ApiKeys extends LitElement {
+  @state() private keys: ApiKey[] = [];
+  @state() private newKey: { key: string; name: string } | null = null;
+
+  render() {
+    return html`
+      <div class="header">
+        <h1>API Keys</h1>
+        <wa-button variant="primary" @click=${this.createKey}>
+          <wa-icon slot="prefix" name="key"></wa-icon>
+          Create API Key
+        </wa-button>
+      </div>
+
+      <wa-alert variant="info" open>
+        API keys provide programmatic access to the Scion Hub API.
+        Keep them secure and never share them publicly.
+      </wa-alert>
+
+      ${this.newKey ? html`
+        <wa-alert variant="success" open closable @wa-close=${() => this.newKey = null}>
+          <strong>New API Key Created</strong>
+          <p>Copy this key now. It won't be shown again.</p>
+          <div class="key-display">
+            <code>${this.newKey.key}</code>
+            <wa-button size="small" @click=${() => this.copyKey(this.newKey!.key)}>
+              <wa-icon name="copy"></wa-icon>
+            </wa-button>
+          </div>
+        </wa-alert>
+      ` : ''}
+
+      <wa-table>
+        <wa-table-header>
+          <wa-table-row>
+            <wa-table-cell header>Name</wa-table-cell>
+            <wa-table-cell header>Key Prefix</wa-table-cell>
+            <wa-table-cell header>Created</wa-table-cell>
+            <wa-table-cell header>Last Used</wa-table-cell>
+            <wa-table-cell header>Expires</wa-table-cell>
+            <wa-table-cell header></wa-table-cell>
+          </wa-table-row>
+        </wa-table-header>
+        <wa-table-body>
+          ${this.keys.map(key => html`
+            <wa-table-row>
+              <wa-table-cell>${key.name}</wa-table-cell>
+              <wa-table-cell><code>${key.prefix}...</code></wa-table-cell>
+              <wa-table-cell>${this.formatDate(key.createdAt)}</wa-table-cell>
+              <wa-table-cell>${key.lastUsed ? this.formatDate(key.lastUsed) : 'Never'}</wa-table-cell>
+              <wa-table-cell>
+                ${key.expiresAt ? this.formatDate(key.expiresAt) : 'Never'}
+              </wa-table-cell>
+              <wa-table-cell>
+                <wa-button
+                  size="small"
+                  variant="danger"
+                  @click=${() => this.revokeKey(key)}
+                >Revoke</wa-button>
+              </wa-table-cell>
+            </wa-table-row>
+          `)}
+        </wa-table-body>
+      </wa-table>
+    `;
+  }
+
+  private async createKey() {
+    const dialog = document.createElement('wa-dialog');
+    dialog.label = 'Create API Key';
+    dialog.innerHTML = `
+      <form>
+        <wa-input name="name" label="Key Name" required placeholder="e.g., CI/CD Pipeline"></wa-input>
+        <wa-input name="expiresIn" label="Expires In (days)" type="number" placeholder="Leave empty for no expiry"></wa-input>
+        <div slot="footer">
+          <wa-button>Cancel</wa-button>
+          <wa-button type="submit" variant="primary">Create</wa-button>
+        </div>
+      </form>
+    `;
+    // Handle form submission...
+  }
+}
+```
+
+---
+
+## 12. NATS Integration
+
+### 12.1 NATS Subject Schema
 
 The Hub API publishes events to NATS when database changes occur. The Web Frontend subscribes to relevant subjects based on user context.
 
@@ -1301,7 +2510,7 @@ The Hub API publishes events to NATS when database changes occur. The Web Fronte
 | `grove.{groveId}.host.disconnected` | Host left grove | `{ hostId }` |
 | `host.{hostId}.status` | Host status change | `{ status, resources }` |
 
-### 6.2 Hub-Side Publishing
+### 12.2 Hub-Side Publishing
 
 The Hub API publishes events after successful database operations:
 
@@ -1336,7 +2545,7 @@ func (s *AgentService) UpdateStatus(ctx context.Context, agentID string, status 
 }
 ```
 
-### 6.3 Web Frontend Subscription Logic
+### 12.3 Web Frontend Subscription Logic
 
 ```typescript
 // src/server/routes/sse.ts
@@ -1411,9 +2620,9 @@ export const sseRoutes = router;
 
 ---
 
-## 7. Authentication
+## 13. Authentication
 
-### 7.1 OAuth Flow
+### 13.1 OAuth Flow
 
 ```
 ┌─────────┐     ┌─────────────┐     ┌──────────────┐     ┌─────────┐
@@ -1441,7 +2650,7 @@ export const sseRoutes = router;
      │◄───────────────│                    │                  │
 ```
 
-### 7.2 Auth Routes
+### 13.2 Auth Routes
 
 ```typescript
 // src/server/routes/auth.ts
@@ -1586,7 +2795,7 @@ router.get('/me', async (ctx: Context) => {
 export const authRoutes = router;
 ```
 
-### 7.3 Session Configuration
+### 13.3 Session Configuration
 
 ```typescript
 // src/server/config.ts
@@ -1614,9 +2823,9 @@ export function getSessionConfig(): SessionConfig {
 
 ---
 
-## 8. Cloud Run Deployment
+## 14. Cloud Run Deployment
 
-### 8.1 Container Configuration
+### 14.1 Container Configuration
 
 ```dockerfile
 # Dockerfile
@@ -1653,7 +2862,7 @@ EXPOSE 8080
 CMD ["node", "dist/server/index.js"]
 ```
 
-### 8.2 Cloud Run Service Definition
+### 14.2 Cloud Run Service Definition
 
 ```yaml
 # cloudrun.yaml
@@ -1722,7 +2931,7 @@ spec:
             periodSeconds: 5
 ```
 
-### 8.3 Cold Start Optimization
+### 14.3 Cold Start Optimization
 
 Cloud Run instances may be scaled to zero. Optimize cold starts:
 
@@ -1762,7 +2971,7 @@ async function main() {
 main().catch(console.error);
 ```
 
-### 8.4 Health Endpoints
+### 14.4 Health Endpoints
 
 ```typescript
 // src/server/routes/health.ts
@@ -1818,9 +3027,9 @@ export const healthRoutes = router;
 
 ---
 
-## 9. Configuration
+## 15. Configuration
 
-### 9.1 Environment Variables
+### 15.1 Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -1837,7 +3046,7 @@ export const healthRoutes = router;
 | `LOG_LEVEL` | No | `info` | Logging level |
 | `LOG_FORMAT` | No | `json` | Log format (json/text) |
 
-### 9.2 YAML Configuration
+### 15.2 YAML Configuration
 
 ```yaml
 # config/default.yaml
@@ -1877,9 +3086,9 @@ assets:
 
 ---
 
-## 10. Security Considerations
+## 16. Security Considerations
 
-### 10.1 Content Security Policy
+### 16.1 Content Security Policy
 
 ```typescript
 // src/server/middleware/security.ts
@@ -1913,7 +3122,7 @@ export function security(config: AppConfig) {
 }
 ```
 
-### 10.2 CSRF Protection
+### 16.2 CSRF Protection
 
 ```typescript
 // src/server/middleware/csrf.ts
@@ -1930,7 +3139,7 @@ export function csrfProtection() {
 }
 ```
 
-### 10.3 Rate Limiting
+### 16.3 Rate Limiting
 
 ```typescript
 // src/server/middleware/rate-limit.ts
@@ -1957,7 +3166,7 @@ export function rateLimiter() {
 
 ---
 
-## 11. Implementation Plan
+## 17. Implementation Plan
 
 ### Phase 1: Core Server Setup
 - [ ] Koa application structure
@@ -1998,7 +3207,44 @@ export function rateLimiter() {
 - [ ] Terminal theming
 - [ ] Resize handling
 
-### Phase 7: Cloud Run Deployment
+### Phase 7: Template Management UI
+- [ ] Template list page
+- [ ] Template card component
+- [ ] Template detail/viewer
+- [ ] Template upload wizard
+- [ ] Scope selector component
+- [ ] Template clone dialog
+
+### Phase 8: User & Group Management UI
+- [ ] User list page
+- [ ] User detail page
+- [ ] User avatar component
+- [ ] Group list page
+- [ ] Group detail with member management
+- [ ] Member list component
+- [ ] Group selector component
+
+### Phase 9: Permissions & Policy UI
+- [ ] Policy list page
+- [ ] Policy editor component
+- [ ] Principal selector component
+- [ ] Access evaluation debug tool
+- [ ] Permission badge component
+
+### Phase 10: Environment & Secrets UI
+- [ ] Environment settings page (scoped)
+- [ ] Secrets management page
+- [ ] Scope selector for env/secrets
+- [ ] Env var editor dialog
+- [ ] Secret editor dialog (write-only)
+
+### Phase 11: API Key Management
+- [ ] API keys list page
+- [ ] Create API key dialog
+- [ ] Key display/copy component
+- [ ] Revocation confirmation
+
+### Phase 12: Cloud Run Deployment
 - [ ] Dockerfile
 - [ ] Cloud Run configuration
 - [ ] Secret management
@@ -2007,11 +3253,18 @@ export function rateLimiter() {
 
 ---
 
-## 12. References
+## 18. References
 
+### Design Documents
 - **Server Implementation:** `server-implementation-design.md`
 - **Hub API:** `hub-api.md`
 - **Hosted Architecture:** `hosted-architecture.md`
+- **Authentication Design:** `authentication-design.md`
+- **Permissions Design:** `permissions-design.md`
+- **Hosted Templates:** `hosted-templates.md`
+- **Frontend Milestones:** `frontend-milestones.md`
+
+### External Documentation
 - **Lit Documentation:** https://lit.dev/
 - **Web Awesome:** https://webawesome.com/
 - **Koa Documentation:** https://koajs.com/
