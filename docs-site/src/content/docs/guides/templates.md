@@ -63,6 +63,23 @@ You can clone an existing template to use as a starting point:
 scion templates clone security-auditor security-auditor-v2
 ```
 
+### Deleting a Template
+
+To delete a template, use `scion templates delete` (or `rm`). The command checks both local and Hub locations and prompts for confirmation before deleting:
+
+```bash
+# Delete a template (will prompt for confirmation)
+scion templates delete security-auditor
+
+# Skip confirmation
+scion templates delete security-auditor --yes
+
+# Delete local only (skip Hub check)
+scion templates delete security-auditor --no-hub
+```
+
+If the template exists in both locations, you'll be prompted to choose whether to delete the local copy, the remote copy, or both.
+
 ### Global vs. Project Templates
 
 - **Project Templates**: Stored in `.scion/templates/` within your project. Shared with the team via git.
