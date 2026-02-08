@@ -128,8 +128,8 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 	fmt.Printf("Attaching to agent '%s' via Hub...\n", agentName)
 
 	// Connect via WebSocket
-	// Use agent ID for the PTY endpoint
-	agentID := agent.AgentID
+	// Use agent UUID for the PTY endpoint
+	agentID := agent.ID
 	if agentID == "" {
 		agentID = agentName // Fall back to name if ID not set
 	}
