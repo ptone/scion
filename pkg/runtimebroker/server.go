@@ -74,6 +74,12 @@ type ServerConfig struct {
 	// Defaults to ~/.scion/broker-credentials.json if not specified.
 	BrokerCredentialsPath string
 
+	// InMemoryCredentials allows injecting credentials directly without a file.
+	// Used for co-located Hub+RuntimeBroker mode where credentials are generated
+	// in-memory and shared between the Hub and RuntimeBroker in the same process.
+	// Takes precedence over BrokerCredentialsPath if set.
+	InMemoryCredentials *brokercredentials.BrokerCredentials
+
 	// BrokerAuthEnabled enables HMAC verification for incoming requests from the Hub.
 	BrokerAuthEnabled bool
 	// BrokerAuthStrictMode, when true, requires all requests to be authenticated.
@@ -259,8 +265,17 @@ func (s *Server) initHubIntegration() error {
 	return nil
 }
 
-// loadBrokerCredentials attempts to load broker credentials from the configured path.
+// loadBrokerCredentials attempts to load broker credentials.
+// Priority: InMemoryCredentials (co-located mode) > BrokerCredentialsPath > default path
 func (s *Server) loadBrokerCredentials() error {
+	// Check for in-memory credentials first (used in co-located Hub+RuntimeBroker mode)
+	if s.config.InMemoryCredentials != nil {
+		s.brokerCredentials = s.config.InMemoryCredentials
+		slog.Info("Using in-memory broker credentials (co-located mode)", "brokerID", s.brokerCredentials.BrokerID)
+		return nil
+	}
+
+	// Fall back to file-based credentials
 	credPath := s.config.BrokerCredentialsPath
 	if credPath == "" {
 		credPath = brokercredentials.DefaultPath()

@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -17,6 +19,7 @@ import (
 	"github.com/ptone/scion-agent/pkg/agent"
 	"github.com/ptone/scion-agent/pkg/api"
 	"github.com/ptone/scion-agent/pkg/apiclient"
+	"github.com/ptone/scion-agent/pkg/brokercredentials"
 	"github.com/ptone/scion-agent/pkg/config"
 	"github.com/ptone/scion-agent/pkg/harness"
 	"github.com/ptone/scion-agent/pkg/hub"
@@ -518,6 +521,50 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			}
 		}
 
+		// For co-located mode, generate in-memory credentials so the RuntimeBroker
+		// can establish a control channel to the Hub. This is required for PTY attach
+		// to work, as PTY streams are multiplexed over the control channel WebSocket.
+		var inMemoryCreds *brokercredentials.BrokerCredentials
+		if enableHub && !simulateRemoteBroker && s != nil {
+			// Generate a 32-byte random secret key
+			secretKeyBytes := make([]byte, 32)
+			if _, err := rand.Read(secretKeyBytes); err != nil {
+				log.Printf("Warning: failed to generate secret key for co-located mode: %v", err)
+			} else {
+				// Store the secret in Hub's database for HMAC validation
+				brokerSecret := &store.BrokerSecret{
+					BrokerID:  brokerID,
+					SecretKey: secretKeyBytes,
+					Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+					CreatedAt: time.Now(),
+					Status:    store.BrokerSecretStatusActive,
+				}
+				if err := s.CreateBrokerSecret(ctx, brokerSecret); err != nil {
+					// If already exists, try to update it
+					if err == store.ErrAlreadyExists {
+						brokerSecret.RotatedAt = time.Now()
+						if updateErr := s.UpdateBrokerSecret(ctx, brokerSecret); updateErr != nil {
+							log.Printf("Warning: failed to update broker secret for co-located mode: %v", updateErr)
+						} else {
+							log.Printf("Updated broker secret for co-located control channel")
+						}
+					} else {
+						log.Printf("Warning: failed to create broker secret for co-located mode: %v", err)
+					}
+				} else {
+					log.Printf("Created broker secret for co-located control channel")
+				}
+
+				// Create in-memory credentials for RuntimeBroker
+				inMemoryCreds = &brokercredentials.BrokerCredentials{
+					BrokerID:     brokerID,
+					SecretKey:    base64.StdEncoding.EncodeToString(secretKeyBytes),
+					HubEndpoint:  hubEndpointForRH,
+					RegisteredAt: time.Now(),
+				}
+			}
+		}
+
 		// Create Runtime Broker server configuration
 		rhCfg := runtimebroker.ServerConfig{
 			Port:               cfg.RuntimeBroker.Port,
@@ -547,6 +594,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			// the internal database heartbeat loop instead.
 			ControlChannelEnabled: hubEndpointForRH != "",
 			HeartbeatEnabled:      hubEndpointForRH != "" && (simulateRemoteBroker || !enableHub),
+
+			// In-memory credentials for co-located mode (allows control channel without file-based creds)
+			InMemoryCredentials: inMemoryCreds,
 		}
 
 		// Create Runtime Broker server
