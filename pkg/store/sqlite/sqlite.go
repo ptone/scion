@@ -76,6 +76,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV9,
 		migrationV10,
 		migrationV11,
+		migrationV12,
 	}
 
 	// Create migrations table if not exists
@@ -460,6 +461,12 @@ ALTER TABLE runtime_brokers ADD COLUMN created_by TEXT;
 const migrationV11 = `
 -- Add auto_provide column to runtime_brokers for automatic grove provider registration
 ALTER TABLE runtime_brokers ADD COLUMN auto_provide INTEGER NOT NULL DEFAULT 0;
+`
+
+// Migration V12: Add injection_mode and secret columns to env_vars
+const migrationV12 = `
+ALTER TABLE env_vars ADD COLUMN injection_mode TEXT NOT NULL DEFAULT 'as_needed';
+ALTER TABLE env_vars ADD COLUMN secret INTEGER NOT NULL DEFAULT 0;
 `
 
 // Helper functions for JSON marshaling/unmarshaling
@@ -2014,11 +2021,11 @@ func (s *SQLiteStore) CreateEnvVar(ctx context.Context, envVar *store.EnvVar) er
 	envVar.Updated = now
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO env_vars (id, key, value, scope, scope_id, description, sensitive, created_at, updated_at, created_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO env_vars (id, key, value, scope, scope_id, description, sensitive, injection_mode, secret, created_at, updated_at, created_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		envVar.ID, envVar.Key, envVar.Value, envVar.Scope, envVar.ScopeID,
-		envVar.Description, envVar.Sensitive,
+		envVar.Description, envVar.Sensitive, envVar.InjectionMode, envVar.Secret,
 		envVar.Created, envVar.Updated, envVar.CreatedBy,
 	)
 	if err != nil {
@@ -2034,11 +2041,11 @@ func (s *SQLiteStore) GetEnvVar(ctx context.Context, key, scope, scopeID string)
 	envVar := &store.EnvVar{}
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, key, value, scope, scope_id, description, sensitive, created_at, updated_at, created_by
+		SELECT id, key, value, scope, scope_id, description, sensitive, injection_mode, secret, created_at, updated_at, created_by
 		FROM env_vars WHERE key = ? AND scope = ? AND scope_id = ?
 	`, key, scope, scopeID).Scan(
 		&envVar.ID, &envVar.Key, &envVar.Value, &envVar.Scope, &envVar.ScopeID,
-		&envVar.Description, &envVar.Sensitive,
+		&envVar.Description, &envVar.Sensitive, &envVar.InjectionMode, &envVar.Secret,
 		&envVar.Created, &envVar.Updated, &envVar.CreatedBy,
 	)
 	if err != nil {
@@ -2056,10 +2063,10 @@ func (s *SQLiteStore) UpdateEnvVar(ctx context.Context, envVar *store.EnvVar) er
 
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE env_vars SET
-			value = ?, description = ?, sensitive = ?, updated_at = ?
+			value = ?, description = ?, sensitive = ?, injection_mode = ?, secret = ?, updated_at = ?
 		WHERE key = ? AND scope = ? AND scope_id = ?
 	`,
-		envVar.Value, envVar.Description, envVar.Sensitive, envVar.Updated,
+		envVar.Value, envVar.Description, envVar.Sensitive, envVar.InjectionMode, envVar.Secret, envVar.Updated,
 		envVar.Key, envVar.Scope, envVar.ScopeID,
 	)
 	if err != nil {
@@ -2143,7 +2150,7 @@ func (s *SQLiteStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, key, value, scope, scope_id, description, sensitive, created_at, updated_at, created_by
+		SELECT id, key, value, scope, scope_id, description, sensitive, injection_mode, secret, created_at, updated_at, created_by
 		FROM env_vars %s ORDER BY key
 	`, whereClause)
 
@@ -2158,7 +2165,7 @@ func (s *SQLiteStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter
 		var envVar store.EnvVar
 		if err := rows.Scan(
 			&envVar.ID, &envVar.Key, &envVar.Value, &envVar.Scope, &envVar.ScopeID,
-			&envVar.Description, &envVar.Sensitive,
+			&envVar.Description, &envVar.Sensitive, &envVar.InjectionMode, &envVar.Secret,
 			&envVar.Created, &envVar.Updated, &envVar.CreatedBy,
 		); err != nil {
 			return nil, err

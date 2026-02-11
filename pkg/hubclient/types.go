@@ -253,16 +253,18 @@ type UserPreferences struct {
 
 // EnvVar represents an environment variable from the Hub API.
 type EnvVar struct {
-	ID          string    `json:"id"`
-	Key         string    `json:"key"`
-	Value       string    `json:"value"`
-	Scope       string    `json:"scope"`
-	ScopeID     string    `json:"scopeId"`
-	Description string    `json:"description,omitempty"`
-	Sensitive   bool      `json:"sensitive,omitempty"`
-	Created     time.Time `json:"created"`
-	Updated     time.Time `json:"updated"`
-	CreatedBy   string    `json:"createdBy,omitempty"`
+	ID            string    `json:"id"`
+	Key           string    `json:"key"`
+	Value         string    `json:"value"`
+	Scope         string    `json:"scope"`
+	ScopeID       string    `json:"scopeId"`
+	Description   string    `json:"description,omitempty"`
+	Sensitive     bool      `json:"sensitive,omitempty"`
+	InjectionMode string    `json:"injectionMode,omitempty"`
+	Secret        bool      `json:"secret,omitempty"`
+	Created       time.Time `json:"created"`
+	Updated       time.Time `json:"updated"`
+	CreatedBy     string    `json:"createdBy,omitempty"`
 }
 
 // Secret represents secret metadata from the Hub API.

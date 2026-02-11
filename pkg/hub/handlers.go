@@ -2765,11 +2765,13 @@ type ListEnvVarsResponse struct {
 }
 
 type SetEnvVarRequest struct {
-	Value       string `json:"value"`
-	Scope       string `json:"scope,omitempty"`
-	ScopeID     string `json:"scopeId,omitempty"`
-	Description string `json:"description,omitempty"`
-	Sensitive   bool   `json:"sensitive,omitempty"`
+	Value         string `json:"value"`
+	Scope         string `json:"scope,omitempty"`
+	ScopeID       string `json:"scopeId,omitempty"`
+	Description   string `json:"description,omitempty"`
+	Sensitive     bool   `json:"sensitive,omitempty"`
+	InjectionMode string `json:"injectionMode,omitempty"`
+	Secret        bool   `json:"secret,omitempty"`
 }
 
 type SetEnvVarResponse struct {
@@ -2897,14 +2899,26 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		scopeID = "default" // TODO: Get from auth context
 	}
 
+	injectionMode := req.InjectionMode
+	if injectionMode == "" {
+		injectionMode = store.InjectionModeAsNeeded
+	}
+
+	sensitive := req.Sensitive
+	if req.Secret {
+		sensitive = true
+	}
+
 	envVar := &store.EnvVar{
-		ID:          api.NewUUID(),
-		Key:         key,
-		Value:       req.Value,
-		Scope:       scope,
-		ScopeID:     scopeID,
-		Description: req.Description,
-		Sensitive:   req.Sensitive,
+		ID:            api.NewUUID(),
+		Key:           key,
+		Value:         req.Value,
+		Scope:         scope,
+		ScopeID:       scopeID,
+		Description:   req.Description,
+		Sensitive:     sensitive,
+		InjectionMode: injectionMode,
+		Secret:        req.Secret,
 	}
 
 	created, err := s.store.UpsertEnvVar(ctx, envVar)
@@ -3205,14 +3219,24 @@ func (s *Server) handleGroveEnvVarByKey(w http.ResponseWriter, r *http.Request, 
 			ValidationError(w, "value is required", nil)
 			return
 		}
+		groveInjectionMode := req.InjectionMode
+		if groveInjectionMode == "" {
+			groveInjectionMode = store.InjectionModeAsNeeded
+		}
+		groveSensitive := req.Sensitive
+		if req.Secret {
+			groveSensitive = true
+		}
 		envVar := &store.EnvVar{
-			ID:          api.NewUUID(),
-			Key:         key,
-			Value:       req.Value,
-			Scope:       store.ScopeGrove,
-			ScopeID:     groveID,
-			Description: req.Description,
-			Sensitive:   req.Sensitive,
+			ID:            api.NewUUID(),
+			Key:           key,
+			Value:         req.Value,
+			Scope:         store.ScopeGrove,
+			ScopeID:       groveID,
+			Description:   req.Description,
+			Sensitive:     groveSensitive,
+			InjectionMode: groveInjectionMode,
+			Secret:        req.Secret,
 		}
 		created, err := s.store.UpsertEnvVar(ctx, envVar)
 		if err != nil {
@@ -3555,14 +3579,24 @@ func (s *Server) handleBrokerEnvVarByKey(w http.ResponseWriter, r *http.Request,
 			ValidationError(w, "value is required", nil)
 			return
 		}
+		brokerInjectionMode := req.InjectionMode
+		if brokerInjectionMode == "" {
+			brokerInjectionMode = store.InjectionModeAsNeeded
+		}
+		brokerSensitive := req.Sensitive
+		if req.Secret {
+			brokerSensitive = true
+		}
 		envVar := &store.EnvVar{
-			ID:          api.NewUUID(),
-			Key:         key,
-			Value:       req.Value,
-			Scope:       store.ScopeRuntimeBroker,
-			ScopeID:     brokerID,
-			Description: req.Description,
-			Sensitive:   req.Sensitive,
+			ID:            api.NewUUID(),
+			Key:           key,
+			Value:         req.Value,
+			Scope:         store.ScopeRuntimeBroker,
+			ScopeID:       brokerID,
+			Description:   req.Description,
+			Sensitive:     brokerSensitive,
+			InjectionMode: brokerInjectionMode,
+			Secret:        req.Secret,
 		}
 		created, err := s.store.UpsertEnvVar(ctx, envVar)
 		if err != nil {

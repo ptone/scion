@@ -612,11 +612,125 @@ test_phase3_edge_cases() {
 }
 
 # ============================================================================
-# Phase 4: Cleanup Verification
+# Phase 4: Injection Mode and Secret Options
 # ============================================================================
 
-test_phase4_cleanup() {
-    log_section "Phase 4: Cleanup Verification"
+test_phase4_injection_and_secret() {
+    log_section "Phase 4: Injection Mode and Secret Options"
+
+    # 4.1 Set var with --always
+    assert_output_contains \
+        "4.1  Set var with --always" \
+        "(always)" \
+        $SCION hub env set --always "INJECT_VAR_A=always_val"
+
+    # 4.2 Get var shows (always) annotation
+    assert_output_contains \
+        "4.2  Get var shows (always) annotation" \
+        "(always)" \
+        $SCION hub env get INJECT_VAR_A
+
+    # 4.3 Set var with explicit --as-needed
+    assert_output_contains \
+        "4.3  Set var with --as-needed" \
+        "(as-needed)" \
+        $SCION hub env set --as-needed "INJECT_VAR_B=asneeded_val"
+
+    # 4.4 Set var with neither (default is as-needed)
+    assert_output_contains \
+        "4.4  Set var with default injection mode" \
+        "(as-needed)" \
+        $SCION hub env set "INJECT_VAR_C=default_val"
+
+    # 4.5 Set var with --secret
+    assert_output_contains \
+        "4.5  Set var with --secret" \
+        "(secret)" \
+        $SCION hub env set --secret "SECRET_VAR_A=s3cret_val"
+
+    # 4.6 Get secret var shows masked value
+    assert_output_contains \
+        "4.6  Get secret var shows masked value" \
+        "******" \
+        $SCION hub env get SECRET_VAR_A
+
+    # 4.7 Secret var value is not shown
+    assert_output_not_contains \
+        "4.7  Secret var value is not shown in get" \
+        "s3cret_val" \
+        $SCION hub env get SECRET_VAR_A
+
+    # 4.8 Update var from as-needed to always
+    assert_output_contains \
+        "4.8  Update var to --always" \
+        "(always)" \
+        $SCION hub env set --always "INJECT_VAR_B=updated_always"
+
+    # 4.9 Verify update changed injection mode
+    assert_output_contains \
+        "4.9  Verify updated injection mode" \
+        "(always)" \
+        $SCION hub env get INJECT_VAR_B
+
+    # 4.10 Set var with --secret --always combined
+    assert_output_contains \
+        "4.10 Set var with --secret --always" \
+        "(always)" \
+        $SCION hub env set --secret --always "COMBO_VAR=combo_val"
+
+    assert_output_contains \
+        "4.10b Set var with --secret --always shows secret" \
+        "(secret)" \
+        $SCION hub env get COMBO_VAR
+
+    # 4.11 --always and --as-needed together is rejected
+    assert_failure \
+        "4.11 Reject --always and --as-needed together" \
+        $SCION hub env set --always --as-needed "BAD_VAR=bad"
+
+    # 4.12 JSON output includes injectionMode and secret fields
+    TESTS_RUN=$((TESTS_RUN + 1))
+    local json_output=""
+    json_output=$($SCION hub env get --json SECRET_VAR_A 2>/dev/null) || true
+    local json_injection_mode=""
+    local json_secret=""
+    json_injection_mode=$(echo "$json_output" | jq -r '.injectionMode // empty' 2>/dev/null) || true
+    json_secret=$(echo "$json_output" | jq -r '.secret // empty' 2>/dev/null) || true
+    if [[ "$json_secret" == "true" ]]; then
+        log_success "4.12 JSON output includes secret field"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        log_error "4.12 JSON output includes secret field"
+        log_error "  expected secret=true, got: $json_output"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+    json_output=$($SCION hub env get --json INJECT_VAR_A 2>/dev/null) || true
+    json_injection_mode=$(echo "$json_output" | jq -r '.injectionMode // empty' 2>/dev/null) || true
+    if [[ "$json_injection_mode" == "always" ]]; then
+        log_success "4.12b JSON output includes injectionMode field"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        log_error "4.12b JSON output includes injectionMode field"
+        log_error "  expected injectionMode=always, got: $json_output"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+
+    # Clean up test vars
+    for key in INJECT_VAR_A INJECT_VAR_B INJECT_VAR_C SECRET_VAR_A COMBO_VAR; do
+        $SCION hub env clear "$key" 2>/dev/null || true
+    done
+
+    log_info "Phase 4 complete"
+}
+
+# ============================================================================
+# Phase 5: Cleanup Verification
+# ============================================================================
+
+test_phase5_cleanup() {
+    log_section "Phase 5: Cleanup Verification"
 
     # Clear all user-scoped test variables
     for key in TEST_VAR_A TEST_VAR_B SPECIAL_VAR URL_VAR EQUALS_VAR MULTI_VAR; do
@@ -626,19 +740,19 @@ test_phase4_cleanup() {
     # Clear remaining grove-scoped variables
     $SCION hub env clear --grove="$GROVE_ID" GROVE_VAR_A 2>/dev/null || true
 
-    # 4.1 Verify user scope is empty
+    # 5.1 Verify user scope is empty
     assert_output_contains \
-        "4.1  User scope empty after cleanup" \
+        "5.1  User scope empty after cleanup" \
         "No environment variables found" \
         $SCION hub env get
 
-    # 4.2 Verify grove scope is empty
+    # 5.2 Verify grove scope is empty
     assert_output_contains \
-        "4.2  Grove scope empty after cleanup" \
+        "5.2  Grove scope empty after cleanup" \
         "No environment variables found" \
         $SCION hub env get --grove="$GROVE_ID"
 
-    log_info "Phase 4 complete"
+    log_info "Phase 5 complete"
 }
 
 # ============================================================================
@@ -660,7 +774,8 @@ run_all_tests() {
     test_phase1_user_scope
     test_phase2_grove_scope
     test_phase3_edge_cases
-    test_phase4_cleanup
+    test_phase4_injection_and_secret
+    test_phase5_cleanup
 
     # Summary
     log_section "Test Summary"

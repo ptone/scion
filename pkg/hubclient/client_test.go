@@ -455,6 +455,61 @@ func TestEnvSet(t *testing.T) {
 	}
 }
 
+func TestEnvSetWithInjectionModeAndSecret(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req SetEnvRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("failed to decode request: %v", err)
+		}
+		if req.InjectionMode != "always" {
+			t.Errorf("expected injectionMode 'always', got %q", req.InjectionMode)
+		}
+		if !req.Secret {
+			t.Error("expected secret=true")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(SetEnvResponse{
+			EnvVar: &EnvVar{
+				ID:            "uuid-secret",
+				Key:           "SECRET_KEY",
+				Value:         "********",
+				Scope:         "user",
+				Sensitive:     true,
+				InjectionMode: "always",
+				Secret:        true,
+			},
+			Created: true,
+		})
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	resp, err := client.Env().Set(context.Background(), "SECRET_KEY", &SetEnvRequest{
+		Value:         "s3cret",
+		InjectionMode: "always",
+		Secret:        true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.Created {
+		t.Error("expected created=true")
+	}
+	if resp.EnvVar.InjectionMode != "always" {
+		t.Errorf("expected injectionMode 'always', got %q", resp.EnvVar.InjectionMode)
+	}
+	if !resp.EnvVar.Secret {
+		t.Error("expected secret=true in response")
+	}
+	if !resp.EnvVar.Sensitive {
+		t.Error("expected sensitive=true in response (implied by secret)")
+	}
+	if resp.EnvVar.Value != "********" {
+		t.Errorf("expected masked value, got %q", resp.EnvVar.Value)
+	}
+}
+
 func TestEnvDelete(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {

@@ -28,9 +28,12 @@ import (
 )
 
 var (
-	envGroveScope string
-	envBrokerScope  string
-	envOutputJSON bool
+	envGroveScope  string
+	envBrokerScope string
+	envOutputJSON  bool
+	envAlways      bool
+	envAsNeeded    bool
+	envSecret      bool
 )
 
 // hubEnvCmd is the parent command for environment variable operations
@@ -134,6 +137,11 @@ func init() {
 	}
 
 	hubEnvGetCmd.Flags().BoolVar(&envOutputJSON, "json", false, "Output in JSON format")
+
+	// Injection mode and secret flags for set command
+	hubEnvSetCmd.Flags().BoolVar(&envAlways, "always", false, "Always inject this variable at its scope")
+	hubEnvSetCmd.Flags().BoolVar(&envAsNeeded, "as-needed", false, "Only inject when requested by a template (default)")
+	hubEnvSetCmd.Flags().BoolVar(&envSecret, "secret", false, "Treat as a secret (encrypted, value never returned)")
 }
 
 // resolveEnvScope determines the scope and scopeID based on flags
@@ -224,13 +232,29 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Validate --always and --as-needed are mutually exclusive
+	if envAlways && envAsNeeded {
+		return fmt.Errorf("--always and --as-needed are mutually exclusive")
+	}
+
+	// Determine injection mode
+	injectionMode := ""
+	if envAlways {
+		injectionMode = "always"
+	} else if envAsNeeded {
+		injectionMode = "as_needed"
+	}
+	// If neither is set, leave empty to let the server default to "as_needed"
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	req := &hubclient.SetEnvRequest{
-		Value:   value,
-		Scope:   scope,
-		ScopeID: scopeID,
+		Value:         value,
+		Scope:         scope,
+		ScopeID:       scopeID,
+		InjectionMode: injectionMode,
+		Secret:        envSecret,
 	}
 
 	resp, err := client.Env().Set(ctx, key, req)
@@ -238,11 +262,30 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to set environment variable: %w", err)
 	}
 
-	if resp.Created {
-		fmt.Printf("Created %s=%s (scope: %s)\n", key, value, scope)
-	} else {
-		fmt.Printf("Updated %s=%s (scope: %s)\n", key, value, scope)
+	displayValue := value
+	if envSecret || (resp.EnvVar != nil && resp.EnvVar.Sensitive) {
+		displayValue = "********"
 	}
+
+	action := "Updated"
+	if resp.Created {
+		action = "Created"
+	}
+
+	// Build annotation string
+	annotations := ""
+	if resp.EnvVar != nil {
+		if resp.EnvVar.InjectionMode == "always" {
+			annotations += " (always)"
+		} else {
+			annotations += " (as-needed)"
+		}
+		if resp.EnvVar.Secret {
+			annotations += " (secret)"
+		}
+	}
+
+	fmt.Printf("%s %s=%s (scope: %s)%s\n", action, key, displayValue, scope, annotations)
 
 	return nil
 }
@@ -291,9 +334,9 @@ func runEnvGet(cmd *cobra.Command, args []string) error {
 		}
 
 		if envVar.Sensitive {
-			fmt.Printf("%s=****** (sensitive, scope: %s)\n", envVar.Key, envVar.Scope)
+			fmt.Printf("%s=****** (sensitive, scope: %s)%s\n", envVar.Key, envVar.Scope, formatEnvAnnotations(envVar))
 		} else {
-			fmt.Printf("%s=%s\n", envVar.Key, envVar.Value)
+			fmt.Printf("%s=%s%s\n", envVar.Key, envVar.Value, formatEnvAnnotations(envVar))
 		}
 		return nil
 	}
@@ -323,13 +366,30 @@ func runEnvGet(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Environment variables (scope: %s):\n", scope)
 	for _, v := range resp.EnvVars {
 		if v.Sensitive {
-			fmt.Printf("  %s=****** (sensitive)\n", v.Key)
+			fmt.Printf("  %s=****** (sensitive)%s\n", v.Key, formatEnvAnnotations(&v))
 		} else {
-			fmt.Printf("  %s=%s\n", v.Key, v.Value)
+			fmt.Printf("  %s=%s%s\n", v.Key, v.Value, formatEnvAnnotations(&v))
 		}
 	}
 
 	return nil
+}
+
+// formatEnvAnnotations builds an annotation string for injection mode and secret status.
+func formatEnvAnnotations(v *hubclient.EnvVar) string {
+	var parts []string
+	if v.InjectionMode == "always" {
+		parts = append(parts, "always")
+	} else if v.InjectionMode == "as_needed" {
+		parts = append(parts, "as-needed")
+	}
+	if v.Secret {
+		parts = append(parts, "secret")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
 }
 
 func runEnvClear(cmd *cobra.Command, args []string) error {

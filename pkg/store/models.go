@@ -420,8 +420,10 @@ type EnvVar struct {
 	ScopeID string `json:"scopeId"` // ID of the scoped entity
 
 	// Metadata
-	Description string `json:"description,omitempty"` // Optional description
-	Sensitive   bool   `json:"sensitive,omitempty"`   // If true, value is masked in responses
+	Description   string `json:"description,omitempty"`   // Optional description
+	Sensitive     bool   `json:"sensitive,omitempty"`     // If true, value is masked in responses
+	InjectionMode string `json:"injectionMode,omitempty"` // "always" or "as_needed" (default: "as_needed")
+	Secret        bool   `json:"secret,omitempty"`        // If true, value is encrypted and never returned
 
 	// Timestamps
 	Created time.Time `json:"created"`
@@ -464,6 +466,12 @@ const (
 	ScopeUser        = "user"
 	ScopeGrove       = "grove"
 	ScopeRuntimeBroker = "runtime_broker"
+)
+
+// InjectionMode constants for environment variables.
+const (
+	InjectionModeAlways   = "always"
+	InjectionModeAsNeeded = "as_needed"
 )
 
 // =============================================================================

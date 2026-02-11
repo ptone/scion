@@ -63,11 +63,13 @@ type EnvScopeOptions struct {
 
 // SetEnvRequest is the request for setting an environment variable.
 type SetEnvRequest struct {
-	Value       string `json:"value"`                 // Required: variable value
-	Scope       string `json:"scope,omitempty"`       // Scope type (default: user)
-	ScopeID     string `json:"scopeId,omitempty"`     // Required for grove/runtime_broker scope
-	Description string `json:"description,omitempty"` // Optional description
-	Sensitive   bool   `json:"sensitive,omitempty"`   // Mask value in responses
+	Value         string `json:"value"`                   // Required: variable value
+	Scope         string `json:"scope,omitempty"`         // Scope type (default: user)
+	ScopeID       string `json:"scopeId,omitempty"`       // Required for grove/runtime_broker scope
+	Description   string `json:"description,omitempty"`   // Optional description
+	Sensitive     bool   `json:"sensitive,omitempty"`     // Mask value in responses
+	InjectionMode string `json:"injectionMode,omitempty"` // "always" or "as_needed" (default: "as_needed")
+	Secret        bool   `json:"secret,omitempty"`        // Treat as a secret (encrypted, value never returned)
 }
 
 // SetEnvResponse is the response from setting an environment variable.
