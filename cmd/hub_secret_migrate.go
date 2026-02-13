@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ptone/scion-agent/pkg/config"
@@ -32,6 +33,7 @@ var (
 	migrateProject     string
 	migrateCredentials string
 	migrateDryRun      bool
+	migrateForce       bool
 )
 
 var hubSecretMigrateCmd = &cobra.Command{
@@ -53,7 +55,10 @@ Examples:
   scion hub secret migrate --project=my-project
 
   # With explicit credentials
-  scion hub secret migrate --project=my-project --credentials=/path/to/creds.json`,
+  scion hub secret migrate --project=my-project --credentials=/path/to/creds.json
+
+  # Force re-migration of already-migrated secrets (e.g., after naming scheme change)
+  scion hub secret migrate --project=my-project --force`,
 	RunE: runSecretMigrate,
 }
 
@@ -63,6 +68,7 @@ func init() {
 	hubSecretMigrateCmd.Flags().StringVar(&migrateProject, "project", "", "GCP project ID (required)")
 	hubSecretMigrateCmd.Flags().StringVar(&migrateCredentials, "credentials", "", "Path to GCP credentials JSON file")
 	hubSecretMigrateCmd.Flags().BoolVar(&migrateDryRun, "dry-run", false, "Show what would be migrated without making changes")
+	hubSecretMigrateCmd.Flags().BoolVar(&migrateForce, "force", false, "Re-migrate secrets that already have a GCP SM reference")
 
 	_ = hubSecretMigrateCmd.MarkFlagRequired("project")
 }
@@ -125,8 +131,8 @@ func runSecretMigrate(cmd *cobra.Command, args []string) error {
 	migrated := 0
 	skipped := 0
 	for _, s := range allSecrets {
-		// Skip secrets that already have a GCP SM reference
-		if s.SecretRef != "" {
+		// Skip secrets that already have a GCP SM reference (unless --force)
+		if s.SecretRef != "" && !migrateForce {
 			if migrateDryRun {
 				fmt.Printf("  SKIP  %s (scope: %s/%s) - already has ref: %s\n", s.Key, s.Scope, s.ScopeID, s.SecretRef)
 			}
@@ -134,16 +140,41 @@ func runSecretMigrate(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Get the actual value
-		value, err := db.GetSecretValue(ctx, s.Key, s.Scope, s.ScopeID)
-		if err != nil {
-			log.Printf("  WARN  %s (scope: %s/%s) - failed to get value: %v", s.Key, s.Scope, s.ScopeID, err)
-			skipped++
-			continue
+		var value string
+		if s.SecretRef != "" && migrateForce {
+			// --force: read value from existing GCP SM secret via its secretRef
+			ref := s.SecretRef
+			// secretRef format: "gcpsm:projects/{project}/secrets/{name}"
+			if !strings.HasPrefix(ref, "gcpsm:") {
+				log.Printf("  WARN  %s (scope: %s/%s) - unsupported ref format: %s", s.Key, s.Scope, s.ScopeID, ref)
+				skipped++
+				continue
+			}
+			smPath := strings.TrimPrefix(ref, "gcpsm:")
+			val, err := gcpBackend.AccessSecretValueByRef(ctx, smPath)
+			if err != nil {
+				log.Printf("  WARN  %s (scope: %s/%s) - failed to read from old ref: %v", s.Key, s.Scope, s.ScopeID, err)
+				skipped++
+				continue
+			}
+			value = val
+		} else {
+			// Normal migration: get value from DB
+			var err error
+			value, err = db.GetSecretValue(ctx, s.Key, s.Scope, s.ScopeID)
+			if err != nil {
+				log.Printf("  WARN  %s (scope: %s/%s) - failed to get value: %v", s.Key, s.Scope, s.ScopeID, err)
+				skipped++
+				continue
+			}
 		}
 
 		if migrateDryRun {
-			fmt.Printf("  WOULD MIGRATE  %s (scope: %s/%s, type: %s)\n", s.Key, s.Scope, s.ScopeID, s.SecretType)
+			action := "WOULD MIGRATE"
+			if s.SecretRef != "" {
+				action = "WOULD RE-MIGRATE"
+			}
+			fmt.Printf("  %s  %s (scope: %s/%s, type: %s)\n", action, s.Key, s.Scope, s.ScopeID, s.SecretType)
 		} else {
 			input := &secret.SetSecretInput{
 				Name:        s.Key,
@@ -162,7 +193,11 @@ func runSecretMigrate(cmd *cobra.Command, args []string) error {
 				skipped++
 				continue
 			}
-			fmt.Printf("  MIGRATED  %s (scope: %s/%s, type: %s)\n", s.Key, s.Scope, s.ScopeID, s.SecretType)
+			action := "MIGRATED"
+			if s.SecretRef != "" {
+				action = "RE-MIGRATED"
+			}
+			fmt.Printf("  %s  %s (scope: %s/%s, type: %s)\n", action, s.Key, s.Scope, s.ScopeID, s.SecretType)
 		}
 		migrated++
 	}

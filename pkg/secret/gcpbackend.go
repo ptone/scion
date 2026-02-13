@@ -16,6 +16,8 @@ package secret
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -85,6 +87,11 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 	smName := b.gcpSecretName(input.Name, input.Scope, input.ScopeID)
 	fullName := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
 
+	target := input.Target
+	if target == "" {
+		target = input.Name
+	}
+
 	// Ensure the GCP SM secret exists (create if needed)
 	_, err := b.smClient.GetSecret(ctx, &smpb.GetSecretRequest{
 		Name: fullName,
@@ -105,6 +112,8 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 						"scion-scope":    sanitizeLabel(input.Scope),
 						"scion-scope-id": sanitizeLabel(input.ScopeID),
 						"scion-type":     sanitizeLabel(input.SecretType),
+						"scion-name":     sanitizeLabel(input.Name),
+						"scion-target":   sanitizeLabel(target),
 					},
 				},
 			})
@@ -260,10 +269,27 @@ func (b *GCPBackend) accessLatestVersion(ctx context.Context, smSecretName strin
 	return string(resp.Payload.Data), nil
 }
 
+// AccessSecretValueByRef retrieves a secret value using a full GCP SM resource path.
+// The path should be in the form "projects/{project}/secrets/{name}".
+// This is used during migration to read values from old GCP SM secrets.
+func (b *GCPBackend) AccessSecretValueByRef(ctx context.Context, smPath string) (string, error) {
+	resp, err := b.smClient.AccessSecretVersion(ctx, &smpb.AccessSecretVersionRequest{
+		Name: smPath + "/versions/latest",
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to access secret at %s: %w", smPath, err)
+	}
+	return string(resp.Payload.Data), nil
+}
+
 // gcpSecretName builds a sanitized GCP SM secret ID from the scion secret identity.
-// Format: scion-{scope}-{scopeID}-{name}
+// Format: scion-{scope}-{sha256(scopeID)[:12]}-{name}
+// The scopeID is hashed to avoid collisions when different IDs sanitize to the same string,
+// and to keep the total length well within the 255-char GCP SM limit.
 func (b *GCPBackend) gcpSecretName(name, scope, scopeID string) string {
-	return sanitizeSecretID(fmt.Sprintf("scion-%s-%s-%s", scope, scopeID, name))
+	hash := sha256.Sum256([]byte(scopeID))
+	shortHash := hex.EncodeToString(hash[:6]) // 6 bytes = 12 hex chars
+	return sanitizeSecretID(fmt.Sprintf("scion-%s-%s-%s", scope, shortHash, name))
 }
 
 // sanitizeSecretID ensures the string is a valid GCP SM secret ID.

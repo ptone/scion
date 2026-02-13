@@ -18,7 +18,10 @@ package secret
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -385,16 +388,147 @@ func TestGCPBackend_Resolve(t *testing.T) {
 func TestGCPBackend_SecretNameSanitization(t *testing.T) {
 	backend, _ := createTestGCPBackend(t)
 
-	// Test the naming convention
-	name := backend.gcpSecretName("MY_KEY", "user", "user-123")
-	if name != "scion-user-user-123-MY_KEY" {
-		t.Errorf("unexpected secret name: %s", name)
+	// Helper to compute expected hash prefix
+	hashScopeID := func(scopeID string) string {
+		h := sha256.Sum256([]byte(scopeID))
+		return hex.EncodeToString(h[:6])
 	}
 
-	// Test sanitization of special characters
+	// Test the hashed naming convention
+	name := backend.gcpSecretName("MY_KEY", "user", "user-123")
+	expectedHash := hashScopeID("user-123")
+	expectedPrefix := "scion-user-" + expectedHash + "-"
+	if !strings.HasPrefix(name, expectedPrefix) {
+		t.Errorf("expected prefix %q, got name %q", expectedPrefix, name)
+	}
+	if !strings.HasSuffix(name, "-MY_KEY") {
+		t.Errorf("expected suffix %q, got name %q", "-MY_KEY", name)
+	}
+	// Hash portion should be exactly 12 hex chars
+	parts := strings.SplitN(name, "-", 4) // scion, user, hash, name
+	if len(parts) != 4 {
+		t.Fatalf("expected 4 parts in name, got %d: %q", len(parts), name)
+	}
+	if len(parts[2]) != 12 {
+		t.Errorf("expected 12-char hash, got %d chars: %q", len(parts[2]), parts[2])
+	}
+
+	// Determinism: same inputs produce same output
+	name2 := backend.gcpSecretName("MY_KEY", "user", "user-123")
+	if name != name2 {
+		t.Errorf("gcpSecretName is not deterministic: %q != %q", name, name2)
+	}
+
+	// Test sanitization of special characters in name (scopeID is hashed, not sanitized)
 	name = backend.gcpSecretName("my.key/with spaces", "grove", "grove@id")
-	expected := "scion-grove-grove-id-my-key-with-spaces"
-	if name != expected {
-		t.Errorf("expected sanitized name %q, got %q", expected, name)
+	expectedHash = hashScopeID("grove@id")
+	expectedFull := fmt.Sprintf("scion-grove-%s-my-key-with-spaces", expectedHash)
+	if name != expectedFull {
+		t.Errorf("expected sanitized name %q, got %q", expectedFull, name)
+	}
+}
+
+func TestGCPBackend_SecretNameCollisionResistance(t *testing.T) {
+	backend, _ := createTestGCPBackend(t)
+
+	// Different UUIDs must produce different GCP SM names
+	name1 := backend.gcpSecretName("API_KEY", "user", "550e8400-e29b-41d4-a716-446655440000")
+	name2 := backend.gcpSecretName("API_KEY", "user", "550e8400-e29b-41d4-a716-446655440001")
+	if name1 == name2 {
+		t.Errorf("different scopeIDs produced same name: %q", name1)
+	}
+
+	// "default" scopeID must differ from UUID-based scopeIDs
+	nameDefault := backend.gcpSecretName("GITHUB_TOKEN", "user", "default")
+	nameUUID := backend.gcpSecretName("GITHUB_TOKEN", "user", "550e8400-e29b-41d4-a716-446655440000")
+	if nameDefault == nameUUID {
+		t.Errorf("default and UUID scopeIDs produced same name: %q", nameDefault)
+	}
+
+	// Two different "default-like" scopeIDs that would collide without hashing
+	nameA := backend.gcpSecretName("KEY", "user", "abc-def")
+	nameB := backend.gcpSecretName("KEY", "user", "abc@def")
+	if nameA == nameB {
+		t.Errorf("scopeIDs that differ only in special chars produced same name: %q", nameA)
+	}
+}
+
+func TestGCPBackend_Labels(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	input := &SetSecretInput{
+		Name:       "API_KEY",
+		Value:      "sk-test-123",
+		SecretType: TypeEnvironment,
+		Target:     "ANTHROPIC_API_KEY",
+		Scope:      ScopeUser,
+		ScopeID:    "user-1",
+	}
+
+	_, _, err := backend.Set(ctx, input)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	// Find the created secret in the mock and verify labels
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+
+	if len(mock.secrets) != 1 {
+		t.Fatalf("expected 1 secret in mock, got %d", len(mock.secrets))
+	}
+
+	for _, sec := range mock.secrets {
+		labels := sec.Labels
+		expectedLabels := map[string]string{
+			"scion-scope":    "user",
+			"scion-scope-id": "user-1",
+			"scion-type":     "environment",
+			"scion-name":     "api_key",
+			"scion-target":   "anthropic_api_key",
+		}
+		for k, expected := range expectedLabels {
+			got, ok := labels[k]
+			if !ok {
+				t.Errorf("missing label %q", k)
+			} else if got != expected {
+				t.Errorf("label %q: expected %q, got %q", k, expected, got)
+			}
+		}
+		if len(labels) != len(expectedLabels) {
+			t.Errorf("expected %d labels, got %d: %v", len(expectedLabels), len(labels), labels)
+		}
+	}
+}
+
+func TestGCPBackend_Labels_DefaultTarget(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	// When Target is empty, it should default to Name
+	input := &SetSecretInput{
+		Name:       "MY_SECRET",
+		Value:      "value",
+		SecretType: TypeEnvironment,
+		Scope:      ScopeGrove,
+		ScopeID:    "grove-1",
+	}
+
+	_, _, err := backend.Set(ctx, input)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+
+	for _, sec := range mock.secrets {
+		if got := sec.Labels["scion-target"]; got != "my_secret" {
+			t.Errorf("expected default target label %q, got %q", "my_secret", got)
+		}
+		if got := sec.Labels["scion-name"]; got != "my_secret" {
+			t.Errorf("expected name label %q, got %q", "my_secret", got)
+		}
 	}
 }

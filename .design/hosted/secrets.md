@@ -261,16 +261,23 @@ The primary production implementation uses [Google Cloud Secret Manager](https:/
 
 ### 4.2 Secret Naming Convention
 
-GCP Secret Manager has a flat namespace per project. Scion secrets are mapped using a hierarchical naming convention:
+GCP Secret Manager has a flat namespace per project. Scion secrets are mapped using a hashed naming convention to avoid collisions and stay within the 255-character GCP SM secret ID limit:
 
 ```
-scion/{scope}/{scopeID}/{name}
+scion-{scope}-{sha256(scopeID)[:12]}-{name}
 ```
+
+The `scopeID` is hashed using SHA-256, truncated to the first 12 hex characters (48 bits, birthday collision threshold ~16 million). This prevents collisions when:
+- Different scope IDs sanitize to the same string (e.g., `abc-def` vs `abc@def`)
+- The default scope ID `"default"` is used for user-scoped secrets
+- Long UUIDs combined with long names would exceed the 255-char limit
+
+The full scope ID is preserved in GCP labels (see Section 4.4) for discoverability and cross-referencing.
 
 Examples:
-- `scion/user/user-abc/ANTHROPIC_API_KEY`
-- `scion/grove/grove-xyz/DB_PASSWORD`
-- `scion/runtime_broker/broker-123/TLS_CERT`
+- `scion-user-a1b2c3d4e5f6-ANTHROPIC_API_KEY`
+- `scion-grove-f9e8d7c6b5a4-DB_PASSWORD`
+- `scion-runtime_broker-1a2b3c4d5e6f-TLS_CERT`
 
 ### 4.3 Implementation Sketch
 
@@ -331,11 +338,12 @@ GCP Secret Manager supports labels on secret resources. Scion stores the followi
 | Label Key | Value | Purpose |
 |-----------|-------|---------|
 | `scion-scope` | `user`, `grove`, `runtime_broker` | Scope identification |
-| `scion-scope-id` | UUID | Scoped entity ID |
+| `scion-scope-id` | Full scope ID (sanitized) | Scoped entity ID (full value, since the secret name uses a hash) |
 | `scion-type` | `environment`, `variable`, `file` | Secret type |
-| `scion-target` | URL-encoded target | Projection target |
+| `scion-name` | Secret key name (sanitized) | Original secret name for discoverability |
+| `scion-target` | Projection target (sanitized) | Projection target (env var name, file path, etc.) |
 
-These labels are maintained for operational convenience (e.g., GCP Console visibility, cross-referencing) but the Hub database remains the authoritative source for secret metadata.
+These labels are maintained for operational convenience (e.g., GCP Console visibility, cross-referencing with hashed secret names) but the Hub database remains the authoritative source for secret metadata.
 
 ### 4.5 Hybrid Storage (Default)
 
