@@ -129,8 +129,25 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Load on-disk harness-config for the container user (base layer).
 	// The settings map may not define harness_configs, but the on-disk
 	// config.yaml (seeded from harness embeds) always has the user field.
+	// Also check template directories since harness-configs may be bundled
+	// inside templates (§3.4 of agnostic-template-design).
 	if harnessConfigName != "" {
-		if hcDir, err := config.FindHarnessConfigDir(harnessConfigName, projectDir); err == nil {
+		var templatePaths []string
+		templateName := ""
+		if finalScionCfg != nil && finalScionCfg.Info != nil {
+			templateName = finalScionCfg.Info.Template
+		}
+		if templateName == "" {
+			templateName = opts.Template
+		}
+		if templateName != "" {
+			if chain, err := config.GetTemplateChainInGrove(templateName, opts.GrovePath); err == nil {
+				for _, tpl := range chain {
+					templatePaths = append(templatePaths, tpl.Path)
+				}
+			}
+		}
+		if hcDir, err := config.FindHarnessConfigDir(harnessConfigName, projectDir, templatePaths...); err == nil {
 			if hcDir.Config.User != "" {
 				unixUsername = hcDir.Config.User
 			}
