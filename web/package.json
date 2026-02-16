@@ -15,7 +15,7 @@
     "build:server": "tsc -p tsconfig.server.json",
     "build:client": "vite build",
     "build:client:dev": "vite build --mode development && npm run copy:client",
-    "copy:client": "cp -r dist/client/assets/* public/assets/",
+    "copy:client": "mkdir -p public/assets && cp -r dist/client/assets/* public/assets/",
     "start": "node dist/server/server/index.js",
     "lint": "eslint src --ext .ts,.tsx",
     "lint:fix": "eslint src --ext .ts,.tsx --fix",
