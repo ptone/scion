@@ -153,7 +153,8 @@ type RuntimeBrokerClient interface {
 	// StartAgent starts an agent on a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.
 	// task is an optional task string to pass to the agent on start.
-	StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task string) error
+	// grovePath is the local filesystem path to the grove on the broker.
+	StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task, grovePath string) (*RemoteAgentResponse, error)
 
 	// StopAgent stops an agent on a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.

@@ -332,14 +332,19 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			existingAgent.AppliedConfig.Attach = req.Attach
 		}
 
-		// Dispatch start action
+		// Dispatch start action — DispatchAgentStart applies the broker's
+		// response (status, container info) onto existingAgent in-place.
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task); err != nil {
 			RuntimeError(w, "Failed to start agent: "+err.Error())
 			return
 		}
 
-		// Update agent status
-		existingAgent.Status = store.AgentStatusRunning
+		// If the broker didn't set a status, default to running
+		if existingAgent.Status == store.AgentStatusCreated ||
+			existingAgent.Status == store.AgentStatusProvisioning ||
+			existingAgent.Status == store.AgentStatusPending {
+			existingAgent.Status = store.AgentStatusRunning
+		}
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
 			// Log but continue - agent was started
 			slog.Warn("Failed to update agent status after start", "error", err)
@@ -973,6 +978,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		newStatus = store.AgentStatusRunning
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "")
+			// DispatchAgentStart applies the broker response in-place;
+			// use the broker-reported status if it was set.
+			if dispatchErr == nil && agent.Status != "" {
+				newStatus = agent.Status
+			}
 		}
 	case "stop":
 		newStatus = store.AgentStatusStopped
@@ -999,6 +1009,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// reflects the stopped state without waiting for the next heartbeat.
 	if action == "stop" {
 		statusUpdate.ContainerStatus = "stopped"
+	}
+	// When starting, propagate container status from broker response
+	if action == "start" && agent.ContainerStatus != "" {
+		statusUpdate.ContainerStatus = agent.ContainerStatus
 	}
 	if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
 		writeErrorFromErr(w, err, "")
@@ -1697,14 +1711,17 @@ func (s *Server) createGroveAgent(w http.ResponseWriter, r *http.Request, groveI
 				return
 			}
 
-			// Dispatch start action
+			// Dispatch start action — DispatchAgentStart applies the broker's
+			// response (status, container info) onto existingAgent in-place.
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task); err != nil {
 				RuntimeError(w, "Failed to start agent: "+err.Error())
 				return
 			}
 
-			// Update agent status
-			existingAgent.Status = store.AgentStatusRunning
+			// If the broker didn't set a running status, default to running
+			if existingAgent.Status != store.AgentStatusRunning {
+				existingAgent.Status = store.AgentStatusRunning
+			}
 			if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
 				slog.Warn("Failed to update agent status after start", "error", err)
 			}
@@ -2490,7 +2507,12 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				case strings.HasPrefix(containerStatusLower, "exited") || containerStatusLower == "stopped":
 					statusUpdate.Status = store.AgentStatusStopped
 				case containerStatusLower == "created":
-					statusUpdate.Status = store.AgentStatusProvisioning
+					// Don't downgrade a running agent to provisioning — the
+					// container may briefly report "created" while the runtime
+					// is transitioning to started.
+					if agent.Status != store.AgentStatusRunning {
+						statusUpdate.Status = store.AgentStatusProvisioning
+					}
 				}
 			}
 

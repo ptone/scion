@@ -42,20 +42,23 @@ func createTestStore(t *testing.T) store.Store {
 
 // mockRuntimeBrokerClient is a mock implementation of RuntimeBrokerClient for testing.
 type mockRuntimeBrokerClient struct {
-	createCalled   bool
-	startCalled    bool
-	stopCalled     bool
-	restartCalled  bool
-	deleteCalled   bool
-	messageCalled  bool
-	lastBrokerID string
-	lastEndpoint   string
-	lastAgentID    string
-	lastMessage    string
-	lastInterrupt  bool
-	lastCreateReq  *RemoteCreateAgentRequest
-	lastDeleteOpts struct{ deleteFiles, removeBranch bool }
-	returnErr      error
+	createCalled    bool
+	startCalled     bool
+	stopCalled      bool
+	restartCalled   bool
+	deleteCalled    bool
+	messageCalled   bool
+	lastBrokerID    string
+	lastEndpoint    string
+	lastAgentID     string
+	lastTask        string
+	lastGrovePath   string
+	lastMessage     string
+	lastInterrupt   bool
+	lastCreateReq   *RemoteCreateAgentRequest
+	lastDeleteOpts  struct{ deleteFiles, removeBranch bool }
+	returnErr       error
+	startReturnResp *RemoteAgentResponse // custom start response if set
 }
 
 func (m *mockRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
@@ -79,12 +82,27 @@ func (m *mockRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, bro
 	}, nil
 }
 
-func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task string) error {
+func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task, grovePath string) (*RemoteAgentResponse, error) {
 	m.startCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
-	return m.returnErr
+	m.lastTask = task
+	m.lastGrovePath = grovePath
+	if m.returnErr != nil {
+		return nil, m.returnErr
+	}
+	if m.startReturnResp != nil {
+		return m.startReturnResp, nil
+	}
+	return &RemoteAgentResponse{
+		Agent: &RemoteAgentInfo{
+			ID:              agentID,
+			Name:            agentID,
+			Status:          "running",
+			ContainerStatus: "Up 5 seconds",
+		},
+	}, nil
 }
 
 func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID string) error {
@@ -848,5 +866,136 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DoesNotSetProvisionOnly(t *test
 	// Verify ProvisionOnly is NOT set for regular create
 	if mockClient.lastCreateReq.ProvisionOnly {
 		t.Error("expected ProvisionOnly to be false for regular DispatchAgentCreate")
+	}
+}
+
+func TestHTTPAgentDispatcher_DispatchAgentStart_WithGroveProviderPath(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	// Create the grove
+	grove := &store.Grove{
+		ID:   "grove-1",
+		Name: "test-grove",
+		Slug: "test-grove",
+	}
+	if err := memStore.CreateGrove(ctx, grove); err != nil {
+		t.Fatalf("failed to create grove: %v", err)
+	}
+
+	// Create a runtime broker
+	broker := &store.RuntimeBroker{
+		ID:       "broker-1",
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	// Add a grove provider record with a local path
+	provider := &store.GroveProvider{
+		GroveID:    "grove-1",
+		BrokerID:   "broker-1",
+		BrokerName: "test-broker",
+		LocalPath:  "/home/user/projects/myproject/.scion",
+		Status:     store.BrokerStatusOnline,
+	}
+	if err := memStore.AddGroveProvider(ctx, provider); err != nil {
+		t.Fatalf("failed to add grove provider: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false)
+
+	agent := &store.Agent{
+		ID:              "agent-1",
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		GroveID:         "grove-1",
+		RuntimeBrokerID: "broker-1",
+	}
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "do task")
+	if err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+
+	if !mockClient.startCalled {
+		t.Fatal("expected StartAgent to be called")
+	}
+	if mockClient.lastGrovePath != "/home/user/projects/myproject/.scion" {
+		t.Errorf("expected grovePath '/home/user/projects/myproject/.scion', got '%s'", mockClient.lastGrovePath)
+	}
+	if mockClient.lastTask != "do task" {
+		t.Errorf("expected task 'do task', got '%s'", mockClient.lastTask)
+	}
+
+	// Verify broker response was applied to the agent
+	if agent.Status != "running" {
+		t.Errorf("expected agent status 'running', got '%s'", agent.Status)
+	}
+}
+
+func TestHTTPAgentDispatcher_DispatchAgentStart_AppliesBrokerResponse(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       "broker-1",
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{
+		startReturnResp: &RemoteAgentResponse{
+			Agent: &RemoteAgentInfo{
+				ID:              "container-abc",
+				Name:            "test-agent",
+				Status:          "running",
+				ContainerStatus: "Up 10 seconds",
+				Template:        "claude",
+				Runtime:         "docker",
+			},
+		},
+	}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false)
+
+	agent := &store.Agent{
+		ID:              "agent-1",
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		GroveID:         "grove-1",
+		RuntimeBrokerID: "broker-1",
+		Status:          store.AgentStatusCreated,
+	}
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	if err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+
+	// Verify broker response fields were applied
+	if agent.Status != "running" {
+		t.Errorf("expected status 'running', got '%s'", agent.Status)
+	}
+	if agent.ContainerStatus != "Up 10 seconds" {
+		t.Errorf("expected containerStatus 'Up 10 seconds', got '%s'", agent.ContainerStatus)
+	}
+	if agent.Template != "claude" {
+		t.Errorf("expected template 'claude', got '%s'", agent.Template)
+	}
+	if agent.Runtime != "docker" {
+		t.Errorf("expected runtime 'docker', got '%s'", agent.Runtime)
+	}
+	if agent.RuntimeState != "container:container-abc" {
+		t.Errorf("expected runtimeState 'container:container-abc', got '%s'", agent.RuntimeState)
 	}
 }

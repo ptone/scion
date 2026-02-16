@@ -147,30 +147,43 @@ func (c *AuthenticatedBrokerClient) CreateAgent(ctx context.Context, brokerID, b
 }
 
 // StartAgent starts an agent on a remote runtime broker with HMAC authentication.
-func (c *AuthenticatedBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task string) error {
+func (c *AuthenticatedBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task, grovePath string) (*RemoteAgentResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/start", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
 
-	var body []byte
+	payload := map[string]string{}
 	if task != "" {
+		payload["task"] = task
+	}
+	if grovePath != "" {
+		payload["grovePath"] = grovePath
+	}
+
+	var body []byte
+	if len(payload) > 0 {
 		var err error
-		body, err = json.Marshal(map[string]string{"task": task})
+		body, err = json.Marshal(payload)
 		if err != nil {
-			return fmt.Errorf("failed to marshal task: %w", err)
+			return nil, fmt.Errorf("failed to marshal request: %w", err)
 		}
 	}
 
 	resp, err := c.doRequest(ctx, brokerID, http.MethodPost, endpoint, body)
 	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return nil
+	var result RemoteAgentResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, nil
+	}
+
+	return &result, nil
 }
 
 // StopAgent stops an agent on a remote runtime broker with HMAC authentication.

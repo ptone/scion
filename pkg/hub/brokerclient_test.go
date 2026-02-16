@@ -195,7 +195,15 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 			t.Error("missing signature header")
 		}
 
-		w.WriteHeader(http.StatusOK)
+		resp := &RemoteAgentResponse{
+			Agent: &RemoteAgentInfo{
+				ID:     "my-agent",
+				Name:   "my-agent",
+				Status: "running",
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -203,7 +211,7 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 	client := NewAuthenticatedBrokerClient(db, false)
 
 	// Make request
-	err = client.StartAgent(context.Background(), brokerID, server.URL, "my-agent", "")
+	resp, err := client.StartAgent(context.Background(), brokerID, server.URL, "my-agent", "", "")
 	if err != nil {
 		t.Fatalf("StartAgent failed: %v", err)
 	}
@@ -214,6 +222,13 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 
 	if receivedPath != "/api/v1/agents/my-agent/start" {
 		t.Errorf("wrong path: got %s, want /api/v1/agents/my-agent/start", receivedPath)
+	}
+
+	if resp == nil || resp.Agent == nil {
+		t.Fatal("expected non-nil response with agent info")
+	}
+	if resp.Agent.Status != "running" {
+		t.Errorf("expected status 'running', got '%s'", resp.Agent.Status)
 	}
 }
 
@@ -420,7 +435,7 @@ func TestAuthenticatedBrokerClient_AllOperations(t *testing.T) {
 		t.Errorf("CreateAgent failed: %v", err)
 	}
 
-	err = client.StartAgent(ctx, brokerID, server.URL, "test-agent", "")
+	_, err = client.StartAgent(ctx, brokerID, server.URL, "test-agent", "", "")
 	if err != nil {
 		t.Errorf("StartAgent failed: %v", err)
 	}

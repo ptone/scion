@@ -553,9 +553,10 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
-	// Read optional task from request body
+	// Read optional task and grovePath from request body
 	var startReq struct {
-		Task string `json:"task"`
+		Task      string `json:"task"`
+		GrovePath string `json:"grovePath"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
@@ -563,32 +564,33 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 
-	slog.Debug("startAgent called", "id", id, "task", startReq.Task)
+	slog.Debug("startAgent called", "id", id, "task", startReq.Task, "grovePath", startReq.GrovePath)
 
-	// Look up the agent to find its grove path
-	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
-	if err != nil {
-		RuntimeError(w, "Failed to list agents: "+err.Error())
-		return
-	}
-
-	var existingAgent *api.AgentInfo
-	for i := range agents {
-		if agents[i].Name == id || agents[i].ContainerID == id || agents[i].Slug == id {
-			existingAgent = &agents[i]
-			break
-		}
-	}
-
-	// If no running container found, try to start from provisioned state
-	// by finding the agent's scion-agent.json config file
+	// Build start options
 	opts := api.StartOptions{
 		Name: id,
 		Task: startReq.Task,
 	}
 
-	if existingAgent != nil && existingAgent.GrovePath != "" {
-		opts.GrovePath = existingAgent.GrovePath
+	// Use grove path from request if provided
+	if startReq.GrovePath != "" {
+		opts.GrovePath = startReq.GrovePath
+	} else {
+		// Fall back to looking up grove path from an existing container
+		agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
+		if err != nil {
+			RuntimeError(w, "Failed to list agents: "+err.Error())
+			return
+		}
+
+		for i := range agents {
+			if agents[i].Name == id || agents[i].ContainerID == id || agents[i].Slug == id {
+				if agents[i].GrovePath != "" {
+					opts.GrovePath = agents[i].GrovePath
+				}
+				break
+			}
+		}
 	}
 
 	agentInfo, err := s.manager.Start(ctx, opts)
@@ -601,10 +603,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	writeJSON(w, http.StatusAccepted, map[string]interface{}{
-		"status":  "accepted",
-		"message": "Start operation accepted",
-		"agent":   AgentInfoToResponse(*agentInfo),
+	agentResp := AgentInfoToResponse(*agentInfo)
+	writeJSON(w, http.StatusAccepted, CreateAgentResponse{
+		Agent:   &agentResp,
+		Created: false,
 	})
 }
 

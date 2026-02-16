@@ -62,21 +62,38 @@ func (c *ControlChannelBrokerClient) CreateAgent(ctx context.Context, brokerID, 
 }
 
 // StartAgent starts an agent via control channel.
-func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task string) error {
+func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task, grovePath string) (*RemoteAgentResponse, error) {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s/start", agentID)
 
-	var body []byte
+	payload := map[string]string{}
 	if task != "" {
+		payload["task"] = task
+	}
+	if grovePath != "" {
+		payload["grovePath"] = grovePath
+	}
+
+	var body []byte
+	if len(payload) > 0 {
 		var err error
-		body, err = json.Marshal(map[string]string{"task": task})
+		body, err = json.Marshal(payload)
 		if err != nil {
-			return fmt.Errorf("failed to marshal task: %w", err)
+			return nil, fmt.Errorf("failed to marshal request: %w", err)
 		}
 	}
 
-	_, err := c.doRequest(ctx, brokerID, "POST", path, "", body)
-	return err
+	resp, err := c.doRequest(ctx, brokerID, "POST", path, "", body)
+	if err != nil {
+		return nil, err
+	}
+
+	var result RemoteAgentResponse
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		return nil, nil
+	}
+
+	return &result, nil
 }
 
 // StopAgent stops an agent via control channel.
@@ -199,11 +216,11 @@ func (c *HybridBrokerClient) CreateAgent(ctx context.Context, brokerID, brokerEn
 }
 
 // StartAgent starts an agent, preferring control channel.
-func (c *HybridBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task string) error {
+func (c *HybridBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task, grovePath string) (*RemoteAgentResponse, error) {
 	if c.useControlChannel(brokerID) {
-		return c.controlChannel.StartAgent(ctx, brokerID, brokerEndpoint, agentID, task)
+		return c.controlChannel.StartAgent(ctx, brokerID, brokerEndpoint, agentID, task, grovePath)
 	}
-	return c.httpClient.StartAgent(ctx, brokerID, brokerEndpoint, agentID, task)
+	return c.httpClient.StartAgent(ctx, brokerID, brokerEndpoint, agentID, task, grovePath)
 }
 
 // StopAgent stops an agent, preferring control channel.

@@ -759,17 +759,18 @@ func TestStartAgentEndpoint(t *testing.T) {
 		t.Errorf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp CreateAgentResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if resp["status"] != "accepted" {
-		t.Errorf("expected status 'accepted', got '%v'", resp["status"])
+	// Should have an agent in the response
+	if resp.Agent == nil {
+		t.Fatal("expected agent info in start response")
 	}
 
-	// Should have an agent in the response
-	if resp["agent"] == nil {
-		t.Error("expected agent info in start response")
+	// Created should be false for a start (not a create)
+	if resp.Created {
+		t.Error("expected Created to be false for start operation")
 	}
 }

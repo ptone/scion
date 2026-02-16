@@ -100,7 +100,7 @@ func (c *HTTPRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, bro
 
 // StartAgent starts an agent on a remote runtime broker.
 // Note: brokerID is unused in this unauthenticated client.
-func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task string) error {
+func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task, grovePath string) (*RemoteAgentResponse, error) {
 	_ = brokerID // Unused in unauthenticated client
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/start", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
 
@@ -108,35 +108,49 @@ func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brok
 		slog.Debug("Dispatcher request", "method", "POST", "endpoint", endpoint)
 	}
 
-	var body io.Reader
+	payload := map[string]string{}
 	if task != "" {
-		payload, err := json.Marshal(map[string]string{"task": task})
+		payload["task"] = task
+	}
+	if grovePath != "" {
+		payload["grovePath"] = grovePath
+	}
+
+	var body io.Reader
+	if len(payload) > 0 {
+		data, err := json.Marshal(payload)
 		if err != nil {
-			return fmt.Errorf("failed to marshal task: %w", err)
+			return nil, fmt.Errorf("failed to marshal request: %w", err)
 		}
-		body = bytes.NewReader(payload)
+		body = bytes.NewReader(data)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	if task != "" {
+	if len(payload) > 0 {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return nil
+	var result RemoteAgentResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		// If the broker doesn't return a parseable response, that's OK — return nil
+		return nil, nil
+	}
+
+	return &result, nil
 }
 
 // StopAgent stops an agent on a remote runtime broker.
@@ -563,8 +577,32 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		task = agent.AppliedConfig.Task
 	}
 
+	// Look up the local path for this grove on the target runtime broker
+	var grovePath string
+	if agent.GroveID != "" && agent.RuntimeBrokerID != "" {
+		provider, err := d.store.GetGroveProvider(ctx, agent.GroveID, agent.RuntimeBrokerID)
+		if err != nil {
+			if d.debug {
+				slog.Warn("Failed to get grove provider for path lookup", "error", err)
+			}
+		} else if provider.LocalPath != "" {
+			grovePath = provider.LocalPath
+			if d.debug {
+				slog.Debug("Found grove path for broker", "brokerID", agent.RuntimeBrokerID, "path", grovePath)
+			}
+		}
+	}
+
 	// Use agent name as identifier (runtime broker uses name or ID)
-	return d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Name, task)
+	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Name, task, grovePath)
+	if err != nil {
+		return err
+	}
+
+	if resp != nil {
+		d.applyBrokerResponse(agent, resp)
+	}
+	return nil
 }
 
 // DispatchAgentStop stops an agent on the runtime broker.
