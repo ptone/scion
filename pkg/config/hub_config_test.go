@@ -465,3 +465,83 @@ runtimeBroker:
 	// but the config expects "runtimeBroker.hubEndpoint" (camelCase). This is a known limitation.
 	// For RuntimeBroker hubEndpoint, use config file or the settings.yaml fallback (Fix 6).
 }
+
+func TestSettingsYamlEnvVarOverride(t *testing.T) {
+	// This test verifies that when config is loaded from settings.yaml (the
+	// non-legacy path), SCION_SERVER_ env vars still override values.
+	// Previously, the settings.yaml path returned early without loading env vars.
+
+	// Create a temp dir with settings.yaml containing a server key
+	tmpDir := t.TempDir()
+	settingsPath := filepath.Join(tmpDir, "settings.yaml")
+	settingsContent := `
+version: 1
+server:
+  hub:
+    port: 9999
+  database:
+    driver: sqlite
+`
+	if err := os.WriteFile(settingsPath, []byte(settingsContent), 0644); err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	// Set OAuth env vars (these should override settings.yaml values)
+	os.Setenv("SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTID", "env-web-google-id")
+	os.Setenv("SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTSECRET", "env-web-google-secret")
+	os.Setenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID", "env-cli-google-id")
+	os.Setenv("SCION_SERVER_HUB_PORT", "7777")
+	defer func() {
+		os.Unsetenv("SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTID")
+		os.Unsetenv("SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTSECRET")
+		os.Unsetenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID")
+		os.Unsetenv("SCION_SERVER_HUB_PORT")
+	}()
+
+	// loadGlobalConfigFromSettings checks GetGlobalDir() first, then
+	// falls back to configPath. We pass the tmpDir as configPath.
+	gc, found := loadGlobalConfigFromSettings(tmpDir)
+	if !found {
+		t.Fatal("expected settings.yaml to be found")
+	}
+
+	// Env vars should override
+	if gc.OAuth.Web.Google.ClientID != "env-web-google-id" {
+		t.Errorf("expected OAuth.Web.Google.ClientID = %q from env, got %q",
+			"env-web-google-id", gc.OAuth.Web.Google.ClientID)
+	}
+	if gc.OAuth.Web.Google.ClientSecret != "env-web-google-secret" {
+		t.Errorf("expected OAuth.Web.Google.ClientSecret = %q from env, got %q",
+			"env-web-google-secret", gc.OAuth.Web.Google.ClientSecret)
+	}
+	if gc.OAuth.CLI.Google.ClientID != "env-cli-google-id" {
+		t.Errorf("expected OAuth.CLI.Google.ClientID = %q from env, got %q",
+			"env-cli-google-id", gc.OAuth.CLI.Google.ClientID)
+	}
+
+	// Env var for hub port should override settings.yaml value
+	if gc.Hub.Port != 7777 {
+		t.Errorf("expected Hub.Port = 7777 from env override, got %d", gc.Hub.Port)
+	}
+}
+
+func TestApplyEnvOverridesCommaSeparatedLists(t *testing.T) {
+	os.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "a@x.com,b@x.com")
+	os.Setenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS", "x.com,y.com")
+	defer func() {
+		os.Unsetenv("SCION_SERVER_HUB_ADMINEMAILS")
+		os.Unsetenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS")
+	}()
+
+	gc := DefaultGlobalConfig()
+	if err := applyEnvOverrides(&gc); err != nil {
+		t.Fatalf("applyEnvOverrides failed: %v", err)
+	}
+
+	if len(gc.Hub.AdminEmails) != 2 || gc.Hub.AdminEmails[0] != "a@x.com" || gc.Hub.AdminEmails[1] != "b@x.com" {
+		t.Errorf("expected admin emails [a@x.com, b@x.com], got %v", gc.Hub.AdminEmails)
+	}
+	if len(gc.Auth.AuthorizedDomains) != 2 || gc.Auth.AuthorizedDomains[0] != "x.com" || gc.Auth.AuthorizedDomains[1] != "y.com" {
+		t.Errorf("expected authorized domains [x.com, y.com], got %v", gc.Auth.AuthorizedDomains)
+	}
+}

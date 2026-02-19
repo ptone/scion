@@ -285,6 +285,12 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 		}
 	}
 
+	// Apply environment variable overrides (SCION_SERVER_ prefix).
+	// Without this, env vars are ignored when config comes from settings.yaml.
+	if err := applyEnvOverrides(gc); err != nil {
+		return nil, false
+	}
+
 	// Apply database URL default if needed
 	if gc.Database.URL == "" && gc.Database.Driver == "sqlite" {
 		gc.Database.URL = filepath.Join(globalDir, "hub.db")
@@ -481,6 +487,33 @@ func envKeyToConfigKey(envKey string) string {
 	}
 
 	return strings.Join(parts, ".")
+}
+
+// applyEnvOverrides loads SCION_SERVER_ environment variables and merges them
+// into an existing GlobalConfig. This ensures env vars override config file
+// values regardless of which config loading path was used (settings.yaml or
+// legacy server.yaml).
+func applyEnvOverrides(gc *GlobalConfig) error {
+	k := koanf.New(".")
+	_ = k.Load(env.Provider("SCION_SERVER_", ".", func(s string) string {
+		key := strings.TrimPrefix(s, "SCION_SERVER_")
+		return envKeyToConfigKey(key)
+	}), nil)
+
+	if err := k.Unmarshal("", gc); err != nil {
+		return err
+	}
+
+	// Fixup for list fields that might be loaded as a single comma-separated
+	// string from env vars (koanf's env provider doesn't auto-split slices).
+	if len(gc.Hub.AdminEmails) == 1 && strings.Contains(gc.Hub.AdminEmails[0], ",") {
+		gc.Hub.AdminEmails = parseCommaSeparatedList(gc.Hub.AdminEmails[0])
+	}
+	if len(gc.Auth.AuthorizedDomains) == 1 && strings.Contains(gc.Auth.AuthorizedDomains[0], ",") {
+		gc.Auth.AuthorizedDomains = parseCommaSeparatedList(gc.Auth.AuthorizedDomains[0])
+	}
+
+	return nil
 }
 
 // GetServerConfigPath returns the path to server.yaml (or server.yml) in the given directory,
