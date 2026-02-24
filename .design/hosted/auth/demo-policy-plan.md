@@ -1,9 +1,9 @@
 # Demo Policy Implementation Plan
 
 ## Status
-**In Progress** — 2026-02-24
+**Complete** — 2026-02-24
 
-Steps 1-3, 7, 8 completed. Steps 4-6, 9 remaining.
+All steps (1-9) completed.
 
 ## 1. Goal
 
@@ -230,7 +230,7 @@ Extend the existing `createGrove` handler (after line 1524 where `createGroveGro
 
 These operations follow the same best-effort pattern as the existing `createGroveGroup` call — failures are logged but don't fail grove creation.
 
-### Step 4: Enforce Authorization in Agent Creation
+### Step 4: Enforce Authorization in Agent Creation ✅
 
 **Files**: `pkg/hub/handlers.go`
 
@@ -258,7 +258,7 @@ This check will:
 - **Pass** for grove members (grove-level policy grants `create` on `agent` to members group)
 - **Fail** for everyone else (default deny — no matching policy)
 
-### Step 5: Enforce Authorization on Agent Delete
+### Step 5: Enforce Authorization on Agent Delete ✅
 
 **Files**: `pkg/hub/handlers.go`
 
@@ -286,7 +286,7 @@ This check will:
 - **Pass** for the agent's creator (owner bypass — `agent.OwnerID` matches user)
 - **Fail** for everyone else (no hub-level or grove-level policy grants `delete` on agents)
 
-### Step 6: Enforce Authorization on Agent Attach/PTY
+### Step 6: Enforce Authorization on Agent Attach/PTY ✅
 
 **Files**: `pkg/hub/handlers.go`
 
@@ -328,7 +328,7 @@ Minor additions needed:
 
 The `handleGroveRegister` handler's registration path already calls `createGroveGroup`. Added a call to `createGroveMembersGroupAndPolicy` immediately after, ensuring groves created via `scion hub register` (the CLI registration flow) get the same policy treatment as groves created via the web API.
 
-### Step 9: Tests
+### Step 9: Tests ✅
 
 **Files**: `pkg/hub/authz_test.go` (new or extended), `pkg/hub/handlers_test.go`
 
@@ -393,20 +393,20 @@ Step 1: Seed groups/policies on Hub init ✅
   │
   └── Step 3: Grove creation → members group + policy ✅
         │
-        ├── Step 4: Enforce agent creation (depends on grove-level policy from Step 3)
+        ├── Step 4: Enforce agent creation (depends on grove-level policy from Step 3) ✅
         │
-        ├── Step 5: Enforce agent deletion (independent — uses owner bypass only)
+        ├── Step 5: Enforce agent deletion (independent — uses owner bypass only) ✅
         │
-        └── Step 6: Enforce agent attach/PTY (independent — uses owner bypass only)
+        └── Step 6: Enforce agent attach/PTY (independent — uses owner bypass only) ✅
 
 Step 7: Store additions (prerequisite for Steps 1-3) ✅
 Step 8: Grove registration path (parallel to Step 3) ✅
-Step 9: Tests (after Steps 1-8)
+Step 9: Tests (after Steps 1-8) ✅
 ```
 
 **Recommended order**: Step 7 → Step 1 → Step 2 → Step 3 + Step 8 → Steps 4, 5, 6 (parallel) → Step 9
 
-**Remaining**: Steps 4, 5, 6 (enforcement checks in handlers) and Step 9 (tests)
+**All steps complete.**
 
 ---
 

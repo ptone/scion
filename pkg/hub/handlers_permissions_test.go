@@ -59,12 +59,13 @@ func TestGroupList(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if len(resp.Groups) != 3 {
-		t.Errorf("expected 3 groups, got %d", len(resp.Groups))
+	// 3 test groups + 1 seeded hub-members group = 4
+	if len(resp.Groups) != 4 {
+		t.Errorf("expected 4 groups (3 test + 1 seeded), got %d", len(resp.Groups))
 	}
 
-	if resp.TotalCount != 3 {
-		t.Errorf("expected total 3, got %d", resp.TotalCount)
+	if resp.TotalCount != 4 {
+		t.Errorf("expected total 4, got %d", resp.TotalCount)
 	}
 }
 
@@ -555,8 +556,9 @@ func TestGroupListWithGroupTypeFilter(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if len(resp.Groups) != 2 {
-		t.Errorf("expected 2 groups, got %d", len(resp.Groups))
+	// 2 test explicit groups + 1 seeded hub-members explicit group = 3
+	if len(resp.Groups) != 3 {
+		t.Errorf("expected 3 groups (2 test + 1 seeded), got %d", len(resp.Groups))
 	}
 }
 
@@ -604,8 +606,9 @@ func TestPolicyList(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if len(resp.Policies) != 3 {
-		t.Errorf("expected 3 policies, got %d", len(resp.Policies))
+	// 3 test policies + 2 seeded policies (hub-member-read-all, hub-member-create-groves) = 5
+	if len(resp.Policies) != 5 {
+		t.Errorf("expected 5 policies (3 test + 2 seeded), got %d", len(resp.Policies))
 	}
 }
 

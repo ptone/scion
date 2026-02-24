@@ -89,29 +89,18 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if user has access to this agent
-	user := GetUserIdentityFromContext(ctx)
-	if user != nil {
-		// Verify user has access to the agent's grove
-		grove, err := s.store.GetGrove(ctx, agent.GroveID)
-		if err != nil {
-			slog.Warn("PTY access denied: failed to get grove",
+	// Enforce policy-based authorization: only the agent's creator (owner) or admins can access PTY
+	if user := GetUserIdentityFromContext(ctx); user != nil {
+		decision := s.authzService.CheckAccess(ctx, user, Resource{
+			Type:    "agent",
+			ID:      agent.ID,
+			OwnerID: agent.OwnerID,
+		}, ActionAttach)
+		if !decision.Allowed {
+			slog.Warn("PTY access denied: policy check failed",
 				"agentID", agentID,
-				"groveID", agent.GroveID,
 				"userID", user.ID(),
-				"error", err)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
-		// Allow access if:
-		// 1. Grove has no owner (backward compatibility for groves created before ownership tracking)
-		// 2. User is the grove owner
-		if grove.OwnerID != "" && grove.OwnerID != user.ID() {
-			slog.Warn("PTY access denied: user is not grove owner",
-				"agentID", agentID,
-				"groveID", agent.GroveID,
-				"groveOwnerID", grove.OwnerID,
-				"userID", user.ID())
+				"reason", decision.Reason)
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
 			return
 		}

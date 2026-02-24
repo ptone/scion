@@ -326,6 +326,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		creatorName = userIdent.Email()
 		notifySubscriberType = store.SubscriberTypeUser
 		notifySubscriberID = userIdent.ID()
+		// Enforce policy-based authorization: user must have permission to create agents in this grove
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:       "agent",
+			ParentType: "grove",
+			ParentID:   req.GroveID,
+		}, ActionCreate)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to create agents in this grove", nil)
+			return
+		}
 	}
 
 	// Verify grove exists and get its configuration
@@ -1083,6 +1094,21 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id string) 
 // Hard-delete: permanently removes the agent record from the store.
 func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
 	ctx := r.Context()
+
+	// Enforce policy-based authorization: only the agent's creator (owner) or admins can delete
+	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:    "agent",
+			ID:      agent.ID,
+			OwnerID: agent.OwnerID,
+		}, ActionDelete)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Only the agent's creator can delete it", nil)
+			return
+		}
+	}
+
 	query := r.URL.Query()
 
 	deleteFiles := query.Get("deleteFiles") == "true"
@@ -1173,6 +1199,24 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 			}
 			if targetAgent.GroveID != agentIdent.GroveID() {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only manage agents within their own grove", nil)
+				return
+			}
+		}
+		// For user callers, enforce policy-based authorization on interactive actions
+		if userIdent != nil {
+			targetAgent, err := s.store.GetAgent(r.Context(), id)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			decision := s.authzService.CheckAccess(r.Context(), userIdent, Resource{
+				Type:    "agent",
+				ID:      targetAgent.ID,
+				OwnerID: targetAgent.OwnerID,
+			}, ActionAttach)
+			if !decision.Allowed {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"Only the agent's creator can interact with it", nil)
 				return
 			}
 		}
@@ -2593,6 +2637,23 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 		} else {
 			writeErrorFromErr(w, err, "")
 			return
+		}
+	}
+
+	// For interactive actions, enforce policy-based authorization (owner or admin only)
+	switch action {
+	case "start", "stop", "restart", "message":
+		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+				Type:    "agent",
+				ID:      agent.ID,
+				OwnerID: agent.OwnerID,
+			}, ActionAttach)
+			if !decision.Allowed {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"Only the agent's creator can interact with it", nil)
+				return
+			}
 		}
 	}
 
