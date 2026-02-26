@@ -46,6 +46,7 @@ export interface AdminUser {
   status: 'active' | 'suspended';
   created: string;
   lastLogin?: string;
+  _capabilities?: Capabilities;
 }
 
 /**
@@ -70,6 +71,7 @@ export interface AdminGroup {
   createdBy?: string;
   created: string;
   updated: string;
+  _capabilities?: Capabilities;
 }
 
 /**
@@ -127,6 +129,7 @@ export interface Grove {
   agentCount: number;
   createdAt: string;
   updatedAt: string;
+  _capabilities?: Capabilities;
 }
 
 /**
@@ -158,6 +161,7 @@ export interface Agent {
   lastSeen?: string;
   createdAt: string;
   updatedAt: string;
+  _capabilities?: Capabilities;
 }
 
 /**
@@ -174,6 +178,7 @@ export interface Template {
   scope: string;
   createdAt: string;
   updatedAt: string;
+  _capabilities?: Capabilities;
 }
 
 /**
@@ -268,4 +273,103 @@ export interface RuntimeBroker {
   endpoint?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Access control capabilities
+// ---------------------------------------------------------------------------
+
+/**
+ * Capabilities attached to API resource responses.
+ * Each resource includes `_capabilities: { actions: [...] }` describing
+ * what the current user is allowed to do with that resource.
+ */
+export interface Capabilities {
+  actions: string[];
+}
+
+/**
+ * Check whether a capability set permits a specific action.
+ * Returns false (fail-closed) when capabilities are undefined.
+ */
+export function can(capabilities: Capabilities | undefined, action: string): boolean {
+  if (!capabilities) return false;
+  return capabilities.actions.includes(action);
+}
+
+/**
+ * Check whether a capability set permits any of the given actions.
+ * Returns false (fail-closed) when capabilities are undefined.
+ */
+export function canAny(capabilities: Capabilities | undefined, ...actions: string[]): boolean {
+  if (!capabilities) return false;
+  return actions.some((a) => capabilities.actions.includes(a));
+}
+
+/**
+ * Generic wrapper for paginated list responses from the Hub API.
+ *
+ * Note: The Hub API returns list responses with named keys (e.g., `agents`,
+ * `groves`) rather than a generic `items` key. This type is provided as a
+ * convenience for new code. Existing components that parse `data.agents` etc.
+ * continue to work — the important part is that each item now carries
+ * `_capabilities` and the response includes scope-level capabilities.
+ */
+export interface ListResponse<T> {
+  items: T[];
+  _capabilities?: Capabilities;
+  nextCursor?: string;
+  totalCount?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Policy types (mirrors Go store.Policy)
+// ---------------------------------------------------------------------------
+
+/**
+ * Condition matching agents delegated from a specific principal.
+ */
+export interface DelegatedFromCondition {
+  principalType: string;
+  principalId: string;
+}
+
+/**
+ * Optional conditional logic for policies.
+ */
+export interface PolicyConditions {
+  labels?: Record<string, string>;
+  validFrom?: string;
+  validUntil?: string;
+  sourceIps?: string[];
+  delegatedFrom?: DelegatedFromCondition;
+  delegatedFromGroup?: string;
+}
+
+/**
+ * Policy effect: allow or deny.
+ */
+export type PolicyEffect = 'allow' | 'deny';
+
+/**
+ * Access control policy from the Hub API.
+ * Mirrors the Go `store.Policy` struct.
+ */
+export interface Policy {
+  id: string;
+  name: string;
+  description?: string;
+  scopeType: string;
+  scopeId: string;
+  resourceType: string;
+  resourceId?: string;
+  actions: string[];
+  effect: PolicyEffect;
+  conditions?: PolicyConditions;
+  priority: number;
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+  created: string;
+  updated: string;
+  createdBy?: string;
 }

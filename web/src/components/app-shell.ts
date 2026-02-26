@@ -31,6 +31,7 @@ import './shared/breadcrumb.js';
 import './shared/debug-panel.js';
 
 import type { User } from '../shared/types.js';
+import type { AccessDeniedDetail } from '../client/api.js';
 
 /**
  * Page title configuration
@@ -64,6 +65,9 @@ export class ScionApp extends LitElement {
    */
   @state()
   _drawerOpen = false;
+
+  /** Bound listener reference for cleanup */
+  private _accessDeniedHandler = this.handleAccessDenied.bind(this);
 
   static override styles = css`
     :host {
@@ -171,6 +175,34 @@ export class ScionApp extends LitElement {
       }
     }
   `;
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    window.addEventListener('scion:access-denied', this._accessDeniedHandler as EventListener);
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener('scion:access-denied', this._accessDeniedHandler as EventListener);
+  }
+
+  private handleAccessDenied(event: CustomEvent<AccessDeniedDetail>): void {
+    const detail = event.detail || {};
+    const action = detail.action || 'perform this action on';
+    const message = `You don't have permission to ${action} this resource.`;
+
+    const alert = Object.assign(document.createElement('sl-alert'), {
+      variant: 'warning',
+      closable: true,
+      duration: 5000,
+    });
+    alert.innerHTML = `
+      <sl-icon name="exclamation-triangle" slot="icon"></sl-icon>
+      ${message}
+    `;
+    document.body.appendChild(alert);
+    void (alert as HTMLElement & { toast(): Promise<void> }).toast();
+  }
 
   override render() {
     const pageTitle = this.getPageTitle();
