@@ -1695,30 +1695,46 @@ func (s *Server) createGroveGroup(ctx context.Context, grove *store.Grove) {
 
 // createGroveMembersGroupAndPolicy creates an explicit members group for a grove
 // and a policy allowing members to create agents. Best-effort; failures are logged.
+// If the group already exists (e.g., grove was deleted and recreated with the same
+// slug), the existing group is reused and the creator is still added as a member.
 func (s *Server) createGroveMembersGroupAndPolicy(ctx context.Context, grove *store.Grove) {
-	// Create grove members group
+	membersSlug := "grove:" + grove.Slug + ":members"
+
+	// Create grove members group, or look up the existing one
 	membersGroup := &store.Group{
 		ID:        api.NewUUID(),
 		Name:      grove.Name + " Members",
-		Slug:      "grove:" + grove.Slug + ":members",
+		Slug:      membersSlug,
 		GroupType: store.GroupTypeExplicit,
 		GroveID:   grove.ID,
 		OwnerID:   grove.OwnerID,
 		CreatedBy: grove.CreatedBy,
 	}
 	if err := s.store.CreateGroup(ctx, membersGroup); err != nil {
-		slog.Warn("failed to create grove members group", "grove", grove.ID, "error", err)
-		return
+		if !errors.Is(err, store.ErrAlreadyExists) {
+			slog.Warn("failed to create grove members group", "grove", grove.ID, "error", err)
+			return
+		}
+		// Group already exists — look it up so we can still add the user
+		existing, lookupErr := s.store.GetGroupBySlug(ctx, membersSlug)
+		if lookupErr != nil {
+			slog.Warn("failed to look up existing grove members group",
+				"grove", grove.ID, "slug", membersSlug, "error", lookupErr)
+			return
+		}
+		membersGroup = existing
+		// Update the grove ID association in case it changed (recreated grove)
+		membersGroup.GroveID = grove.ID
 	}
 
-	// Add the creating user as a member
+	// Add the creating user as a member (idempotent — ErrAlreadyExists is fine)
 	if grove.CreatedBy != "" {
 		if err := s.store.AddGroupMember(ctx, &store.GroupMember{
 			GroupID:    membersGroup.ID,
 			MemberType: store.GroupMemberTypeUser,
 			MemberID:   grove.CreatedBy,
 			Role:       store.GroupMemberRoleMember,
-		}); err != nil {
+		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			slog.Warn("failed to add creator to grove members group",
 				"grove", grove.ID, "user", grove.CreatedBy, "error", err)
 		}
@@ -1737,8 +1753,11 @@ func (s *Server) createGroveMembersGroupAndPolicy(ctx context.Context, grove *st
 		Effect:       "allow",
 	}
 	if err := s.store.CreatePolicy(ctx, policy); err != nil {
-		slog.Warn("failed to create grove member policy",
-			"grove", grove.ID, "policy", policyName, "error", err)
+		if !errors.Is(err, store.ErrAlreadyExists) {
+			slog.Warn("failed to create grove member policy",
+				"grove", grove.ID, "policy", policyName, "error", err)
+		}
+		// Policy already exists — that's fine, the binding should already be in place
 		return
 	}
 
@@ -1747,7 +1766,7 @@ func (s *Server) createGroveMembersGroupAndPolicy(ctx context.Context, grove *st
 		PolicyID:      policy.ID,
 		PrincipalType: "group",
 		PrincipalID:   membersGroup.ID,
-	}); err != nil {
+	}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		slog.Warn("failed to bind grove member policy",
 			"grove", grove.ID, "policy", policyName, "error", err)
 	}
@@ -2856,10 +2875,21 @@ func (s *Server) deleteGrove(w http.ResponseWriter, r *http.Request, id string) 
 		s.deleteGroveAgents(ctx, grove)
 	}
 
-	// Clean up the associated grove_agents group (best-effort)
-	if groveGroup, err := s.store.GetGroupByGroveID(ctx, id); err == nil {
-		if delErr := s.store.DeleteGroup(ctx, groveGroup.ID); delErr != nil {
-			slog.Warn("failed to delete grove group", "grove", id, "group", groveGroup.ID, "error", delErr)
+	// Clean up all groups associated with the grove (agents group, members group, etc.)
+	if groveGroups, err := s.store.ListGroups(ctx, store.GroupFilter{GroveID: id}, store.ListOptions{Limit: 100}); err == nil {
+		for _, g := range groveGroups.Items {
+			if delErr := s.store.DeleteGroup(ctx, g.ID); delErr != nil {
+				slog.Warn("failed to delete grove group", "grove", id, "group", g.ID, "slug", g.Slug, "error", delErr)
+			}
+		}
+	}
+
+	// Clean up grove-scoped policies (best-effort)
+	if grovePolicies, err := s.store.ListPolicies(ctx, store.PolicyFilter{ScopeType: "grove", ScopeID: id}, store.ListOptions{Limit: 100}); err == nil {
+		for _, p := range grovePolicies.Items {
+			if delErr := s.store.DeletePolicy(ctx, p.ID); delErr != nil {
+				slog.Warn("failed to delete grove policy", "grove", id, "policy", p.ID, "name", p.Name, "error", delErr)
+			}
 		}
 	}
 
