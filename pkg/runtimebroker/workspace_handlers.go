@@ -295,7 +295,7 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 	var agentName string
 
 	for _, agent := range agents {
-		if agent.Name == agentID || agent.ContainerID == agentID || agent.Slug == agentID {
+		if agent.Name == agentID || agent.ContainerID == agentID || agent.Slug == agentID || strings.EqualFold(agent.Name, agentID) {
 			containerID = agent.ContainerID
 			grovePath = agent.GrovePath
 			agentName = agent.Name

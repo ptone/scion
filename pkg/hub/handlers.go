@@ -1898,7 +1898,7 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 
 	// Tunnel upload request to the broker
 	uploadReq := RuntimeBrokerWorkspaceUploadRequest{
-		Slug:        agent.Name,
+		Slug:        agent.Slug,
 		StoragePath: storagePath,
 	}
 	var uploadResp RuntimeBrokerWorkspaceUploadResponse

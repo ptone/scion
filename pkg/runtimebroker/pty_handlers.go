@@ -61,8 +61,9 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Look up agent using List with filter
-	agents, err := s.manager.List(ctx, map[string]string{"scion.name": agentID})
+	// Look up agent using List with filter (normalize to lowercase for slug match)
+	normalizedID := strings.ToLower(agentID)
+	agents, err := s.manager.List(ctx, map[string]string{"scion.name": normalizedID})
 	if err != nil || len(agents) == 0 {
 		NotFound(w, "Agent")
 		return

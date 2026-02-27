@@ -663,6 +663,9 @@ func (s *Server) LookupContainerID(ctx context.Context, slug string) (string, er
 		return "", fmt.Errorf("agent manager not available")
 	}
 
+	// Normalize slug to lowercase for case-insensitive lookup
+	slug = strings.ToLower(slug)
+
 	// Look up agent using List with filter by name
 	agents, err := s.manager.List(ctx, map[string]string{"scion.name": slug})
 	if err != nil {

@@ -472,7 +472,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		Resume:   opts.Resume,
 		Labels: map[string]string{
 			"scion.agent":          "true",
-			"scion.name":           opts.Name,
+			"scion.name":           api.Slugify(opts.Name),
 			"scion.grove":          groveName,
 			"scion.template":       template,
 			"scion.harness_config": harnessConfigName,
@@ -506,10 +506,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	_ = UpdateAgentConfig(opts.Name, opts.GrovePath, status, m.Runtime.Name(), profileName)
 
 	// Fetch fresh info
-	allAgents, err := m.Runtime.List(ctx, map[string]string{"scion.name": opts.Name})
+	slug := api.Slugify(opts.Name)
+	allAgents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
 	if err == nil {
 		for _, a := range allAgents {
-			if a.ContainerID == id || a.Name == opts.Name {
+			if a.ContainerID == id || strings.EqualFold(a.Name, opts.Name) {
 				a.Detached = detached
 				a.Warnings = warnings
 				a.Status = status

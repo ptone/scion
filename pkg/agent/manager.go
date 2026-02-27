@@ -71,13 +71,14 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	// We use name filter if possible, but runtime.List might take map[string]string
 	util.Debugf("delete: listing containers in mgr.Delete for %s", agentID)
 	listStart := time.Now()
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": agentID})
+	slug := api.Slugify(agentID)
+	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
 	util.Debugf("delete: mgr.Delete container list completed in %v", time.Since(listStart))
 	containerExists := false
 	var targetID string
 	if err == nil {
 		for _, a := range agents {
-			if a.Name == agentID || a.ContainerID == agentID || strings.TrimPrefix(a.Name, "/") == agentID {
+			if a.Name == agentID || a.ContainerID == agentID || strings.TrimPrefix(a.Name, "/") == agentID || strings.EqualFold(a.Name, agentID) {
 				containerExists = true
 				targetID = a.ContainerID
 				break

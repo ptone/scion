@@ -1045,7 +1045,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		harnessConfig = agent.AppliedConfig.HarnessConfig
 	}
 
-	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Name, task, grovePath, groveSlug, harnessConfig, resolvedEnv)
+	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, task, grovePath, groveSlug, harnessConfig, resolvedEnv)
 	if err != nil {
 		return err
 	}
