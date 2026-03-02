@@ -71,6 +71,32 @@ func TestFormatLastSeenFutureTime(t *testing.T) {
 	}
 }
 
+func TestFormatLastActivity(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name     string
+		status   string
+		t        time.Time
+		expected string
+	}{
+		{"activity with time", "thinking", now.Add(-30 * time.Second), "thinking, 30 seconds ago"},
+		{"phase with time", "stopped", now.Add(-2 * time.Hour), "stopped, 2 hours ago"},
+		{"empty status with time", "", now.Add(-5 * time.Minute), "5 minutes ago"},
+		{"IDLE status with time", "IDLE", now.Add(-5 * time.Minute), "5 minutes ago"},
+		{"activity with zero time", "running", time.Time{}, "running"},
+		{"empty status with zero time", "", time.Time{}, "-"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatLastActivity(tt.status, tt.t)
+			if result != tt.expected {
+				t.Errorf("formatLastActivity(%q, ...) = %q, want %q", tt.status, result, tt.expected)
+			}
+		})
+	}
+}
+
 func TestDisplayAgentsLocalMode(t *testing.T) {
 	agents := []api.AgentInfo{
 		{
@@ -80,6 +106,7 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 			Runtime:         "docker",
 			Grove:           "my-project",
 			Phase:           "running",
+			Activity:        "thinking",
 			ContainerStatus: "Up 2 hours",
 			LastSeen:        time.Now().Add(-30 * time.Second),
 		},
@@ -118,7 +145,7 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 	}
 
 	header := lines[0]
-	for _, col := range []string{"NAME", "TEMPLATE", "HARNESS-CFG", "RUNTIME", "GROVE", "STATUS", "CONTAINER", "LAST EVENT"} {
+	for _, col := range []string{"NAME", "TEMPLATE", "HARNESS-CFG", "RUNTIME", "GROVE", "STATUS", "CONTAINER", "LAST ACTIVITY"} {
 		if !strings.Contains(header, col) {
 			t.Errorf("header missing column %q: %s", col, header)
 		}
@@ -128,8 +155,8 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 	if !strings.Contains(lines[1], "claude") {
 		t.Errorf("agent-1 row should contain harness config 'claude': %s", lines[1])
 	}
-	if !strings.Contains(lines[1], "30 seconds ago") {
-		t.Errorf("agent-1 row should contain '30 seconds ago': %s", lines[1])
+	if !strings.Contains(lines[1], "thinking, 30 seconds ago") {
+		t.Errorf("agent-1 row should contain 'thinking, 30 seconds ago': %s", lines[1])
 	}
 
 	// Verify second agent row shows "-" for missing harness config
@@ -176,7 +203,7 @@ func TestDisplayAgentsHubMode(t *testing.T) {
 
 	header := lines[0]
 	// Hub mode should have BROKER column
-	for _, col := range []string{"NAME", "TEMPLATE", "HARNESS-CFG", "RUNTIME", "GROVE", "BROKER", "STATUS", "CONTAINER", "LAST EVENT"} {
+	for _, col := range []string{"NAME", "TEMPLATE", "HARNESS-CFG", "RUNTIME", "GROVE", "BROKER", "STATUS", "CONTAINER", "LAST ACTIVITY"} {
 		if !strings.Contains(header, col) {
 			t.Errorf("hub mode header missing column %q: %s", col, header)
 		}
@@ -189,8 +216,8 @@ func TestDisplayAgentsHubMode(t *testing.T) {
 	if !strings.Contains(lines[1], "local-broker") {
 		t.Errorf("hub agent row should contain broker name: %s", lines[1])
 	}
-	if !strings.Contains(lines[1], "2 minutes ago") {
-		t.Errorf("hub agent row should contain '2 minutes ago': %s", lines[1])
+	if !strings.Contains(lines[1], "running, 2 minutes ago") {
+		t.Errorf("hub agent row should contain 'running, 2 minutes ago': %s", lines[1])
 	}
 }
 

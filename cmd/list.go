@@ -273,9 +273,9 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	if hubMode {
-		fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tGROVE\tBROKER\tSTATUS\tCONTAINER\tLAST EVENT")
+		fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tGROVE\tBROKER\tSTATUS\tCONTAINER\tLAST ACTIVITY")
 	} else {
-		fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tGROVE\tSTATUS\tCONTAINER\tLAST EVENT")
+		fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tGROVE\tSTATUS\tCONTAINER\tLAST ACTIVITY")
 	}
 	for _, a := range agents {
 		// Display: if phase is running and activity is set, show activity; otherwise show phase.
@@ -294,16 +294,16 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		if harnessConfig == "" {
 			harnessConfig = "-"
 		}
-		lastEvent := formatLastSeen(a.LastSeen)
+		lastActivity := formatLastActivity(agentStatus, a.LastSeen)
 		// Use broker name if available, otherwise fall back to ID
 		broker := a.RuntimeBrokerName
 		if broker == "" {
 			broker = a.RuntimeBrokerID
 		}
 		if hubMode {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Grove, broker, agentStatus, containerStatus, lastEvent)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Grove, broker, agentStatus, containerStatus, lastActivity)
 		} else {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Grove, agentStatus, containerStatus, lastEvent)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Grove, agentStatus, containerStatus, lastActivity)
 		}
 	}
 	w.Flush()
@@ -347,6 +347,18 @@ func formatLastSeen(t time.Time) string {
 		}
 		return fmt.Sprintf("%d days ago", days)
 	}
+}
+
+// formatLastActivity formats a status and timestamp as a combined "activity, time ago" string.
+func formatLastActivity(status string, t time.Time) string {
+	timePart := formatLastSeen(t)
+	if status == "" || status == "IDLE" {
+		return timePart
+	}
+	if timePart == "-" {
+		return status
+	}
+	return fmt.Sprintf("%s, %s", status, timePart)
 }
 
 // handleUnlinkedGrovePrompt checks if the error is due to an unlinked grove and prompts the user.
@@ -510,5 +522,5 @@ func init() {
 	rootCmd.AddCommand(listCmd)
 	listCmd.Flags().BoolVarP(&listAll, "all", "a", false, "List all agents across all groves")
 	listCmd.Flags().BoolVar(&listDeleted, "deleted", false, "Include soft-deleted agents in listing")
-	listCmd.Flags().BoolVarP(&sortByTime, "time", "t", false, "Sort by last event, most recent first")
+	listCmd.Flags().BoolVarP(&sortByTime, "time", "t", false, "Sort by last activity, most recent first")
 }
