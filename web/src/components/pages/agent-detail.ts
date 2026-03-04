@@ -172,6 +172,19 @@ export class ScionPageAgentDetail extends LitElement {
       color: var(--scion-primary, #3b82f6);
     }
 
+    .broker-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      color: var(--scion-text-muted, #64748b);
+      text-decoration: none;
+      font-size: 0.875rem;
+    }
+
+    .broker-link:hover {
+      color: var(--scion-primary, #3b82f6);
+    }
+
     .header-actions {
       display: flex;
       gap: 0.5rem;
@@ -761,6 +774,14 @@ export class ScionPageAgentDetail extends LitElement {
                   <a href="/groves/${this.grove.id}" class="grove-link">
                     <sl-icon name="folder"></sl-icon>
                     ${this.grove.name}
+                  </a>
+                `
+              : ''}
+            ${this.agent.runtimeBrokerId
+              ? html`
+                  <a href="/brokers/${this.agent.runtimeBrokerId}" class="broker-link">
+                    <sl-icon name="hdd-rack"></sl-icon>
+                    ${this.agent.runtimeBrokerName || this.agent.runtimeBrokerId}
                   </a>
                 `
               : ''}

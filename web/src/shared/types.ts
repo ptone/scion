@@ -212,6 +212,8 @@ export interface Agent {
   lastSeen?: string;
   createdAt: string;
   updatedAt: string;
+  runtimeBrokerId?: string;
+  runtimeBrokerName?: string;
   _capabilities?: Capabilities;
 }
 
