@@ -62,3 +62,11 @@ type Harness interface {
 	// message if no valid auth method is available.
 	ResolveAuth(auth AuthConfig) (*ResolvedAuth, error)
 }
+
+// AuthSettingsApplier is an optional interface that harnesses can implement
+// to update their native settings files after auth resolution. This is called
+// at agent start time, after ResolveAuth, to ensure harness-specific config
+// (e.g. Gemini's settings.json selectedType) reflects the resolved auth method.
+type AuthSettingsApplier interface {
+	ApplyAuthSettings(agentHome string, resolved *ResolvedAuth) error
+}

@@ -261,13 +261,31 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	var resolvedAuth *api.ResolvedAuth
 	if !opts.NoAuth {
 		auth = harness.GatherAuthWithEnv(opts.Env)
+		util.Debugf("auth: gathered credentials — selectedType=%q, hasGeminiKey=%t, hasGoogleKey=%t, hasOAuth=%t, hasADC=%t, hasAnthropicKey=%t, cloudProject=%q",
+			auth.SelectedType,
+			auth.GeminiAPIKey != "",
+			auth.GoogleAPIKey != "",
+			auth.OAuthCreds != "",
+			auth.GoogleAppCredentials != "",
+			auth.AnthropicAPIKey != "",
+			auth.GoogleCloudProject,
+		)
 		harness.OverlaySettings(&auth, h, agentHome)
+		util.Debugf("auth: after overlay — selectedType=%q", auth.SelectedType)
 		resolved, err := h.ResolveAuth(auth)
 		if err != nil {
 			return nil, fmt.Errorf("auth resolution failed: %w", err)
 		}
+		util.Debugf("auth: resolved — method=%q, envVars=%v, files=%d", resolved.Method, resolved.EnvVars, len(resolved.Files))
 		if err := harness.ValidateAuth(resolved); err != nil {
 			return nil, fmt.Errorf("auth validation failed: %w", err)
+		}
+		// Allow harnesses to update their native settings files (e.g. Gemini settings.json)
+		if applier, ok := h.(api.AuthSettingsApplier); ok {
+			if err := applier.ApplyAuthSettings(agentHome, resolved); err != nil {
+				return nil, fmt.Errorf("failed to apply auth settings: %w", err)
+			}
+			util.Debugf("auth: applied harness-specific settings for %q", harnessName)
 		}
 		resolvedAuth = resolved
 	}

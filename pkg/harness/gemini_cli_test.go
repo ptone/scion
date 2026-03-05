@@ -15,6 +15,7 @@
 package harness
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -336,6 +337,37 @@ func TestGeminiResolveAuth_NoCreds(t *testing.T) {
 	_, err := g.ResolveAuth(api.AuthConfig{})
 	if err == nil {
 		t.Fatal("expected error for empty AuthConfig")
+	}
+}
+
+func TestGeminiApplyAuthSettings_OAuthPersonal(t *testing.T) {
+	agentHome := t.TempDir()
+	g := &GeminiCLI{}
+
+	resolved := &api.ResolvedAuth{
+		Method: "auth-file",
+		EnvVars: map[string]string{
+			"GEMINI_DEFAULT_AUTH_TYPE": "oauth-personal",
+		},
+	}
+	if err := g.ApplyAuthSettings(agentHome, resolved); err != nil {
+		t.Fatalf("ApplyAuthSettings failed: %v", err)
+	}
+
+	settingsPath := filepath.Join(agentHome, ".gemini", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("expected settings.json at %s: %v", settingsPath, err)
+	}
+
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("failed to parse settings.json: %v", err)
+	}
+	sec, _ := settings["security"].(map[string]interface{})
+	auth, _ := sec["auth"].(map[string]interface{})
+	if got := auth["selectedType"]; got != "oauth-personal" {
+		t.Errorf("selectedType = %q, want %q", got, "oauth-personal")
 	}
 }
 

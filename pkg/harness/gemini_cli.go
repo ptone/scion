@@ -226,6 +226,18 @@ func (g *GeminiCLI) toGeminiAuthType(universal string) string {
 	}
 }
 
+// ApplyAuthSettings updates Gemini's settings.json with the resolved auth type.
+// This ensures the settings.json selectedType matches the resolved auth even
+// when auth was auto-detected (i.e. no explicit AuthSelectedType was set).
+func (g *GeminiCLI) ApplyAuthSettings(agentHome string, resolved *api.ResolvedAuth) error {
+	geminiAuthType := resolved.EnvVars["GEMINI_DEFAULT_AUTH_TYPE"]
+	if geminiAuthType == "" {
+		return nil
+	}
+	settingsPath := filepath.Join(agentHome, g.DefaultConfigDir(), "settings.json")
+	return g.updateSelectedAuthType(settingsPath, geminiAuthType)
+}
+
 func (g *GeminiCLI) GetEmbedDir() string {
 	return "gemini"
 }
