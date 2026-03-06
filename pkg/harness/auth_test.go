@@ -521,6 +521,12 @@ func TestDetectAuthTypeFromFileSecrets(t *testing.T) {
 			"auth-file",
 		},
 		{
+			"claude with GOOGLE_APPLICATION_CREDENTIALS",
+			"claude",
+			map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}},
+			"vertex-ai",
+		},
+		{
 			"claude with no file secrets",
 			"claude",
 			map[string]struct{}{},
