@@ -38,7 +38,7 @@ var ResourceActions = map[string][]Action{
 
 // ScopeActions maps resource types to scope-level actions (e.g., create, list).
 var ScopeActions = map[string][]Action{
-	"agent":    {ActionCreate, ActionList},
+	"agent":    {ActionCreate, ActionList, ActionStopAll},
 	"grove":    {ActionCreate, ActionList},
 	"template": {ActionCreate, ActionList},
 	"group":    {ActionCreate, ActionList},

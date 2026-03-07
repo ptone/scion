@@ -56,6 +56,9 @@ type AgentService interface {
 	// Restart restarts an agent.
 	Restart(ctx context.Context, agentID string) error
 
+	// StopAll stops all running agents in scope.
+	StopAll(ctx context.Context) (*StopAllResponse, error)
+
 	// SendMessage sends a plain text message to an agent (legacy).
 	SendMessage(ctx context.Context, agentID string, message string, interrupt bool) error
 
@@ -123,6 +126,22 @@ type ListAgentsResponse struct {
 	Agents     []Agent
 	ServerTime time.Time // Hub server timestamp for clock-skew-safe sync watermarks
 	Page       apiclient.PageResult
+}
+
+// StopAllResult represents the outcome of stopping a single agent.
+type StopAllResult struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// StopAllResponse is the response from the stop-all endpoint.
+type StopAllResponse struct {
+	Stopped int             `json:"stopped"`
+	Failed  int             `json:"failed"`
+	Total   int             `json:"total"`
+	Results []StopAllResult `json:"results"`
 }
 
 // CreateAgentRequest is the request body for creating an agent.
@@ -367,6 +386,15 @@ func (s *agentService) Restart(ctx context.Context, agentID string) error {
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+// StopAll stops all running agents in scope.
+func (s *agentService) StopAll(ctx context.Context) (*StopAllResponse, error) {
+	resp, err := s.c.transport.Post(ctx, s.agentsPath()+"/stop-all", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[StopAllResponse](resp)
 }
 
 // Restore restores a soft-deleted agent.

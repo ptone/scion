@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ptone/scion-agent/pkg/agent/state"
@@ -1021,6 +1022,12 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle stop-all (POST /api/v1/agents/stop-all)
+	if id == "stop-all" {
+		s.handleStopAllAgents(w, r, "")
+		return
+	}
+
 	// Handle PTY WebSocket connections
 	if action == "pty" && isWebSocketUpgrade(r) {
 		s.handleAgentPTY(w, r)
@@ -1777,6 +1784,142 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	s.events.PublishAgentStatus(ctx, agent)
 
 	writeJSON(w, http.StatusOK, agent)
+}
+
+// ============================================================================
+// Stop All Agents
+// ============================================================================
+
+// stopAllResult represents the outcome of stopping a single agent.
+type stopAllResult struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// StopAllAgentsResponse is the response from the stop-all endpoint.
+type StopAllAgentsResponse struct {
+	Stopped int              `json:"stopped"`
+	Failed  int              `json:"failed"`
+	Total   int              `json:"total"`
+	Results []stopAllResult  `json:"results"`
+}
+
+// handleStopAllAgents stops all running agents, optionally scoped to a grove.
+// Requires admin role. Fans out stop operations concurrently to each broker.
+func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, groveID string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	// Require admin role
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil || userIdent.Role() != "admin" {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"Only admins can stop all agents", nil)
+		return
+	}
+
+	// List running agents (optionally scoped to grove)
+	filter := store.AgentFilter{
+		GroveID: groveID,
+		Phase:   string(state.PhaseRunning),
+	}
+
+	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{
+		Limit: 1000, // reasonable upper bound
+	})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	agents := result.Items
+	if len(agents) == 0 {
+		writeJSON(w, http.StatusOK, StopAllAgentsResponse{
+			Results: []stopAllResult{},
+		})
+		return
+	}
+
+	dispatcher := s.GetDispatcher()
+
+	var (
+		mu      sync.Mutex
+		wg      sync.WaitGroup
+		results = make([]stopAllResult, 0, len(agents))
+	)
+
+	for i := range agents {
+		agent := &agents[i]
+		wg.Add(1)
+		go func(agent *store.Agent) {
+			defer wg.Done()
+
+			res := stopAllResult{
+				ID:   agent.ID,
+				Name: agent.Name,
+			}
+
+			// Dispatch stop to broker
+			var dispatchErr error
+			if dispatcher != nil && agent.RuntimeBrokerID != "" {
+				opCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+				defer cancel()
+				s.syncWorkspaceOnStop(opCtx, agent)
+				dispatchErr = dispatcher.DispatchAgentStop(opCtx, agent)
+			}
+
+			if dispatchErr != nil {
+				res.Status = "error"
+				res.Error = dispatchErr.Error()
+				s.agentLifecycleLog.Warn("stop-all: failed to stop agent",
+					"agentID", agent.ID, "error", dispatchErr)
+			} else {
+				// Update agent status in store
+				statusUpdate := store.AgentStatusUpdate{
+					Phase:           string(state.PhaseStopped),
+					ContainerStatus: "stopped",
+					Activity:        "",
+				}
+				if updateErr := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); updateErr != nil {
+					res.Status = "error"
+					res.Error = updateErr.Error()
+				} else {
+					res.Status = "stopped"
+					agent.Phase = string(state.PhaseStopped)
+					s.events.PublishAgentStatus(ctx, agent)
+				}
+			}
+
+			mu.Lock()
+			results = append(results, res)
+			mu.Unlock()
+		}(agent)
+	}
+
+	wg.Wait()
+
+	stopped := 0
+	failed := 0
+	for _, r := range results {
+		if r.Status == "stopped" {
+			stopped++
+		} else {
+			failed++
+		}
+	}
+
+	writeJSON(w, http.StatusOK, StopAllAgentsResponse{
+		Stopped: stopped,
+		Failed:  failed,
+		Total:   len(results),
+		Results: results,
+	})
 }
 
 // ============================================================================
@@ -2629,6 +2772,12 @@ func (s *Server) handleGroveAgents(w http.ResponseWriter, r *http.Request, grove
 			return
 		}
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Handle stop-all (POST /api/v1/groves/{groveId}/agents/stop-all)
+	if agentPath == "stop-all" {
+		s.handleStopAllAgents(w, r, grove.ID)
 		return
 	}
 

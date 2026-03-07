@@ -66,6 +66,12 @@ export class ScionPageAgents extends LitElement {
   private actionLoading: Record<string, boolean> = {};
 
   /**
+   * Loading state for stop-all action
+   */
+  @state()
+  private stopAllLoading = false;
+
+  /**
    * Scope-level capabilities from the agents list response
    */
   @state()
@@ -296,6 +302,46 @@ export class ScionPageAgents extends LitElement {
     }
   }
 
+  private hasRunningAgents(): boolean {
+    return this.agents.some((a) => isAgentRunning(a));
+  }
+
+  private async handleStopAll(): Promise<void> {
+    if (!confirm('Are you sure you want to stop all running agents?')) {
+      return;
+    }
+
+    this.stopAllLoading = true;
+
+    try {
+      const response = await apiFetch('/api/v1/agents/stop-all', {
+        method: 'POST',
+      });
+
+      if (!response.ok) {
+        const errorData = (await response.json().catch(() => ({}))) as {
+          message?: string;
+          error?: { message?: string };
+        };
+        throw new Error(
+          errorData.error?.message || errorData.message || 'Failed to stop all agents',
+        );
+      }
+
+      const result = (await response.json()) as { stopped: number; failed: number };
+      if (result.failed > 0) {
+        alert(`Stopped ${result.stopped} agents, ${result.failed} failed.`);
+      }
+
+      await this.loadAgents();
+    } catch (err) {
+      console.error('Failed to stop all agents:', err);
+      alert(err instanceof Error ? err.message : 'Failed to stop all agents');
+    } finally {
+      this.stopAllLoading = false;
+    }
+  }
+
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
     this.viewMode = e.detail.view;
   }
@@ -310,6 +356,19 @@ export class ScionPageAgents extends LitElement {
             storageKey="scion-view-agents"
             @view-change=${this.onViewChange}
           ></scion-view-toggle>
+          ${can(this.scopeCapabilities, 'stop_all') && this.hasRunningAgents() ? html`
+            <sl-button
+              variant="danger"
+              size="small"
+              outline
+              ?loading=${this.stopAllLoading}
+              ?disabled=${this.stopAllLoading}
+              @click=${() => this.handleStopAll()}
+            >
+              <sl-icon slot="prefix" name="sign-stop"></sl-icon>
+              Stop All
+            </sl-button>
+          ` : nothing}
           ${can(this.scopeCapabilities, 'create') ? html`
             <a href="/agents/new" style="text-decoration: none;">
               <sl-button variant="primary" size="small">
