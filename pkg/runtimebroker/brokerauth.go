@@ -67,6 +67,12 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Health endpoints are always public — no authentication required.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Extract HMAC headers
 		brokerID := r.Header.Get(apiclient.HeaderBrokerID)
 		timestamp := r.Header.Get(apiclient.HeaderTimestamp)
@@ -195,6 +201,12 @@ func (m *MultiKeyBrokerAuthMiddleware) Middleware(next http.Handler) http.Handle
 		m.mu.RUnlock()
 
 		if !enabled {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Health endpoints are always public — no authentication required.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}
