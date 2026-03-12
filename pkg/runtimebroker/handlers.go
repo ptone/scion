@@ -1521,12 +1521,29 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 		// linked local path on the broker).
 		if globalDir, err := config.GetGlobalDir(); err == nil {
 			settingsPath = globalDir
+			if s.config.Debug {
+				s.envSecretLog.Debug("extractRequiredEnvKeys: grovePath empty, using global dir",
+					"globalDir", globalDir,
+				)
+			}
 		}
 	}
 	if settingsPath != "" {
 		vs, _, err := config.LoadEffectiveSettings(settingsPath)
 		if err == nil {
 			settings = vs
+			if s.config.Debug {
+				s.envSecretLog.Debug("extractRequiredEnvKeys: loaded settings",
+					"path", settingsPath,
+					"defaultHarnessConfig", vs.DefaultHarnessConfig,
+					"harnessConfigCount", len(vs.HarnessConfigs),
+				)
+			}
+		} else if s.config.Debug {
+			s.envSecretLog.Debug("extractRequiredEnvKeys: failed to load settings",
+				"path", settingsPath,
+				"error", err.Error(),
+			)
 		}
 	}
 
@@ -1542,12 +1559,24 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 	// Resolve harness type and auth_selected_type, then derive required keys.
 	secretInfo := make(map[string]api.SecretKeyInfo)
 	harnessConfigName := s.resolveHarnessConfigName(req, settings)
+	if s.config.Debug {
+		s.envSecretLog.Debug("extractRequiredEnvKeys: harness resolution",
+			"harnessConfigName", harnessConfigName,
+			"hasSettings", settings != nil,
+			"grovePath", req.GrovePath,
+		)
+	}
 	if harnessConfigName != "" {
 		var harnessType, authType string
 
-		// Try on-disk harness-config directory first
-		if req.GrovePath != "" {
-			if hcDir, err := config.FindHarnessConfigDir(harnessConfigName, req.GrovePath); err == nil {
+		// Try on-disk harness-config directory first (check grovePath,
+		// then fall back to global dir for hub-dispatched agents without a local grove)
+		harnessConfigSearchPath := req.GrovePath
+		if harnessConfigSearchPath == "" {
+			harnessConfigSearchPath = settingsPath
+		}
+		if harnessConfigSearchPath != "" {
+			if hcDir, err := config.FindHarnessConfigDir(harnessConfigName, harnessConfigSearchPath); err == nil {
 				harnessType = hcDir.Config.Harness
 				authType = hcDir.Config.AuthSelectedType
 			}
