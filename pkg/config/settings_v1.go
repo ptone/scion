@@ -259,6 +259,10 @@ type V1ServerConfig struct {
 	// When enabled, messages are routed through the broker instead of direct dispatch,
 	// enabling topic-based subscriptions and broadcast fan-out at the Hub level.
 	MessageBroker *V1MessageBrokerConfig `json:"message_broker,omitempty" yaml:"message_broker,omitempty" koanf:"message_broker"`
+
+	// Plugins configures external plugin loading for message brokers and harnesses.
+	// Plugins run as separate processes using hashicorp/go-plugin.
+	Plugins *V1PluginsConfig `json:"plugins,omitempty" yaml:"plugins,omitempty" koanf:"plugins"`
 }
 
 // V1NotificationChannelConfig holds configuration for an external notification channel.
@@ -275,6 +279,23 @@ type V1MessageBrokerConfig struct {
 	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	// Type selects the broker adapter: "inprocess" (default). Future: "nats", "redis".
 	Type string `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
+}
+
+// V1PluginsConfig configures external plugin loading for message brokers and harnesses.
+type V1PluginsConfig struct {
+	// Broker maps plugin names to their configuration for message broker plugins.
+	Broker map[string]V1PluginEntry `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
+	// Harness maps plugin names to their configuration for harness plugins.
+	Harness map[string]V1PluginEntry `json:"harness,omitempty" yaml:"harness,omitempty" koanf:"harness"`
+}
+
+// V1PluginEntry holds configuration for a single plugin.
+type V1PluginEntry struct {
+	// Path is the explicit filesystem path to the plugin binary.
+	// If empty, discovery will attempt to find it automatically.
+	Path string `json:"path,omitempty" yaml:"path,omitempty" koanf:"path"`
+	// Config is an opaque key-value map passed to the plugin via Configure().
+	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty" koanf:"config"`
 }
 
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).

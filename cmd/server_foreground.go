@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -189,10 +190,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// Parse admin emails
 	adminEmailList := parseAdminEmails(cfg)
 
+	// 10b. Initialize plugin manager
+	pluginMgr := initPluginManager()
+	defer pluginMgr.Shutdown()
+	harness.SetPluginManager(pluginMgr)
+
 	// 11. Start Hub
 	var hubSrv *hub.Server
 	if enableHub {
-		hubSrv = initHubServer(ctx, cfg, s, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir)
+		hubSrv = initHubServer(ctx, cfg, s, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr)
 
 		if !enableWeb {
 			// Hub runs its own HTTP server (standalone mode).
@@ -587,7 +593,7 @@ func parseAdminEmails(cfg *config.GlobalConfig) []string {
 }
 
 // initHubServer creates and configures the Hub server.
-func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string) *hub.Server {
+func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager) *hub.Server {
 	hubCfg := hub.ServerConfig{
 		Port:                  cfg.Hub.Port,
 		Host:                  cfg.Hub.Host,
@@ -677,7 +683,18 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			hubSrv.StartMessageBroker(b)
 			log.Printf("Message broker started: type=%s", brokerType)
 		default:
-			log.Printf("Warning: unknown message broker type %q, skipping", brokerType)
+			// Try loading as a plugin broker
+			if pluginMgr.HasPlugin(scionplugin.PluginTypeBroker, brokerType) {
+				b, pluginErr := pluginMgr.GetBroker(brokerType)
+				if pluginErr != nil {
+					log.Printf("Warning: failed to get broker plugin %q: %v", brokerType, pluginErr)
+				} else {
+					hubSrv.StartMessageBroker(b)
+					log.Printf("Message broker started: type=%s (plugin)", brokerType)
+				}
+			} else {
+				log.Printf("Warning: unknown message broker type %q (no plugin loaded), skipping", brokerType)
+			}
 		}
 	}
 
@@ -1004,6 +1021,52 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	}
 
 	return nil
+}
+
+// initPluginManager creates and loads a plugin manager from versioned settings.
+func initPluginManager() *scionplugin.Manager {
+	logger := logging.Subsystem("plugin")
+	mgr := scionplugin.NewManager(logger)
+
+	vs, err := config.LoadVersionedSettings("")
+	if err != nil || vs == nil || vs.Server == nil || vs.Server.Plugins == nil {
+		return mgr
+	}
+
+	pluginsDir, err := scionplugin.DefaultPluginsDir()
+	if err != nil {
+		log.Printf("Warning: failed to resolve plugins directory: %v", err)
+		return mgr
+	}
+
+	// Convert V1PluginsConfig to plugin.PluginsConfig
+	pluginsCfg := scionplugin.PluginsConfig{
+		Broker:  make(map[string]scionplugin.PluginEntry),
+		Harness: make(map[string]scionplugin.PluginEntry),
+	}
+	for name, entry := range vs.Server.Plugins.Broker {
+		pluginsCfg.Broker[name] = scionplugin.PluginEntry{
+			Path:   entry.Path,
+			Config: entry.Config,
+		}
+	}
+	for name, entry := range vs.Server.Plugins.Harness {
+		pluginsCfg.Harness[name] = scionplugin.PluginEntry{
+			Path:   entry.Path,
+			Config: entry.Config,
+		}
+	}
+
+	if err := mgr.LoadAll(pluginsCfg, pluginsDir); err != nil {
+		log.Printf("Warning: plugin loading encountered errors: %v", err)
+	}
+
+	loaded := mgr.ListPlugins()
+	if len(loaded) > 0 {
+		log.Printf("Loaded %d plugin(s): %v", len(loaded), loaded)
+	}
+
+	return mgr
 }
 
 // resolveBrokerID determines the broker ID from various sources.
