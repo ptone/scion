@@ -61,22 +61,22 @@ Rationale:
 Implements the `broker.MessageBroker` interface across the plugin boundary:
 
 ```go
-// Plugin-side interface (same shape as broker.MessageBroker)
+// Plugin-side interface
 type MessageBrokerPlugin interface {
+    Configure(config map[string]string) error
     Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error
-    Subscribe(pattern string) (SubscriptionID, error)
-    ReceiveMessages(subID SubscriptionID) ([]*ReceivedMessage, error)  // polling
-    Unsubscribe(subID SubscriptionID) error
+    Subscribe(pattern string) error
+    Unsubscribe(pattern string) error
     Close() error
 }
 ```
 
 **Key considerations:**
-- The in-process `Subscribe()` uses a callback-based `MessageHandler`, which cannot cross process boundaries directly. Over RPC, the plugin assigns a `SubscriptionID` and the host polls for messages via `ReceiveMessages()`, or we use a reverse connection (plugin calls back to host RPC server)
+- The in-process `Subscribe()` uses a callback-based `MessageHandler`, which cannot cross process boundaries directly. Instead of polling or reverse RPC, the plugin delivers inbound messages via the hub's existing API endpoints (see "Subscription Delivery via Hub API" in Decisions)
 - The plugin maintains the external connection (NATS, Redis, etc.) internally
-- Configuration (connection URLs, auth) passed via a `Configure(map[string]string)` call at startup
+- Configuration (connection URLs, auth, hub API endpoint) passed via `Configure(map[string]string)` at startup
 - Plugin must handle reconnection to the backing service internally
-- The host-side adapter wraps the plugin RPC client to satisfy the existing `broker.MessageBroker` interface, bridging the callback model
+- The host-side adapter wraps the plugin RPC client to satisfy the existing `broker.MessageBroker` interface; for the subscribe path, the adapter simply calls `Subscribe()` on the plugin — actual message delivery happens out-of-band via the hub API
 
 ### Type 2: Harness (`harness`)
 
@@ -138,7 +138,7 @@ For message brokers, the active broker is selected in server config:
 message_broker: nats   # selects the "nats" plugin (or "inprocess" for built-in)
 ```
 
-The design should accommodate future multi-broker configurations (see Open Questions), so internally the broker selection should resolve through a registry that can hold multiple loaded broker plugins, even if only one is "active" initially.
+The design should accommodate future multi-broker configurations (see "Multiple Active Brokers" in Decisions), so internally the broker selection should resolve through a registry that can hold multiple loaded broker plugins. A future routing layer would manage multiple active brokers in a gateway pattern.
 
 For harnesses, plugin harnesses are available alongside built-in ones. The harness factory (`harness.New()`) checks plugins after built-in types:
 
@@ -242,25 +242,27 @@ Plugin processes are started when the hub/broker server starts and stopped when 
 
 ### Broker Plugin
 
-The `broker.MessageBroker` interface is small and maps well to RPC with one challenge: `Subscribe()` uses a callback-based `MessageHandler` that cannot cross process boundaries.
+The `broker.MessageBroker` interface is small and maps well to RPC. The main challenge — `Subscribe()` uses a callback-based `MessageHandler` that cannot cross process boundaries — is solved by having the plugin deliver inbound messages via the hub API (see "Subscription Delivery via Hub API" in Decisions).
 
-**Approach: Host-side polling adapter**
-
-The plugin assigns an opaque subscription ID and buffers incoming messages. The host-side adapter runs a goroutine that polls the plugin for new messages and dispatches them to the local `MessageHandler`:
+**Host-side adapter:**
 
 ```go
 type brokerPluginClient struct {
     client *rpc.Client
 }
 
+func (b *brokerPluginClient) Publish(ctx context.Context, topic string, msg *StructuredMessage) error {
+    return b.client.Call("Plugin.Publish", &PublishArgs{Topic: topic, Msg: msg}, nil)
+}
+
 func (b *brokerPluginClient) Subscribe(pattern string, handler MessageHandler) (Subscription, error) {
-    var subID string
-    err := b.client.Call("Plugin.Subscribe", pattern, &subID)
-    // Goroutine polls Plugin.ReceiveMessages(subID) and calls handler
+    // handler is not forwarded to the plugin — inbound delivery happens via hub API
+    err := b.client.Call("Plugin.Subscribe", pattern, nil)
+    // Return a Subscription that calls Plugin.Unsubscribe on cancel
 }
 ```
 
-Alternative: The host exposes a reverse RPC server that the plugin calls to deliver messages. This avoids polling overhead but adds complexity. Start with polling; optimize if latency becomes an issue.
+The adapter's `Subscribe()` tells the plugin to start listening on the external broker. The `MessageHandler` callback is not used for plugin brokers — messages arrive via the hub API instead, where the hub dispatches them through its existing `DispatchAgentMessage()` path.
 
 ### Harness Plugin
 
@@ -277,8 +279,6 @@ The harness interface has several methods that don't translate directly:
 
 ## Decisions
 
-These items from the original draft have been resolved based on review feedback:
-
 | Topic | Decision | Rationale |
 |---|---|---|
 | Host↔Plugin RPC | Use `net/rpc` for Go plugins | Simpler than gRPC; no proto files. Plugin handles external protocols internally. gRPC option deferred for polyglot support. |
@@ -288,51 +288,118 @@ These items from the original draft have been resolved based on review feedback:
 | Dynamic registration | Deferred | Static settings-based registration covers primary use cases. |
 | Hot reload | Deferred | Plugin lifecycle tied to server start/stop/restart. No watch-and-reload. |
 | Plugin distribution | Deferred | Manual install to `~/.scion/plugins/<type>/`. Future `scion plugin install` command possible. |
+| Subscription delivery | Hub API callback (see below) | Plugin delivers inbound messages via the hub's existing authenticated API, avoiding polling/reverse-RPC complexity. |
+| Plugin versioning | Strict version check; reject incompatible | go-plugin protocol version negotiation with hard rejection on mismatch. No graceful degradation. |
+| Multiple brokers | Deferred; design accommodates | Registry supports multiple loaded plugins. Future work: multiple active brokers with a routing layer. |
+| Harness `GetHarnessEmbedsFS()` | Return nil for plugin harnesses | `Provision()` flow handles nil gracefully; plugin writes files directly during provisioning. |
+
+### Subscription Delivery via Hub API
+
+The original design proposed polling or reverse RPC for delivering messages from a broker plugin back to the host. A better approach exists: **the broker plugin delivers inbound messages through the hub's existing API**.
+
+The hub already exposes authenticated endpoints for message delivery:
+- `POST /api/v1/agents/{agentId}/message` — deliver to a specific agent
+- `POST /api/v1/groves/{groveId}/broadcast` — broadcast to a grove
+
+The broker plugin can use these endpoints directly, authenticating via the existing broker HMAC mechanism or a dedicated plugin credential. This eliminates the need for polling loops or a reverse RPC server entirely.
+
+**Message flow with hub API delivery:**
+
+```
+Outbound (hub → external):
+  Hub → broker.Publish() → [RPC] → Plugin → NATS/Redis
+
+Inbound (external → hub):
+  NATS/Redis → Plugin → hub API (POST /api/v1/agents/{id}/message) → Hub dispatches to agent
+```
+
+This is the preferred approach because:
+- Reuses existing authenticated infrastructure — no new transport to build
+- The hub API already handles agent dispatch, fan-out, and audit logging
+- No streaming or polling required over the RPC boundary
+- The plugin's RPC interface becomes simpler: only `Publish()`, `Subscribe()`, `Unsubscribe()`, and `Close()` — no `ReceiveMessages()` needed
+
+**Implications for the RPC interface:**
+
+The plugin-side broker interface simplifies to:
+
+```go
+type MessageBrokerPlugin interface {
+    Configure(config map[string]string) error
+    Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error
+    Subscribe(pattern string) error       // Plugin starts delivering via hub API
+    Unsubscribe(pattern string) error
+    Close() error
+}
+```
+
+The `Subscribe()` call tells the plugin to start listening on the external broker for the given pattern. When messages arrive, the plugin delivers them to the hub API autonomously — no host-side polling needed.
+
+### Plugin Versioning
+
+Scion uses go-plugin's protocol version negotiation with **strict matching**:
+- Each plugin type (broker, harness) has a protocol version number (starting at 1)
+- On `plugin.NewClient()`, scion specifies the expected protocol version
+- go-plugin rejects plugins that report a different version — the plugin process is killed and an error is returned
+- Any change to the RPC method signatures, argument types, or semantics constitutes a breaking change requiring a version bump
+- Plugins can report their minimum compatible scion version via a `GetInfo()` RPC call; scion logs a warning if the plugin targets a newer scion version
+
+### Multiple Active Brokers
+
+The current design loads one active message broker. Future support for multiple active brokers would follow a gateway/router pattern:
+
+- Multiple broker plugins loaded and active simultaneously (e.g., NATS for inter-agent messaging, Redis for notifications)
+- A routing layer determines which broker handles each `Publish()` and `Subscribe()` call based on topic patterns, message types, or explicit configuration
+- The plugin manager's registry (keyed by `type:name`) already supports loading multiple broker plugins — the missing piece is the routing logic
+
+This is deferred but the registry and plugin lifecycle design intentionally accommodate it. The routing layer design will be specified when a concrete multi-broker use case is prioritized.
 
 ## Open Questions
 
-### 1. Subscription Delivery: Polling vs Reverse RPC
+### 1. Plugin Authentication for Hub API Callbacks
 
-The host-side broker adapter needs to bridge the plugin's RPC boundary with the local callback-based `MessageHandler`. Two approaches:
+When a broker plugin delivers inbound messages via the hub API, it needs to authenticate. Options:
 
-- **Polling**: Host goroutine periodically calls `ReceiveMessages()` on the plugin. Simple but introduces latency proportional to poll interval.
-- **Reverse RPC**: Plugin calls back to a host-provided RPC endpoint to push messages. Lower latency but more complex setup (host must expose an RPC server to the plugin).
+- **Broker HMAC auth**: The plugin is provisioned with the same HMAC credentials as a runtime broker. This is natural since broker plugins run on the same host as the hub/broker server, but conflates "plugin" identity with "runtime broker" identity.
+- **Dedicated plugin credentials**: A new auth type (e.g., `X-Scion-Plugin-Token`) issued to the plugin at startup via the `Configure()` call. Cleaner separation of concerns but adds a new auth path.
+- **Inherit host credentials**: Since the plugin runs as a subprocess of the hub server, it could receive the hub's own internal auth token. Simplest, but blurs security boundaries.
 
-**Recommendation**: Start with polling at a reasonable interval (e.g., 50-100ms). Measure latency in practice and switch to reverse RPC if needed.
+**Recommendation**: Start with broker HMAC auth since the infrastructure already exists. The plugin receives broker credentials as part of its `Configure()` config map. Revisit if the identity conflation causes issues.
 
-### 2. Plugin Versioning and Compatibility
+### 2. Circular Message Delivery Prevention
 
-go-plugin supports protocol version negotiation. We need to define:
-- What constitutes a breaking change to the plugin protocol?
-- Should scion refuse to load plugins with incompatible versions, or degrade gracefully?
-- How do we communicate minimum scion version requirements from the plugin side?
+When a broker plugin delivers an inbound message via the hub API, the hub must not re-publish that message through the broker plugin (creating an infinite loop). The hub's `MessageBrokerProxy` currently subscribes to broker topics and dispatches via `DispatchAgentMessage()` — if inbound messages arrive via the hub API instead, the proxy's subscription-based dispatch is bypassed for those messages.
 
-### 3. Multiple Broker Plugins Simultaneously
+This needs clear delineation:
+- **Outbound path**: Hub → `MessageBrokerProxy.PublishMessage()` → `broker.Publish()` → plugin RPC → external system
+- **Inbound path**: External system → plugin → hub API → `DispatchAgentMessage()` directly (bypasses broker)
 
-Can a hub run multiple message broker plugins (e.g., NATS for inter-agent messaging, Redis for notifications)?
+The risk is that an outbound publish to the external broker might echo back as an inbound message. The plugin must either:
+- Filter out messages that originated from the hub (e.g., by sender metadata or a message ID seen-set)
+- Use separate external broker topics/channels for inbound vs outbound to prevent echo
 
-- Current `MessageBroker` interface assumes one active broker
-- Could support named broker instances with different roles
-- The plugin manager already holds a registry keyed by `type:name`, so multiple broker plugins can be loaded simultaneously — the question is how to route messages to the right one
+### 3. Plugin Topic-to-Agent Mapping
 
-This is deferred but the current design (registry-based, keyed by name) intentionally accommodates it. A future "multi-broker gateway" pattern could wrap multiple broker plugins behind a routing layer.
+When the broker plugin receives a message from the external system (NATS/Redis), it needs to know which hub API endpoint to call — specifically, which `agentId` or `groveId` the message targets. Options:
 
-### 4. net/rpc Streaming Limitations
+- **Topic convention**: The external broker uses the same topic hierarchy as scion internally (`scion.grove.<groveId>.agent.<agentSlug>.messages`). The plugin parses the topic to extract agent/grove identifiers.
+- **Subscription metadata**: When the host calls `Subscribe(pattern)`, it includes metadata mapping patterns to agent/grove IDs. The plugin uses this mapping for delivery.
+- **Pass-through**: The plugin delivers all inbound messages to a single hub API endpoint (e.g., a new `/api/v1/broker/inbound` route) with the original topic, and the hub handles routing internally.
 
-Go's `net/rpc` does not natively support streaming. For broker subscriptions, this means we rely on polling or reverse RPC rather than server-side streaming. If we find that the polling/reverse-RPC approach is insufficient, we may need to:
-- Switch broker plugins to gRPC (which supports streaming natively)
-- Use a custom transport within go-plugin
+**Recommendation**: The pass-through approach is cleanest — it keeps routing logic in the hub where it belongs and avoids duplicating topic-parsing logic in every plugin. A new internal API endpoint for plugin message delivery would accept `{topic, message}` and route accordingly.
 
-This is worth monitoring as the first broker plugin (NATS) is implemented.
+### 4. net/rpc Suitability for Broker Plugins
 
-### 5. Harness `GetHarnessEmbedsFS()` Contract Change
+With hub API callbacks handling inbound message delivery, the `net/rpc` streaming limitation is largely mitigated — the plugin RPC interface becomes request/response only (Publish, Subscribe, Unsubscribe, Close). However, if future requirements add RPC methods that benefit from streaming (e.g., bulk operations, health telemetry), switching broker plugins to gRPC may be warranted. Monitor during NATS plugin implementation.
 
-If plugin harnesses write their files during `Provision()` instead of returning an `embed.FS`, the harness interface contract needs adjustment. Options:
-- Make `GetHarnessEmbedsFS()` optional (return nil is acceptable)
-- Split the interface: built-in harnesses embed, plugin harnesses provision
-- Refactor built-in harnesses to also write during `Provision()` for consistency
+### 5. Plugin Behavior During Hub Unavailability
 
-**Recommendation**: Make `GetHarnessEmbedsFS()` return nil for plugin harnesses. The `Provision()` flow should handle the nil case gracefully, since plugin harnesses will have already written their files.
+If the hub API is temporarily unavailable when the broker plugin tries to deliver an inbound message:
+- Should the plugin buffer messages and retry? If so, what are the buffer limits?
+- Should it drop messages and log warnings?
+- Should it report health degradation back to the host via the RPC channel?
+
+This matters for production reliability but can be deferred to Phase 2 (NATS plugin implementation) when real failure modes are encountered.
 
 ## Phased Implementation Plan
 
@@ -344,9 +411,10 @@ If plugin harnesses write their files during `Provision()` instead of returning 
 
 ### Phase 2: Message Broker Plugins
 - NATS broker plugin (first external implementation)
-- Host-side adapter bridging RPC to `MessageHandler` callbacks
-- Test the full lifecycle: discovery, loading, configuration, operation, shutdown
-- Evaluate polling vs reverse RPC based on real latency measurements
+- Host-side adapter wrapping plugin RPC client as `broker.MessageBroker`
+- Hub API inbound endpoint for plugin message delivery (or reuse existing endpoints)
+- Plugin authentication and circular delivery prevention
+- Test the full lifecycle: discovery, loading, configuration, publish, subscribe, inbound delivery, shutdown
 
 ### Phase 3: Harness Plugins
 - `net/rpc` interface definitions for harness plugin
