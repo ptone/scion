@@ -595,15 +595,34 @@ Log token generation events (not sidecar cache hits) with agent ID, grove ID, SA
 | `pkg/runtimebroker/start_context.go` | Pass GCP identity config to provisioning |
 | `pkg/api/types.go` | Add `GCPIdentityConfig` to relevant types |
 
-### Phase 2: Hardening
+### Phase 2: Hardening ✅ Complete
 
-- Block mode implementation (403 for token/identity requests)
-- iptables interception for Docker runtime
-- Audit logging for token generation events
-- CLI commands for SA management (`scion grove service-accounts add/list/remove/verify`)
-- Web UI for SA management and agent identity assignment
-- Rate limiting on the Hub token endpoint (per-agent)
-- Metrics: token requests, cache hit rate, IAM API latency
+1. ✅ **Block mode**: Implemented in Phase 1 — metadata sidecar returns 403 for all token/identity/email/scopes requests in block mode.
+2. ✅ **iptables interception**: Docker runtime adds `NET_ADMIN` capability; metadata server sets up iptables DNAT rule redirecting `169.254.169.254:80` to local sidecar port. Non-fatal fallback if iptables unavailable.
+3. ✅ **Audit logging**: GCP token generation events logged via `AuditLogger` with agent ID, grove ID, SA email, success/failure status.
+4. ✅ **CLI commands**: `scion grove service-accounts add/list/remove/verify` with hub client integration.
+5. **Web UI**: Deferred — SA management and agent identity assignment via web interface.
+6. ✅ **Rate limiting**: Per-agent token bucket rate limiter (1 req/sec avg, burst of 10) on Hub GCP token endpoints.
+7. ✅ **Metrics**: `GCPTokenMetrics` tracking access/identity token requests, successes, failures, rate limit rejections, and IAM API latency percentiles. Exposed via `/metrics` endpoint.
+
+**Files created/modified**:
+
+| File | Change |
+|------|--------|
+| `pkg/hub/gcp_ratelimit.go` | New: Per-agent token bucket rate limiter |
+| `pkg/hub/gcp_metrics.go` | New: GCP token metrics (counters + latency percentiles) |
+| `pkg/hub/audit.go` | Extended: GCP token event types and audit logging |
+| `pkg/hub/handlers_gcp_identity.go` | Modified: Rate limiting, metrics, audit logging integration |
+| `pkg/hub/server.go` | Modified: Initialize rate limiter and metrics |
+| `pkg/hub/handlers.go` | Modified: Include GCP metrics in `/metrics` response |
+| `pkg/sciontool/metadata/iptables.go` | New: iptables redirect setup/cleanup |
+| `pkg/sciontool/metadata/server.go` | Modified: iptables setup on Start, cleanup on Stop |
+| `pkg/runtime/interface.go` | Modified: `MetadataInterception` field on `RunConfig` |
+| `pkg/runtime/common.go` | Modified: `--cap-add NET_ADMIN` when metadata interception enabled |
+| `pkg/agent/run.go` | Modified: Detect metadata mode and set `MetadataInterception` |
+| `cmd/grove_service_accounts.go` | New: CLI commands for SA management |
+| `pkg/hubclient/gcp_service_accounts.go` | New: Hub client for GCP SA CRUD + verify |
+| `pkg/hubclient/client.go` | Modified: Add `GCPServiceAccounts()` to Client interface |
 
 ### Phase 3: Extensions
 
