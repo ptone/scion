@@ -80,10 +80,25 @@ func resolveHubGroveRef(ref string, opts EnsureHubReadyOptions) (*HubContext, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve fallback grove for hub settings: %w", err)
 	}
+	debugf("resolveHubGroveRef: fallbackPath=%s, isGlobal=%v", fallbackPath, isGlobal)
 
 	settings, err := config.LoadSettings(fallbackPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load settings from fallback grove: %w", err)
+	}
+
+	debugf("resolveHubGroveRef: hub=%v, hubConfigured=%v, hubEnabled=%v, hubExplicitlyDisabled=%v",
+		settings.Hub != nil, settings.IsHubConfigured(), settings.IsHubEnabled(), settings.IsHubExplicitlyDisabled())
+	if settings.Hub != nil {
+		hasToken := settings.Hub.Token != ""
+		hasAPIKey := settings.Hub.APIKey != ""
+		hasEndpoint := settings.Hub.Endpoint != ""
+		enabledPtr := "<nil>"
+		if settings.Hub.Enabled != nil {
+			enabledPtr = fmt.Sprintf("%v", *settings.Hub.Enabled)
+		}
+		debugf("resolveHubGroveRef: hub.enabled=%s, hub.endpoint=%v, hub.hasToken=%v, hub.hasAPIKey=%v",
+			enabledPtr, hasEndpoint, hasToken, hasAPIKey)
 	}
 
 	if !settings.IsHubEnabled() {

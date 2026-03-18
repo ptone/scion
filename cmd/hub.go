@@ -475,6 +475,14 @@ func getHubEnabledScope(resolvedPath string, isGlobal bool, mergedSettings *conf
 		return result
 	}
 
+	// Check if enabled implicitly via credentials — this takes priority
+	// over any hub.enabled setting in config files.
+	if mergedSettings.Hub != nil && mergedSettings.Hub.Endpoint != "" &&
+		(mergedSettings.Hub.Token != "" || mergedSettings.Hub.APIKey != "") {
+		result.Scope = "implicit"
+		return result
+	}
+
 	// Check if the grove itself has hub.enabled set
 	groveSettings, err := config.LoadSettingsFromDir(resolvedPath)
 	if err == nil && groveSettings.Hub != nil && groveSettings.Hub.Enabled != nil {
@@ -493,13 +501,8 @@ func getHubEnabledScope(resolvedPath string, isGlobal bool, mergedSettings *conf
 		}
 	}
 
-	// Neither grove nor global has it set explicitly.
-	// Check if implicitly enabled via credentials (token/apiKey + endpoint).
-	if result.Enabled {
-		result.Scope = "implicit"
-	} else {
-		result.Scope = "default"
-	}
+	// Neither grove nor global has it set — default (false)
+	result.Scope = "default"
 	return result
 }
 

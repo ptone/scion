@@ -451,10 +451,10 @@ func TestHubMethods(t *testing.T) {
 			wantExplicitlyDisabled:   false,
 		},
 		{
-			name:                     "hub with endpoint, token, and enabled=false stays disabled",
+			name:                     "hub with endpoint, token, and enabled=false overrides to enabled",
 			hub:                      &HubClientConfig{Endpoint: "https://hub.example.com", Token: "scion_pat_xxx", Enabled: &falseBool},
 			wantConfigured:           true,
-			wantEnabled:              false,
+			wantEnabled:              true,
 			wantExplicitlyDisabled:   true,
 		},
 	}
