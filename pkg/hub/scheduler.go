@@ -61,6 +61,7 @@ type Scheduler struct {
 	log *slog.Logger
 
 	// Lifecycle
+	ctx      context.Context // long-lived context from Start(); used for timer callbacks
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
@@ -120,6 +121,11 @@ func (s *Scheduler) RegisterRecurring(name string, intervalMinutes int, fn func(
 // invocations. Before starting the ticker, persisted one-shot timers are
 // loaded from the database.
 func (s *Scheduler) Start(ctx context.Context) {
+	// Store the long-lived server context for use by timer callbacks.
+	// This prevents timers scheduled via HTTP requests from inheriting
+	// the short-lived request context.
+	s.ctx = ctx
+
 	// Load and schedule persisted one-shot timers
 	s.loadPersistedTimers(ctx)
 
@@ -323,13 +329,18 @@ func (s *Scheduler) ScheduleEvent(ctx context.Context, evt store.ScheduledEvent)
 		return fmt.Errorf("scheduler has no store configured")
 	}
 
-	// Persist to database first
+	// Persist to database first (use caller's context for the DB write)
 	if err := s.store.CreateScheduledEvent(ctx, &evt); err != nil {
 		return err
 	}
 
-	// Schedule in memory
-	s.scheduleTimer(ctx, evt)
+	// Schedule in memory using the long-lived server context so the timer
+	// callback is not cancelled when the originating HTTP request completes.
+	timerCtx := s.ctx
+	if timerCtx == nil {
+		timerCtx = context.Background()
+	}
+	s.scheduleTimer(timerCtx, evt)
 
 	s.log.Info("Scheduler: event scheduled",
 		"eventID", evt.ID, "type", evt.EventType, "fireAt", evt.FireAt)

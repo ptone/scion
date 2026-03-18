@@ -843,6 +843,70 @@ func TestUnregisteredEventTypeReturnsError(t *testing.T) {
 	}
 }
 
+func TestScheduleEventWithCancelledCallerContext(t *testing.T) {
+	// Regression test: when ScheduleEvent is called from an HTTP handler,
+	// the caller's context (r.Context()) is cancelled as soon as the response
+	// is sent. The timer must still fire using the scheduler's long-lived context.
+	ms := newMockStore()
+	s := newTestSchedulerWithStore(1*time.Second, ms)
+
+	var handlerCalled atomic.Int32
+	s.RegisterEventHandler("message", func(_ context.Context, evt store.ScheduledEvent) error {
+		handlerCalled.Add(1)
+		return nil
+	})
+
+	// Start the scheduler with a long-lived context (simulates server lifetime)
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	defer serverCancel()
+	s.Start(serverCtx)
+
+	// Create a short-lived context simulating an HTTP request
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+
+	evt := store.ScheduledEvent{
+		ID:        "req-ctx-1",
+		GroveID:   "grove-1",
+		EventType: "message",
+		FireAt:    time.Now().Add(80 * time.Millisecond),
+		Payload:   `{"msg":"test"}`,
+		Status:    store.ScheduledEventPending,
+	}
+
+	err := s.ScheduleEvent(reqCtx, evt)
+	if err != nil {
+		t.Fatalf("ScheduleEvent failed: %v", err)
+	}
+
+	// Cancel the request context immediately (simulates HTTP response sent)
+	reqCancel()
+
+	// Wait for the timer to fire
+	deadline := time.After(1 * time.Second)
+	for {
+		e := ms.getEvent("req-ctx-1")
+		if e != nil && e.Status != store.ScheduledEventPending {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timer did not fire after caller context was cancelled — this is the bug")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	e := ms.getEvent("req-ctx-1")
+	if e.Status != store.ScheduledEventFired {
+		t.Errorf("expected status %q, got %q", store.ScheduledEventFired, e.Status)
+	}
+	if handlerCalled.Load() != 1 {
+		t.Errorf("expected handler to be called once, got %d", handlerCalled.Load())
+	}
+
+	s.Stop()
+}
+
 func TestMultipleEventHandlers(t *testing.T) {
 	ms := newMockStore()
 	s := newTestSchedulerWithStore(1*time.Second, ms)
