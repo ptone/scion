@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
@@ -100,7 +100,7 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 		Name:       "Stale Runner",
 		Template:   "claude",
 		GroveID:    grove.ID,
-		Phase: string(state.PhaseCreated),
+		Phase:      string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, staleAgent); err != nil {
@@ -121,7 +121,7 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 		Name:       "Stopped Agent",
 		Template:   "claude",
 		GroveID:    grove.ID,
-		Phase: string(state.PhaseStopped),
+		Phase:      string(state.PhaseStopped),
 		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, stoppedAgent); err != nil {
@@ -184,12 +184,12 @@ func TestAgentHeartbeatTimeoutHandler_ClearedBySubsequentHeartbeat(t *testing.T)
 	}
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Slug:       "recovery-agent",
-		Name:       "Recovery Agent",
-		Template:   "claude",
-		GroveID:    grove.ID,
-		Phase: string(state.PhaseRunning), Activity: string(state.ActivityOffline),
+		ID:       api.NewUUID(),
+		Slug:     "recovery-agent",
+		Name:     "Recovery Agent",
+		Template: "claude",
+		GroveID:  grove.ID,
+		Phase:    string(state.PhaseRunning), Activity: string(state.ActivityOffline),
 		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
@@ -199,7 +199,7 @@ func TestAgentHeartbeatTimeoutHandler_ClearedBySubsequentHeartbeat(t *testing.T)
 	// Simulate a heartbeat arriving — normal UpdateAgentStatus with a new status
 	// clears undetermined without any special logic.
 	if err := s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
-		Phase: string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 		Heartbeat: true,
 	}); err != nil {
 		t.Fatalf("failed to update agent heartbeat: %v", err)

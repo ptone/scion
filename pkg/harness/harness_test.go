@@ -72,21 +72,23 @@ func (m *mockPluginProvider) GetHarness(name string) (api.Harness, error) {
 // stubHarness is a minimal api.Harness for testing plugin lookup.
 type stubHarness struct{ name string }
 
-func (s *stubHarness) Name() string                                              { return s.name }
-func (s *stubHarness) AdvancedCapabilities() api.HarnessAdvancedCapabilities     { return api.HarnessAdvancedCapabilities{} }
-func (s *stubHarness) GetEnv(string, string, string) map[string]string           { return nil }
-func (s *stubHarness) GetCommand(string, bool, []string) []string                { return nil }
-func (s *stubHarness) DefaultConfigDir() string                                  { return "" }
-func (s *stubHarness) SkillsDir() string                                         { return "" }
-func (s *stubHarness) HasSystemPrompt(string) bool                               { return false }
-func (s *stubHarness) Provision(_ context.Context, _, _, _, _ string) error       { return nil }
-func (s *stubHarness) GetEmbedDir() string                                       { return "" }
-func (s *stubHarness) GetInterruptKey() string                                   { return "" }
-func (s *stubHarness) GetHarnessEmbedsFS() (embed.FS, string)                    { return embed.FS{}, "" }
-func (s *stubHarness) InjectAgentInstructions(string, []byte) error              { return nil }
-func (s *stubHarness) InjectSystemPrompt(string, []byte) error                   { return nil }
-func (s *stubHarness) GetTelemetryEnv() map[string]string                        { return nil }
-func (s *stubHarness) ResolveAuth(api.AuthConfig) (*api.ResolvedAuth, error)     { return nil, nil }
+func (s *stubHarness) Name() string { return s.name }
+func (s *stubHarness) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
+	return api.HarnessAdvancedCapabilities{}
+}
+func (s *stubHarness) GetEnv(string, string, string) map[string]string       { return nil }
+func (s *stubHarness) GetCommand(string, bool, []string) []string            { return nil }
+func (s *stubHarness) DefaultConfigDir() string                              { return "" }
+func (s *stubHarness) SkillsDir() string                                     { return "" }
+func (s *stubHarness) HasSystemPrompt(string) bool                           { return false }
+func (s *stubHarness) Provision(_ context.Context, _, _, _, _ string) error  { return nil }
+func (s *stubHarness) GetEmbedDir() string                                   { return "" }
+func (s *stubHarness) GetInterruptKey() string                               { return "" }
+func (s *stubHarness) GetHarnessEmbedsFS() (embed.FS, string)                { return embed.FS{}, "" }
+func (s *stubHarness) InjectAgentInstructions(string, []byte) error          { return nil }
+func (s *stubHarness) InjectSystemPrompt(string, []byte) error               { return nil }
+func (s *stubHarness) GetTelemetryEnv() map[string]string                    { return nil }
+func (s *stubHarness) ResolveAuth(api.AuthConfig) (*api.ResolvedAuth, error) { return nil, nil }
 
 func TestNew_PluginHarness(t *testing.T) {
 	provider := &mockPluginProvider{

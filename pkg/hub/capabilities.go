@@ -27,23 +27,23 @@ type Capabilities struct {
 
 // ResourceActions maps resource types to the actions applicable to individual resources.
 var ResourceActions = map[string][]Action{
-	"agent":    {ActionRead, ActionUpdate, ActionDelete, ActionStart, ActionStop, ActionMessage, ActionAttach},
-	"grove":    {ActionRead, ActionUpdate, ActionDelete, ActionManage, ActionRegister},
-	"template": {ActionRead, ActionUpdate, ActionDelete},
-	"group":    {ActionRead, ActionUpdate, ActionDelete, ActionAddMember, ActionRemoveMember},
-	"user":     {ActionRead, ActionUpdate},
-	"policy":   {ActionRead, ActionUpdate, ActionDelete},
+	"agent":               {ActionRead, ActionUpdate, ActionDelete, ActionStart, ActionStop, ActionMessage, ActionAttach},
+	"grove":               {ActionRead, ActionUpdate, ActionDelete, ActionManage, ActionRegister},
+	"template":            {ActionRead, ActionUpdate, ActionDelete},
+	"group":               {ActionRead, ActionUpdate, ActionDelete, ActionAddMember, ActionRemoveMember},
+	"user":                {ActionRead, ActionUpdate},
+	"policy":              {ActionRead, ActionUpdate, ActionDelete},
 	"broker":              {ActionRead, ActionUpdate, ActionDelete, ActionDispatch},
 	"gcp_service_account": {ActionRead, ActionDelete, ActionVerify},
 }
 
 // ScopeActions maps resource types to scope-level actions (e.g., create, list).
 var ScopeActions = map[string][]Action{
-	"agent":    {ActionCreate, ActionList, ActionStopAll},
-	"grove":    {ActionCreate, ActionList},
-	"template": {ActionCreate, ActionList},
-	"group":    {ActionCreate, ActionList},
-	"policy":   {ActionCreate, ActionList},
+	"agent":               {ActionCreate, ActionList, ActionStopAll},
+	"grove":               {ActionCreate, ActionList},
+	"template":            {ActionCreate, ActionList},
+	"group":               {ActionCreate, ActionList},
+	"policy":              {ActionCreate, ActionList},
 	"broker":              {ActionCreate, ActionList},
 	"gcp_service_account": {ActionCreate, ActionList},
 }

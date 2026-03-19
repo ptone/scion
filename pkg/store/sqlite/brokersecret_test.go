@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 func TestBrokerSecretCRUD(t *testing.T) {
@@ -36,7 +36,7 @@ func TestBrokerSecretCRUD(t *testing.T) {
 		ID:      brokerID,
 		Name:    "test-host",
 		Slug:    "test-host",
-				Status:  store.BrokerStatusOnline,
+		Status:  store.BrokerStatusOnline,
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -46,7 +46,7 @@ func TestBrokerSecretCRUD(t *testing.T) {
 
 	// Test CreateBrokerSecret
 	secret := &store.BrokerSecret{
-		BrokerID:    brokerID,
+		BrokerID:  brokerID,
 		SecretKey: []byte("test-secret-key-32-bytes-long!!"),
 		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
 		Status:    store.BrokerSecretStatusActive,
@@ -131,7 +131,7 @@ func TestBrokerSecretForeignKey(t *testing.T) {
 
 	// Try to create secret for non-existent broker
 	secret := &store.BrokerSecret{
-		BrokerID:    "non-existent-host",
+		BrokerID:  "non-existent-host",
 		SecretKey: []byte("test-secret"),
 		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
 		Status:    store.BrokerSecretStatusActive,
@@ -156,7 +156,7 @@ func TestBrokerJoinTokenCRUD(t *testing.T) {
 		ID:      brokerID,
 		Name:    "test-host-for-token",
 		Slug:    "test-host-for-token",
-				Status:  store.BrokerStatusOffline,
+		Status:  store.BrokerStatusOffline,
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -166,7 +166,7 @@ func TestBrokerJoinTokenCRUD(t *testing.T) {
 
 	// Test CreateJoinToken
 	token := &store.BrokerJoinToken{
-		BrokerID:    brokerID,
+		BrokerID:  brokerID,
 		TokenHash: "test-token-hash-abc123",
 		ExpiresAt: time.Now().Add(1 * time.Hour),
 		CreatedBy: "admin-user-id",
@@ -238,7 +238,7 @@ func TestCleanExpiredJoinTokens(t *testing.T) {
 			ID:      id,
 			Name:    "test-host-" + string(rune('a'+i)),
 			Slug:    "test-host-" + string(rune('a'+i)),
-						Status:  store.BrokerStatusOffline,
+			Status:  store.BrokerStatusOffline,
 			Created: time.Now(),
 			Updated: time.Now(),
 		}
@@ -249,13 +249,13 @@ func TestCleanExpiredJoinTokens(t *testing.T) {
 
 	// Create an expired token and a valid token
 	expiredToken := &store.BrokerJoinToken{
-		BrokerID:    host1ID,
+		BrokerID:  host1ID,
 		TokenHash: "expired-token-hash",
 		ExpiresAt: time.Now().Add(-1 * time.Hour), // Already expired
 		CreatedBy: "admin",
 	}
 	validToken := &store.BrokerJoinToken{
-		BrokerID:    host2ID,
+		BrokerID:  host2ID,
 		TokenHash: "valid-token-hash",
 		ExpiresAt: time.Now().Add(1 * time.Hour), // Still valid
 		CreatedBy: "admin",
@@ -296,7 +296,7 @@ func TestBrokerSecretCascadeDelete(t *testing.T) {
 		ID:      brokerID,
 		Name:    "cascade-test-host",
 		Slug:    "cascade-test-host",
-				Status:  store.BrokerStatusOnline,
+		Status:  store.BrokerStatusOnline,
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -306,7 +306,7 @@ func TestBrokerSecretCascadeDelete(t *testing.T) {
 
 	// Create a secret for the broker
 	secret := &store.BrokerSecret{
-		BrokerID:    brokerID,
+		BrokerID:  brokerID,
 		SecretKey: []byte("test-secret"),
 		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
 		Status:    store.BrokerSecretStatusActive,

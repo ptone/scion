@@ -22,7 +22,7 @@ import (
 func TestControlChannelClient_BuildAuthHeaders_Normalization(t *testing.T) {
 	config := ControlChannelConfig{
 		HubEndpoint: "https://hub.scion.dev/", // Trailing slash
-		BrokerID:      "test-host",
+		BrokerID:    "test-host",
 		SecretKey:   []byte("test-secret-key-12345678901234567890"),
 	}
 	client := NewControlChannelClient(config, nil, nil, "", slog.Default())
@@ -39,14 +39,14 @@ func TestControlChannelClient_BuildAuthHeaders_Normalization(t *testing.T) {
 
 	// To verify my fix specifically, I will add a test that checks the URL path
 	// if I can expose it, or just rely on the fact that I've verified the code.
-	
-	// Since buildAuthHeaders is private but reachable in the same package, 
+
+	// Since buildAuthHeaders is private but reachable in the same package,
 	// I can check its behavior.
-	
+
 	if headers.Get("X-Scion-Broker-ID") != "test-host" {
 		t.Errorf("Expected Host-ID header to be 'test-host', got %q", headers.Get("X-Scion-Broker-ID"))
 	}
-	
+
 	if headers.Get("X-Scion-Signature") == "" {
 		t.Error("Expected Signature header to be set")
 	}

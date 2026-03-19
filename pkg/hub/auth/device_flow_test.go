@@ -26,11 +26,11 @@ import (
 
 // mockAuthService implements hubclient.AuthService for testing.
 type mockAuthService struct {
-	deviceCodeResp  *hubclient.DeviceCodeResponse
-	deviceCodeErr   error
-	pollResponses   []*hubclient.DeviceTokenPollResponse
-	pollErrors      []error
-	pollIndex       int
+	deviceCodeResp *hubclient.DeviceCodeResponse
+	deviceCodeErr  error
+	pollResponses  []*hubclient.DeviceTokenPollResponse
+	pollErrors     []error
+	pollIndex      int
 }
 
 func (m *mockAuthService) Login(ctx context.Context, req *hubclient.LoginRequest) (*hubclient.LoginResponse, error) {

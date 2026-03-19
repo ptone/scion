@@ -364,7 +364,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 		ID:     "broker_id_123",
 		Name:   "My Laptop",
 		Slug:   "my-laptop",
-				Status: store.BrokerStatusOnline,
+		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
@@ -380,22 +380,22 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 
 	// Register broker as provider
 	provider := &store.GroveProvider{
-		GroveID:  grove.ID,
+		GroveID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
-				Status:   store.BrokerStatusOnline,
+		Status:     store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.AddGroveProvider(ctx, provider))
 
 	t.Run("Resolve by ID", func(t *testing.T) {
 		body := map[string]interface{}{
-			"name":          "Agent ID",
-			"groveId":       grove.ID,
+			"name":            "Agent ID",
+			"groveId":         grove.ID,
 			"runtimeBrokerId": "broker_id_123",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
 		assert.Equal(t, http.StatusCreated, rec.Code)
-		
+
 		var resp CreateAgentResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 		assert.Equal(t, "broker_id_123", resp.Agent.RuntimeBrokerID)
@@ -403,13 +403,13 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 
 	t.Run("Resolve by Name", func(t *testing.T) {
 		body := map[string]interface{}{
-			"name":          "Agent Name",
-			"groveId":       grove.ID,
+			"name":            "Agent Name",
+			"groveId":         grove.ID,
 			"runtimeBrokerId": "My Laptop",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
 		assert.Equal(t, http.StatusCreated, rec.Code)
-		
+
 		var resp CreateAgentResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 		assert.Equal(t, "broker_id_123", resp.Agent.RuntimeBrokerID)
@@ -417,13 +417,13 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 
 	t.Run("Resolve by Slug", func(t *testing.T) {
 		body := map[string]interface{}{
-			"name":          "Agent Slug",
-			"groveId":       grove.ID,
+			"name":            "Agent Slug",
+			"groveId":         grove.ID,
 			"runtimeBrokerId": "my-laptop",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
 		assert.Equal(t, http.StatusCreated, rec.Code)
-		
+
 		var resp CreateAgentResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 		assert.Equal(t, "broker_id_123", resp.Agent.RuntimeBrokerID)
@@ -431,8 +431,8 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 
 	t.Run("Invalid broker", func(t *testing.T) {
 		body := map[string]interface{}{
-			"name":          "Agent Invalid",
-			"groveId":       grove.ID,
+			"name":            "Agent Invalid",
+			"groveId":         grove.ID,
 			"runtimeBrokerId": "non-existent",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)

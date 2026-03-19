@@ -82,7 +82,7 @@ type Envelope struct {
 // ConnectMessage is sent by Runtime Broker when establishing control channel.
 type ConnectMessage struct {
 	Type      string   `json:"type"` // Always "connect"
-	BrokerID string   `json:"brokerId"`
+	BrokerID  string   `json:"brokerId"`
 	Version   string   `json:"version"`
 	Groves    []string `json:"groves,omitempty"`    // Grove IDs this broker serves
 	Timestamp int64    `json:"timestamp,omitempty"` // Unix timestamp
@@ -91,7 +91,7 @@ type ConnectMessage struct {
 // ConnectedMessage is sent by Hub to confirm successful connection.
 type ConnectedMessage struct {
 	Type           string `json:"type"` // Always "connected"
-	BrokerID string `json:"brokerId"`
+	BrokerID       string `json:"brokerId"`
 	SessionID      string `json:"sessionId"`      // Unique session identifier
 	PingIntervalMs int    `json:"pingIntervalMs"` // Expected ping interval
 }
@@ -209,15 +209,15 @@ type PTYResizeMessage struct {
 
 // Common error codes
 const (
-	ErrCodeInvalidMessage   = "invalid_message"
-	ErrCodeAuthFailed       = "auth_failed"
+	ErrCodeInvalidMessage     = "invalid_message"
+	ErrCodeAuthFailed         = "auth_failed"
 	ErrCodeBrokerNotFound     = "broker_not_found"
-	ErrCodeAgentNotFound    = "agent_not_found"
-	ErrCodeStreamNotFound   = "stream_not_found"
-	ErrCodeStreamFailed     = "stream_failed"
-	ErrCodeTimeout          = "timeout"
+	ErrCodeAgentNotFound      = "agent_not_found"
+	ErrCodeStreamNotFound     = "stream_not_found"
+	ErrCodeStreamFailed       = "stream_failed"
+	ErrCodeTimeout            = "timeout"
 	ErrCodeBrokerDisconnected = "broker_disconnected"
-	ErrCodeInternalError    = "internal_error"
+	ErrCodeInternalError      = "internal_error"
 )
 
 // ParseEnvelope extracts the message type from a raw JSON message.
@@ -233,7 +233,7 @@ func ParseEnvelope(data []byte) (*Envelope, error) {
 func NewConnectMessage(brokerID, version string, groves []string) *ConnectMessage {
 	return &ConnectMessage{
 		Type:      TypeConnect,
-		BrokerID:    brokerID,
+		BrokerID:  brokerID,
 		Version:   version,
 		Groves:    groves,
 		Timestamp: time.Now().Unix(),
@@ -244,7 +244,7 @@ func NewConnectMessage(brokerID, version string, groves []string) *ConnectMessag
 func NewConnectedMessage(brokerID, sessionID string, pingIntervalMs int) *ConnectedMessage {
 	return &ConnectedMessage{
 		Type:           TypeConnected,
-		BrokerID:         brokerID,
+		BrokerID:       brokerID,
 		SessionID:      sessionID,
 		PingIntervalMs: pingIntervalMs,
 	}

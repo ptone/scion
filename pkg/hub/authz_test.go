@@ -181,7 +181,7 @@ func TestAuthz_ScopeOverride(t *testing.T) {
 	// Grove-level allow (more specific scope overrides)
 	grovePolicy := &store.Policy{
 		ID: "policy-grove-allow", Name: "Grove Allow", ScopeType: "grove",
-		ScopeID:  "grove-1",
+		ScopeID:      "grove-1",
 		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow", Priority: 0,
 	}
 	require.NoError(t, s.CreatePolicy(ctx, grovePolicy))

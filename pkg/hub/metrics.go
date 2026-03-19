@@ -179,7 +179,7 @@ func (m *BrokerAuthMetrics) GetSnapshot() *MetricsSnapshot {
 		Rotations:        m.rotations.Load(),
 		DispatchAttempts: m.dispatchAttempts.Load(),
 		DispatchFailures: m.dispatchFailures.Load(),
-		ConnectedBrokers:   m.connectedBrokers.Load(),
+		ConnectedBrokers: m.connectedBrokers.Load(),
 	}
 
 	// Calculate latency percentiles

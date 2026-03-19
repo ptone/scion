@@ -35,8 +35,8 @@ import (
 // mockSMClient implements SMClient for testing.
 type mockSMClient struct {
 	mu       sync.Mutex
-	secrets  map[string]*smpb.Secret            // keyed by full name
-	versions map[string][]byte                   // keyed by full name, latest value
+	secrets  map[string]*smpb.Secret // keyed by full name
+	versions map[string][]byte       // keyed by full name, latest value
 	closed   bool
 }
 

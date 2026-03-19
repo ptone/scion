@@ -38,7 +38,7 @@ type recordingChannel struct {
 	validErr   error
 }
 
-func (r *recordingChannel) Name() string { return r.name }
+func (r *recordingChannel) Name() string    { return r.name }
 func (r *recordingChannel) Validate() error { return r.validErr }
 func (r *recordingChannel) Deliver(_ context.Context, msg *messages.StructuredMessage) error {
 	r.mu.Lock()
@@ -429,8 +429,8 @@ func TestFormatSlackMessage(t *testing.T) {
 			wantContains:    []string{"@channel", "fire!"},
 		},
 		{
-			name: "not urgent, no mention",
-			msg:  messages.NewNotification("agent:dev", "user:alice", "all good", messages.TypeStateChange),
+			name:            "not urgent, no mention",
+			msg:             messages.NewNotification("agent:dev", "user:alice", "all good", messages.TypeStateChange),
 			mentionOnUrgent: "@here",
 			wantNotContains: []string{"@here"},
 		},

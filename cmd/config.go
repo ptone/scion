@@ -392,7 +392,7 @@ func runSettingsMigration() error {
 
 	if isJSONOutput() {
 		type jsonResult struct {
-			Label  string                `json:"label"`
+			Label  string                  `json:"label"`
 			Result *config.MigrationResult `json:"result"`
 		}
 		var jsonResults []jsonResult
@@ -400,7 +400,7 @@ func runSettingsMigration() error {
 			jsonResults = append(jsonResults, jsonResult{Label: labels[i], Result: r})
 		}
 		return outputJSON(map[string]interface{}{
-			"results":          jsonResults,
+			"results":            jsonResults,
 			"nothing_to_migrate": allSkipped && migrationErr == nil,
 		})
 	}

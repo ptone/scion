@@ -108,12 +108,12 @@ type AgentResponse struct {
 	Slug            string            `json:"slug"`                  // URL-safe identifier
 	ContainerID     string            `json:"containerId,omitempty"` // Runtime container ID
 	Name            string            `json:"name"`
-	Template        string            `json:"template,omitempty"`        // Template name used
-	HarnessConfig   string            `json:"harnessConfig,omitempty"`   // Resolved harness-config name
-	HarnessAuth     string            `json:"harnessAuth,omitempty"`     // Resolved harness auth method
-	Image           string            `json:"image,omitempty"`           // Resolved container image
-	RuntimeType     string            `json:"runtime,omitempty"`         // Runtime type (docker, kubernetes, apple)
-	Profile         string            `json:"profile,omitempty"`         // Settings profile used
+	Template        string            `json:"template,omitempty"`      // Template name used
+	HarnessConfig   string            `json:"harnessConfig,omitempty"` // Resolved harness-config name
+	HarnessAuth     string            `json:"harnessAuth,omitempty"`   // Resolved harness auth method
+	Image           string            `json:"image,omitempty"`         // Resolved container image
+	RuntimeType     string            `json:"runtime,omitempty"`       // Runtime type (docker, kubernetes, apple)
+	Profile         string            `json:"profile,omitempty"`       // Settings profile used
 	GroveID         string            `json:"groveId,omitempty"`
 	UserID          string            `json:"userId,omitempty"`
 	Status          string            `json:"status"`
@@ -131,16 +131,16 @@ type AgentResponse struct {
 
 // AgentConfig contains agent configuration details.
 type AgentConfig struct {
-	Template  string                 `json:"template,omitempty"`
-	Image     string                 `json:"image,omitempty"`
-	HomeDir   string                 `json:"homeDir,omitempty"`
-	Workspace string                 `json:"workspace,omitempty"`
-	RepoRoot  string                 `json:"repoRoot,omitempty"`
-	Harness   string                 `json:"harness,omitempty"`
-	Env       []string               `json:"env,omitempty"`
-	Volumes   []api.VolumeMount      `json:"volumes,omitempty"`
-	Resources *api.K8sResources      `json:"resources,omitempty"`
-	K8s       *api.KubernetesConfig  `json:"kubernetes,omitempty"`
+	Template  string                `json:"template,omitempty"`
+	Image     string                `json:"image,omitempty"`
+	HomeDir   string                `json:"homeDir,omitempty"`
+	Workspace string                `json:"workspace,omitempty"`
+	RepoRoot  string                `json:"repoRoot,omitempty"`
+	Harness   string                `json:"harness,omitempty"`
+	Env       []string              `json:"env,omitempty"`
+	Volumes   []api.VolumeMount     `json:"volumes,omitempty"`
+	Resources *api.K8sResources     `json:"resources,omitempty"`
+	K8s       *api.KubernetesConfig `json:"kubernetes,omitempty"`
 }
 
 // AgentRuntime contains runtime information about the agent.
@@ -224,22 +224,22 @@ type CreateAgentRequest struct {
 
 // CreateAgentConfig contains configuration for agent creation.
 type CreateAgentConfig struct {
-	Template    string                `json:"template,omitempty"`
-	Image       string                `json:"image,omitempty"`
-	HomeDir     string                `json:"homeDir,omitempty"`
-	Workspace   string                `json:"workspace,omitempty"`
-	RepoRoot    string                `json:"repoRoot,omitempty"`
-	Env         []string              `json:"env,omitempty"`
-	Volumes     []api.VolumeMount     `json:"volumes,omitempty"`
-	Labels      map[string]string     `json:"labels,omitempty"`
-	Annotations map[string]string     `json:"annotations,omitempty"`
-	HarnessConfig     string                `json:"harnessConfig,omitempty"`
-	HarnessAuth       string                `json:"harnessAuth,omitempty"` // Late-binding override for auth_selected_type
-	Task        string                `json:"task,omitempty"`
-	CommandArgs []string              `json:"commandArgs,omitempty"`
-	Profile     string                `json:"profile,omitempty"` // Settings profile for the runtime broker
-	Branch      string                `json:"branch,omitempty"`  // Git branch name (defaults to agent slug if empty)
-	Kubernetes  *api.KubernetesConfig `json:"kubernetes,omitempty"`
+	Template      string                `json:"template,omitempty"`
+	Image         string                `json:"image,omitempty"`
+	HomeDir       string                `json:"homeDir,omitempty"`
+	Workspace     string                `json:"workspace,omitempty"`
+	RepoRoot      string                `json:"repoRoot,omitempty"`
+	Env           []string              `json:"env,omitempty"`
+	Volumes       []api.VolumeMount     `json:"volumes,omitempty"`
+	Labels        map[string]string     `json:"labels,omitempty"`
+	Annotations   map[string]string     `json:"annotations,omitempty"`
+	HarnessConfig string                `json:"harnessConfig,omitempty"`
+	HarnessAuth   string                `json:"harnessAuth,omitempty"` // Late-binding override for auth_selected_type
+	Task          string                `json:"task,omitempty"`
+	CommandArgs   []string              `json:"commandArgs,omitempty"`
+	Profile       string                `json:"profile,omitempty"` // Settings profile for the runtime broker
+	Branch        string                `json:"branch,omitempty"`  // Git branch name (defaults to agent slug if empty)
+	Kubernetes    *api.KubernetesConfig `json:"kubernetes,omitempty"`
 
 	// TemplateID is the Hub template ID for cache lookup.
 	// When provided, the Runtime Broker can use this to look up or fetch
@@ -264,9 +264,9 @@ type CreateAgentConfig struct {
 
 // GCPIdentityConfig holds GCP identity configuration passed from Hub to Broker.
 type GCPIdentityConfig struct {
-	MetadataMode string `json:"metadata_mode"`           // "block", "passthrough", "assign"
-	SAEmail      string `json:"sa_email,omitempty"`      // Service account email
-	ProjectID    string `json:"project_id,omitempty"`    // GCP project ID
+	MetadataMode string `json:"metadata_mode"`        // "block", "passthrough", "assign"
+	SAEmail      string `json:"sa_email,omitempty"`   // Service account email
+	ProjectID    string `json:"project_id,omitempty"` // GCP project ID
 }
 
 // CreateAgentResponse is the response for creating an agent.
@@ -279,11 +279,11 @@ type CreateAgentResponse struct {
 // and the merged environment is missing required keys. The broker returns
 // HTTP 202 with this payload instead of starting the agent.
 type EnvRequirementsResponse struct {
-	AgentID    string                      `json:"agentId"`
-	Required   []string                    `json:"required"`
-	HubHas     []string                    `json:"hubHas"`
-	BrokerHas  []string                    `json:"brokerHas"` // Deprecated: always empty; kept for API compatibility
-	Needs      []string                    `json:"needs"`
+	AgentID    string                       `json:"agentId"`
+	Required   []string                     `json:"required"`
+	HubHas     []string                     `json:"hubHas"`
+	BrokerHas  []string                     `json:"brokerHas"` // Deprecated: always empty; kept for API compatibility
+	Needs      []string                     `json:"needs"`
 	SecretInfo map[string]api.SecretKeyInfo `json:"secretInfo,omitempty"`
 }
 
@@ -323,11 +323,11 @@ type ExecResponse struct {
 
 // StatsResponse contains resource usage statistics for an agent.
 type StatsResponse struct {
-	CPUUsagePercent    float64 `json:"cpuUsagePercent"`
-	MemoryUsageBytes   int64   `json:"memoryUsageBytes"`
-	MemoryLimitBytes   int64   `json:"memoryLimitBytes,omitempty"`
-	NetworkRxBytes     int64   `json:"networkRxBytes,omitempty"`
-	NetworkTxBytes     int64   `json:"networkTxBytes,omitempty"`
+	CPUUsagePercent  float64 `json:"cpuUsagePercent"`
+	MemoryUsageBytes int64   `json:"memoryUsageBytes"`
+	MemoryLimitBytes int64   `json:"memoryLimitBytes,omitempty"`
+	NetworkRxBytes   int64   `json:"networkRxBytes,omitempty"`
+	NetworkTxBytes   int64   `json:"networkTxBytes,omitempty"`
 }
 
 // ============================================================================

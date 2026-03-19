@@ -28,9 +28,9 @@ import (
 
 // Template resolution flags for agent creation
 var (
-	uploadTemplate  bool   // --upload-template: auto-upload local template
-	noUpload        bool   // --no-upload: fail if template requires upload
-	templateScope   string // --template-scope: scope for uploaded template
+	uploadTemplate bool   // --upload-template: auto-upload local template
+	noUpload       bool   // --no-upload: fail if template requires upload
+	templateScope  string // --template-scope: scope for uploaded template
 )
 
 // TemplateResolutionResult contains the result of template resolution.

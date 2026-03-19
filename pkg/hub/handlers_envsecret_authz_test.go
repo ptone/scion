@@ -25,8 +25,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -337,7 +337,7 @@ func TestEnvVar_GroveScope_AgentReadOwnGrove(t *testing.T) {
 		Slug:         "env-test-agent",
 		Name:         "Env Test Agent",
 		GroveID:      grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      time.Now(),
 		Updated:      time.Now(),

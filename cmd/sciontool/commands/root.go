@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/spf13/cobra"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/spf13/cobra"
 )
 
 var (

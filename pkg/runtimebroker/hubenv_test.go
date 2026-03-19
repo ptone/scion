@@ -72,9 +72,9 @@ func TestResolveHubEndpointForStartPrecedence(t *testing.T) {
 		want                 string
 	}{
 		{
-			name:     "resolved env wins over broker",
-			broker:   "https://broker.example.com",
-			resolved: map[string]string{"SCION_HUB_ENDPOINT": "https://resolved.example.com"},
+			name:      "resolved env wins over broker",
+			broker:    "https://broker.example.com",
+			resolved:  map[string]string{"SCION_HUB_ENDPOINT": "https://resolved.example.com"},
 			grovePath: groveDir,
 			want:      "https://resolved.example.com",
 		},

@@ -138,7 +138,7 @@ func TestEventPublisher_DeleteAgentEmitsEvent(t *testing.T) {
 		Slug:    "agent-evt-del",
 		Name:    "Delete Me",
 		GroveID: grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

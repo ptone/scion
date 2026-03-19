@@ -210,7 +210,7 @@ func TestWorkspaceGetStatus(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(WorkspaceStatusResponse{
-			Slug:    "agent-status",
+			Slug:       "agent-status",
 			GroveID:    "grove-xyz",
 			StorageURI: "gs://bucket/workspaces/grove-xyz/agent-status/",
 			LastSync: &WorkspaceSyncInfo{
@@ -508,7 +508,7 @@ func TestWorkspaceGetStatus_NoLastSync(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(WorkspaceStatusResponse{
-			Slug:    "agent-new",
+			Slug:       "agent-new",
 			GroveID:    "grove-1",
 			StorageURI: "gs://bucket/workspaces/grove-1/agent-new/",
 			LastSync:   nil, // No sync yet

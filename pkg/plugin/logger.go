@@ -110,8 +110,8 @@ func (h *hclogAdapter) ResetNamed(name string) hclog.Logger {
 	}
 }
 
-func (h *hclogAdapter) SetLevel(hclog.Level)                  {}
-func (h *hclogAdapter) GetLevel() hclog.Level                 { return hclog.Debug }
+func (h *hclogAdapter) SetLevel(hclog.Level)  {}
+func (h *hclogAdapter) GetLevel() hclog.Level { return hclog.Debug }
 func (h *hclogAdapter) StandardLogger(opts *hclog.StandardLoggerOptions) *log.Logger {
 	return log.Default()
 }

@@ -33,13 +33,13 @@ import (
 func TestClient_ListSandboxClaims(t *testing.T) {
 	scheme := k8sruntime.NewScheme()
 	gvr := schema.GroupVersionResource{Group: "extensions.agents.x-k8s.io", Version: "v1alpha1", Resource: "sandboxclaims"}
-	
-scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
 		Group:   "extensions.agents.x-k8s.io",
 		Version: "v1alpha1",
 		Kind:    "SandboxClaim",
 	}, &v1alpha1.SandboxClaim{})
-scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
 		Group:   "extensions.agents.x-k8s.io",
 		Version: "v1alpha1",
 		Kind:    "SandboxClaimList",
@@ -57,10 +57,10 @@ scheme.AddKnownTypeWithName(schema.GroupVersionKind{
 			Namespace: "default",
 		},
 	}
-	
-unstructuredMap, _ := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(claim)
+
+	unstructuredMap, _ := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(claim)
 	u := &unstructured.Unstructured{Object: unstructuredMap}
-	
+
 	_, err := fc.Resource(gvr).Namespace("default").Create(context.Background(), u, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)

@@ -816,7 +816,6 @@ func syncAllTemplatesToHub(hubCtx *HubContext, scope string) error {
 	return nil
 }
 
-
 // templatesPullCmd downloads a template from the Hub.
 var templatesPullCmd = &cobra.Command{
 	Use:   "pull <name>",
@@ -1182,11 +1181,11 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 			Command: "templates sync",
 			Message: fmt.Sprintf("Template '%s' synced successfully.", name),
 			Details: map[string]interface{}{
-				"id":          template.ID,
-				"name":        name,
-				"status":      template.Status,
-				"contentHash": template.ContentHash,
-				"scope":       scope,
+				"id":            template.ID,
+				"name":          name,
+				"status":        template.Status,
+				"contentHash":   template.ContentHash,
+				"scope":         scope,
 				"filesUploaded": len(filesToUpload),
 			},
 		})

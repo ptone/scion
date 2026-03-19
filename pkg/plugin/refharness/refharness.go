@@ -100,8 +100,8 @@ func (h *RefHarness) GetCommand(task string, resume bool, baseArgs []string) []s
 
 func (h *RefHarness) DefaultConfigDir() string { return ".refharness" }
 func (h *RefHarness) SkillsDir() string        { return ".refharness/skills" }
-func (h *RefHarness) GetEmbedDir() string       { return "refharness" }
-func (h *RefHarness) GetInterruptKey() string    { return "C-c" }
+func (h *RefHarness) GetEmbedDir() string      { return "refharness" }
+func (h *RefHarness) GetInterruptKey() string  { return "C-c" }
 
 func (h *RefHarness) GetTelemetryEnv() map[string]string {
 	return map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4317"}

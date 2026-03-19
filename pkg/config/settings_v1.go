@@ -22,13 +22,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	yamlv3 "gopkg.in/yaml.v3"
 )
 
@@ -223,25 +223,25 @@ func PrintDeprecationWarnings(warnings []string) {
 
 // VersionedSettings is the root configuration struct for versioned settings (v1+).
 type VersionedSettings struct {
-	SchemaVersion        string                          `json:"schema_version" yaml:"schema_version" koanf:"schema_version"`
-	ActiveProfile        string                          `json:"active_profile,omitempty" yaml:"active_profile,omitempty" koanf:"active_profile"`
-	DefaultTemplate      string                          `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
-	DefaultHarnessConfig string                          `json:"default_harness_config,omitempty" yaml:"default_harness_config,omitempty" koanf:"default_harness_config"`
-	Server               *V1ServerConfig                 `json:"server,omitempty" yaml:"server,omitempty" koanf:"server"`
-	Hub             *V1HubClientConfig              `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
-	CLI             *V1CLIConfig                    `json:"cli,omitempty" yaml:"cli,omitempty" koanf:"cli"`
-	Telemetry       *V1TelemetryConfig              `json:"telemetry,omitempty" yaml:"telemetry,omitempty" koanf:"telemetry"`
-	Runtimes        map[string]V1RuntimeConfig      `json:"runtimes,omitempty" yaml:"runtimes,omitempty" koanf:"runtimes"`
-	ImageRegistry   string                          `json:"image_registry,omitempty" yaml:"image_registry,omitempty" koanf:"image_registry"`
-	WorkspacePath   string                          `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`
-	HarnessConfigs  map[string]HarnessConfigEntry   `json:"harness_configs,omitempty" yaml:"harness_configs,omitempty" koanf:"harness_configs"`
-	Profiles        map[string]V1ProfileConfig      `json:"profiles,omitempty" yaml:"profiles,omitempty" koanf:"profiles"`
-	SharedDirs      []api.SharedDir                 `json:"shared_dirs,omitempty" yaml:"shared_dirs,omitempty" koanf:"shared_dirs"`
+	SchemaVersion        string                        `json:"schema_version" yaml:"schema_version" koanf:"schema_version"`
+	ActiveProfile        string                        `json:"active_profile,omitempty" yaml:"active_profile,omitempty" koanf:"active_profile"`
+	DefaultTemplate      string                        `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
+	DefaultHarnessConfig string                        `json:"default_harness_config,omitempty" yaml:"default_harness_config,omitempty" koanf:"default_harness_config"`
+	Server               *V1ServerConfig               `json:"server,omitempty" yaml:"server,omitempty" koanf:"server"`
+	Hub                  *V1HubClientConfig            `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
+	CLI                  *V1CLIConfig                  `json:"cli,omitempty" yaml:"cli,omitempty" koanf:"cli"`
+	Telemetry            *V1TelemetryConfig            `json:"telemetry,omitempty" yaml:"telemetry,omitempty" koanf:"telemetry"`
+	Runtimes             map[string]V1RuntimeConfig    `json:"runtimes,omitempty" yaml:"runtimes,omitempty" koanf:"runtimes"`
+	ImageRegistry        string                        `json:"image_registry,omitempty" yaml:"image_registry,omitempty" koanf:"image_registry"`
+	WorkspacePath        string                        `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`
+	HarnessConfigs       map[string]HarnessConfigEntry `json:"harness_configs,omitempty" yaml:"harness_configs,omitempty" koanf:"harness_configs"`
+	Profiles             map[string]V1ProfileConfig    `json:"profiles,omitempty" yaml:"profiles,omitempty" koanf:"profiles"`
+	SharedDirs           []api.SharedDir               `json:"shared_dirs,omitempty" yaml:"shared_dirs,omitempty" koanf:"shared_dirs"`
 
 	// Default agent limits (applied when no explicit value is set)
-	DefaultMaxTurns      int              `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
-	DefaultMaxModelCalls int              `json:"default_max_model_calls,omitempty" yaml:"default_max_model_calls,omitempty" koanf:"default_max_model_calls"`
-	DefaultMaxDuration   string           `json:"default_max_duration,omitempty" yaml:"default_max_duration,omitempty" koanf:"default_max_duration"`
+	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
+	DefaultMaxModelCalls int               `json:"default_max_model_calls,omitempty" yaml:"default_max_model_calls,omitempty" koanf:"default_max_model_calls"`
+	DefaultMaxDuration   string            `json:"default_max_duration,omitempty" yaml:"default_max_duration,omitempty" koanf:"default_max_duration"`
 	DefaultResources     *api.ResourceSpec `json:"default_resources,omitempty" yaml:"default_resources,omitempty" koanf:"default_resources"`
 }
 
@@ -251,17 +251,17 @@ type VersionedSettings struct {
 type V1ServerConfig struct {
 	// Mode selects the server operating mode: "workstation" (default) or "production".
 	// When set to "production", the server behaves as if --production were passed.
-	Mode      string              `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
-	Env       string              `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
-	Hub       *V1ServerHubConfig  `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
-	Broker    *V1BrokerConfig     `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
-	Database  *V1DatabaseConfig   `json:"database,omitempty" yaml:"database,omitempty" koanf:"database"`
-	Auth      *V1AuthConfig       `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
-	OAuth     *V1OAuthConfig      `json:"oauth,omitempty" yaml:"oauth,omitempty" koanf:"oauth"`
-	Storage   *V1StorageConfig    `json:"storage,omitempty" yaml:"storage,omitempty" koanf:"storage"`
-	Secrets   *V1SecretsConfig    `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
-	LogLevel  string              `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
-	LogFormat string              `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	Mode      string             `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	Env       string             `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
+	Hub       *V1ServerHubConfig `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
+	Broker    *V1BrokerConfig    `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
+	Database  *V1DatabaseConfig  `json:"database,omitempty" yaml:"database,omitempty" koanf:"database"`
+	Auth      *V1AuthConfig      `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
+	OAuth     *V1OAuthConfig     `json:"oauth,omitempty" yaml:"oauth,omitempty" koanf:"oauth"`
+	Storage   *V1StorageConfig   `json:"storage,omitempty" yaml:"storage,omitempty" koanf:"storage"`
+	Secrets   *V1SecretsConfig   `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	LogLevel  string             `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
+	LogFormat string             `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
 
 	// NotificationChannels configures external notification delivery channels.
 	// Secrets (webhook URLs, API tokens) are held in memory only — never persisted to a database.
@@ -325,13 +325,13 @@ type V1PluginEntry struct {
 
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).
 type V1ServerHubConfig struct {
-	Port         int          `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
-	Host         string       `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
-	PublicURL    string       `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
-	ReadTimeout  string       `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
-	WriteTimeout string       `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
+	Port         int           `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
+	Host         string        `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
+	PublicURL    string        `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	ReadTimeout  string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
+	WriteTimeout string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
 	CORS         *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
-	AdminEmails  []string     `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
+	AdminEmails  []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
 
 	// SoftDeleteRetention is how long soft-deleted agents are retained (e.g., "72h").
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
@@ -342,19 +342,19 @@ type V1ServerHubConfig struct {
 // V1BrokerConfig holds Runtime Broker configuration.
 // Includes broker identity fields previously in hub client config.
 type V1BrokerConfig struct {
-	Enabled         bool         `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
-	Port            int          `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
-	Host            string       `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
-	ReadTimeout     string       `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
-	WriteTimeout    string       `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
-	HubEndpoint          string       `json:"hub_endpoint,omitempty" yaml:"hub_endpoint,omitempty" koanf:"hub_endpoint"`
-	ContainerHubEndpoint string       `json:"container_hub_endpoint,omitempty" yaml:"container_hub_endpoint,omitempty" koanf:"container_hub_endpoint"`
-	BrokerID             string       `json:"broker_id,omitempty" yaml:"broker_id,omitempty" koanf:"broker_id"`
-	BrokerName      string       `json:"broker_name,omitempty" yaml:"broker_name,omitempty" koanf:"broker_name"`
-	BrokerNickname  string       `json:"broker_nickname,omitempty" yaml:"broker_nickname,omitempty" koanf:"broker_nickname"`
-	BrokerToken     string       `json:"broker_token,omitempty" yaml:"broker_token,omitempty" koanf:"broker_token"`
-	AutoProvide     *bool        `json:"auto_provide,omitempty" yaml:"auto_provide,omitempty" koanf:"auto_provide"`
-	CORS            *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
+	Enabled              bool          `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	Port                 int           `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
+	Host                 string        `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
+	ReadTimeout          string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
+	WriteTimeout         string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
+	HubEndpoint          string        `json:"hub_endpoint,omitempty" yaml:"hub_endpoint,omitempty" koanf:"hub_endpoint"`
+	ContainerHubEndpoint string        `json:"container_hub_endpoint,omitempty" yaml:"container_hub_endpoint,omitempty" koanf:"container_hub_endpoint"`
+	BrokerID             string        `json:"broker_id,omitempty" yaml:"broker_id,omitempty" koanf:"broker_id"`
+	BrokerName           string        `json:"broker_name,omitempty" yaml:"broker_name,omitempty" koanf:"broker_name"`
+	BrokerNickname       string        `json:"broker_nickname,omitempty" yaml:"broker_nickname,omitempty" koanf:"broker_nickname"`
+	BrokerToken          string        `json:"broker_token,omitempty" yaml:"broker_token,omitempty" koanf:"broker_token"`
+	AutoProvide          *bool         `json:"auto_provide,omitempty" yaml:"auto_provide,omitempty" koanf:"auto_provide"`
+	CORS                 *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
 }
 
 // V1DatabaseConfig holds database settings.
@@ -433,23 +433,23 @@ type V1CLIConfig struct {
 // Configurable at global or grove scope in settings.yaml, and overridable per-template/agent
 // in scion-agent.yaml. See design doc section 10.2 for the full reference.
 type V1TelemetryConfig struct {
-	Enabled  *bool                     `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
-	Cloud    *V1TelemetryCloudConfig   `json:"cloud,omitempty" yaml:"cloud,omitempty" koanf:"cloud"`
-	Hub      *V1TelemetryHubConfig     `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
-	Local    *V1TelemetryLocalConfig   `json:"local,omitempty" yaml:"local,omitempty" koanf:"local"`
-	Filter   *V1TelemetryFilterConfig  `json:"filter,omitempty" yaml:"filter,omitempty" koanf:"filter"`
-	Resource map[string]string         `json:"resource,omitempty" yaml:"resource,omitempty" koanf:"resource"`
+	Enabled  *bool                    `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	Cloud    *V1TelemetryCloudConfig  `json:"cloud,omitempty" yaml:"cloud,omitempty" koanf:"cloud"`
+	Hub      *V1TelemetryHubConfig    `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
+	Local    *V1TelemetryLocalConfig  `json:"local,omitempty" yaml:"local,omitempty" koanf:"local"`
+	Filter   *V1TelemetryFilterConfig `json:"filter,omitempty" yaml:"filter,omitempty" koanf:"filter"`
+	Resource map[string]string        `json:"resource,omitempty" yaml:"resource,omitempty" koanf:"resource"`
 }
 
 // V1TelemetryCloudConfig holds cloud OTLP forwarding settings.
 type V1TelemetryCloudConfig struct {
-	Enabled  *bool                  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
-	Endpoint string                 `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
-	Protocol string                 `json:"protocol,omitempty" yaml:"protocol,omitempty" koanf:"protocol"`
-	Headers  map[string]string      `json:"headers,omitempty" yaml:"headers,omitempty" koanf:"headers"`
-	TLS      *V1TelemetryTLSConfig  `json:"tls,omitempty" yaml:"tls,omitempty" koanf:"tls"`
+	Enabled  *bool                   `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	Endpoint string                  `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
+	Protocol string                  `json:"protocol,omitempty" yaml:"protocol,omitempty" koanf:"protocol"`
+	Headers  map[string]string       `json:"headers,omitempty" yaml:"headers,omitempty" koanf:"headers"`
+	TLS      *V1TelemetryTLSConfig   `json:"tls,omitempty" yaml:"tls,omitempty" koanf:"tls"`
 	Batch    *V1TelemetryBatchConfig `json:"batch,omitempty" yaml:"batch,omitempty" koanf:"batch"`
-	Provider string                 `json:"provider,omitempty" yaml:"provider,omitempty" koanf:"provider"`
+	Provider string                  `json:"provider,omitempty" yaml:"provider,omitempty" koanf:"provider"`
 }
 
 // V1TelemetryTLSConfig holds TLS settings for cloud OTLP export.
@@ -479,11 +479,11 @@ type V1TelemetryLocalConfig struct {
 
 // V1TelemetryFilterConfig holds event filtering and sampling settings.
 type V1TelemetryFilterConfig struct {
-	Enabled          *bool                          `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
-	RespectDebugMode *bool                          `json:"respect_debug_mode,omitempty" yaml:"respect_debug_mode,omitempty" koanf:"respect_debug_mode"`
-	Events           *V1TelemetryEventsConfig       `json:"events,omitempty" yaml:"events,omitempty" koanf:"events"`
-	Attributes       *V1TelemetryAttributesConfig   `json:"attributes,omitempty" yaml:"attributes,omitempty" koanf:"attributes"`
-	Sampling         *V1TelemetrySamplingConfig      `json:"sampling,omitempty" yaml:"sampling,omitempty" koanf:"sampling"`
+	Enabled          *bool                        `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	RespectDebugMode *bool                        `json:"respect_debug_mode,omitempty" yaml:"respect_debug_mode,omitempty" koanf:"respect_debug_mode"`
+	Events           *V1TelemetryEventsConfig     `json:"events,omitempty" yaml:"events,omitempty" koanf:"events"`
+	Attributes       *V1TelemetryAttributesConfig `json:"attributes,omitempty" yaml:"attributes,omitempty" koanf:"attributes"`
+	Sampling         *V1TelemetrySamplingConfig   `json:"sampling,omitempty" yaml:"sampling,omitempty" koanf:"sampling"`
 }
 
 // V1TelemetryEventsConfig holds event include/exclude lists.
@@ -519,15 +519,15 @@ type V1RuntimeConfig struct {
 // HarnessConfigEntry defines a harness configuration entry in versioned settings.
 // The Harness field is required and specifies the harness type this config applies to.
 type HarnessConfigEntry struct {
-	Harness          string            `json:"harness" yaml:"harness" koanf:"harness"`
-	Image            string            `json:"image,omitempty" yaml:"image,omitempty" koanf:"image"`
-	User             string            `json:"user,omitempty" yaml:"user,omitempty" koanf:"user"`
-	Model            string            `json:"model,omitempty" yaml:"model,omitempty" koanf:"model"`
-	TaskFlag         string            `json:"task_flag,omitempty" yaml:"task_flag,omitempty" koanf:"task_flag"`
-	Args             []string          `json:"args,omitempty" yaml:"args,omitempty" koanf:"args"`
-	Env              map[string]string `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
-	Volumes          []api.VolumeMount `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
-	AuthSelectedType string            `json:"auth_selected_type,omitempty" yaml:"auth_selected_type,omitempty" koanf:"auth_selected_type"`
+	Harness          string               `json:"harness" yaml:"harness" koanf:"harness"`
+	Image            string               `json:"image,omitempty" yaml:"image,omitempty" koanf:"image"`
+	User             string               `json:"user,omitempty" yaml:"user,omitempty" koanf:"user"`
+	Model            string               `json:"model,omitempty" yaml:"model,omitempty" koanf:"model"`
+	TaskFlag         string               `json:"task_flag,omitempty" yaml:"task_flag,omitempty" koanf:"task_flag"`
+	Args             []string             `json:"args,omitempty" yaml:"args,omitempty" koanf:"args"`
+	Env              map[string]string    `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
+	Volumes          []api.VolumeMount    `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
+	AuthSelectedType string               `json:"auth_selected_type,omitempty" yaml:"auth_selected_type,omitempty" koanf:"auth_selected_type"`
 	Secrets          []api.RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
 }
 
@@ -1113,15 +1113,15 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Broker config
 	v1.Broker = &V1BrokerConfig{
-		Enabled:      gc.RuntimeBroker.Enabled,
-		Port:         gc.RuntimeBroker.Port,
-		Host:         gc.RuntimeBroker.Host,
-		ReadTimeout:  gc.RuntimeBroker.ReadTimeout.String(),
-		WriteTimeout: gc.RuntimeBroker.WriteTimeout.String(),
+		Enabled:              gc.RuntimeBroker.Enabled,
+		Port:                 gc.RuntimeBroker.Port,
+		Host:                 gc.RuntimeBroker.Host,
+		ReadTimeout:          gc.RuntimeBroker.ReadTimeout.String(),
+		WriteTimeout:         gc.RuntimeBroker.WriteTimeout.String(),
 		HubEndpoint:          gc.RuntimeBroker.HubEndpoint,
 		ContainerHubEndpoint: gc.RuntimeBroker.ContainerHubEndpoint,
 		BrokerID:             gc.RuntimeBroker.BrokerID,
-		BrokerName:   gc.RuntimeBroker.BrokerName,
+		BrokerName:           gc.RuntimeBroker.BrokerName,
 		CORS: &V1CORSConfig{
 			Enabled:        gc.RuntimeBroker.CORSEnabled,
 			AllowedOrigins: gc.RuntimeBroker.CORSAllowedOrigins,
@@ -1483,16 +1483,16 @@ func LoadEffectiveSettings(grovePath string) (*VersionedSettings, []string, erro
 
 // MigrationResult reports what happened during a migration.
 type MigrationResult struct {
-	Path             string   `json:"path"`              // settings file that was migrated
-	BackupPath       string   `json:"backup_path"`       // path of backup file created
-	Format           string   `json:"format"`            // "legacy" or "versioned" (already up-to-date)
-	Warnings         []string `json:"warnings"`          // deprecation warnings from AdaptLegacySettings
-	StateMigrated    bool     `json:"state_migrated"`    // true if hub.lastSyncedAt was moved to state.yaml
-	ServerMigrated   bool     `json:"server_migrated"`   // true if server.yaml was merged into settings
-	ServerBackupPath string   `json:"server_backup_path"`// path of server.yaml backup created
-	WasJSON          bool     `json:"was_json"`          // true if source was .json format
-	Skipped          bool     `json:"skipped"`           // true if file was already versioned or missing
-	SkipReason       string   `json:"skip_reason"`       // reason for skipping
+	Path             string   `json:"path"`               // settings file that was migrated
+	BackupPath       string   `json:"backup_path"`        // path of backup file created
+	Format           string   `json:"format"`             // "legacy" or "versioned" (already up-to-date)
+	Warnings         []string `json:"warnings"`           // deprecation warnings from AdaptLegacySettings
+	StateMigrated    bool     `json:"state_migrated"`     // true if hub.lastSyncedAt was moved to state.yaml
+	ServerMigrated   bool     `json:"server_migrated"`    // true if server.yaml was merged into settings
+	ServerBackupPath string   `json:"server_backup_path"` // path of server.yaml backup created
+	WasJSON          bool     `json:"was_json"`           // true if source was .json format
+	Skipped          bool     `json:"skipped"`            // true if file was already versioned or missing
+	SkipReason       string   `json:"skip_reason"`        // reason for skipping
 }
 
 // loadSingleFileVersioned loads a single settings file from dir into a VersionedSettings struct.
@@ -1919,4 +1919,3 @@ func getBackupPath(path string) string {
 		}
 	}
 }
-

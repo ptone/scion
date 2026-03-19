@@ -151,7 +151,7 @@ func (m *mockUserStore) UpdateUser(context.Context, *store.User) error { return 
 func (m *mockUserStore) ListUsers(context.Context, store.UserFilter, store.ListOptions) (*store.ListResult[store.User], error) {
 	return nil, nil
 }
-func (m *mockUserStore) DeleteUser(context.Context, string) error         { return nil }
+func (m *mockUserStore) DeleteUser(context.Context, string) error                    { return nil }
 func (m *mockUserStore) UpdateUserLastSeen(context.Context, string, time.Time) error { return nil }
 
 // mockGroveStore implements store.GroveStore for testing (minimal).
@@ -168,7 +168,7 @@ func (m *mockGroveStore) GetGrove(_ context.Context, id string) (*store.Grove, e
 }
 func (m *mockGroveStore) CreateGrove(context.Context, *store.Grove) error { return nil }
 func (m *mockGroveStore) UpdateGrove(context.Context, *store.Grove) error { return nil }
-func (m *mockGroveStore) DeleteGrove(context.Context, string) error      { return nil }
+func (m *mockGroveStore) DeleteGrove(context.Context, string) error       { return nil }
 func (m *mockGroveStore) GetGroveBySlug(context.Context, string) (*store.Grove, error) {
 	return nil, store.ErrNotFound
 }

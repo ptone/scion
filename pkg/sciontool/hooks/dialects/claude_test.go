@@ -156,10 +156,10 @@ func TestClaudeDialect_ParseTokens(t *testing.T) {
 
 	t.Run("cache_read_input_tokens", func(t *testing.T) {
 		event, err := d.Parse(map[string]interface{}{
-			"hook_event_name":          "ModelResponse",
-			"input_tokens":             float64(1000),
-			"output_tokens":            float64(400),
-			"cache_read_input_tokens":  float64(600),
+			"hook_event_name":         "ModelResponse",
+			"input_tokens":            float64(1000),
+			"output_tokens":           float64(400),
+			"cache_read_input_tokens": float64(600),
 		})
 		require.NoError(t, err)
 		assert.Equal(t, int64(1000), event.Data.InputTokens)

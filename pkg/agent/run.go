@@ -636,15 +636,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	runCfg := runtime.RunConfig{
 		Name:               opts.Name,
 		Template:           template,
-		UnixUsername:        unixUsername,
+		UnixUsername:       unixUsername,
 		Image:              resolvedImage,
 		HomeDir:            agentHome,
 		Workspace:          effectiveWorkspace,
 		RepoRoot:           repoRoot,
 		ContainerWorkspace: containerWorkspace,
-		ResolvedAuth:     resolvedAuth,
-		Harness:          h,
-		TelemetryEnabled: telemetryEnabled,
+		ResolvedAuth:       resolvedAuth,
+		Harness:            h,
+		TelemetryEnabled:   telemetryEnabled,
 		Task: func() string {
 			// When task_flag is set, task is delivered via CommandArgs instead
 			if finalScionCfg != nil && finalScionCfg.TaskFlag != "" {
@@ -697,8 +697,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			}
 			return nil
 		}(),
-		GitClone: opts.GitClone,
-		SharedDirs: effectiveSharedDirs,
+		GitClone:             opts.GitClone,
+		SharedDirs:           effectiveSharedDirs,
 		BrokerMode:           opts.BrokerMode,
 		Debug:                util.DebugEnabled(),
 		Resume:               opts.Resume,

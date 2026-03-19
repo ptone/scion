@@ -439,7 +439,7 @@ func TestDeleteGrove_DeleteAgents_DispatchesToBroker(t *testing.T) {
 		Name:            "Agent Online grove-del 2",
 		GroveID:         grove.ID,
 		RuntimeBrokerID: "broker-online-grove-del",
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
@@ -890,9 +890,9 @@ func TestGroveSyncTemplates_CreatesAgent(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	grove := &store.Grove{
-		ID:                    "grove-sync-tmpl",
-		Slug:                  "sync-tmpl-grove",
-		Name:                  "Sync Template Grove",
+		ID:                     "grove-sync-tmpl",
+		Slug:                   "sync-tmpl-grove",
+		Name:                   "Sync Template Grove",
 		DefaultRuntimeBrokerID: broker.ID,
 	}
 	require.NoError(t, s.CreateGrove(ctx, grove))
@@ -1229,4 +1229,3 @@ func TestGroveRegister_ExistingGrove_CreatesMembershipGroup(t *testing.T) {
 	assert.True(t, ownerIDs["original-creator-id"], "original creator should be an owner")
 	assert.True(t, ownerIDs[DevUserID], "linking user should be an owner")
 }
-

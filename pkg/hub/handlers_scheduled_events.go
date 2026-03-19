@@ -27,10 +27,10 @@ import (
 
 // CreateScheduledEventRequest is the API request for creating a scheduled event.
 type CreateScheduledEventRequest struct {
-	EventType string `json:"eventType"`           // Required: "message" or "dispatch_agent"
-	FireAt    string `json:"fireAt,omitempty"`     // ISO 8601 absolute time
-	FireIn    string `json:"fireIn,omitempty"`     // Duration string (e.g. "30m")
-	Payload   string `json:"payload,omitempty"`    // Raw JSON payload (advanced)
+	EventType string `json:"eventType"`         // Required: "message" or "dispatch_agent"
+	FireAt    string `json:"fireAt,omitempty"`  // ISO 8601 absolute time
+	FireIn    string `json:"fireIn,omitempty"`  // Duration string (e.g. "30m")
+	Payload   string `json:"payload,omitempty"` // Raw JSON payload (advanced)
 
 	// Convenience fields for "message" events — used to auto-construct Payload
 	AgentID   string `json:"agentId,omitempty"`

@@ -87,17 +87,17 @@ type Server struct {
 	mu          sync.RWMutex
 	cachedToken *cachedAccessToken
 	// Identity token cache (keyed by audience)
-	idTokenMu    sync.RWMutex
+	idTokenMu      sync.RWMutex
 	cachedIDTokens map[string]*cachedIDToken
 
 	// Singleflight for token fetches
-	fetchMu      sync.Mutex
+	fetchMu       sync.Mutex
 	fetchInFlight bool
-	fetchDone    chan struct{}
+	fetchDone     chan struct{}
 
-	cancel              context.CancelFunc
-	iptablesConfigured  bool        // whether iptables redirect was successfully set up
-	metadataBlocked     blockMethod // which blocking method was applied (block mode only)
+	cancel             context.CancelFunc
+	iptablesConfigured bool        // whether iptables redirect was successfully set up
+	metadataBlocked    blockMethod // which blocking method was applied (block mode only)
 }
 
 type cachedAccessToken struct {
@@ -116,8 +116,8 @@ type cachedIDToken struct {
 // New creates a new metadata server.
 func New(cfg Config) *Server {
 	return &Server{
-		config: cfg,
-		client: &http.Client{Timeout: 30 * time.Second},
+		config:         cfg,
+		client:         &http.Client{Timeout: 30 * time.Second},
 		cachedIDTokens: make(map[string]*cachedIDToken),
 	}
 }
@@ -324,8 +324,8 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"access_token": cached.AccessToken,
-				"expires_in":  int(remaining.Seconds()),
-				"token_type":  cached.TokenType,
+				"expires_in":   int(remaining.Seconds()),
+				"token_type":   cached.TokenType,
 			})
 			return
 		}

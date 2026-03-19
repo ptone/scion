@@ -36,14 +36,14 @@ import (
 // It wires together the HTTP server, event publisher, notification dispatcher,
 // and a recording dispatcher to verify end-to-end notification flows.
 type integrationTestEnv struct {
-	srv        *Server
-	store      store.Store
-	pub        *ChannelEventPublisher
-	recorder   *recordingDispatcher
-	nd         *NotificationDispatcher
-	grove      *store.Grove
-	broker     *store.RuntimeBroker
-	tokenSvc   *AgentTokenService
+	srv      *Server
+	store    store.Store
+	pub      *ChannelEventPublisher
+	recorder *recordingDispatcher
+	nd       *NotificationDispatcher
+	grove    *store.Grove
+	broker   *store.RuntimeBroker
+	tokenSvc *AgentTokenService
 }
 
 // setupIntegrationTest creates a test environment with:
@@ -190,7 +190,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_FullFlow(t *testing.T) {
 		Slug:            "parent-agent",
 		Name:            "Parent Agent",
 		GroveID:         env.grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -246,7 +246,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_WaitingForInput(t *testing.T) {
 		Slug:            "parent-agent-wfi",
 		Name:            "Parent Agent WFI",
 		GroveID:         env.grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -294,7 +294,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_MultipleStatusChanges(t *testin
 		Slug:            "parent-multi",
 		Name:            "Parent Multi",
 		GroveID:         env.grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -352,7 +352,7 @@ func TestIntegration_StatusNormalization_LowercaseEventMatchesUppercaseTrigger(t
 		Slug:            "parent-case",
 		Name:            "Parent Case",
 		GroveID:         env.grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -389,7 +389,7 @@ func TestIntegration_StatusNormalization_DedupAcrossCaseBoundaries(t *testing.T)
 		Slug:            "parent-dedup",
 		Name:            "Parent Dedup",
 		GroveID:         env.grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -430,7 +430,7 @@ func TestIntegration_StatusNormalization_NonTriggerStatusNoNotification(t *testi
 		Slug:            "parent-nontrig",
 		Name:            "Parent NonTrig",
 		GroveID:         env.grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -480,7 +480,7 @@ func TestIntegration_SubscriptionCleanup_HardDeleteCascades(t *testing.T) {
 		Slug:            "parent-hdel",
 		Name:            "Parent Hard Delete",
 		GroveID:         env.grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -532,7 +532,7 @@ func TestIntegration_SubscriptionCleanup_SoftDeleteRetainsSubscriptions(t *testi
 		Slug:            "parent-sdel",
 		Name:            "Parent Soft Delete",
 		GroveID:         env.grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -745,7 +745,7 @@ func TestIntegration_MultipleSubscribers_AgentAndUser(t *testing.T) {
 		Slug:            "parent-multi-sub",
 		Name:            "Parent Multi Sub",
 		GroveID:         env.grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -756,14 +756,14 @@ func TestIntegration_MultipleSubscribers_AgentAndUser(t *testing.T) {
 
 	// User also subscribes to the same child (manually, since the API doesn't support this yet)
 	userSub := &store.NotificationSubscription{
-		ID:              "user-sub-multi",
-		AgentID:         child.ID,
-		SubscriberType:  store.SubscriberTypeUser,
-		SubscriberID:    DevUserID,
-		GroveID:         env.grove.ID,
+		ID:                "user-sub-multi",
+		AgentID:           child.ID,
+		SubscriberType:    store.SubscriberTypeUser,
+		SubscriberID:      DevUserID,
+		GroveID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED"},
-		CreatedAt:       time.Now(),
-		CreatedBy:       DevUserID,
+		CreatedAt:         time.Now(),
+		CreatedBy:         DevUserID,
 	}
 	require.NoError(t, env.store.CreateNotificationSubscription(ctx, userSub))
 
@@ -806,7 +806,7 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 		Slug:            "parent-no-notify",
 		Name:            "Parent No Notify",
 		GroveID:         env.grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
 	}

@@ -225,9 +225,9 @@ func TestMergeScionConfig(t *testing.T) {
 	falseVal := false
 
 	tests := []struct {
-		name     string
-		base     *api.ScionConfig
-		override *api.ScionConfig
+		name      string
+		base      *api.ScionConfig
+		override  *api.ScionConfig
 		wantPhase string
 	}{
 		{
@@ -931,10 +931,10 @@ func TestMergeScionConfig_InlineConfigFields(t *testing.T) {
 
 	t.Run("full inline config merge over template", func(t *testing.T) {
 		template := &api.ScionConfig{
-			Model:          "claude-sonnet-4-6",
-			MaxTurns:       100,
-			HarnessConfig:  "claude-default",
-			User:           "root",
+			Model:         "claude-sonnet-4-6",
+			MaxTurns:      100,
+			HarnessConfig: "claude-default",
+			User:          "root",
 		}
 		inline := &api.ScionConfig{
 			Model:  "claude-opus-4-6",
@@ -964,7 +964,7 @@ func TestMergeScionConfig_InlineConfigFields(t *testing.T) {
 	})
 }
 
-func boolP(b bool) *bool    { return &b }
+func boolP(b bool) *bool          { return &b }
 func float64P(f float64) *float64 { return &f }
 
 func TestMergeScionConfigTelemetry(t *testing.T) {

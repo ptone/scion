@@ -216,9 +216,9 @@ func TestNewShortID(t *testing.T) {
 
 func TestMakeGroveID(t *testing.T) {
 	tests := []struct {
-		name     string
-		id       string
-		groveName string
+		name       string
+		id         string
+		groveName  string
 		wantPrefix string
 		wantSuffix string
 	}{

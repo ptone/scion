@@ -43,10 +43,10 @@ import (
 )
 
 type KubernetesRuntime struct {
-	Client             *k8s.Client
-	DefaultNamespace   string
-	GKEMode            bool
-	ListAllNamespaces  bool // When true, List() queries all namespaces for scion pods
+	Client            *k8s.Client
+	DefaultNamespace  string
+	GKEMode           bool
+	ListAllNamespaces bool // When true, List() queries all namespaces for scion pods
 }
 
 func NewKubernetesRuntime(client *k8s.Client) *KubernetesRuntime {

@@ -44,17 +44,17 @@ type EventPublisher interface {
 // The Server initializes events to this so handlers never need nil checks.
 type noopEventPublisher struct{}
 
-func (noopEventPublisher) PublishAgentStatus(_ context.Context, _ *store.Agent)               {}
-func (noopEventPublisher) PublishAgentCreated(_ context.Context, _ *store.Agent)               {}
-func (noopEventPublisher) PublishAgentDeleted(_ context.Context, _, _ string)                  {}
-func (noopEventPublisher) PublishGroveCreated(_ context.Context, _ *store.Grove)               {}
-func (noopEventPublisher) PublishGroveUpdated(_ context.Context, _ *store.Grove)               {}
-func (noopEventPublisher) PublishGroveDeleted(_ context.Context, _ string)                     {}
-func (noopEventPublisher) PublishBrokerConnected(_ context.Context, _, _ string, _ []string)   {}
-func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string, _ []string)   {}
-func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                  {}
-func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)        {}
-func (noopEventPublisher) Close()                                                             {}
+func (noopEventPublisher) PublishAgentStatus(_ context.Context, _ *store.Agent)              {}
+func (noopEventPublisher) PublishAgentCreated(_ context.Context, _ *store.Agent)             {}
+func (noopEventPublisher) PublishAgentDeleted(_ context.Context, _, _ string)                {}
+func (noopEventPublisher) PublishGroveCreated(_ context.Context, _ *store.Grove)             {}
+func (noopEventPublisher) PublishGroveUpdated(_ context.Context, _ *store.Grove)             {}
+func (noopEventPublisher) PublishGroveDeleted(_ context.Context, _ string)                   {}
+func (noopEventPublisher) PublishBrokerConnected(_ context.Context, _, _ string, _ []string) {}
+func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string, _ []string) {}
+func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                {}
+func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)      {}
+func (noopEventPublisher) Close()                                                            {}
 
 // Event is a published event with a subject and JSON-encoded data.
 type Event struct {

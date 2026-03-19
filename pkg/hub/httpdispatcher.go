@@ -112,15 +112,15 @@ type GitHubAppTokenMinter interface {
 // It looks up the runtime broker endpoint from the store and uses HTTPRuntimeBrokerClient
 // to make the actual API calls.
 type HTTPAgentDispatcher struct {
-	store               store.Store
-	client              RuntimeBrokerClient
-	tokenGenerator      AgentTokenGenerator
-	secretBackend       secret.SecretBackend
-	githubAppMinter     GitHubAppTokenMinter // Optional GitHub App token minter
-	hubEndpoint         string               // Hub endpoint URL for agents to call back
-	devAuthToken        string               // Dev auth token to inject into agent env (dev-auth mode only)
-	debug               bool
-	log                 *slog.Logger
+	store           store.Store
+	client          RuntimeBrokerClient
+	tokenGenerator  AgentTokenGenerator
+	secretBackend   secret.SecretBackend
+	githubAppMinter GitHubAppTokenMinter // Optional GitHub App token minter
+	hubEndpoint     string               // Hub endpoint URL for agents to call back
+	devAuthToken    string               // Dev auth token to inject into agent env (dev-auth mode only)
+	debug           bool
+	log             *slog.Logger
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.

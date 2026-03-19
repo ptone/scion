@@ -932,9 +932,9 @@ func gitCloneWorkspace(uid, gid int) error {
 	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
-			Phase:    state.PhaseCloning,
-			Status:   string(state.PhaseCloning),
-			Message:  "Cloning repository",
+			Phase:   state.PhaseCloning,
+			Status:  string(state.PhaseCloning),
+			Message: "Cloning repository",
 			Metadata: map[string]string{
 				"repository": normalizedURL,
 				"branch":     branch,

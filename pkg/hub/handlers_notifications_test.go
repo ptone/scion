@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -50,7 +50,7 @@ func setupNotificationHandlerTest(t *testing.T) (*Server, store.Store, string) {
 		Slug:    "watched-agent",
 		Name:    "Watched Agent",
 		GroveID: grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -59,15 +59,15 @@ func setupNotificationHandlerTest(t *testing.T) (*Server, store.Store, string) {
 	userID := DevUserID
 
 	sub := &store.NotificationSubscription{
-		ID:              api.NewUUID(),
-		Scope:           store.SubscriptionScopeAgent,
-		AgentID:         agent.ID,
-		SubscriberType:  store.SubscriberTypeUser,
-		SubscriberID:    userID,
-		GroveID:         grove.ID,
+		ID:                api.NewUUID(),
+		Scope:             store.SubscriptionScopeAgent,
+		AgentID:           agent.ID,
+		SubscriberType:    store.SubscriberTypeUser,
+		SubscriberID:      userID,
+		GroveID:           grove.ID,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
-		CreatedAt:       time.Now(),
-		CreatedBy:       "test",
+		CreatedAt:         time.Now(),
+		CreatedBy:         "test",
 	}
 	require.NoError(t, s.CreateNotificationSubscription(ctx, sub))
 
@@ -195,7 +195,7 @@ func TestHandleNotifications_RejectAgentToken(t *testing.T) {
 		Slug:    "auth-agent",
 		Name:    "Auth Agent",
 		GroveID: grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

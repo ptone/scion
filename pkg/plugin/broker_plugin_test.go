@@ -27,11 +27,11 @@ import (
 
 // mockBrokerPlugin implements MessageBrokerPluginInterface for testing.
 type mockBrokerPlugin struct {
-	configured  map[string]string
-	published   []PublishArgs
-	subscribed  []string
+	configured   map[string]string
+	published    []PublishArgs
+	subscribed   []string
 	unsubscribed []string
-	closed      bool
+	closed       bool
 }
 
 func (m *mockBrokerPlugin) Configure(config map[string]string) error {

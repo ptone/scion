@@ -36,12 +36,12 @@ import (
 
 // Config holds the GitHub App configuration.
 type Config struct {
-	AppID          int64  `json:"app_id" yaml:"app_id" koanf:"app_id"`
-	PrivateKeyPath string `json:"private_key_path,omitempty" yaml:"private_key_path,omitempty" koanf:"private_key_path"`
-	PrivateKey     string `json:"private_key,omitempty" yaml:"private_key,omitempty" koanf:"private_key"`
-	WebhookSecret  string `json:"webhook_secret,omitempty" yaml:"webhook_secret,omitempty" koanf:"webhook_secret"`
-	APIBaseURL     string `json:"api_base_url,omitempty" yaml:"api_base_url,omitempty" koanf:"api_base_url"`
-	WebhooksEnabled bool  `json:"webhooks_enabled,omitempty" yaml:"webhooks_enabled,omitempty" koanf:"webhooks_enabled"`
+	AppID           int64  `json:"app_id" yaml:"app_id" koanf:"app_id"`
+	PrivateKeyPath  string `json:"private_key_path,omitempty" yaml:"private_key_path,omitempty" koanf:"private_key_path"`
+	PrivateKey      string `json:"private_key,omitempty" yaml:"private_key,omitempty" koanf:"private_key"`
+	WebhookSecret   string `json:"webhook_secret,omitempty" yaml:"webhook_secret,omitempty" koanf:"webhook_secret"`
+	APIBaseURL      string `json:"api_base_url,omitempty" yaml:"api_base_url,omitempty" koanf:"api_base_url"`
+	WebhooksEnabled bool   `json:"webhooks_enabled,omitempty" yaml:"webhooks_enabled,omitempty" koanf:"webhooks_enabled"`
 }
 
 // IsConfigured returns true if the GitHub App config has the minimum required fields.
@@ -70,8 +70,8 @@ func DefaultTokenPermissions() TokenPermissions {
 
 // InstallationToken represents a minted GitHub App installation access token.
 type InstallationToken struct {
-	Token       string    `json:"token"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	Token       string            `json:"token"`
+	ExpiresAt   time.Time         `json:"expires_at"`
 	Permissions map[string]string `json:"permissions"`
 }
 
@@ -93,13 +93,13 @@ func (e *TokenMintError) Unwrap() error {
 
 // Error codes for token minting failures.
 const (
-	ErrCodeInstallationRevoked  = "installation_revoked"
+	ErrCodeInstallationRevoked   = "installation_revoked"
 	ErrCodeInstallationSuspended = "installation_suspended"
-	ErrCodeRepoNotAccessible    = "repo_not_accessible"
-	ErrCodePermissionDenied     = "permission_denied"
-	ErrCodeTokenMintFailed      = "token_mint_failed"
-	ErrCodePrivateKeyInvalid    = "private_key_invalid"
-	ErrCodeAppNotFound          = "app_not_found"
+	ErrCodeRepoNotAccessible     = "repo_not_accessible"
+	ErrCodePermissionDenied      = "permission_denied"
+	ErrCodeTokenMintFailed       = "token_mint_failed"
+	ErrCodePrivateKeyInvalid     = "private_key_invalid"
+	ErrCodeAppNotFound           = "app_not_found"
 )
 
 // Client handles GitHub App authentication operations.
@@ -393,15 +393,15 @@ func classifyGitHubError(statusCode int, body []byte) *TokenMintError {
 
 // Installation represents a GitHub App installation as returned by the GitHub API.
 type Installation struct {
-	ID      int64  `json:"id"`
+	ID      int64 `json:"id"`
 	Account struct {
 		Login string `json:"login"`
 		Type  string `json:"type"` // "Organization" or "User"
 	} `json:"account"`
-	AppID               int64    `json:"app_id"`
-	TargetType          string   `json:"target_type"`
-	RepositorySelection string   `json:"repository_selection"` // "all" or "selected"
-	SuspendedAt         *string  `json:"suspended_at"`
+	AppID               int64   `json:"app_id"`
+	TargetType          string  `json:"target_type"`
+	RepositorySelection string  `json:"repository_selection"` // "all" or "selected"
+	SuspendedAt         *string `json:"suspended_at"`
 }
 
 // InstallationRepository represents a repository accessible to a GitHub App installation.

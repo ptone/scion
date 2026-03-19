@@ -165,7 +165,7 @@ func TestBuildPod_NodeSelector(t *testing.T) {
 		UnixUsername: "scion",
 		Kubernetes: &api.KubernetesConfig{
 			NodeSelector: map[string]string{
-				"gpu": "true",
+				"gpu":  "true",
 				"zone": "us-central1-a",
 			},
 		},
@@ -621,10 +621,10 @@ func TestBuildPod_FullConfig_Stage2(t *testing.T) {
 	rt, _, _ := newTestK8sRuntime()
 
 	config := RunConfig{
-		Name:         "full-test",
-		Image:        "gcr.io/test/image:v1",
-		UnixUsername: "scion",
-		Harness:      &EnvHarness{},
+		Name:             "full-test",
+		Image:            "gcr.io/test/image:v1",
+		UnixUsername:     "scion",
+		Harness:          &EnvHarness{},
 		TelemetryEnabled: true,
 		Resources: &api.ResourceSpec{
 			Requests: api.ResourceList{CPU: "500m", Memory: "1Gi"},

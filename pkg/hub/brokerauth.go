@@ -31,8 +31,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // BrokerAuthConfig holds broker authentication configuration.
@@ -192,7 +192,7 @@ type BrokerJoinRequest struct {
 type BrokerJoinResponse struct {
 	SecretKey   string `json:"secretKey"` // Base64-encoded 256-bit key
 	HubEndpoint string `json:"hubEndpoint"`
-	BrokerID string `json:"brokerId"`
+	BrokerID    string `json:"brokerId"`
 }
 
 // JoinTokenPrefix is the prefix for join tokens.
@@ -275,7 +275,7 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 
 	// Store the join token
 	joinTokenRecord := &store.BrokerJoinToken{
-		BrokerID:    brokerID,
+		BrokerID:  brokerID,
 		TokenHash: tokenHash,
 		ExpiresAt: expiresAt,
 		CreatedAt: time.Now(),
@@ -343,7 +343,7 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 
 	// Store the broker secret
 	brokerSecret := &store.BrokerSecret{
-		BrokerID:    req.BrokerID,
+		BrokerID:  req.BrokerID,
 		SecretKey: secretKey,
 		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
 		CreatedAt: time.Now(),
@@ -381,7 +381,7 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 	return &BrokerJoinResponse{
 		SecretKey:   base64.StdEncoding.EncodeToString(secretKey),
 		HubEndpoint: hubEndpoint,
-		BrokerID:      req.BrokerID,
+		BrokerID:    req.BrokerID,
 	}, nil
 }
 
@@ -408,7 +408,7 @@ func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID
 
 	// Store the broker secret
 	brokerSecret := &store.BrokerSecret{
-		BrokerID:    brokerID,
+		BrokerID:  brokerID,
 		SecretKey: secretKey,
 		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
 		CreatedAt: time.Now(),
@@ -428,7 +428,7 @@ func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID
 
 // HMAC authentication headers as per runtime-broker-auth.md
 const (
-	HeaderBrokerID        = "X-Scion-Broker-ID"
+	HeaderBrokerID      = "X-Scion-Broker-ID"
 	HeaderTimestamp     = "X-Scion-Timestamp"
 	HeaderNonce         = "X-Scion-Nonce"
 	HeaderSignature     = "X-Scion-Signature"
@@ -605,7 +605,7 @@ type RotateSecretRequest struct {
 
 // RotateSecretResponse is the response for POST /api/v1/brokers/{id}/rotate-secret.
 type RotateSecretResponse struct {
-	SecretKey   string    `json:"secretKey"`   // Base64-encoded new secret
+	SecretKey   string    `json:"secretKey"` // Base64-encoded new secret
 	RotatedAt   time.Time `json:"rotatedAt"`
 	GracePeriod string    `json:"gracePeriod"` // Duration string
 }

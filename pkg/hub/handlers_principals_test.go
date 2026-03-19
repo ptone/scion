@@ -78,7 +78,7 @@ func TestAgentGroups(t *testing.T) {
 		Slug:    "agent-1-slug",
 		Name:    "Agent 1",
 		GroveID: grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -141,7 +141,7 @@ func TestPrincipalResolve_Agent(t *testing.T) {
 		Slug:    "agent-1-slug",
 		Name:    "Agent 1",
 		GroveID: grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -243,7 +243,7 @@ func TestPrincipalResolve_AgentWithCreator(t *testing.T) {
 		Slug:      "agent-deleg-slug",
 		Name:      "Delegated Agent",
 		GroveID:   grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 		CreatedBy: "creator-1",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))

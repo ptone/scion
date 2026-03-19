@@ -858,7 +858,7 @@ func UpdateAgentConfig(agentName string, grovePath string, status string, runtim
 	// If agent-info.json doesn't exist, we can't update it.
 	// This might happen if provisioning failed or hasn't finished.
 	if _, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
-		return nil 
+		return nil
 	}
 
 	data, err := os.ReadFile(agentInfoPath)
@@ -1076,4 +1076,3 @@ func isWorkspaceEmptyDir(path string) bool {
 	}
 	return true
 }
-

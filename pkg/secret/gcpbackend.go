@@ -328,4 +328,3 @@ func buildLabels(input *SetSecretInput, target string) map[string]string {
 	}
 	return labels
 }
-

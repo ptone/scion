@@ -35,8 +35,8 @@ import (
 
 // recordingDispatcher is a mock AgentDispatcher that records DispatchAgentMessage calls.
 type recordingDispatcher struct {
-	mu       sync.Mutex
-	calls    []dispatchCall
+	mu        sync.Mutex
+	calls     []dispatchCall
 	returnErr error
 }
 
@@ -63,14 +63,16 @@ func (d *recordingDispatcher) getCalls() []dispatchCall {
 }
 
 // Implement remaining AgentDispatcher methods as no-ops.
-func (d *recordingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error { return nil }
+func (d *recordingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error {
+	return nil
+}
 func (d *recordingDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
 }
 func (d *recordingDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string) error {
 	return nil
 }
-func (d *recordingDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error  { return nil }
+func (d *recordingDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error { return nil }
 func (d *recordingDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error {
 	return nil
 }
@@ -140,7 +142,7 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		Name:            "Watched Agent",
 		Template:        "claude",
 		GroveID:         grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: "broker-1",
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -152,22 +154,22 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		Name:            "Subscriber Agent",
 		Template:        "claude",
 		GroveID:         grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: "broker-1",
 		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, subscriber))
 
 	sub := &store.NotificationSubscription{
-		ID:              api.NewUUID(),
-		Scope:           store.SubscriptionScopeAgent,
-		AgentID:         watched.ID,
-		SubscriberType:  store.SubscriberTypeAgent,
-		SubscriberID:    subscriber.Slug,
-		GroveID:         grove.ID,
+		ID:                api.NewUUID(),
+		Scope:             store.SubscriptionScopeAgent,
+		AgentID:           watched.ID,
+		SubscriberType:    store.SubscriberTypeAgent,
+		SubscriberID:      subscriber.Slug,
+		GroveID:           grove.ID,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
-		CreatedAt:       time.Now(),
-		CreatedBy:       "test",
+		CreatedAt:         time.Now(),
+		CreatedBy:         "test",
 	}
 	require.NoError(t, s.CreateNotificationSubscription(ctx, sub))
 
@@ -393,14 +395,14 @@ func TestNotificationDispatcher_UserSubscriber(t *testing.T) {
 	// Replace the agent subscription with a user subscription
 	require.NoError(t, env.store.DeleteNotificationSubscription(context.Background(), env.sub.ID))
 	userSub := &store.NotificationSubscription{
-		ID:              api.NewUUID(),
-		AgentID:         env.watched.ID,
-		SubscriberType:  store.SubscriberTypeUser,
-		SubscriberID:    "user-123",
-		GroveID:         env.grove.ID,
+		ID:                api.NewUUID(),
+		AgentID:           env.watched.ID,
+		SubscriberType:    store.SubscriberTypeUser,
+		SubscriberID:      "user-123",
+		GroveID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED"},
-		CreatedAt:       time.Now(),
-		CreatedBy:       "test",
+		CreatedAt:         time.Now(),
+		CreatedBy:         "test",
 	}
 	require.NoError(t, env.store.CreateNotificationSubscription(context.Background(), userSub))
 
@@ -585,14 +587,14 @@ func TestNotificationDispatcher_MultipleSubscribers(t *testing.T) {
 
 	// Add a user subscription in addition to the existing agent subscription
 	userSub := &store.NotificationSubscription{
-		ID:              api.NewUUID(),
-		AgentID:         env.watched.ID,
-		SubscriberType:  store.SubscriberTypeUser,
-		SubscriberID:    "user-456",
-		GroveID:         env.grove.ID,
+		ID:                api.NewUUID(),
+		AgentID:           env.watched.ID,
+		SubscriberType:    store.SubscriberTypeUser,
+		SubscriberID:      "user-456",
+		GroveID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED"},
-		CreatedAt:       time.Now(),
-		CreatedBy:       "test",
+		CreatedAt:         time.Now(),
+		CreatedBy:         "test",
 	}
 	require.NoError(t, env.store.CreateNotificationSubscription(context.Background(), userSub))
 

@@ -129,13 +129,13 @@ type HubConnectionConfig struct {
 }
 
 type Settings struct {
-	GroveID         string                   `json:"grove_id,omitempty" yaml:"grove_id,omitempty" koanf:"grove_id"`
-	ActiveProfile   string                   `json:"active_profile" yaml:"active_profile" koanf:"active_profile"`
-	DefaultTemplate string                   `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
-	WorkspacePath   string                   `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`
-	Bucket          *BucketConfig            `json:"bucket,omitempty" yaml:"bucket,omitempty" koanf:"bucket"`
-	Hub             *HubClientConfig         `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
-	CLI             *CLIConfig               `json:"cli,omitempty" yaml:"cli,omitempty" koanf:"cli"`
+	GroveID         string                         `json:"grove_id,omitempty" yaml:"grove_id,omitempty" koanf:"grove_id"`
+	ActiveProfile   string                         `json:"active_profile" yaml:"active_profile" koanf:"active_profile"`
+	DefaultTemplate string                         `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
+	WorkspacePath   string                         `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`
+	Bucket          *BucketConfig                  `json:"bucket,omitempty" yaml:"bucket,omitempty" koanf:"bucket"`
+	Hub             *HubClientConfig               `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
+	CLI             *CLIConfig                     `json:"cli,omitempty" yaml:"cli,omitempty" koanf:"cli"`
 	HubConnections  map[string]HubConnectionConfig `json:"hub_connections,omitempty" yaml:"hub_connections,omitempty" koanf:"hub_connections"`
 	Runtimes        map[string]RuntimeConfig       `json:"runtimes" yaml:"runtimes" koanf:"runtimes"`
 	Harnesses       map[string]HarnessConfig       `json:"harnesses" yaml:"harnesses" koanf:"harnesses"`

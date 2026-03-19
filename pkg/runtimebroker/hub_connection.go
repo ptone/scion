@@ -42,7 +42,7 @@ const (
 
 // HubConnection encapsulates all per-hub state for a single hub connection.
 type HubConnection struct {
-	Name        string                             // "local", "prod", "hub-scion-dev"
+	Name        string // "local", "prod", "hub-scion-dev"
 	HubEndpoint string
 	BrokerID    string
 	AuthMode    brokercredentials.AuthMode

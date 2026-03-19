@@ -31,8 +31,8 @@ var safeEnvLogKeys = map[string]struct{}{
 	"SCION_CREATOR":           {},
 	"SCION_DEBUG":             {},
 	"SCION_GROVE_ID":          {},
-	"SCION_HUB_ENDPOINT":     {},
-	"SCION_HUB_URL":          {},
+	"SCION_HUB_ENDPOINT":      {},
+	"SCION_HUB_URL":           {},
 	"SCION_TELEMETRY_ENABLED": {},
 }
 

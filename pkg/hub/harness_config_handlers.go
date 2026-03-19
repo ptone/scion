@@ -26,16 +26,16 @@ import (
 
 // CreateHarnessConfigRequest is the request body for creating a harness config.
 type CreateHarnessConfigRequest struct {
-	Name        string                  `json:"name"`
-	Slug        string                  `json:"slug,omitempty"`
-	DisplayName string                  `json:"displayName,omitempty"`
-	Description string                  `json:"description,omitempty"`
-	Harness     string                  `json:"harness"`
-	Scope       string                  `json:"scope"`
-	ScopeID     string                  `json:"scopeId,omitempty"`
+	Name        string                   `json:"name"`
+	Slug        string                   `json:"slug,omitempty"`
+	DisplayName string                   `json:"displayName,omitempty"`
+	Description string                   `json:"description,omitempty"`
+	Harness     string                   `json:"harness"`
+	Scope       string                   `json:"scope"`
+	ScopeID     string                   `json:"scopeId,omitempty"`
 	Config      *store.HarnessConfigData `json:"config,omitempty"`
-	Visibility  string                  `json:"visibility,omitempty"`
-	Files       []FileUploadRequest     `json:"files,omitempty"`
+	Visibility  string                   `json:"visibility,omitempty"`
+	Files       []FileUploadRequest      `json:"files,omitempty"`
 }
 
 // CreateHarnessConfigResponse is the response for harness config creation.
@@ -47,8 +47,8 @@ type CreateHarnessConfigResponse struct {
 
 // HarnessConfigManifest is the manifest of uploaded harness config files.
 type HarnessConfigManifest struct {
-	Version string              `json:"version"`
-	Harness string              `json:"harness,omitempty"`
+	Version string               `json:"version"`
+	Harness string               `json:"harness,omitempty"`
 	Files   []store.TemplateFile `json:"files"`
 }
 

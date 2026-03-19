@@ -81,15 +81,15 @@ type ListHarnessConfigsResponse struct {
 
 // CreateHarnessConfigRequest is the request for creating a harness config.
 type CreateHarnessConfigRequest struct {
-	Name        string             `json:"name"`
-	Slug        string             `json:"slug,omitempty"`
-	DisplayName string             `json:"displayName,omitempty"`
-	Description string             `json:"description,omitempty"`
-	Harness     string             `json:"harness"`
-	Scope       string             `json:"scope"`
-	ScopeID     string             `json:"scopeId,omitempty"`
-	Config      *HarnessConfigData `json:"config,omitempty"`
-	Visibility  string             `json:"visibility,omitempty"`
+	Name        string              `json:"name"`
+	Slug        string              `json:"slug,omitempty"`
+	DisplayName string              `json:"displayName,omitempty"`
+	Description string              `json:"description,omitempty"`
+	Harness     string              `json:"harness"`
+	Scope       string              `json:"scope"`
+	ScopeID     string              `json:"scopeId,omitempty"`
+	Config      *HarnessConfigData  `json:"config,omitempty"`
+	Visibility  string              `json:"visibility,omitempty"`
 	Files       []FileUploadRequest `json:"files,omitempty"`
 }
 

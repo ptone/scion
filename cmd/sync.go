@@ -21,13 +21,13 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/dustin/go-humanize"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
 )
 
@@ -243,13 +243,13 @@ func syncFromViaHub(hubCtx *HubContext, agentID, agentName, localPath string) er
 
 	if isJSONOutput() {
 		return outputJSON(map[string]interface{}{
-			"status":          "success",
-			"command":         "sync",
-			"direction":       "from",
-			"agent":           agentName,
-			"filesDownloaded": downloadedCount,
+			"status":           "success",
+			"command":          "sync",
+			"direction":        "from",
+			"agent":            agentName,
+			"filesDownloaded":  downloadedCount,
 			"bytesTransferred": downloadedBytes,
-			"filesSkipped":    skipCount,
+			"filesSkipped":     skipCount,
 		})
 	}
 
@@ -356,14 +356,14 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 
 	if isJSONOutput() {
 		return outputJSON(map[string]interface{}{
-			"status":          "success",
-			"command":         "sync",
-			"direction":       "to",
-			"agent":           agentName,
-			"filesUploaded":   uploadedCount,
+			"status":           "success",
+			"command":          "sync",
+			"direction":        "to",
+			"agent":            agentName,
+			"filesUploaded":    uploadedCount,
 			"bytesTransferred": uploadedBytes,
-			"filesSkipped":    len(resp.ExistingFiles),
-			"filesApplied":    finalizeResp.FilesApplied,
+			"filesSkipped":     len(resp.ExistingFiles),
+			"filesApplied":     finalizeResp.FilesApplied,
 		})
 	}
 

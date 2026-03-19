@@ -22,15 +22,15 @@ import (
 
 // Standard attribute keys
 const (
-	AttrComponent  = "component"
-	AttrSubsystem  = "subsystem"
-	AttrTraceID    = "trace_id"
-	AttrGroveID    = "grove_id"
-	AttrAgentID    = "agent_id"
-	AttrBrokerID   = "broker_id"
-	AttrRequestID  = "request_id"
-	AttrUserID     = "user_id"
-	AttrAuthType   = "auth_type"
+	AttrComponent = "component"
+	AttrSubsystem = "subsystem"
+	AttrTraceID   = "trace_id"
+	AttrGroveID   = "grove_id"
+	AttrAgentID   = "agent_id"
+	AttrBrokerID  = "broker_id"
+	AttrRequestID = "request_id"
+	AttrUserID    = "user_id"
+	AttrAuthType  = "auth_type"
 )
 
 // Setup initializes the global logger.

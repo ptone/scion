@@ -84,9 +84,9 @@ type AgentLookup interface {
 type ControlChannelClient struct {
 	config         ControlChannelConfig
 	conn           *wsprotocol.Connection
-	handlers       http.Handler  // Reuse existing HTTP handlers
-	agentLookup    AgentLookup   // For looking up agent container IDs
-	connectionName string        // identifies which HubConnection this belongs to
+	handlers       http.Handler // Reuse existing HTTP handlers
+	agentLookup    AgentLookup  // For looking up agent container IDs
+	connectionName string       // identifies which HubConnection this belongs to
 	log            *slog.Logger
 	streams        map[string]*StreamHandler
 	streamMu       sync.RWMutex
@@ -280,7 +280,7 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 
 	// Apply HMAC auth using the HMACAuth type
 	hmacAuth := &apiclient.HMACAuth{
-		BrokerID:    c.config.BrokerID,
+		BrokerID:  c.config.BrokerID,
 		SecretKey: c.config.SecretKey,
 	}
 	if err := hmacAuth.ApplyAuth(req); err != nil {

@@ -34,38 +34,38 @@ type ServerConfigResponse struct {
 	ScionCommit    string `json:"scion_commit,omitempty"`
 	ScionBuildTime string `json:"scion_build_time,omitempty"`
 
-	SchemaVersion        string                                `json:"schema_version"`
-	ActiveProfile        string                                `json:"active_profile,omitempty"`
-	DefaultTemplate      string                                `json:"default_template,omitempty"`
-	DefaultHarnessConfig string                                `json:"default_harness_config,omitempty"`
-	ImageRegistry        string                                `json:"image_registry,omitempty"`
-	WorkspacePath        string                                `json:"workspace_path,omitempty"`
-	Server               *config.V1ServerConfig                `json:"server,omitempty"`
-	Telemetry            *config.V1TelemetryConfig             `json:"telemetry,omitempty"`
-	Runtimes             map[string]config.V1RuntimeConfig     `json:"runtimes,omitempty"`
-	HarnessConfigs       map[string]config.HarnessConfigEntry  `json:"harness_configs,omitempty"`
-	Profiles             map[string]config.V1ProfileConfig     `json:"profiles,omitempty"`
+	SchemaVersion        string                               `json:"schema_version"`
+	ActiveProfile        string                               `json:"active_profile,omitempty"`
+	DefaultTemplate      string                               `json:"default_template,omitempty"`
+	DefaultHarnessConfig string                               `json:"default_harness_config,omitempty"`
+	ImageRegistry        string                               `json:"image_registry,omitempty"`
+	WorkspacePath        string                               `json:"workspace_path,omitempty"`
+	Server               *config.V1ServerConfig               `json:"server,omitempty"`
+	Telemetry            *config.V1TelemetryConfig            `json:"telemetry,omitempty"`
+	Runtimes             map[string]config.V1RuntimeConfig    `json:"runtimes,omitempty"`
+	HarnessConfigs       map[string]config.HarnessConfigEntry `json:"harness_configs,omitempty"`
+	Profiles             map[string]config.V1ProfileConfig    `json:"profiles,omitempty"`
 
 	// Default agent limits
-	DefaultMaxTurns      int              `json:"default_max_turns,omitempty"`
-	DefaultMaxModelCalls int              `json:"default_max_model_calls,omitempty"`
-	DefaultMaxDuration   string           `json:"default_max_duration,omitempty"`
+	DefaultMaxTurns      int               `json:"default_max_turns,omitempty"`
+	DefaultMaxModelCalls int               `json:"default_max_model_calls,omitempty"`
+	DefaultMaxDuration   string            `json:"default_max_duration,omitempty"`
 	DefaultResources     *api.ResourceSpec `json:"default_resources,omitempty"`
 }
 
 // ServerConfigUpdateRequest is the payload for updating settings.
 type ServerConfigUpdateRequest struct {
-	SchemaVersion        *string                               `json:"schema_version,omitempty"`
-	ActiveProfile        *string                               `json:"active_profile,omitempty"`
-	DefaultTemplate      *string                               `json:"default_template,omitempty"`
-	DefaultHarnessConfig *string                               `json:"default_harness_config,omitempty"`
-	ImageRegistry        *string                               `json:"image_registry,omitempty"`
-	WorkspacePath        *string                               `json:"workspace_path,omitempty"`
-	Server               *config.V1ServerConfig                `json:"server,omitempty"`
-	Telemetry            *config.V1TelemetryConfig             `json:"telemetry,omitempty"`
-	Runtimes             map[string]config.V1RuntimeConfig     `json:"runtimes,omitempty"`
-	HarnessConfigs       map[string]config.HarnessConfigEntry  `json:"harness_configs,omitempty"`
-	Profiles             map[string]config.V1ProfileConfig     `json:"profiles,omitempty"`
+	SchemaVersion        *string                              `json:"schema_version,omitempty"`
+	ActiveProfile        *string                              `json:"active_profile,omitempty"`
+	DefaultTemplate      *string                              `json:"default_template,omitempty"`
+	DefaultHarnessConfig *string                              `json:"default_harness_config,omitempty"`
+	ImageRegistry        *string                              `json:"image_registry,omitempty"`
+	WorkspacePath        *string                              `json:"workspace_path,omitempty"`
+	Server               *config.V1ServerConfig               `json:"server,omitempty"`
+	Telemetry            *config.V1TelemetryConfig            `json:"telemetry,omitempty"`
+	Runtimes             map[string]config.V1RuntimeConfig    `json:"runtimes,omitempty"`
+	HarnessConfigs       map[string]config.HarnessConfigEntry `json:"harness_configs,omitempty"`
+	Profiles             map[string]config.V1ProfileConfig    `json:"profiles,omitempty"`
 
 	// Default agent limits
 	DefaultMaxTurns      *int              `json:"default_max_turns,omitempty"`
@@ -206,8 +206,8 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	reloadResults := s.reloadSettings()
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":  "saved",
-		"reload":  reloadResults,
+		"status": "saved",
+		"reload": reloadResults,
 	})
 }
 

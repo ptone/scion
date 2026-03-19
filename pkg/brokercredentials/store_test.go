@@ -29,7 +29,7 @@ func TestStore_SaveLoad(t *testing.T) {
 	store := NewStore(credPath)
 
 	creds := &BrokerCredentials{
-		BrokerID:       "test-host-id",
+		BrokerID:     "test-host-id",
 		SecretKey:    base64.StdEncoding.EncodeToString([]byte("test-secret-key")),
 		HubEndpoint:  "http://localhost:8080",
 		RegisteredAt: time.Now().Truncate(time.Second),
@@ -64,7 +64,7 @@ func TestStore_FilePermissions(t *testing.T) {
 	store := NewStore(credPath)
 
 	creds := &BrokerCredentials{
-		BrokerID:    "test-host-id",
+		BrokerID:  "test-host-id",
 		SecretKey: base64.StdEncoding.EncodeToString([]byte("secret")),
 	}
 
@@ -97,7 +97,7 @@ func TestStore_Exists(t *testing.T) {
 
 	// Create file
 	creds := &BrokerCredentials{
-		BrokerID:    "test-host-id",
+		BrokerID:  "test-host-id",
 		SecretKey: base64.StdEncoding.EncodeToString([]byte("secret")),
 	}
 	_ = store.Save(creds)
@@ -115,7 +115,7 @@ func TestStore_Delete(t *testing.T) {
 
 	// Create file
 	creds := &BrokerCredentials{
-		BrokerID:    "test-host-id",
+		BrokerID:  "test-host-id",
 		SecretKey: base64.StdEncoding.EncodeToString([]byte("secret")),
 	}
 	_ = store.Save(creds)
@@ -156,7 +156,7 @@ func TestStore_GetSecretKey(t *testing.T) {
 
 	originalKey := []byte("test-secret-key-32bytes!12345678")
 	creds := &BrokerCredentials{
-		BrokerID:    "test-host-id",
+		BrokerID:  "test-host-id",
 		SecretKey: base64.StdEncoding.EncodeToString(originalKey),
 	}
 	_ = store.Save(creds)
@@ -190,7 +190,7 @@ func TestStore_SaveValidation(t *testing.T) {
 		{
 			name: "missing broker ID",
 			creds: &BrokerCredentials{
-				BrokerID:    "",
+				BrokerID:  "",
 				SecretKey: "abc",
 			},
 			expectErr: true,
@@ -198,7 +198,7 @@ func TestStore_SaveValidation(t *testing.T) {
 		{
 			name: "missing secret key",
 			creds: &BrokerCredentials{
-				BrokerID:    "host-id",
+				BrokerID:  "host-id",
 				SecretKey: "",
 			},
 			expectErr: true,
@@ -206,7 +206,7 @@ func TestStore_SaveValidation(t *testing.T) {
 		{
 			name: "valid credentials",
 			creds: &BrokerCredentials{
-				BrokerID:    "host-id",
+				BrokerID:  "host-id",
 				SecretKey: "secret",
 			},
 			expectErr: false,
@@ -330,7 +330,7 @@ func TestStore_JSONFormat(t *testing.T) {
 	store := NewStore(credPath)
 
 	creds := &BrokerCredentials{
-		BrokerID:       "test-host-id",
+		BrokerID:     "test-host-id",
 		SecretKey:    "dGVzdC1zZWNyZXQ=",
 		HubEndpoint:  "http://localhost:8080",
 		RegisteredAt: time.Date(2025, 1, 30, 12, 0, 0, 0, time.UTC),
@@ -369,7 +369,7 @@ func TestStore_ModTime(t *testing.T) {
 
 	// Create the file
 	creds := &BrokerCredentials{
-		BrokerID:    "test-host",
+		BrokerID:  "test-host",
 		SecretKey: "dGVzdC1zZWNyZXQ=",
 	}
 	if err := store.Save(creds); err != nil {
@@ -404,7 +404,7 @@ func TestStore_LoadIfChanged(t *testing.T) {
 
 	// Create initial credentials
 	initialCreds := &BrokerCredentials{
-		BrokerID:    "host-v1",
+		BrokerID:  "host-v1",
 		SecretKey: "c2VjcmV0LXYx",
 	}
 	if err := store.Save(initialCreds); err != nil {
@@ -438,7 +438,7 @@ func TestStore_LoadIfChanged(t *testing.T) {
 	// Update the file
 	time.Sleep(10 * time.Millisecond) // Ensure different mod time
 	updatedCreds := &BrokerCredentials{
-		BrokerID:    "host-v2",
+		BrokerID:  "host-v2",
 		SecretKey: "c2VjcmV0LXYy",
 	}
 	if err := store.Save(updatedCreds); err != nil {

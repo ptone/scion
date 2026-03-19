@@ -45,28 +45,28 @@ func TestValidateSharedDirs(t *testing.T) {
 			wantErr: "missing required field: name",
 		},
 		{
-			name: "invalid name - uppercase",
-			dirs: []SharedDir{{Name: "BuildCache"}},
+			name:    "invalid name - uppercase",
+			dirs:    []SharedDir{{Name: "BuildCache"}},
 			wantErr: "invalid name",
 		},
 		{
-			name: "invalid name - spaces",
-			dirs: []SharedDir{{Name: "build cache"}},
+			name:    "invalid name - spaces",
+			dirs:    []SharedDir{{Name: "build cache"}},
 			wantErr: "invalid name",
 		},
 		{
-			name: "invalid name - starts with hyphen",
-			dirs: []SharedDir{{Name: "-cache"}},
+			name:    "invalid name - starts with hyphen",
+			dirs:    []SharedDir{{Name: "-cache"}},
 			wantErr: "invalid name",
 		},
 		{
-			name: "invalid name - ends with hyphen",
-			dirs: []SharedDir{{Name: "cache-"}},
+			name:    "invalid name - ends with hyphen",
+			dirs:    []SharedDir{{Name: "cache-"}},
 			wantErr: "invalid name",
 		},
 		{
-			name: "invalid name - special characters",
-			dirs: []SharedDir{{Name: "build_cache"}},
+			name:    "invalid name - special characters",
+			dirs:    []SharedDir{{Name: "build_cache"}},
 			wantErr: "invalid name",
 		},
 		{

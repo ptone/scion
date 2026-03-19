@@ -32,9 +32,9 @@ import (
 // ListGroupsResponse is the response for listing groups.
 type ListGroupsResponse struct {
 	Groups       []GroupWithCapabilities `json:"groups"`
-	NextCursor   string                 `json:"nextCursor,omitempty"`
-	TotalCount   int                    `json:"totalCount"`
-	Capabilities *Capabilities          `json:"_capabilities,omitempty"`
+	NextCursor   string                  `json:"nextCursor,omitempty"`
+	TotalCount   int                     `json:"totalCount"`
+	Capabilities *Capabilities           `json:"_capabilities,omitempty"`
 }
 
 // CreateGroupRequest is the request body for creating a group.

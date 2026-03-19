@@ -108,16 +108,16 @@ func TestAgentsList(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"agents": []Agent{
 				{
-					ID:      "uuid-1",
-					Slug: "agent-1",
-					Name:    "Test Agent 1",
-					Status:  "running",
+					ID:     "uuid-1",
+					Slug:   "agent-1",
+					Name:   "Test Agent 1",
+					Status: "running",
 				},
 				{
-					ID:      "uuid-2",
-					Slug: "agent-2",
-					Name:    "Test Agent 2",
-					Status:  "stopped",
+					ID:     "uuid-2",
+					Slug:   "agent-2",
+					Name:   "Test Agent 2",
+					Status: "stopped",
 				},
 			},
 			"totalCount": 2,
@@ -149,7 +149,7 @@ func TestAgentsGet(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(Agent{
 			ID:      "uuid-123",
-			Slug: "test-agent",
+			Slug:    "test-agent",
 			Name:    "Test Agent",
 			Status:  "running",
 			Created: time.Now(),
@@ -192,7 +192,7 @@ func TestAgentsCreate(t *testing.T) {
 		json.NewEncoder(w).Encode(CreateAgentResponse{
 			Agent: &Agent{
 				ID:      "uuid-new",
-				Slug: "new-agent",
+				Slug:    "new-agent",
 				Name:    "new-agent",
 				GroveID: "grove-123",
 				Status:  "provisioning",
@@ -298,7 +298,7 @@ func TestGrovesRegister(t *testing.T) {
 				ID:   "host-uuid",
 				Name: req.Broker.Name,
 			},
-			Created:   true,
+			Created:     true,
 			BrokerToken: "secret-host-token",
 		})
 	}))

@@ -66,18 +66,18 @@ type SecretScopeOptions struct {
 
 // SetSecretRequest is the request for setting a secret.
 type SetSecretRequest struct {
-	Value         string `json:"value"`                       // Required: secret value (write-only)
-	Scope         string `json:"scope,omitempty"`             // Scope type (default: user)
-	ScopeID       string `json:"scopeId,omitempty"`           // Required for grove/runtime_broker scope
-	Description   string `json:"description,omitempty"`       // Optional description
-	InjectionMode string `json:"injectionMode,omitempty"`     // "always" or "as_needed" (default: as_needed)
-	Type          string `json:"type,omitempty"`              // Secret type: environment (default), variable, file
-	Target        string `json:"target,omitempty"`            // Projection target (defaults to key)
+	Value         string `json:"value"`                   // Required: secret value (write-only)
+	Scope         string `json:"scope,omitempty"`         // Scope type (default: user)
+	ScopeID       string `json:"scopeId,omitempty"`       // Required for grove/runtime_broker scope
+	Description   string `json:"description,omitempty"`   // Optional description
+	InjectionMode string `json:"injectionMode,omitempty"` // "always" or "as_needed" (default: as_needed)
+	Type          string `json:"type,omitempty"`          // Secret type: environment (default), variable, file
+	Target        string `json:"target,omitempty"`        // Projection target (defaults to key)
 }
 
 // SetSecretResponse is the response from setting a secret.
 type SetSecretResponse struct {
-	Secret  *Secret `json:"secret"` // Metadata only, no value
+	Secret  *Secret `json:"secret"`  // Metadata only, no value
 	Created bool    `json:"created"` // Whether this was a new secret
 }
 

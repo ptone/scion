@@ -184,16 +184,16 @@ func ValidateVolumes(volumes []VolumeMount) error {
 }
 
 type KubernetesConfig struct {
-	Context            string            `json:"context,omitempty" yaml:"context,omitempty"`
-	Namespace          string            `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	RuntimeClassName   string            `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
-	ServiceAccountName string            `json:"serviceAccountName,omitempty" yaml:"serviceAccountName,omitempty"` // For Workload Identity
-	Resources          *K8sResources     `json:"resources,omitempty" yaml:"resources,omitempty"`
-	NodeSelector       map[string]string `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty"`
-	Tolerations        []K8sToleration   `json:"tolerations,omitempty" yaml:"tolerations,omitempty"`
-	ImagePullPolicy    string            `json:"imagePullPolicy,omitempty" yaml:"imagePullPolicy,omitempty"` // Always, IfNotPresent, Never
-	SharedDirStorageClass string         `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty"` // Storage class for shared dir PVCs (must support RWX)
-	SharedDirSize         string         `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty"`                  // Default size per shared dir PVC (e.g. "10Gi")
+	Context               string            `json:"context,omitempty" yaml:"context,omitempty"`
+	Namespace             string            `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	RuntimeClassName      string            `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
+	ServiceAccountName    string            `json:"serviceAccountName,omitempty" yaml:"serviceAccountName,omitempty"` // For Workload Identity
+	Resources             *K8sResources     `json:"resources,omitempty" yaml:"resources,omitempty"`
+	NodeSelector          map[string]string `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty"`
+	Tolerations           []K8sToleration   `json:"tolerations,omitempty" yaml:"tolerations,omitempty"`
+	ImagePullPolicy       string            `json:"imagePullPolicy,omitempty" yaml:"imagePullPolicy,omitempty"`                   // Always, IfNotPresent, Never
+	SharedDirStorageClass string            `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty"` // Storage class for shared dir PVCs (must support RWX)
+	SharedDirSize         string            `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty"`                   // Default size per shared dir PVC (e.g. "10Gi")
 }
 
 // K8sToleration mirrors corev1.Toleration for use in agent configuration
@@ -234,12 +234,12 @@ type AgentHubConfig struct {
 // TelemetryConfig holds telemetry/observability settings at the agent/template level.
 // These are merged with settings-level telemetry config (last write wins).
 type TelemetryConfig struct {
-	Enabled  *bool                    `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	Cloud    *TelemetryCloudConfig    `json:"cloud,omitempty" yaml:"cloud,omitempty"`
-	Hub      *TelemetryHubConfig      `json:"hub,omitempty" yaml:"hub,omitempty"`
-	Local    *TelemetryLocalConfig    `json:"local,omitempty" yaml:"local,omitempty"`
-	Filter   *TelemetryFilterConfig   `json:"filter,omitempty" yaml:"filter,omitempty"`
-	Resource map[string]string        `json:"resource,omitempty" yaml:"resource,omitempty"`
+	Enabled  *bool                  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Cloud    *TelemetryCloudConfig  `json:"cloud,omitempty" yaml:"cloud,omitempty"`
+	Hub      *TelemetryHubConfig    `json:"hub,omitempty" yaml:"hub,omitempty"`
+	Local    *TelemetryLocalConfig  `json:"local,omitempty" yaml:"local,omitempty"`
+	Filter   *TelemetryFilterConfig `json:"filter,omitempty" yaml:"filter,omitempty"`
+	Resource map[string]string      `json:"resource,omitempty" yaml:"resource,omitempty"`
 }
 
 // TelemetryCloudConfig holds cloud OTLP forwarding settings.
@@ -284,7 +284,7 @@ type TelemetryFilterConfig struct {
 	RespectDebugMode *bool                      `json:"respect_debug_mode,omitempty" yaml:"respect_debug_mode,omitempty"`
 	Events           *TelemetryEventsConfig     `json:"events,omitempty" yaml:"events,omitempty"`
 	Attributes       *TelemetryAttributesConfig `json:"attributes,omitempty" yaml:"attributes,omitempty"`
-	Sampling         *TelemetrySamplingConfig    `json:"sampling,omitempty" yaml:"sampling,omitempty"`
+	Sampling         *TelemetrySamplingConfig   `json:"sampling,omitempty" yaml:"sampling,omitempty"`
 }
 
 // TelemetryEventsConfig holds event include/exclude lists.
@@ -306,31 +306,31 @@ type TelemetrySamplingConfig struct {
 }
 
 type ScionConfig struct {
-	Harness       string            `json:"harness,omitempty" yaml:"harness,omitempty"`
-	HarnessConfig string            `json:"harness_config,omitempty" yaml:"harness_config,omitempty"`
-	ConfigDir     string            `json:"config_dir,omitempty" yaml:"config_dir,omitempty"`
-	Env         map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
-	Volumes     []VolumeMount     `json:"volumes,omitempty" yaml:"volumes,omitempty"`
-	Detached    *bool             `json:"detached" yaml:"detached"`
-	CommandArgs []string          `json:"command_args,omitempty" yaml:"command_args,omitempty"`
-	TaskFlag    string            `json:"task_flag,omitempty" yaml:"task_flag,omitempty"`
-	Model       string            `json:"model,omitempty" yaml:"model,omitempty"`
+	Harness          string            `json:"harness,omitempty" yaml:"harness,omitempty"`
+	HarnessConfig    string            `json:"harness_config,omitempty" yaml:"harness_config,omitempty"`
+	ConfigDir        string            `json:"config_dir,omitempty" yaml:"config_dir,omitempty"`
+	Env              map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+	Volumes          []VolumeMount     `json:"volumes,omitempty" yaml:"volumes,omitempty"`
+	Detached         *bool             `json:"detached" yaml:"detached"`
+	CommandArgs      []string          `json:"command_args,omitempty" yaml:"command_args,omitempty"`
+	TaskFlag         string            `json:"task_flag,omitempty" yaml:"task_flag,omitempty"`
+	Model            string            `json:"model,omitempty" yaml:"model,omitempty"`
 	Kubernetes       *KubernetesConfig `json:"kubernetes,omitempty" yaml:"kubernetes,omitempty"`
 	AuthSelectedType string            `json:"auth_selectedType,omitempty" yaml:"auth_selectedType,omitempty"`
 	Resources        *ResourceSpec     `json:"resources,omitempty" yaml:"resources,omitempty"`
-	Image       string            `json:"image,omitempty" yaml:"image,omitempty"`
-	Services    []ServiceSpec     `json:"services,omitempty" yaml:"services,omitempty"`
-	MaxTurns      int               `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
-	MaxModelCalls int               `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"`
-	MaxDuration   string            `json:"max_duration,omitempty" yaml:"max_duration,omitempty"`
-	Hub         *AgentHubConfig      `json:"hub,omitempty" yaml:"hub,omitempty"`
-	Telemetry   *TelemetryConfig     `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
+	Image            string            `json:"image,omitempty" yaml:"image,omitempty"`
+	Services         []ServiceSpec     `json:"services,omitempty" yaml:"services,omitempty"`
+	MaxTurns         int               `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
+	MaxModelCalls    int               `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"`
+	MaxDuration      string            `json:"max_duration,omitempty" yaml:"max_duration,omitempty"`
+	Hub              *AgentHubConfig   `json:"hub,omitempty" yaml:"hub,omitempty"`
+	Telemetry        *TelemetryConfig  `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
 
-	Secrets     []RequiredSecret     `json:"secrets,omitempty" yaml:"secrets,omitempty"`
+	Secrets []RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 
 	// Agnostic template fields
-	AgentInstructions  string `json:"agent_instructions,omitempty" yaml:"agent_instructions,omitempty"`
-	SystemPrompt       string `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
+	AgentInstructions    string `json:"agent_instructions,omitempty" yaml:"agent_instructions,omitempty"`
+	SystemPrompt         string `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
 	DefaultHarnessConfig string `json:"default_harness_config,omitempty" yaml:"default_harness_config,omitempty"`
 
 	// Container user (absorbed from harness-config)
@@ -358,13 +358,13 @@ func (c *ScionConfig) IsDetached() bool {
 
 type AuthConfig struct {
 	// Google/Gemini auth
-	GeminiAPIKey                  string
-	GoogleAPIKey                  string
-	GoogleAppCredentials          string
-	GoogleAppCredentialsExplicit  bool // true when value came from GOOGLE_APPLICATION_CREDENTIALS env var
-	GoogleCloudProject            string
-	GoogleCloudRegion             string
-	OAuthCreds                    string
+	GeminiAPIKey                 string
+	GoogleAPIKey                 string
+	GoogleAppCredentials         string
+	GoogleAppCredentialsExplicit bool // true when value came from GOOGLE_APPLICATION_CREDENTIALS env var
+	GoogleCloudProject           string
+	GoogleCloudRegion            string
+	OAuthCreds                   string
 
 	// Anthropic auth
 	AnthropicAPIKey string
@@ -399,9 +399,9 @@ type FileMapping struct {
 // It supports both local/solo mode and hosted/distributed mode.
 type AgentInfo struct {
 	// Identity fields
-	ID          string `json:"id,omitempty"`          // Hub UUID (database primary key, globally unique)
-	Slug        string `json:"slug,omitempty"`        // URL-safe slug identifier (unique per grove)
-	ContainerID string `json:"containerId,omitempty"` // Runtime container ID (ephemeral, runtime-assigned)
+	ID            string `json:"id,omitempty"`          // Hub UUID (database primary key, globally unique)
+	Slug          string `json:"slug,omitempty"`        // URL-safe slug identifier (unique per grove)
+	ContainerID   string `json:"containerId,omitempty"` // Runtime container ID (ephemeral, runtime-assigned)
 	Name          string `json:"name"`                  // Human-friendly display name
 	Template      string `json:"template"`
 	HarnessConfig string `json:"harnessConfig,omitempty"` // Resolved harness-config name
@@ -445,10 +445,10 @@ type AgentInfo struct {
 	RuntimeBrokerID   string `json:"runtimeBrokerId,omitempty"`   // ID of the Runtime Broker managing this agent
 	RuntimeBrokerName string `json:"runtimeBrokerName,omitempty"` // Name of the Runtime Broker
 	RuntimeBrokerType string `json:"runtimeBrokerType,omitempty"` // Type: docker, kubernetes, apple
-	RuntimeState    string `json:"runtimeState,omitempty"`    // Low-level runtime state
-	HubEndpoint     string `json:"hubEndpoint,omitempty"`     // Scion Hub URL if connected
-	WebPTYEnabled   bool   `json:"webPtyEnabled,omitempty"`   // Whether web terminal access is available
-	TaskSummary     string `json:"taskSummary,omitempty"`     // Current task description (for dashboard)
+	RuntimeState      string `json:"runtimeState,omitempty"`      // Low-level runtime state
+	HubEndpoint       string `json:"hubEndpoint,omitempty"`       // Scion Hub URL if connected
+	WebPTYEnabled     bool   `json:"webPtyEnabled,omitempty"`     // Whether web terminal access is available
+	TaskSummary       string `json:"taskSummary,omitempty"`       // Current task description (for dashboard)
 
 	// Optimistic locking
 	StateVersion int64 `json:"stateVersion,omitempty"` // Version for concurrent update detection
@@ -474,19 +474,19 @@ type RequiredSecret struct {
 // a human-readable description and the source that declared it.
 type SecretKeyInfo struct {
 	Description string `json:"description,omitempty"`
-	Source      string `json:"source"`                // "harness", "template", "settings"
-	Type        string `json:"type,omitempty"`         // "environment" (default), "variable", "file"
+	Source      string `json:"source"`         // "harness", "template", "settings"
+	Type        string `json:"type,omitempty"` // "environment" (default), "variable", "file"
 }
 
 // ResolvedSecret represents a secret that has been resolved from the Hub
 // and is ready for projection into an agent container.
 type ResolvedSecret struct {
-	Name   string `json:"name"`             // Secret key name
-	Type   string `json:"type"`             // environment, variable, file
-	Target string `json:"target"`           // Projection target (env var name, json key, or file path)
-	Value  string `json:"value"`            // Decrypted secret value
-	Source string `json:"source"`           // Scope that provided this secret (user, grove, runtime_broker)
-	Ref    string `json:"ref,omitempty"`    // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
+	Name   string `json:"name"`          // Secret key name
+	Type   string `json:"type"`          // environment, variable, file
+	Target string `json:"target"`        // Projection target (env var name, json key, or file path)
+	Value  string `json:"value"`         // Decrypted secret value
+	Source string `json:"source"`        // Scope that provided this secret (user, grove, runtime_broker)
+	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
 }
 
 // GitCloneConfig specifies how to clone a git repository into the workspace.
@@ -525,23 +525,23 @@ func IsBrokerModeFromContext(ctx context.Context) bool {
 }
 
 type StartOptions struct {
-	Name            string
-	Task            string
-	Template        string
-	TemplateName    string // Human-friendly template slug (overrides Template for labels when hydration replaces Template with a cache path)
-	Profile         string
-	HarnessConfig   string
-	HarnessAuth     string // Late-binding override for auth_selected_type (api-key, vertex-ai, auth-file)
-	Image           string
-	GrovePath       string
-	Env             map[string]string
-	ResolvedSecrets []ResolvedSecret
-	BrokerMode      bool // When true, auth gathering skips local sources (broker env + filesystem)
-	Detached        *bool
-	Resume          bool
-	NoAuth          bool
-	Branch          string
-	Workspace       string
+	Name              string
+	Task              string
+	Template          string
+	TemplateName      string // Human-friendly template slug (overrides Template for labels when hydration replaces Template with a cache path)
+	Profile           string
+	HarnessConfig     string
+	HarnessAuth       string // Late-binding override for auth_selected_type (api-key, vertex-ai, auth-file)
+	Image             string
+	GrovePath         string
+	Env               map[string]string
+	ResolvedSecrets   []ResolvedSecret
+	BrokerMode        bool // When true, auth gathering skips local sources (broker env + filesystem)
+	Detached          *bool
+	Resume            bool
+	NoAuth            bool
+	Branch            string
+	Workspace         string
 	GitClone          *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
 	TelemetryOverride *bool           // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
 	InlineConfig      *ScionConfig    // Inline config from --config flag, merged over template config

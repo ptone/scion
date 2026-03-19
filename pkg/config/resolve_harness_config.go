@@ -29,11 +29,11 @@ type HarnessConfigResolution struct {
 
 // HarnessConfigInputs collects all the inputs needed to resolve a harness-config name.
 type HarnessConfigInputs struct {
-	CLIFlag     string            // --harness-config flag (highest priority)
+	CLIFlag      string           // --harness-config flag (highest priority)
 	StoredConfig *api.ScionConfig // existing agent's stored config (resume path)
-	TemplateCfg *api.ScionConfig  // merged template config
-	Settings    *VersionedSettings
-	ProfileName string
+	TemplateCfg  *api.ScionConfig // merged template config
+	Settings     *VersionedSettings
+	ProfileName  string
 }
 
 // ResolveHarnessConfigName determines which harness-config to use for an agent.

@@ -24,9 +24,9 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 )
 

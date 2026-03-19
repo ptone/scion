@@ -82,7 +82,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				ResolvedAuth: &api.ResolvedAuth{
 					Method: "api-key",
 					EnvVars: map[string]string{
-						"GEMINI_API_KEY":          "sk-123",
+						"GEMINI_API_KEY":           "sk-123",
 						"GEMINI_DEFAULT_AUTH_TYPE": "gemini-api-key",
 					},
 				},
@@ -94,13 +94,13 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "labels",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
-				Name: "test-agent",
+				Harness: &harness.GeminiCLI{},
+				Name:    "test-agent",
 				Labels: map[string]string{
 					"foo": "bar",
 				},
-				Image:   "scion-agent:latest",
-				Task:    "hello",
+				Image: "scion-agent:latest",
+				Task:  "hello",
 			},
 			wantIn: []string{
 				"--label", "foo=bar",
@@ -136,7 +136,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				ResolvedAuth: &api.ResolvedAuth{
 					Method: "compute-default-credentials",
 					EnvVars: map[string]string{
-						"GEMINI_DEFAULT_AUTH_TYPE":      "compute-default-credentials",
+						"GEMINI_DEFAULT_AUTH_TYPE":       "compute-default-credentials",
 						"GOOGLE_APPLICATION_CREDENTIALS": "/home/scion/.config/gcp/application_default_credentials.json",
 					},
 					Files: []api.FileMapping{
@@ -161,7 +161,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 					EnvVars: map[string]string{
 						"GOOGLE_API_KEY":           "google-123",
 						"GOOGLE_CLOUD_PROJECT":     "my-project",
-						"GEMINI_DEFAULT_AUTH_TYPE":  "gemini-api-key",
+						"GEMINI_DEFAULT_AUTH_TYPE": "gemini-api-key",
 					},
 				},
 				Env:   []string{"GEMINI_MODEL=gemini-1.5-pro"},
@@ -176,12 +176,12 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "resume and env",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
-				Name:  "test-agent",
-				Image: "scion-agent:latest",
-				Env:   []string{"FOO=BAR"},
-				Task:  "hello",
-				Resume: true,
+				Harness: &harness.GeminiCLI{},
+				Name:    "test-agent",
+				Image:   "scion-agent:latest",
+				Env:     []string{"FOO=BAR"},
+				Task:    "hello",
+				Resume:  true,
 			},
 			wantIn: []string{
 				"-e FOO=BAR",
@@ -191,7 +191,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "resume with tmux",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness: &harness.GeminiCLI{},
 				Name:    "test-agent",
 				Image:   "scion-agent:latest",
 				Task:    "hello",
@@ -204,7 +204,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "template label",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:  &harness.GeminiCLI{},
 				Name:     "test-agent",
 				Image:    "scion-agent:latest",
 				Template: "my-template",
@@ -432,109 +432,11 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		},
 	}
 
-		for _, tt := range tests {
+	for _, tt := range tests {
 
-			t.Run(tt.name, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 
-				args, err := buildCommonRunArgs(tt.config)
-
-				if err != nil {
-
-					t.Fatalf("buildCommonRunArgs failed: %v", err)
-
-				}
-
-				argStr := strings.Join(args, " ")
-
-				for _, want := range tt.wantIn {
-
-					if !strings.Contains(argStr, want) {
-
-						t.Errorf("expected arg %q not found in %v", want, args)
-
-					}
-
-				}
-
-				for _, notWant := range tt.wantOut {
-
-					if strings.Contains(argStr, notWant) {
-
-						t.Errorf("unexpected arg %q found in %v", notWant, args)
-
-					}
-
-				}
-
-			})
-
-		}
-
-	}
-
-	
-
-	func TestRunSimpleCommand(t *testing.T) {
-
-		out, err := runSimpleCommand(context.Background(), "echo", "hello")
-
-		if err != nil {
-
-			t.Fatalf("runSimpleCommand failed: %v", err)
-
-		}
-
-		if out != "hello" {
-
-			t.Errorf("expected \"hello\", got %q", out)
-
-		}
-
-	
-
-		_, err = runSimpleCommand(context.Background(), "false")
-
-			if err == nil {
-
-				t.Error("expected error from running 'false', got nil")
-
-			}
-
-		}
-
-		
-
-		func TestVolumeDeduplication(t *testing.T) {
-
-			// Setup
-
-			config := RunConfig{
-
-				Harness:      &harness.GeminiCLI{},
-
-				Name:         "test-agent",
-
-				UnixUsername: "scion",
-
-				Image:        "scion-agent:latest",
-
-				// Simulate duplicate volumes
-
-				Volumes: []api.VolumeMount{
-
-					{Source: "/host/path1", Target: "/container/target", ReadOnly: true},
-
-					{Source: "/host/path2", Target: "/container/target", ReadOnly: false}, // Should override
-
-					{Source: "/host/path3", Target: "/container/other", ReadOnly: false},
-
-				},
-
-			}
-
-		
-
-			args, err := buildCommonRunArgs(config)
+			args, err := buildCommonRunArgs(tt.config)
 
 			if err != nil {
 
@@ -542,41 +444,121 @@ func TestBuildCommonRunArgs(t *testing.T) {
 
 			}
 
-		
-
 			argStr := strings.Join(args, " ")
 
-		
+			for _, want := range tt.wantIn {
 
-			// Check that /container/target appears only once (ideally)
+				if !strings.Contains(argStr, want) {
 
-			count := strings.Count(argStr, ":/container/target")
+					t.Errorf("expected arg %q not found in %v", want, args)
 
-			if count != 1 {
-
-				t.Errorf("expected 1 mount for /container/target, got %d. Args: %v", count, args)
+				}
 
 			}
 
-		
+			for _, notWant := range tt.wantOut {
 
-			// Check that the last one won
+				if strings.Contains(argStr, notWant) {
 
-			if !strings.Contains(argStr, "/host/path2:/container/target") {
+					t.Errorf("unexpected arg %q found in %v", notWant, args)
 
-				t.Errorf("expected /host/path2:/container/target to be present, got: %s", argStr)
-
-			}
-
-		
-
-			if strings.Contains(argStr, "/host/path1:/container/target") {
-
-				t.Errorf("expected /host/path1:/container/target to be ABSENT, got: %s", argStr)
+				}
 
 			}
 
-		}
+		})
+
+	}
+
+}
+
+func TestRunSimpleCommand(t *testing.T) {
+
+	out, err := runSimpleCommand(context.Background(), "echo", "hello")
+
+	if err != nil {
+
+		t.Fatalf("runSimpleCommand failed: %v", err)
+
+	}
+
+	if out != "hello" {
+
+		t.Errorf("expected \"hello\", got %q", out)
+
+	}
+
+	_, err = runSimpleCommand(context.Background(), "false")
+
+	if err == nil {
+
+		t.Error("expected error from running 'false', got nil")
+
+	}
+
+}
+
+func TestVolumeDeduplication(t *testing.T) {
+
+	// Setup
+
+	config := RunConfig{
+
+		Harness: &harness.GeminiCLI{},
+
+		Name: "test-agent",
+
+		UnixUsername: "scion",
+
+		Image: "scion-agent:latest",
+
+		// Simulate duplicate volumes
+
+		Volumes: []api.VolumeMount{
+
+			{Source: "/host/path1", Target: "/container/target", ReadOnly: true},
+
+			{Source: "/host/path2", Target: "/container/target", ReadOnly: false}, // Should override
+
+			{Source: "/host/path3", Target: "/container/other", ReadOnly: false},
+		},
+	}
+
+	args, err := buildCommonRunArgs(config)
+
+	if err != nil {
+
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+
+	}
+
+	argStr := strings.Join(args, " ")
+
+	// Check that /container/target appears only once (ideally)
+
+	count := strings.Count(argStr, ":/container/target")
+
+	if count != 1 {
+
+		t.Errorf("expected 1 mount for /container/target, got %d. Args: %v", count, args)
+
+	}
+
+	// Check that the last one won
+
+	if !strings.Contains(argStr, "/host/path2:/container/target") {
+
+		t.Errorf("expected /host/path2:/container/target to be present, got: %s", argStr)
+
+	}
+
+	if strings.Contains(argStr, "/host/path1:/container/target") {
+
+		t.Errorf("expected /host/path1:/container/target to be ABSENT, got: %s", argStr)
+
+	}
+
+}
 
 func TestDevBinariesMount(t *testing.T) {
 	// When SCION_DEV_BINARIES is set to a valid directory, it should
@@ -922,7 +904,3 @@ func TestResolveContainerWorkspace(t *testing.T) {
 		})
 	}
 }
-
-
-
-	

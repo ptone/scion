@@ -24,7 +24,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -33,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
@@ -58,10 +58,10 @@ var (
 	brokerRestartDebug       bool
 
 	// broker provide/withdraw flags
-	brokerGroveID      string
-	brokerBrokerID     string // --broker flag for remote broker operations
-	brokerMakeDefault  bool   // --make-default flag to set broker as grove default
-	brokerHubFlag      string // --hub flag to target a specific hub connection
+	brokerGroveID     string
+	brokerBrokerID    string // --broker flag for remote broker operations
+	brokerMakeDefault bool   // --make-default flag to set broker as grove default
+	brokerHubFlag     string // --hub flag to target a specific hub connection
 
 	// broker hubs flags
 	brokerHubsJSON bool
@@ -1978,7 +1978,7 @@ func getHubClientForConnection(name string) (hubclient.Client, error) {
 // for CLI use without importing the runtimebroker package.
 type BrokerHubConnectionsResponse struct {
 	Connections []BrokerHubConnectionInfo `json:"connections"`
-	Mode        string                   `json:"mode"`
+	Mode        string                    `json:"mode"`
 }
 
 // BrokerHubConnectionInfo mirrors runtimebroker.HubConnectionInfo for CLI use.

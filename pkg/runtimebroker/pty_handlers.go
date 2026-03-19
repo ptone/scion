@@ -27,9 +27,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
-	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
 const (

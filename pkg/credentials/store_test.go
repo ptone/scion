@@ -283,4 +283,3 @@ func TestGetAccessToken(t *testing.T) {
 		t.Errorf("GetAccessToken returned %q, want %q", got, expectedToken)
 	}
 }
-

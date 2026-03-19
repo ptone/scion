@@ -236,7 +236,7 @@ func TestBrokerAuthMiddleware_MissingHeaders(t *testing.T) {
 		{
 			name: "missing timestamp",
 			headers: map[string]string{
-				apiclient.HeaderBrokerID:    "host-id",
+				apiclient.HeaderBrokerID:  "host-id",
 				apiclient.HeaderNonce:     "nonce",
 				apiclient.HeaderSignature: "sig",
 			},
@@ -244,7 +244,7 @@ func TestBrokerAuthMiddleware_MissingHeaders(t *testing.T) {
 		{
 			name: "missing signature",
 			headers: map[string]string{
-				apiclient.HeaderBrokerID:    "host-id",
+				apiclient.HeaderBrokerID:  "host-id",
 				apiclient.HeaderTimestamp: "123",
 				apiclient.HeaderNonce:     "nonce",
 			},

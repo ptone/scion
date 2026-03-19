@@ -44,13 +44,13 @@ type GCPServiceAccountService interface {
 
 // GCPServiceAccount represents a registered GCP service account.
 type GCPServiceAccount struct {
-	ID            string    `json:"id"`
-	Scope         string    `json:"scope"`
-	ScopeID       string    `json:"scope_id"`
-	Email         string    `json:"email"`
-	ProjectID     string    `json:"project_id"`
-	DisplayName   string    `json:"display_name"`
-	DefaultScopes []string  `json:"default_scopes,omitempty"`
+	ID                 string    `json:"id"`
+	Scope              string    `json:"scope"`
+	ScopeID            string    `json:"scope_id"`
+	Email              string    `json:"email"`
+	ProjectID          string    `json:"project_id"`
+	DisplayName        string    `json:"display_name"`
+	DefaultScopes      []string  `json:"default_scopes,omitempty"`
 	Verified           bool      `json:"verified"`
 	VerifiedAt         time.Time `json:"verified_at,omitempty"`
 	VerificationStatus string    `json:"verificationStatus,omitempty"`

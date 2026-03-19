@@ -218,11 +218,11 @@ type StorageConfig struct {
 func DefaultGlobalConfig() GlobalConfig {
 	return GlobalConfig{
 		Hub: HubServerConfig{
-			Port:         9810,
-			Host:         "0.0.0.0",
-			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 60 * time.Second,
-			CORSEnabled:  true,
+			Port:               9810,
+			Host:               "0.0.0.0",
+			ReadTimeout:        30 * time.Second,
+			WriteTimeout:       60 * time.Second,
+			CORSEnabled:        true,
 			CORSAllowedOrigins: []string{"*"},
 			CORSAllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 			CORSAllowedHeaders: []string{"Authorization", "Content-Type", "X-Scion-Broker-Token", "X-Scion-Agent-Token", "X-API-Key"},
@@ -405,7 +405,6 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 		return nil, err
 	}
 
-
 	// 2. Load global config (~/.scion/server.yaml)
 	if globalDir, err := GetGlobalDir(); err == nil {
 		loadServerConfigFile(k, globalDir)
@@ -500,26 +499,26 @@ func parseCommaSeparatedList(s string) []string {
 func envKeyToConfigKey(envKey string) string {
 	// Known camelCase field mappings
 	camelCaseFields := map[string]string{
-		"clientid":          "clientId",
-		"clientsecret":      "clientSecret",
-		"readtimeout":       "readTimeout",
-		"writetimeout":      "writeTimeout",
-		"brokerid":          "brokerId",
-		"brokername":        "brokerName",
-		"hubendpoint":            "hubEndpoint",
-		"containerhubendpoint":   "containerHubEndpoint",
-		"devmode":           "devMode",
-		"devtoken":          "devToken",
-		"devtokenfile":      "devTokenFile",
-		"loglevel":          "logLevel",
-		"logformat":         "logFormat",
-		"localpath":         "localPath",
-		"authorizeddomains": "authorizedDomains",
-		"adminemails":       "adminEmails",
-		"gcpprojectid":      "gcpProjectId",
-		"gcpcredentials":    "gcpCredentials",
-		"adminmode":          "adminMode",
-		"maintenancemessage": "maintenanceMessage",
+		"clientid":             "clientId",
+		"clientsecret":         "clientSecret",
+		"readtimeout":          "readTimeout",
+		"writetimeout":         "writeTimeout",
+		"brokerid":             "brokerId",
+		"brokername":           "brokerName",
+		"hubendpoint":          "hubEndpoint",
+		"containerhubendpoint": "containerHubEndpoint",
+		"devmode":              "devMode",
+		"devtoken":             "devToken",
+		"devtokenfile":         "devTokenFile",
+		"loglevel":             "logLevel",
+		"logformat":            "logFormat",
+		"localpath":            "localPath",
+		"authorizeddomains":    "authorizedDomains",
+		"adminemails":          "adminEmails",
+		"gcpprojectid":         "gcpProjectId",
+		"gcpcredentials":       "gcpCredentials",
+		"adminmode":            "adminMode",
+		"maintenancemessage":   "maintenanceMessage",
 	}
 
 	// Split by underscore, convert each part

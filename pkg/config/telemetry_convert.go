@@ -214,4 +214,3 @@ func TelemetryConfigToEnv(cfg *api.TelemetryConfig) map[string]string {
 
 	return env
 }
-

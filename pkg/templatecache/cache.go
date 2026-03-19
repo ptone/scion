@@ -444,10 +444,10 @@ func (c *Cache) Stats() CacheStats {
 	defer c.mu.RUnlock()
 
 	return CacheStats{
-		TotalSize:     c.index.TotalSize,
-		MaxSize:       c.index.MaxSize,
-		EntryCount:    len(c.index.Entries),
-		UsagePercent:  float64(c.index.TotalSize) / float64(c.index.MaxSize) * 100,
+		TotalSize:    c.index.TotalSize,
+		MaxSize:      c.index.MaxSize,
+		EntryCount:   len(c.index.Entries),
+		UsagePercent: float64(c.index.TotalSize) / float64(c.index.MaxSize) * 100,
 	}
 }
 

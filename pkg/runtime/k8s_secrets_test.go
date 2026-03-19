@@ -560,4 +560,3 @@ func TestCreateSecretProviderClass_NoRefs(t *testing.T) {
 		t.Errorf("expected empty name when no refs present, got %s", name)
 	}
 }
-

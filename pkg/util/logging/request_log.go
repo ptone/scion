@@ -157,7 +157,6 @@ func SetRequestBrokerID(ctx context.Context, brokerID string) {
 	}
 }
 
-
 // RequestLoggerConfig configures the dedicated request logger.
 type RequestLoggerConfig struct {
 	FilePath    string         // From SCION_SERVER_REQUEST_LOG_PATH

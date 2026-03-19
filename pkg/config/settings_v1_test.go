@@ -47,7 +47,7 @@ func TestVersionedSettings_YAMLRoundTrip(t *testing.T) {
 			InteractiveDisabled: boolPtr(false),
 		},
 		Runtimes: map[string]V1RuntimeConfig{
-			"docker": {Type: "docker", Host: ""},
+			"docker":    {Type: "docker", Host: ""},
 			"container": {Type: "container"},
 		},
 		HarnessConfigs: map[string]HarnessConfigEntry{
@@ -3384,8 +3384,8 @@ func TestImageRegistryYAMLRoundTrip(t *testing.T) {
 func TestUpdateVersionedSetting_ImageRegistry(t *testing.T) {
 	dir := t.TempDir()
 	initial := &VersionedSettings{
-		SchemaVersion: "1",
-		ActiveProfile: "local",
+		SchemaVersion:  "1",
+		ActiveProfile:  "local",
 		Profiles:       map[string]V1ProfileConfig{},
 		HarnessConfigs: map[string]HarnessConfigEntry{},
 		Runtimes:       map[string]V1RuntimeConfig{},

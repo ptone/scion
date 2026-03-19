@@ -30,9 +30,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
+	"github.com/google/uuid"
 )
 
 func setupTestBrokerAuthService(t *testing.T) (*BrokerAuthService, store.Store) {
@@ -88,7 +88,7 @@ func TestBrokerRegistrationAndJoin(t *testing.T) {
 
 	// Complete the join
 	joinReq := BrokerJoinRequest{
-		BrokerID:    resp.BrokerID,
+		BrokerID:  resp.BrokerID,
 		JoinToken: resp.JoinToken,
 		Hostname:  "test-hostname",
 		Version:   "1.0.0",
@@ -132,7 +132,7 @@ func TestJoinWithInvalidToken(t *testing.T) {
 
 	// Try to join with wrong token
 	joinReq := BrokerJoinRequest{
-		BrokerID:    resp.BrokerID,
+		BrokerID:  resp.BrokerID,
 		JoinToken: JoinTokenPrefix + "invalid-token",
 		Hostname:  "test",
 		Version:   "1.0.0",
@@ -172,7 +172,7 @@ func TestJoinWithExpiredToken(t *testing.T) {
 
 	// Try to join
 	joinReq := BrokerJoinRequest{
-		BrokerID:    resp.BrokerID,
+		BrokerID:  resp.BrokerID,
 		JoinToken: resp.JoinToken,
 		Hostname:  "test",
 		Version:   "1.0.0",
@@ -199,7 +199,7 @@ func TestJoinTokenSingleUse(t *testing.T) {
 	}
 
 	joinReq := BrokerJoinRequest{
-		BrokerID:    resp.BrokerID,
+		BrokerID:  resp.BrokerID,
 		JoinToken: resp.JoinToken,
 		Hostname:  "test",
 		Version:   "1.0.0",
@@ -228,7 +228,7 @@ func TestValidateBrokerSignature(t *testing.T) {
 		ID:      brokerID,
 		Name:    "test-host",
 		Slug:    "test-host",
-				Status:  store.BrokerStatusOnline,
+		Status:  store.BrokerStatusOnline,
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -238,7 +238,7 @@ func TestValidateBrokerSignature(t *testing.T) {
 
 	secretKey := []byte("test-secret-key-32-bytes-long!!")
 	secret := &store.BrokerSecret{
-		BrokerID:    brokerID,
+		BrokerID:  brokerID,
 		SecretKey: secretKey,
 		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
 		Status:    store.BrokerSecretStatusActive,
@@ -293,7 +293,7 @@ func TestValidateBrokerSignature_InvalidSignature(t *testing.T) {
 		ID:      brokerID,
 		Name:    "test-host",
 		Slug:    "test-host",
-				Status:  store.BrokerStatusOnline,
+		Status:  store.BrokerStatusOnline,
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -302,7 +302,7 @@ func TestValidateBrokerSignature_InvalidSignature(t *testing.T) {
 	}
 
 	secret := &store.BrokerSecret{
-		BrokerID:    brokerID,
+		BrokerID:  brokerID,
 		SecretKey: []byte("correct-secret-key-32-bytes-ok!"),
 		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
 		Status:    store.BrokerSecretStatusActive,
@@ -349,7 +349,7 @@ func TestValidateBrokerSignature_ClockSkew(t *testing.T) {
 		ID:      brokerID,
 		Name:    "test-host",
 		Slug:    "test-host",
-				Status:  store.BrokerStatusOnline,
+		Status:  store.BrokerStatusOnline,
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -358,7 +358,7 @@ func TestValidateBrokerSignature_ClockSkew(t *testing.T) {
 	}
 
 	secret := &store.BrokerSecret{
-		BrokerID:    brokerID,
+		BrokerID:  brokerID,
 		SecretKey: []byte("test-secret-key-32-bytes-long!!"),
 		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
 		Status:    store.BrokerSecretStatusActive,
@@ -497,7 +497,7 @@ func TestBrokerAuthMiddleware(t *testing.T) {
 		ID:      brokerID,
 		Name:    "middleware-test-host",
 		Slug:    "middleware-test-host",
-				Status:  store.BrokerStatusOnline,
+		Status:  store.BrokerStatusOnline,
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -507,7 +507,7 @@ func TestBrokerAuthMiddleware(t *testing.T) {
 
 	secretKey := []byte("middleware-secret-key-32-bytes!!")
 	secret := &store.BrokerSecret{
-		BrokerID:    brokerID,
+		BrokerID:  brokerID,
 		SecretKey: secretKey,
 		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
 		Status:    store.BrokerSecretStatusActive,
@@ -625,7 +625,7 @@ func TestGenerateAndStoreSecret(t *testing.T) {
 		ID:      brokerID,
 		Name:    "test-host",
 		Slug:    "test-host",
-				Status:  store.BrokerStatusOnline,
+		Status:  store.BrokerStatusOnline,
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -673,7 +673,7 @@ func TestGenerateAndStoreSecret_ReturnsExistingSecret(t *testing.T) {
 		ID:      brokerID,
 		Name:    "test-host",
 		Slug:    "test-host",
-				Status:  store.BrokerStatusOnline,
+		Status:  store.BrokerStatusOnline,
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -724,7 +724,7 @@ func TestGenerateAndStoreSecret_CanBeUsedForHMACAuth(t *testing.T) {
 		ID:      brokerID,
 		Name:    "auth-test-host",
 		Slug:    "auth-test-host",
-				Status:  store.BrokerStatusOnline,
+		Status:  store.BrokerStatusOnline,
 		Created: time.Now(),
 		Updated: time.Now(),
 	}

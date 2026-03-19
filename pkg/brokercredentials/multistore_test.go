@@ -400,7 +400,7 @@ func TestMultiStore_ValidateName(t *testing.T) {
 		{"contains dots", "hub.scion.dev", true},
 		{"contains underscores", "my_hub", true},
 		{"too long", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true}, // 66 chars
-		{"max length", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},  // 63 chars
+		{"max length", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false}, // 63 chars
 	}
 
 	for _, tc := range tests {

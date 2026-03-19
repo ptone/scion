@@ -305,7 +305,7 @@ trust_level = "trusted"
 		Cloud: &api.TelemetryCloudConfig{
 			Endpoint: "collector.example.com:4317",
 			Protocol: "grpc",
-			Headers: map[string]string{"x-api-key": "test123"},
+			Headers:  map[string]string{"x-api-key": "test123"},
 		},
 	}
 	err := c.ApplyTelemetrySettings(agentHome, telemetry, nil)

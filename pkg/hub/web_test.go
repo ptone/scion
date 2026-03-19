@@ -25,8 +25,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gorilla/securecookie"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/gorilla/securecookie"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -279,7 +279,7 @@ func TestSecurityHeaders(t *testing.T) {
 	expectedHeaders := map[string]string{
 		"X-Frame-Options":        "DENY",
 		"X-Content-Type-Options": "nosniff",
-		"X-XSS-Protection":      "1; mode=block",
+		"X-XSS-Protection":       "1; mode=block",
 		"Referrer-Policy":        "strict-origin-when-cross-origin",
 	}
 
@@ -474,11 +474,11 @@ func TestIsHashedAsset(t *testing.T) {
 		{"style-deadbeef.css", true},
 		{"main.js", false},
 		{"main.css", false},
-		{"chunk-ab.js", false},       // hash too short
-		{"chunk-ABCDEF12.js", true},   // uppercase hex
-		{".js", false},               // no name
-		{"no-extension", false},      // no extension
-		{"name-ghijk.js", false},     // non-hex chars
+		{"chunk-ab.js", false},      // hash too short
+		{"chunk-ABCDEF12.js", true}, // uppercase hex
+		{".js", false},              // no name
+		{"no-extension", false},     // no extension
+		{"name-ghijk.js", false},    // non-hex chars
 	}
 
 	for _, tt := range tests {
@@ -1482,8 +1482,8 @@ func TestResolveAPIPath(t *testing.T) {
 		{"/login", ""},
 		{"/settings", ""},
 		{"/admin/users", ""},
-		{"/agents/abc/terminal", ""},  // too many segments
-		{"/groves/abc/settings", ""},  // too many segments
+		{"/agents/abc/terminal", ""}, // too many segments
+		{"/groves/abc/settings", ""}, // too many segments
 	}
 
 	for _, tt := range tests {

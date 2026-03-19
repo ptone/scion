@@ -61,7 +61,7 @@ func TestStoreAndGet(t *testing.T) {
 	templateID := "test-template-1"
 	contentHash := "abc123hash"
 	files := map[string][]byte{
-		"scion-agent.yaml": []byte("harness: claude\n"),
+		"scion-agent.yaml":       []byte("harness: claude\n"),
 		"home/.claude/CLAUDE.md": []byte("# Test Template\n"),
 	}
 

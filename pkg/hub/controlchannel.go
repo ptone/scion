@@ -25,9 +25,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
 // ControlChannelConfig holds configuration for the control channel.
@@ -95,7 +95,7 @@ func (m *ControlChannelManager) SetOnDisconnect(fn func(brokerID string)) {
 
 // BrokerConnection represents an active control channel connection to a Runtime Broker.
 type BrokerConnection struct {
-	brokerID    string
+	brokerID  string
 	sessionID string
 	conn      *wsprotocol.Connection
 	config    ControlChannelConfig
@@ -202,7 +202,7 @@ func (m *ControlChannelManager) HandleUpgrade(w http.ResponseWriter, r *http.Req
 	sessionID := uuid.New().String()
 
 	brokerConn := &BrokerConnection{
-		brokerID:          brokerID,
+		brokerID:        brokerID,
 		sessionID:       sessionID,
 		conn:            wsConn,
 		config:          m.config,

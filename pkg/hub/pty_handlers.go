@@ -25,9 +25,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
 // PTY endpoint configuration

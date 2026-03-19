@@ -37,19 +37,19 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	// We need to know which groves to scan.
 	// If filter has scion.grove, we scan that one.
 	// Otherwise, we scan current and global?
-	
+
 	var grovesToScan []string
 	if groveName, ok := filter["scion.grove"]; ok {
 		_ = groveName
 		// We need to resolve groveName to a path. This is currently not easy without searching.
-		// For now, if scion.grove is provided, we assume we only care about running ones 
+		// For now, if scion.grove is provided, we assume we only care about running ones
 		// OR we need to be passed a grove path.
 	}
 
 	// This logic is a bit tied to how CLI uses it.
 	// Let's at least support scanning a specific grove if provided in filter?
 	// Or maybe Add a special filter key for GrovePath.
-	
+
 	grovePath := filter["scion.grove_path"]
 	if grovePath != "" {
 		grovesToScan = append(grovesToScan, grovePath)
@@ -176,7 +176,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 					}
 				}
 			}
-			
+
 			// If we still have no info, check if scion-agent.json exists at all to confirm it's an agent
 			// but we can't report much.
 			if info == nil {
@@ -184,7 +184,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 					// It's an agent directory but we can't read info.
 					// Maybe report minimal info?
 					info = &api.AgentInfo{
-						Name: e.Name(),
+						Name:  e.Name(),
 						Grove: groveName,
 						Phase: "unknown",
 					}

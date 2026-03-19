@@ -75,9 +75,9 @@ func cleanupIPTablesRedirect(port int) {
 type blockMethod int
 
 const (
-	blockNone      blockMethod = iota
-	blockIPTables              // iptables REJECT rule in filter OUTPUT chain
-	blockRoute                 // ip route unreachable/blackhole
+	blockNone     blockMethod = iota
+	blockIPTables             // iptables REJECT rule in filter OUTPUT chain
+	blockRoute                // ip route unreachable/blackhole
 )
 
 // setupMetadataBlock blocks all outbound traffic to the GCE metadata server IP.

@@ -76,7 +76,7 @@ type groveService struct {
 type ListGrovesOptions struct {
 	Visibility string // Filter by visibility
 	GitRemote  string // Filter by git remote (exact or prefix)
-	BrokerID string // Filter by contributing broker
+	BrokerID   string // Filter by contributing broker
 	Name       string // Filter by exact name (case-insensitive)
 	Slug       string // Filter by exact slug (case-insensitive)
 	Labels     map[string]string
@@ -91,32 +91,32 @@ type ListGrovesResponse struct {
 
 // RegisterGroveRequest is the request for registering a grove.
 type RegisterGroveRequest struct {
-	ID       string            `json:"id,omitempty"` // Client-provided grove ID (from grove_id setting)
-	Name     string            `json:"name"`
+	ID        string            `json:"id,omitempty"` // Client-provided grove ID (from grove_id setting)
+	Name      string            `json:"name"`
 	GitRemote string            `json:"gitRemote"`
-	Path     string            `json:"path,omitempty"`
-	BrokerID string            `json:"brokerId,omitempty"` // Link to existing broker (two-phase flow)
-	Broker   *BrokerInfo       `json:"broker,omitempty"`   // DEPRECATED: Use BrokerID with two-phase registration
-	Profiles []string          `json:"profiles,omitempty"`
-	Labels   map[string]string `json:"labels,omitempty"`
+	Path      string            `json:"path,omitempty"`
+	BrokerID  string            `json:"brokerId,omitempty"` // Link to existing broker (two-phase flow)
+	Broker    *BrokerInfo       `json:"broker,omitempty"`   // DEPRECATED: Use BrokerID with two-phase registration
+	Profiles  []string          `json:"profiles,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
 }
 
 // BrokerInfo describes the registering broker.
 type BrokerInfo struct {
-	ID           string            `json:"id,omitempty"`
-	Name         string            `json:"name"`
-	Version      string            `json:"version"`
+	ID           string              `json:"id,omitempty"`
+	Name         string              `json:"name"`
+	Version      string              `json:"version"`
 	Capabilities *BrokerCapabilities `json:"capabilities,omitempty"`
 	Profiles     []BrokerProfile     `json:"profiles,omitempty"`
 }
 
 // RegisterGroveResponse is the response from registering a grove.
 type RegisterGroveResponse struct {
-	Grove     *Grove       `json:"grove"`
-	Broker    *RuntimeBroker `json:"broker,omitempty"` // Populated if brokerId or broker provided
-	Created   bool         `json:"created"`        // True if grove was newly created
-	BrokerToken string       `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
-	SecretKey string       `json:"secretKey,omitempty"` // DEPRECATED: secrets only from /brokers/join
+	Grove       *Grove         `json:"grove"`
+	Broker      *RuntimeBroker `json:"broker,omitempty"`      // Populated if brokerId or broker provided
+	Created     bool           `json:"created"`               // True if grove was newly created
+	BrokerToken string         `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
+	SecretKey   string         `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
 }
 
 // CreateGroveRequest is the request for creating a grove without a broker.

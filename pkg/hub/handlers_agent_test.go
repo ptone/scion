@@ -3248,15 +3248,15 @@ func TestCreateAgent_GCPIdentityAssign(t *testing.T) {
 
 	// Register and verify a GCP service account
 	sa := &store.GCPServiceAccount{
-		ID:        "sa-assign-1",
-		Scope:     store.ScopeGrove,
-		ScopeID:   grove.ID,
-		Email:     "worker@project.iam.gserviceaccount.com",
-		ProjectID: "my-project",
-		Verified:  true,
+		ID:         "sa-assign-1",
+		Scope:      store.ScopeGrove,
+		ScopeID:    grove.ID,
+		Email:      "worker@project.iam.gserviceaccount.com",
+		ProjectID:  "my-project",
+		Verified:   true,
 		VerifiedAt: time.Now(),
-		CreatedBy: "user-1",
-		CreatedAt: time.Now(),
+		CreatedBy:  "user-1",
+		CreatedAt:  time.Now(),
 	}
 	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
 
@@ -3428,15 +3428,15 @@ func TestCreateAgent_GCPIdentityAssignWrongGrove(t *testing.T) {
 	ctx := context.Background()
 
 	sa := &store.GCPServiceAccount{
-		ID:        "sa-other-grove-1",
-		Scope:     store.ScopeGrove,
-		ScopeID:   "other-grove-id",
-		Email:     "other@project.iam.gserviceaccount.com",
-		ProjectID: "my-project",
-		Verified:  true,
+		ID:         "sa-other-grove-1",
+		Scope:      store.ScopeGrove,
+		ScopeID:    "other-grove-id",
+		Email:      "other@project.iam.gserviceaccount.com",
+		ProjectID:  "my-project",
+		Verified:   true,
 		VerifiedAt: time.Now(),
-		CreatedBy: "user-1",
-		CreatedAt: time.Now(),
+		CreatedBy:  "user-1",
+		CreatedAt:  time.Now(),
 	}
 	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
 

@@ -34,10 +34,10 @@ type DelegatedFromCondition struct {
 // PolicyConditions provides optional conditional logic for policies,
 // stored as JSON.
 type PolicyConditions struct {
-	Labels             map[string]string        `json:"labels,omitempty"`
-	ValidFrom          *time.Time               `json:"validFrom,omitempty"`
-	ValidUntil         *time.Time               `json:"validUntil,omitempty"`
-	SourceIPs          []string                 `json:"sourceIps,omitempty"`
-	DelegatedFrom      *DelegatedFromCondition  `json:"delegatedFrom,omitempty"`
-	DelegatedFromGroup string                   `json:"delegatedFromGroup,omitempty"`
+	Labels             map[string]string       `json:"labels,omitempty"`
+	ValidFrom          *time.Time              `json:"validFrom,omitempty"`
+	ValidUntil         *time.Time              `json:"validUntil,omitempty"`
+	SourceIPs          []string                `json:"sourceIps,omitempty"`
+	DelegatedFrom      *DelegatedFromCondition `json:"delegatedFrom,omitempty"`
+	DelegatedFromGroup string                  `json:"delegatedFromGroup,omitempty"`
 }

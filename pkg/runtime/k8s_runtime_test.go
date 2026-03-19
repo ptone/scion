@@ -36,7 +36,7 @@ func TestKubernetesRuntime_List(t *testing.T) {
 			Name:      "test-agent",
 			Namespace: "default",
 			Labels: map[string]string{
-				"scion.name": "test-agent",
+				"scion.name":     "test-agent",
 				"scion.template": "test-template",
 			},
 		},
@@ -96,7 +96,7 @@ func TestKubernetesRuntime_BuildPod_Env(t *testing.T) {
 	r := NewKubernetesRuntime(client)
 
 	config := RunConfig{
-		Name: "test-agent",
+		Name:  "test-agent",
 		Image: "test-image",
 	}
 

@@ -24,8 +24,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -292,9 +292,9 @@ func TestEnvGather_HubHandler_202Response(t *testing.T) {
 
 	// Create agent with GatherEnv=true
 	reqBody := map[string]interface{}{
-		"name":     "gather-agent",
-		"groveId":  "grove-gather",
-		"template": "claude",
+		"name":      "gather-agent",
+		"groveId":   "grove-gather",
+		"template":  "claude",
 		"gatherEnv": true,
 	}
 
@@ -434,7 +434,7 @@ func TestEnvGather_HubHandler_SubmitEnv(t *testing.T) {
 		Slug:            "submit-agent",
 		GroveID:         "grove-submit",
 		RuntimeBrokerID: "broker-submit",
-		Phase: string(state.PhaseProvisioning),
+		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -498,7 +498,7 @@ func TestEnvGather_HubHandler_SubmitEnv_InvalidState(t *testing.T) {
 		Name:    "invalid-agent",
 		Slug:    "invalid-agent",
 		GroveID: "grove-invalid",
-		Phase: string(state.PhaseRunning),
+		Phase:   string(state.PhaseRunning),
 	}
 	if err := st.CreateAgent(ctx, agent); err != nil {
 		t.Fatal(err)
@@ -612,7 +612,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 		Slug:            "retry-agent",
 		GroveID:         "grove-retry-global",
 		RuntimeBrokerID: "broker-retry-global",
-		Phase: string(state.PhaseProvisioning),
+		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -1173,7 +1173,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GroveRoute(t *testing.T) {
 		Slug:            "retry-route-agent",
 		GroveID:         "grove-retry-route",
 		RuntimeBrokerID: "broker-retry-route",
-		Phase: string(state.PhaseProvisioning),
+		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},

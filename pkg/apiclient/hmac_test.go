@@ -29,7 +29,7 @@ import (
 func TestHMACAuth_ApplyAuth(t *testing.T) {
 	secret := []byte("test-secret-key-12345678901234567890")
 	auth := &HMACAuth{
-		BrokerID:    "test-host-id",
+		BrokerID:  "test-host-id",
 		SecretKey: secret,
 	}
 
@@ -87,7 +87,7 @@ func TestHMACAuth_ApplyAuth(t *testing.T) {
 func TestHMACAuth_ApplyAuth_WithBody(t *testing.T) {
 	secret := []byte("test-secret-key-12345678901234567890")
 	auth := &HMACAuth{
-		BrokerID:    "test-host-id",
+		BrokerID:  "test-host-id",
 		SecretKey: secret,
 	}
 
@@ -122,7 +122,7 @@ func TestHMACAuth_ApplyAuth_MissingCredentials(t *testing.T) {
 		{
 			name: "missing host ID",
 			auth: &HMACAuth{
-				BrokerID:    "",
+				BrokerID:  "",
 				SecretKey: []byte("secret"),
 			},
 			expectErr: true,
@@ -130,7 +130,7 @@ func TestHMACAuth_ApplyAuth_MissingCredentials(t *testing.T) {
 		{
 			name: "missing secret key",
 			auth: &HMACAuth{
-				BrokerID:    "host-id",
+				BrokerID:  "host-id",
 				SecretKey: nil,
 			},
 			expectErr: true,
@@ -138,7 +138,7 @@ func TestHMACAuth_ApplyAuth_MissingCredentials(t *testing.T) {
 		{
 			name: "empty secret key",
 			auth: &HMACAuth{
-				BrokerID:    "host-id",
+				BrokerID:  "host-id",
 				SecretKey: []byte{},
 			},
 			expectErr: true,
@@ -296,7 +296,7 @@ func TestVerifyHMAC(t *testing.T) {
 
 func TestHMACAuth_Refresh(t *testing.T) {
 	auth := &HMACAuth{
-		BrokerID:    "host-id",
+		BrokerID:  "host-id",
 		SecretKey: []byte("secret"),
 	}
 

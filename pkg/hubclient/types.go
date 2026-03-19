@@ -18,42 +18,42 @@ import "time"
 
 // Agent represents an agent from the Hub API.
 type Agent struct {
-	ID              string            `json:"id"`              // Hub UUID (database primary key)
-	Slug            string            `json:"slug"`            // URL-safe slug identifier (unique per grove)
-	ContainerID     string            `json:"containerId"`     // Runtime container ID (ephemeral)
-	Name            string            `json:"name"`
-	Template        string            `json:"template,omitempty"`
-	HarnessConfig   string            `json:"harnessConfig,omitempty"`
-	HarnessAuth     string            `json:"harnessAuth,omitempty"`
-	GroveID         string            `json:"groveId,omitempty"`
-	Grove           string            `json:"grove,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
-	Annotations     map[string]string `json:"annotations,omitempty"`
-	Phase           string            `json:"phase,omitempty"`           // Lifecycle phase (created, provisioning, running, stopped, error)
-	Activity        string            `json:"activity,omitempty"`        // Runtime activity (idle, thinking, executing, waiting_for_input, completed)
-	Status          string            `json:"status"`                    // Legacy/fallback status field
-	ConnectionState string            `json:"connectionState,omitempty"`
-	ContainerStatus string            `json:"containerStatus,omitempty"`
-	RuntimeState    string            `json:"runtimeState,omitempty"`
-	Image           string            `json:"image,omitempty"`
-	Detached        bool              `json:"detached,omitempty"`
-	Runtime         string            `json:"runtime,omitempty"`
+	ID                string            `json:"id"`          // Hub UUID (database primary key)
+	Slug              string            `json:"slug"`        // URL-safe slug identifier (unique per grove)
+	ContainerID       string            `json:"containerId"` // Runtime container ID (ephemeral)
+	Name              string            `json:"name"`
+	Template          string            `json:"template,omitempty"`
+	HarnessConfig     string            `json:"harnessConfig,omitempty"`
+	HarnessAuth       string            `json:"harnessAuth,omitempty"`
+	GroveID           string            `json:"groveId,omitempty"`
+	Grove             string            `json:"grove,omitempty"`
+	Labels            map[string]string `json:"labels,omitempty"`
+	Annotations       map[string]string `json:"annotations,omitempty"`
+	Phase             string            `json:"phase,omitempty"`    // Lifecycle phase (created, provisioning, running, stopped, error)
+	Activity          string            `json:"activity,omitempty"` // Runtime activity (idle, thinking, executing, waiting_for_input, completed)
+	Status            string            `json:"status"`             // Legacy/fallback status field
+	ConnectionState   string            `json:"connectionState,omitempty"`
+	ContainerStatus   string            `json:"containerStatus,omitempty"`
+	RuntimeState      string            `json:"runtimeState,omitempty"`
+	Image             string            `json:"image,omitempty"`
+	Detached          bool              `json:"detached,omitempty"`
+	Runtime           string            `json:"runtime,omitempty"`
 	RuntimeBrokerID   string            `json:"runtimeBrokerId,omitempty"`
 	RuntimeBrokerName string            `json:"runtimeBrokerName,omitempty"`
 	RuntimeBrokerType string            `json:"runtimeBrokerType,omitempty"`
-	WebPTYEnabled   bool              `json:"webPtyEnabled,omitempty"`
-	TaskSummary     string            `json:"taskSummary,omitempty"`
-	AppliedConfig   *AgentConfig      `json:"appliedConfig,omitempty"`
-	DirectConnect   *DirectConnect    `json:"directConnect,omitempty"`
-	Kubernetes      *KubernetesInfo   `json:"kubernetes,omitempty"`
-	Created         time.Time         `json:"created"`
-	Updated         time.Time         `json:"updated"`
-	LastSeen        time.Time         `json:"lastSeen,omitempty"`
-	DeletedAt       time.Time         `json:"deletedAt,omitempty"`
-	CreatedBy       string            `json:"createdBy,omitempty"`
-	OwnerID         string            `json:"ownerId,omitempty"`
-	Visibility      string            `json:"visibility,omitempty"`
-	StateVersion    int64             `json:"stateVersion,omitempty"`
+	WebPTYEnabled     bool              `json:"webPtyEnabled,omitempty"`
+	TaskSummary       string            `json:"taskSummary,omitempty"`
+	AppliedConfig     *AgentConfig      `json:"appliedConfig,omitempty"`
+	DirectConnect     *DirectConnect    `json:"directConnect,omitempty"`
+	Kubernetes        *KubernetesInfo   `json:"kubernetes,omitempty"`
+	Created           time.Time         `json:"created"`
+	Updated           time.Time         `json:"updated"`
+	LastSeen          time.Time         `json:"lastSeen,omitempty"`
+	DeletedAt         time.Time         `json:"deletedAt,omitempty"`
+	CreatedBy         string            `json:"createdBy,omitempty"`
+	OwnerID           string            `json:"ownerId,omitempty"`
+	Visibility        string            `json:"visibility,omitempty"`
+	StateVersion      int64             `json:"stateVersion,omitempty"`
 }
 
 // AgentConfig represents agent configuration.
@@ -85,22 +85,22 @@ type KubernetesInfo struct {
 
 // Grove represents a grove from the Hub API.
 type Grove struct {
-	ID                   string             `json:"id"`
-	Name                 string             `json:"name"`
-	Slug                 string             `json:"slug"`
-	GitRemote            string             `json:"gitRemote,omitempty"`
-	DefaultRuntimeBrokerID string             `json:"defaultRuntimeBrokerId,omitempty"`
-	Created              time.Time          `json:"created"`
-	Updated              time.Time          `json:"updated"`
-	CreatedBy            string             `json:"createdBy,omitempty"`
-	OwnerID              string             `json:"ownerId,omitempty"`
-	Visibility           string             `json:"visibility,omitempty"`
-	Labels               map[string]string  `json:"labels,omitempty"`
-	Annotations          map[string]string  `json:"annotations,omitempty"`
-	Providers            []GroveProvider    `json:"providers,omitempty"`
-	AgentCount           int                `json:"agentCount,omitempty"`
-	ActiveBrokerCount      int                `json:"activeBrokerCount,omitempty"`
-	GroveType            string             `json:"groveType,omitempty"`
+	ID                     string            `json:"id"`
+	Name                   string            `json:"name"`
+	Slug                   string            `json:"slug"`
+	GitRemote              string            `json:"gitRemote,omitempty"`
+	DefaultRuntimeBrokerID string            `json:"defaultRuntimeBrokerId,omitempty"`
+	Created                time.Time         `json:"created"`
+	Updated                time.Time         `json:"updated"`
+	CreatedBy              string            `json:"createdBy,omitempty"`
+	OwnerID                string            `json:"ownerId,omitempty"`
+	Visibility             string            `json:"visibility,omitempty"`
+	Labels                 map[string]string `json:"labels,omitempty"`
+	Annotations            map[string]string `json:"annotations,omitempty"`
+	Providers              []GroveProvider   `json:"providers,omitempty"`
+	AgentCount             int               `json:"agentCount,omitempty"`
+	ActiveBrokerCount      int               `json:"activeBrokerCount,omitempty"`
+	GroveType              string            `json:"groveType,omitempty"`
 }
 
 // GroveProvider represents a broker providing runtime services to a grove.
@@ -126,9 +126,9 @@ type GroveSettings struct {
 	Profiles             map[string]interface{} `json:"profiles,omitempty"`
 
 	// Default agent limits
-	DefaultMaxTurns      int              `json:"defaultMaxTurns,omitempty"`
-	DefaultMaxModelCalls int              `json:"defaultMaxModelCalls,omitempty"`
-	DefaultMaxDuration   string           `json:"defaultMaxDuration,omitempty"`
+	DefaultMaxTurns      int                `json:"defaultMaxTurns,omitempty"`
+	DefaultMaxModelCalls int                `json:"defaultMaxModelCalls,omitempty"`
+	DefaultMaxDuration   string             `json:"defaultMaxDuration,omitempty"`
 	DefaultResources     *GroveResourceSpec `json:"defaultResources,omitempty"`
 }
 

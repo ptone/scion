@@ -25,8 +25,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 const (
@@ -37,7 +37,7 @@ const (
 )
 
 var (
-	ErrInvalidUAT       = errors.New("invalid access token")
+	ErrInvalidUAT        = errors.New("invalid access token")
 	ErrUATExpired        = errors.New("access token expired")
 	ErrUATRevoked        = errors.New("access token revoked")
 	ErrInvalidUATFormat  = errors.New("invalid token format")

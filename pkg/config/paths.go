@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	DotScion = ".scion"
+	DotScion  = ".scion"
 	GlobalDir = ".scion"
 )
 

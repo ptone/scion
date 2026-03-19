@@ -53,11 +53,11 @@ type Filter struct {
 // SecretMeta holds secret metadata without the secret value.
 type SecretMeta struct {
 	ID            string    `json:"id"`
-	Name          string    `json:"name"`        // Secret key name (e.g., "API_KEY")
-	SecretType    string    `json:"type"`        // environment, variable, file
-	Target        string    `json:"target"`      // Projection target
-	Scope         string    `json:"scope"`       // user, grove, runtime_broker
-	ScopeID       string    `json:"scopeId"`     // ID of the scoped entity
+	Name          string    `json:"name"`    // Secret key name (e.g., "API_KEY")
+	SecretType    string    `json:"type"`    // environment, variable, file
+	Target        string    `json:"target"`  // Projection target
+	Scope         string    `json:"scope"`   // user, grove, runtime_broker
+	ScopeID       string    `json:"scopeId"` // ID of the scoped entity
 	Description   string    `json:"description,omitempty"`
 	InjectionMode string    `json:"injectionMode,omitempty"` // "always" or "as_needed"
 	SecretRef     string    `json:"secretRef,omitempty"`     // External reference (e.g., GCP SM resource path)

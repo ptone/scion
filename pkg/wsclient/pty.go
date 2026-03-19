@@ -30,8 +30,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
+	"github.com/gorilla/websocket"
 	"golang.org/x/term"
 )
 

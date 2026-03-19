@@ -185,12 +185,12 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 				Image:           d.Image,
 				Labels:          labels,
 				Annotations:     labels,
-				Template:      labels["scion.template"],
-				HarnessConfig: labels["scion.harness_config"],
-				HarnessAuth:   labels["scion.harness_auth"],
-				Grove:         labels["scion.grove"],
-				GrovePath:     labels["scion.grove_path"],
-				Runtime:       r.Name(),
+				Template:        labels["scion.template"],
+				HarnessConfig:   labels["scion.harness_config"],
+				HarnessAuth:     labels["scion.harness_auth"],
+				Grove:           labels["scion.grove"],
+				GrovePath:       labels["scion.grove_path"],
+				Runtime:         r.Name(),
 			})
 		}
 	}

@@ -37,14 +37,14 @@ func (m *MockHarness) GetEnv(agentName string, agentHome string, unixUsername st
 	return nil
 }
 func (m *MockHarness) GetCommand(task string, resume bool, baseArgs []string) []string { return nil }
-func (m *MockHarness) DefaultConfigDir() string { return m.ConfigDirVal }
+func (m *MockHarness) DefaultConfigDir() string                                        { return m.ConfigDirVal }
 func (m *MockHarness) SkillsDir() string {
 	if m.ConfigDirVal == "" {
 		return ""
 	}
 	return m.ConfigDirVal + "/skills"
 }
-func (m *MockHarness) HasSystemPrompt(agentHome string) bool                           { return false }
+func (m *MockHarness) HasSystemPrompt(agentHome string) bool { return false }
 func (m *MockHarness) Provision(ctx context.Context, agentName, agentDir, agentHome, agentWorkspace string) error {
 	return nil
 }

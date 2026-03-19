@@ -66,7 +66,7 @@ func TestGetRuntime(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		err := os.WriteFile(filepath.Join(globalDir, "settings.json"), 
+		err := os.WriteFile(filepath.Join(globalDir, "settings.json"),
 			[]byte(`{"active_profile": "local", "runtimes": {"container": {}}, "profiles": {"local": {"runtime": "container"}}}`), 0644)
 		if err != nil {
 			t.Fatal(err)
@@ -87,7 +87,7 @@ func TestGetRuntime(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		err := os.WriteFile(filepath.Join(globalDir, "settings.json"), 
+		err := os.WriteFile(filepath.Join(globalDir, "settings.json"),
 			[]byte(`{"active_profile": "remote", "runtimes": {"kubernetes": {}}, "profiles": {"remote": {"runtime": "kubernetes"}}}`), 0644)
 		if err != nil {
 			t.Fatal(err)
@@ -117,7 +117,7 @@ func TestGetRuntime(t *testing.T) {
 	t.Run("Settings_Grove_Override", func(t *testing.T) {
 		tmpHome := t.TempDir()
 		t.Setenv("HOME", tmpHome)
-		
+
 		// Create a fake grove project
 		grovePath := filepath.Join(tmpHome, "myproject")
 		groveScionDir := filepath.Join(grovePath, ".scion")
@@ -130,11 +130,11 @@ func TestGetRuntime(t *testing.T) {
 		if err := os.MkdirAll(globalDir, 0755); err != nil {
 			t.Fatal(err)
 		}
-		os.WriteFile(filepath.Join(globalDir, "settings.json"), 
+		os.WriteFile(filepath.Join(globalDir, "settings.json"),
 			[]byte(`{"active_profile": "local", "runtimes": {"container": {}}, "profiles": {"local": {"runtime": "container"}}}`), 0644)
 
 		// Grove says docker
-		os.WriteFile(filepath.Join(groveScionDir, "settings.json"), 
+		os.WriteFile(filepath.Join(groveScionDir, "settings.json"),
 			[]byte(`{"active_profile": "local", "runtimes": {"docker": {}}, "profiles": {"local": {"runtime": "docker"}}}`), 0644)
 
 		r := GetRuntime(groveScionDir, "")

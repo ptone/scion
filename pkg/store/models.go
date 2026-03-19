@@ -57,8 +57,8 @@ type Agent struct {
 	// Runtime configuration
 	Image           string `json:"image,omitempty"`
 	Detached        bool   `json:"detached"`
-	Runtime         string `json:"runtime,omitempty"`           // docker, kubernetes, apple
-	RuntimeBrokerID string `json:"runtimeBrokerId,omitempty"`   // FK to RuntimeBroker.ID
+	Runtime         string `json:"runtime,omitempty"`         // docker, kubernetes, apple
+	RuntimeBrokerID string `json:"runtimeBrokerId,omitempty"` // FK to RuntimeBroker.ID
 	WebPTYEnabled   bool   `json:"webPtyEnabled,omitempty"`
 	TaskSummary     string `json:"taskSummary,omitempty"`
 	Message         string `json:"message,omitempty"`
@@ -90,17 +90,17 @@ type Agent struct {
 
 // AgentAppliedConfig stores the effective configuration of an agent.
 type AgentAppliedConfig struct {
-	Image   string            `json:"image,omitempty"`
-	HarnessConfig string            `json:"harnessConfig,omitempty"`
-	HarnessAuth   string            `json:"harnessAuth,omitempty"` // Late-binding override for auth_selected_type
-	Env     map[string]string `json:"env,omitempty"`
-	Model   string            `json:"model,omitempty"`
-	Profile string            `json:"profile,omitempty"`   // Settings profile for the runtime broker
-	Task    string            `json:"task,omitempty"`      // Initial task/prompt for the agent
-	Attach  bool              `json:"attach,omitempty"`    // If true, signals interactive attach mode to the broker/harness
-	Branch  string            `json:"branch,omitempty"`    // Git branch name (defaults to agent slug if empty)
-	Workspace string          `json:"workspace,omitempty"` // Host path to mount as /workspace (overrides default grove root)
-	GitClone  *api.GitCloneConfig `json:"gitClone,omitempty"`
+	Image         string              `json:"image,omitempty"`
+	HarnessConfig string              `json:"harnessConfig,omitempty"`
+	HarnessAuth   string              `json:"harnessAuth,omitempty"` // Late-binding override for auth_selected_type
+	Env           map[string]string   `json:"env,omitempty"`
+	Model         string              `json:"model,omitempty"`
+	Profile       string              `json:"profile,omitempty"`   // Settings profile for the runtime broker
+	Task          string              `json:"task,omitempty"`      // Initial task/prompt for the agent
+	Attach        bool                `json:"attach,omitempty"`    // If true, signals interactive attach mode to the broker/harness
+	Branch        string              `json:"branch,omitempty"`    // Git branch name (defaults to agent slug if empty)
+	Workspace     string              `json:"workspace,omitempty"` // Host path to mount as /workspace (overrides default grove root)
+	GitClone      *api.GitCloneConfig `json:"gitClone,omitempty"`
 
 	// Template info for Runtime Broker hydration
 	TemplateID   string `json:"templateId,omitempty"`   // Hub template ID for fetching
@@ -126,7 +126,6 @@ type AgentAppliedConfig struct {
 	// GCPIdentity holds the GCP identity assignment for this agent.
 	GCPIdentity *GCPIdentityConfig `json:"gcpIdentity,omitempty"`
 }
-
 
 // Grove type constants.
 // Type reflects how the grove was established on the Hub:
@@ -172,14 +171,14 @@ type Grove struct {
 
 	// GitHub App integration
 	GitHubInstallationID *int64                  `json:"githubInstallationId,omitempty"`
-	GitHubPermissions    *GitHubTokenPermissions  `json:"githubPermissions,omitempty"`
-	GitHubAppStatus      *GitHubAppGroveStatus    `json:"githubAppStatus,omitempty"`
+	GitHubPermissions    *GitHubTokenPermissions `json:"githubPermissions,omitempty"`
+	GitHubAppStatus      *GitHubAppGroveStatus   `json:"githubAppStatus,omitempty"`
 
 	// Computed fields (not stored, populated on read)
 	AgentCount        int    `json:"agentCount,omitempty"`
 	ActiveBrokerCount int    `json:"activeBrokerCount,omitempty"`
-	GroveType         string `json:"groveType,omitempty"`          // "git", "linked", or "hub-native"
-	OwnerName         string `json:"ownerName,omitempty"`          // Enriched: resolved from OwnerID
+	GroveType         string `json:"groveType,omitempty"` // "git", "linked", or "hub-native"
+	OwnerName         string `json:"ownerName,omitempty"` // Enriched: resolved from OwnerID
 }
 
 // RuntimeBroker represents a compute node in the Hub database.
@@ -232,8 +231,8 @@ type BrokerCapabilities struct {
 
 // BrokerProfile describes a runtime profile available on a broker.
 type BrokerProfile struct {
-	Name      string `json:"name"`      // Profile name (e.g., "docker-default", "k8s-prod")
-	Type      string `json:"type"`      // docker, kubernetes, apple
+	Name      string `json:"name"` // Profile name (e.g., "docker-default", "k8s-prod")
+	Type      string `json:"type"` // docker, kubernetes, apple
 	Available bool   `json:"available"`
 	Context   string `json:"context,omitempty"`   // K8s context
 	Namespace string `json:"namespace,omitempty"` // K8s namespace
@@ -368,13 +367,13 @@ type HarnessConfig struct {
 
 // HarnessConfigData holds the harness-specific configuration details.
 type HarnessConfigData struct {
-	Harness          string            `json:"harness,omitempty"`
-	Image            string            `json:"image,omitempty"`
-	User             string            `json:"user,omitempty"`
-	Model            string            `json:"model,omitempty"`
-	Args             []string          `json:"args,omitempty"`
-	Env              map[string]string `json:"env,omitempty"`
-	AuthSelectedType string            `json:"authSelectedType,omitempty"`
+	Harness          string               `json:"harness,omitempty"`
+	Image            string               `json:"image,omitempty"`
+	User             string               `json:"user,omitempty"`
+	Model            string               `json:"model,omitempty"`
+	Args             []string             `json:"args,omitempty"`
+	Env              map[string]string    `json:"env,omitempty"`
+	AuthSelectedType string               `json:"authSelectedType,omitempty"`
 	Secrets          []api.RequiredSecret `json:"secrets,omitempty"`
 }
 
@@ -394,15 +393,15 @@ const (
 
 // TemplateConfig holds template configuration details.
 type TemplateConfig struct {
-	Harness     string            `json:"harness,omitempty"`
-	Image       string            `json:"image,omitempty"`
-	ConfigDir   string            `json:"configDir,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
-	Detached    bool              `json:"detached,omitempty"`
-	CommandArgs []string          `json:"commandArgs,omitempty"`
-	Model       string            `json:"model,omitempty"`
-	Kubernetes  *KubernetesConfig `json:"kubernetes,omitempty"`
-	HubAccess   *HubAccessConfig  `json:"hubAccess,omitempty"`
+	Harness     string               `json:"harness,omitempty"`
+	Image       string               `json:"image,omitempty"`
+	ConfigDir   string               `json:"configDir,omitempty"`
+	Env         map[string]string    `json:"env,omitempty"`
+	Detached    bool                 `json:"detached,omitempty"`
+	CommandArgs []string             `json:"commandArgs,omitempty"`
+	Model       string               `json:"model,omitempty"`
+	Kubernetes  *KubernetesConfig    `json:"kubernetes,omitempty"`
+	HubAccess   *HubAccessConfig     `json:"hubAccess,omitempty"`
 	Secrets     []api.RequiredSecret `json:"secrets,omitempty"`
 	Telemetry   *api.TelemetryConfig `json:"telemetry,omitempty"`
 }
@@ -414,8 +413,8 @@ type HubAccessConfig struct {
 
 // KubernetesConfig holds Kubernetes-specific configuration for templates.
 type KubernetesConfig struct {
-	Resources *ResourceRequirements `json:"resources,omitempty"`
-	NodeSelector map[string]string  `json:"nodeSelector,omitempty"`
+	Resources    *ResourceRequirements `json:"resources,omitempty"`
+	NodeSelector map[string]string     `json:"nodeSelector,omitempty"`
 }
 
 // ResourceRequirements defines compute resource requirements.
@@ -473,8 +472,8 @@ const (
 
 // BrokerSecret stores the HMAC shared secret for a Runtime Broker.
 type BrokerSecret struct {
-	BrokerID string    `json:"brokerId"`
-	SecretKey []byte    `json:"-"` // Never serialize - stored encrypted at rest
+	BrokerID  string    `json:"brokerId"`
+	SecretKey []byte    `json:"-"`         // Never serialize - stored encrypted at rest
 	Algorithm string    `json:"algorithm"` // "hmac-sha256"
 	CreatedAt time.Time `json:"createdAt"`
 	RotatedAt time.Time `json:"rotatedAt,omitempty"`
@@ -496,7 +495,7 @@ const (
 
 // BrokerJoinToken is a short-lived token for broker registration.
 type BrokerJoinToken struct {
-	BrokerID string    `json:"brokerId"`
+	BrokerID  string    `json:"brokerId"`
 	TokenHash string    `json:"-"` // SHA-256 hash of token (never exposed)
 	ExpiresAt time.Time `json:"expiresAt"`
 	CreatedAt time.Time `json:"createdAt"`
@@ -528,15 +527,15 @@ const (
 
 // NotificationSubscription represents a subscription to agent activity changes.
 type NotificationSubscription struct {
-	ID                string   `json:"id"`               // UUID primary key
-	Scope             string   `json:"scope"`            // "agent" or "grove"
-	AgentID           string   `json:"agentId,omitempty"` // Required when Scope="agent", empty when Scope="grove"
-	SubscriberType    string   `json:"subscriberType"`   // "agent" or "user"
-	SubscriberID      string   `json:"subscriberId"`     // Slug or ID of the subscriber
-	GroveID           string   `json:"groveId"`          // Always required (grove context)
-	TriggerActivities []string `json:"triggerActivities"` // e.g. ["COMPLETED", "WAITING_FOR_INPUT"]
+	ID                string    `json:"id"`                // UUID primary key
+	Scope             string    `json:"scope"`             // "agent" or "grove"
+	AgentID           string    `json:"agentId,omitempty"` // Required when Scope="agent", empty when Scope="grove"
+	SubscriberType    string    `json:"subscriberType"`    // "agent" or "user"
+	SubscriberID      string    `json:"subscriberId"`      // Slug or ID of the subscriber
+	GroveID           string    `json:"groveId"`           // Always required (grove context)
+	TriggerActivities []string  `json:"triggerActivities"` // e.g. ["COMPLETED", "WAITING_FOR_INPUT"]
 	CreatedAt         time.Time `json:"createdAt"`
-	CreatedBy         string   `json:"createdBy"`
+	CreatedBy         string    `json:"createdBy"`
 }
 
 // MatchesActivity returns true if the given activity matches any of the subscription's
@@ -570,10 +569,10 @@ type Notification struct {
 	GroveID        string    `json:"groveId"`
 	SubscriberType string    `json:"subscriberType"` // "agent" or "user"
 	SubscriberID   string    `json:"subscriberId"`
-	Status         string    `json:"status"`         // Trigger status (UPPER CASE)
+	Status         string    `json:"status"` // Trigger status (UPPER CASE)
 	Message        string    `json:"message"`
-	Dispatched     bool      `json:"dispatched"`     // Whether dispatch was attempted
-	Acknowledged   bool      `json:"acknowledged"`   // Whether acknowledged (for human targets)
+	Dispatched     bool      `json:"dispatched"`   // Whether dispatch was attempted
+	Acknowledged   bool      `json:"acknowledged"` // Whether acknowledged (for human targets)
 	CreatedAt      time.Time `json:"createdAt"`
 }
 
@@ -688,9 +687,9 @@ const (
 // Groups support hierarchical membership through nested groups.
 type Group struct {
 	// Identity
-	ID          string `json:"id"`          // UUID primary key
-	Name        string `json:"name"`        // Human-friendly display name
-	Slug        string `json:"slug"`        // URL-safe identifier
+	ID          string `json:"id"`   // UUID primary key
+	Name        string `json:"name"` // Human-friendly display name
+	Slug        string `json:"slug"` // URL-safe identifier
 	Description string `json:"description,omitempty"`
 	GroupType   string `json:"groupType,omitempty"` // "explicit" or "grove_agents"
 	GroveID     string `json:"groveId,omitempty"`   // FK to Grove.ID (for grove_agents groups)
@@ -731,7 +730,7 @@ const (
 
 // GroupType constants
 const (
-	GroupTypeExplicit   = "explicit"
+	GroupTypeExplicit    = "explicit"
 	GroupTypeGroveAgents = "grove_agents"
 )
 
@@ -794,12 +793,12 @@ type DelegatedFromCondition struct {
 
 // PolicyConditions provides optional conditional logic for policies.
 type PolicyConditions struct {
-	Labels             map[string]string        `json:"labels,omitempty"`             // Resource must have these labels
-	ValidFrom          *time.Time               `json:"validFrom,omitempty"`          // Policy valid from this time
-	ValidUntil         *time.Time               `json:"validUntil,omitempty"`         // Policy valid until this time
-	SourceIPs          []string                 `json:"sourceIps,omitempty"`          // Allowed source IP ranges (CIDR)
-	DelegatedFrom      *DelegatedFromCondition  `json:"delegatedFrom,omitempty"`      // Match agents delegated from a specific principal
-	DelegatedFromGroup string                   `json:"delegatedFromGroup,omitempty"` // Match agents whose creator is in this group
+	Labels             map[string]string       `json:"labels,omitempty"`             // Resource must have these labels
+	ValidFrom          *time.Time              `json:"validFrom,omitempty"`          // Policy valid from this time
+	ValidUntil         *time.Time              `json:"validUntil,omitempty"`         // Policy valid until this time
+	SourceIPs          []string                `json:"sourceIps,omitempty"`          // Allowed source IP ranges (CIDR)
+	DelegatedFrom      *DelegatedFromCondition `json:"delegatedFrom,omitempty"`      // Match agents delegated from a specific principal
+	DelegatedFromGroup string                  `json:"delegatedFromGroup,omitempty"` // Match agents whose creator is in this group
 }
 
 // PolicyEffect constants
@@ -922,25 +921,25 @@ const UATDefaultExpiry = 90 * 24 * time.Hour
 // No key material is stored — the Hub's own GCP identity impersonates the SA at
 // token-generation time via the IAM Credentials API.
 type GCPServiceAccount struct {
-	ID            string    `json:"id"`             // UUID
-	Scope         string    `json:"scope"`          // "hub", "grove", "user"
-	ScopeID       string    `json:"scope_id"`       // ID of the hub/grove/user
-	Email         string    `json:"email"`          // e.g. "agent-worker@project.iam.gserviceaccount.com"
-	ProjectID     string    `json:"project_id"`     // GCP project containing the SA
-	DisplayName   string    `json:"display_name"`   // Human-friendly label
-	DefaultScopes []string  `json:"default_scopes,omitempty"` // OAuth scopes (default: cloud-platform)
-	Verified           bool      `json:"verified"`                      // Hub confirmed it can impersonate this SA
+	ID                 string    `json:"id"`                       // UUID
+	Scope              string    `json:"scope"`                    // "hub", "grove", "user"
+	ScopeID            string    `json:"scope_id"`                 // ID of the hub/grove/user
+	Email              string    `json:"email"`                    // e.g. "agent-worker@project.iam.gserviceaccount.com"
+	ProjectID          string    `json:"project_id"`               // GCP project containing the SA
+	DisplayName        string    `json:"display_name"`             // Human-friendly label
+	DefaultScopes      []string  `json:"default_scopes,omitempty"` // OAuth scopes (default: cloud-platform)
+	Verified           bool      `json:"verified"`                 // Hub confirmed it can impersonate this SA
 	VerifiedAt         time.Time `json:"verified_at,omitempty"`
-	VerificationStatus string    `json:"verificationStatus,omitempty"`  // "unverified", "verified", "failed"
-	VerificationError  string    `json:"verificationError,omitempty"`   // Error message when verification failed
-	CreatedBy          string    `json:"created_by"`                    // User who registered it
+	VerificationStatus string    `json:"verificationStatus,omitempty"` // "unverified", "verified", "failed"
+	VerificationError  string    `json:"verificationError,omitempty"`  // Error message when verification failed
+	CreatedBy          string    `json:"created_by"`                   // User who registered it
 	CreatedAt          time.Time `json:"created_at"`
 }
 
 // GCPIdentityConfig holds the GCP identity assignment for an agent.
 type GCPIdentityConfig struct {
-	MetadataMode        string `json:"metadata_mode"`                  // "block", "passthrough", "assign"
-	ServiceAccountID    string `json:"service_account_id,omitempty"`   // FK to GCPServiceAccount (required for "assign")
+	MetadataMode        string `json:"metadata_mode"`                   // "block", "passthrough", "assign"
+	ServiceAccountID    string `json:"service_account_id,omitempty"`    // FK to GCPServiceAccount (required for "assign")
 	ServiceAccountEmail string `json:"service_account_email,omitempty"` // Denormalized for runtime use
 	ProjectID           string `json:"project_id,omitempty"`            // Denormalized
 }
@@ -972,10 +971,10 @@ const (
 type ScheduledEvent struct {
 	ID         string     `json:"id"`
 	GroveID    string     `json:"groveId"`
-	EventType  string     `json:"eventType"`        // "message", "status_update"
-	FireAt     time.Time  `json:"fireAt"`            // When to fire (UTC)
-	Payload    string     `json:"payload"`           // JSON blob (handler-specific)
-	Status     string     `json:"status"`            // pending, fired, cancelled, expired
+	EventType  string     `json:"eventType"` // "message", "status_update"
+	FireAt     time.Time  `json:"fireAt"`    // When to fire (UTC)
+	Payload    string     `json:"payload"`   // JSON blob (handler-specific)
+	Status     string     `json:"status"`    // pending, fired, cancelled, expired
 	CreatedAt  time.Time  `json:"createdAt"`
 	CreatedBy  string     `json:"createdBy"`
 	FiredAt    *time.Time `json:"firedAt,omitempty"`
@@ -1008,10 +1007,10 @@ type Schedule struct {
 	ID            string     `json:"id"`
 	GroveID       string     `json:"groveId"`
 	Name          string     `json:"name"`
-	CronExpr      string     `json:"cronExpr"`         // Standard 5-field cron expression (UTC)
-	EventType     string     `json:"eventType"`         // "message" (future: "dispatch_agent")
-	Payload       string     `json:"payload"`           // JSON: handler-specific configuration
-	Status        string     `json:"status"`            // active, paused, deleted
+	CronExpr      string     `json:"cronExpr"`  // Standard 5-field cron expression (UTC)
+	EventType     string     `json:"eventType"` // "message" (future: "dispatch_agent")
+	Payload       string     `json:"payload"`   // JSON: handler-specific configuration
+	Status        string     `json:"status"`    // active, paused, deleted
 	NextRunAt     *time.Time `json:"nextRunAt,omitempty"`
 	LastRunAt     *time.Time `json:"lastRunAt,omitempty"`
 	LastRunStatus string     `json:"lastRunStatus,omitempty"` // success, error
@@ -1066,12 +1065,12 @@ func (a *Agent) ToAPI() *api.AgentInfo {
 		RuntimeState:    a.RuntimeState,
 
 		// Runtime configuration
-		Image:         a.Image,
-		Detached:      a.Detached,
-		Runtime:       a.Runtime,
+		Image:           a.Image,
+		Detached:        a.Detached,
+		Runtime:         a.Runtime,
 		RuntimeBrokerID: a.RuntimeBrokerID,
-		WebPTYEnabled: a.WebPTYEnabled,
-		TaskSummary:   a.TaskSummary,
+		WebPTYEnabled:   a.WebPTYEnabled,
+		TaskSummary:     a.TaskSummary,
 
 		// Timestamps
 		Created:   a.Created,

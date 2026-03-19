@@ -381,81 +381,81 @@ func TestHubMethods(t *testing.T) {
 	falseBool := false
 
 	tests := []struct {
-		name                     string
-		hub                      *HubClientConfig
-		wantConfigured           bool
-		wantEnabled              bool
-		wantExplicitlyDisabled   bool
+		name                   string
+		hub                    *HubClientConfig
+		wantConfigured         bool
+		wantEnabled            bool
+		wantExplicitlyDisabled bool
 	}{
 		{
-			name:                     "nil hub",
-			hub:                      nil,
-			wantConfigured:           false,
-			wantEnabled:              false,
-			wantExplicitlyDisabled:   false,
+			name:                   "nil hub",
+			hub:                    nil,
+			wantConfigured:         false,
+			wantEnabled:            false,
+			wantExplicitlyDisabled: false,
 		},
 		{
-			name:                     "empty hub",
-			hub:                      &HubClientConfig{},
-			wantConfigured:           false,
-			wantEnabled:              false,
-			wantExplicitlyDisabled:   false,
+			name:                   "empty hub",
+			hub:                    &HubClientConfig{},
+			wantConfigured:         false,
+			wantEnabled:            false,
+			wantExplicitlyDisabled: false,
 		},
 		{
-			name:                     "hub with endpoint only",
-			hub:                      &HubClientConfig{Endpoint: "https://hub.example.com"},
-			wantConfigured:           true,
-			wantEnabled:              false,
-			wantExplicitlyDisabled:   false,
+			name:                   "hub with endpoint only",
+			hub:                    &HubClientConfig{Endpoint: "https://hub.example.com"},
+			wantConfigured:         true,
+			wantEnabled:            false,
+			wantExplicitlyDisabled: false,
 		},
 		{
-			name:                     "hub with endpoint and enabled=true",
-			hub:                      &HubClientConfig{Endpoint: "https://hub.example.com", Enabled: &trueBool},
-			wantConfigured:           true,
-			wantEnabled:              true,
-			wantExplicitlyDisabled:   false,
+			name:                   "hub with endpoint and enabled=true",
+			hub:                    &HubClientConfig{Endpoint: "https://hub.example.com", Enabled: &trueBool},
+			wantConfigured:         true,
+			wantEnabled:            true,
+			wantExplicitlyDisabled: false,
 		},
 		{
-			name:                     "hub with endpoint and enabled=false",
-			hub:                      &HubClientConfig{Endpoint: "https://hub.example.com", Enabled: &falseBool},
-			wantConfigured:           true,
-			wantEnabled:              false,
-			wantExplicitlyDisabled:   true,
+			name:                   "hub with endpoint and enabled=false",
+			hub:                    &HubClientConfig{Endpoint: "https://hub.example.com", Enabled: &falseBool},
+			wantConfigured:         true,
+			wantEnabled:            false,
+			wantExplicitlyDisabled: true,
 		},
 		{
-			name:                     "hub with enabled=false but no endpoint",
-			hub:                      &HubClientConfig{Enabled: &falseBool},
-			wantConfigured:           false,
-			wantEnabled:              false,
-			wantExplicitlyDisabled:   true,
+			name:                   "hub with enabled=false but no endpoint",
+			hub:                    &HubClientConfig{Enabled: &falseBool},
+			wantConfigured:         false,
+			wantEnabled:            false,
+			wantExplicitlyDisabled: true,
 		},
 		{
-			name:                     "hub with endpoint and token implies enabled",
-			hub:                      &HubClientConfig{Endpoint: "https://hub.example.com", Token: "scion_pat_xxx"},
-			wantConfigured:           true,
-			wantEnabled:              true,
-			wantExplicitlyDisabled:   false,
+			name:                   "hub with endpoint and token implies enabled",
+			hub:                    &HubClientConfig{Endpoint: "https://hub.example.com", Token: "scion_pat_xxx"},
+			wantConfigured:         true,
+			wantEnabled:            true,
+			wantExplicitlyDisabled: false,
 		},
 		{
-			name:                     "hub with endpoint and apiKey implies enabled",
-			hub:                      &HubClientConfig{Endpoint: "https://hub.example.com", APIKey: "key123"},
-			wantConfigured:           true,
-			wantEnabled:              true,
-			wantExplicitlyDisabled:   false,
+			name:                   "hub with endpoint and apiKey implies enabled",
+			hub:                    &HubClientConfig{Endpoint: "https://hub.example.com", APIKey: "key123"},
+			wantConfigured:         true,
+			wantEnabled:            true,
+			wantExplicitlyDisabled: false,
 		},
 		{
-			name:                     "hub with token only (no endpoint) not enabled",
-			hub:                      &HubClientConfig{Token: "scion_pat_xxx"},
-			wantConfigured:           false,
-			wantEnabled:              false,
-			wantExplicitlyDisabled:   false,
+			name:                   "hub with token only (no endpoint) not enabled",
+			hub:                    &HubClientConfig{Token: "scion_pat_xxx"},
+			wantConfigured:         false,
+			wantEnabled:            false,
+			wantExplicitlyDisabled: false,
 		},
 		{
-			name:                     "hub with endpoint, token, and enabled=false overrides to enabled",
-			hub:                      &HubClientConfig{Endpoint: "https://hub.example.com", Token: "scion_pat_xxx", Enabled: &falseBool},
-			wantConfigured:           true,
-			wantEnabled:              true,
-			wantExplicitlyDisabled:   true,
+			name:                   "hub with endpoint, token, and enabled=false overrides to enabled",
+			hub:                    &HubClientConfig{Endpoint: "https://hub.example.com", Token: "scion_pat_xxx", Enabled: &falseBool},
+			wantConfigured:         true,
+			wantEnabled:            true,
+			wantExplicitlyDisabled: true,
 		},
 	}
 

@@ -24,8 +24,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // AuthLoginRequest is the request body for /api/v1/auth/login.
@@ -56,7 +56,7 @@ type UserResponse struct {
 
 // AuthTokenRequest is the request body for /api/v1/auth/token.
 type AuthTokenRequest struct {
-	Provider     string `json:"provider"`     // "google", "github", etc.
+	Provider     string `json:"provider"` // "google", "github", etc.
 	Code         string `json:"code"`
 	RedirectURI  string `json:"redirectUri"`
 	GrantType    string `json:"grantType"`    // "authorization_code"

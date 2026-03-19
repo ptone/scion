@@ -37,10 +37,10 @@ type NotificationChannel interface {
 
 // ChannelConfig holds channel-specific configuration loaded from settings.
 type ChannelConfig struct {
-	Type            string            `json:"type" yaml:"type" koanf:"type"`
-	Params          map[string]string `json:"params,omitempty" yaml:"params,omitempty" koanf:"params"`
-	FilterTypes     []string          `json:"filter_types,omitempty" yaml:"filter_types,omitempty" koanf:"filter_types"`
-	FilterUrgentOnly bool            `json:"filter_urgent_only,omitempty" yaml:"filter_urgent_only,omitempty" koanf:"filter_urgent_only"`
+	Type             string            `json:"type" yaml:"type" koanf:"type"`
+	Params           map[string]string `json:"params,omitempty" yaml:"params,omitempty" koanf:"params"`
+	FilterTypes      []string          `json:"filter_types,omitempty" yaml:"filter_types,omitempty" koanf:"filter_types"`
+	FilterUrgentOnly bool              `json:"filter_urgent_only,omitempty" yaml:"filter_urgent_only,omitempty" koanf:"filter_urgent_only"`
 }
 
 // ChannelRegistry holds configured notification channels and dispatches

@@ -395,8 +395,8 @@ func TestBuildAgentEnv_EmptyValuePassthrough(t *testing.T) {
 
 	scionCfg := &api.ScionConfig{
 		Env: map[string]string{
-			"HOST_AVAILABLE_KEY": "",  // empty → should pick up "host-value" from host
-			"HOST_MISSING_KEY":   "",  // empty → host doesn't have it → should be omitted
+			"HOST_AVAILABLE_KEY": "", // empty → should pick up "host-value" from host
+			"HOST_MISSING_KEY":   "", // empty → host doesn't have it → should be omitted
 			"EXPLICIT_VALUE":     "explicit",
 		},
 	}
@@ -476,7 +476,7 @@ func TestBuildAgentEnv_HubEndpointOverride(t *testing.T) {
 		// then override with scion config hub endpoint.
 		extraEnv := map[string]string{
 			"SCION_HUB_ENDPOINT": "http://localhost:9810",
-			"SCION_HUB_URL":     "http://localhost:9810",
+			"SCION_HUB_URL":      "http://localhost:9810",
 		}
 
 		// Apply the override logic from Start()
@@ -507,7 +507,7 @@ func TestBuildAgentEnv_HubEndpointOverride(t *testing.T) {
 		scionCfg := &api.ScionConfig{}
 		extraEnv := map[string]string{
 			"SCION_HUB_ENDPOINT": "https://hub.example.com",
-			"SCION_HUB_URL":     "https://hub.example.com",
+			"SCION_HUB_URL":      "https://hub.example.com",
 		}
 
 		env, _, _ := buildAgentEnv(scionCfg, extraEnv)
@@ -1565,10 +1565,10 @@ func TestBuildAgentEnv_HubEnvVarsSurviveMerge(t *testing.T) {
 	// or dev token resolution) survive the buildAgentEnv merge.
 	scionCfg := &api.ScionConfig{}
 	extraEnv := map[string]string{
-		"SCION_HUB_ENDPOINT":          "http://localhost:9810",
-		"SCION_HUB_URL":              "http://localhost:9810",
-		"SCION_AUTH_TOKEN": "scion-dev-test-token-123",
-		"SCION_AGENT_NAME":           "test-agent",
+		"SCION_HUB_ENDPOINT": "http://localhost:9810",
+		"SCION_HUB_URL":      "http://localhost:9810",
+		"SCION_AUTH_TOKEN":   "scion-dev-test-token-123",
+		"SCION_AGENT_NAME":   "test-agent",
 	}
 
 	env, _, _ := buildAgentEnv(scionCfg, extraEnv)
@@ -1582,10 +1582,10 @@ func TestBuildAgentEnv_HubEnvVarsSurviveMerge(t *testing.T) {
 	}
 
 	expected := map[string]string{
-		"SCION_HUB_ENDPOINT":          "http://localhost:9810",
-		"SCION_HUB_URL":              "http://localhost:9810",
-		"SCION_AUTH_TOKEN": "scion-dev-test-token-123",
-		"SCION_AGENT_NAME":           "test-agent",
+		"SCION_HUB_ENDPOINT": "http://localhost:9810",
+		"SCION_HUB_URL":      "http://localhost:9810",
+		"SCION_AUTH_TOKEN":   "scion-dev-test-token-123",
+		"SCION_AGENT_NAME":   "test-agent",
 	}
 	for k, want := range expected {
 		got, ok := envMap[k]
@@ -1897,7 +1897,7 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 		// 1. CLI/grove settings sets initial value
 		extraEnv := map[string]string{
 			"SCION_HUB_ENDPOINT": "http://localhost:8080",
-			"SCION_HUB_URL":     "http://localhost:8080",
+			"SCION_HUB_URL":      "http://localhost:8080",
 		}
 
 		// 2. hub.endpoint overrides
@@ -1945,7 +1945,7 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 
 		extraEnv := map[string]string{
 			"SCION_HUB_ENDPOINT": "http://localhost:8080",
-			"SCION_HUB_URL":     "http://localhost:8080",
+			"SCION_HUB_URL":      "http://localhost:8080",
 		}
 
 		// hub.endpoint overrides

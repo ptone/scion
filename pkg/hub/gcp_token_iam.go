@@ -30,7 +30,7 @@ import (
 // to impersonate target service accounts. The Hub's own GCP identity (from ADC)
 // must have roles/iam.serviceAccountTokenCreator on each target SA.
 type IAMTokenGenerator struct {
-	service             *iamcredentials.Service
+	service                *iamcredentials.Service
 	hubServiceAccountEmail string
 }
 
@@ -49,7 +49,7 @@ func NewIAMTokenGenerator(ctx context.Context, hubEmail string, opts ...option.C
 	}
 
 	return &IAMTokenGenerator{
-		service:             svc,
+		service:                svc,
 		hubServiceAccountEmail: hubEmail,
 	}, nil
 }

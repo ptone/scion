@@ -479,10 +479,10 @@ func TestRequiredAuthSecrets(t *testing.T) {
 
 func TestDetectAuthTypeFromFileSecrets(t *testing.T) {
 	tests := []struct {
-		name       string
-		harness    string
-		secrets    map[string]struct{}
-		wantType   string
+		name     string
+		harness  string
+		secrets  map[string]struct{}
+		wantType string
 	}{
 		{
 			"gemini with GEMINI_OAUTH_CREDS",

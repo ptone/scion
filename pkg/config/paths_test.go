@@ -38,7 +38,7 @@ func TestGetGlobalDir(t *testing.T) {
 
 func TestGetGroveName(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	tests := []struct {
 		path string
 		want string
@@ -85,7 +85,7 @@ func TestGetResolvedProjectDir(t *testing.T) {
 			t.Errorf("GetResolvedProjectDir(%q) error: %v", tt.explicit, err)
 			continue
 		}
-		
+
 		evalGot, _ := filepath.EvalSymlinks(got)
 		evalWant, _ := filepath.EvalSymlinks(tt.want)
 

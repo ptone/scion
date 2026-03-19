@@ -90,20 +90,20 @@ type Client interface {
 type client struct {
 	transport *apiclient.Transport
 
-	agents         *agentService
-	groves         *groveService
-	runtimeBrokers *runtimeBrokerService
-	templates      *templateService
-	harnessConfigs *harnessConfigService
-	workspace      *workspaceService
-	users          *userService
-	env            *envService
-	secrets        *secretService
-	authService    *authService
-	tokens         *tokenService
-	notifications           *notificationService
-	subscriptions           *subscriptionService
-	subscriptionTemplates   *subscriptionTemplateService
+	agents                *agentService
+	groves                *groveService
+	runtimeBrokers        *runtimeBrokerService
+	templates             *templateService
+	harnessConfigs        *harnessConfigService
+	workspace             *workspaceService
+	users                 *userService
+	env                   *envService
+	secrets               *secretService
+	authService           *authService
+	tokens                *tokenService
+	notifications         *notificationService
+	subscriptions         *subscriptionService
+	subscriptionTemplates *subscriptionTemplateService
 }
 
 // New creates a new Hub API client.
@@ -334,7 +334,7 @@ func WithAgentToken(token string) Option {
 func WithHMACAuth(brokerID string, secretKey []byte) Option {
 	return func(c *client) {
 		c.transport.Auth = &apiclient.HMACAuth{
-			BrokerID:    brokerID,
+			BrokerID:  brokerID,
 			SecretKey: secretKey,
 		}
 	}

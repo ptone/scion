@@ -147,22 +147,22 @@ type StopAllResponse struct {
 
 // CreateAgentRequest is the request body for creating an agent.
 type CreateAgentRequest struct {
-	Name          string            `json:"name"`
-	GroveID       string            `json:"groveId"`
-	Template      string            `json:"template,omitempty"`
-	HarnessConfig       string            `json:"harnessConfig,omitempty"` // Explicit harness config name (used during sync when template may not be on Hub)
-	HarnessAuth         string            `json:"harnessAuth,omitempty"`   // Late-binding override for auth_selected_type
+	Name            string            `json:"name"`
+	GroveID         string            `json:"groveId"`
+	Template        string            `json:"template,omitempty"`
+	HarnessConfig   string            `json:"harnessConfig,omitempty"` // Explicit harness config name (used during sync when template may not be on Hub)
+	HarnessAuth     string            `json:"harnessAuth,omitempty"`   // Late-binding override for auth_selected_type
 	RuntimeBrokerID string            `json:"runtimeBrokerId,omitempty"`
-	Profile       string            `json:"profile,omitempty"`
-	Task          string            `json:"task,omitempty"`
-	Branch        string            `json:"branch,omitempty"`
-	Workspace     string            `json:"workspace,omitempty"`
-	Labels        map[string]string `json:"labels,omitempty"`
-	Annotations   map[string]string `json:"annotations,omitempty"`
-	Config        *api.ScionConfig  `json:"config,omitempty"`
-	Resume        bool              `json:"resume,omitempty"`
-	Attach        bool              `json:"attach,omitempty"` // If true, signals interactive attach mode to the broker/harness
-	ProvisionOnly bool              `json:"provisionOnly,omitempty"` // If true, provision only (write task to prompt.md) without starting
+	Profile         string            `json:"profile,omitempty"`
+	Task            string            `json:"task,omitempty"`
+	Branch          string            `json:"branch,omitempty"`
+	Workspace       string            `json:"workspace,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	Annotations     map[string]string `json:"annotations,omitempty"`
+	Config          *api.ScionConfig  `json:"config,omitempty"`
+	Resume          bool              `json:"resume,omitempty"`
+	Attach          bool              `json:"attach,omitempty"`        // If true, signals interactive attach mode to the broker/harness
+	ProvisionOnly   bool              `json:"provisionOnly,omitempty"` // If true, provision only (write task to prompt.md) without starting
 	// WorkspaceFiles is populated for non-git workspace bootstrap.
 	WorkspaceFiles []transfer.FileInfo `json:"workspaceFiles,omitempty"`
 
@@ -195,18 +195,18 @@ type CreateAgentResponse struct {
 // SecretKeyInfo provides metadata about a required secret key.
 type SecretKeyInfo struct {
 	Description string `json:"description,omitempty"`
-	Source      string `json:"source"`                // "harness", "template", "settings"
-	Type        string `json:"type,omitempty"`         // "environment" (default), "variable", "file"
+	Source      string `json:"source"`         // "harness", "template", "settings"
+	Type        string `json:"type,omitempty"` // "environment" (default), "variable", "file"
 }
 
 type EnvGatherResponse struct {
-	AgentID     string                  `json:"agentId"`
-	Required    []string                `json:"required"`
-	HubHas      []EnvSource             `json:"hubHas"`
-	BrokerHas   []string                `json:"brokerHas"`
-	Needs       []string                `json:"needs"`
+	AgentID     string                   `json:"agentId"`
+	Required    []string                 `json:"required"`
+	HubHas      []EnvSource              `json:"hubHas"`
+	BrokerHas   []string                 `json:"brokerHas"`
+	Needs       []string                 `json:"needs"`
 	SecretInfo  map[string]SecretKeyInfo `json:"secretInfo,omitempty"`
-	HubWarnings []string                `json:"hubWarnings,omitempty"`
+	HubWarnings []string                 `json:"hubWarnings,omitempty"`
 }
 
 // EnvSource tracks which scope provided an env var key.

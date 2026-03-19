@@ -32,15 +32,15 @@ import (
 // notification subscriptions, stores notification records, and dispatches
 // messages to subscriber agents.
 type NotificationDispatcher struct {
-	store            store.Store
-	events           *ChannelEventPublisher
-	getDispatcher    func() AgentDispatcher // lazy getter; dispatcher may be set after startup
-	log              *slog.Logger
-	messageLog       *slog.Logger       // dedicated message audit logger (nil = disabled)
-	channelRegistry  *ChannelRegistry   // external notification channels (nil = disabled)
-	stopCh           chan struct{}
-	stopOnce         sync.Once
-	wg               sync.WaitGroup
+	store           store.Store
+	events          *ChannelEventPublisher
+	getDispatcher   func() AgentDispatcher // lazy getter; dispatcher may be set after startup
+	log             *slog.Logger
+	messageLog      *slog.Logger     // dedicated message audit logger (nil = disabled)
+	channelRegistry *ChannelRegistry // external notification channels (nil = disabled)
+	stopCh          chan struct{}
+	stopOnce        sync.Once
+	wg              sync.WaitGroup
 }
 
 // NewNotificationDispatcher creates a new NotificationDispatcher.

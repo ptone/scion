@@ -21,11 +21,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -165,7 +165,7 @@ func TestCompositeStore_AddGroupMember_AgentShadowRecord(t *testing.T) {
 		Name:         "Test Agent",
 		Slug:         "test-agent",
 		GroveID:      groveID,
-		Phase: string(state.PhaseStopped),
+		Phase:        string(state.PhaseStopped),
 		StateVersion: 1,
 		Created:      time.Now(),
 		Updated:      time.Now(),

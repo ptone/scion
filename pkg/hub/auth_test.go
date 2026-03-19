@@ -106,9 +106,9 @@ func TestUnifiedAuthMiddleware_UserToken(t *testing.T) {
 	}
 
 	cfg := AuthConfig{
-		Mode:          "production",
-		UserTokenSvc:  userTokenSvc,
-		Debug:         false,
+		Mode:         "production",
+		UserTokenSvc: userTokenSvc,
+		Debug:        false,
 	}
 
 	middleware := UnifiedAuthMiddleware(cfg)

@@ -69,16 +69,16 @@ type GCPTokenEvent struct {
 // BrokerAuthEvent represents an auditable event related to broker authentication.
 type BrokerAuthEvent struct {
 	EventType  BrokerAuthEventType `json:"eventType"`
-	BrokerID string            `json:"brokerId"`
-	BrokerName string            `json:"brokerName,omitempty"`
-	IPAddress  string            `json:"ipAddress,omitempty"`
-	UserAgent  string            `json:"userAgent,omitempty"`
-	Success    bool              `json:"success"`
-	FailReason string            `json:"failReason,omitempty"`
-	ActorID    string            `json:"actorId,omitempty"`   // User ID if admin action
-	ActorType  string            `json:"actorType,omitempty"` // "user", "broker", or "system"
-	Timestamp  time.Time         `json:"timestamp"`
-	Details    map[string]string `json:"details,omitempty"`
+	BrokerID   string              `json:"brokerId"`
+	BrokerName string              `json:"brokerName,omitempty"`
+	IPAddress  string              `json:"ipAddress,omitempty"`
+	UserAgent  string              `json:"userAgent,omitempty"`
+	Success    bool                `json:"success"`
+	FailReason string              `json:"failReason,omitempty"`
+	ActorID    string              `json:"actorId,omitempty"`   // User ID if admin action
+	ActorType  string              `json:"actorType,omitempty"` // "user", "broker", or "system"
+	Timestamp  time.Time           `json:"timestamp"`
+	Details    map[string]string   `json:"details,omitempty"`
 }
 
 // AuditLogger defines the interface for logging audit events.
@@ -184,7 +184,7 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 
 			// Create base event
 			event := &BrokerAuthEvent{
-				BrokerID:    brokerID,
+				BrokerID:  brokerID,
 				IPAddress: getClientIP(r),
 				UserAgent: r.UserAgent(),
 				Timestamp: time.Now(),
@@ -250,14 +250,14 @@ func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, bro
 	}
 
 	event := &BrokerAuthEvent{
-		EventType: BrokerAuthEventRegister,
-		BrokerID:    brokerID,
-		BrokerName:  brokerName,
-		IPAddress: ipAddress,
-		Success:   true,
-		ActorID:   actorID,
-		ActorType: "user",
-		Timestamp: time.Now(),
+		EventType:  BrokerAuthEventRegister,
+		BrokerID:   brokerID,
+		BrokerName: brokerName,
+		IPAddress:  ipAddress,
+		Success:    true,
+		ActorID:    actorID,
+		ActorType:  "user",
+		Timestamp:  time.Now(),
 	}
 
 	_ = logger.LogBrokerAuthEvent(ctx, event)
@@ -271,7 +271,7 @@ func LogJoinEvent(ctx context.Context, logger AuditLogger, brokerID, ipAddress s
 
 	event := &BrokerAuthEvent{
 		EventType:  BrokerAuthEventJoin,
-		BrokerID:     brokerID,
+		BrokerID:   brokerID,
 		IPAddress:  ipAddress,
 		Success:    success,
 		FailReason: failReason,

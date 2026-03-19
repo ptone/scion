@@ -67,7 +67,7 @@ func TestAgentCRUD(t *testing.T) {
 		Name:       "Test Agent",
 		Template:   "claude",
 		GroveID:    grove.ID,
-		Phase: string(state.PhaseCreated),
+		Phase:      string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 		Labels:     map[string]string{"env": "test"},
 	}
@@ -139,11 +139,11 @@ func TestAgentList(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		agent := &store.Agent{
 			ID:         api.NewUUID(),
-			Slug:    api.Slugify("agent-" + string(rune('a'+i))),
+			Slug:       api.Slugify("agent-" + string(rune('a'+i))),
 			Name:       "Agent " + string(rune('A'+i)),
 			Template:   "claude",
 			GroveID:    grove.ID,
-			Phase: string(state.PhaseRunning),
+			Phase:      string(state.PhaseRunning),
 			Visibility: store.VisibilityPrivate,
 		}
 		if i%2 == 0 {
@@ -193,14 +193,14 @@ func TestAgentStatusUpdate(t *testing.T) {
 		Name:       "Test Agent",
 		Template:   "claude",
 		GroveID:    grove.ID,
-		Phase: string(state.PhaseCreated),
+		Phase:      string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
 	// Legacy path: update flat status only (backward compat)
 	err := s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
-		Phase: string(state.PhaseRunning),
+		Phase:           string(state.PhaseRunning),
 		ContainerStatus: "Up 5 minutes",
 	})
 	require.NoError(t, err)
@@ -335,7 +335,7 @@ func TestSoftDeleteFilterExclusion(t *testing.T) {
 			Name:       "SD Agent " + string(rune('A'+i)),
 			Template:   "claude",
 			GroveID:    grove.ID,
-			Phase: string(state.PhaseRunning),
+			Phase:      string(state.PhaseRunning),
 			Visibility: store.VisibilityPrivate,
 		}
 		if i == 2 {
@@ -411,7 +411,7 @@ func TestPurgeDeletedAgents(t *testing.T) {
 		Name:       "Active Agent",
 		Template:   "claude",
 		GroveID:    grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:      string(state.PhaseRunning),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, oldAgent))
@@ -456,7 +456,7 @@ func TestDeletedAtPersistence(t *testing.T) {
 		Name:       "Soft Delete Test",
 		Template:   "claude",
 		GroveID:    grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:      string(state.PhaseRunning),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -595,7 +595,7 @@ func TestGroveList(t *testing.T) {
 				Slug:    "test-agent",
 				Name:    "Test Agent",
 				GroveID: grove.ID,
-				Phase: string(state.PhaseRunning),
+				Phase:   string(state.PhaseRunning),
 			}
 			require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -716,7 +716,7 @@ func TestRuntimeBrokerLookupByName(t *testing.T) {
 		ID:     api.NewUUID(),
 		Name:   "My-Laptop",
 		Slug:   "my-laptop",
-				Status: store.BrokerStatusOnline,
+		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
@@ -753,7 +753,7 @@ func TestRuntimeBrokerCRUD(t *testing.T) {
 		ID:      api.NewUUID(),
 		Name:    "Dev Laptop",
 		Slug:    "dev-laptop",
-				Version: "1.0.0",
+		Version: "1.0.0",
 		Status:  store.BrokerStatusOnline,
 		Capabilities: &store.BrokerCapabilities{
 			WebPTY: true,
@@ -817,7 +817,7 @@ func TestRuntimeBrokerList(t *testing.T) {
 			ID:     api.NewUUID(),
 			Name:   "Host " + string(rune('A'+i)),
 			Slug:   "host-" + string(rune('a'+i)),
-						Status: store.BrokerStatusOnline,
+			Status: store.BrokerStatusOnline,
 			Profiles: []store.BrokerProfile{
 				{Name: "default", Type: "docker", Available: true},
 			},
@@ -1212,7 +1212,7 @@ func TestGroveProviders(t *testing.T) {
 		ID:     api.NewUUID(),
 		Name:   "Host 1",
 		Slug:   "host-1",
-				Status: store.BrokerStatusOnline,
+		Status: store.BrokerStatusOnline,
 		Profiles: []store.BrokerProfile{
 			{Name: "docker", Type: "docker", Available: true},
 			{Name: "dev", Type: "docker", Available: true},
@@ -1224,7 +1224,7 @@ func TestGroveProviders(t *testing.T) {
 		ID:     api.NewUUID(),
 		Name:   "Host 2",
 		Slug:   "host-2",
-				Status: store.BrokerStatusOnline,
+		Status: store.BrokerStatusOnline,
 		Profiles: []store.BrokerProfile{
 			{Name: "k8s-prod", Type: "kubernetes", Available: true},
 		},
@@ -1401,11 +1401,11 @@ func TestCascadeDelete(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:         api.NewUUID(),
-		Slug:    "test-agent",
+		Slug:       "test-agent",
 		Name:       "Test Agent",
 		Template:   "claude",
 		GroveID:    grove.ID,
-		Phase: string(state.PhaseRunning),
+		Phase:      string(state.PhaseRunning),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -1565,7 +1565,7 @@ func TestMarkStaleAgentsOffline(t *testing.T) {
 			Name:       "Active Agent " + activity,
 			Template:   "claude",
 			GroveID:    grove.ID,
-			Phase: string(state.PhaseCreated),
+			Phase:      string(state.PhaseCreated),
 			Visibility: store.VisibilityPrivate,
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent))

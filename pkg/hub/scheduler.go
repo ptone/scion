@@ -361,11 +361,11 @@ func (s *Scheduler) ScheduleEvent(ctx context.Context, evt store.ScheduledEvent)
 
 // SchedulerStatus holds a point-in-time snapshot of the scheduler's state.
 type SchedulerStatus struct {
-	TickCount     uint64                  `json:"tickCount"`
-	TickInterval  string                  `json:"tickInterval"`
-	Recurring     []RecurringHandlerInfo  `json:"recurringHandlers"`
-	EventHandlers []string                `json:"eventHandlers"`
-	ActiveTimers  int                     `json:"activeTimers"`
+	TickCount     uint64                 `json:"tickCount"`
+	TickInterval  string                 `json:"tickInterval"`
+	Recurring     []RecurringHandlerInfo `json:"recurringHandlers"`
+	EventHandlers []string               `json:"eventHandlers"`
+	ActiveTimers  int                    `json:"activeTimers"`
 }
 
 // RecurringHandlerInfo is the public view of a registered recurring handler.

@@ -62,8 +62,8 @@ func (m *mockHarness) Provision(ctx context.Context, agentName, agentDir, agentH
 	m.provisioned = true
 	return nil
 }
-func (m *mockHarness) GetEmbedDir() string             { return "my-harness" }
-func (m *mockHarness) GetInterruptKey() string          { return "C-c" }
+func (m *mockHarness) GetEmbedDir() string                    { return "my-harness" }
+func (m *mockHarness) GetInterruptKey() string                { return "C-c" }
 func (m *mockHarness) GetHarnessEmbedsFS() (embed.FS, string) { return embed.FS{}, "" }
 func (m *mockHarness) InjectAgentInstructions(agentHome string, content []byte) error {
 	m.injected = content

@@ -42,8 +42,8 @@ const (
 type TemplateMatch struct {
 	Name        string
 	Location    TemplateLocation
-	LocalPath   string               // For local templates
-	HubTemplate *hubclient.Template  // For hub templates
+	LocalPath   string              // For local templates
+	HubTemplate *hubclient.Template // For hub templates
 }
 
 // DisplayLocation returns a human-readable location string.

@@ -215,7 +215,6 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 	return agents, nil
 }
 
-
 func (r *AppleContainerRuntime) GetLogs(ctx context.Context, id string) (string, error) {
 	return runSimpleCommand(ctx, r.Command, "logs", id)
 }

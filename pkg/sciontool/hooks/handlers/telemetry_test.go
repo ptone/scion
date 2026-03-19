@@ -215,7 +215,7 @@ func (p *recordingProcessor) OnEmit(_ context.Context, record *sdklog.Record) er
 	return nil
 }
 
-func (p *recordingProcessor) Shutdown(context.Context) error { return nil }
+func (p *recordingProcessor) Shutdown(context.Context) error   { return nil }
 func (p *recordingProcessor) ForceFlush(context.Context) error { return nil }
 
 func (p *recordingProcessor) Records() []sdklog.Record {
@@ -261,7 +261,7 @@ func TestTelemetryHandler_WithLoggerProvider(t *testing.T) {
 		Dialect: "claude",
 		Data: hooks.EventData{
 			SessionID: "sess-abc",
-			Source:     "cli",
+			Source:    "cli",
 		},
 	}
 	if err := h.Handle(event); err != nil {

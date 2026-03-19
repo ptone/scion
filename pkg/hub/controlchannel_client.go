@@ -24,10 +24,10 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
+	"github.com/google/uuid"
 )
 
 // ControlChannelBrokerClient implements RuntimeBrokerClient by tunneling requests

@@ -304,10 +304,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		templatePath, err := s.hydrateTemplate(ctx, in.Config, hubConn)
 		if err != nil {
 			return nil, &startContextError{
-				Status:       http.StatusInternalServerError,
-				Message:      "Failed to hydrate template: " + err.Error(),
-				IsHubError:   true,
-				OriginalErr:  err,
+				Status:      http.StatusInternalServerError,
+				Message:     "Failed to hydrate template: " + err.Error(),
+				IsHubError:  true,
+				OriginalErr: err,
 			}
 		}
 		if templatePath != "" {

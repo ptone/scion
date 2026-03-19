@@ -301,8 +301,8 @@ func TestStart_ErrorPropagation_FalsePositive_Tmux(t *testing.T) {
 	// This simulates the user's case:
 	// "container run ... tmux new-session ... failed: ... Error: invalidArgument: path ... does not exist"
 	originalErr := fmt.Errorf("container run -d ... tmux new-session ... failed: exit status 1 (output: Error: invalidArgument: \"path '/foo' does not exist\")")
-	
-mockRuntime := &runtime.MockRuntime{
+
+	mockRuntime := &runtime.MockRuntime{
 		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
 			return "", originalErr
 		},
@@ -399,8 +399,8 @@ func TestStart_ErrorPropagation_Tmux_CommandNotFound(t *testing.T) {
 
 	// MockRuntime that simulates "tmux: command not found"
 	originalErr := fmt.Errorf("container run failed: bash: tmux: command not found")
-	
-mockRuntime := &runtime.MockRuntime{
+
+	mockRuntime := &runtime.MockRuntime{
 		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
 			return "", originalErr
 		},

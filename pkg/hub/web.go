@@ -30,12 +30,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/sessions"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/web"
+	"github.com/gorilla/sessions"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 )
@@ -138,17 +138,17 @@ type WebServer struct {
 	config       WebServerConfig
 	httpServer   *http.Server
 	mux          *http.ServeMux
-	assets       fs.FS              // embedded or nil
-	assetsDisk   string             // filesystem override path, or ""
+	assets       fs.FS  // embedded or nil
+	assetsDisk   string // filesystem override path, or ""
 	shellTmpl    *template.Template
 	sessionStore *sessions.FilesystemStore
 	oauthService *OAuthService
 	store        store.Store
 	userTokenSvc *UserTokenService
-	events       *ChannelEventPublisher // nil when no publisher configured
-	hubHandler   http.Handler           // mounted Hub API handler, or nil
+	events       *ChannelEventPublisher      // nil when no publisher configured
+	hubHandler   http.Handler                // mounted Hub API handler, or nil
 	hubShutdown  func(context.Context) error // Hub resource cleanup, or nil
-	maintenance  *MaintenanceState     // runtime maintenance mode state (shared with Hub)
+	maintenance  *MaintenanceState           // runtime maintenance mode state (shared with Hub)
 	startTime    time.Time
 
 	// Dedicated request logger (nil = disabled)

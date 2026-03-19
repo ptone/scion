@@ -21,28 +21,28 @@ import (
 )
 
 type RunConfig struct {
-	Name               string
-	Template           string
-	UnixUsername        string
-	Image              string
-	HomeDir            string
-	Workspace          string
-	RepoRoot           string
-	ContainerWorkspace string // The container-side workspace path (e.g., /workspace or /repo-root/.scion/agents/foo/workspace)
-	Env             []string
-	ResolvedSecrets []api.ResolvedSecret
-	Volumes         []api.VolumeMount
-	Labels          map[string]string
-	Annotations     map[string]string
-	ResolvedAuth    *api.ResolvedAuth
-	Harness         api.Harness
-	Task            string
-	CommandArgs     []string
-	Resume           bool
-	TelemetryEnabled bool
-	Resources        *api.ResourceSpec
-	Kubernetes      *api.KubernetesConfig
-	GitClone        *api.GitCloneConfig
+	Name                 string
+	Template             string
+	UnixUsername         string
+	Image                string
+	HomeDir              string
+	Workspace            string
+	RepoRoot             string
+	ContainerWorkspace   string // The container-side workspace path (e.g., /workspace or /repo-root/.scion/agents/foo/workspace)
+	Env                  []string
+	ResolvedSecrets      []api.ResolvedSecret
+	Volumes              []api.VolumeMount
+	Labels               map[string]string
+	Annotations          map[string]string
+	ResolvedAuth         *api.ResolvedAuth
+	Harness              api.Harness
+	Task                 string
+	CommandArgs          []string
+	Resume               bool
+	TelemetryEnabled     bool
+	Resources            *api.ResourceSpec
+	Kubernetes           *api.KubernetesConfig
+	GitClone             *api.GitCloneConfig
 	SharedDirs           []api.SharedDir
 	BrokerMode           bool
 	Debug                bool

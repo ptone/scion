@@ -291,8 +291,8 @@ func TestCreateSharedDirPVCs_MissingGroveLabel(t *testing.T) {
 	ctx := context.Background()
 
 	config := RunConfig{
-		Name:  "test-agent",
-		Image: "test:latest",
+		Name:   "test-agent",
+		Image:  "test:latest",
 		Labels: map[string]string{},
 		SharedDirs: []api.SharedDir{
 			{Name: "build-cache"},

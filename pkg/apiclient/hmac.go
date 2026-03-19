@@ -31,7 +31,7 @@ import (
 
 // HMAC authentication headers (must match pkg/hub/hostauth.go).
 const (
-	HeaderBrokerID        = "X-Scion-Broker-ID"
+	HeaderBrokerID      = "X-Scion-Broker-ID"
 	HeaderTimestamp     = "X-Scion-Timestamp"
 	HeaderNonce         = "X-Scion-Nonce"
 	HeaderSignature     = "X-Scion-Signature"
@@ -41,7 +41,7 @@ const (
 // HMACAuth implements HMAC-based authentication for Runtime Brokers.
 // This authenticator signs requests using the same algorithm as pkg/hub/hostauth.go.
 type HMACAuth struct {
-	BrokerID string
+	BrokerID  string
 	SecretKey []byte
 }
 

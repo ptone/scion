@@ -113,9 +113,9 @@ func TestOutputActionResult(t *testing.T) {
 		os.Stderr = stderrW
 
 		result := ActionResult{
-			Status:  "success",
-			Command: "test",
-			Message: "test message",
+			Status:   "success",
+			Command:  "test",
+			Message:  "test message",
 			Warnings: []string{"warning 1"},
 		}
 		err := outputActionResult(result)

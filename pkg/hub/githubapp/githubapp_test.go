@@ -88,8 +88,8 @@ func TestParsePrivateKey_PKCS8(t *testing.T) {
 
 func TestParsePrivateKey_Invalid(t *testing.T) {
 	tests := []struct {
-		name    string
-		data    []byte
+		name string
+		data []byte
 	}{
 		{"empty", []byte{}},
 		{"garbage", []byte("not a pem block")},

@@ -121,8 +121,8 @@ func TestOAuthConfig_IsProviderConfigured(t *testing.T) {
 		provider string
 		expected bool
 	}{
-		{"google", true},  // configured in web
-		{"github", true},  // configured in device (cli missing secret)
+		{"google", true}, // configured in web
+		{"github", true}, // configured in device (cli missing secret)
 		{"unknown", false},
 	}
 

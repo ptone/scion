@@ -29,7 +29,7 @@ func Init() {
 
 	// If already initialized, we might still want to re-init slog if logPath changed
 	// but for now let's just allow re-setting slog default to our handler
-	
+
 	if logPath == "" {
 		// Priority 1: Check if /home/scion exists (standard agent home)
 		if _, err := os.Stat("/home/scion"); err == nil {

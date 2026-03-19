@@ -33,18 +33,18 @@ const SignedURLExpiry = 15 * time.Minute
 
 // CreateTemplateRequest is the request body for creating a template.
 type CreateTemplateRequest struct {
-	Name         string               `json:"name"`
-	Slug         string               `json:"slug,omitempty"`
-	DisplayName  string               `json:"displayName,omitempty"`
-	Description  string               `json:"description,omitempty"`
-	Harness      string               `json:"harness,omitempty"`
-	Scope        string               `json:"scope"`
-	ScopeID      string               `json:"scopeId,omitempty"`
-	GroveID      string               `json:"groveId,omitempty"` // Deprecated: use ScopeID
+	Name         string                `json:"name"`
+	Slug         string                `json:"slug,omitempty"`
+	DisplayName  string                `json:"displayName,omitempty"`
+	Description  string                `json:"description,omitempty"`
+	Harness      string                `json:"harness,omitempty"`
+	Scope        string                `json:"scope"`
+	ScopeID      string                `json:"scopeId,omitempty"`
+	GroveID      string                `json:"groveId,omitempty"` // Deprecated: use ScopeID
 	Config       *store.TemplateConfig `json:"config,omitempty"`
-	BaseTemplate string               `json:"baseTemplate,omitempty"`
-	Visibility   string               `json:"visibility,omitempty"`
-	Files        []FileUploadRequest  `json:"files,omitempty"`
+	BaseTemplate string                `json:"baseTemplate,omitempty"`
+	Visibility   string                `json:"visibility,omitempty"`
+	Files        []FileUploadRequest   `json:"files,omitempty"`
 }
 
 // FileUploadRequest describes a file to upload.
@@ -55,9 +55,9 @@ type FileUploadRequest struct {
 
 // CreateTemplateResponse is the response for template creation.
 type CreateTemplateResponse struct {
-	Template    *store.Template    `json:"template"`
-	UploadURLs  []UploadURLInfo    `json:"uploadUrls,omitempty"`
-	ManifestURL string             `json:"manifestUrl,omitempty"`
+	Template    *store.Template `json:"template"`
+	UploadURLs  []UploadURLInfo `json:"uploadUrls,omitempty"`
+	ManifestURL string          `json:"manifestUrl,omitempty"`
 }
 
 // UploadURLInfo contains a signed URL for uploading a file.
@@ -87,16 +87,16 @@ type FinalizeRequest struct {
 
 // TemplateManifest is the manifest of uploaded template files.
 type TemplateManifest struct {
-	Version string              `json:"version"`
-	Harness string              `json:"harness,omitempty"`
+	Version string               `json:"version"`
+	Harness string               `json:"harness,omitempty"`
 	Files   []store.TemplateFile `json:"files"`
 }
 
 // DownloadResponse contains signed URLs for downloading template files.
 type DownloadResponse struct {
-	ManifestURL string         `json:"manifestUrl,omitempty"`
+	ManifestURL string            `json:"manifestUrl,omitempty"`
 	Files       []DownloadURLInfo `json:"files"`
-	Expires     time.Time      `json:"expires"`
+	Expires     time.Time         `json:"expires"`
 }
 
 // DownloadURLInfo contains info for downloading a file.

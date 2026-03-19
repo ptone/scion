@@ -29,7 +29,7 @@ const (
 
 // GCPBackendConfig holds configuration for the GCP Secret Manager backend.
 type GCPBackendConfig struct {
-	ProjectID      string
+	ProjectID       string
 	CredentialsJSON string
 }
 

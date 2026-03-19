@@ -480,8 +480,8 @@ func (s *Server) createAgentInGrove(
 		// Authorization: only users with grove manage permission can assign SAs
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type:       "grove",
-				ID:         groveID,
+				Type: "grove",
+				ID:   groveID,
 			}, ActionManage)
 			if !decision.Allowed {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden,
@@ -2051,10 +2051,10 @@ type stopAllResult struct {
 
 // StopAllAgentsResponse is the response from the stop-all endpoint.
 type StopAllAgentsResponse struct {
-	Stopped int              `json:"stopped"`
-	Failed  int              `json:"failed"`
-	Total   int              `json:"total"`
-	Results []stopAllResult  `json:"results"`
+	Stopped int             `json:"stopped"`
+	Failed  int             `json:"failed"`
+	Total   int             `json:"total"`
+	Results []stopAllResult `json:"results"`
 }
 
 // handleStopAllAgents stops all running agents, optionally scoped to a grove.
@@ -4502,7 +4502,7 @@ type brokerAgentHeartbeat struct {
 	Activity        string `json:"activity,omitempty"`
 	ContainerStatus string `json:"containerStatus,omitempty"`
 	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
-	Profile         string `json:"profile,omitempty"`      // Settings profile used
+	Profile         string `json:"profile,omitempty"`     // Settings profile used
 }
 
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {

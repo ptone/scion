@@ -33,7 +33,7 @@ type mockRuntimeBrokerService struct {
 }
 
 type mockHeartbeatCall struct {
-	BrokerID string
+	BrokerID  string
 	Heartbeat *hubclient.BrokerHeartbeat
 	Time      time.Time
 }
@@ -70,7 +70,7 @@ func (m *mockRuntimeBrokerService) Heartbeat(ctx context.Context, brokerID strin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.heartbeatCalls = append(m.heartbeatCalls, mockHeartbeatCall{
-		BrokerID:    brokerID,
+		BrokerID:  brokerID,
 		Heartbeat: status,
 		Time:      time.Now(),
 	})

@@ -197,8 +197,8 @@ func TestMetadataServer_AssignMode_SAEndpoints(t *testing.T) {
 		case "/api/v1/agent/gcp-token":
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"access_token": "ya29.test-token",
-				"expires_in":  3599,
-				"token_type":  "Bearer",
+				"expires_in":   3599,
+				"token_type":   "Bearer",
 			})
 		case "/api/v1/agent/gcp-identity-token":
 			json.NewEncoder(w).Encode(map[string]string{
@@ -301,8 +301,8 @@ func TestMetadataServer_AssignMode_TokenCaching(t *testing.T) {
 		requestCount++
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token": fmt.Sprintf("ya29.token-%d", requestCount),
-			"expires_in":  3599,
-			"token_type":  "Bearer",
+			"expires_in":   3599,
+			"token_type":   "Bearer",
 		})
 	}))
 	defer hubServer.Close()

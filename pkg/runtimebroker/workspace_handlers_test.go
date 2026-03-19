@@ -228,7 +228,7 @@ func TestWorkspaceUploadAgentNotFound(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := WorkspaceUploadRequest{
-		Slug:     "nonexistent-agent",
+		Slug:        "nonexistent-agent",
 		StoragePath: "workspaces/grove/agent",
 	}
 	bodyBytes, _ := json.Marshal(body)
@@ -252,7 +252,7 @@ func TestWorkspaceApplyAgentNotFound(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := WorkspaceApplyRequest{
-		Slug:     "nonexistent-agent",
+		Slug:        "nonexistent-agent",
 		StoragePath: "workspaces/grove/agent",
 	}
 	bodyBytes, _ := json.Marshal(body)
@@ -582,7 +582,7 @@ func TestApplyFilePermissions_MissingFile(t *testing.T) {
 
 func TestWorkspaceUploadRequest_JSONSerialization(t *testing.T) {
 	req := WorkspaceUploadRequest{
-		Slug:         "agent-123",
+		Slug:            "agent-123",
 		StoragePath:     "workspaces/grove-1/agent-123",
 		Bucket:          "my-bucket",
 		ExcludePatterns: []string{".git/**", "node_modules/**"},
@@ -651,7 +651,7 @@ func TestWorkspaceUploadResponse_JSONSerialization(t *testing.T) {
 
 func TestWorkspaceApplyRequest_JSONSerialization(t *testing.T) {
 	req := WorkspaceApplyRequest{
-		Slug:     "agent-456",
+		Slug:        "agent-456",
 		StoragePath: "workspaces/grove-2/agent-456",
 		Bucket:      "other-bucket",
 		Manifest: &transfer.Manifest{
@@ -757,7 +757,7 @@ func TestWorkspaceUpload_WithBucketInRequest(t *testing.T) {
 
 	// Bucket provided in request
 	body := WorkspaceUploadRequest{
-		Slug:     "test-agent",
+		Slug:        "test-agent",
 		StoragePath: "workspaces/grove/agent",
 		Bucket:      "request-bucket",
 	}
@@ -790,7 +790,7 @@ func TestWorkspaceApply_WithBucketInRequest(t *testing.T) {
 
 	// Bucket provided in request
 	body := WorkspaceApplyRequest{
-		Slug:     "test-agent",
+		Slug:        "test-agent",
 		StoragePath: "workspaces/grove/agent",
 		Bucket:      "request-bucket",
 	}
@@ -850,10 +850,10 @@ func TestCountWorkspaceFiles_NestedDirectories(t *testing.T) {
 
 	// Create nested files
 	testFiles := map[string]string{
-		"a.txt":            "content1",
-		"dir1/b.txt":       "content22",
-		"dir1/dir2/c.txt":  "content333",
-		"dir3/d.txt":       "content4444",
+		"a.txt":           "content1",
+		"dir1/b.txt":      "content22",
+		"dir1/dir2/c.txt": "content333",
+		"dir3/d.txt":      "content4444",
 	}
 
 	var expectedSize int64

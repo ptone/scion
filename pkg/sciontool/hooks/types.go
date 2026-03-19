@@ -64,7 +64,7 @@ const (
 	EventToolEnd   = "tool-end"
 
 	// User interaction events
-	EventPromptSubmit    = "prompt-submit"
+	EventPromptSubmit     = "prompt-submit"
 	EventResponseComplete = "response-complete"
 
 	// Notification events

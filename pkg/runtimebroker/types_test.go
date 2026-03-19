@@ -23,12 +23,12 @@ import (
 
 func TestAgentInfoToResponse(t *testing.T) {
 	tests := []struct {
-		name            string
-		info            api.AgentInfo
-		expectedStatus  string
-		expectedPhase   string
+		name             string
+		info             api.AgentInfo
+		expectedStatus   string
+		expectedPhase    string
 		expectedActivity string
-		expectedReady   bool
+		expectedReady    bool
 	}{
 		{
 			name: "phase and activity set uses structured path",

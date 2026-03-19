@@ -66,7 +66,7 @@ type ListBrokersOptions struct {
 // ListBrokersResponse is the response from listing runtime brokers.
 type ListBrokersResponse struct {
 	Brokers []RuntimeBroker
-	Page  apiclient.PageResult
+	Page    apiclient.PageResult
 }
 
 // UpdateBrokerRequest is the request for updating a runtime broker.
@@ -102,7 +102,7 @@ type AgentHeartbeat struct {
 	Activity        string `json:"activity,omitempty"`
 	ContainerStatus string `json:"containerStatus,omitempty"`
 	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
-	Profile         string `json:"profile,omitempty"`      // Settings profile used
+	Profile         string `json:"profile,omitempty"`     // Settings profile used
 }
 
 // CreateBrokerRequest is the request to create a new broker registration.
@@ -136,7 +136,7 @@ type JoinBrokerRequest struct {
 type JoinBrokerResponse struct {
 	SecretKey   string `json:"secretKey"` // Base64-encoded HMAC secret
 	HubEndpoint string `json:"hubEndpoint"`
-	BrokerID string `json:"brokerId"`
+	BrokerID    string `json:"brokerId"`
 }
 
 // Create creates a new broker registration and returns a join token.
@@ -180,8 +180,8 @@ func (s *runtimeBrokerService) List(ctx context.Context, opts *ListBrokersOption
 
 	type listResponse struct {
 		Brokers    []RuntimeBroker `json:"brokers"`
-		NextCursor string        `json:"nextCursor,omitempty"`
-		TotalCount int           `json:"totalCount,omitempty"`
+		NextCursor string          `json:"nextCursor,omitempty"`
+		TotalCount int             `json:"totalCount,omitempty"`
 	}
 
 	result, err := apiclient.DecodeResponse[listResponse](resp)

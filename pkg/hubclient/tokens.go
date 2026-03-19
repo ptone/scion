@@ -54,7 +54,7 @@ type CreateTokenRequest struct {
 
 // CreateTokenResponse is the response from creating a user access token.
 type CreateTokenResponse struct {
-	Token       string     `json:"token"`       // Full token value, shown only once
+	Token       string     `json:"token"` // Full token value, shown only once
 	AccessToken *TokenInfo `json:"accessToken"`
 }
 

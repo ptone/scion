@@ -170,7 +170,7 @@ func TestListSetsLastSeenFromAgentInfoMtime(t *testing.T) {
 	}
 
 	info := api.AgentInfo{
-		Name:   agentName,
+		Name:  agentName,
 		Phase: "running",
 	}
 	infoData, _ := json.MarshalIndent(info, "", "  ")

@@ -92,9 +92,9 @@ func newMessageMockHubServer(t *testing.T, groveID string, runningAgents []hubcl
 			}
 
 			var body struct {
-				Message           string                     `json:"message"`
+				Message           string                      `json:"message"`
 				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
-				Interrupt         bool                       `json:"interrupt"`
+				Interrupt         bool                        `json:"interrupt"`
 			}
 			json.NewDecoder(r.Body).Decode(&body)
 
@@ -321,12 +321,12 @@ func TestSendMessageViaHub_SingleAgentError(t *testing.T) {
 
 func TestScheduleMessageFlagValidation(t *testing.T) {
 	tests := []struct {
-		name    string
-		in      string
-		at      string
+		name      string
+		in        string
+		at        string
 		broadcast bool
-		all     bool
-		wantErr string
+		all       bool
+		wantErr   string
 	}{
 		{
 			name:    "in and at are mutually exclusive",
@@ -414,8 +414,8 @@ func TestSendMessageViaHub_BroadcastPartialFailure(t *testing.T) {
 
 			var body struct {
 				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
-				Message           string                     `json:"message"`
-				Interrupt         bool                       `json:"interrupt"`
+				Message           string                      `json:"message"`
+				Interrupt         bool                        `json:"interrupt"`
 			}
 			json.NewDecoder(r.Body).Decode(&body)
 			msg := body.Message
@@ -523,8 +523,8 @@ func TestSendMessageViaHub_NotifyFlag(t *testing.T) {
 		case r.Method == http.MethodPost:
 			var body struct {
 				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
-				Interrupt         bool                       `json:"interrupt"`
-				Notify            bool                       `json:"notify"`
+				Interrupt         bool                        `json:"interrupt"`
+				Notify            bool                        `json:"notify"`
 			}
 			json.NewDecoder(r.Body).Decode(&body)
 			mu.Lock()

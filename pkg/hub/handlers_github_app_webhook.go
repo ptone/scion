@@ -799,4 +799,3 @@ func (s *Server) MintGitHubAppTokenForGrove(ctx context.Context, grove *store.Gr
 
 	return s.mintGitHubAppToken(ctx, grove)
 }
-

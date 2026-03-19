@@ -31,16 +31,16 @@ import (
 // ListPoliciesResponse is the response for listing policies.
 type ListPoliciesResponse struct {
 	Policies     []PolicyWithCapabilities `json:"policies"`
-	NextCursor   string                  `json:"nextCursor,omitempty"`
-	TotalCount   int                     `json:"totalCount"`
-	Capabilities *Capabilities           `json:"_capabilities,omitempty"`
+	NextCursor   string                   `json:"nextCursor,omitempty"`
+	TotalCount   int                      `json:"totalCount"`
+	Capabilities *Capabilities            `json:"_capabilities,omitempty"`
 }
 
 // CreatePolicyRequest is the request body for creating a policy.
 type CreatePolicyRequest struct {
 	Name         string                  `json:"name"`
 	Description  string                  `json:"description,omitempty"`
-	ScopeType    string                  `json:"scopeType"`   // "hub", "grove", "resource"
+	ScopeType    string                  `json:"scopeType"` // "hub", "grove", "resource"
 	ScopeID      string                  `json:"scopeId,omitempty"`
 	ResourceType string                  `json:"resourceType"` // "*" for all
 	ResourceID   string                  `json:"resourceId,omitempty"`

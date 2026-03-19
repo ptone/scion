@@ -17,10 +17,10 @@ package hub
 import (
 	"bufio"
 	"context"
-	"errors"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -384,7 +384,7 @@ type RemoteAgentInfo struct {
 	HarnessAuth     string `json:"harnessAuth,omitempty"`
 	Image           string `json:"image,omitempty"` // Resolved container image
 	Runtime         string `json:"runtime,omitempty"`
-	Profile         string `json:"profile,omitempty"` // Settings profile used
+	Profile         string `json:"profile,omitempty"`  // Settings profile used
 	Phase           string `json:"phase,omitempty"`    // Lifecycle phase
 	Activity        string `json:"activity,omitempty"` // Runtime activity
 	Status          string `json:"status"`             // Legacy: kept for backward compat with older brokers
@@ -1203,10 +1203,10 @@ func (s *Server) messageEventHandler() EventHandler {
 
 // DispatchAgentEventPayload is the JSON payload for "dispatch_agent" type scheduled events.
 type DispatchAgentEventPayload struct {
-	AgentName  string `json:"agentName"`
-	Template   string `json:"template,omitempty"`
-	Task       string `json:"task,omitempty"`
-	Branch     string `json:"branch,omitempty"`
+	AgentName string `json:"agentName"`
+	Template  string `json:"template,omitempty"`
+	Task      string `json:"task,omitempty"`
+	Branch    string `json:"branch,omitempty"`
 }
 
 // dispatchAgentEventHandler returns an EventHandler that creates and starts

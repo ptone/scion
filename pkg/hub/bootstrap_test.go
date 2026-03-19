@@ -27,9 +27,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -51,9 +51,9 @@ func newMockStorage(bucket string) *mockStorage {
 	}
 }
 
-func (m *mockStorage) Bucket() string                 { return m.bucket }
-func (m *mockStorage) Provider() storage.Provider      { return storage.ProviderLocal }
-func (m *mockStorage) Close() error                    { return nil }
+func (m *mockStorage) Bucket() string             { return m.bucket }
+func (m *mockStorage) Provider() storage.Provider { return storage.ProviderLocal }
+func (m *mockStorage) Close() error               { return nil }
 
 func (m *mockStorage) GenerateSignedURL(_ context.Context, objectPath string, opts storage.SignedURLOptions) (*storage.SignedURL, error) {
 	return &storage.SignedURL{
@@ -690,7 +690,7 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 		Name:            "Bootstrap Finalize",
 		GroveID:         groveID,
 		RuntimeBrokerID: "broker_bootstrap_test",
-		Phase: string(state.PhaseProvisioning),
+		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
 		AppliedConfig: &store.AgentAppliedConfig{
 			Task: "test task",
@@ -776,7 +776,7 @@ func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 		Name:            "Bootstrap Missing",
 		GroveID:         groveID,
 		RuntimeBrokerID: "broker_bootstrap_test",
-		Phase: string(state.PhaseProvisioning),
+		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
@@ -820,7 +820,7 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 		Name:            "Bootstrap Stopped",
 		GroveID:         groveID,
 		RuntimeBrokerID: "broker_bootstrap_test",
-		Phase: string(state.PhaseStopped),
+		Phase:           string(state.PhaseStopped),
 		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
@@ -867,7 +867,7 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 		Name:            "Bootstrap No Dispatcher",
 		GroveID:         groveID,
 		RuntimeBrokerID: "broker_bootstrap_test",
-		Phase: string(state.PhaseProvisioning),
+		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
@@ -905,7 +905,7 @@ func TestDispatcherPassesWorkspaceStoragePath(t *testing.T) {
 		Name:            "Storage Path Agent",
 		GroveID:         "grove_test",
 		RuntimeBrokerID: "broker_test",
-		Phase: string(state.PhaseProvisioning),
+		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
 			Task:                 "test task",
 			WorkspaceStoragePath: "workspaces/grove_test/agent_with_storage_path",
