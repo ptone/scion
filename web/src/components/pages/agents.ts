@@ -126,6 +126,10 @@ export class ScionPageAgents extends LitElement {
         color: var(--scion-primary, #3b82f6);
       }
 
+      .agent-meta a:hover {
+        color: var(--scion-primary, #3b82f6);
+      }
+
       .agent-task {
         font-size: 0.875rem;
         color: var(--scion-text, #1e293b);
@@ -553,7 +557,7 @@ export class ScionPageAgents extends LitElement {
               </a>
             </h3>
             <div class="agent-meta">
-              ${agent.grove ? html`<div><sl-icon name="folder"></sl-icon> ${agent.grove}</div>` : ''}
+              ${agent.grove ? html`<div><sl-icon name="folder"></sl-icon> <a href="/groves/${agent.groveId}" style="color: inherit; text-decoration: none;" @click=${(e: MouseEvent) => e.stopPropagation()}>${agent.grove}</a></div>` : ''}
               <div><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
               ${agent.runtimeBrokerId
                 ? html`<div>
@@ -664,7 +668,7 @@ export class ScionPageAgents extends LitElement {
             <a href="/agents/${agent.id}">${agent.name}</a>
           </span>
         </td>
-        <td>${agent.grove || '\u2014'}</td>
+        <td>${agent.grove ? html`<a href="/groves/${agent.groveId}">${agent.grove}</a>` : '\u2014'}</td>
         <td class="hide-mobile">${agent.template}</td>
         <td>
           <scion-status-badge
