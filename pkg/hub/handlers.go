@@ -7654,7 +7654,7 @@ func (s *Server) handleGroveSyncTemplates(w http.ResponseWriter, r *http.Request
 		Detached:   true,
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "generic",
-			Task:          "scion templates sync --all --force",
+			Task:          "scion templates sync --all",
 		},
 	}
 

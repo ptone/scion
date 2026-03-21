@@ -927,7 +927,7 @@ func TestGroveSyncTemplates_CreatesAgent(t *testing.T) {
 	assert.True(t, agent.Detached)
 	require.NotNil(t, agent.AppliedConfig)
 	assert.Equal(t, "generic", agent.AppliedConfig.HarnessConfig)
-	assert.Equal(t, "scion templates sync --all --force", agent.AppliedConfig.Task)
+	assert.Equal(t, "scion templates sync --all", agent.AppliedConfig.Task)
 	assert.Nil(t, agent.AppliedConfig.GitClone, "non-git grove should have no GitClone config")
 }
 
