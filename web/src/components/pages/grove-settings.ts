@@ -1659,7 +1659,7 @@ export class ScionPageGroveSettings extends LitElement {
           </sl-tab-panel>
         </sl-tab-group>
 
-        ${canEdit
+        ${canEdit && this.activeConfigTab !== 'brokers'
           ? html`
               <div class="config-actions">
                 ${this.settingsError
