@@ -24,7 +24,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData } from '../../shared/types.js';
-import { apiFetch } from '../../client/api.js';
+import { apiFetch, extractApiError } from '../../client/api.js';
 import '../shared/schedule-list.js';
 
 interface Grove {
@@ -157,8 +157,7 @@ export class ScionPageGroveSchedules extends LitElement {
     try {
       const response = await apiFetch(`/api/v1/groves/${encodeURIComponent(this.groveId)}`);
       if (!response.ok) {
-        const errorData = (await response.json().catch(() => ({}))) as { message?: string };
-        throw new Error(errorData.message || `HTTP ${response.status}`);
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
       this.grove = (await response.json()) as Grove;
     } catch (err) {

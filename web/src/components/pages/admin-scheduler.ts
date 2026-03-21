@@ -24,7 +24,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import { apiFetch } from '../../client/api.js';
+import { apiFetch, extractApiError } from '../../client/api.js';
 
 interface RecurringHandlerInfo {
   name: string;
@@ -381,8 +381,7 @@ export class ScionPageAdminScheduler extends LitElement {
       const response = await apiFetch('/api/v1/admin/scheduler');
 
       if (!response.ok) {
-        const errorData = (await response.json().catch(() => ({}))) as { message?: string };
-        throw new Error(errorData.message || `HTTP ${response.status}: ${response.statusText}`);
+        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
       }
 
       const data = (await response.json()) as SchedulerResponse;
@@ -462,8 +461,7 @@ export class ScionPageAdminScheduler extends LitElement {
         { method: 'DELETE' }
       );
       if (!response.ok) {
-        const errorData = (await response.json().catch(() => ({}))) as { message?: string };
-        throw new Error(errorData.message || `HTTP ${response.status}`);
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
       // Reload data to reflect the cancellation
       await this.loadSchedulerStatus();

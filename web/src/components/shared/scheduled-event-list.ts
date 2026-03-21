@@ -24,7 +24,7 @@
 import { LitElement, html, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import { apiFetch } from '../../client/api.js';
+import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 
 interface ScheduledEvent {
@@ -87,8 +87,7 @@ export class ScionScheduledEventList extends LitElement {
       );
 
       if (!response.ok) {
-        const errorData = (await response.json().catch(() => ({}))) as { message?: string };
-        throw new Error(errorData.message || `HTTP ${response.status}: ${response.statusText}`);
+        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
       }
 
       const data = (await response.json()) as ListResponse;
@@ -148,8 +147,7 @@ export class ScionScheduledEventList extends LitElement {
       );
 
       if (!response.ok) {
-        const errorData = (await response.json().catch(() => ({}))) as { message?: string };
-        throw new Error(errorData.message || `HTTP ${response.status}`);
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
 
       this.closeDialog();
@@ -171,8 +169,7 @@ export class ScionScheduledEventList extends LitElement {
       );
 
       if (!response.ok) {
-        const errorData = (await response.json().catch(() => ({}))) as { message?: string };
-        throw new Error(errorData.message || `HTTP ${response.status}`);
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
 
       await this.loadEvents();
