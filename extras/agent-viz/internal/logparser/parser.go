@@ -3,12 +3,17 @@ package logparser
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
+
+// deleteAgentURLPattern matches DELETE /agents/<name> or /v1/agents/<name> etc.
+var deleteAgentURLPattern = regexp.MustCompile(`/agents/([^/?]+)(?:\?.*)?$`)
 
 // GCPLogEntry represents a single log entry from Google Cloud Logging export.
 type GCPLogEntry struct {
@@ -18,6 +23,19 @@ type GCPLogEntry struct {
 	Severity    string            `json:"severity"`
 	Labels      map[string]string `json:"labels"`
 	LogName     string            `json:"logName"`
+	HTTPRequest *HTTPRequestField `json:"httpRequest,omitempty"`
+}
+
+// HTTPRequestField represents the httpRequest field in GCP log entries.
+type HTTPRequestField struct {
+	RequestMethod string `json:"requestMethod"`
+	RequestURL    string `json:"requestUrl"`
+}
+
+// deleteAgentRequest captures a DELETE /agents/<name> request from logs.
+type deleteAgentRequest struct {
+	agentName string
+	timestamp string
 }
 
 // PlaybackManifest is sent once at connection start.
@@ -78,9 +96,10 @@ type FileEditEvent struct {
 }
 
 type AgentLifecycleEvent struct {
-	AgentID string `json:"agentId"`
-	Name    string `json:"name"`
-	Action  string `json:"action"`
+	AgentID     string `json:"agentId"`
+	Name        string `json:"name"`
+	Action      string `json:"action"`
+	RequestedBy string `json:"requestedBy,omitempty"` // agent name that requested the destroy
 }
 
 // Agent colors assigned in order.
@@ -114,7 +133,6 @@ func ParseLogFile(path string) (*ParseResult, error) {
 	})
 
 	agents := extractAgents(entries)
-	files := extractFiles(entries)
 	events := extractEvents(entries, agents)
 	timeRange := extractTimeRange(entries)
 
@@ -125,7 +143,7 @@ func ParseLogFile(path string) (*ParseResult, error) {
 		Type:      "manifest",
 		TimeRange: timeRange,
 		Agents:    agents,
-		Files:     files,
+		Files:     []FileNode{}, // Files are added dynamically via events
 		GroveID:   groveID,
 		GroveName: groveName,
 	}
@@ -165,12 +183,30 @@ func extractGroveInfo(entries []GCPLogEntry) (string, string) {
 func extractAgents(entries []GCPLogEntry) []AgentInfo {
 	agentMap := make(map[string]*AgentInfo)
 	nameMap := make(map[string]string) // id -> name
+	// Track which IDs had explicit lifecycle events (pre_start)
+	hasLifecycle := make(map[string]bool)
 
-	// First pass: find agent names from message events
+	// First pass: find agent names and IDs from server "Agent created" logs and message events.
 	for _, e := range entries {
 		logName := logBaseName(e.LogName)
+		jp := e.JSONPayload
+
+		// scion-server "Agent created" logs carry name, slug, and agent_id
+		if logName == "scion-server" && getStr(jp, "message") == "Agent created" {
+			aid := getStr(jp, "agent_id")
+			if aid == "" {
+				aid = e.Labels["agent_id"]
+			}
+			name := getStr(jp, "slug")
+			if name == "" {
+				name = getStr(jp, "name")
+			}
+			if aid != "" && name != "" {
+				nameMap[aid] = name
+			}
+		}
+
 		if logName == "scion-messages" {
-			jp := e.JSONPayload
 			for _, field := range []string{"sender", "recipient"} {
 				val := getStr(jp, field)
 				if val == "" {
@@ -181,14 +217,26 @@ func extractAgents(entries []GCPLogEntry) []AgentInfo {
 				if aid == "" {
 					aid = e.Labels[idField]
 				}
-				if strings.HasPrefix(val, "agent:") && aid != "" {
-					nameMap[aid] = strings.TrimPrefix(val, "agent:")
+				if strings.HasPrefix(val, "agent:") {
+					name := strings.TrimPrefix(val, "agent:")
+					if aid != "" {
+						nameMap[aid] = name
+					} else {
+						// No UUID available — use the slug name as both ID and name
+						nameMap[name] = name
+					}
+				}
+			}
+			// Also check agent_name / agent_id fields in message payloads
+			if an := getStr(jp, "agent_name"); an != "" {
+				if aid := getStr(jp, "agent_id"); aid != "" {
+					nameMap[aid] = an
 				}
 			}
 		}
 	}
 
-	// Second pass: collect all agents from scion-agents logs
+	// Second pass: collect agents from scion-agents logs (these have UUIDs and harness info)
 	for _, e := range entries {
 		logName := logBaseName(e.LogName)
 		if logName != "scion-agents" {
@@ -198,41 +246,68 @@ func extractAgents(entries []GCPLogEntry) []AgentInfo {
 		if aid == "" {
 			continue
 		}
-		if _, exists := agentMap[aid]; exists {
-			continue
+		if _, exists := agentMap[aid]; !exists {
+			harness := e.Labels["scion.harness"]
+			name := nameMap[aid]
+			if name == "" && len(aid) >= 8 {
+				name = aid[:8]
+			} else if name == "" {
+				name = aid
+			}
+			agentMap[aid] = &AgentInfo{
+				ID:      aid,
+				Name:    name,
+				Harness: harness,
+			}
 		}
-		harness := e.Labels["scion.harness"]
-		name := nameMap[aid]
-		if name == "" {
-			// Fallback: use short ID
-			name = aid[:8]
-		}
-		agentMap[aid] = &AgentInfo{
-			ID:      aid,
-			Name:    name,
-			Harness: harness,
+		msg := getStr(e.JSONPayload, "message")
+		if msg == "agent.lifecycle.pre_start" {
+			hasLifecycle[aid] = true
 		}
 	}
 
-	// Assign colors
+	// Third pass: backfill agents discovered only from messages (no scion-agents entries).
+	// These are agents that existed before the log window or whose agent logs weren't captured.
+	for id, name := range nameMap {
+		if _, exists := agentMap[id]; !exists {
+			agentMap[id] = &AgentInfo{
+				ID:      id,
+				Name:    name,
+				Harness: "unknown",
+			}
+		}
+	}
+
+	// Assign colors after sorting for deterministic output
 	agents := make([]AgentInfo, 0, len(agentMap))
-	i := 0
 	for _, a := range agentMap {
-		a.Color = agentColors[i%len(agentColors)]
 		agents = append(agents, *a)
-		i++
 	}
 
 	sort.Slice(agents, func(i, j int) bool {
 		return agents[i].Name < agents[j].Name
 	})
 
-	// Reassign colors after sorting for deterministic output
 	for i := range agents {
 		agents[i].Color = agentColors[i%len(agentColors)]
 	}
 
 	return agents
+}
+
+// agentsWithLifecycle returns the set of agent IDs that had explicit lifecycle events.
+func agentsWithLifecycle(entries []GCPLogEntry) map[string]bool {
+	has := make(map[string]bool)
+	for _, e := range entries {
+		if logBaseName(e.LogName) != "scion-agents" {
+			continue
+		}
+		msg := getStr(e.JSONPayload, "message")
+		if msg == "agent.lifecycle.pre_start" {
+			has[e.Labels["agent_id"]] = true
+		}
+	}
+	return has
 }
 
 func extractFiles(entries []GCPLogEntry) []FileNode {
@@ -244,42 +319,27 @@ func extractFiles(entries []GCPLogEntry) []FileNode {
 			continue
 		}
 		jp := e.JSONPayload
-		toolName := getStr(jp, "tool_name")
-		if !isFileEditTool(toolName) {
-			continue
-		}
-		fp := getStr(jp, "file_path")
-		if fp == "" {
-			fp = getStr(jp, "path")
-		}
+		// Any tool event with a file_path contributes to the file tree
+		fp := extractFilePath(jp)
 		if fp != "" {
-			// Normalize to relative path
-			fp = strings.TrimPrefix(fp, "/workspace/")
-			fp = strings.TrimPrefix(fp, "./")
 			filePaths[fp] = true
 		}
 	}
 
-	// Build file tree nodes from paths
+	// Build file tree nodes from discovered paths
 	nodes := make(map[string]*FileNode)
+
+	// Always add workspace root as the tree anchor
+	if len(filePaths) > 0 {
+		nodes["."] = &FileNode{
+			ID:    ".",
+			Name:  "/workspace",
+			IsDir: true,
+		}
+	}
 
 	for fp := range filePaths {
 		addFileToTree(nodes, fp)
-	}
-
-	// If no files detected from logs, create a placeholder structure
-	if len(nodes) == 0 {
-		// Create a basic project structure
-		placeholderFiles := []string{
-			"src/main.go",
-			"src/handler.go",
-			"pkg/config/config.go",
-			"go.mod",
-			"README.md",
-		}
-		for _, fp := range placeholderFiles {
-			addFileToTree(nodes, fp)
-		}
 	}
 
 	result := make([]FileNode, 0, len(nodes))
@@ -292,6 +352,24 @@ func extractFiles(entries []GCPLogEntry) []FileNode {
 	})
 
 	return result
+}
+
+// extractFilePath tries to find a file path from a tool call's JSON payload.
+func extractFilePath(jp map[string]any) string {
+	for _, key := range []string{"file_path", "path", "filePath", "filename"} {
+		fp := getStr(jp, key)
+		if fp != "" {
+			return normalizeFilePath(fp)
+		}
+	}
+	return ""
+}
+
+// normalizeFilePath strips workspace prefixes and relative path markers.
+func normalizeFilePath(fp string) string {
+	fp = strings.TrimPrefix(fp, "/workspace/")
+	fp = strings.TrimPrefix(fp, "./")
+	return fp
 }
 
 func addFileToTree(nodes map[string]*FileNode, fp string) {
@@ -328,6 +406,38 @@ func extractEvents(entries []GCPLogEntry, agents []AgentInfo) []PlaybackEvent {
 		agentNameByID[a.ID] = a.Name
 	}
 
+	// Track which agents had explicit lifecycle (pre_start) events
+	hasLifecycle := agentsWithLifecycle(entries)
+	// Track which agents we've already emitted a backfill create event for
+	backfilled := make(map[string]bool)
+
+	// Helper: ensure an agent has a create event. For agents without explicit lifecycle
+	// events, we emit a synthetic agent_create at the timestamp of their first appearance.
+	ensureAgent := func(agentID, ts string) {
+		if hasLifecycle[agentID] || backfilled[agentID] {
+			return
+		}
+		backfilled[agentID] = true
+		events = append(events, PlaybackEvent{
+			Type:      "agent_create",
+			Timestamp: ts,
+			Data: AgentLifecycleEvent{
+				AgentID: agentID,
+				Name:    agentNameByID[agentID],
+				Action:  "create",
+			},
+		})
+		events = append(events, PlaybackEvent{
+			Type:      "agent_state",
+			Timestamp: ts,
+			Data: AgentStateEvent{
+				AgentID:  agentID,
+				Phase:    "running",
+				Activity: "idle",
+			},
+		})
+	}
+
 	for _, e := range entries {
 		logName := logBaseName(e.LogName)
 		jp := e.JSONPayload
@@ -337,6 +447,11 @@ func extractEvents(entries []GCPLogEntry, agents []AgentInfo) []PlaybackEvent {
 		case "scion-agents":
 			msg := getStr(jp, "message")
 			aid := e.Labels["agent_id"]
+
+			// Backfill agent if first appearance and no lifecycle event
+			if aid != "" {
+				ensureAgent(aid, ts)
+			}
 
 			switch msg {
 			case "agent.session.start":
@@ -388,15 +503,10 @@ func extractEvents(entries []GCPLogEntry, agents []AgentInfo) []PlaybackEvent {
 						ToolName: toolName,
 					},
 				})
-				// Generate file edit event for file-modifying tools
-				if isFileEditTool(toolName) {
-					fp := getStr(jp, "file_path")
-					if fp == "" {
-						fp = getStr(jp, "path")
-					}
-					if fp != "" {
-						fp = strings.TrimPrefix(fp, "/workspace/")
-						fp = strings.TrimPrefix(fp, "./")
+				// Generate file events for tools that interact with files
+				fp := extractFilePath(jp)
+				if fp != "" {
+					if isFileEditTool(toolName) {
 						action := "edit"
 						if toolName == "write_file" || toolName == "create_file" || toolName == "Write" {
 							action = "create"
@@ -408,6 +518,16 @@ func extractEvents(entries []GCPLogEntry, agents []AgentInfo) []PlaybackEvent {
 								AgentID:  aid,
 								FilePath: fp,
 								Action:   action,
+							},
+						})
+					} else if isFileReadTool(toolName) {
+						events = append(events, PlaybackEvent{
+							Type:      "file_read",
+							Timestamp: ts,
+							Data: FileEditEvent{
+								AgentID:  aid,
+								FilePath: fp,
+								Action:   "read",
 							},
 						})
 					}
@@ -439,6 +559,15 @@ func extractEvents(entries []GCPLogEntry, agents []AgentInfo) []PlaybackEvent {
 						Phase:   "starting",
 					},
 				})
+			case "agent.lifecycle.post_start":
+				events = append(events, PlaybackEvent{
+					Type:      "agent_state",
+					Timestamp: ts,
+					Data: AgentStateEvent{
+						AgentID: aid,
+						Phase:   "running",
+					},
+				})
 			case "agent.lifecycle.pre_stop":
 				events = append(events, PlaybackEvent{
 					Type:      "agent_state",
@@ -446,6 +575,15 @@ func extractEvents(entries []GCPLogEntry, agents []AgentInfo) []PlaybackEvent {
 					Data: AgentStateEvent{
 						AgentID: aid,
 						Phase:   "stopping",
+					},
+				})
+				events = append(events, PlaybackEvent{
+					Type:      "agent_destroy",
+					Timestamp: ts,
+					Data: AgentLifecycleEvent{
+						AgentID: aid,
+						Name:    agentNameByID[aid],
+						Action:  "destroy",
 					},
 				})
 			case "Tool requires confirmation":
@@ -460,6 +598,12 @@ func extractEvents(entries []GCPLogEntry, agents []AgentInfo) []PlaybackEvent {
 			}
 
 		case "scion-messages":
+			// Skip rejected messages (failed deliveries)
+			msgAction := getStr(jp, "message")
+			if strings.Contains(msgAction, "rejected") {
+				continue
+			}
+
 			sender := getStr(jp, "sender")
 			if sender == "" {
 				sender = e.Labels["sender"]
@@ -476,18 +620,204 @@ func extractEvents(entries []GCPLogEntry, agents []AgentInfo) []PlaybackEvent {
 			broadcasted := getBool(jp, "broadcasted")
 
 			if sender != "" && recipient != "" {
+				senderName := strings.TrimPrefix(sender, "agent:")
+				recipientName := strings.TrimPrefix(recipient, "agent:")
+
+				// Backfill agents referenced in messages
+				senderID := getStr(jp, "sender_id")
+				if senderID == "" {
+					senderID = e.Labels["sender_id"]
+				}
+				if senderID == "" && strings.HasPrefix(sender, "agent:") {
+					senderID = senderName
+				}
+				recipientID := getStr(jp, "recipient_id")
+				if recipientID == "" {
+					recipientID = e.Labels["recipient_id"]
+				}
+				if recipientID == "" && strings.HasPrefix(recipient, "agent:") {
+					recipientID = recipientName
+				}
+
+				if senderID != "" && strings.HasPrefix(sender, "agent:") {
+					ensureAgent(senderID, ts)
+				}
+				if recipientID != "" && strings.HasPrefix(recipient, "agent:") {
+					ensureAgent(recipientID, ts)
+				}
+
+				// Resolve UUID-based names to friendly names
+				// e.g., "agent:a35ea791-..." should become "orchestrator"
+				if agentNameByID[senderName] != "" {
+					senderName = agentNameByID[senderName]
+				} else if senderID != "" && agentNameByID[senderID] != "" {
+					senderName = agentNameByID[senderID]
+				}
+				if agentNameByID[recipientName] != "" {
+					recipientName = agentNameByID[recipientName]
+				} else if recipientID != "" && agentNameByID[recipientID] != "" {
+					recipientName = agentNameByID[recipientID]
+				}
+
 				events = append(events, PlaybackEvent{
 					Type:      "message",
 					Timestamp: ts,
 					Data: MessageEvent{
-						Sender:      strings.TrimPrefix(sender, "agent:"),
-						Recipient:   strings.TrimPrefix(recipient, "agent:"),
+						Sender:      senderName,
+						Recipient:   recipientName,
 						MsgType:     msgType,
 						Content:     content,
 						Broadcasted: broadcasted,
 					},
 				})
 			}
+		}
+	}
+
+	// Collect DELETE agent requests from scion_request_log entries
+	var deleteRequests []deleteAgentRequest
+	for _, e := range entries {
+		logName := logBaseName(e.LogName)
+		if !strings.HasSuffix(logName, "scion_request_log") {
+			continue
+		}
+		if e.HTTPRequest == nil || e.HTTPRequest.RequestMethod != "DELETE" {
+			continue
+		}
+		matches := deleteAgentURLPattern.FindStringSubmatch(e.HTTPRequest.RequestURL)
+		if len(matches) < 2 {
+			continue
+		}
+		agentSlug := matches[1]
+		deleteRequests = append(deleteRequests, deleteAgentRequest{
+			agentName: agentSlug,
+			timestamp: e.Timestamp,
+		})
+	}
+
+	// Post-processing: enrich agent_create events with requestedBy
+	// For each agent_create, look backward for the nearest Bash tool-start from another agent within 15s.
+	for i, evt := range events {
+		if evt.Type != "agent_create" {
+			continue
+		}
+		lifecycle, ok := evt.Data.(AgentLifecycleEvent)
+		if !ok || lifecycle.RequestedBy != "" {
+			continue
+		}
+		createTime, err := TimestampToTime(evt.Timestamp)
+		if err != nil {
+			continue
+		}
+
+		for j := i - 1; j >= 0; j-- {
+			prev := events[j]
+			if prev.Type != "agent_state" {
+				continue
+			}
+			stateEvt, ok := prev.Data.(AgentStateEvent)
+			if !ok || stateEvt.Activity != "executing" || !isShellTool(stateEvt.ToolName) {
+				continue
+			}
+			evtTime, err := TimestampToTime(prev.Timestamp)
+			if err != nil {
+				continue
+			}
+			delta := createTime.Sub(evtTime)
+			if delta < 0 || delta > 15*time.Second {
+				continue
+			}
+			// Must be a different agent
+			if stateEvt.AgentID == lifecycle.AgentID {
+				continue
+			}
+			if name, ok := agentNameByID[stateEvt.AgentID]; ok {
+				lifecycle.RequestedBy = name
+			} else {
+				lifecycle.RequestedBy = stateEvt.AgentID
+			}
+			events[i].Data = lifecycle
+			break
+		}
+	}
+
+	// Post-processing: enrich agent_destroy events with requestedBy info
+	for _, delReq := range deleteRequests {
+		delTime, err := TimestampToTime(delReq.timestamp)
+		if err != nil {
+			continue
+		}
+
+		// Find the nearest agent_destroy event for this agent name (within 30 seconds)
+		bestDestroyIdx := -1
+		bestDestroyDelta := time.Duration(math.MaxInt64)
+		for i, evt := range events {
+			if evt.Type != "agent_destroy" {
+				continue
+			}
+			lifecycle, ok := evt.Data.(AgentLifecycleEvent)
+			if !ok {
+				continue
+			}
+			if lifecycle.Name != delReq.agentName {
+				continue
+			}
+			evtTime, err := TimestampToTime(evt.Timestamp)
+			if err != nil {
+				continue
+			}
+			delta := evtTime.Sub(delTime)
+			if delta < 0 {
+				delta = -delta
+			}
+			if delta <= 30*time.Second && delta < bestDestroyDelta {
+				bestDestroyDelta = delta
+				bestDestroyIdx = i
+			}
+		}
+		if bestDestroyIdx < 0 {
+			continue
+		}
+
+		// Find the nearest Bash tool-start from another agent within 15s before the DELETE request
+		var requestingAgent string
+		for i := len(events) - 1; i >= 0; i-- {
+			evt := events[i]
+			if evt.Type != "agent_state" {
+				continue
+			}
+			stateEvt, ok := evt.Data.(AgentStateEvent)
+			if !ok {
+				continue
+			}
+			if stateEvt.Activity != "executing" || !isShellTool(stateEvt.ToolName) {
+				continue
+			}
+			evtTime, err := TimestampToTime(evt.Timestamp)
+			if err != nil {
+				continue
+			}
+			delta := delTime.Sub(evtTime)
+			if delta < 0 || delta > 15*time.Second {
+				continue
+			}
+			// Must be a different agent than the one being destroyed
+			destroyEvt := events[bestDestroyIdx].Data.(AgentLifecycleEvent)
+			if stateEvt.AgentID == destroyEvt.AgentID {
+				continue
+			}
+			if name, ok := agentNameByID[stateEvt.AgentID]; ok {
+				requestingAgent = name
+			} else {
+				requestingAgent = stateEvt.AgentID
+			}
+			break
+		}
+
+		if requestingAgent != "" {
+			lifecycle := events[bestDestroyIdx].Data.(AgentLifecycleEvent)
+			lifecycle.RequestedBy = requestingAgent
+			events[bestDestroyIdx].Data = lifecycle
 		}
 	}
 
@@ -502,6 +832,22 @@ func extractEvents(entries []GCPLogEntry, agents []AgentInfo) []PlaybackEvent {
 func isFileEditTool(name string) bool {
 	switch name {
 	case "write_file", "create_file", "Write", "edit_file", "Edit", "patch_file":
+		return true
+	}
+	return false
+}
+
+func isShellTool(name string) bool {
+	switch name {
+	case "Bash", "run_shell_command":
+		return true
+	}
+	return false
+}
+
+func isFileReadTool(name string) bool {
+	switch name {
+	case "read_file", "Read", "Grep", "Glob":
 		return true
 	}
 	return false

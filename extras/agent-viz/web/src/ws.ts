@@ -1,6 +1,6 @@
-import type { PlaybackCommand, PlaybackManifest, PlaybackEvent, StatusUpdate } from './types';
+import type { PlaybackCommand, PlaybackManifest, PlaybackEvent, StatusUpdate, SnapshotMessage } from './types';
 
-export type WSMessage = PlaybackManifest | PlaybackEvent | StatusUpdate;
+export type WSMessage = PlaybackManifest | PlaybackEvent | StatusUpdate | SnapshotMessage;
 
 export type MessageHandler = (msg: WSMessage) => void;
 

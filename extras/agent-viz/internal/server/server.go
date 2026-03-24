@@ -77,6 +77,7 @@ func (s *Server) Start(port int, devMode bool) error {
 	// Start broadcasting events to clients
 	go s.broadcastEvents()
 	go s.broadcastStatus()
+	go s.broadcastSnapshots()
 
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("Agent Visualizer running at http://localhost:%d", port)
@@ -157,6 +158,12 @@ func (s *Server) broadcastEvents() {
 func (s *Server) broadcastStatus() {
 	for status := range s.engine.Status() {
 		s.broadcast(status)
+	}
+}
+
+func (s *Server) broadcastSnapshots() {
+	for snapshot := range s.engine.Snapshots() {
+		s.broadcast(snapshot)
 	}
 }
 

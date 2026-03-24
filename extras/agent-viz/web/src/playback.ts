@@ -106,6 +106,7 @@ export class PlaybackControls {
             <label class="filter-item"><input type="checkbox" checked data-event-type="agent_state"> State Changes</label>
             <label class="filter-item"><input type="checkbox" checked data-event-type="message"> Messages</label>
             <label class="filter-item"><input type="checkbox" checked data-event-type="file_edit"> File Edits</label>
+            <label class="filter-item"><input type="checkbox" checked data-event-type="file_read"> File Reads</label>
             <label class="filter-item"><input type="checkbox" checked data-event-type="agent_create"> Lifecycle</label>
           </div>
         </div>

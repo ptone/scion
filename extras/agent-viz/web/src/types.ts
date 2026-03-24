@@ -22,7 +22,7 @@ export interface FileNode {
 }
 
 export interface PlaybackEvent {
-  type: 'agent_state' | 'message' | 'file_edit' | 'agent_create' | 'agent_destroy';
+  type: 'agent_state' | 'message' | 'file_edit' | 'file_read' | 'agent_create' | 'agent_destroy';
   timestamp: string;
   data: AgentStateEvent | MessageEvent | FileEditEvent | AgentLifecycleEvent;
 }
@@ -45,13 +45,19 @@ export interface MessageEvent {
 export interface FileEditEvent {
   agentId: string;
   filePath: string;
-  action: 'create' | 'edit';
+  action: 'create' | 'edit' | 'read';
 }
 
 export interface AgentLifecycleEvent {
   agentId: string;
   name: string;
   action: 'create' | 'destroy';
+  requestedBy?: string;
+}
+
+export interface SnapshotMessage {
+  type: 'snapshot';
+  events: PlaybackEvent[];
 }
 
 export interface PlaybackCommand {
@@ -85,6 +91,8 @@ export interface GraphNode {
   // Visual state
   highlighted?: boolean;
   highlightTime?: number;
+  visible: boolean;
+  revealTime?: number;
 }
 
 export interface GraphLink {

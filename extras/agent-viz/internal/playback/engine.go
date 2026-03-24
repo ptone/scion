@@ -17,13 +17,14 @@ type Engine struct {
 	endTime   time.Time
 
 	// Playback state
-	playing   bool
-	speed     float64
-	position  int // current event index
-	currentTS time.Time
-	stopCh    chan struct{}
-	eventsCh  chan logparser.PlaybackEvent
-	statusCh  chan StatusUpdate
+	playing    bool
+	speed      float64
+	position   int // current event index
+	currentTS  time.Time
+	stopCh     chan struct{}
+	eventsCh   chan logparser.PlaybackEvent
+	statusCh   chan StatusUpdate
+	snapshotCh chan SnapshotMessage
 
 	// Filters
 	agentFilter     map[string]bool // nil = all
@@ -39,6 +40,12 @@ type StatusUpdate struct {
 	Position  int     `json:"position"`
 	Total     int     `json:"total"`
 	Timestamp string  `json:"timestamp"`
+}
+
+// SnapshotMessage contains all events up to a seek target for client state rebuild.
+type SnapshotMessage struct {
+	Type   string                    `json:"type"` // "snapshot"
+	Events []logparser.PlaybackEvent `json:"events"`
 }
 
 // NewEngine creates a playback engine from parsed log data.
@@ -67,6 +74,7 @@ func NewEngine(result *logparser.ParseResult) (*Engine, error) {
 		timeRangeEnd:   endTime,
 		eventsCh:       make(chan logparser.PlaybackEvent, 100),
 		statusCh:       make(chan StatusUpdate, 10),
+		snapshotCh:     make(chan SnapshotMessage, 1),
 	}, nil
 }
 
@@ -83,6 +91,11 @@ func (e *Engine) Events() <-chan logparser.PlaybackEvent {
 // Status returns the channel that emits status updates.
 func (e *Engine) Status() <-chan StatusUpdate {
 	return e.statusCh
+}
+
+// Snapshots returns the channel that emits snapshot messages on seek.
+func (e *Engine) Snapshots() <-chan SnapshotMessage {
+	return e.snapshotCh
 }
 
 // Play starts or resumes playback.
@@ -115,7 +128,7 @@ func (e *Engine) Pause() {
 	e.sendStatusLocked()
 }
 
-// Seek jumps to the event nearest the given timestamp.
+// Seek jumps to the event nearest the given timestamp and sends a snapshot.
 func (e *Engine) Seek(timestamp string) {
 	t, err := logparser.TimestampToTime(timestamp)
 	if err != nil {
@@ -123,10 +136,16 @@ func (e *Engine) Seek(timestamp string) {
 	}
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	// Stop current playback
+	wasPlaying := e.playing
+	if e.playing && e.stopCh != nil {
+		close(e.stopCh)
+		e.stopCh = nil
+	}
+	e.playing = false
 
-	// Find nearest event
-	e.position = 0
+	// Find target position
+	targetPos := 0
 	for i, evt := range e.events {
 		evtTime, err := logparser.TimestampToTime(evt.Timestamp)
 		if err != nil {
@@ -135,10 +154,37 @@ func (e *Engine) Seek(timestamp string) {
 		if evtTime.After(t) {
 			break
 		}
-		e.position = i
+		targetPos = i
 	}
+
+	// Build snapshot of all events up to target
+	var snapshotEvents []logparser.PlaybackEvent
+	for i := 0; i <= targetPos && i < len(e.events); i++ {
+		if e.passesFilterLocked(e.events[i]) {
+			snapshotEvents = append(snapshotEvents, e.events[i])
+		}
+	}
+
+	e.position = targetPos
 	e.currentTS = t
 	e.sendStatusLocked()
+	e.mu.Unlock()
+
+	// Send snapshot (non-blocking)
+	select {
+	case e.snapshotCh <- SnapshotMessage{Type: "snapshot", Events: snapshotEvents}:
+	default:
+	}
+
+	// Resume if was playing
+	if wasPlaying {
+		e.mu.Lock()
+		e.playing = true
+		e.stopCh = make(chan struct{})
+		e.mu.Unlock()
+		e.sendStatus()
+		go e.playbackLoop()
+	}
 }
 
 // SetSpeed sets the playback speed multiplier.
@@ -292,21 +338,21 @@ func (e *Engine) playbackLoop() {
 
 func (e *Engine) passesFilter(evt logparser.PlaybackEvent) bool {
 	e.mu.Lock()
-	agentFilter := e.agentFilter
-	eventTypeFilter := e.eventTypeFilter
+	result := e.passesFilterLocked(evt)
 	e.mu.Unlock()
+	return result
+}
 
-	if eventTypeFilter != nil && !eventTypeFilter[evt.Type] {
+func (e *Engine) passesFilterLocked(evt logparser.PlaybackEvent) bool {
+	if e.eventTypeFilter != nil && !e.eventTypeFilter[evt.Type] {
 		return false
 	}
-
-	if agentFilter != nil {
+	if e.agentFilter != nil {
 		agentID := extractAgentID(evt)
-		if agentID != "" && !agentFilter[agentID] {
+		if agentID != "" && !e.agentFilter[agentID] {
 			return false
 		}
 	}
-
 	return true
 }
 
@@ -318,6 +364,8 @@ func extractAgentID(evt logparser.PlaybackEvent) string {
 		return d.AgentID
 	case logparser.AgentLifecycleEvent:
 		return d.AgentID
+	case logparser.MessageEvent:
+		return ""
 	}
 	return ""
 }

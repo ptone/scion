@@ -412,6 +412,8 @@ func TestDetectDefaultBranch(t *testing.T) {
 		}
 	}
 	cloneRun("clone", remote, ".")
+	cloneRun("config", "user.email", "test@test.com")
+	cloneRun("config", "user.name", "Test")
 	cloneRun("checkout", "-b", "testbranch")
 	cloneRun("commit", "--allow-empty", "-m", "init")
 	cloneRun("push", "origin", "testbranch")
