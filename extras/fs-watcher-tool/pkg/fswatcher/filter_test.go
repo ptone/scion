@@ -22,12 +22,38 @@ func TestFilter_ShouldIgnore_InlinePatterns(t *testing.T) {
 		{"pkg/foo.go", false},
 		{"file.swp", true},
 		{"dir/file.swp", true},
+		{"sub/dir/file.swp", true},
 	}
 
 	for _, tt := range tests {
 		got := f.ShouldIgnore(tt.path)
 		if got != tt.ignore {
 			t.Errorf("ShouldIgnore(%q) = %v, want %v", tt.path, got, tt.ignore)
+		}
+	}
+}
+
+func TestFilter_ShouldIgnore_DoubleStar(t *testing.T) {
+	f, err := NewFilter([]string{"**/node_modules/**", "**/dist/*"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		path   string
+		ignore bool
+	}{
+		{"node_modules/foo.js", true},
+		{"pkg/node_modules/bar.js", true},
+		{"dist/main.js", true},
+		{"pkg/dist/sub.js", true},
+		{"src/main.go", false},
+	}
+
+	for _, tt := range tests {
+		got := f.ShouldIgnore(tt.path)
+		if got != tt.ignore {
+			t.Errorf("DoubleStar: ShouldIgnore(%q) = %v, want %v", tt.path, got, tt.ignore)
 		}
 	}
 }
