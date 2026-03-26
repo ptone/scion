@@ -243,7 +243,7 @@ This endpoint is authenticated via agent token (same as `/api/v1/agent/status`).
 #### Recipient Resolution
 
 When an agent sends a message, the recipient may be:
-- **Implicit (empty)** — the message targets "whoever is watching this agent". The Hub resolves this to the agent's `CreatedBy` user, or to all users subscribed (via notification subscriptions) to this agent. The stored `recipient` becomes `user:<resolved-identity>`.
+- **Implicit (empty)** — the message targets the agent's `CreatedBy` user. The Hub resolves this from the agent record. The stored `recipient` becomes `user:<createdBy-identity>`.
 - **Explicit** — `"user:alice@example.com"` or `"user:<user-id>"` targets a specific user.
 
 Implicit resolution is the common case: the agent doesn't know or care who launched it, it just needs to ask a question.
@@ -513,9 +513,12 @@ Detailed web frontend changes are out of scope for this design and will be addre
 
 ---
 
-## Open Questions
+## Decisions
 
-1. **Message retention defaults** — 30 days for read, 90 for unread? Or a single retention window?
-2. **Implicit recipient resolution** — should unaddressed outbound messages go to the agent's `CreatedBy` user only, or to all notification subscribers? Leaning toward `CreatedBy` for simplicity.
-3. **Deduplication with notifications** — when `ask_user` fires, the human gets both a notification and a message. Should the notification be suppressed when a message is sent, or are both valuable? Leaning toward keeping both: notifications drive alert channels (Slack ping), messages populate the inbox.
-4. **Local mode** — should the message store work in local (non-Hub) mode? The notification system is Hub-only. Messages could follow the same constraint for now.
+1. **Message retention** — 30 days for read messages, 90 days for unread. Cleanup is implemented as a scheduled event using the Hub's built-in scheduler, not a separate cron or background goroutine.
+
+2. **Implicit recipient resolution** — unaddressed outbound messages (e.g. from `ask_user`) go to the agent's `CreatedBy` user only. Notifications (status-change alerts) continue to go to all subscribers. These are distinct systems with distinct audiences: a question is directed at whoever started the work, not broadcast to all watchers.
+
+3. **Notifications and messages both fire** — when `ask_user` fires, both a WAITING_FOR_INPUT notification and an `input-needed` message are created independently. They may be routed differently: notifications drive external alert channels (Slack, webhook, email) for all subscribers; messages populate the inbox for the creator. Neither suppresses the other.
+
+4. **Hub-only** — the message store and inbox are Hub-only, matching the notification system. Local (non-Hub) mode is out of scope.
