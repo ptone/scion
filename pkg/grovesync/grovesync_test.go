@@ -119,14 +119,15 @@ func TestDirection_Values(t *testing.T) {
 func TestBuildRcloneRemoteString(t *testing.T) {
 	// Verify that the remote string properly single-quotes values so that
 	// special characters (e.g. "://" in URLs) are not parsed as rclone
-	// connection-string delimiters.
+	// connection-string delimiters. vendor=owncloud enables OC checksum support.
 	davURL := buildWebDAVURL("https://hub.example.com", "grove-123")
 	token := "eyJhbGciOiJIUzI1NiJ9.test.signature"
 
-	remote := fmt.Sprintf(":webdav,url='%s',bearer_token='%s':", davURL, token)
+	remote := fmt.Sprintf(":webdav,url='%s',bearer_token='%s',vendor='owncloud':", davURL, token)
 
 	assert.Contains(t, remote, "url='https://hub.example.com/api/v1/groves/grove-123/dav'")
 	assert.Contains(t, remote, "bearer_token='eyJhbGciOiJIUzI1NiJ9.test.signature'")
+	assert.Contains(t, remote, "vendor='owncloud'")
 	assert.True(t, strings.HasPrefix(remote, ":webdav,"))
 	assert.True(t, strings.HasSuffix(remote, ":"))
 }

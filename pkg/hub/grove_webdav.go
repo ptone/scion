@@ -16,11 +16,15 @@ package hub
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -90,9 +94,12 @@ func (s *Server) handleGroveWebDAV(w http.ResponseWriter, r *http.Request, grove
 
 	handler := &webdav.Handler{
 		Prefix:     prefix,
-		FileSystem: &filteredFS{root: webdav.Dir(workspacePath)},
+		FileSystem: &filteredFS{root: webdav.Dir(workspacePath), rootPath: workspacePath},
 		LockSystem: webdav.NewMemLS(),
 		Logger: func(r *http.Request, err error) {
+			if r.Method == "PROPFIND" {
+				slog.Debug("webdav propfind", "path", r.URL.Path, "depth", r.Header.Get("Depth"))
+			}
 			if err != nil {
 				slog.Debug("webdav operation", "method", r.Method, "path", r.URL.Path, "error", err)
 			}
@@ -103,6 +110,7 @@ func (s *Server) handleGroveWebDAV(w http.ResponseWriter, r *http.Request, grove
 
 	// Update sync state after successful write operations
 	if r.Method == "PUT" || r.Method == "DELETE" || r.Method == "MKCOL" || r.Method == "MOVE" {
+		slog.Debug("webdav write operation", "method", r.Method, "path", r.URL.Path)
 		go s.updateGroveSyncState(grove.ID, workspacePath)
 	}
 }
@@ -228,7 +236,8 @@ func walkFilteredDirRecursive(root, prefix string, fn func(relPath string, info 
 
 // filteredFS wraps a webdav.FileSystem to exclude sync-excluded paths.
 type filteredFS struct {
-	root webdav.FileSystem
+	root     webdav.FileSystem
+	rootPath string // absolute path on disk, used for checksum computation
 }
 
 func (fs *filteredFS) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
@@ -248,10 +257,13 @@ func (fs *filteredFS) OpenFile(ctx context.Context, name string, flag int, perm 
 		return f, err
 	}
 
-	// If this is a directory being opened for reading, wrap to filter children
+	// Wrap based on file type: directories get filteredDir, regular files get checksumFile
 	info, statErr := f.Stat()
-	if statErr == nil && info.IsDir() {
-		return &filteredDir{File: f, dirName: name}, nil
+	if statErr == nil {
+		if info.IsDir() {
+			return &filteredDir{File: f, dirName: name}, nil
+		}
+		return &checksumFile{File: f, rootPath: fs.rootPath, relPath: name}, nil
 	}
 
 	return f, nil
@@ -298,6 +310,57 @@ func (d *filteredDir) Readdir(count int) ([]os.FileInfo, error) {
 		}
 	}
 	return filtered, nil
+}
+
+// checksumFile wraps a webdav.File to add OwnCloud-style checksum properties to
+// PROPFIND responses via the DeadPropsHolder interface.
+type checksumFile struct {
+	webdav.File
+	rootPath string // absolute workspace root path
+	relPath  string // path relative to workspace root
+}
+
+// DeadProps implements webdav.DeadPropsHolder. Returns an oc:checksums property
+// containing the SHA1 hash of the file, computed on-the-fly.
+func (f *checksumFile) DeadProps() (map[xml.Name]webdav.Property, error) {
+	hash, err := f.computeSHA1()
+	if err != nil {
+		return nil, err
+	}
+	name := xml.Name{Space: "http://owncloud.org/ns", Local: "checksums"}
+	prop := webdav.Property{
+		XMLName:  name,
+		InnerXML: []byte(`<oc:checksum xmlns:oc="http://owncloud.org/ns">SHA1:` + hash + `</oc:checksum>`),
+	}
+	return map[xml.Name]webdav.Property{name: prop}, nil
+}
+
+// Patch implements webdav.DeadPropsHolder. Checksums are computed, not stored,
+// so all patch attempts are rejected with 403 Forbidden.
+func (f *checksumFile) Patch(patches []webdav.Proppatch) ([]webdav.Propstat, error) {
+	return []webdav.Propstat{{
+		Props:  []webdav.Property{{XMLName: xml.Name{Space: "http://owncloud.org/ns", Local: "checksums"}}},
+		Status: http.StatusForbidden,
+	}}, nil
+}
+
+// computeSHA1 opens the file by path and returns its hex-encoded SHA1 hash.
+func (f *checksumFile) computeSHA1() (string, error) {
+	start := time.Now()
+	fullPath := filepath.Join(f.rootPath, filepath.FromSlash(strings.TrimPrefix(f.relPath, "/")))
+	file, err := os.Open(fullPath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	h := sha1.New()
+	if _, err := io.Copy(h, file); err != nil {
+		return "", err
+	}
+	hash := fmt.Sprintf("%x", h.Sum(nil))
+	slog.Debug("webdav checksum computed", "path", f.relPath, "sha1", hash, "duration", time.Since(start))
+	return hash, nil
 }
 
 // isExcluded returns true if a path should be excluded from sync.

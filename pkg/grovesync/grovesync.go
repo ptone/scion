@@ -19,6 +19,7 @@ package grovesync
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	_ "github.com/rclone/rclone/backend/local"
@@ -97,13 +98,14 @@ func Sync(ctx context.Context, opts Options) (*Result, error) {
 	// Values must be single-quoted so that special characters in the URL
 	// (e.g. "://" in https://) and token are not misinterpreted as
 	// rclone connection-string delimiters.
-	remote := fmt.Sprintf(":webdav,url='%s',bearer_token='%s':", davURL, opts.AuthToken)
+	// vendor=owncloud enables rclone to request and parse oc:checksums from PROPFIND responses.
+	remote := fmt.Sprintf(":webdav,url='%s',bearer_token='%s',vendor='owncloud':", davURL, opts.AuthToken)
+	slog.Debug("grovesync webdav remote", "url", davURL, "direction", string(opts.Direction))
 
 	// Set up rclone context with config
 	ctx, ci := fs.AddConfig(ctx)
 	ci.DryRun = opts.DryRun
 	ci.LogLevel = fs.LogLevelNotice
-	ci.CheckSum = true // WebDAV doesn't support modtime; use checksums instead
 
 	// Set up file exclusion filters
 	ctx, fi := filter.AddConfig(ctx)
