@@ -35,11 +35,6 @@ import '../shared/scheduled-event-list.js';
 import '../shared/subscription-manager.js';
 import '../shared/schedule-list.js';
 
-interface Agent {
-  id: string;
-  phase: string;
-  activity?: string;
-}
 
 interface GroveResourceSpec {
   requests?: { cpu?: string | undefined; memory?: string | undefined };
@@ -217,8 +212,6 @@ export class ScionPageGroveSettings extends LitElement {
 
   private brokerRelativeTimeInterval: ReturnType<typeof setInterval> | null = null;
 
-  private syncAgentId: string | null = null;
-  private syncPollTimer: ReturnType<typeof setInterval> | null = null;
 
   static override styles = css`
     :host {
@@ -753,7 +746,6 @@ export class ScionPageGroveSettings extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    this.stopSyncPolling();
     if (this.brokerRelativeTimeInterval) {
       clearInterval(this.brokerRelativeTimeInterval);
       this.brokerRelativeTimeInterval = null;
@@ -772,6 +764,10 @@ export class ScionPageGroveSettings extends LitElement {
       }
 
       this.grove = (await response.json()) as Grove;
+      // Pre-populate template import URL with the grove's git remote when set
+      if (this.grove.gitRemote && !this.syncRepoUrl) {
+        this.syncRepoUrl = this.grove.gitRemote;
+      }
       // Populate GitHub App fields from grove data
       this.githubAppInstallationId = this.grove.githubInstallationId ?? null;
       this.githubAppStatus = this.grove.githubAppStatus ?? null;
@@ -994,80 +990,24 @@ export class ScionPageGroveSettings extends LitElement {
     this.syncSuccess = null;
 
     try {
-      const fetchOpts: RequestInit = { method: 'POST' };
-      if (this.syncRepoUrl) {
-        fetchOpts.headers = { 'Content-Type': 'application/json' };
-        fetchOpts.body = JSON.stringify({ repoUrl: this.syncRepoUrl });
-      }
-      const response = await apiFetch(`/api/v1/groves/${this.groveId}/sync-templates`, fetchOpts);
+      const response = await apiFetch(`/api/v1/groves/${this.groveId}/import-templates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceUrl: this.syncRepoUrl }),
+      });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `Failed to start template sync: HTTP ${response.status}`));
+        throw new Error(await extractApiError(response, `Failed to import templates: HTTP ${response.status}`));
       }
 
-      const data = (await response.json()) as { agentId: string; status: string };
-      this.syncAgentId = data.agentId;
-      this.startSyncPolling();
+      const data = (await response.json()) as { templates: string[]; count: number };
+      await Promise.all([this.loadTemplates(), this.loadDropdownTemplates()]);
+      this.syncSuccess = `${data.count} template${data.count !== 1 ? 's' : ''} imported successfully.`;
     } catch (err) {
-      console.error('Failed to sync templates:', err);
-      this.syncError = err instanceof Error ? err.message : 'Failed to sync templates';
+      console.error('Failed to import templates:', err);
+      this.syncError = err instanceof Error ? err.message : 'Failed to import templates';
+    } finally {
       this.syncLoading = false;
-    }
-  }
-
-  private startSyncPolling(): void {
-    this.stopSyncPolling();
-    this.syncPollTimer = setInterval(() => void this.pollSyncAgent(), 3000);
-  }
-
-  private stopSyncPolling(): void {
-    if (this.syncPollTimer) {
-      clearInterval(this.syncPollTimer);
-      this.syncPollTimer = null;
-    }
-  }
-
-  private async pollSyncAgent(): Promise<void> {
-    if (!this.syncAgentId) return;
-
-    try {
-      const response = await apiFetch(`/api/v1/agents/${this.syncAgentId}`);
-      if (!response.ok) {
-        this.stopSyncPolling();
-        this.syncError = 'Lost track of sync agent';
-        this.syncLoading = false;
-        return;
-      }
-
-      const agent = (await response.json()) as Agent;
-
-      if (agent.phase === 'stopped' || agent.phase === 'completed') {
-        this.stopSyncPolling();
-        void this.cleanupSyncAgent();
-        await Promise.all([this.loadTemplates(), this.loadDropdownTemplates()]);
-        this.syncLoading = false;
-        this.syncSuccess = 'Templates synced successfully.';
-      } else if (agent.phase === 'error') {
-        this.stopSyncPolling();
-        this.syncLoading = false;
-        this.syncError = 'Template sync agent encountered an error.';
-        void this.cleanupSyncAgent();
-      }
-    } catch {
-      this.stopSyncPolling();
-      this.syncError = 'Failed to check sync status';
-      this.syncLoading = false;
-    }
-  }
-
-  private async cleanupSyncAgent(): Promise<void> {
-    if (!this.syncAgentId) return;
-    const agentId = this.syncAgentId;
-    this.syncAgentId = null;
-    try {
-      await apiFetch(`/api/v1/agents/${agentId}`, { method: 'DELETE' });
-    } catch {
-      // Best-effort cleanup
     }
   }
 
@@ -1787,12 +1727,11 @@ export class ScionPageGroveSettings extends LitElement {
   }
 
   private renderTemplatesContent() {
-    const isGitGrove = !!this.grove?.gitRemote;
     const canSync = canAny(this.grove!._capabilities, 'update', 'manage');
     return html`
       <div class="section-header" style="margin-bottom: 1rem;">
         <div class="section-header-text">
-          <p style="margin: 0;">Grove-scoped agent templates synced to the Hub.</p>
+          <p style="margin: 0;">Grove-scoped agent templates imported into the Hub.</p>
         </div>
         ${canSync
           ? html`
@@ -1800,21 +1739,21 @@ export class ScionPageGroveSettings extends LitElement {
                 size="small"
                 variant="default"
                 ?loading=${this.syncLoading}
-                ?disabled=${this.syncLoading || (!isGitGrove && !this.syncRepoUrl)}
+                ?disabled=${this.syncLoading || !this.syncRepoUrl}
                 @click=${() => this.handleSyncTemplates()}
               >
-                <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
-                Load Templates
+                <sl-icon slot="prefix" name="download"></sl-icon>
+                Import Templates
               </sl-button>
             `
           : ''}
       </div>
-      ${canSync && !isGitGrove
+      ${canSync
         ? html`
             <div style="margin-bottom: 1rem;">
               <sl-input
-                label="Load from repo"
-                placeholder="https://github.com/org/repo"
+                label="Import from URL"
+                placeholder="https://github.com/org/repo/tree/main/.scion/templates"
                 size="small"
                 clearable
                 .value=${this.syncRepoUrl}
@@ -1829,7 +1768,7 @@ export class ScionPageGroveSettings extends LitElement {
                 <sl-icon slot="prefix" name="github"></sl-icon>
               </sl-input>
               <div style="margin-top: 0.25rem; font-size: 0.75rem; color: var(--sl-color-neutral-500);">
-                Git repository URL containing templates in <code>.scion/templates</code>
+                GitHub URL to a template or templates directory — supports arbitrary deep paths
               </div>
             </div>
           `
@@ -1839,9 +1778,7 @@ export class ScionPageGroveSettings extends LitElement {
         ? html`
             <div class="sync-status syncing">
               <sl-spinner style="font-size: 0.875rem;"></sl-spinner>
-              ${isGitGrove || !this.syncRepoUrl
-                ? 'Syncing templates from grove...'
-                : `Syncing templates from ${this.syncRepoUrl}...`}
+              ${`Importing templates from ${this.syncRepoUrl}...`}
             </div>
           `
         : ''}
@@ -1885,13 +1822,9 @@ export class ScionPageGroveSettings extends LitElement {
           : html`
               <div class="empty-templates">
                 <sl-icon name="file-earmark"></sl-icon>
-                <p>No grove templates synced yet.</p>
+                <p>No grove templates imported yet.</p>
                 ${canSync
-                  ? html`<p>
-                      ${isGitGrove
-                        ? 'Use "Load Templates" to sync templates from the grove\'s repository.'
-                        : 'Enter a repository URL above and click "Load Templates" to import templates.'}
-                    </p>`
+                  ? html`<p>Enter a URL above and click "Import Templates" to import.</p>`
                   : ''}
               </div>
             `}

@@ -3638,9 +3638,9 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for nested /sync-templates path
-	if subPath == "sync-templates" {
-		s.handleGroveSyncTemplates(w, r, groveID)
+	// Check for nested /import-templates path
+	if subPath == "import-templates" {
+		s.handleGroveImportTemplates(w, r, groveID)
 		return
 	}
 
@@ -8020,22 +8020,23 @@ func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================================================================
-// Grove Template Sync
+// Grove Template Import
 // ============================================================================
 
-// SyncTemplatesRequest is the optional request body for template sync.
-type SyncTemplatesRequest struct {
-	RepoURL string `json:"repoUrl,omitempty"`
+// ImportTemplatesRequest is the request body for direct template import.
+type ImportTemplatesRequest struct {
+	SourceURL string `json:"sourceUrl"`
 }
 
-// SyncTemplatesResponse is returned when a template sync agent is dispatched.
-type SyncTemplatesResponse struct {
-	AgentID string `json:"agentId"`
-	Status  string `json:"status"`
+// ImportTemplatesResponse is returned after a direct template import completes.
+type ImportTemplatesResponse struct {
+	Templates []string `json:"templates"`
+	Count     int      `json:"count"`
 }
 
-// handleGroveSyncTemplates dispatches an agent to synchronize templates for a grove.
-func (s *Server) handleGroveSyncTemplates(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleGroveImportTemplates imports templates directly from a remote URL into
+// the grove's template store without spawning a bootstrap container agent.
+func (s *Server) handleGroveImportTemplates(w http.ResponseWriter, r *http.Request, groveID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -8044,17 +8045,15 @@ func (s *Server) handleGroveSyncTemplates(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 
 	// Authorize the caller
-	var createdBy string
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if !agentIdent.HasScope(ScopeAgentCreate) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: grove:agent:create", nil)
 			return
 		}
 		if groveID != agentIdent.GroveID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only sync templates within their own grove", nil)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only import templates within their own grove", nil)
 			return
 		}
-		createdBy = agentIdent.ID()
 	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
 			Type:       "agent",
@@ -8063,25 +8062,22 @@ func (s *Server) handleGroveSyncTemplates(w http.ResponseWriter, r *http.Request
 		}, ActionCreate)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You don't have permission to sync templates in this grove", nil)
+				"You don't have permission to import templates in this grove", nil)
 			return
 		}
-		createdBy = userIdent.ID()
 	} else {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 		return
 	}
 
-	// Parse optional request body for repoUrl.
-	var req SyncTemplatesRequest
-	if r.Body != nil {
-		// Ignore decode errors for empty bodies (the field is optional).
-		_ = readJSON(r, &req)
+	var req ImportTemplatesRequest
+	if err := readJSON(r, &req); err != nil || req.SourceURL == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "sourceUrl is required", nil)
+		return
 	}
 
 	// Verify grove exists
-	grove, err := s.store.GetGrove(ctx, groveID)
-	if err != nil {
+	if _, err := s.store.GetGrove(ctx, groveID); err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Grove")
 			return
@@ -8090,138 +8086,19 @@ func (s *Server) handleGroveSyncTemplates(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Resolve a runtime broker (use grove default)
-	runtimeBrokerID, err := s.resolveRuntimeBroker(ctx, w, "", grove)
+	if s.GetStorage() == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Template storage is not configured", nil)
+		return
+	}
+
+	imported, err := s.importTemplatesFromRemote(ctx, groveID, req.SourceURL)
 	if err != nil {
-		// Error response already written by resolveRuntimeBroker
+		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
 	}
 
-	// Check broker dispatch access
-	if runtimeBrokerID != "" {
-		if !s.checkBrokerDispatchAccess(ctx, w, runtimeBrokerID) {
-			return
-		}
-	}
-
-	// Build agent name with timestamp
-	agentName := fmt.Sprintf("template-sync-%d", time.Now().Unix())
-	slug, err := api.ValidateAgentName(agentName)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_name", err.Error(), nil)
-		return
-	}
-
-	agent := &store.Agent{
-		ID:              api.NewUUID(),
-		Slug:            slug,
-		Name:            slug,
-		GroveID:         groveID,
-		RuntimeBrokerID: runtimeBrokerID,
-		Phase:           string(state.PhaseCreated),
-		Labels: map[string]string{
-			"scion.dev/purpose": "template-sync",
-		},
-		Visibility: store.VisibilityPrivate,
-		CreatedBy:  createdBy,
-		OwnerID:    createdBy,
-		Detached:   true,
-		AppliedConfig: &store.AgentAppliedConfig{
-			HarnessConfig: "generic",
-			Task:          "scion templates sync --all",
-		},
-	}
-
-	// Populate GitClone config for git-anchored groves so the broker
-	// clones the repo before running the sync command. Without this,
-	// the container starts with an empty workspace and the sync exits
-	// immediately because there are no templates to find.
-	s.populateAgentConfig(agent, grove, nil)
-
-	// For non-git groves, allow loading templates from an external repo URL.
-	if req.RepoURL != "" && grove.GitRemote == "" {
-		cleanedURL := cleanTemplateRepoURL(req.RepoURL)
-		// Accept bare host/org/repo inputs by prepending https://.
-		if !strings.Contains(cleanedURL, "://") && !strings.HasPrefix(cleanedURL, "git@") {
-			cleanedURL = "https://" + cleanedURL
-		}
-		if !util.IsGitURL(cleanedURL) {
-			writeError(w, http.StatusBadRequest, "invalid_repo_url", "The provided URL is not a valid git repository URL", nil)
-			return
-		}
-		cloneURL := util.ToHTTPSCloneURL(cleanedURL)
-		agent.AppliedConfig.GitClone = &api.GitCloneConfig{
-			URL:    cloneURL,
-			Branch: "main",
-			Depth:  1,
-		}
-
-		// Look up a GitHub App installation that covers this repo directly,
-		// then find a grove owned by the same user that references it so the
-		// dispatcher can mint a token for cloning.
-		normalizedRemote := util.NormalizeGitRemote(cleanedURL)
-		if parts := strings.SplitN(normalizedRemote, "/", 2); len(parts) == 2 {
-			if inst, err := s.store.GetInstallationForRepository(ctx, parts[1]); err == nil {
-				matchingGroves, _ := s.store.GetGrovesByGitRemote(ctx, normalizedRemote)
-				for _, g := range matchingGroves {
-					if g.GitHubInstallationID != nil && *g.GitHubInstallationID == inst.InstallationID && g.OwnerID == grove.OwnerID {
-						agent.Labels["scion.dev/github-token-source-grove"] = g.ID
-						break
-					}
-				}
-			}
-		}
-	}
-
-	if err := s.store.CreateAgent(ctx, agent); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Dispatch to runtime broker.
-	// Set the phase to provisioning BEFORE dispatching so that a fast
-	// container failure (e.g. git clone error) that reports phase=error
-	// via the status API doesn't get clobbered by a post-dispatch update.
-	if dispatcher := s.GetDispatcher(); dispatcher != nil {
-		agent.Phase = string(state.PhaseProvisioning)
-		if err := s.store.UpdateAgent(ctx, agent); err != nil {
-			s.agentLifecycleLog.Warn("Failed to update template-sync agent phase", "error", err)
-		}
-
-		if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
-			// Clean up on dispatch failure
-			s.agentLifecycleLog.Warn("Failed to dispatch template-sync agent", "agent_id", agent.ID, "error", err)
-			_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
-			_ = s.store.DeleteAgent(ctx, agent.ID)
-			RuntimeError(w, "Failed to dispatch template sync agent: "+err.Error())
-			return
-		}
-	}
-
-	s.events.PublishAgentCreated(ctx, agent)
-
-	s.agentLifecycleLog.Info("Template sync agent dispatched",
-		"agent_id", agent.ID, "grove_id", groveID, "broker", runtimeBrokerID)
-
-	writeJSON(w, http.StatusOK, SyncTemplatesResponse{
-		AgentID: agent.ID,
-		Status:  "syncing",
+	writeJSON(w, http.StatusOK, ImportTemplatesResponse{
+		Templates: imported,
+		Count:     len(imported),
 	})
-}
-
-// cleanTemplateRepoURL strips .scion/templates suffixes and common
-// repository browse paths (e.g. /tree/main) from a URL so that it can
-// be normalized to a plain clone URL.
-func cleanTemplateRepoURL(rawURL string) string {
-	// Strip .scion/templates suffix (with optional trailing slash).
-	if idx := strings.Index(rawURL, "/.scion/templates"); idx >= 0 {
-		rawURL = rawURL[:idx]
-	}
-	// Strip GitHub/GitLab browse path segments (longer patterns first).
-	for _, seg := range []string{"/-/tree/", "/-/blob/", "/tree/", "/blob/"} {
-		if idx := strings.Index(rawURL, seg); idx >= 0 {
-			rawURL = rawURL[:idx]
-		}
-	}
-	return strings.TrimRight(rawURL, "/")
 }

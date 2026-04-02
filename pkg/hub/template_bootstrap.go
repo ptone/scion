@@ -16,12 +16,14 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/templateimport"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -72,7 +74,7 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 
 		if existing == nil {
 			// New template — import it
-			if err := s.bootstrapSingleTemplate(ctx, name, templatePath); err != nil {
+			if err := s.bootstrapSingleTemplate(ctx, name, templatePath, store.TemplateScopeGlobal, ""); err != nil {
 				s.templateLog.Warn("template bootstrap: failed to import template, skipping",
 					"template", name, "error", err)
 				continue
@@ -178,8 +180,9 @@ func (s *Server) syncExistingTemplate(ctx context.Context, existing *store.Templ
 }
 
 // bootstrapSingleTemplate imports one local template directory into the
-// Hub's database and storage backend.
-func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath string) error {
+// Hub's database and storage backend under the given scope and groveID.
+// For global templates pass store.TemplateScopeGlobal and "".
+func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath, scope, groveID string) error {
 	stor := s.GetStorage()
 
 	// Collect files from the template directory
@@ -192,20 +195,21 @@ func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath
 	harness := detectHarnessFromConfig(templatePath, name)
 
 	slug := api.Slugify(name)
-	scope := store.TemplateScopeGlobal
 
 	// Create a pending template record
-	storagePath := storage.TemplateStoragePath(scope, "", slug)
+	storagePath := storage.TemplateStoragePath(scope, groveID, slug)
 	tmpl := &store.Template{
 		ID:            api.NewUUID(),
 		Name:          name,
 		Slug:          slug,
 		Harness:       harness,
 		Scope:         scope,
+		ScopeID:       groveID,
+		GroveID:       groveID, // deprecated alias kept for compatibility
 		Status:        store.TemplateStatusPending,
 		StoragePath:   storagePath,
 		StorageBucket: stor.Bucket(),
-		StorageURI:    storage.TemplateStorageURI(stor.Bucket(), scope, "", slug),
+		StorageURI:    storage.TemplateStorageURI(stor.Bucket(), scope, groveID, slug),
 		Visibility:    store.VisibilityPrivate,
 	}
 
@@ -294,4 +298,78 @@ func inferHarnessFromName(name string) string {
 	default:
 		return ""
 	}
+}
+
+// importTemplatesFromRemote fetches a remote source URL, discovers scion
+// templates within it, and registers each one into the Hub store scoped
+// to the given grove. Returns the names of all templates imported or updated.
+func (s *Server) importTemplatesFromRemote(ctx context.Context, groveID, sourceURL string) ([]string, error) {
+	if !config.IsRemoteURI(sourceURL) {
+		return nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
+	}
+
+	stor := s.GetStorage()
+	if stor == nil {
+		return nil, fmt.Errorf("template storage is not configured")
+	}
+
+	// Fetch to a temporary directory
+	cachePath, err := config.FetchRemoteTemplate(ctx, sourceURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch remote templates: %w", err)
+	}
+	defer os.RemoveAll(cachePath)
+
+	// Collect template directories to import
+	type templateDir struct{ name, path string }
+	var dirs []templateDir
+
+	if templateimport.IsScionTemplate(cachePath) {
+		// URL pointed directly at a single template directory
+		dirs = append(dirs, templateDir{filepath.Base(cachePath), cachePath})
+	} else {
+		entries, err := os.ReadDir(cachePath)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			dir := filepath.Join(cachePath, entry.Name())
+			if templateimport.IsScionTemplate(dir) {
+				dirs = append(dirs, templateDir{entry.Name(), dir})
+			}
+		}
+	}
+
+	if len(dirs) == 0 {
+		return nil, fmt.Errorf("no scion templates found at %s", sourceURL)
+	}
+
+	var imported []string
+	for _, td := range dirs {
+		slug := api.Slugify(td.name)
+		existing, err := s.store.GetTemplateBySlug(ctx, slug, store.TemplateScopeGrove, groveID)
+		if err != nil && err != store.ErrNotFound {
+			s.templateLog.Warn("template import: failed to look up template, skipping",
+				"name", td.name, "error", err)
+			continue
+		}
+		if existing == nil {
+			if err := s.bootstrapSingleTemplate(ctx, td.name, td.path, store.TemplateScopeGrove, groveID); err != nil {
+				s.templateLog.Warn("template import: failed to import template, skipping",
+					"name", td.name, "error", err)
+				continue
+			}
+		} else {
+			if _, err := s.syncExistingTemplate(ctx, existing, td.path); err != nil {
+				s.templateLog.Warn("template import: failed to sync template, skipping",
+					"name", td.name, "error", err)
+				continue
+			}
+		}
+		imported = append(imported, td.name)
+	}
+	return imported, nil
 }
