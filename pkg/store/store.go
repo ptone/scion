@@ -235,6 +235,7 @@ type GroveFilter struct {
 	OwnerID         string
 	Visibility      string
 	GitRemotePrefix string
+	GitRemote       string // Filter by exact git remote (case-sensitive)
 	BrokerID        string // Filter by contributing broker
 	Name            string // Filter by exact name (case-insensitive)
 	Slug            string // Filter by exact slug (case-insensitive)

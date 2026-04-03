@@ -984,6 +984,40 @@ func TestGroveListBySlug(t *testing.T) {
 	assert.Equal(t, 0, result.TotalCount)
 }
 
+func TestListGrovesByGitRemoteExactMatch(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	grove1 := &store.Grove{
+		ID:         api.NewUUID(),
+		Name:       "Repo",
+		Slug:       "repo",
+		GitRemote:  "github.com/org/repo",
+		Visibility: store.VisibilityPrivate,
+	}
+	grove2 := &store.Grove{
+		ID:         api.NewUUID(),
+		Name:       "Repo Clone",
+		Slug:       "repo-clone",
+		GitRemote:  "github.com/org/repo-clone",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateGrove(ctx, grove1))
+	require.NoError(t, s.CreateGrove(ctx, grove2))
+
+	// Exact match should return only the exact grove, not the one with repo-clone
+	result, err := s.ListGroves(ctx, store.GroveFilter{GitRemote: "github.com/org/repo"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalCount)
+	assert.Equal(t, grove1.ID, result.Items[0].ID)
+
+	// Exact match on the clone URL should return only that grove
+	result, err = s.ListGroves(ctx, store.GroveFilter{GitRemote: "github.com/org/repo-clone"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalCount)
+	assert.Equal(t, grove2.ID, result.Items[0].ID)
+}
+
 func TestRuntimeBrokerLookupByName(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()

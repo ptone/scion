@@ -2094,7 +2094,10 @@ func (s *SQLiteStore) ListGroves(ctx context.Context, filter store.GroveFilter, 
 		conditions = append(conditions, "visibility = ?")
 		args = append(args, filter.Visibility)
 	}
-	if filter.GitRemotePrefix != "" {
+	if filter.GitRemote != "" {
+		conditions = append(conditions, "git_remote = ?")
+		args = append(args, filter.GitRemote)
+	} else if filter.GitRemotePrefix != "" {
 		conditions = append(conditions, "git_remote LIKE ?")
 		args = append(args, filter.GitRemotePrefix+"%")
 	}

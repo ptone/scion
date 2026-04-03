@@ -2583,12 +2583,12 @@ func (s *Server) listGroves(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	filter := store.GroveFilter{
-		OwnerID:         query.Get("ownerId"),
-		Visibility:      query.Get("visibility"),
-		GitRemotePrefix: util.NormalizeGitRemote(query.Get("gitRemote")),
-		BrokerID:        query.Get("brokerId"),
-		Name:            query.Get("name"),
-		Slug:            query.Get("slug"),
+		OwnerID:    query.Get("ownerId"),
+		Visibility: query.Get("visibility"),
+		GitRemote:  util.NormalizeGitRemote(query.Get("gitRemote")),
+		BrokerID:   query.Get("brokerId"),
+		Name:       query.Get("name"),
+		Slug:       query.Get("slug"),
 	}
 
 	// mine=true: restrict to groves the current user owns or is a member of
