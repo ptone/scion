@@ -239,6 +239,39 @@ export class ScionCodeEditor extends LitElement {
       const { searchKeymap, highlightSelectionMatches } = cm.search;
       const { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap } = cm.autocomplete;
 
+      // Detect dark mode from document theme or system preference
+      const isDark = document.documentElement.getAttribute('data-theme') === 'dark'
+        || document.documentElement.classList.contains('sl-theme-dark')
+        || document.documentElement.classList.contains('dark')
+        || (!document.documentElement.getAttribute('data-theme')
+            && window.matchMedia('(prefers-color-scheme: dark)').matches);
+
+      // Build a dark-mode-aware highlight style
+      const { HighlightStyle } = cm.language;
+      const { tags } = await import('@lezer/highlight');
+
+      const darkHighlightStyle = HighlightStyle.define([
+        { tag: tags.keyword, color: '#c678dd' },
+        { tag: [tags.name, tags.deleted, tags.character, tags.macroName], color: '#e06c75' },
+        { tag: [tags.propertyName], color: '#61afef' },
+        { tag: [tags.function(tags.variableName), tags.labelName], color: '#61afef' },
+        { tag: [tags.color, tags.constant(tags.name), tags.standard(tags.name)], color: '#d19a66' },
+        { tag: [tags.definition(tags.name), tags.separator], color: '#abb2bf' },
+        { tag: [tags.typeName, tags.className, tags.number, tags.changed, tags.annotation,
+                tags.modifier, tags.self, tags.namespace], color: '#e5c07b' },
+        { tag: [tags.operator, tags.operatorKeyword, tags.url, tags.escape,
+                tags.regexp, tags.special(tags.string)], color: '#56b6c2' },
+        { tag: [tags.meta, tags.comment], color: '#7f848e' },
+        { tag: tags.strong, fontWeight: 'bold' },
+        { tag: tags.emphasis, fontStyle: 'italic' },
+        { tag: tags.strikethrough, textDecoration: 'line-through' },
+        { tag: tags.link, color: '#61afef', textDecoration: 'underline' },
+        { tag: tags.heading, fontWeight: 'bold', color: '#e06c75' },
+        { tag: [tags.atom, tags.bool, tags.special(tags.variableName)], color: '#d19a66' },
+        { tag: [tags.processingInstruction, tags.string, tags.inserted], color: '#98c379' },
+        { tag: tags.invalid, color: '#ffffff', backgroundColor: '#e06c75' },
+      ]);
+
       // Load language support
       const extensions = [
         lineNumbers(),
@@ -250,7 +283,7 @@ export class ScionCodeEditor extends LitElement {
         dropCursor(),
         EditorState.allowMultipleSelections.of(true),
         indentOnInput(),
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        syntaxHighlighting(isDark ? darkHighlightStyle : defaultHighlightStyle, { fallback: true }),
         bracketMatching(),
         closeBrackets(),
         autocompletion(),
@@ -279,20 +312,33 @@ export class ScionCodeEditor extends LitElement {
             borderRight: '1px solid var(--scion-border, #e2e8f0)',
           },
           '.cm-activeLineGutter': {
-            backgroundColor: 'var(--sl-color-primary-50, #eff6ff)',
+            backgroundColor: isDark
+              ? 'rgba(255, 255, 255, 0.05)'
+              : 'var(--sl-color-primary-50, #eff6ff)',
           },
           '.cm-activeLine': {
-            backgroundColor: 'var(--sl-color-primary-50, #eff6ff)',
+            backgroundColor: isDark
+              ? 'rgba(255, 255, 255, 0.05)'
+              : 'var(--sl-color-primary-50, #eff6ff)',
           },
           '&.cm-focused .cm-cursor': {
-            borderLeftColor: 'var(--sl-color-primary-600, #2563eb)',
+            borderLeftColor: isDark
+              ? 'var(--sl-color-primary-400, #60a5fa)'
+              : 'var(--sl-color-primary-600, #2563eb)',
           },
           '&.cm-focused .cm-selectionBackground, ::selection': {
-            backgroundColor: 'var(--sl-color-primary-100, #dbeafe)',
+            backgroundColor: isDark
+              ? 'rgba(97, 175, 239, 0.25)'
+              : 'var(--sl-color-primary-100, #dbeafe)',
           },
           '.cm-selectionMatch': {
-            backgroundColor: 'var(--sl-color-warning-100, #fef3c7)',
+            backgroundColor: isDark
+              ? 'rgba(229, 192, 123, 0.2)'
+              : 'var(--sl-color-warning-100, #fef3c7)',
           },
+          '.cm-matchingBracket': isDark
+            ? { backgroundColor: 'rgba(97, 175, 239, 0.3)', color: '#ffffff !important' }
+            : {},
         }),
       ];
 

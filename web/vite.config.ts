@@ -100,6 +100,8 @@ export default defineConfig({
             },
         },
         sourcemap: true,
+        // CodeMirror and xterm are lazy-loaded, so large chunks are acceptable
+        chunkSizeWarningLimit: 800,
         // Ensure Lit components are properly bundled
         target: 'esnext',
         minify: 'esbuild',

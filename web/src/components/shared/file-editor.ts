@@ -494,7 +494,7 @@ export class ScionFileEditor extends LitElement {
                   variant=${this.showPreview ? 'primary' : 'default'}
                   @click=${this.handleTogglePreview}
                 >
-                  <sl-icon slot="prefix" name=${this.showPreview ? 'code' : 'eye'}></sl-icon>
+                  <sl-icon slot="prefix" name=${this.showPreview ? 'pencil' : 'eye'}></sl-icon>
                   ${this.showPreview ? 'Edit' : 'Preview'}
                 </sl-button>
               `
