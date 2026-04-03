@@ -929,25 +929,19 @@ export class ScionPageAgentCreate extends LitElement {
             ></sl-input>
           </div>
 
-          ${this.selectedGrove?.gitRemote
+          ${this.selectedGrove?.gitRemote && !isSharedWorkspace(this.selectedGrove)
             ? html`
                 <div class="form-field">
                   <label for="branch">Branch</label>
                   <sl-input
                     id="branch"
-                    placeholder=${this.selectedGrove && isSharedWorkspace(this.selectedGrove)
-                      ? (this.selectedGrove.labels?.['scion.dev/default-branch'] || 'main')
-                      : 'defaults to agent name'}
+                    placeholder="defaults to agent name"
                     .value=${this.branch}
                     @sl-input=${(e: Event) => {
                       this.branch = (e.target as HTMLElement & { value: string }).value;
                     }}
                   ></sl-input>
-                  <div class="hint">
-                    ${this.selectedGrove && isSharedWorkspace(this.selectedGrove)
-                      ? 'Branch checked out in the shared workspace. All agents share this branch.'
-                      : 'Git branch for this agent\'s workspace.'}
-                  </div>
+                  <div class="hint">Git branch for this agent's workspace.</div>
                 </div>
               `
             : ''}
