@@ -8164,6 +8164,8 @@ func (s *Server) handleGroveImportTemplates(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
+
 	// Verify grove exists
 	if _, err := s.store.GetGrove(ctx, groveID); err != nil {
 		if err == store.ErrNotFound {

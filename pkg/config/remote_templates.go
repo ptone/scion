@@ -65,6 +65,44 @@ func remoteCacheDir() (string, error) {
 	return filepath.Join(globalDir, "cache", "remote-templates"), nil
 }
 
+// NormalizeTemplateSourceURL normalizes a user-provided template source URL.
+// It handles two cases of user convenience:
+//  1. Missing scheme: if the URL doesn't start with a scheme or rclone prefix,
+//     "https://" is prepended automatically (e.g. "github.com/org/repo").
+//  2. Bare GitHub org/repo: if the result is a GitHub URL with only owner/repo
+//     in the path (no deeper path), "/.scion/templates/" is appended so that
+//     the standard template directory is used automatically.
+func NormalizeTemplateSourceURL(raw string) string {
+	s := strings.TrimSpace(raw)
+
+	// Add https:// scheme if missing (not rclone and not already http/https)
+	if !strings.HasPrefix(s, ":") && !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
+		s = "https://" + s
+	}
+
+	// For GitHub URLs with just owner/repo, append /.scion/templates/
+	u, err := url.Parse(s)
+	if err != nil {
+		return s
+	}
+	if strings.EqualFold(u.Host, "github.com") {
+		// Split path and filter empty segments
+		var parts []string
+		for _, p := range strings.Split(strings.TrimPrefix(u.Path, "/"), "/") {
+			if p != "" {
+				parts = append(parts, p)
+			}
+		}
+		if len(parts) == 2 {
+			// Just owner/repo — point to the standard templates directory
+			u.Path = "/" + parts[0] + "/" + parts[1] + "/.scion/templates/"
+			return u.String()
+		}
+	}
+
+	return s
+}
+
 // IsRemoteURI checks if the given string looks like a remote template URI.
 // Returns true for:
 // - URLs starting with http:// or https://
