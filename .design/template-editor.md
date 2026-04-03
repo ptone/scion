@@ -267,9 +267,22 @@ Inline editing introduces mutable template files, which conflicts with the curre
 
 **Important clarification:** Template mutability only affects *new* agents created from the template. Already-created/running agents are not affected by template edits — their files were copied at creation time.
 
-**Open investigation:** Does a broker check for template content hash changes each time it creates an agent, or does it rely on a cached copy? This affects how quickly edits propagate to new agent creation. Needs further investigation.
+### 5.3 Broker Cache Invalidation (Investigated)
 
-### 5.3 Locked Template Cleanup
+Cache invalidation is **implicit and demand-driven** — no polling or webhooks needed:
+
+1. When a template file is edited, the Hub recomputes the template's `ContentHash` and stores it in the database.
+2. On next agent creation, the Hub resolves the template and passes the **current** `ContentHash` to the broker in the `CreateAgentRequest`.
+3. The broker's template cache (`pkg/templatecache/`) checks for a matching hash via `cache.GetByHash(contentHash)`:
+   - **Hit** → uses cached files immediately.
+   - **Miss** (hash changed) → re-downloads from Hub storage. Downloads are incremental — only files whose individual hashes changed are fetched; unchanged files are reused from the previous cached version.
+4. The new version is cached under the new content hash. Old versions remain until LRU eviction (default 100MB cache limit).
+
+**Co-located brokers** (broker on same machine as Hub) bypass the cache entirely — they read templates directly from the local filesystem, so edits are picked up immediately.
+
+**Result:** Template edits propagate to the very next agent creation request with no delay beyond the file download time. The existing architecture fully supports mutable active templates.
+
+### 5.4 Locked Template Cleanup
 
 The `locked` field on templates was introduced speculatively in earlier designs but is not meaningfully used in the current implementation. Rather than building UI around it, the locked template concept should be cleaned out as tech debt until it can be reintroduced more thoughtfully. This is tracked separately from the template editor work.
 
@@ -283,11 +296,8 @@ The `locked` field on templates was introduced speculatively in earlier designs 
 | File tree vs. flat list | Flat list of full paths for now |
 | Template file upload UX | Use workspace-style multipart upload (consistent, simpler) |
 | Shared component extraction timing | File browser + editor extracted first as part of [web-file-editor.md](./web-file-editor.md), before template editor work begins |
-| Locked templates | Clean out `locked` field as tech debt (see Section 5.3) |
-
-### Open Investigation
-
-- **Multi-broker cache invalidation** — When a template file is edited, the content hash changes. How quickly do brokers pick up the change? Need to investigate whether brokers check the hash on each agent creation or cache templates locally.
+| Locked templates | Clean out `locked` field as tech debt (see Section 5.4) |
+| Broker cache invalidation | Implicit and demand-driven — no action needed (see Section 5.3) |
 
 ---
 

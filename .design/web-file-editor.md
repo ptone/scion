@@ -201,7 +201,6 @@ Only markdown changes behavior. This is a targeted enhancement — the eye icon 
 
 The existing download endpoint (`GET .../workspace/files/{path}`) returns the file as a download or inline view. For the editor, we need the content as a JSON-wrapped response with metadata:
 
-**Option A: New dedicated endpoint**
 ```
 GET /api/v1/groves/{groveId}/workspace/files/{filePath}/content
 ```
@@ -216,14 +215,7 @@ Response:
 }
 ```
 
-**Option B: Query parameter on existing endpoint**
-```
-GET /api/v1/groves/{groveId}/workspace/files/{filePath}?format=json
-```
-
-Same response body.
-
-**Recommendation:** Option B — avoids adding a new route. The `format=json` param is consistent with the existing `view=true` pattern.
+A dedicated route keeps the existing download endpoint unchanged and makes the editor's read path explicit.
 
 ### 5.2 Write File Content (New Endpoint)
 
