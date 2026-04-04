@@ -40,8 +40,8 @@ type GroveService interface {
 	// Update updates grove metadata.
 	Update(ctx context.Context, groveID string, req *UpdateGroveRequest) (*Grove, error)
 
-	// Delete removes a grove.
-	Delete(ctx context.Context, groveID string, deleteAgents bool) error
+	// Delete removes a grove and all its agents.
+	Delete(ctx context.Context, groveID string) error
 
 	// ListAgents returns agents in a grove.
 	ListAgents(ctx context.Context, groveID string, opts *ListAgentsOptions) (*ListAgentsResponse, error)
@@ -276,12 +276,9 @@ func (s *groveService) Update(ctx context.Context, groveID string, req *UpdateGr
 	return apiclient.DecodeResponse[Grove](resp)
 }
 
-// Delete removes a grove.
-func (s *groveService) Delete(ctx context.Context, groveID string, deleteAgents bool) error {
+// Delete removes a grove and all its agents.
+func (s *groveService) Delete(ctx context.Context, groveID string) error {
 	path := "/api/v1/groves/" + groveID
-	if deleteAgents {
-		path += "?deleteAgents=true"
-	}
 	resp, err := s.c.transport.Delete(ctx, path, nil)
 	if err != nil {
 		return err

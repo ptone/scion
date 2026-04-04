@@ -65,6 +65,10 @@ type HubServerConfig struct {
 	// Used to namespace secrets and other hub-scoped resources in shared GCP projects.
 	// Defaults to sha256(hostname)[:12] if not set.
 	HubID string `json:"hubId" yaml:"hubId" koanf:"hubId"`
+
+	// GCPProjectID is the GCP project ID used for minting service accounts.
+	// If empty, auto-detected from the metadata server when running on GCE/Cloud Run.
+	GCPProjectID string `json:"gcpProjectId,omitempty" yaml:"gcpProjectId,omitempty" koanf:"gcpProjectId"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.

@@ -77,43 +77,34 @@ type blockMethod int
 const (
 	blockNone     blockMethod = iota
 	blockIPTables             // iptables REJECT rule in filter OUTPUT chain
-	blockRoute                // ip route unreachable/blackhole
 )
 
-// setupMetadataBlock blocks all outbound traffic to the GCE metadata server IP.
+// setupMetadataBlock blocks outbound HTTP traffic to the GCE metadata server IP.
+// Only TCP port 80 is blocked — other traffic (notably DNS on UDP 53) is left
+// alone because on GCE the metadata IP doubles as the default DNS resolver.
 // It tries iptables first (REJECT rule in the filter table), then falls back to
-// an ip-route unreachable entry. This provides defense-in-depth for block mode:
-// even if the nat REDIRECT rule is ineffective (wrong iptables variant, kernel
-// module issue), the filter-level REJECT or route-level block prevents direct
-// access to the real metadata server.
+// an iptables DROP on TCP/80. An ip-route fallback is intentionally NOT used
+// because it would block all protocols including DNS.
 func setupMetadataBlock() (blockMethod, error) {
-	// Try iptables REJECT in the filter OUTPUT chain.
+	// Try iptables REJECT in the filter OUTPUT chain, scoped to TCP port 80.
 	// This gives immediate "connection refused" feedback to the caller.
 	rejectArgs := []string{
 		"-A", "OUTPUT",
 		"-d", metadataIP,
+		"-p", "tcp",
+		"--dport", "80",
 		"-j", "REJECT",
 		"--reject-with", "icmp-port-unreachable",
 	}
 	cmd := exec.Command("iptables", rejectArgs...)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
-		log.Info("iptables: blocking all traffic to %s (REJECT)", metadataIP)
+		log.Info("iptables: blocking TCP/80 traffic to %s (REJECT)", metadataIP)
 		return blockIPTables, nil
 	}
 	log.Debug("iptables REJECT failed: %v (output: %s)", err, string(output))
 
-	// Fallback: add an unreachable route. This works at the routing level
-	// and does not depend on iptables/netfilter kernel modules.
-	routeCmd := exec.Command("ip", "route", "add", "unreachable", metadataIP+"/32")
-	routeOutput, routeErr := routeCmd.CombinedOutput()
-	if routeErr == nil {
-		log.Info("ip route: blocking traffic to %s (unreachable route)", metadataIP)
-		return blockRoute, nil
-	}
-	log.Debug("ip route unreachable failed: %v (output: %s)", routeErr, string(routeOutput))
-
-	return blockNone, fmt.Errorf("all metadata blocking methods failed: iptables: %v; ip route: %v", err, routeErr)
+	return blockNone, fmt.Errorf("metadata blocking failed: iptables: %v", err)
 }
 
 // cleanupMetadataBlock removes the metadata block installed by setupMetadataBlock.
@@ -123,17 +114,14 @@ func cleanupMetadataBlock(method blockMethod) {
 		args := []string{
 			"-D", "OUTPUT",
 			"-d", metadataIP,
+			"-p", "tcp",
+			"--dport", "80",
 			"-j", "REJECT",
 			"--reject-with", "icmp-port-unreachable",
 		}
 		cmd := exec.Command("iptables", args...)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			log.Debug("iptables block cleanup failed (non-fatal): %v (output: %s)", err, string(output))
-		}
-	case blockRoute:
-		cmd := exec.Command("ip", "route", "del", "unreachable", metadataIP+"/32")
-		if output, err := cmd.CombinedOutput(); err != nil {
-			log.Debug("ip route block cleanup failed (non-fatal): %v (output: %s)", err, string(output))
 		}
 	}
 }

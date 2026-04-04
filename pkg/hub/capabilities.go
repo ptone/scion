@@ -46,7 +46,7 @@ var ScopeActions = map[string][]Action{
 	"group":               {ActionCreate, ActionList},
 	"policy":              {ActionCreate, ActionList},
 	"broker":              {ActionCreate, ActionList},
-	"gcp_service_account": {ActionCreate, ActionList},
+	"gcp_service_account": {ActionCreate, ActionList, ActionMint},
 }
 
 // agentResource constructs a Resource from a store.Agent for capability computation.

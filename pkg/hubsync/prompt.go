@@ -476,7 +476,7 @@ func ShowGroveDeletePrompt(groveName string, agentCount int, providers GroveProv
 	fmt.Println()
 	fmt.Println("The following will be removed:")
 	if agentCount > 0 {
-		fmt.Printf("  - %d agent(s)\n", agentCount)
+		fmt.Printf("  - %d agent(s) (will be stopped and deleted)\n", agentCount)
 	} else {
 		fmt.Println("  - 0 agents")
 	}

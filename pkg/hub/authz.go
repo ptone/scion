@@ -44,6 +44,7 @@ const (
 	ActionDispatch     Action = "dispatch"
 	ActionStopAll      Action = "stop_all"
 	ActionVerify       Action = "verify"
+	ActionMint         Action = "mint"
 )
 
 // Resource represents the target of an authorization check.

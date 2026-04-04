@@ -384,6 +384,7 @@ func TestCheckAgentContainerContext(t *testing.T) {
 		hostUID     string
 		hubEndpoint string // flag value
 		hubEnv      string // SCION_HUB_ENDPOINT env var
+		networkMode string // SCION_NETWORK_MODE env var
 		cmdName     string
 		expectError bool
 		errContains string
@@ -416,6 +417,14 @@ func TestCheckAgentContainerContext(t *testing.T) {
 			cmdName:     "start",
 			expectError: true,
 			errContains: "points to localhost",
+		},
+		{
+			name:        "in container, localhost hub with host networking — no error",
+			hostUID:     "1000",
+			hubEnv:      "http://localhost:8080",
+			networkMode: "host",
+			cmdName:     "list",
+			expectError: false,
 		},
 		{
 			name:        "in container, remote hub — no error",
@@ -480,6 +489,12 @@ func TestCheckAgentContainerContext(t *testing.T) {
 			}
 			t.Setenv("SCION_HUB_URL", "")
 			os.Unsetenv("SCION_HUB_URL")
+			if tt.networkMode != "" {
+				t.Setenv("SCION_NETWORK_MODE", tt.networkMode)
+			} else {
+				t.Setenv("SCION_NETWORK_MODE", "")
+				os.Unsetenv("SCION_NETWORK_MODE")
+			}
 
 			// Set flag
 			hubEndpoint = tt.hubEndpoint

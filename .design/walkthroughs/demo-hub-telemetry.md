@@ -1,7 +1,7 @@
 # Walkthrough: Enabling Full OTEL Telemetry on Demo Hub GCE Instance
 
 **Created:** 2026-02-26
-**Status:** Blocked (agent-side cloud telemetry auth)
+**Status:** Ready for QA
 **Goal:** Enable and verify end-to-end OpenTelemetry on the `scion-demo` GCE
 instance, covering both Hub-side telemetry (Cloud Logging, Cloud Trace) and
 agent-side telemetry (settings-driven OTLP export).
@@ -24,55 +24,14 @@ local development telemetry QA, see [telemetry-gcp.md](telemetry-gcp.md).
 
 ## Blocking Conditions
 
-The following issues must be resolved before agent-side cloud telemetry
-export can work end-to-end. Hub-side Cloud Logging (via `cloud_handler.go`)
-is unaffected — it uses the GCP client library which handles ADC natively.
+### ~~B1: OTLP exporter lacks GCP credential injection~~ (RESOLVED)
 
-### B1: OTLP exporter lacks GCP credential injection
-
-**Affects:** Agent-side cloud export (sciontool), Hub-side OTel trace/log
-export (`otel_provider.go`)
-
-**Problem:** The cloud exporter in `pkg/sciontool/telemetry/exporter.go`
-creates a plain `otlptracegrpc` exporter:
-
-```go
-exporter, err := otlptracegrpc.New(context.Background(), opts...)
-```
-
-This establishes a TLS gRPC connection but does **not** inject OAuth2
-bearer tokens. Google Cloud's OTLP endpoint at
-`cloudtrace.googleapis.com:443` requires OAuth2 authentication on every
-RPC. The standard OTel OTLP gRPC SDK does not use GCP Application Default
-Credentials — that is a convention honored only by GCP-specific client
-libraries (e.g., `cloud.google.com/go`).
-
-The same gap exists in the Hub-side OTel log provider
-(`pkg/util/logging/otel_provider.go`), which also uses a plain
-`otlploggrpc` exporter.
-
-**Design reference:** [metrics-system.md §11.8](../hosted/metrics-system.md)
-marks credential injection as "out of scope" and defers to the runtime
-broker, but the broker does not currently address this.
-
-**Resolution options:**
-
-1. **Use `grpc.WithPerRPCCredentials`** — Fetch an OAuth2 token from ADC
-   (via `golang.org/x/oauth2/google.DefaultTokenSource`) and inject it as
-   a per-RPC credential on the gRPC dial options. This is the minimal fix.
-2. **Use Google's `opentelemetry-operations-go` exporter** — The
-   `github.com/GoogleCloudPlatform/opentelemetry-operations-go` package
-   wraps the OTLP exporter with native GCP auth handling.
-3. **Route through an OTel Collector sidecar** — Deploy an OTel Collector
-   on the instance that receives OTLP locally (no auth required) and
-   exports to Cloud Trace using its GCP exporter (which handles auth). This
-   avoids modifying sciontool code but adds operational complexity.
-
-**Who needs to act:** Sciontool telemetry implementation (exporter.go and
-otel_provider.go). The runtime broker should also ensure ADC is available
-inside agent containers — the harness already propagates
-`GOOGLE_APPLICATION_CREDENTIALS` and mounts the credential file, but this
-only helps if the exporter is updated to use it.
+**Resolved:** The telemetry exporter now supports GCP-native mode
+(`provider: gcp`) which uses the `opentelemetry-operations-go` Cloud
+Trace, Cloud Monitoring, and Cloud Logging SDKs directly. These handle
+GCP authentication natively via ADC or explicit service account key files.
+The `endpoint` and `protocol` fields are no longer needed for GCP — the
+SDKs route to the correct endpoints automatically.
 
 ### B2: Hub OTEL env vars should use hub.env
 
@@ -189,7 +148,7 @@ SESSION_SECRET=<generate-with-openssl-rand-base64-32>
 SCION_CLOUD_LOGGING=true
 SCION_GCP_PROJECT_ID=deploy-demo-test
 GOOGLE_CLOUD_PROJECT=deploy-demo-test
-SCION_OTEL_ENDPOINT=cloudtrace.googleapis.com:443
+SCION_TELEMETRY_CLOUD_PROVIDER=gcp
 SCION_OTEL_LOG_ENABLED=true
 ```
 
@@ -210,7 +169,7 @@ SESSION_SECRET=<your-session-secret>
 SCION_CLOUD_LOGGING=true
 SCION_GCP_PROJECT_ID=deploy-demo-test
 GOOGLE_CLOUD_PROJECT=deploy-demo-test
-SCION_OTEL_ENDPOINT=cloudtrace.googleapis.com:443
+SCION_TELEMETRY_CLOUD_PROVIDER=gcp
 SCION_OTEL_LOG_ENABLED=true
 EOF
 
@@ -260,8 +219,7 @@ telemetry:
   enabled: true
   cloud:
     enabled: true
-    endpoint: "cloudtrace.googleapis.com:443"
-    protocol: "grpc"
+    provider: "gcp"
     batch:
       max_size: 256
       timeout: "5s"
@@ -283,12 +241,6 @@ EOF
 '
 ```
 
-> **Note:** Cloud export from agent containers requires GCP credential
-> injection into the OTLP exporter, which is not yet implemented. See
-> [Blocking Condition B1](#b1-otlp-exporter-lacks-gcp-credential-injection)
-> above. The settings-to-env bridge and local telemetry pipeline work
-> correctly; only the cloud export leg is blocked.
-
 ### 3.2 Verify env var injection
 
 Start a test agent and inspect the container environment to confirm
@@ -307,8 +259,7 @@ docker inspect test-telem --format '{{range .Config.Env}}{{println .}}{{end}}' \
 ```
 SCION_TELEMETRY_ENABLED=true
 SCION_TELEMETRY_CLOUD_ENABLED=true
-SCION_OTEL_ENDPOINT=cloudtrace.googleapis.com:443
-SCION_OTEL_PROTOCOL=grpc
+SCION_TELEMETRY_CLOUD_PROVIDER=gcp
 SCION_TELEMETRY_FILTER_EXCLUDE=agent.user.prompt
 SCION_TELEMETRY_REDACT=prompt,user.email,tool_output,tool_input
 SCION_TELEMETRY_HASH=session_id
@@ -458,7 +409,7 @@ gcloud compute ssh scion-demo --zone us-central1-a --command '
 | `SCION_CLOUD_LOGGING` | `true` | Enable direct Cloud Logging via `cloud_handler.go` |
 | `SCION_GCP_PROJECT_ID` | `deploy-demo-test` | GCP project for Cloud Logging client |
 | `GOOGLE_CLOUD_PROJECT` | `deploy-demo-test` | Standard GCP project env var |
-| `SCION_OTEL_ENDPOINT` | `cloudtrace.googleapis.com:443` | OTel exporter target for traces |
+| `SCION_TELEMETRY_CLOUD_PROVIDER` | `gcp` | Use GCP-native SDKs for telemetry export |
 | `SCION_OTEL_LOG_ENABLED` | `true` | Enable OTel log bridge |
 
 ### Agent-side settings.yaml fields
@@ -467,8 +418,7 @@ gcloud compute ssh scion-demo --zone us-central1-a --command '
 |-------|-------|---------|
 | `telemetry.enabled` | `true` | Master switch for agent telemetry |
 | `telemetry.cloud.enabled` | `true` | Enable cloud export |
-| `telemetry.cloud.endpoint` | `cloudtrace.googleapis.com:443` | Cloud Trace endpoint |
-| `telemetry.cloud.protocol` | `grpc` | Export protocol |
+| `telemetry.cloud.provider` | `gcp` | Use GCP-native SDKs (no endpoint needed) |
 | `telemetry.cloud.batch.max_size` | `256` | Max spans per batch |
 | `telemetry.cloud.batch.timeout` | `5s` | Batch flush interval |
 | `telemetry.local.enabled` | `true` | Enable local debug telemetry |

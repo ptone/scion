@@ -220,12 +220,12 @@ func TestIsCloudConfigured_GCP(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "gcp without credentials",
+			name: "gcp without credentials (ADC fallback)",
 			config: &Config{
 				CloudEnabled:  true,
 				CloudProvider: "gcp",
 			},
-			expected: false,
+			expected: true,
 		},
 		{
 			name: "gcp disabled",
@@ -284,11 +284,11 @@ func TestIsGCP(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "gcp without creds",
+			name: "gcp without creds (ADC fallback)",
 			config: &Config{
 				CloudProvider: "gcp",
 			},
-			expected: false,
+			expected: true,
 		},
 		{
 			name: "not gcp",
@@ -512,6 +512,24 @@ func TestLoadConfig_EnvTakesPriorityOverWellKnown(t *testing.T) {
 	}
 	if cfg.ProjectID != "env-project" {
 		t.Errorf("Expected ProjectID from env creds, got %q", cfg.ProjectID)
+	}
+}
+
+func TestIsGCP_WithEndpointNoCreds(t *testing.T) {
+	// Reproduces the scenario where provider=gcp and endpoint is set but no
+	// credentials file is present. IsGCP must still return true so the code
+	// uses GCP-native SDKs (which support ADC) instead of falling through to
+	// generic OTLP against a non-OTLP endpoint like cloudtrace.googleapis.com.
+	cfg := &Config{
+		CloudEnabled:  true,
+		CloudProvider: "gcp",
+		Endpoint:      "cloudtrace.googleapis.com:443",
+	}
+	if !cfg.IsGCP() {
+		t.Error("IsGCP() should return true when CloudProvider=gcp, even without credentials file")
+	}
+	if !cfg.IsCloudConfigured() {
+		t.Error("IsCloudConfigured() should return true when CloudProvider=gcp, even without credentials file")
 	}
 }
 

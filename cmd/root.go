@@ -360,6 +360,12 @@ func checkAgentContainerContext(cmd *cobra.Command) error {
 		return nil
 	}
 
+	// With --network=host, the container shares the host's network namespace,
+	// so localhost endpoints are reachable.
+	if endpoint != "" && os.Getenv("SCION_NETWORK_MODE") == "host" {
+		return nil
+	}
+
 	reason := "no Hub endpoint is configured"
 	if endpoint != "" {
 		reason = fmt.Sprintf("the Hub endpoint (%s) points to localhost, which is not reachable from inside this container", endpoint)

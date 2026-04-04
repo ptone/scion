@@ -1088,69 +1088,67 @@ export class ScionPageAgentCreate extends LitElement {
             <div class="hint">The task or prompt to start the agent with.</div>
           </div>
 
-          ${this.gcpServiceAccounts.length > 0
+          <div class="form-field">
+            <label for="gcp-mode">GCP Identity</label>
+            <sl-select
+              id="gcp-mode"
+              .value=${this.gcpMetadataMode}
+              @sl-change=${(e: Event) => {
+                this.gcpMetadataMode = (e.target as HTMLElement & { value: string }).value as
+                  | 'block'
+                  | 'passthrough'
+                  | 'assign';
+                if (this.gcpMetadataMode !== 'assign') {
+                  this.gcpServiceAccountId = '';
+                }
+              }}
+            >
+              <sl-option value="block">Block</sl-option>
+              ${this.gcpServiceAccounts.length > 0
+                ? html`<sl-option value="assign">Assign Service Account</sl-option>`
+                : ''}
+              <sl-option value="passthrough">Passthrough</sl-option>
+            </sl-select>
+            <div class="hint">
+              ${this.gcpMetadataMode === 'block'
+                ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
+                : this.gcpMetadataMode === 'assign'
+                  ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
+                  : 'No metadata interception. The agent inherits the broker\'s GCP identity. Requires broker ownership.'}
+            </div>
+          </div>
+
+          ${this.gcpMetadataMode === 'assign'
             ? html`
                 <div class="form-field">
-                  <label for="gcp-mode">GCP Identity</label>
-                  <sl-select
-                    id="gcp-mode"
-                    .value=${this.gcpMetadataMode}
-                    @sl-change=${(e: Event) => {
-                      this.gcpMetadataMode = (e.target as HTMLElement & { value: string }).value as
-                        | 'block'
-                        | 'passthrough'
-                        | 'assign';
-                      if (this.gcpMetadataMode !== 'assign') {
-                        this.gcpServiceAccountId = '';
-                      }
-                    }}
-                  >
-                    <sl-option value="block">Block</sl-option>
-                    <sl-option value="assign">Assign Service Account</sl-option>
-                    <sl-option value="passthrough">Passthrough</sl-option>
-                  </sl-select>
-                  <div class="hint">
-                    ${this.gcpMetadataMode === 'block'
-                      ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-                      : this.gcpMetadataMode === 'assign'
-                        ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-                        : 'No metadata interception. The agent inherits the broker\'s GCP identity. Requires broker ownership.'}
-                  </div>
+                  <label for="gcp-sa">Service Account</label>
+                  ${this.verifiedGCPServiceAccounts.length > 0
+                    ? html`
+                        <sl-select
+                          id="gcp-sa"
+                          placeholder="Select a service account..."
+                          .value=${this.gcpServiceAccountId}
+                          @sl-change=${(e: Event) => {
+                            this.gcpServiceAccountId = (
+                              e.target as HTMLElement & { value: string }
+                            ).value;
+                          }}
+                        >
+                          ${this.verifiedGCPServiceAccounts.map(
+                            (sa) =>
+                              html`<sl-option value=${sa.id}>
+                                ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}
+                              </sl-option>`
+                          )}
+                        </sl-select>
+                      `
+                    : html`
+                        <div class="hint" style="margin-top: 0;">
+                          No verified service accounts available. Register and verify service
+                          accounts in grove settings.
+                        </div>
+                      `}
                 </div>
-
-                ${this.gcpMetadataMode === 'assign'
-                  ? html`
-                      <div class="form-field">
-                        <label for="gcp-sa">Service Account</label>
-                        ${this.verifiedGCPServiceAccounts.length > 0
-                          ? html`
-                              <sl-select
-                                id="gcp-sa"
-                                placeholder="Select a service account..."
-                                .value=${this.gcpServiceAccountId}
-                                @sl-change=${(e: Event) => {
-                                  this.gcpServiceAccountId = (
-                                    e.target as HTMLElement & { value: string }
-                                  ).value;
-                                }}
-                              >
-                                ${this.verifiedGCPServiceAccounts.map(
-                                  (sa) =>
-                                    html`<sl-option value=${sa.id}>
-                                      ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}
-                                    </sl-option>`
-                                )}
-                              </sl-select>
-                            `
-                          : html`
-                              <div class="hint" style="margin-top: 0;">
-                                No verified service accounts available. Register and verify service
-                                accounts in grove settings.
-                              </div>
-                            `}
-                      </div>
-                    `
-                  : ''}
               `
             : ''}
 

@@ -320,7 +320,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if opts.BrokerMode {
 			harness.OverlayFileSecrets(&auth, opts.ResolvedSecrets)
 		}
-		util.Debugf("auth: gathered credentials — selectedType=%q, hasGeminiKey=%t, hasGoogleKey=%t, hasOAuth=%t, hasADC=%t, hasAnthropicKey=%t, cloudProject=%q, brokerMode=%t",
+		util.Debugf("auth: gathered credentials — selectedType=%q, hasGeminiKey=%t, hasGoogleKey=%t, hasOAuth=%t, hasADC=%t, hasAnthropicKey=%t, cloudProject=%q, gcpMetadataMode=%q, brokerMode=%t",
 			auth.SelectedType,
 			auth.GeminiAPIKey != "",
 			auth.GoogleAPIKey != "",
@@ -328,6 +328,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			auth.GoogleAppCredentials != "",
 			auth.AnthropicAPIKey != "",
 			auth.GoogleCloudProject,
+			auth.GCPMetadataMode,
 			opts.BrokerMode,
 		)
 		harness.OverlaySettings(&auth, h, agentDir)
@@ -509,6 +510,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			delete(finalScionCfg.Env, "SCION_HUB_ENDPOINT")
 			delete(finalScionCfg.Env, "SCION_HUB_URL")
 		}
+	}
+
+	// Resolve Docker host networking: when the hub endpoint is localhost or was
+	// translated to host.docker.internal, use --network=host so the container
+	// can reach the host's loopback interface directly. This also rewrites any
+	// bridge hostnames back to localhost in opts.Env.
+	dockerNetworkMode := runtime.ResolveDockerNetworking(m.Runtime.Name(), opts.Env)
+	if dockerNetworkMode != "" {
+		opts.Env["SCION_NETWORK_MODE"] = dockerNetworkMode
 	}
 
 	// Persist harness auth override to scion-agent.json so sciontool inside the container sees it.
@@ -700,6 +710,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		Debug:                util.DebugEnabled(),
 		Resume:               opts.Resume,
 		MetadataInterception: hasMetadataInterception(agentEnv),
+		ExtraHosts:           runtime.BridgeExtraHosts(m.Runtime.Name(), agentEnv),
+		NetworkMode:          dockerNetworkMode,
 		Labels: func() map[string]string {
 			l := map[string]string{
 				"scion.agent":          "true",
@@ -943,8 +955,7 @@ func isAuthEnvKey(key string) bool {
 		"ANTHROPIC_VERTEX_PROJECT_ID",
 		"GOOGLE_CLOUD_REGION",
 		"CLOUD_ML_REGION",
-		"GOOGLE_CLOUD_LOCATION",
-		"GOOGLE_APPLICATION_CREDENTIALS":
+		"GOOGLE_CLOUD_LOCATION":
 		return true
 	default:
 		return false
@@ -953,7 +964,7 @@ func isAuthEnvKey(key string) bool {
 
 func authFileKind(name, target string) string {
 	switch {
-	case name == "GOOGLE_APPLICATION_CREDENTIALS" || strings.HasSuffix(target, "/application_default_credentials.json"):
+	case name == "gcloud-adc" || strings.HasSuffix(target, "/application_default_credentials.json"):
 		return "adc"
 	case name == "GEMINI_OAUTH_CREDS" || strings.HasSuffix(target, "/oauth_creds.json"):
 		return "gemini-oauth"

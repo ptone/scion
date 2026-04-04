@@ -431,38 +431,44 @@ func TestRequiredAuthEnvKeys(t *testing.T) {
 
 func TestRequiredAuthSecrets(t *testing.T) {
 	tests := []struct {
-		name     string
-		harness  string
-		authType string
-		wantNil  bool
-		wantKey  string
-		wantType string
+		name          string
+		harness       string
+		authType      string
+		gcpSAAssigned bool
+		wantNil       bool
+		wantKey       string
+		wantType      string
 	}{
-		{"claude vertex-ai", "claude", "vertex-ai", false, "GOOGLE_APPLICATION_CREDENTIALS", "file"},
-		{"gemini vertex-ai", "gemini", "vertex-ai", false, "GOOGLE_APPLICATION_CREDENTIALS", "file"},
-		{"opencode vertex-ai", "opencode", "vertex-ai", false, "GOOGLE_APPLICATION_CREDENTIALS", "file"},
-		{"codex vertex-ai", "codex", "vertex-ai", false, "GOOGLE_APPLICATION_CREDENTIALS", "file"},
-		{"claude api-key", "claude", "api-key", true, "", ""},
-		{"gemini api-key", "gemini", "api-key", true, "", ""},
-		{"claude empty auth type", "claude", "", true, "", ""},
-		{"gemini empty auth type", "gemini", "", true, "", ""},
-		{"generic vertex-ai", "generic", "vertex-ai", true, "", ""},
-		{"unknown harness", "unknown", "vertex-ai", true, "", ""},
-		{"empty harness", "", "vertex-ai", true, "", ""},
-		{"both empty", "", "", true, "", ""},
+		{"claude vertex-ai", "claude", "vertex-ai", false, false, "gcloud-adc", "file"},
+		{"gemini vertex-ai", "gemini", "vertex-ai", false, false, "gcloud-adc", "file"},
+		{"opencode vertex-ai", "opencode", "vertex-ai", false, false, "gcloud-adc", "file"},
+		{"codex vertex-ai", "codex", "vertex-ai", false, false, "gcloud-adc", "file"},
+		{"claude api-key", "claude", "api-key", false, true, "", ""},
+		{"gemini api-key", "gemini", "api-key", false, true, "", ""},
+		{"claude empty auth type", "claude", "", false, true, "", ""},
+		{"gemini empty auth type", "gemini", "", false, true, "", ""},
+		{"generic vertex-ai", "generic", "vertex-ai", false, true, "", ""},
+		{"unknown harness", "unknown", "vertex-ai", false, true, "", ""},
+		{"empty harness", "", "vertex-ai", false, true, "", ""},
+		{"both empty", "", "", false, true, "", ""},
+		// GCP SA assigned — ADC not required
+		{"claude vertex-ai with GCP SA", "claude", "vertex-ai", true, true, "", ""},
+		{"gemini vertex-ai with GCP SA", "gemini", "vertex-ai", true, true, "", ""},
+		{"opencode vertex-ai with GCP SA", "opencode", "vertex-ai", true, true, "", ""},
+		{"codex vertex-ai with GCP SA", "codex", "vertex-ai", true, true, "", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := RequiredAuthSecrets(tt.harness, tt.authType)
+			got := RequiredAuthSecrets(tt.harness, tt.authType, tt.gcpSAAssigned)
 			if tt.wantNil {
 				if got != nil {
-					t.Errorf("RequiredAuthSecrets(%q, %q) = %v, want nil", tt.harness, tt.authType, got)
+					t.Errorf("RequiredAuthSecrets(%q, %q, %t) = %v, want nil", tt.harness, tt.authType, tt.gcpSAAssigned, got)
 				}
 				return
 			}
 			if len(got) != 1 {
-				t.Fatalf("RequiredAuthSecrets(%q, %q) returned %d secrets, want 1", tt.harness, tt.authType, len(got))
+				t.Fatalf("RequiredAuthSecrets(%q, %q, %t) returned %d secrets, want 1", tt.harness, tt.authType, tt.gcpSAAssigned, len(got))
 			}
 			if got[0].Key != tt.wantKey {
 				t.Errorf("Key = %q, want %q", got[0].Key, tt.wantKey)
@@ -472,6 +478,33 @@ func TestRequiredAuthSecrets(t *testing.T) {
 			}
 			if got[0].Description == "" {
 				t.Error("Description should not be empty")
+			}
+		})
+	}
+}
+
+func TestDetectAuthTypeFromGCPIdentity(t *testing.T) {
+	tests := []struct {
+		name          string
+		harness       string
+		gcpSAAssigned bool
+		wantType      string
+	}{
+		{"claude with GCP SA", "claude", true, "vertex-ai"},
+		{"gemini with GCP SA", "gemini", true, "vertex-ai"},
+		{"claude without GCP SA", "claude", false, ""},
+		{"gemini without GCP SA", "gemini", false, ""},
+		{"opencode with GCP SA", "opencode", true, ""},
+		{"codex with GCP SA", "codex", true, ""},
+		{"generic with GCP SA", "generic", true, ""},
+		{"unknown with GCP SA", "unknown", true, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DetectAuthTypeFromGCPIdentity(tt.harness, tt.gcpSAAssigned)
+			if got != tt.wantType {
+				t.Errorf("DetectAuthTypeFromGCPIdentity(%q, %t) = %q, want %q", tt.harness, tt.gcpSAAssigned, got, tt.wantType)
 			}
 		})
 	}
@@ -491,15 +524,15 @@ func TestDetectAuthTypeFromFileSecrets(t *testing.T) {
 			"auth-file",
 		},
 		{
-			"gemini with GOOGLE_APPLICATION_CREDENTIALS",
+			"gemini with gcloud-adc",
 			"gemini",
-			map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}},
+			map[string]struct{}{"gcloud-adc": {}},
 			"vertex-ai",
 		},
 		{
 			"gemini with both OAuth and ADC prefers OAuth",
 			"gemini",
-			map[string]struct{}{"GEMINI_OAUTH_CREDS": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}},
+			map[string]struct{}{"GEMINI_OAUTH_CREDS": {}, "gcloud-adc": {}},
 			"auth-file",
 		},
 		{
@@ -521,9 +554,9 @@ func TestDetectAuthTypeFromFileSecrets(t *testing.T) {
 			"auth-file",
 		},
 		{
-			"claude with GOOGLE_APPLICATION_CREDENTIALS",
+			"claude with gcloud-adc",
 			"claude",
-			map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}},
+			map[string]struct{}{"gcloud-adc": {}},
 			"vertex-ai",
 		},
 		{
@@ -637,6 +670,26 @@ func TestGatherAuthWithEnv_OverlayAllKeys(t *testing.T) {
 	}
 }
 
+func TestGatherAuthWithEnv_GCPMetadataMode(t *testing.T) {
+	t.Setenv("SCION_METADATA_MODE", "")
+
+	// From overlay
+	overlay := map[string]string{
+		"SCION_METADATA_MODE": "assign",
+	}
+	auth := GatherAuthWithEnv(overlay, true)
+	if auth.GCPMetadataMode != "assign" {
+		t.Errorf("GCPMetadataMode = %q, want %q", auth.GCPMetadataMode, "assign")
+	}
+
+	// From process env
+	t.Setenv("SCION_METADATA_MODE", "block")
+	auth2 := GatherAuthWithEnv(nil, true)
+	if auth2.GCPMetadataMode != "block" {
+		t.Errorf("GCPMetadataMode = %q, want %q", auth2.GCPMetadataMode, "block")
+	}
+}
+
 func TestOverlaySettings_ReadsScionAgentJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	agentHome := filepath.Join(tmpDir, "home")
@@ -747,14 +800,11 @@ func TestOverlayFileSecrets(t *testing.T) {
 		{
 			name: "ADC by name",
 			secrets: []api.ResolvedSecret{
-				{Name: "GOOGLE_APPLICATION_CREDENTIALS", Type: "file", Target: "/home/gemini/.config/gcloud/application_default_credentials.json"},
+				{Name: "gcloud-adc", Type: "file", Target: "/home/gemini/.config/gcloud/application_default_credentials.json"},
 			},
 			check: func(t *testing.T, auth api.AuthConfig) {
 				if auth.GoogleAppCredentials != "/home/gemini/.config/gcloud/application_default_credentials.json" {
 					t.Errorf("GoogleAppCredentials = %q, want ADC path", auth.GoogleAppCredentials)
-				}
-				if auth.GoogleAppCredentialsExplicit {
-					t.Errorf("GoogleAppCredentialsExplicit should be false for ADC overlay")
 				}
 			},
 		},
@@ -805,7 +855,7 @@ func TestOverlayFileSecrets(t *testing.T) {
 		{
 			name: "non-file secrets are skipped",
 			secrets: []api.ResolvedSecret{
-				{Name: "GOOGLE_APPLICATION_CREDENTIALS", Type: "environment", Target: "GOOGLE_APPLICATION_CREDENTIALS", Value: "/some/path"},
+				{Name: "gcloud-adc", Type: "environment", Target: "gcloud-adc", Value: "/some/path"},
 			},
 			check: func(t *testing.T, auth api.AuthConfig) {
 				if auth.GoogleAppCredentials != "" {

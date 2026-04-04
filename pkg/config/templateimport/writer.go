@@ -25,12 +25,18 @@ import (
 )
 
 // WriteTemplate creates a scion template directory from an ImportedAgent.
-// It seeds the base agnostic template, then overwrites the instruction file
-// with the imported system prompt and updates scion-agent.yaml with the model
-// from the import.
+// For scion-format templates, it performs a direct copy. For harness-specific
+// formats, it seeds the base agnostic template, then overwrites the instruction
+// file with the imported system prompt and updates scion-agent.yaml with the
+// model from the import.
 // Returns the path to the created template directory.
 func WriteTemplate(agent *ImportedAgent, templatesDir string, force bool) (string, error) {
 	templateDir := filepath.Join(templatesDir, agent.Name)
+
+	// Scion-format templates are copied directly
+	if agent.ScionFormat && agent.SourcePath != "" {
+		return CopyScionTemplate(agent.SourcePath, templateDir, force)
+	}
 
 	// Check if template already exists
 	if !force {

@@ -485,3 +485,106 @@ func TestBuildStartContext_HubEndpoint(t *testing.T) {
 		t.Errorf("expected SCION_HUB_URL='https://hub.example.com', got %q", sc.Opts.Env["SCION_HUB_URL"])
 	}
 }
+
+func TestBuildStartContext_GCPMetadataDefaultBlock(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	mgr := &envCapturingManager{}
+	rt := &runtime.MockRuntime{}
+	srv := New(cfg, mgr, rt)
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	// No GCPIdentity config — should default to block mode
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-no-gcp",
+		HTTPRequest: r,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if sc.Opts.Env["SCION_METADATA_MODE"] != "block" {
+		t.Errorf("expected SCION_METADATA_MODE='block' by default, got %q", sc.Opts.Env["SCION_METADATA_MODE"])
+	}
+	if sc.Opts.Env["SCION_METADATA_PORT"] != "18380" {
+		t.Errorf("expected SCION_METADATA_PORT='18380', got %q", sc.Opts.Env["SCION_METADATA_PORT"])
+	}
+	if sc.Opts.Env["GCE_METADATA_HOST"] != "localhost:18380" {
+		t.Errorf("expected GCE_METADATA_HOST='localhost:18380', got %q", sc.Opts.Env["GCE_METADATA_HOST"])
+	}
+	if sc.Opts.Env["GCE_METADATA_ROOT"] != "localhost:18380" {
+		t.Errorf("expected GCE_METADATA_ROOT='localhost:18380', got %q", sc.Opts.Env["GCE_METADATA_ROOT"])
+	}
+	// No SA env vars should be set in block mode
+	if sc.Opts.Env["SCION_METADATA_SA_EMAIL"] != "" {
+		t.Errorf("expected empty SCION_METADATA_SA_EMAIL in block mode, got %q", sc.Opts.Env["SCION_METADATA_SA_EMAIL"])
+	}
+}
+
+func TestBuildStartContext_GCPMetadataPassthrough(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	mgr := &envCapturingManager{}
+	rt := &runtime.MockRuntime{}
+	srv := New(cfg, mgr, rt)
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	// Explicit passthrough — should NOT set metadata env vars
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name: "agent-passthrough",
+		Config: &CreateAgentConfig{
+			GCPIdentity: &GCPIdentityConfig{
+				MetadataMode: "passthrough",
+			},
+		},
+		HTTPRequest: r,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if sc.Opts.Env["SCION_METADATA_MODE"] != "" {
+		t.Errorf("expected no SCION_METADATA_MODE for passthrough, got %q", sc.Opts.Env["SCION_METADATA_MODE"])
+	}
+	if sc.Opts.Env["GCE_METADATA_HOST"] != "" {
+		t.Errorf("expected no GCE_METADATA_HOST for passthrough, got %q", sc.Opts.Env["GCE_METADATA_HOST"])
+	}
+	if sc.Opts.Env["GCE_METADATA_ROOT"] != "" {
+		t.Errorf("expected no GCE_METADATA_ROOT for passthrough, got %q", sc.Opts.Env["GCE_METADATA_ROOT"])
+	}
+}
+
+func TestBuildStartContext_GCPMetadataExplicitBlock(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	mgr := &envCapturingManager{}
+	rt := &runtime.MockRuntime{}
+	srv := New(cfg, mgr, rt)
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name: "agent-block",
+		Config: &CreateAgentConfig{
+			GCPIdentity: &GCPIdentityConfig{
+				MetadataMode: "block",
+			},
+		},
+		HTTPRequest: r,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if sc.Opts.Env["SCION_METADATA_MODE"] != "block" {
+		t.Errorf("expected SCION_METADATA_MODE='block', got %q", sc.Opts.Env["SCION_METADATA_MODE"])
+	}
+	if sc.Opts.Env["GCE_METADATA_HOST"] != "localhost:18380" {
+		t.Errorf("expected GCE_METADATA_HOST='localhost:18380', got %q", sc.Opts.Env["GCE_METADATA_HOST"])
+	}
+	if sc.Opts.Env["GCE_METADATA_ROOT"] != "localhost:18380" {
+		t.Errorf("expected GCE_METADATA_ROOT='localhost:18380', got %q", sc.Opts.Env["GCE_METADATA_ROOT"])
+	}
+}

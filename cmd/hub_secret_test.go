@@ -234,6 +234,40 @@ func TestResolveSecretScope_ScopeHub(t *testing.T) {
 	assert.Equal(t, "", scopeID, "hub scope should return empty scopeID (server resolves it)")
 }
 
+func TestResolveSecretScope_GroveFallbackToGroveID(t *testing.T) {
+	// When --grove is set without value and settings.Hub.GroveID is empty,
+	// it should fall back to settings.GroveID (the top-level deterministic grove ID).
+	orig := saveSecretTestState()
+	defer orig.restore()
+
+	testCmd := &cobra.Command{Use: "test"}
+	testCmd.Flags().StringVar(&secretScope, "scope", "", "")
+	testCmd.Flags().StringVar(&secretGroveScope, "grove", "", "")
+	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&secretBrokerScope, "broker", "", "")
+	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
+
+	// Set --grove without a value (triggers inference)
+	testCmd.Flags().Set("grove", scopeInferSentinel)
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	// setupSecretGrove sets grove_id but NOT hub.groveId
+	groveDir := setupSecretGrove(t, tmpHome, "http://localhost:9999")
+	grovePath = groveDir
+
+	settings, err := config.LoadSettings(groveDir)
+	require.NoError(t, err)
+	// Verify precondition: Hub.GroveID is empty but GroveID is set
+	assert.Empty(t, settings.GetHubGroveID(), "hub grove ID should be empty for this test")
+	assert.NotEmpty(t, settings.GroveID, "top-level grove ID should be set")
+
+	scope, scopeID, err := resolveSecretScope(testCmd, settings)
+	assert.NoError(t, err)
+	assert.Equal(t, "grove", scope)
+	assert.Equal(t, settings.GroveID, scopeID, "should fall back to settings.GroveID")
+}
+
 func TestResolveSecretScope_ScopeConflictsWithGrove(t *testing.T) {
 	orig := saveSecretTestState()
 	defer orig.restore()

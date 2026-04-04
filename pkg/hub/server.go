@@ -125,6 +125,15 @@ type ServerConfig struct {
 	SecretBackend secret.SecretBackend
 	// MaintenanceConfig holds configuration for routine maintenance operations.
 	MaintenanceConfig MaintenanceConfig
+	// GCPProjectID is the GCP project ID used for minting service accounts.
+	// If empty, auto-detected from the metadata server when running on GCE/Cloud Run.
+	GCPProjectID string
+	// GCPMintCapPerGrove is the maximum number of minted service accounts allowed per grove.
+	// Zero means unlimited (default).
+	GCPMintCapPerGrove int
+	// GCPMintCapGlobal is the maximum total number of minted service accounts across all groves.
+	// Zero means unlimited (default).
+	GCPMintCapGlobal int
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -483,6 +492,9 @@ type Server struct {
 	// GCP token generator for agent identity (nil = GCP identity disabled)
 	gcpTokenGenerator GCPTokenGenerator
 
+	// GCP IAM admin for minting service accounts (nil = minting disabled)
+	gcpIAMAdmin GCPServiceAccountAdmin
+
 	// GCP token rate limiter (nil = no rate limiting)
 	gcpTokenRateLimiter *GCPTokenRateLimiter
 
@@ -746,6 +758,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 				input := &secret.SetSecretInput{
 					Name:        keyName,
 					Value:       val,
+					SecretType:  store.SecretTypeInternal,
 					Scope:       store.ScopeHub,
 					ScopeID:     hubID,
 					Description: fmt.Sprintf("Hub signing key for %s (synced from store)", keyName),
@@ -814,6 +827,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 		input := &secret.SetSecretInput{
 			Name:        keyName,
 			Value:       encodedKey,
+			SecretType:  store.SecretTypeInternal,
 			Scope:       store.ScopeHub,
 			ScopeID:     hubID,
 			Description: fmt.Sprintf("Hub signing key for %s", keyName),
@@ -862,6 +876,7 @@ func (s *Server) persistSigningKey(ctx context.Context, keyName, encodedValue, h
 		EncryptedValue: encodedValue,
 		Scope:          store.ScopeHub,
 		ScopeID:        hubID,
+		SecretType:     store.SecretTypeInternal,
 		Description:    fmt.Sprintf("Hub signing key for %s", keyName),
 	}
 	_, err := s.store.UpsertSecret(ctx, sec)
@@ -1082,6 +1097,20 @@ func (s *Server) SetGCPTokenGenerator(g GCPTokenGenerator) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gcpTokenGenerator = g
+}
+
+// SetGCPServiceAccountAdmin sets the GCP IAM admin client for minting service accounts.
+func (s *Server) SetGCPServiceAccountAdmin(a GCPServiceAccountAdmin) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gcpIAMAdmin = a
+}
+
+// SetGCPProjectID sets the GCP project ID used for minting service accounts.
+func (s *Server) SetGCPProjectID(projectID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.config.GCPProjectID = projectID
 }
 
 func (s *Server) SetEventPublisher(ep EventPublisher) {
@@ -1867,6 +1896,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/maintenance/migrations/", s.handleAdminMaintenanceMigrations)
 	s.mux.HandleFunc("/api/v1/admin/scheduler", s.handleAdminScheduler)
 	s.mux.HandleFunc("/api/v1/admin/server-config", s.handleAdminServerConfig)
+	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota)
 
 	// Notification endpoints (user-facing)
 	s.mux.HandleFunc("/api/v1/notifications", s.handleNotifications)

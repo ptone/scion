@@ -31,10 +31,11 @@ func (s *SQLiteStore) CreateGCPServiceAccount(ctx context.Context, sa *store.GCP
 	scopesStr := strings.Join(sa.DefaultScopes, ",")
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO gcp_service_accounts (id, scope, scope_id, email, project_id, display_name, default_scopes, verified, verified_at, created_by, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO gcp_service_accounts (id, scope, scope_id, email, project_id, display_name, default_scopes, verified, verified_at, created_by, created_at, managed, managed_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sa.ID, sa.Scope, sa.ScopeID, sa.Email, sa.ProjectID, sa.DisplayName,
 		scopesStr, sa.Verified, nullableTime(sa.VerifiedAt), sa.CreatedBy, sa.CreatedAt,
+		sa.Managed, sa.ManagedBy,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -51,10 +52,11 @@ func (s *SQLiteStore) GetGCPServiceAccount(ctx context.Context, id string) (*sto
 	var verifiedAt sql.NullTime
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, scope, scope_id, email, project_id, display_name, default_scopes, verified, verified_at, created_by, created_at
+		SELECT id, scope, scope_id, email, project_id, display_name, default_scopes, verified, verified_at, created_by, created_at, managed, managed_by
 		FROM gcp_service_accounts WHERE id = ?`, id,
 	).Scan(&sa.ID, &sa.Scope, &sa.ScopeID, &sa.Email, &sa.ProjectID, &sa.DisplayName,
 		&scopesStr, &sa.Verified, &verifiedAt, &sa.CreatedBy, &sa.CreatedAt,
+		&sa.Managed, &sa.ManagedBy,
 	)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
@@ -78,9 +80,10 @@ func (s *SQLiteStore) UpdateGCPServiceAccount(ctx context.Context, sa *store.GCP
 
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE gcp_service_accounts
-		SET email = ?, project_id = ?, display_name = ?, default_scopes = ?, verified = ?, verified_at = ?
+		SET email = ?, project_id = ?, display_name = ?, default_scopes = ?, verified = ?, verified_at = ?, managed = ?, managed_by = ?
 		WHERE id = ?`,
-		sa.Email, sa.ProjectID, sa.DisplayName, scopesStr, sa.Verified, nullableTime(sa.VerifiedAt), sa.ID,
+		sa.Email, sa.ProjectID, sa.DisplayName, scopesStr, sa.Verified, nullableTime(sa.VerifiedAt),
+		sa.Managed, sa.ManagedBy, sa.ID,
 	)
 	if err != nil {
 		return err
@@ -105,7 +108,7 @@ func (s *SQLiteStore) DeleteGCPServiceAccount(ctx context.Context, id string) er
 }
 
 func (s *SQLiteStore) ListGCPServiceAccounts(ctx context.Context, filter store.GCPServiceAccountFilter) ([]store.GCPServiceAccount, error) {
-	query := `SELECT id, scope, scope_id, email, project_id, display_name, default_scopes, verified, verified_at, created_by, created_at FROM gcp_service_accounts WHERE 1=1`
+	query := `SELECT id, scope, scope_id, email, project_id, display_name, default_scopes, verified, verified_at, created_by, created_at, managed, managed_by FROM gcp_service_accounts WHERE 1=1`
 	var args []interface{}
 
 	if filter.Scope != "" {
@@ -119,6 +122,10 @@ func (s *SQLiteStore) ListGCPServiceAccounts(ctx context.Context, filter store.G
 	if filter.Email != "" {
 		query += ` AND email = ?`
 		args = append(args, filter.Email)
+	}
+	if filter.Managed != nil {
+		query += ` AND managed = ?`
+		args = append(args, *filter.Managed)
 	}
 
 	query += ` ORDER BY created_at DESC`
@@ -137,6 +144,7 @@ func (s *SQLiteStore) ListGCPServiceAccounts(ctx context.Context, filter store.G
 
 		if err := rows.Scan(&sa.ID, &sa.Scope, &sa.ScopeID, &sa.Email, &sa.ProjectID, &sa.DisplayName,
 			&scopesStr, &sa.Verified, &verifiedAt, &sa.CreatedBy, &sa.CreatedAt,
+			&sa.Managed, &sa.ManagedBy,
 		); err != nil {
 			return nil, err
 		}
@@ -152,4 +160,30 @@ func (s *SQLiteStore) ListGCPServiceAccounts(ctx context.Context, filter store.G
 	}
 
 	return results, rows.Err()
+}
+
+func (s *SQLiteStore) CountGCPServiceAccounts(ctx context.Context, filter store.GCPServiceAccountFilter) (int, error) {
+	query := `SELECT COUNT(*) FROM gcp_service_accounts WHERE 1=1`
+	var args []interface{}
+
+	if filter.Scope != "" {
+		query += ` AND scope = ?`
+		args = append(args, filter.Scope)
+	}
+	if filter.ScopeID != "" {
+		query += ` AND scope_id = ?`
+		args = append(args, filter.ScopeID)
+	}
+	if filter.Email != "" {
+		query += ` AND email = ?`
+		args = append(args, filter.Email)
+	}
+	if filter.Managed != nil {
+		query += ` AND managed = ?`
+		args = append(args, *filter.Managed)
+	}
+
+	var count int
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&count)
+	return count, err
 }

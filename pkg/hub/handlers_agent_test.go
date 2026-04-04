@@ -3533,7 +3533,11 @@ func TestCreateAgent_GCPIdentityNoField(t *testing.T) {
 
 	var resp CreateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Nil(t, resp.Agent.AppliedConfig.GCPIdentity, "GCPIdentity should be nil when not specified")
+	// When no GCP identity is specified, default to "block" to prevent
+	// leaking the underlying compute identity.
+	require.NotNil(t, resp.Agent.AppliedConfig.GCPIdentity, "GCPIdentity should default to block when not specified")
+	assert.Equal(t, store.GCPMetadataModeBlock, resp.Agent.AppliedConfig.GCPIdentity.MetadataMode)
+	assert.Empty(t, resp.Agent.AppliedConfig.GCPIdentity.ServiceAccountID)
 }
 
 func TestCreateAgent_GCPIdentityInvalidMode(t *testing.T) {

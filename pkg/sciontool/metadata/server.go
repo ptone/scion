@@ -163,7 +163,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// For assign mode: only the REDIRECT is needed.
 	if err := setupIPTablesRedirect(s.config.Port); err != nil {
 		// Non-fatal: iptables may not be available (no NET_ADMIN cap, non-Docker runtime).
-		// The GCE_METADATA_HOST env var is the primary mechanism.
+		// The GCE_METADATA_HOST / GCE_METADATA_ROOT env vars are the primary mechanism.
 		log.Debug("iptables redirect not available: %v", err)
 	} else {
 		s.iptablesConfigured = true
@@ -246,7 +246,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, s.config.ProjectID)
 
 	case path == "project/numeric-project-id":
-		fmt.Fprint(w, "")
+		fmt.Fprint(w, "0")
 
 	case path == "instance/service-accounts/" || path == "instance/service-accounts":
 		s.handleServiceAccountList(w, r)
@@ -259,13 +259,43 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// isRecursive returns true if the request has ?recursive=true (case-insensitive value).
+func isRecursive(r *http.Request) bool {
+	return strings.EqualFold(r.URL.Query().Get("recursive"), "true")
+}
+
 func (s *Server) handleServiceAccountList(w http.ResponseWriter, r *http.Request) {
 	if s.config.Mode == "block" {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
+	if isRecursive(r) {
+		w.Header().Set("Content-Type", "application/json")
+		result := map[string]interface{}{
+			"default": s.serviceAccountInfo("default"),
+		}
+		if s.config.SAEmail != "" {
+			result[s.config.SAEmail] = s.serviceAccountInfo(s.config.SAEmail)
+		}
+		json.NewEncoder(w).Encode(result)
+		return
+	}
+
 	fmt.Fprintf(w, "default/\n%s/\n", s.config.SAEmail)
+}
+
+// serviceAccountInfo returns the recursive JSON representation of a service account.
+func (s *Server) serviceAccountInfo(account string) map[string]interface{} {
+	aliases := []string{}
+	if account == "default" {
+		aliases = []string{"default"}
+	}
+	return map[string]interface{}{
+		"email":   s.config.SAEmail,
+		"scopes":  []string{"https://www.googleapis.com/auth/cloud-platform"},
+		"aliases": aliases,
+	}
 }
 
 func (s *Server) handleServiceAccount(w http.ResponseWriter, r *http.Request, path string) {
@@ -303,6 +333,11 @@ func (s *Server) handleServiceAccount(w http.ResponseWriter, r *http.Request, pa
 		s.handleIdentityToken(w, r)
 
 	case "":
+		if isRecursive(r) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(s.serviceAccountInfo(account))
+			return
+		}
 		// List endpoints for this account
 		fmt.Fprint(w, "email\nscopes\ntoken\nidentity\n")
 

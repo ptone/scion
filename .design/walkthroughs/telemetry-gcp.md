@@ -96,8 +96,7 @@ telemetry:
   enabled: true
   cloud:
     enabled: true
-    endpoint: "cloudtrace.googleapis.com:443"
-    protocol: "grpc"
+    provider: "gcp"
   filter:
     events:
       exclude:
@@ -111,6 +110,12 @@ telemetry:
       hash:
         - "session_id"
 ```
+
+> **Note:** When `provider: gcp` is set, the GCP-native SDKs (Cloud Trace,
+> Cloud Monitoring, Cloud Logging) handle endpoint routing automatically.
+> No `endpoint` or `protocol` fields are needed. Authentication uses
+> Application Default Credentials (ADC) or an explicit service account key
+> file injected by the broker.
 
 ### 3.3 (Optional) Override at grove scope
 
@@ -150,8 +155,7 @@ docker inspect qa-telem --format '{{range .Config.Env}}{{println .}}{{end}}' \
 ```
 SCION_TELEMETRY_ENABLED=true
 SCION_TELEMETRY_CLOUD_ENABLED=true
-SCION_OTEL_ENDPOINT=cloudtrace.googleapis.com:443
-SCION_OTEL_PROTOCOL=grpc
+SCION_TELEMETRY_CLOUD_PROVIDER=gcp
 SCION_TELEMETRY_FILTER_EXCLUDE=agent.user.prompt
 SCION_TELEMETRY_REDACT=prompt,user.email,tool_output,tool_input
 SCION_TELEMETRY_HASH=session_id
@@ -192,9 +196,9 @@ For Claude harness agents, check for `CLAUDE_CODE_ENABLE_TELEMETRY=1` and
 
 - Settings-level telemetry fields appear as container env vars.
 - Harness-specific telemetry env vars are injected when telemetry is enabled.
-- The `GCP_PROJECT` env var (if needed via `SCION_GCP_PROJECT_ID`) is only
-  required when using project-scoped Cloud Trace endpoints; the standard
-  `cloudtrace.googleapis.com:443` endpoint infers the project from ADC.
+- The `SCION_GCP_PROJECT_ID` env var is auto-resolved from the GCP
+  credentials file when present. If using ADC without an explicit
+  credentials file, set `SCION_GCP_PROJECT_ID` explicitly.
 
 Clean up the test agent:
 
@@ -337,8 +341,7 @@ telemetry:
   enabled: true
   cloud:
     enabled: true
-    endpoint: "cloudtrace.googleapis.com:443"
-    protocol: "grpc"
+    provider: "gcp"
   filter:
     events:
       include:

@@ -907,6 +907,9 @@ type GCPServiceAccountStore interface {
 
 	// ListGCPServiceAccounts returns GCP service accounts matching the filter.
 	ListGCPServiceAccounts(ctx context.Context, filter GCPServiceAccountFilter) ([]GCPServiceAccount, error)
+
+	// CountGCPServiceAccounts returns the number of GCP service accounts matching the filter.
+	CountGCPServiceAccounts(ctx context.Context, filter GCPServiceAccountFilter) (int, error)
 }
 
 // GCPServiceAccountFilter defines criteria for filtering GCP service accounts.
@@ -914,6 +917,7 @@ type GCPServiceAccountFilter struct {
 	Scope   string // Filter by scope (hub, grove, user)
 	ScopeID string // Filter by scope ID
 	Email   string // Filter by SA email
+	Managed *bool  // Filter by managed status (nil = no filter)
 }
 
 // =============================================================================

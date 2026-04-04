@@ -358,13 +358,12 @@ func (c *ScionConfig) IsDetached() bool {
 
 type AuthConfig struct {
 	// Google/Gemini auth
-	GeminiAPIKey                 string
-	GoogleAPIKey                 string
-	GoogleAppCredentials         string
-	GoogleAppCredentialsExplicit bool // true when value came from GOOGLE_APPLICATION_CREDENTIALS env var
-	GoogleCloudProject           string
-	GoogleCloudRegion            string
-	OAuthCreds                   string
+	GeminiAPIKey         string
+	GoogleAPIKey         string
+	GoogleAppCredentials string
+	GoogleCloudProject   string
+	GoogleCloudRegion    string
+	OAuthCreds           string
 
 	// Anthropic auth
 	AnthropicAPIKey string
@@ -374,6 +373,11 @@ type AuthConfig struct {
 	CodexAPIKey      string
 	CodexAuthFile    string
 	OpenCodeAuthFile string
+
+	// GCP metadata server mode ("block", "passthrough", "assign").
+	// When "assign", a GCP service account is available via the metadata
+	// server and ADC file secrets are not required for vertex-ai auth.
+	GCPMetadataMode string
 
 	// Auth mode selection
 	SelectedType string

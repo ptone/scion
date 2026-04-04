@@ -205,11 +205,10 @@ func TestGeminiResolveAuth_ExplicitAuthFileMissing(t *testing.T) {
 func TestGeminiResolveAuth_ExplicitVertexAI(t *testing.T) {
 	g := &GeminiCLI{}
 	auth := api.AuthConfig{
-		SelectedType:                 "vertex-ai",
-		GoogleCloudProject:           "proj",
-		GoogleCloudRegion:            "us-east1",
-		GoogleAppCredentials:         "/path/to/adc.json",
-		GoogleAppCredentialsExplicit: true,
+		SelectedType:         "vertex-ai",
+		GoogleCloudProject:   "proj",
+		GoogleCloudRegion:    "us-east1",
+		GoogleAppCredentials: "/path/to/adc.json",
 	}
 	result, err := g.ResolveAuth(auth)
 	if err != nil {
@@ -359,6 +358,69 @@ func TestGeminiResolveAuth_NoCreds(t *testing.T) {
 	_, err := g.ResolveAuth(api.AuthConfig{})
 	if err == nil {
 		t.Fatal("expected error for empty AuthConfig")
+	}
+}
+
+func TestGeminiResolveAuth_AutoDetectGCPServiceAccount(t *testing.T) {
+	g := &GeminiCLI{}
+	auth := api.AuthConfig{
+		GCPMetadataMode:    "assign",
+		GoogleCloudProject: "my-project",
+	}
+	result, err := g.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "vertex-ai" {
+		t.Errorf("Method = %q, want %q", result.Method, "vertex-ai")
+	}
+	if result.EnvVars["GEMINI_DEFAULT_AUTH_TYPE"] != "vertex-ai" {
+		t.Errorf("GEMINI_DEFAULT_AUTH_TYPE = %q, want %q", result.EnvVars["GEMINI_DEFAULT_AUTH_TYPE"], "vertex-ai")
+	}
+	if result.EnvVars["GOOGLE_CLOUD_PROJECT"] != "my-project" {
+		t.Errorf("GOOGLE_CLOUD_PROJECT = %q, want %q", result.EnvVars["GOOGLE_CLOUD_PROJECT"], "my-project")
+	}
+	// No ADC file should be mapped — metadata server provides credentials
+	if len(result.Files) != 0 {
+		t.Errorf("expected no file mappings for GCP SA auth, got %d", len(result.Files))
+	}
+}
+
+func TestGeminiResolveAuth_AutoDetectGCPServiceAccountWithRegion(t *testing.T) {
+	g := &GeminiCLI{}
+	auth := api.AuthConfig{
+		GCPMetadataMode:    "assign",
+		GoogleCloudProject: "my-project",
+		GoogleCloudRegion:  "europe-west1",
+	}
+	result, err := g.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.EnvVars["GOOGLE_CLOUD_REGION"] != "europe-west1" {
+		t.Errorf("GOOGLE_CLOUD_REGION = %q, want %q", result.EnvVars["GOOGLE_CLOUD_REGION"], "europe-west1")
+	}
+	if result.EnvVars["GOOGLE_CLOUD_LOCATION"] != "europe-west1" {
+		t.Errorf("GOOGLE_CLOUD_LOCATION = %q, want %q", result.EnvVars["GOOGLE_CLOUD_LOCATION"], "europe-west1")
+	}
+}
+
+func TestGeminiResolveAuth_ExplicitVertexAIWithGCPSA(t *testing.T) {
+	g := &GeminiCLI{}
+	auth := api.AuthConfig{
+		SelectedType:       "vertex-ai",
+		GCPMetadataMode:    "assign",
+		GoogleCloudProject: "my-project",
+	}
+	result, err := g.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "vertex-ai" {
+		t.Errorf("Method = %q, want %q", result.Method, "vertex-ai")
+	}
+	if len(result.Files) != 0 {
+		t.Errorf("expected no file mappings for GCP SA auth, got %d", len(result.Files))
 	}
 }
 

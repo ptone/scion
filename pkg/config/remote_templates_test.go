@@ -149,6 +149,67 @@ func TestParseGitHubURL(t *testing.T) {
 	}
 }
 
+func TestNormalizeTemplateSourceURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "full https URL unchanged",
+			input:    "https://github.com/org/repo/tree/main/.scion/templates",
+			expected: "https://github.com/org/repo/tree/main/.scion/templates",
+		},
+		{
+			name:     "scheme-less github domain gets https prefix",
+			input:    "github.com/org/repo/tree/main/.scion/templates",
+			expected: "https://github.com/org/repo/tree/main/.scion/templates",
+		},
+		{
+			name:     "bare org/repo appends scion templates path",
+			input:    "https://github.com/org/repo",
+			expected: "https://github.com/org/repo/.scion/templates/",
+		},
+		{
+			name:     "scheme-less bare org/repo gets scheme and scion templates path",
+			input:    "github.com/org/repo",
+			expected: "https://github.com/org/repo/.scion/templates/",
+		},
+		{
+			name:     "GitHub.com capitalized is normalized",
+			input:    "GitHub.com/org/repo",
+			expected: "https://GitHub.com/org/repo/.scion/templates/",
+		},
+		{
+			name:     "rclone prefix left unchanged",
+			input:    ":gcs:bucket/path",
+			expected: ":gcs:bucket/path",
+		},
+		{
+			name:     "http URL unchanged",
+			input:    "http://example.com/template.tgz",
+			expected: "http://example.com/template.tgz",
+		},
+		{
+			name:     "whitespace trimmed",
+			input:    "  github.com/org/repo  ",
+			expected: "https://github.com/org/repo/.scion/templates/",
+		},
+		{
+			name:     "deeper path not modified",
+			input:    "github.com/org/repo/.scion/templates/mytmpl",
+			expected: "https://github.com/org/repo/.scion/templates/mytmpl",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := NormalizeTemplateSourceURL(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 func TestConvertToSvnURL(t *testing.T) {
 	tests := []struct {
 		name     string

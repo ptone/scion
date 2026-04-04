@@ -1,0 +1,3 @@
+schema_version: "1"
+description: "Texas Hold'em auditor - monitors game integrity and detects cheating"
+system_prompt: system-prompt.md

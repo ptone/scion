@@ -585,9 +585,9 @@ func TestDeleteGrove_DeleteAgents_DispatchesToBroker(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
-	// Delete grove with deleteAgents=true
+	// Delete grove — agents are always cascade-deleted
 	rec := doRequest(t, srv, http.MethodDelete,
-		"/api/v1/groves/"+grove.ID+"?deleteAgents=true", nil)
+		"/api/v1/groves/"+grove.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Verify dispatcher was called for both agents
@@ -605,7 +605,7 @@ func TestDeleteGrove_DeleteAgents_DispatchesToBroker(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-func TestDeleteGrove_WithoutDeleteAgents_SkipsBrokerDispatch(t *testing.T) {
+func TestDeleteGrove_AlwaysCascadeDeletesAgents(t *testing.T) {
 	srv, s := testServer(t)
 
 	disp := &deleteDispatcher{}
@@ -613,15 +613,15 @@ func TestDeleteGrove_WithoutDeleteAgents_SkipsBrokerDispatch(t *testing.T) {
 
 	grove, _, _ := setupOnlineBrokerAgent(t, s, "grove-nodelflag")
 
-	// Delete grove without deleteAgents flag
+	// Delete grove without explicit deleteAgents param — agents should still be deleted
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+grove.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
-	// Dispatcher should NOT have been called
-	assert.Equal(t, 0, disp.deleteCalls,
-		"DispatchAgentDelete should not be called without deleteAgents flag")
+	// Dispatcher should have been called (cascade delete is always on)
+	assert.Equal(t, 1, disp.deleteCalls,
+		"DispatchAgentDelete should always be called when deleting a grove")
 
-	// Grove should still be deleted from database (cascade deletes agent records)
+	// Grove should be deleted from database
 	ctx := context.Background()
 	_, err := s.GetGrove(ctx, grove.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)

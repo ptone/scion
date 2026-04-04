@@ -103,6 +103,10 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private runHistory: Map<string, MaintenanceRun[]> = new Map();
 
+  /** Whether maintenance mode is enabled. */
+  @state()
+  private maintenanceEnabled = false;
+
   /** Run detail currently being viewed. */
   @state()
   private viewingRun: MaintenanceRun | null = null;
@@ -129,6 +133,61 @@ export class ScionPageAdminMaintenance extends LitElement {
       font-weight: 700;
       color: var(--scion-text, #1e293b);
       margin: 0;
+    }
+
+    /* -- Maintenance mode toggle ------------------------------------------ */
+
+    .maintenance-mode-toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .maintenance-mode-toggle .toggle-track {
+      position: relative;
+      width: 36px;
+      height: 20px;
+      background: var(--scion-border, #e2e8f0);
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.2s ease;
+      border: none;
+      padding: 0;
+      flex-shrink: 0;
+    }
+
+    .maintenance-mode-toggle .toggle-track:hover {
+      background: var(--scion-text-muted, #94a3b8);
+    }
+
+    .maintenance-mode-toggle .toggle-track.active {
+      background: var(--scion-warning, #f59e0b);
+    }
+
+    .maintenance-mode-toggle .toggle-track.active:hover {
+      background: #d97706;
+    }
+
+    .maintenance-mode-toggle .toggle-knob {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 16px;
+      height: 16px;
+      background: white;
+      border-radius: 50%;
+      transition: transform 0.2s ease;
+      pointer-events: none;
+    }
+
+    .maintenance-mode-toggle .toggle-track.active .toggle-knob {
+      transform: translateX(16px);
+    }
+
+    .maintenance-mode-toggle .toggle-label {
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--scion-text, #1e293b);
     }
 
     /* -- Sections --------------------------------------------------------- */
@@ -419,11 +478,41 @@ export class ScionPageAdminMaintenance extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.loadData();
+    void this.fetchMaintenanceState();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopPolling();
+  }
+
+  private async fetchMaintenanceState(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance');
+      if (res.ok) {
+        const data = await res.json();
+        this.maintenanceEnabled = data.enabled;
+      }
+    } catch {
+      // Silently ignore — toggle will default to off.
+    }
+  }
+
+  private async toggleMaintenance(): Promise<void> {
+    const newValue = !this.maintenanceEnabled;
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: newValue }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        this.maintenanceEnabled = data.enabled;
+      }
+    } catch {
+      // Silently ignore — keep current state on failure.
+    }
   }
 
   private async loadData(): Promise<void> {
@@ -763,8 +852,34 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   private renderContent() {
     return html`
+      ${this.renderMaintenanceMode()}
       ${this.renderMigrations()}
       ${this.renderOperations()}
+    `;
+  }
+
+  private renderMaintenanceMode() {
+    return html`
+      <div class="section">
+        <h2 class="section-title">Maintenance Mode</h2>
+        <p class="section-description">
+          When maintenance mode is enabled, only administrators can log in.
+          All other users will be temporarily blocked until maintenance mode is
+          disabled.
+        </p>
+        <div class="maintenance-mode-toggle">
+          <button
+            class="toggle-track ${this.maintenanceEnabled ? 'active' : ''}"
+            @click=${() => { this.toggleMaintenance(); }}
+            aria-label="Toggle maintenance mode"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+          <span class="toggle-label">
+            ${this.maintenanceEnabled ? 'Enabled' : 'Disabled'}
+          </span>
+        </div>
+      </div>
     `;
   }
 

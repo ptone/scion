@@ -305,6 +305,13 @@ func runInit(args []string) int {
 	// Start GCP metadata server if configured
 	var metadataServer *metadata.Server
 	if metaCfg := metadata.ConfigFromEnv(); metaCfg != nil {
+		// Remove pre-existing gcloud configuration state so that gcloud
+		// re-initializes and discovers the emulated metadata server via
+		// GCE_METADATA_ROOT. gcloud only checks for the metadata server
+		// during its first-run configuration detection.
+		// We preserve application_default_credentials.json which may be
+		// bind-mounted as a secret (gcloud-adc).
+		cleanGcloudConfigForMetadata(filepath.Join(agentHome, ".config", "gcloud"))
 		metadataServer = metadata.New(*metaCfg)
 		metaCtx := context.Background()
 		if err := metadataServer.Start(metaCtx); err != nil {
@@ -1415,4 +1422,25 @@ func isWorkspaceEmpty(path string) bool {
 		}
 	}
 	return true
+}
+
+// cleanGcloudConfigForMetadata removes gcloud configuration state files from
+// the given directory while preserving application_default_credentials.json,
+// which may be bind-mounted as a gcloud-adc secret. Clearing the config state
+// forces gcloud to re-initialize and discover the emulated metadata server.
+func cleanGcloudConfigForMetadata(gcloudDir string) {
+	entries, err := os.ReadDir(gcloudDir)
+	if err != nil {
+		// Directory doesn't exist — nothing to clean.
+		return
+	}
+	for _, e := range entries {
+		if e.Name() == "application_default_credentials.json" {
+			continue
+		}
+		p := filepath.Join(gcloudDir, e.Name())
+		if err := os.RemoveAll(p); err != nil {
+			log.Debug("Could not remove gcloud config entry %s: %v", p, err)
+		}
+	}
 }

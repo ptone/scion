@@ -184,7 +184,9 @@ func MetricsDebugEnabled() bool {
 }
 
 // IsCloudConfigured returns true if cloud forwarding is properly configured.
-// For GCP provider, only credentials file is needed (no endpoint required).
+// For GCP provider, no endpoint is required — GCP-native SDKs handle routing
+// and support Application Default Credentials (ADC) when no explicit
+// credentials file is provided.
 // For generic OTLP, an endpoint must be specified.
 func (c *Config) IsCloudConfigured() bool {
 	if c == nil {
@@ -193,8 +195,8 @@ func (c *Config) IsCloudConfigured() bool {
 	if !c.CloudEnabled {
 		return false
 	}
-	// GCP mode: credentials file is sufficient (endpoint not needed)
-	if c.CloudProvider == "gcp" && c.GCPCredentialsFile != "" {
+	// GCP mode: SDKs handle endpoints and auth (ADC or explicit credentials)
+	if c.CloudProvider == "gcp" {
 		return true
 	}
 	// Generic OTLP mode: endpoint is required
@@ -202,8 +204,11 @@ func (c *Config) IsCloudConfigured() bool {
 }
 
 // IsGCP returns true if the cloud provider is configured for GCP-native export.
+// GCP-native mode uses Cloud Trace, Cloud Monitoring, and Cloud Logging SDKs
+// directly, which support both explicit credentials files and Application
+// Default Credentials (ADC). An explicit credentials file is not required.
 func (c *Config) IsGCP() bool {
-	return c != nil && c.CloudProvider == "gcp" && c.GCPCredentialsFile != ""
+	return c != nil && c.CloudProvider == "gcp"
 }
 
 // readProjectIDFromCredentials reads the project_id field from a GCP service

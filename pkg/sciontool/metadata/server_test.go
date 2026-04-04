@@ -145,6 +145,32 @@ func TestMetadataServer_ProjectID(t *testing.T) {
 	}
 }
 
+func TestMetadataServer_NumericProjectID(t *testing.T) {
+	port := freePort(t)
+	srv := New(Config{
+		Mode:      "block",
+		Port:      port,
+		ProjectID: "my-test-project",
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	resp, body := metadataGet(t, port, "/computeMetadata/v1/project/numeric-project-id")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if body != "0" {
+		t.Fatalf("expected numeric-project-id to be \"0\", got %q", body)
+	}
+}
+
 func TestMetadataServer_BlockMode(t *testing.T) {
 	port := freePort(t)
 	srv := New(Config{
@@ -343,6 +369,125 @@ func TestMetadataServer_AssignMode_TokenCaching(t *testing.T) {
 	// Only one Hub request should have been made
 	if requestCount != 1 {
 		t.Fatalf("expected 1 Hub request (caching), got %d", requestCount)
+	}
+}
+
+func TestMetadataServer_AssignMode_RecursiveServiceAccount(t *testing.T) {
+	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "ya29.test-token",
+			"expires_in":   3599,
+			"token_type":   "Bearer",
+		})
+	}))
+	defer hubServer.Close()
+
+	port := freePort(t)
+	srv := New(Config{
+		Mode:      "assign",
+		Port:      port,
+		SAEmail:   "agent-worker@project.iam.gserviceaccount.com",
+		ProjectID: "my-project",
+		HubURL:    hubServer.URL,
+		AuthToken: "test-auth-token",
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	// Recursive on a specific service account (the main bug scenario)
+	resp, body := metadataGet(t, port, "/computeMetadata/v1/instance/service-accounts/default/?recursive=true")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "application/json" {
+		t.Fatalf("expected application/json content-type, got %q", ct)
+	}
+
+	var info map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &info); err != nil {
+		t.Fatalf("failed to parse recursive response: %v\nbody: %s", err, body)
+	}
+	if info["email"] != "agent-worker@project.iam.gserviceaccount.com" {
+		t.Fatalf("unexpected email: %v", info["email"])
+	}
+	scopes, ok := info["scopes"].([]interface{})
+	if !ok || len(scopes) == 0 {
+		t.Fatalf("expected scopes array, got %v", info["scopes"])
+	}
+	if scopes[0] != "https://www.googleapis.com/auth/cloud-platform" {
+		t.Fatalf("unexpected scope: %v", scopes[0])
+	}
+	aliases, ok := info["aliases"].([]interface{})
+	if !ok || len(aliases) == 0 || aliases[0] != "default" {
+		t.Fatalf("expected aliases [\"default\"], got %v", info["aliases"])
+	}
+
+	// Recursive on service-accounts listing
+	resp, body = metadataGet(t, port, "/computeMetadata/v1/instance/service-accounts/?recursive=true")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ct = resp.Header.Get("Content-Type")
+	if ct != "application/json" {
+		t.Fatalf("expected application/json for SA listing, got %q", ct)
+	}
+
+	var saList map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &saList); err != nil {
+		t.Fatalf("failed to parse recursive SA listing: %v\nbody: %s", err, body)
+	}
+	if _, ok := saList["default"]; !ok {
+		t.Fatal("expected 'default' key in recursive SA listing")
+	}
+	if _, ok := saList["agent-worker@project.iam.gserviceaccount.com"]; !ok {
+		t.Fatal("expected email key in recursive SA listing")
+	}
+
+	// Non-recursive should still return text listing
+	resp, body = metadataGet(t, port, "/computeMetadata/v1/instance/service-accounts/default/")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if body != "email\nscopes\ntoken\nidentity\n" {
+		t.Fatalf("expected text listing without recursive, got %q", body)
+	}
+}
+
+func TestMetadataServer_BlockMode_RecursiveForbidden(t *testing.T) {
+	port := freePort(t)
+	srv := New(Config{
+		Mode:      "block",
+		Port:      port,
+		ProjectID: "test-project",
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	// Recursive on service account in block mode should still be 403
+	resp, _ := metadataGet(t, port, "/computeMetadata/v1/instance/service-accounts/default/?recursive=true")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for recursive in block mode, got %d", resp.StatusCode)
+	}
+
+	// Recursive on SA listing in block mode should still be 403
+	resp, _ = metadataGet(t, port, "/computeMetadata/v1/instance/service-accounts/?recursive=true")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for recursive SA listing in block mode, got %d", resp.StatusCode)
 	}
 }
 

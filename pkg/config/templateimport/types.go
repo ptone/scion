@@ -26,6 +26,7 @@ type ImportedAgent struct {
 	Temperature    float64        // Temperature (Gemini only, 0 = unset)
 	RawFrontMatter map[string]any // Full front matter for pass-through
 	SourcePath     string         // Original file path
+	ScionFormat    bool           // True if this is a native scion template (copy, don't convert)
 }
 
 // Importer parses harness-specific agent definitions.

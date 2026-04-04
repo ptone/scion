@@ -139,6 +139,82 @@ func TestGCPServiceAccount_DuplicateEmail(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestGCPServiceAccount_ManagedFields(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	sa := &store.GCPServiceAccount{
+		ID:        "sa-managed-1",
+		Scope:     store.ScopeGrove,
+		ScopeID:   "grove-1",
+		Email:     "scion-abc123@hub-project.iam.gserviceaccount.com",
+		ProjectID: "hub-project",
+		Managed:   true,
+		ManagedBy: "hub-instance-1",
+		CreatedBy: "user-1",
+	}
+
+	err := s.CreateGCPServiceAccount(ctx, sa)
+	require.NoError(t, err)
+
+	got, err := s.GetGCPServiceAccount(ctx, "sa-managed-1")
+	require.NoError(t, err)
+	assert.True(t, got.Managed)
+	assert.Equal(t, "hub-instance-1", got.ManagedBy)
+
+	// List with managed filter
+	managed := true
+	list, err := s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+		Scope:   store.ScopeGrove,
+		ScopeID: "grove-1",
+		Managed: &managed,
+	})
+	require.NoError(t, err)
+	assert.Len(t, list, 1)
+	assert.True(t, list[0].Managed)
+
+	// Create a non-managed SA
+	sa2 := &store.GCPServiceAccount{
+		ID:        "sa-byosa-1",
+		Scope:     store.ScopeGrove,
+		ScopeID:   "grove-1",
+		Email:     "user-sa@other-project.iam.gserviceaccount.com",
+		ProjectID: "other-project",
+		Managed:   false,
+		CreatedBy: "user-1",
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa2))
+
+	// Filter managed=true should return only the managed one
+	list, err = s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+		Scope:   store.ScopeGrove,
+		ScopeID: "grove-1",
+		Managed: &managed,
+	})
+	require.NoError(t, err)
+	assert.Len(t, list, 1)
+	assert.Equal(t, "sa-managed-1", list[0].ID)
+
+	// Filter managed=false should return only the BYOSA one
+	notManaged := false
+	list, err = s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+		Scope:   store.ScopeGrove,
+		ScopeID: "grove-1",
+		Managed: &notManaged,
+	})
+	require.NoError(t, err)
+	assert.Len(t, list, 1)
+	assert.Equal(t, "sa-byosa-1", list[0].ID)
+
+	// No managed filter should return both
+	list, err = s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+		Scope:   store.ScopeGrove,
+		ScopeID: "grove-1",
+	})
+	require.NoError(t, err)
+	assert.Len(t, list, 2)
+}
+
 func TestGCPServiceAccount_NotFound(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()

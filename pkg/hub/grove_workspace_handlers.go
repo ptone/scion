@@ -17,6 +17,7 @@ package hub
 import (
 	"archive/zip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -39,6 +41,9 @@ const maxUploadTotalSize = 100 * 1024 * 1024
 
 // maxUploadFileSize is the maximum size for a single uploaded file (50MB).
 const maxUploadFileSize = 50 * 1024 * 1024
+
+// maxEditableFileSize is the maximum file size the editor will serve for inline editing (1MB).
+const maxEditableFileSize = 1 * 1024 * 1024
 
 // GroveWorkspaceFile represents a file in a grove workspace.
 type GroveWorkspaceFile struct {
@@ -97,6 +102,8 @@ func (s *Server) handleGroveWorkspace(w http.ResponseWriter, r *http.Request, gr
 		s.handleGroveWorkspaceDownload(w, r, workspacePath, filePath)
 	case r.Method == http.MethodPost && filePath == "":
 		s.handleGroveWorkspaceUpload(w, r, workspacePath)
+	case r.Method == http.MethodPut && filePath != "":
+		s.handleGroveWorkspaceWrite(w, r, workspacePath, filePath)
 	case r.Method == http.MethodDelete && filePath != "":
 		s.handleGroveWorkspaceDelete(w, workspacePath, filePath)
 	default:
@@ -323,6 +330,8 @@ func (s *Server) handleGroveWorkspaceUpload(w http.ResponseWriter, r *http.Reque
 // handleGroveWorkspaceDownload serves a single file from a grove workspace.
 // When the query parameter "view=true" is set, the file is served inline for
 // in-browser preview; otherwise the response forces a download.
+// When "format=json" is set, the file content is returned as a JSON object
+// with metadata, suitable for the inline file editor.
 func (s *Server) handleGroveWorkspaceDownload(w http.ResponseWriter, r *http.Request, workspacePath, filePath string) {
 	// Validate the file path
 	if err := validateWorkspaceFilePath(filePath); err != nil {
@@ -344,6 +353,35 @@ func (s *Server) handleGroveWorkspaceDownload(w http.ResponseWriter, r *http.Req
 	}
 	if info.IsDir() {
 		BadRequest(w, "Cannot download a directory")
+		return
+	}
+
+	// JSON format: return content wrapped with metadata for the editor
+	if r.URL.Query().Get("format") == "json" {
+		if info.Size() > maxEditableFileSize {
+			BadRequest(w, fmt.Sprintf("File too large for editing (%s). Maximum is 1MB.", formatByteSize(info.Size())))
+			return
+		}
+
+		data, readErr := os.ReadFile(fullPath)
+		if readErr != nil {
+			InternalError(w)
+			return
+		}
+
+		// Verify content is valid UTF-8 text
+		if !utf8.Valid(data) {
+			BadRequest(w, "File contains binary content and cannot be edited")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"path":     filePath,
+			"content":  string(data),
+			"size":     info.Size(),
+			"modTime":  info.ModTime(),
+			"encoding": "utf-8",
+		})
 		return
 	}
 
@@ -475,6 +513,79 @@ func (s *Server) handleGroveWorkspaceArchive(w http.ResponseWriter, r *http.Requ
 	}
 }
 
+// GroveWorkspaceWriteRequest is the request body for writing file content.
+type GroveWorkspaceWriteRequest struct {
+	Content         string `json:"content"`
+	ExpectedModTime string `json:"expectedModTime,omitempty"` // optional optimistic concurrency
+}
+
+// handleGroveWorkspaceWrite writes (creates or overwrites) a file in a grove workspace.
+// The content is provided as a JSON request body. If expectedModTime is set, the
+// server checks that the file has not been modified since that time and returns
+// 409 Conflict if it has.
+func (s *Server) handleGroveWorkspaceWrite(w http.ResponseWriter, r *http.Request, workspacePath, filePath string) {
+	// Validate the file path
+	if err := validateWorkspaceFilePath(filePath); err != nil {
+		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
+		return
+	}
+
+	var req GroveWorkspaceWriteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	fullPath := filepath.Join(workspacePath, filePath)
+
+	// Optimistic concurrency check: if expectedModTime is set, verify the file
+	// has not been modified since the client loaded it.
+	if req.ExpectedModTime != "" {
+		expectedTime, parseErr := time.Parse(time.RFC3339Nano, req.ExpectedModTime)
+		if parseErr != nil {
+			BadRequest(w, "Invalid expectedModTime format — use RFC3339")
+			return
+		}
+
+		info, statErr := os.Stat(fullPath)
+		if statErr == nil {
+			// File exists — check mod time. Allow a 1-second tolerance for
+			// filesystem timestamp granularity.
+			if info.ModTime().Sub(expectedTime) > time.Second {
+				Conflict(w, "File has been modified since you loaded it. Reload and try again.")
+				return
+			}
+		}
+		// If file doesn't exist (new file creation), skip the check
+	}
+
+	// Create parent directories if needed
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		InternalError(w)
+		return
+	}
+
+	// Write the file
+	if err := os.WriteFile(fullPath, []byte(req.Content), 0644); err != nil {
+		InternalError(w)
+		return
+	}
+
+	// Read back file info for the response
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		InternalError(w)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, GroveWorkspaceFile{
+		Path:    filePath,
+		Size:    info.Size(),
+		ModTime: info.ModTime(),
+		Mode:    info.Mode().String(),
+	})
+}
+
 // handleGroveWorkspaceDelete deletes a file from a grove workspace.
 func (s *Server) handleGroveWorkspaceDelete(w http.ResponseWriter, workspacePath, filePath string) {
 	// Validate the file path
@@ -556,6 +667,8 @@ func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, gr
 		s.handleGroveWorkspaceDownload(w, r, sharedDirPath, filePath)
 	case r.Method == http.MethodPost && filePath == "":
 		s.handleGroveWorkspaceUpload(w, r, sharedDirPath)
+	case r.Method == http.MethodPut && filePath != "":
+		s.handleGroveWorkspaceWrite(w, r, sharedDirPath, filePath)
 	case r.Method == http.MethodDelete && filePath != "":
 		s.handleGroveWorkspaceDelete(w, sharedDirPath, filePath)
 	default:
@@ -714,6 +827,20 @@ func (s *Server) handleGroveWorkspacePull(w http.ResponseWriter, r *http.Request
 		"status": "ok",
 		"output": output,
 	})
+}
+
+// formatByteSize formats a byte count as a human-readable string.
+func formatByteSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 // cleanEmptyDirs removes empty directories from targetDir up to (but not including) rootDir.

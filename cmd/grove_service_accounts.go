@@ -103,9 +103,27 @@ Examples:
 	RunE: runSAVerify,
 }
 
+var saMintCmd = &cobra.Command{
+	Use:   "mint",
+	Short: "Mint a new GCP service account in the Hub's project",
+	Long: `Create a new GCP service account in the Hub's own GCP project.
+
+The minted SA is permissionless by default — no IAM roles are granted.
+The Hub automatically configures itself to impersonate the SA for token
+generation. You can later grant IAM permissions on your own GCP projects.
+
+Examples:
+  scion grove service-accounts mint
+  scion grove service-accounts mint --account-id my-pipeline
+  scion grove service-accounts mint --account-id my-pipeline --name "My Pipeline SA"`,
+	Args: cobra.NoArgs,
+	RunE: runSAMint,
+}
+
 var (
 	saProjectID   string
 	saDisplayName string
+	saMintID      string
 )
 
 func init() {
@@ -114,10 +132,14 @@ func init() {
 	groveServiceAccountsCmd.AddCommand(saListCmd)
 	groveServiceAccountsCmd.AddCommand(saRemoveCmd)
 	groveServiceAccountsCmd.AddCommand(saVerifyCmd)
+	groveServiceAccountsCmd.AddCommand(saMintCmd)
 
 	saAddCmd.Flags().StringVar(&saProjectID, "project", "", "GCP project ID (required)")
 	saAddCmd.Flags().StringVar(&saDisplayName, "name", "", "Display name for the service account")
 	_ = saAddCmd.MarkFlagRequired("project")
+
+	saMintCmd.Flags().StringVar(&saMintID, "account-id", "", "Custom account ID (will be prefixed with scion-)")
+	saMintCmd.Flags().StringVar(&saDisplayName, "name", "", "Display name for the service account")
 
 	saListCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
 }
@@ -253,6 +275,43 @@ func runSARemove(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Removed service account %s\n", saID)
+	return nil
+}
+
+func runSAMint(cmd *cobra.Command, args []string) error {
+	client, groveID, err := resolveGroveForSA()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	req := &hubclient.MintGCPServiceAccountRequest{
+		AccountID:   saMintID,
+		DisplayName: saDisplayName,
+	}
+
+	sa, err := client.GCPServiceAccounts(groveID).Mint(ctx, req)
+	if err != nil {
+		return fmt.Errorf("failed to mint service account: %w", err)
+	}
+
+	if isJSONOutput() {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(sa)
+	}
+
+	fmt.Printf("Minted service account: %s\n", sa.Email)
+	fmt.Printf("  ID:        %s\n", sa.ID)
+	fmt.Printf("  Project:   %s\n", sa.ProjectID)
+	if sa.DisplayName != "" {
+		fmt.Printf("  Name:      %s\n", sa.DisplayName)
+	}
+	fmt.Printf("  Verified:  %v\n", sa.Verified)
+	fmt.Printf("  Managed:   %v\n", sa.Managed)
+
 	return nil
 }
 

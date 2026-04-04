@@ -46,7 +46,9 @@ type RunConfig struct {
 	SharedDirs           []api.SharedDir
 	BrokerMode           bool
 	Debug                bool
-	MetadataInterception bool // Add NET_ADMIN cap for iptables-based metadata server interception
+	MetadataInterception bool     // Add NET_ADMIN cap for iptables-based metadata server interception
+	ExtraHosts           []string // Extra /etc/hosts entries (e.g. "host.docker.internal:host-gateway")
+	NetworkMode          string   // Container network mode (e.g. "host" for --network=host)
 }
 
 type Runtime interface {

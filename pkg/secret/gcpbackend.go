@@ -247,6 +247,12 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, groveID, brokerID stri
 		}
 
 		for _, s := range secrets {
+			// Never project hub-internal infrastructure secrets (e.g. signing keys)
+			// into agent environments.
+			if s.SecretType == store.SecretTypeInternal {
+				continue
+			}
+
 			smName := b.gcpSecretName(s.Key, sc.scope, sc.scopeID)
 			value, err := b.accessLatestVersion(ctx, smName)
 			if err != nil {

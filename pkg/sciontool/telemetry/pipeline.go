@@ -86,6 +86,9 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			mode := "OTLP"
 			if p.config.IsGCP() {
 				mode = "GCP-native"
+				if p.config.Endpoint != "" {
+					log.Info("Cloud endpoint %q is ignored in GCP-native mode (SDKs use built-in endpoints)", p.config.Endpoint)
+				}
 			}
 			log.Info("Cloud exporter initialized (%s, project: %s)", mode, p.config.ProjectID)
 		}

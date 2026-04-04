@@ -167,6 +167,79 @@ Prompt.
 	assert.Equal(t, "claude", agents[0].Harness)
 }
 
+func TestDiscoverAgents_ScionTemplates(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a scion templates directory with two templates
+	templatesDir := filepath.Join(dir, ".scion", "templates")
+	for _, name := range []string{"frontend", "backend"} {
+		templateDir := filepath.Join(templatesDir, name)
+		require.NoError(t, os.MkdirAll(filepath.Join(templateDir, "home"), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(templateDir, "scion-agent.yaml"), []byte(`
+schema_version: "1"
+description: "`+name+` agent"
+default_harness_config: claude
+`), 0644))
+	}
+
+	// Discover from project root (should find .scion/templates/)
+	agents, err := discoverAgents(dir, "", true)
+	require.NoError(t, err)
+	assert.Len(t, agents, 2)
+	for _, agent := range agents {
+		assert.True(t, agent.ScionFormat)
+	}
+}
+
+func TestDiscoverAgents_ScionTemplatesDirectDir(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create scion templates directly in the target directory
+	for _, name := range []string{"api-agent", "ui-agent"} {
+		templateDir := filepath.Join(dir, name)
+		require.NoError(t, os.MkdirAll(templateDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(templateDir, "scion-agent.yaml"), []byte(`
+schema_version: "1"
+description: "`+name+`"
+default_harness_config: claude
+`), 0644))
+	}
+
+	// Discover from templates directory directly
+	agents, err := discoverAgents(dir, "", true)
+	require.NoError(t, err)
+	assert.Len(t, agents, 2)
+}
+
+func TestDiscoverAgents_MixedFormats(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create .claude/agents/ with an agent
+	claudeDir := filepath.Join(dir, ".claude", "agents")
+	require.NoError(t, os.MkdirAll(claudeDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, "reviewer.md"), []byte(`---
+name: reviewer
+description: Reviews code
+tools: Read
+---
+
+Review code.
+`), 0644))
+
+	// Also create .scion/templates/ with a template
+	scionDir := filepath.Join(dir, ".scion", "templates", "my-template")
+	require.NoError(t, os.MkdirAll(scionDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(scionDir, "scion-agent.yaml"), []byte(`
+schema_version: "1"
+description: "My template"
+default_harness_config: claude
+`), 0644))
+
+	agents, err := discoverAgents(dir, "", true)
+	require.NoError(t, err)
+	assert.Len(t, agents, 2, "should find both claude agent and scion template")
+}
+
 func TestResultStatus(t *testing.T) {
 	allOk := []importResult{
 		{Status: "imported"},

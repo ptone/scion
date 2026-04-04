@@ -275,18 +275,25 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		env["SCION_DEBUG"] = "1"
 	}
 
-	// 8. GCP identity metadata server configuration
+	// 8. GCP identity metadata server configuration.
+	// Default to "block" when no GCP identity config is provided, so agents
+	// cannot access the underlying compute identity via the GCE metadata
+	// server unless the hub explicitly sets "passthrough" or "assign".
+	gcpMetadataMode := "block" // secure default
 	if in.Config != nil && in.Config.GCPIdentity != nil {
-		gcpID := in.Config.GCPIdentity
-		if gcpID.MetadataMode == "assign" || gcpID.MetadataMode == "block" {
-			env["SCION_METADATA_MODE"] = gcpID.MetadataMode
-			env["SCION_METADATA_PORT"] = "18380"
-			if gcpID.MetadataMode == "assign" {
-				env["SCION_METADATA_SA_EMAIL"] = gcpID.SAEmail
-				env["SCION_METADATA_PROJECT_ID"] = gcpID.ProjectID
-			}
-			env["GCE_METADATA_HOST"] = "localhost:18380"
+		gcpMetadataMode = in.Config.GCPIdentity.MetadataMode
+	}
+	if gcpMetadataMode == "assign" || gcpMetadataMode == "block" {
+		env["SCION_METADATA_MODE"] = gcpMetadataMode
+		env["SCION_METADATA_PORT"] = "18380"
+		if gcpMetadataMode == "assign" && in.Config != nil && in.Config.GCPIdentity != nil {
+			env["SCION_METADATA_SA_EMAIL"] = in.Config.GCPIdentity.SAEmail
+			env["SCION_METADATA_PROJECT_ID"] = in.Config.GCPIdentity.ProjectID
 		}
+		env["GCE_METADATA_HOST"] = "localhost:18380"
+		// gcloud CLI uses GCE_METADATA_ROOT (not GCE_METADATA_HOST) to locate
+		// the metadata server during its initial configuration detection.
+		env["GCE_METADATA_ROOT"] = "localhost:18380"
 	}
 
 	// Debug log final env

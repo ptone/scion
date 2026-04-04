@@ -1,0 +1,3 @@
+schema_version: "1"
+description: "Texas Hold'em player - plays poker to win chips"
+system_prompt: system-prompt.md

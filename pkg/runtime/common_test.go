@@ -136,8 +136,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				ResolvedAuth: &api.ResolvedAuth{
 					Method: "compute-default-credentials",
 					EnvVars: map[string]string{
-						"GEMINI_DEFAULT_AUTH_TYPE":       "compute-default-credentials",
-						"GOOGLE_APPLICATION_CREDENTIALS": "/home/scion/.config/gcp/application_default_credentials.json",
+						"GEMINI_DEFAULT_AUTH_TYPE": "compute-default-credentials",
 					},
 					Files: []api.FileMapping{
 						{SourcePath: adcFile, ContainerPath: "~/.config/gcp/application_default_credentials.json"},
@@ -147,7 +146,6 @@ func TestBuildCommonRunArgs(t *testing.T) {
 			},
 			wantIn: []string{
 				"-v", fmt.Sprintf("%s:/home/scion/.config/gcp/application_default_credentials.json:ro", adcFile),
-				"-e", "GOOGLE_APPLICATION_CREDENTIALS=/home/scion/.config/gcp/application_default_credentials.json",
 				"-e", "GEMINI_DEFAULT_AUTH_TYPE=compute-default-credentials",
 			},
 		},
@@ -902,5 +900,224 @@ func TestResolveContainerWorkspace(t *testing.T) {
 					tt.repoRoot, tt.workspace, tt.gitClone, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBridgeExtraHosts(t *testing.T) {
+	tests := []struct {
+		name        string
+		runtimeName string
+		env         []string
+		want        []string
+	}{
+		{
+			name:        "docker with host.docker.internal in env",
+			runtimeName: "docker",
+			env:         []string{"SCION_HUB_ENDPOINT=http://host.docker.internal:8080"},
+			want:        []string{"host.docker.internal:host-gateway"},
+		},
+		{
+			name:        "docker without bridge hostname",
+			runtimeName: "docker",
+			env:         []string{"SCION_HUB_ENDPOINT=http://example.com:8080"},
+			want:        nil,
+		},
+		{
+			name:        "docker with empty env",
+			runtimeName: "docker",
+			env:         nil,
+			want:        nil,
+		},
+		{
+			name:        "podman with host.containers.internal",
+			runtimeName: "podman",
+			env:         []string{"SCION_HUB_ENDPOINT=http://host.containers.internal:8080"},
+			want:        nil,
+		},
+		{
+			name:        "kubernetes runtime",
+			runtimeName: "kubernetes",
+			env:         []string{"SCION_HUB_ENDPOINT=http://host.docker.internal:8080"},
+			want:        nil,
+		},
+		{
+			name:        "docker with bridge hostname in SCION_HUB_URL",
+			runtimeName: "docker",
+			env:         []string{"FOO=bar", "SCION_HUB_URL=http://host.docker.internal:9090"},
+			want:        []string{"host.docker.internal:host-gateway"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BridgeExtraHosts(tt.runtimeName, tt.env)
+			if len(got) != len(tt.want) {
+				t.Fatalf("BridgeExtraHosts(%q, %v) = %v, want %v", tt.runtimeName, tt.env, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("BridgeExtraHosts(%q, %v)[%d] = %q, want %q", tt.runtimeName, tt.env, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestResolveDockerNetworking(t *testing.T) {
+	tests := []struct {
+		name        string
+		runtimeName string
+		env         map[string]string
+		wantMode    string
+		wantEP      string // expected SCION_HUB_ENDPOINT after call (empty = unchanged/absent)
+	}{
+		{
+			name:        "docker with bridge hostname rewrites to localhost",
+			runtimeName: "docker",
+			env: map[string]string{
+				"SCION_HUB_ENDPOINT": "http://host.docker.internal:8080",
+				"SCION_HUB_URL":      "http://host.docker.internal:8080",
+			},
+			wantMode: "host",
+			wantEP:   "http://localhost:8080",
+		},
+		{
+			name:        "docker with localhost endpoint",
+			runtimeName: "docker",
+			env: map[string]string{
+				"SCION_HUB_ENDPOINT": "http://localhost:8080",
+			},
+			wantMode: "host",
+			wantEP:   "http://localhost:8080",
+		},
+		{
+			name:        "docker with 127.0.0.1 endpoint",
+			runtimeName: "docker",
+			env: map[string]string{
+				"SCION_HUB_ENDPOINT": "http://127.0.0.1:9090",
+			},
+			wantMode: "host",
+			wantEP:   "http://127.0.0.1:9090",
+		},
+		{
+			name:        "docker with external endpoint",
+			runtimeName: "docker",
+			env: map[string]string{
+				"SCION_HUB_ENDPOINT": "https://hub.example.com:443",
+			},
+			wantMode: "",
+			wantEP:   "https://hub.example.com:443",
+		},
+		{
+			name:        "docker with no hub endpoint",
+			runtimeName: "docker",
+			env:         map[string]string{},
+			wantMode:    "",
+		},
+		{
+			name:        "podman is not affected",
+			runtimeName: "podman",
+			env: map[string]string{
+				"SCION_HUB_ENDPOINT": "http://localhost:8080",
+			},
+			wantMode: "",
+			wantEP:   "http://localhost:8080",
+		},
+		{
+			name:        "kubernetes is not affected",
+			runtimeName: "kubernetes",
+			env: map[string]string{
+				"SCION_HUB_ENDPOINT": "http://localhost:8080",
+			},
+			wantMode: "",
+			wantEP:   "http://localhost:8080",
+		},
+		{
+			name:        "docker with bridge hostname in HUB_URL only",
+			runtimeName: "docker",
+			env: map[string]string{
+				"SCION_HUB_URL": "http://host.docker.internal:9090",
+			},
+			wantMode: "host",
+			wantEP:   "", // SCION_HUB_ENDPOINT not set
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Copy env to avoid mutation across subtests
+			env := make(map[string]string)
+			for k, v := range tt.env {
+				env[k] = v
+			}
+
+			got := ResolveDockerNetworking(tt.runtimeName, env)
+			if got != tt.wantMode {
+				t.Errorf("ResolveDockerNetworking(%q) = %q, want %q", tt.runtimeName, got, tt.wantMode)
+			}
+			if tt.wantEP != "" {
+				if ep := env["SCION_HUB_ENDPOINT"]; ep != tt.wantEP {
+					t.Errorf("SCION_HUB_ENDPOINT = %q, want %q", ep, tt.wantEP)
+				}
+			}
+			// Verify HUB_URL is also rewritten when bridge hostname was present
+			if tt.runtimeName == "docker" && tt.wantMode == "host" {
+				if hubURL, ok := env["SCION_HUB_URL"]; ok && strings.Contains(hubURL, "host.docker.internal") {
+					t.Errorf("SCION_HUB_URL still contains bridge hostname: %q", hubURL)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildCommonRunArgs_NetworkMode(t *testing.T) {
+	config := RunConfig{
+		Harness:      &harness.GeminiCLI{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		NetworkMode:  "host",
+	}
+
+	args, err := buildCommonRunArgs(config)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+
+	found := false
+	for i, arg := range args {
+		if arg == "--network" && i+1 < len(args) && args[i+1] == "host" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected --network host in args, got: %v", args)
+	}
+}
+
+func TestBuildCommonRunArgs_ExtraHosts(t *testing.T) {
+	config := RunConfig{
+		Harness:      &harness.GeminiCLI{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		ExtraHosts:   []string{"host.docker.internal:host-gateway"},
+	}
+
+	args, err := buildCommonRunArgs(config)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+
+	found := false
+	for i, arg := range args {
+		if arg == "--add-host" && i+1 < len(args) && args[i+1] == "host.docker.internal:host-gateway" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected --add-host host.docker.internal:host-gateway in args, got: %v", args)
 	}
 }

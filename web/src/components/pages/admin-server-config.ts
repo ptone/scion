@@ -345,6 +345,17 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private githubAppDiscoverLoading = false;
   @state() private githubAppRateLimit: RateLimitInfo | null = null;
 
+  // GCP Identity Quota
+  @state() private gcpQuotaLoading = false;
+  @state() private gcpQuotaData: {
+    minting_configured: boolean;
+    gcp_project_id?: string;
+    global_minted: number;
+    global_cap: number;
+    per_grove_cap: number;
+    groves?: { grove_id: string; grove_name: string; minted: number }[];
+  } | null = null;
+
   // Keep raw data for sections we don't fully edit
   private rawConfig: ServerConfigResponse | null = null;
 
@@ -954,6 +965,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         <sl-tab slot="nav" panel="github-app" ?active=${this.activeTab === 'github-app'}
           >GitHub App</sl-tab
         >
+        <sl-tab slot="nav" panel="gcp-identity" ?active=${this.activeTab === 'gcp-identity'}
+          >GCP Identity</sl-tab
+        >
 
         <sl-tab-panel name="general">${this.renderGeneralTab()}</sl-tab-panel>
         <sl-tab-panel name="hub-server">${this.renderHubServerTab()}</sl-tab-panel>
@@ -962,6 +976,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         <sl-tab-panel name="auth">${this.renderAuthTab()}</sl-tab-panel>
         <sl-tab-panel name="telemetry">${this.renderTelemetryTab()}</sl-tab-panel>
         <sl-tab-panel name="github-app">${this.renderGitHubAppTab()}</sl-tab-panel>
+        <sl-tab-panel name="gcp-identity">${this.renderGCPIdentityTab()}</sl-tab-panel>
       </sl-tab-group>
 
       <div class="actions">
@@ -1763,6 +1778,110 @@ export class ScionPageAdminServerConfig extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  // ── GCP Identity Tab ──
+
+  private renderGCPIdentityTab() {
+    return html`
+      <div class="section">
+        <h3 class="section-title">GCP Service Account Minting</h3>
+        ${this.gcpQuotaLoading
+          ? html`<div style="text-align: center; padding: 1rem;"><sl-spinner></sl-spinner></div>`
+          : this.gcpQuotaData
+            ? this.renderGCPQuotaContent()
+            : html`<p style="color: var(--scion-text-muted);">
+                Click "Load Quota" to fetch current minting statistics.
+              </p>
+              <sl-button size="small" @click=${() => this.loadGCPQuota()}>
+                <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                Load Quota
+              </sl-button>`}
+      </div>
+    `;
+  }
+
+  private renderGCPQuotaContent() {
+    const q = this.gcpQuotaData!;
+
+    if (!q.minting_configured) {
+      return html`
+        <p style="color: var(--scion-text-muted);">
+          GCP service account minting is not configured on this Hub.
+          Set <code>GCPProjectID</code> and ensure the Hub SA has
+          <code>roles/iam.serviceAccountCreator</code> to enable minting.
+        </p>
+      `;
+    }
+
+    return html`
+      <div class="form-grid">
+        <div class="form-field">
+          <label>GCP Project</label>
+          <span style="font-size: 0.875rem; font-family: monospace;">${q.gcp_project_id}</span>
+        </div>
+        <div class="form-field">
+          <label>Global Minted</label>
+          <span style="font-size: 0.875rem;">
+            ${q.global_minted}${q.global_cap > 0 ? ` / ${q.global_cap}` : ' (no limit)'}
+          </span>
+        </div>
+        <div class="form-field">
+          <label>Per-Grove Cap</label>
+          <span style="font-size: 0.875rem;">
+            ${q.per_grove_cap > 0 ? q.per_grove_cap : 'Unlimited'}
+          </span>
+        </div>
+        <div class="form-field">
+          <label>Global Cap</label>
+          <span style="font-size: 0.875rem;">
+            ${q.global_cap > 0 ? q.global_cap : 'Unlimited'}
+          </span>
+        </div>
+      </div>
+
+      ${q.groves && q.groves.length > 0 ? html`
+        <h3 class="section-title" style="margin-top: 1.5rem;">Per-Grove Usage</h3>
+        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+          ${q.groves.map(g => html`
+            <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: var(--scion-bg-subtle, #f8fafc); border: 1px solid var(--scion-border, #e2e8f0); border-radius: var(--scion-radius, 0.5rem);">
+              <sl-icon name="folder"></sl-icon>
+              <div style="flex: 1;">
+                <strong>${g.grove_name}</strong>
+              </div>
+              <span style="font-size: 0.875rem; font-weight: 500;">
+                ${g.minted} minted${q.per_grove_cap > 0 ? ` / ${q.per_grove_cap}` : ''}
+              </span>
+            </div>
+          `)}
+        </div>
+      ` : html`
+        <p style="color: var(--scion-text-muted); margin-top: 1rem;">
+          No service accounts have been minted yet.
+        </p>
+      `}
+
+      <div style="margin-top: 1rem;">
+        <sl-button size="small" @click=${() => this.loadGCPQuota()}>
+          <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+          Refresh
+        </sl-button>
+      </div>
+    `;
+  }
+
+  private async loadGCPQuota(): Promise<void> {
+    this.gcpQuotaLoading = true;
+    try {
+      const res = await apiFetch('/api/v1/admin/gcp-quota');
+      if (res.ok) {
+        this.gcpQuotaData = await res.json();
+      }
+    } catch {
+      // Non-critical
+    } finally {
+      this.gcpQuotaLoading = false;
+    }
   }
 
   // ── GitHub App Tab ──

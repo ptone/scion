@@ -70,10 +70,8 @@ func GatherAuthWithEnv(env map[string]string, localSources bool) api.AuthConfig 
 			lookup("GOOGLE_CLOUD_LOCATION"),
 		),
 		GoogleAppCredentials: lookup("GOOGLE_APPLICATION_CREDENTIALS"),
+		GCPMetadataMode:      lookup("SCION_METADATA_MODE"),
 	}
-
-	// Mark whether GOOGLE_APPLICATION_CREDENTIALS was explicitly set via env var
-	auth.GoogleAppCredentialsExplicit = auth.GoogleAppCredentials != ""
 
 	// File-sourced fields: check well-known paths (skip in broker mode)
 	if localSources {
@@ -121,10 +119,9 @@ func OverlayFileSecrets(auth *api.AuthConfig, secrets []api.ResolvedSecret) {
 		name := s.Name
 
 		switch {
-		case name == "GOOGLE_APPLICATION_CREDENTIALS" ||
+		case name == "gcloud-adc" ||
 			strings.HasSuffix(target, "/application_default_credentials.json"):
 			auth.GoogleAppCredentials = target
-			auth.GoogleAppCredentialsExplicit = false // container GCP SDK auto-discovers well-known path
 		case name == "GEMINI_OAUTH_CREDS" ||
 			strings.HasSuffix(target, "/oauth_creds.json"):
 			auth.OAuthCreds = target
@@ -202,9 +199,11 @@ func ValidateAuth(resolved *api.ResolvedAuth) error {
 // RequiredAuthSecrets maps a (harnessName, authSelectedType) pair to
 // file-type secrets required by that combination. This is the file-secret
 // counterpart to RequiredAuthEnvKeys (which covers env var requirements).
-// For vertex-ai auth, the ADC credential file is required.
+// For vertex-ai auth, the ADC credential file is required unless a GCP
+// service account is assigned (gcpSAAssigned), in which case the metadata
+// server provides credentials and no ADC file is needed.
 // Returns nil for auth methods that have no file-secret requirements.
-func RequiredAuthSecrets(harnessName, authSelectedType string) []api.RequiredSecret {
+func RequiredAuthSecrets(harnessName, authSelectedType string, gcpSAAssigned bool) []api.RequiredSecret {
 	effectiveType := authSelectedType
 	if effectiveType == "" {
 		effectiveType = "api-key"
@@ -212,10 +211,10 @@ func RequiredAuthSecrets(harnessName, authSelectedType string) []api.RequiredSec
 
 	switch harnessName {
 	case "claude", "gemini", "opencode", "codex":
-		if effectiveType == "vertex-ai" {
+		if effectiveType == "vertex-ai" && !gcpSAAssigned {
 			return []api.RequiredSecret{
 				{
-					Key:         "GOOGLE_APPLICATION_CREDENTIALS",
+					Key:         "gcloud-adc",
 					Type:        "file",
 					Description: "Google Cloud Application Default Credentials (ADC) file for vertex-ai authentication",
 				},
@@ -243,12 +242,12 @@ func DetectAuthTypeFromFileSecrets(harnessName string, fileSecretNames map[strin
 		if _, ok := fileSecretNames["GEMINI_OAUTH_CREDS"]; ok {
 			return "auth-file"
 		}
-		if _, ok := fileSecretNames["GOOGLE_APPLICATION_CREDENTIALS"]; ok {
+		if _, ok := fileSecretNames["gcloud-adc"]; ok {
 			return "vertex-ai"
 		}
 	case "claude":
 		// Auto-detect priority: api-key → ADC (vertex-ai)
-		if _, ok := fileSecretNames["GOOGLE_APPLICATION_CREDENTIALS"]; ok {
+		if _, ok := fileSecretNames["gcloud-adc"]; ok {
 			return "vertex-ai"
 		}
 	case "codex":
@@ -259,6 +258,20 @@ func DetectAuthTypeFromFileSecrets(harnessName string, fileSecretNames map[strin
 		if _, ok := fileSecretNames["OPENCODE_AUTH"]; ok {
 			return "auth-file"
 		}
+	}
+	return ""
+}
+
+// DetectAuthTypeFromGCPIdentity returns "vertex-ai" when a GCP service
+// account is assigned to the agent. Harnesses that support vertex-ai auth
+// can use the metadata server for credentials instead of an ADC file.
+func DetectAuthTypeFromGCPIdentity(harnessName string, gcpSAAssigned bool) string {
+	if !gcpSAAssigned {
+		return ""
+	}
+	switch harnessName {
+	case "claude", "gemini":
+		return "vertex-ai"
 	}
 	return ""
 }

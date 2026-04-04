@@ -15,11 +15,14 @@
 package hub
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -41,6 +44,12 @@ func (s *Server) handleGroveGCPServiceAccounts(w http.ResponseWriter, r *http.Re
 
 // handleGroveGCPServiceAccountByID handles /api/v1/groves/{groveId}/gcp-service-accounts/{id}[/action]
 func (s *Server) handleGroveGCPServiceAccountByID(w http.ResponseWriter, r *http.Request, groveID, saPath string) {
+	// Handle collection-level actions first
+	if saPath == "mint" && r.Method == http.MethodPost {
+		s.mintGCPServiceAccount(w, r, groveID)
+		return
+	}
+
 	parts := strings.SplitN(saPath, "/", 2)
 	saID := parts[0]
 	action := ""
@@ -70,9 +79,9 @@ func (s *Server) handleGroveGCPServiceAccountByID(w http.ResponseWriter, r *http
 
 type createGCPServiceAccountRequest struct {
 	Email       string   `json:"email"`
-	ProjectID   string   `json:"project_id"`
-	DisplayName string   `json:"display_name"`
-	Scopes      []string `json:"default_scopes,omitempty"`
+	ProjectID   string   `json:"projectId"`
+	DisplayName string   `json:"displayName"`
+	Scopes      []string `json:"defaultScopes,omitempty"`
 }
 
 func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request, groveID string) {
@@ -104,7 +113,7 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 			missing = append(missing, "email")
 		}
 		if req.ProjectID == "" {
-			missing = append(missing, "project_id")
+			missing = append(missing, "projectId")
 		}
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			fmt.Sprintf("missing required field(s): %s", strings.Join(missing, ", ")), nil)
@@ -156,10 +165,19 @@ type GCPServiceAccountWithCapabilities struct {
 	Cap *Capabilities `json:"_capabilities,omitempty"`
 }
 
+// GCPMintQuotaInfo provides quota information for minted service accounts.
+type GCPMintQuotaInfo struct {
+	GroveMinted  int `json:"grove_minted"`
+	GroveCap     int `json:"grove_cap"` // 0 = unlimited
+	GlobalMinted int `json:"global_minted"`
+	GlobalCap    int `json:"global_cap"` // 0 = unlimited
+}
+
 // ListGCPServiceAccountsResponse is the response for listing GCP service accounts.
 type ListGCPServiceAccountsResponse struct {
 	Items        []GCPServiceAccountWithCapabilities `json:"items"`
 	Capabilities *Capabilities                       `json:"_capabilities,omitempty"`
+	MintQuota    *GCPMintQuotaInfo                   `json:"mint_quota,omitempty"`
 }
 
 func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, groveID string) {
@@ -199,9 +217,30 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "grove", groveID, "gcp_service_account")
 	}
 
+	// Include mint quota info when minting is configured
+	var mintQuota *GCPMintQuotaInfo
+	if s.gcpIAMAdmin != nil && s.config.GCPProjectID != "" {
+		managed := true
+		groveCount, _ := s.store.CountGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+			Scope:   store.ScopeGrove,
+			ScopeID: groveID,
+			Managed: &managed,
+		})
+		globalCount, _ := s.store.CountGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+			Managed: &managed,
+		})
+		mintQuota = &GCPMintQuotaInfo{
+			GroveMinted:  groveCount,
+			GroveCap:     s.config.GCPMintCapPerGrove,
+			GlobalMinted: globalCount,
+			GlobalCap:    s.config.GCPMintCapGlobal,
+		}
+	}
+
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
 		Items:        items,
 		Capabilities: scopeCap,
+		MintQuota:    mintQuota,
 	})
 }
 
@@ -300,6 +339,304 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	}
 
 	writeJSON(w, http.StatusOK, sa)
+}
+
+// mintGCPServiceAccountRequest is the request body for POST .../gcp-service-accounts/mint.
+type mintGCPServiceAccountRequest struct {
+	AccountID   string `json:"account_id"`   // Optional custom SA account ID (will be prefixed with scion-)
+	DisplayName string `json:"display_name"` // Optional display name
+	Description string `json:"description"`  // Optional description
+}
+
+// gcpSAAccountIDRegexp validates GCP SA account IDs: 6-30 chars, [a-z][a-z0-9-]*[a-z0-9].
+var gcpSAAccountIDRegexp = regexp.MustCompile(`^[a-z][a-z0-9-]*[a-z0-9]$`)
+
+// slugifyAccountID converts a string to a valid GCP SA account ID component.
+func slugifyAccountID(s string) string {
+	s = strings.ToLower(s)
+	// Replace non-alphanumeric chars with hyphens
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	// Collapse multiple hyphens
+	result := b.String()
+	for strings.Contains(result, "--") {
+		result = strings.ReplaceAll(result, "--", "-")
+	}
+	// Trim leading/trailing hyphens
+	result = strings.Trim(result, "-")
+	return result
+}
+
+// generateRandomAccountID generates a random SA account ID: scion-{8-hex-chars}.
+func generateRandomAccountID() (string, error) {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "scion-" + hex.EncodeToString(b), nil
+}
+
+func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, groveID string) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	// Check that minting is configured
+	if s.gcpIAMAdmin == nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"GCP service account minting is not configured on this Hub", nil)
+		return
+	}
+
+	projectID := s.config.GCPProjectID
+	if projectID == "" {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"GCP project ID is not configured for service account minting", nil)
+		return
+	}
+
+	var req mintGCPServiceAccountRequest
+	if r.Body != nil {
+		if err := readJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body: "+err.Error(), nil)
+			return
+		}
+	}
+
+	// Verify grove exists
+	grove, err := s.store.GetGrove(r.Context(), groveID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Grove")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Enforce per-grove mint cap
+	managed := true
+	groveCount, err := s.store.CountGCPServiceAccounts(r.Context(), store.GCPServiceAccountFilter{
+		Scope:   store.ScopeGrove,
+		ScopeID: groveID,
+		Managed: &managed,
+	})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if s.config.GCPMintCapPerGrove > 0 && groveCount >= s.config.GCPMintCapPerGrove {
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			fmt.Sprintf("per-grove mint limit reached (%d/%d)", groveCount, s.config.GCPMintCapPerGrove), nil)
+		return
+	}
+
+	// Enforce global mint cap
+	if s.config.GCPMintCapGlobal > 0 {
+		globalCount, err := s.store.CountGCPServiceAccounts(r.Context(), store.GCPServiceAccountFilter{
+			Managed: &managed,
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if globalCount >= s.config.GCPMintCapGlobal {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				fmt.Sprintf("global mint limit reached (%d/%d)", globalCount, s.config.GCPMintCapGlobal), nil)
+			return
+		}
+	}
+
+	// Generate or validate the account ID
+	var accountID string
+	if req.AccountID != "" {
+		// Custom: prefix with scion-, slugify, validate
+		slug := slugifyAccountID(req.AccountID)
+		accountID = "scion-" + slug
+	} else {
+		// Auto-generate
+		accountID, err = generateRandomAccountID()
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	}
+
+	// Validate against GCP rules: 6-30 chars, [a-z][a-z0-9-]*[a-z0-9]
+	if len(accountID) < 6 || len(accountID) > 30 {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			fmt.Sprintf("account ID %q must be 6-30 characters (got %d)", accountID, len(accountID)), nil)
+		return
+	}
+	if !gcpSAAccountIDRegexp.MatchString(accountID) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			fmt.Sprintf("account ID %q must match [a-z][a-z0-9-]*[a-z0-9]", accountID), nil)
+		return
+	}
+
+	// Build display name and description
+	displayName := req.DisplayName
+	if displayName == "" {
+		displayName = fmt.Sprintf("Scion agent (%s)", grove.Slug)
+	}
+	description := req.Description
+	if description == "" {
+		description = fmt.Sprintf("Minted by Scion Hub for grove %s (ID: %s) by user %s", grove.Slug, groveID, user.ID())
+	}
+
+	// Create the SA in GCP
+	saEmail, _, err := s.gcpIAMAdmin.CreateServiceAccount(r.Context(), projectID, accountID, displayName, description)
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "409") || strings.Contains(errStr, "alreadyExists") {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				fmt.Sprintf("service account %s already exists in project %s", accountID, projectID), nil)
+			return
+		}
+		slog.Error("GCP SA mint: failed to create service account",
+			"grove_id", groveID, "account_id", accountID, "error", err)
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"failed to create GCP service account: "+err.Error(), nil)
+		return
+	}
+
+	// Grant token creator role to Hub SA on the new SA
+	if s.gcpTokenGenerator != nil {
+		hubEmail := s.gcpTokenGenerator.ServiceAccountEmail()
+		if hubEmail != "" {
+			member := "serviceAccount:" + hubEmail
+			if err := s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, member, "roles/iam.serviceAccountTokenCreator"); err != nil {
+				slog.Error("GCP SA mint: failed to set IAM policy",
+					"grove_id", groveID, "sa_email", saEmail, "hub_email", hubEmail, "error", err)
+				// SA was created but policy failed — still store it but log the issue
+				// The user can verify later
+			}
+		}
+	}
+
+	// Store the SA record
+	sa := &store.GCPServiceAccount{
+		ID:                 uuid.New().String(),
+		Scope:              store.ScopeGrove,
+		ScopeID:            groveID,
+		Email:              saEmail,
+		ProjectID:          projectID,
+		DisplayName:        displayName,
+		DefaultScopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
+		Verified:           true,
+		VerifiedAt:         time.Now(),
+		VerificationStatus: "verified",
+		CreatedBy:          user.ID(),
+		CreatedAt:          time.Now(),
+		Managed:            true,
+		ManagedBy:          s.config.HubID,
+	}
+
+	if err := s.store.CreateGCPServiceAccount(r.Context(), sa); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"a service account with this email already exists for this grove", nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Audit log the mint
+	LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventMintSA,
+		"", groveID, saEmail, sa.ID, true, "")
+
+	slog.Info("GCP SA minted",
+		"grove_id", groveID, "sa_id", sa.ID, "email", saEmail,
+		"account_id", accountID, "project", projectID, "user", user.ID())
+
+	writeJSON(w, http.StatusCreated, sa)
+}
+
+// GCPQuotaGroveInfo holds per-grove mint quota info for the admin endpoint.
+type GCPQuotaGroveInfo struct {
+	GroveID   string `json:"grove_id"`
+	GroveName string `json:"grove_name"`
+	Minted    int    `json:"minted"`
+}
+
+// GCPQuotaResponse is the response for GET /api/v1/admin/gcp-quota.
+type GCPQuotaResponse struct {
+	MintingConfigured bool                `json:"minting_configured"`
+	GCPProjectID      string              `json:"gcp_project_id,omitempty"`
+	GlobalMinted      int                 `json:"global_minted"`
+	GlobalCap         int                 `json:"global_cap"`
+	PerGroveCap       int                 `json:"per_grove_cap"`
+	Groves            []GCPQuotaGroveInfo `json:"groves,omitempty"`
+}
+
+// handleAdminGCPQuota handles GET /api/v1/admin/gcp-quota.
+func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil || user.Role() != "admin" {
+		Forbidden(w)
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	resp := GCPQuotaResponse{
+		MintingConfigured: s.gcpIAMAdmin != nil && s.config.GCPProjectID != "",
+		GCPProjectID:      s.config.GCPProjectID,
+		GlobalCap:         s.config.GCPMintCapGlobal,
+		PerGroveCap:       s.config.GCPMintCapPerGrove,
+	}
+
+	if resp.MintingConfigured {
+		managed := true
+		globalCount, err := s.store.CountGCPServiceAccounts(r.Context(), store.GCPServiceAccountFilter{
+			Managed: &managed,
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		resp.GlobalMinted = globalCount
+
+		// Get per-grove breakdown
+		allMinted, err := s.store.ListGCPServiceAccounts(r.Context(), store.GCPServiceAccountFilter{
+			Managed: &managed,
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+
+		groveCounts := map[string]int{}
+		for _, sa := range allMinted {
+			groveCounts[sa.ScopeID]++
+		}
+
+		for groveID, count := range groveCounts {
+			name := groveID
+			if g, err := s.store.GetGrove(r.Context(), groveID); err == nil {
+				name = g.Name
+			}
+			resp.Groves = append(resp.Groves, GCPQuotaGroveInfo{
+				GroveID:   groveID,
+				GroveName: name,
+				Minted:    count,
+			})
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAgentGCPToken handles POST /api/v1/agent/gcp-token.

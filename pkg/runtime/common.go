@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -161,6 +162,10 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 
 	addArg("--name", config.Name)
+
+	if config.NetworkMode != "" {
+		addArg("--network", config.NetworkMode)
+	}
 
 	if config.HomeDir != "" {
 		registerMount(config.HomeDir, util.GetHomeDir(config.UnixUsername), false, true)
@@ -315,6 +320,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addArg("--cap-add", "NET_ADMIN")
 	}
 
+	// Add extra /etc/hosts entries (e.g. for host.docker.internal on Linux)
+	for _, h := range config.ExtraHosts {
+		addArg("--add-host", h)
+	}
+
 	if len(fuseMounts) > 0 {
 		addArg("--cap-add", "SYS_ADMIN")
 		addArg("--device", "/dev/fuse")
@@ -466,6 +476,70 @@ func expandTildeTarget(target, containerHome string) string {
 		return filepath.Join(containerHome, target[2:])
 	}
 	return target
+}
+
+// ResolveDockerNetworking checks whether Docker host networking should be used
+// to allow containers to reach services on the host's loopback interface.
+// When the hub endpoint is localhost or was translated to a Docker bridge
+// hostname (host.docker.internal), it returns "host" and rewrites any bridge
+// hostnames back to localhost in the env map. This avoids the need for the
+// server to bind to 0.0.0.0.
+//
+// For non-Docker runtimes or non-localhost endpoints, returns "" (no override).
+func ResolveDockerNetworking(runtimeName string, env map[string]string) string {
+	if runtimeName != "docker" {
+		return ""
+	}
+
+	ep := env["SCION_HUB_ENDPOINT"]
+	if ep == "" {
+		ep = env["SCION_HUB_URL"]
+	}
+	if ep == "" {
+		return ""
+	}
+
+	// If endpoint uses the Docker bridge hostname (translated from localhost),
+	// rewrite back to localhost since host networking makes it reachable directly.
+	if strings.Contains(ep, "host.docker.internal") {
+		for _, key := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL"} {
+			if v, ok := env[key]; ok {
+				env[key] = strings.Replace(v, "host.docker.internal", "localhost", 1)
+			}
+		}
+		return "host"
+	}
+
+	// If endpoint is localhost, containers need host networking to reach it.
+	u, err := url.Parse(ep)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return "host"
+	}
+
+	return ""
+}
+
+// BridgeExtraHosts returns the --add-host entries needed for the given runtime
+// when a bridge hostname (e.g. host.docker.internal) is used in environment
+// variables. On Linux, Docker does not automatically resolve
+// host.docker.internal; the "host-gateway" special address must be mapped
+// explicitly. Podman resolves host.containers.internal natively, so no extra
+// hosts are needed.
+func BridgeExtraHosts(runtimeName string, env []string) []string {
+	if runtimeName != "docker" {
+		return nil
+	}
+	// Check if any env value references host.docker.internal
+	for _, e := range env {
+		if strings.Contains(e, "host.docker.internal") {
+			return []string{"host.docker.internal:host-gateway"}
+		}
+	}
+	return nil
 }
 
 // applyResolvedAuth injects ResolvedAuth env vars and files into the container

@@ -497,6 +497,69 @@ func TestClaudeResolveAuth_NoCreds(t *testing.T) {
 	}
 }
 
+func TestClaudeResolveAuth_VertexAI_GCPServiceAccount(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{
+		GCPMetadataMode:    "assign",
+		GoogleCloudProject: "my-project",
+		GoogleCloudRegion:  "us-central1",
+	}
+	result, err := c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "vertex-ai" {
+		t.Errorf("Method = %q, want %q", result.Method, "vertex-ai")
+	}
+	if result.EnvVars["CLAUDE_CODE_USE_VERTEX"] != "1" {
+		t.Errorf("CLAUDE_CODE_USE_VERTEX = %q, want %q", result.EnvVars["CLAUDE_CODE_USE_VERTEX"], "1")
+	}
+	if result.EnvVars["ANTHROPIC_VERTEX_PROJECT_ID"] != "my-project" {
+		t.Errorf("ANTHROPIC_VERTEX_PROJECT_ID = %q, want %q", result.EnvVars["ANTHROPIC_VERTEX_PROJECT_ID"], "my-project")
+	}
+	// No ADC file should be mapped — metadata server provides credentials
+	if len(result.Files) != 0 {
+		t.Errorf("expected no file mappings for GCP SA auth, got %d", len(result.Files))
+	}
+}
+
+func TestClaudeResolveAuth_VertexAI_ExplicitWithGCPSA(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{
+		SelectedType:       "vertex-ai",
+		GCPMetadataMode:    "assign",
+		GoogleCloudProject: "my-project",
+		GoogleCloudRegion:  "us-central1",
+	}
+	result, err := c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "vertex-ai" {
+		t.Errorf("Method = %q, want %q", result.Method, "vertex-ai")
+	}
+	if len(result.Files) != 0 {
+		t.Errorf("expected no file mappings for GCP SA auth, got %d", len(result.Files))
+	}
+}
+
+func TestClaudeResolveAuth_APIKeyWinsOverGCPSA(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{
+		AnthropicAPIKey:    "sk-ant-key",
+		GCPMetadataMode:    "assign",
+		GoogleCloudProject: "my-project",
+		GoogleCloudRegion:  "us-central1",
+	}
+	result, err := c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "api-key" {
+		t.Errorf("API key should win over GCP SA; Method = %q, want %q", result.Method, "api-key")
+	}
+}
+
 func TestClaudeApplyAuthSettings_APIKey(t *testing.T) {
 	agentHome := t.TempDir()
 	c := &ClaudeCode{}

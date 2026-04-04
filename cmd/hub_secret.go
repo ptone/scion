@@ -233,9 +233,11 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 			// Explicit value — may be a name, slug, or UUID (resolved later)
 			scopeID = groveVal
 		} else {
-			// Infer from settings
+			// Infer from settings: try explicit hub link first, then local grove ID
 			if settings.Hub != nil && settings.Hub.GroveID != "" {
 				scopeID = settings.Hub.GroveID
+			} else if settings.GroveID != "" {
+				scopeID = settings.GroveID
 			} else {
 				return "", "", fmt.Errorf("cannot infer grove ID: not linked with Hub. Use 'scion hub link' first or provide explicit grove ID")
 			}

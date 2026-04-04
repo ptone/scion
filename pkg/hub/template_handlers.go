@@ -312,7 +312,14 @@ func (s *Server) handleTemplateByIDV2(w http.ResponseWriter, r *http.Request) {
 		s.handleTemplateDownload(w, r, templateID)
 	case "clone":
 		s.handleTemplateClone(w, r, templateID)
+	case "files":
+		s.handleTemplateFiles(w, r, templateID, "")
 	default:
+		if strings.HasPrefix(action, "files/") {
+			filePath := strings.TrimPrefix(action, "files/")
+			s.handleTemplateFiles(w, r, templateID, filePath)
+			return
+		}
 		NotFound(w, "Template action")
 	}
 }

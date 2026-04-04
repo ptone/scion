@@ -1302,6 +1302,14 @@ export class ScionPageAgentDetail extends LitElement {
                 </div>
               `
             : ''}
+          ${agent.harnessAuth || agent.appliedConfig?.harnessAuth
+            ? html`
+                <div class="info-item">
+                  <span class="info-label">Auth Method</span>
+                  <span class="info-value">${agent.harnessAuth || agent.appliedConfig?.harnessAuth}</span>
+                </div>
+              `
+            : ''}
           ${agent.visibility
             ? html`
                 <div class="info-item">

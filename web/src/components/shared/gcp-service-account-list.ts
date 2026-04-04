@@ -24,7 +24,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { GCPServiceAccount, GCPVerificationStatus, Capabilities } from '../../shared/types.js';
+import type { GCPServiceAccount, GCPVerificationStatus, Capabilities, GCPMintQuotaInfo } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
@@ -39,7 +39,7 @@ export class ScionGCPServiceAccountList extends LitElement {
   @state() private error: string | null = null;
   @state() private listCapabilities: Capabilities | undefined;
 
-  // Add dialog state
+  // Register dialog state (BYOSA — bring your own service account)
   @state() private dialogOpen = false;
   @state() private dialogEmail = '';
   @state() private dialogProjectId = '';
@@ -50,6 +50,17 @@ export class ScionGCPServiceAccountList extends LitElement {
   // Action state
   @state() private verifyingId: string | null = null;
   @state() private deletingId: string | null = null;
+
+  // Mint dialog state
+  @state() private mintDialogOpen = false;
+  @state() private mintAccountId = '';
+  @state() private mintDisplayName = '';
+  @state() private mintDescription = '';
+  @state() private mintDialogLoading = false;
+  @state() private mintDialogError: string | null = null;
+
+  // Quota info
+  @state() private mintQuota: GCPMintQuotaInfo | null = null;
 
   // Verify-failed dialog state
   @state() private verifyFailedOpen = false;
@@ -82,6 +93,37 @@ export class ScionGCPServiceAccountList extends LitElement {
         border-radius: 0.25rem;
         font-size: 0.875em;
         word-break: break-all;
+      }
+
+      .managed-badge {
+        display: inline-flex;
+        align-items: center;
+        font-size: 0.6875rem;
+        padding: 0.0625rem 0.375rem;
+        border-radius: 9999px;
+        background: var(--sl-color-primary-100, #dbeafe);
+        color: var(--sl-color-primary-700, #1d4ed8);
+        font-weight: 500;
+        white-space: nowrap;
+      }
+
+      .quota-info {
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .quota-info .quota-warning {
+        color: var(--sl-color-warning-700, #a16207);
+      }
+
+      .list-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
       }
 
       .verify-failed-content .gcloud-command {
@@ -118,6 +160,7 @@ export class ScionGCPServiceAccountList extends LitElement {
         | {
             items?: GCPServiceAccount[];
             _capabilities?: Capabilities;
+            mint_quota?: GCPMintQuotaInfo;
           }
         | GCPServiceAccount[];
 
@@ -126,6 +169,7 @@ export class ScionGCPServiceAccountList extends LitElement {
       } else {
         this.accounts = data.items || [];
         this.listCapabilities = data._capabilities;
+        this.mintQuota = data.mint_quota || null;
       }
     } catch (err) {
       console.error('Failed to load GCP service accounts:', err);
@@ -133,6 +177,63 @@ export class ScionGCPServiceAccountList extends LitElement {
     } finally {
       this.loading = false;
     }
+  }
+
+  private openMintDialog(): void {
+    this.mintAccountId = '';
+    this.mintDisplayName = '';
+    this.mintDescription = '';
+    this.mintDialogError = null;
+    this.mintDialogOpen = true;
+  }
+
+  private closeMintDialog(): void {
+    this.mintDialogOpen = false;
+  }
+
+  private async handleMint(e: Event): Promise<void> {
+    e.preventDefault();
+
+    this.mintDialogLoading = true;
+    this.mintDialogError = null;
+
+    try {
+      const body: Record<string, unknown> = {};
+      if (this.mintAccountId.trim()) body.account_id = this.mintAccountId.trim();
+      if (this.mintDisplayName.trim()) body.display_name = this.mintDisplayName.trim();
+      if (this.mintDescription.trim()) body.description = this.mintDescription.trim();
+
+      const response = await apiFetch(
+        `/api/v1/groves/${this.groveId}/gcp-service-accounts/mint`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
+      }
+
+      this.closeMintDialog();
+      await this.loadAccounts();
+    } catch (err) {
+      console.error('Failed to mint service account:', err);
+      this.mintDialogError = err instanceof Error ? err.message : 'Failed to mint service account';
+    } finally {
+      this.mintDialogLoading = false;
+    }
+  }
+
+  private isMintDisabled(): boolean {
+    if (!this.mintQuota) return false;
+    const { grove_cap, grove_minted, global_cap, global_minted } = this.mintQuota;
+    if (grove_cap > 0 && grove_minted >= grove_cap) return true;
+    if (global_cap > 0 && global_minted >= global_cap) return true;
+    return false;
   }
 
   private openAddDialog(): void {
@@ -187,8 +288,8 @@ export class ScionGCPServiceAccountList extends LitElement {
       this.closeDialog();
       await this.loadAccounts();
     } catch (err) {
-      console.error('Failed to add service account:', err);
-      this.dialogError = err instanceof Error ? err.message : 'Failed to add service account';
+      console.error('Failed to register service account:', err);
+      this.dialogError = err instanceof Error ? err.message : 'Failed to register service account';
     } finally {
       this.dialogLoading = false;
     }
@@ -335,19 +436,36 @@ export class ScionGCPServiceAccountList extends LitElement {
       `;
     }
 
+    const canCreate = can(this.listCapabilities, 'create');
+    const canMint = can(this.listCapabilities, 'mint');
+    const showHeader = canCreate || canMint;
+
     return html`
-      ${can(this.listCapabilities, 'create')
+      ${showHeader
         ? html`
             <div class="list-header">
-              <sl-button variant="primary" @click=${this.openAddDialog}>
-                <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-                Add Service Account
-              </sl-button>
+              ${canCreate
+                ? html`<sl-button variant="primary" @click=${this.openAddDialog}>
+                    <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                    Register Existing
+                  </sl-button>`
+                : ''}
+              ${canMint
+                ? html`<sl-button
+                    variant="default"
+                    @click=${this.openMintDialog}
+                    ?disabled=${this.isMintDisabled()}
+                  >
+                    <sl-icon slot="prefix" name="shield-check"></sl-icon>
+                    Mint Service Account
+                  </sl-button>`
+                : ''}
+              ${this.renderQuotaInfo()}
             </div>
           `
         : ''}
       ${this.accounts.length === 0 ? this.renderEmpty() : this.renderTable()} ${this.renderDialog()}
-      ${this.renderVerifyFailedDialog()}
+      ${this.renderMintDialog()} ${this.renderVerifyFailedDialog()}
     `;
   }
 
@@ -363,11 +481,25 @@ export class ScionGCPServiceAccountList extends LitElement {
             ? html`
                 <sl-button variant="primary" size="small" @click=${this.openAddDialog}>
                   <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-                  Add Service Account
+                  Register Existing
+                </sl-button>
+              `
+            : ''}
+          ${can(this.listCapabilities, 'mint')
+            ? html`
+                <sl-button
+                  variant="default"
+                  size="small"
+                  @click=${this.openMintDialog}
+                  ?disabled=${this.isMintDisabled()}
+                >
+                  <sl-icon slot="prefix" name="shield-check"></sl-icon>
+                  Mint
                 </sl-button>
               `
             : ''}
         </div>
+        ${this.renderQuotaInfo()}
 
         ${this.loading
           ? html`<div class="section-loading">
@@ -385,7 +517,7 @@ export class ScionGCPServiceAccountList extends LitElement {
               ? this.renderEmpty()
               : this.renderTable()}
       </div>
-      ${this.renderDialog()} ${this.renderVerifyFailedDialog()}
+      ${this.renderDialog()} ${this.renderMintDialog()} ${this.renderVerifyFailedDialog()}
     `;
   }
 
@@ -425,6 +557,7 @@ export class ScionGCPServiceAccountList extends LitElement {
               <sl-icon name="shield-lock"></sl-icon>
             </div>
             ${account.email}
+            ${account.managed ? html`<span class="managed-badge">Hub-minted</span>` : ''}
           </div>
         </td>
         <td class="hide-mobile">
@@ -498,12 +631,25 @@ export class ScionGCPServiceAccountList extends LitElement {
       <div class="empty-state">
         <sl-icon name="shield-lock"></sl-icon>
         <h3>No GCP Service Accounts</h3>
-        <p>Register GCP service accounts to assign cloud identities to agents in this grove.</p>
+        <p>Register an existing GCP service account, or mint a new one in the Hub's project.</p>
         ${can(this.listCapabilities, 'create')
           ? html`
               <sl-button variant="primary" size="small" @click=${this.openAddDialog}>
                 <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-                Add Service Account
+                Register Existing
+              </sl-button>
+            `
+          : ''}
+        ${can(this.listCapabilities, 'mint')
+          ? html`
+              <sl-button
+                variant="default"
+                size="small"
+                @click=${this.openMintDialog}
+                ?disabled=${this.isMintDisabled()}
+              >
+                <sl-icon slot="prefix" name="shield-check"></sl-icon>
+                Mint Service Account
               </sl-button>
             `
           : ''}
@@ -514,7 +660,7 @@ export class ScionGCPServiceAccountList extends LitElement {
   private renderDialog() {
     return html`
       <sl-dialog
-        label="Add GCP Service Account"
+        label="Register GCP Service Account"
         ?open=${this.dialogOpen}
         @sl-request-close=${this.closeDialog}
       >
@@ -550,7 +696,7 @@ export class ScionGCPServiceAccountList extends LitElement {
 
           <div class="dialog-hint">
             <sl-icon name="info-circle"></sl-icon>
-            The Hub will automatically attempt to verify the service account after creation.
+            The Hub will automatically attempt to verify impersonation access after registration.
           </div>
 
           ${this.dialogError ? html`<div class="dialog-error">${this.dialogError}</div>` : nothing}
@@ -571,7 +717,94 @@ export class ScionGCPServiceAccountList extends LitElement {
           ?disabled=${this.dialogLoading}
           @click=${this.handleAdd}
         >
-          Add
+          Register
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  private renderQuotaInfo() {
+    if (!this.mintQuota) return nothing;
+    const { grove_minted, grove_cap, global_minted, global_cap } = this.mintQuota;
+
+    const parts: string[] = [];
+    if (grove_cap > 0) {
+      parts.push(`Grove: ${grove_minted}/${grove_cap}`);
+    }
+    if (global_cap > 0) {
+      parts.push(`Global: ${global_minted}/${global_cap}`);
+    }
+    if (parts.length === 0) return nothing;
+
+    const atLimit = this.isMintDisabled();
+    return html`
+      <span class="quota-info ${atLimit ? 'quota-warning' : ''}">
+        Minted: ${parts.join(' · ')}${atLimit ? ' (limit reached)' : ''}
+      </span>
+    `;
+  }
+
+  private renderMintDialog() {
+    return html`
+      <sl-dialog
+        label="Mint GCP Service Account"
+        ?open=${this.mintDialogOpen}
+        @sl-request-close=${this.closeMintDialog}
+      >
+        <form class="dialog-form" @submit=${this.handleMint}>
+          <sl-input
+            label="Account ID"
+            placeholder="Optional (e.g. my-pipeline → scion-my-pipeline)"
+            help-text="Leave empty for auto-generated ID. Will be prefixed with scion-."
+            value=${this.mintAccountId}
+            @sl-input=${(e: Event) => {
+              this.mintAccountId = (e.target as HTMLInputElement).value;
+            }}
+          ></sl-input>
+
+          <sl-input
+            label="Display Name"
+            placeholder="Optional human-friendly label"
+            value=${this.mintDisplayName}
+            @sl-input=${(e: Event) => {
+              this.mintDisplayName = (e.target as HTMLInputElement).value;
+            }}
+          ></sl-input>
+
+          <sl-input
+            label="Description"
+            placeholder="Optional description"
+            value=${this.mintDescription}
+            @sl-input=${(e: Event) => {
+              this.mintDescription = (e.target as HTMLInputElement).value;
+            }}
+          ></sl-input>
+
+          <div class="dialog-hint">
+            <sl-icon name="info-circle"></sl-icon>
+            The Hub will create a new service account in its own GCP project. The SA starts with
+            no IAM permissions and is automatically verified for impersonation.
+          </div>
+
+          ${this.mintDialogError ? html`<div class="dialog-error">${this.mintDialogError}</div>` : nothing}
+        </form>
+
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${this.closeMintDialog}
+          ?disabled=${this.mintDialogLoading}
+        >
+          Cancel
+        </sl-button>
+        <sl-button
+          slot="footer"
+          variant="primary"
+          ?loading=${this.mintDialogLoading}
+          ?disabled=${this.mintDialogLoading}
+          @click=${this.handleMint}
+        >
+          Mint
         </sl-button>
       </sl-dialog>
     `;

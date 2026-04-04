@@ -611,7 +611,10 @@ func (s *Server) createAgentInGrove(
 
 	agent.AppliedConfig = s.buildAppliedConfig(req, harnessConfig, creatorName)
 
-	// Populate GCP identity in applied config
+	// Populate GCP identity in applied config.
+	// Default to "block" mode when no GCP identity is specified, so agents
+	// cannot access the underlying compute identity via the GCE metadata
+	// server unless explicitly opted into "passthrough" or "assign".
 	if req.GCPIdentity != nil {
 		switch req.GCPIdentity.MetadataMode {
 		case store.GCPMetadataModeAssign:
@@ -629,6 +632,12 @@ func (s *Server) createAgentInGrove(
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModeBlock,
 			}
+		}
+	} else {
+		// No GCP identity specified — default to block to prevent leaking
+		// the host compute identity to agents.
+		agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+			MetadataMode: store.GCPMetadataModeBlock,
 		}
 	}
 
@@ -1342,12 +1351,13 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 	}
 
 	var updates struct {
-		Name         string            `json:"name,omitempty"`
-		Labels       map[string]string `json:"labels,omitempty"`
-		Annotations  map[string]string `json:"annotations,omitempty"`
-		TaskSummary  string            `json:"taskSummary,omitempty"`
-		Config       *api.ScionConfig  `json:"config,omitempty"`
-		StateVersion int64             `json:"stateVersion"`
+		Name         string                 `json:"name,omitempty"`
+		Labels       map[string]string      `json:"labels,omitempty"`
+		Annotations  map[string]string      `json:"annotations,omitempty"`
+		TaskSummary  string                 `json:"taskSummary,omitempty"`
+		Config       *api.ScionConfig       `json:"config,omitempty"`
+		GCPIdentity  *GCPIdentityAssignment `json:"gcp_identity,omitempty"`
+		StateVersion int64                  `json:"stateVersion"`
 	}
 
 	if err := readJSON(r, &updates); err != nil {
@@ -1409,6 +1419,46 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 			agent.AppliedConfig.Env = cfg.Env
 		}
 		agent.AppliedConfig.InlineConfig = cfg
+	}
+
+	// Apply GCP identity update (only allowed for agents in 'created' phase)
+	if updates.GCPIdentity != nil {
+		if agent.Phase != "created" {
+			Conflict(w, "GCP identity can only be updated for agents in 'created' phase")
+			return
+		}
+		if agent.AppliedConfig == nil {
+			agent.AppliedConfig = &store.AgentAppliedConfig{}
+		}
+		switch updates.GCPIdentity.MetadataMode {
+		case store.GCPMetadataModeBlock:
+			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+				MetadataMode: store.GCPMetadataModeBlock,
+			}
+		case store.GCPMetadataModePassthrough:
+			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+				MetadataMode: store.GCPMetadataModePassthrough,
+			}
+		case store.GCPMetadataModeAssign:
+			if updates.GCPIdentity.ServiceAccountID == "" {
+				ValidationError(w, "service_account_id is required when metadata_mode is 'assign'", nil)
+				return
+			}
+			sa, err := s.store.GetGCPServiceAccount(ctx, updates.GCPIdentity.ServiceAccountID)
+			if err != nil {
+				writeErrorFromErr(w, err, "GCP service account not found")
+				return
+			}
+			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+				MetadataMode:        store.GCPMetadataModeAssign,
+				ServiceAccountID:    sa.ID,
+				ServiceAccountEmail: sa.Email,
+				ProjectID:           sa.ProjectID,
+			}
+		default:
+			ValidationError(w, "invalid metadata_mode: must be 'block', 'passthrough', or 'assign'", nil)
+			return
+		}
 	}
 
 	if err := s.store.UpdateAgent(ctx, agent); err != nil {
@@ -3638,9 +3688,9 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for nested /sync-templates path
-	if subPath == "sync-templates" {
-		s.handleGroveSyncTemplates(w, r, groveID)
+	// Check for nested /import-templates path
+	if subPath == "import-templates" {
+		s.handleGroveImportTemplates(w, r, groveID)
 		return
 	}
 
@@ -4253,10 +4303,7 @@ func (s *Server) deleteGrove(w http.ResponseWriter, r *http.Request, id string) 
 	// Dispatch agent deletions to runtime brokers so containers are stopped
 	// and agent files are cleaned up. The DB cascade will remove agent records,
 	// but we need the broker to tear down the actual resources first.
-	deleteAgents := r.URL.Query().Get("deleteAgents") == "true"
-	if deleteAgents {
-		s.deleteGroveAgents(ctx, grove)
-	}
+	s.deleteGroveAgents(ctx, grove)
 
 	// Clean up all groups associated with the grove (agents group, members group, etc.)
 	if groveGroups, err := s.store.ListGroups(ctx, store.GroupFilter{GroveID: id}, store.ListOptions{Limit: 100}); err == nil {
@@ -4289,6 +4336,23 @@ func (s *Server) deleteGrove(w http.ResponseWriter, r *http.Request, id string) 
 		slog.Warn("failed to delete grove secrets", "grove_id", id, "error", err)
 	} else if n > 0 {
 		slog.Info("deleted grove secrets", "grove_id", id, "count", n)
+	}
+
+	// Warn about retained managed GCP service accounts (best-effort).
+	// Managed SAs are NOT deleted from GCP — only unlinked from the grove.
+	s.warnManagedGCPServiceAccounts(ctx, id)
+
+	// Clean up grove-scoped GCP service account registrations (best-effort).
+	if sas, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+		Scope:   store.ScopeGrove,
+		ScopeID: id,
+	}); err == nil {
+		for _, sa := range sas {
+			if delErr := s.store.DeleteGCPServiceAccount(ctx, sa.ID); delErr != nil {
+				slog.Warn("failed to delete grove GCP service account registration",
+					"grove_id", id, "sa_id", sa.ID, "email", sa.Email, "error", delErr.Error())
+			}
+		}
 	}
 
 	// Clean up grove-scoped templates (best-effort), including storage files.
@@ -4396,6 +4460,26 @@ func (s *Server) deleteGroveTemplates(ctx context.Context, groveID string) {
 		slog.Warn("failed to delete grove templates", "grove_id", groveID, "error", err)
 	} else if n > 0 {
 		slog.Info("deleted grove templates", "grove_id", groveID, "count", n)
+	}
+}
+
+// warnManagedGCPServiceAccounts logs a warning for any hub-minted GCP service
+// accounts that will be retained in GCP when a grove is deleted.
+func (s *Server) warnManagedGCPServiceAccounts(ctx context.Context, groveID string) {
+	managed := true
+	sas, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+		Scope:   store.ScopeGrove,
+		ScopeID: groveID,
+		Managed: &managed,
+	})
+	if err != nil {
+		slog.Warn("failed to list managed GCP SAs for grove deletion warning",
+			"grove_id", groveID, "error", err)
+		return
+	}
+	for _, sa := range sas {
+		slog.Warn("grove deletion: managed GCP service account retained in GCP — manual cleanup may be required",
+			"grove_id", groveID, "sa_email", sa.Email, "sa_id", sa.ID, "project_id", sa.ProjectID)
 	}
 }
 
@@ -5731,19 +5815,23 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 
 	case store.ScopeHub:
 		// Hub scope: only admin users can read or write.
-		// Agents and brokers retain read access for env/secret injection.
+		// Agent environment injection is handled internally via Resolve(),
+		// which filters out internal secrets. Direct API access to hub-scoped
+		// secrets requires hub admin privileges.
 		identity := GetIdentityFromContext(ctx)
 		if identity == nil {
 			Unauthorized(w)
 			return "", false
 		}
-		if userIdent, ok := identity.(UserIdentity); ok {
-			if userIdent.Role() != store.UserRoleAdmin {
-				Forbidden(w)
-				return "", false
-			}
-		} else if isWrite {
-			// Non-user identities (agents, brokers) can only read.
+		userIdent, ok := identity.(UserIdentity)
+		if !ok {
+			// Non-user identities (agents, brokers) cannot access hub-scoped
+			// secrets directly. Secret injection is handled server-side via
+			// the Resolve() path during agent dispatch.
+			Forbidden(w)
+			return "", false
+		}
+		if userIdent.Role() != store.UserRoleAdmin {
 			Forbidden(w)
 			return "", false
 		}
@@ -8020,22 +8108,23 @@ func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================================================================
-// Grove Template Sync
+// Grove Template Import
 // ============================================================================
 
-// SyncTemplatesRequest is the optional request body for template sync.
-type SyncTemplatesRequest struct {
-	RepoURL string `json:"repoUrl,omitempty"`
+// ImportTemplatesRequest is the request body for direct template import.
+type ImportTemplatesRequest struct {
+	SourceURL string `json:"sourceUrl"`
 }
 
-// SyncTemplatesResponse is returned when a template sync agent is dispatched.
-type SyncTemplatesResponse struct {
-	AgentID string `json:"agentId"`
-	Status  string `json:"status"`
+// ImportTemplatesResponse is returned after a direct template import completes.
+type ImportTemplatesResponse struct {
+	Templates []string `json:"templates"`
+	Count     int      `json:"count"`
 }
 
-// handleGroveSyncTemplates dispatches an agent to synchronize templates for a grove.
-func (s *Server) handleGroveSyncTemplates(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleGroveImportTemplates imports templates directly from a remote URL into
+// the grove's template store without spawning a bootstrap container agent.
+func (s *Server) handleGroveImportTemplates(w http.ResponseWriter, r *http.Request, groveID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -8044,17 +8133,15 @@ func (s *Server) handleGroveSyncTemplates(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 
 	// Authorize the caller
-	var createdBy string
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if !agentIdent.HasScope(ScopeAgentCreate) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: grove:agent:create", nil)
 			return
 		}
 		if groveID != agentIdent.GroveID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only sync templates within their own grove", nil)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only import templates within their own grove", nil)
 			return
 		}
-		createdBy = agentIdent.ID()
 	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
 			Type:       "agent",
@@ -8063,25 +8150,24 @@ func (s *Server) handleGroveSyncTemplates(w http.ResponseWriter, r *http.Request
 		}, ActionCreate)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You don't have permission to sync templates in this grove", nil)
+				"You don't have permission to import templates in this grove", nil)
 			return
 		}
-		createdBy = userIdent.ID()
 	} else {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 		return
 	}
 
-	// Parse optional request body for repoUrl.
-	var req SyncTemplatesRequest
-	if r.Body != nil {
-		// Ignore decode errors for empty bodies (the field is optional).
-		_ = readJSON(r, &req)
+	var req ImportTemplatesRequest
+	if err := readJSON(r, &req); err != nil || req.SourceURL == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "sourceUrl is required", nil)
+		return
 	}
 
+	req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
+
 	// Verify grove exists
-	grove, err := s.store.GetGrove(ctx, groveID)
-	if err != nil {
+	if _, err := s.store.GetGrove(ctx, groveID); err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Grove")
 			return
@@ -8090,138 +8176,19 @@ func (s *Server) handleGroveSyncTemplates(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Resolve a runtime broker (use grove default)
-	runtimeBrokerID, err := s.resolveRuntimeBroker(ctx, w, "", grove)
+	if s.GetStorage() == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Template storage is not configured", nil)
+		return
+	}
+
+	imported, err := s.importTemplatesFromRemote(ctx, groveID, req.SourceURL)
 	if err != nil {
-		// Error response already written by resolveRuntimeBroker
+		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
 	}
 
-	// Check broker dispatch access
-	if runtimeBrokerID != "" {
-		if !s.checkBrokerDispatchAccess(ctx, w, runtimeBrokerID) {
-			return
-		}
-	}
-
-	// Build agent name with timestamp
-	agentName := fmt.Sprintf("template-sync-%d", time.Now().Unix())
-	slug, err := api.ValidateAgentName(agentName)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_name", err.Error(), nil)
-		return
-	}
-
-	agent := &store.Agent{
-		ID:              api.NewUUID(),
-		Slug:            slug,
-		Name:            slug,
-		GroveID:         groveID,
-		RuntimeBrokerID: runtimeBrokerID,
-		Phase:           string(state.PhaseCreated),
-		Labels: map[string]string{
-			"scion.dev/purpose": "template-sync",
-		},
-		Visibility: store.VisibilityPrivate,
-		CreatedBy:  createdBy,
-		OwnerID:    createdBy,
-		Detached:   true,
-		AppliedConfig: &store.AgentAppliedConfig{
-			HarnessConfig: "generic",
-			Task:          "scion templates sync --all",
-		},
-	}
-
-	// Populate GitClone config for git-anchored groves so the broker
-	// clones the repo before running the sync command. Without this,
-	// the container starts with an empty workspace and the sync exits
-	// immediately because there are no templates to find.
-	s.populateAgentConfig(agent, grove, nil)
-
-	// For non-git groves, allow loading templates from an external repo URL.
-	if req.RepoURL != "" && grove.GitRemote == "" {
-		cleanedURL := cleanTemplateRepoURL(req.RepoURL)
-		// Accept bare host/org/repo inputs by prepending https://.
-		if !strings.Contains(cleanedURL, "://") && !strings.HasPrefix(cleanedURL, "git@") {
-			cleanedURL = "https://" + cleanedURL
-		}
-		if !util.IsGitURL(cleanedURL) {
-			writeError(w, http.StatusBadRequest, "invalid_repo_url", "The provided URL is not a valid git repository URL", nil)
-			return
-		}
-		cloneURL := util.ToHTTPSCloneURL(cleanedURL)
-		agent.AppliedConfig.GitClone = &api.GitCloneConfig{
-			URL:    cloneURL,
-			Branch: "main",
-			Depth:  1,
-		}
-
-		// Look up a GitHub App installation that covers this repo directly,
-		// then find a grove owned by the same user that references it so the
-		// dispatcher can mint a token for cloning.
-		normalizedRemote := util.NormalizeGitRemote(cleanedURL)
-		if parts := strings.SplitN(normalizedRemote, "/", 2); len(parts) == 2 {
-			if inst, err := s.store.GetInstallationForRepository(ctx, parts[1]); err == nil {
-				matchingGroves, _ := s.store.GetGrovesByGitRemote(ctx, normalizedRemote)
-				for _, g := range matchingGroves {
-					if g.GitHubInstallationID != nil && *g.GitHubInstallationID == inst.InstallationID && g.OwnerID == grove.OwnerID {
-						agent.Labels["scion.dev/github-token-source-grove"] = g.ID
-						break
-					}
-				}
-			}
-		}
-	}
-
-	if err := s.store.CreateAgent(ctx, agent); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Dispatch to runtime broker.
-	// Set the phase to provisioning BEFORE dispatching so that a fast
-	// container failure (e.g. git clone error) that reports phase=error
-	// via the status API doesn't get clobbered by a post-dispatch update.
-	if dispatcher := s.GetDispatcher(); dispatcher != nil {
-		agent.Phase = string(state.PhaseProvisioning)
-		if err := s.store.UpdateAgent(ctx, agent); err != nil {
-			s.agentLifecycleLog.Warn("Failed to update template-sync agent phase", "error", err)
-		}
-
-		if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
-			// Clean up on dispatch failure
-			s.agentLifecycleLog.Warn("Failed to dispatch template-sync agent", "agent_id", agent.ID, "error", err)
-			_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
-			_ = s.store.DeleteAgent(ctx, agent.ID)
-			RuntimeError(w, "Failed to dispatch template sync agent: "+err.Error())
-			return
-		}
-	}
-
-	s.events.PublishAgentCreated(ctx, agent)
-
-	s.agentLifecycleLog.Info("Template sync agent dispatched",
-		"agent_id", agent.ID, "grove_id", groveID, "broker", runtimeBrokerID)
-
-	writeJSON(w, http.StatusOK, SyncTemplatesResponse{
-		AgentID: agent.ID,
-		Status:  "syncing",
+	writeJSON(w, http.StatusOK, ImportTemplatesResponse{
+		Templates: imported,
+		Count:     len(imported),
 	})
-}
-
-// cleanTemplateRepoURL strips .scion/templates suffixes and common
-// repository browse paths (e.g. /tree/main) from a URL so that it can
-// be normalized to a plain clone URL.
-func cleanTemplateRepoURL(rawURL string) string {
-	// Strip .scion/templates suffix (with optional trailing slash).
-	if idx := strings.Index(rawURL, "/.scion/templates"); idx >= 0 {
-		rawURL = rawURL[:idx]
-	}
-	// Strip GitHub/GitLab browse path segments (longer patterns first).
-	for _, seg := range []string{"/-/tree/", "/-/blob/", "/tree/", "/blob/"} {
-		if idx := strings.Index(rawURL, seg); idx >= 0 {
-			rawURL = rawURL[:idx]
-		}
-	}
-	return strings.TrimRight(rawURL, "/")
 }

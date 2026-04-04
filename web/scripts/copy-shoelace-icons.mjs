@@ -38,6 +38,7 @@ const DEST = resolve(ROOT, 'public/shoelace/assets/icons');
 /** Icons referenced via <sl-icon name="..."> across the app. */
 const USED_ICONS = [
   'arrow-clockwise',
+  'arrow-counterclockwise',
   'bell-slash',
   'arrow-down-circle',
   'arrow-left',
@@ -60,6 +61,7 @@ const USED_ICONS = [
   'circle-fill',
   'clock',
   'clock-history',
+  'code',
   'code-square',
   'cpu',
   'diagram-3',
@@ -75,10 +77,12 @@ const USED_ICONS = [
   'file-earmark-code',
   'file-earmark-zip',
   'file-text',
+  'floppy',
   'folder',
   'folder-fill',
   'folder-plus',
   'folder2-open',
+  'funnel',
   'gear',
   'github',
   'grid-3x3-gap',

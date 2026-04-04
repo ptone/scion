@@ -33,6 +33,12 @@ import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-message-viewer.js';
+import '../shared/file-browser.js';
+import '../shared/file-editor.js';
+import { WorkspaceFileBrowserDataSource, SharedDirFileBrowserDataSource } from '../shared/file-browser.js';
+import type { FileBrowserDataSource } from '../shared/file-browser.js';
+import { WorkspaceFileEditorDataSource, SharedDirFileEditorDataSource } from '../shared/file-editor.js';
+import type { FileEditorDataSource } from '../shared/file-editor.js';
 
 @customElement('scion-page-grove-detail')
 export class ScionPageGroveDetail extends LitElement {
@@ -91,34 +97,9 @@ export class ScionPageGroveDetail extends LitElement {
   private activeFileTab = 'workspace';
 
   /**
-   * Per-tab file data keyed by tab name
+   * Per-tab file browser data sources keyed by tab name
    */
-  @state()
-  private fileTabData: Record<string, {
-    files: Array<{ path: string; size: number; modTime: string; mode: string }>;
-    loading: boolean;
-    totalSize: number;
-    error: string | null;
-    providerCount?: number;
-  }> = {};
-
-  /**
-   * File sort field
-   */
-  @state()
-  private fileSortField: 'name' | 'size' | 'modified' = 'name';
-
-  /**
-   * File sort direction
-   */
-  @state()
-  private fileSortDir: 'asc' | 'desc' = 'asc';
-
-  /**
-   * Upload in progress
-   */
-  @state()
-  private uploadProgress = false;
+  private fileBrowserDataSources: Record<string, FileBrowserDataSource> = {};
 
   /**
    * Loading state for stop-all action
@@ -149,6 +130,23 @@ export class ScionPageGroveDetail extends LitElement {
    */
   @state()
   private messagesExpanded = false;
+
+  /**
+   * Path of the file currently open in the editor (null = editor closed, '' = new file)
+   */
+  @state()
+  private editingFilePath: string | null = null;
+
+  /**
+   * Whether to open the editor initially in preview mode (for .md eye icon)
+   */
+  @state()
+  private editorInitialPreview = false;
+
+  /**
+   * Per-tab editor data sources keyed by tab name
+   */
+  private editorDataSources: Record<string, FileEditorDataSource> = {};
 
   static override styles = css`
     :host {
@@ -540,150 +538,6 @@ export class ScionPageGroveDetail extends LitElement {
       margin: 0;
     }
 
-    .workspace-meta {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .file-table-wrapper {
-      max-height: 26rem; /* ~10 rows visible */
-      overflow-y: auto;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-    }
-
-    .file-table {
-      width: 100%;
-      border-collapse: collapse;
-      background: var(--scion-surface, #ffffff);
-    }
-
-    .file-table th,
-    .file-table td {
-      padding: 0.625rem 1rem;
-      text-align: left;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .file-table th {
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--scion-text-muted, #64748b);
-      background: var(--scion-bg-subtle, #f8fafc);
-      font-weight: 600;
-      position: sticky;
-      top: 0;
-      z-index: 1;
-    }
-
-    .file-table th.sortable {
-      cursor: pointer;
-      user-select: none;
-    }
-
-    .file-table th.sortable:hover {
-      color: var(--scion-text, #1e293b);
-    }
-
-    .file-table .sort-indicator {
-      display: inline-block;
-      margin-left: 0.25rem;
-      font-size: 0.625rem;
-      vertical-align: middle;
-      opacity: 0.4;
-    }
-
-    .file-table th.sorted .sort-indicator {
-      opacity: 1;
-    }
-
-    .file-table tr:last-child td {
-      border-bottom: none;
-    }
-
-    .file-list-truncated {
-      padding: 0.5rem 1rem;
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      text-align: center;
-      background: var(--scion-bg-subtle, #f8fafc);
-      border-top: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .file-name {
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.875rem;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .file-name sl-icon {
-      color: var(--scion-text-muted, #64748b);
-      flex-shrink: 0;
-    }
-
-    .file-size,
-    .file-date {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .file-actions {
-      text-align: right;
-      white-space: nowrap;
-    }
-
-    .file-actions .preview-disabled {
-      opacity: 0.3;
-      cursor: not-allowed;
-    }
-
-    .workspace-empty {
-      text-align: center;
-      padding: 2.5rem 2rem;
-      background: var(--scion-surface, #ffffff);
-      border: 1px dashed var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-    }
-
-    .workspace-empty > sl-icon {
-      font-size: 2.5rem;
-      color: var(--scion-text-muted, #64748b);
-      opacity: 0.5;
-      margin-bottom: 0.75rem;
-    }
-
-    .workspace-empty p {
-      color: var(--scion-text-muted, #64748b);
-      margin: 0 0 1rem 0;
-      font-size: 0.875rem;
-    }
-
-    .workspace-error {
-      color: var(--sl-color-danger-600, #dc2626);
-      font-size: 0.875rem;
-      padding: 0.75rem 1rem;
-      background: var(--sl-color-danger-50, #fef2f2);
-      border-radius: var(--scion-radius, 0.5rem);
-      margin-bottom: 1rem;
-    }
-
-    .files-tab-header {
-      position: relative;
-    }
-
-    .files-tab-actions {
-      position: absolute;
-      top: 0;
-      right: 0;
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-      height: 2.5rem;
-    }
-
     .files-tab-group {
       margin-bottom: 0;
     }
@@ -696,20 +550,8 @@ export class ScionPageGroveDetail extends LitElement {
       padding: 0;
     }
 
-    .files-provider-warning {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.375rem;
-      font-size: 0.75rem;
-      color: var(--sl-color-warning-700, #a16207);
-      background: var(--sl-color-warning-50, #fefce8);
-      border: 1px solid var(--sl-color-warning-200, #fde68a);
-      border-radius: var(--scion-radius, 0.5rem);
-      padding: 0.25rem 0.625rem;
-    }
-
-    .files-provider-warning sl-icon {
-      font-size: 0.875rem;
+    .editor-back-row {
+      margin-bottom: 0.5rem;
     }
 
     .tab-label-truncated {
@@ -837,14 +679,14 @@ export class ScionPageGroveDetail extends LitElement {
         stateManager.seedGroves([this.grove]);
       }
 
-      // Load files for the active tab
+      // Pre-create data sources for file tabs (the component loads files on connect)
       if (this.grove && (!this.grove.gitRemote || isSharedWorkspace(this.grove))) {
-        void this.loadTabFiles('workspace');
+        this.getTabDataSource('workspace');
       }
-      // For git-based groves (non-shared) with shared dirs, load the first shared dir
+      // For git-based groves (non-shared) with shared dirs, activate the first shared dir
       if (this.grove && this.grove.gitRemote && !isSharedWorkspace(this.grove) && this.grove.sharedDirs?.length) {
         this.activeFileTab = this.grove.sharedDirs[0].name;
-        void this.loadTabFiles(this.grove.sharedDirs[0].name);
+        this.getTabDataSource(this.grove.sharedDirs[0].name);
       }
 
       // Auto-discover GitHub App installation if grove has a GitHub remote but no installation
@@ -929,227 +771,53 @@ export class ScionPageGroveDetail extends LitElement {
     }
   }
 
-  private getTabApiPath(tabName: string): string {
-    if (tabName === 'workspace') {
-      return `/api/v1/groves/${this.groveId}/workspace/files`;
-    }
-    return `/api/v1/groves/${this.groveId}/shared-dirs/${encodeURIComponent(tabName)}/files`;
-  }
-
-  private getTabData(tabName: string) {
-    return this.fileTabData[tabName] || { files: [], loading: false, totalSize: 0, error: null };
-  }
-
-  private async loadTabFiles(tabName: string): Promise<void> {
-    this.fileTabData = {
-      ...this.fileTabData,
-      [tabName]: { ...this.getTabData(tabName), loading: true, error: null },
-    };
-
-    try {
-      const response = await apiFetch(this.getTabApiPath(tabName));
-
-      if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+  private getTabDataSource(tabName: string): FileBrowserDataSource {
+    if (!this.fileBrowserDataSources[tabName]) {
+      if (tabName === 'workspace') {
+        this.fileBrowserDataSources[tabName] = new WorkspaceFileBrowserDataSource(this.groveId);
+      } else {
+        this.fileBrowserDataSources[tabName] = new SharedDirFileBrowserDataSource(this.groveId, tabName);
       }
-
-      const data = (await response.json()) as {
-        files: Array<{ path: string; size: number; modTime: string; mode: string }>;
-        totalSize: number;
-        totalCount: number;
-        providerCount?: number;
-      };
-
-      this.fileTabData = {
-        ...this.fileTabData,
-        [tabName]: {
-          files: data.files || [],
-          loading: false,
-          totalSize: data.totalSize || 0,
-          error: null,
-          providerCount: data.providerCount ?? 0,
-        },
-      };
-    } catch (err) {
-      console.error(`Failed to load files for tab ${tabName}:`, err);
-      this.fileTabData = {
-        ...this.fileTabData,
-        [tabName]: {
-          ...this.getTabData(tabName),
-          loading: false,
-          error: err instanceof Error ? err.message : 'Failed to load files',
-        },
-      };
     }
+    return this.fileBrowserDataSources[tabName];
   }
 
-  private handleUploadClick(): void {
-    const input = this.shadowRoot?.querySelector('#file-tab-input') as HTMLInputElement;
-    if (input) {
-      input.click();
-    }
-  }
-
-  private async handleFileUpload(e: Event): Promise<void> {
-    const input = e.target as HTMLInputElement;
-    const fileList = input.files;
-    if (!fileList || fileList.length === 0) return;
-
-    const tab = this.activeFileTab;
-    this.uploadProgress = true;
-
-    try {
-      const formData = new FormData();
-      for (let i = 0; i < fileList.length; i++) {
-        const file = fileList[i];
-        formData.append(file.name, file);
+  private getEditorDataSource(tabName: string): FileEditorDataSource {
+    if (!this.editorDataSources[tabName]) {
+      if (tabName === 'workspace') {
+        this.editorDataSources[tabName] = new WorkspaceFileEditorDataSource(this.groveId);
+      } else {
+        this.editorDataSources[tabName] = new SharedDirFileEditorDataSource(this.groveId, tabName);
       }
-
-      const response = await apiFetch(this.getTabApiPath(tab), {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        throw new Error(await extractApiError(response, `Upload failed: HTTP ${response.status}`));
-      }
-
-      void this.loadTabFiles(tab);
-    } catch (err) {
-      console.error('Failed to upload files:', err);
-      this.fileTabData = {
-        ...this.fileTabData,
-        [tab]: { ...this.getTabData(tab), error: err instanceof Error ? err.message : 'Upload failed' },
-      };
-    } finally {
-      this.uploadProgress = false;
-      input.value = '';
     }
+    return this.editorDataSources[tabName];
   }
 
-  private async handleFileDelete(filePath: string, event?: MouseEvent): Promise<void> {
-    if (!event?.altKey && !confirm(`Delete ${filePath}?`)) return;
-
-    const tab = this.activeFileTab;
-    try {
-      const encodedPath = filePath
-        .split('/')
-        .map((seg) => encodeURIComponent(seg))
-        .join('/');
-
-      const apiBase = this.getTabApiPath(tab);
-      const response = await apiFetch(`${apiBase}/${encodedPath}`, { method: 'DELETE' });
-
-      if (!response.ok && response.status !== 204) {
-        throw new Error(await extractApiError(response, `Delete failed: HTTP ${response.status}`));
-      }
-
-      const tabData = this.getTabData(tab);
-      this.fileTabData = {
-        ...this.fileTabData,
-        [tab]: { ...tabData, files: tabData.files.filter(f => f.path !== filePath) },
-      };
-      void this.loadTabFiles(tab);
-    } catch (err) {
-      console.error('Failed to delete file:', err);
-      this.fileTabData = {
-        ...this.fileTabData,
-        [tab]: { ...this.getTabData(tab), error: err instanceof Error ? err.message : 'Delete failed' },
-      };
-    }
+  private handleFileEditRequested(e: CustomEvent<{ path: string }>): void {
+    this.editingFilePath = e.detail.path;
+    this.editorInitialPreview = false;
   }
 
-  private static readonly PREVIEWABLE_EXTENSIONS = new Set([
-    // Images
-    '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp', '.ico',
-    // Text
-    '.txt', '.log', '.csv', '.tsv',
-    // Markdown
-    '.md',
-    // Code
-    '.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs',
-    '.py', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.hpp', '.cs',
-    '.css', '.scss', '.less', '.html', '.htm', '.xml', '.xsl',
-    '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf',
-    '.sh', '.bash', '.zsh', '.fish',
-    '.sql', '.rb', '.php', '.swift', '.kt', '.scala', '.r', '.lua',
-    '.pl', '.ex', '.exs', '.elm', '.hs', '.clj', '.vim',
-    '.dockerfile', '.makefile', '.env', '.gitignore', '.editorconfig',
-    // PDF
-    '.pdf',
-  ]);
-
-  private isPreviewable(filePath: string): boolean {
-    const ext = filePath.includes('.') ? '.' + filePath.split('.').pop()!.toLowerCase() : '';
-    return ScionPageGroveDetail.PREVIEWABLE_EXTENSIONS.has(ext);
+  private handleFilePreviewRequested(e: CustomEvent<{ path: string }>): void {
+    this.editingFilePath = e.detail.path;
+    this.editorInitialPreview = true;
   }
 
-  private encodeFilePath(filePath: string): string {
-    return filePath
-      .split('/')
-      .map((seg) => encodeURIComponent(seg))
-      .join('/');
+  private handleFileCreateRequested(): void {
+    this.editingFilePath = '';
+    this.editorInitialPreview = false;
   }
 
-  private handleFilePreview(filePath: string): void {
-    const encodedPath = this.encodeFilePath(filePath);
-    const base = this.getTabApiPath(this.activeFileTab);
-    window.open(`${base}/${encodedPath}?view=true`, '_blank');
+  private handleEditorClosed(): void {
+    this.editingFilePath = null;
+    this.editorInitialPreview = false;
   }
 
-  private handleFileDownload(filePath: string): void {
-    const encodedPath = this.encodeFilePath(filePath);
-    const base = this.getTabApiPath(this.activeFileTab);
-    window.open(`${base}/${encodedPath}`, '_blank');
+  private handleFileSaved(): void {
+    // Refresh the file browser to reflect the saved/new file
+    this.refreshActiveFileBrowser();
   }
 
-  private handleDownloadArchive(): void {
-    window.open(`/api/v1/groves/${this.groveId}/workspace/archive`, '_blank');
-  }
-
-  private formatFileSize(bytes: number): string {
-    if (bytes === 0) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    const size = bytes / Math.pow(1024, i);
-    return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-  }
-
-  private toggleFileSort(field: 'name' | 'size' | 'modified'): void {
-    if (this.fileSortField === field) {
-      this.fileSortDir = this.fileSortDir === 'asc' ? 'desc' : 'asc';
-    } else {
-      this.fileSortField = field;
-      this.fileSortDir = field === 'name' ? 'asc' : 'desc';
-    }
-  }
-
-  private fileSortIndicator(field: 'name' | 'size' | 'modified'): string {
-    return this.fileSortField === field ? (this.fileSortDir === 'asc' ? '▲' : '▼') : '▲';
-  }
-
-  private getSortedFiles(
-    files: Array<{ path: string; size: number; modTime: string; mode: string }>
-  ): Array<{ path: string; size: number; modTime: string; mode: string }> {
-    return [...files].sort((a, b) => {
-      let cmp = 0;
-      switch (this.fileSortField) {
-        case 'name':
-          cmp = a.path.localeCompare(b.path);
-          break;
-        case 'size':
-          cmp = a.size - b.size;
-          break;
-        case 'modified': {
-          const aTime = a.modTime ? new Date(a.modTime).getTime() : 0;
-          const bTime = b.modTime ? new Date(b.modTime).getTime() : 0;
-          cmp = aTime - bTime;
-          break;
-        }
-      }
-      return this.fileSortDir === 'asc' ? cmp : -cmp;
-    });
-  }
 
   private async handleAgentAction(
     agentId: string,
@@ -1282,7 +950,7 @@ export class ScionPageGroveDetail extends LitElement {
 
       this.pullResult = { status: 'ok', output: result.output };
       // Refresh file list after pull
-      void this.loadTabFiles(this.activeFileTab);
+      this.refreshActiveFileBrowser();
     } catch (err) {
       this.pullResult = { status: 'error', error: err instanceof Error ? err.message : 'Pull failed' };
     } finally {
@@ -1501,244 +1169,73 @@ export class ScionPageGroveDetail extends LitElement {
     const panel = e.detail.name;
     if (!panel) return;
     this.activeFileTab = panel;
-    // Load files if not already loaded
-    const tabData = this.getTabData(panel);
-    if (tabData.files.length === 0 && !tabData.loading && !tabData.error) {
-      void this.loadTabFiles(panel);
-    }
   }
 
-  private handleRefreshFiles(): void {
-    void this.loadTabFiles(this.activeFileTab);
-  }
-
-  private renderFileActions() {
-    const tabData = this.getTabData(this.activeFileTab);
-    return html`
-      <sl-icon-button
-        name="arrow-clockwise"
-        label="Refresh file list"
-        ?disabled=${tabData.loading}
-        @click=${() => this.handleRefreshFiles()}
-      ></sl-icon-button>
-      ${this.activeFileTab === 'workspace' && tabData.files.length > 0
-        ? html`
-            <sl-button
-              size="small"
-              variant="default"
-              @click=${() => this.handleDownloadArchive()}
-            >
-              <sl-icon slot="prefix" name="file-earmark-zip"></sl-icon>
-              Download Zip
-            </sl-button>
-          `
-        : nothing}
-      ${can(this.grove?._capabilities, 'update')
-        ? html`
-            <input
-              type="file"
-              id="file-tab-input"
-              multiple
-              style="display: none"
-              @change=${this.handleFileUpload}
-            />
-            <sl-button
-              size="small"
-              variant="default"
-              ?loading=${this.uploadProgress}
-              ?disabled=${this.uploadProgress}
-              @click=${() => this.handleUploadClick()}
-            >
-              <sl-icon slot="prefix" name="upload"></sl-icon>
-              Upload Files
-            </sl-button>
-          `
-        : nothing}
-    `;
-  }
-
-  private renderProviderWarning(tabData: { providerCount?: number }) {
-    if (!tabData.providerCount || tabData.providerCount <= 1) return nothing;
-    return html`
-      <div class="files-provider-warning">
-        <sl-icon name="exclamation-triangle"></sl-icon>
-        Showing files from this server only — ${tabData.providerCount} brokers serve this grove
-      </div>
-    `;
+  private refreshActiveFileBrowser(): void {
+    const browser = this.shadowRoot?.querySelector(
+      `scion-file-browser[data-tab="${this.activeFileTab}"]`
+    ) as import('../shared/file-browser.js').ScionFileBrowser | null;
+    browser?.loadFiles();
   }
 
   private renderFilesSection() {
     const tabs = this.getFileTabs();
-    const tabData = this.getTabData(this.activeFileTab);
+    const isEditable = can(this.grove?._capabilities, 'update');
+    const isEditorOpen = this.editingFilePath !== null;
 
     return html`
       <div class="workspace-section">
         <div class="workspace-header">
           <div class="workspace-header-left">
             <h2>Files</h2>
-            <span class="workspace-meta">
-              ${tabData.files.length}
-              file${tabData.files.length !== 1 ? 's' : ''}${tabData.totalSize > 0
-                ? ` (${this.formatFileSize(tabData.totalSize)})`
-                : ''}
-            </span>
           </div>
         </div>
 
-        <div class="files-tab-header">
-          <sl-tab-group class="files-tab-group" @sl-tab-show=${this.onFileTabChange}>
-            ${tabs.map(
-              (tab) => html`
-                <sl-tab slot="nav" panel=${tab.key} ?active=${tab.key === this.activeFileTab}>
-                  <span class="tab-label-truncated" title=${tab.label}>${this.truncateTabLabel(tab.label)}</span>
-                </sl-tab>
-              `
-            )}
-            ${tabs.map(
-              (tab) => html`
-                <sl-tab-panel name=${tab.key}
-                  >${this.renderFileTabContent(this.getTabData(tab.key))}</sl-tab-panel
-                >
-              `
-            )}
-          </sl-tab-group>
-          <div class="files-tab-actions">
-            ${this.renderProviderWarning(tabData)}
-            ${this.renderFileActions()}
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  private renderFileTabContent(tabData: {
-    files: Array<{ path: string; size: number; modTime: string; mode: string }>;
-    loading: boolean;
-    totalSize: number;
-    error: string | null;
-  }) {
-    if (tabData.error) {
-      return html`<div class="workspace-error">${tabData.error}</div>`;
-    }
-    if (tabData.loading) {
-      return html`
-        <div class="loading-state" style="padding: 2rem;">
-          <sl-spinner></sl-spinner>
-          <p>Loading files...</p>
-        </div>
-      `;
-    }
-    if (tabData.files.length === 0) {
-      return html`
-        <div class="workspace-empty">
-          <sl-icon name="file-earmark"></sl-icon>
-          <p>
-            No files in this directory.${can(this.grove?._capabilities, 'update')
-              ? ' Upload files to get started.'
-              : ''}
-          </p>
-          ${can(this.grove?._capabilities, 'update')
-            ? html`
-                <sl-button
-                  size="small"
-                  variant="primary"
-                  ?loading=${this.uploadProgress}
-                  ?disabled=${this.uploadProgress}
-                  @click=${() => this.handleUploadClick()}
-                >
-                  <sl-icon slot="prefix" name="upload"></sl-icon>
-                  Upload Files
+        ${isEditorOpen
+          ? html`
+              <div class="editor-back-row">
+                <sl-button size="small" variant="text" @click=${this.handleEditorClosed}>
+                  <sl-icon slot="prefix" name="arrow-left"></sl-icon>
+                  Back to files
                 </sl-button>
-              `
-            : nothing}
-        </div>
-      `;
-    }
-    return html`
-      <div class="file-table-wrapper">
-        <table class="file-table">
-          <thead>
-            <tr>
-              <th
-                class="sortable ${this.fileSortField === 'name' ? 'sorted' : ''}"
-                @click=${() => this.toggleFileSort('name')}
-              >
-                <span class="sort-indicator">${this.fileSortIndicator('name')}</span>
-                Name
-              </th>
-              <th
-                class="sortable ${this.fileSortField === 'size' ? 'sorted' : ''}"
-                @click=${() => this.toggleFileSort('size')}
-              >
-                <span class="sort-indicator">${this.fileSortIndicator('size')}</span>
-                Size
-              </th>
-              <th
-                class="sortable ${this.fileSortField === 'modified' ? 'sorted' : ''}"
-                @click=${() => this.toggleFileSort('modified')}
-              >
-                <span class="sort-indicator">${this.fileSortIndicator('modified')}</span>
-                Modified
-              </th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            ${this.getSortedFiles(tabData.files).slice(0, 1000).map(
-              (file) => html`
-                <tr>
-                  <td>
-                    <span class="file-name">
-                      <sl-icon name="file-earmark"></sl-icon>
-                      ${file.path}
-                    </span>
-                  </td>
-                  <td><span class="file-size">${this.formatFileSize(file.size)}</span></td>
-                  <td>
-                    <span class="file-date">${this.formatDate(file.modTime)}</span>
-                  </td>
-                  <td class="file-actions">
-                    ${this.isPreviewable(file.path)
-                      ? html`
-                          <sl-icon-button
-                            name="eye"
-                            label="Preview ${file.path}"
-                            @click=${() => this.handleFilePreview(file.path)}
-                          ></sl-icon-button>
-                        `
-                      : html`
-                          <sl-icon-button
-                            name="eye"
-                            label="Preview not available for this format"
-                            class="preview-disabled"
-                            disabled
-                          ></sl-icon-button>
-                        `}
-                    <sl-icon-button
-                      name="download"
-                      label="Download ${file.path}"
-                      @click=${() => this.handleFileDownload(file.path)}
-                    ></sl-icon-button>
-                    ${can(this.grove?._capabilities, 'update')
-                      ? html`
-                          <sl-icon-button
-                            name="trash"
-                            label="Delete ${file.path}"
-                            @click=${(e: MouseEvent) => this.handleFileDelete(file.path, e)}
-                          ></sl-icon-button>
-                        `
-                      : nothing}
-                  </td>
-                </tr>
-              `
-            )}
-          </tbody>
-        </table>
-        ${tabData.files.length > 1000
-          ? html`<div class="file-list-truncated">
-              File list truncated — showing 1,000 of ${tabData.files.length.toLocaleString()} files
-            </div>`
-          : nothing}
+              </div>
+              <scion-file-editor
+                .filePath=${this.editingFilePath || ''}
+                .dataSource=${this.getEditorDataSource(this.activeFileTab)}
+                ?readonly=${!isEditable}
+                ?initialPreview=${this.editorInitialPreview}
+                @file-saved=${this.handleFileSaved}
+                @editor-closed=${this.handleEditorClosed}
+              ></scion-file-editor>
+            `
+          : html`
+              <div class="files-tab-header">
+                <sl-tab-group class="files-tab-group" @sl-tab-show=${this.onFileTabChange}>
+                  ${tabs.map(
+                    (tab) => html`
+                      <sl-tab slot="nav" panel=${tab.key} ?active=${tab.key === this.activeFileTab}>
+                        <span class="tab-label-truncated" title=${tab.label}>${this.truncateTabLabel(tab.label)}</span>
+                      </sl-tab>
+                    `
+                  )}
+                  ${tabs.map(
+                    (tab) => html`
+                      <sl-tab-panel name=${tab.key}>
+                        <scion-file-browser
+                          data-tab=${tab.key}
+                          .dataSource=${this.getTabDataSource(tab.key)}
+                          ?editable=${isEditable}
+                          ?showArchive=${tab.key === 'workspace'}
+                          @file-edit-requested=${this.handleFileEditRequested}
+                          @file-preview-requested=${this.handleFilePreviewRequested}
+                          @file-create-requested=${this.handleFileCreateRequested}
+                        ></scion-file-browser>
+                      </sl-tab-panel>
+                    `
+                  )}
+                </sl-tab-group>
+              </div>
+            `}
       </div>
     `;
   }

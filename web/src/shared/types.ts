@@ -435,9 +435,18 @@ export interface Template {
   status: string;
   scope: string;
   scopeId?: string;
+  contentHash?: string;
+  files?: TemplateFileInfo[];
   createdAt: string;
   updatedAt: string;
   _capabilities?: Capabilities;
+}
+
+export interface TemplateFileInfo {
+  path: string;
+  size: number;
+  hash: string;
+  mode?: string;
 }
 
 /**
@@ -684,7 +693,16 @@ export interface GCPServiceAccount {
   verificationError?: string;
   createdBy: string;
   createdAt: string;
+  managed?: boolean;
+  managedBy?: string;
   _capabilities?: Capabilities;
+}
+
+export interface GCPMintQuotaInfo {
+  grove_minted: number;
+  grove_cap: number;
+  global_minted: number;
+  global_cap: number;
 }
 
 export interface GCPIdentityConfig {

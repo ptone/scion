@@ -1,0 +1,3 @@
+schema_version: "1"
+description: "Texas Hold'em dealer - manages game state, deals cards, and enforces rules"
+system_prompt: system-prompt.md

@@ -1535,11 +1535,14 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 			authType = req.Config.HarnessAuth
 		}
 
+		// Determine if a GCP service account is assigned via identity config.
+		gcpSAAssigned := req.Config != nil && req.Config.GCPIdentity != nil &&
+			req.Config.GCPIdentity.MetadataMode == "assign"
+
 		// When auth type is unset (auto-detect), check if resolved file secrets
-		// can satisfy an alternative auth method before defaulting to api-key.
-		// This mirrors the auto-detect priority in each harness's ResolveAuth:
-		// e.g., for gemini, OAuth creds (auth-file) take precedence over requiring
-		// an API key when the OAUTH_CREDS file secret is available.
+		// or a GCP service account can satisfy an alternative auth method before
+		// defaulting to api-key. This mirrors the auto-detect priority in each
+		// harness's ResolveAuth.
 		if authType == "" {
 			fileSecretNames := make(map[string]struct{})
 			for _, sec := range req.ResolvedSecrets {
@@ -1548,6 +1551,11 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 				}
 			}
 			if detected := harness.DetectAuthTypeFromFileSecrets(harnessType, fileSecretNames); detected != "" {
+				authType = detected
+			}
+		}
+		if authType == "" {
+			if detected := harness.DetectAuthTypeFromGCPIdentity(harnessType, gcpSAAssigned); detected != "" {
 				authType = detected
 			}
 		}
@@ -1590,8 +1598,10 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 			}
 		}
 
-		// Phase 1b: Auth-required file secrets (e.g. ADC for vertex-ai)
-		if authSecrets := harness.RequiredAuthSecrets(harnessType, authType); len(authSecrets) > 0 {
+		// Phase 1b: Auth-required file secrets (e.g. ADC for vertex-ai).
+		// When a GCP service account is assigned, the metadata server provides
+		// credentials, so the ADC file is not required.
+		if authSecrets := harness.RequiredAuthSecrets(harnessType, authType, gcpSAAssigned); len(authSecrets) > 0 {
 			// Build lookup of file-type resolved secrets by Name and Target suffix
 			fileSecrets := make(map[string]struct{})
 			for _, sec := range req.ResolvedSecrets {

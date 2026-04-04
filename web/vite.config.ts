@@ -85,6 +85,12 @@ export default defineConfig({
                     if (id.includes('node_modules/lit') || id.includes('node_modules/@lit')) {
                         return 'lit';
                     }
+                    if (id.includes('node_modules/@codemirror') || id.includes('node_modules/@lezer')) {
+                        return 'codemirror';
+                    }
+                    if (id.includes('node_modules/marked') || id.includes('node_modules/dompurify')) {
+                        return 'markdown';
+                    }
                     if (id.includes('node_modules/@xterm')) {
                         // Basename without extension for stable chunk names
                         const match = id.match(/@xterm\/([^/]+)/);
@@ -94,6 +100,8 @@ export default defineConfig({
             },
         },
         sourcemap: true,
+        // CodeMirror and xterm are lazy-loaded, so large chunks are acceptable
+        chunkSizeWarningLimit: 800,
         // Ensure Lit components are properly bundled
         target: 'esnext',
         minify: 'esbuild',

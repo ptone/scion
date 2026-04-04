@@ -458,3 +458,70 @@ func TestLocalBackend_ResolveBrokerOverride(t *testing.T) {
 		t.Errorf("expected scope %q, got %q", ScopeRuntimeBroker, resolved[0].Scope)
 	}
 }
+
+func TestLocalBackend_ResolveExcludesInternalSecrets(t *testing.T) {
+	backend, s := createTestBackend(t)
+	ctx := context.Background()
+
+	// Seed an internal signing key at hub scope (simulates hub signing keys)
+	seedSecret(t, s, &store.Secret{
+		ID:             "signing-1",
+		Key:            "agent_signing_key",
+		EncryptedValue: "super-secret-key-material",
+		SecretType:     store.SecretTypeInternal,
+		Target:         "agent_signing_key",
+		Scope:          store.ScopeHub,
+		ScopeID:        "test-hub-id",
+	})
+
+	// Seed a normal hub-scoped environment secret
+	seedSecret(t, s, &store.Secret{
+		ID:             "hub-env-1",
+		Key:            "HUB_API_TOKEN",
+		EncryptedValue: "hub-token-value",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "HUB_API_TOKEN",
+		Scope:          store.ScopeHub,
+		ScopeID:        "test-hub-id",
+	})
+
+	// Seed a user-scoped secret
+	seedSecret(t, s, &store.Secret{
+		ID:             "user-env-1",
+		Key:            "USER_KEY",
+		EncryptedValue: "user-key-value",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "USER_KEY",
+		Scope:          store.ScopeUser,
+		ScopeID:        "user-1",
+	})
+
+	resolved, err := backend.Resolve(ctx, "user-1", "", "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	byName := make(map[string]SecretWithValue)
+	for _, sv := range resolved {
+		byName[sv.Name] = sv
+	}
+
+	// Internal signing key must NOT be present
+	if _, ok := byName["agent_signing_key"]; ok {
+		t.Error("internal secret 'agent_signing_key' must not be included in resolved secrets")
+	}
+
+	// Normal hub secret should be present
+	if _, ok := byName["HUB_API_TOKEN"]; !ok {
+		t.Error("expected HUB_API_TOKEN in resolved secrets")
+	}
+
+	// User secret should be present
+	if _, ok := byName["USER_KEY"]; !ok {
+		t.Error("expected USER_KEY in resolved secrets")
+	}
+
+	if len(resolved) != 2 {
+		t.Errorf("expected 2 resolved secrets, got %d", len(resolved))
+	}
+}

@@ -29,17 +29,22 @@ import (
 var templatesImportCmd = &cobra.Command{
 	Use:   "import <source>",
 	Short: "Import agent definitions as scion templates",
-	Long: `Import agent or sub-agent definitions from Claude Code (.claude/agents/*.md)
-or Gemini CLI (.gemini/agents/*.md) and convert them into scion templates.
+	Long: `Import agent or sub-agent definitions from Claude Code (.claude/agents/*.md),
+Gemini CLI (.gemini/agents/*.md), or existing scion templates and add them to your
+current grove or global templates.
 
 Source can be:
   - A single .md agent definition file
   - A directory containing agent definition files
-  - A project root (auto-discovers .claude/agents/ and .gemini/agents/)
+  - A project root (auto-discovers .claude/agents/, .gemini/agents/, .scion/templates/)
+  - A scion template directory (contains scion-agent.yaml)
+  - A directory of scion templates (subdirectories with scion-agent.yaml)
   - A GitHub URL pointing to a repository or subdirectory
 
-The harness type (claude/gemini) is auto-detected from file path and content.
-Use --harness to override detection.
+For non-scion formats, the harness type (claude/gemini) is auto-detected from file
+path and content. Use --harness to override detection.
+
+Scion-format templates are copied directly without conversion.
 
 Examples:
   # Import a single Claude sub-agent definition
@@ -51,8 +56,11 @@ Examples:
   # Auto-detect and import all agents from project root
   scion templates import --all .
 
-  # Import from a GitHub repository subdirectory
-  scion templates import --all https://github.com/org/repo/path/to/.scion/templates
+  # Import scion templates from another project
+  scion templates import --all https://github.com/org/repo/tree/main/.scion/templates
+
+  # Import a single scion template directory
+  scion templates import path/to/.scion/templates/my-template
 
   # Import from a GitHub URL with explicit branch
   scion templates import --all https://github.com/org/repo/tree/main/.claude/agents
@@ -117,15 +125,24 @@ func runTemplateImport(cmd *cobra.Command, args []string) error {
 	var agents []*templateimport.ImportedAgent
 
 	if info.IsDir() {
-		agents, err = discoverAgents(absSource, harnessFlag, all)
-		if err != nil {
-			return err
-		}
-		if len(agents) == 0 {
-			return fmt.Errorf("no importable agent definitions found in %s", source)
-		}
-		if !all && len(agents) > 1 {
-			return fmt.Errorf("found %d agent definitions in %s; use --all to import all of them, or specify a single file", len(agents), source)
+		// Check if source is itself a single scion template
+		if templateimport.IsScionTemplate(absSource) {
+			agent, err := templateimport.ParseScionTemplate(absSource)
+			if err != nil {
+				return fmt.Errorf("failed to parse scion template: %w", err)
+			}
+			agents = append(agents, agent)
+		} else {
+			agents, err = discoverAgents(absSource, harnessFlag, all)
+			if err != nil {
+				return err
+			}
+			if len(agents) == 0 {
+				return fmt.Errorf("no importable agent definitions found in %s", source)
+			}
+			if !all && len(agents) > 1 {
+				return fmt.Errorf("found %d agent definitions in %s; use --all to import all of them, or specify a single file", len(agents), source)
+			}
 		}
 	} else {
 		// Single file
@@ -236,8 +253,28 @@ func discoverAgents(dir, harnessFlag string, all bool) ([]*templateimport.Import
 		agents = append(agents, found...)
 	}
 
-	// If neither .claude/agents/ nor .gemini/agents/ exists, try the directory itself
-	if !hasClaude && !hasGemini {
+	// Check for scion-format templates (directories containing scion-agent.yaml).
+	// First check the directory itself (e.g., .scion/templates/), then check
+	// for a .scion/templates/ subdirectory if this is a project root.
+	if templateimport.IsScionTemplatesDir(dir) {
+		found, err := templateimport.DiscoverScionTemplates(dir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to discover scion templates: %w", err)
+		}
+		agents = append(agents, found...)
+	} else {
+		scionTemplatesDir := filepath.Join(dir, ".scion", "templates")
+		if dirExists(scionTemplatesDir) && templateimport.IsScionTemplatesDir(scionTemplatesDir) {
+			found, err := templateimport.DiscoverScionTemplates(scionTemplatesDir)
+			if err != nil {
+				return nil, fmt.Errorf("failed to discover scion templates: %w", err)
+			}
+			agents = append(agents, found...)
+		}
+	}
+
+	// If no known format was found, try the directory as loose .md files
+	if !hasClaude && !hasGemini && len(agents) == 0 {
 		found, err := parseDirectoryAsAgents(dir, harnessFlag)
 		if err != nil {
 			return nil, err

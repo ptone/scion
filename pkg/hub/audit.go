@@ -52,6 +52,7 @@ type GCPTokenEventType string
 const (
 	GCPTokenEventAccessToken   GCPTokenEventType = "gcp_access_token"
 	GCPTokenEventIdentityToken GCPTokenEventType = "gcp_identity_token"
+	GCPTokenEventMintSA        GCPTokenEventType = "gcp_mint_service_account"
 )
 
 // GCPTokenEvent represents an auditable GCP token generation event.

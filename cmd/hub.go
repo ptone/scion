@@ -114,7 +114,7 @@ var hubGrovesDeleteCmd = &cobra.Command{
 	Long: `Delete a grove from the Hub.
 
 This will remove the grove and all associated broker provider relationships.
-Agents within the grove will also be deleted unless --preserve-agents is set.
+All agents within the grove will be stopped and deleted.
 
 If no grove name is provided, the current grove is used.
 
@@ -126,10 +126,7 @@ Examples:
   scion hub groves delete my-project
 
   # Delete without confirmation
-  scion hub groves delete my-project -y
-
-  # Delete grove but preserve agents
-  scion hub groves delete my-project --preserve-agents`,
+  scion hub groves delete my-project -y`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runHubGrovesDelete,
 }
@@ -258,11 +255,10 @@ Examples:
 }
 
 var (
-	hubGrovesDeletePreserveAgents bool
-	hubGroveCreateSlug            string
-	hubGroveCreateName            string
-	hubGroveCreateBranch          string
-	hubGroveCreateVisibility      string
+	hubGroveCreateSlug       string
+	hubGroveCreateName       string
+	hubGroveCreateBranch     string
+	hubGroveCreateVisibility string
 )
 
 // hubGroveCreateCmd creates a grove on the Hub from a git URL
@@ -320,8 +316,6 @@ func init() {
 	hubGrovesInfoCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
 	hubGrovesDeleteCmd.Flags().BoolVarP(&autoConfirm, "yes", "y", false, "Skip confirmation prompt")
 	hubGrovesDeleteCmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes, errors on ambiguous prompts")
-	hubGrovesDeleteCmd.Flags().BoolVar(&hubGrovesDeletePreserveAgents, "preserve-agents", false, "Preserve agents when deleting grove")
-
 	// Grove create flags
 	hubGroveCreateCmd.Flags().StringVar(&hubGroveCreateSlug, "slug", "", "Override the auto-derived slug")
 	hubGroveCreateCmd.Flags().StringVar(&hubGroveCreateName, "name", "", "Human-friendly display name (defaults to repo name)")
@@ -619,11 +613,13 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 					status["scionVersionServer"] = health.ScionVersion
 
 					// Verify auth against server
+					jsonAuthVerified := false
 					if authInfo.MethodType != "none" {
 						meCtx, meCancel := context.WithTimeout(context.Background(), 5*time.Second)
 						defer meCancel()
 						if meUser, meErr := client.Auth().Me(meCtx); meErr == nil {
 							status["authVerified"] = true
+							jsonAuthVerified = true
 							status["authUser"] = map[string]string{
 								"id":          meUser.ID,
 								"email":       meUser.Email,
@@ -641,7 +637,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 					}
 
 					// Add grove context to JSON output
-					groveContext := getGroveContextJSON(client, resolvedPath, isGlobal, settings)
+					groveContext := getGroveContextJSON(client, resolvedPath, isGlobal, settings, jsonAuthVerified)
 					status["groveContext"] = groveContext
 				} else {
 					status["connected"] = false
@@ -690,6 +686,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	var client hubclient.Client
 	var health *hubclient.HealthResponse
 	var clientErr error
+	authVerified := false
 
 	if endpoint != "" && !noHub {
 		client, clientErr = getHubClient(settings)
@@ -717,6 +714,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Method:     %s (configured but not accepted by server)\n", authInfo.Method)
 			fmt.Println("            Run 'scion hub auth login' to authenticate.")
 		} else {
+			authVerified = true
 			fmt.Printf("Method:     %s\n", authInfo.Method)
 			if authInfo.IsDevAuth {
 				fmt.Println("            (development mode - not for production use)")
@@ -765,7 +763,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Scion Version (Local):  %s\n", version.Short())
 
 			// Show grove context if we're in a grove
-			printGroveContext(client, resolvedPath, isGlobal, settings)
+			printGroveContext(client, resolvedPath, isGlobal, settings, authVerified)
 		}
 	}
 
@@ -773,7 +771,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 }
 
 // printGroveContext prints information about the current grove's registration and available brokers.
-func printGroveContext(client hubclient.Client, grovePath string, isGlobal bool, settings *config.Settings) {
+func printGroveContext(client hubclient.Client, grovePath string, isGlobal bool, settings *config.Settings, authVerified bool) {
 	// Determine grove name from path
 	groveName := config.GetGroveName(grovePath)
 	if isGlobal {
@@ -788,6 +786,14 @@ func printGroveContext(client hubclient.Client, grovePath string, isGlobal bool,
 		fmt.Printf("Type:       user global\n")
 	} else {
 		fmt.Printf("Type:       project\n")
+	}
+
+	// If not authenticated, we can't query the Hub for grove info
+	if !authVerified {
+		fmt.Printf("Linked:     unknown (not authenticated)\n")
+		fmt.Println()
+		fmt.Println("Authenticate with 'scion hub auth login' to view grove status.")
+		return
 	}
 
 	// Get git remote for this grove (if not global)
@@ -901,7 +907,7 @@ func printGroveContext(client hubclient.Client, grovePath string, isGlobal bool,
 }
 
 // getGroveContextJSON returns grove context information for JSON output.
-func getGroveContextJSON(client hubclient.Client, grovePath string, isGlobal bool, settings *config.Settings) map[string]interface{} {
+func getGroveContextJSON(client hubclient.Client, grovePath string, isGlobal bool, settings *config.Settings, authVerified bool) map[string]interface{} {
 	result := make(map[string]interface{})
 
 	// Determine grove name from path
@@ -916,6 +922,13 @@ func getGroveContextJSON(client hubclient.Client, grovePath string, isGlobal boo
 		result["type"] = "user global"
 	} else {
 		result["type"] = "project"
+	}
+
+	// If not authenticated, we can't query the Hub for grove info
+	if !authVerified {
+		result["linked"] = "unknown"
+		result["reason"] = "not authenticated"
+		return result
 	}
 
 	// Get git remote for this grove (if not global)
@@ -1278,9 +1291,8 @@ func runHubGrovesDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("deletion cancelled")
 	}
 
-	// Delete the grove
-	deleteAgents := !hubGrovesDeletePreserveAgents
-	if err := client.Groves().Delete(ctx, grove.ID, deleteAgents); err != nil {
+	// Delete the grove (always cascade-deletes all agents)
+	if err := client.Groves().Delete(ctx, grove.ID); err != nil {
 		return fmt.Errorf("failed to delete grove: %w", err)
 	}
 
@@ -1290,16 +1302,15 @@ func runHubGrovesDelete(cmd *cobra.Command, args []string) error {
 			Command: "hub groves delete",
 			Message: fmt.Sprintf("Grove '%s' deleted successfully.", grove.Name),
 			Details: map[string]interface{}{
-				"groveId":       grove.ID,
-				"groveName":     grove.Name,
-				"agentsDeleted": deleteAgents,
-				"agentCount":    grove.AgentCount,
+				"groveId":    grove.ID,
+				"groveName":  grove.Name,
+				"agentCount": grove.AgentCount,
 			},
 		})
 	}
 
 	fmt.Printf("Grove '%s' deleted successfully.\n", grove.Name)
-	if deleteAgents {
+	if grove.AgentCount > 0 {
 		fmt.Printf("Deleted %d agent(s).\n", grove.AgentCount)
 	}
 	if providersResp != nil && len(providersResp.Providers) > 0 {

@@ -124,6 +124,44 @@ func TestServer_PersistentSigningKeys_WithHubID(t *testing.T) {
 	if !foundKeys[SecretKeyUserSigningKey] {
 		t.Error("user_signing_key should appear in hub secret list")
 	}
+
+	// Signing keys must be stored with SecretTypeInternal so they are never
+	// projected into agent environments via Resolve().
+	for _, sec := range listed {
+		if sec.Key == SecretKeyAgentSigningKey || sec.Key == SecretKeyUserSigningKey {
+			if sec.SecretType != store.SecretTypeInternal {
+				t.Errorf("signing key %q has SecretType=%q, want %q", sec.Key, sec.SecretType, store.SecretTypeInternal)
+			}
+		}
+	}
+}
+
+func TestServer_SigningKeysExcludedFromResolve(t *testing.T) {
+	s, err := sqlite.New(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.HubID = "test-hub-resolve"
+
+	srv := New(cfg, s)
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
+
+	// Resolve secrets as if dispatching an agent — signing keys must not appear.
+	backend := secret.NewLocalBackend(s, "test-hub-resolve")
+	resolved, err := backend.Resolve(ctx, "", "", "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	for _, sv := range resolved {
+		if sv.Name == SecretKeyAgentSigningKey || sv.Name == SecretKeyUserSigningKey {
+			t.Errorf("signing key %q must not appear in Resolve() results", sv.Name)
+		}
+	}
 }
 
 func TestServer_UserTokenSurvivesRestart(t *testing.T) {

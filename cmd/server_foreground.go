@@ -685,6 +685,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		},
 		MaintenanceConfig: resolveMaintenanceConfig(cfg),
 		SecretBackend:     secretBackend,
+		GCPProjectID:      cfg.Hub.GCPProjectID,
 	}
 
 	hubSrv := hub.New(hubCfg, s)
@@ -763,6 +764,22 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			log.Printf("GCP token generator configured (hub SA: %s)", saEmail)
 		} else {
 			log.Printf("GCP token generator configured (hub SA: unknown - not running on GCE)")
+		}
+	}
+
+	// Initialize GCP IAM admin client for minting service accounts.
+	// Non-fatal if GCP is not available — minting will be disabled.
+	gcpAdmin, adminErr := hub.NewIAMAdminClient(ctx)
+	if adminErr != nil {
+		log.Printf("GCP IAM admin not available (service account minting disabled): %v", adminErr)
+	} else {
+		// Resolve project ID for minting
+		if projectID, err := hub.ResolveGCPProjectID(cfg.Hub.GCPProjectID); err != nil {
+			log.Printf("GCP project ID not available (service account minting disabled): %v", err)
+		} else {
+			hubSrv.SetGCPServiceAccountAdmin(gcpAdmin)
+			hubSrv.SetGCPProjectID(projectID)
+			log.Printf("GCP service account minting configured (project: %s)", projectID)
 		}
 	}
 

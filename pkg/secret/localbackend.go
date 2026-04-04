@@ -115,6 +115,12 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, groveID, brokerID st
 		}
 
 		for _, s := range secrets {
+			// Never project hub-internal infrastructure secrets (e.g. signing keys)
+			// into agent environments.
+			if s.SecretType == store.SecretTypeInternal {
+				continue
+			}
+
 			value, err := b.store.GetSecretValue(ctx, s.Key, sc.scope, sc.scopeID)
 			if err != nil {
 				continue

@@ -133,6 +133,7 @@ const ROUTES: RouteConfig[] = [
   { pattern: /^\/github-app\/installed$/, tag: 'scion-page-github-app-setup', load: () => import('../components/pages/github-app-setup.js') },
   { pattern: /^\/groves\/new$/, tag: 'scion-page-grove-create', load: () => import('../components/pages/grove-create.js') },
   { pattern: /^\/groves\/[^/]+\/settings$/, tag: 'scion-page-grove-settings', load: () => import('../components/pages/grove-settings.js') },
+  { pattern: /^\/groves\/[^/]+\/templates\/[^/]+$/, tag: 'scion-page-template-detail', load: () => import('../components/pages/template-detail.js') },
   { pattern: /^\/groves\/[^/]+\/schedules$/, tag: 'scion-page-grove-schedules', load: () => import('../components/pages/grove-schedules.js') },
   { pattern: /^\/groves\/[^/]+$/, tag: 'scion-page-grove-detail', load: () => import('../components/pages/grove-detail.js') },
   { pattern: /^\/agents\/new$/, tag: 'scion-page-agent-create', load: () => import('../components/pages/agent-create.js') },

@@ -436,6 +436,53 @@ func TestGroveWorkspaceDownload_InlineView(t *testing.T) {
 	assert.Equal(t, "inline content", rec.Body.String())
 }
 
+func TestGroveWorkspaceDownload_FormatJSON(t *testing.T) {
+	srv, _ := testServer(t)
+	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Download JSON")
+
+	content := "# Hello\n\nThis is markdown."
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "readme.md"), []byte(content), 0644))
+
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/files/readme.md?format=json", grove.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Equal(t, "readme.md", resp["path"])
+	assert.Equal(t, content, resp["content"])
+	assert.Equal(t, "utf-8", resp["encoding"])
+	assert.Equal(t, float64(len(content)), resp["size"])
+}
+
+func TestGroveWorkspaceDownload_FormatJSON_BinaryRejected(t *testing.T) {
+	srv, _ := testServer(t)
+	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Download JSON Bin")
+
+	// Write binary content (invalid UTF-8)
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "image.bin"), []byte{0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0xFE}, 0644))
+
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/files/image.bin?format=json", grove.ID), nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "binary")
+}
+
+func TestGroveWorkspaceDownload_FormatJSON_TooLarge(t *testing.T) {
+	srv, _ := testServer(t)
+	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Download JSON Big")
+
+	// Write a file larger than 1MB
+	bigContent := make([]byte, maxEditableFileSize+1)
+	for i := range bigContent {
+		bigContent[i] = 'x'
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "big.txt"), bigContent, 0644))
+
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/files/big.txt?format=json", grove.ID), nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "too large")
+}
+
 func TestGroveWorkspaceDownload_ScionDirRejected(t *testing.T) {
 	srv, _ := testServer(t)
 	grove, _ := createTestHubNativeGrove(t, srv, "WS Download Scion")
@@ -519,6 +566,84 @@ func TestGroveWorkspaceArchive_MethodNotAllowed(t *testing.T) {
 }
 
 // ============================================================================
+// Write (PUT) Tests
+// ============================================================================
+
+func TestGroveWorkspaceWrite_CreateNewFile(t *testing.T) {
+	srv, _ := testServer(t)
+	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Write New")
+
+	body := GroveWorkspaceWriteRequest{Content: "# New File\n\nHello!"}
+	rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/groves/%s/workspace/files/docs/readme.md", grove.ID), body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp GroveWorkspaceFile
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "docs/readme.md", resp.Path)
+	assert.Equal(t, int64(len(body.Content)), resp.Size)
+
+	// Verify on disk
+	content, err := os.ReadFile(filepath.Join(workspacePath, "docs", "readme.md"))
+	require.NoError(t, err)
+	assert.Equal(t, body.Content, string(content))
+}
+
+func TestGroveWorkspaceWrite_OverwriteExisting(t *testing.T) {
+	srv, _ := testServer(t)
+	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Write Overwrite")
+
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "config.yaml"), []byte("old: true"), 0644))
+
+	body := GroveWorkspaceWriteRequest{Content: "new: true"}
+	rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/groves/%s/workspace/files/config.yaml", grove.ID), body)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	content, err := os.ReadFile(filepath.Join(workspacePath, "config.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, "new: true", string(content))
+}
+
+func TestGroveWorkspaceWrite_ConflictDetection(t *testing.T) {
+	srv, _ := testServer(t)
+	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Write Conflict")
+
+	filePath := filepath.Join(workspacePath, "data.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("original"), 0644))
+
+	// Set expectedModTime to a time in the past
+	pastTime := time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339Nano)
+	body := GroveWorkspaceWriteRequest{
+		Content:         "updated",
+		ExpectedModTime: pastTime,
+	}
+	rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/groves/%s/workspace/files/data.txt", grove.ID), body)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+
+	// File should not have changed
+	content, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+	assert.Equal(t, "original", string(content))
+}
+
+func TestGroveWorkspaceWrite_ScionDirRejected(t *testing.T) {
+	srv, _ := testServer(t)
+	grove, _ := createTestHubNativeGrove(t, srv, "WS Write Scion")
+
+	body := GroveWorkspaceWriteRequest{Content: "bad"}
+	rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/groves/%s/workspace/files/.scion/evil.yaml", grove.ID), body)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestGroveWorkspaceWrite_PathTraversalRejected(t *testing.T) {
+	srv, _ := testServer(t)
+	grove, _ := createTestHubNativeGrove(t, srv, "WS Write Traversal")
+
+	body := GroveWorkspaceWriteRequest{Content: "bad"}
+	rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/groves/%s/workspace/files/../../../etc/passwd", grove.ID), body)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// ============================================================================
 // Auth Tests
 // ============================================================================
 
@@ -555,9 +680,10 @@ func TestGroveWorkspace_MethodNotAllowed(t *testing.T) {
 		method string
 		path   string
 	}{
-		{http.MethodPut, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID)},
-		{http.MethodPatch, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID)},
-		{http.MethodPost, fmt.Sprintf("/api/v1/groves/%s/workspace/files/some-file.txt", grove.ID)},
+		{http.MethodPut, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID)},                 // PUT without filePath
+		{http.MethodPatch, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID)},               // PATCH not supported
+		{http.MethodPost, fmt.Sprintf("/api/v1/groves/%s/workspace/files/some-file.txt", grove.ID)},  // POST with filePath
+		{http.MethodPatch, fmt.Sprintf("/api/v1/groves/%s/workspace/files/some-file.txt", grove.ID)}, // PATCH with filePath
 	}
 
 	for _, tt := range tests {
