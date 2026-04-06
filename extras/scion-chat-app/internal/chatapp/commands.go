@@ -99,23 +99,24 @@ func (r *CommandRouter) SetMessenger(m Messenger) {
 }
 
 // HandleEvent processes a ChatEvent and routes it to the appropriate handler.
-func (r *CommandRouter) HandleEvent(ctx context.Context, event *ChatEvent) error {
+// Returns an optional EventResponse for synchronous HTTP responses.
+func (r *CommandRouter) HandleEvent(ctx context.Context, event *ChatEvent) (*EventResponse, error) {
 	switch event.Type {
 	case EventCommand:
-		return r.handleCommand(ctx, event)
+		return nil, r.handleCommand(ctx, event)
 	case EventMessage:
-		return r.handleMessage(ctx, event)
+		return nil, r.handleMessage(ctx, event)
 	case EventAction:
-		return r.handleAction(ctx, event)
+		return nil, r.handleAction(ctx, event)
 	case EventDialogSubmit:
-		return r.handleDialogSubmit(ctx, event)
+		return nil, r.handleDialogSubmit(ctx, event)
 	case EventSpaceJoin:
-		return r.handleSpaceJoin(ctx, event)
+		return nil, r.handleSpaceJoin(ctx, event)
 	case EventSpaceRemove:
-		return r.handleSpaceRemove(ctx, event)
+		return nil, r.handleSpaceRemove(ctx, event)
 	default:
 		r.log.Debug("unhandled event type", "type", event.Type)
-		return nil
+		return nil, nil
 	}
 }
 
@@ -301,7 +302,14 @@ func (r *CommandRouter) handleAgentAction(ctx context.Context, event *ChatEvent,
 }
 
 // handleSpaceJoin is called when the bot is added to a space.
+// When added via @mention (InteractionAdd=true), a subsequent messagePayload
+// or appCommandPayload will follow, so we suppress the welcome message to
+// avoid duplicate responses.
 func (r *CommandRouter) handleSpaceJoin(ctx context.Context, event *ChatEvent) error {
+	if event.InteractionAdd {
+		r.log.Debug("space join via @mention, deferring to subsequent event")
+		return nil
+	}
 	return r.reply(ctx, event, "Hello! I'm Scion Bot. Use `/scion link <grove-slug>` to connect this space to a grove, then `/scion help` for available commands.")
 }
 

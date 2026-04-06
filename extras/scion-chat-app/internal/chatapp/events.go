@@ -16,17 +16,34 @@ package chatapp
 
 // ChatEvent represents a normalized inbound event from a chat platform.
 type ChatEvent struct {
-	Type       ChatEventType
-	Platform   string
-	SpaceID    string
-	ThreadID   string
-	UserID     string
-	Text       string
-	Command    string
-	Args       string
-	ActionID   string
-	ActionData string
-	DialogData map[string]string
+	Type           ChatEventType
+	Platform       string
+	SpaceID        string
+	ThreadID       string
+	UserID         string
+	Text           string
+	Command        string
+	Args           string
+	ActionID       string
+	ActionData     string
+	DialogData     map[string]string
+	InteractionAdd bool // true when added to space via @mention (multi-turn)
+	IsDialogEvent  bool // true when the event is a dialog request/submit
+}
+
+// EventResponse holds an optional synchronous response to return in the HTTP body.
+// Handlers return nil for async-only responses (200 OK with empty body).
+type EventResponse struct {
+	// Message, if set, creates a message synchronously in the response.
+	Message *SendMessageRequest
+	// UpdateMessage, if set, updates the triggering message synchronously.
+	UpdateMessage *SendMessageRequest
+	// Dialog, if set, opens a dialog via pushCard navigation.
+	Dialog *Dialog
+	// CloseDialog, if true, closes the current dialog.
+	CloseDialog bool
+	// Notification is optional text shown as a snackbar after dialog close.
+	Notification string
 }
 
 // ChatEventType identifies the kind of inbound chat event.

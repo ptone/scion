@@ -32,14 +32,15 @@ const (
 	chatAPIBase  = "https://chat.googleapis.com/v1"
 )
 
-// EventHandler processes normalized chat events.
-type EventHandler func(ctx context.Context, event *chatapp.ChatEvent) error
+// EventHandler processes normalized chat events and returns an optional synchronous response.
+type EventHandler func(ctx context.Context, event *chatapp.ChatEvent) (*chatapp.EventResponse, error)
 
 // Adapter implements the chatapp.Messenger interface for Google Chat.
 type Adapter struct {
-	projectID    string
-	audience     string
-	httpServer   *http.Server
+	projectID   string
+	externalURL string
+	commandIDs  map[string]string // command ID → command name
+	httpServer  *http.Server
 	eventHandler EventHandler
 	httpClient   *http.Client // authenticated client for Chat API calls
 	log          *slog.Logger
@@ -50,10 +51,12 @@ type Adapter struct {
 
 // Config holds Google Chat adapter configuration.
 type Config struct {
-	ProjectID     string
-	Audience      string
-	ListenAddress string
-	Credentials   string // Path to service account key
+	ProjectID           string
+	ExternalURL         string            // Public endpoint URL for action functions
+	ServiceAccountEmail string            // Per-project SA for token verification
+	CommandIDMap        map[string]string // Console command ID → command name
+	ListenAddress       string
+	Credentials         string // Path to service account key
 }
 
 // NewAdapter creates a new Google Chat adapter.
@@ -61,9 +64,14 @@ func NewAdapter(cfg Config, handler EventHandler, httpClient *http.Client, log *
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	cmdIDs := cfg.CommandIDMap
+	if cmdIDs == nil {
+		cmdIDs = make(map[string]string)
+	}
 	return &Adapter{
 		projectID:    cfg.ProjectID,
-		audience:     cfg.Audience,
+		externalURL:  cfg.ExternalURL,
+		commandIDs:   cmdIDs,
 		eventHandler: handler,
 		httpClient:   httpClient,
 		log:          log,
@@ -97,7 +105,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	return nil
 }
 
-// handleEvent processes incoming Google Chat webhook events.
+// handleEvent processes incoming Google Chat Workspace Add-on events.
 func (a *Adapter) handleEvent(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -120,25 +128,254 @@ func (a *Adapter) handleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.eventHandler(r.Context(), event); err != nil {
+	resp, err := a.eventHandler(r.Context(), event)
+	if err != nil {
 		a.log.Error("handling event", "type", event.Type, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
+	// Serialize synchronous response if handler returned one.
+	if resp != nil {
+		payload := a.buildSyncResponse(resp)
+		if payload != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if err := json.NewEncoder(w).Encode(payload); err != nil {
+				a.log.Error("encoding sync response", "error", err)
+			}
+			return
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
-// rawEvent represents the raw Google Chat event payload.
+// buildSyncResponse converts an EventResponse to the Workspace Add-on JSON format.
+func (a *Adapter) buildSyncResponse(resp *chatapp.EventResponse) map[string]any {
+	if resp.Dialog != nil {
+		return a.buildDialogResponse(resp.Dialog)
+	}
+	if resp.CloseDialog {
+		result := map[string]any{
+			"action": map[string]any{
+				"navigations": []any{
+					map[string]any{"endNavigation": "CLOSE_DIALOG"},
+				},
+			},
+		}
+		if resp.Notification != "" {
+			result["action"].(map[string]any)["notification"] = map[string]any{
+				"text": resp.Notification,
+			}
+		}
+		return result
+	}
+	if resp.Message != nil {
+		return a.buildMessageResponse("createMessageAction", resp.Message)
+	}
+	if resp.UpdateMessage != nil {
+		return a.buildMessageResponse("updateMessageAction", resp.UpdateMessage)
+	}
+	return nil
+}
+
+// buildDialogResponse creates a pushCard navigation response for opening a dialog.
+func (a *Adapter) buildDialogResponse(dialog *chatapp.Dialog) map[string]any {
+	widgets := make([]any, 0, len(dialog.Fields))
+	for _, f := range dialog.Fields {
+		switch f.Type {
+		case "text", "textarea":
+			w := map[string]any{
+				"label": f.Label,
+				"name":  f.ID,
+				"type":  "SINGLE_LINE",
+			}
+			if f.Type == "textarea" {
+				w["type"] = "MULTIPLE_LINE"
+			}
+			if f.Placeholder != "" {
+				w["hintText"] = f.Placeholder
+			}
+			widgets = append(widgets, map[string]any{"textInput": w})
+		case "select", "checkbox":
+			items := make([]any, 0, len(f.Options))
+			for _, opt := range f.Options {
+				items = append(items, map[string]any{
+					"text":     opt.Label,
+					"value":    opt.Value,
+					"selected": false,
+				})
+			}
+			selType := "CHECK_BOX"
+			if f.Type == "select" {
+				selType = "DROPDOWN"
+			}
+			widgets = append(widgets, map[string]any{
+				"selectionInput": map[string]any{
+					"name":  f.ID,
+					"label": f.Label,
+					"type":  selType,
+					"items": items,
+				},
+			})
+		}
+	}
+
+	card := map[string]any{
+		"header":   map[string]any{"title": dialog.Title},
+		"sections": []any{map[string]any{"widgets": widgets}},
+	}
+
+	// Footer buttons
+	footer := map[string]any{}
+	if dialog.Submit.Label != "" {
+		footer["primaryButton"] = map[string]any{
+			"text": dialog.Submit.Label,
+			"onClick": map[string]any{
+				"action": map[string]any{
+					"function":   a.externalURL,
+					"parameters": []any{map[string]any{"key": "action", "value": dialog.Submit.ActionID}},
+				},
+			},
+		}
+	}
+	if dialog.Cancel.Label != "" {
+		footer["secondaryButton"] = map[string]any{
+			"text": dialog.Cancel.Label,
+			"onClick": map[string]any{
+				"action": map[string]any{
+					"function":   a.externalURL,
+					"parameters": []any{map[string]any{"key": "action", "value": dialog.Cancel.ActionID}},
+				},
+			},
+		}
+	}
+	if len(footer) > 0 {
+		card["fixedFooter"] = footer
+	}
+
+	return map[string]any{
+		"action": map[string]any{
+			"navigations": []any{
+				map[string]any{"pushCard": card},
+			},
+		},
+	}
+}
+
+// buildMessageResponse wraps a message in the hostAppDataAction envelope.
+func (a *Adapter) buildMessageResponse(actionKey string, req *chatapp.SendMessageRequest) map[string]any {
+	msg := map[string]any{}
+	if req.Text != "" {
+		msg["text"] = req.Text
+	}
+	if req.Card != nil {
+		msg["cardsV2"] = []map[string]any{
+			{
+				"cardId": "scion_card",
+				"card":   a.renderCardV2(req.Card),
+			},
+		}
+	}
+	return map[string]any{
+		"hostAppDataAction": map[string]any{
+			"chatDataAction": map[string]any{
+				actionKey: map[string]any{
+					"message": msg,
+				},
+			},
+		},
+	}
+}
+
+// rawEvent represents the Workspace Add-on event envelope.
 type rawEvent struct {
-	Type         string       `json:"type"`
-	EventTime    string       `json:"eventTime"`
-	Space        rawSpace     `json:"space"`
-	Message      *rawMessage  `json:"message,omitempty"`
-	User         rawUser      `json:"user"`
-	Action       *rawAction   `json:"action,omitempty"`
-	Common       *rawCommon   `json:"common,omitempty"`
-	SlashCommand *rawSlashCmd `json:"slashCommand,omitempty"`
+	CommonEventObject *rawCommonEventObject `json:"commonEventObject,omitempty"`
+	Chat              *rawChatPayload       `json:"chat,omitempty"`
+}
+
+type rawCommonEventObject struct {
+	Platform   string                         `json:"platform"`
+	HostApp    string                         `json:"hostApp"`
+	UserLocale string                         `json:"userLocale"`
+	TimeZone   *rawTimeZone                   `json:"timeZone,omitempty"`
+	Parameters map[string]string              `json:"parameters,omitempty"`
+	FormInputs map[string]rawFormInputWrapper `json:"formInputs,omitempty"`
+}
+
+type rawTimeZone struct {
+	ID     string `json:"id"`
+	Offset int    `json:"offset"`
+}
+
+type rawFormInputWrapper struct {
+	StringInputs  *rawStringInputs  `json:"stringInputs,omitempty"`
+	DateTimeInput *rawDateTimeInput `json:"dateTimeInput,omitempty"`
+}
+
+type rawStringInputs struct {
+	Value []string `json:"value"`
+}
+
+type rawDateTimeInput struct {
+	Milliseconds int64 `json:"msSinceEpoch"`
+	HasDate      bool  `json:"hasDate"`
+	HasTime      bool  `json:"hasTime"`
+}
+
+type rawChatPayload struct {
+	User                    *rawUser                    `json:"user,omitempty"`
+	Space                   *rawSpace                   `json:"space,omitempty"`
+	EventTime               string                      `json:"eventTime"`
+	MessagePayload          *rawMessagePayload          `json:"messagePayload,omitempty"`
+	AddedToSpacePayload     *rawAddedToSpacePayload     `json:"addedToSpacePayload,omitempty"`
+	RemovedFromSpacePayload *rawRemovedFromSpacePayload `json:"removedFromSpacePayload,omitempty"`
+	ButtonClickedPayload    *rawButtonClickedPayload    `json:"buttonClickedPayload,omitempty"`
+	AppCommandPayload       *rawAppCommandPayload       `json:"appCommandPayload,omitempty"`
+	WidgetUpdatedPayload    *rawWidgetUpdatedPayload    `json:"widgetUpdatedPayload,omitempty"`
+}
+
+type rawMessagePayload struct {
+	Message                  *rawMessage `json:"message,omitempty"`
+	Space                    *rawSpace   `json:"space,omitempty"`
+	ConfigCompleteRedirectUri string     `json:"configCompleteRedirectUri,omitempty"`
+}
+
+type rawAddedToSpacePayload struct {
+	Space                    *rawSpace `json:"space,omitempty"`
+	InteractionAdd           bool      `json:"interactionAdd"`
+	ConfigCompleteRedirectUri string   `json:"configCompleteRedirectUri,omitempty"`
+}
+
+type rawRemovedFromSpacePayload struct {
+	Space *rawSpace `json:"space,omitempty"`
+}
+
+type rawButtonClickedPayload struct {
+	Message         *rawMessage `json:"message,omitempty"`
+	Space           *rawSpace   `json:"space,omitempty"`
+	IsDialogEvent   bool        `json:"isDialogEvent"`
+	DialogEventType string      `json:"dialogEventType"`
+}
+
+type rawAppCommandPayload struct {
+	AppCommandMetadata *rawAppCommandMetadata `json:"appCommandMetadata,omitempty"`
+	Space              *rawSpace              `json:"space,omitempty"`
+	Thread             *rawThread             `json:"thread,omitempty"`
+	Message            *rawMessage            `json:"message,omitempty"`
+	IsDialogEvent      bool                   `json:"isDialogEvent"`
+	DialogEventType    string                 `json:"dialogEventType"`
+}
+
+type rawAppCommandMetadata struct {
+	AppCommandId   json.Number `json:"appCommandId"`
+	AppCommandType string      `json:"appCommandType"`
+}
+
+type rawWidgetUpdatedPayload struct {
+	Space   *rawSpace   `json:"space,omitempty"`
+	Message *rawMessage `json:"message,omitempty"`
 }
 
 type rawSpace struct {
@@ -152,17 +389,12 @@ type rawMessage struct {
 	Text         string          `json:"text"`
 	ArgumentText string          `json:"argumentText"`
 	Thread       *rawThread      `json:"thread,omitempty"`
-	SlashCommand *rawSlashCmd    `json:"slashCommand,omitempty"`
 	Annotations  []rawAnnotation `json:"annotations,omitempty"`
 }
 
 type rawThread struct {
 	Name      string `json:"name"`
 	ThreadKey string `json:"threadKey,omitempty"`
-}
-
-type rawSlashCmd struct {
-	CommandID int64 `json:"commandId"`
 }
 
 type rawAnnotation struct {
@@ -178,108 +410,169 @@ type rawUser struct {
 	Type        string `json:"type"`
 }
 
-type rawAction struct {
-	ActionMethodName string           `json:"actionMethodName"`
-	Parameters       []rawActionParam `json:"parameters"`
-}
-
-type rawActionParam struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
-}
-
-type rawCommon struct {
-	FormInputs map[string]rawFormInput `json:"formInputs,omitempty"`
-}
-
-type rawFormInput struct {
-	StringInputs *rawStringInputs `json:"stringInputs,omitempty"`
-}
-
-type rawStringInputs struct {
-	Value []string `json:"value"`
-}
-
-// normalizeEvent converts a raw Google Chat event to a ChatEvent.
+// normalizeEvent converts a Workspace Add-on event to a ChatEvent.
+// Event type is inferred from which chat payload is present (no top-level type field).
 func (a *Adapter) normalizeEvent(raw *rawEvent) *chatapp.ChatEvent {
-	event := &chatapp.ChatEvent{
-		Platform: PlatformName,
-		SpaceID:  raw.Space.Name,
-		UserID:   raw.User.Name,
+	if raw.Chat == nil {
+		a.log.Debug("event has no chat payload, ignoring")
+		return nil
 	}
 
-	switch raw.Type {
-	case "ADDED_TO_SPACE":
+	event := &chatapp.ChatEvent{
+		Platform: PlatformName,
+	}
+
+	// User is at the top level of the chat object.
+	if raw.Chat.User != nil {
+		event.UserID = raw.Chat.User.Name
+	}
+
+	// Extract parameters from commonEventObject.
+	params := a.getParameters(raw)
+
+	switch {
+	case raw.Chat.AddedToSpacePayload != nil:
+		p := raw.Chat.AddedToSpacePayload
 		event.Type = chatapp.EventSpaceJoin
+		event.InteractionAdd = p.InteractionAdd
+		if p.Space != nil {
+			event.SpaceID = p.Space.Name
+		}
 		a.mu.Lock()
-		a.spaces[raw.Space.Name] = true
+		a.spaces[event.SpaceID] = true
 		a.mu.Unlock()
 		return event
 
-	case "REMOVED_FROM_SPACE":
+	case raw.Chat.RemovedFromSpacePayload != nil:
+		p := raw.Chat.RemovedFromSpacePayload
 		event.Type = chatapp.EventSpaceRemove
+		if p.Space != nil {
+			event.SpaceID = p.Space.Name
+		}
 		a.mu.Lock()
-		delete(a.spaces, raw.Space.Name)
+		delete(a.spaces, event.SpaceID)
 		a.mu.Unlock()
 		return event
 
-	case "MESSAGE":
-		if raw.Message == nil {
+	case raw.Chat.AppCommandPayload != nil:
+		p := raw.Chat.AppCommandPayload
+		event.Type = chatapp.EventCommand
+		if p.Space != nil {
+			event.SpaceID = p.Space.Name
+		}
+		if p.Thread != nil {
+			event.ThreadID = p.Thread.Name
+		}
+		// Map numeric command ID to command name.
+		if p.AppCommandMetadata != nil {
+			cmdID := p.AppCommandMetadata.AppCommandId.String()
+			if name, ok := a.commandIDs[cmdID]; ok {
+				event.Command = name
+			} else {
+				event.Command = "scion" // default fallback
+			}
+		}
+		if p.Message != nil {
+			event.Args = strings.TrimSpace(p.Message.ArgumentText)
+			if p.Message.Thread != nil {
+				event.ThreadID = p.Message.Thread.Name
+			}
+		}
+		return event
+
+	case raw.Chat.MessagePayload != nil:
+		p := raw.Chat.MessagePayload
+		if p.Message == nil {
 			return nil
 		}
-		if raw.Message.Thread != nil {
-			event.ThreadID = raw.Message.Thread.Name
+		if p.Space != nil {
+			event.SpaceID = p.Space.Name
 		}
-
-		// Check for slash command
-		if raw.Message.SlashCommand != nil {
-			event.Type = chatapp.EventCommand
-			event.Command = "scion"
-			event.Args = strings.TrimSpace(raw.Message.ArgumentText)
-			return event
+		if p.Message.Thread != nil {
+			event.ThreadID = p.Message.Thread.Name
 		}
-
-		// Regular message (with @mention stripped via ArgumentText)
 		event.Type = chatapp.EventMessage
-		text := raw.Message.ArgumentText
+		text := p.Message.ArgumentText
 		if text == "" {
-			text = raw.Message.Text
+			text = p.Message.Text
 		}
 		event.Text = strings.TrimSpace(text)
 		return event
 
-	case "CARD_CLICKED":
-		if raw.Message != nil && raw.Message.Thread != nil {
-			event.ThreadID = raw.Message.Thread.Name
+	case raw.Chat.ButtonClickedPayload != nil:
+		p := raw.Chat.ButtonClickedPayload
+		if p.Space != nil {
+			event.SpaceID = p.Space.Name
 		}
-		if raw.Action != nil {
-			event.Type = chatapp.EventAction
-			event.ActionID = raw.Action.ActionMethodName
-			// Collect action parameters
-			for _, p := range raw.Action.Parameters {
-				if event.ActionData != "" {
-					event.ActionData += ","
-				}
-				event.ActionData += p.Key + "=" + p.Value
+		if p.Message != nil && p.Message.Thread != nil {
+			event.ThreadID = p.Message.Thread.Name
+		}
+		event.IsDialogEvent = p.IsDialogEvent
+
+		// Read action ID from parameters.
+		actionID := params["action"]
+		if actionID == "" {
+			// Backward compat: pre-migration cards pass old function name here.
+			actionID = params["__action_method_name__"]
+		}
+		event.ActionID = actionID
+
+		// Collect remaining parameters as action data.
+		for k, v := range params {
+			if k == "action" || k == "__action_method_name__" {
+				continue
 			}
+			if event.ActionData != "" {
+				event.ActionData += ","
+			}
+			event.ActionData += k + "=" + v
 		}
 
-		// Check for dialog/form submission
-		if raw.Common != nil && len(raw.Common.FormInputs) > 0 {
+		// Check for form inputs (dialog submission).
+		formInputs := a.getFormInputs(raw)
+		if len(formInputs) > 0 {
 			event.Type = chatapp.EventDialogSubmit
-			event.DialogData = make(map[string]string)
-			for k, v := range raw.Common.FormInputs {
-				if v.StringInputs != nil && len(v.StringInputs.Value) > 0 {
-					event.DialogData[k] = v.StringInputs.Value[0]
-				}
-			}
+			event.DialogData = formInputs
+		} else {
+			event.Type = chatapp.EventAction
 		}
 		return event
 
 	default:
-		a.log.Debug("unhandled event type", "type", raw.Type)
+		a.log.Debug("no recognized chat payload present")
 		return nil
 	}
+}
+
+// getParameters extracts action parameters from commonEventObject.
+func (a *Adapter) getParameters(raw *rawEvent) map[string]string {
+	if raw.CommonEventObject != nil && raw.CommonEventObject.Parameters != nil {
+		return raw.CommonEventObject.Parameters
+	}
+	return map[string]string{}
+}
+
+// getFormInputs extracts form input values from commonEventObject.
+// Values are arrays in the Add-on format; we take the first value for single inputs
+// and join with commas for multi-value inputs.
+func (a *Adapter) getFormInputs(raw *rawEvent) map[string]string {
+	if raw.CommonEventObject == nil || raw.CommonEventObject.FormInputs == nil {
+		return nil
+	}
+	result := make(map[string]string)
+	for k, v := range raw.CommonEventObject.FormInputs {
+		if v.StringInputs != nil && len(v.StringInputs.Value) > 0 {
+			if len(v.StringInputs.Value) == 1 {
+				result[k] = v.StringInputs.Value[0]
+			} else {
+				result[k] = strings.Join(v.StringInputs.Value, ",")
+			}
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 // SendMessage sends a text or card message to a Google Chat space.
@@ -294,7 +587,7 @@ func (a *Adapter) SendMessage(ctx context.Context, req chatapp.SendMessageReques
 		payload["cardsV2"] = []map[string]any{
 			{
 				"cardId": "scion_card",
-				"card":   renderCardV2(req.Card),
+				"card":   a.renderCardV2(req.Card),
 			},
 		}
 	}
@@ -342,7 +635,7 @@ func (a *Adapter) UpdateMessage(ctx context.Context, messageID string, req chata
 		payload["cardsV2"] = []map[string]any{
 			{
 				"cardId": "scion_card",
-				"card":   renderCardV2(req.Card),
+				"card":   a.renderCardV2(req.Card),
 			},
 		}
 	}
@@ -384,7 +677,8 @@ func (a *Adapter) SetAgentIdentity(ctx context.Context, agent chatapp.AgentIdent
 }
 
 // renderCardV2 converts a platform-agnostic Card to Google Chat Cards V2 format.
-func renderCardV2(card *chatapp.Card) map[string]any {
+// Action IDs are moved into parameters and the function is set to the external URL.
+func (a *Adapter) renderCardV2(card *chatapp.Card) map[string]any {
 	c := map[string]any{}
 
 	// Header
@@ -412,7 +706,7 @@ func renderCardV2(card *chatapp.Card) map[string]any {
 		if len(s.Widgets) > 0 {
 			widgets := make([]map[string]any, 0, len(s.Widgets))
 			for _, w := range s.Widgets {
-				widget := renderWidget(&w)
+				widget := a.renderWidget(&w)
 				if widget != nil {
 					widgets = append(widgets, widget)
 				}
@@ -425,20 +719,16 @@ func renderCardV2(card *chatapp.Card) map[string]any {
 	// Render card-level actions as a button list in a footer section
 	if len(card.Actions) > 0 {
 		buttons := make([]any, 0, len(card.Actions))
-		for _, a := range card.Actions {
+		for _, act := range card.Actions {
 			btn := map[string]any{
-				"text": a.Label,
-				"onClick": map[string]any{
-					"action": map[string]any{
-						"function": a.ActionID,
-					},
-				},
+				"text":    act.Label,
+				"onClick": a.actionOnClick(act.ActionID),
 			}
-			if a.Style == "danger" {
+			if act.Style == "danger" {
 				btn["color"] = map[string]any{
 					"red": 0.9, "green": 0.2, "blue": 0.2, "alpha": 1,
 				}
-			} else if a.Style == "primary" {
+			} else if act.Style == "primary" {
 				btn["color"] = map[string]any{
 					"red": 0.1, "green": 0.5, "blue": 0.9, "alpha": 1,
 				}
@@ -463,8 +753,20 @@ func renderCardV2(card *chatapp.Card) map[string]any {
 	return c
 }
 
+// actionOnClick builds an onClick action with the full external URL and action ID in parameters.
+func (a *Adapter) actionOnClick(actionID string) map[string]any {
+	return map[string]any{
+		"action": map[string]any{
+			"function": a.externalURL,
+			"parameters": []any{
+				map[string]any{"key": "action", "value": actionID},
+			},
+		},
+	}
+}
+
 // renderWidget converts a Widget to Google Chat widget format.
-func renderWidget(w *chatapp.Widget) map[string]any {
+func (a *Adapter) renderWidget(w *chatapp.Widget) map[string]any {
 	switch w.Type {
 	case chatapp.WidgetText:
 		return map[string]any{
@@ -482,12 +784,8 @@ func renderWidget(w *chatapp.Widget) map[string]any {
 		}
 	case chatapp.WidgetButton:
 		btn := map[string]any{
-			"text": w.Label,
-			"onClick": map[string]any{
-				"action": map[string]any{
-					"function": w.ActionID,
-				},
-			},
+			"text":    w.Label,
+			"onClick": a.actionOnClick(w.ActionID),
 		}
 		return map[string]any{
 			"buttonList": map[string]any{
@@ -511,11 +809,7 @@ func renderWidget(w *chatapp.Widget) map[string]any {
 			"type":  "SINGLE_LINE",
 		}
 		if w.ActionID != "" {
-			input["onChangeAction"] = map[string]any{
-				"action": map[string]any{
-					"function": w.ActionID,
-				},
-			}
+			input["onChangeAction"] = a.actionOnClick(w.ActionID)
 		}
 		return map[string]any{
 			"textInput": input,

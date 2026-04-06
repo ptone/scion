@@ -118,10 +118,12 @@ func main() {
 	if cfg.Platforms.GoogleChat.Enabled {
 		gcAdapter := googlechat.NewAdapter(
 			googlechat.Config{
-				ProjectID:     cfg.Platforms.GoogleChat.ProjectID,
-				Audience:      cfg.Platforms.GoogleChat.Audience,
-				ListenAddress: cfg.Platforms.GoogleChat.ListenAddress,
-				Credentials:   cfg.Platforms.GoogleChat.Credentials,
+				ProjectID:           cfg.Platforms.GoogleChat.ProjectID,
+				ExternalURL:         cfg.Platforms.GoogleChat.ExternalURL,
+				ServiceAccountEmail: cfg.Platforms.GoogleChat.ServiceAccountEmail,
+				CommandIDMap:        cfg.Platforms.GoogleChat.CommandIDMap,
+				ListenAddress:       cfg.Platforms.GoogleChat.ListenAddress,
+				Credentials:         cfg.Platforms.GoogleChat.Credentials,
 			},
 			cmdRouter.HandleEvent,
 			nil, // uses http.DefaultClient
@@ -130,6 +132,7 @@ func main() {
 		messenger = gcAdapter
 		log.Info("google chat adapter initialized",
 			"project_id", cfg.Platforms.GoogleChat.ProjectID,
+			"external_url", cfg.Platforms.GoogleChat.ExternalURL,
 		)
 	}
 

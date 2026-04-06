@@ -44,11 +44,13 @@ type PlatformsConfig struct {
 
 // GoogleChatConfig holds settings for the Google Chat adapter.
 type GoogleChatConfig struct {
-	Enabled       bool   `yaml:"enabled"`
-	ProjectID     string `yaml:"project_id"`
-	Credentials   string `yaml:"credentials"`
-	ListenAddress string `yaml:"listen_address"`
-	Audience      string `yaml:"audience"`
+	Enabled             bool              `yaml:"enabled"`
+	ProjectID           string            `yaml:"project_id"`
+	Credentials         string            `yaml:"credentials"`
+	ListenAddress       string            `yaml:"listen_address"`
+	ExternalURL         string            `yaml:"external_url"`
+	ServiceAccountEmail string            `yaml:"service_account_email"`
+	CommandIDMap        map[string]string `yaml:"command_id_map"`
 }
 
 // SlackConfig holds settings for the Slack adapter (future).
