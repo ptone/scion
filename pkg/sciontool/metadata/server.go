@@ -46,7 +46,12 @@ type Config struct {
 	// HubURL is the Hub endpoint for token brokering.
 	HubURL string
 	// AuthToken is the agent's SCION_AUTH_TOKEN for Hub authentication.
+	// Deprecated: Use TokenFunc for dynamic token retrieval.
 	AuthToken string
+	// TokenFunc, if set, is called to get the current auth token.
+	// This allows the metadata server to pick up refreshed tokens.
+	// If nil, the static AuthToken field is used.
+	TokenFunc func() string
 }
 
 // ConfigFromEnv reads metadata server configuration from environment variables.
@@ -98,6 +103,15 @@ type Server struct {
 	cancel             context.CancelFunc
 	iptablesConfigured bool        // whether iptables redirect was successfully set up
 	metadataBlocked    blockMethod // which blocking method was applied (block mode only)
+}
+
+// authToken returns the current auth token, preferring the dynamic TokenFunc
+// over the static AuthToken field.
+func (s *Server) authToken() string {
+	if s.config.TokenFunc != nil {
+		return s.config.TokenFunc()
+	}
+	return s.config.AuthToken
 }
 
 type cachedAccessToken struct {
@@ -420,7 +434,7 @@ func (s *Server) fetchAccessToken(ctx context.Context) (*cachedAccessToken, erro
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.config.AuthToken)
+	req.Header.Set("Authorization", "Bearer "+s.authToken())
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -462,7 +476,7 @@ func (s *Server) fetchIdentityToken(ctx context.Context, audience string) (*cach
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.config.AuthToken)
+	req.Header.Set("Authorization", "Bearer "+s.authToken())
 
 	resp, err := s.client.Do(req)
 	if err != nil {

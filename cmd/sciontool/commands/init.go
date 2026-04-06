@@ -312,6 +312,12 @@ func runInit(args []string) int {
 		// We preserve application_default_credentials.json which may be
 		// bind-mounted as a secret (gcloud-adc).
 		cleanGcloudConfigForMetadata(filepath.Join(agentHome, ".config", "gcloud"))
+		// Wire up dynamic token retrieval so the metadata server always
+		// uses the latest agent token after refresh, not the startup value.
+		// The env var is updated by the token refresh loop (see OnRefreshed).
+		metaCfg.TokenFunc = func() string {
+			return os.Getenv(hub.EnvHubToken)
+		}
 		metadataServer = metadata.New(*metaCfg)
 		metaCtx := context.Background()
 		if err := metadataServer.Start(metaCtx); err != nil {
