@@ -655,6 +655,9 @@ func TestServer_GenerateAgentToken_NoDevAuthDoesNotAutoGrant(t *testing.T) {
 	if !claims.HasScope(ScopeAgentStatusUpdate) {
 		t.Error("expected ScopeAgentStatusUpdate to be present")
 	}
+	if !claims.HasScope(ScopeAgentNotify) {
+		t.Error("expected ScopeAgentNotify to be present as a default scope")
+	}
 	if claims.HasScope(ScopeAgentCreate) {
 		t.Error("expected ScopeAgentCreate NOT to be auto-granted without dev-auth")
 	}
