@@ -52,11 +52,21 @@ type PluginsConfig struct {
 type PluginEntry struct {
 	// Path is the explicit filesystem path to the plugin binary.
 	// If empty, discovery will attempt to find it automatically.
+	// Ignored when SelfManaged is true.
 	Path string `json:"path,omitempty" yaml:"path,omitempty" koanf:"path"`
 
 	// Config is an opaque key-value map passed to the plugin via Configure().
 	// The plugin validates its own config and returns clear errors for invalid values.
 	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty" koanf:"config"`
+
+	// SelfManaged indicates the plugin manages its own process lifecycle.
+	// The Hub connects to the plugin's RPC server rather than starting it.
+	// The plugin is responsible for its own startup and shutdown.
+	SelfManaged bool `json:"self_managed,omitempty" yaml:"self_managed,omitempty" koanf:"self_managed"`
+
+	// Address is the RPC address for self-managed plugins (e.g. "localhost:9090").
+	// Required when SelfManaged is true.
+	Address string `json:"address,omitempty" yaml:"address,omitempty" koanf:"address"`
 }
 
 // PluginInfo contains metadata reported by a plugin via the GetInfo() RPC call.

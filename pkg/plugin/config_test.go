@@ -76,3 +76,33 @@ func TestPluginsConfigFromEntries(t *testing.T) {
 	assert.Equal(t, "nats://localhost", cfg.Broker["nats"].Config["url"])
 	assert.Equal(t, "cursor:latest", cfg.Harness["cursor"].Config["image"])
 }
+
+func TestPluginEntry_SelfManaged(t *testing.T) {
+	entry := PluginEntry{
+		SelfManaged: true,
+		Address:     "localhost:9090",
+		Config: map[string]string{
+			"hub_endpoint": "https://hub.example.com",
+		},
+	}
+
+	assert.True(t, entry.SelfManaged)
+	assert.Equal(t, "localhost:9090", entry.Address)
+	assert.Empty(t, entry.Path)
+}
+
+func TestPluginsConfigFromEntries_SelfManaged(t *testing.T) {
+	brokerEntries := map[string]V1PluginEntryLike{
+		"googlechat": {
+			SelfManaged: true,
+			Address:     "localhost:9090",
+			Config:      map[string]string{"project_id": "my-gcp-project"},
+		},
+	}
+
+	cfg := PluginsConfigFromEntries(brokerEntries, nil)
+	assert.True(t, cfg.Broker["googlechat"].SelfManaged)
+	assert.Equal(t, "localhost:9090", cfg.Broker["googlechat"].Address)
+	assert.Equal(t, "my-gcp-project", cfg.Broker["googlechat"].Config["project_id"])
+	assert.Empty(t, cfg.Broker["googlechat"].Path)
+}

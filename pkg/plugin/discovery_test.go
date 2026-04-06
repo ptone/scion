@@ -191,6 +191,98 @@ func TestDiscoverPlugins_MissingBinary(t *testing.T) {
 	assert.Empty(t, discovered)
 }
 
+func TestDiscoverPlugins_SelfManaged(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.Default()
+
+	cfg := PluginsConfig{
+		Broker: map[string]PluginEntry{
+			"googlechat": {
+				SelfManaged: true,
+				Address:     "localhost:9090",
+				Config:      map[string]string{"project_id": "my-gcp-project"},
+			},
+		},
+	}
+
+	discovered := DiscoverPlugins(cfg, dir, logger)
+	require.Len(t, discovered, 1)
+	assert.Equal(t, "googlechat", discovered[0].Name)
+	assert.Equal(t, PluginTypeBroker, discovered[0].Type)
+	assert.True(t, discovered[0].SelfManaged)
+	assert.Equal(t, "localhost:9090", discovered[0].Address)
+	assert.Empty(t, discovered[0].Path) // No binary path for self-managed plugins
+	assert.True(t, discovered[0].FromConfig)
+}
+
+func TestDiscoverPlugins_SelfManagedHarness(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.Default()
+
+	cfg := PluginsConfig{
+		Harness: map[string]PluginEntry{
+			"external": {
+				SelfManaged: true,
+				Address:     "localhost:8080",
+			},
+		},
+	}
+
+	discovered := DiscoverPlugins(cfg, dir, logger)
+	require.Len(t, discovered, 1)
+	assert.Equal(t, "external", discovered[0].Name)
+	assert.Equal(t, PluginTypeHarness, discovered[0].Type)
+	assert.True(t, discovered[0].SelfManaged)
+	assert.Equal(t, "localhost:8080", discovered[0].Address)
+}
+
+func TestDiscoverPlugins_MixedModes(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.Default()
+
+	// Create a regular plugin binary
+	brokerDir := filepath.Join(dir, "broker")
+	require.NoError(t, os.MkdirAll(brokerDir, 0755))
+	pluginPath := filepath.Join(brokerDir, "scion-plugin-nats")
+	require.NoError(t, os.WriteFile(pluginPath, []byte("#!/bin/sh\n"), 0755))
+
+	cfg := PluginsConfig{
+		Broker: map[string]PluginEntry{
+			"nats": {
+				Config: map[string]string{"url": "nats://localhost:4222"},
+			},
+			"googlechat": {
+				SelfManaged: true,
+				Address:     "localhost:9090",
+				Config:      map[string]string{"project_id": "my-gcp-project"},
+			},
+		},
+	}
+
+	discovered := DiscoverPlugins(cfg, dir, logger)
+	require.Len(t, discovered, 2)
+
+	// Find each by name since map iteration order is non-deterministic
+	var nats, chat *DiscoveredPlugin
+	for i := range discovered {
+		switch discovered[i].Name {
+		case "nats":
+			nats = &discovered[i]
+		case "googlechat":
+			chat = &discovered[i]
+		}
+	}
+
+	require.NotNil(t, nats)
+	assert.False(t, nats.SelfManaged)
+	assert.Equal(t, pluginPath, nats.Path)
+
+	require.NotNil(t, chat)
+	assert.True(t, chat.SelfManaged)
+	assert.Empty(t, chat.Path)
+	assert.Equal(t, "localhost:9090", chat.Address)
+}
+
 func TestDefaultPluginsDir(t *testing.T) {
 	dir, err := DefaultPluginsDir()
 	require.NoError(t, err)

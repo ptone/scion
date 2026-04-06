@@ -1166,6 +1166,12 @@ func (s *Server) StartMessageBroker(b broker.MessageBroker) {
 	proxy.messageLog = s.dedicatedMessageLog
 	s.messageBrokerProxy = proxy
 	proxy.Start()
+
+	// Wire broker proxy to notification dispatcher so user notifications
+	// flow through the broker plugin instead of the channel registry.
+	if s.notificationDispatcher != nil {
+		s.notificationDispatcher.SetBrokerProxy(proxy)
+	}
 }
 
 // GetControlChannelManager returns the control channel manager.
@@ -1216,6 +1222,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	if s.secretBackend != nil {
 		dispatcher.SetSecretBackend(s.secretBackend)
 	}
+	if s.authzService != nil {
+		dispatcher.SetAuthzService(s.authzService)
+	}
 
 	// In dev-auth mode, pass the dev token so agents get it for fallback auth
 	if s.config.DevAuthToken != "" {
@@ -1233,7 +1242,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 // GenerateAgentToken generates a JWT for an agent.
 // This is a convenience method that delegates to the token service.
 // Additional scopes are merged with the default ScopeAgentStatusUpdate scope.
-func (s *Server) GenerateAgentToken(agentID, groveID string, additionalScopes ...AgentTokenScope) (string, error) {
+func (s *Server) GenerateAgentToken(agentID, groveID string, ancestry []string, additionalScopes ...AgentTokenScope) (string, error) {
 	s.mu.RLock()
 	tokenService := s.agentTokenService
 	s.mu.RUnlock()
@@ -1262,7 +1271,7 @@ func (s *Server) GenerateAgentToken(agentID, groveID string, additionalScopes ..
 		}
 	}
 
-	return tokenService.GenerateAgentToken(agentID, groveID, scopes)
+	return tokenService.GenerateAgentToken(agentID, groveID, scopes, ancestry)
 }
 
 // agentHeartbeatTimeoutHandler returns a recurring handler function that marks

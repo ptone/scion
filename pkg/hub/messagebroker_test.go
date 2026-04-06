@@ -456,6 +456,142 @@ func TestMessageBrokerProxy_EnsureGroveSubscriptionsIncludesUserMessages(t *test
 	}
 }
 
+func TestMessageBrokerProxy_PluginSubscription(t *testing.T) {
+	s := newBrokerTestStore(t)
+	groveID := setupBrokerTestGrove(t, s)
+	setupBrokerTestAgent(t, s, groveID, "agent-x", "running")
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	b := broker.NewInProcessBroker(slog.Default())
+	defer b.Close()
+
+	dispatcher := &brokerMockDispatcher{}
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	proxy.Start()
+	defer proxy.Stop()
+
+	// Plugin requests a subscription for the grove
+	pattern := broker.TopicAgentMessages(groveID, "*")
+	if err := proxy.RequestSubscription(pattern); err != nil {
+		t.Fatalf("RequestSubscription failed: %v", err)
+	}
+
+	// Verify the subscription was tracked
+	proxy.mu.Lock()
+	_, exists := proxy.pluginSubscriptions[pattern]
+	proxy.mu.Unlock()
+	if !exists {
+		t.Fatal("expected plugin subscription to be tracked")
+	}
+}
+
+func TestMessageBrokerProxy_PluginSubscriptionDedup(t *testing.T) {
+	s := newBrokerTestStore(t)
+	_ = setupBrokerTestGrove(t, s)
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	b := broker.NewInProcessBroker(slog.Default())
+	defer b.Close()
+
+	dispatcher := &brokerMockDispatcher{}
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	proxy.Start()
+	defer proxy.Stop()
+
+	pattern := "scion.grove.test.>"
+	if err := proxy.RequestSubscription(pattern); err != nil {
+		t.Fatalf("first RequestSubscription failed: %v", err)
+	}
+
+	// Second request for the same pattern should be a no-op
+	if err := proxy.RequestSubscription(pattern); err != nil {
+		t.Fatalf("duplicate RequestSubscription failed: %v", err)
+	}
+
+	proxy.mu.Lock()
+	count := len(proxy.pluginSubscriptions)
+	proxy.mu.Unlock()
+	if count != 1 {
+		t.Fatalf("expected 1 plugin subscription, got %d", count)
+	}
+}
+
+func TestMessageBrokerProxy_PluginSubscriptionCancel(t *testing.T) {
+	s := newBrokerTestStore(t)
+	_ = setupBrokerTestGrove(t, s)
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	b := broker.NewInProcessBroker(slog.Default())
+	defer b.Close()
+
+	dispatcher := &brokerMockDispatcher{}
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	proxy.Start()
+	defer proxy.Stop()
+
+	pattern := "scion.grove.test.>"
+	if err := proxy.RequestSubscription(pattern); err != nil {
+		t.Fatalf("RequestSubscription failed: %v", err)
+	}
+
+	if err := proxy.CancelSubscription(pattern); err != nil {
+		t.Fatalf("CancelSubscription failed: %v", err)
+	}
+
+	proxy.mu.Lock()
+	_, exists := proxy.pluginSubscriptions[pattern]
+	proxy.mu.Unlock()
+	if exists {
+		t.Fatal("expected plugin subscription to be removed after cancel")
+	}
+
+	// Cancelling a non-existent pattern should be a no-op
+	if err := proxy.CancelSubscription("nonexistent.>"); err != nil {
+		t.Fatalf("CancelSubscription of nonexistent pattern should not error: %v", err)
+	}
+}
+
+func TestMessageBrokerProxy_PluginSubscriptionCleanupOnStop(t *testing.T) {
+	s := newBrokerTestStore(t)
+	_ = setupBrokerTestGrove(t, s)
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	b := broker.NewInProcessBroker(slog.Default())
+	defer b.Close()
+
+	dispatcher := &brokerMockDispatcher{}
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	proxy.Start()
+
+	if err := proxy.RequestSubscription("scion.grove.a.>"); err != nil {
+		t.Fatal(err)
+	}
+	if err := proxy.RequestSubscription("scion.grove.b.>"); err != nil {
+		t.Fatal(err)
+	}
+
+	proxy.Stop()
+
+	proxy.mu.Lock()
+	count := len(proxy.pluginSubscriptions)
+	proxy.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("expected 0 plugin subscriptions after stop, got %d", count)
+	}
+}
+
 func TestRecipientSlug(t *testing.T) {
 	tests := []struct {
 		input    string

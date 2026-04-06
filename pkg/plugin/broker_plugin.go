@@ -27,6 +27,11 @@ import (
 // BrokerPluginName is the name used to dispense broker plugins via go-plugin.
 const BrokerPluginName = "broker"
 
+// hostCallbacksConfigKey is the config map key used to signal that the host
+// supports the HostCallbacks reverse channel. Set to "true" by the manager
+// when HostCallbacks are available.
+const hostCallbacksConfigKey = "_host_callbacks"
+
 // --- RPC argument/response types ---
 
 // ConfigureArgs holds arguments for the Configure RPC call.
@@ -73,6 +78,58 @@ type HealthStatus struct {
 	Details map[string]string
 }
 
+// hostCallbacksMuxID is the well-known MuxBroker stream ID used to establish
+// the reverse RPC channel for host callbacks. The host accepts on this ID
+// and the plugin dials it during Configure.
+const hostCallbacksMuxID uint32 = 1
+
+// --- Host callback interface (host → plugin reverse channel) ---
+
+// HostCallbacks is an interface the plugin can call back to the host.
+// It allows plugins to dynamically request or cancel subscriptions on the
+// host's message broker. Provided to the plugin during Configure via the
+// MuxBroker reverse channel.
+type HostCallbacks interface {
+	RequestSubscription(pattern string) error
+	CancelSubscription(pattern string) error
+}
+
+// HostCallbacksAware is an optional interface that plugin implementations
+// can implement to receive host callbacks. If a plugin's Impl satisfies
+// this interface, the RPC server will inject a HostCallbacks instance
+// after the reverse channel is established during Configure.
+type HostCallbacksAware interface {
+	SetHostCallbacks(HostCallbacks)
+}
+
+// HostCallbacksRPCServer wraps a HostCallbacks implementation to serve
+// RPC requests from the plugin process. This runs in the host process.
+type HostCallbacksRPCServer struct {
+	Impl HostCallbacks
+}
+
+func (s *HostCallbacksRPCServer) RequestSubscription(args *SubscribeArgs, _ *struct{}) error {
+	return s.Impl.RequestSubscription(args.Pattern)
+}
+
+func (s *HostCallbacksRPCServer) CancelSubscription(args *UnsubscribeArgs, _ *struct{}) error {
+	return s.Impl.CancelSubscription(args.Pattern)
+}
+
+// HostCallbacksRPCClient implements HostCallbacks by making RPC calls
+// to the host process. This runs in the plugin process.
+type HostCallbacksRPCClient struct {
+	client *rpc.Client
+}
+
+func (c *HostCallbacksRPCClient) RequestSubscription(pattern string) error {
+	return c.client.Call("Plugin.RequestSubscription", &SubscribeArgs{Pattern: pattern}, &struct{}{})
+}
+
+func (c *HostCallbacksRPCClient) CancelSubscription(pattern string) error {
+	return c.client.Call("Plugin.CancelSubscription", &UnsubscribeArgs{Pattern: pattern}, &struct{}{})
+}
+
 // --- Plugin interface (implemented by the plugin binary) ---
 
 // MessageBrokerPluginInterface defines the methods that a broker plugin must implement.
@@ -108,14 +165,24 @@ type MessageBrokerPluginInterface interface {
 type BrokerPlugin struct {
 	// Impl is set only on the plugin side (the server).
 	Impl MessageBrokerPluginInterface
+
+	// HostCallbacks is set on the host side only. When non-nil, the host
+	// serves a reverse RPC channel via MuxBroker so the plugin can call
+	// RequestSubscription / CancelSubscription back to the host.
+	HostCallbacks HostCallbacks
 }
 
-func (p *BrokerPlugin) Server(*goplugin.MuxBroker) (interface{}, error) {
-	return &BrokerRPCServer{Impl: p.Impl}, nil
+func (p *BrokerPlugin) Server(broker *goplugin.MuxBroker) (interface{}, error) {
+	return &BrokerRPCServer{Impl: p.Impl, muxBroker: broker}, nil
 }
 
-func (p *BrokerPlugin) Client(_ *goplugin.MuxBroker, c *rpc.Client) (interface{}, error) {
-	return &BrokerRPCClient{client: c}, nil
+func (p *BrokerPlugin) Client(broker *goplugin.MuxBroker, c *rpc.Client) (interface{}, error) {
+	if p.HostCallbacks != nil {
+		// Start serving host callbacks on the MuxBroker reverse channel.
+		// The plugin will Dial this channel during Configure.
+		go broker.AcceptAndServe(hostCallbacksMuxID, &HostCallbacksRPCServer{Impl: p.HostCallbacks})
+	}
+	return &BrokerRPCClient{client: c, hostCallbacksAvailable: p.HostCallbacks != nil}, nil
 }
 
 // --- RPC Server (runs in the plugin process) ---
@@ -123,10 +190,22 @@ func (p *BrokerPlugin) Client(_ *goplugin.MuxBroker, c *rpc.Client) (interface{}
 // BrokerRPCServer wraps a MessageBrokerPluginInterface to serve RPC requests.
 // This runs inside the plugin binary.
 type BrokerRPCServer struct {
-	Impl MessageBrokerPluginInterface
+	Impl      MessageBrokerPluginInterface
+	muxBroker *goplugin.MuxBroker
 }
 
 func (s *BrokerRPCServer) Configure(args *ConfigureArgs, _ *struct{}) error {
+	// If the host indicated that callbacks are available, establish the
+	// reverse RPC channel and inject it into the plugin implementation.
+	if args.Config != nil && args.Config[hostCallbacksConfigKey] == "true" && s.muxBroker != nil {
+		conn, err := s.muxBroker.Dial(hostCallbacksMuxID)
+		if err == nil {
+			callbacks := &HostCallbacksRPCClient{client: rpc.NewClient(conn)}
+			if aware, ok := s.Impl.(HostCallbacksAware); ok {
+				aware.SetHostCallbacks(callbacks)
+			}
+		}
+	}
 	return s.Impl.Configure(args.Config)
 }
 
@@ -174,6 +253,10 @@ func (s *BrokerRPCServer) HealthCheck(_ struct{}, resp *HealthCheckResponse) err
 // to the plugin process. This is used on the host side.
 type BrokerRPCClient struct {
 	client *rpc.Client
+	// hostCallbacksAvailable indicates that the host started a reverse RPC
+	// channel for HostCallbacks. The manager reads this flag to include
+	// the _host_callbacks key in the config map passed to Configure.
+	hostCallbacksAvailable bool
 }
 
 // NewBrokerRPCClient creates a BrokerRPCClient wrapping the given RPC client.

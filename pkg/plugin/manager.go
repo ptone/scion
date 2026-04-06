@@ -15,22 +15,27 @@
 package plugin
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os/exec"
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/broker"
 	goplugin "github.com/hashicorp/go-plugin"
+	"github.com/hashicorp/go-plugin/runner"
 )
 
 // Manager owns the lifecycle of all loaded plugins.
 // It handles discovery, loading, dispensing, and shutdown of plugin processes.
 type Manager struct {
-	clients map[string]*goplugin.Client // "type:name" -> client
-	mu      sync.RWMutex
-	logger  *slog.Logger
+	clients         map[string]*goplugin.Client // "type:name" -> client
+	selfManaged     map[string]bool             // "type:name" -> true if self-managed
+	mu              sync.RWMutex
+	logger          *slog.Logger
+	brokerCallbacks *HostCallbacksForwarder // lazily-wired host callbacks for broker plugins
 }
 
 // NewManager creates a new plugin manager.
@@ -39,9 +44,52 @@ func NewManager(logger *slog.Logger) *Manager {
 		logger = slog.Default()
 	}
 	return &Manager{
-		clients: make(map[string]*goplugin.Client),
-		logger:  logger,
+		clients:         make(map[string]*goplugin.Client),
+		selfManaged:     make(map[string]bool),
+		logger:          logger,
+		brokerCallbacks: &HostCallbacksForwarder{},
 	}
+}
+
+// SetBrokerHostCallbacks sets the HostCallbacks implementation that broker
+// plugins can use to request/cancel subscriptions. Typically called after the
+// MessageBrokerProxy is created, which implements HostCallbacks.
+func (m *Manager) SetBrokerHostCallbacks(cb HostCallbacks) {
+	m.brokerCallbacks.Set(cb)
+}
+
+// HostCallbacksForwarder lazily forwards HostCallbacks calls to a target
+// implementation. It is created immediately with the Manager but the target
+// is set later (after the MessageBrokerProxy is created). Calls made before
+// the target is set return an error.
+type HostCallbacksForwarder struct {
+	mu sync.RWMutex
+	cb HostCallbacks
+}
+
+// Set wires the forwarder to the real HostCallbacks implementation.
+func (f *HostCallbacksForwarder) Set(cb HostCallbacks) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cb = cb
+}
+
+func (f *HostCallbacksForwarder) RequestSubscription(pattern string) error {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.cb == nil {
+		return fmt.Errorf("host callbacks not yet available")
+	}
+	return f.cb.RequestSubscription(pattern)
+}
+
+func (f *HostCallbacksForwarder) CancelSubscription(pattern string) error {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.cb == nil {
+		return fmt.Errorf("host callbacks not yet available")
+	}
+	return f.cb.CancelSubscription(pattern)
 }
 
 // LoadAll discovers and loads all plugins from the given configuration and plugins directory.
@@ -70,6 +118,16 @@ func (m *Manager) LoadAll(cfg PluginsConfig, pluginsDir string) error {
 
 // LoadOne loads a single plugin by type and name from the given configuration.
 func (m *Manager) LoadOne(pluginType, name string, entry PluginEntry, pluginsDir string) error {
+	if entry.SelfManaged {
+		return m.loadPlugin(DiscoveredPlugin{
+			Name:        name,
+			Type:        pluginType,
+			Config:      entry.Config,
+			FromConfig:  true,
+			SelfManaged: true,
+			Address:     entry.Address,
+		})
+	}
 	path := resolvePluginPath(name, pluginType, entry.Path, pluginsDir, m.logger)
 	if path == "" {
 		return fmt.Errorf("plugin binary not found: %s/%s", pluginType, name)
@@ -83,7 +141,7 @@ func (m *Manager) LoadOne(pluginType, name string, entry PluginEntry, pluginsDir
 	})
 }
 
-// loadPlugin starts a plugin process and stores its client.
+// loadPlugin starts a plugin process (or connects to a self-managed one) and stores its client.
 func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 	var protocolVersion uint
 	var pluginMap map[string]goplugin.Plugin
@@ -92,7 +150,7 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 	case PluginTypeBroker:
 		protocolVersion = BrokerPluginProtocolVersion
 		pluginMap = map[string]goplugin.Plugin{
-			BrokerPluginName: &BrokerPlugin{},
+			BrokerPluginName: &BrokerPlugin{HostCallbacks: m.brokerCallbacks},
 		}
 	case PluginTypeHarness:
 		protocolVersion = HarnessPluginProtocolVersion
@@ -103,22 +161,29 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 		return fmt.Errorf("unknown plugin type: %s", dp.Type)
 	}
 
-	client := goplugin.NewClient(&goplugin.ClientConfig{
-		HandshakeConfig: goplugin.HandshakeConfig{
-			ProtocolVersion:  protocolVersion,
-			MagicCookieKey:   MagicCookieKey,
-			MagicCookieValue: MagicCookieValue,
-		},
-		Plugins: pluginMap,
-		Cmd:     exec.Command(dp.Path),
-		Logger:  newHclogAdapter(m.logger),
-	})
+	var client *goplugin.Client
+	if dp.SelfManaged {
+		client = m.loadSelfManagedPlugin(dp, protocolVersion, pluginMap)
+	} else {
+		client = goplugin.NewClient(&goplugin.ClientConfig{
+			HandshakeConfig: goplugin.HandshakeConfig{
+				ProtocolVersion:  protocolVersion,
+				MagicCookieKey:   MagicCookieKey,
+				MagicCookieValue: MagicCookieValue,
+			},
+			Plugins: pluginMap,
+			Cmd:     exec.Command(dp.Path),
+			Logger:  newHclogAdapter(m.logger),
+		})
+	}
 
-	// Start the plugin process and get the RPC client
+	// Connect to the plugin process and get the RPC client
 	rpcClient, err := client.Client()
 	if err != nil {
-		client.Kill()
-		return fmt.Errorf("failed to start plugin %s/%s: %w", dp.Type, dp.Name, err)
+		if !dp.SelfManaged {
+			client.Kill()
+		}
+		return fmt.Errorf("failed to connect to plugin %s/%s: %w", dp.Type, dp.Name, err)
 	}
 
 	// Dispense the plugin interface
@@ -132,7 +197,9 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 
 	raw, err := rpcClient.Dispense(dispenseName)
 	if err != nil {
-		client.Kill()
+		if !dp.SelfManaged {
+			client.Kill()
+		}
 		return fmt.Errorf("failed to dispense plugin %s/%s: %w", dp.Type, dp.Name, err)
 	}
 
@@ -143,8 +210,13 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 			if config == nil {
 				config = make(map[string]string)
 			}
+			if brokerClient.hostCallbacksAvailable {
+				config[hostCallbacksConfigKey] = "true"
+			}
 			if err := brokerClient.Configure(config); err != nil {
-				client.Kill()
+				if !dp.SelfManaged {
+					client.Kill()
+				}
 				return fmt.Errorf("failed to configure broker plugin %s: %w", dp.Name, err)
 			}
 		}
@@ -152,14 +224,67 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 
 	key := dp.Type + ":" + dp.Name
 	m.mu.Lock()
-	// Kill any existing plugin with the same key
+	// Kill any existing plugin with the same key (only if not self-managed)
 	if existing, ok := m.clients[key]; ok {
-		existing.Kill()
+		if !m.selfManaged[key] {
+			existing.Kill()
+		}
 	}
 	m.clients[key] = client
+	m.selfManaged[key] = dp.SelfManaged
 	m.mu.Unlock()
 
 	return nil
+}
+
+// loadSelfManagedPlugin creates a go-plugin client that connects to an
+// already-running plugin process at the configured address. The Hub does not
+// own the process — Kill() will not terminate it.
+func (m *Manager) loadSelfManagedPlugin(dp DiscoveredPlugin, protocolVersion uint, pluginMap map[string]goplugin.Plugin) *goplugin.Client {
+	addr, err := net.ResolveTCPAddr("tcp", dp.Address)
+	if err != nil {
+		addr = &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0}
+		m.logger.Warn("Failed to resolve self-managed plugin address",
+			"address", dp.Address, "error", err)
+	}
+
+	pluginAddr := addr // capture for closure
+	return goplugin.NewClient(&goplugin.ClientConfig{
+		HandshakeConfig: goplugin.HandshakeConfig{
+			ProtocolVersion:  protocolVersion,
+			MagicCookieKey:   MagicCookieKey,
+			MagicCookieValue: MagicCookieValue,
+		},
+		Plugins: pluginMap,
+		Reattach: &goplugin.ReattachConfig{
+			Protocol:        goplugin.ProtocolNetRPC,
+			ProtocolVersion: int(protocolVersion),
+			Addr:            pluginAddr,
+			Test:            true, // Prevents Kill() from terminating the process
+			ReattachFunc: func() (runner.AttachedRunner, error) {
+				return &selfManagedRunner{id: dp.Name}, nil
+			},
+		},
+		Logger: newHclogAdapter(m.logger),
+	})
+}
+
+// selfManagedRunner implements runner.AttachedRunner for self-managed plugins.
+// It is a no-op runner that does not own or manage the plugin process.
+type selfManagedRunner struct {
+	id string
+}
+
+func (r *selfManagedRunner) Wait(_ context.Context) error { return nil }
+func (r *selfManagedRunner) Kill(_ context.Context) error { return nil }
+func (r *selfManagedRunner) ID() string                   { return r.id }
+
+func (r *selfManagedRunner) PluginToHost(pluginNet, pluginAddr string) (string, string, error) {
+	return pluginNet, pluginAddr, nil
+}
+
+func (r *selfManagedRunner) HostToPlugin(hostNet, hostAddr string) (string, string, error) {
+	return hostNet, hostAddr, nil
 }
 
 // Get returns the dispensed plugin interface for the given type and name.
@@ -230,6 +355,14 @@ func (m *Manager) HasPlugin(pluginType, name string) bool {
 	return ok
 }
 
+// IsSelfManaged returns true if the named plugin is loaded in self-managed mode.
+func (m *Manager) IsSelfManaged(pluginType, name string) bool {
+	key := pluginType + ":" + name
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.selfManaged[key]
+}
+
 // ListPlugins returns a list of all loaded plugin keys ("type:name").
 func (m *Manager) ListPlugins() []string {
 	m.mu.RLock()
@@ -243,15 +376,24 @@ func (m *Manager) ListPlugins() []string {
 }
 
 // Shutdown kills all plugin processes gracefully.
+// Self-managed plugins are disconnected but their processes are not terminated.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for key, client := range m.clients {
-		m.logger.Info("Shutting down plugin", "plugin", key)
+		if m.selfManaged[key] {
+			m.logger.Info("Disconnecting self-managed plugin", "plugin", key)
+			// For self-managed plugins, Kill() with Test=true in the
+			// ReattachConfig will close the RPC connection without
+			// terminating the external process.
+		} else {
+			m.logger.Info("Shutting down plugin", "plugin", key)
+		}
 		client.Kill()
 	}
 	m.clients = make(map[string]*goplugin.Client)
+	m.selfManaged = make(map[string]bool)
 
 	goplugin.CleanupClients()
 }

@@ -23,8 +23,10 @@ package plugin
 //	    cfg := plugin.PluginsConfigFromV1(vs.Server.Plugins.Broker, vs.Server.Plugins.Harness)
 //	}
 type V1PluginEntryLike struct {
-	Path   string
-	Config map[string]string
+	Path        string
+	Config      map[string]string
+	SelfManaged bool
+	Address     string
 }
 
 // PluginsConfigFromEntries builds a PluginsConfig from generic entry maps.

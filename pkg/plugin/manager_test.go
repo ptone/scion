@@ -93,3 +93,118 @@ func TestManagerGet_UnknownType(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not loaded")
 }
+
+func TestManagerIsSelfManaged_NotLoaded(t *testing.T) {
+	mgr := NewManager(nil)
+	assert.False(t, mgr.IsSelfManaged(PluginTypeBroker, "googlechat"))
+}
+
+func TestManagerLoadOne_SelfManaged_UnreachableAddress(t *testing.T) {
+	mgr := NewManager(nil)
+	dir := t.TempDir()
+
+	// Self-managed plugin with unreachable address — loadPlugin will create the
+	// client but connecting to it (client.Client()) should fail since nothing
+	// is listening.
+	err := mgr.LoadOne(PluginTypeBroker, "googlechat", PluginEntry{
+		SelfManaged: true,
+		Address:     "localhost:19999",
+		Config:      map[string]string{"project_id": "test"},
+	}, dir)
+	// The connection should fail since no server is running
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to connect to plugin")
+}
+
+func TestManagerLoadOne_SelfManaged_NoBinaryNeeded(t *testing.T) {
+	mgr := NewManager(nil)
+	dir := t.TempDir()
+
+	// A self-managed plugin should not require a binary path.
+	// The error should be about connection, not "plugin binary not found".
+	err := mgr.LoadOne(PluginTypeBroker, "googlechat", PluginEntry{
+		SelfManaged: true,
+		Address:     "localhost:19999",
+	}, dir)
+	assert.Error(t, err)
+	assert.NotContains(t, err.Error(), "plugin binary not found")
+}
+
+func TestHostCallbacksForwarder_BeforeSet(t *testing.T) {
+	fwd := &HostCallbacksForwarder{}
+
+	err := fwd.RequestSubscription("scion.grove.test.>")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not yet available")
+
+	err = fwd.CancelSubscription("scion.grove.test.>")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not yet available")
+}
+
+func TestHostCallbacksForwarder_AfterSet(t *testing.T) {
+	fwd := &HostCallbacksForwarder{}
+
+	var requestedPattern, cancelledPattern string
+	mock := &mockHostCallbacks{
+		onRequest: func(p string) error { requestedPattern = p; return nil },
+		onCancel:  func(p string) error { cancelledPattern = p; return nil },
+	}
+	fwd.Set(mock)
+
+	err := fwd.RequestSubscription("scion.grove.prod.>")
+	assert.NoError(t, err)
+	assert.Equal(t, "scion.grove.prod.>", requestedPattern)
+
+	err = fwd.CancelSubscription("scion.grove.prod.>")
+	assert.NoError(t, err)
+	assert.Equal(t, "scion.grove.prod.>", cancelledPattern)
+}
+
+func TestManagerSetBrokerHostCallbacks(t *testing.T) {
+	mgr := NewManager(nil)
+
+	var called bool
+	mock := &mockHostCallbacks{
+		onRequest: func(p string) error { called = true; return nil },
+	}
+	mgr.SetBrokerHostCallbacks(mock)
+
+	err := mgr.brokerCallbacks.RequestSubscription("test")
+	assert.NoError(t, err)
+	assert.True(t, called)
+}
+
+type mockHostCallbacks struct {
+	onRequest func(string) error
+	onCancel  func(string) error
+}
+
+func (m *mockHostCallbacks) RequestSubscription(pattern string) error {
+	if m.onRequest != nil {
+		return m.onRequest(pattern)
+	}
+	return nil
+}
+
+func (m *mockHostCallbacks) CancelSubscription(pattern string) error {
+	if m.onCancel != nil {
+		return m.onCancel(pattern)
+	}
+	return nil
+}
+
+func TestManagerShutdown_SelfManagedTracking(t *testing.T) {
+	mgr := NewManager(nil)
+
+	// Verify self-managed tracking is cleared on shutdown
+	mgr.mu.Lock()
+	mgr.selfManaged["broker:test"] = true
+	mgr.mu.Unlock()
+
+	mgr.Shutdown()
+
+	mgr.mu.RLock()
+	assert.Empty(t, mgr.selfManaged)
+	mgr.mu.RUnlock()
+}

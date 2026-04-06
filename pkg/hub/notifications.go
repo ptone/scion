@@ -36,8 +36,9 @@ type NotificationDispatcher struct {
 	events          *ChannelEventPublisher
 	getDispatcher   func() AgentDispatcher // lazy getter; dispatcher may be set after startup
 	log             *slog.Logger
-	messageLog      *slog.Logger     // dedicated message audit logger (nil = disabled)
-	channelRegistry *ChannelRegistry // external notification channels (nil = disabled)
+	messageLog      *slog.Logger          // dedicated message audit logger (nil = disabled)
+	channelRegistry *ChannelRegistry      // external notification channels (nil = disabled)
+	brokerProxy     *MessageBrokerProxy   // broker plugin proxy (nil = no broker, use ChannelRegistry)
 	stopCh          chan struct{}
 	stopOnce        sync.Once
 	wg              sync.WaitGroup
@@ -55,6 +56,14 @@ func NewNotificationDispatcher(s store.Store, events *ChannelEventPublisher, get
 		log:           log,
 		stopCh:        make(chan struct{}),
 	}
+}
+
+// SetBrokerProxy sets the message broker proxy for routing user notifications.
+// When set, user-targeted notifications are published through the broker so
+// the broker plugin can render them (e.g., as rich chat cards). The
+// ChannelRegistry becomes a fallback for deployments without a broker plugin.
+func (nd *NotificationDispatcher) SetBrokerProxy(p *MessageBrokerProxy) {
+	nd.brokerProxy = p
 }
 
 // Start subscribes to agent status and deletion events and spawns goroutines to process them.
@@ -290,8 +299,14 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 		nd.log.Info("Notification dispatched to user via SSE",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
 
-		// Dispatch to external notification channels (fire-and-forget)
-		nd.dispatchToChannels(ctx, sub, notif, agent.ID, agent.Slug)
+		if nd.brokerProxy != nil {
+			// Broker plugin present — publish notification as a StructuredMessage
+			// through the broker so the plugin can render it (e.g., as a rich card).
+			nd.dispatchToBroker(ctx, sub, notif, agent.ID, agent.Slug)
+		} else {
+			// No broker plugin — fall back to channel registry (webhook/email)
+			nd.dispatchToChannels(ctx, sub, notif, agent.ID, agent.Slug)
+		}
 	default:
 		nd.log.Warn("Unknown subscriber type", "type", sub.SubscriberType)
 	}
@@ -391,6 +406,29 @@ func (nd *NotificationDispatcher) dispatchToChannels(ctx context.Context, sub *s
 	structuredMsg.RecipientID = sub.SubscriberID
 
 	nd.channelRegistry.Dispatch(ctx, structuredMsg)
+}
+
+// dispatchToBroker publishes a user notification through the message broker proxy
+// so a broker plugin can render it (e.g., as a rich interactive card in a chat app).
+// This is fire-and-forget; errors are logged but do not affect the notification pipeline.
+func (nd *NotificationDispatcher) dispatchToBroker(ctx context.Context, sub *store.NotificationSubscription, notif *store.Notification, watchedAgentID, watchedSlug string) {
+	msgType := notificationMessageType(notif.Status)
+	structuredMsg := messages.NewNotification(
+		"agent:"+watchedSlug,
+		"user:"+sub.SubscriberID,
+		notif.Message,
+		msgType,
+	)
+	structuredMsg.SenderID = watchedAgentID
+	structuredMsg.RecipientID = sub.SubscriberID
+
+	if err := nd.brokerProxy.PublishUserMessage(ctx, sub.GroveID, sub.SubscriberID, structuredMsg); err != nil {
+		nd.log.Error("Failed to dispatch notification through broker",
+			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "error", err)
+	} else {
+		nd.log.Info("Notification dispatched to user via broker",
+			"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+	}
 }
 
 // formatNotificationMessage formats a notification message based on agent state and status.

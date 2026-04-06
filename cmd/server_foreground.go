@@ -735,6 +735,13 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 				log.Printf("Warning: unknown message broker type %q (no plugin loaded), skipping", brokerType)
 			}
 		}
+
+		// Wire the broker proxy as the host callbacks target for broker plugins.
+		// This enables plugin-initiated subscriptions via the HostCallbacks
+		// reverse channel (the proxy implements plugin.HostCallbacks).
+		if proxy := hubSrv.GetMessageBrokerProxy(); proxy != nil {
+			pluginMgr.SetBrokerHostCallbacks(proxy)
+		}
 	}
 
 	// Initialize storage

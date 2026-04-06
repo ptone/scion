@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -42,11 +43,12 @@ type MessageBrokerProxy struct {
 	log           *slog.Logger
 	messageLog    *slog.Logger
 
-	mu            sync.Mutex
-	subscriptions map[string][]broker.Subscription // groveID -> active subscriptions
-	stopCh        chan struct{}
-	stopOnce      sync.Once
-	wg            sync.WaitGroup
+	mu                  sync.Mutex
+	subscriptions       map[string][]broker.Subscription // groveID -> active subscriptions
+	pluginSubscriptions map[string]broker.Subscription   // pattern -> plugin-initiated subscription
+	stopCh              chan struct{}
+	stopOnce            sync.Once
+	wg                  sync.WaitGroup
 }
 
 // NewMessageBrokerProxy creates a new MessageBrokerProxy.
@@ -58,13 +60,14 @@ func NewMessageBrokerProxy(
 	log *slog.Logger,
 ) *MessageBrokerProxy {
 	return &MessageBrokerProxy{
-		broker:        b,
-		store:         s,
-		events:        events,
-		getDispatcher: getDispatcher,
-		log:           log,
-		subscriptions: make(map[string][]broker.Subscription),
-		stopCh:        make(chan struct{}),
+		broker:              b,
+		store:               s,
+		events:              events,
+		getDispatcher:       getDispatcher,
+		log:                 log,
+		subscriptions:       make(map[string][]broker.Subscription),
+		pluginSubscriptions: make(map[string]broker.Subscription),
+		stopCh:              make(chan struct{}),
 	}
 }
 
@@ -115,10 +118,62 @@ func (p *MessageBrokerProxy) Stop() {
 			}
 			delete(p.subscriptions, groveID)
 		}
+		for pattern, sub := range p.pluginSubscriptions {
+			sub.Unsubscribe()
+			delete(p.pluginSubscriptions, pattern)
+		}
 		p.mu.Unlock()
 
 		p.log.Info("Message broker proxy stopped")
 	})
+}
+
+// RequestSubscription handles a plugin's request to subscribe to a topic
+// pattern. Messages matching the pattern are routed to the plugin via the
+// broker's Publish method. Plugin-initiated subscriptions coexist with
+// proxy-managed subscriptions; duplicate patterns are no-ops.
+func (p *MessageBrokerProxy) RequestSubscription(pattern string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if _, exists := p.pluginSubscriptions[pattern]; exists {
+		p.log.Debug("Plugin subscription already exists", "pattern", pattern)
+		return nil
+	}
+
+	sub, err := p.broker.Subscribe(pattern, func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+		// Route the message to the plugin for external delivery.
+		if pubErr := p.broker.Publish(ctx, topic, msg); pubErr != nil {
+			p.log.Error("Failed to deliver plugin-requested message", "pattern", pattern, "error", pubErr)
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("failed to subscribe for plugin pattern %q: %w", pattern, err)
+	}
+
+	p.pluginSubscriptions[pattern] = sub
+	p.log.Info("Plugin-initiated subscription created", "pattern", pattern)
+	return nil
+}
+
+// CancelSubscription handles a plugin's request to cancel a previously
+// requested subscription.
+func (p *MessageBrokerProxy) CancelSubscription(pattern string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	sub, exists := p.pluginSubscriptions[pattern]
+	if !exists {
+		return nil
+	}
+
+	if err := sub.Unsubscribe(); err != nil {
+		return fmt.Errorf("failed to unsubscribe plugin pattern %q: %w", pattern, err)
+	}
+
+	delete(p.pluginSubscriptions, pattern)
+	p.log.Info("Plugin-initiated subscription cancelled", "pattern", pattern)
+	return nil
 }
 
 // PublishMessage publishes a message to the appropriate broker topic based on

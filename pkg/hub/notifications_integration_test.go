@@ -119,7 +119,7 @@ func (env *integrationTestEnv) createAgentWithNotify(t *testing.T, callingAgent 
 		ScopeAgentStatusUpdate,
 		ScopeAgentCreate,
 		ScopeAgentNotify,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	body, _ := json.Marshal(CreateAgentRequest{
@@ -150,7 +150,7 @@ func (env *integrationTestEnv) updateStatusViaAPI(t *testing.T, agentID, status,
 
 	token, err := env.tokenSvc.GenerateAgentToken(agentID, env.grove.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// Map status string to the appropriate field
@@ -816,7 +816,7 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 	token, err := env.tokenSvc.GenerateAgentToken(parent.ID, env.grove.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 		ScopeAgentCreate,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	body, _ := json.Marshal(CreateAgentRequest{

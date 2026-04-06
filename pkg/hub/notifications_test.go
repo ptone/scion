@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/broker"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
@@ -91,6 +92,42 @@ func (d *recordingDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agen
 func (d *recordingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
 	return nil
 }
+
+// recordingBroker is a mock MessageBroker that records Publish calls.
+type recordingBroker struct {
+	mu        sync.Mutex
+	publishes []brokerPublish
+}
+
+type brokerPublish struct {
+	topic string
+	msg   *messages.StructuredMessage
+}
+
+func (b *recordingBroker) Publish(_ context.Context, topic string, msg *messages.StructuredMessage) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.publishes = append(b.publishes, brokerPublish{topic: topic, msg: msg})
+	return nil
+}
+
+func (b *recordingBroker) Subscribe(_ string, _ broker.MessageHandler) (broker.Subscription, error) {
+	return &noopSubscription{}, nil
+}
+
+func (b *recordingBroker) Close() error { return nil }
+
+func (b *recordingBroker) getPublishes() []brokerPublish {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	result := make([]brokerPublish, len(b.publishes))
+	copy(result, b.publishes)
+	return result
+}
+
+type noopSubscription struct{}
+
+func (s *noopSubscription) Unsubscribe() error { return nil }
 
 // notificationTestEnv holds all components for a notification test.
 type notificationTestEnv struct {
@@ -802,6 +839,101 @@ func TestNotificationDispatcher_ErrorPhase(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, notifs, 1)
 	assert.Equal(t, "ERROR", notifs[0].Status)
+}
+
+func TestNotificationDispatcher_BrokerRoutingOnUserNotification(t *testing.T) {
+	env := setupNotificationTest(t)
+
+	// Replace the agent subscription with a user subscription
+	require.NoError(t, env.store.DeleteNotificationSubscription(context.Background(), env.sub.ID))
+	userSub := &store.NotificationSubscription{
+		ID:                api.NewUUID(),
+		AgentID:           env.watched.ID,
+		SubscriberType:    store.SubscriberTypeUser,
+		SubscriberID:      "user-broker",
+		GroveID:           env.grove.ID,
+		TriggerActivities: []string{"COMPLETED"},
+		CreatedAt:         time.Now(),
+		CreatedBy:         "test",
+	}
+	require.NoError(t, env.store.CreateNotificationSubscription(context.Background(), userSub))
+
+	// Set up a recording broker and wire it as the broker proxy
+	rb := &recordingBroker{}
+	proxy := NewMessageBrokerProxy(rb, env.store, env.pub, func() AgentDispatcher { return env.dispatcher }, slog.Default())
+	env.nd.SetBrokerProxy(proxy)
+
+	// Also set up a recording channel — should NOT receive anything when broker is present
+	ch := &recordingChannel{name: "test-channel"}
+	env.nd.channelRegistry = &ChannelRegistry{
+		channels: []NotificationChannel{ch},
+		configs:  []ChannelConfig{{Type: "test-channel"}},
+		log:      slog.Default(),
+	}
+
+	env.nd.Start()
+	defer env.nd.Stop()
+
+	env.publishStatus("completed")
+
+	// Wait for broker to receive the notification
+	require.Eventually(t, func() bool {
+		return len(rb.getPublishes()) >= 1
+	}, 2*time.Second, 50*time.Millisecond)
+
+	// Verify the broker received the notification as a StructuredMessage
+	publishes := rb.getPublishes()
+	assert.Equal(t, "agent:watched-agent", publishes[0].msg.Sender)
+	assert.Equal(t, "user:user-broker", publishes[0].msg.Recipient)
+	assert.Equal(t, messages.TypeStateChange, publishes[0].msg.Type)
+	assert.Contains(t, publishes[0].msg.Msg, "watched-agent has reached a state of COMPLETED")
+
+	// Verify the topic is the user message topic
+	expectedTopic := broker.TopicUserMessages(env.grove.ID, "user-broker")
+	assert.Equal(t, expectedTopic, publishes[0].topic)
+
+	// Channel registry should NOT have been called (broker takes priority)
+	assert.Empty(t, ch.getDeliveries())
+}
+
+func TestNotificationDispatcher_FallbackToChannelWhenNoBroker(t *testing.T) {
+	env := setupNotificationTest(t)
+
+	// Replace the agent subscription with a user subscription
+	require.NoError(t, env.store.DeleteNotificationSubscription(context.Background(), env.sub.ID))
+	userSub := &store.NotificationSubscription{
+		ID:                api.NewUUID(),
+		AgentID:           env.watched.ID,
+		SubscriberType:    store.SubscriberTypeUser,
+		SubscriberID:      "user-fallback",
+		GroveID:           env.grove.ID,
+		TriggerActivities: []string{"COMPLETED"},
+		CreatedAt:         time.Now(),
+		CreatedBy:         "test",
+	}
+	require.NoError(t, env.store.CreateNotificationSubscription(context.Background(), userSub))
+
+	// No broker proxy set — should fall back to channel registry
+	ch := &recordingChannel{name: "test-channel"}
+	env.nd.channelRegistry = &ChannelRegistry{
+		channels: []NotificationChannel{ch},
+		configs:  []ChannelConfig{{Type: "test-channel"}},
+		log:      slog.Default(),
+	}
+
+	env.nd.Start()
+	defer env.nd.Stop()
+
+	env.publishStatus("completed")
+
+	// Wait for channel to receive the notification
+	require.Eventually(t, func() bool {
+		return len(ch.getDeliveries()) == 1
+	}, 2*time.Second, 50*time.Millisecond)
+
+	deliveries := ch.getDeliveries()
+	assert.Equal(t, "agent:watched-agent", deliveries[0].Sender)
+	assert.Equal(t, "user:user-fallback", deliveries[0].Recipient)
 }
 
 func TestNotificationDispatcher_ChannelDispatchOnUserNotification(t *testing.T) {
