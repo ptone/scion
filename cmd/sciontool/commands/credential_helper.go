@@ -82,9 +82,14 @@ func runCredentialHelper() {
 				log.Error("credential-helper: on-demand GitHub token refresh failed: %v", err)
 			} else {
 				token = newToken
-				// Write the refreshed token to the file for future use
+				// Write the refreshed token and expiry to the file for future use.
+				// Writing the expiry prevents the next credential-helper invocation
+				// (git often calls twice per push) from redundantly refreshing.
 				if writeErr := hub.WriteGitHubTokenFile(tokenPath, newToken); writeErr != nil {
 					log.Error("credential-helper: failed to write token file: %v", writeErr)
+				}
+				if expiryErr := hub.WriteGitHubTokenExpiry(tokenPath, newExpiry); expiryErr != nil {
+					log.Error("credential-helper: failed to write token expiry file: %v", expiryErr)
 				}
 				os.Setenv("GITHUB_TOKEN", newToken)
 				log.Debug("credential-helper: on-demand refresh succeeded, expires: %s", newExpiry.Format(time.RFC3339))
