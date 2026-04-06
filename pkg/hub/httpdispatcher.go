@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 )
 
 // HTTPRuntimeBrokerClient is an HTTP-based implementation of RuntimeBrokerClient.
@@ -101,7 +102,7 @@ func (d *HTTPAgentDispatcher) GetClient() RuntimeBrokerClient {
 
 // AgentTokenGenerator generates JWT tokens for agents.
 type AgentTokenGenerator interface {
-	GenerateAgentToken(agentID, groveID string, additionalScopes ...AgentTokenScope) (string, error)
+	GenerateAgentToken(agentID, groveID string, ancestry []string, additionalScopes ...AgentTokenScope) (string, error)
 }
 
 // GitHubAppTokenMinter mints GitHub App installation tokens for groves.
@@ -120,6 +121,7 @@ type HTTPAgentDispatcher struct {
 	client          RuntimeBrokerClient
 	tokenGenerator  AgentTokenGenerator
 	secretBackend   secret.SecretBackend
+	authzService    *AuthzService        // Optional authz service for progeny secret verification
 	githubAppMinter GitHubAppTokenMinter // Optional GitHub App token minter
 	hubEndpoint     string               // Hub endpoint URL for agents to call back
 	hubID           string               // Hub instance ID for hub-scoped queries
@@ -172,6 +174,11 @@ func (d *HTTPAgentDispatcher) SetHubID(id string) {
 // When set, agents receive SCION_DEV_TOKEN as a fallback authentication method.
 func (d *HTTPAgentDispatcher) SetDevAuthToken(token string) {
 	d.devAuthToken = token
+}
+
+// SetAuthzService sets the authorization service for progeny secret verification.
+func (d *HTTPAgentDispatcher) SetAuthzService(a *AuthzService) {
+	d.authzService = a
 }
 
 // SetGitHubAppMinter sets the GitHub App token minter for resolving
@@ -250,7 +257,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
 			}
 		}
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.GroveID, additionalScopes...)
+		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.GroveID, agent.Ancestry, additionalScopes...)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("Failed to generate agent token", "error", err)
@@ -959,7 +966,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
 			}
 		}
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.GroveID, additionalScopes...)
+		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.GroveID, agent.Ancestry, additionalScopes...)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("DispatchAgentStart: failed to generate agent token", "error", err)
@@ -1091,7 +1098,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
 			}
 		}
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.GroveID, additionalScopes...)
+		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.GroveID, agent.Ancestry, additionalScopes...)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("DispatchAgentRestart: failed to generate agent token", "error", err)
@@ -1176,7 +1183,32 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			"brokerID", agent.RuntimeBrokerID,
 		)
 	}
-	resolved, err := d.secretBackend.Resolve(ctx, agent.OwnerID, agent.GroveID, agent.RuntimeBrokerID)
+	// Build resolve options: include agent ancestry for progeny secret resolution
+	// when the creating principal is an agent (ancestry has more than one entry,
+	// meaning the agent was created by another agent, not directly by the user).
+	var resolveOpts *secret.ResolveOpts
+	if len(agent.Ancestry) > 1 && d.authzService != nil {
+		agentID := agent.ID
+		ancestry := agent.Ancestry
+		resolveOpts = &secret.ResolveOpts{
+			AgentAncestry: ancestry,
+			AuthzCheck: func(s secret.SecretMeta) bool {
+				decision := d.authzService.CheckAccess(ctx, &agentIdentityWrapper{
+					AgentTokenClaims: &AgentTokenClaims{
+						Claims:   jwt.Claims{Subject: agentID},
+						GroveID:  agent.GroveID,
+						Ancestry: ancestry,
+					},
+				}, Resource{
+					Type: "secret",
+					ID:   s.ID,
+				}, ActionRead)
+				return decision.Allowed
+			},
+		}
+	}
+
+	resolved, err := d.secretBackend.Resolve(ctx, agent.OwnerID, agent.GroveID, agent.RuntimeBrokerID, resolveOpts)
 	if err != nil {
 		return nil, err
 	}

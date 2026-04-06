@@ -84,7 +84,7 @@ func (b *LocalBackend) GetMeta(ctx context.Context, name, scope, scopeID string)
 	return fromStoreSecretMeta(s), nil
 }
 
-func (b *LocalBackend) Resolve(ctx context.Context, userID, groveID, brokerID string) ([]SecretWithValue, error) {
+func (b *LocalBackend) Resolve(ctx context.Context, userID, groveID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error) {
 	merged := make(map[string]SecretWithValue)
 
 	type scopeEntry struct {
@@ -146,6 +146,70 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, groveID, brokerID st
 					Description:   s.Description,
 					InjectionMode: s.InjectionMode,
 					SecretRef:     s.SecretRef,
+					AllowProgeny:  s.AllowProgeny,
+					Version:       s.Version,
+					Created:       s.Created,
+					Updated:       s.Updated,
+					CreatedBy:     s.CreatedBy,
+					UpdatedBy:     s.UpdatedBy,
+				},
+				Value: value,
+			}
+		}
+	}
+
+	// Progeny secret resolution: when the caller is an agent with ancestry,
+	// include user-scoped secrets marked allowProgeny whose creator is in the
+	// ancestry chain. These are added at user-scope precedence — grove/broker
+	// secrets with the same key will already have overridden them.
+	if opts != nil && len(opts.AgentAncestry) > 0 {
+		progenySecrets, err := b.store.ListProgenySecrets(ctx, opts.AgentAncestry)
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range progenySecrets {
+			// Skip if a higher-precedence scope already set this key
+			if _, exists := merged[s.Key]; exists {
+				continue
+			}
+			// Skip internal secrets
+			if s.SecretType == store.SecretTypeInternal {
+				continue
+			}
+
+			meta := fromStoreSecretMeta(&s)
+
+			// Verify access via policy engine if checker is provided
+			if opts.AuthzCheck != nil && !opts.AuthzCheck(*meta) {
+				continue
+			}
+
+			value, err := b.store.GetSecretValue(ctx, s.Key, s.Scope, s.ScopeID)
+			if err != nil {
+				continue
+			}
+
+			secretType := s.SecretType
+			if secretType == "" {
+				secretType = store.SecretTypeEnvironment
+			}
+			target := s.Target
+			if target == "" {
+				target = s.Key
+			}
+
+			merged[s.Key] = SecretWithValue{
+				SecretMeta: SecretMeta{
+					ID:            s.ID,
+					Name:          s.Key,
+					SecretType:    secretType,
+					Target:        target,
+					Scope:         s.Scope,
+					ScopeID:       s.ScopeID,
+					Description:   s.Description,
+					InjectionMode: s.InjectionMode,
+					SecretRef:     s.SecretRef,
+					AllowProgeny:  s.AllowProgeny,
 					Version:       s.Version,
 					Created:       s.Created,
 					Updated:       s.Updated,
@@ -188,6 +252,7 @@ func toStoreSecret(input *SetSecretInput) *store.Secret {
 		ScopeID:        input.ScopeID,
 		Description:    input.Description,
 		InjectionMode:  injectionMode,
+		AllowProgeny:   input.AllowProgeny,
 		CreatedBy:      input.CreatedBy,
 		UpdatedBy:      input.UpdatedBy,
 	}
@@ -215,6 +280,7 @@ func fromStoreSecretMeta(s *store.Secret) *SecretMeta {
 		Description:   s.Description,
 		InjectionMode: s.InjectionMode,
 		SecretRef:     s.SecretRef,
+		AllowProgeny:  s.AllowProgeny,
 		Version:       s.Version,
 		Created:       s.Created,
 		Updated:       s.Updated,

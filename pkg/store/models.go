@@ -666,6 +666,7 @@ type Secret struct {
 	// Metadata
 	Description   string `json:"description,omitempty"`   // Optional description
 	InjectionMode string `json:"injectionMode,omitempty"` // "always" or "as_needed" (default: as_needed)
+	AllowProgeny  bool   `json:"allowProgeny,omitempty"`  // Progeny access opt-in (user scope only)
 	Version       int    `json:"version"`                 // Incremented on each update
 
 	// Timestamps

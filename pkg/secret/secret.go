@@ -61,6 +61,7 @@ type SecretMeta struct {
 	Description   string    `json:"description,omitempty"`
 	InjectionMode string    `json:"injectionMode,omitempty"` // "always" or "as_needed"
 	SecretRef     string    `json:"secretRef,omitempty"`     // External reference (e.g., GCP SM resource path)
+	AllowProgeny  bool      `json:"allowProgeny,omitempty"`  // Allow creator's progeny agents to access (user scope only)
 	Version       int       `json:"version"`
 	Created       time.Time `json:"created"`
 	Updated       time.Time `json:"updated"`
@@ -84,9 +85,23 @@ type SetSecretInput struct {
 	ScopeID       string // ID of the scoped entity
 	Description   string // Optional description
 	InjectionMode string // "always" or "as_needed"
+	AllowProgeny  bool   // Allow creator's progeny agents to access (user scope only)
 	CreatedBy     string // User ID of creator (for new secrets)
 	UpdatedBy     string // User ID of updater
 	UserEmail     string // Email of the user (for labeling user-scoped secrets)
+}
+
+// ResolveOpts provides additional context for secret resolution.
+type ResolveOpts struct {
+	// AgentAncestry is the ordered ancestor chain from the agent's token.
+	// When present, secrets marked allowProgeny whose creator appears
+	// in this chain are included in the result.
+	AgentAncestry []string
+
+	// AuthzCheck is called for each progeny-candidate secret to verify
+	// access via the policy engine. If nil, progeny secrets are not included.
+	// Returns true if access is allowed.
+	AuthzCheck func(secret SecretMeta) bool
 }
 
 // SecretBackend defines the interface for secret storage operations.
@@ -109,7 +124,10 @@ type SecretBackend interface {
 
 	// Resolve collects and merges secrets from all applicable scopes for an agent.
 	// Scopes are resolved in order: user < grove < runtime_broker (later overrides earlier).
-	Resolve(ctx context.Context, userID, groveID, brokerID string) ([]SecretWithValue, error)
+	// The opts parameter is optional; pass nil for the current behavior.
+	// When opts.AgentAncestry is present, user-scoped secrets marked allowProgeny
+	// whose creator appears in the ancestry chain are included in the result.
+	Resolve(ctx context.Context, userID, groveID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error)
 
 	// HubID returns the hub instance ID used for hub-scoped secret namespacing.
 	HubID() string

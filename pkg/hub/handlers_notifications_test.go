@@ -202,7 +202,7 @@ func TestHandleNotifications_RejectAgentToken(t *testing.T) {
 	tokenSvc := srv.GetAgentTokenService()
 	require.NotNil(t, tokenSvc)
 
-	agentToken, err := tokenSvc.GenerateAgentToken(agent.ID, grove.ID, []AgentTokenScope{ScopeAgentStatusUpdate})
+	agentToken, err := tokenSvc.GenerateAgentToken(agent.ID, grove.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	require.NoError(t, err)
 
 	// Try to access notifications with an agent token

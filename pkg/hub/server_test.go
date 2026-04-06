@@ -153,7 +153,7 @@ func TestServer_SigningKeysExcludedFromResolve(t *testing.T) {
 
 	// Resolve secrets as if dispatching an agent — signing keys must not appear.
 	backend := secret.NewLocalBackend(s, "test-hub-resolve")
-	resolved, err := backend.Resolve(ctx, "", "", "")
+	resolved, err := backend.Resolve(ctx, "", "", "", nil)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -550,7 +550,7 @@ func TestServer_GenerateAgentToken_DevAuthAutoGrantsScopes(t *testing.T) {
 	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	// Generate token without any additional scopes
-	token, err := srv.GenerateAgentToken("agent-1", "grove-1")
+	token, err := srv.GenerateAgentToken("agent-1", "grove-1", nil)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}
@@ -595,7 +595,7 @@ func TestServer_GenerateAgentToken_DevAuthDeduplicatesScopes(t *testing.T) {
 	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	// Generate token with explicit scopes that overlap with auto-granted ones
-	token, err := srv.GenerateAgentToken("agent-1", "grove-1",
+	token, err := srv.GenerateAgentToken("agent-1", "grove-1", nil,
 		ScopeAgentCreate, ScopeAgentLifecycle, ScopeGroveSecretRead)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
@@ -642,7 +642,7 @@ func TestServer_GenerateAgentToken_NoDevAuthDoesNotAutoGrant(t *testing.T) {
 	srv := New(cfg, s)
 	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
-	token, err := srv.GenerateAgentToken("agent-1", "grove-1")
+	token, err := srv.GenerateAgentToken("agent-1", "grove-1", nil)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}

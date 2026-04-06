@@ -1,7 +1,7 @@
 # Agent Progeny Secret Access
 
 ## Status
-**Proposed** — 2026-04-05
+**Implemented** — 2026-04-05
 
 ## Related Documents
 - [Agent-to-Hub Access](hosted/agent-hub-access.md) — Sub-agent creation and management
@@ -364,7 +364,7 @@ Materialized progeny policies are labeled `scion.dev/managed-by: progeny-secret-
 
 ## 6. Implementation Plan
 
-### Phase 1: Data Model and Storage
+### Phase 1: Data Model and Storage ✅
 
 1. Add `AllowProgeny` field to `SecretMeta`, `SetSecretInput`, `Secret`, and `EnvVar` models.
 2. Add `allow_progeny` column to secrets table (Ent schema migration).
@@ -374,28 +374,28 @@ Materialized progeny policies are labeled `scion.dev/managed-by: progeny-secret-
 6. Update API handler for `PUT /api/v1/secrets/{key}` to accept `allowProgeny`.
 7. Update CLI `secret set` command to accept `--allow-progeny` flag.
 
-### Phase 2: Ancestry in Token Claims
+### Phase 2: Ancestry in Token Claims ✅
 
 8. Add `Ancestry` field to `AgentTokenClaims`.
 9. Update `GenerateAgentToken` call sites in dispatcher to include agent ancestry.
 10. Update `AgentIdentity` interface to expose `Ancestry()` and `OriginUserID()`.
 11. Update agent auth middleware to populate ancestry from validated token claims.
 
-### Phase 3: Policy Integration
+### Phase 3: Policy Integration ✅
 
 12. Implement implicit policy creation/deletion when `allowProgeny` is toggled on a secret.
 13. Label implicit policies with `scion.dev/managed-by: progeny-secret-access` for identification.
 14. Ensure policy cleanup on secret deletion.
 15. Add `DelegatedFrom` condition matching against agent ancestry in policy evaluation (verify existing support is sufficient).
 
-### Phase 4: Secret Resolution
+### Phase 4: Secret Resolution ✅
 
 16. Add `ResolveOpts` parameter to `SecretBackend.Resolve()`.
 17. Update dispatch flow to pass agent ancestry into `Resolve()` when the creating principal is an agent.
 18. Implement progeny secret query: `WHERE scope=user AND allowProgeny=true AND createdBy IN ancestry`.
 19. Verify via policy engine before including each progeny secret.
 
-### Phase 5: UX and Testing
+### Phase 5: UX and Testing ✅
 
 20. Add progeny column to CLI `secret list` output.
 21. Add toggle to web UI secret creation/edit forms.

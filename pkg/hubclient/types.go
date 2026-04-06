@@ -307,6 +307,7 @@ type Secret struct {
 	ScopeID       string    `json:"scopeId"`
 	Description   string    `json:"description,omitempty"`
 	InjectionMode string    `json:"injectionMode,omitempty"`
+	AllowProgeny  bool      `json:"allowProgeny,omitempty"`
 	Version       int       `json:"version"`
 	Created       time.Time `json:"created"`
 	Updated       time.Time `json:"updated"`

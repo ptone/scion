@@ -216,7 +216,7 @@ func (b *GCPBackend) GetMeta(ctx context.Context, name, scope, scopeID string) (
 	return fromStoreSecretMeta(s), nil
 }
 
-func (b *GCPBackend) Resolve(ctx context.Context, userID, groveID, brokerID string) ([]SecretWithValue, error) {
+func (b *GCPBackend) Resolve(ctx context.Context, userID, groveID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error) {
 	merged := make(map[string]SecretWithValue)
 
 	type scopeEntry struct {
@@ -279,6 +279,68 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, groveID, brokerID stri
 					Description:   s.Description,
 					InjectionMode: s.InjectionMode,
 					SecretRef:     fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName),
+					AllowProgeny:  s.AllowProgeny,
+					Version:       s.Version,
+					Created:       s.Created,
+					Updated:       s.Updated,
+					CreatedBy:     s.CreatedBy,
+					UpdatedBy:     s.UpdatedBy,
+				},
+				Value: value,
+			}
+		}
+	}
+
+	// Progeny secret resolution: when the caller is an agent with ancestry,
+	// include user-scoped secrets marked allowProgeny whose creator is in the
+	// ancestry chain. These are added at user-scope precedence.
+	if opts != nil && len(opts.AgentAncestry) > 0 {
+		progenySecrets, err := b.store.ListProgenySecrets(ctx, opts.AgentAncestry)
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range progenySecrets {
+			if _, exists := merged[s.Key]; exists {
+				continue
+			}
+			if s.SecretType == store.SecretTypeInternal {
+				continue
+			}
+
+			meta := fromStoreSecretMeta(&s)
+
+			if opts.AuthzCheck != nil && !opts.AuthzCheck(*meta) {
+				continue
+			}
+
+			// Read value from GCP SM
+			smName := b.gcpSecretName(s.Key, s.Scope, s.ScopeID)
+			value, err := b.accessLatestVersion(ctx, smName)
+			if err != nil {
+				continue
+			}
+
+			secretType := s.SecretType
+			if secretType == "" {
+				secretType = store.SecretTypeEnvironment
+			}
+			target := s.Target
+			if target == "" {
+				target = s.Key
+			}
+
+			merged[s.Key] = SecretWithValue{
+				SecretMeta: SecretMeta{
+					ID:            s.ID,
+					Name:          s.Key,
+					SecretType:    secretType,
+					Target:        target,
+					Scope:         s.Scope,
+					ScopeID:       s.ScopeID,
+					Description:   s.Description,
+					InjectionMode: s.InjectionMode,
+					SecretRef:     fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName),
+					AllowProgeny:  s.AllowProgeny,
 					Version:       s.Version,
 					Created:       s.Created,
 					Updated:       s.Updated,

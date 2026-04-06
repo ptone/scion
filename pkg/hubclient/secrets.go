@@ -73,6 +73,7 @@ type SetSecretRequest struct {
 	InjectionMode string `json:"injectionMode,omitempty"` // "always" or "as_needed" (default: as_needed)
 	Type          string `json:"type,omitempty"`          // Secret type: environment (default), variable, file
 	Target        string `json:"target,omitempty"`        // Projection target (defaults to key)
+	AllowProgeny  bool   `json:"allowProgeny,omitempty"`  // Allow creator's progeny agents to access (user scope only)
 }
 
 // SetSecretResponse is the response from setting a secret.

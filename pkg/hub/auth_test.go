@@ -157,7 +157,7 @@ func TestUnifiedAuthMiddleware_AgentToken(t *testing.T) {
 		t.Fatalf("failed to create agent token service: %v", err)
 	}
 
-	agentToken, err := agentTokenSvc.GenerateAgentToken("agent-456", "grove-789", []AgentTokenScope{ScopeAgentStatusUpdate})
+	agentToken, err := agentTokenSvc.GenerateAgentToken("agent-456", "grove-789", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}

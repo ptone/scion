@@ -51,6 +51,7 @@ export class ScionSecretList extends LitElement {
   @state() private dialogType: SecretType = 'environment';
   @state() private dialogTarget = '';
   @state() private dialogInjectionMode: InjectionMode = 'as_needed';
+  @state() private dialogAllowProgeny = false;
   @state() private dialogLoading = false;
   @state() private dialogError: string | null = null;
 
@@ -97,6 +98,7 @@ export class ScionSecretList extends LitElement {
     this.dialogType = 'environment';
     this.dialogTarget = '';
     this.dialogInjectionMode = 'as_needed';
+    this.dialogAllowProgeny = false;
     this.dialogError = null;
     this.dialogOpen = true;
   }
@@ -109,6 +111,7 @@ export class ScionSecretList extends LitElement {
     this.dialogType = secret.type;
     this.dialogTarget = secret.target || '';
     this.dialogInjectionMode = secret.injectionMode || 'as_needed';
+    this.dialogAllowProgeny = secret.allowProgeny || false;
     this.dialogError = null;
     this.dialogOpen = true;
   }
@@ -142,6 +145,7 @@ export class ScionSecretList extends LitElement {
         type: this.dialogType,
         target: this.dialogTarget || undefined,
         injectionMode: this.dialogInjectionMode,
+        allowProgeny: this.scope === 'user' ? this.dialogAllowProgeny : undefined,
       };
 
       if (this.scope === 'grove') {
@@ -310,6 +314,7 @@ export class ScionSecretList extends LitElement {
               <th>Key</th>
               <th>Type</th>
               <th>Inject</th>
+              ${this.scope === 'user' ? html`<th>Progeny</th>` : nothing}
               <th class="hide-mobile">Description</th>
               <th>Version</th>
               <th class="hide-mobile">Updated</th>
@@ -345,6 +350,9 @@ export class ScionSecretList extends LitElement {
             ? html`<span class="badge inject-as-needed">as needed</span>`
             : html`<span class="badge inject-always">always</span>`}
         </td>
+        ${this.scope === 'user'
+          ? html`<td>${secret.allowProgeny ? html`<sl-icon name="check-lg" title="Progeny can access"></sl-icon>` : '\u2014'}</td>`
+          : nothing}
         <td class="description-cell hide-mobile">${secret.description || '\u2014'}</td>
         <td>
           <span class="version-badge">v${secret.version}</span>
@@ -472,6 +480,22 @@ export class ScionSecretList extends LitElement {
               "As needed" injects only when the agent configuration requests this value.
             </span>
           </div>
+
+          ${this.scope === 'user'
+            ? html`
+                <sl-switch
+                  ?checked=${this.dialogAllowProgeny}
+                  @sl-change=${(e: Event) => {
+                    this.dialogAllowProgeny = (e.target as HTMLInputElement).checked;
+                  }}
+                >
+                  Allow agent progeny to access
+                </sl-switch>
+                <span class="radio-field-help">
+                  When enabled, agents spawned by your agents (and their descendants) will also receive this secret.
+                </span>
+              `
+            : nothing}
 
           ${this.dialogError ? html`<div class="dialog-error">${this.dialogError}</div>` : nothing}
         </form>

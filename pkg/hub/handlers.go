@@ -6145,6 +6145,7 @@ type SetSecretRequest struct {
 	InjectionMode string `json:"injectionMode,omitempty"` // "always" or "as_needed" (default: as_needed)
 	Type          string `json:"type,omitempty"`          // environment (default), variable, file
 	Target        string `json:"target,omitempty"`        // Projection target (defaults to key)
+	AllowProgeny  bool   `json:"allowProgeny,omitempty"`  // Allow creator's progeny agents to access (user scope only)
 }
 
 type SetSecretResponse struct {
@@ -6164,6 +6165,7 @@ func metaToStoreSecret(m secret.SecretMeta) store.Secret {
 		ScopeID:       m.ScopeID,
 		Description:   m.Description,
 		InjectionMode: m.InjectionMode,
+		AllowProgeny:  m.AllowProgeny,
 		Version:       m.Version,
 		Created:       m.Created,
 		Updated:       m.Updated,
@@ -6188,6 +6190,80 @@ func secretMetaToEnvVar(m secret.SecretMeta) store.EnvVar {
 		Created:       m.Created,
 		Updated:       m.Updated,
 		CreatedBy:     m.CreatedBy,
+	}
+}
+
+// progenyPolicyName returns the canonical policy name for a progeny secret policy.
+func progenyPolicyName(secretID string) string {
+	return "progeny-secret-access:" + secretID
+}
+
+// ensureProgenyPolicy creates or deletes the implicit progeny policy for a secret
+// based on the allowProgeny flag. It is called after a secret is created or updated.
+func (s *Server) ensureProgenyPolicy(ctx context.Context, meta *secret.SecretMeta) {
+	if meta.Scope != store.ScopeUser {
+		return
+	}
+
+	policyName := progenyPolicyName(meta.ID)
+
+	if meta.AllowProgeny {
+		// Check if policy already exists
+		existing, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
+		if err != nil {
+			s.envSecretLog.Warn("failed to check for existing progeny policy", "secret", meta.Name, "error", err)
+			return
+		}
+		if existing.TotalCount > 0 {
+			return // Policy already exists
+		}
+
+		// Create implicit policy
+		policy := &store.Policy{
+			ID:           api.NewUUID(),
+			Name:         policyName,
+			Description:  "Implicit policy granting progeny agents read access to secret " + meta.Name,
+			ScopeType:    store.PolicyScopeResource,
+			ScopeID:      meta.ID,
+			ResourceType: "secret",
+			ResourceID:   meta.ID,
+			Actions:      []string{"read"},
+			Effect:       store.PolicyEffectAllow,
+			Conditions: &store.PolicyConditions{
+				DelegatedFrom: &store.DelegatedFromCondition{
+					PrincipalType: "user",
+					PrincipalID:   meta.CreatedBy,
+				},
+			},
+			Labels: map[string]string{
+				"scion.dev/managed-by":  "progeny-secret-access",
+				"scion.dev/secret-key":  meta.Name,
+				"scion.dev/secret-id":   meta.ID,
+				"scion.dev/secret-scope": meta.Scope,
+			},
+			CreatedBy: meta.CreatedBy,
+		}
+		if err := s.store.CreatePolicy(ctx, policy); err != nil {
+			s.envSecretLog.Warn("failed to create progeny policy", "secret", meta.Name, "error", err)
+		}
+	} else {
+		// Delete implicit policy if it exists
+		s.deleteProgenyPolicy(ctx, meta.ID)
+	}
+}
+
+// deleteProgenyPolicy removes the implicit progeny policy for a secret by its ID.
+func (s *Server) deleteProgenyPolicy(ctx context.Context, secretID string) {
+	policyName := progenyPolicyName(secretID)
+	existing, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
+	if err != nil {
+		s.envSecretLog.Warn("failed to look up progeny policy for deletion", "secretID", secretID, "error", err)
+		return
+	}
+	for _, p := range existing.Items {
+		if err := s.store.DeletePolicy(ctx, p.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			s.envSecretLog.Warn("failed to delete progeny policy", "policyID", p.ID, "error", err)
+		}
 	}
 }
 
@@ -6344,6 +6420,15 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
+	// allowProgeny is only valid on user-scoped secrets
+	if req.AllowProgeny && scope != store.ScopeUser {
+		ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
+			"field": "allowProgeny",
+			"scope": scope,
+		})
+		return
+	}
+
 	input := &secret.SetSecretInput{
 		Name:          key,
 		Value:         req.Value,
@@ -6353,6 +6438,7 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 		ScopeID:       scopeID,
 		Description:   req.Description,
 		InjectionMode: req.InjectionMode,
+		AllowProgeny:  req.AllowProgeny,
 	}
 
 	// Populate CreatedBy/UpdatedBy from authenticated user
@@ -6369,6 +6455,10 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	// Manage implicit progeny policy lifecycle
+	s.ensureProgenyPolicy(ctx, meta)
+
 	result := metaToStoreSecret(*meta)
 	writeJSON(w, http.StatusOK, SetSecretResponse{
 		Secret:  &result,
@@ -6388,6 +6478,13 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), true)
 	if !ok {
 		return
+	}
+
+	// Fetch secret metadata before deletion for policy cleanup
+	if scope == store.ScopeUser {
+		if meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID); err == nil && meta.AllowProgeny {
+			defer s.deleteProgenyPolicy(ctx, meta.ID)
+		}
 	}
 
 	if err := s.secretBackend.Delete(ctx, key, scope, scopeID); err != nil {

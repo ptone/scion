@@ -41,6 +41,8 @@ type AgentIdentity interface {
 	GroveID() string
 	Scopes() []AgentTokenScope
 	HasScope(scope AgentTokenScope) bool
+	Ancestry() []string   // Ordered ancestor chain: [root_user, ..., parent_agent]
+	OriginUserID() string // Returns Ancestry[0] if present, empty string otherwise
 }
 
 // AuthenticatedUser implements UserIdentity.
@@ -130,6 +132,17 @@ func (a *agentIdentityWrapper) GroveID() string { return a.AgentTokenClaims.Grov
 
 // Scopes returns the agent scopes.
 func (a *agentIdentityWrapper) Scopes() []AgentTokenScope { return a.AgentTokenClaims.Scopes }
+
+// Ancestry returns the ordered ancestor chain from the token claims.
+func (a *agentIdentityWrapper) Ancestry() []string { return a.AgentTokenClaims.Ancestry }
+
+// OriginUserID returns the originating user ID (first element of ancestry).
+func (a *agentIdentityWrapper) OriginUserID() string {
+	if len(a.AgentTokenClaims.Ancestry) > 0 {
+		return a.AgentTokenClaims.Ancestry[0]
+	}
+	return ""
+}
 
 // identityContextKey is the key for storing identity in the request context.
 type identityContextKey struct{}

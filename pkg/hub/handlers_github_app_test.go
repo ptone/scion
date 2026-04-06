@@ -538,7 +538,7 @@ func TestHandleAgentGitHubTokenRefresh_SelfAccess(t *testing.T) {
 	// Generate an agent token with refresh scope
 	agentToken, err := srv.agentTokenService.GenerateAgentToken(
 		"agent_gh_refresh3", grove.ID,
-		[]AgentTokenScope{ScopeAgentTokenRefresh})
+		[]AgentTokenScope{ScopeAgentTokenRefresh}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
@@ -581,7 +581,7 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 
 	agentToken, err := srv.agentTokenService.GenerateAgentToken(
 		"agent_gh_refresh4", grove.ID,
-		[]AgentTokenScope{ScopeAgentTokenRefresh})
+		[]AgentTokenScope{ScopeAgentTokenRefresh}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}

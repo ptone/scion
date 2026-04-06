@@ -71,7 +71,7 @@ func TestAgentStatusUpdate_Authorization(t *testing.T) {
 	require.NotNil(t, tokenSvc)
 
 	// Generate token for agent 1
-	token1, err := tokenSvc.GenerateAgentToken(agent1.ID, grove.ID, []AgentTokenScope{ScopeAgentStatusUpdate})
+	token1, err := tokenSvc.GenerateAgentToken(agent1.ID, grove.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	require.NoError(t, err)
 
 	t.Run("Agent 1 can update its own status", func(t *testing.T) {
@@ -468,7 +468,7 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, grove.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
 			ScopeAgentCreate,
-		})
+		}, nil)
 		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
@@ -507,7 +507,7 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, grove.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
 			ScopeAgentCreate,
-		})
+		}, nil)
 		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
@@ -528,7 +528,7 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 		// Token with only status update scope (no create scope)
 		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, grove.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
-		})
+		}, nil)
 		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
@@ -585,7 +585,7 @@ func TestAgentLifecycle_WithScope(t *testing.T) {
 		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, grove.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
 			ScopeAgentLifecycle,
-		})
+		}, nil)
 		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+targetAgent.ID+"/stop", nil)
@@ -619,7 +619,7 @@ func TestAgentLifecycle_WithScope(t *testing.T) {
 		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, grove.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
 			ScopeAgentLifecycle,
-		})
+		}, nil)
 		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+otherAgent.ID+"/stop", nil)
@@ -635,7 +635,7 @@ func TestAgentLifecycle_WithScope(t *testing.T) {
 		// Token with only status update scope (existing behavior)
 		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, grove.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
-		})
+		}, nil)
 		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+targetAgent.ID+"/stop", nil)
@@ -698,7 +698,7 @@ func TestAgentGetAgent_GroveIsolation(t *testing.T) {
 	tokenSvc := srv.GetAgentTokenService()
 	require.NotNil(t, tokenSvc)
 
-	token, err := tokenSvc.GenerateAgentToken(agent1.ID, grove1.ID, []AgentTokenScope{ScopeAgentStatusUpdate})
+	token, err := tokenSvc.GenerateAgentToken(agent1.ID, grove1.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	require.NoError(t, err)
 
 	t.Run("Agent can GET details of agents in same grove", func(t *testing.T) {
@@ -2568,7 +2568,7 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 			ScopeAgentStatusUpdate,
 			ScopeAgentCreate,
 			ScopeAgentNotify,
-		})
+		}, nil)
 		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
@@ -2611,7 +2611,7 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, grove.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
 			ScopeAgentCreate,
-		})
+		}, nil)
 		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
@@ -2702,7 +2702,7 @@ func TestCreateAgent_NotifySubscriptionCascadeOnDelete(t *testing.T) {
 		ScopeAgentStatusUpdate,
 		ScopeAgentCreate,
 		ScopeAgentNotify,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// Create agent with notify

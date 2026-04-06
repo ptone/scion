@@ -242,6 +242,20 @@ func (a *AuthzService) checkDelegation(ctx context.Context, agent AgentIdentity,
 			a.logger.Warn("delegation check failed", "agent_id", agent.ID(), "policyID", policy.ID, "error", err)
 			continue
 		}
+
+		// If store-level delegation didn't match, check ancestry chain.
+		// This supports progeny access: the DelegatedFrom principal may be
+		// an ancestor (not the direct creator) of this agent.
+		if !allowed && policy.Conditions.DelegatedFrom != nil {
+			ancestry := agent.Ancestry()
+			for _, ancestorID := range ancestry {
+				if policy.Conditions.DelegatedFrom.PrincipalID == ancestorID {
+					allowed = true
+					break
+				}
+			}
+		}
+
 		if allowed && policy.Effect == "allow" {
 			return Decision{
 				Allowed:    true,

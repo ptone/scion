@@ -120,6 +120,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV42,
 		migrationV43,
 		migrationV44,
+		migrationV45,
 	}
 
 	// Create migrations table if not exists
@@ -1082,6 +1083,11 @@ WHERE key IN ('agent_signing_key', 'user_signing_key')
 const migrationV44 = `
 ALTER TABLE gcp_service_accounts ADD COLUMN managed INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE gcp_service_accounts ADD COLUMN managed_by TEXT NOT NULL DEFAULT '';
+`
+
+// Migration V45: Add allow_progeny column to secrets table
+const migrationV45 = `
+ALTER TABLE secrets ADD COLUMN allow_progeny INTEGER NOT NULL DEFAULT 0;
 `
 
 // Helper functions for JSON marshaling/unmarshaling
@@ -3734,13 +3740,13 @@ func (s *SQLiteStore) CreateSecret(ctx context.Context, secret *store.Secret) er
 	}
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO secrets (id, key, encrypted_value, secret_ref, secret_type, target, scope, scope_id, description, injection_mode, version, created_at, updated_at, created_by, updated_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO secrets (id, key, encrypted_value, secret_ref, secret_type, target, scope, scope_id, description, injection_mode, allow_progeny, version, created_at, updated_at, created_by, updated_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		secret.ID, secret.Key, secret.EncryptedValue, nullableString(secret.SecretRef),
 		secret.SecretType, nullableString(secret.Target),
 		secret.Scope, secret.ScopeID,
-		secret.Description, secret.InjectionMode, secret.Version,
+		secret.Description, secret.InjectionMode, boolToInt(secret.AllowProgeny), secret.Version,
 		secret.Created, secret.Updated, secret.CreatedBy, secret.UpdatedBy,
 	)
 	if err != nil {
@@ -3757,14 +3763,15 @@ func (s *SQLiteStore) GetSecret(ctx context.Context, key, scope, scopeID string)
 	var target sql.NullString
 	var secretRef sql.NullString
 
+	var allowProgeny int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, key, encrypted_value, secret_ref, secret_type, COALESCE(target, key), scope, scope_id, description, injection_mode, version, created_at, updated_at, created_by, updated_by
+		SELECT id, key, encrypted_value, secret_ref, secret_type, COALESCE(target, key), scope, scope_id, description, injection_mode, allow_progeny, version, created_at, updated_at, created_by, updated_by
 		FROM secrets WHERE key = ? AND scope = ? AND scope_id = ?
 	`, key, scope, scopeID).Scan(
 		&secret.ID, &secret.Key, &secret.EncryptedValue, &secretRef,
 		&secret.SecretType, &target,
 		&secret.Scope, &secret.ScopeID,
-		&secret.Description, &secret.InjectionMode, &secret.Version,
+		&secret.Description, &secret.InjectionMode, &allowProgeny, &secret.Version,
 		&secret.Created, &secret.Updated, &secret.CreatedBy, &secret.UpdatedBy,
 	)
 	if err != nil {
@@ -3780,6 +3787,7 @@ func (s *SQLiteStore) GetSecret(ctx context.Context, key, scope, scopeID string)
 	if secretRef.Valid {
 		secret.SecretRef = secretRef.String
 	}
+	secret.AllowProgeny = allowProgeny != 0
 
 	return secret, nil
 }
@@ -3800,12 +3808,12 @@ func (s *SQLiteStore) UpdateSecret(ctx context.Context, secret *store.Secret) er
 
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE secrets SET
-			encrypted_value = ?, secret_ref = ?, secret_type = ?, target = ?, description = ?, injection_mode = ?, version = ?, updated_at = ?, updated_by = ?
+			encrypted_value = ?, secret_ref = ?, secret_type = ?, target = ?, description = ?, injection_mode = ?, allow_progeny = ?, version = ?, updated_at = ?, updated_by = ?
 		WHERE key = ? AND scope = ? AND scope_id = ?
 	`,
 		secret.EncryptedValue, nullableString(secret.SecretRef),
 		secret.SecretType, nullableString(secret.Target),
-		secret.Description, secret.InjectionMode, secret.Version, secret.Updated, secret.UpdatedBy,
+		secret.Description, secret.InjectionMode, boolToInt(secret.AllowProgeny), secret.Version, secret.Updated, secret.UpdatedBy,
 		secret.Key, secret.Scope, secret.ScopeID,
 	)
 	if err != nil {
@@ -3907,7 +3915,7 @@ func (s *SQLiteStore) ListSecrets(ctx context.Context, filter store.SecretFilter
 
 	// Note: We do NOT select encrypted_value for listing
 	query := fmt.Sprintf(`
-		SELECT id, key, secret_ref, secret_type, COALESCE(target, key), scope, scope_id, description, injection_mode, version, created_at, updated_at, created_by, updated_by
+		SELECT id, key, secret_ref, secret_type, COALESCE(target, key), scope, scope_id, description, injection_mode, allow_progeny, version, created_at, updated_at, created_by, updated_by
 		FROM secrets %s ORDER BY key
 	`, whereClause)
 
@@ -3922,10 +3930,11 @@ func (s *SQLiteStore) ListSecrets(ctx context.Context, filter store.SecretFilter
 		var secret store.Secret
 		var target sql.NullString
 		var secretRef sql.NullString
+		var allowProgeny int
 		if err := rows.Scan(
 			&secret.ID, &secret.Key, &secretRef, &secret.SecretType, &target,
 			&secret.Scope, &secret.ScopeID,
-			&secret.Description, &secret.InjectionMode, &secret.Version,
+			&secret.Description, &secret.InjectionMode, &allowProgeny, &secret.Version,
 			&secret.Created, &secret.Updated, &secret.CreatedBy, &secret.UpdatedBy,
 		); err != nil {
 			return nil, err
@@ -3936,6 +3945,60 @@ func (s *SQLiteStore) ListSecrets(ctx context.Context, filter store.SecretFilter
 		if secretRef.Valid {
 			secret.SecretRef = secretRef.String
 		}
+		secret.AllowProgeny = allowProgeny != 0
+		secrets = append(secrets, secret)
+	}
+
+	return secrets, nil
+}
+
+func (s *SQLiteStore) ListProgenySecrets(ctx context.Context, ancestorIDs []string) ([]store.Secret, error) {
+	if len(ancestorIDs) == 0 {
+		return nil, nil
+	}
+
+	// Build placeholder list for IN clause
+	placeholders := make([]string, len(ancestorIDs))
+	args := make([]interface{}, len(ancestorIDs))
+	for i, id := range ancestorIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, key, secret_ref, secret_type, COALESCE(target, key), scope, scope_id, description, injection_mode, allow_progeny, version, created_at, updated_at, created_by, updated_by
+		FROM secrets
+		WHERE scope = 'user' AND allow_progeny = 1 AND created_by IN (%s)
+		ORDER BY key
+	`, strings.Join(placeholders, ", "))
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var secrets []store.Secret
+	for rows.Next() {
+		var secret store.Secret
+		var target sql.NullString
+		var secretRef sql.NullString
+		var allowProgeny int
+		if err := rows.Scan(
+			&secret.ID, &secret.Key, &secretRef, &secret.SecretType, &target,
+			&secret.Scope, &secret.ScopeID,
+			&secret.Description, &secret.InjectionMode, &allowProgeny, &secret.Version,
+			&secret.Created, &secret.Updated, &secret.CreatedBy, &secret.UpdatedBy,
+		); err != nil {
+			return nil, err
+		}
+		if target.Valid {
+			secret.Target = target.String
+		}
+		if secretRef.Valid {
+			secret.SecretRef = secretRef.String
+		}
+		secret.AllowProgeny = allowProgeny != 0
 		secrets = append(secrets, secret)
 	}
 

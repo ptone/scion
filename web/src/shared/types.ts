@@ -498,6 +498,7 @@ export interface Secret {
   scopeId: string;
   description?: string;
   injectionMode: InjectionMode;
+  allowProgeny?: boolean;
   version: number;
   created: string;
   updated: string;

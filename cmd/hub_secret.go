@@ -36,6 +36,7 @@ var (
 	secretOutputJSON  bool
 	secretType        string
 	secretTarget      string
+	secretAllowProgeny bool
 )
 
 // hubSecretCmd is the parent command for secret operations
@@ -186,6 +187,7 @@ func init() {
 	// Type and target flags for set command
 	hubSecretSetCmd.Flags().StringVar(&secretType, "type", "", "Secret type: environment (default), variable, file")
 	hubSecretSetCmd.Flags().StringVar(&secretTarget, "target", "", "Projection target (env var name, json key, or file path; defaults to KEY)")
+	hubSecretSetCmd.Flags().BoolVar(&secretAllowProgeny, "allow-progeny", false, "Allow creator's progeny agents to access this secret (user scope only)")
 }
 
 // resolveSecretScope determines the scope and scopeID based on flags.
@@ -347,11 +349,12 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 	}
 
 	req := &hubclient.SetSecretRequest{
-		Value:   value,
-		Scope:   scope,
-		ScopeID: scopeID,
-		Type:    secretType,
-		Target:  secretTarget,
+		Value:        value,
+		Scope:        scope,
+		ScopeID:      scopeID,
+		Type:         secretType,
+		Target:       secretTarget,
+		AllowProgeny: secretAllowProgeny,
 	}
 
 	resp, err := client.Secrets().Set(ctx, key, req)
@@ -498,14 +501,18 @@ func runSecretList(cmd *cobra.Command, _ []string) error {
 	}
 
 	fmt.Printf("Secrets (scope: %s):\n", scope)
-	fmt.Printf("%-30s  %-12s  %-8s  %s\n", "KEY", "TYPE", "VERSION", "UPDATED")
-	fmt.Printf("%-30s  %-12s  %-8s  %s\n", "------------------------------", "------------", "--------", "-------------------")
+	fmt.Printf("%-30s  %-12s  %-8s  %-8s  %s\n", "KEY", "TYPE", "PROGENY", "VERSION", "UPDATED")
+	fmt.Printf("%-30s  %-12s  %-8s  %-8s  %s\n", "------------------------------", "------------", "--------", "--------", "-------------------")
 	for _, s := range resp.Secrets {
 		typeLabel := s.SecretType
 		if typeLabel == "" {
 			typeLabel = "environment"
 		}
-		fmt.Printf("%-30s  %-12s  v%-7d  %s\n", truncate(s.Key, 30), typeLabel, s.Version, s.Updated.Format("2006-01-02 15:04:05"))
+		progenyLabel := "-"
+		if s.AllowProgeny {
+			progenyLabel = "\u2713"
+		}
+		fmt.Printf("%-30s  %-12s  %-8s  v%-7d  %s\n", truncate(s.Key, 30), typeLabel, progenyLabel, s.Version, s.Updated.Format("2006-01-02 15:04:05"))
 	}
 
 	return nil

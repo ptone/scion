@@ -346,7 +346,7 @@ func TestEnvVar_GroveScope_AgentReadOwnGrove(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestEnvVar_GroveScope_AgentOtherGroveDenied(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove1.ID, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove1.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestEnvVar_GroveScope_AgentWriteDenied(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
@@ -660,7 +660,7 @@ func TestSecret_GroveScope_AgentReadOwnGrove(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
@@ -693,7 +693,7 @@ func TestSecret_GroveScope_AgentWriteDenied(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
@@ -1348,7 +1348,7 @@ func TestEnvVar_HubScope_AgentCanRead(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}

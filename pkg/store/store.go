@@ -495,6 +495,11 @@ type SecretStore interface {
 	// This is used internally for environment resolution.
 	// Returns ErrNotFound if the secret doesn't exist.
 	GetSecretValue(ctx context.Context, key, scope, scopeID string) (encryptedValue string, err error)
+
+	// ListProgenySecrets returns user-scoped secrets with allowProgeny=true
+	// whose createdBy is in the given set of ancestor IDs.
+	// Note: EncryptedValue is NOT populated in the returned secrets.
+	ListProgenySecrets(ctx context.Context, ancestorIDs []string) ([]Secret, error)
 }
 
 // SecretFilter defines criteria for filtering secrets.

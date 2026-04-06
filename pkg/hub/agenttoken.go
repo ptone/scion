@@ -63,8 +63,9 @@ const (
 // AgentTokenClaims represents the custom claims in an agent JWT.
 type AgentTokenClaims struct {
 	jwt.Claims
-	GroveID string            `json:"grove_id,omitempty"`
-	Scopes  []AgentTokenScope `json:"scopes,omitempty"`
+	GroveID  string            `json:"grove_id,omitempty"`
+	Scopes   []AgentTokenScope `json:"scopes,omitempty"`
+	Ancestry []string          `json:"ancestry,omitempty"` // [root_user, ..., parent_agent]
 }
 
 // AgentTokenConfig holds configuration for agent token generation.
@@ -114,7 +115,7 @@ func NewAgentTokenService(config AgentTokenConfig) (*AgentTokenService, error) {
 }
 
 // GenerateAgentToken generates a JWT for an agent with the specified scopes.
-func (s *AgentTokenService) GenerateAgentToken(agentID, groveID string, scopes []AgentTokenScope) (string, error) {
+func (s *AgentTokenService) GenerateAgentToken(agentID, groveID string, scopes []AgentTokenScope, ancestry []string) (string, error) {
 	now := time.Now()
 
 	// Default to status update scope if none provided
@@ -132,8 +133,9 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, groveID string, scopes [
 			NotBefore: jwt.NewNumericDate(now),
 			ID:        generateTokenID(),
 		},
-		GroveID: groveID,
-		Scopes:  scopes,
+		GroveID:  groveID,
+		Scopes:   scopes,
+		Ancestry: ancestry,
 	}
 
 	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()
@@ -179,12 +181,12 @@ func (s *AgentTokenService) RefreshAgentToken(tokenString string) (string, time.
 		return "", time.Time{}, fmt.Errorf("cannot refresh invalid token: %w", err)
 	}
 
-	return s.GenerateAgentTokenWithExpiry(claims.Subject, claims.GroveID, claims.Scopes)
+	return s.GenerateAgentTokenWithExpiry(claims.Subject, claims.GroveID, claims.Scopes, claims.Ancestry)
 }
 
 // GenerateAgentTokenWithExpiry generates a JWT for an agent and also returns
 // the expiry time of the new token.
-func (s *AgentTokenService) GenerateAgentTokenWithExpiry(agentID, groveID string, scopes []AgentTokenScope) (string, time.Time, error) {
+func (s *AgentTokenService) GenerateAgentTokenWithExpiry(agentID, groveID string, scopes []AgentTokenScope, ancestry []string) (string, time.Time, error) {
 	now := time.Now()
 
 	if len(scopes) == 0 {
@@ -202,8 +204,9 @@ func (s *AgentTokenService) GenerateAgentTokenWithExpiry(agentID, groveID string
 			NotBefore: jwt.NewNumericDate(now),
 			ID:        generateTokenID(),
 		},
-		GroveID: groveID,
-		Scopes:  scopes,
+		GroveID:  groveID,
+		Scopes:   scopes,
+		Ancestry: ancestry,
 	}
 
 	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()

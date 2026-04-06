@@ -125,7 +125,7 @@ func TestLocalBackend_SetAndResolveRoundTrip(t *testing.T) {
 	}
 
 	// Resolve should find it
-	resolved, err := backend.Resolve(ctx, "user-1", "", "")
+	resolved, err := backend.Resolve(ctx, "user-1", "", "", nil)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestLocalBackend_Resolve(t *testing.T) {
 		ScopeID:        "grove-1",
 	})
 
-	resolved, err := backend.Resolve(ctx, "user-1", "grove-1", "")
+	resolved, err := backend.Resolve(ctx, "user-1", "grove-1", "", nil)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestLocalBackend_ResolveNoScopes(t *testing.T) {
 	backend, _ := createTestBackend(t)
 	ctx := context.Background()
 
-	resolved, err := backend.Resolve(ctx, "", "", "")
+	resolved, err := backend.Resolve(ctx, "", "", "", nil)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -443,7 +443,7 @@ func TestLocalBackend_ResolveBrokerOverride(t *testing.T) {
 		ScopeID:        "broker-1",
 	})
 
-	resolved, err := backend.Resolve(ctx, "user-1", "", "broker-1")
+	resolved, err := backend.Resolve(ctx, "user-1", "", "broker-1", nil)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -496,7 +496,7 @@ func TestLocalBackend_ResolveExcludesInternalSecrets(t *testing.T) {
 		ScopeID:        "user-1",
 	})
 
-	resolved, err := backend.Resolve(ctx, "user-1", "", "")
+	resolved, err := backend.Resolve(ctx, "user-1", "", "", nil)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -523,5 +523,379 @@ func TestLocalBackend_ResolveExcludesInternalSecrets(t *testing.T) {
 
 	if len(resolved) != 2 {
 		t.Errorf("expected 2 resolved secrets, got %d", len(resolved))
+	}
+}
+
+// ============================================================================
+// Progeny Secret Access Tests
+// ============================================================================
+
+// TestLocalBackend_ResolveProgeny_AllowProgenyGrantsAccess verifies the full
+// progeny flow: a user-scoped secret with allowProgeny=true is resolved for
+// an agent whose ancestry includes the secret's creator.
+func TestLocalBackend_ResolveProgeny_AllowProgenyGrantsAccess(t *testing.T) {
+	backend, s := createTestBackend(t)
+	ctx := context.Background()
+
+	// User "alice" creates a secret with allowProgeny
+	seedSecret(t, s, &store.Secret{
+		ID:             "sec-prog-1",
+		Key:            "ANTHROPIC_API_KEY",
+		EncryptedValue: "sk-ant-progeny",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "ANTHROPIC_API_KEY",
+		Scope:          store.ScopeUser,
+		ScopeID:        "alice-123",
+		AllowProgeny:   true,
+		CreatedBy:      "alice-123",
+	})
+
+	// Resolve as a sub-agent whose ancestry includes alice
+	// ancestry: [alice-123, agent-a] means alice created agent-a, agent-a created this agent
+	opts := &ResolveOpts{
+		AgentAncestry: []string{"alice-123", "agent-a"},
+		AuthzCheck:    func(_ SecretMeta) bool { return true }, // policy allows
+	}
+
+	resolved, err := backend.Resolve(ctx, "", "grove-1", "", opts)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if len(resolved) != 1 {
+		t.Fatalf("expected 1 resolved secret, got %d", len(resolved))
+	}
+	if resolved[0].Name != "ANTHROPIC_API_KEY" {
+		t.Errorf("expected ANTHROPIC_API_KEY, got %s", resolved[0].Name)
+	}
+	if resolved[0].Value != "sk-ant-progeny" {
+		t.Errorf("expected value %q, got %q", "sk-ant-progeny", resolved[0].Value)
+	}
+}
+
+// TestLocalBackend_ResolveProgeny_DeepAncestry verifies that deeply nested
+// progeny agents (grandchild, great-grandchild) receive the secret.
+func TestLocalBackend_ResolveProgeny_DeepAncestry(t *testing.T) {
+	backend, s := createTestBackend(t)
+	ctx := context.Background()
+
+	seedSecret(t, s, &store.Secret{
+		ID:             "sec-prog-deep",
+		Key:            "DEEP_KEY",
+		EncryptedValue: "deep-value",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "DEEP_KEY",
+		Scope:          store.ScopeUser,
+		ScopeID:        "user-root",
+		AllowProgeny:   true,
+		CreatedBy:      "user-root",
+	})
+
+	// Agent C is a great-grandchild: user-root -> agent-a -> agent-b -> agent-c
+	opts := &ResolveOpts{
+		AgentAncestry: []string{"user-root", "agent-a", "agent-b", "agent-c"},
+		AuthzCheck:    func(_ SecretMeta) bool { return true },
+	}
+
+	resolved, err := backend.Resolve(ctx, "", "", "", opts)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if len(resolved) != 1 {
+		t.Fatalf("expected 1 resolved secret, got %d", len(resolved))
+	}
+	if resolved[0].Name != "DEEP_KEY" {
+		t.Errorf("expected DEEP_KEY, got %s", resolved[0].Name)
+	}
+}
+
+// TestLocalBackend_ResolveProgeny_GroveOverridesProgeny verifies that
+// grove-scoped secrets with the same key take precedence over progeny secrets.
+func TestLocalBackend_ResolveProgeny_GroveOverridesProgeny(t *testing.T) {
+	backend, s := createTestBackend(t)
+	ctx := context.Background()
+
+	// User-scoped progeny secret
+	seedSecret(t, s, &store.Secret{
+		ID:             "sec-prog-override-user",
+		Key:            "API_KEY",
+		EncryptedValue: "user-progeny-value",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "API_KEY",
+		Scope:          store.ScopeUser,
+		ScopeID:        "alice-123",
+		AllowProgeny:   true,
+		CreatedBy:      "alice-123",
+	})
+
+	// Grove-scoped secret with same key (higher precedence)
+	seedSecret(t, s, &store.Secret{
+		ID:             "sec-prog-override-grove",
+		Key:            "API_KEY",
+		EncryptedValue: "grove-value",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "API_KEY",
+		Scope:          store.ScopeGrove,
+		ScopeID:        "grove-1",
+	})
+
+	opts := &ResolveOpts{
+		AgentAncestry: []string{"alice-123", "agent-a"},
+		AuthzCheck:    func(_ SecretMeta) bool { return true },
+	}
+
+	resolved, err := backend.Resolve(ctx, "", "grove-1", "", opts)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	byName := make(map[string]SecretWithValue)
+	for _, sv := range resolved {
+		byName[sv.Name] = sv
+	}
+
+	apiKey, ok := byName["API_KEY"]
+	if !ok {
+		t.Fatal("expected API_KEY in resolved secrets")
+	}
+	// Grove should win
+	if apiKey.Value != "grove-value" {
+		t.Errorf("expected grove override %q, got %q", "grove-value", apiKey.Value)
+	}
+	if apiKey.Scope != ScopeGrove {
+		t.Errorf("expected scope %q, got %q", ScopeGrove, apiKey.Scope)
+	}
+}
+
+// TestLocalBackend_ResolveProgeny_DeniedWhenFlagFalse verifies that secrets
+// without allowProgeny=true are NOT included in progeny resolution.
+func TestLocalBackend_ResolveProgeny_DeniedWhenFlagFalse(t *testing.T) {
+	backend, s := createTestBackend(t)
+	ctx := context.Background()
+
+	// User-scoped secret WITHOUT allowProgeny
+	seedSecret(t, s, &store.Secret{
+		ID:             "sec-no-prog",
+		Key:            "PRIVATE_KEY",
+		EncryptedValue: "private-value",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "PRIVATE_KEY",
+		Scope:          store.ScopeUser,
+		ScopeID:        "alice-123",
+		AllowProgeny:   false,
+		CreatedBy:      "alice-123",
+	})
+
+	opts := &ResolveOpts{
+		AgentAncestry: []string{"alice-123", "agent-a"},
+		AuthzCheck:    func(_ SecretMeta) bool { return true },
+	}
+
+	resolved, err := backend.Resolve(ctx, "", "", "", opts)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	for _, sv := range resolved {
+		if sv.Name == "PRIVATE_KEY" {
+			t.Error("secret without allowProgeny should not be included in progeny resolution")
+		}
+	}
+}
+
+// TestLocalBackend_ResolveProgeny_DeniedWhenAncestryMismatch verifies that
+// an agent whose ancestry does NOT include the secret's creator cannot access it.
+func TestLocalBackend_ResolveProgeny_DeniedWhenAncestryMismatch(t *testing.T) {
+	backend, s := createTestBackend(t)
+	ctx := context.Background()
+
+	// Alice's secret with allowProgeny
+	seedSecret(t, s, &store.Secret{
+		ID:             "sec-ancestry-miss",
+		Key:            "ALICE_SECRET",
+		EncryptedValue: "alice-value",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "ALICE_SECRET",
+		Scope:          store.ScopeUser,
+		ScopeID:        "alice-123",
+		AllowProgeny:   true,
+		CreatedBy:      "alice-123",
+	})
+
+	// Bob's agent — ancestry does NOT include alice
+	opts := &ResolveOpts{
+		AgentAncestry: []string{"bob-456", "agent-b"},
+		AuthzCheck:    func(_ SecretMeta) bool { return true },
+	}
+
+	resolved, err := backend.Resolve(ctx, "", "", "", opts)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	for _, sv := range resolved {
+		if sv.Name == "ALICE_SECRET" {
+			t.Error("agent with wrong ancestry should not receive alice's progeny secret")
+		}
+	}
+}
+
+// TestLocalBackend_ResolveProgeny_DeniedByPolicyCheck verifies that even when
+// allowProgeny=true and ancestry matches, a deny from the policy engine
+// prevents the secret from being included.
+func TestLocalBackend_ResolveProgeny_DeniedByPolicyCheck(t *testing.T) {
+	backend, s := createTestBackend(t)
+	ctx := context.Background()
+
+	seedSecret(t, s, &store.Secret{
+		ID:             "sec-policy-deny",
+		Key:            "POLICY_KEY",
+		EncryptedValue: "policy-value",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "POLICY_KEY",
+		Scope:          store.ScopeUser,
+		ScopeID:        "alice-123",
+		AllowProgeny:   true,
+		CreatedBy:      "alice-123",
+	})
+
+	opts := &ResolveOpts{
+		AgentAncestry: []string{"alice-123", "agent-a"},
+		AuthzCheck:    func(_ SecretMeta) bool { return false }, // policy DENIES
+	}
+
+	resolved, err := backend.Resolve(ctx, "", "", "", opts)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	for _, sv := range resolved {
+		if sv.Name == "POLICY_KEY" {
+			t.Error("secret should be excluded when policy check returns false")
+		}
+	}
+}
+
+// TestLocalBackend_ResolveProgeny_NilAuthzCheckIncludesAll verifies that
+// when no AuthzCheck is provided, progeny secrets with matching ancestry
+// are included (the policy check is optional).
+func TestLocalBackend_ResolveProgeny_NilAuthzCheckIncludesAll(t *testing.T) {
+	backend, s := createTestBackend(t)
+	ctx := context.Background()
+
+	seedSecret(t, s, &store.Secret{
+		ID:             "sec-no-authz",
+		Key:            "NO_AUTHZ_KEY",
+		EncryptedValue: "no-authz-value",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "NO_AUTHZ_KEY",
+		Scope:          store.ScopeUser,
+		ScopeID:        "alice-123",
+		AllowProgeny:   true,
+		CreatedBy:      "alice-123",
+	})
+
+	opts := &ResolveOpts{
+		AgentAncestry: []string{"alice-123", "agent-a"},
+		AuthzCheck:    nil, // no policy checker — secrets are included by default
+	}
+
+	resolved, err := backend.Resolve(ctx, "", "", "", opts)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	found := false
+	for _, sv := range resolved {
+		if sv.Name == "NO_AUTHZ_KEY" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("progeny secret should be included when AuthzCheck is nil (no policy gating)")
+	}
+}
+
+// TestLocalBackend_ResolveProgeny_NilOptsNoProgeny verifies that passing
+// nil opts preserves the original behavior (no progeny resolution).
+func TestLocalBackend_ResolveProgeny_NilOptsNoProgeny(t *testing.T) {
+	backend, s := createTestBackend(t)
+	ctx := context.Background()
+
+	seedSecret(t, s, &store.Secret{
+		ID:             "sec-nil-opts",
+		Key:            "NIL_OPTS_KEY",
+		EncryptedValue: "nil-opts-value",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "NIL_OPTS_KEY",
+		Scope:          store.ScopeUser,
+		ScopeID:        "alice-123",
+		AllowProgeny:   true,
+		CreatedBy:      "alice-123",
+	})
+
+	// nil opts — no progeny resolution
+	resolved, err := backend.Resolve(ctx, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	for _, sv := range resolved {
+		if sv.Name == "NIL_OPTS_KEY" {
+			t.Error("progeny secrets should not be included when opts is nil")
+		}
+	}
+}
+
+// TestLocalBackend_SetProgeny_RejectsNonUserScope verifies that setting
+// allowProgeny=true on non-user-scoped secrets is handled correctly at
+// the backend level (the API layer validates this, but the backend should
+// store whatever is passed).
+func TestLocalBackend_SetProgeny_AllowProgenyPersists(t *testing.T) {
+	backend, _ := createTestBackend(t)
+	ctx := context.Background()
+
+	// Create with allowProgeny=true
+	_, meta, err := backend.Set(ctx, &SetSecretInput{
+		Name:         "PROG_TEST",
+		Value:        "value",
+		SecretType:   TypeEnvironment,
+		Scope:        ScopeUser,
+		ScopeID:      "user-1",
+		AllowProgeny: true,
+		CreatedBy:    "user-1",
+	})
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	if !meta.AllowProgeny {
+		t.Error("expected AllowProgeny=true after Set")
+	}
+
+	// Verify via GetMeta
+	got, err := backend.GetMeta(ctx, "PROG_TEST", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("GetMeta failed: %v", err)
+	}
+	if !got.AllowProgeny {
+		t.Error("expected AllowProgeny=true from GetMeta")
+	}
+
+	// Update to allowProgeny=false
+	_, meta2, err := backend.Set(ctx, &SetSecretInput{
+		Name:         "PROG_TEST",
+		Value:        "value-2",
+		SecretType:   TypeEnvironment,
+		Scope:        ScopeUser,
+		ScopeID:      "user-1",
+		AllowProgeny: false,
+		CreatedBy:    "user-1",
+	})
+	if err != nil {
+		t.Fatalf("Set (update) failed: %v", err)
+	}
+	if meta2.AllowProgeny {
+		t.Error("expected AllowProgeny=false after update")
 	}
 }

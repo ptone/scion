@@ -352,7 +352,7 @@ func TestGCPBackend_Resolve(t *testing.T) {
 		ScopeID:    "grove-1",
 	})
 
-	resolved, err := backend.Resolve(ctx, "user-1", "grove-1", "")
+	resolved, err := backend.Resolve(ctx, "user-1", "grove-1", "", nil)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
