@@ -118,6 +118,8 @@ export class ScionPageAgentCreate extends LitElement {
       defaultMaxTurns?: number;
       defaultMaxModelCalls?: number;
       defaultMaxDuration?: string;
+      defaultGCPIdentityMode?: string;
+      defaultGCPIdentityServiceAccountID?: string;
     }
   > = new Map();
 
@@ -808,6 +810,25 @@ export class ScionPageAgentCreate extends LitElement {
     } catch {
       // Non-critical — just won't show GCP identity section
     }
+
+    // Apply grove default GCP identity if configured
+    const settings = await this.fetchGroveSettings(this.groveId);
+    if (settings?.defaultGCPIdentityMode) {
+      const mode = settings.defaultGCPIdentityMode as 'block' | 'passthrough' | 'assign';
+      if (mode === 'assign' && settings.defaultGCPIdentityServiceAccountID) {
+        const verified = this.verifiedGCPServiceAccounts;
+        const match = verified.find(
+          (sa) => sa.id === settings.defaultGCPIdentityServiceAccountID
+        );
+        if (match) {
+          this.gcpMetadataMode = 'assign';
+          this.gcpServiceAccountId = match.id;
+        }
+        // If the configured SA isn't found/verified, fall through to block
+      } else if (mode === 'passthrough' || mode === 'block') {
+        this.gcpMetadataMode = mode;
+      }
+    }
   }
 
   private get verifiedGCPServiceAccounts(): GCPServiceAccount[] {
@@ -826,6 +847,8 @@ export class ScionPageAgentCreate extends LitElement {
     defaultMaxTurns?: number;
     defaultMaxModelCalls?: number;
     defaultMaxDuration?: string;
+    defaultGCPIdentityMode?: string;
+    defaultGCPIdentityServiceAccountID?: string;
   } | null> {
     if (!groveId) return null;
 
@@ -841,6 +864,8 @@ export class ScionPageAgentCreate extends LitElement {
           defaultMaxTurns?: number;
           defaultMaxModelCalls?: number;
           defaultMaxDuration?: string;
+          defaultGCPIdentityMode?: string;
+          defaultGCPIdentityServiceAccountID?: string;
         };
         this.groveSettingsCache.set(groveId, data);
         return data;
@@ -1068,21 +1093,6 @@ export class ScionPageAgentCreate extends LitElement {
             : ''}
 
           <div class="form-field">
-            <label for="task">Initial Task</label>
-            <sl-textarea
-              id="task"
-              placeholder="Describe what this agent should work on..."
-              .value=${this.task}
-              @sl-input=${(e: Event) => {
-                this.task = (e.target as HTMLElement & { value: string }).value;
-              }}
-              rows="4"
-              resize="auto"
-            ></sl-textarea>
-            <div class="hint">The task or prompt to start the agent with.</div>
-          </div>
-
-          <div class="form-field">
             <label for="gcp-mode">GCP Identity</label>
             <sl-select
               id="gcp-mode"
@@ -1145,6 +1155,21 @@ export class ScionPageAgentCreate extends LitElement {
                 </div>
               `
             : ''}
+
+          <div class="form-field">
+            <label for="task">Initial Task</label>
+            <sl-textarea
+              id="task"
+              placeholder="Describe what this agent should work on..."
+              .value=${this.task}
+              @sl-input=${(e: Event) => {
+                this.task = (e.target as HTMLElement & { value: string }).value;
+              }}
+              rows="4"
+              resize="auto"
+            ></sl-textarea>
+            <div class="hint">The task or prompt to start the agent with.</div>
+          </div>
 
           <div class="notify-field">
             <sl-checkbox
