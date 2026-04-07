@@ -9,6 +9,7 @@ require (
 	github.com/hashicorp/go-plugin v1.7.0
 	github.com/mattn/go-sqlite3 v1.14.28
 	golang.org/x/oauth2 v0.36.0
+	google.golang.org/api v0.259.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -45,7 +46,6 @@ require (
 	golang.org/x/term v0.39.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
-	google.golang.org/api v0.259.0 // indirect
 	google.golang.org/genproto v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260128011058-8636f8732409 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260128011058-8636f8732409 // indirect

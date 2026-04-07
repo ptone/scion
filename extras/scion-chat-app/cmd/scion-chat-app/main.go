@@ -28,6 +28,7 @@ import (
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	"google.golang.org/api/iterator"
 	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/chatapp"
@@ -65,7 +66,7 @@ func main() {
 	defer store.Close()
 	log.Info("state database initialized", "path", dbPath)
 
-	// Load hub signing key from file or GCP Secret Manager.
+	// Load hub signing key: local file → explicit SM secret → auto-discover from SM.
 	var signingKeyB64 string
 	switch {
 	case cfg.Hub.SigningKey != "":
@@ -86,8 +87,22 @@ func main() {
 		signingKeyB64 = strings.TrimSpace(val)
 		log.Info("loaded signing key from Secret Manager", "secret", cfg.Hub.SigningKeySecret)
 	default:
-		log.Error("hub signing_key or signing_key_secret is required")
-		os.Exit(1)
+		// Auto-discover the signing key from GCP Secret Manager by label.
+		projectID := cfg.Platforms.GoogleChat.ProjectID
+		if projectID == "" {
+			log.Error("hub signing_key, signing_key_secret, or platforms.google_chat.project_id (for auto-discovery) is required")
+			os.Exit(1)
+		}
+		log.Info("no signing key configured, searching Secret Manager by label", "project_id", projectID)
+		smCtx, smCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		val, secretName, err := discoverSigningKey(smCtx, projectID)
+		smCancel()
+		if err != nil {
+			log.Error("failed to auto-discover signing key from Secret Manager", "project_id", projectID, "error", err)
+			os.Exit(1)
+		}
+		signingKeyB64 = strings.TrimSpace(val)
+		log.Info("auto-discovered signing key from Secret Manager", "secret", secretName)
 	}
 	signingKey, err := base64.StdEncoding.DecodeString(signingKeyB64)
 	if err != nil {
@@ -271,6 +286,37 @@ func loadConfig(path string) (*chatapp.Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	return &cfg, nil
+}
+
+// discoverSigningKey searches GCP Secret Manager for a secret with the label
+// scion-name=user_signing_key and returns its latest version value and resource name.
+func discoverSigningKey(ctx context.Context, projectID string) (value, resourceName string, err error) {
+	client, err := secretmanager.NewClient(ctx)
+	if err != nil {
+		return "", "", fmt.Errorf("creating secret manager client: %w", err)
+	}
+	defer client.Close()
+
+	it := client.ListSecrets(ctx, &smpb.ListSecretsRequest{
+		Parent: fmt.Sprintf("projects/%s", projectID),
+		Filter: `labels.scion-name=user_signing_key`,
+	})
+
+	secret, err := it.Next()
+	if err == iterator.Done {
+		return "", "", fmt.Errorf("no secret with label scion-name=user_signing_key found in project %s", projectID)
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("listing secrets: %w", err)
+	}
+
+	resp, err := client.AccessSecretVersion(ctx, &smpb.AccessSecretVersionRequest{
+		Name: secret.Name + "/versions/latest",
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("accessing secret %s: %w", secret.Name, err)
+	}
+	return string(resp.Payload.Data), secret.Name, nil
 }
 
 // accessSecret fetches the latest version of a GCP Secret Manager secret.
