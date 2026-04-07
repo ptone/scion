@@ -390,5 +390,7 @@ func initLogger(cfg chatapp.LoggingConfig) *slog.Logger {
 	} else {
 		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
 	}
-	return slog.New(handler)
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
+	return logger
 }
