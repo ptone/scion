@@ -146,6 +146,49 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	return resp, nil
 }
 
+// AuthenticatedHTTPClient returns an *http.Client that applies this transport's
+// authentication to every request. This is useful for code paths that need a
+// raw *http.Client (e.g. the transfer client for signed URL uploads/downloads)
+// but still need to authenticate with the hub when signed URLs are HTTP proxy
+// URLs rather than GCS signed URLs or file:// URLs.
+func (t *Transport) AuthenticatedHTTPClient() *http.Client {
+	base := t.HTTPClient
+	if base == nil {
+		base = http.DefaultClient
+	}
+	return &http.Client{
+		Timeout: base.Timeout,
+		Transport: &authRoundTripper{
+			base: base.Transport,
+			auth: t.Auth,
+			ua:   t.UserAgent,
+		},
+	}
+}
+
+// authRoundTripper is an http.RoundTripper that applies authentication headers.
+type authRoundTripper struct {
+	base http.RoundTripper
+	auth Authenticator
+	ua   string
+}
+
+func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if rt.ua != "" && req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", rt.ua)
+	}
+	if rt.auth != nil {
+		if err := rt.auth.ApplyAuth(req); err != nil {
+			return nil, fmt.Errorf("failed to apply auth: %w", err)
+		}
+	}
+	base := rt.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(req)
+}
+
 // buildURL joins the base URL with a path and optional query parameters.
 func (t *Transport) buildURL(path string, query url.Values) string {
 	u := t.BaseURL + path

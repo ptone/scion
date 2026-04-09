@@ -255,7 +255,7 @@ func (s *harnessConfigService) DownloadFile(ctx context.Context, signedURL strin
 
 func (s *harnessConfigService) getTransferClient() *transfer.Client {
 	if s.transferClient == nil {
-		s.transferClient = transfer.NewClient(s.c.transport.HTTPClient)
+		s.transferClient = transfer.NewClient(s.c.transport.AuthenticatedHTTPClient())
 	}
 	return s.transferClient
 }

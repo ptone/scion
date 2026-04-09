@@ -309,9 +309,11 @@ func (s *templateService) DownloadFile(ctx context.Context, signedURL string) ([
 }
 
 // getTransferClient returns the transfer client, creating one if necessary.
+// Uses an authenticated HTTP client so that proxy URLs (HTTP URLs returned
+// instead of file:// URLs for local storage) carry proper auth headers.
 func (s *templateService) getTransferClient() *transfer.Client {
 	if s.transferClient == nil {
-		s.transferClient = transfer.NewClient(s.c.transport.HTTPClient)
+		s.transferClient = transfer.NewClient(s.c.transport.AuthenticatedHTTPClient())
 	}
 	return s.transferClient
 }

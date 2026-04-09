@@ -172,3 +172,20 @@ func rewriteLocalUploadURLs(urls []UploadURLInfo, hubEndpoint, resourceType, res
 	}
 	return urls
 }
+
+// rewriteLocalDownloadURLs rewrites file:// URLs to HTTP proxy URLs pointing to
+// the hub's own file read endpoint for downloads. Same rationale as
+// rewriteLocalUploadURLs — file:// URLs reference server-side paths that are
+// inaccessible from remote clients.
+func rewriteLocalDownloadURLs(urls []DownloadURLInfo, hubEndpoint, resourceType, resourceID, authHeader string) []DownloadURLInfo {
+	if hubEndpoint == "" {
+		return urls
+	}
+	hubEndpoint = strings.TrimRight(hubEndpoint, "/")
+	for i := range urls {
+		if strings.HasPrefix(urls[i].URL, "file://") {
+			urls[i].URL = hubEndpoint + "/api/v1/" + resourceType + "/" + resourceID + "/files/" + urls[i].Path + "?raw=1"
+		}
+	}
+	return urls
+}

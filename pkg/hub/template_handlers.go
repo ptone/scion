@@ -641,6 +641,12 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 	// Generate download URLs using shared helper
 	downloadURLs, manifestURL, expires, _ := generateDownloadURLs(ctx, stor, template.StoragePath, template.Files)
 
+	// For local storage, rewrite file:// URLs to HTTP proxy URLs
+	if stor.Provider() == storage.ProviderLocal {
+		hubURL := requestBaseURL(r)
+		downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "templates", id, r.Header.Get("Authorization"))
+	}
+
 	response := DownloadResponse{
 		Files:       downloadURLs,
 		ManifestURL: manifestURL,

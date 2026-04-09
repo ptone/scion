@@ -171,7 +171,7 @@ func (s *workspaceService) GetStatus(ctx context.Context, agentID string) (*Work
 // getTransferClient returns the transfer client, creating one if necessary.
 func (s *workspaceService) getTransferClient() *transfer.Client {
 	if s.transferClient == nil {
-		s.transferClient = transfer.NewClient(s.c.transport.HTTPClient)
+		s.transferClient = transfer.NewClient(s.c.transport.AuthenticatedHTTPClient())
 	}
 	return s.transferClient
 }

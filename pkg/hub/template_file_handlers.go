@@ -136,6 +136,10 @@ func (s *Server) handleTemplateFileList(w http.ResponseWriter, r *http.Request, 
 }
 
 // handleTemplateFileRead returns the content of a single template file.
+// Supports two modes:
+//   - Accept: application/octet-stream — streams raw binary content (used by the
+//     local storage proxy flow for downloads)
+//   - Default — returns JSON with content, size, hash (existing behavior, 1MB limit)
 func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, templateID, filePath string) {
 	ctx := r.Context()
 
@@ -158,16 +162,36 @@ func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Check size limit
-	if found.Size > maxTemplateFileSize {
-		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
-			"File too large for inline viewing. Use the download endpoint instead.", nil)
-		return
-	}
-
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")
+		return
+	}
+
+	// Raw binary download for local storage proxy flow
+	if r.URL.Query().Get("raw") != "" || strings.Contains(r.Header.Get("Accept"), "application/octet-stream") {
+		objectPath := template.StoragePath + "/" + filePath
+		reader, _, err := stor.Download(ctx, objectPath)
+		if err != nil {
+			if err == storage.ErrNotFound {
+				NotFound(w, "Template file")
+				return
+			}
+			RuntimeError(w, "Failed to read file from storage")
+			return
+		}
+		defer reader.Close()
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		io.Copy(w, reader)
+		return
+	}
+
+	// JSON response with size limit
+	if found.Size > maxTemplateFileSize {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+			"File too large for inline viewing. Use the download endpoint instead.", nil)
 		return
 	}
 
