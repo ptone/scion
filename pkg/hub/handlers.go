@@ -5312,33 +5312,55 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				Message:         agentHB.Message,
 			}
 
+			// Guard: a heartbeat must never revert an agent out of a
+			// terminal phase (stopped/failed) that was set by an explicit
+			// lifecycle action. Only start/restart handlers may
+			// transition away from these phases. Without this guard a
+			// forced heartbeat fired immediately after a stop dispatch
+			// can race and overwrite the stopped state with stale
+			// container data.
+			agentInTerminalPhase := agent.Phase == string(state.PhaseStopped) ||
+				agent.Phase == string(state.PhaseError)
+
 			if agentHB.Phase != "" {
-				// Structured path: broker sent Phase/Activity directly
-				statusUpdate.Phase = agentHB.Phase
-				// Only propagate Activity when it differs from the stored
-				// value. Heartbeats always report the current activity, but
-				// repeating the same value would refresh last_activity_event
-				// on every heartbeat and prevent stalled detection from
-				// ever triggering.
-				if agentHB.Activity != agent.Activity {
-					if agent.Activity == string(state.ActivityStalled) {
-						// The agent is currently marked stalled. Only clear the
-						// stall if the broker reports a genuinely different
-						// activity than what caused the stall. If the broker is
-						// still reporting the same pre-stall activity, the agent
-						// hasn't recovered — keep it stalled.
-						if agentHB.Activity != agent.StalledFromActivity {
+				if agentInTerminalPhase {
+					// Keep the hub's authoritative terminal phase; only
+					// allow the heartbeat to confirm it (not revert it).
+					if agentHB.Phase == agent.Phase {
+						statusUpdate.Phase = agentHB.Phase
+					}
+					// Do not propagate activity — the hub already cleared
+					// it when the stop was issued.
+				} else {
+					// Structured path: broker sent Phase/Activity directly
+					statusUpdate.Phase = agentHB.Phase
+					// Only propagate Activity when it differs from the stored
+					// value. Heartbeats always report the current activity, but
+					// repeating the same value would refresh last_activity_event
+					// on every heartbeat and prevent stalled detection from
+					// ever triggering.
+					if agentHB.Activity != agent.Activity {
+						if agent.Activity == string(state.ActivityStalled) {
+							// The agent is currently marked stalled. Only clear the
+							// stall if the broker reports a genuinely different
+							// activity than what caused the stall. If the broker is
+							// still reporting the same pre-stall activity, the agent
+							// hasn't recovered — keep it stalled.
+							if agentHB.Activity != agent.StalledFromActivity {
+								statusUpdate.Activity = agentHB.Activity
+							}
+						} else {
 							statusUpdate.Activity = agentHB.Activity
 						}
-					} else {
-						statusUpdate.Activity = agentHB.Activity
 					}
 				}
-			} else {
+			} else if !agentInTerminalPhase {
 				// Legacy path: no structured fields, derive from ContainerStatus
 				// Derive phase from container status to ensure agents
 				// registered via sync (not started via hub) get proper state.
 				// Terminal container states (exited/stopped) override agent phase.
+				// Skipped when agent is already in a terminal phase to avoid
+				// reverting an authoritative hub-set state.
 				if agentHB.ContainerStatus != "" {
 					containerStatusLower := strings.ToLower(agentHB.ContainerStatus)
 					switch {

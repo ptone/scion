@@ -3124,6 +3124,112 @@ func TestBrokerHeartbeat_StalledAgentRecoveredByNewActivity(t *testing.T) {
 	assert.Empty(t, updated.StalledFromActivity, "stalled_from_activity should be cleared on recovery")
 }
 
+func TestBrokerHeartbeat_DoesNotRevertStoppedAgent(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	grove := &store.Grove{ID: "grove-stop-revert", Name: "Stop Revert Grove", Slug: "stop-revert-grove"}
+	require.NoError(t, s.CreateGrove(ctx, grove))
+
+	broker := &store.RuntimeBroker{
+		ID: "broker-stop-revert", Name: "Stop Revert Broker", Slug: "stop-revert-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID: "agent-stop-revert", Slug: "stop-revert-slug", Name: "Stop Revert Agent",
+		GroveID: grove.ID, RuntimeBrokerID: broker.ID,
+		Phase: string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Simulate hub setting agent to stopped (as handleAgentLifecycle does)
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase:           string(state.PhaseStopped),
+		Activity:        "",
+		ContainerStatus: "stopped",
+	}))
+
+	// Verify agent is stopped
+	stopped, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), stopped.Phase)
+	assert.Empty(t, stopped.Activity)
+
+	// Send a heartbeat with stale data (as if the forced heartbeat raced
+	// and still reports the old running+completed state)
+	hb := brokerHeartbeatRequest{
+		Status: "online",
+		Groves: []brokerGroveHeartbeat{{
+			GroveID:    grove.ID,
+			AgentCount: 1,
+			Agents: []brokerAgentHeartbeat{{
+				Slug:            agent.Slug,
+				Phase:           string(state.PhaseRunning),
+				Activity:        "completed",
+				ContainerStatus: "running",
+			}},
+		}},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Agent should remain stopped — heartbeat must not revert terminal phase
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), updated.Phase, "heartbeat should not revert stopped phase")
+	assert.Empty(t, updated.Activity, "heartbeat should not restore activity on stopped agent")
+}
+
+func TestBrokerHeartbeat_DoesNotRevertStoppedAgent_LegacyPath(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	grove := &store.Grove{ID: "grove-stop-legacy", Name: "Stop Legacy Grove", Slug: "stop-legacy-grove"}
+	require.NoError(t, s.CreateGrove(ctx, grove))
+
+	broker := &store.RuntimeBroker{
+		ID: "broker-stop-legacy", Name: "Stop Legacy Broker", Slug: "stop-legacy-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID: "agent-stop-legacy", Slug: "stop-legacy-slug", Name: "Stop Legacy Agent",
+		GroveID: grove.ID, RuntimeBrokerID: broker.ID,
+		Phase: string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Set agent to stopped
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase:           string(state.PhaseStopped),
+		Activity:        "",
+		ContainerStatus: "stopped",
+	}))
+
+	// Send heartbeat with NO Phase (legacy path) but container reports "Up"
+	hb := brokerHeartbeatRequest{
+		Status: "online",
+		Groves: []brokerGroveHeartbeat{{
+			GroveID:    grove.ID,
+			AgentCount: 1,
+			Agents: []brokerAgentHeartbeat{{
+				Slug:            agent.Slug,
+				ContainerStatus: "Up 5 minutes",
+			}},
+		}},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Agent should remain stopped
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), updated.Phase, "legacy heartbeat should not revert stopped phase")
+}
+
 func TestCreateAgent_RestartCreatesNotificationSubscription(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, grove := setupCreateAgentServer(t, disp)
