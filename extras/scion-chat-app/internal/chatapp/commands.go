@@ -32,10 +32,14 @@ import (
 // eventUserLookup returns user info from the ChatEvent. For platforms that
 // include the email in every event (Google Chat), it returns it directly.
 // For platforms where the email is absent (Slack), it falls back to the
-// Messenger.GetUser() API call.
+// Messenger.GetUser() API call. Results are cached per-instance so repeated
+// lookups within the same event processing avoid redundant API/cache calls.
 type eventUserLookup struct {
 	event     *ChatEvent
 	messenger Messenger
+	cached    *identity.ChatUserInfo
+	cachedErr error
+	looked    bool
 }
 
 func (el *eventUserLookup) GetUser(ctx context.Context, userID string) (*identity.ChatUserInfo, error) {
@@ -45,19 +49,26 @@ func (el *eventUserLookup) GetUser(ctx context.Context, userID string) (*identit
 			Email:      el.event.UserEmail,
 		}, nil
 	}
+	if el.looked {
+		return el.cached, el.cachedErr
+	}
+	el.looked = true
 	if el.messenger == nil {
-		return &identity.ChatUserInfo{
+		el.cached = &identity.ChatUserInfo{
 			PlatformID: el.event.UserID,
-		}, nil
+		}
+		return el.cached, nil
 	}
 	user, err := el.messenger.GetUser(ctx, el.event.UserID)
 	if err != nil {
+		el.cachedErr = err
 		return nil, err
 	}
-	return &identity.ChatUserInfo{
+	el.cached = &identity.ChatUserInfo{
 		PlatformID: user.PlatformID,
 		Email:      user.Email,
-	}, nil
+	}
+	return el.cached, nil
 }
 
 // pendingDeviceAuth tracks an in-progress device authorization flow.

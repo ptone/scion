@@ -97,6 +97,7 @@ type cachedUser struct {
 }
 
 const userCacheTTL = 15 * time.Minute
+const asyncProcessingTimeout = 30 * time.Second
 
 // NewAdapter creates a new Slack adapter.
 func NewAdapter(cfg Config, handler EventHandler, log *slog.Logger) *Adapter {
@@ -330,7 +331,11 @@ func (a *Adapter) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	// Process asynchronously.
-	go a.processEventsAPIEvent(context.Background(), &eventsAPIEvent)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), asyncProcessingTimeout)
+		defer cancel()
+		a.processEventsAPIEvent(ctx, &eventsAPIEvent)
+	}()
 }
 
 func (a *Adapter) handleCommands(w http.ResponseWriter, r *http.Request) {
@@ -366,7 +371,11 @@ func (a *Adapter) handleCommands(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Process asynchronously.
-	go a.processSlashCommand(context.Background(), cmd)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), asyncProcessingTimeout)
+		defer cancel()
+		a.processSlashCommand(ctx, cmd)
+	}()
 }
 
 func (a *Adapter) handleInteractions(w http.ResponseWriter, r *http.Request) {
@@ -408,7 +417,11 @@ func (a *Adapter) handleInteractions(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	// Process asynchronously.
-	go a.processInteraction(context.Background(), callback)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), asyncProcessingTimeout)
+		defer cancel()
+		a.processInteraction(ctx, callback)
+	}()
 }
 
 func (a *Adapter) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -424,7 +437,11 @@ func (a *Adapter) handleSocketEvent(evt socketmode.Event) {
 		return
 	}
 	a.socketClient.Ack(*evt.Request)
-	go a.processEventsAPIEvent(context.Background(), &data)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), asyncProcessingTimeout)
+		defer cancel()
+		a.processEventsAPIEvent(ctx, &data)
+	}()
 }
 
 func (a *Adapter) handleSocketCommand(evt socketmode.Event) {
@@ -433,7 +450,11 @@ func (a *Adapter) handleSocketCommand(evt socketmode.Event) {
 		return
 	}
 	a.socketClient.Ack(*evt.Request)
-	go a.processSlashCommand(context.Background(), cmd)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), asyncProcessingTimeout)
+		defer cancel()
+		a.processSlashCommand(ctx, cmd)
+	}()
 }
 
 func (a *Adapter) handleSocketInteraction(evt socketmode.Event) {
@@ -442,7 +463,11 @@ func (a *Adapter) handleSocketInteraction(evt socketmode.Event) {
 		return
 	}
 	a.socketClient.Ack(*evt.Request)
-	go a.processInteraction(context.Background(), callback)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), asyncProcessingTimeout)
+		defer cancel()
+		a.processInteraction(ctx, callback)
+	}()
 }
 
 // --- Event processing ---
