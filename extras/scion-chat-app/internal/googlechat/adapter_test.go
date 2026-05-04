@@ -161,6 +161,93 @@ func TestNormalizeEvent_CommandIDMapping(t *testing.T) {
 	}
 }
 
+func TestNormalizeEvent_SlashCommandInMessage(t *testing.T) {
+	adapter := NewAdapter(Config{
+		CommandIDMap: map[string]string{
+			"1": "scion",
+			"2": "scionAdmin",
+		},
+	}, nil, nil, slog.Default())
+
+	tests := []struct {
+		name        string
+		raw         rawEvent
+		wantType    chatapp.ChatEventType
+		wantCommand string
+		wantArgs    string
+	}{
+		{
+			name: "messagePayload with slashCommand routes as command",
+			raw: rawEvent{
+				Chat: &rawChatPayload{
+					User: &rawUser{Name: "users/1", Email: "u@e.com"},
+					MessagePayload: &rawMessagePayload{
+						Space: &rawSpace{Name: "spaces/s"},
+						Message: &rawMessage{
+							ArgumentText: "help",
+							SlashCommand: &rawSlashCommand{CommandId: jsonNumber("2")},
+						},
+					},
+				},
+			},
+			wantType:    chatapp.EventCommand,
+			wantCommand: "scionAdmin",
+			wantArgs:    "help",
+		},
+		{
+			name: "messagePayload without slashCommand remains a message",
+			raw: rawEvent{
+				Chat: &rawChatPayload{
+					User: &rawUser{Name: "users/1", Email: "u@e.com"},
+					MessagePayload: &rawMessagePayload{
+						Space:   &rawSpace{Name: "spaces/s"},
+						Message: &rawMessage{Text: "hello"},
+					},
+				},
+			},
+			wantType:    chatapp.EventMessage,
+			wantCommand: "",
+			wantArgs:    "",
+		},
+		{
+			name: "appCommandPayload falls back to message slashCommand",
+			raw: rawEvent{
+				Chat: &rawChatPayload{
+					User: &rawUser{Name: "users/1", Email: "u@e.com"},
+					AppCommandPayload: &rawAppCommandPayload{
+						Space: &rawSpace{Name: "spaces/s"},
+						Message: &rawMessage{
+							ArgumentText: "info",
+							SlashCommand: &rawSlashCommand{CommandId: jsonNumber("2")},
+						},
+					},
+				},
+			},
+			wantType:    chatapp.EventCommand,
+			wantCommand: "scionAdmin",
+			wantArgs:    "info",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := adapter.normalizeEvent(&tt.raw)
+			if event == nil {
+				t.Fatal("normalizeEvent returned nil")
+			}
+			if event.Type != tt.wantType {
+				t.Errorf("Type = %q, want %q", event.Type, tt.wantType)
+			}
+			if event.Command != tt.wantCommand {
+				t.Errorf("Command = %q, want %q", event.Command, tt.wantCommand)
+			}
+			if tt.wantArgs != "" && event.Args != tt.wantArgs {
+				t.Errorf("Args = %q, want %q", event.Args, tt.wantArgs)
+			}
+		})
+	}
+}
+
 func TestNormalizeEvent_NilChat(t *testing.T) {
 	adapter := NewAdapter(Config{}, nil, nil, slog.Default())
 	event := adapter.normalizeEvent(&rawEvent{})
