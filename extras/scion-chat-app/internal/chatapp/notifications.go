@@ -26,17 +26,46 @@ import (
 
 // NotificationRelay routes agent notifications to chat spaces as rich cards.
 type NotificationRelay struct {
-	store     *state.Store
-	messenger Messenger
-	log       *slog.Logger
+	store      *state.Store
+	messenger  Messenger
+	messengers map[string]Messenger // platform name → adapter
+	log        *slog.Logger
 }
 
 // NewNotificationRelay creates a new notification relay.
 func NewNotificationRelay(store *state.Store, messenger Messenger, log *slog.Logger) *NotificationRelay {
 	return &NotificationRelay{
-		store:     store,
-		messenger: messenger,
-		log:       log,
+		store:      store,
+		messenger:  messenger,
+		messengers: make(map[string]Messenger),
+		log:        log,
+	}
+}
+
+// RegisterMessenger registers a platform-specific messenger.
+func (n *NotificationRelay) RegisterMessenger(platform string, m Messenger) {
+	n.messengers[platform] = m
+}
+
+// messengerFor returns the messenger for the given platform, falling back to
+// the default.
+func (n *NotificationRelay) messengerFor(platform string) Messenger {
+	if m, ok := n.messengers[platform]; ok {
+		return m
+	}
+	return n.messenger
+}
+
+// formatMention returns a platform-specific @mention string.
+// Google Chat user IDs already include the "users/" prefix, so we just
+// wrap them in angle brackets. Slack user IDs are bare (e.g., "U0ABC123")
+// and need the "@" prefix.
+func formatMention(platform, userID string) string {
+	switch platform {
+	case "slack":
+		return fmt.Sprintf("<@%s>", userID)
+	default:
+		return fmt.Sprintf("<%s>", userID)
 	}
 }
 
@@ -103,7 +132,7 @@ func (n *NotificationRelay) handleAgentNotification(ctx context.Context, groveID
 			})
 		}
 
-		if _, err := n.messenger.SendCard(ctx, link.SpaceID, card); err != nil {
+		if _, err := n.messengerFor(link.Platform).SendCard(ctx, link.SpaceID, card); err != nil {
 			n.log.Error("failed to send notification card",
 				"space_id", link.SpaceID,
 				"grove_id", groveID,
@@ -173,7 +202,7 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, groveID strin
 		// Chat API renders them as interactive user pills.
 		mentions := n.buildMentions(mapping.PlatformUserID, agentSlug, link)
 
-		if _, err := n.messenger.SendMessage(ctx, SendMessageRequest{
+		if _, err := n.messengerFor(link.Platform).SendMessage(ctx, SendMessageRequest{
 			SpaceID: link.SpaceID,
 			Text:    mentions,
 			Card:    &card,
@@ -339,8 +368,7 @@ func (n *NotificationRelay) getSubscriberMentions(msg *messages.StructuredMessag
 			}
 		}
 
-		// Format platform-specific mention
-		mentions = append(mentions, fmt.Sprintf("<users/%s>", sub.PlatformUserID))
+		mentions = append(mentions, formatMention(link.Platform, sub.PlatformUserID))
 	}
 
 	if len(mentions) == 0 {
@@ -355,7 +383,7 @@ func (n *NotificationRelay) getSubscriberMentions(msg *messages.StructuredMessag
 func (n *NotificationRelay) buildMentions(recipientPlatformID, agentSlug string, link state.SpaceLink) string {
 	// Start with the direct recipient
 	seen := map[string]bool{recipientPlatformID: true}
-	mentions := []string{fmt.Sprintf("<%s>", recipientPlatformID)}
+	mentions := []string{formatMention(link.Platform, recipientPlatformID)}
 
 	// Add subscribers for this agent/grove, skipping the recipient to avoid duplication
 	subs, err := n.store.ListAgentSubscriptions(agentSlug, link.GroveID)
@@ -369,7 +397,7 @@ func (n *NotificationRelay) buildMentions(recipientPlatformID, agentSlug string,
 			continue
 		}
 		seen[sub.PlatformUserID] = true
-		mentions = append(mentions, fmt.Sprintf("<users/%s>", sub.PlatformUserID))
+		mentions = append(mentions, formatMention(link.Platform, sub.PlatformUserID))
 	}
 
 	return strings.Join(mentions, " ")

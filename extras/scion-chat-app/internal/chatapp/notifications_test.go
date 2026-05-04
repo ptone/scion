@@ -171,3 +171,25 @@ func TestHandleUserMessage_NoSubscriptionRequired(t *testing.T) {
 		t.Errorf("expected no card actions, got %d", len(got.Card.Actions))
 	}
 }
+
+func TestFormatMention(t *testing.T) {
+	tests := []struct {
+		platform string
+		userID   string
+		want     string
+	}{
+		{"slack", "U0ABC123", "<@U0ABC123>"},
+		{"google_chat", "users/12345", "<users/12345>"},
+		{"googlechat", "users/12345", "<users/12345>"},
+		{"unknown", "user123", "<user123>"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.platform+"/"+tt.userID, func(t *testing.T) {
+			got := formatMention(tt.platform, tt.userID)
+			if got != tt.want {
+				t.Errorf("formatMention(%q, %q) = %q, want %q", tt.platform, tt.userID, got, tt.want)
+			}
+		})
+	}
+}

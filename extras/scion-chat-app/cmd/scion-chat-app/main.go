@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/chatapp"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/googlechat"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/identity"
+	slackadapter "github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/slack"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
@@ -231,11 +232,42 @@ func main() {
 		)
 	}
 
+	// Initialize the Slack adapter if enabled.
+	var slackAdapter *slackadapter.Adapter
+	if cfg.Platforms.Slack.Enabled {
+		slackAdapter = slackadapter.NewAdapter(slackadapter.Config{
+			BotToken:      cfg.Platforms.Slack.BotToken,
+			AppToken:      cfg.Platforms.Slack.AppToken,
+			SigningSecret: cfg.Platforms.Slack.SigningSecret,
+			ListenAddress: cfg.Platforms.Slack.ListenAddress,
+			SocketMode:    cfg.Platforms.Slack.SocketMode,
+		}, cmdRouter.HandleEvent, log.With("component", "slack"))
+		slackAdapter.SetStore(store)
+		slackAdapter.SetIdentityMapper(idMapper)
+
+		if messenger == nil {
+			messenger = slackAdapter
+		}
+		log.Info("slack adapter initialized")
+	}
+
 	// Wire the messenger into the command router now that it exists.
 	cmdRouter.SetMessenger(messenger)
+	if cfg.Platforms.GoogleChat.Enabled && messenger != nil {
+		cmdRouter.RegisterMessenger("google_chat", messenger)
+	}
+	if slackAdapter != nil {
+		cmdRouter.RegisterMessenger("slack", slackAdapter)
+	}
 
 	// Create notification relay and wire it as the broker's message handler.
 	relay := chatapp.NewNotificationRelay(store, messenger, log.With("component", "notifications"))
+	if cfg.Platforms.GoogleChat.Enabled && messenger != nil {
+		relay.RegisterMessenger("google_chat", messenger)
+	}
+	if slackAdapter != nil {
+		relay.RegisterMessenger("slack", slackAdapter)
+	}
 	broker.SetHandler(relay.HandleBrokerMessage)
 
 	// Load existing space-grove links and request broker subscriptions.
@@ -258,18 +290,41 @@ func main() {
 	// Start platform servers.
 	errCh := make(chan error, 1)
 
-	if cfg.Platforms.GoogleChat.Enabled && messenger != nil {
-		gcAdapter := messenger.(*googlechat.Adapter)
-		listenAddr := cfg.Platforms.GoogleChat.ListenAddress
-		if listenAddr == "" {
-			listenAddr = ":8443"
-		}
-		go func() {
-			if err := gcAdapter.Start(listenAddr); err != nil {
-				errCh <- fmt.Errorf("google chat server: %w", err)
+	if cfg.Platforms.GoogleChat.Enabled {
+		if gcAdapter, ok := messenger.(*googlechat.Adapter); ok {
+			listenAddr := cfg.Platforms.GoogleChat.ListenAddress
+			if listenAddr == "" {
+				listenAddr = ":8443"
 			}
-		}()
-		log.Info("google chat webhook server starting", "address", listenAddr)
+			go func() {
+				if err := gcAdapter.Start(listenAddr); err != nil {
+					errCh <- fmt.Errorf("google chat server: %w", err)
+				}
+			}()
+			log.Info("google chat webhook server starting", "address", listenAddr)
+		}
+	}
+
+	if slackAdapter != nil {
+		if cfg.Platforms.Slack.SocketMode {
+			go func() {
+				if err := slackAdapter.StartSocketMode(); err != nil {
+					errCh <- fmt.Errorf("slack socket mode: %w", err)
+				}
+			}()
+			log.Info("slack socket mode starting")
+		} else {
+			listenAddr := cfg.Platforms.Slack.ListenAddress
+			if listenAddr == "" {
+				listenAddr = ":8444"
+			}
+			go func() {
+				if err := slackAdapter.Start(listenAddr); err != nil {
+					errCh <- fmt.Errorf("slack server: %w", err)
+				}
+			}()
+			log.Info("slack webhook server starting", "address", listenAddr)
+		}
 	}
 
 	log.Info("scion-chat-app ready")
@@ -289,10 +344,17 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer shutdownCancel()
 
-	if cfg.Platforms.GoogleChat.Enabled && messenger != nil {
-		gcAdapter := messenger.(*googlechat.Adapter)
-		if err := gcAdapter.Stop(shutdownCtx); err != nil {
-			log.Error("failed to stop google chat adapter", "error", err)
+	if cfg.Platforms.GoogleChat.Enabled {
+		if gcAdapter, ok := messenger.(*googlechat.Adapter); ok {
+			if err := gcAdapter.Stop(shutdownCtx); err != nil {
+				log.Error("failed to stop google chat adapter", "error", err)
+			}
+		}
+	}
+
+	if slackAdapter != nil {
+		if err := slackAdapter.Stop(shutdownCtx); err != nil {
+			log.Error("failed to stop slack adapter", "error", err)
 		}
 	}
 

@@ -29,17 +29,34 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
-// eventUserLookup returns user info from the ChatEvent itself, using the
-// Google-asserted email from the signed event payload. This avoids the need
-// for a separate API call to look up the user's email.
+// eventUserLookup returns user info from the ChatEvent. For platforms that
+// include the email in every event (Google Chat), it returns it directly.
+// For platforms where the email is absent (Slack), it falls back to the
+// Messenger.GetUser() API call.
 type eventUserLookup struct {
-	event *ChatEvent
+	event     *ChatEvent
+	messenger Messenger
 }
 
 func (el *eventUserLookup) GetUser(ctx context.Context, userID string) (*identity.ChatUserInfo, error) {
+	if el.event.UserEmail != "" {
+		return &identity.ChatUserInfo{
+			PlatformID: el.event.UserID,
+			Email:      el.event.UserEmail,
+		}, nil
+	}
+	if el.messenger == nil {
+		return &identity.ChatUserInfo{
+			PlatformID: el.event.UserID,
+		}, nil
+	}
+	user, err := el.messenger.GetUser(ctx, el.event.UserID)
+	if err != nil {
+		return nil, err
+	}
 	return &identity.ChatUserInfo{
-		PlatformID: el.event.UserID,
-		Email:      el.event.UserEmail,
+		PlatformID: user.PlatformID,
+		Email:      user.Email,
 	}, nil
 }
 
@@ -59,6 +76,7 @@ type CommandRouter struct {
 	store       *state.Store
 	idMapper    *identity.Mapper
 	messenger   Messenger
+	messengers  map[string]Messenger // platform name → adapter
 	broker      *BrokerServer
 	log         *slog.Logger
 
@@ -83,6 +101,7 @@ func NewCommandRouter(
 		store:          store,
 		idMapper:       idMapper,
 		messenger:      messenger,
+		messengers:     make(map[string]Messenger),
 		broker:         broker,
 		log:            log,
 		pendingAuth:    make(map[string]*pendingDeviceAuth),
@@ -98,10 +117,26 @@ func (r *CommandRouter) hubHostname() string {
 	return r.hubURL
 }
 
-// SetMessenger sets the messenger after construction, breaking the
+// SetMessenger sets the default messenger after construction, breaking the
 // circular dependency between the command router and chat adapter.
 func (r *CommandRouter) SetMessenger(m Messenger) {
 	r.messenger = m
+}
+
+// RegisterMessenger registers a platform-specific messenger for multi-platform
+// dispatch. When both Google Chat and Slack are enabled, each platform's
+// adapter is registered under its platform name.
+func (r *CommandRouter) RegisterMessenger(platform string, m Messenger) {
+	r.messengers[platform] = m
+}
+
+// messengerFor returns the messenger for the given platform, falling back to
+// the default messenger if no platform-specific one is registered.
+func (r *CommandRouter) messengerFor(platform string) Messenger {
+	if m, ok := r.messengers[platform]; ok {
+		return m
+	}
+	return r.messenger
 }
 
 // HandleEvent processes a ChatEvent and routes it to the appropriate handler.
@@ -204,7 +239,7 @@ func (r *CommandRouter) handleMessage(ctx context.Context, event *ChatEvent) err
 	}
 
 	// Try to resolve the user
-	mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event}, event.UserID, event.Platform)
+	mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event: event, messenger: r.messengerFor(event.Platform)}, event.UserID, event.Platform)
 	if err != nil {
 		return fmt.Errorf("resolving user: %w", err)
 	}
@@ -327,11 +362,12 @@ func (r *CommandRouter) handleAgentAction(ctx context.Context, event *ChatEvent,
 		if err != nil {
 			return err
 		}
+		m := r.messengerFor(event.Platform)
 		if resp != nil && resp.Message != nil {
 			if resp.Message.Card != nil {
-				_, err = r.messenger.SendCard(ctx, event.SpaceID, *resp.Message.Card)
+				_, err = m.SendCard(ctx, event.SpaceID, *resp.Message.Card)
 			} else {
-				_, err = r.messenger.SendMessage(ctx, *resp.Message)
+				_, err = m.SendMessage(ctx, *resp.Message)
 			}
 		}
 		return err
@@ -529,7 +565,7 @@ func (r *CommandRouter) cmdLink(ctx context.Context, event *ChatEvent, args []st
 		return textResponse(event, "Usage: `/scion link <grove-slug>`"), nil
 	}
 
-	mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event}, event.UserID, event.Platform)
+	mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event: event, messenger: r.messengerFor(event.Platform)}, event.UserID, event.Platform)
 	if err != nil || mapping == nil {
 		return textResponse(event, "Authentication required. Use `/scion register` first."), nil
 	}
@@ -606,7 +642,7 @@ func (r *CommandRouter) cmdRegister(ctx context.Context, event *ChatEvent, args 
 	}
 
 	// Try auto-registration by email (short-circuit)
-	mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event}, event.UserID, event.Platform)
+	mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event: event, messenger: r.messengerFor(event.Platform)}, event.UserID, event.Platform)
 	if err != nil {
 		return nil, fmt.Errorf("auto-registration: %w", err)
 	}
@@ -945,7 +981,7 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 		return linkResp, nil
 	}
 
-	mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event}, event.UserID, event.Platform)
+	mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event: event, messenger: r.messengerFor(event.Platform)}, event.UserID, event.Platform)
 	if err != nil || mapping == nil {
 		return textResponse(event, "Authentication required. Use `/scion register` first."), nil
 	}
@@ -1005,8 +1041,16 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 	if displayName == "" {
 		displayName = event.UserEmail
 	}
-	replyText := fmt.Sprintf("Message from *%s* sent to *%s*:\n%s", displayName, agentSlug, messageText)
-	return textResponse(event, replyText), nil
+	visibleText := fmt.Sprintf("Message from *%s* sent to *%s*:\n%s", displayName, agentSlug, messageText)
+	if _, err := r.messengerFor(event.Platform).SendMessage(ctx, SendMessageRequest{
+		SpaceID:  event.SpaceID,
+		ThreadID: event.ThreadID,
+		Text:     visibleText,
+	}); err != nil {
+		r.log.Error("failed to send visible message confirmation", "error", err)
+	}
+
+	return nil, nil
 }
 
 func (r *CommandRouter) cmdSetDefault(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {
@@ -1153,7 +1197,7 @@ func (r *CommandRouter) cmdHelp(ctx context.Context, event *ChatEvent) (*EventRe
 // reply sends a text message back to the space where the event originated.
 // Used by non-command handlers (actions, messages, etc.) that respond asynchronously.
 func (r *CommandRouter) reply(ctx context.Context, event *ChatEvent, text string) error {
-	_, err := r.messenger.SendMessage(ctx, SendMessageRequest{
+	_, err := r.messengerFor(event.Platform).SendMessage(ctx, SendMessageRequest{
 		SpaceID:  event.SpaceID,
 		ThreadID: event.ThreadID,
 		Text:     text,
@@ -1197,7 +1241,7 @@ func (r *CommandRouter) requireSpaceLink(ctx context.Context, event *ChatEvent) 
 
 // clientForUser creates a Hub client authenticated as the event's user.
 func (r *CommandRouter) clientForUser(ctx context.Context, event *ChatEvent) (hubclient.Client, error) {
-	mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event}, event.UserID, event.Platform)
+	mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event: event, messenger: r.messengerFor(event.Platform)}, event.UserID, event.Platform)
 	if err != nil {
 		return nil, err
 	}

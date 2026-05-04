@@ -55,12 +55,14 @@ type GoogleChatConfig struct {
 	CommandIDMap        map[string]string `yaml:"command_id_map"`
 }
 
-// SlackConfig holds settings for the Slack adapter (future).
+// SlackConfig holds settings for the Slack adapter.
 type SlackConfig struct {
 	Enabled       bool   `yaml:"enabled"`
 	BotToken      string `yaml:"bot_token"`
+	AppToken      string `yaml:"app_token"`
 	SigningSecret string `yaml:"signing_secret"`
 	ListenAddress string `yaml:"listen_address"`
+	SocketMode    bool   `yaml:"socket_mode"`
 }
 
 // StateConfig holds local state database settings.
