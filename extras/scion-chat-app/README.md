@@ -70,9 +70,10 @@ gcloud iam service-accounts keys create chat-sa-key.json \
    https://<YOUR_CHAT_APP_URL>/chat/events
    ```
 5. Under **Slash commands**, add:
-   | Command ID | Command  | Description                |
-   |------------|----------|----------------------------|
-   | 1          | `/scion` | Scion agent management     |
+   | Command ID | Command        | Description                |
+   |------------|----------------|----------------------------|
+   | 1          | `/scion`       | Message agents             |
+   | 2          | `/scionAdmin`  | Agent & space admin        |
 
    Note the numeric **Command ID** assigned by the console — you'll need it for the `command_id_map` configuration.
 6. Set the **Card interaction URL** to the same endpoint URL (for backward compatibility with pre-migration cards)
@@ -116,6 +117,7 @@ platforms:
     # Mapping of numeric command IDs (assigned in Console) to command names
     command_id_map:
       "1": "scion"
+      "2": "scionAdmin"
 
   slack:
     enabled: false
@@ -180,6 +182,7 @@ platforms:
     service_account_email: "chat@my-gcp-project.iam.gserviceaccount.com"
     command_id_map:
       "1": "scion"
+      "2": "scionAdmin"
 state:
   database: "./scion-chat-app.db"
 logging:

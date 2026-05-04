@@ -27,6 +27,73 @@ func newTestRouter(t *testing.T) (*CommandRouter, *fakeMessenger) {
 	return router, fm
 }
 
+// TestHandleEvent_CommandRouting verifies that /scion routes to messaging
+// and /scionAdmin routes to admin command handling.
+func TestHandleEvent_CommandRouting(t *testing.T) {
+	router, _ := newTestRouter(t)
+
+	tests := []struct {
+		name        string
+		command     string
+		args        string
+		wantContain string
+	}{
+		{
+			name:        "scion with no args shows messaging help",
+			command:     "scion",
+			args:        "",
+			wantContain: "Message Agents",
+		},
+		{
+			name:        "scion help shows messaging help",
+			command:     "scion",
+			args:        "help",
+			wantContain: "Message Agents",
+		},
+		{
+			name:        "scionAdmin with no args shows admin help",
+			command:     "scionAdmin",
+			args:        "",
+			wantContain: "Admin Commands",
+		},
+		{
+			name:        "scionAdmin help shows admin help",
+			command:     "scionAdmin",
+			args:        "help",
+			wantContain: "Admin Commands",
+		},
+		{
+			name:        "scionAdmin unknown command",
+			command:     "scionAdmin",
+			args:        "bogus",
+			wantContain: "Unknown command",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := &ChatEvent{
+				Type:     EventCommand,
+				Platform: "googlechat",
+				SpaceID:  "spaces/test",
+				UserID:   "user-1",
+				Command:  tt.command,
+				Args:     tt.args,
+			}
+			resp, err := router.HandleEvent(context.Background(), event)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if resp == nil || resp.Message == nil {
+				t.Fatal("expected a response")
+			}
+			if !strings.Contains(resp.Message.Text, tt.wantContain) {
+				t.Errorf("expected response to contain %q, got: %s", tt.wantContain, resp.Message.Text)
+			}
+		})
+	}
+}
+
 // TestCmdStart_RequiresSpaceLink verifies that /scion start now requires a
 // space link (grove context) before attempting to start an agent.
 func TestCmdStart_RequiresSpaceLink(t *testing.T) {

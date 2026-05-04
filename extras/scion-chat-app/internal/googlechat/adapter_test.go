@@ -15,11 +15,16 @@
 package googlechat
 
 import (
+	"encoding/json"
 	"log/slog"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/chatapp"
 )
+
+func jsonNumber(s string) json.Number {
+	return json.Number(s)
+}
 
 func TestNormalizeEvent_UserEmail(t *testing.T) {
 	adapter := NewAdapter(Config{}, nil, nil, slog.Default())
@@ -100,6 +105,57 @@ func TestNormalizeEvent_UserEmail(t *testing.T) {
 			}
 			if event.Platform != PlatformName {
 				t.Errorf("Platform = %q, want %q", event.Platform, PlatformName)
+			}
+		})
+	}
+}
+
+func TestNormalizeEvent_CommandIDMapping(t *testing.T) {
+	adapter := NewAdapter(Config{
+		CommandIDMap: map[string]string{
+			"1": "scion",
+			"2": "scionAdmin",
+		},
+	}, nil, nil, slog.Default())
+
+	tests := []struct {
+		name        string
+		commandID   string
+		wantCommand string
+	}{
+		{
+			name:        "command ID 1 maps to scion",
+			commandID:   "1",
+			wantCommand: "scion",
+		},
+		{
+			name:        "command ID 2 maps to scionAdmin",
+			commandID:   "2",
+			wantCommand: "scionAdmin",
+		},
+		{
+			name:        "unknown command ID falls back to scion",
+			commandID:   "99",
+			wantCommand: "scion",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := adapter.normalizeEvent(&rawEvent{
+				Chat: &rawChatPayload{
+					User: &rawUser{Name: "users/1", Email: "u@e.com"},
+					AppCommandPayload: &rawAppCommandPayload{
+						Space:              &rawSpace{Name: "spaces/s"},
+						AppCommandMetadata: &rawAppCommandMetadata{AppCommandId: jsonNumber(tt.commandID)},
+					},
+				},
+			})
+			if event == nil {
+				t.Fatal("normalizeEvent returned nil")
+			}
+			if event.Command != tt.wantCommand {
+				t.Errorf("Command = %q, want %q", event.Command, tt.wantCommand)
 			}
 		})
 	}

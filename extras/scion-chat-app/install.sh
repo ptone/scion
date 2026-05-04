@@ -217,6 +217,7 @@ platforms:
     service_account_email: "${CHAT_APP_SERVICE_ACCOUNT_EMAIL:-}"
     command_id_map:
       "1": "scion"
+      "2": "scionAdmin"
 
 state:
   database: "${SCION_DIR}/scion-chat-app.db"
