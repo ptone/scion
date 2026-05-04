@@ -112,7 +112,7 @@ func (s *Store) migrate() error {
 			grove_id         TEXT NOT NULL,
 			activities       TEXT NOT NULL DEFAULT '',
 			subscribed_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (platform_user_id, platform, agent_id)
+			PRIMARY KEY (platform_user_id, platform, agent_id, grove_id)
 		)`,
 	}
 
@@ -132,7 +132,66 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Fix agent_subscriptions PK to include grove_id. The original PK was
+	// (platform_user_id, platform, agent_id) which caused INSERT OR REPLACE
+	// to overwrite subscriptions across groves for the same-named agent.
+	// SQLite doesn't support ALTER TABLE to change a PK, so we recreate.
+	if err := s.migrateAgentSubscriptionsPK(); err != nil {
+		return fmt.Errorf("migrate agent_subscriptions PK: %w", err)
+	}
+
 	return nil
+}
+
+// migrateAgentSubscriptionsPK recreates agent_subscriptions with grove_id in
+// the PRIMARY KEY. Idempotent: skips if the PK already includes grove_id.
+func (s *Store) migrateAgentSubscriptionsPK() error {
+	// Check whether grove_id is already part of the PK by inspecting table_info.
+	// If the table was created with the new schema (4-column PK), the pk ordinals
+	// for grove_id will be non-zero.
+	var grovePK int
+	err := s.db.QueryRow(
+		`SELECT pk FROM pragma_table_info('agent_subscriptions') WHERE name = 'grove_id'`,
+	).Scan(&grovePK)
+	if err != nil {
+		// Table might not exist yet (fresh DB) — the CREATE TABLE IF NOT EXISTS
+		// above already uses the correct PK if we update it. But we need to
+		// handle the case where the initial CREATE used the old PK.
+		return nil
+	}
+	if grovePK > 0 {
+		return nil // already migrated
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmts := []string{
+		`CREATE TABLE agent_subscriptions_new (
+			platform_user_id TEXT NOT NULL,
+			platform         TEXT NOT NULL,
+			agent_id         TEXT NOT NULL,
+			grove_id         TEXT NOT NULL,
+			activities       TEXT NOT NULL DEFAULT '',
+			subscribed_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (platform_user_id, platform, agent_id, grove_id)
+		)`,
+		`INSERT INTO agent_subscriptions_new
+			SELECT platform_user_id, platform, agent_id, grove_id, activities, subscribed_at
+			FROM agent_subscriptions`,
+		`DROP TABLE agent_subscriptions`,
+		`ALTER TABLE agent_subscriptions_new RENAME TO agent_subscriptions`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("exec %q: %w", stmt[:40], err)
+		}
+	}
+
+	return tx.Commit()
 }
 
 // --- User Mappings ---
@@ -280,13 +339,13 @@ func (s *Store) ClearDefaultAgent(spaceID, platform string) error {
 
 // --- Agent Subscriptions ---
 
-// GetAgentSubscription returns the subscription for the given user and agent, or nil, nil if not found.
-func (s *Store) GetAgentSubscription(platformUserID, platform, agentID string) (*AgentSubscription, error) {
+// GetAgentSubscription returns the subscription for the given user, agent, and grove, or nil, nil if not found.
+func (s *Store) GetAgentSubscription(platformUserID, platform, agentID, groveID string) (*AgentSubscription, error) {
 	sub := &AgentSubscription{}
 	err := s.db.QueryRow(
 		`SELECT platform_user_id, platform, agent_id, grove_id, activities, subscribed_at
-		 FROM agent_subscriptions WHERE platform_user_id = ? AND platform = ? AND agent_id = ?`,
-		platformUserID, platform, agentID,
+		 FROM agent_subscriptions WHERE platform_user_id = ? AND platform = ? AND agent_id = ? AND grove_id = ?`,
+		platformUserID, platform, agentID, groveID,
 	).Scan(&sub.PlatformUserID, &sub.Platform, &sub.AgentID, &sub.GroveID, &sub.Activities, &sub.SubscribedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
