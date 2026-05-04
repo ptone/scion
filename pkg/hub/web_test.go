@@ -211,6 +211,99 @@ func TestStaticAssetHandler_NoAssets(t *testing.T) {
 	}
 }
 
+func TestSPAHandler_NoAssets_ServesErrorPage(t *testing.T) {
+	ws := newDevAuthWebServer(t)
+	ws.assets = nil
+	ws.assetsDisk = ""
+
+	handler := ws.Handler()
+
+	paths := []string{"/", "/groves", "/agents", "/settings"}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest("GET", path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			resp := rec.Result()
+			body, _ := io.ReadAll(resp.Body)
+			html := string(body)
+
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+			assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
+			assert.Contains(t, html, "Web UI Not Available")
+			assert.Contains(t, html, "not built from source")
+			assert.Contains(t, html, "Hub API")
+			assert.NotContains(t, html, "scion-app",
+				"should not render SPA shell when no assets are available")
+			assert.NotContains(t, html, "main.js",
+				"should not reference main.js when no assets are available")
+		})
+	}
+}
+
+func TestSPAHandler_NoAssets_HealthzStillWorks(t *testing.T) {
+	ws := newTestWebServer(t, WebServerConfig{})
+	ws.assets = nil
+	ws.assetsDisk = ""
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, _ := io.ReadAll(resp.Body)
+	var result CompositeHealthResponse
+	require.NoError(t, json.Unmarshal(body, &result))
+	assert.Equal(t, "healthy", result.Status)
+}
+
+func TestSPAHandler_NoAssets_APIStillWorks(t *testing.T) {
+	ws := newTestWebServer(t, WebServerConfig{})
+	ws.assets = nil
+	ws.assetsDisk = ""
+
+	mockHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+	ws.MountHubAPI(mockHub, func(ctx context.Context) error { return nil })
+
+	req := httptest.NewRequest("GET", "/api/v1/groves", nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, _ := io.ReadAll(resp.Body)
+	var result map[string]string
+	require.NoError(t, json.Unmarshal(body, &result))
+	assert.Equal(t, "ok", result["status"])
+}
+
+func TestSPAHandler_WithAssets_ServesNormalShell(t *testing.T) {
+	ws := newDevAuthWebServer(t, func(cfg *WebServerConfig) {
+		cfg.AssetsDir = t.TempDir()
+	})
+
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, html, "scion-app")
+	assert.Contains(t, html, "main.js")
+	assert.NotContains(t, html, "Web UI Not Available")
+}
+
 func TestRootLevelStaticFile_Disk(t *testing.T) {
 	// Root-level public files (e.g. /scion-notification-icon.png) should be
 	// served as static assets rather than falling through to the SPA shell.

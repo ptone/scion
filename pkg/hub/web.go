@@ -332,6 +332,55 @@ var spaShellTemplate = `<!DOCTYPE html>
 </body>
 </html>`
 
+// noAssetsPage is a self-contained HTML page served when the binary was built
+// without embedded web assets (e.g. via `go install`) and no --web-assets-dir
+// was provided. It requires no external resources so it renders correctly even
+// when the static asset routes return 404.
+var noAssetsPage = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scion – Web UI Not Available</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a; color: #e2e8f0;
+            display: flex; align-items: center; justify-content: center;
+            min-height: 100vh; padding: 2rem;
+        }
+        .container {
+            max-width: 540px; text-align: center;
+        }
+        h1 { font-size: 1.5rem; margin-bottom: 1rem; color: #f1f5f9; }
+        p  { line-height: 1.6; margin-bottom: 1rem; color: #94a3b8; }
+        code {
+            background: #1e293b; padding: 0.15em 0.4em; border-radius: 4px;
+            font-size: 0.9em; color: #60a5fa;
+        }
+        .hint {
+            margin-top: 1.5rem; padding: 1rem; background: #1e293b;
+            border-radius: 8px; text-align: left; font-size: 0.9rem;
+        }
+        .hint p { margin-bottom: 0.5rem; }
+        .hint p:last-child { margin-bottom: 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Web UI Not Available</h1>
+        <p>This Scion binary was not built from source with web assets included.
+           The Hub API is still fully operational.</p>
+        <div class="hint">
+            <p>To use the web UI, either:</p>
+            <p>1. Build from source: <code>make build</code></p>
+            <p>2. Point to pre-built assets: <code>--web-assets-dir /path/to/dist/client</code></p>
+        </div>
+    </div>
+</body>
+</html>`
+
 // spaShellData holds the template data for the SPA shell.
 type spaShellData struct {
 	ShoelaceVersion string
@@ -820,6 +869,12 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 	return template.JS(safeJSONForHTML(string(raw)))
 }
 
+// hasWebAssets reports whether the server has web assets available to serve,
+// either from an embedded FS or a filesystem directory.
+func (ws *WebServer) hasWebAssets() bool {
+	return ws.assets != nil || ws.assetsDisk != ""
+}
+
 // spaHandler returns the SPA shell HTML for any route not matched by other handlers.
 func (ws *WebServer) spaHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -828,6 +883,17 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 		// the SPA shell. Without this, files in web/public/ that don't live
 		// under /assets/ or /shoelace/ would get the HTML shell instead.
 		if r.URL.Path != "/" && ws.tryServeStaticFile(w, r) {
+			return
+		}
+
+		// When no web assets are available (e.g. binary built via `go install`
+		// without embedded assets), serve a self-contained error page instead
+		// of the SPA shell which would render as a blank page.
+		if !ws.hasWebAssets() {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, noAssetsPage)
 			return
 		}
 
