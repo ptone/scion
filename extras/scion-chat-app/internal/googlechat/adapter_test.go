@@ -17,6 +17,7 @@ package googlechat
 import (
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/chatapp"
@@ -158,6 +159,184 @@ func TestNormalizeEvent_CommandIDMapping(t *testing.T) {
 				t.Errorf("Command = %q, want %q", event.Command, tt.wantCommand)
 			}
 		})
+	}
+}
+
+func TestNormalizeEvent_CommandIDFallbackToMessageText(t *testing.T) {
+	// Empty command ID map — simulates missing command_id_map in YAML config.
+	adapter := NewAdapter(Config{}, nil, nil, slog.Default())
+
+	tests := []struct {
+		name        string
+		text        string
+		wantCommand string
+	}{
+		{
+			name:        "scionAdmin extracted from message text",
+			text:        "/scionAdmin list",
+			wantCommand: "scionAdmin",
+		},
+		{
+			name:        "scion extracted from message text",
+			text:        "/scion myagent hello",
+			wantCommand: "scion",
+		},
+		{
+			name:        "empty text falls back to scion default",
+			text:        "",
+			wantCommand: "scion",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &rawMessage{Text: tt.text}
+			if fields := strings.Fields(tt.text); len(fields) > 1 {
+				msg.ArgumentText = strings.TrimPrefix(tt.text, fields[0]+" ")
+			}
+			event := adapter.normalizeEvent(&rawEvent{
+				Chat: &rawChatPayload{
+					User: &rawUser{Name: "users/1", Email: "u@e.com"},
+					AppCommandPayload: &rawAppCommandPayload{
+						Space: &rawSpace{Name: "spaces/s"},
+						AppCommandMetadata: &rawAppCommandMetadata{
+							AppCommandId: jsonNumber("99"),
+						},
+						Message: msg,
+					},
+				},
+			})
+			if event == nil {
+				t.Fatal("normalizeEvent returned nil")
+			}
+			if event.Command != tt.wantCommand {
+				t.Errorf("Command = %q, want %q", event.Command, tt.wantCommand)
+			}
+		})
+	}
+}
+
+func TestNormalizeEvent_LegacySlashCommand(t *testing.T) {
+	adapter := NewAdapter(Config{
+		CommandIDMap: map[string]string{
+			"1": "scion",
+			"2": "scionAdmin",
+		},
+	}, nil, nil, slog.Default())
+
+	tests := []struct {
+		name        string
+		commandID   string
+		text        string
+		argText     string
+		wantCommand string
+		wantArgs    string
+		wantType    chatapp.ChatEventType
+	}{
+		{
+			name:        "legacy scionAdmin via command ID",
+			commandID:   "2",
+			text:        "/scionAdmin list",
+			argText:     "list",
+			wantCommand: "scionAdmin",
+			wantArgs:    "list",
+			wantType:    chatapp.EventCommand,
+		},
+		{
+			name:        "legacy scion via command ID",
+			commandID:   "1",
+			text:        "/scion myagent hello",
+			argText:     "myagent hello",
+			wantCommand: "scion",
+			wantArgs:    "myagent hello",
+			wantType:    chatapp.EventCommand,
+		},
+		{
+			name:        "legacy unknown ID falls back to text extraction",
+			commandID:   "99",
+			text:        "/scionAdmin status myagent",
+			argText:     "status myagent",
+			wantCommand: "scionAdmin",
+			wantArgs:    "status myagent",
+			wantType:    chatapp.EventCommand,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := adapter.normalizeEvent(&rawEvent{
+				Chat: &rawChatPayload{
+					User: &rawUser{Name: "users/1", Email: "u@e.com"},
+					MessagePayload: &rawMessagePayload{
+						Message: &rawMessage{
+							Text:         tt.text,
+							ArgumentText: tt.argText,
+							SlashCommand: &rawSlashCommand{
+								CommandId: jsonNumber(tt.commandID),
+							},
+						},
+						Space: &rawSpace{Name: "spaces/s"},
+					},
+				},
+			})
+			if event == nil {
+				t.Fatal("normalizeEvent returned nil")
+			}
+			if event.Type != tt.wantType {
+				t.Errorf("Type = %q, want %q", event.Type, tt.wantType)
+			}
+			if event.Command != tt.wantCommand {
+				t.Errorf("Command = %q, want %q", event.Command, tt.wantCommand)
+			}
+			if event.Args != tt.wantArgs {
+				t.Errorf("Args = %q, want %q", event.Args, tt.wantArgs)
+			}
+		})
+	}
+}
+
+func TestNormalizeEvent_MessageWithoutSlashCommand(t *testing.T) {
+	adapter := NewAdapter(Config{}, nil, nil, slog.Default())
+
+	event := adapter.normalizeEvent(&rawEvent{
+		Chat: &rawChatPayload{
+			User: &rawUser{Name: "users/1", Email: "u@e.com"},
+			MessagePayload: &rawMessagePayload{
+				Message: &rawMessage{
+					Text: "hello world",
+				},
+				Space: &rawSpace{Name: "spaces/s"},
+			},
+		},
+	})
+	if event == nil {
+		t.Fatal("normalizeEvent returned nil")
+	}
+	if event.Type != chatapp.EventMessage {
+		t.Errorf("Type = %q, want %q", event.Type, chatapp.EventMessage)
+	}
+	if event.Text != "hello world" {
+		t.Errorf("Text = %q, want %q", event.Text, "hello world")
+	}
+}
+
+func TestExtractCommandName(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"/scionAdmin list", "scionAdmin"},
+		{"/scion myagent hello", "scion"},
+		{"/scion", "scion"},
+		{"hello world", ""},
+		{"", ""},
+		{"  /scionAdmin  ", "scionAdmin"},
+	}
+	for _, tt := range tests {
+		got := extractCommandName(tt.input)
+		if got != tt.want {
+			t.Errorf("extractCommandName(%q) = %q, want %q", tt.input, got, tt.want)
+		}
 	}
 }
 

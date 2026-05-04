@@ -400,11 +400,12 @@ type rawSpace struct {
 }
 
 type rawMessage struct {
-	Name         string          `json:"name"`
-	Text         string          `json:"text"`
-	ArgumentText string          `json:"argumentText"`
-	Thread       *rawThread      `json:"thread,omitempty"`
-	Annotations  []rawAnnotation `json:"annotations,omitempty"`
+	Name         string           `json:"name"`
+	Text         string           `json:"text"`
+	ArgumentText string           `json:"argumentText"`
+	Thread       *rawThread       `json:"thread,omitempty"`
+	Annotations  []rawAnnotation  `json:"annotations,omitempty"`
+	SlashCommand *rawSlashCommand `json:"slashCommand,omitempty"`
 }
 
 type rawThread struct {
@@ -416,6 +417,10 @@ type rawAnnotation struct {
 	Type       string  `json:"type"`
 	StartIndex float64 `json:"startIndex"`
 	Length     float64 `json:"length"`
+}
+
+type rawSlashCommand struct {
+	CommandId json.Number `json:"commandId"`
 }
 
 type rawUser struct {
@@ -485,9 +490,13 @@ func (a *Adapter) normalizeEvent(raw *rawEvent) *chatapp.ChatEvent {
 			cmdID := p.AppCommandMetadata.AppCommandId.String()
 			if name, ok := a.commandIDs[cmdID]; ok {
 				event.Command = name
-			} else {
-				event.Command = "scion" // default fallback
 			}
+		}
+		if event.Command == "" && p.Message != nil {
+			event.Command = extractCommandName(p.Message.Text)
+		}
+		if event.Command == "" {
+			event.Command = "scion"
 		}
 		if p.Message != nil {
 			event.Args = strings.TrimSpace(p.Message.ArgumentText)
@@ -508,6 +517,24 @@ func (a *Adapter) normalizeEvent(raw *rawEvent) *chatapp.ChatEvent {
 		if p.Message.Thread != nil {
 			event.ThreadID = p.Message.Thread.Name
 		}
+
+		// Legacy format: slash commands arrive as message events with an
+		// embedded slashCommand field rather than as appCommandPayload.
+		if p.Message.SlashCommand != nil {
+			event.Type = chatapp.EventCommand
+			cmdID := p.Message.SlashCommand.CommandId.String()
+			if name, ok := a.commandIDs[cmdID]; ok {
+				event.Command = name
+			} else {
+				event.Command = extractCommandName(p.Message.Text)
+			}
+			if event.Command == "" {
+				event.Command = "scion"
+			}
+			event.Args = strings.TrimSpace(p.Message.ArgumentText)
+			return event
+		}
+
 		event.Type = chatapp.EventMessage
 		text := p.Message.ArgumentText
 		if text == "" {
@@ -559,6 +586,17 @@ func (a *Adapter) normalizeEvent(raw *rawEvent) *chatapp.ChatEvent {
 		a.log.Debug("no recognized chat payload present")
 		return nil
 	}
+}
+
+// extractCommandName parses "/scionAdmin list" → "scionAdmin".
+// Returns "" if the text doesn't start with a slash command.
+func extractCommandName(text string) string {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "/") {
+		return ""
+	}
+	cmd := strings.Fields(text)[0]
+	return strings.TrimPrefix(cmd, "/")
 }
 
 // getParameters extracts action parameters from commonEventObject.
