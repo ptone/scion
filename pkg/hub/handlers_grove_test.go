@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/stretchr/testify/assert"
@@ -1564,6 +1565,69 @@ func TestResolveCloneToken_NoCredentials(t *testing.T) {
 
 	token := srv.resolveCloneToken(context.Background(), grove)
 	assert.Empty(t, token, "should return empty when no credentials available")
+}
+
+func TestResolveCloneToken_FallsBackToCreatorUserToken(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, st.CreateSecret(ctx, &store.Secret{
+		ID:             "sec-user-gh",
+		Key:            "GITHUB_TOKEN",
+		EncryptedValue: "ghp_user_token_123",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "GITHUB_TOKEN",
+		Scope:          store.ScopeUser,
+		ScopeID:        "creator-user-1",
+	}))
+
+	backend := secret.NewLocalBackend(st, "test-hub-id")
+	srv.SetSecretBackend(backend)
+
+	grove := &store.Grove{
+		ID:        "grove-bootstrap",
+		GitRemote: "github.com/test/private-repo",
+		CreatedBy: "creator-user-1",
+	}
+
+	token := srv.resolveCloneToken(ctx, grove)
+	assert.Equal(t, "ghp_user_token_123", token, "should fall back to creator's user-scoped GITHUB_TOKEN")
+}
+
+func TestResolveCloneToken_PrefersGroveTokenOverUserToken(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, st.CreateSecret(ctx, &store.Secret{
+		ID:             "sec-grove-gh",
+		Key:            "GITHUB_TOKEN",
+		EncryptedValue: "ghp_grove_token",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "GITHUB_TOKEN",
+		Scope:          store.ScopeGrove,
+		ScopeID:        "grove-with-both",
+	}))
+	require.NoError(t, st.CreateSecret(ctx, &store.Secret{
+		ID:             "sec-user-gh-2",
+		Key:            "GITHUB_TOKEN",
+		EncryptedValue: "ghp_user_token",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "GITHUB_TOKEN",
+		Scope:          store.ScopeUser,
+		ScopeID:        "creator-user-2",
+	}))
+
+	backend := secret.NewLocalBackend(st, "test-hub-id")
+	srv.SetSecretBackend(backend)
+
+	grove := &store.Grove{
+		ID:        "grove-with-both",
+		GitRemote: "github.com/test/repo",
+		CreatedBy: "creator-user-2",
+	}
+
+	token := srv.resolveCloneToken(ctx, grove)
+	assert.Equal(t, "ghp_grove_token", token, "should prefer grove-scoped token over user-scoped token")
 }
 
 func TestCreateGrove_AutoAssociatesGitHubInstallation(t *testing.T) {

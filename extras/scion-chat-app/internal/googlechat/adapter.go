@@ -491,6 +491,13 @@ func (a *Adapter) normalizeEvent(raw *rawEvent) *chatapp.ChatEvent {
 			if name, ok := a.commandIDs[cmdID]; ok {
 				event.Command = name
 			}
+		} else if p.Message != nil && p.Message.SlashCommand != nil {
+			cmdID := p.Message.SlashCommand.CommandId.String()
+			if name, ok := a.commandIDs[cmdID]; ok {
+				event.Command = name
+			} else {
+				event.Command = "scion"
+			}
 		}
 		if event.Command == "" && p.Message != nil {
 			event.Command = extractCommandName(p.Message.Text)
@@ -517,7 +524,6 @@ func (a *Adapter) normalizeEvent(raw *rawEvent) *chatapp.ChatEvent {
 		if p.Message.Thread != nil {
 			event.ThreadID = p.Message.Thread.Name
 		}
-
 		// Legacy format: slash commands arrive as message events with an
 		// embedded slashCommand field rather than as appCommandPayload.
 		if p.Message.SlashCommand != nil {

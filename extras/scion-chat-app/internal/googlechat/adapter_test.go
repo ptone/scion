@@ -216,7 +216,7 @@ func TestNormalizeEvent_CommandIDFallbackToMessageText(t *testing.T) {
 	}
 }
 
-func TestNormalizeEvent_LegacySlashCommand(t *testing.T) {
+func TestNormalizeEvent_SlashCommandInMessage(t *testing.T) {
 	adapter := NewAdapter(Config{
 		CommandIDMap: map[string]string{
 			"1": "scion",
@@ -226,59 +226,67 @@ func TestNormalizeEvent_LegacySlashCommand(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		commandID   string
-		text        string
-		argText     string
+		raw         rawEvent
+		wantType    chatapp.ChatEventType
 		wantCommand string
 		wantArgs    string
-		wantType    chatapp.ChatEventType
 	}{
 		{
-			name:        "legacy scionAdmin via command ID",
-			commandID:   "2",
-			text:        "/scionAdmin list",
-			argText:     "list",
-			wantCommand: "scionAdmin",
-			wantArgs:    "list",
+			name: "messagePayload with slashCommand routes as command",
+			raw: rawEvent{
+				Chat: &rawChatPayload{
+					User: &rawUser{Name: "users/1", Email: "u@e.com"},
+					MessagePayload: &rawMessagePayload{
+						Space: &rawSpace{Name: "spaces/s"},
+						Message: &rawMessage{
+							ArgumentText: "help",
+							SlashCommand: &rawSlashCommand{CommandId: jsonNumber("2")},
+						},
+					},
+				},
+			},
 			wantType:    chatapp.EventCommand,
+			wantCommand: "scionAdmin",
+			wantArgs:    "help",
 		},
 		{
-			name:        "legacy scion via command ID",
-			commandID:   "1",
-			text:        "/scion myagent hello",
-			argText:     "myagent hello",
-			wantCommand: "scion",
-			wantArgs:    "myagent hello",
-			wantType:    chatapp.EventCommand,
+			name: "messagePayload without slashCommand remains a message",
+			raw: rawEvent{
+				Chat: &rawChatPayload{
+					User: &rawUser{Name: "users/1", Email: "u@e.com"},
+					MessagePayload: &rawMessagePayload{
+						Space:   &rawSpace{Name: "spaces/s"},
+						Message: &rawMessage{Text: "hello"},
+					},
+				},
+			},
+			wantType:    chatapp.EventMessage,
+			wantCommand: "",
+			wantArgs:    "",
 		},
 		{
-			name:        "legacy unknown ID falls back to text extraction",
-			commandID:   "99",
-			text:        "/scionAdmin status myagent",
-			argText:     "status myagent",
-			wantCommand: "scionAdmin",
-			wantArgs:    "status myagent",
+			name: "appCommandPayload falls back to message slashCommand",
+			raw: rawEvent{
+				Chat: &rawChatPayload{
+					User: &rawUser{Name: "users/1", Email: "u@e.com"},
+					AppCommandPayload: &rawAppCommandPayload{
+						Space: &rawSpace{Name: "spaces/s"},
+						Message: &rawMessage{
+							ArgumentText: "info",
+							SlashCommand: &rawSlashCommand{CommandId: jsonNumber("2")},
+						},
+					},
+				},
+			},
 			wantType:    chatapp.EventCommand,
+			wantCommand: "scionAdmin",
+			wantArgs:    "info",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			event := adapter.normalizeEvent(&rawEvent{
-				Chat: &rawChatPayload{
-					User: &rawUser{Name: "users/1", Email: "u@e.com"},
-					MessagePayload: &rawMessagePayload{
-						Message: &rawMessage{
-							Text:         tt.text,
-							ArgumentText: tt.argText,
-							SlashCommand: &rawSlashCommand{
-								CommandId: jsonNumber(tt.commandID),
-							},
-						},
-						Space: &rawSpace{Name: "spaces/s"},
-					},
-				},
-			})
+			event := adapter.normalizeEvent(&tt.raw)
 			if event == nil {
 				t.Fatal("normalizeEvent returned nil")
 			}
@@ -288,7 +296,7 @@ func TestNormalizeEvent_LegacySlashCommand(t *testing.T) {
 			if event.Command != tt.wantCommand {
 				t.Errorf("Command = %q, want %q", event.Command, tt.wantCommand)
 			}
-			if event.Args != tt.wantArgs {
+			if tt.wantArgs != "" && event.Args != tt.wantArgs {
 				t.Errorf("Args = %q, want %q", event.Args, tt.wantArgs)
 			}
 		})
