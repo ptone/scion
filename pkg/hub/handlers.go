@@ -3496,7 +3496,10 @@ func (s *Server) autoAssociateGitHubInstallation(ctx context.Context, grove *sto
 }
 
 // resolveCloneToken resolves a GitHub token for cloning a grove's repository.
-// It tries GitHub App installation tokens first, then falls back to grove secrets.
+// It tries GitHub App installation tokens first, then grove secrets, then the
+// creating user's profile-level GitHub token as a final fallback. This last
+// fallback solves the bootstrap problem where a new grove linked to a private
+// repo has no grove-level credentials yet.
 func (s *Server) resolveCloneToken(ctx context.Context, grove *store.Grove) string {
 	// Try GitHub App token first
 	if grove.GitHubInstallationID != nil {
@@ -3510,11 +3513,21 @@ func (s *Server) resolveCloneToken(ctx context.Context, grove *store.Grove) stri
 		}
 	}
 
-	// Fall back to GITHUB_TOKEN from grove secrets
 	if s.secretBackend != nil {
+		// Fall back to GITHUB_TOKEN from grove secrets
 		sv, err := s.secretBackend.Get(ctx, "GITHUB_TOKEN", "grove", grove.ID)
 		if err == nil && sv != nil && sv.Value != "" {
 			return sv.Value
+		}
+
+		// Fall back to the creating user's profile-level GITHUB_TOKEN
+		if grove.CreatedBy != "" {
+			sv, err = s.secretBackend.Get(ctx, "GITHUB_TOKEN", "user", grove.CreatedBy)
+			if err == nil && sv != nil && sv.Value != "" {
+				slog.Info("using creator's GitHub token for grove clone",
+					"grove_id", grove.ID, "user_id", grove.CreatedBy)
+				return sv.Value
+			}
 		}
 	}
 
