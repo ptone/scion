@@ -651,10 +651,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		slog.Info("Authorized domains", "domains", strings.Join(cfg.AuthorizedDomains, ", "))
 	}
 
+	// Initialize audit logger (used by broker auth and invite system)
+	srv.auditLogger = NewLogAuditLogger("[Hub Audit]", cfg.Debug)
+
 	// Initialize broker auth service if enabled
 	if cfg.BrokerAuthConfig.Enabled {
 		srv.brokerAuthService = NewBrokerAuthService(cfg.BrokerAuthConfig, s)
-		srv.auditLogger = NewLogAuditLogger("[Hub Audit]", cfg.Debug)
 		srv.metrics = NewBrokerAuthMetrics()
 		slog.Info("Broker HMAC authentication enabled")
 	}

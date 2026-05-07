@@ -15,9 +15,14 @@
 package hub
 
 import (
+	"bufio"
+	"encoding/csv"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -26,6 +31,16 @@ import (
 type AllowListAddRequest struct {
 	Email string `json:"email"`
 	Note  string `json:"note"`
+}
+
+type AllowListBulkAddRequest struct {
+	Emails []AllowListAddRequest `json:"emails"`
+}
+
+type AllowListBulkAddResponse struct {
+	Added   int `json:"added"`
+	Skipped int `json:"skipped"`
+	Total   int `json:"total"`
 }
 
 type AllowListResponse struct {
@@ -52,11 +67,32 @@ func (s *Server) handleAdminAllowList(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleAdminAllowListByEmail handles DELETE /api/v1/admin/allow-list/{email}.
+// handleAdminAllowListByEmail handles sub-paths under /api/v1/admin/allow-list/.
 func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil || user.Role() != "admin" {
 		Forbidden(w)
+		return
+	}
+
+	// Extract sub-path
+	subPath := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/allow-list/")
+
+	// Route special sub-paths
+	switch subPath {
+	case "import":
+		if r.Method != http.MethodPost {
+			MethodNotAllowed(w)
+			return
+		}
+		s.handleAdminAllowListImport(w, r, user)
+		return
+	case "domains":
+		if r.Method != http.MethodGet {
+			MethodNotAllowed(w)
+			return
+		}
+		s.handleAdminAllowListDomains(w, r)
 		return
 	}
 
@@ -66,7 +102,7 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Extract email from path: /api/v1/admin/allow-list/{email}
-	email := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/allow-list/")
+	email := subPath
 	if email == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "email is required", nil)
 		return
@@ -85,6 +121,8 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 		"email", email,
 		"removed_by", user.Email(),
 	)
+	LogInviteAudit(r.Context(), s.auditLogger, InviteAuditAllowListRemove, email, "", user.ID(), user.Email(), nil)
+	s.events.PublishAllowListChanged(r.Context(), "removed", email)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 }
@@ -143,6 +181,169 @@ func (s *Server) handleAdminAllowListAdd(w http.ResponseWriter, r *http.Request,
 		"email", email,
 		"added_by", user.Email(),
 	)
+	LogInviteAudit(r.Context(), s.auditLogger, InviteAuditAllowListAdd, email, "", user.ID(), user.Email(), nil)
+	s.events.PublishAllowListChanged(r.Context(), "added", email)
 
 	writeJSON(w, http.StatusCreated, entry)
+}
+
+// handleAdminAllowListImport handles POST /api/v1/admin/allow-list/import.
+// Accepts either a JSON body with an array of emails, or a CSV file upload.
+func (s *Server) handleAdminAllowListImport(w http.ResponseWriter, r *http.Request, user UserIdentity) {
+	contentType := r.Header.Get("Content-Type")
+
+	var emails []AllowListAddRequest
+
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		// CSV file upload
+		if err := r.ParseMultipartForm(2 << 20); err != nil { // 2MB max
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "failed to parse multipart form", nil)
+			return
+		}
+
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "file field is required", nil)
+			return
+		}
+		defer file.Close()
+
+		parsed, err := parseCSVEmails(file)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+		emails = parsed
+	} else {
+		// JSON body
+		var req AllowListBulkAddRequest
+		if err := readJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
+			return
+		}
+		emails = req.Emails
+	}
+
+	if len(emails) == 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "no emails provided", nil)
+		return
+	}
+
+	if len(emails) > 1000 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "maximum 1000 emails per import", nil)
+		return
+	}
+
+	// Build entries
+	var entries []*store.AllowListEntry
+	for _, e := range emails {
+		email := strings.TrimSpace(strings.ToLower(e.Email))
+		if email == "" || !strings.Contains(email, "@") {
+			continue
+		}
+		entries = append(entries, &store.AllowListEntry{
+			ID:      uuid.New().String(),
+			Email:   email,
+			Note:    e.Note,
+			AddedBy: user.ID(),
+		})
+	}
+
+	if len(entries) == 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "no valid emails found", nil)
+		return
+	}
+
+	added, skipped, err := s.store.BulkAddAllowListEntries(r.Context(), entries)
+	if err != nil {
+		slog.Error("bulk allow list import failed", "error", err)
+		InternalError(w)
+		return
+	}
+
+	slog.Info("allow list bulk import",
+		"added", added,
+		"skipped", skipped,
+		"total", len(entries),
+		"imported_by", user.Email(),
+	)
+
+	if logger := s.auditLogger; logger != nil {
+		event := &InviteAuditEvent{
+			EventType:  InviteAuditAllowListBulkAdd,
+			ActorID:    user.ID(),
+			ActorEmail: user.Email(),
+			Success:    true,
+			Count:      added,
+			Timestamp:  time.Now(),
+			Details:    map[string]string{"skipped": fmt.Sprintf("%d", skipped)},
+		}
+		_ = logger.LogInviteAuditEvent(r.Context(), event)
+	}
+
+	s.events.PublishAllowListChanged(r.Context(), "bulk_added", "")
+
+	writeJSON(w, http.StatusOK, AllowListBulkAddResponse{
+		Added:   added,
+		Skipped: skipped,
+		Total:   len(entries),
+	})
+}
+
+// handleAdminAllowListDomains handles GET /api/v1/admin/allow-list/domains.
+func (s *Server) handleAdminAllowListDomains(w http.ResponseWriter, r *http.Request) {
+	domains, err := s.store.ListEmailDomains(r.Context())
+	if err != nil {
+		slog.Error("failed to list email domains", "error", err)
+		InternalError(w)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"domains": domains,
+	})
+}
+
+// parseCSVEmails parses a CSV file with email,note columns.
+func parseCSVEmails(r io.Reader) ([]AllowListAddRequest, error) {
+	reader := csv.NewReader(bufio.NewReader(r))
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
+
+	var emails []AllowListAddRequest
+	lineNum := 0
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("CSV parse error at line %d: %w", lineNum+1, err)
+		}
+		lineNum++
+
+		if len(record) == 0 {
+			continue
+		}
+
+		email := strings.TrimSpace(record[0])
+
+		// Skip header row
+		if lineNum == 1 && (strings.EqualFold(email, "email") || strings.EqualFold(email, "e-mail")) {
+			continue
+		}
+
+		if email == "" || !strings.Contains(email, "@") {
+			continue
+		}
+
+		var note string
+		if len(record) > 1 {
+			note = strings.TrimSpace(record[1])
+		}
+
+		emails = append(emails, AllowListAddRequest{Email: email, Note: note})
+	}
+
+	return emails, nil
 }

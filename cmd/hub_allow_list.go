@@ -15,19 +15,25 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
 
 var (
 	allowListOutputJSON bool
 	allowListAddNote    string
+	allowListImportNote string
 )
 
 var hubAllowListCmd = &cobra.Command{
@@ -81,16 +87,34 @@ Examples:
 	RunE: runAllowListList,
 }
 
+var hubAllowListImportCmd = &cobra.Command{
+	Use:   "import FILE",
+	Short: "Bulk import emails from a CSV file",
+	Long: `Import email addresses from a CSV file into the allow list.
+
+The CSV file should have one email per line, with an optional second column for notes.
+A header row (starting with "email") is automatically skipped.
+
+Examples:
+  scion hub allow-list import emails.csv
+  scion hub allow-list import emails.csv --note "Q3 batch import"`,
+	Args: cobra.ExactArgs(1),
+	RunE: runAllowListImport,
+}
+
 func init() {
 	hubCmd.AddCommand(hubAllowListCmd)
 	hubAllowListCmd.AddCommand(hubAllowListAddCmd)
 	hubAllowListCmd.AddCommand(hubAllowListRemoveCmd)
 	hubAllowListCmd.AddCommand(hubAllowListListCmd)
+	hubAllowListCmd.AddCommand(hubAllowListImportCmd)
 
 	hubAllowListAddCmd.Flags().StringVar(&allowListAddNote, "note", "", "Optional note for this entry")
+	hubAllowListImportCmd.Flags().StringVar(&allowListImportNote, "note", "", "Note to apply to all imported entries")
 
 	hubAllowListCmd.Flags().BoolVar(&allowListOutputJSON, "json", false, "Output in JSON format")
 	hubAllowListListCmd.Flags().BoolVar(&allowListOutputJSON, "json", false, "Output in JSON format")
+	hubAllowListImportCmd.Flags().BoolVar(&allowListOutputJSON, "json", false, "Output in JSON format")
 }
 
 func runAllowListList(cmd *cobra.Command, args []string) error {
@@ -204,4 +228,108 @@ func runAllowListRemove(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Removed %s from the allow list.\n", email)
 	return nil
+}
+
+func runAllowListImport(cmd *cobra.Command, args []string) error {
+	filePath := args[0]
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer f.Close()
+
+	emails, err := parseImportCSV(f)
+	if err != nil {
+		return fmt.Errorf("failed to parse CSV: %w", err)
+	}
+
+	if len(emails) == 0 {
+		fmt.Println("No valid emails found in the file.")
+		return nil
+	}
+
+	// Apply the --note flag to entries that don't already have a note from the CSV
+	if allowListImportNote != "" {
+		for i := range emails {
+			if emails[i].Note == "" {
+				emails[i].Note = allowListImportNote
+			}
+		}
+	}
+
+	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve grove path: %w", err)
+	}
+
+	settings, err := config.LoadSettings(resolvedPath)
+	if err != nil {
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+
+	client, err := getHubClient(settings)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	resp, err := client.AllowList().BulkAdd(ctx, emails)
+	if err != nil {
+		return fmt.Errorf("failed to import: %w", err)
+	}
+
+	if allowListOutputJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(resp)
+	}
+
+	fmt.Printf("Import complete: %d added, %d skipped (already on list), %d total processed.\n",
+		resp.Added, resp.Skipped, resp.Total)
+	return nil
+}
+
+func parseImportCSV(r io.Reader) ([]hubclient.AllowListAddRequest, error) {
+	reader := csv.NewReader(bufio.NewReader(r))
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
+
+	var emails []hubclient.AllowListAddRequest
+	lineNum := 0
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", lineNum+1, err)
+		}
+		lineNum++
+
+		if len(record) == 0 {
+			continue
+		}
+
+		email := strings.TrimSpace(record[0])
+
+		if lineNum == 1 && (strings.EqualFold(email, "email") || strings.EqualFold(email, "e-mail")) {
+			continue
+		}
+
+		if email == "" || !strings.Contains(email, "@") {
+			continue
+		}
+
+		var note string
+		if len(record) > 1 {
+			note = strings.TrimSpace(record[1])
+		}
+
+		emails = append(emails, hubclient.AllowListAddRequest{Email: email, Note: note})
+	}
+
+	return emails, nil
 }

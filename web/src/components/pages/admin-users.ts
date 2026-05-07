@@ -146,6 +146,15 @@ export class ScionPageAdminUsers extends LitElement {
   @state()
   private addEmailInProgress = false;
 
+  @state()
+  private showImportDialog = false;
+
+  @state()
+  private importInProgress = false;
+
+  @state()
+  private emailDomains: string[] = [];
+
   // Invites tab state
   @state()
   private invites: InviteCodeEntry[] = [];
@@ -579,6 +588,19 @@ export class ScionPageAdminUsers extends LitElement {
       gap: 1rem;
     }
 
+    .domain-suggestions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.375rem;
+      margin-top: -0.5rem;
+    }
+
+    .domain-label {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     .invite-status {
       display: inline-flex;
       align-items: center;
@@ -936,6 +958,7 @@ export class ScionPageAdminUsers extends LitElement {
 
       ${this.renderConfirmDialog()}
       ${this.renderAddEmailDialog()}
+      ${this.renderImportDialog()}
       ${this.renderCreateInviteDialog()}
       ${this.renderInviteRevealDialog()}
     `;
@@ -1155,6 +1178,20 @@ export class ScionPageAdminUsers extends LitElement {
     }
   }
 
+  private async loadEmailDomains(): Promise<void> {
+    try {
+      const response = await fetch('/api/v1/admin/allow-list/domains', {
+        credentials: 'include',
+      });
+      if (response.ok) {
+        const data = (await response.json()) as { domains: string[] };
+        this.emailDomains = data.domains || [];
+      }
+    } catch {
+      // Non-critical, ignore
+    }
+  }
+
   private async addToAllowList(): Promise<void> {
     const email = this.addEmailValue.trim().toLowerCase();
     if (!email || !email.includes('@')) return;
@@ -1206,10 +1243,16 @@ export class ScionPageAdminUsers extends LitElement {
     return html`
       <div class="allow-list-header">
         <span>${this.allowListTotalCount} email${this.allowListTotalCount !== 1 ? 's' : ''} on the allow list</span>
-        <sl-button size="small" variant="primary" @click=${() => { this.showAddEmailDialog = true; }}>
-          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-          Add Email
-        </sl-button>
+        <div style="display: flex; gap: 0.5rem">
+          <sl-button size="small" variant="default" @click=${() => { this.showImportDialog = true; }}>
+            <sl-icon slot="prefix" name="upload"></sl-icon>
+            Import CSV
+          </sl-button>
+          <sl-button size="small" variant="primary" @click=${() => { this.showAddEmailDialog = true; this.loadEmailDomains(); }}>
+            <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+            Add Email
+          </sl-button>
+        </div>
       </div>
 
       ${this.allowListEntries.length === 0
@@ -1259,6 +1302,13 @@ export class ScionPageAdminUsers extends LitElement {
 
   private renderAddEmailDialog() {
     if (!this.showAddEmailDialog) return nothing;
+
+    // Show domain suggestions when user has typed something but no @ yet, or partial domain
+    const val = this.addEmailValue.trim();
+    const atIdx = val.indexOf('@');
+    const showDomainSuggestions = this.emailDomains.length > 0 && val.length > 0 && (atIdx === -1 || (atIdx > 0 && atIdx === val.length - 1));
+    const username = atIdx > 0 ? val.substring(0, atIdx) : val;
+
     return html`
       <sl-dialog
         label="Add Email to Allow List"
@@ -1274,6 +1324,19 @@ export class ScionPageAdminUsers extends LitElement {
             @sl-input=${(e: Event) => { this.addEmailValue = (e.target as HTMLInputElement).value; }}
             required
           ></sl-input>
+          ${showDomainSuggestions ? html`
+            <div class="domain-suggestions">
+              <span class="domain-label">Suggested domains:</span>
+              ${this.emailDomains.slice(0, 5).map(domain => html`
+                <sl-tag
+                  size="small"
+                  pill
+                  style="cursor: pointer"
+                  @click=${() => { this.addEmailValue = `${username}@${domain}`; }}
+                >@${domain}</sl-tag>
+              `)}
+            </div>
+          ` : nothing}
           <sl-input
             label="Note (optional)"
             placeholder="e.g., New hire, Q3 contractor"
@@ -1335,6 +1398,73 @@ export class ScionPageAdminUsers extends LitElement {
         >${action.confirmLabel}</sl-button>
       </sl-dialog>
     `;
+  }
+
+  private renderImportDialog() {
+    if (!this.showImportDialog) return nothing;
+    return html`
+      <sl-dialog
+        label="Import Emails from CSV"
+        open
+        @sl-request-close=${() => { if (!this.importInProgress) this.showImportDialog = false; }}
+      >
+        <div class="import-form">
+          <p style="margin: 0 0 1rem; font-size: 0.875rem; color: var(--scion-text-muted)">
+            Upload a CSV file with one email per line. An optional second column can contain notes.
+          </p>
+          <input
+            type="file"
+            accept=".csv,.txt"
+            id="import-file-input"
+            style="margin-bottom: 1rem"
+          />
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this.importInProgress}
+          @click=${() => { this.showImportDialog = false; }}
+        >Cancel</sl-button>
+        <sl-button
+          slot="footer"
+          variant="primary"
+          ?loading=${this.importInProgress}
+          @click=${() => this.importCSV()}
+        >Import</sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  private async importCSV(): Promise<void> {
+    const input = this.shadowRoot?.querySelector('#import-file-input') as HTMLInputElement;
+    if (!input?.files?.length) {
+      this.showFeedback('danger', 'Please select a file.');
+      return;
+    }
+
+    const file = input.files[0];
+    const formData = new FormData();
+    formData.append('file', file);
+
+    this.importInProgress = true;
+    try {
+      const response = await fetch('/api/v1/admin/allow-list/import', {
+        method: 'POST',
+        credentials: 'include',
+        body: formData,
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      const result = (await response.json()) as { added: number; skipped: number; total: number };
+      this.showFeedback('success', `Import complete: ${result.added} added, ${result.skipped} skipped.`);
+      this.showImportDialog = false;
+      void this.loadAllowList();
+    } catch (err) {
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Import failed');
+    } finally {
+      this.importInProgress = false;
+    }
   }
 
   // ==================== Invites Tab ====================

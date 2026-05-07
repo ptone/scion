@@ -232,6 +232,11 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	// Check if user is authorized (admin bypass, domain check, access mode)
 	ctx := r.Context()
 	if !s.isUserAuthorized(ctx, userInfo.Email) {
+		reason := "not_on_allow_list"
+		if s.config.UserAccessMode != "invite_only" {
+			reason = "domain_not_authorized"
+		}
+		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, userInfo.Email, reason)
 		writeError(w, http.StatusForbidden, "unauthorized_domain",
 			"your email domain is not authorized", nil)
 		return
@@ -893,6 +898,11 @@ func (s *Server) handleCLIAuthToken(w http.ResponseWriter, r *http.Request) {
 
 	// Check if user is authorized (admin bypass, domain check, access mode)
 	if !s.isUserAuthorized(ctx, userInfo.Email) {
+		reason := "not_on_allow_list"
+		if s.config.UserAccessMode != "invite_only" {
+			reason = "domain_not_authorized"
+		}
+		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, userInfo.Email, reason)
 		writeError(w, http.StatusForbidden, "unauthorized_domain",
 			"your email domain is not authorized", nil)
 		return
@@ -1144,6 +1154,11 @@ func (s *Server) completeOAuthLogin(w http.ResponseWriter, r *http.Request, user
 
 	// Check if user is authorized (admin bypass, domain check, access mode)
 	if !s.isUserAuthorized(ctx, userInfo.Email) {
+		reason := "not_on_allow_list"
+		if s.config.UserAccessMode != "invite_only" {
+			reason = "domain_not_authorized"
+		}
+		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, userInfo.Email, reason)
 		writeError(w, http.StatusForbidden, "unauthorized_domain",
 			"your email domain is not authorized", nil)
 		return
@@ -1388,6 +1403,9 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 		"invite_id", invite.ID,
 		"email", user.Email(),
 	)
+	LogInviteAudit(r.Context(), s.auditLogger, InviteAuditInviteRedeemed, user.Email(), invite.ID, user.ID(), user.Email(), nil)
+	s.events.PublishInviteChanged(r.Context(), "redeemed", invite.ID, invite.CodePrefix)
+	s.events.PublishAllowListChanged(r.Context(), "added", user.Email())
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message": "You have been added to the hub.",

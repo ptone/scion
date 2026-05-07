@@ -534,6 +534,25 @@ const InviteCodeMaxExpiry = 5 * 24 * time.Hour
 // InviteCodePrefixLength is the length of the visible prefix for identification.
 const InviteCodePrefixLength = 8
 
+// InviteStats contains aggregate statistics about invite codes and the allow list.
+type InviteStats struct {
+	PendingInvites     int              `json:"pendingInvites"`
+	TotalRedemptions   int              `json:"totalRedemptions"`
+	AllowListCount     int              `json:"allowListCount"`
+	RecentRedemptions  []InviteCodeInfo `json:"recentRedemptions"`
+}
+
+// InviteCodeInfo is a lightweight representation of an invite code for stats.
+type InviteCodeInfo struct {
+	ID         string    `json:"id"`
+	CodePrefix string    `json:"codePrefix"`
+	UseCount   int       `json:"useCount"`
+	MaxUses    int       `json:"maxUses"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	Note       string    `json:"note"`
+	Created    time.Time `json:"created"`
+}
+
 // =============================================================================
 // Broker Authentication (Runtime Broker HMAC Authentication)
 // =============================================================================

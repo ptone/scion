@@ -27,6 +27,8 @@ type AllowListService interface {
 	List(ctx context.Context, cursor string) (*AllowListResponse, error)
 	Add(ctx context.Context, email, note string) (*AllowListEntry, error)
 	Remove(ctx context.Context, email string) error
+	BulkAdd(ctx context.Context, emails []AllowListAddRequest) (*AllowListBulkAddResponse, error)
+	ListDomains(ctx context.Context) ([]string, error)
 }
 
 type allowListService struct {
@@ -50,9 +52,27 @@ type AllowListResponse struct {
 	NextCursor string           `json:"nextCursor,omitempty"`
 }
 
-type allowListAddRequest struct {
+// AllowListAddRequest is used when adding an email to the allow list.
+type AllowListAddRequest struct {
 	Email string `json:"email"`
 	Note  string `json:"note"`
+}
+
+// AllowListBulkAddRequest is the request for bulk importing emails.
+type AllowListBulkAddRequest struct {
+	Emails []AllowListAddRequest `json:"emails"`
+}
+
+// AllowListBulkAddResponse is the response from bulk importing emails.
+type AllowListBulkAddResponse struct {
+	Added   int `json:"added"`
+	Skipped int `json:"skipped"`
+	Total   int `json:"total"`
+}
+
+// AllowListDomainsResponse is the response from listing email domains.
+type AllowListDomainsResponse struct {
+	Domains []string `json:"domains"`
 }
 
 func (s *allowListService) List(ctx context.Context, cursor string) (*AllowListResponse, error) {
@@ -68,7 +88,7 @@ func (s *allowListService) List(ctx context.Context, cursor string) (*AllowListR
 }
 
 func (s *allowListService) Add(ctx context.Context, email, note string) (*AllowListEntry, error) {
-	req := &allowListAddRequest{Email: email, Note: note}
+	req := &AllowListAddRequest{Email: email, Note: note}
 	resp, err := s.c.transport.Post(ctx, "/api/v1/admin/allow-list", req, nil)
 	if err != nil {
 		return nil, err
@@ -82,4 +102,25 @@ func (s *allowListService) Remove(ctx context.Context, email string) error {
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+func (s *allowListService) BulkAdd(ctx context.Context, emails []AllowListAddRequest) (*AllowListBulkAddResponse, error) {
+	req := &AllowListBulkAddRequest{Emails: emails}
+	resp, err := s.c.transport.Post(ctx, "/api/v1/admin/allow-list/import", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[AllowListBulkAddResponse](resp)
+}
+
+func (s *allowListService) ListDomains(ctx context.Context) ([]string, error) {
+	resp, err := s.c.transport.Get(ctx, "/api/v1/admin/allow-list/domains", nil)
+	if err != nil {
+		return nil, err
+	}
+	result, err := apiclient.DecodeResponse[AllowListDomainsResponse](resp)
+	if err != nil {
+		return nil, err
+	}
+	return result.Domains, nil
 }

@@ -436,6 +436,8 @@ type AllowListStore interface {
 	GetAllowListEntry(ctx context.Context, email string) (*AllowListEntry, error)
 	ListAllowListEntries(ctx context.Context, opts ListOptions) (*ListResult[AllowListEntry], error)
 	IsEmailAllowListed(ctx context.Context, email string) (bool, error)
+	BulkAddAllowListEntries(ctx context.Context, entries []*AllowListEntry) (added int, skipped int, err error)
+	ListEmailDomains(ctx context.Context) ([]string, error)
 }
 
 // InviteCodeStore defines operations for invite code management.
@@ -447,6 +449,7 @@ type InviteCodeStore interface {
 	IncrementInviteUseCount(ctx context.Context, id string) error
 	RevokeInviteCode(ctx context.Context, id string) error
 	DeleteInviteCode(ctx context.Context, id string) error
+	GetInviteStats(ctx context.Context) (*InviteStats, error)
 }
 
 // GroveProviderStore defines grove-broker relationship operations.

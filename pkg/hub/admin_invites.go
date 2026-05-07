@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -67,10 +68,15 @@ func (s *Server) handleAdminInviteByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse path: /api/v1/admin/invites/{id} or /api/v1/admin/invites/{id}/revoke
+	// Parse path: /api/v1/admin/invites/{id} or /api/v1/admin/invites/{id}/revoke or stats
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/invites/")
 	parts := strings.SplitN(path, "/", 2)
 	id := parts[0]
+
+	if id == "stats" && r.Method == http.MethodGet {
+		s.handleAdminInviteStats(w, r)
+		return
+	}
 
 	if id == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invite ID is required", nil)
@@ -172,6 +178,13 @@ func (s *Server) handleAdminInvitesCreate(w http.ResponseWriter, r *http.Request
 		"max_uses", invite.MaxUses,
 		"created_by", user.Email(),
 	)
+	LogInviteAudit(r.Context(), s.auditLogger, InviteAuditInviteCreated, "", invite.ID, user.ID(), user.Email(), map[string]string{
+		"prefix":     invite.CodePrefix,
+		"expires_at": invite.ExpiresAt.Format(time.RFC3339),
+		"max_uses":   fmt.Sprintf("%d", invite.MaxUses),
+	})
+
+	s.events.PublishInviteChanged(r.Context(), "created", invite.ID, invite.CodePrefix)
 
 	writeJSON(w, http.StatusCreated, InviteCreateResponse{
 		Code:      code,
@@ -208,6 +221,8 @@ func (s *Server) handleAdminInviteRevoke(w http.ResponseWriter, r *http.Request,
 		"invite_id", id,
 		"revoked_by", user.Email(),
 	)
+	LogInviteAudit(r.Context(), s.auditLogger, InviteAuditInviteRevoked, "", id, user.ID(), user.Email(), nil)
+	s.events.PublishInviteChanged(r.Context(), "revoked", id, "")
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
@@ -226,6 +241,19 @@ func (s *Server) handleAdminInviteDelete(w http.ResponseWriter, r *http.Request,
 		"invite_id", id,
 		"deleted_by", user.Email(),
 	)
+	LogInviteAudit(r.Context(), s.auditLogger, InviteAuditInviteDeleted, "", id, user.ID(), user.Email(), nil)
+	s.events.PublishInviteChanged(r.Context(), "deleted", id, "")
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleAdminInviteStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.store.GetInviteStats(r.Context())
+	if err != nil {
+		slog.Error("failed to get invite stats", "error", err)
+		InternalError(w)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, stats)
 }
