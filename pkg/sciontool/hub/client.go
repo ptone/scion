@@ -703,21 +703,7 @@ func (c *Client) StartGitHubTokenRefresh(ctx context.Context, config *GitHubToke
 
 // WriteGitHubTokenFile writes a GitHub token to the specified path atomically.
 func WriteGitHubTokenFile(path, token string) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("failed to create token file directory: %w", err)
-	}
-
-	// Write to temp file then rename for atomicity
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
-		return fmt.Errorf("failed to write GitHub token file: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("failed to rename GitHub token file: %w", err)
-	}
-	return nil
+	return atomicWriteFile(path, []byte(token), 0600)
 }
 
 // ReadGitHubTokenFile reads a GitHub token from the specified path.
@@ -737,10 +723,11 @@ func GitHubTokenExpiryPath(tokenPath string) string {
 
 // WriteGitHubTokenExpiry writes the token expiry time to a companion file
 // alongside the token file. This allows the credential helper (a separate
-// process) to check whether the cached token is still valid.
+// process) to check whether the cached token is still valid. The write is
+// atomic to prevent concurrent readers from seeing partial data.
 func WriteGitHubTokenExpiry(tokenPath string, expiry time.Time) error {
 	expiryPath := GitHubTokenExpiryPath(tokenPath)
-	return os.WriteFile(expiryPath, []byte(expiry.Format(time.RFC3339)), 0600)
+	return atomicWriteFile(expiryPath, []byte(expiry.Format(time.RFC3339)), 0600)
 }
 
 // ReadGitHubTokenExpiry reads the token expiry time from the companion expiry
@@ -864,27 +851,55 @@ func TokenFilePath() string {
 	return filepath.Join(tokenHomeResolver(), ".scion", TokenFile)
 }
 
-// WriteTokenFile writes the agent token to the canonical token file.
-// Called by sciontool init to seed the initial value and by the refresh
-// loop to persist updated tokens. Written atomically via temp file + rename.
-func WriteTokenFile(token string) error {
-	path := TokenFilePath()
+// atomicWriteFile writes data to path atomically. It creates a unique temp
+// file in the same directory, writes the data, fsyncs, and renames over the
+// target. Because the temp name is unique, concurrent writers never corrupt
+// each other's data, and readers always see either the old or new content.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
-
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("failed to create token file directory: %w", err)
+		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Write to temp file then rename for atomicity
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
-		return fmt.Errorf("failed to write token file: %w", err)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("failed to rename token file: %w", err)
+	tmpName := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("failed to sync temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	if err := os.Chmod(tmpName, perm); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("failed to set permissions on temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 	return nil
+}
+
+// WriteTokenFile writes the agent token to the canonical token file.
+// Called by sciontool init to seed the initial value and by the refresh
+// loop to persist updated tokens. The write is atomic: a unique temp file
+// is written and fsynced, then renamed over the target path. Concurrent
+// readers (child processes) always see a complete token.
+func WriteTokenFile(token string) error {
+	return atomicWriteFile(TokenFilePath(), []byte(token), 0600)
 }
 
 // ReadTokenFile reads the agent token from the canonical token file.

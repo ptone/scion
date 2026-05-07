@@ -640,14 +640,25 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			util.Debugf("Start: failed to create .scion dir for token file: %v", err)
 		} else {
 			tokenPath := filepath.Join(scionDir, "scion-token")
-			tmp := tokenPath + ".tmp"
-			if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
-				util.Debugf("Start: failed to write token file: %v", err)
-			} else if err := os.Rename(tmp, tokenPath); err != nil {
-				util.Debugf("Start: failed to rename token file: %v", err)
-				os.Remove(tmp)
+			if tmp, err := os.CreateTemp(scionDir, "scion-token.tmp.*"); err != nil {
+				util.Debugf("Start: failed to create temp token file: %v", err)
 			} else {
-				util.Debugf("Start: wrote agent token to %s", tokenPath)
+				tmpName := tmp.Name()
+				_, writeErr := tmp.Write([]byte(token))
+				syncErr := tmp.Sync()
+				closeErr := tmp.Close()
+				if writeErr != nil || syncErr != nil || closeErr != nil {
+					util.Debugf("Start: failed to write token file: write=%v sync=%v close=%v", writeErr, syncErr, closeErr)
+					os.Remove(tmpName)
+				} else if err := os.Chmod(tmpName, 0600); err != nil {
+					util.Debugf("Start: failed to chmod token file: %v", err)
+					os.Remove(tmpName)
+				} else if err := os.Rename(tmpName, tokenPath); err != nil {
+					util.Debugf("Start: failed to rename token file: %v", err)
+					os.Remove(tmpName)
+				} else {
+					util.Debugf("Start: wrote agent token to %s", tokenPath)
+				}
 			}
 		}
 		delete(opts.Env, "SCION_AUTH_TOKEN")
