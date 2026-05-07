@@ -935,16 +935,25 @@ export class ScionPageAdminUsers extends LitElement {
           `
         : nothing}
 
-      <div class="tabs">
+      <div class="tabs" role="tablist">
         <button
+          role="tab"
+          aria-selected=${this.activeTab === 'users'}
+          aria-controls="panel-users"
           class="tab-btn ${this.activeTab === 'users' ? 'active' : ''}"
           @click=${() => { this.activeTab = 'users'; }}
         >Users ${!this.loading ? `(${this.totalCount})` : ''}</button>
         <button
+          role="tab"
+          aria-selected=${this.activeTab === 'allow-list'}
+          aria-controls="panel-allow-list"
           class="tab-btn ${this.activeTab === 'allow-list' ? 'active' : ''}"
           @click=${() => { this.activeTab = 'allow-list'; this.loadAllowList(); }}
         >Allow List ${this.allowListTotalCount > 0 ? `(${this.allowListTotalCount})` : ''}</button>
         <button
+          role="tab"
+          aria-selected=${this.activeTab === 'invites'}
+          aria-controls="panel-invites"
           class="tab-btn ${this.activeTab === 'invites' ? 'active' : ''}"
           @click=${() => { this.activeTab = 'invites'; this.loadInvites(); }}
         >Invites ${this.invitesTotalCount > 0 ? `(${this.invitesTotalCount})` : ''}</button>
@@ -1567,7 +1576,14 @@ export class ScionPageAdminUsers extends LitElement {
       this.inviteCopied = true;
       setTimeout(() => { this.inviteCopied = false; }, 2000);
     } catch {
-      // Fallback: select the text
+      const input = document.createElement('input');
+      input.value = this.createdInviteResult.inviteUrl;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      document.body.removeChild(input);
+      this.inviteCopied = true;
+      setTimeout(() => { this.inviteCopied = false; }, 2000);
     }
   }
 

@@ -112,9 +112,7 @@ func init() {
 	hubAllowListAddCmd.Flags().StringVar(&allowListAddNote, "note", "", "Optional note for this entry")
 	hubAllowListImportCmd.Flags().StringVar(&allowListImportNote, "note", "", "Note to apply to all imported entries")
 
-	hubAllowListCmd.Flags().BoolVar(&allowListOutputJSON, "json", false, "Output in JSON format")
-	hubAllowListListCmd.Flags().BoolVar(&allowListOutputJSON, "json", false, "Output in JSON format")
-	hubAllowListImportCmd.Flags().BoolVar(&allowListOutputJSON, "json", false, "Output in JSON format")
+	hubAllowListCmd.PersistentFlags().BoolVar(&allowListOutputJSON, "json", false, "Output in JSON format")
 }
 
 func runAllowListList(cmd *cobra.Command, args []string) error {

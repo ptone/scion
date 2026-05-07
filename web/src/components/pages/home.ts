@@ -102,10 +102,11 @@ export class ScionPageHome extends LitElement {
 
   private async loadData(): Promise<void> {
     try {
+      const isAdmin = this.pageData?.user?.role === 'admin';
       const [agentsResp, grovesResp, inviteStatsResp] = await Promise.all([
         apiFetch('/api/v1/agents'),
         apiFetch('/api/v1/groves'),
-        apiFetch('/api/v1/admin/invites/stats').catch(() => null),
+        isAdmin ? apiFetch('/api/v1/admin/invites/stats').catch(() => null) : Promise.resolve(null),
       ]);
 
       if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;

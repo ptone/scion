@@ -953,6 +953,7 @@ func initWebServer(cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken st
 		DevAuthToken:       devAuthToken,
 		AuthorizedDomains:  webAuthorizedDomains,
 		AdminEmails:        webAdminEmails,
+		UserAccessMode:     cfg.Auth.UserAccessMode,
 		AdminMode:          adminMode,
 		MaintenanceMessage: maintenanceMessage,
 	}

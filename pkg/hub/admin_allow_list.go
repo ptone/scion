@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -156,7 +157,7 @@ func (s *Server) handleAdminAllowListAdd(w http.ResponseWriter, r *http.Request,
 	}
 
 	email := strings.TrimSpace(strings.ToLower(req.Email))
-	if email == "" || !strings.Contains(email, "@") {
+	if _, err := mail.ParseAddress(email); err != nil || email == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "valid email is required", nil)
 		return
 	}

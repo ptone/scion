@@ -1151,13 +1151,12 @@ VALUES (
 const migrationV48 = `
 CREATE TABLE IF NOT EXISTS allow_list (
     id TEXT PRIMARY KEY,
-    email TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
     note TEXT NOT NULL DEFAULT '',
     added_by TEXT NOT NULL,
     invite_id TEXT NOT NULL DEFAULT '',
     created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_allow_list_email ON allow_list(email);
 `
 
 const migrationV48 = `
@@ -1173,7 +1172,6 @@ CREATE TABLE IF NOT EXISTS invite_codes (
     note TEXT NOT NULL DEFAULT '',
     created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_invite_codes_hash ON invite_codes(code_hash);
 CREATE INDEX IF NOT EXISTS idx_invite_codes_expires ON invite_codes(expires_at);
 `
 
@@ -3592,8 +3590,9 @@ func (s *SQLiteStore) ListAllowListEntries(ctx context.Context, opts store.ListO
 	var args []interface{}
 
 	if opts.Cursor != "" {
-		conditions = append(conditions, "created < (SELECT created FROM allow_list WHERE id = ?)")
-		args = append(args, opts.Cursor)
+		conditions = append(conditions, `(created < (SELECT created FROM allow_list WHERE id = ?)
+			OR (created = (SELECT created FROM allow_list WHERE id = ?) AND id < ?))`)
+		args = append(args, opts.Cursor, opts.Cursor, opts.Cursor)
 	}
 
 	whereClause := ""
@@ -3603,7 +3602,7 @@ func (s *SQLiteStore) ListAllowListEntries(ctx context.Context, opts store.ListO
 
 	query := fmt.Sprintf(`
 		SELECT id, email, note, added_by, invite_id, created
-		FROM allow_list %s ORDER BY created DESC LIMIT ?
+		FROM allow_list %s ORDER BY created DESC, id DESC LIMIT ?
 	`, whereClause)
 	args = append(args, limit+1)
 
@@ -3620,6 +3619,9 @@ func (s *SQLiteStore) ListAllowListEntries(ctx context.Context, opts store.ListO
 			return nil, err
 		}
 		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	if entries == nil {
 		entries = []store.AllowListEntry{}
@@ -3791,8 +3793,9 @@ func (s *SQLiteStore) ListInviteCodes(ctx context.Context, opts store.ListOption
 	var args []interface{}
 
 	if opts.Cursor != "" {
-		conditions = append(conditions, "created < (SELECT created FROM invite_codes WHERE id = ?)")
-		args = append(args, opts.Cursor)
+		conditions = append(conditions, `(created < (SELECT created FROM invite_codes WHERE id = ?)
+			OR (created = (SELECT created FROM invite_codes WHERE id = ?) AND id < ?))`)
+		args = append(args, opts.Cursor, opts.Cursor, opts.Cursor)
 	}
 
 	whereClause := ""
@@ -3801,8 +3804,8 @@ func (s *SQLiteStore) ListInviteCodes(ctx context.Context, opts store.ListOption
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, code_hash, code_prefix, max_uses, use_count, expires_at, revoked, created_by, note, created
-		FROM invite_codes %s ORDER BY created DESC LIMIT ?
+		SELECT id, code_prefix, max_uses, use_count, expires_at, revoked, created_by, note, created
+		FROM invite_codes %s ORDER BY created DESC, id DESC LIMIT ?
 	`, whereClause)
 	args = append(args, limit+1)
 
@@ -3817,13 +3820,16 @@ func (s *SQLiteStore) ListInviteCodes(ctx context.Context, opts store.ListOption
 		var invite store.InviteCode
 		var revoked int
 		if err := rows.Scan(
-			&invite.ID, &invite.CodeHash, &invite.CodePrefix, &invite.MaxUses, &invite.UseCount,
+			&invite.ID, &invite.CodePrefix, &invite.MaxUses, &invite.UseCount,
 			&invite.ExpiresAt, &revoked, &invite.CreatedBy, &invite.Note, &invite.Created,
 		); err != nil {
 			return nil, err
 		}
 		invite.Revoked = revoked != 0
 		invites = append(invites, invite)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	if invites == nil {
 		invites = []store.InviteCode{}
@@ -3843,7 +3849,11 @@ func (s *SQLiteStore) ListInviteCodes(ctx context.Context, opts store.ListOption
 }
 
 func (s *SQLiteStore) IncrementInviteUseCount(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, "UPDATE invite_codes SET use_count = use_count + 1 WHERE id = ?", id)
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE invite_codes SET use_count = use_count + 1
+		WHERE id = ? AND revoked = 0 AND expires_at > datetime('now')
+		  AND (max_uses = 0 OR use_count < max_uses)
+	`, id)
 	if err != nil {
 		return err
 	}

@@ -433,10 +433,10 @@ func (p *ChannelEventPublisher) PublishNotification(_ context.Context, notif *st
 }
 
 // PublishAllowListChanged publishes an allow list change event.
-func (p *ChannelEventPublisher) PublishAllowListChanged(_ context.Context, action, email string) {
+// Email is intentionally omitted from the event to avoid PII leak via SSE.
+func (p *ChannelEventPublisher) PublishAllowListChanged(_ context.Context, action, _ string) {
 	evt := AllowListChangedEvent{
 		Action: action,
-		Email:  email,
 	}
 	p.publish("admin.allowlist.changed", evt)
 }

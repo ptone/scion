@@ -160,13 +160,11 @@ export class ScionPageInvite extends LitElement {
 
   private async loadProviders(): Promise<void> {
     try {
-      const res = await fetch('/api/v1/auth/providers', { credentials: 'include' });
+      const res = await fetch('/auth/providers', { credentials: 'include' });
       if (res.ok) {
-        const data = (await res.json()) as { providers?: Array<{ id: string; available: boolean }> };
-        for (const p of data.providers || []) {
-          if (p.id === 'google' && p.available) this.googleEnabled = true;
-          if (p.id === 'github' && p.available) this.githubEnabled = true;
-        }
+        const data = (await res.json()) as Record<string, boolean>;
+        this.googleEnabled = data.google === true;
+        this.githubEnabled = data.github === true;
       }
     } catch {
       // Default: show both

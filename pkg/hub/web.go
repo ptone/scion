@@ -127,6 +127,8 @@ type WebServerConfig struct {
 	AuthorizedDomains []string
 	// AdminEmails is the list of bootstrap admin emails (bypass domain check).
 	AdminEmails []string
+	// UserAccessMode controls login-time access evaluation ("open", "domain_restricted", "invite_only").
+	UserAccessMode string
 	// AdminMode restricts access to admin users only (maintenance mode).
 	AdminMode bool
 	// MaintenanceMessage is the custom message shown during admin mode.
@@ -1363,9 +1365,9 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Check email authorization
-	if !isEmailAuthorized(userInfo.Email, ws.config.AuthorizedDomains, ws.config.AdminEmails) {
-		slog.Warn("Unauthorized email domain", "email", userInfo.Email)
+	// Check if user is authorized (admin bypass, domain check, access mode)
+	if !checkUserAuthorized(ctx, userInfo.Email, ws.config.AuthorizedDomains, ws.config.AdminEmails, ws.config.UserAccessMode, ws.store) {
+		slog.Warn("Unauthorized user", "email", userInfo.Email)
 		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
 		return
 	}

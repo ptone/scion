@@ -147,9 +147,10 @@ func (s *InviteService) RedeemCode(ctx context.Context, code, email, userID stri
 	}
 
 	if err := s.allowList.AddAllowListEntry(ctx, entry); err != nil {
-		if !errors.Is(err, store.ErrAlreadyExists) {
-			return nil, fmt.Errorf("failed to add to allow list: %w", err)
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return invite, nil
 		}
+		return nil, fmt.Errorf("failed to add to allow list: %w", err)
 	}
 
 	if err := s.invites.IncrementInviteUseCount(ctx, invite.ID); err != nil {

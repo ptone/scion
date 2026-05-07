@@ -149,8 +149,8 @@ func (s *Server) handleAdminInvitesCreate(w http.ResponseWriter, r *http.Request
 	expiresAt := time.Now().Add(duration)
 
 	maxUses := req.MaxUses
-	if maxUses == 0 {
-		maxUses = 1
+	if maxUses < 0 {
+		maxUses = 0
 	}
 
 	if s.inviteService == nil {

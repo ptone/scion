@@ -374,6 +374,18 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if user is authorized (admin bypass, domain check, access mode)
+	if !s.isUserAuthorized(ctx, userInfo.Email) {
+		reason := "not_on_allow_list"
+		if s.config.UserAccessMode != "invite_only" {
+			reason = "domain_not_authorized"
+		}
+		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, userInfo.Email, reason)
+		writeError(w, http.StatusForbidden, "unauthorized_domain",
+			"your email domain is not authorized", nil)
+		return
+	}
+
 	// Find or create user
 	user, err := s.store.GetUserByEmail(ctx, userInfo.Email)
 	if err != nil {
@@ -1236,33 +1248,43 @@ func generateID() string {
 // isUserAuthorized checks whether a user is permitted to log in based on
 // admin_emails, authorized_domains, and user_access_mode (allow list).
 func (s *Server) isUserAuthorized(ctx context.Context, email string) bool {
+	return checkUserAuthorized(ctx, email, s.config.AuthorizedDomains, s.config.AdminEmails, s.config.UserAccessMode, s.store)
+}
+
+// checkUserAuthorized is a package-level authorization check used by both
+// Server and WebServer to enforce admin bypass, domain, and access mode rules.
+func checkUserAuthorized(ctx context.Context, email string, authorizedDomains, adminEmails []string, accessMode string, st store.Store) bool {
 	emailLower := strings.ToLower(email)
 
 	// Admin emails always bypass all checks
-	for _, admin := range s.config.AdminEmails {
+	for _, admin := range adminEmails {
 		if strings.ToLower(admin) == emailLower {
 			return true
 		}
 	}
 
 	// Domain check (applies when authorized_domains is configured)
-	if len(s.config.AuthorizedDomains) > 0 {
-		if !isEmailInDomains(emailLower, s.config.AuthorizedDomains) {
+	if len(authorizedDomains) > 0 {
+		if !isEmailInDomains(emailLower, authorizedDomains) {
 			return false
 		}
 	}
 
 	// Access mode check
-	switch s.config.UserAccessMode {
+	switch accessMode {
 	case "invite_only":
-		allowed, err := s.store.IsEmailAllowListed(ctx, emailLower)
+		if st == nil {
+			slog.Error("allow list check failed: store is nil", "email", emailLower)
+			return false
+		}
+		allowed, err := st.IsEmailAllowListed(ctx, emailLower)
 		if err != nil {
 			slog.Error("allow list check failed", "email", emailLower, "error", err)
 			return false
 		}
 		return allowed
 	case "domain_restricted":
-		return len(s.config.AuthorizedDomains) > 0
+		return len(authorizedDomains) > 0
 	default: // "open" or empty
 		return true
 	}
@@ -1383,15 +1405,25 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check authorized domains before allowing redemption
+	if len(s.config.AuthorizedDomains) > 0 {
+		if !isEmailInDomains(strings.ToLower(user.Email()), s.config.AuthorizedDomains) {
+			writeError(w, http.StatusForbidden, "unauthorized_domain",
+				"your email domain is not authorized to join this hub", nil)
+			return
+		}
+	}
+
 	invite, err := s.inviteService.RedeemCode(r.Context(), req.Code, user.Email(), user.ID())
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrInviteInvalidFormat):
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid invite code format", nil)
-		case errors.Is(err, ErrInviteNotFound):
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "invite code not found", nil)
-		case errors.Is(err, ErrInviteExpired), errors.Is(err, ErrInviteRevoked), errors.Is(err, ErrInviteExhausted):
-			writeError(w, http.StatusGone, "invite_expired", "this invite is no longer valid", nil)
+		case errors.Is(err, ErrInviteNotFound),
+			errors.Is(err, ErrInviteExpired),
+			errors.Is(err, ErrInviteRevoked),
+			errors.Is(err, ErrInviteExhausted):
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "invite code not found or no longer valid", nil)
 		default:
 			slog.Error("invite redemption failed", "error", err)
 			InternalError(w)
