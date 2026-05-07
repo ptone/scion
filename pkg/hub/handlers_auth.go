@@ -229,15 +229,15 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if user's email domain is authorized.
-	if !isEmailAuthorized(userInfo.Email, s.config.AuthorizedDomains, s.config.AdminEmails) {
+	// Check if user is authorized (admin bypass, domain check, access mode)
+	ctx := r.Context()
+	if !s.isUserAuthorized(ctx, userInfo.Email) {
 		writeError(w, http.StatusForbidden, "unauthorized_domain",
 			"your email domain is not authorized", nil)
 		return
 	}
 
 	// Find or create user
-	ctx := r.Context()
 	user, err := s.store.GetUserByEmail(ctx, userInfo.Email)
 	if err != nil {
 		// Create new user
@@ -891,8 +891,8 @@ func (s *Server) handleCLIAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if user's email domain is authorized
-	if !isEmailAuthorized(userInfo.Email, s.config.AuthorizedDomains, s.config.AdminEmails) {
+	// Check if user is authorized (admin bypass, domain check, access mode)
+	if !s.isUserAuthorized(ctx, userInfo.Email) {
 		writeError(w, http.StatusForbidden, "unauthorized_domain",
 			"your email domain is not authorized", nil)
 		return
@@ -1142,8 +1142,8 @@ func (s *Server) getDeviceFlowUserInfo(ctx context.Context, provider, accessToke
 func (s *Server) completeOAuthLogin(w http.ResponseWriter, r *http.Request, userInfo *OAuthUserInfo) {
 	ctx := r.Context()
 
-	// Check if user's email domain is authorized
-	if !isEmailAuthorized(userInfo.Email, s.config.AuthorizedDomains, s.config.AdminEmails) {
+	// Check if user is authorized (admin bypass, domain check, access mode)
+	if !s.isUserAuthorized(ctx, userInfo.Email) {
 		writeError(w, http.StatusForbidden, "unauthorized_domain",
 			"your email domain is not authorized", nil)
 		return
@@ -1216,6 +1216,64 @@ func (s *Server) completeOAuthLogin(w http.ResponseWriter, r *http.Request, user
 // generateID generates a new UUID.
 func generateID() string {
 	return uuid.New().String()
+}
+
+// isUserAuthorized checks whether a user is permitted to log in based on
+// admin_emails, authorized_domains, and user_access_mode (allow list).
+func (s *Server) isUserAuthorized(ctx context.Context, email string) bool {
+	emailLower := strings.ToLower(email)
+
+	// Admin emails always bypass all checks
+	for _, admin := range s.config.AdminEmails {
+		if strings.ToLower(admin) == emailLower {
+			return true
+		}
+	}
+
+	// Domain check (applies when authorized_domains is configured)
+	if len(s.config.AuthorizedDomains) > 0 {
+		if !isEmailInDomains(emailLower, s.config.AuthorizedDomains) {
+			return false
+		}
+	}
+
+	// Access mode check
+	switch s.config.UserAccessMode {
+	case "invite_only":
+		allowed, err := s.store.IsEmailAllowListed(ctx, emailLower)
+		if err != nil {
+			slog.Error("allow list check failed", "email", emailLower, "error", err)
+			return false
+		}
+		return allowed
+	case "domain_restricted":
+		return len(s.config.AuthorizedDomains) > 0
+	default: // "open" or empty
+		return true
+	}
+}
+
+// isEmailInDomains checks if the email's domain matches any authorized domain.
+func isEmailInDomains(emailLower string, authorizedDomains []string) bool {
+	atIndex := strings.LastIndex(emailLower, "@")
+	if atIndex == -1 {
+		return false
+	}
+	domain := emailLower[atIndex+1:]
+
+	for _, authorized := range authorizedDomains {
+		authorizedLower := strings.ToLower(authorized)
+		if authorizedLower == domain {
+			return true
+		}
+		if strings.HasPrefix(authorizedLower, "*.") {
+			suffix := authorizedLower[1:]
+			if strings.HasSuffix(domain, suffix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isEmailAuthorized checks if an email address is from an authorized domain.

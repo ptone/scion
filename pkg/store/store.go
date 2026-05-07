@@ -102,6 +102,9 @@ type Store interface {
 
 	// Grove Sync State operations (Workspace Sync Metadata)
 	GroveSyncStateStore
+
+	// Allow List operations (User Access Control)
+	AllowListStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -421,6 +424,15 @@ type UserFilter struct {
 	Role   string
 	Status string
 	Search string // fuzzy match on email and display_name
+}
+
+// AllowListStore defines operations for the email allow list used in invite_only mode.
+type AllowListStore interface {
+	AddAllowListEntry(ctx context.Context, entry *AllowListEntry) error
+	RemoveAllowListEntry(ctx context.Context, email string) error
+	GetAllowListEntry(ctx context.Context, email string) (*AllowListEntry, error)
+	ListAllowListEntries(ctx context.Context, opts ListOptions) (*ListResult[AllowListEntry], error)
+	IsEmailAllowListed(ctx context.Context, email string) (bool, error)
 }
 
 // GroveProviderStore defines grove-broker relationship operations.

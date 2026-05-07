@@ -29,6 +29,7 @@ import { extractApiError } from '../../client/api.js';
 
 type SortField = 'name' | 'created' | 'lastSeen';
 type SortDir = 'asc' | 'desc';
+type AdminTab = 'users' | 'allow-list';
 
 interface ConfirmAction {
   title: string;
@@ -37,6 +38,15 @@ interface ConfirmAction {
   confirmLabel: string;
   user: AdminUser;
   action: () => Promise<void>;
+}
+
+interface AllowListEntry {
+  id: string;
+  email: string;
+  note: string;
+  addedBy: string;
+  inviteId?: string;
+  created: string;
 }
 
 const PAGE_SIZE = 50;
@@ -81,6 +91,30 @@ export class ScionPageAdminUsers extends LitElement {
 
   @state()
   private actionFeedback: { message: string; variant: 'success' | 'danger' } | null = null;
+
+  @state()
+  private activeTab: AdminTab = 'users';
+
+  @state()
+  private allowListEntries: AllowListEntry[] = [];
+
+  @state()
+  private allowListLoading = false;
+
+  @state()
+  private allowListTotalCount = 0;
+
+  @state()
+  private showAddEmailDialog = false;
+
+  @state()
+  private addEmailValue = '';
+
+  @state()
+  private addEmailNote = '';
+
+  @state()
+  private addEmailInProgress = false;
 
   static override styles = css`
     :host {
@@ -438,6 +472,52 @@ export class ScionPageAdminUsers extends LitElement {
       margin-bottom: 1rem;
     }
 
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      margin-bottom: 1.5rem;
+    }
+
+    .tab-btn {
+      padding: 0.625rem 1.25rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--scion-text-muted, #64748b);
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+
+    .tab-btn:hover {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .tab-btn.active {
+      color: var(--scion-primary, #3b82f6);
+      border-bottom-color: var(--scion-primary, #3b82f6);
+    }
+
+    .allow-list-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+
+    .allow-list-header span {
+      font-size: 0.875rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .add-email-form {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
     @media (max-width: 768px) {
       .hide-mobile {
         display: none;
@@ -684,11 +764,6 @@ export class ScionPageAdminUsers extends LitElement {
     return html`
       <div class="header">
         <h1>Users</h1>
-        ${!this.loading && !this.error
-          ? html`<span class="user-count"
-              >${this.totalCount} user${this.totalCount !== 1 ? 's' : ''}</span
-            >`
-          : ''}
       </div>
 
       ${this.actionFeedback
@@ -707,9 +782,23 @@ export class ScionPageAdminUsers extends LitElement {
           `
         : nothing}
 
-      ${this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderUsers()}
+      <div class="tabs">
+        <button
+          class="tab-btn ${this.activeTab === 'users' ? 'active' : ''}"
+          @click=${() => { this.activeTab = 'users'; }}
+        >Users ${!this.loading ? `(${this.totalCount})` : ''}</button>
+        <button
+          class="tab-btn ${this.activeTab === 'allow-list' ? 'active' : ''}"
+          @click=${() => { this.activeTab = 'allow-list'; this.loadAllowList(); }}
+        >Allow List ${this.allowListTotalCount > 0 ? `(${this.allowListTotalCount})` : ''}</button>
+      </div>
+
+      ${this.activeTab === 'users'
+        ? this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderUsers()
+        : this.renderAllowListTab()}
 
       ${this.renderConfirmDialog()}
+      ${this.renderAddEmailDialog()}
     `;
   }
 
@@ -902,6 +991,171 @@ export class ScionPageAdminUsers extends LitElement {
               `}
         </td>
       </tr>
+    `;
+  }
+
+  private async loadAllowList(): Promise<void> {
+    this.allowListLoading = true;
+    try {
+      const response = await fetch('/api/v1/admin/allow-list', {
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      const data = (await response.json()) as {
+        items: AllowListEntry[];
+        totalCount: number;
+      };
+      this.allowListEntries = data.items || [];
+      this.allowListTotalCount = data.totalCount ?? 0;
+    } catch (err) {
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to load allow list');
+    } finally {
+      this.allowListLoading = false;
+    }
+  }
+
+  private async addToAllowList(): Promise<void> {
+    const email = this.addEmailValue.trim().toLowerCase();
+    if (!email || !email.includes('@')) return;
+
+    this.addEmailInProgress = true;
+    try {
+      const response = await fetch('/api/v1/admin/allow-list', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, note: this.addEmailNote }),
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      this.showFeedback('success', `Added ${email} to the allow list.`);
+      this.showAddEmailDialog = false;
+      this.addEmailValue = '';
+      this.addEmailNote = '';
+      void this.loadAllowList();
+    } catch (err) {
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to add email');
+    } finally {
+      this.addEmailInProgress = false;
+    }
+  }
+
+  private async removeFromAllowList(email: string): Promise<void> {
+    try {
+      const response = await fetch(`/api/v1/admin/allow-list/${encodeURIComponent(email)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      this.showFeedback('success', `Removed ${email} from the allow list.`);
+      void this.loadAllowList();
+    } catch (err) {
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to remove email');
+    }
+  }
+
+  private renderAllowListTab() {
+    if (this.allowListLoading) {
+      return this.renderLoading();
+    }
+
+    return html`
+      <div class="allow-list-header">
+        <span>${this.allowListTotalCount} email${this.allowListTotalCount !== 1 ? 's' : ''} on the allow list</span>
+        <sl-button size="small" variant="primary" @click=${() => { this.showAddEmailDialog = true; }}>
+          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+          Add Email
+        </sl-button>
+      </div>
+
+      ${this.allowListEntries.length === 0
+        ? html`
+            <div class="empty-state">
+              <sl-icon name="shield-lock"></sl-icon>
+              <h2>No Allow List Entries</h2>
+              <p>When invite-only mode is enabled, only emails on this list (and admin emails) can log in.</p>
+            </div>
+          `
+        : html`
+            <div class="table-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Email</th>
+                    <th class="hide-mobile">Note</th>
+                    <th class="hide-mobile">Added</th>
+                    <th class="actions-cell"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${this.allowListEntries.map(
+                    (entry) => html`
+                      <tr>
+                        <td>${entry.email}</td>
+                        <td class="hide-mobile"><span class="meta-text">${entry.note || '-'}</span></td>
+                        <td class="hide-mobile"><span class="meta-text">${this.formatRelativeTime(entry.created)}</span></td>
+                        <td class="actions-cell">
+                          <sl-button
+                            size="small"
+                            variant="text"
+                            @click=${() => this.removeFromAllowList(entry.email)}
+                          >
+                            <sl-icon name="trash" style="color: var(--sl-color-danger-600, #dc2626)"></sl-icon>
+                          </sl-button>
+                        </td>
+                      </tr>
+                    `,
+                  )}
+                </tbody>
+              </table>
+            </div>
+          `}
+    `;
+  }
+
+  private renderAddEmailDialog() {
+    if (!this.showAddEmailDialog) return nothing;
+    return html`
+      <sl-dialog
+        label="Add Email to Allow List"
+        open
+        @sl-request-close=${() => { if (!this.addEmailInProgress) this.showAddEmailDialog = false; }}
+      >
+        <div class="add-email-form">
+          <sl-input
+            label="Email address"
+            type="email"
+            placeholder="user@example.com"
+            .value=${this.addEmailValue}
+            @sl-input=${(e: Event) => { this.addEmailValue = (e.target as HTMLInputElement).value; }}
+            required
+          ></sl-input>
+          <sl-input
+            label="Note (optional)"
+            placeholder="e.g., New hire, Q3 contractor"
+            .value=${this.addEmailNote}
+            @sl-input=${(e: Event) => { this.addEmailNote = (e.target as HTMLInputElement).value; }}
+          ></sl-input>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this.addEmailInProgress}
+          @click=${() => { this.showAddEmailDialog = false; }}
+        >Cancel</sl-button>
+        <sl-button
+          slot="footer"
+          variant="primary"
+          ?loading=${this.addEmailInProgress}
+          ?disabled=${!this.addEmailValue.trim().includes('@')}
+          @click=${() => this.addToAllowList()}
+        >Add</sl-button>
+      </sl-dialog>
     `;
   }
 

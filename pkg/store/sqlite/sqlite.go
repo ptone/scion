@@ -141,6 +141,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV45,
 		migrationV46,
 		migrationV47,
+		migrationV48,
 	}
 
 	// Create migrations table if not exists
@@ -1145,6 +1146,18 @@ VALUES (
     'operation',
     'pending'
 );
+`
+
+const migrationV48 = `
+CREATE TABLE IF NOT EXISTS allow_list (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    note TEXT NOT NULL DEFAULT '',
+    added_by TEXT NOT NULL,
+    invite_id TEXT NOT NULL DEFAULT '',
+    created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_allow_list_email ON allow_list(email);
 `
 
 // Helper functions for JSON marshaling/unmarshaling
@@ -3490,6 +3503,131 @@ func (s *SQLiteStore) ListUsers(ctx context.Context, filter store.UserFilter, op
 	}
 
 	return result, nil
+}
+
+// ============================================================================
+// Allow List Operations
+// ============================================================================
+
+func (s *SQLiteStore) AddAllowListEntry(ctx context.Context, entry *store.AllowListEntry) error {
+	if entry.Created.IsZero() {
+		entry.Created = time.Now()
+	}
+	entry.Email = strings.ToLower(entry.Email)
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO allow_list (id, email, note, added_by, invite_id, created)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, entry.ID, entry.Email, entry.Note, entry.AddedBy, entry.InviteID, entry.Created)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return store.ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteStore) RemoveAllowListEntry(ctx context.Context, email string) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM allow_list WHERE email = ?", strings.ToLower(email))
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetAllowListEntry(ctx context.Context, email string) (*store.AllowListEntry, error) {
+	entry := &store.AllowListEntry{}
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, email, note, added_by, invite_id, created
+		FROM allow_list WHERE email = ?
+	`, strings.ToLower(email)).Scan(
+		&entry.ID, &entry.Email, &entry.Note, &entry.AddedBy, &entry.InviteID, &entry.Created,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	return entry, nil
+}
+
+func (s *SQLiteStore) ListAllowListEntries(ctx context.Context, opts store.ListOptions) (*store.ListResult[store.AllowListEntry], error) {
+	var totalCount int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM allow_list").Scan(&totalCount); err != nil {
+		return nil, err
+	}
+
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	var conditions []string
+	var args []interface{}
+
+	if opts.Cursor != "" {
+		conditions = append(conditions, "created < (SELECT created FROM allow_list WHERE id = ?)")
+		args = append(args, opts.Cursor)
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, email, note, added_by, invite_id, created
+		FROM allow_list %s ORDER BY created DESC LIMIT ?
+	`, whereClause)
+	args = append(args, limit+1)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []store.AllowListEntry
+	for rows.Next() {
+		var entry store.AllowListEntry
+		if err := rows.Scan(&entry.ID, &entry.Email, &entry.Note, &entry.AddedBy, &entry.InviteID, &entry.Created); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	if entries == nil {
+		entries = []store.AllowListEntry{}
+	}
+
+	var nextCursor string
+	if len(entries) > limit {
+		nextCursor = entries[limit-1].ID
+		entries = entries[:limit]
+	}
+
+	return &store.ListResult[store.AllowListEntry]{
+		Items:      entries,
+		TotalCount: totalCount,
+		NextCursor: nextCursor,
+	}, nil
+}
+
+func (s *SQLiteStore) IsEmailAllowListed(ctx context.Context, email string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM allow_list WHERE email = ?", strings.ToLower(email)).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // ============================================================================

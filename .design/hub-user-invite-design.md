@@ -303,8 +303,10 @@ The UI and CLI offer these preset durations (configurable at creation):
 | 4 hours | 4h |
 | 12 hours | 12h |
 | 24 hours | 24h |
+| 3 days | 72h |
+| 5 days | 120h |
 
-These are **presets only** — the API accepts any `expiresAt` timestamp, allowing custom durations via CLI.
+Maximum expiration is 5 days. These are **presets only** — the API accepts any `expiresAt` timestamp up to 5 days, allowing custom durations via CLI.
 
 #### Single-Use vs. Multi-Use
 
@@ -710,19 +712,19 @@ CREATE INDEX idx_invite_codes_expires ON invite_codes(expires_at);
 
 ---
 
-## 7. Open Questions
+## 7. Open Questions (Resolved)
 
-1. **Auto-populate allow list on mode switch?** When switching to `invite_only`, should all existing active users be automatically added to the allow list? This prevents lockout but may include users the admin intended to exclude. **Recommendation:** Yes, with a confirmation dialog that lists the users being added.
+1. **Auto-populate allow list on mode switch?** When switching to `invite_only`, should all existing active users be automatically added to the allow list? ~~**Recommendation:** Yes, with a confirmation dialog that lists the users being added.~~ **Resolved:** Yes, auto-populate from existing users. The UI shows the count of users that will be added, not the full list.
 
-2. **Allow list + domain interaction.** If `authorized_domains: ["example.com"]` and `user_access_mode: "invite_only"`, should an invited user from `gmail.com` be admitted? Current design says no (both gates must pass). This is safer but may surprise admins. **Recommendation:** Keep the composition (both must pass), but show a clear warning in the UI when both are configured.
+2. **Allow list + domain interaction.** If `authorized_domains: ["example.com"]` and `user_access_mode: "invite_only"`, should an invited user from `gmail.com` be admitted? ~~Current design says no (both gates must pass). This is safer but may surprise admins. **Recommendation:** Keep the composition (both must pass), but show a clear warning in the UI when both are configured.~~ **Resolved:** Both invite-only AND authorized-domains must pass. Users cannot be added to the allow list if their email is outside the authorized domains. The UI shows a clear warning when both are configured.
 
-3. **Invite code for CLI login.** Should CLI login (`scion hub auth login`) support passing an invite code? This would allow headless onboarding. **Recommendation:** Yes, add `--invite-code` flag to `scion hub auth login` that calls the redemption endpoint after authentication.
+3. **Invite code for CLI login.** Should CLI login (`scion hub auth login`) support passing an invite code? ~~**Recommendation:** Yes, add `--invite-code` flag to `scion hub auth login` that calls the redemption endpoint after authentication.~~ **Resolved:** Yes, support CLI for invite management. CLI commands provided for allow-list and invite management.
 
-4. **Max invite code lifetime.** Should there be a hard ceiling on invite code expiration (e.g., no more than 24 hours)? **Recommendation:** The 24-hour preset is the maximum in the UI, but the API allows custom values up to 7 days. Admin discretion.
+4. **Max invite code lifetime.** Should there be a hard ceiling on invite code expiration (e.g., no more than 24 hours)? ~~**Recommendation:** The 24-hour preset is the maximum in the UI, but the API allows custom values up to 7 days. Admin discretion.~~ **Resolved:** Maximum expiration is 5 days. Presets updated accordingly: 5m, 15m, 30m, 1h, 4h, 12h, 24h, 3d, 5d.
 
-5. **Revoke all invites on mode change.** When switching from `invite_only` back to `open`, should outstanding invite codes be automatically revoked? **Recommendation:** No — the codes become inert (the allow list isn't checked in `open` mode), and the admin may want to switch back later.
+5. **Revoke all invites on mode change.** When switching from `invite_only` back to `open`, should outstanding invite codes be automatically revoked? ~~**Recommendation:** No — the codes become inert (the allow list isn't checked in `open` mode), and the admin may want to switch back later.~~ **Resolved:** No. Unused codes stay inert when invite-only is disabled. Leave them in place so the admin can switch back later.
 
-6. **Allow list scope.** Should the allow list support wildcards (e.g., `*@team.example.com`) like `authorized_domains`? **Recommendation:** No — keep the allow list as exact emails only. Wildcards belong in `authorized_domains`. This maintains a clean separation of concerns.
+6. **Allow list scope.** Should the allow list support wildcards (e.g., `*@team.example.com`) like `authorized_domains`? ~~**Recommendation:** No — keep the allow list as exact emails only. Wildcards belong in `authorized_domains`. This maintains a clean separation of concerns.~~ **Resolved:** Exact emails only. No wildcards — those belong in authorized-domains. Clean separation of concerns.
 
 ---
 

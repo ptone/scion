@@ -86,6 +86,9 @@ type ServerConfig struct {
 	// AdminEmails is a list of email addresses that should be auto-promoted to admin role.
 	// Useful for bootstrapping the first admin user.
 	AdminEmails []string
+	// UserAccessMode controls how user access is evaluated at login time.
+	// Values: "open" (default), "domain_restricted", "invite_only".
+	UserAccessMode string
 	// BrokerAuthConfig holds configuration for Runtime Broker HMAC authentication.
 	BrokerAuthConfig BrokerAuthConfig
 	// HubEndpoint is the public endpoint URL for this Hub (used in broker join responses).
@@ -2046,6 +2049,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/maintenance/migrations/", s.handleAdminMaintenanceMigrations)
 	s.mux.HandleFunc("/api/v1/admin/maintenance/check-updates", s.handleCheckForUpdates)
 	s.mux.HandleFunc("/api/v1/admin/scheduler", s.handleAdminScheduler)
+	s.mux.HandleFunc("/api/v1/admin/allow-list", s.handleAdminAllowList)
+	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.handleAdminAllowListByEmail)
 	s.mux.HandleFunc("/api/v1/admin/server-config", s.handleAdminServerConfig)
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota)
 

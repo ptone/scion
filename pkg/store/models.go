@@ -491,6 +491,20 @@ const (
 )
 
 // =============================================================================
+// Allow List (User Access Control)
+// =============================================================================
+
+// AllowListEntry represents an email address permitted to log in when invite_only mode is active.
+type AllowListEntry struct {
+	ID       string    `json:"id"`
+	Email    string    `json:"email"`
+	Note     string    `json:"note"`
+	AddedBy  string    `json:"addedBy"`
+	InviteID string    `json:"inviteId,omitempty"`
+	Created  time.Time `json:"created"`
+}
+
+// =============================================================================
 // Broker Authentication (Runtime Broker HMAC Authentication)
 // =============================================================================
 

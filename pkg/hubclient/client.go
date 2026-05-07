@@ -85,6 +85,9 @@ type Client interface {
 	// Messages returns the user message inbox operations interface.
 	Messages() MessageService
 
+	// AllowList returns the allow list management operations interface.
+	AllowList() AllowListService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 }
@@ -108,6 +111,7 @@ type client struct {
 	subscriptions         *subscriptionService
 	subscriptionTemplates *subscriptionTemplateService
 	messages              *messageService
+	allowList             *allowListService
 }
 
 // New creates a new Hub API client.
@@ -136,6 +140,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.subscriptions = &subscriptionService{c: c}
 	c.subscriptionTemplates = &subscriptionTemplateService{c: c}
 	c.messages = &messageService{c: c}
+	c.allowList = &allowListService{c: c}
 
 	return c, nil
 }
@@ -233,6 +238,11 @@ func (c *client) GCPServiceAccounts(groveID string) GCPServiceAccountService {
 // Messages returns the user message inbox operations interface.
 func (c *client) Messages() MessageService {
 	return c.messages
+}
+
+// AllowList returns the allow list management operations interface.
+func (c *client) AllowList() AllowListService {
+	return c.allowList
 }
 
 // Health checks API availability.
