@@ -88,6 +88,9 @@ type Client interface {
 	// AllowList returns the allow list management operations interface.
 	AllowList() AllowListService
 
+	// Invites returns the invite code management operations interface.
+	Invites() InviteService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 }
@@ -112,6 +115,7 @@ type client struct {
 	subscriptionTemplates *subscriptionTemplateService
 	messages              *messageService
 	allowList             *allowListService
+	invites               *inviteService
 }
 
 // New creates a new Hub API client.
@@ -141,6 +145,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.subscriptionTemplates = &subscriptionTemplateService{c: c}
 	c.messages = &messageService{c: c}
 	c.allowList = &allowListService{c: c}
+	c.invites = &inviteService{c: c}
 
 	return c, nil
 }
@@ -243,6 +248,11 @@ func (c *client) Messages() MessageService {
 // AllowList returns the allow list management operations interface.
 func (c *client) AllowList() AllowListService {
 	return c.allowList
+}
+
+// Invites returns the invite code management operations interface.
+func (c *client) Invites() InviteService {
+	return c.invites
 }
 
 // Health checks API availability.

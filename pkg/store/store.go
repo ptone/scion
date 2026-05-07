@@ -105,6 +105,9 @@ type Store interface {
 
 	// Allow List operations (User Access Control)
 	AllowListStore
+
+	// Invite Code operations (User Invitation System)
+	InviteCodeStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -433,6 +436,17 @@ type AllowListStore interface {
 	GetAllowListEntry(ctx context.Context, email string) (*AllowListEntry, error)
 	ListAllowListEntries(ctx context.Context, opts ListOptions) (*ListResult[AllowListEntry], error)
 	IsEmailAllowListed(ctx context.Context, email string) (bool, error)
+}
+
+// InviteCodeStore defines operations for invite code management.
+type InviteCodeStore interface {
+	CreateInviteCode(ctx context.Context, invite *InviteCode) error
+	GetInviteCodeByHash(ctx context.Context, codeHash string) (*InviteCode, error)
+	GetInviteCode(ctx context.Context, id string) (*InviteCode, error)
+	ListInviteCodes(ctx context.Context, opts ListOptions) (*ListResult[InviteCode], error)
+	IncrementInviteUseCount(ctx context.Context, id string) error
+	RevokeInviteCode(ctx context.Context, id string) error
+	DeleteInviteCode(ctx context.Context, id string) error
 }
 
 // GroveProviderStore defines grove-broker relationship operations.

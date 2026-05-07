@@ -505,6 +505,36 @@ type AllowListEntry struct {
 }
 
 // =============================================================================
+// Invite Codes
+// =============================================================================
+
+// InviteCode represents a time-limited, shareable token that allows a new user to join the hub.
+type InviteCode struct {
+	ID         string    `json:"id"`
+	CodeHash   string    `json:"-"`
+	CodePrefix string    `json:"codePrefix"`
+	MaxUses    int       `json:"maxUses"`
+	UseCount   int       `json:"useCount"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	Revoked    bool      `json:"revoked"`
+	CreatedBy  string    `json:"createdBy"`
+	Note       string    `json:"note"`
+	Created    time.Time `json:"created"`
+}
+
+// InviteCodePrefix distinguishes invite codes from other token types.
+const InviteCodePrefix = "scion_inv_"
+
+// InviteCodeRandomBytes is the number of random bytes in an invite code.
+const InviteCodeRandomBytes = 24
+
+// InviteCodeMaxExpiry is the maximum expiry duration for an invite code (5 days).
+const InviteCodeMaxExpiry = 5 * 24 * time.Hour
+
+// InviteCodePrefixLength is the length of the visible prefix for identification.
+const InviteCodePrefixLength = 8
+
+// =============================================================================
 // Broker Authentication (Runtime Broker HMAC Authentication)
 // =============================================================================
 

@@ -1160,6 +1160,23 @@ CREATE TABLE IF NOT EXISTS allow_list (
 CREATE INDEX IF NOT EXISTS idx_allow_list_email ON allow_list(email);
 `
 
+const migrationV48 = `
+CREATE TABLE IF NOT EXISTS invite_codes (
+    id TEXT PRIMARY KEY,
+    code_hash TEXT NOT NULL UNIQUE,
+    code_prefix TEXT NOT NULL,
+    max_uses INTEGER NOT NULL DEFAULT 1,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    expires_at DATETIME NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_invite_codes_hash ON invite_codes(code_hash);
+CREATE INDEX IF NOT EXISTS idx_invite_codes_expires ON invite_codes(expires_at);
+`
+
 // Helper functions for JSON marshaling/unmarshaling
 func marshalJSON(v interface{}) string {
 	if v == nil {
@@ -3628,6 +3645,180 @@ func (s *SQLiteStore) IsEmailAllowListed(ctx context.Context, email string) (boo
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// ============================================================================
+// Invite Code Operations
+// ============================================================================
+
+func (s *SQLiteStore) CreateInviteCode(ctx context.Context, invite *store.InviteCode) error {
+	if invite.Created.IsZero() {
+		invite.Created = time.Now()
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO invite_codes (id, code_hash, code_prefix, max_uses, use_count, expires_at, revoked, created_by, note, created)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, invite.ID, invite.CodeHash, invite.CodePrefix, invite.MaxUses, invite.UseCount,
+		invite.ExpiresAt, invite.Revoked, invite.CreatedBy, invite.Note, invite.Created)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return store.ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetInviteCodeByHash(ctx context.Context, codeHash string) (*store.InviteCode, error) {
+	invite := &store.InviteCode{}
+	var revoked int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, code_hash, code_prefix, max_uses, use_count, expires_at, revoked, created_by, note, created
+		FROM invite_codes WHERE code_hash = ?
+	`, codeHash).Scan(
+		&invite.ID, &invite.CodeHash, &invite.CodePrefix, &invite.MaxUses, &invite.UseCount,
+		&invite.ExpiresAt, &revoked, &invite.CreatedBy, &invite.Note, &invite.Created,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	invite.Revoked = revoked != 0
+	return invite, nil
+}
+
+func (s *SQLiteStore) GetInviteCode(ctx context.Context, id string) (*store.InviteCode, error) {
+	invite := &store.InviteCode{}
+	var revoked int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, code_hash, code_prefix, max_uses, use_count, expires_at, revoked, created_by, note, created
+		FROM invite_codes WHERE id = ?
+	`, id).Scan(
+		&invite.ID, &invite.CodeHash, &invite.CodePrefix, &invite.MaxUses, &invite.UseCount,
+		&invite.ExpiresAt, &revoked, &invite.CreatedBy, &invite.Note, &invite.Created,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	invite.Revoked = revoked != 0
+	return invite, nil
+}
+
+func (s *SQLiteStore) ListInviteCodes(ctx context.Context, opts store.ListOptions) (*store.ListResult[store.InviteCode], error) {
+	var totalCount int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM invite_codes").Scan(&totalCount); err != nil {
+		return nil, err
+	}
+
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	var conditions []string
+	var args []interface{}
+
+	if opts.Cursor != "" {
+		conditions = append(conditions, "created < (SELECT created FROM invite_codes WHERE id = ?)")
+		args = append(args, opts.Cursor)
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, code_hash, code_prefix, max_uses, use_count, expires_at, revoked, created_by, note, created
+		FROM invite_codes %s ORDER BY created DESC LIMIT ?
+	`, whereClause)
+	args = append(args, limit+1)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var invites []store.InviteCode
+	for rows.Next() {
+		var invite store.InviteCode
+		var revoked int
+		if err := rows.Scan(
+			&invite.ID, &invite.CodeHash, &invite.CodePrefix, &invite.MaxUses, &invite.UseCount,
+			&invite.ExpiresAt, &revoked, &invite.CreatedBy, &invite.Note, &invite.Created,
+		); err != nil {
+			return nil, err
+		}
+		invite.Revoked = revoked != 0
+		invites = append(invites, invite)
+	}
+	if invites == nil {
+		invites = []store.InviteCode{}
+	}
+
+	var nextCursor string
+	if len(invites) > limit {
+		nextCursor = invites[limit-1].ID
+		invites = invites[:limit]
+	}
+
+	return &store.ListResult[store.InviteCode]{
+		Items:      invites,
+		TotalCount: totalCount,
+		NextCursor: nextCursor,
+	}, nil
+}
+
+func (s *SQLiteStore) IncrementInviteUseCount(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, "UPDATE invite_codes SET use_count = use_count + 1 WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) RevokeInviteCode(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, "UPDATE invite_codes SET revoked = 1 WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) DeleteInviteCode(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM invite_codes WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // ============================================================================

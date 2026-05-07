@@ -1336,3 +1336,64 @@ func determineUserRole(email string, adminEmails []string) string {
 func (s *Server) getUserRole(email string) string {
 	return determineUserRole(email, s.config.AdminEmails)
 }
+
+// handleInviteRedeem handles POST /api/v1/auth/invite/redeem.
+func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
+		return
+	}
+
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
+		return
+	}
+
+	if req.Code == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "code is required", nil)
+		return
+	}
+
+	if s.inviteService == nil {
+		InternalError(w)
+		return
+	}
+
+	invite, err := s.inviteService.RedeemCode(r.Context(), req.Code, user.Email(), user.ID())
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInviteInvalidFormat):
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid invite code format", nil)
+		case errors.Is(err, ErrInviteNotFound):
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "invite code not found", nil)
+		case errors.Is(err, ErrInviteExpired), errors.Is(err, ErrInviteRevoked), errors.Is(err, ErrInviteExhausted):
+			writeError(w, http.StatusGone, "invite_expired", "this invite is no longer valid", nil)
+		default:
+			slog.Error("invite redemption failed", "error", err)
+			InternalError(w)
+		}
+		return
+	}
+
+	slog.Info("invite code redeemed",
+		"invite_id", invite.ID,
+		"email", user.Email(),
+	)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message": "You have been added to the hub.",
+		"user": map[string]string{
+			"id":    user.ID(),
+			"email": user.Email(),
+		},
+	})
+}

@@ -488,6 +488,7 @@ type Server struct {
 	agentTokenService      *AgentTokenService      // Agent JWT token service
 	userTokenService       *UserTokenService       // User JWT token service
 	uatService             *UserAccessTokenService // User access token service
+	inviteService          *InviteService          // Invite code service
 	oauthService           *OAuthService           // OAuth service for CLI authentication
 	authConfig             AuthConfig              // Unified auth configuration
 	brokerAuthService      *BrokerAuthService      // Broker HMAC authentication service
@@ -628,6 +629,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize user access token service
 	srv.uatService = NewUserAccessTokenService(s, s, s)
+
+	// Initialize invite code service
+	srv.inviteService = NewInviteService(s, s)
 
 	// Initialize OAuth service if configured
 	if cfg.OAuthConfig.IsConfigured() {
@@ -1991,6 +1995,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/auth/providers", s.handleCLIAuthProviders)
 
 	// CLI OAuth endpoints (unauthenticated - used for login)
+	s.mux.HandleFunc("/api/v1/auth/invite/redeem", s.handleInviteRedeem)
 	s.mux.HandleFunc("/api/v1/auth/cli/authorize", s.handleCLIAuthAuthorize)
 	s.mux.HandleFunc("/api/v1/auth/cli/token", s.handleCLIAuthToken)
 	s.mux.HandleFunc("/api/v1/auth/cli/device", s.handleCLIDeviceAuthorize)
@@ -2051,6 +2056,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/scheduler", s.handleAdminScheduler)
 	s.mux.HandleFunc("/api/v1/admin/allow-list", s.handleAdminAllowList)
 	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.handleAdminAllowListByEmail)
+	s.mux.HandleFunc("/api/v1/admin/invites", s.handleAdminInvites)
+	s.mux.HandleFunc("/api/v1/admin/invites/", s.handleAdminInviteByID)
 	s.mux.HandleFunc("/api/v1/admin/server-config", s.handleAdminServerConfig)
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota)
 
