@@ -142,6 +142,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV46,
 		migrationV47,
 		migrationV48,
+		migrationV49,
 	}
 
 	// Create migrations table if not exists
@@ -1159,7 +1160,7 @@ CREATE TABLE IF NOT EXISTS allow_list (
 );
 `
 
-const migrationV48 = `
+const migrationV49 = `
 CREATE TABLE IF NOT EXISTS invite_codes (
     id TEXT PRIMARY KEY,
     code_hash TEXT NOT NULL UNIQUE,
