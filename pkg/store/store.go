@@ -198,6 +198,11 @@ type AgentStatusUpdate struct {
 	CurrentTurns      *int   `json:"currentTurns,omitempty"`
 	CurrentModelCalls *int   `json:"currentModelCalls,omitempty"`
 	StartedAt         string `json:"startedAt,omitempty"`
+
+	// Exit tracking (scaffolding for future exit_code column; currently
+	// included in the Hub status payload but not persisted to a dedicated
+	// database column — the exit code is preserved as free text in Message).
+	ExitCode *int `json:"exitCode,omitempty"`
 }
 
 // GroveStore defines grove-related persistence operations.

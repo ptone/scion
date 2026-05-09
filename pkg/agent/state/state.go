@@ -77,8 +77,10 @@ func (p Phase) Validate() error {
 	return fmt.Errorf("invalid phase: %q", p)
 }
 
-// Activity represents what a running agent is doing.
-// Activity is only meaningful when Phase == PhaseRunning.
+// Activity represents what an agent is doing. Most activities are only
+// meaningful when Phase == PhaseRunning, but terminal activities (crashed,
+// limits_exceeded) are valid when Phase == PhaseStopped — they carry
+// information about HOW the agent stopped.
 type Activity string
 
 const (
@@ -91,6 +93,7 @@ const (
 	ActivityLimitsExceeded  Activity = "limits_exceeded"
 	ActivityStalled         Activity = "stalled"
 	ActivityOffline         Activity = "offline"
+	ActivityCrashed         Activity = "crashed"
 )
 
 // allActivities is the internal list; Activities() returns a copy.
@@ -104,6 +107,7 @@ var allActivities = []Activity{
 	ActivityLimitsExceeded,
 	ActivityStalled,
 	ActivityOffline,
+	ActivityCrashed,
 }
 
 // Activities returns a copy of all valid Activity values.
@@ -143,7 +147,18 @@ func (a Activity) Validate() error {
 // (prompt-submit, agent-start, session-start).
 func (a Activity) IsSticky() bool {
 	switch a {
-	case ActivityWaitingForInput, ActivityBlocked, ActivityCompleted, ActivityLimitsExceeded:
+	case ActivityWaitingForInput, ActivityBlocked, ActivityCompleted, ActivityLimitsExceeded, ActivityCrashed:
+		return true
+	}
+	return false
+}
+
+// IsTerminal reports whether this activity represents a terminal outcome that
+// survives the phase transition to stopped. Terminal activities carry
+// information about HOW the agent stopped and are valid when phase is stopped.
+func (a Activity) IsTerminal() bool {
+	switch a {
+	case ActivityCrashed, ActivityLimitsExceeded:
 		return true
 	}
 	return false
@@ -180,6 +195,9 @@ func (s AgentState) DisplayStatus() string {
 	if s.Phase == PhaseRunning && s.Activity != "" {
 		return string(s.Activity)
 	}
+	if s.Phase == PhaseStopped && s.Activity.IsTerminal() {
+		return string(s.Activity)
+	}
 	return string(s.Phase)
 }
 
@@ -194,7 +212,9 @@ func (s AgentState) Validate() error {
 		return err
 	}
 	if s.Activity != "" && s.Phase != PhaseRunning {
-		return fmt.Errorf("activity %q is not valid when phase is %q (must be %q)", s.Activity, s.Phase, PhaseRunning)
+		if !(s.Phase == PhaseStopped && s.Activity.IsTerminal()) {
+			return fmt.Errorf("activity %q is not valid when phase is %q (must be %q)", s.Activity, s.Phase, PhaseRunning)
+		}
 	}
 	return nil
 }
