@@ -1284,6 +1284,10 @@ func checkUserAuthorized(ctx context.Context, email string, authorizedDomains, a
 		}
 		return allowed
 	case "domain_restricted":
+		if len(authorizedDomains) == 0 {
+			slog.Warn("user_access_mode is domain_restricted but no authorized_domains configured; all users will be blocked",
+				"email", emailLower)
+		}
 		return len(authorizedDomains) > 0
 	default: // "open" or empty
 		return true

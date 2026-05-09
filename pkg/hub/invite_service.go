@@ -137,7 +137,16 @@ func (s *InviteService) RedeemCode(ctx context.Context, code, email, userID stri
 
 	emailLower := strings.ToLower(email)
 
-	// Add to allow list (idempotent — skip if already present)
+	// Atomically claim a use slot before modifying the allow list.
+	// IncrementInviteUseCount uses a conditional UPDATE (WHERE use_count < max_uses)
+	// so only one concurrent request can claim the last slot.
+	if err := s.invites.IncrementInviteUseCount(ctx, invite.ID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrInviteExhausted
+		}
+		return nil, fmt.Errorf("failed to increment use count: %w", err)
+	}
+
 	entry := &store.AllowListEntry{
 		ID:       uuid.New().String(),
 		Email:    emailLower,
@@ -148,13 +157,10 @@ func (s *InviteService) RedeemCode(ctx context.Context, code, email, userID stri
 
 	if err := s.allowList.AddAllowListEntry(ctx, entry); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
+			// Already on the allow list — idempotent success.
 			return invite, nil
 		}
 		return nil, fmt.Errorf("failed to add to allow list: %w", err)
-	}
-
-	if err := s.invites.IncrementInviteUseCount(ctx, invite.ID); err != nil {
-		return nil, fmt.Errorf("failed to increment use count: %w", err)
 	}
 
 	invite.UseCount++

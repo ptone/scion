@@ -239,7 +239,7 @@ func (s *Server) handleAdminAllowListImport(w http.ResponseWriter, r *http.Reque
 	var entries []*store.AllowListEntry
 	for _, e := range emails {
 		email := strings.TrimSpace(strings.ToLower(e.Email))
-		if email == "" || !strings.Contains(email, "@") {
+		if _, err := mail.ParseAddress(email); err != nil || email == "" {
 			continue
 		}
 		entries = append(entries, &store.AllowListEntry{
@@ -334,7 +334,7 @@ func parseCSVEmails(r io.Reader) ([]AllowListAddRequest, error) {
 			continue
 		}
 
-		if email == "" || !strings.Contains(email, "@") {
+		if _, err := mail.ParseAddress(email); err != nil || email == "" {
 			continue
 		}
 

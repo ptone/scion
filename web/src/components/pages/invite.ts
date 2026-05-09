@@ -191,10 +191,8 @@ export class ScionPageInvite extends LitElement {
         return;
       }
 
-      if (res.status === 410) {
-        this.errorMessage = 'This invite is no longer valid. It may have expired or been revoked.';
-      } else if (res.status === 404) {
-        this.errorMessage = 'This invite code was not found.';
+      if (res.status === 404) {
+        this.errorMessage = 'This invite code was not found or is no longer valid.';
       } else if (res.status === 401) {
         // Session expired during redemption — show login
         await this.loadProviders();
