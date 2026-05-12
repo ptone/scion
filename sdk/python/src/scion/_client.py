@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 
 from scion._transport import Transport
+from scion.resources.agents import AgentsResource
 from scion.resources.messages import MessagesResource
 from scion.resources.projects import ProjectsResource
 from scion.types.common import HealthResponse
@@ -89,6 +90,7 @@ class ScionClient:
             max_retries=max_retries,
             headers=headers,
         )
+        self._agents: AgentsResource | None = None
         self._messages: MessagesResource | None = None
 
     @classmethod
@@ -123,6 +125,13 @@ class ScionClient:
     # -- Service properties --
 
     @property
+    def agents(self) -> AgentsResource:
+        """Access the agents resource for managing agents."""
+        if self._agents is None:
+            self._agents = AgentsResource(self._transport)
+        return self._agents
+
+    @property
     def messages(self) -> MessagesResource:
         """Access the messages resource for inbox operations.
 
@@ -143,9 +152,6 @@ class ScionClient:
         if not hasattr(self, "_projects"):
             self._projects = ProjectsResource(self._transport)
         return self._projects
-
-    # @property
-    # def agents(self) -> AgentsResource: ...
 
     # @property
     # def secrets(self) -> SecretsResource: ...

@@ -29,6 +29,7 @@ from scion._errors import (
     ValidationError,
 )
 from scion._pagination import AsyncPage, SyncPage
+from scion.resources.agents import AgentsResource, AsyncAgentsResource
 
 __version__ = "0.1.0"
 
@@ -36,6 +37,9 @@ __all__ = [
     # Clients
     "ScionClient",
     "AsyncScionClient",
+    # Resources
+    "AgentsResource",
+    "AsyncAgentsResource",
     # Errors
     "ScionError",
     "AuthenticationError",

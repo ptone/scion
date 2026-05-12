@@ -20,6 +20,7 @@ import os
 
 from scion._client import _resolve_token
 from scion._transport import AsyncTransport
+from scion.resources.agents import AsyncAgentsResource
 from scion.resources.messages import AsyncMessagesResource
 from scion.resources.projects import AsyncProjectsResource
 from scion.types.common import HealthResponse
@@ -58,6 +59,7 @@ class AsyncScionClient:
             max_retries=max_retries,
             headers=headers,
         )
+        self._agents: AsyncAgentsResource | None = None
         self._messages: AsyncMessagesResource | None = None
 
     @classmethod
@@ -92,6 +94,13 @@ class AsyncScionClient:
     # -- Service properties --
 
     @property
+    def agents(self) -> AsyncAgentsResource:
+        """Access the agents resource for managing agents."""
+        if self._agents is None:
+            self._agents = AsyncAgentsResource(self._transport)
+        return self._agents
+
+    @property
     def messages(self) -> AsyncMessagesResource:
         """Access the messages resource for inbox operations.
 
@@ -112,9 +121,6 @@ class AsyncScionClient:
         if not hasattr(self, "_projects"):
             self._projects = AsyncProjectsResource(self._transport)
         return self._projects
-
-    # @property
-    # def agents(self) -> AsyncAgentsResource: ...
 
     # @property
     # def secrets(self) -> AsyncSecretsResource: ...
