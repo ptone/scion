@@ -35,14 +35,14 @@ Implemented the Hub-side HTTP handlers for skill CRUD, file transfer (signed URL
 
 4. **`pkg/hub/skill_handlers_test.go`** — 12 handler tests covering CRUD, validation, version lifecycle, batch resolve, URI parsing, and content hashing
 
-5. **`pkg/hubclient/skills_test.go`** — 9 client tests covering list, get, create, update, delete, publish version, list versions, resolve, and accessor wiring
+5. **`pkg/hubclient/skills_test.go`** — 8 client tests covering list, get, create, delete, publish version, list versions, resolve, and accessor wiring
 
 ### Modified Files
 1. **`pkg/hub/server.go`** — Added route registration for `/api/v1/skills`, `/api/v1/skills/resolve`, `/api/v1/skills/`
 2. **`pkg/hubclient/client.go`** — Added `Skills()` to `Client` interface and `client` struct, wired initialization
 3. **`pkg/hubclient/client_test.go`** — Added Skills() nil check to TestNew
 4. **`pkg/storage/storage.go`** — Added `SkillStoragePath`, `SkillStorageURI`, `SkillVersionStoragePath` helpers
-5. **`pkg/store/sqlite/skills.go`** — Full implementation replacing stubs: all SkillStore methods with working SQLite queries
+5. **`pkg/store/sqlite/skills.go`** — Resolved merge conflict (deferred to Phase 1B's implementation)
 
 ## Patterns Followed
 - Route registration follows template pattern (`handleTemplatesV2` / `handleTemplateByIDV2`)
@@ -57,8 +57,14 @@ Implemented the Hub-side HTTP handlers for skill CRUD, file transfer (signed URL
 - Skill versions use delete+recreate during finalize since the store interface doesn't expose an UpdateSkillVersion method
 - "grove" → "project" naming used in all new code (storage paths use "projects" not "groves")
 
+## Rebase Resolution
+During push, Phase 1B (store) and Phase 1D (CLI) had been merged ahead. Rebased onto 8b93c50:
+- `pkg/store/sqlite/skills.go` — accepted Phase 1B's version (validation, `scanSkill()` helper)
+- `pkg/hubclient/skills.go` — accepted Phase 1D's version (client-side types: `Skill`, `SkillVersion`, `SkillRef`, etc.)
+- Updated hubclient tests to match Phase 1D's type signatures (removed `Update` test, adjusted `Create` response wrapper, etc.)
+
 ## Verification
 - `go build ./...` passes
 - All 12 hub handler tests pass
-- All 9 hubclient tests pass
-- All existing tests in hub, hubclient, store/sqlite, and storage continue to pass
+- All 8 hubclient tests pass
+- All existing tests in hub, hubclient, and storage continue to pass
