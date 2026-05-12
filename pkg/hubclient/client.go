@@ -93,6 +93,9 @@ type Client interface {
 	// Invites returns the invite code management operations interface.
 	Invites() InviteService
 
+	// Skills returns the skill bank operations interface.
+	Skills() SkillService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 }
@@ -118,6 +121,7 @@ type client struct {
 	messages              *messageService
 	allowList             *allowListService
 	invites               *inviteService
+	skills                *skillService
 }
 
 // New creates a new Hub API client.
@@ -148,6 +152,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.messages = &messageService{c: c}
 	c.allowList = &allowListService{c: c}
 	c.invites = &inviteService{c: c}
+	c.skills = &skillService{c: c}
 
 	return c, nil
 }
@@ -255,6 +260,11 @@ func (c *client) AllowList() AllowListService {
 // Invites returns the invite code management operations interface.
 func (c *client) Invites() InviteService {
 	return c.invites
+}
+
+// Skills returns the skill bank operations interface.
+func (c *client) Skills() SkillService {
+	return c.skills
 }
 
 // get performs an HTTP GET request with fallback.

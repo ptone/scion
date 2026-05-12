@@ -81,6 +81,22 @@ var agentAllowed = map[string]bool{
 	"template.push":               true,
 	"template.pull":               true,
 	"template.status":             true,
+	"skills":                      true,
+	"skills.list":                 true,
+	"skills.show":                 true,
+	"skills.create":               true,
+	"skills.publish":              true,
+	"skills.delete":               true,
+	"skills.versions":             true,
+	"skills.resolve":              true,
+	"skill":                       true,
+	"skill.list":                  true,
+	"skill.show":                  true,
+	"skill.create":                true,
+	"skill.publish":               true,
+	"skill.delete":                true,
+	"skill.versions":              true,
+	"skill.resolve":               true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.
