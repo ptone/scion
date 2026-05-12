@@ -76,6 +76,185 @@ Ship the minimum surface area that makes the SDKs useful for the most common aut
 
 ---
 
+## 2a. Implementation Breakdown
+
+This section decomposes the work into discrete implementation steps. Each step is sized, labeled with dependencies, and marked as parallelizable or serial.
+
+**Complexity key:** S = Small (1-2 files, < 1 day), M = Medium (3-6 files, 1-2 days), L = Large (7+ files, 2-4 days)
+
+### Step 1: Project Scaffolding
+
+| Attribute | Detail |
+|-----------|--------|
+| **Covers** | Create `sdk/python/` and `sdk/typescript/` directory structures. Set up `pyproject.toml` (hatchling, Python 3.9+, dependencies: httpx, pydantic v2), `package.json` (@scion/sdk, Node 18+), `tsconfig.json`, build tooling (tsup for TS dual ESM+CJS output), test framework config (pytest + pytest-asyncio for Python, vitest for TS), linting (ruff for Python, eslint/prettier for TS). Add placeholder README for each SDK. |
+| **Complexity** | **M** — Boilerplate but must get build/test/lint right from the start. |
+| **Dependencies** | None — this is the starting point. |
+| **Parallelism** | Python and TypeScript scaffolding can be done **in parallel**. |
+
+### Step 2: Transport Layer
+
+| Attribute | Detail |
+|-----------|--------|
+| **Covers** | Core HTTP transport for each SDK. Request pipeline: URL construction, JSON serialization, auth header injection, User-Agent, retry with exponential backoff (3 retries on 5xx / network errors), timeout handling (30s default), response status checking. Python: `_transport.py` using `httpx.Client` (sync) and `httpx.AsyncClient` (async). TypeScript: `transport.ts` using native `fetch`. |
+| **Complexity** | **M** per language — central piece, needs thorough unit tests. |
+| **Dependencies** | Step 1 (scaffolding must exist). |
+| **Parallelism** | Python and TypeScript transports can be done **in parallel**. |
+
+### Step 3: Error Handling
+
+| Attribute | Detail |
+|-----------|--------|
+| **Covers** | Error type hierarchy and response parsing. Map API error JSON (`{"error": {"code": ..., "message": ..., "details": ..., "requestId": ...}}`) to typed exceptions. Python: `_errors.py` with `ScionError`, `AuthenticationError`, `NotFoundError`, `ConflictError`, `ValidationError`, `RateLimitError`, `ServerError`, `ConnectionError`. TypeScript: `errors.ts` with same hierarchy as ES6 classes extending `Error`. Wire error parsing into transport layer. |
+| **Complexity** | **S** per language — straightforward mapping from `pkg/apiclient/errors.go`. |
+| **Dependencies** | Step 2 (transport layer must exist for integration). |
+| **Parallelism** | Python and TypeScript can be done **in parallel**. |
+
+### Step 4: Type Models — Core Resources
+
+| Attribute | Detail |
+|-----------|--------|
+| **Covers** | Data models for Phase 1 resources. Python: Pydantic v2 models in `types/` for `Agent`, `CreateAgentRequest`, `CreateAgentResponse`, `ListAgentsResponse`, `Project`, `CreateProjectRequest`, `Secret`, `SetSecretRequest`, `Message`, `AgentMessage`, `HealthResponse`, pagination types. TypeScript: TypeScript interfaces/types in `types/` for the same set. Derived from `pkg/hubclient/types.go`. No legacy grove fields — use `project` exclusively. |
+| **Complexity** | **M** per language — many types but mechanical. |
+| **Dependencies** | Step 1 (scaffolding). No dependency on transport. |
+| **Parallelism** | Can be done **in parallel** with Steps 2-3 (types are independent of transport). Python and TypeScript can also be done in parallel with each other. |
+
+### Step 5: Client Entrypoint + Auth
+
+| Attribute | Detail |
+|-----------|--------|
+| **Covers** | `ScionClient` / `AsyncScionClient` (Python) and `ScionClient` (TypeScript) classes. Constructor accepting `hub_url` and `token`. Token resolution chain: explicit param → `SCION_API_TOKEN` env → `SCION_DEV_TOKEN` env → `~/.scion/dev-token` file. `from_agent_env()` / `fromAgentEnv()` factory for agent-context auto-detection (`SCION_HUB_URL` + `SCION_AGENT_TOKEN`). Health check method. Service property accessors (lazy-initialized). |
+| **Complexity** | **M** per language — wiring auth + transport + service accessors. |
+| **Dependencies** | Steps 2 + 3 (transport + errors must exist). |
+| **Parallelism** | Python and TypeScript can be done **in parallel**. |
+
+### Step 6: Pagination Helpers
+
+| Attribute | Detail |
+|-----------|--------|
+| **Covers** | Cursor-based pagination support. Python: `SyncPage[T]` and `AsyncPage[T]` classes with `.data`, `.has_next`, `.next_cursor`, and `.auto_paging_iter()` that yields items across pages. TypeScript: `Page<T>` class with `.data`, `.hasNext`, `.nextCursor`, and `Symbol.asyncIterator` for `for await` auto-pagination. Used by all list methods. |
+| **Complexity** | **S** per language — small but important for DX. |
+| **Dependencies** | Steps 2 + 4 (transport + types). |
+| **Parallelism** | Can be done **in parallel** with Steps 5 and 7. |
+
+### Step 7: Agents Resource
+
+| Attribute | Detail |
+|-----------|--------|
+| **Covers** | `AgentResource` (Python: `resources/agents.py`, TypeScript: `resources/agents.ts`). Methods: `create()`, `get()`, `list()`, `start()`, `stop()`, `suspend()`, `restart()`, `delete()`, `restore()`. List returns paginated results. Mirrors `pkg/hubclient/agents.go` AgentService interface (excluding streaming and messaging — those are separate steps). |
+| **Complexity** | **M** per language — many methods but uniform pattern (build path, call transport, decode). |
+| **Dependencies** | Steps 2 + 3 + 4 + 5 (full client stack). |
+| **Parallelism** | Python and TypeScript can be done **in parallel**. Steps 7-10 (all resource modules) can be done **in parallel** with each other once the client stack is ready. |
+
+### Step 8: Messaging Resource
+
+| Attribute | Detail |
+|-----------|--------|
+| **Covers** | Message-related methods on the agents resource and a standalone messages resource. Agents: `send_message()`, `send_structured_message()`, `broadcast_message()` (project-scoped). Messages inbox: `list()`, `get()`, `mark_read()`, `mark_all_read()`. Mirrors `pkg/hubclient/agents.go` (messaging methods) and `pkg/hubclient/messages.go`. |
+| **Complexity** | **S-M** per language. |
+| **Dependencies** | Steps 2 + 3 + 4 + 5. |
+| **Parallelism** | Can be done **in parallel** with Steps 7, 9, 10. |
+
+### Step 9: Projects Resource
+
+| Attribute | Detail |
+|-----------|--------|
+| **Covers** | `ProjectResource`. Methods: `list()`, `get()`, `create()`, `update()`, `delete()`, `list_agents()`. Mirrors core subset of `pkg/hubclient/projects.go` ProjectService. |
+| **Complexity** | **S-M** per language. |
+| **Dependencies** | Steps 2 + 3 + 4 + 5. |
+| **Parallelism** | Can be done **in parallel** with Steps 7, 8, 10. |
+
+### Step 10: Secrets Resource
+
+| Attribute | Detail |
+|-----------|--------|
+| **Covers** | `SecretResource`. Methods: `set()`, `get()`, `list()`, `delete()` — all with scope/scopeId parameters. Mirrors `pkg/hubclient/secrets.go`. |
+| **Complexity** | **S** per language — small, uniform CRUD. |
+| **Dependencies** | Steps 2 + 3 + 4 + 5. |
+| **Parallelism** | Can be done **in parallel** with Steps 7, 8, 9. |
+
+### Step 11: SSE Streaming
+
+| Attribute | Detail |
+|-----------|--------|
+| **Covers** | SSE stream parser and typed event iterators. Python: `_streaming.py` — SSE line parser (skip empty, `:` heartbeats, `event:` type lines; yield parsed `data:` JSON), exposed as `AsyncIterator[T]` (async) and `Iterator[T]` (sync) via httpx streaming responses. TypeScript: `streaming.ts` — SSE parser using `fetch` + `ReadableStream` + `TextDecoderStream`, exposed as `AsyncIterable<T>`. Agent methods: `stream_events()` / `streamEvents()`, `stream_cloud_logs()` / `streamCloudLogs()`. Support `AbortSignal` (TS) / context cancellation (Python). Optional auto-reconnect with configurable behavior. |
+| **Complexity** | **L** per language — SSE parsing, reconnection logic, and async iteration are the most complex parts of the SDK. |
+| **Dependencies** | Steps 2 + 3 + 4 + 5 + 7 (streaming methods live on the agents resource). |
+| **Parallelism** | Python and TypeScript can be done **in parallel**. Should be done **after** Step 7 (agents resource) since stream methods are agent-scoped. |
+
+### Step 12: Integration Tests
+
+| Attribute | Detail |
+|-----------|--------|
+| **Covers** | End-to-end tests against a real Hub instance. Full lifecycle: create project → create agent → send message → stream events → stop agent → delete. Gated on `SCION_TEST_HUB_URL` env var (skipped when no Hub is available). Dedicated test project to avoid interference. Both sync and async paths tested (Python). |
+| **Complexity** | **M** per language — test authoring plus CI setup. |
+| **Dependencies** | Steps 7-11 (all resources + streaming must exist). |
+| **Parallelism** | Python and TypeScript can be done **in parallel**. Must be done **after** all resource steps. |
+
+### Step 13: Documentation + Examples
+
+| Attribute | Detail |
+|-----------|--------|
+| **Covers** | README with quickstart for each SDK. Example scripts: `examples/create_agent.py`, `examples/stream_logs.py`, `examples/create_agent.ts`, `examples/stream_logs.ts`. Inline docstrings/JSDoc on all public methods and types. |
+| **Complexity** | **S-M** per language. |
+| **Dependencies** | Steps 7-11 (all resources implemented). |
+| **Parallelism** | Can be done **in parallel** with Step 12 (integration tests). |
+
+### Dependency Graph
+
+```
+Step 1: Scaffolding (Python) ─────┐     Step 1: Scaffolding (TypeScript) ────┐
+                                  │                                           │
+Step 4: Types (Python) ───────────┤     Step 4: Types (TypeScript) ───────────┤
+                                  │                                           │
+Step 2: Transport (Python) ───────┤     Step 2: Transport (TypeScript) ───────┤
+          │                       │               │                           │
+Step 3: Errors (Python) ──────────┤     Step 3: Errors (TypeScript) ──────────┤
+          │                       │               │                           │
+Step 5: Client + Auth (Python) ───┤     Step 5: Client + Auth (TypeScript) ───┤
+          │                       │               │                           │
+Step 6: Pagination (Python) ──────┤     Step 6: Pagination (TypeScript) ──────┤
+          │                       │               │                           │
+     ┌────┴────┬────┬────┐        │          ┌────┴────┬────┬────┐            │
+     │         │    │    │        │          │         │    │    │            │
+  Step 7    Step 8  9   10       │       Step 7    Step 8  9   10           │
+  Agents    Msg  Proj  Secrets   │       Agents    Msg  Proj  Secrets       │
+     │         │    │    │        │          │         │    │    │            │
+     └────┬────┴────┴────┘        │          └────┬────┴────┴────┘            │
+          │                       │               │                           │
+     Step 11: SSE Streaming ──────┤          Step 11: SSE Streaming ──────────┤
+          │                       │               │                           │
+     ┌────┴────┐                  │          ┌────┴────┐                      │
+  Step 12   Step 13               │       Step 12   Step 13                   │
+  Int.Tests  Docs                 │       Int.Tests  Docs                     │
+```
+
+### Parallelism Summary
+
+| Work Axis | Can Parallelize? |
+|-----------|-----------------|
+| Python vs. TypeScript (same step) | **Yes** — fully independent, can be assigned to separate agents. |
+| Steps 1-6 (foundation) | **Serial chain** within each language: 1 → 2 → 3 → 5, with 4 and 6 parallelizable alongside. |
+| Steps 7-10 (resources) | **Fully parallel** within each language — all depend only on the foundation (Steps 1-6). |
+| Step 11 (streaming) | **After Step 7** (agent resource must exist), but parallel with Steps 8-10. |
+| Steps 12-13 (testing + docs) | **After Steps 7-11**, parallel with each other. |
+
+### Recommended Execution Order
+
+For a single developer per language:
+
+1. Steps 1-3: Scaffolding + Transport + Errors (foundation)
+2. Steps 4-6: Types + Client + Pagination (complete the client stack)
+3. Steps 7-10: All four resource modules (agents → messaging/projects/secrets)
+4. Step 11: SSE streaming
+5. Steps 12-13: Integration tests + documentation
+
+For two developers per language (maximum useful parallelism):
+
+- **Developer A:** Steps 1 → 2 → 3 → 5 → 7 → 11 → 12 (critical path: transport → client → agents → streaming → integration)
+- **Developer B:** Step 4 → 6 → 8 → 9 → 10 → 13 (types → pagination → messaging/projects/secrets → docs)
+
+---
+
 ## 3. Code Generation vs. Hand-Written
 
 ### Analysis
