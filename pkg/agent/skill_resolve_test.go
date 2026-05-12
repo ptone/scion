@@ -299,17 +299,23 @@ func TestContextHubClient(t *testing.T) {
 // ---------- resolveSkillReferences tests ----------
 
 func TestResolveSkillReferences_NoRefsNoOp(t *testing.T) {
-	err := resolveSkillReferences(context.Background(), nil, nil, "/tmp/test", "", "")
+	records, err := resolveSkillReferences(context.Background(), nil, nil, "/tmp/test", "", "")
 	if err != nil {
 		t.Fatalf("expected nil error for empty refs, got: %v", err)
+	}
+	if len(records) != 0 {
+		t.Errorf("expected no records, got %d", len(records))
 	}
 }
 
 func TestResolveSkillReferences_NoClientNoOp(t *testing.T) {
 	refs := []api.SkillReference{{Name: "test-skill"}}
-	err := resolveSkillReferences(context.Background(), nil, refs, "/tmp/test", "", "")
+	records, err := resolveSkillReferences(context.Background(), nil, refs, "/tmp/test", "", "")
 	if err != nil {
 		t.Fatalf("expected nil error with nil client, got: %v", err)
+	}
+	if len(records) != 0 {
+		t.Errorf("expected no records, got %d", len(records))
 	}
 }
 
@@ -329,7 +335,7 @@ func TestResolveSkillReferences_RequiredSkillError(t *testing.T) {
 	}
 
 	destDir := t.TempDir()
-	err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
+	_, err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
 	if err == nil {
 		t.Fatal("expected error for required skill that fails resolution")
 	}
@@ -354,7 +360,7 @@ func TestResolveSkillReferences_OptionalSkillErrorSkipped(t *testing.T) {
 	}
 
 	destDir := t.TempDir()
-	err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
+	_, err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
 	if err != nil {
 		t.Fatalf("expected nil error for optional skill failure, got: %v", err)
 	}
@@ -394,7 +400,7 @@ func TestResolveSkillReferences_SuccessfulDownload(t *testing.T) {
 	}
 
 	destDir := t.TempDir()
-	err := resolveSkillReferences(context.Background(), mock, refs, destDir, "proj-123", "user-456")
+	records, err := resolveSkillReferences(context.Background(), mock, refs, destDir, "proj-123", "user-456")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -407,6 +413,30 @@ func TestResolveSkillReferences_SuccessfulDownload(t *testing.T) {
 	}
 	if string(data) != string(skillContent) {
 		t.Errorf("skill file content mismatch: got %q, want %q", string(data), string(skillContent))
+	}
+
+	// Verify returned records
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	rec := records[0]
+	if rec.Name != "test-skill" {
+		t.Errorf("record.Name=%q want test-skill", rec.Name)
+	}
+	if rec.URI != "test-skill" {
+		t.Errorf("record.URI=%q want test-skill", rec.URI)
+	}
+	if rec.ResolvedVersion != "1.0.0" {
+		t.Errorf("record.ResolvedVersion=%q want 1.0.0", rec.ResolvedVersion)
+	}
+	if rec.ContentHash != contentHash {
+		t.Errorf("record.ContentHash=%q want %q", rec.ContentHash, contentHash)
+	}
+	if rec.Source != "registry" {
+		t.Errorf("record.Source=%q want registry", rec.Source)
+	}
+	if rec.InstalledPath != filepath.Join(destDir, "test-skill") {
+		t.Errorf("record.InstalledPath=%q want %q", rec.InstalledPath, filepath.Join(destDir, "test-skill"))
 	}
 }
 
@@ -443,7 +473,7 @@ func TestResolveSkillReferences_AsRename(t *testing.T) {
 	}
 
 	destDir := t.TempDir()
-	err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
+	records, err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -452,6 +482,14 @@ func TestResolveSkillReferences_AsRename(t *testing.T) {
 	skillPath := filepath.Join(destDir, "custom-name", "SKILL.md")
 	if _, err := os.Stat(skillPath); os.IsNotExist(err) {
 		t.Errorf("expected skill file at %s, but it doesn't exist", skillPath)
+	}
+
+	// Record should use the "as" name
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	if records[0].Name != "custom-name" {
+		t.Errorf("record.Name=%q want custom-name", records[0].Name)
 	}
 }
 
@@ -487,7 +525,7 @@ func TestResolveSkillReferences_HashMismatch(t *testing.T) {
 	}
 
 	destDir := t.TempDir()
-	err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
+	_, err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
 	if err == nil {
 		t.Fatal("expected error for hash mismatch")
 	}
@@ -527,7 +565,7 @@ func TestResolveSkillReferences_NestedFiles(t *testing.T) {
 	refs := []api.SkillReference{{Name: "nested-skill"}}
 	destDir := t.TempDir()
 
-	err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
+	_, err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -557,7 +595,7 @@ func TestResolveSkillReferences_AllOptionalHubFailure(t *testing.T) {
 	}
 
 	destDir := t.TempDir()
-	err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
+	_, err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
 	if err != nil {
 		t.Fatalf("expected nil error when all optional and hub fails, got: %v", err)
 	}
@@ -575,7 +613,7 @@ func TestResolveSkillReferences_RequiredHubFailure(t *testing.T) {
 	}
 
 	destDir := t.TempDir()
-	err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
+	_, err := resolveSkillReferences(context.Background(), mock, refs, destDir, "", "")
 	if err == nil {
 		t.Fatal("expected error when required skill and hub fails")
 	}

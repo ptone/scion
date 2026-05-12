@@ -288,6 +288,7 @@ type ProvisionInputs struct {
 	Telemetry      string `json:"telemetry,omitempty"`
 	AuthCandidates string `json:"auth_candidates,omitempty"`
 	MCPServers     string `json:"mcp_servers,omitempty"`
+	ResolvedSkills string `json:"resolved_skills,omitempty"`
 }
 
 type ProvisionOutputs struct {
@@ -385,6 +386,9 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 	}
 	if fileExistsHelper(filepath.Join(bundleHostPath, "inputs", "mcp-servers.json")) {
 		manifest.Inputs.MCPServers = filepath.Join(bundleContainerPath, "inputs", "mcp-servers.json")
+	}
+	if fileExistsHelper(filepath.Join(bundleHostPath, "inputs", "resolved-skills.json")) {
+		manifest.Inputs.ResolvedSkills = filepath.Join(bundleContainerPath, "inputs", "resolved-skills.json")
 	}
 
 	manifestPath := filepath.Join(bundleHostPath, "manifest.json")
@@ -507,6 +511,25 @@ func (c *ContainerScriptHarness) ApplyMCPSettings(agentHome string, mcpServers m
 		return fmt.Errorf("marshal mcp servers input: %w", err)
 	}
 	return c.stageInputFile(agentHome, "mcp-servers.json", data)
+}
+
+// ApplyResolvedSkills stages the resolved skills manifest into
+// agent_home/.scion/harness/inputs/resolved-skills.json so the container-side
+// provision.py can post-process skills if needed (e.g. transform for
+// non-standard harness formats). An empty or nil slice is a no-op.
+func (c *ContainerScriptHarness) ApplyResolvedSkills(agentHome string, skills []api.ResolvedSkillRecord) error {
+	if len(skills) == 0 {
+		return nil
+	}
+	payload := map[string]interface{}{
+		"schema_version": 1,
+		"skills":         skills,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal resolved skills input: %w", err)
+	}
+	return c.stageInputFile(agentHome, "resolved-skills.json", data)
 }
 
 // ApplyTelemetrySettings stages telemetry config into

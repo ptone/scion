@@ -203,7 +203,8 @@ type resolvedSkillInfo struct {
 
 // resolveSkillReferences batch-resolves skill references via the hub client,
 // downloads the resolved files, verifies content hashes, and places them into
-// the agent's skills directory.
+// the agent's skills directory. Returns records describing each successfully
+// resolved skill, suitable for staging into the container-script harness bundle.
 //
 // Parameters:
 //   - ctx: context (may carry hub client)
@@ -219,9 +220,9 @@ func resolveSkillReferences(
 	skillsDestDir string,
 	projectID string,
 	userID string,
-) error {
+) ([]api.ResolvedSkillRecord, error) {
 	if len(refs) == 0 || hubClient == nil {
-		return nil
+		return nil, nil
 	}
 
 	// Build the batch resolve request
@@ -251,9 +252,9 @@ func resolveSkillReferences(
 		}
 		if allOptional {
 			util.Debugf("resolveSkillReferences: hub resolve failed but all skills optional, skipping: %v", err)
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("hub skill resolve: %w", err)
+		return nil, fmt.Errorf("hub skill resolve: %w", err)
 	}
 
 	// Build a lookup map from URI to SkillReference for optional/as handling
@@ -270,7 +271,7 @@ func resolveSkillReferences(
 			util.Debugf("resolveSkillReferences: optional skill %s failed to resolve: %s", resolveErr.URI, resolveErr.Error)
 			continue
 		}
-		return fmt.Errorf("skill %s: %s", resolveErr.URI, resolveErr.Error)
+		return nil, fmt.Errorf("skill %s: %s", resolveErr.URI, resolveErr.Error)
 	}
 
 	// Log warnings
@@ -278,7 +279,8 @@ func resolveSkillReferences(
 		util.Debugf("resolveSkillReferences: warning for %s: %s", w.URI, w.Message)
 	}
 
-	// Download and place resolved skills
+	// Download and place resolved skills, collecting records for the manifest
+	var records []api.ResolvedSkillRecord
 	for _, resolved := range resp.Resolved {
 		ref := refByURI[resolved.URI]
 
@@ -299,7 +301,7 @@ func resolveSkillReferences(
 
 		destDir := filepath.Join(skillsDestDir, destName)
 		if err := os.MkdirAll(destDir, 0755); err != nil {
-			return fmt.Errorf("create skill dir %s: %w", destName, err)
+			return nil, fmt.Errorf("create skill dir %s: %w", destName, err)
 		}
 
 		util.Debugf("resolveSkillReferences: downloading skill %s (version %s) → %s",
@@ -312,11 +314,20 @@ func resolveSkillReferences(
 				_ = os.RemoveAll(destDir)
 				continue
 			}
-			return fmt.Errorf("download skill %s: %w", resolved.URI, err)
+			return nil, fmt.Errorf("download skill %s: %w", resolved.URI, err)
 		}
+
+		records = append(records, api.ResolvedSkillRecord{
+			Name:            destName,
+			URI:             resolved.URI,
+			ResolvedVersion: resolved.ResolvedVersion,
+			ContentHash:     resolved.ContentHash,
+			InstalledPath:   destDir,
+			Source:          "registry",
+		})
 	}
 
-	return nil
+	return records, nil
 }
 
 // downloadSkillFiles downloads all files for a resolved skill, verifies

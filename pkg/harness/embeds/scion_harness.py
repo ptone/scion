@@ -26,6 +26,7 @@ Provides:
   - atomic_write_json(path, data): tmp + os.replace
   - read_manifest(path): load and shape-check the staged manifest.json
   - read_mcp_servers(bundle_path): load inputs/mcp-servers.json -> dict[name -> spec]
+  - read_resolved_skills(bundle_path): load inputs/resolved-skills.json -> list[record]
   - apply_mcp_servers_simple(bundle_path, mcp_mapping): for harnesses whose
       native MCP config is a 1:1 JSON merge (Claude/Gemini-style). Reads the
       universal mcp_servers map, translates each entry per mcp_mapping, merges
@@ -206,6 +207,35 @@ def _merge_into_file(path: str, dotted_path: str, entries: dict[str, dict[str, A
         leaf[name] = spec
     atomic_write_json(path, data)
     return len(entries)
+
+
+def read_resolved_skills(bundle_path: str) -> list[dict[str, Any]]:
+    """Load inputs/resolved-skills.json from the staged bundle.
+
+    Returns the list of resolved skill records. Each record contains:
+      - name: skill identifier
+      - uri: skill URI (omitted for local skills)
+      - resolved_version: resolved semver (omitted for local skills)
+      - content_hash: integrity hash (omitted for local skills)
+      - installed_path: where the skill was placed
+      - source: "registry" or "local"
+
+    Returns an empty list if the file is absent (not an error: no skills
+    were resolved from the skill bank).
+    """
+    path = os.path.join(bundle_path, "inputs", "resolved-skills.json")
+    if not os.path.isfile(path):
+        return []
+    try:
+        payload = load_json(path) or {}
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid resolved-skills.json: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("resolved-skills.json is not a JSON object")
+    skills = payload.get("skills") or []
+    if not isinstance(skills, list):
+        raise ValueError("resolved-skills.json: skills must be an array")
+    return skills
 
 
 def warn(message: str) -> None:

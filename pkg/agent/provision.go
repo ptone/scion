@@ -575,7 +575,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Step 3: Copy skills directories into harness-specific location
 	resolved, err := harness.Resolve(ctx, harness.ResolveOptions{
 		Name:          harnessConfigName,
-		ProjectPath:     projectPath,
+		ProjectPath:   projectPath,
 		TemplatePaths: templatePaths,
 		ProfileName:   profileName,
 		Settings:      settings,
@@ -617,6 +617,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Step 3c: Resolve referenced skills from the Skill Bank (if any).
 	// Registry skills are placed after local skills and win on name conflict,
 	// matching the existing overlay pattern where later sources override earlier.
+	var resolvedSkillRecords []api.ResolvedSkillRecord
 	if len(finalScionCfg.Skills) > 0 && skillsDir != "" {
 		hubClient := hubClientFromContext(ctx)
 		if hubClient != nil {
@@ -626,9 +627,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 
 			resolveProjectID, _ := config.ReadProjectID(projectDir)
-			if err := resolveSkillReferences(ctx, hubClient, finalScionCfg.Skills, skillsDest, resolveProjectID, ""); err != nil {
+			records, err := resolveSkillReferences(ctx, hubClient, finalScionCfg.Skills, skillsDest, resolveProjectID, "")
+			if err != nil {
 				return "", "", nil, fmt.Errorf("resolve skill references: %w", err)
 			}
+			resolvedSkillRecords = records
 		} else {
 			// No hub client — check if any required skills exist
 			for _, ref := range finalScionCfg.Skills {
@@ -636,6 +639,17 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 					util.Debugf("ProvisionAgent: skill %q requires hub client but none available (skipping)", skillRefToURI(ref))
 				}
 			}
+		}
+	}
+
+	// Stage resolved skills metadata for container-script harnesses so
+	// provision.py scripts can post-process skills if needed.
+	if len(resolvedSkillRecords) > 0 {
+		if applier, ok := h.(api.ResolvedSkillsApplier); ok {
+			if err := applier.ApplyResolvedSkills(agentHome, resolvedSkillRecords); err != nil {
+				return "", "", nil, fmt.Errorf("failed to apply resolved skills: %w", err)
+			}
+			util.Debugf("ProvisionAgent: staged %d resolved skill record(s) for harness=%q", len(resolvedSkillRecords), h.Name())
 		}
 	}
 

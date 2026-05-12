@@ -335,6 +335,106 @@ func TestContainerScriptHarness_ProvisionReferencesMCPInputInManifest(t *testing
 	}
 }
 
+func TestContainerScriptHarness_ApplyResolvedSkills_WritesInput(t *testing.T) {
+	h, _ := newTestContainerScriptHarness(t)
+	agentHome := t.TempDir()
+
+	skills := []api.ResolvedSkillRecord{
+		{
+			Name:            "scion",
+			URI:             "skill://scion/core/scion@^1.0",
+			ResolvedVersion: "1.3.2",
+			ContentHash:     "sha256:abc123",
+			InstalledPath:   ".claude/skills/scion",
+			Source:          "registry",
+		},
+		{
+			Name:          "team-creation",
+			InstalledPath: ".claude/skills/team-creation",
+			Source:        "local",
+		},
+	}
+	if err := h.ApplyResolvedSkills(agentHome, skills); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "resolved-skills.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if payload["schema_version"] != float64(1) {
+		t.Errorf("schema_version=%v", payload["schema_version"])
+	}
+	got, ok := payload["skills"].([]interface{})
+	if !ok {
+		t.Fatalf("skills is not an array: %T", payload["skills"])
+	}
+	if len(got) != 2 {
+		t.Errorf("expected 2 skills, got %d", len(got))
+	}
+	// Verify first skill has registry fields
+	first := got[0].(map[string]interface{})
+	if first["name"] != "scion" {
+		t.Errorf("first skill name=%v", first["name"])
+	}
+	if first["source"] != "registry" {
+		t.Errorf("first skill source=%v", first["source"])
+	}
+	if first["resolved_version"] != "1.3.2" {
+		t.Errorf("first skill resolved_version=%v", first["resolved_version"])
+	}
+	// Verify second skill omits registry-only fields
+	second := got[1].(map[string]interface{})
+	if second["name"] != "team-creation" {
+		t.Errorf("second skill name=%v", second["name"])
+	}
+	if second["source"] != "local" {
+		t.Errorf("second skill source=%v", second["source"])
+	}
+	if _, hasURI := second["uri"]; hasURI && second["uri"] != "" {
+		t.Errorf("local skill should omit uri, got %v", second["uri"])
+	}
+}
+
+func TestContainerScriptHarness_ApplyResolvedSkills_NoOpEmpty(t *testing.T) {
+	h, _ := newTestContainerScriptHarness(t)
+	agentHome := t.TempDir()
+	if err := h.ApplyResolvedSkills(agentHome, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(agentHome, ".scion", "harness", "inputs", "resolved-skills.json")); !os.IsNotExist(err) {
+		t.Errorf("empty skills should not write file; stat err=%v", err)
+	}
+}
+
+func TestContainerScriptHarness_ProvisionReferencesResolvedSkillsInManifest(t *testing.T) {
+	h, _ := newTestContainerScriptHarness(t)
+	agentHome := t.TempDir()
+	skills := []api.ResolvedSkillRecord{
+		{Name: "test-skill", InstalledPath: ".test/skills/test-skill", Source: "registry"},
+	}
+	if err := h.ApplyResolvedSkills(agentHome, skills); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Provision(context.Background(), "a", agentHome, agentHome, "/workspace"); err != nil {
+		t.Fatal(err)
+	}
+	manifestData, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest ProvisionManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(manifest.Inputs.ResolvedSkills, "resolved-skills.json") {
+		t.Errorf("manifest.Inputs.ResolvedSkills=%q", manifest.Inputs.ResolvedSkills)
+	}
+}
+
 func TestResolve_ContainerScriptDispatch(t *testing.T) {
 	home := t.TempDir()
 	configsDir := filepath.Join(home, ".scion", "harness-configs")

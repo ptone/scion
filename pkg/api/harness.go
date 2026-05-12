@@ -91,3 +91,24 @@ type TelemetrySettingsApplier interface {
 type MCPSettingsApplier interface {
 	ApplyMCPSettings(agentHome string, mcpServers map[string]MCPServerConfig) error
 }
+
+// ResolvedSkillRecord describes a single skill that was resolved and placed into
+// the agent's skills directory. Both registry-resolved and locally-copied skills
+// are represented so container-side provision scripts can post-process them.
+type ResolvedSkillRecord struct {
+	Name            string `json:"name"`
+	URI             string `json:"uri,omitempty"`
+	ResolvedVersion string `json:"resolved_version,omitempty"`
+	ContentHash     string `json:"content_hash,omitempty"`
+	InstalledPath   string `json:"installed_path"`
+	Source          string `json:"source"` // "registry" or "local"
+}
+
+// ResolvedSkillsApplier is an optional interface that harnesses can implement to
+// stage resolved skill metadata into their provisioning bundle. Container-script
+// harnesses write inputs/resolved-skills.json so provision.py scripts can
+// post-process skills (e.g. transform for non-standard harness formats). Built-in
+// harnesses place skills directly into SkillsDir() and do not need this.
+type ResolvedSkillsApplier interface {
+	ApplyResolvedSkills(agentHome string, skills []ResolvedSkillRecord) error
+}
