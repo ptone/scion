@@ -118,7 +118,6 @@ scion-python-sdk/           (repo or monorepo subdirectory)
 │       ├── _errors.py       (ScionError, NotFoundError, etc.)
 │       ├── _pagination.py   (SyncPage, AsyncPage iterators)
 │       ├── _streaming.py    (SSE stream parsing, event iterator)
-│       ├── _compat.py       (Legacy grove↔project field handling)
 │       ├── types/
 │       │   ├── __init__.py
 │       │   ├── agents.py    (Agent, CreateAgentRequest, etc.)
@@ -157,7 +156,6 @@ scion-typescript-sdk/        (repo or monorepo subdirectory)
 │   ├── errors.ts            (ScionError, NotFoundError, etc.)
 │   ├── pagination.ts        (PageIterator, auto-pagination)
 │   ├── streaming.ts         (SSE parsing, AsyncIterable adapter)
-│   ├── compat.ts            (Legacy grove↔project field handling)
 │   ├── types/
 │   │   ├── agents.ts
 │   │   ├── projects.ts
@@ -471,12 +469,11 @@ for await (const agent of client.agents.list({ phase: 'running' })) {
 
 ### Legacy Field Handling (grove → project)
 
-The Go client handles the `grove` → `project` rename with custom `MarshalJSON`/`UnmarshalJSON` on every type. The SDKs should:
+The Go client handles the `grove` → `project` rename with custom `MarshalJSON`/`UnmarshalJSON` on every type. **Decision:** The SDKs target the current Hub version only, so:
 
 - Use `project` as the canonical field name in all types.
-- Accept `grove`/`groveId` in deserialization (for older Hub versions) via Pydantic validators (Python) or custom deserializers (TypeScript).
-- Send both `projectId` and `groveId` in request bodies during the transition period.
-- Remove `grove` support in SDK 1.0 once the Hub drops legacy endpoints.
+- Do NOT implement `grove`/`groveId` fallbacks — SDKs only support current Hub versions with `project` endpoints.
+- This keeps the SDK code clean and avoids the compatibility complexity present in the Go client.
 
 ---
 
@@ -678,21 +675,23 @@ main();
 
 ---
 
-## 14. Open Questions
+## 14. Resolved Decisions
 
-1. **Repository structure:** Monorepo subdirectory (`sdk/python/`, `sdk/typescript/`) vs. separate repos? Monorepo is recommended but has implications for CI and release tooling.
+Decisions confirmed by project owner (2026-05-12):
 
-2. **Package naming:** Is `scion-sdk` (PyPI) / `@scion/sdk` (npm) confirmed? Are there naming conflicts to check?
+1. **Repository structure:** Monorepo — `sdk/python/` and `sdk/typescript/` subdirectories inside the main scion repo.
+2. **Package naming:** `scion-sdk` (PyPI) / `@scion/sdk` (npm) — confirmed acceptable.
+3. **Minimum Hub version:** Current version only. No legacy `grove` field support needed — SDKs will use `project` endpoints exclusively.
+4. **Code generation:** Hand-written only for this round. No OpenAPI codegen. A future gRPC API version is possible but not in scope.
+5. **Phase 1 scope:** Confirmed — Agents, Messaging, SSE Streaming, Projects, Secrets, and Error handling.
 
-3. **Minimum Hub version:** Should the SDKs support older Hub versions that still use `grove` terminology, or only target the latest Hub with `project` endpoints?
+### Remaining Open Questions
 
-4. **OpenAPI spec timeline:** Is there a plan to introduce an OpenAPI spec for the Hub API? If so, should the SDKs be designed to eventually be generated from it, or will they always be hand-written?
+6. **SSE reconnection:** Should the SDKs implement automatic reconnection on SSE stream interruption, or leave that to the consumer? (Recommendation: implement it with configurable behavior.)
 
-5. **SSE reconnection:** Should the SDKs implement automatic reconnection on SSE stream interruption, or leave that to the consumer? (Recommendation: implement it with configurable behavior.)
+7. **Rate limiting:** Does the Hub implement rate limiting? If so, should the SDKs include automatic retry-after handling?
 
-6. **Rate limiting:** Does the Hub implement rate limiting? If so, should the SDKs include automatic retry-after handling?
-
-7. **WebSocket support:** The Hub has WebSocket endpoints for broker control channels. Should the SDKs expose WebSocket support, or is SSE sufficient for SDK consumers?
+8. **WebSocket support:** The Hub has WebSocket endpoints for broker control channels. Should the SDKs expose WebSocket support, or is SSE sufficient for SDK consumers?
 
 ---
 
