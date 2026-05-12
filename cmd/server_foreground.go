@@ -861,6 +861,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		log.Printf("Warning: harness config bootstrap failed: %v", err)
 	}
 
+	// Bootstrap local skills into Hub (Skill Bank)
+	globalSkillsDir := filepath.Join(globalDir, "skills")
+	if err := hubSrv.BootstrapSkillsFromDir(ctx, globalSkillsDir); err != nil {
+		log.Printf("Warning: skill bootstrap failed: %v", err)
+	}
+
 	log.Printf("Database: %s (%s)", cfg.Database.Driver, cfg.Database.URL)
 
 	return hubSrv, nil

@@ -17,3 +17,11 @@ schema_version: "1"
 description: "Default scion agent template"
 agent_instructions: agents.md
 system_prompt: system-prompt.md
+
+# Skills from the Skill Bank (resolved at agent provisioning time).
+# Local skills/ directory is kept for backward compatibility.
+skills:
+  - uri: scion@^1.0
+    optional: true
+  - uri: team-creation@^1.0
+    optional: true

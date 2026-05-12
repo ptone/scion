@@ -109,6 +109,7 @@ func (m *mockHubClient) Notifications() hubclient.NotificationService           
 func (m *mockHubClient) Subscriptions() hubclient.SubscriptionService                   { return nil }
 func (m *mockHubClient) SubscriptionTemplates() hubclient.SubscriptionTemplateService   { return nil }
 func (m *mockHubClient) ScheduledEvents(projectID string) hubclient.ScheduledEventService { return nil }
+func (m *mockHubClient) Skills() hubclient.SkillService                                  { return nil }
 func (m *mockHubClient) Schedules(projectID string) hubclient.ScheduleService             { return nil }
 func (m *mockHubClient) GCPServiceAccounts(projectID string) hubclient.GCPServiceAccountService {
 	return nil
