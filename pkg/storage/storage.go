@@ -242,6 +242,32 @@ func HarnessConfigStorageURI(bucket, scope, scopeID, slug string) string {
 	return "gs://" + bucket + "/" + path + "/"
 }
 
+// SkillStoragePath returns the storage path for a skill.
+// Skills are stored under the /skills prefix with scope-based organization.
+func SkillStoragePath(scope, scopeID, skillName string) string {
+	switch scope {
+	case "global":
+		return "skills/global/" + skillName
+	case "grove", "project":
+		return "skills/projects/" + scopeID + "/" + skillName
+	case "user":
+		return "skills/users/" + scopeID + "/" + skillName
+	default:
+		return "skills/" + skillName
+	}
+}
+
+// SkillStorageURI returns the full storage URI for a skill.
+func SkillStorageURI(bucket, scope, scopeID, skillName string) string {
+	path := SkillStoragePath(scope, scopeID, skillName)
+	return "gs://" + bucket + "/" + path + "/"
+}
+
+// SkillVersionStoragePath returns the storage path for a specific skill version.
+func SkillVersionStoragePath(scope, scopeID, skillName, version string) string {
+	return SkillStoragePath(scope, scopeID, skillName) + "/" + version
+}
+
 // WorkspaceStoragePath returns the storage path for an agent's workspace.
 // Workspaces are stored under /workspaces/{groveId}/{agentId}/.
 func WorkspaceStoragePath(groveID, agentID string) string {

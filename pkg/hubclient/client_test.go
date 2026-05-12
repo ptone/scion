@@ -61,6 +61,9 @@ func TestNew(t *testing.T) {
 	if client.Tokens() == nil {
 		t.Error("expected non-nil tokens service")
 	}
+	if client.Skills() == nil {
+		t.Error("expected non-nil skills service")
+	}
 }
 
 func TestHealth(t *testing.T) {
