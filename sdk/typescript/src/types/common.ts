@@ -41,3 +41,37 @@ export interface PaginatedResponse<T> {
   /** Total count of matching items (if the server provides it). */
   totalCount?: number;
 }
+
+/** Structured message for inter-agent and user-to-agent communication. */
+export interface StructuredMessage {
+  /** Schema version (currently 1). */
+  version: number;
+  /** ISO 8601 timestamp. */
+  timestamp: string;
+  /** Sender identity (e.g. "user:alice", "agent:code-reviewer"). */
+  sender: string;
+  /** Sender UUID. */
+  senderId?: string;
+  /** Recipient identity. */
+  recipient: string;
+  /** Recipient UUID. */
+  recipientId?: string;
+  /** Message content. */
+  msg: string;
+  /** Message type. */
+  type: 'instruction' | 'input-needed' | 'state-change' | 'assistant-reply';
+  /** If true, deliver as plain text without envelope formatting. */
+  plain?: boolean;
+  /** If true, deliver raw without any wrapping. */
+  raw?: boolean;
+  /** If true, mark as urgent. */
+  urgent?: boolean;
+  /** Whether this message was broadcasted. */
+  broadcasted?: boolean;
+  /** Status hint. */
+  status?: string;
+  /** File attachments (paths or references). */
+  attachments?: string[];
+  /** Arbitrary key-value metadata. */
+  metadata?: Record<string, string>;
+}

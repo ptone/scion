@@ -8,6 +8,7 @@ export type {
   HealthResponse,
   PageParams,
   PaginatedResponse,
+  StructuredMessage,
 } from './common.js';
 
 export type {
@@ -20,6 +21,7 @@ export type {
   UpdateAgentRequest,
   ListAgentsOptions,
   ListAgentsResponse,
+  SendStructuredMessageOptions,
 } from './agents.js';
 
 export type {
@@ -28,6 +30,7 @@ export type {
   CreateProjectRequest,
   UpdateProjectRequest,
   ListProjectsOptions,
+  ListProjectAgentsOptions,
   ListProjectsResponse,
 } from './projects.js';
 
@@ -36,12 +39,12 @@ export type {
   SetSecretRequest,
   SetSecretResponse,
   SecretScopeOptions,
+  ListSecretsOptions,
   ListSecretResponse,
 } from './secrets.js';
 
 export type {
   Message,
-  StructuredMessage,
   ListMessagesOptions,
   ListMessagesResponse,
 } from './messages.js';

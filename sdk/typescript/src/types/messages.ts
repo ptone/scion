@@ -22,7 +22,7 @@ export interface Message {
   recipientId: string;
   /** Message body text. */
   msg: string;
-  /** Message type (e.g. "text", "notification"). */
+  /** Message type (e.g. "instruction", "input-needed", "state-change", "assistant-reply"). */
   type: string;
   /** Whether this message is urgent. */
   urgent?: boolean;
@@ -34,14 +34,6 @@ export interface Message {
   agentId?: string;
   /** Creation timestamp (ISO 8601). */
   createdAt: string;
-}
-
-/** Structured message with additional metadata. */
-export interface StructuredMessage extends Message {
-  /** Structured data payload. */
-  data?: Record<string, unknown>;
-  /** Message priority level. */
-  priority?: string;
 }
 
 /** Options for listing messages. */

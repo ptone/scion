@@ -35,12 +35,23 @@ export type { ScionClientOptions } from './client.js';
 export { Page } from './pagination.js';
 export type { FetchNextPage } from './pagination.js';
 
+// Resources
+export {
+  BaseResource,
+  AgentsResource,
+  MessagesResource,
+  ProjectsResource,
+  SecretsResource,
+} from './resources/index.js';
+export type { SecretsPage } from './resources/index.js';
+
 // Type models
 export type {
   // Common
   HealthResponse,
   PageParams,
   PaginatedResponse,
+  StructuredMessage,
   // Agents
   Agent,
   AgentConfig,
@@ -51,22 +62,24 @@ export type {
   UpdateAgentRequest,
   ListAgentsOptions,
   ListAgentsResponse,
+  SendStructuredMessageOptions,
   // Projects
   Project,
   ProjectProvider,
   CreateProjectRequest,
   UpdateProjectRequest,
   ListProjectsOptions,
+  ListProjectAgentsOptions,
   ListProjectsResponse,
   // Secrets
   Secret,
   SetSecretRequest,
   SetSecretResponse,
   SecretScopeOptions,
+  ListSecretsOptions,
   ListSecretResponse,
   // Messages
   Message,
-  StructuredMessage,
   ListMessagesOptions,
   ListMessagesResponse,
 } from './types/index.js';
