@@ -28,7 +28,20 @@ from scion.types.common import _ScionModel
 
 
 class StructuredMessage(_ScionModel):
-    """A structured message payload for agent communication."""
+    """A structured message payload for agent communication.
+
+    Used with :meth:`AgentsResource.send_structured_message` and
+    :meth:`AgentsResource.broadcast_message` to deliver typed,
+    machine-readable messages to agents.
+
+    Attributes:
+        type: Message type (e.g. ``"instruction"``, ``"input-needed"``).
+        sender: Sender identity string (e.g. ``"user:alice"``).
+        sender_id: Sender UUID.
+        content: Human-readable message content.
+        data: Arbitrary structured data payload.
+        urgent: Mark the message as urgent.
+    """
 
     type: str = ""
     sender: str | None = None
@@ -49,7 +62,26 @@ class StructuredMessage(_ScionModel):
 
 
 class Message(_ScionModel):
-    """A message from the user's inbox."""
+    """A message from the user's inbox.
+
+    Represents a single message received by the authenticated user,
+    including metadata about sender, recipient, and read state.
+
+    Attributes:
+        id: Message UUID.
+        project_id: Project ID this message relates to.
+        sender: Display name of the sender.
+        sender_id: Sender user/agent ID.
+        recipient: Display name of the recipient.
+        recipient_id: Recipient user/agent ID.
+        msg: Message body text.
+        type: Message type (e.g. ``"instruction"``, ``"state-change"``).
+        urgent: Whether this message is urgent.
+        broadcasted: Whether this message was broadcasted.
+        read: Whether this message has been read.
+        agent_id: Agent ID if this message is from/to an agent.
+        created_at: Creation timestamp.
+    """
 
     id: str = ""
     project_id: str | None = Field(None, alias="projectId")

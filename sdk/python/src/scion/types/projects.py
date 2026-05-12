@@ -40,7 +40,25 @@ class ProjectProvider(_ScionModel):
 
 
 class Project(_ScionModel):
-    """A project from the Hub API."""
+    """A project from the Hub API.
+
+    Projects are the primary organizational unit in Scion, grouping agents,
+    templates, and runtime broker providers around a shared codebase.
+
+    Attributes:
+        id: Hub UUID.
+        name: Human-readable name.
+        slug: URL-safe slug.
+        git_remote: Git remote URL associated with this project.
+        default_runtime_broker_id: Default runtime broker ID.
+        created: Creation timestamp.
+        updated: Last-updated timestamp.
+        visibility: Visibility level (``"private"``, ``"public"``).
+        labels: User-defined labels.
+        annotations: User-defined annotations.
+        providers: Runtime brokers providing services to this project.
+        agent_count: Number of agents in this project.
+    """
 
     id: str = ""
     name: str = ""

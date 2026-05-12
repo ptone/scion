@@ -31,7 +31,22 @@ from scion.types.common import _ScionModel
 class Secret(_ScionModel):
     """Secret metadata from the Hub API.
 
-    Note: Secret values are never returned by the API.
+    Note: Secret values are write-only and never returned by the API.
+
+    Attributes:
+        id: Hub UUID.
+        key: Secret key name.
+        secret_ref: External secret reference (e.g. GCP Secret Manager URI).
+        secret_type: Secret type (``"environment"``, ``"variable"``, ``"file"``).
+        target: Projection target (defaults to ``key``).
+        scope: Scope type (``"user"``, ``"project"``, ``"runtime_broker"``).
+        scope_id: ID of the scoped entity.
+        description: Human-readable description.
+        injection_mode: ``"always"`` or ``"as_needed"``.
+        allow_progeny: Whether creator's progeny agents can access this secret.
+        version: Secret version number (incremented on update).
+        created: Creation timestamp.
+        updated: Last-updated timestamp.
     """
 
     id: str = ""

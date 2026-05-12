@@ -8,12 +8,19 @@ import type { PageParams, PaginatedResponse } from './common.js';
 
 /** A broker providing runtime services to a project. */
 export interface ProjectProvider {
+  /** Broker UUID. */
   brokerId: string;
+  /** Human-readable broker name. */
   brokerName: string;
+  /** Broker status (e.g. "online", "offline"). */
   status: string;
+  /** Last heartbeat timestamp (ISO 8601). */
   lastSeen?: string;
+  /** Local filesystem path on the broker. */
   localPath?: string;
+  /** User who linked this broker. */
   linkedBy?: string;
+  /** Timestamp when the broker was linked (ISO 8601). */
   linkedAt?: string;
 }
 

@@ -49,7 +49,24 @@ class DirectConnect(_ScionModel):
 
 
 class Agent(_ScionModel):
-    """An agent from the Hub API."""
+    """An agent from the Hub API.
+
+    Represents a container-based LLM code agent managed by the Scion Hub.
+    Contains identity, lifecycle, configuration, and runtime metadata.
+
+    Attributes:
+        id: Hub UUID (database primary key).
+        slug: URL-safe slug identifier (unique per project).
+        container_id: Runtime container ID (ephemeral).
+        name: Human-readable name.
+        template: Template slug used to create this agent.
+        project_id: ID of the owning project.
+        phase: Lifecycle phase (``"created"``, ``"running"``, ``"stopped"``, etc.).
+        activity: Runtime activity (``"idle"``, ``"thinking"``, ``"executing"``).
+        status: Legacy status field.
+        labels: User-defined labels.
+        annotations: User-defined annotations.
+    """
 
     id: str = ""
     slug: str = ""

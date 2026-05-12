@@ -26,9 +26,13 @@ export interface AgentConfig {
 
 /** Direct-connect (SSH) information for an agent. */
 export interface DirectConnect {
+  /** Whether direct connect is available. */
   enabled: boolean;
+  /** SSH hostname or IP address. */
   sshHost?: string;
+  /** SSH port number. */
   sshPort?: number;
+  /** SSH username. */
   sshUser?: string;
 }
 
