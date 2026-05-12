@@ -26,6 +26,10 @@ web/dist/client/*
 web/public/assets/
 web/public/shoelace/
 
+# SDK
+sdk/typescript/node_modules/
+sdk/typescript/dist/
+
 # docs site
 docs-site/node_modules/
 docs-site/dist/
