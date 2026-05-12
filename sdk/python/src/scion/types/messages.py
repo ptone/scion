@@ -60,6 +60,7 @@ class Message(_ScionModel):
     msg: str = ""
     type: str = ""
     urgent: bool | None = None
+    broadcasted: bool | None = None
     read: bool = False
     agent_id: str | None = Field(None, alias="agentId")
     created_at: datetime | None = Field(None, alias="createdAt")

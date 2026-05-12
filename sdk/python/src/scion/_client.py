@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 
 from scion._transport import Transport
+from scion.resources.messages import MessagesResource
 from scion.types.common import HealthResponse
 
 
@@ -87,6 +88,7 @@ class ScionClient:
             max_retries=max_retries,
             headers=headers,
         )
+        self._messages: MessagesResource | None = None
 
     @classmethod
     def from_agent_env(cls) -> ScionClient:
@@ -117,7 +119,18 @@ class ScionClient:
         resp = self._transport.get("/healthz")
         return HealthResponse.model_validate(resp.json())
 
-    # -- Service property stubs (to be filled by resource agents) --
+    # -- Service properties --
+
+    @property
+    def messages(self) -> MessagesResource:
+        """Access the messages resource for inbox operations.
+
+        Returns:
+            A :class:`MessagesResource` bound to this client's transport.
+        """
+        if self._messages is None:
+            self._messages = MessagesResource(self._transport)
+        return self._messages
 
     # @property
     # def agents(self) -> AgentService: ...

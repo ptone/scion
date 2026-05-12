@@ -20,6 +20,7 @@ import os
 
 from scion._client import _resolve_token
 from scion._transport import AsyncTransport
+from scion.resources.messages import AsyncMessagesResource
 from scion.types.common import HealthResponse
 
 
@@ -56,6 +57,7 @@ class AsyncScionClient:
             max_retries=max_retries,
             headers=headers,
         )
+        self._messages: AsyncMessagesResource | None = None
 
     @classmethod
     def from_agent_env(cls) -> AsyncScionClient:
@@ -86,7 +88,18 @@ class AsyncScionClient:
         resp = await self._transport.get("/healthz")
         return HealthResponse.model_validate(resp.json())
 
-    # -- Service property stubs (to be filled by resource agents) --
+    # -- Service properties --
+
+    @property
+    def messages(self) -> AsyncMessagesResource:
+        """Access the messages resource for inbox operations.
+
+        Returns:
+            An :class:`AsyncMessagesResource` bound to this client's transport.
+        """
+        if self._messages is None:
+            self._messages = AsyncMessagesResource(self._transport)
+        return self._messages
 
     # @property
     # def agents(self) -> AsyncAgentService: ...
