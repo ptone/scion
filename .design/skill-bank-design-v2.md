@@ -931,36 +931,226 @@ SHA-256 content hashes verified at every transfer boundary:
 
 ---
 
-## 17. Migration Plan
+## 17. Implementation Plan
 
-### Phase 1: Core Registry (v1)
+### Overview
 
-**Goal**: Replace copy-paste pattern with Hub-hosted skill references.
+The implementation is broken into phases. Phase 1 builds the core registry and is decomposed into work packages that can be parallelized. Phases 2 and 3 are follow-on work that builds on Phase 1.
 
-1. **Schema**: Add `SkillReference` to `ScionConfig`, `skills` field to `scion-agent.yaml`
-2. **Store**: Add `SkillStore` interface, `migrationV51` for skills tables
-3. **Hub API**: Skill CRUD + batch resolve endpoint
-4. **Hub client**: `SkillService` interface and implementation
-5. **Provisioning**: `resolveSkillReferences()` in `ProvisionAgent` pipeline
-6. **Container-script**: Stage `inputs/resolved-skills.json` manifest
-7. **CLI**: `scion skills list/show/publish/resolve/create/delete`
-8. **Seed**: Publish existing `skills/scion` and `skills/team-creation` to `core` scope
-9. **Templates**: Update default templates to use `skills:` references instead of local copies
+```
+Phase 1 (Core Registry)
+├── 1A: Types & Schema  ──────┐
+├── 1B: Store Layer      ─────┤  (1A must complete first; 1B–1D can then parallelize)
+├── 1C: Hub API + Client ─────┤
+├── 1D: CLI Commands     ─────┘
+├── 1E: Provisioning Integration  (requires 1A + 1C)
+├── 1F: Container-Script Support  (requires 1E)
+├── 1G: Seed & Migrate            (requires 1B + 1C + 1E)
+│
+Phase 2 (Caching + Federation) ── requires Phase 1 complete
+Phase 3 (Discovery + Governance) ── requires Phase 2 complete
+```
 
-### Phase 2: Caching + Federation (v2)
+---
 
-1. Broker-side skill cache with content-hash validation
-2. External registry protocol specification
-3. Hub federation proxy
-4. CLI: `scion skills registries`
+### Phase 1A: Types & Schema Definition
 
-### Phase 3: Discovery + Governance (v3)
+**Covers**: Core type definitions and database migration — the foundation everything else depends on.
 
-1. Skill search/browse UI in web frontend
-2. Signature verification for federated skills
-3. Usage analytics
-4. Skill review workflow for `global` publishing
-5. Deprecation notifications
+**Work items**:
+1. Add `SkillReference` type to `pkg/api/types.go`
+2. Add `Skills []SkillReference` field to `ScionConfig` in `pkg/api/types.go`
+3. Add `Skill`, `SkillVersion`, `SkillFile` model types to `pkg/store/models.go`
+4. Add `SkillScope*` and `SkillStatus*` constants to `pkg/store/models.go`
+5. Add `SkillStore` interface to `pkg/store/store.go`, compose into `Store`
+6. Add `SkillFilter` type to `pkg/store/store.go`
+7. Write `migrationV51` (skills + skill_versions tables) in `pkg/store/sqlite/sqlite.go`
+
+**Files created**: None (all modifications to existing files)
+**Files modified**: `pkg/api/types.go`, `pkg/store/models.go`, `pkg/store/store.go`, `pkg/store/sqlite/sqlite.go`
+**Estimated complexity**: Small — primarily type definitions and SQL DDL. ~200 lines of new code.
+**Parallelism**: **Must complete before 1B, 1C, 1D, 1E.** This is the dependency root — all other Phase 1 packages import these types.
+
+---
+
+### Phase 1B: Store Layer Implementation
+
+**Covers**: SQLite implementation of `SkillStore` interface — CRUD for skills and versions, version resolution logic.
+
+**Work items**:
+1. Implement `SkillStore` interface in `pkg/store/sqlite/skills.go`
+   - `CreateSkill`, `GetSkill`, `GetSkillBySlug`, `UpdateSkill`, `DeleteSkill`, `ListSkills`
+   - `CreateSkillVersion`, `GetSkillVersion`, `ListSkillVersions`
+   - `ResolveSkillVersion` — semver constraint resolution (`^1.0` → `1.3.2`, `latest` → highest published)
+2. Write store tests in `pkg/store/sqlite/skills_test.go`
+3. Add stub/no-op implementations to `pkg/store/entadapter/` composite store if needed
+
+**Files created**: `pkg/store/sqlite/skills.go`, `pkg/store/sqlite/skills_test.go`
+**Files modified**: Possibly `pkg/store/entadapter/composite.go`
+**Estimated complexity**: Medium — the semver resolution logic is the non-trivial part. ~400–500 lines of implementation + tests.
+**Parallelism**: **Requires 1A.** Can run **in parallel with 1C and 1D** after 1A completes.
+
+---
+
+### Phase 1C: Hub API & Hub Client
+
+**Covers**: Hub-side HTTP handlers for skill CRUD, file transfer (signed URLs), batch resolution endpoint, and the corresponding client-side service.
+
+**Work items**:
+1. Hub handler types in `pkg/hub/skill_handlers.go`:
+   - `CreateSkillRequest`, `CreateSkillResponse`, `ResolveSkillsRequest`, `ResolveSkillsResponse`
+   - `handleSkills` (list/create dispatch), `handleSkillRoutes` (get/update/delete + sub-routes)
+   - `handleSkillResolve` (batch resolution endpoint)
+2. File transfer handlers in `pkg/hub/skill_file_handlers.go`:
+   - Upload URL generation, finalize, download URL generation
+   - Reuses `pkg/storage` signed-URL infrastructure (same pattern as `template_file_handlers.go`)
+3. Route registration in `pkg/hub/server.go`:
+   - `/api/v1/skills`, `/api/v1/skills/`, `/api/v1/skills/resolve`
+4. Hub client service in `pkg/hubclient/skills.go`:
+   - `SkillService` interface + `skillService` implementation
+   - `List`, `Get`, `Create`, `Update`, `Delete`
+   - `PublishVersion`, `ListVersions`
+   - `RequestUploadURLs`, `Finalize`, `RequestDownloadURLs`
+   - `Resolve` (batch resolution)
+   - `UploadFile`, `DownloadFile`
+5. Hub handler tests in `pkg/hub/skill_handlers_test.go`
+6. Hub client tests in `pkg/hubclient/skills_test.go`
+
+**Files created**: `pkg/hub/skill_handlers.go`, `pkg/hub/skill_file_handlers.go`, `pkg/hub/skill_handlers_test.go`, `pkg/hubclient/skills.go`, `pkg/hubclient/skills_test.go`
+**Files modified**: `pkg/hub/server.go`
+**Estimated complexity**: Large — this is the biggest single work package. ~800–1000 lines. The handler and client code is mostly mechanical (following template patterns), but the batch resolve endpoint has real logic.
+**Parallelism**: **Requires 1A.** Can run **in parallel with 1B and 1D** after 1A completes. (Hub handlers call the store interface; during development, the store implementation from 1B just needs to exist — tests can use a test store.)
+
+---
+
+### Phase 1D: CLI Commands
+
+**Covers**: `scion skills` command group — the user-facing CLI for skill management.
+
+**Work items**:
+1. Create `cmd/skills.go` with Cobra commands:
+   - `scion skills list [--scope <scope>] [--search <query>]`
+   - `scion skills show <name>`
+   - `scion skills publish <path> --scope <scope> [--version <ver>]`
+   - `scion skills delete <name>`
+   - `scion skills versions <name>`
+   - `scion skills create <name>` (scaffold)
+   - `scion skills resolve <uri>` (debug)
+2. Register in CLI mode allow-lists in `cmd/cli_mode.go`
+3. Wire commands to `hubclient.SkillService`
+
+**Files created**: `cmd/skills.go`
+**Files modified**: `cmd/cli_mode.go`
+**Estimated complexity**: Medium — Cobra command boilerplate is mechanical, but publish flow (upload files via signed URLs) requires care. ~400–500 lines.
+**Parallelism**: **Requires 1A.** Can run **in parallel with 1B and 1C** after 1A completes. (CLI calls the hub client; the client implementation from 1C just needs the interface — mocks suffice during development.)
+
+---
+
+### Phase 1E: Provisioning Integration
+
+**Covers**: Inject skill resolution into the `ProvisionAgent` pipeline — the critical path that makes skills actually work end-to-end.
+
+**Work items**:
+1. URI parsing: implement `ParseSkillURI()` function to parse `skill://<registry>/<scope>/<name>@<version>` and shorthand forms
+2. Skill resolution: implement `resolveSkillReferences()` in `pkg/agent/provision.go`
+   - Collect `SkillReference` entries from `finalScionCfg.Skills`
+   - Call `hubClient.Skills().Resolve()` with batch of URIs
+   - Download resolved files via signed URLs into `agentHome/<skillsDir>/<name>/`
+   - Handle `optional: true` (skip on failure) vs required (fail provisioning)
+   - Content-hash verification after download
+3. Wire into `ProvisionAgent` after existing skills copy (after line ~615)
+4. Add provision tests in `pkg/agent/provision_test.go`
+
+**Files created**: None (possibly a `pkg/agent/skill_resolve.go` to keep provision.go manageable)
+**Files modified**: `pkg/agent/provision.go`
+**Estimated complexity**: Medium — URI parsing and download logic. ~300–400 lines. Integration testing requires a mock hub client.
+**Parallelism**: **Requires 1A and 1C** (needs hub client `Resolve` method). Cannot run until 1C's `SkillService` interface is at least defined (implementation can be mocked).
+
+---
+
+### Phase 1F: Container-Script Harness Support
+
+**Covers**: Extend the container-script provisioning manifest so `provision.py` scripts can see which skills were resolved.
+
+**Work items**:
+1. Add `ResolvedSkills` field to `ProvisionInputs` in `pkg/harness/container_script_harness.go`
+2. Stage `inputs/resolved-skills.json` file during `Provision()` method
+3. Add `read_resolved_skills()` helper to `scion_harness.py`
+4. Update harness tests
+
+**Files modified**: `pkg/harness/container_script_harness.go`, embedded `scion_harness.py`
+**Estimated complexity**: Small — straightforward manifest extension. ~100–150 lines.
+**Parallelism**: **Requires 1E** (needs resolved skills data to stage). Serial after 1E.
+
+---
+
+### Phase 1G: Seed Data & Template Migration
+
+**Covers**: Publish existing first-party skills to the Hub and update default templates to reference them.
+
+**Work items**:
+1. Publish `skills/scion` and `skills/team-creation` to `core` scope (either via CLI or a bootstrap function similar to `template_bootstrap.go`)
+2. Update default templates in `pkg/config/embeds/templates/` to use `skills:` references instead of local copies
+3. Verify end-to-end flow: create agent → skills resolved from Hub → agent has skills
+
+**Files modified**: Template YAML files in `pkg/config/embeds/`, possibly `pkg/hub/template_bootstrap.go` (for skill seeding)
+**Estimated complexity**: Small — mostly configuration changes. ~100 lines.
+**Parallelism**: **Requires 1B, 1C, and 1E** all complete (needs working store, API, and provisioning). This is the final integration step.
+
+---
+
+### Phase 1 summary
+
+| Package | Est. size | Depends on | Can parallel with |
+|---------|-----------|------------|-------------------|
+| **1A**: Types & Schema | Small (~200 LOC) | — | Nothing (root) |
+| **1B**: Store Layer | Medium (~450 LOC) | 1A | 1C, 1D |
+| **1C**: Hub API + Client | Large (~900 LOC) | 1A | 1B, 1D |
+| **1D**: CLI Commands | Medium (~450 LOC) | 1A | 1B, 1C |
+| **1E**: Provisioning | Medium (~350 LOC) | 1A, 1C | — |
+| **1F**: Container-Script | Small (~125 LOC) | 1E | — |
+| **1G**: Seed & Migrate | Small (~100 LOC) | 1B, 1C, 1E | — |
+
+**Critical path**: 1A → 1C → 1E → 1F → 1G
+**Maximum parallelism**: After 1A, three agents can work on 1B, 1C, 1D simultaneously.
+**Total estimated new code**: ~2,500–2,800 lines (implementation + tests).
+
+```
+Time →
+1A ████
+       1B ████████        (parallel)
+       1C ████████████    (parallel, largest)
+       1D ████████        (parallel)
+              1E ████████  (after 1A+1C interface)
+                    1F ███ (after 1E)
+                       1G ██ (after 1B+1C+1E)
+```
+
+---
+
+### Phase 2: Caching + Federation
+
+**Requires**: Phase 1 complete.
+
+| Package | Covers | Est. complexity | Parallelism |
+|---------|--------|-----------------|-------------|
+| **2A**: Broker cache | Content-addressed cache at `~/.scion/cache/skills/`, LRU eviction, cache-hit path in provisioning | Medium | Can parallel with 2B |
+| **2B**: Federation proxy | External registry protocol, Hub proxy for federated URIs, trust configuration | Large | Can parallel with 2A |
+| **2C**: Registry CLI | `scion skills registries list/add` commands | Small | Requires 2B |
+
+---
+
+### Phase 3: Discovery + Governance
+
+**Requires**: Phase 2 complete.
+
+| Package | Covers | Est. complexity | Parallelism |
+|---------|--------|-----------------|-------------|
+| **3A**: Web UI | Skill search/browse in React frontend | Large | Can parallel with 3B |
+| **3B**: Governance | Signature verification, review workflow, deprecation notifications | Medium | Can parallel with 3A |
+| **3C**: Analytics | Usage tracking (which skills consumed, by which templates) | Small | Requires 3A |
+
+---
 
 ### Backward compatibility
 
@@ -1090,28 +1280,30 @@ scion skills publish ./security-audit --scope project --version 1.0.0
 
 ## Appendix A: File Map
 
-Files to create or modify, organized by phase:
+Files to create or modify, organized by implementation phase.
 
-### Phase 1 — new files
-| File | Purpose |
-|------|---------|
-| `pkg/store/models.go` | Add `Skill`, `SkillVersion`, `SkillFile` types, scope/status constants |
-| `pkg/store/store.go` | Add `SkillStore` interface, compose into `Store` |
-| `pkg/store/sqlite/skills.go` | SQLite implementation of `SkillStore` |
-| `pkg/store/sqlite/skills_test.go` | Store tests |
-| `pkg/hub/skill_handlers.go` | Hub API handlers for skill CRUD + resolve |
-| `pkg/hub/skill_file_handlers.go` | Signed-URL upload/download handlers |
-| `pkg/hub/skill_handlers_test.go` | Handler tests |
-| `pkg/hubclient/skills.go` | `SkillService` interface + implementation |
-| `pkg/hubclient/skills_test.go` | Client tests |
-| `cmd/skills.go` | CLI command definitions |
+### New files
+| File | Phase | Purpose |
+|------|-------|---------|
+| `pkg/store/sqlite/skills.go` | 1B | SQLite implementation of `SkillStore` |
+| `pkg/store/sqlite/skills_test.go` | 1B | Store tests |
+| `pkg/hub/skill_handlers.go` | 1C | Hub API handlers for skill CRUD + resolve |
+| `pkg/hub/skill_file_handlers.go` | 1C | Signed-URL upload/download handlers |
+| `pkg/hub/skill_handlers_test.go` | 1C | Handler tests |
+| `pkg/hubclient/skills.go` | 1C | `SkillService` interface + implementation |
+| `pkg/hubclient/skills_test.go` | 1C | Client tests |
+| `cmd/skills.go` | 1D | CLI command definitions |
+| `pkg/agent/skill_resolve.go` | 1E | URI parsing + skill resolution logic (optional split from provision.go) |
 
-### Phase 1 — modified files
-| File | Change |
-|------|--------|
-| `pkg/api/types.go` | Add `SkillReference` type, `Skills` field to `ScionConfig` |
-| `pkg/agent/provision.go` | Add `resolveSkillReferences()` call after line ~615 |
-| `pkg/harness/container_script_harness.go` | Add `ResolvedSkills` to `ProvisionInputs` |
-| `pkg/store/sqlite/sqlite.go` | Add `migrationV51` to migration list |
-| `pkg/hub/server.go` | Register `/api/v1/skills` routes |
-| `cmd/cli_mode.go` | Register `skills` command in mode allow-lists |
+### Modified files
+| File | Phase | Change |
+|------|-------|--------|
+| `pkg/api/types.go` | 1A | Add `SkillReference` type, `Skills` field to `ScionConfig` |
+| `pkg/store/models.go` | 1A | Add `Skill`, `SkillVersion`, `SkillFile` types, scope/status constants |
+| `pkg/store/store.go` | 1A | Add `SkillStore` interface, `SkillFilter`, compose into `Store` |
+| `pkg/store/sqlite/sqlite.go` | 1A | Add `migrationV51` to migration list |
+| `pkg/hub/server.go` | 1C | Register `/api/v1/skills` routes |
+| `cmd/cli_mode.go` | 1D | Register `skills` command in mode allow-lists |
+| `pkg/agent/provision.go` | 1E | Add `resolveSkillReferences()` call after line ~615 |
+| `pkg/harness/container_script_harness.go` | 1F | Add `ResolvedSkills` to `ProvisionInputs` |
+| Template YAMLs in `pkg/config/embeds/` | 1G | Add `skills:` references to default templates |
