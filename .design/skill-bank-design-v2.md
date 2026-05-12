@@ -182,9 +182,9 @@ skills:
 
 Local skills (files in template's `skills/` directory) continue to work unchanged. The `skills:` YAML field is resolved *after* local skills are copied. **Registry skills win on name conflict**, matching the existing overlay pattern where later sources override earlier ones. This lets a team override a core skill with a project-scoped version.
 
-### Template chain merging
+### Template chain behavior
 
-When a base template declares `skills:` and a derived template also declares `skills:`, the lists **merge** (union). On name conflict, the derived template's entry wins. This matches the existing overlay behavior for local `skills/` directories where later templates in the chain override files from earlier ones.
+Template-to-template inheritance is not yet implemented. The `skills:` field is a **flat, explicit list** per template — each template declares exactly the skills it needs. When template inheritance is tackled in the future, merging semantics for the `skills:` field will be defined at that time.
 
 ---
 
@@ -966,25 +966,31 @@ SHA-256 content hashes verified at every transfer boundary:
 
 - **Local skills continue to work**: The `skills/` directory in templates is unchanged. No migration required for existing templates.
 - **Gradual adoption**: Templates can mix local skills and URI references. No flag day.
-- **Solo mode**: When no Hub is connected, only local skills work. URI references fail gracefully if `optional: true`.
+- **Solo mode**: When no Hub is connected, only local skills work. URI references fail (gracefully if `optional: true`).
 
 ---
 
-## 18. Open Questions
+## 18. Resolved Design Decisions
 
-1. **Harness-specific skill variants**: Should a skill ship `SKILL.md` (universal) plus `SKILL.claude.md`, `SKILL.gemini.md` (harness-specific overrides)? The provisioner would pick the best match. Adds complexity but enables harness-tuned instructions.
+Decisions from reviewer feedback (2026-05-12):
 
-2. **MCP server dependencies**: A skill might require an MCP server. Should the registry metadata declare this, with the provisioner auto-injecting MCP config from the skill? Deferred to v2.
+1. **Harness-specific skill variants**: **No.** Skills ship universal `SKILL.md` only. No harness-specific variants (`SKILL.claude.md`, etc.). Keeps the model simple — skills are harness-agnostic by definition.
 
-3. **Lock file for determinism**: Should templates commit a `skills.lock` pinning exact versions and content hashes? Makes provisioning reproducible at the cost of requiring explicit `scion skills update` to pick up new versions. **Recommendation**: Yes, introduce in Phase 1 — deterministic builds are valuable for teams.
+2. **MCP server dependencies**: **No.** Skills are plain instruction bundles. No auto-detection or declaration of MCP server requirements. Skills that need specific MCP servers should document this in their `SKILL.md` for human/agent awareness.
 
-4. **Template inheritance interaction**: When base template declares `skills:` and derived template also declares `skills:`, merge (union) or replace? **Recommendation**: Merge with derived winning on name conflict (matches existing overlay semantics).
+3. **Lock file**: **Optional, future exploration.** A `skills.lock` for deterministic provisioning is not required in Phase 1. Can be explored as a follow-up if teams need reproducible builds.
 
-5. **`core` scope for templates**: Should templates also gain a `core` scope? Currently they have global/project/user. Adding `core` would unify the scoping model.
+4. **Template inheritance merging**: **Flat lists for now.** Template-to-template inheritance is not yet implemented, so the `skills:` field is a simple flat list per template. No merge/override logic needed. **Future item**: revisit when template inheritance is tackled.
 
-6. **Version resolution in solo mode**: Without Hub connectivity, version constraints (`^1.0`) cannot be resolved. Should the CLI cache resolution results alongside file content? This would allow offline re-provisioning with previously-resolved versions.
+5. **`core` scope unification**: **Deferred.** (See §18.1 below for context on what this question meant.) Not needed for Skill Bank v1.
 
-7. **Skill size limits**: Should we enforce a maximum skill bundle size? Large skills with many script files could bloat the cache. **Recommendation**: 10 MB per skill version (generous for text-based instructions + scripts).
+6. **Offline/solo mode**: **Not needed.** No special handling for offline version resolution. When Hub is unavailable, URI references fail (gracefully if `optional: true`). Solo mode uses local skills only.
+
+7. **Skill size limits**: **Yes, 10 MB per version.** Enforced at upload time. More than sufficient for text-based instructions and scripts.
+
+### 18.1 Context: "core" scope question
+
+For reference, the question was: templates today use three scopes (`global`, `project`, `user` — defined as `TemplateScopeGlobal`, `TemplateScopeProject`, `TemplateScopeUser` in `pkg/store/models.go`). The Skill Bank design introduces a fourth scope — `core` — for Scion-maintained first-party skills that only Hub admins can publish. The question was whether templates should also gain this `core` scope to keep the scoping models consistent. Decision: not needed for v1, skills and templates can have different scope sets.
 
 ---
 
