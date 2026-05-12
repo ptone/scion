@@ -109,6 +109,9 @@ type Store interface {
 	// Invite Code operations (User Invitation System)
 	InviteCodeStore
 
+	// Skill operations (Skill Bank)
+	SkillStore
+
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -1100,4 +1103,64 @@ type ProjectSyncStateStore interface {
 	// DeleteProjectSyncState removes sync state for a project and optional broker.
 	// Returns ErrNotFound if the state doesn't exist.
 	DeleteProjectSyncState(ctx context.Context, projectID, brokerID string) error
+}
+
+// =============================================================================
+// Skills (Skill Bank)
+// =============================================================================
+
+// SkillStore defines skill-related persistence operations.
+type SkillStore interface {
+	// CreateSkill creates a new skill record.
+	// Returns ErrAlreadyExists if a skill with the same name+scope+scopeID exists.
+	CreateSkill(ctx context.Context, skill *Skill) error
+
+	// GetSkill retrieves a skill by ID.
+	// Returns ErrNotFound if the skill doesn't exist.
+	GetSkill(ctx context.Context, id string) (*Skill, error)
+
+	// GetSkillByName retrieves a skill by name, scope, and scopeID.
+	// Returns ErrNotFound if the skill doesn't exist.
+	GetSkillByName(ctx context.Context, name, scope, scopeID string) (*Skill, error)
+
+	// UpdateSkill updates an existing skill.
+	// Returns ErrNotFound if the skill doesn't exist.
+	UpdateSkill(ctx context.Context, skill *Skill) error
+
+	// DeleteSkill removes a skill by ID.
+	// Also removes all associated versions.
+	// Returns ErrNotFound if the skill doesn't exist.
+	DeleteSkill(ctx context.Context, id string) error
+
+	// ListSkills returns skills matching the filter criteria.
+	ListSkills(ctx context.Context, filter SkillFilter, opts ListOptions) (*ListResult[Skill], error)
+
+	// CreateSkillVersion creates a new version for a skill.
+	// Returns ErrAlreadyExists if a version with the same skillID+version exists.
+	CreateSkillVersion(ctx context.Context, version *SkillVersion) error
+
+	// GetSkillVersion retrieves a skill version by ID.
+	// Returns ErrNotFound if the version doesn't exist.
+	GetSkillVersion(ctx context.Context, id string) (*SkillVersion, error)
+
+	// GetSkillVersionByNumber retrieves a specific version of a skill.
+	// Returns ErrNotFound if the version doesn't exist.
+	GetSkillVersionByNumber(ctx context.Context, skillID, version string) (*SkillVersion, error)
+
+	// ListSkillVersions returns all versions for a skill.
+	ListSkillVersions(ctx context.Context, skillID string) ([]SkillVersion, error)
+
+	// DeleteSkillVersion removes a skill version by ID.
+	// Returns ErrNotFound if the version doesn't exist.
+	DeleteSkillVersion(ctx context.Context, id string) error
+}
+
+// SkillFilter defines criteria for filtering skills.
+type SkillFilter struct {
+	Name    string // Exact match on skill name
+	Scope   string // Filter by scope (global, project, user)
+	ScopeID string // Filter by scope ID
+	Status  string // Filter by status (draft, active, archived)
+	OwnerID string // Filter by owner
+	Search  string // Full-text search on name/description
 }

@@ -1239,6 +1239,100 @@ const (
 )
 
 // =============================================================================
+// Skills (Skill Bank)
+// =============================================================================
+
+// Skill represents a reusable skill definition in the Hub database.
+// Skills are versioned bundles of instructions and scripts that can be
+// attached to agents via templates or ScionConfig.
+type Skill struct {
+	// Identity
+	ID          string `json:"id"`                    // UUID primary key
+	Name        string `json:"name"`                  // Unique slug identifier (e.g. "code-review")
+	DisplayName string `json:"displayName,omitempty"` // Human-friendly name
+	Description string `json:"description,omitempty"` // Short description of the skill's purpose
+
+	// Scope
+	Scope   string `json:"scope"`             // global, project, user
+	ScopeID string `json:"scopeId,omitempty"` // projectId or userId (empty for global)
+
+	// Status
+	Status string `json:"status"` // draft, active, archived
+
+	// Latest version tracking
+	LatestVersion string `json:"latestVersion,omitempty"` // Semver of the latest published version
+
+	// Metadata (stored as JSON)
+	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Ownership
+	OwnerID   string `json:"ownerId,omitempty"`
+	CreatedBy string `json:"createdBy,omitempty"`
+	UpdatedBy string `json:"updatedBy,omitempty"`
+
+	// Timestamps
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
+}
+
+// SkillVersion represents a specific version of a skill.
+// Each version is an immutable snapshot of the skill's content.
+type SkillVersion struct {
+	// Identity
+	ID      string `json:"id"`      // UUID primary key
+	SkillID string `json:"skillId"` // FK to Skill.ID
+	Version string `json:"version"` // Semver string (e.g. "1.0.0")
+
+	// Content tracking
+	ContentHash string `json:"contentHash,omitempty"` // SHA-256 hash of all files
+
+	// File manifest
+	Files []SkillFile `json:"files,omitempty"` // Files in this version
+
+	// Status
+	Status string `json:"status"` // draft, published, deprecated
+
+	// Changelog
+	Changelog string `json:"changelog,omitempty"` // Release notes for this version
+
+	// Ownership
+	CreatedBy string `json:"createdBy,omitempty"`
+
+	// Timestamps
+	Created time.Time `json:"created"`
+}
+
+// SkillFile represents a file within a skill version.
+type SkillFile struct {
+	Path string `json:"path"`           // Relative path (e.g. "SKILL.md", "scripts/lint.sh")
+	Size int64  `json:"size"`           // File size in bytes
+	Hash string `json:"hash"`           // SHA-256 hash of file
+	Mode string `json:"mode,omitempty"` // File permissions (e.g. "0644")
+}
+
+// SkillScope constants
+const (
+	SkillScopeGlobal  = "global"
+	SkillScopeProject = "project"
+	SkillScopeUser    = "user"
+)
+
+// SkillStatus constants
+const (
+	SkillStatusDraft    = "draft"
+	SkillStatusActive   = "active"
+	SkillStatusArchived = "archived"
+)
+
+// SkillVersionStatus constants
+const (
+	SkillVersionStatusDraft      = "draft"
+	SkillVersionStatusPublished  = "published"
+	SkillVersionStatusDeprecated = "deprecated"
+)
+
+// =============================================================================
 // Conversion Functions: Store -> API
 //
 // These functions convert persistence models to API models for external use.
