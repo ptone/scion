@@ -15,8 +15,11 @@
 """Resource modules for the Scion Python SDK."""
 
 from scion.resources.messages import AsyncMessagesResource, MessagesResource
+from scion.resources.projects import AsyncProjectsResource, ProjectsResource
 
 __all__ = [
     "MessagesResource",
     "AsyncMessagesResource",
+    "ProjectsResource",
+    "AsyncProjectsResource",
 ]

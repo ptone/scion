@@ -21,6 +21,7 @@ import os
 from scion._client import _resolve_token
 from scion._transport import AsyncTransport
 from scion.resources.messages import AsyncMessagesResource
+from scion.resources.projects import AsyncProjectsResource
 from scion.types.common import HealthResponse
 
 
@@ -101,14 +102,22 @@ class AsyncScionClient:
             self._messages = AsyncMessagesResource(self._transport)
         return self._messages
 
-    # @property
-    # def agents(self) -> AsyncAgentService: ...
+    @property
+    def projects(self) -> AsyncProjectsResource:
+        """Access project operations.
+
+        Returns:
+            An :class:`AsyncProjectsResource` bound to this client's transport.
+        """
+        if not hasattr(self, "_projects"):
+            self._projects = AsyncProjectsResource(self._transport)
+        return self._projects
 
     # @property
-    # def projects(self) -> AsyncProjectService: ...
+    # def agents(self) -> AsyncAgentsResource: ...
 
     # @property
-    # def secrets(self) -> AsyncSecretService: ...
+    # def secrets(self) -> AsyncSecretsResource: ...
 
     async def close(self) -> None:
         """Close the underlying HTTP transport."""
