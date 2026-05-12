@@ -614,6 +614,31 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
+	// Step 3c: Resolve referenced skills from the Skill Bank (if any).
+	// Registry skills are placed after local skills and win on name conflict,
+	// matching the existing overlay pattern where later sources override earlier.
+	if len(finalScionCfg.Skills) > 0 && skillsDir != "" {
+		hubClient := hubClientFromContext(ctx)
+		if hubClient != nil {
+			skillsDest := filepath.Join(agentHome, skillsDir)
+			if err := os.MkdirAll(skillsDest, 0755); err != nil {
+				return "", "", nil, fmt.Errorf("failed to create skills dir for resolution: %w", err)
+			}
+
+			resolveProjectID, _ := config.ReadProjectID(projectDir)
+			if err := resolveSkillReferences(ctx, hubClient, finalScionCfg.Skills, skillsDest, resolveProjectID, ""); err != nil {
+				return "", "", nil, fmt.Errorf("resolve skill references: %w", err)
+			}
+		} else {
+			// No hub client — check if any required skills exist
+			for _, ref := range finalScionCfg.Skills {
+				if !ref.Optional {
+					util.Debugf("ProvisionAgent: skill %q requires hub client but none available (skipping)", skillRefToURI(ref))
+				}
+			}
+		}
+	}
+
 	// Step 4: Inject agent instructions
 
 	// Determine whether inline config provided content directly (already resolved).

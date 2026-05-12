@@ -413,9 +413,32 @@ type TelemetrySamplingConfig struct {
 
 // SkillReference identifies a skill from the Skill Bank to attach to an agent.
 // Used in templates and ScionConfig to declare skill dependencies.
+//
+// Skills can be referenced in two ways:
+//  1. URI-based: skill://<registry>/<scope>/<name>@<version> (or a bare name)
+//  2. Name+Version: explicit name and optional semver constraint
+//
+// If URI is set it takes precedence. Otherwise, Name (and optional Version)
+// are used to construct a resolution request.
 type SkillReference struct {
-	Name    string `json:"name" yaml:"name"`                           // Skill name (slug)
-	Version string `json:"version,omitempty" yaml:"version,omitempty"` // Semver constraint (e.g. "^1.0.0"); empty = latest
+	// URI is the skill reference in URI format:
+	//   skill://<registry>/<scope>/<name>@<version>
+	// Or a bare name for scope-search resolution.
+	URI string `json:"uri,omitempty" yaml:"uri,omitempty"`
+
+	// Name is the skill name (slug). Used when URI is not set.
+	Name string `json:"name,omitempty" yaml:"name,omitempty"`
+
+	// Version is a semver constraint (e.g. "^1.0.0"). Empty means "latest".
+	Version string `json:"version,omitempty" yaml:"version,omitempty"`
+
+	// As optionally renames the skill directory in the agent home.
+	// If empty, the skill's declared name is used.
+	As string `json:"as,omitempty" yaml:"as,omitempty"`
+
+	// Optional controls whether provisioning fails if the skill
+	// cannot be resolved. Default false (required).
+	Optional bool `json:"optional,omitempty" yaml:"optional,omitempty"`
 }
 
 type ScionConfig struct {

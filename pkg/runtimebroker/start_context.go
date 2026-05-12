@@ -35,6 +35,7 @@ type startContext struct {
 	Opts         api.StartOptions
 	TemplateSlug string
 	Manager      agent.Manager
+	HubConn      *HubConnection // Hub connection for skill resolution (may be nil)
 }
 
 // startContextInputs captures the handler-specific fields that vary across
@@ -458,6 +459,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Opts:         opts,
 		TemplateSlug: templateSlug,
 		Manager:      mgr,
+		HubConn:      hubConn,
 	}, nil
 }
 

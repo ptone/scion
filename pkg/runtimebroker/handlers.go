@@ -589,6 +589,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	opts := sc.Opts
 
+	// Inject hub client into context for skill resolution during provisioning.
+	if sc.HubConn != nil && sc.HubConn.HubClient != nil {
+		ctx = agent.ContextWithHubClient(ctx, sc.HubConn.HubClient)
+	}
+
 	// If WorkspaceStoragePath is set, download workspace from GCS (non-git bootstrap)
 	if req.WorkspaceStoragePath != "" {
 		// For hub-native groves (ProjectSlug set), use the conventional path
@@ -1048,6 +1053,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 		}
 	}
 
+	// Inject hub client into context for skill resolution during provisioning.
+	if sc.HubConn != nil && sc.HubConn.HubClient != nil {
+		ctx = agent.ContextWithHubClient(ctx, sc.HubConn.HubClient)
+	}
+
 	// Re-resolve manager after profile update
 	mgr := s.resolveManagerForOpts(opts)
 	agentInfo, err := mgr.Start(ctx, opts)
@@ -1204,6 +1214,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, groveI
 
 	if opts.ProjectPath != "" {
 		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
+	}
+
+	// Inject hub client into context for skill resolution during provisioning.
+	if sc.HubConn != nil && sc.HubConn.HubClient != nil {
+		ctx = agent.ContextWithHubClient(ctx, sc.HubConn.HubClient)
 	}
 
 	// Stop then start — tolerate stop errors since the container may already
@@ -1991,6 +2006,11 @@ func (s *Server) finalizeEnv(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 	opts := sc.Opts
+
+	// Inject hub client into context for skill resolution during provisioning.
+	if sc.HubConn != nil && sc.HubConn.HubClient != nil {
+		ctx = agent.ContextWithHubClient(ctx, sc.HubConn.HubClient)
+	}
 
 	if s.config.Debug {
 		s.envSecretLog.Debug("Finalize-env: StartOptions built from pending request",
