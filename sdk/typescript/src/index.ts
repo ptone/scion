@@ -31,6 +31,10 @@ export type { TransportOptions, RequestOptions } from './transport.js';
 export { ScionClient } from './client.js';
 export type { ScionClientOptions } from './client.js';
 
+// Pagination
+export { Page } from './pagination.js';
+export type { FetchNextPage } from './pagination.js';
+
 // Type models
 export type {
   // Common
