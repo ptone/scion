@@ -6,6 +6,7 @@
 
 import { BaseResource } from './base.js';
 import { Page } from '../pagination.js';
+import { ScionStream } from '../streaming.js';
 import type {
   Agent,
   CreateAgentRequest,
@@ -14,6 +15,13 @@ import type {
   SendStructuredMessageOptions,
 } from '../types/agents.js';
 import type { StructuredMessage } from '../types/common.js';
+import type {
+  AgentEvent,
+  LogEntry,
+  StreamOptions,
+  StreamCallbackOptions,
+  StreamEvent,
+} from '../types/streaming.js';
 
 /** Raw list response from the API. */
 interface ListAgentsApiResponse {
@@ -209,6 +217,121 @@ export class AgentsResource extends BaseResource {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Streaming
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Stream real-time agent events via SSE.
+   *
+   * Subscribes to agent lifecycle events (created, status, deleted) for
+   * agents in the current scope (project-scoped or global).
+   *
+   * @param agentId - The agent's unique identifier.
+   * @param opts - Stream options (signal, reconnect, query overrides).
+   * @returns An async iterable of {@link AgentEvent} objects.
+   *
+   * @example
+   * ```ts
+   * const stream = client.agents.streamEvents('agent-id');
+   * for await (const event of stream) {
+   *   console.log(`[${event.type}] ${event.data.phase}`);
+   *   if (event.data.phase === 'stopped') break;
+   * }
+   * ```
+   */
+  streamEvents(agentId: string, opts?: StreamOptions): ScionStream<AgentEvent>;
+  /**
+   * Stream real-time agent events via SSE with callbacks.
+   *
+   * @param agentId - The agent's unique identifier.
+   * @param opts - Callback-style stream options.
+   * @returns A promise that resolves when the stream closes.
+   */
+  streamEvents(agentId: string, opts: StreamCallbackOptions<AgentEvent>): Promise<void>;
+  streamEvents(
+    agentId: string,
+    opts?: StreamOptions | StreamCallbackOptions<AgentEvent>,
+  ): ScionStream<AgentEvent> | Promise<void> {
+    const subjectPattern = this.projectId
+      ? `project.${this.projectId}.agent.${agentId}.*`
+      : `agent.${agentId}.*`;
+
+    const baseQuery: Record<string, string> = {
+      sub: subjectPattern,
+      ...(opts?.query ?? {}),
+    };
+
+    const streamOpts: StreamOptions = {
+      ...opts,
+      query: baseQuery,
+    };
+
+    const stream = new ScionStream<AgentEvent>(
+      this.transport,
+      '/events',
+      parseAgentEvent,
+      streamOpts,
+    );
+
+    if (opts && 'onEvent' in opts) {
+      return stream.subscribe(opts);
+    }
+
+    return stream;
+  }
+
+  /**
+   * Stream cloud log entries for an agent via SSE.
+   *
+   * Opens a long-lived SSE connection to the cloud logs streaming endpoint
+   * and yields parsed log entries as they arrive.
+   *
+   * @param agentId - The agent's unique identifier.
+   * @param opts - Stream options, plus optional log filtering query params.
+   * @returns An async iterable of {@link LogEntry} objects.
+   *
+   * @example
+   * ```ts
+   * const stream = client.agents.streamCloudLogs('agent-id');
+   * for await (const entry of stream) {
+   *   console.log(`[${entry.severity}] ${entry.message}`);
+   * }
+   * ```
+   */
+  streamCloudLogs(agentId: string, opts?: StreamOptions): ScionStream<LogEntry>;
+  /**
+   * Stream cloud log entries with callbacks.
+   *
+   * @param agentId - The agent's unique identifier.
+   * @param opts - Callback-style stream options.
+   * @returns A promise that resolves when the stream closes.
+   */
+  streamCloudLogs(agentId: string, opts: StreamCallbackOptions<LogEntry>): Promise<void>;
+  streamCloudLogs(
+    agentId: string,
+    opts?: StreamOptions | StreamCallbackOptions<LogEntry>,
+  ): ScionStream<LogEntry> | Promise<void> {
+    const streamOpts: StreamOptions = { ...opts };
+
+    const stream = new ScionStream<LogEntry>(
+      this.transport,
+      `${this.agentPath(agentId)}/cloud-logs/stream`,
+      parseLogEntry,
+      streamOpts,
+    );
+
+    if (opts && 'onEvent' in opts) {
+      return stream.subscribe(opts);
+    }
+
+    return stream;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Internal
+  // ---------------------------------------------------------------------------
+
   /** Internal: fetch a single page of agents. */
   private async fetchPage(params?: ListAgentsOptions): Promise<Page<Agent>> {
     const query: Record<string, string> = {};
@@ -237,5 +360,70 @@ export class AgentsResource extends BaseResource {
       (cursor) => this.fetchPage({ ...params, cursor }),
       result.totalCount,
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SSE event parsers
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a raw SSE event into an {@link AgentEvent}.
+ *
+ * The Hub SSE endpoint sends events in the format:
+ * ```
+ * event: update
+ * data: {"subject":"project.xxx.agent.status","data":{...}}
+ * ```
+ *
+ * @internal
+ */
+function parseAgentEvent(event: StreamEvent): AgentEvent | null {
+  try {
+    const envelope = JSON.parse(event.raw) as {
+      subject?: string;
+      data?: Record<string, unknown>;
+    };
+
+    if (!envelope.subject || !envelope.data) {
+      return null;
+    }
+
+    // Extract event type from subject suffix (e.g. "project.x.agent.status" → "status")
+    const parts = envelope.subject.split('.');
+    const type = parts[parts.length - 1] ?? 'unknown';
+
+    return {
+      subject: envelope.subject,
+      type,
+      data: envelope.data as AgentEvent['data'],
+    };
+  } catch {
+    // Malformed JSON — skip
+    return null;
+  }
+}
+
+/**
+ * Parse a raw SSE event into a {@link LogEntry}.
+ *
+ * The cloud logs SSE endpoint sends events in the format:
+ * ```
+ * data: {"timestamp":"...","severity":"INFO","message":"..."}
+ * ```
+ *
+ * @internal
+ */
+function parseLogEntry(event: StreamEvent): LogEntry | null {
+  try {
+    const entry = JSON.parse(event.raw) as LogEntry;
+    // Basic validation — must have at least timestamp and message
+    if (!entry.timestamp || !entry.message) {
+      return null;
+    }
+    return entry;
+  } catch {
+    // Malformed JSON — skip
+    return null;
   }
 }

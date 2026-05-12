@@ -48,3 +48,13 @@ export type {
   ListMessagesOptions,
   ListMessagesResponse,
 } from './messages.js';
+
+export type {
+  StreamEvent,
+  AgentEvent,
+  AgentDetail,
+  LogEntry,
+  SourceLocation,
+  StreamOptions,
+  StreamCallbackOptions,
+} from './streaming.js';

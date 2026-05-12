@@ -35,6 +35,9 @@ export type { ScionClientOptions } from './client.js';
 export { Page } from './pagination.js';
 export type { FetchNextPage } from './pagination.js';
 
+// Streaming
+export { ScionStream, createSSEParser, createLineSplitter } from './streaming.js';
+
 // Resources
 export {
   BaseResource,
@@ -82,4 +85,12 @@ export type {
   Message,
   ListMessagesOptions,
   ListMessagesResponse,
+  // Streaming
+  StreamEvent,
+  AgentEvent,
+  AgentDetail,
+  LogEntry,
+  SourceLocation,
+  StreamOptions,
+  StreamCallbackOptions,
 } from './types/index.js';
