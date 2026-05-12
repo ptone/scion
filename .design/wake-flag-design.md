@@ -349,6 +349,91 @@ This is out of scope for the initial implementation but the API design supports 
 - `pkg/hub/messagebroker.go` — message broker fan-out
 - `pkg/hub/handlers_broker_inbound.go` — broker inbound relay
 
+## Implementation Phases
+
+### Phase 1: Interface plumbing — `SendStructuredMessage` signature change
+**Covers:** Add `wake bool` parameter to the `AgentService` interface in `pkg/hubclient/agents.go`, update the implementation, and update **all** existing call sites to pass `false`.
+**Files:**
+- `pkg/hubclient/agents.go` — interface definition + implementation
+- `cmd/message.go` — 3 call sites (two broadcast fan-outs + single-agent path)
+- `extras/scion-a2a-bridge/internal/bridge/bridge.go` — 3 call sites
+- `extras/scion-a2a-bridge/internal/bridge/stream.go` — 1 call site
+- `extras/scion-chat-app/internal/chatapp/commands.go` — 1 call site
+
+**Complexity:** Low. Mechanical signature change — add a parameter, pass `false` at every existing call site. The risk is missing a call site and breaking compilation.
+**Dependencies:** None. Can start immediately.
+**Parallelizable:** Yes — this phase has no dependency on other phases, though Phases 2–4 depend on it.
+
+---
+
+### Phase 2: CLI flag and validation
+**Covers:** Add `--wake` / `-w` flag to `cmd/message.go`, all flag incompatibility validation rules, Hub-mode requirement check, and passing `wake` through to `sendMessageViaHub()`.
+**Files:**
+- `cmd/message.go` — flag variable, `init()` registration, validation block in `RunE`, `sendMessageViaHub()` signature change, local-mode error gate
+
+**Complexity:** Low. Follows the established pattern of other flag additions (`--notify`, `--raw`, `--plain`). The validation rules are straightforward boolean checks.
+**Dependencies:** Phase 1 (needs the updated `SendStructuredMessage` signature to pass `wake` through).
+**Parallelizable:** Can be done in parallel with Phase 3 (Hub handler) if the Phase 1 interface is landed first. In practice, since both touch `cmd/message.go`, serial is cleaner.
+
+---
+
+### Phase 3: Hub handler — wake logic in `handleAgentMessage`
+**Covers:** Add `Wake` field to Hub's `MessageRequest` struct. Implement the phase-switching wake logic in `handleAgentMessage`: check agent phase, dispatch start for suspended agents, update Hub state, gate on readiness, then fall through to existing message dispatch.
+**Files:**
+- `pkg/hub/handlers.go` — `MessageRequest` struct, `handleAgentMessage()` function
+
+**Complexity:** Medium. This is the core logic. Requires careful ordering (start dispatch → state update → readiness check → message dispatch) and correct error handling for each phase. The readiness polling helper (`waitForAgentReady`) is new code.
+**Dependencies:** Phase 1 (for the API contract). Phase 2 is not strictly required since the Hub handler reads `req.Wake` from the HTTP request body, independent of the CLI flag.
+**Parallelizable:** Can be done in parallel with Phase 2 after Phase 1 is complete.
+
+---
+
+### Phase 4: Readiness polling — `waitForAgentReady` helper
+**Covers:** Implement the `waitForAgentReady(ctx, agentID, timeout)` method on the Hub server. Polls `store.GetAgent()` at 500ms intervals until the agent's `Activity` field is non-empty (indicating the harness has reported its first status after resume), or until timeout.
+**Files:**
+- `pkg/hub/handlers.go` (or a new `pkg/hub/wake.go` if the method is large enough to warrant its own file)
+
+**Complexity:** Medium. The polling logic itself is simple, but the correctness depends on understanding the sciontool status reporting lifecycle. Need to verify that resumed agents reliably report an activity update within the timeout window. If they don't, this phase produces a sub-issue rather than a workaround.
+**Dependencies:** None for the implementation, but it's called by Phase 3. Can be implemented and tested independently.
+**Parallelizable:** Yes — fully parallel with Phases 2 and 3. The method is self-contained and only needs the store interface.
+
+---
+
+### Phase 5: Tests
+**Covers:** Unit tests for all new code: flag validation (Phase 2), Hub handler wake logic (Phase 3), readiness polling (Phase 4), and the interface change (Phase 1).
+**Files:**
+- `cmd/message_test.go` (or new test file) — flag validation tests
+- `pkg/hub/handlers_test.go` (or new `pkg/hub/wake_test.go`) — Hub handler wake tests with mocked store/dispatcher
+- Integration-level test for the end-to-end wake-then-message flow (if test infrastructure supports it)
+
+**Complexity:** Medium. Requires mocking the store (to control agent phase) and the dispatcher (to verify start dispatch). The readiness polling test needs to simulate activity updates arriving asynchronously.
+**Dependencies:** Phases 1–4 (tests exercise the code written in those phases).
+**Parallelizable:** Test scaffolding (mock setup, test helpers) can be written in parallel with implementation phases. Test bodies must be written after the code they test.
+
+---
+
+### Phase Summary
+
+```
+Phase 1: Interface plumbing          [Low]     ──┐
+                                                  ├── Phase 2: CLI flag + validation  [Low]
+Phase 4: Readiness polling helper    [Medium]  ──┤
+                                                  └── Phase 3: Hub handler wake logic [Medium]
+                                                                                        │
+                                                                      Phase 5: Tests  [Medium]
+```
+
+| Phase | Complexity | Serial/Parallel | Depends on |
+|-------|-----------|-----------------|------------|
+| 1. Interface plumbing | Low | Start immediately | — |
+| 2. CLI flag + validation | Low | After Phase 1 | Phase 1 |
+| 3. Hub handler wake logic | Medium | After Phase 1; parallel with Phase 2 | Phase 1, Phase 4 |
+| 4. Readiness polling helper | Medium | Parallel with all others | — |
+| 5. Tests | Medium | After Phases 1–4 | Phases 1–4 |
+
+**Critical path:** Phase 1 → Phase 3 → Phase 5
+**Parallelizable work:** Phase 4 can proceed independently from the start. Phase 2 and Phase 3 can run in parallel once Phase 1 is done.
+
 ## Testing Strategy
 
 ### Unit tests
