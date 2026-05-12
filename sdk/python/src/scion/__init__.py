@@ -30,6 +30,7 @@ from scion._errors import (
 )
 from scion._pagination import AsyncPage, SyncPage
 from scion.resources.agents import AgentsResource, AsyncAgentsResource
+from scion.resources.secrets import AsyncSecretsResource, SecretsResource
 
 __version__ = "0.1.0"
 
@@ -40,6 +41,8 @@ __all__ = [
     # Resources
     "AgentsResource",
     "AsyncAgentsResource",
+    "SecretsResource",
+    "AsyncSecretsResource",
     # Errors
     "ScionError",
     "AuthenticationError",

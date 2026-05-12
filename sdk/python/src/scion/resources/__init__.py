@@ -17,6 +17,7 @@
 from scion.resources.agents import AgentsResource, AsyncAgentsResource
 from scion.resources.messages import AsyncMessagesResource, MessagesResource
 from scion.resources.projects import AsyncProjectsResource, ProjectsResource
+from scion.resources.secrets import AsyncSecretsResource, SecretsResource
 
 __all__ = [
     "AgentsResource",
@@ -25,4 +26,6 @@ __all__ = [
     "AsyncMessagesResource",
     "ProjectsResource",
     "AsyncProjectsResource",
+    "SecretsResource",
+    "AsyncSecretsResource",
 ]

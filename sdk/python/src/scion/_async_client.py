@@ -23,6 +23,7 @@ from scion._transport import AsyncTransport
 from scion.resources.agents import AsyncAgentsResource
 from scion.resources.messages import AsyncMessagesResource
 from scion.resources.projects import AsyncProjectsResource
+from scion.resources.secrets import AsyncSecretsResource
 from scion.types.common import HealthResponse
 
 
@@ -61,6 +62,7 @@ class AsyncScionClient:
         )
         self._agents: AsyncAgentsResource | None = None
         self._messages: AsyncMessagesResource | None = None
+        self._secrets: AsyncSecretsResource | None = None
 
     @classmethod
     def from_agent_env(cls) -> AsyncScionClient:
@@ -122,8 +124,16 @@ class AsyncScionClient:
             self._projects = AsyncProjectsResource(self._transport)
         return self._projects
 
-    # @property
-    # def secrets(self) -> AsyncSecretsResource: ...
+    @property
+    def secrets(self) -> AsyncSecretsResource:
+        """Access the secrets API resource.
+
+        Returns:
+            An :class:`AsyncSecretsResource` bound to this client's transport.
+        """
+        if self._secrets is None:
+            self._secrets = AsyncSecretsResource(self._transport)
+        return self._secrets
 
     async def close(self) -> None:
         """Close the underlying HTTP transport."""
