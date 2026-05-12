@@ -411,6 +411,13 @@ type TelemetrySamplingConfig struct {
 	Rates   map[string]float64 `json:"rates,omitempty" yaml:"rates,omitempty"`
 }
 
+// SkillReference identifies a skill from the Skill Bank to attach to an agent.
+// Used in templates and ScionConfig to declare skill dependencies.
+type SkillReference struct {
+	Name    string `json:"name" yaml:"name"`                           // Skill name (slug)
+	Version string `json:"version,omitempty" yaml:"version,omitempty"` // Semver constraint (e.g. "^1.0.0"); empty = latest
+}
+
 type ScionConfig struct {
 	Harness          string            `json:"harness,omitempty" yaml:"harness,omitempty"`
 	HarnessConfig    string            `json:"harness_config,omitempty" yaml:"harness_config,omitempty"`
@@ -437,6 +444,9 @@ type ScionConfig struct {
 	Telemetry     *TelemetryConfig           `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
 
 	Secrets []RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty"`
+
+	// Skills from the Skill Bank to attach to this agent
+	Skills []SkillReference `json:"skills,omitempty" yaml:"skills,omitempty"`
 
 	// Agnostic template fields
 	AgentInstructions    string `json:"agent_instructions,omitempty" yaml:"agent_instructions,omitempty"`

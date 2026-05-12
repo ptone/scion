@@ -144,6 +144,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV48,
 		migrationV49,
 		migrateV50,
+		migrationV51,
 	}
 
 	// Create migrations table if not exists
@@ -1326,6 +1327,46 @@ CREATE INDEX IF NOT EXISTS idx_gcp_sa_project ON gcp_service_accounts(project_id
 
 	return nil
 }
+
+// migrationV51 creates the skills and skill_versions tables for the Skill Bank feature.
+const migrationV51 = `
+CREATE TABLE IF NOT EXISTS skills (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    scope TEXT NOT NULL DEFAULT 'global',
+    scope_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft',
+    latest_version TEXT NOT NULL DEFAULT '',
+    labels TEXT NOT NULL DEFAULT '{}',
+    annotations TEXT NOT NULL DEFAULT '{}',
+    owner_id TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    updated_by TEXT NOT NULL DEFAULT '',
+    created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_name_scope ON skills(name, scope, scope_id);
+CREATE INDEX IF NOT EXISTS idx_skills_scope ON skills(scope, scope_id);
+CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status);
+CREATE INDEX IF NOT EXISTS idx_skills_owner ON skills(owner_id);
+
+CREATE TABLE IF NOT EXISTS skill_versions (
+    id TEXT PRIMARY KEY,
+    skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+    version TEXT NOT NULL,
+    content_hash TEXT NOT NULL DEFAULT '',
+    files TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'draft',
+    changelog TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_versions_skill_version ON skill_versions(skill_id, version);
+CREATE INDEX IF NOT EXISTS idx_skill_versions_skill ON skill_versions(skill_id);
+CREATE INDEX IF NOT EXISTS idx_skill_versions_status ON skill_versions(status);
+`
 
 // tableExists checks whether a table with the given name exists in the database.
 func tableExists(ctx context.Context, tx *sql.Tx, tableName string) (bool, error) {
