@@ -1,7 +1,7 @@
 # Design: `--wake` Flag for `scion message` Command
 
 **Issue:** [#26](https://github.com/ptone/scion/issues/26)
-**Status:** Draft — Awaiting Approval
+**Status:** Approved (with revisions — see Decisions below)
 **Author:** design-wake agent
 **Date:** 2026-05-12
 
@@ -112,39 +112,16 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string,
 }
 ```
 
-#### Local mode path
+#### Local mode path — not supported
 
-Before attempting message delivery, check the agent's phase and resume if needed:
+`--wake` is Hub/API-only. In the local code path, validate early and return an error:
 
 ```go
-// Local mode — handle --wake for suspended agents
-if msgWake && !msgBroadcast && !msgAll {
-    projectDir, _ := config.GetResolvedProjectDir(projectPath)
-    if projectDir != "" {
-        savedPhase := agent.GetSavedPhase(agentName, projectPath)
-        switch savedPhase {
-        case string(state.PhaseSuspended):
-            fmt.Printf("Waking suspended agent '%s'...\n", agentName)
-            if err := RunAgent(cmd, []string{agentName}, true); err != nil {
-                return fmt.Errorf("failed to wake agent '%s': %w", agentName, err)
-            }
-            // Wait briefly for the container to be ready for messages
-            // (tmux session initialization after resume)
-            time.Sleep(2 * time.Second)
-        case string(state.PhaseStopped):
-            return fmt.Errorf("agent '%s' is stopped, not suspended — use 'scion start' to start a fresh session", agentName)
-        case string(state.PhaseError):
-            return fmt.Errorf("agent '%s' is in error state — use 'scion start' to restart", agentName)
-        case string(state.PhaseRunning), "":
-            // Already running or unknown — proceed to message delivery
-        default:
-            return fmt.Errorf("agent '%s' is not yet running (phase: %s) — wait for it to reach running state", agentName, savedPhase)
-        }
-    }
+// Local mode — --wake requires Hub
+if msgWake {
+    return fmt.Errorf("--wake requires Hub mode (use 'scion hub enable' first)")
 }
 ```
-
-**Note on local-mode limitation:** `RunAgent()` handles both Hub and local start paths and already contains the suspend→resume detection logic. However, `RunAgent()` may call `startAgentViaHub()` if Hub mode is available, in which case the resume goes through the Hub. The local-only path provisions and starts the container, and the agent manager's `Start()` handles the `opts.Resume = true` case. A more robust implementation would call `mgr.Start()` directly rather than going through `RunAgent()`, but `RunAgent()` captures all the necessary flag resolution and config loading. **Open question: should we extract a lower-level resume helper?**
 
 ### 2. API Layer Changes
 
@@ -250,10 +227,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
             agent.Phase = string(state.PhaseRunning)
             s.events.PublishAgentStatus(ctx, agent)
 
-            // Brief pause for the harness to initialize after container resume.
-            // The broker's start handler returns once the container is running,
-            // but the tmux session inside needs a moment to become responsive.
-            time.Sleep(2 * time.Second)
+            // Wait for the agent to become ready for messages.
+            // Poll the agent's state until the harness reports readiness
+            // (activity transitions from empty/starting to idle/thinking/etc.)
+            if err := s.waitForAgentReady(ctx, id, 15*time.Second); err != nil {
+                RuntimeError(w, "Agent resumed but did not become ready: "+err.Error())
+                return
+            }
 
         case state.PhaseRunning:
             // Already running — wake is a no-op, proceed to message delivery
@@ -297,11 +277,16 @@ DispatchAgentStart returns → container running → tmux session restored → h
                               ~0s                  ~1-2s                  ~2-5s
 ```
 
-**Approach:** Insert a fixed 2-second sleep after the start dispatch returns. This matches the empirical startup time for resumed containers (which skip provisioning and image pull).
+**Approach: State-based readiness inference.** After dispatching the start, the Hub should poll the agent's reported state until the harness indicates readiness. The sciontool hooks report activity transitions (STARTING → IDLE/THINKING/WAITING_FOR_INPUT) — the Hub can wait for the agent's activity to move beyond the initial startup phase.
 
-**Why not polling?** The Hub doesn't have a direct readiness probe for the harness inside the container. The status reporting mechanism (sciontool hooks) operates asynchronously and the `PhaseRunning` state is set by the broker before the harness sends its first status update. A fixed delay is simpler and sufficient for resume (as opposed to cold start, where provisioning time is unpredictable).
+Concretely, after `DispatchAgentStart`:
+1. Poll `store.GetAgent()` at short intervals (e.g., 500ms)
+2. Wait until `agent.Phase == "running"` AND `agent.Activity` is set to a non-empty value (indicating the harness has initialized and reported its first status)
+3. Apply a timeout (e.g., 15 seconds) — if the agent doesn't reach ready state within the timeout, return an error
 
-**Future improvement:** The broker could expose a `/readiness` probe that checks tmux session state. This is out of scope for v1.
+If the current state infrastructure doesn't expose enough granularity to determine harness readiness (e.g., the activity field isn't populated quickly enough after resume), this should be filed as a sub-issue rather than worked around with a fixed `time.Sleep`.
+
+**Do NOT use a fixed timing delay.** Timing-based approaches are fragile across different hardware, container runtimes, and harness implementations.
 
 #### Concurrent wake requests
 
@@ -332,9 +317,9 @@ The existing 30-second context timeout in `sendMessageViaHub()` covers the entir
 ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 ```
 
-A resume typically completes in 3-5 seconds (no provisioning, no image pull — the container is checkpointed). The 2-second post-resume delay plus message delivery fits well within 30 seconds.
+A resume typically completes in 3-5 seconds (no provisioning, no image pull — the container is checkpointed). The readiness poll has its own 15-second sub-timeout within this overall 30-second budget. This leaves ~12 seconds for the actual message delivery.
 
-If the resume takes longer than expected (e.g., slow disk I/O on restoring the container checkpoint), the context timeout will cancel the request and the CLI will report a timeout error. The agent may still resume successfully on the broker side — a subsequent `scion message` (without `--wake`) would then succeed.
+If the resume or readiness check exceeds the context timeout, the CLI reports a timeout error. The agent may still resume successfully on the broker side — a subsequent `scion message` (without `--wake`) would then succeed.
 
 ### 6. CLI Modes (`cmd/cli_mode.go`)
 
@@ -352,9 +337,9 @@ This is out of scope for the initial implementation but the API design supports 
 
 | File | Change |
 |---|---|
-| `cmd/message.go` | Add `--wake` flag, validation rules, pass through to Hub/local paths |
-| `pkg/hub/handlers.go` | Add `Wake` field to `MessageRequest`, wake logic in `handleAgentMessage` |
-| `pkg/hubclient/agents.go` | Add `wake` parameter to `SendStructuredMessage` |
+| `cmd/message.go` | Add `--wake` flag, validation rules, pass through to Hub path; error in local mode |
+| `pkg/hub/handlers.go` | Add `Wake` field to `MessageRequest`, wake logic + `waitForAgentReady()` in `handleAgentMessage` |
+| `pkg/hubclient/agents.go` | Add `wake` parameter to `SendStructuredMessage` interface + implementation |
 | `pkg/runtimebroker/types.go` | No changes needed (broker doesn't need wake awareness) |
 | `pkg/agent/manager.go` | No changes needed (manager handles running agents only) |
 
@@ -376,12 +361,12 @@ This is out of scope for the initial implementation but the API design supports 
 - `scion message --wake` on a stopped agent → verify error message
 - Concurrent `--wake` messages → verify both messages delivered
 
-## Open Questions
+## Resolved Decisions (from review feedback)
 
-1. **Should `--wake` work for stopped agents?** The issue recommends erroring. An alternative is to start a fresh session and deliver the message, but this conflates "resume preserved state" with "start new session." Recommend: error with a clear message pointing to `scion start`.
+1. **Stopped agents:** `--wake` targets suspended (paused) agents only. Stopped agents return an error directing the user to `scion start`. ✅ Confirmed.
 
-2. **Sleep vs. polling for post-resume readiness:** A 2-second fixed delay is proposed. Should we implement a readiness check (e.g., poll the broker for container tmux status)? The fixed delay is simpler but may be too short on slow systems or too long on fast ones.
+2. **Post-resume readiness:** Do NOT use a fixed timing delay (e.g. `time.Sleep`). Instead, infer readiness from agent state. The Hub should wait until the agent's phase/activity indicates it is ready to receive messages (e.g., the harness has reported `PhaseRunning` + a non-starting activity via sciontool status hooks). If the current state infrastructure doesn't support inferring readiness precisely enough, file a sub-issue to address that gap — but do not ship a timing-based workaround.
 
-3. **Should the web UI auto-wake?** When a user types a message to a suspended agent in the web UI, should it automatically set `wake: true`? This is a UX question that can be decided separately.
+3. **No local-only mode:** The `--wake` feature is Hub/API-only. The local-mode code path in `cmd/message.go` does not need wake support. If `--wake` is used without Hub mode, return an error: `"--wake requires Hub mode"`.
 
-4. **Local-mode implementation depth:** Should we extract a lower-level `resumeAgent()` helper from `RunAgent()` for local mode, or is calling `RunAgent()` directly acceptable? The current approach reuses `RunAgent()` which handles all flag resolution, but it may also trigger Hub-mode paths if Hub is configured.
+4. **Interface change approach:** Add `wake` as a parameter to the existing `SendStructuredMessage` function in the `AgentService` interface. Do not create a separate method. All existing call sites must be updated to pass `false` for the new parameter. Proper testing is required for the interface change.
