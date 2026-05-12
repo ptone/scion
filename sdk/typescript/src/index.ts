@@ -27,6 +27,10 @@ export type { ErrorCodeValue } from './errors.js';
 export { Transport } from './transport.js';
 export type { TransportOptions, RequestOptions } from './transport.js';
 
+// Client
+export { ScionClient } from './client.js';
+export type { ScionClientOptions } from './client.js';
+
 // Type models
 export type {
   // Common
