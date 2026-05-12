@@ -38,6 +38,7 @@ from scion.types.secrets import (
     SetSecretRequest,
     SetSecretResponse,
 )
+from scion.types.streaming import AgentEvent, LogEntry, StreamEvent
 
 __all__ = [
     # Agents
@@ -67,4 +68,8 @@ __all__ = [
     "Secret",
     "SetSecretRequest",
     "SetSecretResponse",
+    # Streaming
+    "AgentEvent",
+    "LogEntry",
+    "StreamEvent",
 ]

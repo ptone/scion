@@ -29,8 +29,10 @@ from scion._errors import (
     ValidationError,
 )
 from scion._pagination import AsyncPage, SyncPage
+from scion._streaming import AsyncSSEIterator, SyncSSEIterator
 from scion.resources.agents import AgentsResource, AsyncAgentsResource
 from scion.resources.secrets import AsyncSecretsResource, SecretsResource
+from scion.types.streaming import AgentEvent, LogEntry, StreamEvent
 
 __version__ = "0.1.0"
 
@@ -57,4 +59,10 @@ __all__ = [
     # Pagination
     "SyncPage",
     "AsyncPage",
+    # Streaming
+    "SyncSSEIterator",
+    "AsyncSSEIterator",
+    "AgentEvent",
+    "LogEntry",
+    "StreamEvent",
 ]

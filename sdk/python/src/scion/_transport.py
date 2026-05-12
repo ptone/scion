@@ -24,6 +24,8 @@ Provides sync and async transports wrapping httpx with:
 from __future__ import annotations
 
 import time as _time
+from collections.abc import AsyncGenerator, Generator
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 import httpx
@@ -166,6 +168,46 @@ class Transport:
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         return self.request("DELETE", path, params=params, headers=headers)
+
+    @contextmanager
+    def stream(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Generator[httpx.Response, None, None]:
+        """Open an HTTP streaming connection.
+
+        Yields an httpx Response with streaming enabled. The caller must
+        consume the response within the context manager block.
+
+        Args:
+            method: HTTP method (typically ``"GET"``).
+            path: API path (e.g. ``/api/v1/agents/{id}/cloud-logs/stream``).
+            params: Optional query parameters.
+            headers: Optional extra headers (``Accept: text/event-stream``
+                is typically added by the caller).
+        """
+        url = self._build_url(path)
+        merged_headers = self._build_headers(headers)
+
+        with self._client.stream(
+            method,
+            url,
+            params=params,
+            headers=merged_headers,
+        ) as response:
+            if response.status_code >= 400:
+                # Read the body for error parsing
+                response.read()
+                raise parse_error_response(
+                    response.status_code,
+                    response.content,
+                    headers=dict(response.headers),
+                )
+            yield response
 
     def close(self) -> None:
         if self._owns_client:
@@ -322,6 +364,45 @@ class AsyncTransport:
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         return await self.request("DELETE", path, params=params, headers=headers)
+
+    @asynccontextmanager
+    async def stream(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> AsyncGenerator[httpx.Response, None]:
+        """Open an async HTTP streaming connection.
+
+        Yields an httpx Response with streaming enabled. The caller must
+        consume the response within the async context manager block.
+
+        Args:
+            method: HTTP method (typically ``"GET"``).
+            path: API path (e.g. ``/api/v1/agents/{id}/cloud-logs/stream``).
+            params: Optional query parameters.
+            headers: Optional extra headers (``Accept: text/event-stream``
+                is typically added by the caller).
+        """
+        url = self._build_url(path)
+        merged_headers = self._build_headers(headers)
+
+        async with self._client.stream(
+            method,
+            url,
+            params=params,
+            headers=merged_headers,
+        ) as response:
+            if response.status_code >= 400:
+                await response.aread()
+                raise parse_error_response(
+                    response.status_code,
+                    response.content,
+                    headers=dict(response.headers),
+                )
+            yield response
 
     async def close(self) -> None:
         if self._owns_client:

@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from scion._pagination import AsyncPage, SyncPage
+from scion._streaming import AsyncSSEIterator, SyncSSEIterator
 from scion.types.agents import (
     Agent,
     CreateAgentRequest,
@@ -31,6 +32,7 @@ from scion.types.agents import (
     ListAgentsResponse,
 )
 from scion.types.messages import StructuredMessage
+from scion.types.streaming import AgentEvent, LogEntry
 
 if TYPE_CHECKING:
     from scion._transport import AsyncTransport, Transport
@@ -302,6 +304,101 @@ class AgentsResource:
         if interrupt:
             body["interrupt"] = True
         self._transport.post("/api/v1/messages/broadcast", json=body)
+
+    def stream_events(
+        self,
+        agent_id: str,
+        *,
+        last_event_id: str | None = None,
+    ) -> SyncSSEIterator[AgentEvent]:
+        """Stream agent events via SSE.
+
+        Opens a streaming connection to ``GET /api/v1/agents/{id}/messages/stream``
+        and yields :class:`AgentEvent` instances as they arrive.
+
+        The returned iterator is also a context manager for clean teardown::
+
+            with client.agents.stream_events("agent-id") as stream:
+                for event in stream:
+                    print(event.type, event.message)
+                    if event.status == "completed":
+                        break
+
+        Args:
+            agent_id: The agent's unique identifier.
+            last_event_id: Resume from this event ID (sent as ``Last-Event-ID``).
+
+        Returns:
+            A SyncSSEIterator yielding AgentEvent instances.
+        """
+        headers: dict[str, str] = {"Accept": "text/event-stream"}
+        if last_event_id:
+            headers["Last-Event-ID"] = last_event_id
+
+        ctx = self._transport.stream(
+            "GET",
+            f"/api/v1/agents/{agent_id}/messages/stream",
+            headers=headers,
+        )
+        response = ctx.__enter__()
+        iterator = SyncSSEIterator(
+            response,
+            AgentEvent,
+            last_event_id=last_event_id,
+        )
+        # Store the context manager so close() can exit it
+        iterator._stream_ctx = ctx  # type: ignore[attr-defined]
+        return iterator
+
+    def stream_cloud_logs(
+        self,
+        agent_id: str,
+        *,
+        severity: str | None = None,
+        last_event_id: str | None = None,
+    ) -> SyncSSEIterator[LogEntry]:
+        """Stream cloud log entries via SSE.
+
+        Opens a streaming connection to
+        ``GET /api/v1/agents/{id}/cloud-logs/stream`` and yields
+        :class:`LogEntry` instances as they arrive.
+
+        The returned iterator is also a context manager for clean teardown::
+
+            with client.agents.stream_cloud_logs("agent-id") as stream:
+                for entry in stream:
+                    print(f"[{entry.severity}] {entry.message}")
+
+        Args:
+            agent_id: The agent's unique identifier.
+            severity: Filter logs by severity level (e.g. ``"INFO"``, ``"ERROR"``).
+            last_event_id: Resume from this event ID (sent as ``Last-Event-ID``).
+
+        Returns:
+            A SyncSSEIterator yielding LogEntry instances.
+        """
+        headers: dict[str, str] = {"Accept": "text/event-stream"}
+        if last_event_id:
+            headers["Last-Event-ID"] = last_event_id
+
+        params: dict[str, str] = {}
+        if severity:
+            params["severity"] = severity
+
+        ctx = self._transport.stream(
+            "GET",
+            f"/api/v1/agents/{agent_id}/cloud-logs/stream",
+            params=params or None,
+            headers=headers,
+        )
+        response = ctx.__enter__()
+        iterator = SyncSSEIterator(
+            response,
+            LogEntry,
+            last_event_id=last_event_id,
+        )
+        iterator._stream_ctx = ctx  # type: ignore[attr-defined]
+        return iterator
 
     def _build_list_params(
         self,
@@ -622,6 +719,101 @@ class AsyncAgentsResource:
         if interrupt:
             body["interrupt"] = True
         await self._transport.post("/api/v1/messages/broadcast", json=body)
+
+    async def stream_events(
+        self,
+        agent_id: str,
+        *,
+        last_event_id: str | None = None,
+    ) -> AsyncSSEIterator[AgentEvent]:
+        """Stream agent events via SSE.
+
+        Opens an async streaming connection to
+        ``GET /api/v1/agents/{id}/messages/stream`` and yields
+        :class:`AgentEvent` instances as they arrive.
+
+        The returned iterator is also an async context manager for clean teardown::
+
+            async with await client.agents.stream_events("agent-id") as stream:
+                async for event in stream:
+                    print(event.type, event.message)
+                    if event.status == "completed":
+                        break
+
+        Args:
+            agent_id: The agent's unique identifier.
+            last_event_id: Resume from this event ID (sent as ``Last-Event-ID``).
+
+        Returns:
+            An AsyncSSEIterator yielding AgentEvent instances.
+        """
+        headers: dict[str, str] = {"Accept": "text/event-stream"}
+        if last_event_id:
+            headers["Last-Event-ID"] = last_event_id
+
+        ctx = self._transport.stream(
+            "GET",
+            f"/api/v1/agents/{agent_id}/messages/stream",
+            headers=headers,
+        )
+        response = await ctx.__aenter__()
+        iterator = AsyncSSEIterator(
+            response,
+            AgentEvent,
+            last_event_id=last_event_id,
+        )
+        iterator._stream_ctx = ctx  # type: ignore[attr-defined]
+        return iterator
+
+    async def stream_cloud_logs(
+        self,
+        agent_id: str,
+        *,
+        severity: str | None = None,
+        last_event_id: str | None = None,
+    ) -> AsyncSSEIterator[LogEntry]:
+        """Stream cloud log entries via SSE.
+
+        Opens an async streaming connection to
+        ``GET /api/v1/agents/{id}/cloud-logs/stream`` and yields
+        :class:`LogEntry` instances as they arrive.
+
+        The returned iterator is also an async context manager for clean teardown::
+
+            async with await client.agents.stream_cloud_logs("agent-id") as stream:
+                async for entry in stream:
+                    print(f"[{entry.severity}] {entry.message}")
+
+        Args:
+            agent_id: The agent's unique identifier.
+            severity: Filter logs by severity level (e.g. ``"INFO"``, ``"ERROR"``).
+            last_event_id: Resume from this event ID (sent as ``Last-Event-ID``).
+
+        Returns:
+            An AsyncSSEIterator yielding LogEntry instances.
+        """
+        headers: dict[str, str] = {"Accept": "text/event-stream"}
+        if last_event_id:
+            headers["Last-Event-ID"] = last_event_id
+
+        params: dict[str, str] = {}
+        if severity:
+            params["severity"] = severity
+
+        ctx = self._transport.stream(
+            "GET",
+            f"/api/v1/agents/{agent_id}/cloud-logs/stream",
+            params=params or None,
+            headers=headers,
+        )
+        response = await ctx.__aenter__()
+        iterator = AsyncSSEIterator(
+            response,
+            LogEntry,
+            last_event_id=last_event_id,
+        )
+        iterator._stream_ctx = ctx  # type: ignore[attr-defined]
+        return iterator
 
     def _build_list_params(
         self,
