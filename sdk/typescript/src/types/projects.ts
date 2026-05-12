@@ -57,8 +57,14 @@ export interface Project {
 export interface CreateProjectRequest {
   /** Project name. */
   name: string;
+  /** Optional client-provided ID. */
+  id?: string;
+  /** Optional URL-safe slug. */
+  slug?: string;
   /** Git remote URL. */
   gitRemote?: string;
+  /** Visibility setting. */
+  visibility?: string;
   /** User-defined labels. */
   labels?: Record<string, string>;
   /** User-defined annotations. */
@@ -71,6 +77,10 @@ export interface UpdateProjectRequest {
   name?: string;
   /** Updated git remote URL. */
   gitRemote?: string;
+  /** Updated visibility. */
+  visibility?: string;
+  /** Default runtime broker ID. */
+  defaultRuntimeBrokerId?: string;
   /** Updated labels. */
   labels?: Record<string, string>;
   /** Updated annotations. */
@@ -81,6 +91,28 @@ export interface UpdateProjectRequest {
 export interface ListProjectsOptions extends PageParams {
   /** Filter by project type. */
   projectType?: string;
+  /** Filter by visibility (e.g. "private", "public"). */
+  visibility?: string;
+  /** Filter by git remote URL (exact or prefix match). */
+  gitRemote?: string;
+  /** Filter by contributing broker ID. */
+  brokerId?: string;
+  /** Filter by exact name (case-insensitive). */
+  name?: string;
+  /** Filter by exact slug (case-insensitive). */
+  slug?: string;
+  /** Filter by labels (key=value pairs). */
+  labels?: Record<string, string>;
+}
+
+/** Options for listing agents within a project. */
+export interface ListProjectAgentsOptions extends PageParams {
+  /** Filter by lifecycle phase (e.g. "running", "stopped"). */
+  phase?: string;
+  /** Filter by runtime broker ID. */
+  runtimeBrokerId?: string;
+  /** Filter by labels (key=value pairs). */
+  labels?: Record<string, string>;
 }
 
 /** Response from listing projects. */

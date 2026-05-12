@@ -74,6 +74,12 @@ export interface SecretScopeOptions {
   scopeId?: string;
 }
 
+/** Options for listing secrets. */
+export interface ListSecretsOptions extends SecretScopeOptions {
+  /** Filter by secret type: environment, variable, or file. */
+  type?: string;
+}
+
 /** Response from listing secrets. */
 export interface ListSecretResponse {
   /** Secret metadata entries (no values). */

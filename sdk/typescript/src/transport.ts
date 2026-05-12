@@ -81,7 +81,19 @@ export class Transport {
    */
   async request<T>(method: string, path: string, options?: RequestOptions): Promise<T> {
     const response = await this.requestRaw(method, path, options);
-    return (await response.json()) as T;
+
+    // 204 No Content — return undefined (cast to T for void-returning callers)
+    if (response.status === 204) {
+      return undefined as T;
+    }
+
+    // Guard against empty bodies on other success statuses
+    const text = await response.text();
+    if (!text) {
+      return undefined as T;
+    }
+
+    return JSON.parse(text) as T;
   }
 
   /**

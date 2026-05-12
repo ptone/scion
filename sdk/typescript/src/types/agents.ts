@@ -120,24 +120,48 @@ export interface Agent {
 export interface CreateAgentRequest {
   /** Agent name (must be unique within the project). */
   name: string;
+  /** Project ID. */
+  projectId?: string;
   /** Template slug to base the agent on. */
   template?: string;
   /** Inline configuration overrides. */
   config?: AgentConfig;
+  /** Harness configuration name. */
+  harnessConfig?: string;
+  /** Harness authentication configuration. */
+  harnessAuth?: string;
+  /** Target runtime broker ID. */
+  runtimeBrokerId?: string;
+  /** Profile name. */
+  profile?: string;
+  /** Initial task / prompt. */
+  task?: string;
+  /** Git branch. */
+  branch?: string;
+  /** Workspace path. */
+  workspace?: string;
   /** User-defined labels. */
   labels?: Record<string, string>;
   /** User-defined annotations. */
   annotations?: Record<string, string>;
-  /** Initial task / prompt. */
-  task?: string;
   /** Whether to start in detached mode. */
   detached?: boolean;
+  /** Whether to resume a previously stopped agent. */
+  resume?: boolean;
+  /** Whether to attach interactively. */
+  attach?: boolean;
+  /** Provision only — write task to prompt.md without starting. */
+  provisionOnly?: boolean;
+  /** Subscribe to status notifications for the new agent. */
+  notify?: boolean;
 }
 
 /** Response from creating an agent. */
 export interface CreateAgentResponse {
   /** The newly created agent. */
   agent: Agent;
+  /** Warnings generated during creation. */
+  warnings?: string[];
 }
 
 /** Request body for updating an existing agent. */
@@ -160,7 +184,21 @@ export interface ListAgentsOptions extends PageParams {
   phase?: string;
   /** Filter by agent activity. */
   activity?: string;
+  /** Filter by runtime broker ID. */
+  runtimeBrokerId?: string;
+  /** Include soft-deleted agents. */
+  includeDeleted?: boolean;
+  /** Label selector (key=value pairs). */
+  labels?: Record<string, string>;
 }
 
 /** Response from listing agents. */
 export type ListAgentsResponse = PaginatedResponse<Agent>;
+
+/** Options for sending a structured message to an agent. */
+export interface SendStructuredMessageOptions {
+  /** Interrupt the agent's current work. */
+  interrupt?: boolean;
+  /** Subscribe to status notifications for the target agent. */
+  notify?: boolean;
+}

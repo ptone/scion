@@ -11,6 +11,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { Transport } from './transport.js';
+import { AgentsResource } from './resources/agents.js';
+import { MessagesResource } from './resources/messages.js';
+import { ProjectsResource } from './resources/projects.js';
+import { SecretsResource } from './resources/secrets.js';
 import type { HealthResponse } from './types/common.js';
 
 /** Options for constructing a {@link ScionClient}. */
@@ -28,14 +32,8 @@ export interface ScionClientOptions {
   token?: string;
   /** Request timeout in milliseconds. Defaults to 30 000 (30 s). */
   timeout?: number;
-}
-
-/**
- * Placeholder stub for a resource service that will be implemented later.
- * Each resource module (agents, projects, etc.) will replace its stub.
- */
-class ResourceStub {
-  constructor(readonly _name: string) {}
+  /** Scope all agent operations to this project ID. */
+  projectId?: string;
 }
 
 /**
@@ -57,11 +55,14 @@ export class ScionClient {
   /** @internal */
   readonly transport: Transport;
 
+  /** Project ID for scoping agent operations. */
+  private readonly projectId?: string;
+
   // Lazy-init backing fields
-  private _agents?: ResourceStub;
-  private _projects?: ResourceStub;
-  private _secrets?: ResourceStub;
-  private _messages?: ResourceStub;
+  private _agents?: AgentsResource;
+  private _projects?: ProjectsResource;
+  private _secrets?: SecretsResource;
+  private _messages?: MessagesResource;
 
   constructor(options: ScionClientOptions = {}) {
     const hubUrl = options.hubUrl ?? resolveHubUrl();
@@ -78,6 +79,8 @@ export class ScionClient {
       token,
       timeout: options.timeout,
     });
+
+    this.projectId = options.projectId;
   }
 
   /**
@@ -129,37 +132,37 @@ export class ScionClient {
   }
 
   // ---------------------------------------------------------------------------
-  // Resource service accessors (lazy-init stubs — replaced in Phase B)
+  // Resource service accessors (lazy-init)
   // ---------------------------------------------------------------------------
 
   /** Access agent operations. */
-  get agents(): ResourceStub {
+  get agents(): AgentsResource {
     if (!this._agents) {
-      this._agents = new ResourceStub('agents');
+      this._agents = new AgentsResource(this.transport, this.projectId);
     }
     return this._agents;
   }
 
   /** Access project operations. */
-  get projects(): ResourceStub {
+  get projects(): ProjectsResource {
     if (!this._projects) {
-      this._projects = new ResourceStub('projects');
+      this._projects = new ProjectsResource(this.transport);
     }
     return this._projects;
   }
 
   /** Access secret operations. */
-  get secrets(): ResourceStub {
+  get secrets(): SecretsResource {
     if (!this._secrets) {
-      this._secrets = new ResourceStub('secrets');
+      this._secrets = new SecretsResource(this.transport);
     }
     return this._secrets;
   }
 
   /** Access message operations. */
-  get messages(): ResourceStub {
+  get messages(): MessagesResource {
     if (!this._messages) {
-      this._messages = new ResourceStub('messages');
+      this._messages = new MessagesResource(this.transport);
     }
     return this._messages;
   }
