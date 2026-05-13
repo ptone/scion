@@ -1266,6 +1266,8 @@ func migrateV50(ctx context.Context, tx *sql.Tx) error {
 	dataUpdates := `
 UPDATE env_vars SET scope = 'project' WHERE scope = 'grove';
 UPDATE secrets SET scope = 'project' WHERE scope = 'grove';
+UPDATE templates SET scope = 'project' WHERE scope = 'grove';
+UPDATE harness_configs SET scope = 'project' WHERE scope = 'grove';
 UPDATE policies SET scope_type = 'project' WHERE scope_type = 'grove';
 UPDATE gcp_service_accounts SET scope = 'project' WHERE scope = 'grove';
 UPDATE groups SET group_type = 'project_agents' WHERE group_type = 'grove_agents';
