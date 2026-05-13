@@ -2443,6 +2443,8 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 			}
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
+				results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "failed to persist message: " + err.Error()}
+				continue
 			}
 			s.events.PublishUserMessage(ctx, storeMsg)
 
@@ -2516,6 +2518,8 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 			}
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
+				results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "failed to persist message: " + err.Error()}
+				continue
 			}
 			s.events.PublishUserMessage(ctx, storeMsg)
 
