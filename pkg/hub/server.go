@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -564,6 +565,8 @@ type Server struct {
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
+
+	imageBuildActive atomic.Bool
 }
 
 // New creates a new Hub API server.
