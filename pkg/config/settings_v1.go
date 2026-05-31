@@ -388,8 +388,6 @@ type V1DatabaseConfig struct {
 
 // V1AuthConfig holds authentication settings.
 type V1AuthConfig struct {
-	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
-	// In proxy mode, OAuth handlers are disabled; in dev mode, dev token auth is used.
 	Mode              string             `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 	DevMode           bool               `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
 	DevToken          string             `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
@@ -398,36 +396,27 @@ type V1AuthConfig struct {
 	UserAccessMode    string             `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
 	Proxy             *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
 	Transport         *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+	Username          string             `json:"username,omitempty" yaml:"username,omitempty" koanf:"username"`
+	DisplayName       string             `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
+	Email             string             `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
 }
 
-// V1TransportConfig holds transport-layer auth settings for agent outbound requests.
 type V1TransportConfig struct {
-	// Mode selects the transport auth mode: "none" (default), "cloudrun_invoker", or "iap".
-	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
-	// OIDCAudience is the OIDC audience for transport tokens.
-	OIDCAudience string `json:"oidc_audience,omitempty" yaml:"oidc_audience,omitempty" koanf:"oidc_audience"`
-	// PlatformAuthSA is the dedicated SA email used for transport-layer auth.
+	Mode           string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	OIDCAudience   string `json:"oidc_audience,omitempty" yaml:"oidc_audience,omitempty" koanf:"oidc_audience"`
 	PlatformAuthSA string `json:"platform_auth_sa,omitempty" yaml:"platform_auth_sa,omitempty" koanf:"platform_auth_sa"`
 }
 
-// V1ProxyConfig holds proxy authentication settings (consulted when auth.mode == "proxy").
 type V1ProxyConfig struct {
-	// Provider selects the proxy auth provider: "iap" or "header".
-	Provider string `json:"provider,omitempty" yaml:"provider,omitempty" koanf:"provider"`
-	// IAP holds Google IAP-specific settings.
-	IAP *V1IAPConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`
-	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
-	RequireTrustedProxyIP bool `json:"require_trusted_proxy_ip,omitempty" yaml:"require_trusted_proxy_ip,omitempty" koanf:"require_trusted_proxy_ip"`
+	Provider              string       `json:"provider,omitempty" yaml:"provider,omitempty" koanf:"provider"`
+	IAP                   *V1IAPConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`
+	RequireTrustedProxyIP bool         `json:"require_trusted_proxy_ip,omitempty" yaml:"require_trusted_proxy_ip,omitempty" koanf:"require_trusted_proxy_ip"`
 }
 
-// V1IAPConfig holds Google IAP-specific settings.
 type V1IAPConfig struct {
-	// Audience is the expected audience claim — MANDATORY for IAP.
 	Audience string `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
-	// Issuer overrides the default IAP issuer (for testing).
-	Issuer string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
-	// JWKSURL overrides the default IAP JWKS URL (for testing).
-	JWKSURL string `json:"jwks_url,omitempty" yaml:"jwks_url,omitempty" koanf:"jwks_url"`
+	Issuer   string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
+	JWKSURL  string `json:"jwks_url,omitempty" yaml:"jwks_url,omitempty" koanf:"jwks_url"`
 }
 
 // V1OAuthConfig holds OAuth provider configurations.
@@ -1345,6 +1334,15 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				PlatformAuthSA: v1.Auth.Transport.PlatformAuthSA,
 			}
 		}
+		if v1.Auth.Username != "" {
+			gc.Auth.Username = v1.Auth.Username
+		}
+		if v1.Auth.DisplayName != "" {
+			gc.Auth.DisplayName = v1.Auth.DisplayName
+		}
+		if v1.Auth.Email != "" {
+			gc.Auth.Email = v1.Auth.Email
+		}
 	}
 
 	// OAuth config
@@ -1504,6 +1502,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		DevTokenFile:      gc.Auth.TokenFile,
 		AuthorizedDomains: gc.Auth.AuthorizedDomains,
 		UserAccessMode:    gc.Auth.UserAccessMode,
+		Username:          gc.Auth.Username,
+		DisplayName:       gc.Auth.DisplayName,
+		Email:             gc.Auth.Email,
 	}
 	if gc.Auth.Proxy != nil {
 		v1.Auth.Proxy = &V1ProxyConfig{
