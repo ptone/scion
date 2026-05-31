@@ -40,6 +40,7 @@ type EventPublisher interface {
 	PublishUserMessage(ctx context.Context, msg *store.Message)
 	PublishAllowListChanged(ctx context.Context, action string, email string)
 	PublishInviteChanged(ctx context.Context, action string, inviteID string, codePrefix string)
+	PublishRaw(subject string, data interface{})
 	Close()
 }
 
@@ -60,6 +61,7 @@ func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notifi
 func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message)            {}
 func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string)            {}
 func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string)            {}
+func (noopEventPublisher) PublishRaw(_ string, _ interface{})                                {}
 func (noopEventPublisher) Close()                                                            {}
 
 // Event is a published event with a subject and JSON-encoded data.
@@ -272,6 +274,11 @@ func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
 			}
 		}
 	}
+}
+
+// PublishRaw publishes an arbitrary event on the given subject.
+func (p *ChannelEventPublisher) PublishRaw(subject string, data interface{}) {
+	p.publish(subject, data)
 }
 
 // Close marks the publisher as closed and closes all subscriber channels.
