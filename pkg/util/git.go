@@ -556,7 +556,7 @@ func ExtractOrgRepo(gitURL string) (org, repo string) {
 }
 
 // CloneSharedWorkspace clones a git repository into the specified workspace path
-// for use as a shared workspace grove. It configures git identity and optionally
+// for use as a shared workspace project. It configures git identity and optionally
 // uses a token for authentication.
 //
 // If the requested branch does not exist on the remote, the clone falls back to
@@ -803,15 +803,15 @@ func sanitizeGitOutput(output, token string) string {
 	return strings.ReplaceAll(output, token, "***")
 }
 
-// scionNamespace is a fixed UUID v5 namespace for deriving deterministic grove IDs.
+// scionNamespace is a fixed UUID v5 namespace for deriving deterministic project IDs.
 var scionNamespace = uuid.MustParse("a1b8e4f0-7c3d-4a1e-9f2b-6d5c8e7a0b1f")
 
 // HashProjectID computes a deterministic ID from a normalized identity string.
 // It uses UUID v5 (SHA-1 based) with a fixed Scion namespace to produce a valid
 // UUID that is deterministic for a given input.
 //
-// NOTE: This function is no longer used for grove ID generation (grove IDs are
-// now random UUIDs). It is retained for other deterministic identifier needs
+// NOTE: This function is no longer used for project ID generation (project IDs
+// are now random UUIDs). It is retained for other deterministic identifier needs
 // such as cache keys.
 func HashProjectID(normalized string) string {
 	return uuid.NewSHA1(scionNamespace, []byte(normalized)).String()
