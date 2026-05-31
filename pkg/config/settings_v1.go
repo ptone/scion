@@ -386,6 +386,9 @@ type V1AuthConfig struct {
 	DevTokenFile      string   `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
 	AuthorizedDomains []string `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
 	UserAccessMode    string   `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
+	Username          string   `json:"username,omitempty" yaml:"username,omitempty" koanf:"username"`
+	DisplayName       string   `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
+	Email             string   `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
 }
 
 // V1OAuthConfig holds OAuth provider configurations.
@@ -1153,6 +1156,15 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Auth.UserAccessMode != "" {
 			gc.Auth.UserAccessMode = v1.Auth.UserAccessMode
 		}
+		if v1.Auth.Username != "" {
+			gc.Auth.Username = v1.Auth.Username
+		}
+		if v1.Auth.DisplayName != "" {
+			gc.Auth.DisplayName = v1.Auth.DisplayName
+		}
+		if v1.Auth.Email != "" {
+			gc.Auth.Email = v1.Auth.Email
+		}
 	}
 
 	// OAuth config
@@ -1302,6 +1314,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		DevTokenFile:      gc.Auth.TokenFile,
 		AuthorizedDomains: gc.Auth.AuthorizedDomains,
 		UserAccessMode:    gc.Auth.UserAccessMode,
+		Username:          gc.Auth.Username,
+		DisplayName:       gc.Auth.DisplayName,
+		Email:             gc.Auth.Email,
 	}
 
 	// OAuth config
