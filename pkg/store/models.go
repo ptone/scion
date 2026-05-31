@@ -225,7 +225,7 @@ type Project struct {
 	// Computed fields (not stored, populated on read)
 	AgentCount        int    `json:"agentCount,omitempty"`
 	ActiveBrokerCount int    `json:"activeBrokerCount,omitempty"`
-	ProjectType       string `json:"projectType,omitempty"` // "git", "linked", or "hub-native"
+	ProjectType       string `json:"projectType,omitempty"` // "linked" or "hub-native" (see ProjectType* constants)
 	OwnerName         string `json:"ownerName,omitempty"`   // Enriched: resolved from OwnerID
 }
 
