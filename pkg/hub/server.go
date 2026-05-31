@@ -31,6 +31,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -638,6 +639,8 @@ type Server struct {
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
+
+	imageBuildActive atomic.Bool
 }
 
 func newInstanceID() string {
