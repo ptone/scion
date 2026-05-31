@@ -137,6 +137,9 @@ type ServerConfig struct {
 	// GCPMintCapGlobal is the maximum total number of minted service accounts across all projects.
 	// Zero means unlimited (default).
 	GCPMintCapGlobal int
+	// Workstation indicates non-production, single-user mode (e.g. local laptop).
+	// When true, /api/v1/system/* and other workstation-only endpoints are enabled.
+	Workstation bool
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -510,6 +513,7 @@ type Server struct {
 	maintenance            *MaintenanceState       // Runtime maintenance mode state
 	hubID                  string                  // Unique hub instance ID for secret namespacing
 	embeddedBrokerID       string                  // Broker ID when running in hub+broker combo mode
+	workstation            bool                    // True when running in workstation (non-production) mode
 	scheduler              *Scheduler              // Unified scheduler for recurring tasks
 	cleanupOnce            sync.Once               // Ensures CleanupResources runs only once
 
@@ -574,6 +578,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		events:      noopEventPublisher{},
 		maintenance: NewMaintenanceState(cfg.AdminMode, cfg.MaintenanceMessage),
 		hubID:       cfg.HubID,
+		workstation: cfg.Workstation,
 
 		// Subsystem loggers
 		agentLifecycleLog: logging.Subsystem("hub.agent-lifecycle"),
@@ -1072,6 +1077,13 @@ func (s *Server) SetEmbeddedBrokerID(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.embeddedBrokerID = id
+}
+
+// GetEmbeddedBrokerID returns the co-located broker ID, if any.
+func (s *Server) GetEmbeddedBrokerID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.embeddedBrokerID
 }
 
 // isEmbeddedBroker returns true if brokerID matches the co-located broker
@@ -2202,6 +2214,31 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// requireWorkstation returns middleware that gates endpoints behind workstation mode.
+// Returns 404 when the server is not running in workstation mode.
+func (s *Server) requireWorkstation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.workstation {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// assertLoopback checks that the request originates from a loopback address.
+func assertLoopback(r *http.Request) error {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("non-loopback request from %s", r.RemoteAddr)
+	}
+	return nil
 }
 
 // loggingMiddleware logs requests.
