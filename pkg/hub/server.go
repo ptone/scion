@@ -573,6 +573,8 @@ type Server struct {
 	workstation      bool              // True when running in workstation (non-production) mode
 	scheduler        *Scheduler        // Unified scheduler for recurring tasks
 	cleanupOnce      sync.Once         // Ensures CleanupResources runs only once
+	ctx              context.Context   // Server-lifetime context; cancelled on Shutdown
+	ctxCancel        context.CancelFunc
 
 	logQueryService *LogQueryService // Cloud Logging query service (nil = disabled)
 
@@ -656,6 +658,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		cfg.StalledThreshold = defaults.StalledThreshold
 	}
 
+	srvCtx, srvCancel := context.WithCancel(context.Background())
+
 	srv := &Server{
 		config:      cfg,
 		store:       s,
@@ -666,6 +670,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		hubID:       cfg.HubID,
 		instanceID:  newInstanceID(),
 		workstation: cfg.Workstation,
+		ctx:         srvCtx,
+		ctxCancel:   srvCancel,
 
 		// Subsystem loggers
 		agentLifecycleLog: logging.Subsystem("hub.agent-lifecycle"),
@@ -2317,6 +2323,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	slog.Info("Hub API server shutting down...")
 
+	// Cancel server-lifetime context to stop background goroutines
+	if s.ctxCancel != nil {
+		s.ctxCancel()
+	}
+
 	// Shutdown control channel first
 	if cc != nil {
 		cc.Shutdown()
@@ -2371,6 +2382,11 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		s.mu.RUnlock()
 
 		slog.Info("Cleaning up Hub resources...")
+
+		// Cancel server-lifetime context to stop background goroutines
+		if s.ctxCancel != nil {
+			s.ctxCancel()
+		}
 
 		if cc != nil {
 			cc.Shutdown()
