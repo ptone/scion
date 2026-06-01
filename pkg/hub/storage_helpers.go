@@ -23,10 +23,20 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
+
+// fileUploadConcurrency bounds how many of a resource's files upload at once
+// (Phase 4). Storage backends (GCS / local FS) are safe for concurrent uploads
+// to distinct object paths, so this is the only cap; a small bound keeps a
+// single large resource fast without overwhelming the backend. Combined with the
+// per-resource pool (resourceImportConcurrency) the worst-case concurrent upload
+// count stays modest for the ≤~dozen-item imports this serves.
+const fileUploadConcurrency = 8
 
 // generateUploadURLs generates signed PUT URLs for a list of files under basePath.
 // Returns the upload URL infos, a manifest URL (if possible), and any error.
@@ -122,32 +132,62 @@ func toResourceFiles(files []transfer.FileInfo) []store.TemplateFile {
 // This is shared bootstrap mechanics for the resource-storage refactor (§7.3):
 // templates and harness-configs both route their import/sync upload loop through
 // it, and it is the basis for a future ResourceStore.Bootstrap.
+//
+// Uploads run concurrently with a bounded worker pool (fileUploadConcurrency,
+// Phase 4) since each file is an independent object. Each worker writes its
+// outcome into its own slot, so the returned manifest preserves input order
+// without locking; only successfully uploaded files appear in it.
 func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath string, files []transfer.FileInfo, log *slog.Logger, label string) ([]store.TemplateFile, map[string]struct{}) {
-	var uploaded []store.TemplateFile
-	written := make(map[string]struct{}, len(files))
-	for _, fi := range files {
-		objectPath := storagePath + "/" + fi.Path
+	type uploadResult struct {
+		file       store.TemplateFile
+		objectPath string
+		ok         bool
+	}
+	results := make([]uploadResult, len(files))
 
-		f, err := os.Open(fi.FullPath)
-		if err != nil {
-			log.Warn(label+": failed to open file, skipping", "file", fi.Path, "error", err)
-			continue
-		}
+	var g errgroup.Group
+	g.SetLimit(fileUploadConcurrency)
+	for i, fi := range files {
+		i, fi := i, fi
+		g.Go(func() error {
+			objectPath := storagePath + "/" + fi.Path
 
-		_, err = stor.Upload(ctx, objectPath, f, storage.UploadOptions{})
-		_ = f.Close()
-		if err != nil {
-			log.Warn(label+": failed to upload file, skipping", "file", fi.Path, "error", err)
-			continue
-		}
+			f, err := os.Open(fi.FullPath)
+			if err != nil {
+				log.Warn(label+": failed to open file, skipping", "file", fi.Path, "error", err)
+				return nil
+			}
 
-		uploaded = append(uploaded, store.TemplateFile{
-			Path: fi.Path,
-			Size: fi.Size,
-			Hash: fi.Hash,
-			Mode: fi.Mode,
+			_, err = stor.Upload(ctx, objectPath, f, storage.UploadOptions{})
+			_ = f.Close()
+			if err != nil {
+				log.Warn(label+": failed to upload file, skipping", "file", fi.Path, "error", err)
+				return nil
+			}
+
+			results[i] = uploadResult{
+				file: store.TemplateFile{
+					Path: fi.Path,
+					Size: fi.Size,
+					Hash: fi.Hash,
+					Mode: fi.Mode,
+				},
+				objectPath: objectPath,
+				ok:         true,
+			}
+			return nil
 		})
-		written[objectPath] = struct{}{}
+	}
+	_ = g.Wait()
+
+	uploaded := make([]store.TemplateFile, 0, len(files))
+	written := make(map[string]struct{}, len(files))
+	for _, r := range results {
+		if !r.ok {
+			continue
+		}
+		uploaded = append(uploaded, r.file)
+		written[r.objectPath] = struct{}{}
 	}
 	return uploaded, written
 }
