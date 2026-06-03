@@ -148,6 +148,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV52,
 		migrationV53,
 		migrateV54,
+		migrateV55,
 	}
 
 	// Create migrations table if not exists
@@ -1380,6 +1381,22 @@ func migrateV54(ctx context.Context, tx *sql.Tx) error {
 			if _, err := tx.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s DROP COLUMN locked", table)); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// migrateV55 replaces the non-unique slug+scope indexes with UNIQUE(slug, scope, scope_id)
+// indexes on templates and harness_configs to prevent slug collisions within a scope.
+func migrateV55(ctx context.Context, tx *sql.Tx) error {
+	for _, stmt := range []string{
+		"DROP INDEX IF EXISTS idx_templates_slug_scope",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_templates_slug_scope_id ON templates(slug, scope, COALESCE(scope_id, ''))",
+		"DROP INDEX IF EXISTS idx_harness_configs_slug_scope",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_harness_configs_slug_scope_id ON harness_configs(slug, scope, COALESCE(scope_id, ''))",
+	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
 		}
 	}
 	return nil
