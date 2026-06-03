@@ -620,3 +620,141 @@ func TestSyncState_DeleteAndNotFound(t *testing.T) {
 	require.NoError(t, ps.DeleteProjectSyncState(ctx, projectID, ""))
 	assert.ErrorIs(t, ps.DeleteProjectSyncState(ctx, projectID, ""), store.ErrNotFound)
 }
+
+// =============================================================================
+// ClaimRuntimeBrokerConnection / ReleaseRuntimeBrokerConnection
+// =============================================================================
+
+func TestBrokerConnection_ClaimSetsAffinityAndOnline(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	b := newBroker()
+	b.Status = store.BrokerStatusOffline
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, b))
+
+	h1, s1 := "hub-instance-1", "session-1"
+	require.NoError(t, ps.ClaimRuntimeBrokerConnection(ctx, b.ID, h1, s1))
+
+	got, err := ps.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ConnectedHubID)
+	assert.Equal(t, h1, *got.ConnectedHubID)
+	require.NotNil(t, got.ConnectedSessionID)
+	assert.Equal(t, s1, *got.ConnectedSessionID)
+	require.NotNil(t, got.ConnectedAt)
+	assert.False(t, got.ConnectedAt.IsZero())
+	assert.Equal(t, store.BrokerStatusOnline, got.Status)
+	assert.False(t, got.LastHeartbeat.IsZero())
+}
+
+func TestBrokerConnection_SecondClaimOverwrites(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	b := newBroker()
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, b))
+
+	h1, s1 := "hub-1", "sess-1"
+	h2, s2 := "hub-2", "sess-2"
+	require.NoError(t, ps.ClaimRuntimeBrokerConnection(ctx, b.ID, h1, s1))
+	require.NoError(t, ps.ClaimRuntimeBrokerConnection(ctx, b.ID, h2, s2))
+
+	got, err := ps.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ConnectedHubID)
+	assert.Equal(t, h2, *got.ConnectedHubID)
+	require.NotNil(t, got.ConnectedSessionID)
+	assert.Equal(t, s2, *got.ConnectedSessionID)
+	assert.Equal(t, store.BrokerStatusOnline, got.Status)
+}
+
+func TestBrokerConnection_ReleaseMatchingClears(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	b := newBroker()
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, b))
+
+	h2, s2 := "hub-2", "sess-2"
+	require.NoError(t, ps.ClaimRuntimeBrokerConnection(ctx, b.ID, h2, s2))
+
+	cleared, err := ps.ReleaseRuntimeBrokerConnection(ctx, b.ID, h2, s2)
+	require.NoError(t, err)
+	assert.True(t, cleared)
+
+	got, err := ps.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	assert.Nil(t, got.ConnectedHubID)
+	assert.Nil(t, got.ConnectedSessionID)
+	assert.Nil(t, got.ConnectedAt)
+}
+
+func TestBrokerConnection_ReleaseNonMatchingNoOp(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	b := newBroker()
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, b))
+
+	h1, s1 := "hub-1", "sess-1"
+	h2, s2 := "hub-2", "sess-2"
+	require.NoError(t, ps.ClaimRuntimeBrokerConnection(ctx, b.ID, h2, s2))
+
+	cleared, err := ps.ReleaseRuntimeBrokerConnection(ctx, b.ID, h1, s1)
+	require.NoError(t, err)
+	assert.False(t, cleared)
+
+	got, err := ps.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ConnectedHubID)
+	assert.Equal(t, h2, *got.ConnectedHubID)
+	require.NotNil(t, got.ConnectedSessionID)
+	assert.Equal(t, s2, *got.ConnectedSessionID)
+	require.NotNil(t, got.ConnectedAt)
+}
+
+func TestBrokerConnection_ClaimCASHandlesVersionBump(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	b := newBroker()
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, b))
+
+	// Bump the lock_version via a heartbeat to simulate a concurrent write
+	// that happens between the read and the CAS update inside Claim.
+	require.NoError(t, ps.UpdateRuntimeBrokerHeartbeat(ctx, b.ID, store.BrokerStatusOnline))
+
+	// Claim should still succeed (the CAS loop retries).
+	h1, s1 := "hub-1", "sess-1"
+	require.NoError(t, ps.ClaimRuntimeBrokerConnection(ctx, b.ID, h1, s1))
+
+	got, err := ps.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ConnectedHubID)
+	assert.Equal(t, h1, *got.ConnectedHubID)
+}
+
+func TestBrokerConnection_ClaimNotFound(t *testing.T) {
+	ps := newTestProjectStore(t)
+	err := ps.ClaimRuntimeBrokerConnection(context.Background(), uuid.NewString(), "hub", "sess")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestBrokerConnection_ReleaseNotFound(t *testing.T) {
+	ps := newTestProjectStore(t)
+	_, err := ps.ReleaseRuntimeBrokerConnection(context.Background(), uuid.NewString(), "hub", "sess")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestBrokerConnection_ReleaseWhenNoAffinity(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	b := newBroker()
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, b))
+
+	cleared, err := ps.ReleaseRuntimeBrokerConnection(ctx, b.ID, "hub-1", "sess-1")
+	require.NoError(t, err)
+	assert.False(t, cleared, "release on a row with no affinity should return false")
+}

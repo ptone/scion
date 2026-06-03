@@ -302,6 +302,16 @@ type RuntimeBrokerStore interface {
 
 	// UpdateRuntimeBrokerHeartbeat updates the last heartbeat and status.
 	UpdateRuntimeBrokerHeartbeat(ctx context.Context, id string, status string) error
+
+	// ClaimRuntimeBrokerConnection sets affinity to the given hub/session
+	// unconditionally (newest connection wins). Also bumps status→online
+	// and refreshes last_heartbeat in the same CAS write.
+	ClaimRuntimeBrokerConnection(ctx context.Context, brokerID, hubInstanceID, sessionID string) error
+
+	// ReleaseRuntimeBrokerConnection clears affinity only if the row still
+	// names (hubInstanceID, sessionID). Returns cleared=true if affinity was
+	// cleared, false if it had already moved to a different hub/session.
+	ReleaseRuntimeBrokerConnection(ctx context.Context, brokerID, hubInstanceID, sessionID string) (cleared bool, err error)
 }
 
 // RuntimeBrokerFilter defines criteria for filtering runtime brokers.

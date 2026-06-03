@@ -808,6 +808,90 @@ func (s *ProjectStore) UpdateRuntimeBrokerHeartbeat(ctx context.Context, id stri
 	return store.ErrVersionConflict
 }
 
+// ClaimRuntimeBrokerConnection unconditionally sets affinity to the given
+// hub/session (newest connection wins). It also bumps status→online and
+// refreshes last_heartbeat in the same CAS write so that a connect both
+// claims affinity and marks the broker online atomically.
+func (s *ProjectStore) ClaimRuntimeBrokerConnection(ctx context.Context, brokerID, hubInstanceID, sessionID string) error {
+	uid, err := parseUUID(brokerID)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	for attempt := 0; attempt < maxCASRetries; attempt++ {
+		cur, err := s.client.RuntimeBroker.Get(ctx, uid)
+		if err != nil {
+			return mapError(err)
+		}
+		affected, err := s.client.RuntimeBroker.Update().
+			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
+			SetConnectedHubID(hubInstanceID).
+			SetConnectedSessionID(sessionID).
+			SetConnectedAt(now).
+			SetStatus(store.BrokerStatusOnline).
+			SetLastHeartbeat(now).
+			SetUpdated(now).
+			AddLockVersion(1).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if affected == 1 {
+			return nil
+		}
+	}
+	return store.ErrVersionConflict
+}
+
+// ReleaseRuntimeBrokerConnection clears affinity only if the row still names
+// (hubInstanceID, sessionID) — compare-and-clear. Returns cleared=true when
+// the affinity was cleared, false if it had already moved to a different
+// hub/session (the caller must NOT stamp the broker offline in that case).
+func (s *ProjectStore) ReleaseRuntimeBrokerConnection(ctx context.Context, brokerID, hubInstanceID, sessionID string) (bool, error) {
+	uid, err := parseUUID(brokerID)
+	if err != nil {
+		return false, err
+	}
+
+	for attempt := 0; attempt < maxCASRetries; attempt++ {
+		cur, err := s.client.RuntimeBroker.Get(ctx, uid)
+		if err != nil {
+			return false, mapError(err)
+		}
+
+		curHub := ""
+		if cur.ConnectedHubID != nil {
+			curHub = *cur.ConnectedHubID
+		}
+		curSession := ""
+		if cur.ConnectedSessionID != nil {
+			curSession = *cur.ConnectedSessionID
+		}
+
+		if curHub != hubInstanceID || curSession != sessionID {
+			return false, nil
+		}
+
+		now := time.Now()
+		affected, err := s.client.RuntimeBroker.Update().
+			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
+			ClearConnectedHubID().
+			ClearConnectedSessionID().
+			ClearConnectedAt().
+			SetUpdated(now).
+			AddLockVersion(1).
+			Save(ctx)
+		if err != nil {
+			return false, mapError(err)
+		}
+		if affected == 1 {
+			return true, nil
+		}
+	}
+	return false, store.ErrVersionConflict
+}
+
 // =============================================================================
 // ProjectProvider (project_contributors) operations
 // =============================================================================
