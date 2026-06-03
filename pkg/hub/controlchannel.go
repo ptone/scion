@@ -232,7 +232,7 @@ func (m *ControlChannelManager) HandleUpgrade(w http.ResponseWriter, r *http.Req
 	if err := wsConn.WriteJSON(connectedMsg); err != nil {
 		m.log.Error("Failed to send connected message", "brokerID", brokerID, "error", err)
 		brokerConn.Close()
-		m.removeConnection(brokerID)
+		m.removeConnection(brokerID, brokerConn)
 		return err
 	}
 
@@ -243,7 +243,7 @@ func (m *ControlChannelManager) HandleUpgrade(w http.ResponseWriter, r *http.Req
 func (m *ControlChannelManager) handleConnection(hc *BrokerConnection) {
 	defer func() {
 		hc.Close()
-		m.removeConnection(hc.brokerID)
+		m.removeConnection(hc.brokerID, hc)
 		m.log.Info("Broker control channel disconnected", "brokerID", hc.brokerID)
 	}()
 
@@ -451,10 +451,23 @@ func (m *ControlChannelManager) pingLoop(hc *BrokerConnection) {
 }
 
 // removeConnection removes a broker connection from the manager.
-func (m *ControlChannelManager) removeConnection(brokerID string) {
+// It only removes the connection and fires the onDisconnect callback if conn
+// is still the active connection for brokerID. When a broker reconnects, the
+// new connection replaces the old one in the map; the old goroutine's deferred
+// call passes its (now-stale) *BrokerConnection, which no longer matches the
+// map entry, so the removal and callback are skipped. This prevents a
+// rapid disconnect/reconnect cycle from leaving the broker stuck offline.
+func (m *ControlChannelManager) removeConnection(brokerID string, conn *BrokerConnection) {
 	m.mu.Lock()
-	_, existed := m.connections[brokerID]
-	delete(m.connections, brokerID)
+	current, existed := m.connections[brokerID]
+	// Only remove if this is still the active connection. A reconnect
+	// will have already replaced the map entry with a new connection;
+	// removing that new entry would incorrectly mark the broker offline.
+	if existed && current == conn {
+		delete(m.connections, brokerID)
+	} else {
+		existed = false // superseded — don't fire disconnect callback
+	}
 	cb := m.onDisconnect
 	m.mu.Unlock()
 
