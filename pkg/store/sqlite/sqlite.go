@@ -147,6 +147,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV51,
 		migrationV52,
 		migrationV53,
+		migrateV54,
 	}
 
 	// Create migrations table if not exists
@@ -1369,6 +1370,20 @@ CREATE TABLE IF NOT EXISTS invite_codes (
 CREATE INDEX IF NOT EXISTS idx_invite_codes_expires ON invite_codes(expires_at);
 CREATE INDEX IF NOT EXISTS idx_allow_list_created_id ON allow_list (created DESC, id DESC);
 `
+
+// migrateV54 drops the unused locked column from templates and harness_configs.
+func migrateV54(ctx context.Context, tx *sql.Tx) error {
+	for _, table := range []string{"templates", "harness_configs"} {
+		if hasCol, err := columnExists(ctx, tx, table, "locked"); err != nil {
+			return err
+		} else if hasCol {
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s DROP COLUMN locked", table)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
 // tableExists checks whether a table with the given name exists in the database.
 func tableExists(ctx context.Context, tx *sql.Tx, tableName string) (bool, error) {
@@ -2842,16 +2857,16 @@ func (s *SQLiteStore) CreateTemplate(ctx context.Context, template *store.Templa
 			id, name, slug, display_name, description, harness, default_harness_config, image, config,
 			content_hash, scope, scope_id, project_id,
 			storage_uri, storage_bucket, storage_path, files,
-			base_template, locked, status,
+			base_template, status,
 			owner_id, created_by, updated_by, visibility,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		template.ID, template.Name, template.Slug, nullableString(template.DisplayName), nullableString(template.Description),
 		template.Harness, nullableString(template.DefaultHarnessConfig), template.Image, marshalJSON(template.Config),
 		nullableString(template.ContentHash), template.Scope, nullableString(template.ScopeID), nullableString(template.ProjectID),
 		nullableString(template.StorageURI), nullableString(template.StorageBucket), nullableString(template.StoragePath), marshalJSON(template.Files),
-		nullableString(template.BaseTemplate), template.Locked, template.Status,
+		nullableString(template.BaseTemplate), template.Status,
 		nullableString(template.OwnerID), nullableString(template.CreatedBy), nullableString(template.UpdatedBy), template.Visibility,
 		template.Created, template.Updated,
 	)
@@ -2876,7 +2891,7 @@ func (s *SQLiteStore) GetTemplate(ctx context.Context, id string) (*store.Templa
 		SELECT id, name, slug, display_name, description, harness, default_harness_config, image, config,
 			content_hash, scope, scope_id, project_id,
 			storage_uri, storage_bucket, storage_path, files,
-			base_template, locked, status,
+			base_template, status,
 			owner_id, created_by, updated_by, visibility,
 			created_at, updated_at
 		FROM templates WHERE id = ?
@@ -2885,7 +2900,7 @@ func (s *SQLiteStore) GetTemplate(ctx context.Context, id string) (*store.Templa
 		&template.Harness, &defaultHarnessConfig, &template.Image, &config,
 		&contentHash, &template.Scope, &scopeID, &projectID,
 		&storageURI, &storageBucket, &storagePath, &files,
-		&baseTemplate, &template.Locked, &template.Status,
+		&baseTemplate, &template.Status,
 		&ownerID, &createdBy, &updatedBy, &visibility,
 		&template.Created, &template.Updated,
 	)
@@ -2975,7 +2990,7 @@ func (s *SQLiteStore) UpdateTemplate(ctx context.Context, template *store.Templa
 			harness = ?, default_harness_config = ?, image = ?, config = ?,
 			content_hash = ?, scope = ?, scope_id = ?, project_id = ?,
 			storage_uri = ?, storage_bucket = ?, storage_path = ?, files = ?,
-			base_template = ?, locked = ?, status = ?,
+			base_template = ?, status = ?,
 			owner_id = ?, updated_by = ?, visibility = ?,
 			updated_at = ?
 		WHERE id = ?
@@ -2984,7 +2999,7 @@ func (s *SQLiteStore) UpdateTemplate(ctx context.Context, template *store.Templa
 		template.Harness, nullableString(template.DefaultHarnessConfig), template.Image, marshalJSON(template.Config),
 		nullableString(template.ContentHash), template.Scope, nullableString(template.ScopeID), nullableString(template.ProjectID),
 		nullableString(template.StorageURI), nullableString(template.StorageBucket), nullableString(template.StoragePath), marshalJSON(template.Files),
-		nullableString(template.BaseTemplate), template.Locked, template.Status,
+		nullableString(template.BaseTemplate), template.Status,
 		nullableString(template.OwnerID), nullableString(template.UpdatedBy), template.Visibility,
 		template.Updated,
 		template.ID,
@@ -3093,7 +3108,7 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 		SELECT id, name, slug, display_name, description, harness, default_harness_config, image, config,
 			content_hash, scope, scope_id, project_id,
 			storage_uri, storage_bucket, storage_path, files,
-			base_template, locked, status,
+			base_template, status,
 			owner_id, created_by, updated_by, visibility,
 			created_at, updated_at
 		FROM templates %s ORDER BY created_at DESC LIMIT ?
@@ -3120,7 +3135,7 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 			&template.Harness, &defaultHarnessConfig, &template.Image, &config,
 			&contentHash, &template.Scope, &scopeID, &projectID,
 			&storageURI, &storageBucket, &storagePath, &files,
-			&baseTemplate, &template.Locked, &template.Status,
+			&baseTemplate, &template.Status,
 			&ownerID, &createdBy, &updatedBy, &visibility,
 			&template.Created, &template.Updated,
 		); err != nil {
@@ -3199,16 +3214,16 @@ func (s *SQLiteStore) CreateHarnessConfig(ctx context.Context, hc *store.Harness
 			id, name, slug, display_name, description, harness, config,
 			content_hash, scope, scope_id,
 			storage_uri, storage_bucket, storage_path, files,
-			locked, status,
+			status,
 			owner_id, created_by, updated_by, visibility,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		hc.ID, hc.Name, hc.Slug, nullableString(hc.DisplayName), nullableString(hc.Description),
 		hc.Harness, marshalJSON(hc.Config),
 		nullableString(hc.ContentHash), hc.Scope, nullableString(hc.ScopeID),
 		nullableString(hc.StorageURI), nullableString(hc.StorageBucket), nullableString(hc.StoragePath), marshalJSON(hc.Files),
-		hc.Locked, hc.Status,
+		hc.Status,
 		nullableString(hc.OwnerID), nullableString(hc.CreatedBy), nullableString(hc.UpdatedBy), hc.Visibility,
 		hc.Created, hc.Updated,
 	)
@@ -3232,7 +3247,7 @@ func (s *SQLiteStore) GetHarnessConfig(ctx context.Context, id string) (*store.H
 		SELECT id, name, slug, display_name, description, harness, config,
 			content_hash, scope, scope_id,
 			storage_uri, storage_bucket, storage_path, files,
-			locked, status,
+			status,
 			owner_id, created_by, updated_by, visibility,
 			created_at, updated_at
 		FROM harness_configs WHERE id = ?
@@ -3241,7 +3256,7 @@ func (s *SQLiteStore) GetHarnessConfig(ctx context.Context, id string) (*store.H
 		&hc.Harness, &configJSON,
 		&contentHash, &hc.Scope, &scopeID,
 		&storageURI, &storageBucket, &storagePath, &filesJSON,
-		&hc.Locked, &hc.Status,
+		&hc.Status,
 		&ownerID, &createdBy, &updatedBy, &visibility,
 		&hc.Created, &hc.Updated,
 	)
@@ -3319,7 +3334,7 @@ func (s *SQLiteStore) UpdateHarnessConfig(ctx context.Context, hc *store.Harness
 			harness = ?, config = ?,
 			content_hash = ?, scope = ?, scope_id = ?,
 			storage_uri = ?, storage_bucket = ?, storage_path = ?, files = ?,
-			locked = ?, status = ?,
+			status = ?,
 			owner_id = ?, updated_by = ?, visibility = ?,
 			updated_at = ?
 		WHERE id = ?
@@ -3328,7 +3343,7 @@ func (s *SQLiteStore) UpdateHarnessConfig(ctx context.Context, hc *store.Harness
 		hc.Harness, marshalJSON(hc.Config),
 		nullableString(hc.ContentHash), hc.Scope, nullableString(hc.ScopeID),
 		nullableString(hc.StorageURI), nullableString(hc.StorageBucket), nullableString(hc.StoragePath), marshalJSON(hc.Files),
-		hc.Locked, hc.Status,
+		hc.Status,
 		nullableString(hc.OwnerID), nullableString(hc.UpdatedBy), hc.Visibility,
 		hc.Updated,
 		hc.ID,
@@ -3436,7 +3451,7 @@ func (s *SQLiteStore) ListHarnessConfigs(ctx context.Context, filter store.Harne
 		SELECT id, name, slug, display_name, description, harness, config,
 			content_hash, scope, scope_id,
 			storage_uri, storage_bucket, storage_path, files,
-			locked, status,
+			status,
 			owner_id, created_by, updated_by, visibility,
 			created_at, updated_at
 		FROM harness_configs %s ORDER BY created_at DESC LIMIT ?
@@ -3462,7 +3477,7 @@ func (s *SQLiteStore) ListHarnessConfigs(ctx context.Context, filter store.Harne
 			&hc.Harness, &configJSON,
 			&contentHash, &hc.Scope, &scopeID,
 			&storageURI, &storageBucket, &storagePath, &filesJSON,
-			&hc.Locked, &hc.Status,
+			&hc.Status,
 			&ownerID, &createdBy, &updatedBy, &visibility,
 			&hc.Created, &hc.Updated,
 		); err != nil {
