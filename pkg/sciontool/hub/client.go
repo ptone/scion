@@ -175,7 +175,7 @@ func NewClient() *Client {
 		return nil
 	}
 
-	return &Client{
+	c := &Client{
 		hubURL:         hubURL,
 		token:          token,
 		agentID:        agentID,
@@ -186,11 +186,13 @@ func NewClient() *Client {
 			Timeout: DefaultTimeout,
 		},
 	}
+	c.maybeConfigureOIDC()
+	return c
 }
 
 // NewClientWithConfig creates a new Hub client with explicit configuration.
 func NewClientWithConfig(hubURL, token, agentID string) *Client {
-	return &Client{
+	c := &Client{
 		hubURL:         hubURL,
 		token:          token,
 		agentID:        agentID,
@@ -201,6 +203,8 @@ func NewClientWithConfig(hubURL, token, agentID string) *Client {
 			Timeout: DefaultTimeout,
 		},
 	}
+	c.maybeConfigureOIDC()
+	return c
 }
 
 // IsConfigured returns true if the client is properly configured.
