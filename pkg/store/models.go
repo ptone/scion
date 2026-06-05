@@ -1214,6 +1214,7 @@ type LifecycleHookSelector struct {
 // LifecycleHookAction describes the HTTP/webhook request a lifecycle hook
 // performs when it fires.
 type LifecycleHookAction struct {
+	Type           string            `json:"type,omitempty"`           // "http" | "webhook"
 	Method         string            `json:"method,omitempty"`
 	URL            string            `json:"url,omitempty"`
 	Headers        map[string]string `json:"headers,omitempty"`
@@ -1234,6 +1235,12 @@ const (
 	LifecycleHookTriggerSuspended = "suspended"
 	LifecycleHookTriggerStopped   = "stopped"
 	LifecycleHookTriggerError     = "error"
+)
+
+// LifecycleHookActionType constants (v1).
+const (
+	LifecycleHookActionHTTP    = "http"
+	LifecycleHookActionWebhook = "webhook"
 )
 
 // LifecycleHookActionOnError constants

@@ -54,6 +54,9 @@ type LifecycleHookSelector struct {
 // LifecycleHookAction describes the HTTP/webhook request a lifecycle hook
 // performs when it fires. Stored as JSON.
 type LifecycleHookAction struct {
+	// Type is the action type: "http" (full authenticated request) or
+	// "webhook" (unauthenticated POST; URL carries its own token).
+	Type    string            `json:"type,omitempty"`
 	Method  string            `json:"method,omitempty"`
 	URL     string            `json:"url,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
