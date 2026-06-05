@@ -113,17 +113,35 @@ func extractVars(s string) []string {
 // disallowed position within the action template. This is the static
 // (create/update time) half of the untrusted-variable guard.
 //
-// Rules:
-//   - Untrusted vars NEVER in URL host or path.
-//   - Untrusted vars NEVER in any auth header value.
-//   - Untrusted vars NEVER in any header name (injected headers).
-//   - Untrusted vars allowed ONLY in body (will be JSON-encoded at render) and
-//     URL query params (will be percent-encoded at render).
+// Rules enforced:
+//   - Untrusted vars NEVER in URL host or path (SSRF risk).
+//   - Untrusted vars NEVER in URL query params.
+//   - Untrusted vars NEVER in any header value (auth or non-auth).
+//   - Untrusted vars NEVER in any header name.
+//   - Untrusted vars are rejected EVERYWHERE unless explicitly allow-listed
+//     by the admin in action.AllowedUntrustedVars.
+//   - Even allow-listed untrusted vars are allowed ONLY in the body
+//     (never URL host/path, query, or headers).
+//   - Allow-listed untrusted vars in the body must sit inside a JSON string
+//     literal (immediately wrapped by double quotes in the template).
+//   - Body is assumed to be JSON; non-JSON content types are not yet supported
+//     (see C8 note below).
+//
+// C8: Content-type awareness is limited. The body is assumed to be JSON and
+// untrusted variables are JSON-string-encoded at render time. If the body is
+// not JSON (e.g. form-encoded), the encoding may be inappropriate. A future
+// enhancement may key off a Content-Type header to select the encoding.
 func ValidateActionVariables(a *store.LifecycleHookAction) []FieldError {
 	var errs []FieldError
 
+	// Build allow-list set for O(1) lookup.
+	allowed := make(map[string]bool, len(a.AllowedUntrustedVars))
+	for _, v := range a.AllowedUntrustedVars {
+		allowed[v] = true
+	}
+
 	if a.URL != "" {
-		errs = append(errs, validateURLVariables(a.URL)...)
+		errs = append(errs, validateURLVariables(a.URL, allowed)...)
 	}
 
 	// Header names must never contain variables (any trust level could be
@@ -137,31 +155,40 @@ func ValidateActionVariables(a *store.LifecycleHookAction) []FieldError {
 		}
 	}
 
-	// Auth header values must never contain untrusted variables.
+	// B1: ALL header values must reject untrusted variables, not just auth
+	// headers. Headers are security-sensitive (can carry credentials,
+	// routing info, CORS directives, etc.).
 	for name, value := range a.Headers {
-		if authHeaderNames[strings.ToLower(strings.TrimSpace(name))] {
-			for _, v := range extractVars(value) {
-				if ClassifyVar(v) == Untrusted {
+		for _, v := range extractVars(value) {
+			if ClassifyVar(v) == Untrusted {
+				if !allowed[v] {
 					errs = append(errs, FieldError{
 						Field:   fmt.Sprintf("action.headers[%s]", name),
-						Message: fmt.Sprintf("untrusted variable ${%s} not allowed in authentication header value", v),
+						Message: fmt.Sprintf("untrusted variable ${%s} not allowed in header value (not in AllowedUntrustedVars)", v),
+					})
+				} else {
+					// Even allow-listed untrusted vars are forbidden in headers.
+					errs = append(errs, FieldError{
+						Field:   fmt.Sprintf("action.headers[%s]", name),
+						Message: fmt.Sprintf("untrusted variable ${%s} not allowed in header value (allowed only in body)", v),
 					})
 				}
 			}
 		}
 	}
 
-	// Body: untrusted variables are allowed (they will be JSON-encoded at
-	// render time). No static restriction needed — encoding is enforced by
-	// the renderer.
+	// Body: untrusted variables are allowed only if they are in the
+	// allow-list AND sit inside a JSON string literal.
+	if a.Body != "" {
+		errs = append(errs, validateBodyVariables(a.Body, allowed)...)
+	}
 
 	return errs
 }
 
 // validateURLVariables checks variable placement within the URL template.
-// Untrusted variables are forbidden in the host and path components but
-// allowed in query parameters (where they will be percent-encoded at render).
-func validateURLVariables(rawURL string) []FieldError {
+// Untrusted variables are forbidden everywhere in the URL (host, path, query).
+func validateURLVariables(rawURL string, allowed map[string]bool) []FieldError {
 	var errs []FieldError
 
 	// Split on '?' to separate host+path from query string.
@@ -171,17 +198,104 @@ func validateURLVariables(rawURL string) []FieldError {
 	// Check host+path for untrusted variables.
 	for _, v := range extractVars(hostAndPath) {
 		if ClassifyVar(v) == Untrusted {
+			if !allowed[v] {
+				errs = append(errs, FieldError{
+					Field:   "action.url",
+					Message: fmt.Sprintf("untrusted variable ${%s} not allowed in URL host or path (SSRF risk; not in AllowedUntrustedVars)", v),
+				})
+			} else {
+				errs = append(errs, FieldError{
+					Field:   "action.url",
+					Message: fmt.Sprintf("untrusted variable ${%s} not allowed in URL host or path (SSRF risk; allowed only in body)", v),
+				})
+			}
+		}
+	}
+
+	// Query params: untrusted variables are now also rejected here.
+	if len(parts) > 1 {
+		query := parts[1]
+		for _, v := range extractVars(query) {
+			if ClassifyVar(v) == Untrusted {
+				if !allowed[v] {
+					errs = append(errs, FieldError{
+						Field:   "action.url",
+						Message: fmt.Sprintf("untrusted variable ${%s} not allowed in URL query (not in AllowedUntrustedVars)", v),
+					})
+				} else {
+					errs = append(errs, FieldError{
+						Field:   "action.url",
+						Message: fmt.Sprintf("untrusted variable ${%s} not allowed in URL query (allowed only in body)", v),
+					})
+				}
+			}
+		}
+	}
+
+	return errs
+}
+
+// validateBodyVariables checks that untrusted variables in the body are
+// (a) in the allow-list and (b) sit inside a JSON string literal — i.e. the
+// placeholder is immediately preceded by " and immediately followed by " or
+// other content within a JSON string. Concretely, we require the character
+// immediately before ${VAR} to be a double quote OR that the placeholder is
+// embedded within a JSON string context (preceded by ": " and quote).
+//
+// B5: This prevents type confusion where an untrusted value appears in a
+// non-string JSON position (key, numeric, boolean, null) and could alter
+// the JSON structure even after encoding.
+func validateBodyVariables(body string, allowed map[string]bool) []FieldError {
+	var errs []FieldError
+
+	matches := varPattern.FindAllStringSubmatchIndex(body, -1)
+	for _, loc := range matches {
+		// loc[0]:loc[1] is the full match ${VAR}
+		// loc[2]:loc[3] is the capture group (VAR name)
+		varName := body[loc[2]:loc[3]]
+
+		if ClassifyVar(varName) != Untrusted {
+			continue
+		}
+
+		if !allowed[varName] {
 			errs = append(errs, FieldError{
-				Field:   "action.url",
-				Message: fmt.Sprintf("untrusted variable ${%s} not allowed in URL host or path (SSRF risk)", v),
+				Field:   "action.body",
+				Message: fmt.Sprintf("untrusted variable ${%s} not allowed (not in AllowedUntrustedVars)", varName),
+			})
+			continue
+		}
+
+		// B5: Check that the placeholder sits inside a JSON string literal.
+		// The character immediately before ${VAR} must be a double quote (")
+		// indicating we're inside a "..." string value, OR we look back to
+		// confirm the context is within quotes.
+		if !isInsideJSONString(body, loc[0]) {
+			errs = append(errs, FieldError{
+				Field:   "action.body",
+				Message: fmt.Sprintf("untrusted variable ${%s} must be inside a JSON string literal (quoted); found in non-string position", varName),
 			})
 		}
 	}
 
-	// Query params: untrusted variables are allowed (percent-encoded at render).
-	// No static check needed.
-
 	return errs
+}
+
+// isInsideJSONString checks whether position pos in s is inside a JSON string
+// literal. It counts unescaped double quotes before pos; an odd count means
+// we are inside a string.
+func isInsideJSONString(s string, pos int) bool {
+	quoteCount := 0
+	for i := 0; i < pos; i++ {
+		if s[i] == '\\' {
+			i++ // skip escaped character
+			continue
+		}
+		if s[i] == '"' {
+			quoteCount++
+		}
+	}
+	return quoteCount%2 == 1
 }
 
 // ---------------------------------------------------------------------------
@@ -194,36 +308,41 @@ type RenderVars map[string]string
 // RenderAction renders a LifecycleHookAction template by substituting
 // variables with their values from vars. Untrusted variable values are
 // strictly encoded:
-//   - In query positions: percent-encoded.
 //   - In body: JSON-string-encoded (escaped for safe embedding in JSON).
 //
-// Trusted variables are substituted verbatim.
+// Trusted variables are substituted verbatim in URL and body positions.
+//
+// B2: Header rendering applies defense-in-depth: untrusted variables are
+// refused (skipped/blanked) even if the static validator were bypassed.
+// Additionally, CR/LF characters are stripped from all header values to
+// prevent header injection.
 //
 // This is the execution-time half of the untrusted-variable guard. The
 // static validator (ValidateActionVariables) has already rejected any hook
 // that places an untrusted variable in a disallowed position, so this
-// function only needs to encode values in their allowed positions.
+// function provides a defense-in-depth layer.
 //
 // Returns a new LifecycleHookAction with all variables resolved. Variables
 // not present in vars are left as-is (the caller decides whether to treat
 // that as an error).
 func RenderAction(a *store.LifecycleHookAction, vars RenderVars) *store.LifecycleHookAction {
 	rendered := &store.LifecycleHookAction{
-		Type:           a.Type,
-		Method:         a.Method,
-		OnError:        a.OnError,
-		TimeoutSeconds: a.TimeoutSeconds,
+		Type:                 a.Type,
+		Method:               a.Method,
+		OnError:              a.OnError,
+		TimeoutSeconds:       a.TimeoutSeconds,
+		AllowedUntrustedVars: a.AllowedUntrustedVars,
 	}
 
 	// Render URL with position-aware encoding.
 	rendered.URL = renderURL(a.URL, vars)
 
-	// Render headers — only trusted vars are allowed in auth headers
-	// (enforced by static validator); substitute all verbatim.
+	// B2: Render headers with defense-in-depth — refuse untrusted vars and
+	// strip CR/LF from all substituted values.
 	if a.Headers != nil {
 		rendered.Headers = make(map[string]string, len(a.Headers))
 		for name, value := range a.Headers {
-			rendered.Headers[name] = renderTrustedSubstitution(value, vars)
+			rendered.Headers[name] = renderHeaderValue(value, vars)
 		}
 	}
 
@@ -233,9 +352,10 @@ func RenderAction(a *store.LifecycleHookAction, vars RenderVars) *store.Lifecycl
 	return rendered
 }
 
-// renderURL substitutes variables in a URL template. Query-parameter values
-// containing untrusted variables are percent-encoded; host/path variables
+// renderURL substitutes variables in a URL template. Host/path variables
 // (which must be trusted, per static validation) are substituted verbatim.
+// Query-parameter values are also substituted verbatim for trusted vars
+// (untrusted vars in query are rejected at validation time).
 func renderURL(rawURL string, vars RenderVars) string {
 	parts := strings.SplitN(rawURL, "?", 2)
 	hostAndPath := parts[0]
@@ -248,7 +368,9 @@ func renderURL(rawURL string, vars RenderVars) string {
 		return hostAndPath
 	}
 
-	// Query string: untrusted vars are percent-encoded.
+	// Query string: untrusted vars are now rejected at validation time,
+	// but for defense-in-depth, we still percent-encode untrusted values
+	// if any slip through.
 	query := parts[1]
 	query = varPattern.ReplaceAllStringFunc(query, func(match string) string {
 		name := varPattern.FindStringSubmatch(match)[1]
@@ -279,9 +401,43 @@ func renderTrustedSubstitution(s string, vars RenderVars) string {
 	})
 }
 
+// renderHeaderValue substitutes variables in a header value with
+// defense-in-depth protections:
+//   - Untrusted variables are blanked (replaced with empty string) rather
+//     than substituted, even if the static validator were bypassed.
+//   - All substituted values have CR (\r) and LF (\n) stripped to prevent
+//     HTTP header injection.
+func renderHeaderValue(s string, vars RenderVars) string {
+	return varPattern.ReplaceAllStringFunc(s, func(match string) string {
+		name := varPattern.FindStringSubmatch(match)[1]
+		value, ok := vars[name]
+		if !ok {
+			return match
+		}
+		// B2: Defense-in-depth — refuse untrusted variables in headers.
+		if ClassifyVar(name) == Untrusted {
+			return "" // Blank untrusted values at render time.
+		}
+		// Strip CR/LF from trusted values as an extra safety measure.
+		return sanitizeHeaderValue(value)
+	})
+}
+
+// sanitizeHeaderValue removes CR and LF characters from a header value
+// to prevent HTTP header injection attacks.
+func sanitizeHeaderValue(s string) string {
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\n", "")
+	return s
+}
+
 // renderBody substitutes variables in a body template. Untrusted variable
 // values are JSON-string-encoded (double-quote-escaped) to prevent JSON
 // structure injection. Trusted variables are substituted verbatim.
+//
+// NOTE (C8): The body is assumed to be JSON. If the body uses a different
+// content type (e.g. form-encoded), JSON-string encoding may be inappropriate.
+// A future enhancement may key off a Content-Type header to select encoding.
 func renderBody(body string, vars RenderVars) string {
 	return varPattern.ReplaceAllStringFunc(body, func(match string) string {
 		name := varPattern.FindStringSubmatch(match)[1]

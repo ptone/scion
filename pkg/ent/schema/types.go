@@ -65,4 +65,12 @@ type LifecycleHookAction struct {
 	OnError string `json:"onError,omitempty"`
 	// TimeoutSeconds is the per-action timeout in seconds.
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
+
+	// AllowedUntrustedVars is the admin-curated allow-list of untrusted
+	// variable names that may appear in the action body. Untrusted variables
+	// used anywhere in the action are rejected unless listed here, and even
+	// allow-listed variables are permitted only in the body (never URL
+	// host/path, query, or headers). This field is stored in the action JSON
+	// blob; no DB migration is needed.
+	AllowedUntrustedVars []string `json:"allowedUntrustedVars,omitempty"`
 }

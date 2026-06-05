@@ -1221,6 +1221,15 @@ type LifecycleHookAction struct {
 	Body           string            `json:"body,omitempty"`
 	OnError        string            `json:"onError,omitempty"`        // "log" (default) | "retry"
 	TimeoutSeconds int               `json:"timeoutSeconds,omitempty"` // Per-action timeout in seconds
+
+	// AllowedUntrustedVars is the admin-curated allow-list of untrusted
+	// variable names that may appear in the action body. Untrusted variables
+	// used anywhere in the action are rejected unless listed here, and even
+	// allow-listed variables are permitted only in the body (never URL
+	// host/path, query, or headers). The admin must consciously opt-in each
+	// untrusted variable, preventing e.g. an agent-controlled callback_url
+	// from being substituted under the service-account's authority.
+	AllowedUntrustedVars []string `json:"allowedUntrustedVars,omitempty"`
 }
 
 // LifecycleHookScopeType constants

@@ -16,6 +16,7 @@ package lifecyclehooks
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -235,13 +236,29 @@ func TestValidateHook_WebhookRules(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "webhook: method must be POST",
+			name: "webhook: method must be POST (canonical)",
 			hook: &store.LifecycleHook{
 				Trigger:   "running",
 				ScopeType: "hub",
 				Action: &store.LifecycleHookAction{
 					Type:           "webhook",
 					Method:         "GET",
+					URL:            "https://hooks.slack.com/services/T00/B00/xxx",
+					TimeoutSeconds: 5,
+				},
+			},
+			wantErr: true,
+			errMsg:  "webhook actions must use POST",
+		},
+		{
+			// C5: lowercase "post" is now rejected (canonical uppercase required).
+			name: "webhook: lowercase post rejected",
+			hook: &store.LifecycleHook{
+				Trigger:   "running",
+				ScopeType: "hub",
+				Action: &store.LifecycleHookAction{
+					Type:           "webhook",
+					Method:         "post",
 					URL:            "https://hooks.slack.com/services/T00/B00/xxx",
 					TimeoutSeconds: 5,
 				},
@@ -300,6 +317,41 @@ func TestValidateHook_WebhookRules(t *testing.T) {
 			wantErr: true,
 			errMsg:  "authentication headers are not allowed on webhook",
 		},
+		// T2: Cookie/Set-Cookie auth-header handling
+		{
+			name: "webhook: Cookie header rejected (B3)",
+			hook: &store.LifecycleHook{
+				Trigger:   "running",
+				ScopeType: "hub",
+				Action: &store.LifecycleHookAction{
+					Type: "webhook",
+					URL:  "https://hooks.slack.com/services/T00/B00/xxx",
+					Headers: map[string]string{
+						"Cookie": "session=abc123",
+					},
+					TimeoutSeconds: 5,
+				},
+			},
+			wantErr: true,
+			errMsg:  "authentication headers are not allowed on webhook",
+		},
+		{
+			name: "webhook: Set-Cookie header rejected (B3)",
+			hook: &store.LifecycleHook{
+				Trigger:   "running",
+				ScopeType: "hub",
+				Action: &store.LifecycleHookAction{
+					Type: "webhook",
+					URL:  "https://hooks.slack.com/services/T00/B00/xxx",
+					Headers: map[string]string{
+						"Set-Cookie": "session=abc123; Path=/; HttpOnly",
+					},
+					TimeoutSeconds: 5,
+				},
+			},
+			wantErr: true,
+			errMsg:  "authentication headers are not allowed on webhook",
+		},
 		{
 			name: "webhook: non-auth custom headers allowed",
 			hook: &store.LifecycleHook{
@@ -340,7 +392,7 @@ func TestValidateHook_WebhookRules(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tc.errMsg)
 				}
-				if tc.errMsg != "" && !containsString(err.Error(), tc.errMsg) {
+				if tc.errMsg != "" && !strings.Contains(err.Error(), tc.errMsg) {
 					t.Errorf("expected error containing %q, got: %v", tc.errMsg, err)
 				}
 			} else if err != nil {
@@ -508,7 +560,7 @@ func TestValidateHook_ExecutionIdentity(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tc.errMsg)
 				}
-				if tc.errMsg != "" && !containsString(err.Error(), tc.errMsg) {
+				if tc.errMsg != "" && !strings.Contains(err.Error(), tc.errMsg) {
 					t.Errorf("expected error containing %q, got: %v", tc.errMsg, err)
 				}
 			} else if err != nil {
@@ -571,7 +623,7 @@ func TestValidateHook_HeaderNameInjection(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ValidateHook — on_error validation
+// ValidateHook — on_error validation (T5: empty defaults to log)
 // ---------------------------------------------------------------------------
 
 func TestValidateHook_OnError(t *testing.T) {
@@ -602,6 +654,20 @@ func TestValidateHook_OnError(t *testing.T) {
 	}
 }
 
+// T5: Verify that empty on_error is normalized to "log" after validation.
+func TestValidateHook_OnErrorDefaultsToLog(t *testing.T) {
+	h := validHTTPHook()
+	h.Action.OnError = ""
+
+	err := ValidateHook(context.Background(), h, defaultResolver())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if h.Action.OnError != "log" {
+		t.Errorf("expected on_error to default to %q, got %q", "log", h.Action.OnError)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ValidateHook — nil action
 // ---------------------------------------------------------------------------
@@ -616,7 +682,7 @@ func TestValidateHook_NilAction(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for nil action, got nil")
 	}
-	if !containsString(err.Error(), "action") {
+	if !strings.Contains(err.Error(), "action") {
 		t.Errorf("expected error about action, got: %v", err)
 	}
 }
@@ -633,21 +699,4 @@ func TestIsValidationError(t *testing.T) {
 	if IsValidationError(store.ErrNotFound) {
 		t.Error("expected IsValidationError to return false for non-ValidationError")
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && contains(s, substr))
-}
-
-func contains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

@@ -14,8 +14,8 @@
 
 // Package lifecyclehooks provides validation and variable-substitution logic
 // for lifecycle hooks. It is imported by both the Hub API handlers (create/update
-// validation) and the executor (render-time variable guard). No Hub server or
-// store dependency — callers pass the data this package needs.
+// validation) and the executor (render-time variable guard). It depends on
+// pkg/store for model types (LifecycleHookAction, constants, etc.).
 package lifecyclehooks
 
 import (
@@ -63,13 +63,15 @@ var validOnErrorPolicies = map[string]bool{
 	store.LifecycleHookOnErrorRetry: true,
 }
 
-// authHeaderPrefixes lists header names that are considered authentication
-// headers. Comparison is case-insensitive.
+// authHeaderNames lists header names that are considered authentication
+// or credential-carrying headers. Comparison is case-insensitive.
 var authHeaderNames = map[string]bool{
 	"authorization":       true,
 	"proxy-authorization": true,
 	"x-api-key":           true,
 	"x-auth-token":        true,
+	"cookie":              true,
+	"set-cookie":          true,
 }
 
 // ValidationError collects one or more field-level validation failures.
@@ -166,16 +168,18 @@ func validateAction(a *store.LifecycleHookAction, execIdentity string) []FieldEr
 	}
 
 	// -- method --
+	// Both http and webhook actions require canonical uppercase HTTP methods
+	// (e.g. "POST", not "post"). This makes the rule consistent across types.
 	if a.Type == store.LifecycleHookActionWebhook {
-		// Webhook is always POST; if method is set it must be POST.
-		if a.Method != "" && !strings.EqualFold(a.Method, http.MethodPost) {
+		// Webhook is always POST; if method is set it must be POST (canonical).
+		if a.Method != "" && a.Method != http.MethodPost {
 			errs = append(errs, FieldError{
 				Field:   "action.method",
-				Message: fmt.Sprintf("webhook actions must use POST; got %q", a.Method),
+				Message: fmt.Sprintf("webhook actions must use POST (canonical uppercase); got %q", a.Method),
 			})
 		}
 	} else {
-		// http action requires a valid method (must be uppercase per HTTP spec).
+		// http action requires a valid method (must be canonical uppercase per HTTP spec).
 		if a.Method == "" {
 			errs = append(errs, FieldError{Field: "action.method", Message: "required for http actions"})
 		} else if !validHTTPMethods[a.Method] {
@@ -210,7 +214,12 @@ func validateAction(a *store.LifecycleHookAction, execIdentity string) []FieldEr
 	}
 
 	// -- on_error --
-	if a.OnError != "" && !validOnErrorPolicies[a.OnError] {
+	// Default empty on_error to "log" (the design default). This normalization
+	// ensures downstream consumers never need to treat empty as a separate case.
+	if a.OnError == "" {
+		a.OnError = store.LifecycleHookOnErrorLog
+	}
+	if !validOnErrorPolicies[a.OnError] {
 		errs = append(errs, FieldError{
 			Field:   "action.onError",
 			Message: fmt.Sprintf("must be one of: log, retry; got %q", a.OnError),
@@ -281,15 +290,17 @@ func validateHeaders(a *store.LifecycleHookAction) []FieldError {
 }
 
 // isValidHeaderName checks that a header name is a valid HTTP token per RFC 7230.
+// Non-ASCII runes (c > 127) are rejected before the byte-level token check to
+// avoid truncation of multi-byte runes to a single byte.
 func isValidHeaderName(name string) bool {
 	if name == "" {
 		return false
 	}
 	for _, c := range name {
-		if !isTokenChar(byte(c)) {
+		if c > 127 {
 			return false
 		}
-		if c > 127 {
+		if !isTokenChar(byte(c)) {
 			return false
 		}
 	}
