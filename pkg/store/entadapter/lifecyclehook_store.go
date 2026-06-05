@@ -85,12 +85,14 @@ func entActionToStore(a *entschema.LifecycleHookAction) *store.LifecycleHookActi
 		return nil
 	}
 	return &store.LifecycleHookAction{
-		Method:         a.Method,
-		URL:            a.URL,
-		Headers:        a.Headers,
-		Body:           a.Body,
-		OnError:        a.OnError,
-		TimeoutSeconds: a.TimeoutSeconds,
+		Type:                 a.Type,
+		Method:               a.Method,
+		URL:                  a.URL,
+		Headers:              a.Headers,
+		Body:                 a.Body,
+		OnError:              a.OnError,
+		TimeoutSeconds:       a.TimeoutSeconds,
+		AllowedUntrustedVars: a.AllowedUntrustedVars,
 	}
 }
 
@@ -100,12 +102,14 @@ func storeActionToEnt(a *store.LifecycleHookAction) *entschema.LifecycleHookActi
 		return nil
 	}
 	return &entschema.LifecycleHookAction{
-		Method:         a.Method,
-		URL:            a.URL,
-		Headers:        a.Headers,
-		Body:           a.Body,
-		OnError:        a.OnError,
-		TimeoutSeconds: a.TimeoutSeconds,
+		Type:                 a.Type,
+		Method:               a.Method,
+		URL:                  a.URL,
+		Headers:              a.Headers,
+		Body:                 a.Body,
+		OnError:              a.OnError,
+		TimeoutSeconds:       a.TimeoutSeconds,
+		AllowedUntrustedVars: a.AllowedUntrustedVars,
 	}
 }
 

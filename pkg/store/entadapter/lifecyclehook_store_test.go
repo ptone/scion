@@ -46,12 +46,14 @@ func sampleHook(id string) *store.LifecycleHook {
 		},
 		Trigger: store.LifecycleHookTriggerRunning,
 		Action: &store.LifecycleHookAction{
-			Method:         "POST",
-			URL:            "https://registry.example.com/agents",
-			Headers:        map[string]string{"Content-Type": "application/json"},
-			Body:           `{"name":"${AGENT_NAME}"}`,
-			OnError:        store.LifecycleHookOnErrorRetry,
-			TimeoutSeconds: 30,
+			Type:                 store.LifecycleHookActionWebhook,
+			Method:               "POST",
+			URL:                  "https://registry.example.com/agents",
+			Headers:              map[string]string{"Content-Type": "application/json"},
+			Body:                 `{"name":"${AGENT_NAME}"}`,
+			OnError:              store.LifecycleHookOnErrorRetry,
+			TimeoutSeconds:       30,
+			AllowedUntrustedVars: []string{"AGENT_NAME"},
 		},
 		ExecutionIdentity: uuid.New().String(),
 		Enabled:           true,
@@ -102,11 +104,43 @@ func TestGetLifecycleHook(t *testing.T) {
 	assert.Equal(t, "registry-agent", got.Selector.Template)
 
 	require.NotNil(t, got.Action)
+	assert.Equal(t, store.LifecycleHookActionWebhook, got.Action.Type)
 	assert.Equal(t, "POST", got.Action.Method)
 	assert.Equal(t, "https://registry.example.com/agents", got.Action.URL)
 	assert.Equal(t, "application/json", got.Action.Headers["Content-Type"])
 	assert.Equal(t, store.LifecycleHookOnErrorRetry, got.Action.OnError)
 	assert.Equal(t, 30, got.Action.TimeoutSeconds)
+	assert.Equal(t, []string{"AGENT_NAME"}, got.Action.AllowedUntrustedVars)
+}
+
+func TestGetLifecycleHook_ActionTypeAndAllowedVars_RoundTrip(t *testing.T) {
+	s := newTestLifecycleHookStore(t)
+	ctx := context.Background()
+
+	id := uuid.New().String()
+	h := sampleHook(id)
+	h.Action.Type = store.LifecycleHookActionHTTP
+	h.Action.AllowedUntrustedVars = []string{"AGENT_NAME", "AGENT_ID"}
+	require.NoError(t, s.CreateLifecycleHook(ctx, h))
+
+	// Verify Type and AllowedUntrustedVars survive Create→Get.
+	got, err := s.GetLifecycleHook(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, got.Action)
+	assert.Equal(t, store.LifecycleHookActionHTTP, got.Action.Type)
+	assert.Equal(t, []string{"AGENT_NAME", "AGENT_ID"}, got.Action.AllowedUntrustedVars)
+
+	// Update the hook with different values.
+	got.Action.Type = store.LifecycleHookActionWebhook
+	got.Action.AllowedUntrustedVars = []string{"CALLBACK_URL"}
+	require.NoError(t, s.UpdateLifecycleHook(ctx, got))
+
+	// Verify Type and AllowedUntrustedVars survive Update→Get.
+	got2, err := s.GetLifecycleHook(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, got2.Action)
+	assert.Equal(t, store.LifecycleHookActionWebhook, got2.Action.Type)
+	assert.Equal(t, []string{"CALLBACK_URL"}, got2.Action.AllowedUntrustedVars)
 }
 
 func TestGetLifecycleHook_NotFound(t *testing.T) {

@@ -72,6 +72,36 @@ func TestSQLite_LifecycleHook_CreateGet(t *testing.T) {
 	assert.Equal(t, h.ExecutionIdentity, got.ExecutionIdentity)
 }
 
+func TestSQLite_LifecycleHook_ActionTypeAndAllowedVars_RoundTrip(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	id := uuid.New().String()
+	h := sampleLifecycleHook(id)
+	h.Action.Type = store.LifecycleHookActionHTTP
+	h.Action.AllowedUntrustedVars = []string{"AGENT_NAME", "AGENT_ID"}
+	require.NoError(t, s.CreateLifecycleHook(ctx, h))
+
+	// Verify Type and AllowedUntrustedVars survive Create→Get.
+	got, err := s.GetLifecycleHook(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, got.Action)
+	assert.Equal(t, store.LifecycleHookActionHTTP, got.Action.Type)
+	assert.Equal(t, []string{"AGENT_NAME", "AGENT_ID"}, got.Action.AllowedUntrustedVars)
+
+	// Update the hook with different values.
+	got.Action.Type = store.LifecycleHookActionWebhook
+	got.Action.AllowedUntrustedVars = []string{"CALLBACK_URL"}
+	require.NoError(t, s.UpdateLifecycleHook(ctx, got))
+
+	// Verify Type and AllowedUntrustedVars survive Update→Get.
+	got2, err := s.GetLifecycleHook(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, got2.Action)
+	assert.Equal(t, store.LifecycleHookActionWebhook, got2.Action.Type)
+	assert.Equal(t, []string{"CALLBACK_URL"}, got2.Action.AllowedUntrustedVars)
+}
+
 func TestSQLite_LifecycleHook_CreateDuplicate(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
