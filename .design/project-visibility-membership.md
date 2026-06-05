@@ -144,6 +144,24 @@ permissions may be refined later):
 | **admin** | member + create/manage agents (today's "member-create-agents") |
 | **owner** | admin + manage membership and visibility |
 
+**Enforcement decision (ptone, 2026-06-05): subtractive-only for now.** The policy
+engine cannot condition a `PolicyBinding` on a member's role today
+(`PolicyBinding` is `(PrincipalType, PrincipalID)` only; `GetEffectiveGroups`
+returns group IDs, dropping role). Rather than extend the engine, we reuse the
+existing `isProjectOwnerOrAdmin` role bypass (`pkg/hub/authz.go`, already checks
+`role==admin||owner`): read is granted by a project-scoped policy bound to the
+members group (all roles read), and `create/stop_all` is **removed** from that
+policy so create/manage flows from the admin/owner bypass. No policy-engine change.
+This is why existing members are bumped to `admin` on migration.
+
+> **Future improvement (deferred):** make policies genuinely role-aware by adding a
+> `role` field to `PolicyBinding`, carrying role through `GetEffectiveGroups`, and
+> filtering on it during policy evaluation. This would let role survive group
+> nesting (the subtractive approach's one gap: a user who is admin only via a
+> *nested* team group gets read but not create) and enable finer per-action grants.
+> Not required to meet this design; revisit when nested-admin or per-action
+> permissions are needed.
+
 Implications:
 - "everyone/public" = add `hub-members` at role=**member** (read-only) — safe.
 - Read-only sharing of an individual/group = add at role=member; collaborators who
