@@ -118,6 +118,8 @@ type AuditLogger interface {
 	LogGCPTokenEvent(ctx context.Context, event *GCPTokenEvent) error
 	// LogInviteAuditEvent logs an invite/allow-list audit event.
 	LogInviteAuditEvent(ctx context.Context, event *InviteAuditEvent) error
+	// LogLifecycleHookEvent logs a lifecycle-hook admin event.
+	LogLifecycleHookEvent(ctx context.Context, event *LifecycleHookEvent) error
 }
 
 // LogAuditLogger is a simple implementation that logs to the standard logger.
@@ -201,6 +203,29 @@ func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEv
 	}
 
 	slog.LogAttrs(ctx, level, "GCP token audit event", attrs...)
+
+	return nil
+}
+
+// LogLifecycleHookEvent logs a lifecycle-hook admin event to the standard logger.
+func (l *LogAuditLogger) LogLifecycleHookEvent(ctx context.Context, event *LifecycleHookEvent) error {
+	level := slog.LevelInfo
+	if !event.Success {
+		level = slog.LevelWarn
+	}
+
+	attrs := []slog.Attr{
+		slog.String("event_type", string(event.EventType)),
+		slog.String("hook_id", event.HookID),
+		slog.String("hook_name", event.HookName),
+		slog.String("actor", event.Actor),
+		slog.Bool("success", event.Success),
+	}
+	if event.FailReason != "" {
+		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
+	}
+
+	slog.LogAttrs(ctx, level, "lifecycle hook audit event", attrs...)
 
 	return nil
 }
@@ -478,26 +503,33 @@ const (
 	LifecycleHookEventDelete  LifecycleHookEventType = "lifecycle_hook_delete"
 )
 
-// LogLifecycleHookEvent logs a lifecycle-hook admin event to the structured
-// logger. It uses slog directly (rather than extending the AuditLogger
-// interface) so that adding lifecycle-hook audit doesn't require updating
-// every AuditLogger implementation.
+// LifecycleHookEvent represents an auditable lifecycle-hook admin event.
+type LifecycleHookEvent struct {
+	EventType  LifecycleHookEventType `json:"eventType"`
+	HookID     string                 `json:"hookId"`
+	HookName   string                 `json:"hookName"`
+	Actor      string                 `json:"actor"`
+	Success    bool                   `json:"success"`
+	FailReason string                 `json:"failReason,omitempty"`
+	Timestamp  time.Time              `json:"timestamp"`
+}
+
+// LogLifecycleHookEvent logs a lifecycle-hook admin event through the
+// AuditLogger interface so custom logger implementations can capture it.
 func LogLifecycleHookEvent(ctx context.Context, logger AuditLogger, eventType LifecycleHookEventType, hookID, hookName, actor string, success bool, failReason string) {
-	level := slog.LevelInfo
-	if !success {
-		level = slog.LevelWarn
+	if logger == nil {
+		return
 	}
 
-	attrs := []slog.Attr{
-		slog.String("event_type", string(eventType)),
-		slog.String("hook_id", hookID),
-		slog.String("hook_name", hookName),
-		slog.String("actor", actor),
-		slog.Bool("success", success),
-	}
-	if failReason != "" {
-		attrs = append(attrs, slog.String("fail_reason", failReason))
+	event := &LifecycleHookEvent{
+		EventType:  eventType,
+		HookID:     hookID,
+		HookName:   hookName,
+		Actor:      actor,
+		Success:    success,
+		FailReason: failReason,
+		Timestamp:  time.Now(),
 	}
 
-	slog.LogAttrs(ctx, level, "lifecycle hook audit event", attrs...)
+	_ = logger.LogLifecycleHookEvent(ctx, event)
 }

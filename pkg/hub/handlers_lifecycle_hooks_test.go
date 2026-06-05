@@ -185,6 +185,28 @@ func TestLifecycleHook_List_Forbidden_NonAdmin(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
+func TestLifecycleHook_Update_Forbidden_NonAdmin(t *testing.T) {
+	srv := &Server{}
+
+	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/lifecycle-hooks/some-id", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), member))
+	rec := httptest.NewRecorder()
+	srv.handleAdminLifecycleHookByID(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestLifecycleHook_Update_Forbidden_Unauthenticated(t *testing.T) {
+	srv := &Server{}
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/lifecycle-hooks/some-id", nil)
+	rec := httptest.NewRecorder()
+	srv.handleAdminLifecycleHookByID(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
 func TestLifecycleHook_Delete_Forbidden_NonAdmin(t *testing.T) {
 	srv := &Server{}
 
@@ -349,6 +371,41 @@ func TestLifecycleHook_Update_NotFound(t *testing.T) {
 	}
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/lifecycle-hooks/"+uuid.New().String(), updateReq)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestLifecycleHook_Update_ScopeImmutable(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Create a hook with hub scope and a scope ID.
+	createReq := validCreateRequest()
+	createReq.ScopeType = store.LifecycleHookScopeHub
+	createReq.ScopeID = "original-scope-id"
+	created := createHookViaAPI(t, srv, createReq)
+
+	assert.Equal(t, store.LifecycleHookScopeHub, created.ScopeType)
+	assert.Equal(t, "original-scope-id", created.ScopeID)
+
+	// Update the hook — the updateLifecycleHookRequest intentionally omits
+	// scopeType and scopeId, ensuring they cannot be changed after creation.
+	updateReq := updateLifecycleHookRequest{
+		Name:         "updated-name",
+		Trigger:      store.LifecycleHookTriggerRunning,
+		Action:       validWebhookAction(),
+		Enabled:      true,
+		StateVersion: created.StateVersion,
+	}
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/lifecycle-hooks/"+created.ID, updateReq)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// Re-fetch and verify scope fields are unchanged.
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/lifecycle-hooks/"+created.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code)
+
+	var got store.LifecycleHook
+	require.NoError(t, json.NewDecoder(getRec.Body).Decode(&got))
+	assert.Equal(t, store.LifecycleHookScopeHub, got.ScopeType, "scopeType must be immutable after creation")
+	assert.Equal(t, "original-scope-id", got.ScopeID, "scopeId must be immutable after creation")
 }
 
 func TestLifecycleHook_Update_ValidationError_BadTrigger(t *testing.T) {
