@@ -20,6 +20,8 @@ type Tx struct {
 	Group *GroupClient
 	// GroupMembership is the client for interacting with the GroupMembership builders.
 	GroupMembership *GroupMembershipClient
+	// LifecycleHook is the client for interacting with the LifecycleHook builders.
+	LifecycleHook *LifecycleHookClient
 	// PolicyBinding is the client for interacting with the PolicyBinding builders.
 	PolicyBinding *PolicyBindingClient
 	// Project is the client for interacting with the Project builders.
@@ -161,6 +163,7 @@ func (tx *Tx) init() {
 	tx.Agent = NewAgentClient(tx.config)
 	tx.Group = NewGroupClient(tx.config)
 	tx.GroupMembership = NewGroupMembershipClient(tx.config)
+	tx.LifecycleHook = NewLifecycleHookClient(tx.config)
 	tx.PolicyBinding = NewPolicyBindingClient(tx.config)
 	tx.Project = NewProjectClient(tx.config)
 	tx.User = NewUserClient(tx.config)

@@ -147,6 +147,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV51,
 		migrationV52,
 		migrationV53,
+		migrationV54,
 	}
 
 	// Create migrations table if not exists
@@ -1368,6 +1369,31 @@ CREATE TABLE IF NOT EXISTS invite_codes (
 );
 CREATE INDEX IF NOT EXISTS idx_invite_codes_expires ON invite_codes(expires_at);
 CREATE INDEX IF NOT EXISTS idx_allow_list_created_id ON allow_list (created DESC, id DESC);
+`
+
+// migrationV54 adds the lifecycle_hooks table (Configurable Agent Lifecycle Hooks).
+// Hooks are Hub database records, authored by hub administrators, that fire an
+// HTTP/webhook action when a matching agent crosses an authoritative phase
+// transition. state_version provides optimistic locking.
+const migrationV54 = `
+CREATE TABLE IF NOT EXISTS lifecycle_hooks (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	scope_type TEXT NOT NULL DEFAULT 'hub',
+	scope_id TEXT,
+	selector TEXT,             -- JSON object
+	trigger TEXT NOT NULL,     -- running | suspended | stopped | error
+	action TEXT,               -- JSON object
+	execution_identity TEXT,
+	enabled INTEGER NOT NULL DEFAULT 1,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	created_by TEXT,
+	state_version INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_hooks_scope ON lifecycle_hooks(scope_type, scope_id);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_hooks_trigger ON lifecycle_hooks(trigger);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_hooks_enabled ON lifecycle_hooks(enabled);
 `
 
 // tableExists checks whether a table with the given name exists in the database.
@@ -5831,6 +5857,205 @@ func (s *SQLiteStore) GetPoliciesForPrincipals(ctx context.Context, principals [
 	}
 
 	return policies, nil
+}
+
+// ============================================================================
+// Lifecycle Hook Operations
+// ============================================================================
+
+func (s *SQLiteStore) CreateLifecycleHook(ctx context.Context, hook *store.LifecycleHook) error {
+	now := time.Now()
+	hook.Created = now
+	hook.Updated = now
+	if hook.StateVersion <= 0 {
+		hook.StateVersion = 1
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO lifecycle_hooks (id, name, scope_type, scope_id, selector, trigger, action, execution_identity, enabled, created_at, updated_at, created_by, state_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		hook.ID, hook.Name, hook.ScopeType, nullableString(hook.ScopeID),
+		marshalJSONPtr(hook.Selector), hook.Trigger, marshalJSONPtr(hook.Action),
+		nullableString(hook.ExecutionIdentity), hook.Enabled,
+		hook.Created, hook.Updated, nullableString(hook.CreatedBy), hook.StateVersion,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") || strings.Contains(err.Error(), "PRIMARY KEY constraint failed") {
+			return store.ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetLifecycleHook(ctx context.Context, id string) (*store.LifecycleHook, error) {
+	hook := &store.LifecycleHook{}
+	var scopeID, selector, action, executionIdentity, createdBy sql.NullString
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, name, scope_type, scope_id, selector, trigger, action, execution_identity, enabled, created_at, updated_at, created_by, state_version
+		FROM lifecycle_hooks WHERE id = ?
+	`, id).Scan(
+		&hook.ID, &hook.Name, &hook.ScopeType, &scopeID,
+		&selector, &hook.Trigger, &action,
+		&executionIdentity, &hook.Enabled,
+		&hook.Created, &hook.Updated, &createdBy, &hook.StateVersion,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+
+	hook.ScopeID = scopeID.String
+	hook.ExecutionIdentity = executionIdentity.String
+	hook.CreatedBy = createdBy.String
+	if selector.Valid {
+		unmarshalJSON(selector.String, &hook.Selector)
+	}
+	if action.Valid {
+		unmarshalJSON(action.String, &hook.Action)
+	}
+
+	return hook, nil
+}
+
+func (s *SQLiteStore) UpdateLifecycleHook(ctx context.Context, hook *store.LifecycleHook) error {
+	hook.Updated = time.Now()
+	newVersion := hook.StateVersion + 1
+
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE lifecycle_hooks SET
+			name = ?, scope_type = ?, scope_id = ?,
+			selector = ?, trigger = ?, action = ?,
+			execution_identity = ?, enabled = ?,
+			updated_at = ?, created_by = ?, state_version = ?
+		WHERE id = ? AND state_version = ?
+	`,
+		hook.Name, hook.ScopeType, nullableString(hook.ScopeID),
+		marshalJSONPtr(hook.Selector), hook.Trigger, marshalJSONPtr(hook.Action),
+		nullableString(hook.ExecutionIdentity), hook.Enabled,
+		hook.Updated, nullableString(hook.CreatedBy), newVersion,
+		hook.ID, hook.StateVersion,
+	)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		var exists bool
+		s.db.QueryRowContext(ctx, "SELECT 1 FROM lifecycle_hooks WHERE id = ?", hook.ID).Scan(&exists)
+		if !exists {
+			return store.ErrNotFound
+		}
+		return store.ErrVersionConflict
+	}
+
+	hook.StateVersion = newVersion
+	return nil
+}
+
+func (s *SQLiteStore) DeleteLifecycleHook(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM lifecycle_hooks WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ListLifecycleHooks(ctx context.Context, filter store.LifecycleHookFilter, opts store.ListOptions) (*store.ListResult[store.LifecycleHook], error) {
+	var conditions []string
+	var args []interface{}
+
+	if filter.ScopeType != "" {
+		conditions = append(conditions, "scope_type = ?")
+		args = append(args, filter.ScopeType)
+	}
+	if filter.ScopeID != "" {
+		conditions = append(conditions, "scope_id = ?")
+		args = append(args, filter.ScopeID)
+	}
+	if filter.Trigger != "" {
+		conditions = append(conditions, "trigger = ?")
+		args = append(args, filter.Trigger)
+	}
+	if filter.Enabled != nil {
+		conditions = append(conditions, "enabled = ?")
+		args = append(args, *filter.Enabled)
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	var totalCount int
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM lifecycle_hooks %s", whereClause)
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+		return nil, err
+	}
+
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, name, scope_type, scope_id, selector, trigger, action, execution_identity, enabled, created_at, updated_at, created_by, state_version
+		FROM lifecycle_hooks %s ORDER BY created_at DESC LIMIT ?
+	`, whereClause)
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hooks []store.LifecycleHook
+	for rows.Next() {
+		var hook store.LifecycleHook
+		var scopeID, selector, action, executionIdentity, createdBy sql.NullString
+
+		if err := rows.Scan(
+			&hook.ID, &hook.Name, &hook.ScopeType, &scopeID,
+			&selector, &hook.Trigger, &action,
+			&executionIdentity, &hook.Enabled,
+			&hook.Created, &hook.Updated, &createdBy, &hook.StateVersion,
+		); err != nil {
+			return nil, err
+		}
+
+		hook.ScopeID = scopeID.String
+		hook.ExecutionIdentity = executionIdentity.String
+		hook.CreatedBy = createdBy.String
+		if selector.Valid {
+			unmarshalJSON(selector.String, &hook.Selector)
+		}
+		if action.Valid {
+			unmarshalJSON(action.String, &hook.Action)
+		}
+
+		hooks = append(hooks, hook)
+	}
+
+	return &store.ListResult[store.LifecycleHook]{
+		Items:      hooks,
+		TotalCount: totalCount,
+	}, nil
 }
 
 // ============================================================================

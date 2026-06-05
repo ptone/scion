@@ -9,6 +9,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
@@ -114,6 +115,34 @@ func init() {
 	groupmembershipDescID := groupmembershipFields[0].Descriptor()
 	// groupmembership.DefaultID holds the default value on creation for the id field.
 	groupmembership.DefaultID = groupmembershipDescID.Default.(func() uuid.UUID)
+	lifecyclehookFields := schema.LifecycleHook{}.Fields()
+	_ = lifecyclehookFields
+	// lifecyclehookDescName is the schema descriptor for name field.
+	lifecyclehookDescName := lifecyclehookFields[1].Descriptor()
+	// lifecyclehook.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	lifecyclehook.NameValidator = lifecyclehookDescName.Validators[0].(func(string) error)
+	// lifecyclehookDescEnabled is the schema descriptor for enabled field.
+	lifecyclehookDescEnabled := lifecyclehookFields[8].Descriptor()
+	// lifecyclehook.DefaultEnabled holds the default value on creation for the enabled field.
+	lifecyclehook.DefaultEnabled = lifecyclehookDescEnabled.Default.(bool)
+	// lifecyclehookDescCreated is the schema descriptor for created field.
+	lifecyclehookDescCreated := lifecyclehookFields[9].Descriptor()
+	// lifecyclehook.DefaultCreated holds the default value on creation for the created field.
+	lifecyclehook.DefaultCreated = lifecyclehookDescCreated.Default.(func() time.Time)
+	// lifecyclehookDescUpdated is the schema descriptor for updated field.
+	lifecyclehookDescUpdated := lifecyclehookFields[10].Descriptor()
+	// lifecyclehook.DefaultUpdated holds the default value on creation for the updated field.
+	lifecyclehook.DefaultUpdated = lifecyclehookDescUpdated.Default.(func() time.Time)
+	// lifecyclehook.UpdateDefaultUpdated holds the default value on update for the updated field.
+	lifecyclehook.UpdateDefaultUpdated = lifecyclehookDescUpdated.UpdateDefault.(func() time.Time)
+	// lifecyclehookDescStateVersion is the schema descriptor for state_version field.
+	lifecyclehookDescStateVersion := lifecyclehookFields[12].Descriptor()
+	// lifecyclehook.DefaultStateVersion holds the default value on creation for the state_version field.
+	lifecyclehook.DefaultStateVersion = lifecyclehookDescStateVersion.Default.(int64)
+	// lifecyclehookDescID is the schema descriptor for id field.
+	lifecyclehookDescID := lifecyclehookFields[0].Descriptor()
+	// lifecyclehook.DefaultID holds the default value on creation for the id field.
+	lifecyclehook.DefaultID = lifecyclehookDescID.Default.(func() uuid.UUID)
 	policybindingFields := schema.PolicyBinding{}.Fields()
 	_ = policybindingFields
 	// policybindingDescCreated is the schema descriptor for created field.

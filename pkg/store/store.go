@@ -73,6 +73,9 @@ type Store interface {
 	// Policy operations (Hub Permissions System)
 	PolicyStore
 
+	// LifecycleHook operations (Configurable Agent Lifecycle Hooks)
+	LifecycleHookStore
+
 	// User Access Token operations
 	UserAccessTokenStore
 
@@ -707,6 +710,42 @@ type PolicyFilter struct {
 	ScopeID      string // Filter by scope ID
 	ResourceType string // Filter by resource type
 	Effect       string // Filter by effect (allow, deny)
+}
+
+// =============================================================================
+// Lifecycle Hooks (Configurable Agent Lifecycle Hooks)
+// =============================================================================
+
+// LifecycleHookStore defines lifecycle-hook persistence operations.
+type LifecycleHookStore interface {
+	// CreateLifecycleHook creates a new lifecycle hook record.
+	// Returns ErrAlreadyExists if a hook with the same ID exists.
+	CreateLifecycleHook(ctx context.Context, hook *LifecycleHook) error
+
+	// GetLifecycleHook retrieves a lifecycle hook by ID.
+	// Returns ErrNotFound if the hook doesn't exist.
+	GetLifecycleHook(ctx context.Context, id string) (*LifecycleHook, error)
+
+	// UpdateLifecycleHook updates an existing lifecycle hook.
+	// Uses optimistic locking via StateVersion.
+	// Returns ErrNotFound if the hook doesn't exist.
+	// Returns ErrVersionConflict if the version doesn't match.
+	UpdateLifecycleHook(ctx context.Context, hook *LifecycleHook) error
+
+	// DeleteLifecycleHook removes a lifecycle hook by ID.
+	// Returns ErrNotFound if the hook doesn't exist.
+	DeleteLifecycleHook(ctx context.Context, id string) error
+
+	// ListLifecycleHooks returns lifecycle hooks matching the filter criteria.
+	ListLifecycleHooks(ctx context.Context, filter LifecycleHookFilter, opts ListOptions) (*ListResult[LifecycleHook], error)
+}
+
+// LifecycleHookFilter defines criteria for filtering lifecycle hooks.
+type LifecycleHookFilter struct {
+	ScopeType string // Filter by scope type (hub, project)
+	ScopeID   string // Filter by scope ID
+	Trigger   string // Filter by trigger (running, suspended, stopped, error)
+	Enabled   *bool  // Filter by enabled status (nil = no filter)
 }
 
 // =============================================================================

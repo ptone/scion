@@ -159,6 +159,45 @@ var (
 			},
 		},
 	}
+	// LifecycleHooksColumns holds the columns for the "lifecycle_hooks" table.
+	LifecycleHooksColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString},
+		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"hub", "project"}, Default: "hub"},
+		{Name: "scope_id", Type: field.TypeString, Nullable: true},
+		{Name: "selector", Type: field.TypeJSON, Nullable: true},
+		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"running", "suspended", "stopped", "error"}},
+		{Name: "action", Type: field.TypeJSON, Nullable: true},
+		{Name: "execution_identity", Type: field.TypeString, Nullable: true},
+		{Name: "enabled", Type: field.TypeBool, Default: true},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "state_version", Type: field.TypeInt64, Default: 1},
+	}
+	// LifecycleHooksTable holds the schema information for the "lifecycle_hooks" table.
+	LifecycleHooksTable = &schema.Table{
+		Name:       "lifecycle_hooks",
+		Columns:    LifecycleHooksColumns,
+		PrimaryKey: []*schema.Column{LifecycleHooksColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "lifecyclehook_scope_type_scope_id",
+				Unique:  false,
+				Columns: []*schema.Column{LifecycleHooksColumns[2], LifecycleHooksColumns[3]},
+			},
+			{
+				Name:    "lifecyclehook_trigger",
+				Unique:  false,
+				Columns: []*schema.Column{LifecycleHooksColumns[5]},
+			},
+			{
+				Name:    "lifecyclehook_enabled",
+				Unique:  false,
+				Columns: []*schema.Column{LifecycleHooksColumns[8]},
+			},
+		},
+	}
 	// PolicyBindingsColumns holds the columns for the "policy_bindings" table.
 	PolicyBindingsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -271,6 +310,7 @@ var (
 		AgentsTable,
 		GroupsTable,
 		GroupMembershipsTable,
+		LifecycleHooksTable,
 		PolicyBindingsTable,
 		ProjectsTable,
 		UsersTable,

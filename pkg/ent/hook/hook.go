@@ -57,6 +57,18 @@ func (f GroupMembershipFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Va
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.GroupMembershipMutation", m)
 }
 
+// The LifecycleHookFunc type is an adapter to allow the use of ordinary
+// function as LifecycleHook mutator.
+type LifecycleHookFunc func(context.Context, *ent.LifecycleHookMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f LifecycleHookFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.LifecycleHookMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.LifecycleHookMutation", m)
+}
+
 // The PolicyBindingFunc type is an adapter to allow the use of ordinary
 // function as PolicyBinding mutator.
 type PolicyBindingFunc func(context.Context, *ent.PolicyBindingMutation) (ent.Value, error)

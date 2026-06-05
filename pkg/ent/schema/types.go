@@ -41,3 +41,25 @@ type PolicyConditions struct {
 	DelegatedFrom      *DelegatedFromCondition `json:"delegatedFrom,omitempty"`
 	DelegatedFromGroup string                  `json:"delegatedFromGroup,omitempty"`
 }
+
+// LifecycleHookSelector describes which agents a lifecycle hook applies to.
+// Matching is performed against attributes persisted on the agent. v1 supports
+// project_id and template; label-based selection is a future enhancement and is
+// intentionally omitted until agents carry persisted labels.
+type LifecycleHookSelector struct {
+	ProjectID string `json:"projectId,omitempty"`
+	Template  string `json:"template,omitempty"`
+}
+
+// LifecycleHookAction describes the HTTP/webhook request a lifecycle hook
+// performs when it fires. Stored as JSON.
+type LifecycleHookAction struct {
+	Method  string            `json:"method,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+	Body    string            `json:"body,omitempty"`
+	// OnError is the failure policy: "log" (default) or "retry".
+	OnError string `json:"onError,omitempty"`
+	// TimeoutSeconds is the per-action timeout in seconds.
+	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
+}

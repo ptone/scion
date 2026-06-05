@@ -27,9 +27,10 @@ import (
 // operations with Ent-backed implementations.
 type CompositeStore struct {
 	store.Store
-	groups   *GroupStore
-	policies *PolicyStore
-	client   *ent.Client
+	groups         *GroupStore
+	policies       *PolicyStore
+	lifecycleHooks *LifecycleHookStore
+	client         *ent.Client
 }
 
 // NewCompositeStore creates a CompositeStore that delegates group and policy
@@ -37,10 +38,11 @@ type CompositeStore struct {
 // underlying store.
 func NewCompositeStore(base store.Store, client *ent.Client) *CompositeStore {
 	return &CompositeStore{
-		Store:    base,
-		groups:   NewGroupStore(client),
-		policies: NewPolicyStore(client),
-		client:   client,
+		Store:          base,
+		groups:         NewGroupStore(client),
+		policies:       NewPolicyStore(client),
+		lifecycleHooks: NewLifecycleHookStore(client),
+		client:         client,
 	}
 }
 
@@ -319,4 +321,26 @@ func (c *CompositeStore) GetPoliciesForPrincipal(ctx context.Context, principalT
 
 func (c *CompositeStore) GetPoliciesForPrincipals(ctx context.Context, principals []store.PrincipalRef) ([]store.Policy, error) {
 	return c.policies.GetPoliciesForPrincipals(ctx, principals)
+}
+
+// LifecycleHookStore method overrides — delegate to Ent-backed LifecycleHookStore.
+
+func (c *CompositeStore) CreateLifecycleHook(ctx context.Context, hook *store.LifecycleHook) error {
+	return c.lifecycleHooks.CreateLifecycleHook(ctx, hook)
+}
+
+func (c *CompositeStore) GetLifecycleHook(ctx context.Context, id string) (*store.LifecycleHook, error) {
+	return c.lifecycleHooks.GetLifecycleHook(ctx, id)
+}
+
+func (c *CompositeStore) UpdateLifecycleHook(ctx context.Context, hook *store.LifecycleHook) error {
+	return c.lifecycleHooks.UpdateLifecycleHook(ctx, hook)
+}
+
+func (c *CompositeStore) DeleteLifecycleHook(ctx context.Context, id string) error {
+	return c.lifecycleHooks.DeleteLifecycleHook(ctx, id)
+}
+
+func (c *CompositeStore) ListLifecycleHooks(ctx context.Context, filter store.LifecycleHookFilter, opts store.ListOptions) (*store.ListResult[store.LifecycleHook], error) {
+	return c.lifecycleHooks.ListLifecycleHooks(ctx, filter, opts)
 }

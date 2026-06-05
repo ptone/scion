@@ -16,6 +16,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
@@ -83,6 +84,7 @@ func checkColumn(t, c string) error {
 			agent.Table:           agent.ValidColumn,
 			group.Table:           group.ValidColumn,
 			groupmembership.Table: groupmembership.ValidColumn,
+			lifecyclehook.Table:   lifecyclehook.ValidColumn,
 			policybinding.Table:   policybinding.ValidColumn,
 			project.Table:         project.ValidColumn,
 			user.Table:            user.ValidColumn,

@@ -18,6 +18,9 @@ type Group func(*sql.Selector)
 // GroupMembership is the predicate function for groupmembership builders.
 type GroupMembership func(*sql.Selector)
 
+// LifecycleHook is the predicate function for lifecyclehook builders.
+type LifecycleHook func(*sql.Selector)
+
 // PolicyBinding is the predicate function for policybinding builders.
 type PolicyBinding func(*sql.Selector)
 
