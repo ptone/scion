@@ -506,7 +506,8 @@ type Server struct {
 	controlChannel         *ControlChannelManager  // WebSocket control channel for runtime brokers
 	authzService           *AuthzService           // Authorization service for policy evaluation
 	events                 EventPublisher          // Event publisher for real-time SSE updates
-	notificationDispatcher *NotificationDispatcher // Notification dispatcher for agent status events
+	notificationDispatcher  *NotificationDispatcher  // Notification dispatcher for agent status events
+	lifecycleHookEvaluator *LifecycleHookEvaluator // Lifecycle hook evaluator for phase transitions
 	maintenance            *MaintenanceState       // Runtime maintenance mode state
 	hubID                  string                  // Unique hub instance ID for secret namespacing
 	embeddedBrokerID       string                  // Broker ID when running in hub+broker combo mode
@@ -1303,6 +1304,31 @@ func (s *Server) StartNotificationDispatcher() {
 	s.notificationDispatcher.Start()
 }
 
+// StartLifecycleHookEvaluator creates and starts the lifecycle hook evaluator
+// if a ChannelEventPublisher is available. The evaluator subscribes to agent
+// status events, detects phase transitions into v1 triggers (running,
+// suspended, stopped, error), and fires matching lifecycle hooks asynchronously
+// after the transition is committed.
+// Safe to call multiple times; subsequent calls are no-ops.
+func (s *Server) StartLifecycleHookEvaluator() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.lifecycleHookEvaluator != nil {
+		return // already started
+	}
+
+	ep, ok := s.events.(*ChannelEventPublisher)
+	if !ok {
+		slog.Warn("Event publisher does not support subscriptions, lifecycle hook evaluator not started")
+		return
+	}
+
+	ev := NewLifecycleHookEvaluator(s.store, ep, nil, logging.Subsystem("hub.lifecycle-hooks"))
+	s.lifecycleHookEvaluator = ev
+	s.lifecycleHookEvaluator.Start()
+}
+
 // StartMessageBroker creates and starts the message broker proxy if a
 // ChannelEventPublisher is available. The broker enables pub/sub message
 // routing with topic-based subscriptions and broadcast fan-out.
@@ -1871,6 +1897,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// The dispatcher is resolved lazily so it works even if SetDispatcher
 	// is called after Start().
 	s.StartNotificationDispatcher()
+
+	// Start lifecycle hook evaluator (uses the current event publisher).
+	// Must start after event publisher is set so it can subscribe.
+	s.StartLifecycleHookEvaluator()
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -1940,6 +1970,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.notificationDispatcher.Stop()
 	}
 
+	// Stop lifecycle hook evaluator before closing event publisher
+	if s.lifecycleHookEvaluator != nil {
+		s.lifecycleHookEvaluator.Stop()
+	}
+
 	// Close event publisher
 	if s.events != nil {
 		s.events.Close()
@@ -1973,6 +2008,9 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		}
 		if s.notificationDispatcher != nil {
 			s.notificationDispatcher.Stop()
+		}
+		if s.lifecycleHookEvaluator != nil {
+			s.lifecycleHookEvaluator.Stop()
 		}
 		if s.messageBrokerProxy != nil {
 			s.messageBrokerProxy.Stop()
