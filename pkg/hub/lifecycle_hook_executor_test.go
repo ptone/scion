@@ -948,7 +948,7 @@ func TestLifecycleHookExecutor_SSRFBlocksLoopback(t *testing.T) {
 	err := executor.Execute(context.Background(), hook, makeTestAgent(projID), "running")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SSRF protection")
-	assert.Contains(t, err.Error(), "loopback/link-local")
+	assert.Contains(t, err.Error(), "all resolved IPs")
 }
 
 // ---------------------------------------------------------------------------
@@ -1109,4 +1109,161 @@ func TestLifecycleHookExecutor_CtxCancelDuringBackoff(t *testing.T) {
 
 	// Should have made only 1 attempt (cancelled during backoff before 2nd).
 	assert.Equal(t, int32(1), attemptCount.Load())
+}
+
+// ---------------------------------------------------------------------------
+// SSRF dialer hardening — DNS-rebinding TOCTOU closure
+// ---------------------------------------------------------------------------
+
+// fakeResolver returns a fixed set of IPs for any hostname lookup.
+type fakeResolver struct {
+	ips []net.IPAddr
+	err error
+}
+
+func (r *fakeResolver) LookupIPAddr(_ context.Context, _ string) ([]net.IPAddr, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	return r.ips, nil
+}
+
+// capturingDialer records the addr passed to DialContext, then delegates to a
+// real dialer. This lets us verify the dialer is called with an IP, not a host.
+type capturingDialer struct {
+	mu       sync.Mutex
+	addrs    []string
+	delegate ssrfDialer
+}
+
+func (d *capturingDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	d.mu.Lock()
+	d.addrs = append(d.addrs, addr)
+	d.mu.Unlock()
+	return d.delegate.DialContext(ctx, network, addr)
+}
+
+func (d *capturingDialer) getAddrs() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]string, len(d.addrs))
+	copy(out, d.addrs)
+	return out
+}
+
+func TestSSRFDialer_DialsByValidatedIP(t *testing.T) {
+	// Start a test server to accept the connection.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	// Parse the httptest server's address to get its actual IP and port.
+	_, tsPort, err := net.SplitHostPort(ts.Listener.Addr().String())
+	require.NoError(t, err)
+
+	// The "allowed" IP is the actual httptest server IP (127.0.0.1 in practice,
+	// but we want the SSRF-safe dialer to see it as an allowed IP for this test).
+	// We use 10.0.0.1 as the "resolved" IP (RFC1918, allowed) and route the
+	// actual dial back to the httptest server via capturingDialer.
+	allowedIP := net.ParseIP("10.0.0.1")
+
+	resolver := &fakeResolver{
+		ips: []net.IPAddr{{IP: allowedIP}},
+	}
+
+	// The capturing dialer wraps a real dialer but rewrites the addr to the
+	// actual httptest server address so the connection succeeds.
+	realDialer := &net.Dialer{Timeout: 5 * time.Second}
+	capturing := &capturingDialer{
+		delegate: &rewritingDialer{
+			target: ts.Listener.Addr().String(),
+			inner:  realDialer,
+		},
+	}
+
+	client := newSSRFSafeClientWith(resolver, capturing)
+
+	// Make a request to a "hostname" URL. The SSRF dialer should resolve
+	// via fakeResolver, find 10.0.0.1 (allowed), and dial "10.0.0.1:<port>".
+	resp, err := client.Get(fmt.Sprintf("http://some-host.example.com:%s/api", tsPort))
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Verify the dialer was called with the IP address, not the hostname.
+	addrs := capturing.getAddrs()
+	require.Len(t, addrs, 1)
+	assert.Equal(t, net.JoinHostPort(allowedIP.String(), tsPort), addrs[0],
+		"dialer must be called with the validated IP, not the hostname")
+}
+
+func TestSSRFDialer_AllBlockedIPsRefused(t *testing.T) {
+	// A resolver that returns only blocked IPs (loopback + link-local).
+	resolver := &fakeResolver{
+		ips: []net.IPAddr{
+			{IP: net.ParseIP("127.0.0.1")},
+			{IP: net.ParseIP("::1")},
+			{IP: net.ParseIP("169.254.169.254")},
+		},
+	}
+
+	realDialer := &net.Dialer{Timeout: 5 * time.Second}
+	client := newSSRFSafeClientWith(resolver, realDialer)
+
+	_, err := client.Get("http://evil-host.example.com:8080/steal")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SSRF protection")
+	assert.Contains(t, err.Error(), "all resolved IPs")
+}
+
+func TestSSRFDialer_MixedIPsDialsFirstAllowed(t *testing.T) {
+	// Resolver returns a blocked IP first, then an allowed IP.
+	allowedIP := net.ParseIP("10.0.0.5")
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	_, tsPort, err := net.SplitHostPort(ts.Listener.Addr().String())
+	require.NoError(t, err)
+
+	resolver := &fakeResolver{
+		ips: []net.IPAddr{
+			{IP: net.ParseIP("127.0.0.1")}, // blocked
+			{IP: allowedIP},                  // allowed — should be dialed
+		},
+	}
+
+	realDialer := &net.Dialer{Timeout: 5 * time.Second}
+	capturing := &capturingDialer{
+		delegate: &rewritingDialer{
+			target: ts.Listener.Addr().String(),
+			inner:  realDialer,
+		},
+	}
+
+	client := newSSRFSafeClientWith(resolver, capturing)
+	resp, err := client.Get(fmt.Sprintf("http://mixed-host.example.com:%s/api", tsPort))
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Verify the dialer was called with the allowed IP, skipping the blocked one.
+	addrs := capturing.getAddrs()
+	require.Len(t, addrs, 1)
+	assert.Equal(t, net.JoinHostPort(allowedIP.String(), tsPort), addrs[0])
+}
+
+// rewritingDialer always dials a fixed target address, regardless of the
+// addr argument. This lets tests verify what address the SSRF transport
+// INTENDED to dial while still reaching an actual httptest server.
+type rewritingDialer struct {
+	target string
+	inner  ssrfDialer
+}
+
+func (d *rewritingDialer) DialContext(ctx context.Context, network, _ string) (net.Conn, error) {
+	return d.inner.DialContext(ctx, network, d.target)
 }

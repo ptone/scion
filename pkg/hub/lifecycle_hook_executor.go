@@ -48,9 +48,12 @@ const defaultTimeoutSeconds = 10
 // Security invariants:
 //   - Initial-URL connections to loopback (127.0.0.0/8, ::1) and link-local
 //     (169.254.0.0/16, fe80::/10) addresses are blocked at the dialer level
-//     (SSRF protection). The check inspects the RESOLVED dial IP, which also
-//     defends against DNS-rebinding. RFC1918 addresses (10/8, 172.16/12,
-//     192.168/16) are intentionally ALLOWED for internal service registries.
+//     (SSRF protection). The dialer resolves the hostname, selects the first
+//     non-blocked IP, and dials THAT SPECIFIC IP — never the original
+//     hostname. This closes the DNS-rebinding TOCTOU window: the TCP
+//     connection is made only to a validated, non-blocked IP.
+//     RFC1918 addresses (10/8, 172.16/12, 192.168/16) are intentionally
+//     ALLOWED for internal service registries.
 //   - All redirects are blocked (SSRF protection via redirect).
 //   - SA tokens are attached ONLY for action.Type == "http"; webhooks send
 //     unauthenticated (the URL carries its own token).
@@ -281,19 +284,47 @@ func (e *HTTPExecutor) buildRenderVars(ctx context.Context, hook *store.Lifecycl
 	return vars
 }
 
+// ssrfResolver abstracts DNS resolution for the SSRF-safe dialer.
+// Production uses net.DefaultResolver; tests can inject a fake to control
+// which IPs a hostname resolves to without real DNS.
+type ssrfResolver interface {
+	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
+}
+
+// ssrfDialer abstracts the raw TCP dial for the SSRF-safe dialer.
+// Production uses a net.Dialer; tests can inject a fake to verify which
+// IP:port pairs are actually dialed.
+type ssrfDialer interface {
+	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+// defaultSSRFResolver wraps net.DefaultResolver to satisfy ssrfResolver.
+type defaultSSRFResolver struct{}
+
+func (defaultSSRFResolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
 // newSSRFSafeClient creates an http.Client with SSRF-safe transport and
-// redirect blocking. The transport uses a DialContext that inspects the
-// RESOLVED dial IP and refuses connections to loopback and link-local
-// addresses. This defends against both direct loopback URLs and
-// DNS-rebinding attacks.
+// redirect blocking. The transport uses a DialContext that resolves the
+// hostname, selects the first non-blocked IP, and dials THAT SPECIFIC IP —
+// never the original hostname. This closes the DNS-rebinding TOCTOU window
+// (the dialed IP is always the one we validated). TLS SNI and the HTTP
+// Host header are unaffected because they come from req.URL.Host, not the
+// dial address.
 //
 // The client blocks ALL redirects. N2: no redundant http.Client.Timeout —
 // the per-attempt context deadline is the single timeout mechanism.
 func newSSRFSafeClient() *http.Client {
-	dialer := &net.Dialer{
+	return newSSRFSafeClientWith(defaultSSRFResolver{}, &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
-	}
+	})
+}
+
+// newSSRFSafeClientWith creates an SSRF-safe http.Client using the provided
+// resolver and dialer. This is the injectable constructor used by tests.
+func newSSRFSafeClientWith(resolver ssrfResolver, dialer ssrfDialer) *http.Client {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// Resolve the address to check the actual IP before connecting.
@@ -301,17 +332,22 @@ func newSSRFSafeClient() *http.Client {
 			if err != nil {
 				return nil, fmt.Errorf("SSRF protection: invalid address %q: %w", addr, err)
 			}
-			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			ips, err := resolver.LookupIPAddr(ctx, host)
 			if err != nil {
 				return nil, fmt.Errorf("SSRF protection: DNS lookup failed for %q: %w", host, err)
 			}
+
+			// Select the first non-blocked IP and dial it directly.
+			// This guarantees we connect to exactly the IP we validated,
+			// closing the DNS-rebinding TOCTOU window.
 			for _, ipAddr := range ips {
-				if isBlockedSSRFTarget(ipAddr.IP) {
-					return nil, fmt.Errorf("SSRF protection: connection to %s (%s) is blocked (loopback/link-local)", host, ipAddr.IP)
+				if !isBlockedSSRFTarget(ipAddr.IP) {
+					return dialer.DialContext(ctx, network, net.JoinHostPort(ipAddr.IP.String(), port))
 				}
 			}
-			// All resolved IPs are safe; dial the original address.
-			return dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
+
+			// Every resolved IP is blocked — refuse without dialing.
+			return nil, fmt.Errorf("SSRF protection: all resolved IPs for %q are blocked (loopback/link-local)", host)
 		},
 	}
 	return &http.Client{
