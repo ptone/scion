@@ -2360,6 +2360,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			if err := s.waitForAgentReady(ctx, id, 15*time.Second); err != nil {
 				// On failure, set agent to an error state for clarity.
 				_ = s.store.UpdateAgentStatus(ctx, id, store.AgentStatusUpdate{Phase: string(state.PhaseError), Message: "Failed to become ready after wake"})
+				agent.Phase = string(state.PhaseError)
+				s.events.PublishAgentStatus(ctx, agent)
 				RuntimeError(w, "Agent resumed but did not become ready: "+err.Error())
 				return
 			}

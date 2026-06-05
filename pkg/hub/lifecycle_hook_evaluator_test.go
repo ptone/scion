@@ -68,6 +68,65 @@ func (e *recordingExecutor) getCalls() []executorCall {
 	return out
 }
 
+// signalingExecutor records calls like recordingExecutor but also signals a
+// channel on each Execute call, enabling deterministic (non-sleep) test sync.
+type signalingExecutor struct {
+	mu      sync.Mutex
+	calls   []executorCall
+	sigCh   chan struct{}
+}
+
+func newSignalingExecutor() *signalingExecutor {
+	return &signalingExecutor{
+		sigCh: make(chan struct{}, 100),
+	}
+}
+
+func (e *signalingExecutor) Execute(_ context.Context, hook *store.LifecycleHook, agent *store.Agent, trigger string) error {
+	e.mu.Lock()
+	e.calls = append(e.calls, executorCall{
+		HookID:  hook.ID,
+		AgentID: agent.ID,
+		Trigger: trigger,
+	})
+	e.mu.Unlock()
+	e.sigCh <- struct{}{}
+	return nil
+}
+
+func (e *signalingExecutor) getCalls() []executorCall {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]executorCall, len(e.calls))
+	copy(out, e.calls)
+	return out
+}
+
+// waitForCalls blocks until at least n executor calls have been signaled, or
+// the timeout expires.
+func (e *signalingExecutor) waitForCalls(t *testing.T, n int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for i := 0; i < n; i++ {
+		select {
+		case <-e.sigCh:
+		case <-deadline:
+			t.Fatalf("timed out waiting for executor call %d/%d", i+1, n)
+		}
+	}
+}
+
+// assertNoMoreCalls verifies no additional calls arrive within a short window.
+func (e *signalingExecutor) assertNoMoreCalls(t *testing.T, within time.Duration) {
+	t.Helper()
+	select {
+	case <-e.sigCh:
+		t.Fatal("unexpected additional executor call")
+	case <-time.After(within):
+		// Good — no extra call.
+	}
+}
+
 // errorExecutor always returns an error from Execute.
 type errorExecutor struct{}
 
@@ -148,6 +207,23 @@ func seedHook(t *testing.T, s store.Store, name, trigger string, enabled bool, s
 	}
 	require.NoError(t, s.CreateLifecycleHook(context.Background(), h))
 	return h
+}
+
+// previousPhaseLen returns the number of entries in the evaluator's
+// previousPhase map. For test assertions only.
+func previousPhaseLen(ev *LifecycleHookEvaluator) int {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	return len(ev.previousPhase)
+}
+
+// previousPhaseHas returns true if the evaluator's previousPhase map has an
+// entry for the given agent ID. For test assertions only.
+func previousPhaseHas(ev *LifecycleHookEvaluator, agentID string) bool {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	_, ok := ev.previousPhase[agentID]
+	return ok
 }
 
 // ---------------------------------------------------------------------------
@@ -450,82 +526,89 @@ func (e *failOnceExecutor) Execute(_ context.Context, _ *store.LifecycleHook, _ 
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Event-driven transition detection
+// Tests: Event-driven transition detection (deterministic, channel-based)
 // ---------------------------------------------------------------------------
 
-func TestHandleEvent_DetectsPhaseTransition(t *testing.T) {
+func TestLifecycleHookHandleEvent_DetectsPhaseTransition(t *testing.T) {
 	s := testEvaluatorStore(t)
 	projectID := seedProject(t, s, "test-project")
-	agent := seedAgent(t, s, projectID, "claude", string(state.PhaseRunning))
+	// Seed agent in a non-v1-trigger phase so Start()'s seeding records "starting",
+	// and the subsequent "running" event is a genuine transition.
+	agent := seedAgent(t, s, projectID, "claude", string(state.PhaseStarting))
 	seedHook(t, s, "running-hook", store.LifecycleHookTriggerRunning, true, nil)
 
-	exec := &recordingExecutor{}
+	exec := newSignalingExecutor()
 	events := NewChannelEventPublisher()
 	defer events.Close()
 	ev := NewLifecycleHookEvaluator(s, events, exec, slog.Default())
 
-	// Start the evaluator BEFORE publishing so the subscriber is listening.
 	ev.Start()
 	defer ev.Stop()
 
-	// Simulate a transition from starting → running by publishing a status event.
-	// The evaluator has no previous phase recorded, so "running" is a transition.
+	// Transition from starting → running by updating the agent and publishing.
+	agent.Phase = string(state.PhaseRunning)
 	events.PublishAgentStatus(context.Background(), agent)
-
-	// Give the event loop a moment to process.
-	time.Sleep(100 * time.Millisecond)
+	exec.waitForCalls(t, 1, 5*time.Second)
 
 	calls := exec.getCalls()
 	require.Len(t, calls, 1)
 	assert.Equal(t, store.LifecycleHookTriggerRunning, calls[0].Trigger)
 }
 
-func TestHandleEvent_IgnoresRepublishedSamePhase(t *testing.T) {
+func TestLifecycleHookHandleEvent_IgnoresRepublishedSamePhase(t *testing.T) {
 	s := testEvaluatorStore(t)
 	projectID := seedProject(t, s, "test-project")
-	agent := seedAgent(t, s, projectID, "claude", string(state.PhaseRunning))
+	// Seed agent in "starting" so the first "running" publish is a genuine transition.
+	agent := seedAgent(t, s, projectID, "claude", string(state.PhaseStarting))
 	seedHook(t, s, "running-hook", store.LifecycleHookTriggerRunning, true, nil)
 
-	exec := &recordingExecutor{}
+	exec := newSignalingExecutor()
 	events := NewChannelEventPublisher()
 	defer events.Close()
 	ev := NewLifecycleHookEvaluator(s, events, exec, slog.Default())
+
 	ev.Start()
 	defer ev.Stop()
 
-	// Publish the same status twice (simulates heartbeat re-publishing).
+	// First publication: starting→running is a genuine transition, fires.
+	agent.Phase = string(state.PhaseRunning)
 	events.PublishAgentStatus(context.Background(), agent)
-	time.Sleep(100 * time.Millisecond)
+	exec.waitForCalls(t, 1, 5*time.Second)
+
+	// Second publication of same phase should NOT fire (heartbeat suppression).
 	events.PublishAgentStatus(context.Background(), agent)
-	time.Sleep(100 * time.Millisecond)
+	exec.assertNoMoreCalls(t, 100*time.Millisecond)
 
 	calls := exec.getCalls()
 	assert.Len(t, calls, 1, "second publication of the same phase should not re-fire")
 }
 
-func TestHandleEvent_SuspendedToRunning_ReFiresRunning(t *testing.T) {
+func TestLifecycleHookHandleEvent_SuspendedToRunning_ReFiresRunning(t *testing.T) {
 	s := testEvaluatorStore(t)
 	projectID := seedProject(t, s, "test-project")
-	agent := seedAgent(t, s, projectID, "claude", string(state.PhaseSuspended))
+	// Seed in "starting" so the suspended event is a genuine transition.
+	agent := seedAgent(t, s, projectID, "claude", string(state.PhaseStarting))
 	seedHook(t, s, "running-hook", store.LifecycleHookTriggerRunning, true, nil)
 	seedHook(t, s, "suspended-hook", store.LifecycleHookTriggerSuspended, true, nil)
 
-	exec := &recordingExecutor{}
+	exec := newSignalingExecutor()
 	events := NewChannelEventPublisher()
 	defer events.Close()
 	ev := NewLifecycleHookEvaluator(s, events, exec, slog.Default())
+
 	ev.Start()
 	defer ev.Stop()
 
-	// First: agent enters suspended.
+	// First: agent enters suspended (starting→suspended is a genuine transition).
+	agent.Phase = string(state.PhaseSuspended)
 	events.PublishAgentStatus(context.Background(), agent)
-	time.Sleep(100 * time.Millisecond)
+	exec.waitForCalls(t, 1, 5*time.Second)
 
 	// Then: agent returns to running (resume).
 	agent.Phase = string(state.PhaseRunning)
 	require.NoError(t, s.UpdateAgentStatus(context.Background(), agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
 	events.PublishAgentStatus(context.Background(), agent)
-	time.Sleep(100 * time.Millisecond)
+	exec.waitForCalls(t, 1, 5*time.Second)
 
 	calls := exec.getCalls()
 	require.Len(t, calls, 2)
@@ -533,7 +616,7 @@ func TestHandleEvent_SuspendedToRunning_ReFiresRunning(t *testing.T) {
 	assert.Equal(t, store.LifecycleHookTriggerRunning, calls[1].Trigger)
 }
 
-func TestHandleEvent_IgnoresNonV1Phases(t *testing.T) {
+func TestLifecycleHookHandleEvent_IgnoresNonV1Phases(t *testing.T) {
 	s := testEvaluatorStore(t)
 	projectID := seedProject(t, s, "test-project")
 	agent := seedAgent(t, s, projectID, "claude", string(state.PhaseProvisioning))
@@ -541,7 +624,7 @@ func TestHandleEvent_IgnoresNonV1Phases(t *testing.T) {
 	// Create a hook for every v1 trigger to verify none fires.
 	seedHook(t, s, "any-hook", store.LifecycleHookTriggerRunning, true, nil)
 
-	exec := &recordingExecutor{}
+	exec := newSignalingExecutor()
 	events := NewChannelEventPublisher()
 	defer events.Close()
 	ev := NewLifecycleHookEvaluator(s, events, exec, slog.Default())
@@ -556,10 +639,198 @@ func TestHandleEvent_IgnoresNonV1Phases(t *testing.T) {
 		agent.Phase = string(phase)
 		events.PublishAgentStatus(context.Background(), agent)
 	}
-	time.Sleep(100 * time.Millisecond)
 
+	exec.assertNoMoreCalls(t, 50*time.Millisecond)
 	calls := exec.getCalls()
 	assert.Empty(t, calls, "non-v1 phases should not fire any hooks")
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Cold-start seeding (F2)
+// ---------------------------------------------------------------------------
+
+func TestLifecycleHookColdStart_NoSpuriousFiring(t *testing.T) {
+	// After seeding from the store, a steady-state "running" event for an
+	// already-running agent does NOT fire a hook.
+	s := testEvaluatorStore(t)
+	projectID := seedProject(t, s, "test-project")
+	agent := seedAgent(t, s, projectID, "claude", string(state.PhaseRunning))
+	seedHook(t, s, "running-hook", store.LifecycleHookTriggerRunning, true, nil)
+
+	exec := newSignalingExecutor()
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	ev := NewLifecycleHookEvaluator(s, events, exec, slog.Default())
+
+	// Start() seeds previousPhase from the store. The agent is already running,
+	// so the evaluator should record running as the known phase.
+	ev.Start()
+	defer ev.Stop()
+
+	// Re-publish the same "running" status (simulates heartbeat after restart).
+	events.PublishAgentStatus(context.Background(), agent)
+	exec.assertNoMoreCalls(t, 100*time.Millisecond)
+
+	calls := exec.getCalls()
+	assert.Empty(t, calls, "seeded agent at steady state should not fire hooks")
+}
+
+func TestLifecycleHookColdStart_SeedsMultipleAgents(t *testing.T) {
+	s := testEvaluatorStore(t)
+	projectID := seedProject(t, s, "test-project")
+	a1 := seedAgent(t, s, projectID, "claude", string(state.PhaseRunning))
+	a2 := seedAgent(t, s, projectID, "claude", string(state.PhaseSuspended))
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	ev := NewLifecycleHookEvaluator(s, events, newSignalingExecutor(), slog.Default())
+	ev.Start()
+	defer ev.Stop()
+
+	// Both agents should be seeded.
+	assert.True(t, previousPhaseHas(ev, a1.ID), "agent 1 should be seeded")
+	assert.True(t, previousPhaseHas(ev, a2.ID), "agent 2 should be seeded")
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Pruning on terminal phases (F3)
+// ---------------------------------------------------------------------------
+
+func TestLifecycleHookPruning_TerminalPhaseRemovesEntry(t *testing.T) {
+	// After a "stopped" or "error" event, the agent's previousPhase entry is
+	// removed, and a subsequent terminal→running transition is detected.
+	for _, terminalPhase := range []state.Phase{state.PhaseStopped, state.PhaseError} {
+		t.Run(string(terminalPhase), func(t *testing.T) {
+			s := testEvaluatorStore(t)
+			projectID := seedProject(t, s, "test-project")
+			// Seed in "starting" so the first v1 transition is genuine.
+			agent := seedAgent(t, s, projectID, "claude", string(state.PhaseStarting))
+			seedHook(t, s, "running-hook", store.LifecycleHookTriggerRunning, true, nil)
+			seedHook(t, s, "terminal-hook", string(terminalPhase), true, nil)
+
+			exec := newSignalingExecutor()
+			events := NewChannelEventPublisher()
+			defer events.Close()
+			ev := NewLifecycleHookEvaluator(s, events, exec, slog.Default())
+
+			ev.Start()
+			defer ev.Stop()
+
+			// starting→running: genuine transition.
+			agent.Phase = string(state.PhaseRunning)
+			events.PublishAgentStatus(context.Background(), agent)
+			exec.waitForCalls(t, 1, 5*time.Second)
+
+			// running→terminal: genuine transition.
+			agent.Phase = string(terminalPhase)
+			require.NoError(t, s.UpdateAgentStatus(context.Background(), agent.ID, store.AgentStatusUpdate{Phase: string(terminalPhase)}))
+			events.PublishAgentStatus(context.Background(), agent)
+			exec.waitForCalls(t, 1, 5*time.Second)
+
+			// The entry should be pruned after a terminal phase.
+			assert.False(t, previousPhaseHas(ev, agent.ID),
+				"terminal phase should prune the agent's previousPhase entry")
+
+			// A subsequent transition to running should be detected (prev="" != "running").
+			agent.Phase = string(state.PhaseRunning)
+			require.NoError(t, s.UpdateAgentStatus(context.Background(), agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
+			events.PublishAgentStatus(context.Background(), agent)
+			exec.waitForCalls(t, 1, 5*time.Second)
+
+			calls := exec.getCalls()
+			require.Len(t, calls, 3)
+			assert.Equal(t, store.LifecycleHookTriggerRunning, calls[0].Trigger)
+			assert.Equal(t, string(terminalPhase), calls[1].Trigger)
+			assert.Equal(t, store.LifecycleHookTriggerRunning, calls[2].Trigger)
+		})
+	}
+}
+
+func TestLifecycleHookPruning_DeletedEventRemovesEntry(t *testing.T) {
+	s := testEvaluatorStore(t)
+	projectID := seedProject(t, s, "test-project")
+	agent := seedAgent(t, s, projectID, "claude", string(state.PhaseRunning))
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	ev := NewLifecycleHookEvaluator(s, events, newSignalingExecutor(), slog.Default())
+	ev.Start()
+	defer ev.Stop()
+
+	// Agent is seeded from Start().
+	assert.True(t, previousPhaseHas(ev, agent.ID), "agent should be seeded")
+
+	// Publish a deleted event.
+	events.PublishAgentDeleted(context.Background(), agent.ID, agent.ProjectID)
+
+	// Give the event loop a moment to process the delete.
+	time.Sleep(50 * time.Millisecond)
+
+	assert.False(t, previousPhaseHas(ev, agent.ID),
+		"deleted event should prune the agent's previousPhase entry")
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Start() idempotency (F5)
+// ---------------------------------------------------------------------------
+
+func TestLifecycleHookStart_DoubleCallSafe(t *testing.T) {
+	// Calling Start() twice must not spawn duplicate goroutines or panic.
+	s := testEvaluatorStore(t)
+	projectID := seedProject(t, s, "test-project")
+	seedAgent(t, s, projectID, "claude", string(state.PhaseRunning))
+	seedHook(t, s, "running-hook", store.LifecycleHookTriggerRunning, true, nil)
+
+	exec := newSignalingExecutor()
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	ev := NewLifecycleHookEvaluator(s, events, exec, slog.Default())
+
+	ev.Start()
+	ev.Start() // second call should be a no-op
+	defer ev.Stop()
+
+	// Publish an event — should only fire once (not duplicated by two goroutines).
+	agent := seedAgent(t, s, projectID, "claude", string(state.PhaseRunning))
+	events.PublishAgentStatus(context.Background(), agent)
+	exec.waitForCalls(t, 1, 5*time.Second)
+	exec.assertNoMoreCalls(t, 50*time.Millisecond)
+
+	calls := exec.getCalls()
+	assert.Len(t, calls, 1, "double Start() should not cause duplicate processing")
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Stop-then-event safety
+// ---------------------------------------------------------------------------
+
+func TestLifecycleHookStopThenEvent_NoPanicNoProcessing(t *testing.T) {
+	// Events published after Stop() must not be processed and must not panic.
+	s := testEvaluatorStore(t)
+	projectID := seedProject(t, s, "test-project")
+	agent := seedAgent(t, s, projectID, "claude", string(state.PhaseRunning))
+	seedHook(t, s, "running-hook", store.LifecycleHookTriggerRunning, true, nil)
+
+	exec := newSignalingExecutor()
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	ev := NewLifecycleHookEvaluator(s, events, exec, slog.Default())
+
+	ev.Start()
+	ev.Stop()
+
+	// Publish after stop — must not panic or fire.
+	agent2 := seedAgent(t, s, projectID, "claude", string(state.PhaseStopped))
+	events.PublishAgentStatus(context.Background(), agent2)
+	agent2.Phase = string(state.PhaseRunning)
+	events.PublishAgentStatus(context.Background(), agent2)
+
+	exec.assertNoMoreCalls(t, 50*time.Millisecond)
+	assert.Empty(t, exec.getCalls(), "no events should be processed after Stop()")
+
+	// Verify that publishing an agent status doesn't panic even though evaluator
+	// is stopped — the event channel just fills (or is ignored by closed subscriber).
+	_ = agent
 }
 
 // ---------------------------------------------------------------------------

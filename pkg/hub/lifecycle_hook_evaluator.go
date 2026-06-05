@@ -72,6 +72,9 @@ func (e *LoggingExecutor) Execute(_ context.Context, hook *store.LifecycleHook, 
 // pattern as NotificationDispatcher: it subscribes to the ChannelEventPublisher
 // and fires asynchronously after the transition is committed, guaranteeing that
 // hook evaluation never blocks or fails the authoritative transition.
+//
+// v1 assumes a single hub instance; HA would fire hooks once per instance and
+// needs dedup (leader election/distributed lock) before it is safe.
 type LifecycleHookEvaluator struct {
 	store    store.Store
 	events   *ChannelEventPublisher
@@ -80,12 +83,16 @@ type LifecycleHookEvaluator struct {
 
 	// previousPhase tracks the last known phase per agent ID so we can detect
 	// actual transitions (not re-publications of the same phase on heartbeats).
+	// Entries are pruned on terminal phases (stopped/error) to avoid unbounded
+	// growth, and seeded from the store on Start() to prevent cold-start
+	// spurious firing.
 	mu            sync.Mutex
 	previousPhase map[string]string
 
-	stopCh   chan struct{}
-	stopOnce sync.Once
-	wg       sync.WaitGroup
+	stopCh    chan struct{}
+	startOnce sync.Once
+	stopOnce  sync.Once
+	wg        sync.WaitGroup
 }
 
 // NewLifecycleHookEvaluator creates a new evaluator. The executor is injectable;
@@ -108,27 +115,64 @@ func NewLifecycleHookEvaluator(s store.Store, events *ChannelEventPublisher, exe
 }
 
 // Start subscribes to agent status events and spawns a goroutine to process them.
+// It is safe to call multiple times; only the first call has an effect.
 func (e *LifecycleHookEvaluator) Start() {
-	statusCh, unsubStatus := e.events.Subscribe("project.>.agent.status")
+	e.startOnce.Do(func() {
+		// Seed previousPhase from the store to prevent cold-start spurious firing.
+		// After a hub restart the map is empty, so without seeding the first status
+		// event per agent looks like a transition and causes a mass re-fire storm.
+		e.seedPreviousPhase()
 
-	e.wg.Add(1)
-	go func() {
-		defer e.wg.Done()
-		defer unsubStatus()
-		for {
-			select {
-			case evt, ok := <-statusCh:
-				if !ok {
+		// Use "*" (single-token wildcard) rather than ">" (multi-token) to
+		// avoid cross-matching: "project.>.agent.status" would also match
+		// "project.X.agent.deleted" subjects, causing handleDeletedEvent to
+		// spuriously prune previousPhase entries on status events.
+		statusCh, unsubStatus := e.events.Subscribe("project.*.agent.status")
+		deletedCh, unsubDeleted := e.events.Subscribe("project.*.agent.deleted")
+
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			defer unsubStatus()
+			defer unsubDeleted()
+			for {
+				select {
+				case evt, ok := <-statusCh:
+					if !ok {
+						return
+					}
+					e.handleEvent(evt)
+				case evt, ok := <-deletedCh:
+					if !ok {
+						return
+					}
+					e.handleDeletedEvent(evt)
+				case <-e.stopCh:
 					return
 				}
-				e.handleEvent(evt)
-			case <-e.stopCh:
-				return
 			}
-		}
-	}()
+		}()
 
-	e.log.Info("Lifecycle hook evaluator started")
+		e.log.Info("Lifecycle hook evaluator started")
+	})
+}
+
+// seedPreviousPhase loads existing agents from the store and populates the
+// previousPhase map so that steady-state status events after a hub restart are
+// not misinterpreted as transitions.
+func (e *LifecycleHookEvaluator) seedPreviousPhase() {
+	ctx := context.Background()
+	result, err := e.store.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: 10000})
+	if err != nil {
+		e.log.Error("Failed to seed previousPhase from store (continuing without seed)", "error", err)
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, a := range result.Items {
+		e.previousPhase[a.ID] = a.Phase
+	}
+	e.log.Info("Seeded lifecycle hook evaluator previousPhase", "agents", len(result.Items))
 }
 
 // Stop signals the evaluator goroutine to exit and waits for it to finish.
@@ -160,7 +204,15 @@ func (e *LifecycleHookEvaluator) handleEvent(evt Event) {
 	// Check for actual transition (not a re-publication of the same phase).
 	e.mu.Lock()
 	prev := e.previousPhase[statusEvt.AgentID]
-	e.previousPhase[statusEvt.AgentID] = statusEvt.Phase
+	phase := state.Phase(statusEvt.Phase)
+	if phase == state.PhaseStopped || phase == state.PhaseError {
+		// Terminal phase: prune the entry to avoid unbounded growth. A later
+		// stopped→running transition is still correctly detected because
+		// a missing entry (prev="") differs from "running".
+		delete(e.previousPhase, statusEvt.AgentID)
+	} else {
+		e.previousPhase[statusEvt.AgentID] = statusEvt.Phase
+	}
 	e.mu.Unlock()
 
 	if prev == statusEvt.Phase {
@@ -243,6 +295,19 @@ func selectorMatches(hook *store.LifecycleHook, agent *store.Agent) bool {
 		return false
 	}
 	return true
+}
+
+// handleDeletedEvent prunes the previousPhase entry for a deleted agent,
+// mirroring the NotificationDispatcher's deletion subscription pattern.
+func (e *LifecycleHookEvaluator) handleDeletedEvent(evt Event) {
+	var deletedEvt AgentDeletedEvent
+	if err := json.Unmarshal(evt.Data, &deletedEvt); err != nil {
+		e.log.Error("Failed to unmarshal agent deleted event for lifecycle hooks", "error", err)
+		return
+	}
+	e.mu.Lock()
+	delete(e.previousPhase, deletedEvt.AgentID)
+	e.mu.Unlock()
 }
 
 // executeHookSafe invokes the executor with panic recovery. Executor errors and

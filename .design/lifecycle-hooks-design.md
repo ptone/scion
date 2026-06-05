@@ -262,6 +262,11 @@ in-container `pre-stop` approach (which is lost on SIGKILL/OOM). Residual gaps
 (e.g. Hub downtime during a transition) can be handled later by a reconciliation
 sweep; out of scope for v1.
 
+**Hook executors should be idempotent.** The evaluator de-duplicates by tracking
+previous phase, but edge cases (hub restart, race conditions) may cause a hook to
+fire more than once for the same logical transition. Executors (and the external
+endpoints they call) must tolerate duplicate invocations safely.
+
 ---
 
 ## Authorization and audit
