@@ -81,9 +81,8 @@ type Agent struct {
 	DeletedAt         time.Time `json:"deletedAt,omitempty"`
 
 	// Ownership
-	CreatedBy  string `json:"createdBy,omitempty"`
-	OwnerID    string `json:"ownerId,omitempty"`
-	Visibility string `json:"visibility"` // private, team, public
+	CreatedBy string `json:"createdBy,omitempty"`
+	OwnerID   string `json:"ownerId,omitempty"`
 
 	// Ancestry chain for transitive access control.
 	// Ordered list of ancestor IDs: [root, ..., parent].
@@ -799,7 +798,7 @@ const (
 type BrokerDispatch struct {
 	ID         string     `json:"id"`
 	BrokerID   string     `json:"brokerId"`
-	AgentID    string     `json:"agentId,omitempty"`   // empty for project-scoped ops
+	AgentID    string     `json:"agentId,omitempty"` // empty for project-scoped ops
 	AgentSlug  string     `json:"agentSlug,omitempty"`
 	ProjectID  string     `json:"projectId,omitempty"` // empty if unknown/none
 	Op         string     `json:"op"`                  // start|stop|restart|delete|finalize_env|check_prompt|create|message
@@ -1663,10 +1662,9 @@ func (a *Agent) ToAPI() *api.AgentInfo {
 		DeletedAt: a.DeletedAt,
 
 		// Ownership
-		CreatedBy:  a.CreatedBy,
-		OwnerID:    a.OwnerID,
-		Visibility: a.Visibility,
-		Ancestry:   a.Ancestry,
+		CreatedBy: a.CreatedBy,
+		OwnerID:   a.OwnerID,
+		Ancestry:  a.Ancestry,
 
 		// Optimistic locking
 		StateVersion: a.StateVersion,

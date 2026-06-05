@@ -42,7 +42,6 @@ var (
 		{Name: "template", Type: field.TypeString, Nullable: true},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"created", "provisioning", "cloning", "starting", "running", "suspended", "stopping", "stopped", "error"}, Default: "created"},
 		{Name: "delegation_enabled", Type: field.TypeBool, Default: false},
-		{Name: "visibility", Type: field.TypeString, Default: "private"},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "phase", Type: field.TypeString, Nullable: true},
@@ -82,19 +81,19 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[34]},
+				Columns:    []*schema.Column{AgentsColumns[33]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
 			{
 				Symbol:     "agents_users_created_agents",
-				Columns:    []*schema.Column{AgentsColumns[35]},
+				Columns:    []*schema.Column{AgentsColumns[34]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
 			{
 				Symbol:     "agents_users_owned_agents",
-				Columns:    []*schema.Column{AgentsColumns[36]},
+				Columns:    []*schema.Column{AgentsColumns[35]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
@@ -103,7 +102,12 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[34]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[33]},
+			},
+			{
+				Name:    "agent_project_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[33]},
 			},
 		},
 	}
