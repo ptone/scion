@@ -1324,7 +1324,14 @@ func (s *Server) StartLifecycleHookEvaluator() {
 		return
 	}
 
-	ev := NewLifecycleHookEvaluator(s.store, ep, nil, logging.Subsystem("hub.lifecycle-hooks"))
+	// Construct the real HTTP executor with the store (for SA resolution),
+	// the GCP token generator (for impersonation), and the audit logger.
+	// This replaces the M4 no-op LoggingExecutor. The executor remains
+	// injectable via NewLifecycleHookEvaluator for tests.
+	var executor LifecycleHookExecutor
+	executor = NewHTTPExecutor(s.store, s.gcpTokenGenerator, s.auditLogger, logging.Subsystem("hub.lifecycle-hooks.executor"))
+
+	ev := NewLifecycleHookEvaluator(s.store, ep, executor, logging.Subsystem("hub.lifecycle-hooks"))
 	s.lifecycleHookEvaluator = ev
 	s.lifecycleHookEvaluator.Start()
 }
