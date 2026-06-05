@@ -262,10 +262,37 @@ in-container `pre-stop` approach (which is lost on SIGKILL/OOM). Residual gaps
 (e.g. Hub downtime during a transition) can be handled later by a reconciliation
 sweep; out of scope for v1.
 
-**Hook executors should be idempotent.** The evaluator de-duplicates by tracking
-previous phase, but edge cases (hub restart, race conditions) may cause a hook to
-fire more than once for the same logical transition. Executors (and the external
+**Hook executors should be idempotent.** Even with the de-duplication described
+below, edge cases (e.g. Hub downtime spanning a transition) may cause a hook to fire
+more than once for the same logical transition. Executors (and the external
 endpoints they call) must tolerate duplicate invocations safely.
+
+### Transition de-duplication and HA
+The evaluator fires off in-process `agent.status` events (`ChannelEventPublisher`),
+which are published on every heartbeat — not only on phase change. It therefore
+de-duplicates by detecting an actual phase transition (current phase differs from
+the last phase it processed for that agent).
+
+The Hub runs **multi-instance / HA (backed by Postgres)** in production. Because the
+event bus is in-process, each instance only observes the transitions it handles, and
+a naive per-instance in-memory map would let the **same** logical transition fire
+hooks on more than one instance (duplicate register/deregister, with possible
+ordering races). De-duplication is therefore backend-aware:
+
+- **Postgres (HA):** the last-processed phase is held in the **store**, and the
+  transition check is an **atomic compare-and-set**
+  (`UPDATE … SET last_phase = :new WHERE agent_id = :id AND last_phase IS DISTINCT
+  FROM :new RETURNING …`). The single instance whose update affects a row "wins" and
+  fires the hook exactly once; all others no-op. This gives **once-only** semantics
+  across instances and, because it is durable, also removes cold-start spurious
+  firing after a restart (no in-memory seeding required). The row is pruned on agent
+  deletion.
+- **Single-instance / sqlite (dev):** an **in-memory** previous-phase map is used
+  (seeded from the store on start, pruned on terminal phase / deletion).
+
+This supersedes the earlier "single-hub-instance assumption." A reconciliation /
+orphan sweep for residual gaps (e.g. a transition lost entirely to Hub downtime)
+remains out of scope for v1.
 
 ---
 
