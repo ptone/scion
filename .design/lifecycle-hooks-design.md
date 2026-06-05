@@ -157,11 +157,17 @@ Matches on attributes **actually persisted** on the agent (`pkg/ent/schema/agent
 > a breaking change.
 
 ### Triggers (v1)
-Only **authoritative phase transitions** owned Hub-side — e.g.:
+Only **authoritative phase transitions** owned Hub-side. **Resolved set (v1):**
 
 - `running` — agent confirmed running → register.
+- `suspended` — agent suspended (no longer serving) → deregister / mark-unavailable
+  (re-register on return to `running`).
 - `stopped` — agent stopped → deregister.
 - `error` — agent entered error phase → deregister / alert.
+
+**Excluded from v1:** `stopping` (overlaps `stopped` and is the less-reliable edge;
+`stopped` is the authoritative terminal signal) and the early lifecycle phases
+(`created`/`provisioning`/`cloning`/`starting` — no current use case).
 
 Running-window **activity** transitions are deferred (they live in the other
 execution domain and add the debounce/ephemeral-process complexity discussed above).
@@ -183,6 +189,19 @@ Hooks run as a **project integration service account**, referenced by the hook r
 and resolvable Hub-side. The Hub already mints, lists, verifies, and deletes
 per-project GCP service accounts (`pkg/hub/handlers_gcp_identity.go`), so this is an
 existing capability, not new machinery.
+
+**Reference shape (resolved):** the hook row stores the **managed-SA record ID
+(UUID)** from the GCP SA store (`store.GCPServiceAccount.ID`), not a raw email.
+At hook-creation time, validate that the SA exists, is in the hook's scope, and is
+`Verified`; at execution time, resolve ID→email and reuse the existing impersonation
+path (token generator / `VerifyImpersonation`). This gives an integrity check at both
+creation and execution and clean audit attribution, since this identity is the
+privileged caller.
+
+> **Association model — start simple (v1):** the SA is referenced **per hook** (one
+> `execution_identity` field on each row). How operators *choose and associate* an SA
+> for hooks (per-hook vs. a hub-wide default for all hooks) may be refined later; v1
+> keeps it explicit per-hook.
 
 Rejected alternatives and why:
 - **Agent identity, in-container:** the agent often lacks rights to the target API,
@@ -229,6 +248,13 @@ the Hub's privilege.
 - Results (success/failure/latency) are recorded to the **audit log** with the
   hook id, trigger, agent id, and execution identity for attribution.
 
+**Response capture (resolved, v1):** record **status code, latency, and a coarse
+error class only** — **not** the HTTP response body. This keeps attacker/third-party-
+controlled content out of the audit store and avoids a redaction pipeline. Request
+metadata (method, host, hook id) is recorded; rendered auth headers and secret body
+fields are **never** stored. If gnarly debugging later demands it, emit a customized,
+opt-in debug log at that point — out of scope for v1.
+
 ### Reliability note
 Because hooks fire off **authoritative Hub-side** transitions rather than from
 inside a possibly-dead container, deregister-on-stop is far more reliable than the
@@ -252,6 +278,14 @@ sweep; out of scope for v1.
 
 ## Explicitly deferred (post-v1)
 
+- **Synchronous, blocking in-container lifecycle hooks** — paired pre-/post-start and
+  pre-/post-stop hooks that run *inside* the container (the long-lived `sciontool init`
+  process, `pkg/sciontool/hooks/lifecycle.go`), execute with container/agent identity,
+  block the lifecycle on each edge, and may abort the transition on the pre- edge.
+  These serve container-local setup / flush / sync needs and are a genuinely distinct
+  execution model from the Hub-side observed-state hooks this design covers (different
+  authorship, identity, and blocking/reliability semantics). Explicitly **out of scope
+  for this design**, recorded here as a future extension point.
 - Template-shipped hooks (and the content-digest provenance machinery they'd need).
 - In-container / agent-identity execution (recoverable later by projecting matching
   hook rows into the container at start, the way config/secrets already flow down).
@@ -283,11 +317,19 @@ No changes to `scion-agent.yaml` / `ScionConfig`. No container/`sciontool` chang
 
 ---
 
-## Open questions
+## Open questions — RESOLVED (issue #35 discussion, June 2026)
 
-1. Exact set of authoritative phase transitions to expose as triggers in v1
-   (`running`, `stopped`, `error` proposed; confirm whether `suspended`/`stopping`
-   are included).
-2. Shape of the `execution_identity` reference (SA email vs. a managed-SA record id
-   from the project GCP SA store).
-3. Whether to capture HTTP response bodies for audit (and how to redact them).
+1. **Trigger set (v1):** `running`, `suspended`, `stopped`, `error`. `stopping` and
+   the early lifecycle phases are excluded. *(See [Triggers (v1)](#triggers-v1).)*
+2. **`execution_identity` reference:** the **managed-SA record ID (UUID)** from the
+   GCP SA store, validated at creation (exists / in-scope / verified). SA *association*
+   model (per-hook vs. hub-wide default) may be refined later; v1 is per-hook.
+   *(See [Execution identity](#execution-identity).)*
+3. **Response-body capture:** **No** — record status code, latency, and error class
+   only; no response bodies. An opt-in debug log can be added later if needed.
+   *(See [Failure, retry, timeout](#failure-retry-timeout).)*
+
+### Additional scope decision
+- **Synchronous, blocking in-container lifecycle hooks** (pre-/post-start,
+  pre-/post-stop) are a distinct execution model and are **out of scope for this
+  design**, recorded as a future extension point. *(See [Explicitly deferred](#explicitly-deferred-post-v1).)*
