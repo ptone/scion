@@ -462,3 +462,42 @@ func LogInviteAuditFailure(ctx context.Context, logger AuditLogger, eventType In
 
 	_ = logger.LogInviteAuditEvent(ctx, event)
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle Hook audit events
+// ---------------------------------------------------------------------------
+
+// LifecycleHookEventType defines the type of lifecycle-hook admin event.
+type LifecycleHookEventType string
+
+const (
+	LifecycleHookEventCreate  LifecycleHookEventType = "lifecycle_hook_create"
+	LifecycleHookEventUpdate  LifecycleHookEventType = "lifecycle_hook_update"
+	LifecycleHookEventEnable  LifecycleHookEventType = "lifecycle_hook_enable"
+	LifecycleHookEventDisable LifecycleHookEventType = "lifecycle_hook_disable"
+	LifecycleHookEventDelete  LifecycleHookEventType = "lifecycle_hook_delete"
+)
+
+// LogLifecycleHookEvent logs a lifecycle-hook admin event to the structured
+// logger. It uses slog directly (rather than extending the AuditLogger
+// interface) so that adding lifecycle-hook audit doesn't require updating
+// every AuditLogger implementation.
+func LogLifecycleHookEvent(ctx context.Context, logger AuditLogger, eventType LifecycleHookEventType, hookID, hookName, actor string, success bool, failReason string) {
+	level := slog.LevelInfo
+	if !success {
+		level = slog.LevelWarn
+	}
+
+	attrs := []slog.Attr{
+		slog.String("event_type", string(eventType)),
+		slog.String("hook_id", hookID),
+		slog.String("hook_name", hookName),
+		slog.String("actor", actor),
+		slog.Bool("success", success),
+	}
+	if failReason != "" {
+		attrs = append(attrs, slog.String("fail_reason", failReason))
+	}
+
+	slog.LogAttrs(ctx, level, "lifecycle hook audit event", attrs...)
+}
