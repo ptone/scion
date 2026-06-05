@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -189,6 +190,21 @@ func makeTestAgent(projectID string) *store.Agent {
 	}
 }
 
+// newTestExecutor creates an HTTPExecutor with a test-friendly HTTP client
+// that allows loopback connections (httptest servers bind to 127.0.0.1).
+// The client still blocks ALL redirects, matching production behavior.
+func newTestExecutor(s store.Store, tokenGen GCPTokenGenerator, auditLog AuditLogger, log *slog.Logger) *HTTPExecutor {
+	executor := NewHTTPExecutor(s, tokenGen, auditLog, log)
+	executor.newHTTPClient = func() *http.Client {
+		return &http.Client{
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return fmt.Errorf("redirects are blocked for lifecycle hook requests (SSRF protection)")
+			},
+		}
+	}
+	return executor
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -211,7 +227,7 @@ func TestLifecycleHookExecutor_Success2xx(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "mock-access-token-123", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -257,7 +273,7 @@ func TestLifecycleHookExecutor_Failure4xx(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -296,7 +312,7 @@ func TestLifecycleHookExecutor_Failure5xx(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -333,7 +349,7 @@ func TestLifecycleHookExecutor_Timeout(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -376,7 +392,7 @@ func TestLifecycleHookExecutor_RetryWithBackoff(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -416,7 +432,7 @@ func TestLifecycleHookExecutor_RetryExhausted(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -455,7 +471,7 @@ func TestLifecycleHookExecutor_HTTPTypeAttachesBearerToken(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "secret-bearer-token-xyz", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -492,7 +508,7 @@ func TestLifecycleHookExecutor_WebhookSendsNoAuth(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "should-not-appear", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionWebhook,
@@ -529,7 +545,7 @@ func TestLifecycleHookExecutor_UntrustedVariableEncoding(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:                 store.LifecycleHookActionHTTP,
@@ -571,7 +587,7 @@ func TestLifecycleHookExecutor_RedirectBlocked(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -604,7 +620,7 @@ func TestLifecycleHookExecutor_NoResponseBodyInAudit(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -638,7 +654,7 @@ func TestLifecycleHookExecutor_NoAuthHeaderInAudit(t *testing.T) {
 	secretToken := "ULTRA_SECRET_TOKEN_ABCDEF"
 	tokenGen := &mockTokenGenerator{accessToken: secretToken, email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -671,7 +687,7 @@ func TestLifecycleHookExecutor_WebhookNoExecutionIdentity(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "should-never-be-used", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	// Webhook with no execution identity — valid for webhooks.
 	hook := makeTestHook("", &store.LifecycleHookAction{
@@ -694,7 +710,7 @@ func TestLifecycleHookExecutor_HTTPRequiresExecutionIdentity(t *testing.T) {
 	projID := seedExecutorProject(t, s, "test-project")
 
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, nil, auditLog, slog.Default())
+	executor := newTestExecutor(s, nil, auditLog, slog.Default())
 
 	hook := makeTestHook("", &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -719,7 +735,7 @@ func TestLifecycleHookExecutor_RenderVarsCorrectTrustClasses(t *testing.T) {
 	s := executorTestStore(t)
 	projID := seedExecutorProject(t, s, "test-project")
 
-	executor := NewHTTPExecutor(s, nil, nil, slog.Default())
+	executor := newTestExecutor(s, nil, nil, slog.Default())
 	agent := makeTestAgent(projID)
 	agent.Name = "Evil Agent"
 	agent.TaskSummary = "task summary"
@@ -732,7 +748,7 @@ func TestLifecycleHookExecutor_RenderVarsCorrectTrustClasses(t *testing.T) {
 		Name: "test-hook",
 	}
 
-	vars := executor.buildRenderVars(hook, agent, "running", "sa@test.com")
+	vars := executor.buildRenderVars(context.Background(), hook, agent, "running", "sa@test.com")
 
 	// Verify trusted variables are present.
 	assert.Equal(t, "hook-123", vars["HOOK_ID"])
@@ -754,7 +770,7 @@ func TestLifecycleHookExecutor_RenderVarsCorrectTrustClasses(t *testing.T) {
 func TestLifecycleHookExecutor_NoAction(t *testing.T) {
 	s := executorTestStore(t)
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, nil, auditLog, slog.Default())
+	executor := newTestExecutor(s, nil, auditLog, slog.Default())
 
 	hook := &store.LifecycleHook{
 		ID:     "hook-no-action",
@@ -781,7 +797,7 @@ func TestLifecycleHookExecutor_AuditHostOnly(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -811,7 +827,7 @@ func TestLifecycleHookExecutor_TokenGeneratorError(t *testing.T) {
 		email:          "hub@sa.com",
 	}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -843,13 +859,13 @@ func TestLifecycleHookExecutor_DefaultTimeout(t *testing.T) {
 
 	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
 		Method:         "GET",
 		URL:            ts.URL + "/api",
-		TimeoutSeconds: 0, // no timeout specified → default should apply
+		TimeoutSeconds: 0, // no timeout specified -> default should apply
 	})
 
 	err := executor.Execute(context.Background(), hook, makeTestAgent(projID), "running")
@@ -860,7 +876,237 @@ func TestLifecycleHookExecutor_DefaultTimeout(t *testing.T) {
 	assert.True(t, events[0].Success)
 }
 
-func TestLifecycleHookExecutor_ImplementsInterface(t *testing.T) {
-	// Compile-time check that HTTPExecutor implements LifecycleHookExecutor.
-	var _ LifecycleHookExecutor = (*HTTPExecutor)(nil)
+// ---------------------------------------------------------------------------
+// S1: SSRF Protection — isBlockedSSRFTarget unit tests
+// ---------------------------------------------------------------------------
+
+func TestIsBlockedSSRFTarget(t *testing.T) {
+	tests := []struct {
+		name    string
+		ip      net.IP
+		blocked bool
+	}{
+		// Loopback — MUST block
+		{"loopback IPv4", net.ParseIP("127.0.0.1"), true},
+		{"loopback IPv4 other", net.ParseIP("127.0.0.2"), true},
+		{"loopback IPv6", net.ParseIP("::1"), true},
+
+		// Link-local — MUST block (includes metadata service 169.254.169.254)
+		{"link-local IPv4 metadata", net.ParseIP("169.254.169.254"), true},
+		{"link-local IPv4 base", net.ParseIP("169.254.0.1"), true},
+		{"link-local IPv6", net.ParseIP("fe80::1"), true},
+
+		// Link-local multicast — MUST block
+		{"link-local multicast IPv4", net.ParseIP("224.0.0.1"), true},
+		{"link-local multicast IPv6", net.ParseIP("ff02::1"), true},
+
+		// RFC1918 — MUST ALLOW (architect decision: internal service registries)
+		{"RFC1918 10.x", net.ParseIP("10.0.0.1"), false},
+		{"RFC1918 172.16.x", net.ParseIP("172.16.0.1"), false},
+		{"RFC1918 192.168.x", net.ParseIP("192.168.1.1"), false},
+
+		// Public IPs — MUST ALLOW
+		{"public IPv4", net.ParseIP("8.8.8.8"), false},
+		{"public IPv4 other", net.ParseIP("203.0.113.1"), false},
+		{"public IPv6", net.ParseIP("2001:4860:4860::8888"), false},
+
+		// nil IP
+		{"nil IP", nil, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isBlockedSSRFTarget(tc.ip)
+			assert.Equal(t, tc.blocked, got, "isBlockedSSRFTarget(%s)", tc.ip)
+		})
+	}
+}
+
+// S1: Integration test — the SSRF-safe transport REFUSES a loopback dial.
+func TestLifecycleHookExecutor_SSRFBlocksLoopback(t *testing.T) {
+	s := executorTestStore(t)
+	projID := seedExecutorProject(t, s, "test-project")
+	saID := seedExecutorSA(t, s, projID, "sa@p.iam.gserviceaccount.com")
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK) // should never reach here
+	}))
+	defer ts.Close()
+
+	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
+	auditLog := newCapturingAuditLogger()
+	// Use the REAL SSRF-safe client (NOT newTestExecutor) to verify blocking.
+	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+
+	hook := makeTestHook(saID, &store.LifecycleHookAction{
+		Type:           store.LifecycleHookActionHTTP,
+		Method:         "GET",
+		URL:            ts.URL + "/api", // httptest URL is 127.0.0.1
+		TimeoutSeconds: 5,
+	})
+
+	err := executor.Execute(context.Background(), hook, makeTestAgent(projID), "running")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SSRF protection")
+	assert.Contains(t, err.Error(), "loopback/link-local")
+}
+
+// ---------------------------------------------------------------------------
+// L1: 4xx is non-retryable
+// ---------------------------------------------------------------------------
+
+func TestLifecycleHookExecutor_4xxNonRetryable(t *testing.T) {
+	s := executorTestStore(t)
+	projID := seedExecutorProject(t, s, "test-project")
+	saID := seedExecutorSA(t, s, projID, "sa@p.iam.gserviceaccount.com")
+
+	var attemptCount atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attemptCount.Add(1)
+		w.WriteHeader(http.StatusForbidden) // 4xx
+	}))
+	defer ts.Close()
+
+	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
+	auditLog := newCapturingAuditLogger()
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
+
+	hook := makeTestHook(saID, &store.LifecycleHookAction{
+		Type:           store.LifecycleHookActionHTTP,
+		Method:         "POST",
+		URL:            ts.URL + "/register",
+		Body:           `{}`,
+		OnError:        store.LifecycleHookOnErrorRetry, // retry policy set...
+		TimeoutSeconds: 5,
+	})
+
+	err := executor.Execute(context.Background(), hook, makeTestAgent(projID), "running")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "non-retryable HTTP 403")
+
+	// L1: Should have made only 1 attempt (4xx is non-retryable).
+	assert.Equal(t, int32(1), attemptCount.Load())
+
+	// Should have exactly 1 audit event.
+	events := auditLog.getEvents()
+	require.Len(t, events, 1)
+	assert.False(t, events[0].Success)
+	assert.Equal(t, 403, events[0].HTTPStatusCode)
+}
+
+// ---------------------------------------------------------------------------
+// on_error="" defaults to single attempt
+// ---------------------------------------------------------------------------
+
+func TestLifecycleHookExecutor_EmptyOnErrorSingleAttempt(t *testing.T) {
+	s := executorTestStore(t)
+	projID := seedExecutorProject(t, s, "test-project")
+	saID := seedExecutorSA(t, s, projID, "sa@p.iam.gserviceaccount.com")
+
+	var attemptCount atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attemptCount.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
+	auditLog := newCapturingAuditLogger()
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
+
+	hook := makeTestHook(saID, &store.LifecycleHookAction{
+		Type:           store.LifecycleHookActionHTTP,
+		Method:         "POST",
+		URL:            ts.URL + "/api",
+		Body:           `{}`,
+		OnError:        "", // empty -> defaults to "log" -> single attempt
+		TimeoutSeconds: 5,
+	})
+
+	err := executor.Execute(context.Background(), hook, makeTestAgent(projID), "running")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTP 500")
+
+	// Only 1 attempt (empty on_error defaults to "log" = single attempt).
+	assert.Equal(t, int32(1), attemptCount.Load())
+}
+
+// ---------------------------------------------------------------------------
+// L3: Empty body sends nil body (GET with no body)
+// ---------------------------------------------------------------------------
+
+func TestLifecycleHookExecutor_EmptyBodySendsNil(t *testing.T) {
+	s := executorTestStore(t)
+	projID := seedExecutorProject(t, s, "test-project")
+	saID := seedExecutorSA(t, s, projID, "sa@p.iam.gserviceaccount.com")
+
+	var receivedContentLength int64
+	var receivedBody string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedContentLength = r.ContentLength
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
+	auditLog := newCapturingAuditLogger()
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
+
+	hook := makeTestHook(saID, &store.LifecycleHookAction{
+		Type:           store.LifecycleHookActionHTTP,
+		Method:         "GET",
+		URL:            ts.URL + "/check",
+		Body:           "", // empty body -> nil request body
+		TimeoutSeconds: 5,
+	})
+
+	err := executor.Execute(context.Background(), hook, makeTestAgent(projID), "running")
+	require.NoError(t, err)
+
+	assert.Empty(t, receivedBody)
+	// With nil body, Content-Length should be 0 or -1 (no body).
+	assert.LessOrEqual(t, receivedContentLength, int64(0))
+}
+
+// ---------------------------------------------------------------------------
+// ctx cancellation during retry backoff aborts further attempts
+// ---------------------------------------------------------------------------
+
+func TestLifecycleHookExecutor_CtxCancelDuringBackoff(t *testing.T) {
+	s := executorTestStore(t)
+	projID := seedExecutorProject(t, s, "test-project")
+	saID := seedExecutorSA(t, s, projID, "sa@p.iam.gserviceaccount.com")
+
+	var attemptCount atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attemptCount.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable) // 5xx -> retryable
+	}))
+	defer ts.Close()
+
+	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
+	auditLog := newCapturingAuditLogger()
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
+
+	hook := makeTestHook(saID, &store.LifecycleHookAction{
+		Type:           store.LifecycleHookActionHTTP,
+		Method:         "POST",
+		URL:            ts.URL + "/register",
+		Body:           `{}`,
+		OnError:        store.LifecycleHookOnErrorRetry,
+		TimeoutSeconds: 5,
+	})
+
+	// Cancel context shortly after first attempt to abort during backoff.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	err := executor.Execute(ctx, hook, makeTestAgent(projID), "running")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	// Should have made only 1 attempt (cancelled during backoff before 2nd).
+	assert.Equal(t, int32(1), attemptCount.Load())
 }

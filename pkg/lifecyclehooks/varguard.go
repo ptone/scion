@@ -387,15 +387,21 @@ func renderURL(rawURL string, vars RenderVars) string {
 	return hostAndPath + "?" + query
 }
 
-// renderTrustedSubstitution substitutes all variables verbatim. This is used
-// for positions where only trusted variables are allowed (enforced at
-// validation time).
+// renderTrustedSubstitution substitutes variables in positions where only
+// trusted variables are allowed (enforced at static validation time).
+// D1 defense-in-depth: untrusted variables are blanked (replaced with empty
+// string) even if the static validator were somehow bypassed, matching the
+// defense-in-depth pattern used in renderHeaderValue.
 func renderTrustedSubstitution(s string, vars RenderVars) string {
 	return varPattern.ReplaceAllStringFunc(s, func(match string) string {
 		name := varPattern.FindStringSubmatch(match)[1]
 		value, ok := vars[name]
 		if !ok {
 			return match
+		}
+		// D1: Blank untrusted vars in URL host/path as defense-in-depth.
+		if ClassifyVar(name) == Untrusted {
+			return ""
 		}
 		return value
 	})

@@ -413,7 +413,7 @@ func TestValidateHook_URLValidation(t *testing.T) {
 		wantErr bool
 	}{
 		{"valid: https", "https://registry.example.com/agents", false},
-		{"valid: http", "http://internal.corp/api/register", false},
+		{"rejected: http scheme with http action type (S2)", "http://internal.corp/api/register", true},
 		{"valid: with port", "https://registry.example.com:8443/agents", false},
 		{"valid: with query", "https://registry.example.com/agents?env=prod", false},
 		{"invalid: no scheme", "registry.example.com/agents", true},
@@ -684,6 +684,84 @@ func TestValidateHook_NilAction(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "action") {
 		t.Errorf("expected error about action, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// S2: http action type requires https (bearer token protection)
+// ---------------------------------------------------------------------------
+
+func TestValidateHook_HTTPActionRequiresHTTPS(t *testing.T) {
+	tests := []struct {
+		name    string
+		hook    *store.LifecycleHook
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "S2: http:// with http action type -> REJECTED (bearer in cleartext)",
+			hook: &store.LifecycleHook{
+				ID:        "hook-s2-1",
+				ScopeType: "hub",
+				Trigger:   "running",
+				Action: &store.LifecycleHookAction{
+					Type:           "http",
+					Method:         "POST",
+					URL:            "http://internal.corp/api/register",
+					TimeoutSeconds: 10,
+				},
+				ExecutionIdentity: "sa-001",
+			},
+			wantErr: true,
+			errMsg:  "requires https",
+		},
+		{
+			name: "S2: https:// with http action type -> OK",
+			hook: &store.LifecycleHook{
+				ID:        "hook-s2-2",
+				ScopeType: "hub",
+				Trigger:   "running",
+				Action: &store.LifecycleHookAction{
+					Type:           "http",
+					Method:         "POST",
+					URL:            "https://registry.example.com/agents",
+					TimeoutSeconds: 10,
+				},
+				ExecutionIdentity: "sa-001",
+			},
+			wantErr: false,
+		},
+		{
+			name: "S2: http:// with webhook action type -> OK (no bearer attached)",
+			hook: &store.LifecycleHook{
+				ID:        "hook-s2-3",
+				ScopeType: "hub",
+				Trigger:   "running",
+				Action: &store.LifecycleHookAction{
+					Type:           "webhook",
+					Method:         "POST",
+					URL:            "http://internal.corp/webhook",
+					TimeoutSeconds: 5,
+				},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateHook(context.Background(), tc.hook, defaultResolver())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.errMsg)
+				}
+				if !strings.Contains(err.Error(), tc.errMsg) {
+					t.Errorf("expected error containing %q, got: %v", tc.errMsg, err)
+				}
+			} else if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 

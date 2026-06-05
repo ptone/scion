@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,6 +28,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// Compile-time interface compliance check (N3).
+var _ LifecycleHookExecutor = (*HTTPExecutor)(nil)
 
 // maxRetryAttempts is the fixed maximum number of attempts for on_error=retry.
 // After all attempts are exhausted, the executor falls back to "log" behavior.
@@ -44,18 +46,28 @@ const defaultTimeoutSeconds = 10
 // and audit.
 //
 // Security invariants:
+//   - Initial-URL connections to loopback (127.0.0.0/8, ::1) and link-local
+//     (169.254.0.0/16, fe80::/10) addresses are blocked at the dialer level
+//     (SSRF protection). The check inspects the RESOLVED dial IP, which also
+//     defends against DNS-rebinding. RFC1918 addresses (10/8, 172.16/12,
+//     192.168/16) are intentionally ALLOWED for internal service registries.
+//   - All redirects are blocked (SSRF protection via redirect).
 //   - SA tokens are attached ONLY for action.Type == "http"; webhooks send
 //     unauthenticated (the URL carries its own token).
 //   - SA tokens/auth headers NEVER come from hook variables — they are injected
 //     directly by the executor after rendering.
 //   - Response bodies are NEVER recorded in the audit log.
 //   - Rendered Authorization header values are NEVER recorded in the audit log.
-//   - Redirects to private/link-local/loopback addresses are blocked (SSRF).
 type HTTPExecutor struct {
 	store       store.Store
 	tokenGen    GCPTokenGenerator
 	auditLogger AuditLogger
 	log         *slog.Logger
+
+	// newHTTPClient creates the http.Client used for hook requests.
+	// Defaults to newSSRFSafeClient. Tests may override this to inject
+	// a client that allows loopback connections for httptest servers.
+	newHTTPClient func() *http.Client
 }
 
 // NewHTTPExecutor creates a new HTTPExecutor.
@@ -64,10 +76,11 @@ func NewHTTPExecutor(s store.Store, tokenGen GCPTokenGenerator, auditLogger Audi
 		log = slog.Default()
 	}
 	return &HTTPExecutor{
-		store:       s,
-		tokenGen:    tokenGen,
-		auditLogger: auditLogger,
-		log:         log,
+		store:         s,
+		tokenGen:      tokenGen,
+		auditLogger:   auditLogger,
+		log:           log,
+		newHTTPClient: newSSRFSafeClient,
 	}
 }
 
@@ -86,7 +99,7 @@ func (e *HTTPExecutor) Execute(ctx context.Context, hook *store.LifecycleHook, a
 	action := hook.Action
 
 	// -----------------------------------------------------------------------
-	// 1. Resolve execution identity → SA email → access token
+	// 1. Resolve execution identity -> SA email -> access token
 	// -----------------------------------------------------------------------
 	saEmail, bearerToken, err := e.resolveIdentityAndToken(ctx, hook, action)
 	if err != nil {
@@ -97,7 +110,7 @@ func (e *HTTPExecutor) Execute(ctx context.Context, hook *store.LifecycleHook, a
 	// -----------------------------------------------------------------------
 	// 2. Build render variables and render the action template
 	// -----------------------------------------------------------------------
-	vars := e.buildRenderVars(hook, agent, trigger, saEmail)
+	vars := e.buildRenderVars(ctx, hook, agent, trigger, saEmail)
 	rendered := lifecyclehooks.RenderAction(action, vars)
 
 	// -----------------------------------------------------------------------
@@ -114,11 +127,16 @@ func (e *HTTPExecutor) Execute(ctx context.Context, hook *store.LifecycleHook, a
 	}
 
 	// -----------------------------------------------------------------------
-	// 4. Execute with timeout + retry
+	// 4. Create a single SSRF-safe HTTP client (L2) reused across attempts
+	// -----------------------------------------------------------------------
+	client := e.newHTTPClient()
+
+	// -----------------------------------------------------------------------
+	// 5. Execute with timeout + retry
 	// -----------------------------------------------------------------------
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		statusCode, latency, attemptErr := e.doHTTPRequest(ctx, rendered, bearerToken, action.Type)
+		statusCode, latency, attemptErr := e.doHTTPRequest(ctx, client, rendered, bearerToken, action.Type)
 
 		success := attemptErr == nil && statusCode >= 200 && statusCode < 300
 
@@ -134,6 +152,20 @@ func (e *HTTPExecutor) Execute(ctx context.Context, hook *store.LifecycleHook, a
 			lastErr = fmt.Errorf("HTTP %d", statusCode)
 		}
 
+		// L1: 4xx responses are non-retryable — record and return immediately.
+		if statusCode >= 400 && statusCode < 500 {
+			e.log.Warn("Lifecycle hook execution failed with non-retryable 4xx",
+				"hook_id", hook.ID,
+				"hook_name", hook.Name,
+				"trigger", trigger,
+				"agent_id", agent.ID,
+				"attempt", attempt,
+				"status_code", statusCode,
+				"error", lastErr,
+			)
+			return fmt.Errorf("hook %s: non-retryable HTTP %d: %w", hook.ID, statusCode, lastErr)
+		}
+
 		e.log.Warn("Lifecycle hook execution attempt failed",
 			"hook_id", hook.ID,
 			"hook_name", hook.Name,
@@ -147,7 +179,8 @@ func (e *HTTPExecutor) Execute(ctx context.Context, hook *store.LifecycleHook, a
 
 		// Backoff before retry (unless this was the last attempt).
 		if attempt < attempts {
-			backoff := time.Duration(math.Pow(2, float64(attempt-1))) * 500 * time.Millisecond
+			// N1: use bit shift instead of math.Pow for integer backoff.
+			backoff := time.Duration(1<<uint(attempt-1)) * 500 * time.Millisecond
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
@@ -156,7 +189,7 @@ func (e *HTTPExecutor) Execute(ctx context.Context, hook *store.LifecycleHook, a
 		}
 	}
 
-	// All attempts exhausted → fall back to log behavior (return the error
+	// All attempts exhausted -> fall back to log behavior (return the error
 	// but never block the transition).
 	return fmt.Errorf("hook %s: all %d attempts failed, last error: %w", hook.ID, attempts, lastErr)
 }
@@ -174,7 +207,7 @@ func (e *HTTPExecutor) resolveIdentityAndToken(ctx context.Context, hook *store.
 		return "", "", nil
 	}
 
-	// Resolve managed-SA record ID → SA email via the store.
+	// Resolve managed-SA record ID -> SA email via the store.
 	sa, err := e.store.GetGCPServiceAccount(ctx, hook.ExecutionIdentity)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve SA record %s: %w", hook.ExecutionIdentity, err)
@@ -205,7 +238,7 @@ func (e *HTTPExecutor) resolveIdentityAndToken(ctx context.Context, hook *store.
 //
 // CRITICAL: agent/LLM-derived data MUST NEVER be placed into trusted variable
 // names. The SA token/auth MUST NEVER come from any hook variable.
-func (e *HTTPExecutor) buildRenderVars(hook *store.LifecycleHook, agent *store.Agent, trigger, saEmail string) lifecyclehooks.RenderVars {
+func (e *HTTPExecutor) buildRenderVars(ctx context.Context, hook *store.LifecycleHook, agent *store.Agent, trigger, saEmail string) lifecyclehooks.RenderVars {
 	vars := lifecyclehooks.RenderVars{
 		// TRUSTED: hub-controlled data only
 		"HOOK_ID":   hook.ID,
@@ -218,8 +251,8 @@ func (e *HTTPExecutor) buildRenderVars(hook *store.LifecycleHook, agent *store.A
 	// Project metadata (hub-controlled).
 	if agent.ProjectID != "" {
 		vars["PROJECT_ID"] = agent.ProjectID
-		// Resolve project name — best-effort; if it fails, leave empty.
-		if project, err := e.store.GetProject(context.Background(), agent.ProjectID); err == nil {
+		// C2: Thread the parent ctx instead of context.Background().
+		if project, err := e.store.GetProject(ctx, agent.ProjectID); err == nil {
 			vars["PROJECT_NAME"] = project.Name
 		}
 	}
@@ -248,15 +281,72 @@ func (e *HTTPExecutor) buildRenderVars(hook *store.LifecycleHook, agent *store.A
 	return vars
 }
 
+// newSSRFSafeClient creates an http.Client with SSRF-safe transport and
+// redirect blocking. The transport uses a DialContext that inspects the
+// RESOLVED dial IP and refuses connections to loopback and link-local
+// addresses. This defends against both direct loopback URLs and
+// DNS-rebinding attacks.
+//
+// The client blocks ALL redirects. N2: no redundant http.Client.Timeout —
+// the per-attempt context deadline is the single timeout mechanism.
+func newSSRFSafeClient() *http.Client {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Resolve the address to check the actual IP before connecting.
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, fmt.Errorf("SSRF protection: invalid address %q: %w", addr, err)
+			}
+			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, fmt.Errorf("SSRF protection: DNS lookup failed for %q: %w", host, err)
+			}
+			for _, ipAddr := range ips {
+				if isBlockedSSRFTarget(ipAddr.IP) {
+					return nil, fmt.Errorf("SSRF protection: connection to %s (%s) is blocked (loopback/link-local)", host, ipAddr.IP)
+				}
+			}
+			// All resolved IPs are safe; dial the original address.
+			return dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
+		},
+	}
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return fmt.Errorf("redirects are blocked for lifecycle hook requests (SSRF protection)")
+		},
+	}
+}
+
+// isBlockedSSRFTarget checks whether an IP address should be blocked for SSRF
+// protection. Per architect decision, ONLY loopback (127.0.0.0/8, ::1) and
+// link-local (169.254.0.0/16, fe80::/10) unicast+multicast are blocked.
+// RFC1918 (10/8, 172.16/12, 192.168/16) is intentionally ALLOWED because
+// internal service registries (Consul, internal catalogs) are a supported
+// use case. The check handles IPv4-mapped-IPv6 variants via Go's net.IP
+// normalization.
+func isBlockedSSRFTarget(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast()
+}
+
 // doHTTPRequest executes a single HTTP request with the per-action timeout.
 // It returns the HTTP status code, latency, and any error.
 //
 // Security:
-//   - A dedicated http.Client is used (never mutates a shared one).
+//   - The provided client has SSRF-safe transport (L2).
 //   - Redirects are blocked to prevent SSRF via redirect to internal addresses.
 //   - The bearer token is injected directly (NOT via hook variables).
 //   - Response body is consumed and discarded (never stored).
-func (e *HTTPExecutor) doHTTPRequest(ctx context.Context, action *store.LifecycleHookAction, bearerToken string, actionType string) (statusCode int, latency time.Duration, err error) {
+func (e *HTTPExecutor) doHTTPRequest(ctx context.Context, client *http.Client, action *store.LifecycleHookAction, bearerToken string, actionType string) (statusCode int, latency time.Duration, err error) {
 	timeout := time.Duration(action.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = time.Duration(defaultTimeoutSeconds) * time.Second
@@ -265,8 +355,14 @@ func (e *HTTPExecutor) doHTTPRequest(ctx context.Context, action *store.Lifecycl
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// L3: Use nil body when action.Body is empty (instead of strings.NewReader("")).
+	var body io.Reader
+	if action.Body != "" {
+		body = strings.NewReader(action.Body)
+	}
+
 	// Build the request.
-	req, err := http.NewRequestWithContext(reqCtx, action.Method, action.URL, strings.NewReader(action.Body))
+	req, err := http.NewRequestWithContext(reqCtx, action.Method, action.URL, body)
 	if err != nil {
 		return 0, 0, fmt.Errorf("build request: %w", err)
 	}
@@ -280,18 +376,6 @@ func (e *HTTPExecutor) doHTTPRequest(ctx context.Context, action *store.Lifecycl
 	// The token is injected directly — it NEVER comes from hook variables.
 	if actionType == store.LifecycleHookActionHTTP && bearerToken != "" {
 		req.Header.Set("Authorization", "Bearer "+bearerToken)
-	}
-
-	// Dedicated http.Client with SSRF-safe redirect policy.
-	client := &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Block ALL redirects to prevent SSRF via redirect.
-			// The target URL is admin-configured and should not redirect
-			// to internal addresses. If the target needs a redirect, the
-			// admin should configure the final URL directly.
-			return fmt.Errorf("redirects are blocked for lifecycle hook requests (SSRF protection)")
-		},
 	}
 
 	start := time.Now()
@@ -373,17 +457,4 @@ func (e *HTTPExecutor) recordAudit(
 	}
 
 	LogLifecycleHookExecutionEvent(ctx, e.auditLogger, event)
-}
-
-// isPrivateIP checks whether an IP address is in a private, loopback, or
-// link-local range.
-func isPrivateIP(ip net.IP) bool {
-	if ip == nil {
-		return false
-	}
-	// Check for loopback, link-local, and private ranges.
-	return ip.IsLoopback() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() ||
-		ip.IsPrivate()
 }

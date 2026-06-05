@@ -195,6 +195,8 @@ func validateAction(a *store.LifecycleHookAction, execIdentity string) []FieldEr
 		errs = append(errs, FieldError{Field: "action.url", Message: "required"})
 	} else {
 		errs = append(errs, validateActionURL(a.URL)...)
+		// S2: http action type requires https (bearer token attached).
+		errs = append(errs, validateActionURLSchemeForType(a.URL, a.Type)...)
 	}
 
 	// -- headers --
@@ -270,6 +272,25 @@ func validateActionURL(rawURL string) []FieldError {
 	}
 	if u.Scheme != "https" && u.Scheme != "http" {
 		return []FieldError{{Field: "action.url", Message: fmt.Sprintf("scheme must be http or https; got %q", u.Scheme)}}
+	}
+	return nil
+}
+
+// validateActionURLSchemeForType checks that the URL scheme is appropriate for
+// the action type. S2: http actions REQUIRE https (bearer token attached);
+// webhook actions allow http (no bearer token attached).
+func validateActionURLSchemeForType(rawURL, actionType string) []FieldError {
+	// Strip variable placeholders for parsing.
+	sanitized := varPattern.ReplaceAllString(rawURL, "PLACEHOLDER")
+	u, err := url.Parse(sanitized)
+	if err != nil {
+		return nil // structural error already caught by validateActionURL
+	}
+	if actionType == store.LifecycleHookActionHTTP && u.Scheme == "http" {
+		return []FieldError{{
+			Field:   "action.url",
+			Message: "http action type requires https (bearer token would be sent in cleartext over http)",
+		}}
 	}
 	return nil
 }

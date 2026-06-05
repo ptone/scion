@@ -1224,3 +1224,59 @@ func TestIsInsideJSONString(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// D1: renderTrustedSubstitution blanks untrusted vars (defense-in-depth)
+// ---------------------------------------------------------------------------
+
+func TestRenderTrustedSubstitution_BlanksUntrustedVars(t *testing.T) {
+	// D1: If an untrusted variable somehow appears in a URL host/path
+	// position (bypassing static validation), it should be blanked
+	// at render time as defense-in-depth.
+	tests := []struct {
+		name  string
+		input string
+		vars  RenderVars
+		want  string
+	}{
+		{
+			name:  "trusted var substituted verbatim",
+			input: "https://registry.example.com/${PROJECT_ID}/agents",
+			vars:  RenderVars{"PROJECT_ID": "proj-123"},
+			want:  "https://registry.example.com/proj-123/agents",
+		},
+		{
+			name:  "untrusted var blanked (defense-in-depth)",
+			input: "https://registry.example.com/${AGENT_NAME}/agents",
+			vars:  RenderVars{"AGENT_NAME": "evil-host.attacker.com"},
+			want:  "https://registry.example.com//agents",
+		},
+		{
+			name:  "unknown var blanked (defaults to untrusted)",
+			input: "https://registry.example.com/${UNKNOWN_VAR}/agents",
+			vars:  RenderVars{"UNKNOWN_VAR": "injected"},
+			want:  "https://registry.example.com//agents",
+		},
+		{
+			name:  "mix of trusted and untrusted",
+			input: "https://${AGENT_SLUG}.example.com/${AGENT_NAME}/api",
+			vars:  RenderVars{"AGENT_SLUG": "my-agent", "AGENT_NAME": "evil"},
+			want:  "https://my-agent.example.com//api",
+		},
+		{
+			name:  "unresolved var left as-is",
+			input: "https://registry.example.com/${NOT_PROVIDED}/agents",
+			vars:  RenderVars{},
+			want:  "https://registry.example.com/${NOT_PROVIDED}/agents",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renderTrustedSubstitution(tc.input, tc.vars)
+			if got != tc.want {
+				t.Errorf("renderTrustedSubstitution(%q, ...) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
