@@ -3474,7 +3474,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		Slug:       slug,
 		GitRemote:  normalizedRemote,
 		Labels:     req.Labels,
-		Visibility: req.Visibility,
+		Visibility: api.NormalizeVisibility(req.Visibility),
 	}
 
 	if project.Visibility == "" {
@@ -5170,7 +5170,7 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		project.Labels = updates.Labels
 	}
 	if updates.Visibility != "" {
-		project.Visibility = updates.Visibility
+		project.Visibility = api.NormalizeVisibility(updates.Visibility)
 	}
 	if updates.DefaultRuntimeBrokerID != "" {
 		project.DefaultRuntimeBrokerID = updates.DefaultRuntimeBrokerID
@@ -6379,6 +6379,7 @@ func (s *Server) createTemplate(w http.ResponseWriter, r *http.Request) {
 	if template.Scope == "" {
 		template.Scope = "global"
 	}
+	template.Visibility = api.NormalizeVisibility(template.Visibility)
 	if template.Visibility == "" {
 		template.Visibility = store.VisibilityPrivate
 	}
