@@ -850,6 +850,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		MaintenanceConfig: resolveMaintenanceConfig(cfg),
 		SecretBackend:     secretBackend,
 		GCPProjectID:      cfg.Hub.GCPProjectID,
+		DatabaseDriver:    cfg.Database.Driver,
 	}
 
 	hubSrv, err := hub.New(hubCfg, s)

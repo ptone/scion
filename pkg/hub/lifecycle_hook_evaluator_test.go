@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,21 +210,15 @@ func seedHook(t *testing.T, s store.Store, name, trigger string, enabled bool, s
 	return h
 }
 
-// previousPhaseLen returns the number of entries in the evaluator's
-// previousPhase map. For test assertions only.
-func previousPhaseLen(ev *LifecycleHookEvaluator) int {
-	ev.mu.Lock()
-	defer ev.mu.Unlock()
-	return len(ev.previousPhase)
-}
-
-// previousPhaseHas returns true if the evaluator's previousPhase map has an
-// entry for the given agent ID. For test assertions only.
-func previousPhaseHas(ev *LifecycleHookEvaluator, agentID string) bool {
-	ev.mu.Lock()
-	defer ev.mu.Unlock()
-	_, ok := ev.previousPhase[agentID]
-	return ok
+// memDeduper returns the evaluator's deduper as a *memoryDeduper. Panics if
+// the deduper is not a memoryDeduper (tests using this helper should use the
+// default sqlite backend, not postgres).
+func memDeduper(ev *LifecycleHookEvaluator) *memoryDeduper {
+	md, ok := ev.deduper.(*memoryDeduper)
+	if !ok {
+		panic("memDeduper: evaluator deduper is not *memoryDeduper")
+	}
+	return md
 }
 
 // ---------------------------------------------------------------------------
@@ -646,7 +641,7 @@ func TestLifecycleHookHandleEvent_IgnoresNonV1Phases(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Cold-start seeding (F2)
+// Tests: Cold-start seeding (F2) — memoryDeduper path
 // ---------------------------------------------------------------------------
 
 func TestLifecycleHookColdStart_NoSpuriousFiring(t *testing.T) {
@@ -687,9 +682,10 @@ func TestLifecycleHookColdStart_SeedsMultipleAgents(t *testing.T) {
 	ev.Start()
 	defer ev.Stop()
 
-	// Both agents should be seeded.
-	assert.True(t, previousPhaseHas(ev, a1.ID), "agent 1 should be seeded")
-	assert.True(t, previousPhaseHas(ev, a2.ID), "agent 2 should be seeded")
+	// Both agents should be seeded in the memory deduper.
+	md := memDeduper(ev)
+	assert.True(t, md.previousPhaseHas(a1.ID), "agent 1 should be seeded")
+	assert.True(t, md.previousPhaseHas(a2.ID), "agent 2 should be seeded")
 }
 
 // ---------------------------------------------------------------------------
@@ -697,7 +693,7 @@ func TestLifecycleHookColdStart_SeedsMultipleAgents(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLifecycleHookPruning_TerminalPhaseRemovesEntry(t *testing.T) {
-	// After a "stopped" or "error" event, the agent's previousPhase entry is
+	// After a "stopped" or "error" event, the agent's deduper entry is
 	// removed, and a subsequent terminal→running transition is detected.
 	for _, terminalPhase := range []state.Phase{state.PhaseStopped, state.PhaseError} {
 		t.Run(string(terminalPhase), func(t *testing.T) {
@@ -727,9 +723,10 @@ func TestLifecycleHookPruning_TerminalPhaseRemovesEntry(t *testing.T) {
 			events.PublishAgentStatus(context.Background(), agent)
 			exec.waitForCalls(t, 1, 5*time.Second)
 
-			// The entry should be pruned after a terminal phase.
-			assert.False(t, previousPhaseHas(ev, agent.ID),
-				"terminal phase should prune the agent's previousPhase entry")
+			// The entry should be pruned after a terminal phase (memory deduper).
+			md := memDeduper(ev)
+			assert.False(t, md.previousPhaseHas(agent.ID),
+				"terminal phase should prune the agent's deduper entry")
 
 			// A subsequent transition to running should be detected (prev="" != "running").
 			agent.Phase = string(state.PhaseRunning)
@@ -758,7 +755,8 @@ func TestLifecycleHookPruning_DeletedEventRemovesEntry(t *testing.T) {
 	defer ev.Stop()
 
 	// Agent is seeded from Start().
-	assert.True(t, previousPhaseHas(ev, agent.ID), "agent should be seeded")
+	md := memDeduper(ev)
+	assert.True(t, md.previousPhaseHas(agent.ID), "agent should be seeded")
 
 	// Publish a deleted event.
 	events.PublishAgentDeleted(context.Background(), agent.ID, agent.ProjectID)
@@ -766,8 +764,8 @@ func TestLifecycleHookPruning_DeletedEventRemovesEntry(t *testing.T) {
 	// Give the event loop a moment to process the delete.
 	time.Sleep(50 * time.Millisecond)
 
-	assert.False(t, previousPhaseHas(ev, agent.ID),
-		"deleted event should prune the agent's previousPhase entry")
+	assert.False(t, md.previousPhaseHas(agent.ID),
+		"deleted event should prune the agent's deduper entry")
 }
 
 // ---------------------------------------------------------------------------
@@ -907,4 +905,234 @@ type countingPanicExecutor struct {
 func (e *countingPanicExecutor) Execute(_ context.Context, _ *store.LifecycleHook, _ *store.Agent, _ string) error {
 	*e.callCount++
 	panic("simulated panic in executor")
+}
+
+// ---------------------------------------------------------------------------
+// Tests: TransitionDeduper — storeDeduper
+// ---------------------------------------------------------------------------
+
+func TestStoreDeduper_CAS_ChangedOnFirstCall(t *testing.T) {
+	s := testEvaluatorStore(t)
+	d := &storeDeduper{store: s, log: slog.Default()}
+
+	changed, err := d.IsTransition(context.Background(), "agent-1", "running")
+	require.NoError(t, err)
+	assert.True(t, changed, "first CAS for a new agent should return changed=true")
+}
+
+func TestStoreDeduper_CAS_SamePhaseReturnsFalse(t *testing.T) {
+	s := testEvaluatorStore(t)
+	d := &storeDeduper{store: s, log: slog.Default()}
+
+	changed, err := d.IsTransition(context.Background(), "agent-1", "running")
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	// Same phase again should return false.
+	changed, err = d.IsTransition(context.Background(), "agent-1", "running")
+	require.NoError(t, err)
+	assert.False(t, changed, "repeat CAS with same phase should return changed=false")
+}
+
+func TestStoreDeduper_CAS_DifferentPhaseReturnsTrue(t *testing.T) {
+	s := testEvaluatorStore(t)
+	d := &storeDeduper{store: s, log: slog.Default()}
+
+	changed, err := d.IsTransition(context.Background(), "agent-1", "running")
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	// Different phase should return true.
+	changed, err = d.IsTransition(context.Background(), "agent-1", "stopped")
+	require.NoError(t, err)
+	assert.True(t, changed, "CAS with different phase should return changed=true")
+}
+
+func TestStoreDeduper_CAS_ConcurrentExactlyOneWinner(t *testing.T) {
+	// Simulate two hub instances racing to CAS the same agent's phase.
+	// Exactly one should win (changed=true), the other should lose (changed=false).
+	s := testEvaluatorStore(t)
+	d := &storeDeduper{store: s, log: slog.Default()}
+
+	const goroutines = 10
+	var winners atomic.Int32
+	var losers atomic.Int32
+	var wg sync.WaitGroup
+
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			changed, err := d.IsTransition(context.Background(), "agent-race", "running")
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+			if changed {
+				winners.Add(1)
+			} else {
+				losers.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, int32(1), winners.Load(),
+		"exactly one goroutine should win the CAS race")
+	assert.Equal(t, int32(goroutines-1), losers.Load(),
+		"all other goroutines should lose the CAS race")
+}
+
+func TestStoreDeduper_Forget_RemovesState(t *testing.T) {
+	s := testEvaluatorStore(t)
+	d := &storeDeduper{store: s, log: slog.Default()}
+
+	// Set a phase.
+	changed, err := d.IsTransition(context.Background(), "agent-1", "running")
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	// Forget should remove the state.
+	require.NoError(t, d.Forget(context.Background(), "agent-1"))
+
+	// After forget, the same phase should be a new transition.
+	changed, err = d.IsTransition(context.Background(), "agent-1", "running")
+	require.NoError(t, err)
+	assert.True(t, changed, "after Forget, same phase should be treated as a new transition")
+}
+
+func TestStoreDeduper_Forget_NoErrorOnMissing(t *testing.T) {
+	s := testEvaluatorStore(t)
+	d := &storeDeduper{store: s, log: slog.Default()}
+
+	// Forget for a non-existent agent should not error.
+	err := d.Forget(context.Background(), "nonexistent-agent")
+	assert.NoError(t, err, "Forget on non-existent agent should not error")
+}
+
+// ---------------------------------------------------------------------------
+// Tests: TransitionDeduper — memoryDeduper
+// ---------------------------------------------------------------------------
+
+func TestMemoryDeduper_TransitionDetection(t *testing.T) {
+	d := newMemoryDeduper()
+
+	// First call for a new agent is always a transition.
+	changed, err := d.IsTransition(context.Background(), "agent-1", "running")
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	// Same phase again: not a transition.
+	changed, err = d.IsTransition(context.Background(), "agent-1", "running")
+	require.NoError(t, err)
+	assert.False(t, changed)
+
+	// Different phase: is a transition.
+	changed, err = d.IsTransition(context.Background(), "agent-1", "stopped")
+	require.NoError(t, err)
+	assert.True(t, changed)
+}
+
+func TestMemoryDeduper_Forget(t *testing.T) {
+	d := newMemoryDeduper()
+
+	changed, _ := d.IsTransition(context.Background(), "agent-1", "running")
+	assert.True(t, changed)
+
+	require.NoError(t, d.Forget(context.Background(), "agent-1"))
+	assert.False(t, d.previousPhaseHas("agent-1"), "Forget should remove the entry")
+
+	// After forget, same phase is a transition again.
+	changed, _ = d.IsTransition(context.Background(), "agent-1", "running")
+	assert.True(t, changed)
+}
+
+func TestMemoryDeduper_Seed(t *testing.T) {
+	s := testEvaluatorStore(t)
+	projectID := seedProject(t, s, "test-project")
+	a := seedAgent(t, s, projectID, "claude", string(state.PhaseRunning))
+
+	d := newMemoryDeduper()
+	d.seed(s, slog.Default())
+
+	assert.True(t, d.previousPhaseHas(a.ID), "seeded agent should be in the map")
+	assert.Equal(t, 1, d.previousPhaseLen())
+
+	// Same phase as seeded should NOT be a transition.
+	changed, _ := d.IsTransition(context.Background(), a.ID, "running")
+	assert.False(t, changed, "seeded phase should prevent spurious transition")
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Backend selection (NewTransitionDeduper)
+// ---------------------------------------------------------------------------
+
+func TestNewTransitionDeduper_PostgresUsesStoreDedeuper(t *testing.T) {
+	s := testEvaluatorStore(t)
+	d := NewTransitionDeduper("postgres", s, slog.Default())
+	_, ok := d.(*storeDeduper)
+	assert.True(t, ok, "postgres driver should select storeDeduper")
+}
+
+func TestNewTransitionDeduper_SqliteUsesMemoryDeduper(t *testing.T) {
+	s := testEvaluatorStore(t)
+	d := NewTransitionDeduper("sqlite", s, slog.Default())
+	_, ok := d.(*memoryDeduper)
+	assert.True(t, ok, "sqlite driver should select memoryDeduper")
+}
+
+func TestNewTransitionDeduper_EmptyUsesMemoryDeduper(t *testing.T) {
+	s := testEvaluatorStore(t)
+	d := NewTransitionDeduper("", s, slog.Default())
+	_, ok := d.(*memoryDeduper)
+	assert.True(t, ok, "empty driver should select memoryDeduper")
+}
+
+func TestEvaluator_WithDBDriver_PostgresSelectsStoreDeduper(t *testing.T) {
+	s := testEvaluatorStore(t)
+	ev := NewLifecycleHookEvaluator(s, nil, nil, slog.Default(), WithDBDriver("postgres"))
+	_, ok := ev.deduper.(*storeDeduper)
+	assert.True(t, ok, "WithDBDriver(postgres) should select storeDeduper")
+	assert.Equal(t, "postgres", ev.dbDriver)
+}
+
+func TestEvaluator_WithDBDriver_DefaultSelectsMemoryDeduper(t *testing.T) {
+	s := testEvaluatorStore(t)
+	ev := NewLifecycleHookEvaluator(s, nil, nil, slog.Default())
+	_, ok := ev.deduper.(*memoryDeduper)
+	assert.True(t, ok, "default (no WithDBDriver) should select memoryDeduper")
+	assert.Equal(t, "", ev.dbDriver)
+}
+
+// ---------------------------------------------------------------------------
+// Tests: storeDeduper end-to-end via evaluator (full event flow)
+// ---------------------------------------------------------------------------
+
+func TestStoreDeduper_EndToEnd_TransitionDetection(t *testing.T) {
+	// Use the store deduper (as if Postgres) and verify full event-driven
+	// transition detection works.
+	s := testEvaluatorStore(t)
+	projectID := seedProject(t, s, "test-project")
+	agent := seedAgent(t, s, projectID, "claude", string(state.PhaseStarting))
+	seedHook(t, s, "running-hook", store.LifecycleHookTriggerRunning, true, nil)
+
+	exec := newSignalingExecutor()
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	ev := NewLifecycleHookEvaluator(s, events, exec, slog.Default(), WithDBDriver("postgres"))
+
+	ev.Start()
+	defer ev.Stop()
+
+	// starting→running: genuine transition via store CAS.
+	agent.Phase = string(state.PhaseRunning)
+	events.PublishAgentStatus(context.Background(), agent)
+	exec.waitForCalls(t, 1, 5*time.Second)
+
+	// Same phase again: store CAS should suppress.
+	events.PublishAgentStatus(context.Background(), agent)
+	exec.assertNoMoreCalls(t, 100*time.Millisecond)
+
+	calls := exec.getCalls()
+	assert.Len(t, calls, 1)
 }

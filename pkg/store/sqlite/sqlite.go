@@ -148,6 +148,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV52,
 		migrationV53,
 		migrationV54,
+		migrationV55,
 	}
 
 	// Create migrations table if not exists
@@ -1394,6 +1395,17 @@ CREATE TABLE IF NOT EXISTS lifecycle_hooks (
 CREATE INDEX IF NOT EXISTS idx_lifecycle_hooks_scope ON lifecycle_hooks(scope_type, scope_id);
 CREATE INDEX IF NOT EXISTS idx_lifecycle_hooks_trigger ON lifecycle_hooks(trigger);
 CREATE INDEX IF NOT EXISTS idx_lifecycle_hooks_enabled ON lifecycle_hooks(enabled);
+`
+
+// migrationV55 adds the lifecycle_hook_agent_phase table for HA-safe transition
+// de-duplication. Each row tracks the last-processed phase for an agent so the
+// evaluator can do an atomic compare-and-set across multiple hub instances.
+const migrationV55 = `
+CREATE TABLE IF NOT EXISTS lifecycle_hook_agent_phase (
+	agent_id TEXT PRIMARY KEY,
+	last_phase TEXT NOT NULL,
+	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 `
 
 // tableExists checks whether a table with the given name exists in the database.
@@ -6240,6 +6252,47 @@ func nullableTimePtr(t *time.Time) sql.NullTime {
 		return sql.NullTime{Valid: false}
 	}
 	return sql.NullTime{Time: *t, Valid: true}
+}
+
+// ============================================================================
+// Lifecycle Hook Agent Phase (HA transition de-duplication)
+// ============================================================================
+
+// CompareAndSetHookPhase atomically records newPhase as the last-processed
+// phase for the given agent. Returns changed=true only when the phase
+// actually changed (or the row was inserted for the first time).
+//
+// The implementation uses INSERT ... ON CONFLICT DO UPDATE with a WHERE
+// guard so that the UPDATE only fires when last_phase differs. The number
+// of rows affected tells us whether the phase changed:
+//   - 1 row affected → insert or update happened → phase changed
+//   - 0 rows affected → ON CONFLICT matched but WHERE excluded it → same phase
+func (s *SQLiteStore) CompareAndSetHookPhase(ctx context.Context, agentID, newPhase string) (bool, error) {
+	now := time.Now()
+	result, err := s.db.ExecContext(ctx, `
+		INSERT INTO lifecycle_hook_agent_phase (agent_id, last_phase, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(agent_id) DO UPDATE
+			SET last_phase = excluded.last_phase,
+			    updated_at = excluded.updated_at
+			WHERE last_phase IS NOT excluded.last_phase
+	`, agentID, newPhase, now)
+	if err != nil {
+		return false, fmt.Errorf("compare-and-set hook phase: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("compare-and-set hook phase rows affected: %w", err)
+	}
+	return rows > 0, nil
+}
+
+// DeleteHookPhase removes the stored phase for an agent. No error is
+// returned if the row does not exist.
+func (s *SQLiteStore) DeleteHookPhase(ctx context.Context, agentID string) error {
+	_, err := s.db.ExecContext(ctx,
+		"DELETE FROM lifecycle_hook_agent_phase WHERE agent_id = ?", agentID)
+	return err
 }
 
 // Ensure SQLiteStore implements Store interface

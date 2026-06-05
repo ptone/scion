@@ -344,3 +344,16 @@ func (c *CompositeStore) DeleteLifecycleHook(ctx context.Context, id string) err
 func (c *CompositeStore) ListLifecycleHooks(ctx context.Context, filter store.LifecycleHookFilter, opts store.ListOptions) (*store.ListResult[store.LifecycleHook], error) {
 	return c.lifecycleHooks.ListLifecycleHooks(ctx, filter, opts)
 }
+
+// CompareAndSetHookPhase delegates to the base store's CAS implementation.
+// The lifecycle_hook_agent_phase table lives in the base (SQL) store, not in
+// the Ent database, because it requires an atomic upsert pattern that maps
+// directly to SQL rather than Ent's ORM model.
+func (c *CompositeStore) CompareAndSetHookPhase(ctx context.Context, agentID, newPhase string) (bool, error) {
+	return c.Store.CompareAndSetHookPhase(ctx, agentID, newPhase)
+}
+
+// DeleteHookPhase delegates to the base store.
+func (c *CompositeStore) DeleteHookPhase(ctx context.Context, agentID string) error {
+	return c.Store.DeleteHookPhase(ctx, agentID)
+}

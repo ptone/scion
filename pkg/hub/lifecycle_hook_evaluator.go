@@ -67,27 +67,158 @@ func (e *LoggingExecutor) Execute(_ context.Context, hook *store.LifecycleHook, 
 	return nil
 }
 
+// =============================================================================
+// TransitionDeduper — backend-aware phase transition de-duplication
+// =============================================================================
+
+// TransitionDeduper detects whether a phase change for an agent constitutes a
+// genuine transition (i.e. the phase actually changed) rather than a
+// re-publication of the same phase (e.g. heartbeats). Two implementations
+// exist:
+//
+//   - storeDeduper: durable, backed by an atomic compare-and-set in the store.
+//     Safe for multi-instance / HA deployments (Postgres) because exactly one
+//     instance's CAS succeeds per logical transition.
+//   - memoryDeduper: in-process map, seeded from the store on start. Used for
+//     single-instance / sqlite / dev deployments where durability adds overhead
+//     without benefit.
+type TransitionDeduper interface {
+	// IsTransition returns true if newPhase differs from the last phase
+	// recorded for this agent (or no phase is recorded yet). On true, the
+	// new phase is recorded atomically. Implementations must be goroutine-safe.
+	IsTransition(ctx context.Context, agentID, newPhase string) (bool, error)
+
+	// Forget removes any recorded phase for the agent. Called on terminal
+	// phases and agent deletion to prevent unbounded state growth.
+	Forget(ctx context.Context, agentID string) error
+}
+
+// storeDeduper delegates to the store's atomic CompareAndSetHookPhase /
+// DeleteHookPhase. Durable across restarts and HA-safe (exactly one CAS
+// winner per transition). No cold-start seeding is needed because the CAS
+// state is persisted.
+type storeDeduper struct {
+	store store.Store
+	log   *slog.Logger
+}
+
+func (d *storeDeduper) IsTransition(ctx context.Context, agentID, newPhase string) (bool, error) {
+	changed, err := d.store.CompareAndSetHookPhase(ctx, agentID, newPhase)
+	if err != nil {
+		return false, fmt.Errorf("store CAS hook phase: %w", err)
+	}
+	return changed, nil
+}
+
+func (d *storeDeduper) Forget(ctx context.Context, agentID string) error {
+	return d.store.DeleteHookPhase(ctx, agentID)
+}
+
+// memoryDeduper is an in-process previous-phase map with the same semantics as
+// the original evaluator implementation: seeded from the store on construction,
+// pruned on terminal phases / deletion. Suitable for single-instance deployments.
+type memoryDeduper struct {
+	mu            sync.Mutex
+	previousPhase map[string]string
+}
+
+func newMemoryDeduper() *memoryDeduper {
+	return &memoryDeduper{
+		previousPhase: make(map[string]string),
+	}
+}
+
+func (d *memoryDeduper) IsTransition(_ context.Context, agentID, newPhase string) (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	prev := d.previousPhase[agentID]
+	if prev == newPhase {
+		return false, nil
+	}
+	d.previousPhase[agentID] = newPhase
+	return true, nil
+}
+
+func (d *memoryDeduper) Forget(_ context.Context, agentID string) error {
+	d.mu.Lock()
+	delete(d.previousPhase, agentID)
+	d.mu.Unlock()
+	return nil
+}
+
+// seed populates the in-memory map from the store so that steady-state status
+// events after a restart are not misinterpreted as transitions.
+func (d *memoryDeduper) seed(s store.Store, log *slog.Logger) {
+	ctx := context.Background()
+	result, err := s.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: 10000})
+	if err != nil {
+		log.Error("Failed to seed previousPhase from store (continuing without seed)", "error", err)
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, a := range result.Items {
+		d.previousPhase[a.ID] = a.Phase
+	}
+	log.Info("Seeded lifecycle hook evaluator previousPhase", "agents", len(result.Items))
+}
+
+// previousPhaseLen returns the number of entries (test helper).
+func (d *memoryDeduper) previousPhaseLen() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.previousPhase)
+}
+
+// previousPhaseHas returns true if the agent has an entry (test helper).
+func (d *memoryDeduper) previousPhaseHas(agentID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.previousPhase[agentID]
+	return ok
+}
+
+// DBDriverPostgres is the sentinel value for a Postgres-backed hub. When the
+// evaluator is constructed with this driver, it uses the durable storeDeduper.
+const DBDriverPostgres = "postgres"
+
+// NewTransitionDeduper selects and returns the appropriate deduper for the
+// given database driver. Postgres uses the durable store-backed CAS;
+// everything else (sqlite, "", etc.) uses the in-memory map.
+func NewTransitionDeduper(dbDriver string, s store.Store, log *slog.Logger) TransitionDeduper {
+	if dbDriver == DBDriverPostgres {
+		return &storeDeduper{store: s, log: log}
+	}
+	md := newMemoryDeduper()
+	md.seed(s, log)
+	return md
+}
+
+// =============================================================================
+// LifecycleHookEvaluator
+// =============================================================================
+
 // LifecycleHookEvaluator listens for authoritative agent phase transitions and
 // evaluates matching lifecycle hooks. It follows the same event-subscriber
 // pattern as NotificationDispatcher: it subscribes to the ChannelEventPublisher
 // and fires asynchronously after the transition is committed, guaranteeing that
 // hook evaluation never blocks or fails the authoritative transition.
 //
-// v1 assumes a single hub instance; HA would fire hooks once per instance and
-// needs dedup (leader election/distributed lock) before it is safe.
+// Transition de-duplication is backend-aware: Postgres deployments use a
+// durable store-backed atomic CAS (safe for multi-instance HA); sqlite/dev
+// deployments use an in-memory map (seeded from the store on Start).
 type LifecycleHookEvaluator struct {
 	store    store.Store
 	events   *ChannelEventPublisher
 	executor LifecycleHookExecutor
 	log      *slog.Logger
 
-	// previousPhase tracks the last known phase per agent ID so we can detect
-	// actual transitions (not re-publications of the same phase on heartbeats).
-	// Entries are pruned on terminal phases (stopped/error) to avoid unbounded
-	// growth, and seeded from the store on Start() to prevent cold-start
-	// spurious firing.
-	mu            sync.Mutex
-	previousPhase map[string]string
+	// deduper detects actual phase transitions vs. heartbeat re-publications.
+	// Selected at construction based on the configured DB backend.
+	deduper TransitionDeduper
+
+	// dbDriver is preserved for test introspection (backend-selection tests).
+	dbDriver string
 
 	stopCh    chan struct{}
 	startOnce sync.Once
@@ -96,21 +227,49 @@ type LifecycleHookEvaluator struct {
 }
 
 // NewLifecycleHookEvaluator creates a new evaluator. The executor is injectable;
-// pass nil to use the default LoggingExecutor.
-func NewLifecycleHookEvaluator(s store.Store, events *ChannelEventPublisher, executor LifecycleHookExecutor, log *slog.Logger) *LifecycleHookEvaluator {
+// pass nil to use the default LoggingExecutor. The dbDriver selects the
+// transition de-duplication strategy: "postgres" uses the durable store-backed
+// CAS (HA-safe); any other value uses the in-memory map.
+func NewLifecycleHookEvaluator(s store.Store, events *ChannelEventPublisher, executor LifecycleHookExecutor, log *slog.Logger, opts ...EvaluatorOption) *LifecycleHookEvaluator {
 	if executor == nil {
 		executor = &LoggingExecutor{Log: log}
 	}
 	if log == nil {
 		log = slog.Default()
 	}
+
+	cfg := evaluatorConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	deduper := NewTransitionDeduper(cfg.dbDriver, s, log)
+
 	return &LifecycleHookEvaluator{
-		store:         s,
-		events:        events,
-		executor:      executor,
-		log:           log,
-		previousPhase: make(map[string]string),
-		stopCh:        make(chan struct{}),
+		store:    s,
+		events:   events,
+		executor: executor,
+		log:      log,
+		deduper:  deduper,
+		dbDriver: cfg.dbDriver,
+		stopCh:   make(chan struct{}),
+	}
+}
+
+// evaluatorConfig holds optional configuration for the evaluator.
+type evaluatorConfig struct {
+	dbDriver string
+}
+
+// EvaluatorOption configures the LifecycleHookEvaluator.
+type EvaluatorOption func(*evaluatorConfig)
+
+// WithDBDriver sets the database driver used for backend-aware de-duplication
+// selection. Pass "postgres" for durable store-backed CAS; any other value
+// (including "") uses the in-memory map.
+func WithDBDriver(driver string) EvaluatorOption {
+	return func(c *evaluatorConfig) {
+		c.dbDriver = driver
 	}
 }
 
@@ -118,15 +277,10 @@ func NewLifecycleHookEvaluator(s store.Store, events *ChannelEventPublisher, exe
 // It is safe to call multiple times; only the first call has an effect.
 func (e *LifecycleHookEvaluator) Start() {
 	e.startOnce.Do(func() {
-		// Seed previousPhase from the store to prevent cold-start spurious firing.
-		// After a hub restart the map is empty, so without seeding the first status
-		// event per agent looks like a transition and causes a mass re-fire storm.
-		e.seedPreviousPhase()
-
 		// Use "*" (single-token wildcard) rather than ">" (multi-token) to
 		// avoid cross-matching: "project.>.agent.status" would also match
 		// "project.X.agent.deleted" subjects, causing handleDeletedEvent to
-		// spuriously prune previousPhase entries on status events.
+		// spuriously prune entries on status events.
 		statusCh, unsubStatus := e.events.Subscribe("project.*.agent.status")
 		deletedCh, unsubDeleted := e.events.Subscribe("project.*.agent.deleted")
 
@@ -157,24 +311,6 @@ func (e *LifecycleHookEvaluator) Start() {
 	})
 }
 
-// seedPreviousPhase loads existing agents from the store and populates the
-// previousPhase map so that steady-state status events after a hub restart are
-// not misinterpreted as transitions.
-func (e *LifecycleHookEvaluator) seedPreviousPhase() {
-	ctx := context.Background()
-	result, err := e.store.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: 10000})
-	if err != nil {
-		e.log.Error("Failed to seed previousPhase from store (continuing without seed)", "error", err)
-		return
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	for _, a := range result.Items {
-		e.previousPhase[a.ID] = a.Phase
-	}
-	e.log.Info("Seeded lifecycle hook evaluator previousPhase", "agents", len(result.Items))
-}
-
 // Stop signals the evaluator goroutine to exit and waits for it to finish.
 // Safe to call multiple times.
 func (e *LifecycleHookEvaluator) Stop() {
@@ -201,26 +337,32 @@ func (e *LifecycleHookEvaluator) handleEvent(evt Event) {
 		return
 	}
 
-	// Check for actual transition (not a re-publication of the same phase).
-	e.mu.Lock()
-	prev := e.previousPhase[statusEvt.AgentID]
+	// Check for actual transition via the deduper.
+	ctx := context.Background()
 	phase := state.Phase(statusEvt.Phase)
-	if phase == state.PhaseStopped || phase == state.PhaseError {
-		// Terminal phase: prune the entry to avoid unbounded growth. A later
-		// stopped→running transition is still correctly detected because
-		// a missing entry (prev="") differs from "running".
-		delete(e.previousPhase, statusEvt.AgentID)
-	} else {
-		e.previousPhase[statusEvt.AgentID] = statusEvt.Phase
-	}
-	e.mu.Unlock()
+	isTerminal := phase == state.PhaseStopped || phase == state.PhaseError
 
-	if prev == statusEvt.Phase {
+	changed, err := e.deduper.IsTransition(ctx, statusEvt.AgentID, statusEvt.Phase)
+	if err != nil {
+		e.log.Error("Failed to check transition dedup",
+			"agent_id", statusEvt.AgentID, "phase", statusEvt.Phase, "error", err)
+		return
+	}
+
+	// For terminal phases, prune the deduper entry to avoid unbounded growth.
+	// This is done AFTER the CAS so we still detect the transition itself.
+	if isTerminal {
+		if forgetErr := e.deduper.Forget(ctx, statusEvt.AgentID); forgetErr != nil {
+			e.log.Error("Failed to prune deduper entry for terminal phase",
+				"agent_id", statusEvt.AgentID, "error", forgetErr)
+		}
+	}
+
+	if !changed {
 		return // same phase re-published (e.g., heartbeat), not a transition
 	}
 
 	// Fetch the full agent record so we have project_id and template for matching.
-	ctx := context.Background()
 	agent, err := e.store.GetAgent(ctx, statusEvt.AgentID)
 	if err != nil {
 		e.log.Error("Failed to fetch agent for lifecycle hook evaluation",
@@ -297,7 +439,7 @@ func selectorMatches(hook *store.LifecycleHook, agent *store.Agent) bool {
 	return true
 }
 
-// handleDeletedEvent prunes the previousPhase entry for a deleted agent,
+// handleDeletedEvent prunes the deduper entry for a deleted agent,
 // mirroring the NotificationDispatcher's deletion subscription pattern.
 func (e *LifecycleHookEvaluator) handleDeletedEvent(evt Event) {
 	var deletedEvt AgentDeletedEvent
@@ -305,9 +447,11 @@ func (e *LifecycleHookEvaluator) handleDeletedEvent(evt Event) {
 		e.log.Error("Failed to unmarshal agent deleted event for lifecycle hooks", "error", err)
 		return
 	}
-	e.mu.Lock()
-	delete(e.previousPhase, deletedEvt.AgentID)
-	e.mu.Unlock()
+	ctx := context.Background()
+	if err := e.deduper.Forget(ctx, deletedEvt.AgentID); err != nil {
+		e.log.Error("Failed to prune deduper entry for deleted agent",
+			"agent_id", deletedEvt.AgentID, "error", err)
+	}
 }
 
 // executeHookSafe invokes the executor with panic recovery. Executor errors and

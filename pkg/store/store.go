@@ -738,6 +738,19 @@ type LifecycleHookStore interface {
 
 	// ListLifecycleHooks returns lifecycle hooks matching the filter criteria.
 	ListLifecycleHooks(ctx context.Context, filter LifecycleHookFilter, opts ListOptions) (*ListResult[LifecycleHook], error)
+
+	// CompareAndSetHookPhase atomically records newPhase as the last-processed
+	// phase for an agent's lifecycle-hook evaluation. It returns changed=true
+	// ONLY when the stored phase actually differed from newPhase (or no row
+	// existed yet). This is used for HA transition de-duplication: across
+	// multiple hub instances the single instance whose CAS succeeds "wins" and
+	// fires hooks; all others see changed=false and skip.
+	CompareAndSetHookPhase(ctx context.Context, agentID, newPhase string) (changed bool, err error)
+
+	// DeleteHookPhase removes the stored last-processed phase for an agent.
+	// Called on terminal phases (stopped/error) and agent deletion to prevent
+	// unbounded growth. No error is returned if the row does not exist.
+	DeleteHookPhase(ctx context.Context, agentID string) error
 }
 
 // LifecycleHookFilter defines criteria for filtering lifecycle hooks.

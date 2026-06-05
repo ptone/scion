@@ -137,6 +137,11 @@ type ServerConfig struct {
 	// GCPMintCapGlobal is the maximum total number of minted service accounts across all projects.
 	// Zero means unlimited (default).
 	GCPMintCapGlobal int
+	// DatabaseDriver is the database driver in use ("sqlite" or "postgres").
+	// Used by the lifecycle hook evaluator to select the appropriate
+	// transition de-duplication strategy (store-backed CAS for Postgres HA,
+	// in-memory map for sqlite/dev). Populated from config.Database.Driver.
+	DatabaseDriver string
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -1331,7 +1336,7 @@ func (s *Server) StartLifecycleHookEvaluator() {
 	var executor LifecycleHookExecutor
 	executor = NewHTTPExecutor(s.store, s.gcpTokenGenerator, s.auditLogger, logging.Subsystem("hub.lifecycle-hooks.executor"))
 
-	ev := NewLifecycleHookEvaluator(s.store, ep, executor, logging.Subsystem("hub.lifecycle-hooks"))
+	ev := NewLifecycleHookEvaluator(s.store, ep, executor, logging.Subsystem("hub.lifecycle-hooks"), WithDBDriver(s.config.DatabaseDriver))
 	s.lifecycleHookEvaluator = ev
 	s.lifecycleHookEvaluator.Start()
 }
