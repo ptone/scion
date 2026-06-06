@@ -94,12 +94,12 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 
 	// Create a running agent with a heartbeat
 	staleAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Slug:       "stale-runner",
-		Name:       "Stale Runner",
-		Template:   "claude",
-		ProjectID:  project.ID,
-		Phase:      string(state.PhaseCreated),
+		ID:        api.NewUUID(),
+		Slug:      "stale-runner",
+		Name:      "Stale Runner",
+		Template:  "claude",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseCreated),
 	}
 	if err := s.CreateAgent(ctx, staleAgent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -114,12 +114,12 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 
 	// Create a stopped agent (terminal — should not be affected)
 	stoppedAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Slug:       "stopped-agent",
-		Name:       "Stopped Agent",
-		Template:   "claude",
-		ProjectID:  project.ID,
-		Phase:      string(state.PhaseStopped),
+		ID:        api.NewUUID(),
+		Slug:      "stopped-agent",
+		Name:      "Stopped Agent",
+		Template:  "claude",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseStopped),
 	}
 	if err := s.CreateAgent(ctx, stoppedAgent); err != nil {
 		t.Fatalf("failed to create stopped agent: %v", err)
