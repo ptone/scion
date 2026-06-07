@@ -131,16 +131,30 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 	return errors.Join(errs...)
 }
 
-// AddSpoke adds a new named event bus to the fan-out at runtime.
-// Subsequent Publish and Subscribe calls will include the new spoke.
+// AddSpoke adds a named event bus to the fan-out at runtime, replacing any
+// existing spoke with the same name. This is safe for re-setup scenarios where
+// a plugin is killed and restarted — the old (dead) spoke is removed before the
+// new one is appended, preventing duplicate/stale entries.
 func (f *FanOutEventBus) AddSpoke(nb NamedEventBus) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.buses = append(f.buses, nb)
+	filtered := f.buses[:0:0]
+	for _, existing := range f.buses {
+		if existing.Name != nb.Name {
+			filtered = append(filtered, existing)
+		} else {
+			f.log.Info("Replacing existing spoke in fan-out bus", "name", nb.Name)
+		}
+	}
+	f.buses = append(filtered, nb)
 	f.log.Info("Added spoke to fan-out bus", "name", nb.Name, "observer", nb.Observer)
 }
 
-// Subscribe delegates to all child event buses.
+// Subscribe delegates to all child event buses. Note: this snapshots the spoke
+// list at call time — spokes added via AddSpoke after this call won't receive
+// messages through this subscription. This is safe because inbound messages
+// arrive via the hub API (host callbacks), not the spoke Subscribe path, and
+// Publish re-snapshots on every call.
 func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscription, error) {
 	f.mu.RLock()
 	buses := f.buses
