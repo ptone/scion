@@ -21,7 +21,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import '../shared/dir-browser.js';
 
 const ONBOARDING_STATUS_KEY = 'onboardingStatus';
-const TOTAL_STEPS = 6;
+const TOTAL_STEPS = 7;
 
 interface OnboardingStatus {
   initialized: boolean;
@@ -98,6 +98,15 @@ export class ScionPageOnboarding extends LitElement {
   @state() private wsValidatingPath = false;
   @state() private wsCreating = false;
   @state() private wsEmbeddedBrokerID = '';
+
+  // Step 6: Telegram
+  @state() private telegramToken = '';
+  @state() private telegramBot: { id: number; username: string; first_name: string } | null = null;
+  @state() private telegramValidating = false;
+  @state() private telegramValidated = false;
+  @state() private telegramSaving = false;
+  @state() private telegramComplete = false;
+  @state() private telegramMessage = '';
 
   static override styles = css`
     :host {
@@ -475,6 +484,62 @@ export class ScionPageOnboarding extends LitElement {
       border: 1px solid var(--sl-color-danger-200, #fecaca);
       color: var(--sl-color-danger-700, #b91c1c);
     }
+
+    .tg-bot-info {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      border: 1px solid var(--sl-color-success-200, #bbf7d0);
+      background: var(--sl-color-success-50, #f0fdf4);
+      margin-bottom: 1.25rem;
+    }
+
+    .tg-bot-info sl-icon {
+      font-size: 1.5rem;
+      color: var(--sl-color-success-500, #22c55e);
+    }
+
+    .tg-bot-info .bot-name {
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .tg-bot-info .bot-username {
+      font-size: 0.875rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .tg-instructions {
+      background: var(--sl-color-neutral-50, #f8fafc);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .tg-instructions h3 {
+      font-size: 0.9375rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 0.5rem 0;
+    }
+
+    .tg-instructions ol {
+      margin: 0;
+      padding-left: 1.25rem;
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.875rem;
+      line-height: 1.75;
+    }
+
+    .tg-instructions code {
+      background: var(--sl-color-neutral-100, #f1f5f9);
+      padding: 0.125rem 0.375rem;
+      border-radius: 0.25rem;
+      font-size: 0.8125rem;
+    }
   `;
 
   override connectedCallback(): void {
@@ -568,7 +633,8 @@ export class ScionPageOnboarding extends LitElement {
       case 3: return this.renderHarnesses();
       case 4: return this.renderImages();
       case 5: return this.renderWorkspacePlaceholder();
-      case 6: return this.renderDone();
+      case 6: return this.renderTelegram();
+      case 7: return this.renderDone();
       default: return nothing;
     }
   }
@@ -1361,7 +1427,152 @@ export class ScionPageOnboarding extends LitElement {
     }
   }
 
-  // ── Step 6: Done ──
+  // ── Step 6: Telegram ──
+
+  private renderTelegram() {
+    if (this.telegramComplete) {
+      return html`
+        <h2>Telegram Connected</h2>
+        <p>${this.telegramMessage}</p>
+
+        ${this.telegramBot ? html`
+          <div class="tg-bot-info">
+            <sl-icon name="check-circle"></sl-icon>
+            <div>
+              <div class="bot-name">${this.telegramBot.first_name}</div>
+              <div class="bot-username">@${this.telegramBot.username}</div>
+            </div>
+          </div>
+        ` : nothing}
+
+        <div class="tg-instructions">
+          <h3>Next: Link to a project</h3>
+          <ol>
+            <li>Add <strong>@${this.telegramBot?.username}</strong> to a Telegram group</li>
+            <li>In the group, send <code>/setup</code> to link it to a Scion project</li>
+            <li>The bot will guide you through selecting a project</li>
+          </ol>
+        </div>
+
+        <div class="footer">
+          <sl-button variant="text" @click=${() => { this.telegramComplete = false; }}>Back</sl-button>
+          <div class="footer-right">
+            <sl-button variant="primary" @click=${() => { this.currentStep = 7; }}>Finish</sl-button>
+          </div>
+        </div>
+      `;
+    }
+
+    return html`
+      <h2>Connect Telegram</h2>
+      <p>Optionally connect a Telegram bot for chat-based interaction with your agents.</p>
+
+      <div class="form-group">
+        <label>Bot Token</label>
+        <sl-input
+          type="password"
+          placeholder="Paste your BotFather token"
+          .value=${this.telegramToken}
+          ?disabled=${this.telegramValidated}
+          @sl-input=${(e: Event) => {
+            this.telegramToken = (e.target as HTMLInputElement).value;
+            this.telegramValidated = false;
+            this.telegramBot = null;
+            this.error = null;
+          }}
+        ></sl-input>
+      </div>
+
+      ${this.telegramBot ? html`
+        <div class="tg-bot-info">
+          <sl-icon name="check-circle"></sl-icon>
+          <div>
+            <div class="bot-name">${this.telegramBot.first_name}</div>
+            <div class="bot-username">@${this.telegramBot.username}</div>
+          </div>
+        </div>
+      ` : nothing}
+
+      <div class="footer">
+        <sl-button variant="text" @click=${() => { this.currentStep = 5; }}>Back</sl-button>
+        <div class="footer-right">
+          <sl-button variant="default" @click=${() => { this.currentStep = 7; }}>Skip</sl-button>
+
+          ${!this.telegramValidated ? html`
+            <sl-button
+              variant="primary"
+              ?loading=${this.telegramValidating}
+              ?disabled=${!this.telegramToken.trim() || this.telegramValidating}
+              @click=${this.handleTelegramValidate}
+            >Validate</sl-button>
+          ` : html`
+            <sl-button
+              variant="primary"
+              ?loading=${this.telegramSaving}
+              @click=${this.handleTelegramSetup}
+            >Save & Connect</sl-button>
+          `}
+        </div>
+      </div>
+    `;
+  }
+
+  private async handleTelegramValidate(): Promise<void> {
+    this.error = null;
+    this.telegramValidating = true;
+    try {
+      const res = await apiFetch('/api/v1/system/telegram/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bot_token: this.telegramToken.trim() }),
+      });
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Validation failed');
+        return;
+      }
+      const data = (await res.json()) as { valid: boolean; bot?: { id: number; username: string; first_name: string }; error?: string };
+      if (!data.valid) {
+        this.error = data.error || 'Invalid bot token. Check that you copied the full token from BotFather.';
+        return;
+      }
+      this.telegramBot = data.bot ?? null;
+      this.telegramValidated = true;
+    } catch {
+      this.error = 'Failed to connect to the server.';
+    } finally {
+      this.telegramValidating = false;
+    }
+  }
+
+  private async handleTelegramSetup(): Promise<void> {
+    this.error = null;
+    this.telegramSaving = true;
+    try {
+      const res = await apiFetch('/api/v1/system/telegram/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bot_token: this.telegramToken.trim() }),
+      });
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Setup failed');
+        return;
+      }
+      const data = (await res.json()) as { success: boolean; bot?: { id: number; username: string; first_name: string }; message?: string; error?: string };
+      if (!data.success) {
+        this.error = data.error || 'Setup failed';
+        return;
+      }
+      if (data.bot) this.telegramBot = data.bot;
+      this.telegramMessage = data.message || 'Telegram bot connected successfully.';
+      this.telegramComplete = true;
+    } catch {
+      this.error = 'Failed to connect to the server.';
+    } finally {
+      this.telegramSaving = false;
+    }
+  }
+
+  // ── Step 7: Done ──
 
   private renderDone() {
     sessionStorage.setItem('onboardingComplete', 'true');
