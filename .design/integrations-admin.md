@@ -58,7 +58,7 @@ Scion defines four canonical deployment modes. Integrations must work across all
 |------|-----------|-------------|---------------|-------------------|-------------|
 | **Workstation** | Local machine (macOS/Linux) | SQLite | None | Co-located subprocess | Local development, personal use |
 | **Single VM** | GCE VM (or similar) | SQLite or Postgres | Caddy + systemd | Co-located or independent services | Small team, current production model |
-| **Cloud Solo** | Cloud Run (single instance) | Cloud SQL (Postgres) | Cloud Run ingress | Sidecar or independent Cloud Run services | Cloud-deployed dev/personal server, small team |
+| **Cloud Solo** | Cloud Run (single instance) | SQLite (persistent volume) | Cloud Run ingress | Co-located subprocess | Cloud-deployed dev/personal server, single user |
 | **HA Cluster** | VM instance group, Cloud Run service, or K8s | Postgres (shared) | LB + Caddy/Ingress | Independent services | Production, multi-user, high availability |
 
 #### Mode Details
@@ -128,23 +128,17 @@ CLOUD SOLO
 │  └─────────────────────────────────────┘    │
 │                                              │
 │  Cloud Run ingress (TLS, routing)            │
-│  Cloud SQL Postgres (external)               │
-│  No Caddy │ No systemd │ Ephemeral FS        │
+│  SQLite (persistent volume)                  │
+│  No Caddy │ No systemd                       │
 └─────────────────────────────────────────────┘
-      │
-      ├──── OR: integrations as separate Cloud Run services
-      │
-┌─────┴──────┐  ┌──────────────┐
-│ Telegram   │  │ Google Chat  │   (separate Cloud Run services)
-│ Service    │  │ Service      │
-└────────────┘  └──────────────┘
 
-- Cloud-deployed single-node (like a cloud workstation)
-- Hub runs as single Cloud Run instance (may scale to zero)
-- Config in Cloud SQL Postgres (no local filesystem persistence)
-- Integrations either co-located (subprocess) or separate Cloud Run services
+- Workstation mode deployed to Cloud Run
+- Single container instance, single binary (same as workstation)
+- SQLite on a persistent volume (Cloud Run volume mount)
+- Telegram as managed subprocess (same as workstation)
 - Cloud Run handles TLS/ingress (no Caddy)
 - No systemd — process lifecycle managed by Cloud Run
+- Config in settings.yaml (baked into image or mounted)
 
 
 HA CLUSTER
@@ -188,15 +182,15 @@ Substrate options:
 |-----------|-------------|-----------|------------|------------|
 | Managed plugin (subprocess) | Yes | Yes | Yes | No (use independent) |
 | Self-managed plugin (localhost RPC) | No | Yes | No | No |
-| Independent service (API transport) | No | Optional | Yes | Required |
+| Independent service (API transport) | No | Optional | No | Required |
 | Caddy reverse proxy | No | Yes | No (Cloud Run ingress) | Depends on substrate |
 | systemd units | No | Yes | No | Depends on substrate |
-| SQLite | Yes | Yes | No | No |
-| Postgres | No | Optional | Required | Required |
-| Advisory locks (single-instance) | N/A | N/A | Optional | Required |
+| SQLite | Yes | Yes | Yes | No |
+| Postgres | No | Optional | No | Required |
+| Advisory locks (single-instance) | N/A | N/A | N/A | Required |
 | Webhook (public URL) | No (polling) | Yes | Yes | Yes |
-| Config in settings.yaml | Yes | Yes | Bootstrap only | Bootstrap only |
-| Config in database | Optional | Optional | Required | Required |
+| Config in settings.yaml | Yes | Yes | Yes | Bootstrap only |
+| Config in database | Optional | Optional | Optional | Required |
 
 ### 4.2 Integration Communication Model
 
@@ -271,10 +265,10 @@ type PostgresTransport struct {
 Integration binaries select transport based on deployment mode:
 
 ```yaml
-# Workstation / Single VM co-located (default, backward compatible)
+# Workstation / Cloud Solo / Single VM co-located (default, backward compatible)
 transport: rpc
 
-# Cloud Solo / HA Cluster — independent service via Hub API
+# HA Cluster — independent service via Hub API
 transport: api
 hub_url: https://hub.example.com
 auth_token: scion_integ_xxx
@@ -288,8 +282,8 @@ postgres_url: postgres://user:pass@db:5432/scion
 
 | Transport | Deployment Modes | Characteristics |
 |-----------|-----------------|-----------------|
-| `rpc` | Workstation, Single VM | go-plugin RPC, subprocess or localhost, lowest latency |
-| `api` | Cloud Solo, HA Cluster | HTTP to hub API (through LB), works anywhere, stateless |
+| `rpc` | Workstation, Cloud Solo, Single VM | go-plugin RPC, subprocess or localhost, lowest latency |
+| `api` | Single VM (optional), HA Cluster | HTTP to hub API (through LB), works anywhere, stateless |
 | `postgres` | HA Cluster | API + Postgres LISTEN for efficient message subscription |
 
 ### 4.3 Configuration Storage
@@ -404,14 +398,13 @@ Option B: Via Postgres NOTIFY (efficient, no HTTP overhead)
 
 #### Cloud Solo
 
-Cloud Solo is like a cloud-deployed workstation — single instance, but with cloud-native infrastructure:
+Cloud Solo is workstation mode deployed to Cloud Run — same single-binary, single-instance model:
 
-- **Ephemeral filesystem:** No persistent local state. Config must be in Cloud SQL Postgres (not settings.yaml, except for bootstrap).
+- **Persistent volume for SQLite:** Cloud Run volume mount provides persistent storage for the SQLite database and settings.yaml. Same data model as workstation.
 - **No Caddy, no systemd:** Cloud Run handles TLS/ingress and process lifecycle.
-- **Telegram as subprocess or separate service:** If the hub container includes the Telegram binary, it can run as a managed subprocess (same as workstation). For better isolation, deploy as a separate Cloud Run service using `APITransport`.
-- **Cloud Run scale-to-zero:** If the hub scales to zero, managed subprocess integrations stop receiving webhooks. Separate Cloud Run services with their own URL can stay alive independently. This is a key argument for independent services even in single-node cloud deployments.
-- **Config in Postgres:** Required — Cloud Run containers are ephemeral. `settings.yaml` is only used for initial bootstrap (baked into container image or mounted from Secret Manager).
-- **Transport:** `RPCTransport` (co-located subprocess) or `APITransport` (separate Cloud Run service).
+- **Telegram as subprocess:** Same as workstation — managed subprocess, baked into the container image. Webhook mode works here since Cloud Run provides a public URL.
+- **Config in settings.yaml:** Same as workstation. Settings can be baked into the container image or mounted via Cloud Run volume/Secret Manager.
+- **Transport:** `RPCTransport` (co-located subprocess, same as workstation).
 
 The `IntegrationTransport` abstraction handles both: the integration binary is the same, only the transport config changes per deployment mode.
 
@@ -472,10 +465,10 @@ Purpose-built executors per integration, using shared infrastructure helpers (Ca
 - Same as current install.sh flow, but automated from web UI
 
 **Cloud Solo** (cloud workstation):
-- Config written to Postgres (no persistent local filesystem)
-- Integration as subprocess (baked into container image) or separate Cloud Run service
+- Same as workstation — subprocess, SQLite, settings.yaml
+- Integration binary baked into container image
 - No Caddy/systemd — Cloud Run handles routing and lifecycle
-- Executor provisions Cloud Run service via gcloud CLI or API (if separate service)
+- Webhook mode available (Cloud Run provides public URL)
 
 **HA Cluster** (multi-node):
 - Write config to Postgres (shared across hub nodes)
