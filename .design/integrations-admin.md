@@ -48,13 +48,24 @@ As Scion moves toward multi-node HA with Postgres (shared database, LISTEN/NOTIF
 
 ## 4. Integration Architecture
 
-### 4.1 Deployment Topologies
+### 4.1 Deployment Modes
 
-Integrations must work across three deployment topologies:
+Scion defines four canonical deployment modes. Integrations must work across all of them. The modes differ in compute substrate, persistence, and how services are exposed — but the integration code is the same, only the transport and infrastructure layer changes.
+
+#### Glossary of Deployment Modes
+
+| Mode | Substrate | Persistence | Reverse Proxy | Integration Model | When to Use |
+|------|-----------|-------------|---------------|-------------------|-------------|
+| **Workstation** | Local machine (macOS/Linux) | SQLite | None | Co-located subprocess | Local development, personal use |
+| **Single VM** | GCE VM (or similar) | SQLite or Postgres | Caddy + systemd | Co-located or independent services | Small team, current production model |
+| **Cloud Solo** | Cloud Run (single instance) | Cloud SQL (Postgres) | Cloud Run ingress | Sidecar or independent Cloud Run services | Cloud-deployed dev/personal server, small team |
+| **HA Cluster** | VM instance group, Cloud Run service, or K8s | Postgres (shared) | LB + Caddy/Ingress | Independent services | Production, multi-user, high availability |
+
+#### Mode Details
 
 ```
-TOPOLOGY 1: Workstation (Single Binary)
-────────────────────────────────────────
+WORKSTATION
+───────────
 ┌─────────────────────────────────────┐
 │         scion server                │
 │  ┌─────┐ ┌─────────┐ ┌──────────┐ │
@@ -68,14 +79,13 @@ TOPOLOGY 1: Workstation (Single Binary)
 └─────────────────────────────────────┘
 
 - Single binary, everything in-process or subprocess
-- Telegram plugin as managed subprocess (current model)
-- No external webhook (polling mode or ngrok for dev)
-- SQLite database
+- Telegram plugin as managed subprocess (polling mode, no public URL)
+- SQLite database, local filesystem
 - Simplest possible setup
 
 
-TOPOLOGY 2: Single Hub (Production, Current)
-─────────────────────────────────────────────
+SINGLE VM
+─────────
 ┌──────────────────────────────────────────────┐
 │                  GCE VM                       │
 │                                               │
@@ -98,14 +108,47 @@ TOPOLOGY 2: Single Hub (Production, Current)
 │  SQLite or Postgres │ Caddy │ systemd         │
 └──────────────────────────────────────────────┘
 
-- Hub manages Telegram as subprocess
-- Chat-app runs as separate systemd service
-- Both connect via localhost RPC
-- Race condition on restart ordering
+- Hub manages Telegram as subprocess or independent systemd service
+- Chat-app as separate systemd service
+- Both connect via localhost RPC (co-located) or hub API
+- Caddy handles TLS termination and webhook routing
 
 
-TOPOLOGY 3: Multi-Node HA (Target)
-──────────────────────────────────────────────────────
+CLOUD SOLO
+──────────
+┌─────────────────────────────────────────────┐
+│            Cloud Run Service                 │
+│                                              │
+│  ┌─────────────────────────────────────┐    │
+│  │  Hub (single container instance)    │    │
+│  │  :8080                              │    │
+│  │  ┌──────────────────────────────┐   │    │
+│  │  │ Telegram Plugin (subprocess) │   │    │
+│  │  └──────────────────────────────┘   │    │
+│  └─────────────────────────────────────┘    │
+│                                              │
+│  Cloud Run ingress (TLS, routing)            │
+│  Cloud SQL Postgres (external)               │
+│  No Caddy │ No systemd │ Ephemeral FS        │
+└─────────────────────────────────────────────┘
+      │
+      ├──── OR: integrations as separate Cloud Run services
+      │
+┌─────┴──────┐  ┌──────────────┐
+│ Telegram   │  │ Google Chat  │   (separate Cloud Run services)
+│ Service    │  │ Service      │
+└────────────┘  └──────────────┘
+
+- Cloud-deployed single-node (like a cloud workstation)
+- Hub runs as single Cloud Run instance (may scale to zero)
+- Config in Cloud SQL Postgres (no local filesystem persistence)
+- Integrations either co-located (subprocess) or separate Cloud Run services
+- Cloud Run handles TLS/ingress (no Caddy)
+- No systemd — process lifecycle managed by Cloud Run
+
+
+HA CLUSTER
+──────────
 ┌──────────────┐  ┌──────────────┐
 │   Hub Node 1 │  │   Hub Node 2 │   (behind LB)
 │   :8080      │  │   :8080      │
@@ -126,13 +169,34 @@ TOPOLOGY 3: Multi-Node HA (Target)
 │        │ │ Service│ │             │
 └────────┘ └────────┘ └─────────────┘
 
+Substrate options:
+  - VM instance group (GCE MIG + Caddy per node)
+  - Cloud Run service (multiple instances, auto-scaling)
+  - Kubernetes (Deployments + Services + Ingress)
+
 - Hub nodes are stateless (shared Postgres)
-- Integrations are independent services
+- Integrations are independent services (own deployment unit)
 - Connect to hub via API (any node, through LB)
-- Coordinate via Postgres (config, state, message routing)
+- Coordinate via Postgres (config, state, advisory locks)
 - No RPC coupling to specific hub instance
-- Single instance of each integration (no duplicates)
+- Single instance of each integration (advisory lock guarantee)
 ```
+
+#### Capability Matrix
+
+| Capability | Workstation | Single VM | Cloud Solo | HA Cluster |
+|-----------|-------------|-----------|------------|------------|
+| Managed plugin (subprocess) | Yes | Yes | Yes | No (use independent) |
+| Self-managed plugin (localhost RPC) | No | Yes | No | No |
+| Independent service (API transport) | No | Optional | Yes | Required |
+| Caddy reverse proxy | No | Yes | No (Cloud Run ingress) | Depends on substrate |
+| systemd units | No | Yes | No | Depends on substrate |
+| SQLite | Yes | Yes | No | No |
+| Postgres | No | Optional | Required | Required |
+| Advisory locks (single-instance) | N/A | N/A | Optional | Required |
+| Webhook (public URL) | No (polling) | Yes | Yes | Yes |
+| Config in settings.yaml | Yes | Yes | Bootstrap only | Bootstrap only |
+| Config in database | Optional | Optional | Required | Required |
 
 ### 4.2 Integration Communication Model
 
@@ -204,23 +268,29 @@ type PostgresTransport struct {
 }
 ```
 
-Integration binaries select transport based on configuration:
+Integration binaries select transport based on deployment mode:
 
 ```yaml
-# Co-located mode (default, backward compatible)
+# Workstation / Single VM co-located (default, backward compatible)
 transport: rpc
 
-# Distributed mode (HA)
+# Cloud Solo / HA Cluster — independent service via Hub API
 transport: api
 hub_url: https://hub.example.com
 auth_token: scion_integ_xxx
 
-# Distributed mode with Postgres subscription
+# HA Cluster with Postgres subscription (efficient, no polling)
 transport: postgres
 hub_url: https://hub.example.com
 auth_token: scion_integ_xxx
 postgres_url: postgres://user:pass@db:5432/scion
 ```
+
+| Transport | Deployment Modes | Characteristics |
+|-----------|-----------------|-----------------|
+| `rpc` | Workstation, Single VM | go-plugin RPC, subprocess or localhost, lowest latency |
+| `api` | Cloud Solo, HA Cluster | HTTP to hub API (through LB), works anywhere, stateless |
+| `postgres` | HA Cluster | API + Postgres LISTEN for efficient message subscription |
 
 ### 4.3 Configuration Storage
 
@@ -322,16 +392,28 @@ Option B: Via Postgres NOTIFY (efficient, no HTTP overhead)
 
 **Recommendation:** Start with Option A (Hub API). It already works, requires no new infrastructure, and scales well enough for current message volumes. Add Option B as a performance optimization when Postgres LISTEN/NOTIFY is implemented for the EventPublisher.
 
-### 4.5 Workstation Mode Considerations
+### 4.5 Lightweight Mode Considerations (Workstation & Cloud Solo)
 
-In workstation mode (Topology 1), integrations must remain lightweight:
+#### Workstation
 
 - **Telegram in polling mode:** No webhook needed (no public URL). Plugin polls Telegram's `getUpdates` API. Already supported via `inbound_mode: polling` config.
 - **No Caddy, no systemd:** Plugin runs as a hub subprocess (managed plugin, current model).
 - **SQLite is fine:** Single-node, no need for Postgres advisory locks.
-- **Config in settings.yaml:** Database migration is optional in workstation mode.
+- **Config in settings.yaml:** Database config storage is optional.
+- **Transport:** `RPCTransport` (subprocess, go-plugin).
 
-The `IntegrationTransport` abstraction handles this: workstation mode uses `RPCTransport`, production uses `APITransport` or `PostgresTransport`. The integration binary is the same; only the transport config changes.
+#### Cloud Solo
+
+Cloud Solo is like a cloud-deployed workstation — single instance, but with cloud-native infrastructure:
+
+- **Ephemeral filesystem:** No persistent local state. Config must be in Cloud SQL Postgres (not settings.yaml, except for bootstrap).
+- **No Caddy, no systemd:** Cloud Run handles TLS/ingress and process lifecycle.
+- **Telegram as subprocess or separate service:** If the hub container includes the Telegram binary, it can run as a managed subprocess (same as workstation). For better isolation, deploy as a separate Cloud Run service using `APITransport`.
+- **Cloud Run scale-to-zero:** If the hub scales to zero, managed subprocess integrations stop receiving webhooks. Separate Cloud Run services with their own URL can stay alive independently. This is a key argument for independent services even in single-node cloud deployments.
+- **Config in Postgres:** Required — Cloud Run containers are ephemeral. `settings.yaml` is only used for initial bootstrap (baked into container image or mounted from Secret Manager).
+- **Transport:** `RPCTransport` (co-located subprocess) or `APITransport` (separate Cloud Run service).
+
+The `IntegrationTransport` abstraction handles both: the integration binary is the same, only the transport config changes per deployment mode.
 
 ---
 
@@ -380,13 +462,24 @@ Navigation: add `{ path: '/admin/integrations', label: 'Integrations', icon: 'pl
 
 Purpose-built executors per integration, using shared infrastructure helpers (CaddyManager, SystemdManager, SettingsPatcher). Executors adapt their behavior based on deployment topology:
 
-**Co-located mode** (single hub):
+**Workstation** (local dev):
+- Build binary, run as hub subprocess
+- Config in settings.yaml, no privileged operations
+- Polling mode for webhooks (no public URL)
+
+**Single VM** (current production):
 - Build binary, install to /usr/local/bin/, patch Caddy, update settings.yaml + DB, restart hub
 - Same as current install.sh flow, but automated from web UI
 
-**HA mode** (multi-node):
-- Write config to DB (shared across hub nodes)
-- Deploy integration as independent service (systemd unit, K8s deployment, or container)
+**Cloud Solo** (cloud workstation):
+- Config written to Postgres (no persistent local filesystem)
+- Integration as subprocess (baked into container image) or separate Cloud Run service
+- No Caddy/systemd — Cloud Run handles routing and lifecycle
+- Executor provisions Cloud Run service via gcloud CLI or API (if separate service)
+
+**HA Cluster** (multi-node):
+- Write config to Postgres (shared across hub nodes)
+- Deploy integration as independent service (systemd unit, Cloud Run service, or K8s deployment)
 - Integration picks up config from DB via API
 - No hub restart needed — integration connects independently
 
