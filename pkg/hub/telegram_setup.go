@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -32,6 +33,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
+
+// wireBrokerMu serializes the get-or-create proxy path in WireBrokerPlugin so
+// concurrent setups can't both create a FanOutBroker (the second StartMessageBroker
+// is a no-op, losing that spoke).
+var wireBrokerMu sync.Mutex
 
 // TelegramBotInfo holds information returned by the Telegram getMe API.
 type TelegramBotInfo struct {
@@ -186,6 +192,11 @@ func WireBrokerPlugin(
 		Bus:      bus,
 		Observer: CheckObserver(pluginMgr, pluginName),
 	}
+
+	// Serialize proxy check + creation so concurrent setups can't both see
+	// proxy==nil and each create their own FanOutBroker.
+	wireBrokerMu.Lock()
+	defer wireBrokerMu.Unlock()
 
 	proxy := srv.GetMessageBrokerProxy()
 	if proxy != nil {

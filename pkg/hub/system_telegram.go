@@ -101,23 +101,14 @@ func (s *Server) handleTelegramSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 3: Persist to settings.yaml
-	if err := PersistTelegramConfig(req.BotToken, webhookSecret); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(TelegramSetupResult{Error: "failed to save configuration: " + err.Error()})
-		return
-	}
-
-	// Step 4: Hot-start the plugin
+	// Step 3: Hot-start the plugin BEFORE persisting. If the plugin fails to
+	// start (binary missing, wiring error), we return an error and leave no
+	// half-applied state so the user can retry cleanly.
 	pluginMgr, pluginsDir := s.GetPluginManager()
 	if pluginMgr == nil {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(TelegramSetupResult{
-			Success: true,
-			Bot:     validation.Bot,
-			Message: "Configuration saved. Restart the server to activate the bot.",
-		})
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(TelegramSetupResult{Error: "plugin manager not available — cannot start bot"})
 		return
 	}
 
@@ -131,10 +122,18 @@ func (s *Server) handleTelegramSetup(w http.ResponseWriter, r *http.Request) {
 
 	if err := WireBrokerPlugin(r.Context(), pluginMgr, s, "telegram", pluginEntry, pluginsDir); err != nil {
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(TelegramSetupResult{Error: "bot failed to start: " + err.Error()})
+		return
+	}
+
+	// Step 4: Plugin is running — now persist to settings.yaml for restart durability.
+	if err := PersistTelegramConfig(req.BotToken, webhookSecret); err != nil {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(TelegramSetupResult{
 			Success: true,
 			Bot:     validation.Bot,
-			Message: "Configuration saved but bot failed to start: " + err.Error() + ". It will start on next server restart.",
+			Message: "Bot @" + validation.Bot.Username + " is running but config failed to save: " + err.Error() + ". The bot will stop on restart.",
 		})
 		return
 	}
