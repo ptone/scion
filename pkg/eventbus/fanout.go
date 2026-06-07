@@ -44,6 +44,7 @@ type NamedEventBus struct {
 // FanOutEventBus implements EventBus by delegating to N child event buses.
 // Publish fans out concurrently. Subscribe and Close delegate to all children.
 type FanOutEventBus struct {
+	mu    sync.RWMutex
 	buses []NamedEventBus
 	log   *slog.Logger
 }
@@ -57,23 +58,27 @@ func NewFanOutEventBus(buses []NamedEventBus, log *slog.Logger) *FanOutEventBus 
 }
 
 func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	f.mu.RLock()
+	buses := f.buses
+	f.mu.RUnlock()
+
 	if msg.Channel != "" {
 		if msg.Channel == InProcessBusName {
 			return fmt.Errorf("channel %q is reserved for internal use", InProcessBusName)
 		}
 
 		var inproc, target *NamedEventBus
-		for i := range f.buses {
-			if f.buses[i].Name == InProcessBusName {
-				inproc = &f.buses[i]
+		for i := range buses {
+			if buses[i].Name == InProcessBusName {
+				inproc = &buses[i]
 				continue
 			}
-			channelKey := f.buses[i].ChannelID
+			channelKey := buses[i].ChannelID
 			if channelKey == "" {
-				channelKey = f.buses[i].Name
+				channelKey = buses[i].Name
 			}
-			if msg != nil && channelKey == msg.Channel {
-				target = &f.buses[i]
+			if channelKey == msg.Channel {
+				target = &buses[i]
 			}
 		}
 		if target == nil {
@@ -108,8 +113,8 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 	}
 
 	var wg sync.WaitGroup
-	errs := make([]error, len(f.buses))
-	for i, nb := range f.buses {
+	errs := make([]error, len(buses))
+	for i, nb := range buses {
 		wg.Add(1)
 		go func(idx int, b NamedEventBus) {
 			defer wg.Done()
@@ -126,10 +131,22 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 	return errors.Join(errs...)
 }
 
+// AddSpoke adds a new named event bus to the fan-out at runtime.
+// Subsequent Publish and Subscribe calls will include the new spoke.
+func (f *FanOutEventBus) AddSpoke(nb NamedEventBus) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.buses = append(f.buses, nb)
+	f.log.Info("Added spoke to fan-out bus", "name", nb.Name, "observer", nb.Observer)
+}
+
 // Subscribe delegates to all child event buses.
 func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscription, error) {
-	subs := make([]Subscription, 0, len(f.buses))
-	for _, nb := range f.buses {
+	f.mu.RLock()
+	buses := f.buses
+	f.mu.RUnlock()
+	subs := make([]Subscription, 0, len(buses))
+	for _, nb := range buses {
 		sub, err := nb.Bus.Subscribe(pattern, handler)
 		if err != nil {
 			f.log.Error("fan-out subscribe failed",
@@ -146,8 +163,11 @@ func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscr
 
 // Close shuts down all child event buses and returns an aggregate error.
 func (f *FanOutEventBus) Close() error {
+	f.mu.RLock()
+	buses := f.buses
+	f.mu.RUnlock()
 	var errs []error
-	for _, nb := range f.buses {
+	for _, nb := range buses {
 		if err := nb.Bus.Close(); err != nil {
 			f.log.Error("fan-out close failed", "bus", nb.Name, "error", err)
 			errs = append(errs, err)
@@ -165,8 +185,11 @@ type BusChannel struct {
 
 // BusChannels returns the list of registered bus names (excluding InProcessBus).
 func (f *FanOutEventBus) BusChannels() []BusChannel {
+	f.mu.RLock()
+	buses := f.buses
+	f.mu.RUnlock()
 	var channels []BusChannel
-	for _, nb := range f.buses {
+	for _, nb := range buses {
 		if nb.Name == InProcessBusName {
 			continue
 		}
