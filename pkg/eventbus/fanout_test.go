@@ -406,3 +406,47 @@ func TestFanOutEventBus_Subscribe(t *testing.T) {
 		t.Fatalf("unexpected unsubscribe error: %v", err)
 	}
 }
+
+func TestFanOutEventBus_AddSpokeReplacesByName(t *testing.T) {
+	inproc := newStubEventBus()
+	oldTelegram := newStubEventBus()
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+		{Name: "telegram", Bus: oldTelegram},
+	}, slog.Default())
+
+	// Simulate re-setup: add a new spoke with the same name.
+	newTelegram := newStubEventBus()
+	fan.AddSpoke(NamedEventBus{Name: "telegram", Bus: newTelegram})
+
+	// Verify: only one telegram spoke exists (no duplicate).
+	channels := fan.BusChannels()
+	telegramCount := 0
+	for _, ch := range channels {
+		if ch.Name == "telegram" {
+			telegramCount++
+		}
+	}
+	if telegramCount != 1 {
+		t.Fatalf("expected exactly 1 telegram spoke after replace, got %d", telegramCount)
+	}
+
+	// Publish should hit the NEW spoke, not the old one.
+	msg := messages.NewInstruction("user:alice", "agent:bot", "hello")
+	if err := fan.Publish(context.Background(), "test.topic", msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	newTelegram.mu.Lock()
+	if len(newTelegram.published) != 1 {
+		t.Errorf("new telegram spoke: expected 1 message, got %d", len(newTelegram.published))
+	}
+	newTelegram.mu.Unlock()
+
+	oldTelegram.mu.Lock()
+	if len(oldTelegram.published) != 0 {
+		t.Errorf("old telegram spoke should not receive messages after replace, got %d", len(oldTelegram.published))
+	}
+	oldTelegram.mu.Unlock()
+}
