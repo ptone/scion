@@ -18,7 +18,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -239,6 +238,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		cmdBus := newCommandBus(ctx, cfg, hubSrv)
 		hubSrv.SetCommandBus(cmdBus)
 
+		pluginsDir, _ := scionplugin.DefaultPluginsDir()
+		hubSrv.SetPluginManager(pluginMgr, pluginsDir)
+
 		if !enableWeb {
 			// Hub runs its own HTTP server (standalone mode).
 			eventPub := newEventPublisher(ctx, cfg)
@@ -305,6 +307,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		// Initialize message broker from versioned settings.
 		// Uses FanOutBroker to support multiple simultaneous broker plugins.
+		// Credential injection uses hub.InjectHubCredentials (shared with hot-start).
 		if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil && vs.Server.MessageBroker != nil && vs.Server.MessageBroker.Enabled {
 			var namedBuses []eventbus.NamedEventBus
 
@@ -329,18 +332,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					continue
 				}
 
-				// Inject hub credentials into hub-managed broker plugins so they
-				// can authenticate back to the Hub API. Self-managed plugins
-				// handle their own credential lifecycle.
+				// Inject hub credentials into hub-managed broker plugins.
 				if !pluginMgr.IsSelfManaged(scionplugin.PluginTypeBroker, bt) && hubSrv != nil && s != nil {
-					// Use the same deterministic UUIDv5 as the α migration so the
-					// broker entity created here matches the migrated ID.
 					pluginBrokerNS := uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
 					legacyID := "plugin-broker-" + bt
 					brokerID := uuid.NewSHA1(pluginBrokerNS, []byte(legacyID)).String()
 					if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
-						// Ensure the runtime broker entity exists (required by
-						// the broker_secrets foreign key constraint).
 						if _, err := s.GetRuntimeBroker(ctx, brokerID); err != nil {
 							pluginBroker := &store.RuntimeBroker{
 								ID:              brokerID,
@@ -367,8 +364,6 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 								"broker_id":   brokerID,
 								"plugin_name": bt,
 							}
-							// Inject project slug map so hub-managed plugins can resolve
-							// human-readable project names without user-level API access.
 							if projects, listErr := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500}); listErr == nil {
 								slugMap := make(map[string]string, len(projects.Items))
 								for _, p := range projects.Items {
@@ -1510,6 +1505,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	return nil
 }
 
+<<<<<<< HEAD
 // pluginChannelID returns the channel identifier reported by a broker plugin
 // via GetInfo().ChannelID. Returns "" if the plugin does not report one, in
 // which case the bus Name is used for channel routing.

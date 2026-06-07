@@ -1,0 +1,148 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"encoding/json"
+	"net/http"
+
+	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
+)
+
+// handleTelegramValidate validates a Telegram bot token by calling getMe.
+// POST /api/v1/system/telegram/validate
+func (s *Server) handleTelegramValidate(w http.ResponseWriter, r *http.Request) {
+	if err := assertLoopback(r); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		BotToken string `json:"bot_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.BotToken == "" {
+		http.Error(w, "bot_token is required", http.StatusBadRequest)
+		return
+	}
+
+	result, err := ValidateTelegramToken(r.Context(), req.BotToken)
+	if err != nil {
+		http.Error(w, "validation failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleTelegramSetup validates a token, persists config, and hot-starts the plugin.
+// POST /api/v1/system/telegram/setup
+func (s *Server) handleTelegramSetup(w http.ResponseWriter, r *http.Request) {
+	if err := assertLoopback(r); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		BotToken string `json:"bot_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.BotToken == "" {
+		http.Error(w, "bot_token is required", http.StatusBadRequest)
+		return
+	}
+
+	// Step 1: Validate token
+	validation, err := ValidateTelegramToken(r.Context(), req.BotToken)
+	if err != nil || !validation.Valid {
+		errMsg := "invalid bot token"
+		if validation != nil && validation.Error != "" {
+			errMsg = validation.Error
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(TelegramSetupResult{Error: errMsg})
+		return
+	}
+
+	// Step 2: Generate webhook secret
+	webhookSecret, err := generateWebhookSecret()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(TelegramSetupResult{Error: "failed to generate webhook secret"})
+		return
+	}
+
+	// Step 3: Persist to settings.yaml
+	if err := PersistTelegramConfig(req.BotToken, webhookSecret); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(TelegramSetupResult{Error: "failed to save configuration: " + err.Error()})
+		return
+	}
+
+	// Step 4: Hot-start the plugin
+	pluginMgr, pluginsDir := s.GetPluginManager()
+	if pluginMgr == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(TelegramSetupResult{
+			Success: true,
+			Bot:     validation.Bot,
+			Message: "Configuration saved. Restart the server to activate the bot.",
+		})
+		return
+	}
+
+	pluginEntry := scionplugin.PluginEntry{
+		Config: map[string]string{
+			"bot_token":      req.BotToken,
+			"webhook_secret": webhookSecret,
+			"inbound_mode":   "polling",
+		},
+	}
+
+	if err := WireBrokerPlugin(r.Context(), pluginMgr, s, "telegram", pluginEntry, pluginsDir); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(TelegramSetupResult{
+			Success: true,
+			Bot:     validation.Bot,
+			Message: "Configuration saved but bot failed to start: " + err.Error() + ". It will start on next server restart.",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(TelegramSetupResult{
+		Success: true,
+		Bot:     validation.Bot,
+		Message: "Bot @" + validation.Bot.Username + " is connected and running in polling mode.",
+	})
+}
