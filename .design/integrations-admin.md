@@ -135,7 +135,10 @@ CLOUD SOLO
 - Workstation mode deployed to Cloud Run
 - Single container instance, single binary (same as workstation)
 - SQLite on a persistent volume (Cloud Run volume mount)
-- Telegram as managed subprocess (same as workstation)
+- Telegram as managed subprocess, polling mode (same as workstation)
+- Cloud Run behind IAP — all requests require authentication,
+  so external webhooks (Telegram, GitHub) cannot reach the service.
+  Integrations must use long-polling or outbound connections only.
 - Cloud Run handles TLS/ingress (no Caddy)
 - No systemd — process lifecycle managed by Cloud Run
 - Config in settings.yaml (baked into image or mounted)
@@ -188,7 +191,7 @@ Substrate options:
 | SQLite | Yes | Yes | Yes | No |
 | Postgres | No | Optional | No | Required |
 | Advisory locks (single-instance) | N/A | N/A | N/A | Required |
-| Webhook (public URL) | No (polling) | Yes | Yes | Yes |
+| Webhook (public URL) | No (polling) | Yes | No (IAP, polling) | Yes |
 | Config in settings.yaml | Yes | Yes | Yes | Bootstrap only |
 | Config in database | Optional | Optional | Optional | Required |
 
@@ -402,7 +405,9 @@ Cloud Solo is workstation mode deployed to Cloud Run — same single-binary, sin
 
 - **Persistent volume for SQLite:** Cloud Run volume mount provides persistent storage for the SQLite database and settings.yaml. Same data model as workstation.
 - **No Caddy, no systemd:** Cloud Run handles TLS/ingress and process lifecycle.
-- **Telegram as subprocess:** Same as workstation — managed subprocess, baked into the container image. Webhook mode works here since Cloud Run provides a public URL.
+- **IAP blocks webhooks:** Cloud Solo runs behind IAP (Identity-Aware Proxy), which requires authentication on every inbound request. External services (Telegram, GitHub) cannot send unauthenticated webhooks. Integrations must use **polling mode** (outbound connections only), same as workstation.
+- **Telegram as subprocess, polling mode:** Same as workstation — managed subprocess, `inbound_mode: polling`. The plugin polls Telegram's `getUpdates` API on an outbound connection that passes through IAP without issue.
+- **GitHub App webhooks:** Cannot receive webhook events behind IAP. GitHub App features that depend on webhooks (push notifications, PR events) are unavailable in Cloud Solo. The GitHub App can still be configured for API-only use (installation token grants, repository access).
 - **Config in settings.yaml:** Same as workstation. Settings can be baked into the container image or mounted via Cloud Run volume/Secret Manager.
 - **Transport:** `RPCTransport` (co-located subprocess, same as workstation).
 
@@ -465,10 +470,10 @@ Purpose-built executors per integration, using shared infrastructure helpers (Ca
 - Same as current install.sh flow, but automated from web UI
 
 **Cloud Solo** (cloud workstation):
-- Same as workstation — subprocess, SQLite, settings.yaml
+- Same as workstation — subprocess, SQLite, settings.yaml, polling mode
 - Integration binary baked into container image
 - No Caddy/systemd — Cloud Run handles routing and lifecycle
-- Webhook mode available (Cloud Run provides public URL)
+- IAP blocks inbound webhooks — polling only (same as workstation)
 
 **HA Cluster** (multi-node):
 - Write config to Postgres (shared across hub nodes)
