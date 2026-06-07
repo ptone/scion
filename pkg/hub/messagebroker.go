@@ -80,6 +80,11 @@ func NewMessageBrokerProxy(
 	}
 }
 
+// GetBus returns the underlying EventBus for dynamic spoke management.
+func (p *MessageBrokerProxy) GetBus() eventbus.EventBus {
+	return p.bus
+}
+
 // Start subscribes to agent lifecycle events and sets up broker subscriptions
 // for existing running agents.
 func (p *MessageBrokerProxy) Start() {

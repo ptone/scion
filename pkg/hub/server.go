@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -567,6 +568,10 @@ type Server struct {
 	githubAppRateLimit *githubapp.RateLimitInfo
 
 	imageBuildActive atomic.Bool
+
+	// Plugin manager for runtime plugin lifecycle (nil = no plugin support)
+	pluginManager    *scionplugin.Manager
+	pluginManagerDir string // plugins directory for binary discovery
 }
 
 // New creates a new Hub API server.
@@ -1111,6 +1116,21 @@ func (s *Server) SetStorage(stor storage.Storage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.storage = stor
+}
+
+// SetPluginManager stores the plugin manager reference for runtime plugin operations.
+func (s *Server) SetPluginManager(mgr *scionplugin.Manager, pluginsDir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pluginManager = mgr
+	s.pluginManagerDir = pluginsDir
+}
+
+// GetPluginManager returns the plugin manager and plugins directory.
+func (s *Server) GetPluginManager() (*scionplugin.Manager, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pluginManager, s.pluginManagerDir
 }
 
 // SetRequestLogger sets the dedicated request logger.
@@ -2171,6 +2191,10 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/api/v1/system/init", s.requireWorkstation(http.HandlerFunc(s.handleSystemInit)))
 	s.mux.Handle("/api/v1/system/images/pull", s.requireWorkstation(http.HandlerFunc(s.handleSystemImagesPull)))
 	s.mux.Handle("/api/v1/system/images/build", s.requireWorkstation(http.HandlerFunc(s.handleSystemImagesBuild)))
+
+	// Workstation-only Telegram onboarding endpoints
+	s.mux.Handle("/api/v1/system/telegram/validate", s.requireWorkstation(http.HandlerFunc(s.handleTelegramValidate)))
+	s.mux.Handle("/api/v1/system/telegram/setup", s.requireWorkstation(http.HandlerFunc(s.handleTelegramSetup)))
 
 	// Workstation-only filesystem endpoints
 	s.mux.Handle("/api/v1/system/fs/list", s.requireWorkstation(http.HandlerFunc(s.handleFSList)))
