@@ -4,7 +4,7 @@
 **Date:** 2026-06-07  
 **Issue:** #115  
 **Branch:** scion/integrationsadmin  
-**Related:** [scion-plugins.md](scion-plugins.md), [message-broker-plugins.md](message-broker-plugins.md), [postgres-strategy.md](postgres-strategy.md), [hosted/web-realtime.md](hosted/web-realtime.md), [hosted/hosted-architecture.md](hosted/hosted-architecture.md)
+**Related:** [scion-plugins.md](scion-plugins.md), [message-broker-plugins.md](message-broker-plugins.md), [postgres-strategy.md](postgres-strategy.md), [hosted/web-realtime.md](hosted/web-realtime.md), [hosted/hosted-architecture.md](hosted/hosted-architecture.md), [workstation-onboarding.md](workstation-onboarding.md) (on `workstation-improvements` branch)
 
 ---
 
@@ -195,7 +195,65 @@ Substrate options:
 | Config in settings.yaml | Yes | Yes | Yes | Bootstrap only |
 | Config in database | Optional | Optional | Optional | Required |
 
-### 4.2 Integration Communication Model
+### 4.2 Integration Lifecycle Journey (Telegram Example)
+
+The design must support a user evolving through deployment modes without re-architecting their integrations. Here's how Telegram works at each stage and what changes at each transition.
+
+#### Day 1: Workstation
+
+- User creates bot in BotFather, gets token
+- Configures via admin UI (or settings.yaml): `bot_token`, `inbound_mode: polling`
+- Hub starts, plugin manager launches `scion-plugin-telegram` as subprocess
+- Plugin polls Telegram `getUpdates` API (outbound, no public URL needed)
+- User adds bot to a Telegram group, runs `/setup` to link to a project
+- **State:** settings.yaml (config), telegram_v2.db (group links, user mappings), hub SQLite (agents, projects)
+
+#### Transition: Workstation → Cloud Solo
+
+**What the user does:**
+1. Builds container image including scion + scion-plugin-telegram binaries
+2. Includes settings.yaml (baked or Secret Manager)
+3. Deploys to Cloud Run with persistent volume for SQLite DBs
+
+**What changes:** Nothing architecturally. Same subprocess, same polling, same SQLite, same settings.yaml. The persistent volume carries both hub DB and telegram_v2.db.
+
+**What stays the same:** Transport (RPC), polling mode (IAP blocks webhooks), config format, all state.
+
+**Migration effort:** Near zero — deploy and go.
+
+#### Transition: Cloud Solo → Single VM
+
+**What the user does:**
+1. Provisions a VM, runs starter-hub setup
+2. Copies settings.yaml config and telegram_v2.db
+3. Hub discovers and launches Telegram as managed subprocess (or independent systemd service)
+4. Switches from polling to webhook mode (VM has public URL via Caddy)
+5. Registers webhook URL with Telegram API
+
+**What changes:** Inbound mode (polling → webhook), Caddy route added, optionally independent systemd service.
+
+**What stays the same:** Bot token, group links (telegram_v2.db), transport can stay RPC or switch to API.
+
+#### Transition: Single VM → HA Cluster
+
+**What the user does:**
+1. Sets up Postgres, migrates hub DB (per postgres-strategy.md)
+2. Deploys Telegram as independent service with APITransport
+3. Migrates telegram_v2.db to the independent service's persistent storage
+4. Configures integration service token for hub API auth
+5. Advisory lock ensures single Telegram instance across the cluster
+
+**What changes:** Transport (RPC → API), process model (subprocess → independent service), hub config moves to DB, health reporting via heartbeat API.
+
+**What stays the same:** Bot token, telegram_v2.db schema (stays as the plugin's own SQLite — not migrated to hub DB), webhook mode, Telegram API interactions.
+
+**Note:** telegram_v2.db remains a separate SQLite database owned by the Telegram plugin, even in HA mode. The plugin carries its own state. Only hub-level integration config (enabled, transport settings) moves to Postgres. This keeps the plugin self-contained and avoids coupling plugin internals to the hub's database schema.
+
+#### Key Design Principle
+
+Each transition should require changing **at most two things**: the transport mode and the inbound mode. Config format, plugin state, and bot identity stay the same across all modes.
+
+### 4.3 Integration Communication Model
 
 The key architectural change: integrations communicate with the hub through the **Hub API** rather than go-plugin RPC. This decouples them from specific hub instances.
 
@@ -456,7 +514,25 @@ Cards show deployment mode indicator:
 
 Navigation: add `{ path: '/admin/integrations', label: 'Integrations', icon: 'plug-fill' }` to ADMIN_SECTION in `web/src/components/shared/nav.ts`.
 
-### 5.3 Installation Executors
+### 5.3 Onboarding Alignment
+
+The `workstation-improvements` branch implements a 6-step browser-based onboarding wizard for first-run setup (identity → system check → runtime → harness selection → image pull → workspace creation). Integration setup layers on top of this:
+
+**In workstation/Cloud Solo mode:**
+- After onboarding step 6 (workspace created), offer an optional "Connect an integration" step
+- Telegram setup wizard: paste BotFather token → configure polling → done
+- Reuse the same integration card components from `/admin/integrations`
+- Workstation-mode gate: integration setup endpoints follow the same pattern as `/api/v1/system/*` (loopback-asserted, 404 in production for workstation-only features)
+
+**In Single VM / HA mode:**
+- Integration setup lives on `/admin/integrations` (admin-only, full capabilities)
+- First-run detection: if no integrations configured, dashboard shows "Connect your first integration" prompt
+
+**Shared components:**
+- Integration card components (`integration-card.ts`, `integration-setup-wizard.ts`) work in both onboarding and admin contexts
+- Config schemas and setup step definitions are the same regardless of where they render
+
+### 5.4 Installation Executors
 
 Purpose-built executors per integration, using shared infrastructure helpers (CaddyManager, SystemdManager, SettingsPatcher). Executors adapt their behavior based on deployment topology:
 
@@ -493,70 +569,100 @@ Purpose-built executors per integration, using shared infrastructure helpers (Ca
 
 ---
 
-## 7. Implementation Phases
+## 7. Implementation Workstreams
 
-### Phase 1: Database Config + Status API (2 weeks)
+This is a major undertaking that spans multiple workstreams. Each workstream is independently valuable and can be staffed in parallel where dependencies allow.
 
-**Deliverables:**
-- `integrations`, `integration_status`, `integration_operations` tables (Ent schema or raw SQL)
-- Config migration: import existing settings.yaml integration config to DB on startup
-- API: GET /api/v1/admin/integrations (list with status from DB + plugin health)
-- API: GET /api/v1/admin/integrations/{type} (detail + config schema)
-- HealthMonitor: polls existing plugin HealthCheck() RPC, writes to integration_status
-- Heartbeat endpoint: POST /api/v1/integrations/{type}/heartbeat
+### Workstream A: Foundation (Integration Status + Admin UI Shell)
 
-**Verification:** API returns accurate status for currently-configured integrations.
+**Goal:** Visibility into what's configured and healthy, before adding lifecycle management.
 
-### Phase 2: Notification Channel Admin (1 week)
+- A1: `integrations`, `integration_status`, `integration_operations` DB tables
+- A2: Config import from settings.yaml to DB on startup (backward compatible)
+- A3: HealthMonitor polling existing plugin HealthCheck() RPC
+- A4: API: GET /api/v1/admin/integrations (list with status)
+- A5: Web UI: `/admin/integrations` page with status cards (read-only initially)
+- A6: Nav entry in admin sidebar
 
-**Deliverables:**
-- NotificationChannelExecutor (simplest case — config-only)
-- API: PUT config, POST test, POST install, DELETE
-- Web UI: notification channel cards with forms, test button
-- Config stored in DB, hot-reload without hub restart
+**Dependencies:** None. Can start immediately.
 
-**Rationale:** Validate the full API → executor → UI stack on the simplest integration type.
+### Workstream B: IntegrationTransport Abstraction
 
-### Phase 3: IntegrationTransport Abstraction (2 weeks)
+**Goal:** Decouple integrations from hub process, enabling both co-located and independent modes.
 
-**Deliverables:**
-- `IntegrationTransport` interface with RPCTransport and APITransport implementations
-- Refactor Telegram plugin to use IntegrationTransport (backward compatible — RPCTransport by default)
-- Integration service token system (for APITransport auth)
-- API: POST /api/v1/broker/publish (new, for API-mode integrations)
-- Config fetch: GET /api/v1/integrations/{type}/config
+- B1: `IntegrationTransport` interface with RPCTransport and APITransport
+- B2: Integration service token system (for APITransport auth)
+- B3: Heartbeat API: POST /api/v1/integrations/{type}/heartbeat
+- B4: Config fetch API: GET /api/v1/integrations/{type}/config
+- B5: Refactor Telegram plugin to use IntegrationTransport (RPC default, API opt-in)
+- B6: Refactor Google Chat plugin to use IntegrationTransport
 
-**Verification:** Telegram plugin works in both RPC mode (co-located) and API mode (connecting to hub URL).
+**Dependencies:** A1-A2 (DB tables for config storage).
 
-### Phase 4: Telegram Admin + Independent Mode (2 weeks)
+### Workstream C: Per-Integration Admin (Executors + Setup Wizards)
 
-**Deliverables:**
-- TelegramExecutor with install/configure/enable/disable/restart
-- Setup wizard UI (BotFather → configure → install)
-- Support for running Telegram as independent service (systemd unit, APITransport)
-- Web UI shows co-located vs independent mode
+**Goal:** Web-based lifecycle management for each integration type.
 
-### Phase 5: Google Chat Admin (1-2 weeks)
+- C1: Shared infra helpers (CaddyManager, SystemdManager, SettingsPatcher)
+- C2: NotificationChannelExecutor + UI (simplest, validates the stack)
+- C3: TelegramExecutor + setup wizard (BotFather → configure → install)
+- C4: ChatAppExecutor + setup wizard (GCP prerequisites → install)
+- C5: GitHubAppExecutor + setup wizard
+- C6: Inbound mode switching (polling ↔ webhook) as admin UI operation
 
-**Deliverables:**
-- ChatAppExecutor with full lifecycle
-- Refactor chat-app to use IntegrationTransport
-- Restart orchestration (co-located mode) and independent deployment (HA mode)
+**Dependencies:** A1-A5 (admin UI shell), partially B1 (transport abstraction for mode switching).
 
-### Phase 6: GitHub App Admin + Onboarding (1-2 weeks)
+### Workstream D: Onboarding Integration
 
-**Deliverables:**
-- GitHubAppExecutor
-- Onboarding flow: first-run detection, guided setup wizard
-- Integration cards embedded in onboarding context
+**Goal:** Integration setup as part of the first-run experience, building on `workstation-improvements` branch.
 
-### Phase 7: HA Support (2 weeks, after Postgres migration)
+- D1: Optional "Connect an integration" step after onboarding wizard step 6
+- D2: Telegram setup wizard in onboarding context (workstation: polling mode, paste token)
+- D3: First-run detection on dashboard ("Connect your first integration" prompt)
+- D4: Shared card/wizard components usable in both onboarding and admin contexts
 
-**Deliverables:**
-- Postgres advisory locks for single-instance guarantee
-- PostgresTransport for efficient message subscription
-- Standby/failover logic for integration services
-- Multi-hub tested: two hub nodes, one integration instance, verify no duplicates
+**Dependencies:** A5 (integration cards), C3 (Telegram executor), `workstation-improvements` branch merged.
+
+### Workstream E: HA Support
+
+**Goal:** Integrations work correctly in multi-node deployments.
+
+- E1: Postgres advisory locks for single-instance guarantee
+- E2: PostgresTransport (API + LISTEN/NOTIFY for message subscription)
+- E3: Standby/failover logic for integration services
+- E4: Multi-hub integration testing (two hub nodes, one integration instance)
+- E5: Container/deployment tooling for independent integration services
+
+**Dependencies:** B1-B6 (transport abstraction), Postgres migration (postgres-strategy.md).
+
+### Workstream Dependency Graph
+
+```
+A: Foundation ──────────┬──► C: Per-Integration Admin ──► D: Onboarding
+                        │                                      │
+                        ├──► B: Transport Abstraction ──────► E: HA Support
+                        │         │
+                        │         └──► C6: Mode switching
+                        │
+                  (workstation-improvements) ──────────────► D: Onboarding
+```
+
+### Suggested Sequencing
+
+**Near-term (can start now):**
+- A1-A6: Foundation — gives immediate visibility, no architectural changes
+- C1: Shared infra helpers — reusable building blocks
+
+**Medium-term (after foundation):**
+- B1-B4: Transport abstraction — architectural enabler for HA
+- C2: Notification channels — validate executor + UI stack on simplest case
+- C3: Telegram executor — most valuable single integration
+
+**After workstation-improvements merges:**
+- D1-D4: Onboarding integration
+
+**After Postgres migration:**
+- E1-E5: HA support
 
 ---
 
