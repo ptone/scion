@@ -259,8 +259,15 @@ export class ScionDirBrowser extends LitElement {
         this.newFolderError = await extractApiError(res, 'Failed to create folder');
         return;
       }
+      const newPath = this.currentPath === '/' ? '/' + name : this.currentPath + '/' + name;
       this.newFolderMode = false;
       this.newFolderName = '';
+      this.selectedPath = newPath;
+      this.dispatchEvent(new CustomEvent('path-selected', {
+        detail: { path: newPath },
+        bubbles: true,
+        composed: true,
+      }));
       void this.navigate(this.currentPath);
     } catch {
       this.newFolderError = 'Failed to connect to the server.';
