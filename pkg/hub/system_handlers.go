@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -510,7 +511,10 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 					return
 				}
 				s.events.PublishRaw("system.images."+jobID, runtime.PullResult{Image: img, Status: "pulling"})
-				if err := rt.PullImage(s.ctx, img); err != nil {
+				pullCtx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
+				err := rt.PullImage(pullCtx, img)
+				cancel()
+				if err != nil {
 					s.events.PublishRaw("system.images."+jobID, runtime.PullResult{Image: img, Status: "error", Error: err.Error()})
 					continue
 				}
