@@ -404,8 +404,10 @@ func TestDeleteAgentFiles_SharedWorktree_DeleteCreatorWhileJoinerRemains(t *test
 
 	tmpDir := t.TempDir()
 	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", tmpDir)
 
 	bare := initBareRepo(t)
@@ -509,8 +511,10 @@ func TestDeleteAgentFiles_SharedWorktree_DeleteLastSharer_RemovesWorktree(t *tes
 
 	tmpDir := t.TempDir()
 	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", tmpDir)
 
 	bare := initBareRepo(t)

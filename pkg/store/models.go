@@ -184,10 +184,10 @@ const (
 // When a git project has the workspace mode label set to "shared", it uses a
 // single shared clone mounted by all agents instead of per-agent clones.
 const (
-	LabelWorkspaceMode             = "scion.dev/workspace-mode"
-	WorkspaceModeShared            = "shared"
-	WorkspaceModePerAgent          = "per-agent"
-	WorkspaceModeWorktreePerAgent  = "worktree-per-agent"
+	LabelWorkspaceMode            = "scion.dev/workspace-mode"
+	WorkspaceModeShared           = "shared"
+	WorkspaceModePerAgent         = "per-agent"
+	WorkspaceModeWorktreePerAgent = "worktree-per-agent"
 )
 
 // WorkspaceSharingMode is the canonical set of workspace sharing modes from the
