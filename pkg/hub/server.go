@@ -2197,6 +2197,11 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/api/v1/system/telegram/validate", s.requireWorkstation(http.HandlerFunc(s.handleTelegramValidate)))
 	s.mux.Handle("/api/v1/system/telegram/setup", s.requireWorkstation(http.HandlerFunc(s.handleTelegramSetup)))
 
+	// Admin integration management endpoints (workstation/loopback now; future: requireAdmin)
+	s.mux.Handle("/api/v1/admin/integrations", s.requireWorkstation(http.HandlerFunc(s.handleAdminIntegrations)))
+	s.mux.Handle("/api/v1/admin/integrations/telegram/enable", s.requireWorkstation(http.HandlerFunc(s.handleAdminTelegramEnable)))
+	s.mux.Handle("/api/v1/admin/integrations/telegram/disable", s.requireWorkstation(http.HandlerFunc(s.handleAdminTelegramDisable)))
+
 	// Workstation-only filesystem endpoints
 	s.mux.Handle("/api/v1/system/fs/list", s.requireWorkstation(http.HandlerFunc(s.handleFSList)))
 	s.mux.Handle("/api/v1/system/fs/mkdir", s.requireWorkstation(http.HandlerFunc(s.handleFSMkdir)))
