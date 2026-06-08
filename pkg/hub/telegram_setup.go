@@ -137,7 +137,7 @@ func PersistTelegramConfig(botToken, webhookSecret string) error {
 	}
 	existing.Config["bot_token"] = botToken
 	existing.Config["webhook_secret"] = webhookSecret
-	existing.Config["inbound_mode"] = "polling"
+	existing.Config["inbound_mode"] = "poll" // must match plugin's accepted values: "poll" or "webhook" (broker_v2.go)
 	vs.Server.Plugins.Broker["telegram"] = existing
 
 	if vs.Server.MessageBroker == nil {

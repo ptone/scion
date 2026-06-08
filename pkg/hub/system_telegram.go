@@ -116,7 +116,7 @@ func (s *Server) handleTelegramSetup(w http.ResponseWriter, r *http.Request) {
 		Config: map[string]string{
 			"bot_token":      req.BotToken,
 			"webhook_secret": webhookSecret,
-			"inbound_mode":   "polling",
+			"inbound_mode":   "poll", // must match plugin's accepted values: "poll" or "webhook" (broker_v2.go)
 		},
 	}
 
