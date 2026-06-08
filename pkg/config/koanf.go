@@ -243,14 +243,18 @@ func getDefaultSettingsYAMLForRuntime(targetRuntime string) ([]byte, error) {
 }
 
 // GetDefaultSettingsDataYAML returns the embedded default settings in YAML format.
-// This function adjusts the local profile runtime based on the OS. It is used as
-// a fallback default for settings loaders; during init, DetectLocalRuntime is used
-// instead for actual runtime probing.
+// This function probes for an available local runtime via DetectLocalRuntime so that
+// the default profile uses a runtime binary that actually exists on the system.
 func GetDefaultSettingsDataYAML() ([]byte, error) {
-	if goruntime.GOOS != "darwin" {
-		return getDefaultSettingsYAMLForRuntime("docker")
+	targetRuntime, err := DetectLocalRuntime()
+	if err != nil {
+		if goruntime.GOOS == "darwin" {
+			targetRuntime = "container"
+		} else {
+			targetRuntime = "docker"
+		}
 	}
-	return getDefaultSettingsYAMLForRuntime("container")
+	return getDefaultSettingsYAMLForRuntime(targetRuntime)
 }
 
 // GetProjectDefaultSettingsYAML returns the embedded project-level default settings YAML.

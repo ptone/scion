@@ -78,13 +78,16 @@ func getDefaultSettingsDataForRuntime(targetRuntime string) ([]byte, error) {
 }
 
 // GetDefaultSettingsData returns the embedded default settings in JSON format.
-// This function adjusts the local profile runtime based on the OS. It is used as
-// a fallback default for settings loaders; during init, DetectLocalRuntime is used
-// instead for actual runtime probing.
+// This function probes for an available local runtime via DetectLocalRuntime so that
+// the default profile uses a runtime binary that actually exists on the system.
 func GetDefaultSettingsData() ([]byte, error) {
-	targetRuntime := "docker"
-	if runtime.GOOS == "darwin" {
-		targetRuntime = "container"
+	targetRuntime, err := DetectLocalRuntime()
+	if err != nil {
+		if runtime.GOOS == "darwin" {
+			targetRuntime = "container"
+		} else {
+			targetRuntime = "docker"
+		}
 	}
 	return getDefaultSettingsDataForRuntime(targetRuntime)
 }
