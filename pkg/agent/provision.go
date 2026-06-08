@@ -441,7 +441,24 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			// Externalized project: use workspace-path from settings
 			workspaceSource = settings.WorkspacePath
 		} else {
-			workspaceSource = filepath.Dir(projectDir)
+			// projectDir may point to an external config directory
+			// (e.g. ~/.scion/project-configs/<slug>__<uuid>/.scion)
+			// after marker-file resolution, so filepath.Dir would
+			// give the config parent instead of the actual workspace.
+			// Use the original projectPath which is the user's directory.
+			if projectPath != "" {
+				absPath, absErr := filepath.Abs(projectPath)
+				if absErr == nil {
+					if filepath.Base(absPath) == config.DotScion {
+						absPath = filepath.Dir(absPath)
+					}
+					workspaceSource = absPath
+				} else {
+					workspaceSource = filepath.Dir(projectDir)
+				}
+			} else {
+				workspaceSource = filepath.Dir(projectDir)
+			}
 		}
 		agentWorkspace = "" // Using external mount
 	}
