@@ -72,12 +72,14 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			if _, err := exec.LookPath("container"); err == nil {
 				runtimeType = "container"
 				util.Debugf("GetRuntime: detected 'container' CLI on macOS")
+			} else if _, err := exec.LookPath("podman"); err == nil {
+				runtimeType = "podman"
+				util.Debugf("GetRuntime: detected 'podman' on macOS")
 			} else {
 				runtimeType = "docker"
-				util.Debugf("GetRuntime: 'container' CLI not found on macOS, using docker")
+				util.Debugf("GetRuntime: no container/podman CLI found on macOS, using docker")
 			}
 		} else {
-			// On Linux, prefer podman over docker when both are available
 			if _, err := exec.LookPath("podman"); err == nil {
 				runtimeType = "podman"
 				util.Debugf("GetRuntime: detected 'podman' on Linux")

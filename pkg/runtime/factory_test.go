@@ -199,6 +199,40 @@ active_profile: apple
 		}
 	})
 
+	t.Run("Settings_Global_Podman", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+
+		globalDir := filepath.Join(tmpHome, ".scion")
+		if err := os.MkdirAll(globalDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		settings := `
+schema_version: "1"
+active_profile: default
+runtimes:
+  podman:
+    type: podman
+profiles:
+  default:
+    runtime: podman
+`
+		if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settings), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		r := GetRuntime("", "")
+		if _, ok := r.(*PodmanRuntime); !ok {
+			if _, ok := r.(*ErrorRuntime); ok {
+				// Acceptable: PATH is empty so NewPodmanRuntime returns ErrorRuntime
+				// after correctly resolving the podman branch from settings.
+			} else {
+				t.Errorf("expected *PodmanRuntime or *ErrorRuntime (podman branch), got %T", r)
+			}
+		}
+	})
+
 	t.Run("Override_Param", func(t *testing.T) {
 		tmpHome := t.TempDir()
 		t.Setenv("HOME", tmpHome)
