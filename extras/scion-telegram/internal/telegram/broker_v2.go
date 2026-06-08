@@ -310,6 +310,17 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		"db_path", dbPath,
 		"inbound_mode", b.inboundMode,
 	)
+
+	// Start polling once hub credentials are available. Configure() is called
+	// twice: first at plugin load (no hub_url yet), then via ConfigureBroker
+	// with injected creds. startPolling() is idempotent (no-op if already
+	// running or in webhook mode). This removes the dependency on Subscribe()
+	// to gate polling — the bot should poll whenever it's configured and
+	// credentialed, so /setup and /start work even with no running agents.
+	if b.inboundMode == "poll" && b.hubURL != "" && b.hmacKey != "" {
+		b.startPolling()
+	}
+
 	return nil
 }
 
