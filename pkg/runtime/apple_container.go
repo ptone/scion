@@ -267,7 +267,8 @@ func (r *AppleContainerRuntime) ImageExists(ctx context.Context, image string) (
 }
 
 func (r *AppleContainerRuntime) PullImage(ctx context.Context, image string) error {
-	return runInteractiveCommand(r.Command, "image", "pull", image)
+	_, err := runSimpleCommand(ctx, r.Command, "image", "pull", image)
+	return err
 }
 
 func (r *AppleContainerRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {

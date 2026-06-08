@@ -1085,8 +1085,30 @@ export class ScionPageOnboarding extends LitElement {
         this.imagePulling = false;
         return;
       }
-      const data = (await res.json()) as { jobId: string };
-      this.subscribeToImageJob(data.jobId, 'pull');
+      const data = (await res.json()) as {
+        jobId: string;
+        initialResults?: Array<{ image: string; status: string; error?: string }>;
+        needPull?: number;
+      };
+
+      if (data.initialResults) {
+        for (const r of data.initialResults) {
+          const harness = this.imageNameToHarness(r.image);
+          if (harness) {
+            const next = new Map(this.imageStatuses);
+            const entry: { status: string; error?: string; fullName?: string } = { status: r.status, fullName: r.image };
+            if (r.error) entry.error = r.error;
+            next.set(harness, entry);
+            this.imageStatuses = next;
+          }
+        }
+      }
+
+      if (data.needPull && data.needPull > 0) {
+        this.subscribeToImageJob(data.jobId, 'pull', data.needPull);
+      } else {
+        this.imagePulling = false;
+      }
     } catch {
       this.error = 'Failed to connect to the server.';
       this.imagePulling = false;
@@ -1118,7 +1140,7 @@ export class ScionPageOnboarding extends LitElement {
     }
   }
 
-  private subscribeToImageJob(jobId: string, mode: 'pull' | 'build'): void {
+  private subscribeToImageJob(jobId: string, mode: 'pull' | 'build', expectedPullCount?: number): void {
     this.cleanupImageEvents();
 
     const url = `/events?sub=${encodeURIComponent('system.images.' + jobId)}`;
@@ -1126,7 +1148,7 @@ export class ScionPageOnboarding extends LitElement {
     this.imageEventSource = es;
 
     let doneCount = 0;
-    const totalImages = this.selectedHarnesses.size;
+    const totalImages = expectedPullCount ?? this.selectedHarnesses.size;
 
     es.addEventListener('update', (event: Event) => {
       try {
