@@ -17,8 +17,6 @@ package runtime
 import (
 	"context"
 	"os"
-	"os/exec"
-	"runtime"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -67,21 +65,13 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 	}
 
 	if runtimeType == "local" || runtimeType == "auto" {
-		util.Debugf("GetRuntime: auto-detecting for OS=%s", runtime.GOOS)
-		if _, err := exec.LookPath("podman"); err == nil {
-			runtimeType = "podman"
-			util.Debugf("GetRuntime: detected 'podman'")
-		} else if runtime.GOOS == "darwin" {
-			if _, err := exec.LookPath("container"); err == nil {
-				runtimeType = "container"
-				util.Debugf("GetRuntime: detected 'container' CLI on macOS")
-			} else {
-				runtimeType = "docker"
-				util.Debugf("GetRuntime: no podman/container CLI found on macOS, using docker")
-			}
-		} else {
+		detected, err := config.DetectLocalRuntime()
+		if err != nil {
 			runtimeType = "docker"
-			util.Debugf("GetRuntime: no podman found, using docker")
+			util.Debugf("GetRuntime: DetectLocalRuntime found no runtime (%v), falling back to docker", err)
+		} else {
+			runtimeType = detected
+			util.Debugf("GetRuntime: DetectLocalRuntime selected %s", detected)
 		}
 	}
 
