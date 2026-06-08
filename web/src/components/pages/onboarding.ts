@@ -83,7 +83,6 @@ export class ScionPageOnboarding extends LitElement {
   @state() private imageBuilding = false;
   @state() private buildLogs: string[] = [];
   @state() private buildExpanded = false;
-  @state() private runtimeAvailable = false;
   @state() private buildAvailable = false;
   @state() private imageRegistry = '';
   @state() private registryInput = 'ghcr.io/homebrew-scion';
@@ -555,8 +554,35 @@ export class ScionPageOnboarding extends LitElement {
   }
 
   override updated(changed: PropertyValues): void {
-    if (changed.has('currentStep') && !this.loading) {
-      localStorage.setItem('onboardingStep', String(this.currentStep));
+    if (!changed.has('currentStep') || this.loading) return;
+
+    localStorage.setItem('onboardingStep', String(this.currentStep));
+    this.error = null;
+
+    switch (this.currentStep) {
+      case 1: void this.loadSystemCheck(); break;
+      case 2: void this.loadRuntime(); break;
+      case 4: this.restoreHarnesses(); void this.loadImagesStep(); break;
+      case 7:
+        sessionStorage.setItem('onboardingComplete', 'true');
+        sessionStorage.removeItem(ONBOARDING_STATUS_KEY);
+        localStorage.removeItem('onboardingStep');
+        localStorage.removeItem('onboardingStarted');
+        localStorage.removeItem('onboardingHarnesses');
+        break;
+    }
+  }
+
+  private restoreHarnesses(): void {
+    if (this.selectedHarnesses.size > 0) return;
+    const saved = localStorage.getItem('onboardingHarnesses');
+    if (saved) {
+      try {
+        const arr = JSON.parse(saved) as string[];
+        if (Array.isArray(arr) && arr.length > 0) {
+          this.selectedHarnesses = new Set(arr);
+        }
+      } catch { /* ignore */ }
     }
   }
 
@@ -628,7 +654,7 @@ export class ScionPageOnboarding extends LitElement {
         ${this.currentStep < TOTAL_STEPS ? html`
           <div class="progress">
             <div class="step-label">Step ${this.currentStep + 1} of ${TOTAL_STEPS}</div>
-            <sl-progress-bar value=${Math.round((this.currentStep / TOTAL_STEPS) * 100)}></sl-progress-bar>
+            <sl-progress-bar value=${Math.round(((this.currentStep + 1) / TOTAL_STEPS) * 100)}></sl-progress-bar>
           </div>
         ` : nothing}
 
@@ -934,8 +960,8 @@ export class ScionPageOnboarding extends LitElement {
         this.error = await extractApiError(res, 'Failed to initialize harnesses');
         return;
       }
+      localStorage.setItem('onboardingHarnesses', JSON.stringify([...this.selectedHarnesses]));
       this.currentStep = 4;
-      void this.loadImagesStep();
     } finally {
       this.stepLoading = false;
     }
@@ -1225,6 +1251,7 @@ export class ScionPageOnboarding extends LitElement {
     });
 
     es.onerror = () => {
+      this.error = 'Lost connection to the server. Please try again.';
       if (mode === 'pull') this.imagePulling = false;
       if (mode === 'build') this.imageBuilding = false;
       this.cleanupImageEvents();
@@ -1247,13 +1274,6 @@ export class ScionPageOnboarding extends LitElement {
   }
 
   private async loadImagesStep(): Promise<void> {
-    try {
-      const res = await apiFetch('/api/v1/system/runtime');
-      if (res.ok) {
-        const data = (await res.json()) as RuntimeResponse;
-        this.runtimeAvailable = data.available;
-      }
-    } catch { /* ignore */ }
     try {
       const res = await apiFetch('/api/v1/system/status');
       if (res.ok) {
@@ -1637,12 +1657,6 @@ export class ScionPageOnboarding extends LitElement {
   // ── Step 7: Done ──
 
   private renderDone() {
-    sessionStorage.setItem('onboardingComplete', 'true');
-    sessionStorage.removeItem(ONBOARDING_STATUS_KEY);
-    sessionStorage.removeItem('onboardingStarted');
-    localStorage.removeItem('onboardingStep');
-    localStorage.removeItem('onboardingStarted');
-
     return html`
       <div class="done-content">
         <sl-icon name="check-circle"></sl-icon>
