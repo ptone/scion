@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -1505,7 +1506,6 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	return nil
 }
 
-<<<<<<< HEAD
 // pluginChannelID returns the channel identifier reported by a broker plugin
 // via GetInfo().ChannelID. Returns "" if the plugin does not report one, in
 // which case the bus Name is used for channel routing.

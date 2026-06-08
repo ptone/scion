@@ -344,6 +344,11 @@ func (p *PostgresEventPublisher) Subscribe(patterns ...string) (<-chan Event, fu
 
 // Close stops the background goroutines, closes the pool, and closes all
 // subscriber channels.
+// PublishRaw publishes a raw event on the given subject.
+func (p *PostgresEventPublisher) PublishRaw(subject string, data interface{}) {
+	p.publish(subject, data)
+}
+
 func (p *PostgresEventPublisher) Close() {
 	p.mu.Lock()
 	if p.closed {

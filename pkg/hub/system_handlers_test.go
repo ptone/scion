@@ -28,21 +28,15 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // testWorkstationServer creates a test server with workstation mode enabled.
-func testWorkstationServer(t *testing.T) (*Server, *sqlite.SQLiteStore) {
+func testWorkstationServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
-		if strings.Contains(err.Error(), "sqlite driver not registered") {
-			t.Skip("sqlite driver not registered")
-		}
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
 	}
 
 	cfg := DefaultServerConfig()
