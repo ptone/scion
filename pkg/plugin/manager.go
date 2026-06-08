@@ -412,6 +412,31 @@ func (m *Manager) ConfigureBroker(name string, extra map[string]string) error {
 	return rpcClient.Configure(merged)
 }
 
+// StopPlugin stops a single plugin by killing its subprocess (or disconnecting
+// from a self-managed one) and removing it from the manager's maps. Config and
+// external state (e.g. telegram_v2.db) are preserved for re-enable.
+func (m *Manager) StopPlugin(pluginType, name string) error {
+	key := pluginType + ":" + name
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	client, ok := m.clients[key]
+	if !ok {
+		return nil // already stopped — idempotent
+	}
+
+	if !m.selfManaged[key] {
+		client.Kill()
+	}
+	delete(m.clients, key)
+	delete(m.dispensed, key)
+	delete(m.selfManaged, key)
+	delete(m.configs, key)
+
+	m.logger.Info("Stopped plugin", "type", pluginType, "name", name)
+	return nil
+}
+
 // HasPlugin returns true if a plugin with the given type and name is loaded.
 func (m *Manager) HasPlugin(pluginType, name string) bool {
 	key := pluginType + ":" + name
