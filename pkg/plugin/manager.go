@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"os/exec"
 	"sync"
 
@@ -126,6 +127,7 @@ func (m *Manager) LoadOne(pluginType, name string, entry PluginEntry, pluginsDir
 			Name:        name,
 			Type:        pluginType,
 			Config:      entry.Config,
+			Env:         entry.Env,
 			FromConfig:  true,
 			SelfManaged: true,
 			Address:     entry.Address,
@@ -140,6 +142,7 @@ func (m *Manager) LoadOne(pluginType, name string, entry PluginEntry, pluginsDir
 		Type:       pluginType,
 		Path:       path,
 		Config:     entry.Config,
+		Env:        entry.Env,
 		FromConfig: true,
 	})
 }
@@ -163,6 +166,13 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 	if dp.SelfManaged {
 		client = m.loadSelfManagedPlugin(dp, protocolVersion, pluginMap)
 	} else {
+		cmd := exec.Command(dp.Path)
+		if len(dp.Env) > 0 {
+			cmd.Env = os.Environ()
+			for k, v := range dp.Env {
+				cmd.Env = append(cmd.Env, k+"="+v)
+			}
+		}
 		client = goplugin.NewClient(&goplugin.ClientConfig{
 			HandshakeConfig: goplugin.HandshakeConfig{
 				ProtocolVersion:  protocolVersion,
@@ -170,7 +180,7 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 				MagicCookieValue: MagicCookieValue,
 			},
 			Plugins: pluginMap,
-			Cmd:     exec.Command(dp.Path),
+			Cmd:     cmd,
 			Logger:  newHclogAdapter(m.logger),
 		})
 	}

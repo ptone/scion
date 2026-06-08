@@ -118,6 +118,9 @@ func (s *Server) handleTelegramSetup(w http.ResponseWriter, r *http.Request) {
 			"webhook_secret": webhookSecret,
 			"inbound_mode":   "poll", // must match plugin's accepted values: "poll" or "webhook" (broker_v2.go)
 		},
+		Env: map[string]string{
+			"SCION_TELEGRAM_V2": "1", // hub requires v2 broker (group links, /setup, project_slug_map)
+		},
 	}
 
 	if err := WireBrokerPlugin(r.Context(), pluginMgr, s, "telegram", pluginEntry, pluginsDir); err != nil {
