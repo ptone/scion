@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	goruntime "runtime"
 	"strings"
 
 	"github.com/knadh/koanf/parsers/json"
@@ -248,11 +247,7 @@ func getDefaultSettingsYAMLForRuntime(targetRuntime string) ([]byte, error) {
 func GetDefaultSettingsDataYAML() ([]byte, error) {
 	targetRuntime, err := DetectLocalRuntime()
 	if err != nil {
-		if goruntime.GOOS == "darwin" {
-			targetRuntime = "container"
-		} else {
-			targetRuntime = "docker"
-		}
+		targetRuntime = "docker"
 	}
 	return getDefaultSettingsYAMLForRuntime(targetRuntime)
 }

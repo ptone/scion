@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"sync"
 	"time"
 )
 
@@ -49,12 +50,26 @@ var runCheckFunc = func(binary string, args []string) error {
 	return exec.CommandContext(ctx, binary, args...).Run()
 }
 
+var detectCache struct {
+	once sync.Once
+	rt   string
+	err  error
+}
+
 // DetectLocalRuntime probes the system for an available container runtime.
 // It checks OS compatibility and verifies each candidate is both on PATH
 // and can execute successfully. Candidates are checked in preference order:
 // podman, container (macOS only), docker.
+// The result is cached for the lifetime of the process.
 // Returns the runtime name or an error if no supported runtime is found.
 func DetectLocalRuntime() (string, error) {
+	detectCache.once.Do(func() {
+		detectCache.rt, detectCache.err = detectLocalRuntimeProbe()
+	})
+	return detectCache.rt, detectCache.err
+}
+
+func detectLocalRuntimeProbe() (string, error) {
 	for _, c := range localRuntimeCandidates {
 		if c.DarwinOnly && runtime.GOOS != "darwin" {
 			continue
@@ -74,19 +89,34 @@ func DetectLocalRuntime() (string, error) {
 	return "", fmt.Errorf("no supported container runtime found: install podman or docker")
 }
 
+// resetDetectCache clears the cached detection result so the next
+// DetectLocalRuntime call re-probes. Used by OverrideRuntimeDetection.
+func resetDetectCache() {
+	detectCache = struct {
+		once sync.Once
+		rt   string
+		err  error
+	}{}
+}
+
 // OverrideRuntimeDetection replaces the functions used by DetectLocalRuntime
-// to look up and verify container runtimes. This is intended for use in tests
-// across packages. Returns a restore function that should be deferred.
+// to look up and verify container runtimes, and resets the cached result so
+// the next call re-probes. This is intended for use in tests across packages.
+// Returns a restore function that should be deferred.
 func OverrideRuntimeDetection(
 	lookPath func(string) (string, error),
 	runCheck func(string, []string) error,
 ) func() {
 	origLP := lookPathFunc
 	origRC := runCheckFunc
+
 	lookPathFunc = lookPath
 	runCheckFunc = runCheck
+	resetDetectCache()
+
 	return func() {
 		lookPathFunc = origLP
 		runCheckFunc = origRC
+		resetDetectCache()
 	}
 }

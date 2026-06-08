@@ -72,15 +72,12 @@ func TestGetDefaultSettingsDataYAML_OSSpecific(t *testing.T) {
 }
 
 // expectedDefaultRuntime returns the runtime that GetDefaultSettingsData and
+// expectedDefaultRuntime returns the runtime that GetDefaultSettingsData and
 // GetDefaultSettingsDataYAML should select on this machine. It mirrors the
-// fallback logic in those functions: probe via DetectLocalRuntime, then fall
-// back to container (macOS) or docker (other).
+// fallback logic: probe via DetectLocalRuntime, fall back to docker.
 func expectedDefaultRuntime() string {
 	if detected, err := DetectLocalRuntime(); err == nil {
 		return detected
-	}
-	if runtime.GOOS == "darwin" {
-		return "container"
 	}
 	return "docker"
 }
