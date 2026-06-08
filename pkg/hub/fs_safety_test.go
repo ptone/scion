@@ -199,7 +199,7 @@ func TestClassifyPath_NotLinked(t *testing.T) {
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		LocalPath:  linkedDir,
-		Status:    "online",
+		Status:     "online",
 	}); err != nil {
 		t.Fatal(err)
 	}

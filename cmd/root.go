@@ -66,12 +66,12 @@ return an error instead of blocking.`,
 		}
 
 		// Only check git version for commands that create worktrees (agent-related).
-			// Server, config, hub, and info commands never use worktrees.
-			if util.IsGitRepo() && usesWorktrees(cmd) {
-				if err := util.CheckGitVersion(); err != nil {
-					return fmt.Errorf("git check failed: %w", err)
-				}
+		// Server, config, hub, and info commands never use worktrees.
+		if util.IsGitRepo() && usesWorktrees(cmd) {
+			if err := util.CheckGitVersion(); err != nil {
+				return fmt.Errorf("git check failed: %w", err)
 			}
+		}
 
 		// Determine if this command requires explicit project context
 		// Commands that don't require project context:

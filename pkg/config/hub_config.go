@@ -220,23 +220,23 @@ type DevAuthConfig struct {
 
 // TransportAuthConfig holds transport-layer (outer/platform) auth settings.
 type TransportAuthConfig struct {
-	Mode string `json:"mode" yaml:"mode" koanf:"mode"`
-	OIDCAudience string `json:"oidcAudience" yaml:"oidcAudience" koanf:"oidcAudience"`
+	Mode           string `json:"mode" yaml:"mode" koanf:"mode"`
+	OIDCAudience   string `json:"oidcAudience" yaml:"oidcAudience" koanf:"oidcAudience"`
 	PlatformAuthSA string `json:"platformAuthSA" yaml:"platformAuthSA" koanf:"platformAuthSA"`
 }
 
 // ProxyAuthConfig holds proxy authentication settings.
 type ProxyAuthConfig struct {
-	Provider string `json:"provider" yaml:"provider" koanf:"provider"`
-	IAP *IAPAuthConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`
-	RequireTrustedProxyIP bool `json:"requireTrustedProxyIP,omitempty" yaml:"requireTrustedProxyIP,omitempty" koanf:"requireTrustedProxyIP"`
+	Provider              string         `json:"provider" yaml:"provider" koanf:"provider"`
+	IAP                   *IAPAuthConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`
+	RequireTrustedProxyIP bool           `json:"requireTrustedProxyIP,omitempty" yaml:"requireTrustedProxyIP,omitempty" koanf:"requireTrustedProxyIP"`
 }
 
 // IAPAuthConfig holds Google IAP-specific settings.
 type IAPAuthConfig struct {
 	Audience string `json:"audience" yaml:"audience" koanf:"audience"`
-	Issuer string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
-	JWKSURL string `json:"jwksURL,omitempty" yaml:"jwksURL,omitempty" koanf:"jwksURL"`
+	Issuer   string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
+	JWKSURL  string `json:"jwksURL,omitempty" yaml:"jwksURL,omitempty" koanf:"jwksURL"`
 }
 
 // OAuthProviderConfig holds OAuth credentials for a single provider.
