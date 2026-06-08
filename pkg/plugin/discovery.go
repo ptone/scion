@@ -29,9 +29,10 @@ type DiscoveredPlugin struct {
 	Type        string // "broker" (additional types may be added in future)
 	Path        string // absolute path to the binary (empty for self-managed plugins)
 	Config      map[string]string
-	FromConfig  bool   // true if found via settings, false if auto-discovered
-	SelfManaged bool   // true if the plugin manages its own process lifecycle
-	Address     string // RPC address for self-managed plugins
+	Env         map[string]string // extra env vars for the plugin subprocess
+	FromConfig  bool              // true if found via settings, false if auto-discovered
+	SelfManaged bool              // true if the plugin manages its own process lifecycle
+	Address     string            // RPC address for self-managed plugins
 }
 
 // DiscoverPlugins finds all available plugins from settings configuration and
@@ -49,6 +50,7 @@ func DiscoverPlugins(cfg PluginsConfig, pluginsDir string, logger *slog.Logger) 
 				Name:        name,
 				Type:        PluginTypeBroker,
 				Config:      entry.Config,
+				Env:         entry.Env,
 				FromConfig:  true,
 				SelfManaged: true,
 				Address:     entry.Address,
@@ -65,6 +67,7 @@ func DiscoverPlugins(cfg PluginsConfig, pluginsDir string, logger *slog.Logger) 
 			Type:       PluginTypeBroker,
 			Path:       path,
 			Config:     entry.Config,
+			Env:        entry.Env,
 			FromConfig: true,
 		})
 	}

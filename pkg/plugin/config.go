@@ -60,6 +60,10 @@ type PluginEntry struct {
 	// Address is the RPC address for self-managed plugins (e.g. "localhost:9090").
 	// Required when SelfManaged is true.
 	Address string `json:"address,omitempty" yaml:"address,omitempty" koanf:"address"`
+
+	// Env is a set of extra environment variables to pass to the plugin subprocess.
+	// Ignored when SelfManaged is true (the external process manages its own env).
+	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
 }
 
 // PluginInfo contains metadata reported by a plugin via the GetInfo() RPC call.
