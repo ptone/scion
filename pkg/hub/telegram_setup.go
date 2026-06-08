@@ -93,7 +93,7 @@ func ValidateTelegramToken(ctx context.Context, token string) (*ValidateTokenRes
 	if err != nil {
 		return &ValidateTokenResult{Valid: false, Error: "failed to connect to Telegram API"}, nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -202,7 +202,7 @@ func WireBrokerPlugin(
 
 	bus, err := pluginMgr.GetBroker(pluginName)
 	if err != nil {
-		pluginMgr.StopPlugin(scionplugin.PluginTypeBroker, pluginName)
+		_ = pluginMgr.StopPlugin(scionplugin.PluginTypeBroker, pluginName)
 		return fmt.Errorf("failed to get broker adapter for %q: %w", pluginName, err)
 	}
 

@@ -17,7 +17,6 @@ package hub
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -52,7 +51,7 @@ func (s *Server) handleAdminIntegrations(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"integrations": integrations,
 	})
 }
@@ -79,7 +78,7 @@ func (s *Server) handleAdminTelegramEnable(w http.ResponseWriter, r *http.Reques
 	if pluginMgr.HasPlugin(scionplugin.PluginTypeBroker, "telegram") {
 		status := s.getTelegramStatus()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":     true,
 			"integration": status,
 		})
@@ -119,7 +118,7 @@ func (s *Server) handleAdminTelegramEnable(w http.ResponseWriter, r *http.Reques
 
 	status := s.getTelegramStatus()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":     true,
 		"integration": status,
 	})
@@ -141,7 +140,7 @@ func (s *Server) handleAdminTelegramDisable(w http.ResponseWriter, r *http.Reque
 
 	// Stop the plugin subprocess (idempotent — no-op if not running).
 	if pluginMgr != nil {
-		pluginMgr.StopPlugin(scionplugin.PluginTypeBroker, "telegram")
+		_ = pluginMgr.StopPlugin(scionplugin.PluginTypeBroker, "telegram")
 	}
 
 	// Remove spoke from fan-out (idempotent).
@@ -159,7 +158,7 @@ func (s *Server) handleAdminTelegramDisable(w http.ResponseWriter, r *http.Reque
 
 	status := s.getTelegramStatus()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":     true,
 		"integration": status,
 	})
@@ -268,21 +267,11 @@ func persistTelegramEnabled(globalDir string, enabled bool) {
 		}
 	}
 
-	config.SaveVersionedSettings(globalDir, vs)
+	_ = config.SaveVersionedSettings(globalDir, vs)
 }
 
 func writeJSONError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
-}
-
-// isTelegramInBrokerTypes checks if "telegram" is in message_broker.types at startup.
-func isTelegramInBrokerTypes(types []string) bool {
-	for _, t := range types {
-		if strings.EqualFold(t, "telegram") {
-			return true
-		}
-	}
-	return false
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
