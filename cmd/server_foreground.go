@@ -1574,17 +1574,13 @@ func initPluginManager() *scionplugin.Manager {
 		Broker: make(map[string]scionplugin.PluginEntry),
 	}
 	for name, entry := range vs.Server.Plugins.Broker {
-		pe := scionplugin.PluginEntry{
+		pluginsCfg.Broker[name] = scionplugin.PluginEntry{
 			Path:        entry.Path,
 			Config:      entry.Config,
 			SelfManaged: entry.SelfManaged,
 			Address:     entry.Address,
+			Env:         entry.Env,
 		}
-		// Hub requires the v2 telegram broker (group links, /setup, project_slug_map).
-		if name == "telegram" && !entry.SelfManaged {
-			pe.Env = map[string]string{"SCION_TELEGRAM_V2": "1"}
-		}
-		pluginsCfg.Broker[name] = pe
 	}
 
 	if err := mgr.LoadAll(pluginsCfg, pluginsDir); err != nil {

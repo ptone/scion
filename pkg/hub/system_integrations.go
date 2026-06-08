@@ -105,7 +105,7 @@ func (s *Server) handleAdminTelegramEnable(w http.ResponseWriter, r *http.Reques
 
 	pluginEntry := scionplugin.PluginEntry{
 		Config: entry.Config,
-		Env:    map[string]string{"SCION_TELEGRAM_V2": "1"},
+		Env:    entry.Env,
 	}
 
 	if err := WireBrokerPlugin(r.Context(), pluginMgr, s, "telegram", pluginEntry, pluginsDir); err != nil {
