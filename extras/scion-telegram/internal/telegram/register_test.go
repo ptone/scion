@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -722,3 +723,82 @@ func TestRegistrationHTTP_MethodNotAllowed(t *testing.T) {
 }
 
 var _ = fmt.Sprintf
+
+func TestIsPublicHTTPS(t *testing.T) {
+	tests := []struct {
+		url    string
+		expect bool
+	}{
+		{"https://hub.example.com", true},
+		{"https://hub.example.com:8443", true},
+		{"http://hub.example.com", false},
+		{"http://127.0.0.1:8080", false},
+		{"http://localhost:8080", false},
+		{"https://localhost:8443", false},
+		{"https://127.0.0.1:8443", false},
+		{"https://[::1]:8443", false},
+		{"", false},
+		{"not-a-url", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			assert.Equal(t, tt.expect, isPublicHTTPS(tt.url))
+		})
+	}
+}
+
+func TestHandleRegister_LocalhostUsesPlainText(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	hubSrv := newFakeHubServer(t)
+
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":    "test-token",
+		"api_base_url": tgSrv.srv.URL,
+		"db_path":      dbPath,
+		"hub_url":      hubSrv.URL, // http://127.0.0.1:... — not public HTTPS
+		"hmac_key":     "c2VjcmV0", // base64("secret")
+		"broker_id":    "broker-1",
+		"inbound_mode": "poll",
+	})
+	require.NoError(t, err)
+
+	msg := &TGMessage{
+		MessageID: 1,
+		Chat:      TGChat{ID: 12345, Type: "private"},
+		From:      &TGUser{ID: 99, Username: "testuser"},
+		Text:      "/register",
+	}
+
+	b.registration.HandleRegister(msg)
+
+	// Wait briefly for async send.
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify the bot sent a plain text message (not a keyboard button).
+	sent := tgSrv.getSentMessages()
+	require.NotEmpty(t, sent, "bot should have sent a reply")
+
+	lastMsg := sent[len(sent)-1]
+	assert.Contains(t, lastMsg.Text, "Your linking code is:")
+	assert.Contains(t, lastMsg.Text, "http://")
+	assert.Nil(t, lastMsg.ReplyMarkup, "should NOT use inline keyboard for localhost URLs")
+}
+
+// newFakeHubServer creates a minimal hub server that accepts link code registration.
+func newFakeHubServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/telegram/link", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/v1/telegram/link/status", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"status": "pending"})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
