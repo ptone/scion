@@ -332,6 +332,8 @@ type V1PluginEntry struct {
 	// Address is the RPC address for self-managed plugins (e.g. "localhost:9090").
 	// Required when SelfManaged is true.
 	Address string `json:"address,omitempty" yaml:"address,omitempty" koanf:"address"`
+	// Env is extra environment variables for the plugin subprocess.
+	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
 }
 
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).

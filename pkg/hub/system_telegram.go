@@ -16,6 +16,7 @@ package hub
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
@@ -33,6 +34,7 @@ func (s *Server) handleTelegramValidate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var req struct {
 		BotToken string `json:"bot_token"`
 	}
@@ -67,6 +69,7 @@ func (s *Server) handleTelegramSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var req struct {
 		BotToken string `json:"bot_token"`
 	}
@@ -124,9 +127,10 @@ func (s *Server) handleTelegramSetup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := WireBrokerPlugin(r.Context(), pluginMgr, s, "telegram", pluginEntry, pluginsDir); err != nil {
+		slog.Error("Telegram hot-start failed", "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(TelegramSetupResult{Error: "bot failed to start: " + err.Error()})
+		json.NewEncoder(w).Encode(TelegramSetupResult{Error: "bot failed to start — check server logs for details"})
 		return
 	}
 

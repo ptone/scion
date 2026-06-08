@@ -23,6 +23,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,8 +66,8 @@ type TelegramSetupResult struct {
 
 // ValidateTelegramToken validates a bot token by calling the Telegram getMe API.
 func ValidateTelegramToken(ctx context.Context, token string) (*ValidateTokenResult, error) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/getMe", token)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/getMe", url.PathEscape(token))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return &ValidateTokenResult{Valid: false, Error: "failed to create request"}, nil
 	}
@@ -138,6 +140,10 @@ func PersistTelegramConfig(botToken, webhookSecret string) error {
 	existing.Config["bot_token"] = botToken
 	existing.Config["webhook_secret"] = webhookSecret
 	existing.Config["inbound_mode"] = "poll" // must match plugin's accepted values: "poll" or "webhook" (broker_v2.go)
+	if existing.Env == nil {
+		existing.Env = make(map[string]string)
+	}
+	existing.Env["SCION_TELEGRAM_V2"] = "1"
 	vs.Server.Plugins.Broker["telegram"] = existing
 
 	if vs.Server.MessageBroker == nil {
@@ -180,6 +186,7 @@ func WireBrokerPlugin(
 
 	bus, err := pluginMgr.GetBroker(pluginName)
 	if err != nil {
+		pluginMgr.StopPlugin(scionplugin.PluginTypeBroker, pluginName)
 		return fmt.Errorf("failed to get broker adapter for %q: %w", pluginName, err)
 	}
 
@@ -297,11 +304,13 @@ func CheckObserver(pluginMgr *scionplugin.Manager, name string) bool {
 		if rpc, ok := raw.(*scionplugin.BrokerRPCClient); ok {
 			if info, infoErr := rpc.GetInfo(); infoErr == nil && info != nil {
 				for _, cap := range info.Capabilities {
-					if cap == "observer" {
+					if strings.EqualFold(cap, "observer") {
 						return true
 					}
 				}
 				return false
+			} else if infoErr != nil {
+				slog.Warn("Failed to get plugin info for observer check", "name", name, "error", infoErr)
 			}
 		}
 	}

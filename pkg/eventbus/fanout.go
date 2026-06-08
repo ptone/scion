@@ -132,6 +132,9 @@ func (f *FanOutEventBus) AddSpoke(nb NamedEventBus) {
 		if existing.Name != nb.Name {
 			filtered = append(filtered, existing)
 		} else {
+			if err := existing.Bus.Close(); err != nil {
+				f.log.Error("Failed to close replaced spoke", "name", nb.Name, "error", err)
+			}
 			f.log.Info("Replacing existing spoke in fan-out bus", "name", nb.Name)
 		}
 	}
@@ -139,8 +142,9 @@ func (f *FanOutEventBus) AddSpoke(nb NamedEventBus) {
 	f.log.Info("Added spoke to fan-out bus", "name", nb.Name, "observer", nb.Observer)
 }
 
-// RemoveSpoke removes a named spoke from the fan-out. Subsequent Publish and
-// Subscribe calls will no longer include it. Safe to call if the name doesn't exist.
+// RemoveSpoke removes a named spoke from the fan-out and closes it.
+// Subsequent Publish and Subscribe calls will no longer include it.
+// Safe to call if the name doesn't exist.
 func (f *FanOutEventBus) RemoveSpoke(name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -148,10 +152,12 @@ func (f *FanOutEventBus) RemoveSpoke(name string) {
 	for _, existing := range f.buses {
 		if existing.Name != name {
 			filtered = append(filtered, existing)
+		} else {
+			if err := existing.Bus.Close(); err != nil {
+				f.log.Error("Failed to close removed spoke", "name", name, "error", err)
+			}
+			f.log.Info("Removed spoke from fan-out bus", "name", name)
 		}
-	}
-	if len(filtered) < len(f.buses) {
-		f.log.Info("Removed spoke from fan-out bus", "name", name)
 	}
 	f.buses = filtered
 }

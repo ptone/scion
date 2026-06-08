@@ -139,73 +139,78 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		return fmt.Errorf("bot_token is required")
 	}
 
-	baseURL := config["api_base_url"]
-	b.api = NewAPIClient(botToken, baseURL)
+	// On re-configure (second call with hub creds), skip re-creating resources
+	// that are already initialized to avoid leaking the old store/sendQueue.
+	firstConfigure := b.api == nil
 
-	// Initialize send queue with rate limiting.
-	sqSize := 0
-	if v, ok := config["send_queue_size"]; ok && v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			sqSize = n
-		}
-	}
-	var sqDelay time.Duration
-	if v, ok := config["send_min_delay"]; ok && v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			sqDelay = d
-		}
-	}
-	b.sendQueue = NewSendQueue(b.api, b.log, sqSize, sqDelay)
+	if firstConfigure {
+		baseURL := config["api_base_url"]
+		b.api = NewAPIClient(botToken, baseURL)
 
-	// Parse optional agent cache TTL.
-	if v, ok := config["agent_cache_ttl"]; ok && v != "" {
-		d, err := time.ParseDuration(v)
+		sqSize := 0
+		if v, ok := config["send_queue_size"]; ok && v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				sqSize = n
+			}
+		}
+		var sqDelay time.Duration
+		if v, ok := config["send_min_delay"]; ok && v != "" {
+			if d, err := time.ParseDuration(v); err == nil {
+				sqDelay = d
+			}
+		}
+		b.sendQueue = NewSendQueue(b.api, b.log, sqSize, sqDelay)
+
+		if v, ok := config["agent_cache_ttl"]; ok && v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return fmt.Errorf("invalid agent_cache_ttl: %w", err)
+			}
+			b.agentCacheTTL = d
+		}
+
+		dbPath := config["db_path"]
+		if dbPath == "" {
+			dbPath = defaultDBPath
+		}
+		store, err := NewSQLiteStore(dbPath)
 		if err != nil {
-			return fmt.Errorf("invalid agent_cache_ttl: %w", err)
+			return fmt.Errorf("init store: %w", err)
 		}
-		b.agentCacheTTL = d
+		b.store = store
 	}
 
-	// Initialize SQLite store.
-	dbPath := config["db_path"]
-	if dbPath == "" {
-		dbPath = defaultDBPath
-	}
-	store, err := NewSQLiteStore(dbPath)
-	if err != nil {
-		return fmt.Errorf("init store: %w", err)
-	}
-	b.store = store
-
-	// Validate bot token.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	bot, err := b.api.GetMe(ctx)
-	if err != nil {
-		b.store.Close()
-		return fmt.Errorf("failed to validate bot token: %w", err)
-	}
-	b.botInfo = bot
-
-	if !bot.CanReadAllGroupMessages {
-		b.log.Warn("Bot has privacy mode enabled (can_read_all_group_messages=false). " +
-			"Group members must use /commands or reply to bot messages. " +
-			"Regular @mentions will NOT be delivered. " +
-			"Disable via BotFather: /mybots → Bot Settings → Group Privacy → Turn OFF.")
-	}
-
-	b.registerBotCommands(ctx)
-
-	// Parse inbound mode: "poll" (default) or "webhook".
-	b.inboundMode = "poll"
-	if v, ok := config["inbound_mode"]; ok && v != "" {
-		switch v {
-		case "poll", "webhook":
-			b.inboundMode = v
-		default:
+	if firstConfigure {
+		bot, err := b.api.GetMe(ctx)
+		if err != nil {
 			b.store.Close()
-			return fmt.Errorf("invalid inbound_mode %q: must be \"poll\" or \"webhook\"", v)
+			return fmt.Errorf("failed to validate bot token: %w", err)
+		}
+		b.botInfo = bot
+
+		if !bot.CanReadAllGroupMessages {
+			b.log.Warn("Bot has privacy mode enabled (can_read_all_group_messages=false). " +
+				"Group members must use /commands or reply to bot messages. " +
+				"Regular @mentions will NOT be delivered. " +
+				"Disable via BotFather: /mybots → Bot Settings → Group Privacy → Turn OFF.")
+		}
+
+		b.registerBotCommands(ctx)
+	}
+
+	if firstConfigure {
+		b.inboundMode = "poll"
+		if v, ok := config["inbound_mode"]; ok && v != "" {
+			switch v {
+			case "poll", "webhook":
+				b.inboundMode = v
+			default:
+				b.store.Close()
+				return fmt.Errorf("invalid inbound_mode %q: must be \"poll\" or \"webhook\"", v)
+			}
 		}
 	}
 
@@ -258,11 +263,10 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		}
 	}
 
-	// Create hub client.
+	// (Re-)create hub client and component handlers. These depend on hub
+	// credentials which may only be available on the second Configure() call.
 	b.hubClient = NewHTTPHubClient(b.hubURL, b.hmacKey, b.brokerID)
-
-	// Create component handlers.
-	b.commands = NewCommandHandler(b.store, b.api, b.hubClient, bot.Username, b.log)
+	b.commands = NewCommandHandler(b.store, b.api, b.hubClient, b.botInfo.Username, b.log)
 	b.callbacks = NewCallbackHandler(b.store, b.api, b.hubClient, b.log)
 	b.registration = NewRegistrationHandler(b.store, b.api, b.hubURL, b.hmacKey, b.brokerID, b.log)
 
@@ -303,11 +307,11 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	}
 
 	b.log.Info("Telegram v2 broker configured",
-		"bot_username", bot.Username,
-		"bot_id", bot.ID,
+		"bot_username", b.botInfo.Username,
+		"bot_id", b.botInfo.ID,
 		"hub_url", b.hubURL,
 		"broker_id", b.brokerID,
-		"db_path", dbPath,
+		"reconfigure", !firstConfigure,
 		"inbound_mode", b.inboundMode,
 	)
 
@@ -1331,6 +1335,7 @@ func (b *TelegramBrokerV2) HealthCheck() (*plugin.HealthStatus, error) {
 
 // --- Long polling ---
 
+// caller must hold b.mu
 func (b *TelegramBrokerV2) startPolling() {
 	if b.inboundMode == "webhook" {
 		return // webhook mode handles inbound via HTTP
