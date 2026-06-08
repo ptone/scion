@@ -378,6 +378,68 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 	}
 }
 
+func TestProvisionAgentExternalizedLocalDirWorkspace(t *testing.T) {
+	mockRuntimeForTest(t)
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+	os.Setenv("HOME", tmpDir)
+
+	if err := config.InitMachine(getTestHarnesses()); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	// Simulate a web-created local-dir project: marker file points to
+	// external config dir, but settings.yaml has NO workspace_path
+	// (buildStartContext creates marker + dirs but not settings).
+	projectDir := filepath.Join(tmpDir, "myproject")
+	os.MkdirAll(projectDir, 0755)
+
+	projectID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	projectSlug := "myproject"
+	shortUUID := "aaaaaaaa"
+
+	// Create external config directory (without workspace_path in settings)
+	extDir := filepath.Join(tmpDir, ".scion", "project-configs", projectSlug+"__"+shortUUID, ".scion")
+	os.MkdirAll(filepath.Join(extDir, "agents"), 0755)
+	os.MkdirAll(filepath.Join(extDir, "templates"), 0755)
+	seedTestHarnessConfig(t, extDir, "generic", "generic")
+	tplDir := filepath.Join(extDir, "templates", "default")
+	os.MkdirAll(tplDir, 0755)
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"generic"}`), 0644)
+
+	// Write marker file (not a directory) at projectDir/.scion
+	markerContent := "project-id: " + projectID + "\nproject-name: " + projectSlug + "\nproject-slug: " + projectSlug + "\n"
+	os.WriteFile(filepath.Join(projectDir, ".scion"), []byte(markerContent), 0644)
+
+	// Provision with projectPath = the user's directory (as the broker does)
+	_, _, cfg, err := ProvisionAgent(context.Background(), "local-agent", "default", "", "", projectDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+
+	// The /workspace volume must map to projectDir, not its parent
+	evalProjectDir, _ := filepath.EvalSymlinks(projectDir)
+	found := false
+	for _, v := range cfg.Volumes {
+		if v.Target == "/workspace" {
+			found = true
+			evalSource, _ := filepath.EvalSymlinks(v.Source)
+			if evalSource != evalProjectDir {
+				t.Errorf("expected /workspace source %q, got %q", evalProjectDir, evalSource)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected /workspace volume mount not found in config")
+	}
+}
+
 func TestProvisionAgentWorkspaceFlag(t *testing.T) {
 	tmpDir := t.TempDir()
 
