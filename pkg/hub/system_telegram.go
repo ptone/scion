@@ -54,7 +54,7 @@ func (s *Server) handleTelegramValidate(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 // handleTelegramSetup validates a token, persists config, and hot-starts the plugin.
@@ -91,7 +91,7 @@ func (s *Server) handleTelegramSetup(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(TelegramSetupResult{Error: errMsg})
+		_ = json.NewEncoder(w).Encode(TelegramSetupResult{Error: errMsg})
 		return
 	}
 
@@ -100,7 +100,7 @@ func (s *Server) handleTelegramSetup(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(TelegramSetupResult{Error: "failed to generate webhook secret"})
+		_ = json.NewEncoder(w).Encode(TelegramSetupResult{Error: "failed to generate webhook secret"})
 		return
 	}
 
@@ -111,7 +111,7 @@ func (s *Server) handleTelegramSetup(w http.ResponseWriter, r *http.Request) {
 	if pluginMgr == nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(TelegramSetupResult{Error: "plugin manager not available — cannot start bot"})
+		_ = json.NewEncoder(w).Encode(TelegramSetupResult{Error: "plugin manager not available — cannot start bot"})
 		return
 	}
 
@@ -128,14 +128,14 @@ func (s *Server) handleTelegramSetup(w http.ResponseWriter, r *http.Request) {
 		slog.Error("Telegram hot-start failed", "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(TelegramSetupResult{Error: "bot failed to start — check server logs for details"})
+		_ = json.NewEncoder(w).Encode(TelegramSetupResult{Error: "bot failed to start — check server logs for details"})
 		return
 	}
 
 	// Step 4: Plugin is running — now persist to settings.yaml for restart durability.
 	if err := PersistTelegramConfig(req.BotToken, webhookSecret); err != nil {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(TelegramSetupResult{
+		_ = json.NewEncoder(w).Encode(TelegramSetupResult{
 			Success: true,
 			Bot:     validation.Bot,
 			Message: "Bot @" + validation.Bot.Username + " is running but config failed to save: " + err.Error() + ". The bot will stop on restart.",
@@ -144,7 +144,7 @@ func (s *Server) handleTelegramSetup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(TelegramSetupResult{
+	_ = json.NewEncoder(w).Encode(TelegramSetupResult{
 		Success: true,
 		Bot:     validation.Bot,
 		Message: "Bot @" + validation.Bot.Username + " is connected and running in polling mode.",
