@@ -46,52 +46,63 @@ func TestTelegramSetup_InboundModeValue(t *testing.T) {
 	}
 }
 
-// TestTelegramSetup_V2EnvSet verifies that the telegram plugin entry built
-// by the setup handler includes SCION_TELEGRAM_V2=1 so the plugin runs v2
-// (group links, /setup, project_slug_map). Without this, the plugin silently
-// runs v1 which ignores inbound_mode and lacks onboarding behavior.
-func TestTelegramSetup_V2EnvSet(t *testing.T) {
-	// Simulate the PluginEntry the setup handler builds.
+// TestEnsureTelegramEnv_SetsV2 verifies that EnsureTelegramEnv sets
+// SCION_TELEGRAM_V2=1 for the telegram broker plugin.
+func TestEnsureTelegramEnv_SetsV2(t *testing.T) {
 	entry := scionplugin.PluginEntry{
-		Config: map[string]string{
-			"bot_token":    "test-token",
-			"inbound_mode": "poll",
-		},
-		Env: map[string]string{
-			"SCION_TELEGRAM_V2": "1",
-		},
+		Config: map[string]string{"bot_token": "test"},
 	}
+	EnsureTelegramEnv("telegram", &entry)
 
-	v, ok := entry.Env["SCION_TELEGRAM_V2"]
-	if !ok {
-		t.Fatal("SCION_TELEGRAM_V2 must be set in plugin env")
-	}
-	if v != "1" {
-		t.Fatalf("SCION_TELEGRAM_V2 must be \"1\", got %q", v)
+	if entry.Env["SCION_TELEGRAM_V2"] != "1" {
+		t.Fatal("EnsureTelegramEnv must set SCION_TELEGRAM_V2=1")
 	}
 }
 
-// TestTelegramPluginEntry_EnvPropagation verifies that PluginEntry.Env is
-// propagated through to DiscoveredPlugin via LoadOne's construction path.
-func TestTelegramPluginEntry_EnvPropagation(t *testing.T) {
-	env := map[string]string{"SCION_TELEGRAM_V2": "1"}
+// TestEnsureTelegramEnv_ExistingSettingsWithoutEnv verifies that an existing
+// settings.yaml entry WITHOUT the Env field still gets v2 after
+// EnsureTelegramEnv. This is the migration/restart-safety test.
+func TestEnsureTelegramEnv_ExistingSettingsWithoutEnv(t *testing.T) {
+	// Simulate a pre-existing settings.yaml entry: has config but NO Env.
 	entry := scionplugin.PluginEntry{
-		Config: map[string]string{"bot_token": "test"},
-		Env:    env,
+		Config: map[string]string{
+			"bot_token":      "existing-token",
+			"inbound_mode":   "poll",
+			"webhook_secret": "existing-secret",
+		},
+		// Env is nil — this is what old settings.yaml files look like.
 	}
 
-	// LoadOne builds a DiscoveredPlugin — verify Env field survives.
-	// We can't call LoadOne without a real binary, but we can verify the
-	// struct construction matches.
-	dp := scionplugin.DiscoveredPlugin{
-		Name:       "telegram",
-		Type:       scionplugin.PluginTypeBroker,
-		Config:     entry.Config,
-		Env:        entry.Env,
-		FromConfig: true,
+	if entry.Env != nil {
+		t.Fatal("precondition: Env should be nil to simulate old settings")
 	}
 
-	if dp.Env["SCION_TELEGRAM_V2"] != "1" {
-		t.Fatal("Env not propagated to DiscoveredPlugin")
+	EnsureTelegramEnv("telegram", &entry)
+
+	if entry.Env == nil || entry.Env["SCION_TELEGRAM_V2"] != "1" {
+		t.Fatal("EnsureTelegramEnv must set v2 even when Env was nil (old settings)")
+	}
+	if entry.Config["bot_token"] != "existing-token" {
+		t.Fatal("EnsureTelegramEnv must not modify existing config")
+	}
+}
+
+// TestEnsureTelegramEnv_SkipsNonTelegram verifies non-telegram plugins are untouched.
+func TestEnsureTelegramEnv_SkipsNonTelegram(t *testing.T) {
+	entry := scionplugin.PluginEntry{Config: map[string]string{"key": "val"}}
+	EnsureTelegramEnv("gchat", &entry)
+
+	if entry.Env != nil {
+		t.Fatal("EnsureTelegramEnv should not set Env for non-telegram plugins")
+	}
+}
+
+// TestEnsureTelegramEnv_SkipsSelfManaged verifies self-managed telegram is untouched.
+func TestEnsureTelegramEnv_SkipsSelfManaged(t *testing.T) {
+	entry := scionplugin.PluginEntry{SelfManaged: true}
+	EnsureTelegramEnv("telegram", &entry)
+
+	if entry.Env != nil {
+		t.Fatal("EnsureTelegramEnv should not set Env for self-managed plugins")
 	}
 }

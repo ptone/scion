@@ -107,6 +107,7 @@ func (s *Server) handleAdminTelegramEnable(w http.ResponseWriter, r *http.Reques
 		Config: entry.Config,
 		Env:    entry.Env,
 	}
+	EnsureTelegramEnv("telegram", &pluginEntry)
 
 	if err := WireBrokerPlugin(r.Context(), pluginMgr, s, "telegram", pluginEntry, pluginsDir); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to start telegram: "+err.Error())
