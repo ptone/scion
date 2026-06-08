@@ -394,7 +394,9 @@ type imagePullRequest struct {
 }
 
 type imagePullResponse struct {
-	JobID string `json:"jobId"`
+	JobID          string               `json:"jobId"`
+	InitialResults []runtime.PullResult `json:"initialResults,omitempty"`
+	NeedPull       int                  `json:"needPull"`
 }
 
 func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) {
@@ -443,18 +445,40 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 
 	rt := runtime.GetRuntime("", "")
 
-	go func() {
-		if err := runtime.PullImages(s.ctx, rt, req.Harnesses, registry, func(pr runtime.PullResult) {
-			s.events.PublishRaw("system.images."+jobID, pr)
-		}); err != nil {
-			s.events.PublishRaw("system.images."+jobID, map[string]string{
-				"status": "error",
-				"error":  err.Error(),
-			})
+	images := runtime.HarnessImages(req.Harnesses, registry)
+	var initialResults []runtime.PullResult
+	var needPull []string
+	for _, img := range images {
+		exists, err := rt.ImageExists(r.Context(), img)
+		if err != nil {
+			initialResults = append(initialResults, runtime.PullResult{Image: img, Status: "error", Error: err.Error()})
+			continue
 		}
-	}()
+		if exists {
+			initialResults = append(initialResults, runtime.PullResult{Image: img, Status: "exists"})
+		} else {
+			initialResults = append(initialResults, runtime.PullResult{Image: img, Status: "queued"})
+			needPull = append(needPull, img)
+		}
+	}
 
-	writeJSON(w, http.StatusOK, imagePullResponse{JobID: jobID})
+	if len(needPull) > 0 {
+		go func() {
+			for _, img := range needPull {
+				if err := s.ctx.Err(); err != nil {
+					return
+				}
+				s.events.PublishRaw("system.images."+jobID, runtime.PullResult{Image: img, Status: "pulling"})
+				if err := rt.PullImage(s.ctx, img); err != nil {
+					s.events.PublishRaw("system.images."+jobID, runtime.PullResult{Image: img, Status: "error", Error: err.Error()})
+					continue
+				}
+				s.events.PublishRaw("system.images."+jobID, runtime.PullResult{Image: img, Status: "done"})
+			}
+		}()
+	}
+
+	writeJSON(w, http.StatusOK, imagePullResponse{JobID: jobID, InitialResults: initialResults, NeedPull: len(needPull)})
 }
 
 // --- 4.2: Image Build ---
