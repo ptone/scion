@@ -27,9 +27,11 @@ func mockRuntimeDetection(t *testing.T, availableRuntime string) {
 	t.Helper()
 	origLookPath := lookPathFunc
 	origRunCheck := runCheckFunc
+	resetDetectCache()
 	t.Cleanup(func() {
 		lookPathFunc = origLookPath
 		runCheckFunc = origRunCheck
+		resetDetectCache()
 	})
 	lookPathFunc = func(file string) (string, error) {
 		if file == availableRuntime {
@@ -50,9 +52,11 @@ func mockRuntimeDetectionMulti(t *testing.T, available map[string]bool) {
 	t.Helper()
 	origLookPath := lookPathFunc
 	origRunCheck := runCheckFunc
+	resetDetectCache()
 	t.Cleanup(func() {
 		lookPathFunc = origLookPath
 		runCheckFunc = origRunCheck
+		resetDetectCache()
 	})
 	lookPathFunc = func(file string) (string, error) {
 		if available[file] {
@@ -73,9 +77,11 @@ func mockRuntimeDetectionNone(t *testing.T) {
 	t.Helper()
 	origLookPath := lookPathFunc
 	origRunCheck := runCheckFunc
+	resetDetectCache()
 	t.Cleanup(func() {
 		lookPathFunc = origLookPath
 		runCheckFunc = origRunCheck
+		resetDetectCache()
 	})
 	lookPathFunc = func(file string) (string, error) {
 		return "", fmt.Errorf("not found: %s", file)

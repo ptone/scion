@@ -21,7 +21,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -83,11 +82,7 @@ func getDefaultSettingsDataForRuntime(targetRuntime string) ([]byte, error) {
 func GetDefaultSettingsData() ([]byte, error) {
 	targetRuntime, err := DetectLocalRuntime()
 	if err != nil {
-		if runtime.GOOS == "darwin" {
-			targetRuntime = "container"
-		} else {
-			targetRuntime = "docker"
-		}
+		targetRuntime = "docker"
 	}
 	return getDefaultSettingsDataForRuntime(targetRuntime)
 }
