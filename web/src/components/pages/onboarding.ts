@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -552,6 +552,12 @@ export class ScionPageOnboarding extends LitElement {
     this.cleanupImageEvents();
   }
 
+  override updated(changed: PropertyValues): void {
+    if (changed.has('currentStep') && !this.loading) {
+      localStorage.setItem('onboardingStep', String(this.currentStep));
+    }
+  }
+
   private async initialize(): Promise<void> {
     try {
       const stored = sessionStorage.getItem(ONBOARDING_STATUS_KEY);
@@ -576,11 +582,17 @@ export class ScionPageOnboarding extends LitElement {
       if (status?.gitVersionOK !== undefined) this.gitVersionOK = status.gitVersionOK;
 
       // Resume: advance past completed steps only if user has previously started
-      const previouslyStarted = sessionStorage.getItem('onboardingStarted') === 'true';
+      const previouslyStarted = localStorage.getItem('onboardingStarted') === 'true';
       if (status && previouslyStarted) {
         if (status.identitySet && this.currentStep === 0) this.currentStep = 1;
         if (status.runtimeOK && this.currentStep <= 2) this.currentStep = Math.max(this.currentStep, 3);
         if (status.harnessesSeeded && this.currentStep <= 3) this.currentStep = Math.max(this.currentStep, 4);
+
+        // Restore saved step for steps 4-6 (Images, Workspace, Telegram)
+        const savedStep = parseInt(localStorage.getItem('onboardingStep') || '0', 10);
+        if (savedStep > this.currentStep && savedStep <= TOTAL_STEPS) {
+          this.currentStep = savedStep;
+        }
       }
 
       // Prefill identity from current user
@@ -696,7 +708,7 @@ export class ScionPageOnboarding extends LitElement {
         this.error = await extractApiError(res, 'Failed to save identity');
         return;
       }
-      sessionStorage.setItem('onboardingStarted', 'true');
+      localStorage.setItem('onboardingStarted', 'true');
       this.currentStep = 1;
       void this.loadSystemCheck();
     } finally {
@@ -1578,6 +1590,8 @@ export class ScionPageOnboarding extends LitElement {
     sessionStorage.setItem('onboardingComplete', 'true');
     sessionStorage.removeItem(ONBOARDING_STATUS_KEY);
     sessionStorage.removeItem('onboardingStarted');
+    localStorage.removeItem('onboardingStep');
+    localStorage.removeItem('onboardingStarted');
 
     return html`
       <div class="done-content">
