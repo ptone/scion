@@ -41,6 +41,22 @@ import (
 // is a no-op, losing that spoke).
 var wireBrokerMu sync.Mutex
 
+// EnsureTelegramEnv ensures the plugin entry for the telegram broker includes
+// SCION_TELEGRAM_V2=1. The hub requires the v2 broker (group links, /setup,
+// project_slug_map). This is the SINGLE mechanism for both cold-start and
+// hot-start — it derives the env from the plugin name, not from persisted
+// settings, so existing settings.yaml files without the Env entry still
+// launch telegram as v2.
+func EnsureTelegramEnv(name string, entry *scionplugin.PluginEntry) {
+	if name != "telegram" || entry.SelfManaged {
+		return
+	}
+	if entry.Env == nil {
+		entry.Env = make(map[string]string)
+	}
+	entry.Env["SCION_TELEGRAM_V2"] = "1"
+}
+
 // TelegramBotInfo holds information returned by the Telegram getMe API.
 type TelegramBotInfo struct {
 	ID        int64  `json:"id"`

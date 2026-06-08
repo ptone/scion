@@ -1574,13 +1574,15 @@ func initPluginManager() *scionplugin.Manager {
 		Broker: make(map[string]scionplugin.PluginEntry),
 	}
 	for name, entry := range vs.Server.Plugins.Broker {
-		pluginsCfg.Broker[name] = scionplugin.PluginEntry{
+		pe := scionplugin.PluginEntry{
 			Path:        entry.Path,
 			Config:      entry.Config,
 			SelfManaged: entry.SelfManaged,
 			Address:     entry.Address,
 			Env:         entry.Env,
 		}
+		hub.EnsureTelegramEnv(name, &pe)
+		pluginsCfg.Broker[name] = pe
 	}
 
 	if err := mgr.LoadAll(pluginsCfg, pluginsDir); err != nil {
