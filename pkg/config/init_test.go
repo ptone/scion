@@ -41,10 +41,7 @@ func TestGetDefaultSettingsData_OSSpecific(t *testing.T) {
 		t.Fatal("local profile not found in default settings")
 	}
 
-	expectedRuntime := "docker"
-	if runtime.GOOS == "darwin" {
-		expectedRuntime = "container"
-	}
+	expectedRuntime := expectedDefaultRuntime()
 
 	if localProfile.Runtime != expectedRuntime {
 		t.Errorf("expected runtime %q for OS %q, got %q", expectedRuntime, runtime.GOOS, localProfile.Runtime)
@@ -67,14 +64,25 @@ func TestGetDefaultSettingsDataYAML_OSSpecific(t *testing.T) {
 		t.Fatal("local profile not found in default settings")
 	}
 
-	expectedRuntime := "docker"
-	if runtime.GOOS == "darwin" {
-		expectedRuntime = "container"
-	}
+	expectedRuntime := expectedDefaultRuntime()
 
 	if localProfile.Runtime != expectedRuntime {
 		t.Errorf("expected runtime %q for OS %q, got %q", expectedRuntime, runtime.GOOS, localProfile.Runtime)
 	}
+}
+
+// expectedDefaultRuntime returns the runtime that GetDefaultSettingsData and
+// GetDefaultSettingsDataYAML should select on this machine. It mirrors the
+// fallback logic in those functions: probe via DetectLocalRuntime, then fall
+// back to container (macOS) or docker (other).
+func expectedDefaultRuntime() string {
+	if detected, err := DetectLocalRuntime(); err == nil {
+		return detected
+	}
+	if runtime.GOOS == "darwin" {
+		return "container"
+	}
+	return "docker"
 }
 
 func TestGenerateProjectIDForDir_NoGitRepo(t *testing.T) {
