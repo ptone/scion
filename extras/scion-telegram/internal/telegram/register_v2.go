@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -165,21 +166,31 @@ func (h *RegistrationHandler) HandleRegister(msg *TGMessage) {
 	h.pending[telegramUserID] = reg
 	h.mu.Unlock()
 
-	hubLink := fmt.Sprintf("%s/profile/telegram?code=%s", strings.TrimRight(h.hubURL, "/"), code)
+	linkURL := fmt.Sprintf("%s/profile/telegram?code=%s", strings.TrimRight(h.hubURL, "/"), code)
 
-	text := "To link your Telegram and Scion accounts, tap and hold the button below and choose \"Open in ...\" your authenticated browser.\n\n" +
-		"(Link expires in 15 minutes.)"
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer sendCancel()
 
-	keyboard := &InlineKeyboardMarkup{
-		InlineKeyboard: [][]InlineKeyboardButton{
-			{
-				{Text: "Link Telegram account", URL: hubLink},
+	if isPublicHTTPS(h.hubURL) {
+		text := "To link your Telegram and Scion accounts, tap the button below to open in your browser.\n\n" +
+			"(Link expires in 15 minutes.)"
+		keyboard := &InlineKeyboardMarkup{
+			InlineKeyboard: [][]InlineKeyboardButton{
+				{
+					{Text: "Link Telegram account", URL: linkURL},
+				},
 			},
-		},
-	}
-
-	if _, err := h.api.SendMessageWithKeyboard(ctx, chatID, text, "Markdown", keyboard, 0); err != nil {
-		h.log.Error("Failed to send registration card", "error", err, "chat_id", chatID)
+		}
+		if _, err := h.api.SendMessageWithKeyboard(sendCtx, chatID, text, "", keyboard, 0); err != nil {
+			h.log.Error("Failed to send registration card, falling back to plain text", "error", err, "chat_id", chatID)
+			h.sendReply(chatID, fmt.Sprintf(
+				"Your linking code is: %s\n\nOpen this URL in your browser to complete registration:\n%s\n\n(Code expires in 15 minutes.)",
+				code, linkURL))
+		}
+	} else {
+		h.sendReply(chatID, fmt.Sprintf(
+			"Your linking code is: %s\n\nOpen this URL in your browser to complete registration:\n%s\n\n(Code expires in 15 minutes.)",
+			code, linkURL))
 	}
 
 	go h.pollForConfirmation(pollCtx, reg)
@@ -543,6 +554,21 @@ func generateLinkingCode() (string, error) {
 		result[i] = linkingCodeCharset[n.Int64()]
 	}
 	return string(result), nil
+}
+
+// isPublicHTTPS returns true if the URL is https and not a localhost/loopback
+// address. Telegram rejects http:// and localhost URLs in inline keyboard
+// buttons (BUTTON_URL_INVALID).
+func isPublicHTTPS(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return false
+	}
+	return true
 }
 
 // signBrokerRequest signs an HTTP request with HMAC broker credentials.
