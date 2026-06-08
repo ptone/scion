@@ -86,6 +86,8 @@ export class ScionPageOnboarding extends LitElement {
   @state() private runtimeAvailable = false;
   @state() private buildAvailable = false;
   @state() private imageRegistry = '';
+  @state() private registryInput = 'ghcr.io/homebrew-scion';
+  @state() private registrySaving = false;
   @state() private gitVersion = '';
   @state() private gitVersionOK = true;
   private imageEventSource: EventSource | null = null;
@@ -956,19 +958,25 @@ export class ScionPageOnboarding extends LitElement {
       `;
     }
 
-    // No registry configured — show a clear error rather than letting pull hang
+    // No registry configured — offer a default the user can accept
     if (!this.imageRegistry) {
       return html`
         <h2>Container Images</h2>
-        <div class="alert alert-warning">
-          <strong>No image registry configured.</strong>
-          <p>
-            An image registry is required to pull container images.
-            Run the following to configure one, then restart the server:
-          </p>
-          <code>scion config set --global image_registry ghcr.io/homebrew-scion</code>
-          <p>If you installed via Homebrew, try reinstalling to auto-configure the registry:</p>
-          <code>brew reinstall --HEAD homebrew-scion/scion/scion-workstation</code>
+        <p>An image registry is required to pull container images. You can accept the default or enter your own.</p>
+        <div style="display:flex;gap:0.5rem;align-items:flex-end;margin:1rem 0;">
+          <sl-input
+            label="Image registry"
+            .value=${this.registryInput}
+            @sl-input=${(e: Event) => { this.registryInput = (e.target as HTMLInputElement).value; }}
+            style="flex:1;"
+            ?disabled=${this.registrySaving}
+          ></sl-input>
+          <sl-button
+            variant="primary"
+            ?loading=${this.registrySaving}
+            ?disabled=${!this.registryInput.trim()}
+            @click=${this.handleSaveRegistry}
+          >Accept & Continue</sl-button>
         </div>
         <div class="footer">
           <sl-button variant="text" @click=${() => { this.currentStep = 3; }}>Back</sl-button>
@@ -1060,6 +1068,26 @@ export class ScionPageOnboarding extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  private async handleSaveRegistry(): Promise<void> {
+    this.error = null;
+    this.registrySaving = true;
+    try {
+      const res = await apiFetch('/api/v1/system/image-registry', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ registry: this.registryInput.trim() }),
+      });
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to save image registry');
+        return;
+      }
+      this.imageRegistry = this.registryInput.trim();
+      sessionStorage.removeItem(ONBOARDING_STATUS_KEY);
+    } finally {
+      this.registrySaving = false;
+    }
   }
 
   private async handlePullImages(): Promise<void> {

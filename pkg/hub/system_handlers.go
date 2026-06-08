@@ -387,6 +387,47 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// --- 4.0: Image Registry ---
+
+func (s *Server) handleSystemImageRegistry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		MethodNotAllowed(w)
+		return
+	}
+
+	if err := assertLoopback(r); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
+	var req struct {
+		Registry string `json:"registry"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+
+	req.Registry = strings.TrimSpace(req.Registry)
+	if req.Registry == "" {
+		ValidationError(w, "registry must not be empty", nil)
+		return
+	}
+
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to resolve settings directory", nil)
+		return
+	}
+
+	if err := config.UpdateSetting(globalDir, "image_registry", req.Registry, true); err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, fmt.Sprintf("failed to save image_registry: %v", err), nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"registry": req.Registry})
+}
+
 // --- 4.1: Image Pull ---
 
 type imagePullRequest struct {
