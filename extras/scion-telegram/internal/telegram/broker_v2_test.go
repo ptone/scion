@@ -2314,3 +2314,72 @@ func TestV2_DownloadTelegramFile_DownloadFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "download file")
 }
+
+func TestV2_Configure_PollStartsWithHubCreds(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	// First Configure: no hub creds — polling should NOT start.
+	err := b.Configure(map[string]string{
+		"bot_token":    "test-token",
+		"api_base_url": tgSrv.srv.URL,
+		"db_path":      dbPath,
+		"inbound_mode": "poll",
+	})
+	require.NoError(t, err)
+
+	b.mu.RLock()
+	assert.Nil(t, b.pollCancel, "polling should not start without hub credentials")
+	b.mu.RUnlock()
+
+	// Second Configure (simulates ConfigureBroker injecting creds): polling should start.
+	err = b.Configure(map[string]string{
+		"bot_token":    "test-token",
+		"api_base_url": tgSrv.srv.URL,
+		"db_path":      dbPath,
+		"inbound_mode": "poll",
+		"hub_url":      "http://localhost:8080",
+		"hmac_key":     "secret",
+		"broker_id":    "broker-1",
+	})
+	require.NoError(t, err)
+
+	b.mu.RLock()
+	assert.NotNil(t, b.pollCancel, "polling should start after Configure with hub credentials")
+	b.mu.RUnlock()
+}
+
+func TestV2_Configure_PollIdempotent(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	cfg := map[string]string{
+		"bot_token":    "test-token",
+		"api_base_url": tgSrv.srv.URL,
+		"db_path":      dbPath,
+		"inbound_mode": "poll",
+		"hub_url":      "http://localhost:8080",
+		"hmac_key":     "secret",
+		"broker_id":    "broker-1",
+	}
+
+	require.NoError(t, b.Configure(cfg))
+
+	b.mu.RLock()
+	firstCancel := b.pollCancel
+	b.mu.RUnlock()
+	assert.NotNil(t, firstCancel)
+
+	// Re-configure — polling should still be running (idempotent, not restarted).
+	require.NoError(t, b.Configure(cfg))
+
+	b.mu.RLock()
+	assert.NotNil(t, b.pollCancel, "polling should still be running after re-configure")
+	b.mu.RUnlock()
+}
