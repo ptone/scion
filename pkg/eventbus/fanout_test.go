@@ -436,6 +436,45 @@ func TestFanOutEventBus_Subscribe(t *testing.T) {
 	}
 }
 
+func TestFanOutEventBus_RemoveSpoke(t *testing.T) {
+	b1 := newStubEventBus()
+	b2 := newStubEventBus()
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: b1},
+		{Name: "telegram", Bus: b2},
+	}, slog.Default())
+
+	fan.RemoveSpoke("telegram")
+
+	channels := fan.BusChannels()
+	for _, ch := range channels {
+		if ch.Name == "telegram" {
+			t.Fatal("telegram spoke should be removed")
+		}
+	}
+
+	msg := messages.NewInstruction("user:alice", "agent:bot", "hello")
+	if err := fan.Publish(context.Background(), "test.topic", msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	b2.mu.Lock()
+	if len(b2.published) != 0 {
+		t.Errorf("removed spoke should not receive messages, got %d", len(b2.published))
+	}
+	b2.mu.Unlock()
+}
+
+func TestFanOutEventBus_RemoveSpokeIdempotent(t *testing.T) {
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: newStubEventBus()},
+	}, slog.Default())
+
+	// Removing a non-existent spoke should not panic.
+	fan.RemoveSpoke("nonexistent")
+}
+
 func TestFanOutEventBus_AddSpokeReplacesByName(t *testing.T) {
 	inproc := newStubEventBus()
 	oldTelegram := newStubEventBus()

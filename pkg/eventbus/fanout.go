@@ -150,6 +150,23 @@ func (f *FanOutEventBus) AddSpoke(nb NamedEventBus) {
 	f.log.Info("Added spoke to fan-out bus", "name", nb.Name, "observer", nb.Observer)
 }
 
+// RemoveSpoke removes a named spoke from the fan-out. Subsequent Publish and
+// Subscribe calls will no longer include it. Safe to call if the name doesn't exist.
+func (f *FanOutEventBus) RemoveSpoke(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	filtered := f.buses[:0:0]
+	for _, existing := range f.buses {
+		if existing.Name != name {
+			filtered = append(filtered, existing)
+		}
+	}
+	if len(filtered) < len(f.buses) {
+		f.log.Info("Removed spoke from fan-out bus", "name", name)
+	}
+	f.buses = filtered
+}
+
 // Subscribe delegates to all child event buses. Note: this snapshots the spoke
 // list at call time — spokes added via AddSpoke after this call won't receive
 // messages through this subscription. This is safe because inbound messages
