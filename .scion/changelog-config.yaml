@@ -1,0 +1,21 @@
+changelog:
+  branch: changelog
+  directory: changelog
+  entry_pattern: "YYYY-MM-DD-changelog.md"
+  timezone: America/Los_Angeles
+  schedule:
+    name: daily-changelog
+    cron: "0 7 * * *"  # 07:00 UTC = midnight PT (PDT)
+    agent: changelog-daily
+    description: >-
+      Generate changelog entry for the previous Pacific Time day.
+      Checks ptone/scion main for merged PRs and commits,
+      writes to the changelog branch.
+  sources:
+    - repo: ptone/scion
+      branch: main
+      type: merged-prs
+    - repo: GoogleCloudPlatform/scion
+      branch: main
+      type: upstream-merges
+      author: ptone
