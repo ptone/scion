@@ -566,17 +566,17 @@ type Server struct {
 	lifecycleHookEvaluator *LifecycleHookEvaluator // Lifecycle hook evaluator for agent phase transitions
 	// reconcile op executors (seams): default to executeDispatch/deliverMessage;
 	// Phase 3/4 supply the real local-tunnel ops; tests override for exactly-once.
-	execDispatch           func(ctx context.Context, d store.BrokerDispatch) (string, error)
-	deliverMsg             func(ctx context.Context, m *store.Message) error
-	maintenance            *MaintenanceState // Runtime maintenance mode state
-	hubID                  string            // Unique hub instance ID for secret namespacing
-	instanceID             string            // Unique per-process ID (uuid); affinity key for broker dispatch
-	embeddedBrokerID       string            // Broker ID when running in hub+broker combo mode
-	workstation            bool              // True when running in workstation (non-production) mode
-	scheduler              *Scheduler        // Unified scheduler for recurring tasks
-	cleanupOnce            sync.Once         // Ensures CleanupResources runs only once
-	ctx                    context.Context   // Server-lifetime context; cancelled on Shutdown
-	ctxCancel              context.CancelFunc
+	execDispatch     func(ctx context.Context, d store.BrokerDispatch) (string, error)
+	deliverMsg       func(ctx context.Context, m *store.Message) error
+	maintenance      *MaintenanceState // Runtime maintenance mode state
+	hubID            string            // Unique hub instance ID for secret namespacing
+	instanceID       string            // Unique per-process ID (uuid); affinity key for broker dispatch
+	embeddedBrokerID string            // Broker ID when running in hub+broker combo mode
+	workstation      bool              // True when running in workstation (non-production) mode
+	scheduler        *Scheduler        // Unified scheduler for recurring tasks
+	cleanupOnce      sync.Once         // Ensures CleanupResources runs only once
+	ctx              context.Context   // Server-lifetime context; cancelled on Shutdown
+	ctxCancel        context.CancelFunc
 
 	logQueryService *LogQueryService // Cloud Logging query service (nil = disabled)
 
