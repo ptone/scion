@@ -289,6 +289,10 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "name is required", nil)
 		return
 	}
+	if err := api.ValidateSkillName(req.Name); err != nil {
+		ValidationError(w, fmt.Sprintf("invalid skill name: %v", err), nil)
+		return
+	}
 
 	// Validate scope
 	scope := req.Scope
