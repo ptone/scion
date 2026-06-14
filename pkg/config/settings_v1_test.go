@@ -3230,6 +3230,10 @@ telemetry:
 }
 
 // --- RewriteImageRegistry tests ---
+//
+// Format-based detection: if the first path component contains a "." or ":"
+// it is treated as a registry domain → image kept as-is.
+// Otherwise (bare name or relative path) → rewrite to newRegistry.
 
 func TestRewriteImageRegistry(t *testing.T) {
 	tests := []struct {
@@ -3238,35 +3242,104 @@ func TestRewriteImageRegistry(t *testing.T) {
 		newRegistry string
 		want        string
 	}{
+		// --- Bare scion-* names → rewritten ---
 		{
-			name:        "rewrite scion image",
-			fullImage:   "us-central1-docker.pkg.dev/example-project/scion-images/scion-claude:latest",
+			name:        "bare scion image with tag",
+			fullImage:   "scion-claude:latest",
 			newRegistry: "ghcr.io/myorg",
 			want:        "ghcr.io/myorg/scion-claude:latest",
 		},
 		{
-			name:        "rewrite with trailing slash",
-			fullImage:   "us-central1-docker.pkg.dev/example-project/scion-images/scion-gemini:latest",
-			newRegistry: "ghcr.io/myorg/",
-			want:        "ghcr.io/myorg/scion-gemini:latest",
+			name:        "bare scion image no tag",
+			fullImage:   "scion-claude",
+			newRegistry: "ghcr.io/myorg",
+			want:        "ghcr.io/myorg/scion-claude",
 		},
 		{
-			name:        "do not rewrite non-scion image",
+			name:        "bare scion image with custom tag",
+			fullImage:   "scion-base:v2",
+			newRegistry: "docker.io/myuser",
+			want:        "docker.io/myuser/scion-base:v2",
+		},
+
+		// --- Bare non-scion names → rewritten (new behavior) ---
+		{
+			name:        "bare non-scion image with tag",
+			fullImage:   "my-custom-agent:v2",
+			newRegistry: "ghcr.io/myorg",
+			want:        "ghcr.io/myorg/my-custom-agent:v2",
+		},
+		{
+			name:        "bare ubuntu image with tag",
 			fullImage:   "ubuntu:22.04",
 			newRegistry: "ghcr.io/myorg",
-			want:        "ubuntu:22.04",
+			want:        "ghcr.io/myorg/ubuntu:22.04",
 		},
 		{
-			name:        "do not rewrite custom registry image",
+			name:        "bare image no tag",
+			fullImage:   "my-agent",
+			newRegistry: "ghcr.io/myorg",
+			want:        "ghcr.io/myorg/my-agent",
+		},
+
+		// --- Relative path (no domain) → rewritten ---
+		{
+			name:        "relative path library/scion-claude",
+			fullImage:   "library/scion-claude:latest",
+			newRegistry: "ghcr.io/myorg",
+			want:        "ghcr.io/myorg/scion-claude:latest",
+		},
+		{
+			name:        "relative path myorg/myimage",
+			fullImage:   "myorg/myimage:v1",
+			newRegistry: "ghcr.io/other",
+			want:        "ghcr.io/other/myimage:v1",
+		},
+
+		// --- Fully qualified with registry domain → NOT rewritten ---
+		{
+			name:        "fully qualified ghcr.io",
+			fullImage:   "ghcr.io/myorg/scion-elixir:latest",
+			newRegistry: "us-docker.pkg.dev/proj/repo",
+			want:        "ghcr.io/myorg/scion-elixir:latest",
+		},
+		{
+			name:        "fully qualified us-docker.pkg.dev",
+			fullImage:   "us-docker.pkg.dev/ptone-misc/scion-alt/scion-elixir:latest",
+			newRegistry: "ghcr.io/myorg",
+			want:        "us-docker.pkg.dev/ptone-misc/scion-alt/scion-elixir:latest",
+		},
+		{
+			name:        "fully qualified docker.io",
+			fullImage:   "docker.io/library/ubuntu:22.04",
+			newRegistry: "ghcr.io/myorg",
+			want:        "docker.io/library/ubuntu:22.04",
+		},
+		{
+			name:        "fully qualified custom registry with port",
+			fullImage:   "localhost:5000/myimage:dev",
+			newRegistry: "ghcr.io/myorg",
+			want:        "localhost:5000/myimage:dev",
+		},
+		{
+			name:        "fully qualified custom.registry:5000",
+			fullImage:   "custom.registry:5000/scion-claude:latest",
+			newRegistry: "ghcr.io/myorg",
+			want:        "custom.registry:5000/scion-claude:latest",
+		},
+		{
+			name:        "fully qualified myregistry.io",
 			fullImage:   "myregistry.io/custom-agent:v1",
 			newRegistry: "ghcr.io/myorg",
 			want:        "myregistry.io/custom-agent:v1",
 		},
+
+		// --- Edge cases ---
 		{
 			name:        "empty registry returns original",
-			fullImage:   "us-central1-docker.pkg.dev/example-project/scion-images/scion-claude:latest",
+			fullImage:   "scion-claude:latest",
 			newRegistry: "",
-			want:        "us-central1-docker.pkg.dev/example-project/scion-images/scion-claude:latest",
+			want:        "scion-claude:latest",
 		},
 		{
 			name:        "empty image returns empty",
@@ -3275,28 +3348,28 @@ func TestRewriteImageRegistry(t *testing.T) {
 			want:        "",
 		},
 		{
-			name:        "scion-base image is rewritten",
-			fullImage:   "us-central1-docker.pkg.dev/example-project/scion-images/scion-base:v2",
-			newRegistry: "docker.io/myuser",
-			want:        "docker.io/myuser/scion-base:v2",
-		},
-		{
-			name:        "preserves tag",
-			fullImage:   "us-central1-docker.pkg.dev/example-project/scion-images/scion-opencode:sha-abc123",
-			newRegistry: "ghcr.io/myorg",
-			want:        "ghcr.io/myorg/scion-opencode:sha-abc123",
-		},
-		{
-			name:        "bare image name (no registry prefix)",
-			fullImage:   "scion-claude:latest",
-			newRegistry: "ghcr.io/myorg",
-			want:        "ghcr.io/myorg/scion-claude:latest",
-		},
-		{
-			name:        "bare image name empty registry",
+			name:        "trailing slash on newRegistry is stripped",
 			fullImage:   "scion-gemini:latest",
+			newRegistry: "ghcr.io/myorg/",
+			want:        "ghcr.io/myorg/scion-gemini:latest",
+		},
+		{
+			name:        "sha256 digest bare name",
+			fullImage:   "scion-claude@sha256:abc123def456",
+			newRegistry: "ghcr.io/myorg",
+			want:        "ghcr.io/myorg/scion-claude@sha256:abc123def456",
+		},
+		{
+			name:        "sha256 digest fully qualified",
+			fullImage:   "ghcr.io/myorg/scion-claude@sha256:abc123def456",
+			newRegistry: "docker.io/other",
+			want:        "ghcr.io/myorg/scion-claude@sha256:abc123def456",
+		},
+		{
+			name:        "fully qualified empty registry returns original",
+			fullImage:   "ghcr.io/myorg/scion-claude:latest",
 			newRegistry: "",
-			want:        "scion-gemini:latest",
+			want:        "ghcr.io/myorg/scion-claude:latest",
 		},
 	}
 

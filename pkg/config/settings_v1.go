@@ -188,15 +188,36 @@ func RequireImageRegistry(projectPath, profileName string) error {
 		"     Example:           scion config set --global image_registry ghcr.io/myorg")
 }
 
-// RewriteImageRegistry replaces the registry prefix of a container image reference
-// with newRegistry. Only images whose basename starts with "scion-" are rewritten.
+// RewriteImageRegistry rewrites an image reference to use newRegistry.
+//
+// Detection uses the Docker/OCI convention: if the part before the first "/"
+// contains a "." or ":" it is treated as a registry domain and the image is
+// considered fully qualified — it is returned unchanged.
+//
+// Bare names (e.g. "scion-claude:latest", "my-agent:v2") and relative paths
+// (e.g. "library/scion-claude:latest") are rewritten so that the basename
+// (last path component) is placed under newRegistry.
+//
 // If newRegistry is empty, the original image is returned unchanged.
 func RewriteImageRegistry(fullImage, newRegistry string) string {
 	if newRegistry == "" || fullImage == "" {
 		return fullImage
 	}
 
-	// Extract the basename (last path component, e.g. "scion-claude:latest")
+	// Check whether the image reference is fully qualified (has a registry domain).
+	// Per Docker/OCI convention, the first path component is a domain if it
+	// contains a "." (e.g. "ghcr.io", "us-docker.pkg.dev") or a ":"
+	// (e.g. "localhost:5000").
+	if firstSlash := strings.Index(fullImage, "/"); firstSlash >= 0 {
+		firstComponent := fullImage[:firstSlash]
+		if strings.ContainsAny(firstComponent, ".:") {
+			// Fully qualified image — keep as-is.
+			return fullImage
+		}
+	}
+
+	// Bare name or relative path — rewrite to newRegistry.
+	// Extract the basename (last path component, e.g. "scion-claude:latest").
 	lastSlash := strings.LastIndex(fullImage, "/")
 	var basename string
 	if lastSlash >= 0 {
@@ -205,12 +226,6 @@ func RewriteImageRegistry(fullImage, newRegistry string) string {
 		basename = fullImage
 	}
 
-	// Only rewrite images following the scion naming convention
-	if !strings.HasPrefix(basename, "scion-") {
-		return fullImage
-	}
-
-	// Strip trailing slash from registry
 	registry := strings.TrimRight(newRegistry, "/")
 	return registry + "/" + basename
 }
