@@ -18,8 +18,8 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .PHONY: all build install test test-fast vet lint compat-literals golangci-lint web web-typecheck fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries
 
-## all: Build the web frontend, then compile the Go binary with embedded assets
-all: web install
+## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
+all: web build
 
 ## build: Compile the scion binary into ./build/
 build:
@@ -28,8 +28,12 @@ build:
 	@go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) $(MAIN_PKG)
 	@echo "Binary: $(BUILD_DIR)/$(BINARY)"
 
-## install: Build and install the binary (default: /usr/local/bin, override with PREFIX=~/.local)
-install: build
+## install: Install a pre-built binary (default: /usr/local/bin, override with PREFIX=~/.local). Run 'make build' first.
+install:
+	@if [ ! -f $(BUILD_DIR)/$(BINARY) ]; then \
+		echo "Error: $(BUILD_DIR)/$(BINARY) not found. Run 'make build' (or 'make all') first."; \
+		exit 1; \
+	fi
 	@echo "Installing $(BINARY) to $(DESTDIR)$(INSTALL_DIR)..."
 	@mkdir -p $(DESTDIR)$(INSTALL_DIR)
 	@install $(BUILD_DIR)/$(BINARY) $(DESTDIR)$(INSTALL_DIR)/$(BINARY)

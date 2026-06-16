@@ -879,8 +879,9 @@ func resolveEffectiveProjectPath(projectPath string) string {
 // Provider priority:
 // 1. Embedded defaults (YAML) with OS-specific runtime adjustment
 // 2. Global settings file (~/.scion/settings.yaml or .json)
-// 3. Project settings file (.scion/settings.yaml or .json)
-// 4. Environment variables (SCION_ prefix)
+// 3. In-repo project settings file (.scion/settings.yaml or .json)
+// 4. External project config settings (for git projects with split storage)
+// 5. Environment variables (SCION_ prefix)
 func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	k := koanf.New(".")
 
@@ -897,9 +898,17 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		}
 	}
 
-	// 3. Load project settings
+	// 3. Load in-repo project settings (.scion/settings.yaml)
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
-	if effectiveProjectPath != "" && effectiveProjectPath != globalDir {
+	if projectPath != "" && projectPath != globalDir {
+		if err := loadSettingsFile(k, projectPath); err != nil {
+			return nil, err
+		}
+		warnIfInRepoHasGlobalKeys(projectPath, effectiveProjectPath)
+	}
+
+	// 4. Load external project config settings (overrides in-repo for split storage)
+	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath {
 		if err := loadSettingsFile(k, effectiveProjectPath); err != nil {
 			return nil, err
 		}

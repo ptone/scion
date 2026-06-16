@@ -829,6 +829,10 @@ func resolveAPIPath(urlPath string) string {
 	case strings.HasPrefix(p, "/projects/") && strings.Count(p, "/") == 2:
 		// /projects/{id} -> /api/v1/projects/{id}
 		return "/api/v1" + p
+	case p == "/skills":
+		return "/api/v1/skills"
+	case strings.HasPrefix(p, "/skills/") && strings.Count(p, "/") == 2:
+		return "/api/v1" + p
 	default:
 		return ""
 	}
@@ -1641,7 +1645,7 @@ func (ws *WebServer) securityHeadersMiddleware(next http.Handler) http.Handler {
 		"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com https://fonts.googleapis.com",
 		"font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdn.webawesome.com",
 		"img-src 'self' data: https:",
-		"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:*",
+		"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com",
 	}, "; ")
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

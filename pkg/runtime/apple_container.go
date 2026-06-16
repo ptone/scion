@@ -161,8 +161,33 @@ func (r *AppleContainerRuntime) Delete(ctx context.Context, id string) error {
 	return err
 }
 
+type containerStatus struct {
+	State string
+}
+
+func (s *containerStatus) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 {
+		return nil
+	}
+	// Try parsing as simple string
+	var str string
+	if err := json.Unmarshal(b, &str); err == nil {
+		s.State = str
+		return nil
+	}
+	// Try parsing as object with "state" field
+	var obj struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(b, &obj); err == nil {
+		s.State = obj.State
+		return nil
+	}
+	return fmt.Errorf("failed to unmarshal status from %s", string(b))
+}
+
 type containerListOutput struct {
-	Status        string `json:"status"`
+	Status        containerStatus `json:"status"`
 	Configuration struct {
 		ID     string            `json:"id"`
 		Labels map[string]string `json:"labels"`
@@ -224,8 +249,8 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 			ProjectPath:     projectcompat.ProjectPathFromLabels(c.Configuration.Labels),
 			Labels:          c.Configuration.Labels,
 			Annotations:     c.Configuration.Labels,
-			ContainerStatus: c.Status,
-			Phase:           phaseFromContainerStatus(c.Status),
+			ContainerStatus: c.Status.State,
+			Phase:           phaseFromContainerStatus(c.Status.State),
 			Image:           c.Configuration.Image.Reference,
 			Runtime:         r.Name(),
 		})

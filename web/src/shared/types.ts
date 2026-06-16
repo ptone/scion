@@ -771,6 +771,87 @@ export interface PolicyConditions {
   delegatedFromGroup?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+export type SkillScope = 'core' | 'global' | 'project' | 'user';
+export type SkillVisibility = 'public' | 'private';
+export type SkillVersionStatus = 'draft' | 'published' | 'deprecated' | 'archived';
+
+export interface Skill {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  tags?: string[];
+  scope: SkillScope;
+  scopeId?: string;
+  status: string;
+  ownerId?: string;
+  createdBy?: string;
+  visibility: SkillVisibility;
+  created: string;
+  updated: string;
+  _capabilities?: Capabilities;
+}
+
+export interface SkillVersion {
+  id: string;
+  skillId: string;
+  version: string;
+  status: SkillVersionStatus;
+  contentHash?: string;
+  files?: SkillFile[];
+  publisherId?: string;
+  deprecationMessage?: string;
+  replacementUri?: string;
+  downloadCount: number;
+  created: string;
+}
+
+export interface SkillFile {
+  path: string;
+  size: number;
+  hash?: string;
+  mode?: string;
+}
+
+export interface SkillUploadUrl {
+  path: string;
+  url: string;
+  method: string;
+  headers?: Record<string, string>;
+  expires: string;
+}
+
+export interface SkillDownloadUrl {
+  path: string;
+  url: string;
+  size: number;
+  hash?: string;
+}
+
+// Skill Registry types (admin only)
+
+export type SkillRegistryStatus = 'active' | 'disabled';
+export type SkillRegistryTrustLevel = 'trusted' | 'pinned';
+export type SkillRegistryType = 'hub' | 'gcp';
+
+export interface SkillRegistry {
+  id: string;
+  name: string;
+  endpoint: string;
+  description?: string;
+  type: SkillRegistryType;
+  trustLevel: SkillRegistryTrustLevel;
+  resolvePath?: string;
+  status: SkillRegistryStatus;
+  createdBy?: string;
+  created: string;
+  updated: string;
+}
+
 /**
  * Policy effect: allow or deny.
  */

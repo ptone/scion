@@ -35,8 +35,9 @@ import (
 // LoadSettingsKoanf loads settings using Koanf with provider priority:
 // 1. Embedded defaults (YAML) with OS-specific runtime adjustment
 // 2. Global settings file (~/.scion/settings.yaml or .json)
-// 3. Project settings file (.scion/settings.yaml or .json)
-// 4. Environment variables (SCION_ prefix, top-level only)
+// 3. In-repo project settings file (.scion/settings.yaml or .json)
+// 4. External project config settings (for git projects with split storage)
+// 5. Environment variables (SCION_ prefix, top-level only)
 func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	k := koanf.New(".")
 
@@ -54,10 +55,19 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 		}
 	}
 
-	// 3. Load project settings
+	// 3. Load in-repo project settings (.scion/settings.yaml)
+	// For git projects with split storage, the in-repo settings provide
+	// project-level defaults checked into the repo.
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
-	// Only load project settings if it's different from global (avoid double-loading)
-	if effectiveProjectPath != "" && effectiveProjectPath != globalDir {
+	if projectPath != "" && projectPath != globalDir {
+		if err := loadSettingsFile(k, projectPath); err != nil {
+			return nil, err
+		}
+		warnIfInRepoHasGlobalKeys(projectPath, effectiveProjectPath)
+	}
+
+	// 4. Load external project config settings (overrides in-repo for split storage)
+	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath {
 		if err := loadSettingsFile(k, effectiveProjectPath); err != nil {
 			return nil, err
 		}
@@ -304,4 +314,32 @@ func SettingsFileExists(dir string) bool {
 // ScionAgentConfigExists checks if a scion-agent config file exists (YAML or JSON)
 func ScionAgentConfigExists(dir string) bool {
 	return GetScionAgentConfigPath(dir) != ""
+}
+
+// warnIfInRepoHasGlobalKeys emits a warning if an in-repo settings file contains
+// profiles or runtimes keys, which are typically managed at the global level.
+// Only warns when split storage is active (effectivePath differs from inRepoPath).
+func warnIfInRepoHasGlobalKeys(inRepoPath, effectivePath string) {
+	if effectivePath == "" || effectivePath == inRepoPath {
+		return
+	}
+	if GetSettingsPath(inRepoPath) == "" {
+		return
+	}
+
+	probe := koanf.New(".")
+	if err := loadSettingsFile(probe, inRepoPath); err != nil {
+		return
+	}
+	var keys []string
+	if probe.Exists("profiles") {
+		keys = append(keys, "profiles")
+	}
+	if probe.Exists("runtimes") {
+		keys = append(keys, "runtimes")
+	}
+	if len(keys) > 0 {
+		fmt.Fprintf(os.Stderr, "Warning: in-repo %s/settings.yaml contains %s; these are typically managed at the global level (~/.scion/settings.yaml).\n",
+			inRepoPath, strings.Join(keys, " and "))
+	}
 }

@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,5 +135,43 @@ echo "$@"
 
 	if strings.Contains(out, "--cap-add") {
 		t.Errorf("Apple container args should not contain --cap-add, got %q", out)
+	}
+}
+
+func TestContainerStatus_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "string status",
+			input: `"running"`,
+			want:  "running",
+		},
+		{
+			name:  "object status with state",
+			input: `{"networks":[],"state":"stopped"}`,
+			want:  "stopped",
+		},
+		{
+			name:    "invalid format",
+			input:   `123`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s containerStatus
+			err := json.Unmarshal([]byte(tt.input), &s)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("json.Unmarshal() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && s.State != tt.want {
+				t.Errorf("got state %q, want %q", s.State, tt.want)
+			}
+		})
 	}
 }

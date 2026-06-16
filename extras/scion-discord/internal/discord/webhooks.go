@@ -3,6 +3,7 @@ package discord
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -111,7 +112,7 @@ func (wm *WebhookManager) invalidate(channelID string) {
 // SendAsAgent sends a message via webhook with the agent's identity (name + avatar).
 // If the webhook has been deleted externally (404/Unknown Webhook), the cache
 // entry is invalidated and a new webhook is created for a retry.
-func (wm *WebhookManager) SendAsAgent(channelID, agentSlug, content string, embeds []*discordgo.MessageEmbed, components []discordgo.MessageComponent) (*discordgo.Message, error) {
+func (wm *WebhookManager) SendAsAgent(channelID, agentSlug, content string, embeds []*discordgo.MessageEmbed, components []discordgo.MessageComponent, files []*discordgo.File) (*discordgo.Message, error) {
 	wh, err := wm.getOrCreateWebhook(channelID)
 	if err != nil {
 		return nil, fmt.Errorf("get webhook for channel %s: %w", channelID, err)
@@ -123,6 +124,7 @@ func (wm *WebhookManager) SendAsAgent(channelID, agentSlug, content string, embe
 		AvatarURL:  agentIconURL(agentSlug),
 		Embeds:     embeds,
 		Components: components,
+		Files:      files,
 	}
 
 	// wait=true so discordgo returns the created Message object.
@@ -140,6 +142,7 @@ func (wm *WebhookManager) SendAsAgent(channelID, agentSlug, content string, embe
 			if err2 != nil {
 				return nil, fmt.Errorf("recreate webhook after 404: %w", err2)
 			}
+			resetFileReaders(files)
 			msg, err = wm.session.WebhookExecute(wh2.ID, wh2.Token, true, params)
 			if err != nil {
 				return nil, fmt.Errorf("webhook send after recreate: %w", err)
@@ -147,6 +150,49 @@ func (wm *WebhookManager) SendAsAgent(channelID, agentSlug, content string, embe
 			return msg, nil
 		}
 		return nil, fmt.Errorf("webhook execute: %w", err)
+	}
+
+	return msg, nil
+}
+
+// SendAsAgentInThread sends a message via webhook with the agent's identity,
+// targeting a specific thread. For forum channels, the webhook is created on
+// the parent channel and executed with thread_id to post in the correct thread.
+func (wm *WebhookManager) SendAsAgentInThread(parentChannelID, threadID, agentSlug, content string, embeds []*discordgo.MessageEmbed, components []discordgo.MessageComponent, files []*discordgo.File) (*discordgo.Message, error) {
+	wh, err := wm.getOrCreateWebhook(parentChannelID)
+	if err != nil {
+		return nil, fmt.Errorf("get webhook for channel %s: %w", parentChannelID, err)
+	}
+
+	params := &discordgo.WebhookParams{
+		Content:    content,
+		Username:   agentSlug,
+		AvatarURL:  agentIconURL(agentSlug),
+		Embeds:     embeds,
+		Components: components,
+		Files:      files,
+	}
+
+	msg, err := wm.session.WebhookThreadExecute(wh.ID, wh.Token, true, threadID, params)
+	if err != nil {
+		if isWebhookNotFound(err) {
+			wm.log.Warn("Webhook gone (deleted externally), recreating",
+				"channel_id", parentChannelID,
+				"webhook_id", wh.ID)
+			wm.invalidate(parentChannelID)
+
+			wh2, err2 := wm.getOrCreateWebhook(parentChannelID)
+			if err2 != nil {
+				return nil, fmt.Errorf("recreate webhook after 404: %w", err2)
+			}
+			resetFileReaders(files)
+			msg, err = wm.session.WebhookThreadExecute(wh2.ID, wh2.Token, true, threadID, params)
+			if err != nil {
+				return nil, fmt.Errorf("webhook send after recreate: %w", err)
+			}
+			return msg, nil
+		}
+		return nil, fmt.Errorf("webhook thread execute: %w", err)
 	}
 
 	return msg, nil
@@ -182,8 +228,14 @@ func isWebhookNotFound(err error) bool {
 	return strings.Contains(s, "10015") || strings.Contains(s, "Unknown Webhook")
 }
 
-// isDiscordHTTPError checks whether err represents a specific HTTP status code
-// from the Discord API. Used for error classification in retry logic.
+func resetFileReaders(files []*discordgo.File) {
+	for _, f := range files {
+		if seeker, ok := f.Reader.(io.Seeker); ok {
+			_, _ = seeker.Seek(0, io.SeekStart)
+		}
+	}
+}
+
 func isDiscordHTTPError(err error, statusCode int) bool {
 	if err == nil {
 		return false

@@ -464,10 +464,11 @@ var configDirCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		configDir := config.GetProjectConfigDir(projectDir)
 		if isJSONOutput() {
-			return outputJSON(map[string]string{"path": projectDir})
+			return outputJSON(map[string]string{"path": configDir})
 		}
-		fmt.Println(projectDir)
+		fmt.Println(configDir)
 		return nil
 	},
 }
@@ -480,7 +481,8 @@ var configCdConfigCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return execShellInDir(projectDir)
+		configDir := config.GetProjectConfigDir(projectDir)
+		return execShellInDir(configDir)
 	},
 }
 

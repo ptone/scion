@@ -202,22 +202,35 @@ def _provision(manifest: dict[str, Any]) -> int:
     env_keys = _present_env_keys(candidates)
     secret_files = _env_secret_files(candidates)
 
-    try:
-        method, env_key = _select_auth_method(explicit, env_keys)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_ERROR
+    # No-auth mode: when no auth candidates were staged and the harness config
+    # declares a no_auth behavior, skip auth setup entirely.
+    harness_cfg = manifest.get("harness_config") or {}
+    no_auth_cfg = harness_cfg.get("no_auth") or {}
+    no_auth_behavior = str(no_auth_cfg.get("behavior") or "").strip()
+
+    if not candidates and no_auth_behavior:
+        print(f"amp provision: no-auth mode (behavior={no_auth_behavior}), skipping auth setup", file=sys.stderr)
+        method = "none"
+        env_key = ""
+    else:
+        try:
+            method, env_key = _select_auth_method(explicit, env_keys)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_ERROR
 
     # Read the secret value and project it as AMP_API_KEY so Amp can find it
     # regardless of which source key was used (AMP_API_KEY or ANTHROPIC_API_KEY).
-    api_key = _read_secret(secret_files, env_key)
-    if not api_key:
-        print(
-            f"amp provision: chose api-key ({env_key}) but no secret value "
-            f"was staged at the recorded path; check ApplyAuthSettings",
-            file=sys.stderr,
-        )
-        return EXIT_ERROR
+    api_key = ""
+    if method == "api-key":
+        api_key = _read_secret(secret_files, env_key)
+        if not api_key:
+            print(
+                f"amp provision: chose api-key ({env_key}) but no secret value "
+                f"was staged at the recorded path; check ApplyAuthSettings",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
 
     # Reconcile settings before writing outputs so any failures are reported
     # before the env overlay is committed.
@@ -238,14 +251,17 @@ def _provision(manifest: dict[str, Any]) -> int:
         "harness": "amp",
         "method": method,
         "explicit_type": explicit or None,
-        "env_var": env_key,
     }
+    if method == "api-key":
+        resolved_payload["env_var"] = env_key
 
     # Project the resolved key as AMP_API_KEY. Amp reads AMP_API_KEY from the
     # environment; normalizing here means the agent process sees a single
     # canonical variable regardless of whether the user supplied AMP_API_KEY or
     # ANTHROPIC_API_KEY.
-    env_payload: dict[str, Any] = {"AMP_API_KEY": api_key}
+    env_payload: dict[str, Any] = {}
+    if api_key:
+        env_payload["AMP_API_KEY"] = api_key
 
     try:
         _write_json(auth_out, resolved_payload)

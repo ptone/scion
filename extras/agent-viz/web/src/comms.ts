@@ -14,8 +14,14 @@
  * limitations under the License.
  */
 
+import { marked } from 'marked';
+
 import type { MessageEvent } from './types';
 import type { AgentRing } from './agents';
+
+// Render message bodies as inline-friendly HTML: no leading <h1> ids, GitHub-style
+// line breaks so single newlines in agent output become visible breaks.
+marked.use({ breaks: true, gfm: true });
 
 /**
  * Window (in event-time ms) for collapsing duplicate broadcast deliveries into a
@@ -165,20 +171,52 @@ export class CommsPanel {
       : '';
     const bcastBadge = broadcast ? '<span class="comms-badge">BROADCAST</span>' : '';
 
+    // The raw message body. Rendered as Markdown lazily on first expand (below), so
+    // collapsed cards — the default, and every card during snapshot replay — pay no
+    // parse cost.
+    const rawContent = event.content ?? '';
+
+    // A one-line plain-text summary shown while the message is collapsed (the default).
+    // Slice first so a huge payload (e.g. a large JSON blob) can't block the main thread
+    // in the regex; strip markdown punctuation + collapse whitespace to keep it one line.
+    const summary = rawContent
+      .slice(0, 1000)
+      .replace(/[#*`>_~\[\]]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 120);
+
     card.innerHTML = `
-      <div class="comms-msg-meta">
-        <span class="comms-time">${this.formatTime(timestamp)}</span>
-        ${bcastBadge}
-        <span class="comms-index">#${this.count + 1}</span>
+      <div class="comms-msg-header">
+        <div class="comms-msg-meta">
+          <span class="comms-time">${this.formatTime(timestamp)}</span>
+          ${bcastBadge}
+          <span class="comms-index">#${this.count + 1}</span>
+        </div>
+        <div class="comms-route">
+          <span class="comms-msg-toggle">▸</span>
+          <span style="color:${senderColor}">${escapeHtml(event.sender || '?')}</span>
+          <span class="comms-arrow">${arrow}</span>
+          <span style="color:${recipientColor}">${escapeHtml(recipientLabel)}</span>
+          ${typeTag}
+        </div>
+        <div class="comms-summary">${escapeHtml(summary)}</div>
       </div>
-      <div class="comms-route">
-        <span style="color:${senderColor}">${escapeHtml(event.sender || '?')}</span>
-        <span class="comms-arrow">${arrow}</span>
-        <span style="color:${recipientColor}">${escapeHtml(recipientLabel)}</span>
-        ${typeTag}
-      </div>
-      <div class="comms-content">${escapeHtml(event.content ?? '')}</div>
+      <div class="comms-content markdown"></div>
     `;
+    // Collapsed by default. Parse + render the Markdown only on first expand, escaping the
+    // raw body first: marked does NOT strip raw HTML, so escaping neutralizes any
+    // <script>/<img onerror> in agent output before it reaches innerHTML. (Trade-off: `>`
+    // is escaped too, so Markdown blockquotes render as literal text — acceptable here.)
+    let rendered = false;
+    card.querySelector('.comms-msg-header')?.addEventListener('click', () => {
+      if (!rendered) {
+        const contentEl = card.querySelector('.comms-content');
+        if (contentEl) contentEl.innerHTML = marked.parse(escapeHtml(rawContent)) as string;
+        rendered = true;
+      }
+      card.classList.toggle('expanded');
+    });
     return card;
   }
 

@@ -783,3 +783,139 @@ hub:
 	assert.Equal(t, "hub-grove-uuid-different", s.GetHubProjectID(),
 		"GetHubProjectID() should return the hub project ID, distinct from local grove_id")
 }
+
+func TestLoadSettingsKoanf_InRepoSettingsLayered(t *testing.T) {
+	// Verifies that when a git project has split storage (project-id file),
+	// the in-repo .scion/settings.yaml is loaded as a layer between global
+	// and external config settings.
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+	os.Setenv("HOME", tmpDir)
+
+	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID", "SCION_ACTIVE_PROFILE"} {
+		if orig, ok := os.LookupEnv(env); ok {
+			os.Unsetenv(env)
+			t.Cleanup(func() { os.Setenv(env, orig) })
+		}
+	}
+
+	// Global settings with profiles.local.runtime = podman
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	globalSettings := `schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: podman
+runtimes:
+  podman:
+    type: podman
+  container:
+    type: container
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644))
+
+	// In-repo .scion directory with profiles.local.runtime = container
+	projectScionDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectScionDir, 0755))
+	inRepoSettings := `schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: container
+`
+	require.NoError(t, os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(inRepoSettings), 0644))
+
+	// Write project-id file to trigger split storage
+	require.NoError(t, WriteProjectID(projectScionDir, "test-project-id"))
+
+	// Create external config dir (empty — no settings file)
+	projectConfigDir, err := GetGitProjectExternalConfigDir(projectScionDir)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(projectConfigDir, 0755))
+
+	s, err := LoadSettingsKoanf(projectScionDir)
+	require.NoError(t, err)
+
+	// In-repo settings should override global: runtime should be "container", not "podman"
+	profile, ok := s.Profiles["local"]
+	require.True(t, ok, "local profile should exist")
+	assert.Equal(t, "container", profile.Runtime,
+		"in-repo settings should override global profiles.local.runtime")
+}
+
+func TestLoadSettingsKoanf_ExternalOverridesInRepo(t *testing.T) {
+	// Verifies that external project config settings override in-repo settings
+	// when both exist (external has highest project-level precedence).
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+	os.Setenv("HOME", tmpDir)
+
+	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID", "SCION_ACTIVE_PROFILE"} {
+		if orig, ok := os.LookupEnv(env); ok {
+			os.Unsetenv(env)
+			t.Cleanup(func() { os.Setenv(env, orig) })
+		}
+	}
+
+	// Global settings
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	globalSettings := `schema_version: "1"
+active_profile: local
+default_template: global-default
+profiles:
+  local:
+    runtime: podman
+runtimes:
+  podman:
+    type: podman
+  container:
+    type: container
+  docker:
+    type: docker
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644))
+
+	// In-repo settings
+	projectScionDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectScionDir, 0755))
+	inRepoSettings := `schema_version: "1"
+active_profile: local
+default_template: in-repo-default
+profiles:
+  local:
+    runtime: container
+`
+	require.NoError(t, os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(inRepoSettings), 0644))
+
+	// Write project-id file to trigger split storage
+	require.NoError(t, WriteProjectID(projectScionDir, "test-project-id"))
+
+	// Create external config dir with settings that override in-repo
+	projectConfigDir, err := GetGitProjectExternalConfigDir(projectScionDir)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(projectConfigDir, 0755))
+	externalSettings := `schema_version: "1"
+default_template: external-override
+profiles:
+  local:
+    runtime: docker
+`
+	require.NoError(t, os.WriteFile(filepath.Join(projectConfigDir, "settings.yaml"), []byte(externalSettings), 0644))
+
+	s, err := LoadSettingsKoanf(projectScionDir)
+	require.NoError(t, err)
+
+	// External config should override in-repo
+	assert.Equal(t, "external-override", s.DefaultTemplate,
+		"external config should override in-repo default_template")
+	profile, ok := s.Profiles["local"]
+	require.True(t, ok, "local profile should exist")
+	assert.Equal(t, "docker", profile.Runtime,
+		"external config should override in-repo profiles.local.runtime")
+}
