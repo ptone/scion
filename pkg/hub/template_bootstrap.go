@@ -261,7 +261,7 @@ const bundledHarnessConfigConcurrency = 4
 //
 // This is a thin wrapper over the shared import driver (resource_import.go).
 func (s *Server) importTemplatesFromRemote(ctx context.Context, projectID, sourceURL string) ([]string, error) {
-	return s.importFromRemote(ctx, projectID, sourceURL, store.TemplateScopeProject, s.templateImportKind(), nil)
+	return s.importFromRemote(ctx, projectID, sourceURL, store.TemplateScopeProject, s.templateImportKind(), nil, nil)
 }
 
 // importTemplatesFromWorkspace imports templates from a path within the
@@ -270,5 +270,5 @@ func (s *Server) importTemplatesFromRemote(ctx context.Context, projectID, sourc
 //
 // This is a thin wrapper over the shared import driver (resource_import.go).
 func (s *Server) importTemplatesFromWorkspace(ctx context.Context, project *store.Project, workspacePath string) ([]string, error) {
-	return s.importFromWorkspace(ctx, project, workspacePath, store.TemplateScopeProject, s.templateImportKind(), nil)
+	return s.importFromWorkspace(ctx, project, workspacePath, store.TemplateScopeProject, s.templateImportKind(), nil, nil)
 }
