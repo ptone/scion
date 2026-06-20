@@ -80,6 +80,10 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 		name = entry.Name
 	}
 
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
+		return nil, fmt.Errorf("invalid harness-config name %q; name cannot contain path components or separators", name)
+	}
+
 	return &HarnessConfigDir{
 		Name:   name,
 		Path:   absPath,
