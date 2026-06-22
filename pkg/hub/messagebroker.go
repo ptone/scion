@@ -492,12 +492,8 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	// strip the prefix and promote to urgent so the harness is interrupted
 	// before delivery — equivalent to --interrupt on the CLI.
 	// Shallow-copy to avoid mutating the event-bus pointer shared across subscribers.
-	if trimmed := strings.TrimSpace(msg.Msg); strings.HasPrefix(trimmed, "!") {
+	if content, isInterrupt := stripInterruptPrefix(msg.Msg); isInterrupt {
 		stripped := *msg
-		content := strings.TrimSpace(trimmed[1:])
-		if content == "" {
-			content = "interrupt"
-		}
 		stripped.Msg = content
 		stripped.Urgent = true
 		msg = &stripped
@@ -681,6 +677,21 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 		p.log.Warn("Failed to dispatch DELIVERY_FAILED notification",
 			"senderID", msg.SenderID, "error", err)
 	}
+}
+
+// stripInterruptPrefix checks for a leading "!" in a message body and returns
+// the stripped content and true if the prefix was found. A bare "!" yields
+// "interrupt" as the content.
+func stripInterruptPrefix(msg string) (string, bool) {
+	trimmed := strings.TrimSpace(msg)
+	if !strings.HasPrefix(trimmed, "!") {
+		return msg, false
+	}
+	content := strings.TrimSpace(trimmed[1:])
+	if content == "" {
+		content = "interrupt"
+	}
+	return content, true
 }
 
 // containsSuffix checks if a dot-separated subject string ends with the given suffix.

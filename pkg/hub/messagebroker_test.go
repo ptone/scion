@@ -973,3 +973,33 @@ func TestContainsSuffix(t *testing.T) {
 		}
 	}
 }
+
+func TestStripInterruptPrefix(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantMsg     string
+		wantStripped bool
+	}{
+		{"bare bang", "!", "interrupt", true},
+		{"bang with spaces", "!   ", "interrupt", true},
+		{"bang with content", "!restart now", "restart now", true},
+		{"leading space before bang", "  !restart", "restart", true},
+		{"space between bang and content", "!  restart", "restart", true},
+		{"leading and inner space", "  !  restart now  ", "restart now", true},
+		{"normal message", "hello", "hello", false},
+		{"empty string", "", "", false},
+		{"exclamation mid-message", "hello ! world", "hello ! world", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotMsg, gotStripped := stripInterruptPrefix(tt.input)
+			if gotMsg != tt.wantMsg {
+				t.Errorf("stripInterruptPrefix(%q) msg = %q, want %q", tt.input, gotMsg, tt.wantMsg)
+			}
+			if gotStripped != tt.wantStripped {
+				t.Errorf("stripInterruptPrefix(%q) stripped = %v, want %v", tt.input, gotStripped, tt.wantStripped)
+			}
+		})
+	}
+}

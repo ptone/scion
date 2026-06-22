@@ -145,6 +145,15 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A leading "!" in the message body acts as an inline interrupt signal:
+	// strip the prefix and promote to urgent. This path bypasses the broker
+	// proxy (to avoid circular delivery), so the stripping that normally
+	// happens in deliverToAgent must be applied here.
+	if content, isInterrupt := stripInterruptPrefix(req.Message.Msg); isInterrupt {
+		req.Message.Msg = content
+		req.Message.Urgent = true
+	}
+
 	// Dispatch directly to the agent, bypassing the broker to avoid circular delivery
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
