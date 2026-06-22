@@ -360,7 +360,8 @@ func (s *Server) importTemplatesFromWorkspace(ctx context.Context, project *stor
 	// Validate the resolved path is within the project root
 	absRoot, _ := filepath.Abs(projectRoot)
 	absDir, _ := filepath.Abs(templatesDir)
-	if !strings.HasPrefix(absDir, absRoot) {
+	sep := string(filepath.Separator)
+	if absDir != absRoot && !strings.HasPrefix(absDir, absRoot+sep) {
 		return nil, fmt.Errorf("workspace path must be within the project workspace")
 	}
 
