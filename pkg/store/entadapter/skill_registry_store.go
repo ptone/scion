@@ -56,7 +56,7 @@ func entSkillRegistryToStore(e *ent.SkillRegistry) *store.SkillRegistry {
 
 func (s *SkillRegistryStore) CreateSkillRegistry(ctx context.Context, registry *store.SkillRegistry) error {
 	pinnedHashesJSON := ""
-	if len(registry.PinnedHashes) > 0 {
+	if registry.PinnedHashes != nil {
 		b, _ := json.Marshal(registry.PinnedHashes)
 		pinnedHashesJSON = string(b)
 	}
@@ -142,7 +142,7 @@ func (s *SkillRegistryStore) UpdateSkillRegistry(ctx context.Context, registry *
 	if registry.Status != "" {
 		update.SetStatus(entskillregistry.Status(registry.Status))
 	}
-	if len(registry.PinnedHashes) > 0 {
+	if registry.PinnedHashes != nil {
 		b, _ := json.Marshal(registry.PinnedHashes)
 		update.SetPinnedHashes(string(b))
 	}
@@ -207,6 +207,7 @@ func (s *SkillRegistryStore) PinSkillHash(ctx context.Context, registryID string
 
 	e, err := tx.SkillRegistry.Query().
 		Where(entskillregistry.ID(uid)).
+		ForUpdate().
 		Only(ctx)
 	if err != nil {
 		return mapError(err)
