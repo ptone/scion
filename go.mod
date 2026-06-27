@@ -8,6 +8,7 @@ require (
 	cloud.google.com/go/logging v1.13.2
 	cloud.google.com/go/longrunning v1.0.0
 	cloud.google.com/go/monitoring v1.24.3
+	cloud.google.com/go/run v1.21.0
 	cloud.google.com/go/secretmanager v1.16.0
 	cloud.google.com/go/storage v1.59.1
 	entgo.io/ent v0.14.5
@@ -73,6 +74,7 @@ require (
 	cloud.google.com/go/auth v0.20.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/iam v1.11.0 // indirect
+	cloud.google.com/go/longrunning v0.9.0 // indirect
 	cloud.google.com/go/trace v1.11.7 // indirect
 	github.com/Azure/go-ntlmssp v0.1.1 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.31.0 // indirect
