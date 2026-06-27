@@ -131,9 +131,10 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		rt.ListAllNamespaces = rtConfig.ListAllNamespaces
 		return rt
 	case "cloudrun":
-		rt := NewCloudRunRuntime(rtConfig.CloudRun)
-		if vs != nil && vs.Server != nil {
-			rt.WorkspaceStorage = vs.Server.WorkspaceStorage
+		rt, err := NewCloudRunRuntime(rtConfig.CloudRun)
+		if err != nil {
+			util.Debugf("GetRuntime: failed to create cloudrun runtime: %v", err)
+			return nil
 		}
 		return rt
 	}
