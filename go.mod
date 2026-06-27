@@ -75,6 +75,7 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/iam v1.11.0 // indirect
 	cloud.google.com/go/longrunning v0.9.0 // indirect
+	cloud.google.com/go/resourcemanager v1.15.0 // indirect
 	cloud.google.com/go/trace v1.11.7 // indirect
 	github.com/Azure/go-ntlmssp v0.1.1 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.31.0 // indirect
