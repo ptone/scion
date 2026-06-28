@@ -134,7 +134,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		rt, err := NewCloudRunRuntime(rtConfig.CloudRun)
 		if err != nil {
 			util.Debugf("GetRuntime: failed to create cloudrun runtime: %v", err)
-			return nil
+			return &ErrorRuntime{Err: err}
 		}
 		return rt
 	}
