@@ -3,11 +3,13 @@ module github.com/GoogleCloudPlatform/scion
 go 1.26.1
 
 require (
+	cloud.google.com/go/auth v0.20.0
 	cloud.google.com/go/cloudbuild v1.25.0
 	cloud.google.com/go/compute/metadata v0.9.0
 	cloud.google.com/go/logging v1.13.2
 	cloud.google.com/go/longrunning v1.0.0
 	cloud.google.com/go/monitoring v1.24.3
+	cloud.google.com/go/resourcemanager v1.15.0
 	cloud.google.com/go/run v1.21.0
 	cloud.google.com/go/secretmanager v1.16.0
 	cloud.google.com/go/storage v1.59.1
@@ -19,6 +21,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/google/uuid v1.6.0
+	github.com/googleapis/gax-go/v2 v2.22.0
 	github.com/gorilla/sessions v1.4.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/hashicorp/go-hclog v1.6.3
@@ -49,6 +52,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0
 	go.opentelemetry.io/proto/otlp v1.10.0
+	golang.org/x/crypto v0.53.0
 	golang.org/x/net v0.56.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.21.0
@@ -71,11 +75,8 @@ require (
 	ariga.io/atlas v0.32.1-0.20250325101103-175b25e1c1b9 // indirect
 	cel.dev/expr v0.25.1 // indirect
 	cloud.google.com/go v0.123.0 // indirect
-	cloud.google.com/go/auth v0.20.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/iam v1.11.0 // indirect
-	cloud.google.com/go/longrunning v0.9.0 // indirect
-	cloud.google.com/go/resourcemanager v1.15.0 // indirect
 	cloud.google.com/go/trace v1.11.7 // indirect
 	github.com/Azure/go-ntlmssp v0.1.1 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.31.0 // indirect
@@ -119,7 +120,6 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.16 // indirect
-	github.com/googleapis/gax-go/v2 v2.22.0 // indirect
 	github.com/gopherjs/gopherjs v1.20.1 // indirect
 	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
@@ -187,7 +187,6 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.43.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/mod v0.36.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
