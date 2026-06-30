@@ -46,12 +46,12 @@ func generateBootstrapScript(gcsBucket, binaryVersion string, envVars map[string
 	fmt.Fprintf(&b, `BASE_URL='https://storage.googleapis.com/%s/bin/%s/linux-amd64'
 mkdir -p /usr/local/bin
 [ -x /usr/local/bin/sciontool ] || curl --fail -sSL --max-time 60 "${BASE_URL}/sciontool" -o /usr/local/bin/sciontool
-[ -x /usr/local/bin/sciontool ] && chmod +x /usr/local/bin/sciontool
+chmod +x /usr/local/bin/sciontool
 [ -x /usr/local/bin/scion ] || curl --fail -sSL --max-time 300 "${BASE_URL}/scion" -o /usr/local/bin/scion
-[ -x /usr/local/bin/scion ] && chmod +x /usr/local/bin/scion
+chmod +x /usr/local/bin/scion
 mkdir -p ~/.scion
 echo "${SCION_TOKEN}" > ~/.scion/scion-token
-[ -x /usr/local/bin/sciontool ] && sciontool heartbeat &
+sciontool heartbeat &
 `, gcsBucket, binaryVersion)
 
 	return b.String()
