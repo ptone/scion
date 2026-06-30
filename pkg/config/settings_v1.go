@@ -2354,7 +2354,16 @@ func loadServerConfigOnly(path string) (*GlobalConfig, error) {
 
 // V1ManagedAgentsConfig holds configuration for cloud-managed agent backends.
 type V1ManagedAgentsConfig struct {
-	Google *V1GoogleManagedAgentConfig `json:"google,omitempty" yaml:"google,omitempty" koanf:"google"`
+	Google    *V1GoogleManagedAgentConfig    `json:"google,omitempty" yaml:"google,omitempty" koanf:"google"`
+	Bootstrap *V1ManagedAgentsBootstrapConfig `json:"bootstrap,omitempty" yaml:"bootstrap,omitempty" koanf:"bootstrap"`
+}
+
+// V1ManagedAgentsBootstrapConfig holds bootstrap settings for managed agents
+// running in environments without pre-installed scion tooling (e.g. Antigravity).
+type V1ManagedAgentsBootstrapConfig struct {
+	// GCSBucket is the GCS bucket containing versioned scion/sciontool binaries.
+	// Layout: gs://<bucket>/bin/<version>/linux-amd64/{scion,sciontool}
+	GCSBucket string `json:"gcs_bucket,omitempty" yaml:"gcs_bucket,omitempty" koanf:"gcs_bucket"`
 }
 
 // V1GoogleManagedAgentConfig holds Google-specific managed agent settings.

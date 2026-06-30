@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/managedagent/google"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 const (
@@ -113,10 +115,22 @@ func (s *Server) managedAgentCreate(ctx context.Context, agent *store.Agent, tas
 				systemInstruction = agent.AppliedConfig.InlineConfig.AgentInstructions
 			}
 		}
+
+		envCfg, envErr := s.buildManagedEnvironment(agent)
+		if envErr != nil {
+			slog.Warn("failed to build managed environment with bootstrap", "agent_id", agent.ID, "err", envErr)
+		}
+
+		// Prepend bootstrap directive if bootstrap is configured.
+		if envCfg != nil && len(envCfg.Sources) > 0 {
+			bootstrapDirective := "IMPORTANT: Before starting any work, run: bash /scion/bootstrap.sh\nThis sets up your connection to the Scion orchestration system.\n\n"
+			systemInstruction = bootstrapDirective + systemInstruction
+		}
+
 		handle, err := backend.CreateInteraction(ctx, managedagent.InteractionRequest{
 			Input:             task,
 			SystemInstruction: systemInstruction,
-			Environment:       &managedagent.EnvironmentConfig{Type: "remote"},
+			Environment:       envCfg,
 			Background:        true,
 		})
 		if err != nil {
@@ -129,6 +143,80 @@ func (s *Server) managedAgentCreate(ctx context.Context, agent *store.Agent, tas
 	}
 
 	return nil
+}
+
+// buildManagedEnvironment constructs the environment config for a managed agent,
+// injecting bootstrap script, env vars, and network allowlist when bootstrap is
+// configured. Falls back to a basic "remote" environment if bootstrap settings
+// are missing.
+func (s *Server) buildManagedEnvironment(agent *store.Agent) (*managedagent.EnvironmentConfig, error) {
+	gcsBucket := getManagedBootstrapBucket()
+	if gcsBucket == "" {
+		return &managedagent.EnvironmentConfig{Type: "remote"}, nil
+	}
+
+	token, err := s.GenerateAgentToken(agent.ID, agent.ProjectID, nil)
+	if err != nil {
+		return &managedagent.EnvironmentConfig{Type: "remote"}, fmt.Errorf("minting agent token: %w", err)
+	}
+
+	script := generateBootstrapScript(gcsBucket, version.Short())
+
+	env := &managedagent.EnvironmentConfig{
+		Type: "remote",
+		Sources: []managedagent.SourceConfig{
+			{
+				Type:    "inline",
+				Path:    "/scion/bootstrap.sh",
+				Content: script,
+			},
+		},
+		EnvVars: map[string]string{
+			"SCION_TOKEN":    token,
+			"SCION_AGENT_ID": agent.ID,
+		},
+		Network: &managedagent.NetworkConfig{
+			Allowlist: []managedagent.AllowlistEntry{
+				{Domain: "storage.googleapis.com"},
+			},
+		},
+	}
+
+	if s.config.HubEndpoint != "" {
+		env.EnvVars["SCION_HUB_ENDPOINT"] = s.config.HubEndpoint
+		if domain := extractDomain(s.config.HubEndpoint); domain != "" {
+			env.Network.Allowlist = append(env.Network.Allowlist, managedagent.AllowlistEntry{
+				Domain: domain,
+			})
+		}
+	}
+
+	return env, nil
+}
+
+// getManagedBootstrapBucket returns the GCS bucket for bootstrap binaries from settings.
+func getManagedBootstrapBucket() string {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return ""
+	}
+	vs, err := config.LoadSingleFileVersioned(globalDir)
+	if err != nil {
+		return ""
+	}
+	if vs.ManagedAgents == nil || vs.ManagedAgents.Bootstrap == nil {
+		return ""
+	}
+	return vs.ManagedAgents.Bootstrap.GCSBucket
+}
+
+// extractDomain parses a URL and returns its hostname.
+func extractDomain(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // managedAgentMessage sends a message to a managed agent by creating a new interaction.

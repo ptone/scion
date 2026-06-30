@@ -96,14 +96,18 @@ type EnvironmentConfig struct {
 	Type    string
 	Sources []SourceConfig
 	Network *NetworkConfig
+	EnvVars map[string]string
 }
 
 // SourceConfig describes a source to mount into the agent environment.
+// For inline sources (Type="inline"), Content holds the file data and Path
+// is the target path inside the sandbox.
 type SourceConfig struct {
-	Type   string
-	URI    string
-	Branch string
-	Path   string
+	Type    string
+	URI     string
+	Branch  string
+	Path    string
+	Content string
 }
 
 // NetworkConfig describes network access rules for the agent environment.

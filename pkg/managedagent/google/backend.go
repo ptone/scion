@@ -276,16 +276,18 @@ func convertEnvironmentConfig(env *managedagent.EnvironmentConfig) *Environment 
 		return nil
 	}
 	e := &Environment{
-		Type: env.Type,
+		Type:    env.Type,
+		EnvVars: env.EnvVars,
 	}
 	if len(env.Sources) > 0 {
 		e.Sources = make([]SourceConfig, len(env.Sources))
 		for i, s := range env.Sources {
 			e.Sources[i] = SourceConfig{
-				Type:   s.Type,
-				URI:    s.URI,
-				Branch: s.Branch,
-				Path:   s.Path,
+				Type:    s.Type,
+				URI:     s.URI,
+				Branch:  s.Branch,
+				Path:    s.Path,
+				Content: s.Content,
 			}
 		}
 	}
