@@ -23,7 +23,11 @@ import (
 )
 
 func TestGenerateBootstrapScript(t *testing.T) {
-	script := generateBootstrapScript("my-bootstrap-bucket", "v1.2.3")
+	envVars := map[string]string{
+		"SCION_TOKEN":    "test-token-123",
+		"SCION_AGENT_ID": "agent-1",
+	}
+	script := generateBootstrapScript("my-bootstrap-bucket", "v1.2.3", envVars)
 
 	if !strings.Contains(script, "#!/bin/bash") {
 		t.Error("script should start with shebang")
@@ -46,6 +50,15 @@ func TestGenerateBootstrapScript(t *testing.T) {
 	if !strings.Contains(script, "/usr/local/bin/sciontool") {
 		t.Error("script should download sciontool binary")
 	}
+	if !strings.Contains(script, "--max-time") {
+		t.Error("script should set curl timeouts")
+	}
+	if !strings.Contains(script, "export SCION_TOKEN='test-token-123'") {
+		t.Error("script should export SCION_TOKEN")
+	}
+	if !strings.Contains(script, "export SCION_AGENT_ID='agent-1'") {
+		t.Error("script should export SCION_AGENT_ID")
+	}
 	if !strings.Contains(script, "${SCION_TOKEN}") {
 		t.Error("script should reference SCION_TOKEN env var")
 	}
@@ -58,13 +71,22 @@ func TestGenerateBootstrapScript(t *testing.T) {
 }
 
 func TestGenerateBootstrapScript_DifferentValues(t *testing.T) {
-	script := generateBootstrapScript("other-bucket", "abc12345")
+	script := generateBootstrapScript("other-bucket", "abc12345", nil)
 
 	if !strings.Contains(script, "other-bucket") {
 		t.Error("script should use the provided bucket name")
 	}
 	if !strings.Contains(script, "abc12345") {
 		t.Error("script should use the provided version")
+	}
+}
+
+func TestShellEscape(t *testing.T) {
+	if got := shellEscape("no-quotes"); got != "no-quotes" {
+		t.Errorf("expected no change, got %q", got)
+	}
+	if got := shellEscape("it's a test"); got != "it'\"'\"'s a test" {
+		t.Errorf("unexpected escape result: %q", got)
 	}
 }
 

@@ -146,9 +146,10 @@ func (s *Server) managedAgentCreate(ctx context.Context, agent *store.Agent, tas
 }
 
 // buildManagedEnvironment constructs the environment config for a managed agent,
-// injecting bootstrap script, env vars, and network allowlist when bootstrap is
-// configured. Falls back to a basic "remote" environment if bootstrap settings
-// are missing.
+// injecting bootstrap script and network allowlist when bootstrap is configured.
+// Environment variables are embedded directly in the bootstrap script because
+// the Google API does not support env_vars on environments.
+// Falls back to a basic "remote" environment if bootstrap settings are missing.
 func (s *Server) buildManagedEnvironment(agent *store.Agent) (*managedagent.EnvironmentConfig, error) {
 	gcsBucket := bootstrapBucketFromSettings(s.loadManagedSettings())
 	if gcsBucket == "" {
@@ -160,22 +161,26 @@ func (s *Server) buildManagedEnvironment(agent *store.Agent) (*managedagent.Envi
 		return &managedagent.EnvironmentConfig{Type: "remote"}, fmt.Errorf("minting agent token: %w", err)
 	}
 
-	script := generateBootstrapScript(gcsBucket, version.Short())
+	envVars := map[string]string{
+		"SCION_TOKEN":      token,
+		"SCION_AGENT_ID":   agent.ID,
+		"SCION_AGENT_NAME": agent.Slug,
+		"SCION_PROJECT_ID": agent.ProjectID,
+	}
+	if s.config.HubEndpoint != "" {
+		envVars["SCION_HUB_ENDPOINT"] = s.config.HubEndpoint
+	}
+
+	script := generateBootstrapScript(gcsBucket, version.Short(), envVars)
 
 	env := &managedagent.EnvironmentConfig{
 		Type: "remote",
 		Sources: []managedagent.SourceConfig{
 			{
 				Type:    "inline",
-				Path:    "/scion/bootstrap.sh",
+				Target:  "/scion/bootstrap.sh",
 				Content: script,
 			},
-		},
-		EnvVars: map[string]string{
-			"SCION_TOKEN":      token,
-			"SCION_AGENT_ID":   agent.ID,
-			"SCION_AGENT_NAME": agent.Slug,
-			"SCION_PROJECT_ID": agent.ProjectID,
 		},
 		Network: &managedagent.NetworkConfig{
 			Allowlist: []managedagent.AllowlistEntry{
@@ -185,7 +190,6 @@ func (s *Server) buildManagedEnvironment(agent *store.Agent) (*managedagent.Envi
 	}
 
 	if s.config.HubEndpoint != "" {
-		env.EnvVars["SCION_HUB_ENDPOINT"] = s.config.HubEndpoint
 		if domain := extractDomain(s.config.HubEndpoint); domain != "" {
 			env.Network.Allowlist = append(env.Network.Allowlist, managedagent.AllowlistEntry{
 				Domain: domain,
@@ -245,11 +249,24 @@ func (s *Server) managedAgentMessage(ctx context.Context, agent *store.Agent, me
 		return nil
 	}
 
+	envID := agent.Annotations[annotationEnvironmentID]
+	if envID == "" {
+		if interactionID := agent.Annotations[annotationInteractionID]; interactionID != "" {
+			if state, pollErr := backend.GetInteraction(ctx, interactionID); pollErr == nil && state.EnvironmentID != "" {
+				envID = state.EnvironmentID
+				agent.Annotations[annotationEnvironmentID] = envID
+			}
+		}
+	}
+
 	req := managedagent.InteractionRequest{
 		Input:                 message,
 		PreviousInteractionID: agent.Annotations[annotationInteractionID],
-		EnvironmentID:         agent.Annotations[annotationEnvironmentID],
+		EnvironmentID:         envID,
 		Background:            true,
+	}
+	if envID == "" {
+		req.Environment = &managedagent.EnvironmentConfig{Type: "remote"}
 	}
 
 	handle, err := backend.CreateInteraction(ctx, req)

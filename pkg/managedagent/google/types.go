@@ -99,20 +99,19 @@ type InteractionUsage struct {
 
 // Environment describes the execution environment configuration.
 type Environment struct {
-	Type    string            `json:"type,omitempty"`
-	Sources []SourceConfig    `json:"sources,omitempty"`
-	Network *NetworkConfig    `json:"network,omitempty"`
-	EnvVars map[string]string `json:"env_vars,omitempty"`
+	Type    string         `json:"type,omitempty"`
+	Sources []SourceConfig `json:"sources,omitempty"`
+	Network *NetworkConfig `json:"network,omitempty"`
 }
 
 // SourceConfig describes a source to mount into the environment.
-// For inline sources (Type="inline"), Content holds the file data and Path
-// is the target path inside the sandbox.
+// For inline sources (Type="inline"), Content holds the file data and Target
+// is the destination path inside the sandbox.
 type SourceConfig struct {
 	Type    string `json:"type"`
 	URI     string `json:"uri,omitempty"`
 	Branch  string `json:"branch,omitempty"`
-	Path    string `json:"path,omitempty"`
+	Target  string `json:"target,omitempty"`
 	Content string `json:"content,omitempty"`
 }
 
