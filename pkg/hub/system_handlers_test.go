@@ -141,6 +141,20 @@ func TestAssertLoopback_RejectViaHandler(t *testing.T) {
 // POST /system/init
 // ============================================================================
 
+// seedHarnessConfigDir creates a minimal harness-config directory under
+// $HOME/.scion/harness-configs/<name>/ so that harness.IsKnown(name) returns true.
+func seedHarnessConfigDir(t *testing.T, home, name string) {
+	t.Helper()
+	dir := filepath.Join(home, ".scion", "harness-configs", name)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "harness: " + name + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSystemInit_ValidHarnesses(t *testing.T) {
 	srv, _ := testWorkstationServer(t)
 	tmpHome := t.TempDir()
@@ -190,6 +204,27 @@ func TestSystemInit_EmptyHarnesses(t *testing.T) {
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for empty harnesses, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSystemInit_ConfigBasedHarness(t *testing.T) {
+	srv, _ := testWorkstationServer(t)
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	seedHarnessConfigDir(t, tmpHome, "myharness")
+
+	restore := config.OverrideRuntimeDetection(
+		func(string) (string, error) { return "/usr/bin/docker", nil },
+		func(string, []string) error { return nil },
+	)
+	defer restore()
+
+	rec := doWorkstationRequest(t, srv, http.MethodPost, "/api/v1/system/init", map[string]interface{}{
+		"harnesses": []string{"myharness"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for config-based harness, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

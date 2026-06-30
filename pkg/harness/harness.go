@@ -16,6 +16,7 @@ package harness
 
 import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 func New(harnessName string) api.Harness {
@@ -34,4 +35,14 @@ func All() []api.Harness {
 		&GeminiCLI{},
 		&ClaudeCode{},
 	}
+}
+
+func IsKnown(name string) bool {
+	for _, h := range All() {
+		if h.Name() == name {
+			return true
+		}
+	}
+	_, err := config.FindHarnessConfigDir(name, "")
+	return err == nil
 }

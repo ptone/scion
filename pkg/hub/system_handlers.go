@@ -356,16 +356,9 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	allowed := map[string]bool{
-		"claude":   true,
-		"gemini":   true,
-		"codex":    true,
-		"opencode": true,
-	}
-
 	var selected []string
 	for _, name := range req.Harnesses {
-		if !allowed[name] {
+		if !harness.IsKnown(name) {
 			ValidationError(w, fmt.Sprintf("unknown harness %q", name), nil)
 			return
 		}
@@ -434,9 +427,8 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	allowed := map[string]bool{"claude": true, "gemini": true, "codex": true, "opencode": true}
 	for _, h := range req.Harnesses {
-		if !allowed[h] {
+		if !harness.IsKnown(h) {
 			s.imagePullActive.Store(false)
 			ValidationError(w, fmt.Sprintf("unknown harness %q", h), nil)
 			return
@@ -541,9 +533,8 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	allowed := map[string]bool{"claude": true, "gemini": true, "codex": true, "opencode": true}
 	for _, h := range req.Harnesses {
-		if !allowed[h] {
+		if !harness.IsKnown(h) {
 			ValidationError(w, fmt.Sprintf("unknown harness %q", h), nil)
 			return
 		}
