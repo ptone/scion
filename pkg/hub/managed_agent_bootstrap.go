@@ -26,12 +26,12 @@ import "fmt"
 func generateBootstrapScript(gcsBucket, binaryVersion string) string {
 	return fmt.Sprintf(`#!/bin/bash
 set -e
-BASE_URL="https://storage.googleapis.com/%s/bin/%s/linux-amd64"
+BASE_URL='https://storage.googleapis.com/%s/bin/%s/linux-amd64'
 mkdir -p /usr/local/bin
-curl -sSL "${BASE_URL}/scion" -o /usr/local/bin/scion && chmod +x /usr/local/bin/scion
-curl -sSL "${BASE_URL}/sciontool" -o /usr/local/bin/sciontool && chmod +x /usr/local/bin/sciontool
+[ -x /usr/local/bin/scion ] || (curl -sSL "${BASE_URL}/scion" -o /usr/local/bin/scion && chmod +x /usr/local/bin/scion)
+[ -x /usr/local/bin/sciontool ] || (curl -sSL "${BASE_URL}/sciontool" -o /usr/local/bin/sciontool && chmod +x /usr/local/bin/sciontool)
 mkdir -p ~/.scion
 echo "${SCION_TOKEN}" > ~/.scion/scion-token
-sciontool heartbeat --daemon &
+sciontool heartbeat &
 `, gcsBucket, binaryVersion)
 }

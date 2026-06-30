@@ -2354,7 +2354,7 @@ func loadServerConfigOnly(path string) (*GlobalConfig, error) {
 
 // V1ManagedAgentsConfig holds configuration for cloud-managed agent backends.
 type V1ManagedAgentsConfig struct {
-	Google    *V1GoogleManagedAgentConfig    `json:"google,omitempty" yaml:"google,omitempty" koanf:"google"`
+	Google    *V1GoogleManagedAgentConfig     `json:"google,omitempty" yaml:"google,omitempty" koanf:"google"`
 	Bootstrap *V1ManagedAgentsBootstrapConfig `json:"bootstrap,omitempty" yaml:"bootstrap,omitempty" koanf:"bootstrap"`
 }
 

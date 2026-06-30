@@ -150,7 +150,7 @@ func (s *Server) managedAgentCreate(ctx context.Context, agent *store.Agent, tas
 // configured. Falls back to a basic "remote" environment if bootstrap settings
 // are missing.
 func (s *Server) buildManagedEnvironment(agent *store.Agent) (*managedagent.EnvironmentConfig, error) {
-	gcsBucket := getManagedBootstrapBucket()
+	gcsBucket := bootstrapBucketFromSettings(s.loadManagedSettings())
 	if gcsBucket == "" {
 		return &managedagent.EnvironmentConfig{Type: "remote"}, nil
 	}
@@ -172,8 +172,10 @@ func (s *Server) buildManagedEnvironment(agent *store.Agent) (*managedagent.Envi
 			},
 		},
 		EnvVars: map[string]string{
-			"SCION_TOKEN":    token,
-			"SCION_AGENT_ID": agent.ID,
+			"SCION_TOKEN":      token,
+			"SCION_AGENT_ID":   agent.ID,
+			"SCION_AGENT_NAME": agent.Slug,
+			"SCION_PROJECT_ID": agent.ProjectID,
 		},
 		Network: &managedagent.NetworkConfig{
 			Allowlist: []managedagent.AllowlistEntry{
@@ -194,17 +196,22 @@ func (s *Server) buildManagedEnvironment(agent *store.Agent) (*managedagent.Envi
 	return env, nil
 }
 
-// getManagedBootstrapBucket returns the GCS bucket for bootstrap binaries from settings.
-func getManagedBootstrapBucket() string {
+// loadManagedSettings loads the global VersionedSettings, returning nil on error.
+func (s *Server) loadManagedSettings() *config.VersionedSettings {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
-		return ""
+		return nil
 	}
 	vs, err := config.LoadSingleFileVersioned(globalDir)
 	if err != nil {
-		return ""
+		return nil
 	}
-	if vs.ManagedAgents == nil || vs.ManagedAgents.Bootstrap == nil {
+	return vs
+}
+
+// bootstrapBucketFromSettings extracts the GCS bootstrap bucket from settings.
+func bootstrapBucketFromSettings(vs *config.VersionedSettings) string {
+	if vs == nil || vs.ManagedAgents == nil || vs.ManagedAgents.Bootstrap == nil {
 		return ""
 	}
 	return vs.ManagedAgents.Bootstrap.GCSBucket

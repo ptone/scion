@@ -30,8 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
-var heartbeatDaemon bool
-
 var heartbeatCmd = &cobra.Command{
 	Use:   "heartbeat",
 	Short: "Run the Hub heartbeat loop",
@@ -44,11 +42,9 @@ This is designed for environments where sciontool does not run as PID 1
   - Hub heartbeat loop (periodic liveness reports)
   - Status file watcher (reads agent-info.json changes, reports to Hub)
 
-Use --daemon to run in the background (typically with & in a shell script).
-
-Required environment variables:
+Required configuration:
   SCION_HUB_ENDPOINT  Hub API URL
-  SCION_AUTH_TOKEN     Agent authentication token (or token file at ~/.scion/scion-token)
+  ~/.scion/scion-token Agent authentication token (or SCION_AUTH_TOKEN env var)
   SCION_AGENT_ID       Agent identifier`,
 	Run: func(cmd *cobra.Command, args []string) {
 		runHeartbeatDaemon()
@@ -56,8 +52,6 @@ Required environment variables:
 }
 
 func init() {
-	heartbeatCmd.Flags().BoolVar(&heartbeatDaemon, "daemon", false,
-		"Run as a background daemon (no-op flag for documentation; use shell & to background)")
 	rootCmd.AddCommand(heartbeatCmd)
 }
 
@@ -119,7 +113,7 @@ func watchStatusFile(ctx context.Context, client *hub.Client, path string) <-cha
 		defer ticker.Stop()
 
 		var lastMod time.Time
-		var lastActivity string
+		var lastActivity, lastPhase, lastMessage string
 
 		for {
 			select {
@@ -151,10 +145,12 @@ func watchStatusFile(ctx context.Context, client *hub.Client, path string) <-cha
 					continue
 				}
 
-				if agentInfo.Activity == lastActivity {
+				if agentInfo.Activity == lastActivity && agentInfo.Phase == lastPhase && agentInfo.Message == lastMessage {
 					continue
 				}
 				lastActivity = agentInfo.Activity
+				lastPhase = agentInfo.Phase
+				lastMessage = agentInfo.Message
 
 				update := hub.StatusUpdate{
 					Activity: state.Activity(agentInfo.Activity),

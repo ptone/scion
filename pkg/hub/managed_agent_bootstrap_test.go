@@ -17,6 +17,9 @@ package hub
 import (
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 func TestGenerateBootstrapScript(t *testing.T) {
@@ -49,8 +52,8 @@ func TestGenerateBootstrapScript(t *testing.T) {
 	if !strings.Contains(script, "~/.scion/scion-token") {
 		t.Error("script should write token file")
 	}
-	if !strings.Contains(script, "sciontool heartbeat --daemon") {
-		t.Error("script should start heartbeat daemon")
+	if !strings.Contains(script, "sciontool heartbeat &") {
+		t.Error("script should start heartbeat in the background")
 	}
 }
 
@@ -65,6 +68,67 @@ func TestGenerateBootstrapScript_DifferentValues(t *testing.T) {
 	}
 }
 
+func TestBootstrapBucketFromSettings(t *testing.T) {
+	t.Run("nil settings", func(t *testing.T) {
+		if got := bootstrapBucketFromSettings(nil); got != "" {
+			t.Errorf("expected empty string, got %q", got)
+		}
+	})
+
+	t.Run("no managed_agents section", func(t *testing.T) {
+		vs := &config.VersionedSettings{}
+		if got := bootstrapBucketFromSettings(vs); got != "" {
+			t.Errorf("expected empty string, got %q", got)
+		}
+	})
+
+	t.Run("no bootstrap section", func(t *testing.T) {
+		vs := &config.VersionedSettings{
+			ManagedAgents: &config.V1ManagedAgentsConfig{},
+		}
+		if got := bootstrapBucketFromSettings(vs); got != "" {
+			t.Errorf("expected empty string, got %q", got)
+		}
+	})
+
+	t.Run("bucket configured", func(t *testing.T) {
+		vs := &config.VersionedSettings{
+			ManagedAgents: &config.V1ManagedAgentsConfig{
+				Bootstrap: &config.V1ManagedAgentsBootstrapConfig{
+					GCSBucket: "my-bucket",
+				},
+			},
+		}
+		if got := bootstrapBucketFromSettings(vs); got != "my-bucket" {
+			t.Errorf("expected %q, got %q", "my-bucket", got)
+		}
+	})
+}
+
+func TestBuildManagedEnvironment_NoBucketFallback(t *testing.T) {
+	srv, _ := testServer(t)
+
+	agent := &store.Agent{
+		ID:        "agent-1",
+		Slug:      "test-agent",
+		ProjectID: "proj-1",
+	}
+
+	env, err := srv.buildManagedEnvironment(agent)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if env == nil {
+		t.Fatal("expected non-nil environment")
+	}
+	if env.Type != "remote" {
+		t.Errorf("expected type %q, got %q", "remote", env.Type)
+	}
+	if len(env.Sources) != 0 {
+		t.Errorf("expected no sources for fallback, got %d", len(env.Sources))
+	}
+}
+
 func TestExtractDomain(t *testing.T) {
 	tests := []struct {
 		url    string
@@ -74,7 +138,7 @@ func TestExtractDomain(t *testing.T) {
 		{"https://hub.example.com:8443/api", "hub.example.com"},
 		{"http://localhost:9810", "localhost"},
 		{"https://192.168.1.1:443", "192.168.1.1"},
-		{"not-a-url", ""},
+		{"not-a-url", ""}, // Go's url.Parse treats this as a relative path, so Hostname() returns ""
 		{"", ""},
 	}
 
