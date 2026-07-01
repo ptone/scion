@@ -338,6 +338,15 @@ func RequireProjectPath(path string) (string, bool, error) {
 		return p, false, nil
 	}
 
+	// In managed agent context (Antigravity sandbox), there is no local project
+	// directory. Fall back to global so CLI commands work without --global flag.
+	if home, err := os.UserHomeDir(); err == nil {
+		if _, err := os.Stat(filepath.Join(home, GlobalDir, "agent-name")); err == nil {
+			g, err := GetGlobalDir()
+			return g, true, err
+		}
+	}
+
 	// No project found and no explicit path - error
 	return "", false, fmt.Errorf("not in a scion project. Use --global for global project or run 'scion init' to create a project")
 }
