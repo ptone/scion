@@ -184,11 +184,23 @@ func IsOldStyleNonGitProject(scionPath string) bool {
 // project data should be accessed via the Hub API rather than the local filesystem.
 // Checks SCION_HUB_ENDPOINT (primary), SCION_HUB_URL (legacy), and
 // SCION_GROVE_ID (always set for broker-dispatched agents).
+// Also returns true when ~/.scion/agent-name exists (managed agent bootstrap
+// in sandboxes where env vars don't persist across code execution shells).
 func IsHubContext() bool {
-	return os.Getenv("SCION_HUB_ENDPOINT") != "" ||
+	if os.Getenv("SCION_HUB_ENDPOINT") != "" ||
 		os.Getenv("SCION_HUB_URL") != "" ||
 		os.Getenv(projectcompat.EnvGroveID) != "" ||
-		os.Getenv(projectcompat.EnvProjectID) != ""
+		os.Getenv(projectcompat.EnvProjectID) != "" {
+		return true
+	}
+	// Managed agent sandbox: env vars from bootstrap don't persist to new shells,
+	// but the agent-name file written during bootstrap signals agent context.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(home, GlobalDir, "agent-name"))
+	return err == nil
 }
 
 // WriteWorkspaceMarker writes a minimal .scion marker file into a workspace
