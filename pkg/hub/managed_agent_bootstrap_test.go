@@ -24,8 +24,11 @@ import (
 
 func TestGenerateBootstrapScript(t *testing.T) {
 	envVars := map[string]string{
-		"SCION_TOKEN":    "test-token-123",
-		"SCION_AGENT_ID": "agent-1",
+		"SCION_TOKEN":        "test-token-123",
+		"SCION_AGENT_ID":     "agent-1",
+		"SCION_AGENT_NAME":   "my-agent",
+		"SCION_PROJECT_ID":   "proj-abc",
+		"SCION_HUB_ENDPOINT": "https://hub.example.com",
 	}
 	script := generateBootstrapScript("my-bootstrap-bucket", "v1.2.3", envVars)
 
@@ -67,6 +70,43 @@ func TestGenerateBootstrapScript(t *testing.T) {
 	}
 	if !strings.Contains(script, "sciontool heartbeat &") {
 		t.Error("script should start heartbeat in the background")
+	}
+
+	// Settings file should be written with hub config
+	if !strings.Contains(script, "~/.scion/settings.yaml") {
+		t.Error("script should write settings.yaml")
+	}
+	if !strings.Contains(script, "enabled: true") {
+		t.Error("settings.yaml should enable hub")
+	}
+	if !strings.Contains(script, "endpoint: https://hub.example.com") {
+		t.Error("settings.yaml should contain hub endpoint")
+	}
+	if !strings.Contains(script, "grove_id: proj-abc") {
+		t.Error("settings.yaml should contain project ID as grove_id")
+	}
+
+	// Agent identity file
+	if !strings.Contains(script, "~/.scion/agent-name") {
+		t.Error("script should write agent-name file")
+	}
+	if !strings.Contains(script, "'my-agent'") {
+		t.Error("agent-name file should contain the agent slug")
+	}
+}
+
+func TestGenerateBootstrapScript_NoHubEndpoint(t *testing.T) {
+	envVars := map[string]string{
+		"SCION_TOKEN":    "test-token-123",
+		"SCION_AGENT_ID": "agent-1",
+	}
+	script := generateBootstrapScript("my-bucket", "v1.0.0", envVars)
+
+	if strings.Contains(script, "settings.yaml") {
+		t.Error("script should not write settings.yaml when no hub endpoint is set")
+	}
+	if strings.Contains(script, "agent-name") {
+		t.Error("script should not write agent-name when no agent name is set")
 	}
 }
 

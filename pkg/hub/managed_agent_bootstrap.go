@@ -51,8 +51,20 @@ chmod +x /usr/local/bin/sciontool
 chmod +x /usr/local/bin/scion
 mkdir -p ~/.scion
 echo "${SCION_TOKEN}" > ~/.scion/scion-token
-sciontool heartbeat &
 `, gcsBucket, binaryVersion)
+
+	// Write settings.yaml so the scion CLI can discover hub config in
+	// subsequent shells where env vars are not preserved.
+	if endpoint := envVars["SCION_HUB_ENDPOINT"]; endpoint != "" {
+		projectID := envVars["SCION_PROJECT_ID"]
+		fmt.Fprintf(&b, "cat > ~/.scion/settings.yaml << 'SCION_SETTINGS_EOF'\nhub:\n  enabled: true\n  endpoint: %s\n  grove_id: %s\nSCION_SETTINGS_EOF\n", endpoint, projectID)
+	}
+
+	if agentName := envVars["SCION_AGENT_NAME"]; agentName != "" {
+		fmt.Fprintf(&b, "echo '%s' > ~/.scion/agent-name\n", shellEscape(agentName))
+	}
+
+	b.WriteString("sciontool heartbeat &\n")
 
 	return b.String()
 }

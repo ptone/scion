@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -332,12 +333,31 @@ Examples:
 	},
 }
 
+// resolveAgentName returns the agent name from environment or the canonical
+// identity file (~/.scion/agent-name). The file is written during managed
+// agent bootstrap so subsequent shells can discover the agent name even
+// when env vars are not preserved.
+func resolveAgentName() string {
+	if name := os.Getenv("SCION_AGENT_NAME"); name != "" {
+		return name
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".scion", "agent-name"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // resolveSenderIdentity determines the sender identity string for structured messages.
 // In agent context (SCION_AGENT_NAME set), returns "agent:<name>".
 // In user context, queries Hub for the current user and returns "user:<displayName>".
 func resolveSenderIdentity(hubCtx *HubContext) string {
 	// Agent context
-	if agentName := os.Getenv("SCION_AGENT_NAME"); agentName != "" {
+	if agentName := resolveAgentName(); agentName != "" {
 		return "agent:" + agentName
 	}
 
@@ -530,9 +550,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		}
 	}
 
-	// Determine the sending agent's name. This command is intended for use
-	// by agents running inside containers, where SCION_AGENT_NAME is set.
-	senderAgent := os.Getenv("SCION_AGENT_NAME")
+	senderAgent := resolveAgentName()
 	if senderAgent == "" {
 		return fmt.Errorf("sending messages to users is only supported from within an agent container (SCION_AGENT_NAME not set)")
 	}
@@ -619,7 +637,7 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 				}
 
 			case messages.RecipientUser:
-				senderAgent := os.Getenv("SCION_AGENT_NAME")
+				senderAgent := resolveAgentName()
 				if senderAgent == "" {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: "sending to users requires agent context (SCION_AGENT_NAME not set)"}
 					if !isJSONOutput() {
