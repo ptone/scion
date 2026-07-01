@@ -224,6 +224,14 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		return nil, nil
 	}
 
+	// Detect managed agent context from the presence of ~/.scion/agent-name,
+	// written during bootstrap when env vars won't persist across shells
+	// (e.g. Google Antigravity sandboxes). Treat this as hub context to skip
+	// project registration and sync — the agent token can't do those operations.
+	if !hubContext && isManagedAgentContext() {
+		hubContext = true
+	}
+
 	// When running inside a hub-connected container, always skip sync checks —
 	// containers cannot register projects or reconcile agents.
 	if hubContext {
@@ -1312,6 +1320,18 @@ func getEndpoint(settings *config.Settings) string {
 		return settings.Hub.Endpoint
 	}
 	return ""
+}
+
+// isManagedAgentContext returns true if the ~/.scion/agent-name file exists,
+// which is written by the managed agent bootstrap script when env vars won't
+// persist across code execution shells (e.g. Google Antigravity sandboxes).
+func isManagedAgentContext() bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(home, ".scion", "agent-name"))
+	return err == nil
 }
 
 // readAgentTokenFile reads the canonical agent token from ~/.scion/scion-token.
