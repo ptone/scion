@@ -126,6 +126,7 @@ func TestIsControlChannelConnected_NilControlChannel_CCEnabled(t *testing.T) {
 	}
 }
 
+
 func TestIsControlChannelConnected_NilControlChannel_CCNotEnabled(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.ControlChannelEnabled = false
