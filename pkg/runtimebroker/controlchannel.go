@@ -244,6 +244,14 @@ func (c *ControlChannelClient) doConnect() error {
 	}
 
 	c.conn = conn
+	c.mu.Lock()
+	c.connected = true
+	c.connectedAt = time.Now()
+	cb := c.config.OnConnectionStateChange
+	c.mu.Unlock()
+	if cb != nil {
+		cb(true)
+	}
 
 	// Send connect message
 	connectMsg := wsprotocol.NewConnectMessage(c.config.BrokerID, c.config.Version, c.config.Projects)
