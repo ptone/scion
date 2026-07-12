@@ -46,6 +46,11 @@ type ContainerScriptHarness struct {
 	// configDirPath is the absolute path to the on-disk harness-config dir
 	// (e.g. ~/.scion/harness-configs/<name>/). Empty for synthetic configs.
 	configDirPath string
+
+	// agentHome is the host-side agent home directory, set by Provision().
+	// Used by GetCommand() to check for system prompt files without
+	// requiring the caller to pass agentHome again.
+	agentHome string
 }
 
 // NewContainerScriptHarness constructs a ContainerScriptHarness from a resolved
@@ -144,8 +149,18 @@ func (c *ContainerScriptHarness) GetCommand(task string, resume bool, baseArgs [
 		resumeTokens = strings.Fields(cmd.ResumeFlag)
 	}
 
+	var systemPromptTokens []string
+	if cmd.SystemPromptFlag != "" && c.entry.SystemPromptFile != "" && c.agentHome != "" {
+		if c.HasSystemPrompt(c.agentHome) {
+			containerHome := containerHomeForUser(c.entry.User)
+			promptPath := filepath.Join(containerHome, c.entry.SystemPromptFile)
+			systemPromptTokens = []string{cmd.SystemPromptFlag, promptPath}
+		}
+	}
+
 	args := append([]string{}, cmd.Base...)
 	args = append(args, resumeTokens...)
+	args = append(args, systemPromptTokens...)
 	args = append(args, baseArgs...)
 
 	if task != "" {
@@ -154,6 +169,7 @@ func (c *ContainerScriptHarness) GetCommand(task string, resume bool, baseArgs [
 			// place task and flag before baseArgs (rebuild)
 			pre := append([]string{}, cmd.Base...)
 			pre = append(pre, resumeTokens...)
+			pre = append(pre, systemPromptTokens...)
 			if cmd.TaskFlag != "" {
 				pre = append(pre, cmd.TaskFlag, task)
 			} else {
@@ -332,6 +348,7 @@ type ProvisionPlatform struct {
 //	  secrets/  (populated by runtime secret projection)
 //	agent_home/.scion/hooks/pre-start.d/20-harness-provision  (trusted wrapper)
 func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agentDir, agentHome, agentWorkspace string) error {
+	c.agentHome = agentHome
 	bundleHostPath := filepath.Join(agentHome, ".scion", "harness")
 	bundleContainerPath := containerBundlePath(agentHome)
 
@@ -842,6 +859,15 @@ func expandEnvTemplate(value, agentName, agentHome, unixUsername string) string 
 		out = strings.ReplaceAll(out, placeholder, replacement)
 	}
 	return out
+}
+
+// containerHomeForUser returns the container-side home directory for the given
+// unix username. Mirrors util.GetHomeDir without adding a package dependency.
+func containerHomeForUser(user string) string {
+	if user == "" || user == "root" {
+		return "/root"
+	}
+	return "/home/" + user
 }
 
 // StageCaptureAuthAssets stages capture_auth.py and its config file into the
