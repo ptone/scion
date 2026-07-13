@@ -75,3 +75,4 @@ downloads/
 
 # PR review artifacts
 pr-*-review*.md
+scripts/skill-bank/gcp/__pycache__/
