@@ -274,8 +274,8 @@
         },
         "auth_selected_type": {
           "type": "string",
-          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai", "none"],
-          "description": "Authentication mechanism to use (e.g., api-key, oauth-token, vertex-ai, auth-file, none)."
+          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai", "config-file", "none"],
+          "description": "Authentication mechanism to use (e.g., api-key, oauth-token, vertex-ai, auth-file, config-file, none)."
         },
         "secrets": {
           "type": "array",
@@ -541,7 +541,7 @@
       "properties": {
         "default_type": {
           "type": "string",
-          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"]
+          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai", "config-file"]
         },
         "types": {
           "type": "object",
@@ -600,14 +600,14 @@
           "type": "object",
           "additionalProperties": {
             "type": "string",
-            "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"]
+            "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai", "config-file"]
           }
         },
         "files": {
           "type": "object",
           "additionalProperties": {
             "type": "string",
-            "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"]
+            "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai", "config-file"]
           }
         }
       },
@@ -671,7 +671,7 @@
         "resources": { "$ref": "#/$defs/resourceSpec" },
         "auth_selected_type": {
           "type": "string",
-          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"]
+          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai", "config-file"]
         }
       },
       "additionalProperties": false
