@@ -791,7 +791,7 @@ func (h *CommandHandler) HandleLogs(s *discordgo.Session, i *discordgo.Interacti
 	h.followup(s, i, fmt.Sprintf("Viewing logs for agent **%s** is not yet implemented.", agentSlug))
 }
 
-// HandleDefault shows agent selection buttons for setting the default agent.
+// HandleDefault shows an agent selection menu for setting the default agent.
 func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -824,36 +824,52 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 		currentText = fmt.Sprintf("Current default: **%s**\n", link.DefaultAgent)
 	}
 
+	const maxOptionsPerMenu = 25
 	var rows []discordgo.MessageComponent
-	var buttons []discordgo.MessageComponent
-	for idx, slug := range agents {
-		style := discordgo.SecondaryButton
-		if slug == link.DefaultAgent {
-			style = discordgo.PrimaryButton
+	for chunk := 0; chunk < len(agents); chunk += maxOptionsPerMenu - 1 {
+		end := chunk + maxOptionsPerMenu - 1
+		if end > len(agents) {
+			end = len(agents)
 		}
-		buttons = append(buttons, discordgo.Button{
-			Label:    slug,
-			Style:    style,
-			CustomID: fmt.Sprintf("default:set:%s", slug),
-		})
-		if len(buttons) == 5 || idx == len(agents)-1 {
-			rows = append(rows, discordgo.ActionsRow{Components: buttons})
-			buttons = nil
+		agentChunk := agents[chunk:end]
+
+		options := []discordgo.SelectMenuOption{
+			{
+				Label:       "None (clear default)",
+				Value:       "default:none",
+				Description: "Remove the default agent for this channel",
+				Default:     link.DefaultAgent == "",
+			},
 		}
-		if len(rows) >= 4 {
-			break
+		for _, slug := range agentChunk {
+			options = append(options, discordgo.SelectMenuOption{
+				Label:   slug,
+				Value:   fmt.Sprintf("default:set:%s", slug),
+				Default: slug == link.DefaultAgent,
+			})
 		}
-	}
-	if len(rows) < 5 {
+
+		menuID := "default:menu"
+		placeholder := "Choose an agent..."
+		if len(agents) > maxOptionsPerMenu-1 {
+			page := (chunk / (maxOptionsPerMenu - 1)) + 1
+			menuID = fmt.Sprintf("default:menu:%d", page)
+			placeholder = fmt.Sprintf("Agents (page %d)...", page)
+		}
+
 		rows = append(rows, discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
-				discordgo.Button{
-					Label:    "None",
-					Style:    discordgo.DangerButton,
-					CustomID: "default:none",
+				discordgo.SelectMenu{
+					MenuType:    discordgo.StringSelectMenu,
+					CustomID:    menuID,
+					Placeholder: placeholder,
+					Options:     options,
 				},
 			},
 		})
+		if len(rows) >= 5 {
+			break
+		}
 	}
 
 	_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{

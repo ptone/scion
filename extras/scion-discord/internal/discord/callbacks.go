@@ -59,7 +59,7 @@ func (h *CallbackHandler) Dispatch(s *discordgo.Session, i *discordgo.Interactio
 	case "settings":
 		h.handleSettingsCallback(s, i, customID)
 	case "default":
-		h.handleDefaultCallback(s, i, customID)
+		h.handleDefaultCallback(s, i, customID, values)
 	default:
 		h.log.Debug("Unhandled callback prefix", "prefix", parts[0], "custom_id", customID)
 	}
@@ -497,14 +497,20 @@ func (h *CallbackHandler) handleSettingsCallback(s *discordgo.Session, i *discor
 
 // --- Default agent callback handlers ---
 
-// handleDefaultCallback handles default agent selection buttons.
-// custom_id formats:
+// handleDefaultCallback handles default agent selection from a select menu.
+// The selected value formats:
 //   - default:set:<agentSlug>  — set agent as default
 //   - default:none             — clear default agent
-func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discordgo.InteractionCreate, customID string) {
-	parts := strings.SplitN(customID, ":", 3)
+func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discordgo.InteractionCreate, customID string, values []string) {
+	if len(values) == 0 {
+		h.log.Warn("No value selected in default menu", "custom_id", customID)
+		return
+	}
+	selected := values[0]
+
+	parts := strings.SplitN(selected, ":", 3)
 	if len(parts) < 2 {
-		h.log.Warn("Malformed default callback custom_id", "custom_id", customID)
+		h.log.Warn("Malformed default menu value", "value", selected)
 		return
 	}
 
@@ -527,11 +533,11 @@ func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discord
 			return
 		}
 		h.respondUpdate(s, i, "Default agent cleared for this channel.", nil)
-		h.log.Info("Default agent cleared via button", "channel_id", i.ChannelID)
+		h.log.Info("Default agent cleared via menu", "channel_id", i.ChannelID)
 
 	case "set":
 		if len(parts) < 3 {
-			h.log.Warn("Missing agent slug in default:set callback", "custom_id", customID)
+			h.log.Warn("Missing agent slug in default:set value", "value", selected)
 			return
 		}
 		agentSlug := parts[2]
@@ -542,10 +548,10 @@ func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discord
 			return
 		}
 		h.respondUpdate(s, i, fmt.Sprintf("Default agent set to **%s** for this channel.", agentSlug), nil)
-		h.log.Info("Default agent set via button", "channel_id", i.ChannelID, "agent", agentSlug)
+		h.log.Info("Default agent set via menu", "channel_id", i.ChannelID, "agent", agentSlug)
 
 	default:
-		h.log.Debug("Unknown default action", "action", action, "custom_id", customID)
+		h.log.Debug("Unknown default action", "action", action, "value", selected)
 	}
 }
 
