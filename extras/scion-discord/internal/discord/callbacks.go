@@ -501,6 +501,10 @@ func (h *CallbackHandler) handleSettingsCallback(s *discordgo.Session, i *discor
 // custom_id formats:
 //   - default:set:<agentSlug>  — set agent as default
 //   - default:none             — clear default agent
+//
+// The default is always written to i.ChannelID so that threads get their
+// own channel_links row (thread default) without overwriting the parent
+// channel's default.
 func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discordgo.InteractionCreate, customID string) {
 	parts := strings.SplitN(customID, ":", 3)
 	if len(parts) < 2 {
@@ -511,8 +515,8 @@ func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discord
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
-	if err != nil || link == nil {
+	resolvedLink, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
+	if err != nil || resolvedLink == nil {
 		h.respondUpdate(s, i, "This channel is not linked to a project.", nil)
 		return
 	}
@@ -520,13 +524,12 @@ func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discord
 	action := parts[1]
 	switch action {
 	case "none":
-		link.DefaultAgent = ""
-		if err := h.store.UpdateChannelLink(ctx, link); err != nil {
+		if err := h.writeDefault(ctx, i, resolvedLink, ""); err != nil {
 			h.log.Error("Failed to clear default agent", "error", err)
 			h.respondUpdate(s, i, "Failed to clear default agent. Please try again.", nil)
 			return
 		}
-		h.respondUpdate(s, i, "Default agent cleared for this channel.", nil)
+		h.respondUpdate(s, i, "Default agent cleared.", nil)
 		h.log.Info("Default agent cleared via button", "channel_id", i.ChannelID)
 
 	case "set":
@@ -535,18 +538,40 @@ func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discord
 			return
 		}
 		agentSlug := parts[2]
-		link.DefaultAgent = agentSlug
-		if err := h.store.UpdateChannelLink(ctx, link); err != nil {
+		if err := h.writeDefault(ctx, i, resolvedLink, agentSlug); err != nil {
 			h.log.Error("Failed to set default agent", "error", err)
 			h.respondUpdate(s, i, "Failed to set default agent. Please try again.", nil)
 			return
 		}
-		h.respondUpdate(s, i, fmt.Sprintf("Default agent set to **%s** for this channel.", agentSlug), nil)
+		h.respondUpdate(s, i, fmt.Sprintf("Default agent set to **%s**.", agentSlug), nil)
 		h.log.Info("Default agent set via button", "channel_id", i.ChannelID, "agent", agentSlug)
 
 	default:
 		h.log.Debug("Unknown default action", "action", action, "custom_id", customID)
 	}
+}
+
+// writeDefault writes the default agent for i.ChannelID. If that exact
+// channel/thread already has a channel_links row it is updated in place;
+// otherwise a new row is created inheriting project settings from
+// resolvedLink (which may be the parent channel's link).
+func (h *CallbackHandler) writeDefault(ctx context.Context, i *discordgo.InteractionCreate, resolvedLink *ChannelLink, agentSlug string) error {
+	direct, err := h.store.GetChannelLink(ctx, i.ChannelID)
+	if err != nil {
+		return err
+	}
+	if direct != nil {
+		direct.DefaultAgent = agentSlug
+		return h.store.UpdateChannelLink(ctx, direct)
+	}
+	link := *resolvedLink
+	link.ChannelID = i.ChannelID
+	link.GuildID = i.GuildID
+	link.DefaultAgent = agentSlug
+	link.LinkedBy = interactionUserID(i)
+	link.LinkedAt = time.Now()
+	link.Active = true
+	return h.store.CreateChannelLink(ctx, &link)
 }
 
 // --- Notification callback handlers ---
