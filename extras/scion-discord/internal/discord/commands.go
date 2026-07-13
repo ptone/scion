@@ -322,7 +322,7 @@ func (h *CommandHandler) HandleAutocomplete(s *discordgo.Session, i *discordgo.I
 			return
 		}
 
-		agents, err := h.getAgents(ctx, link.ProjectID)
+		agents, err := h.getAgents(ctx, link.ProjectID, false)
 		if err != nil {
 			h.log.Debug("Failed to get agents for autocomplete", "error", err)
 			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -807,7 +807,7 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
-	agents, err := h.getAgents(ctx, link.ProjectID)
+	agents, err := h.getAgents(ctx, link.ProjectID, true)
 	if err != nil {
 		h.log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
 		h.followup(s, i, "Failed to fetch agents. Please try again later.")
@@ -927,13 +927,14 @@ func settingsPanel(link *ChannelLink) (string, []discordgo.MessageComponent) {
 }
 
 // getAgents returns agent slugs for a project, using the store cache with
-// a fallback to the hub API.
-func (h *CommandHandler) getAgents(ctx context.Context, projectID string) ([]string, error) {
+// a fallback to the hub API. When forceRefresh is true the cache is bypassed
+// and agents are always fetched from the hub.
+func (h *CommandHandler) getAgents(ctx context.Context, projectID string, forceRefresh bool) ([]string, error) {
 	cached, err := h.store.GetProjectAgents(ctx, projectID)
 	if err != nil {
 		h.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
 	}
-	if cached != nil && time.Since(cached.RefreshedAt) < h.agentCacheTTL {
+	if !forceRefresh && cached != nil && time.Since(cached.RefreshedAt) < h.agentCacheTTL {
 		return cached.AgentSlugs, nil
 	}
 
