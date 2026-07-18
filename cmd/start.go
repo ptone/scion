@@ -80,6 +80,9 @@ func init() {
 	// Model flag
 	startCmd.Flags().StringVar(&modelFlag, "model", "", "Model to use: alias (small, medium, large, extra-large/xl) or explicit model ID")
 
+	// Thinking level flag
+	startCmd.Flags().IntVar(&thinkingLevelFlag, "thinking-level", -1, "Thinking level for the agent (0-100)")
+
 	// Label flags
 	startCmd.Flags().StringArrayVar(&labelFlags, "label", nil, "Label in key=value format (repeatable)")
 
