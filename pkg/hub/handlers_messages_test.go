@@ -208,10 +208,10 @@ func TestAgentMessagesStream_NonManagerFiltered(t *testing.T) {
 
 	// The SSE endpoint requires a subscription-capable EventPublisher.
 	// The default test server uses noopEventPublisher, so it returns 501.
-	// That's fine — we're testing that the auth gate fires before the
-	// publisher check would matter. The important assertion is that the
-	// endpoint is reachable (not 403/404) for a user with read access,
-	// confirming the same authz path as the REST endpoint.
+	// Auth and authz checks run before the publisher check, so a user
+	// with read access passes the auth gate and then hits the 501 from
+	// the noop publisher. A 403 would mean the authz gate rejected the
+	// request, confirming the same authz path as the REST endpoint.
 	rec := doMessageRequestAsUser(t, srv, bob, http.MethodGet,
 		"/api/v1/agents/"+agentID+"/messages/stream", nil)
 

@@ -121,6 +121,9 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	if msg.DispatchedAt != nil {
 		create.SetDispatchedAt(*msg.DispatchedAt)
 	}
+	if msg.DispatchFailureReason != nil {
+		create.SetDispatchFailureReason(*msg.DispatchFailureReason)
+	}
 	if !msg.CreatedAt.IsZero() {
 		create.SetCreated(msg.CreatedAt)
 	}
