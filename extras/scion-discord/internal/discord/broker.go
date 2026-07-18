@@ -53,9 +53,30 @@ type Config struct {
 	BotToken       string
 	ApplicationID  string
 	PublicKey      string
-	GuildID        string // empty = global commands
+	GuildID        string   // empty = global commands (kept for backward compat)
+	GuildIDs       []string // parsed from comma-separated guild_id; empty = global
 	DBPath         string
 	MentionRouting bool
+}
+
+// parseGuildIDs splits a comma-separated guild_id string into a deduplicated
+// slice of guild IDs. An empty input returns nil (global registration mode).
+func parseGuildIDs(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	seen := make(map[string]bool, len(parts))
+	var ids []string
+	for _, p := range parts {
+		id := strings.TrimSpace(p)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // inboundPayload is the JSON body sent to the hub API inbound endpoint.
@@ -224,11 +245,13 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 		b.session = session
 
 		// Parse Discord-specific config.
+		guildIDRaw := config["guild_id"]
 		cfg := &Config{
 			BotToken:       botToken,
 			ApplicationID:  config["application_id"],
 			PublicKey:      config["public_key"],
-			GuildID:        config["guild_id"],
+			GuildID:        guildIDRaw,
+			GuildIDs:       parseGuildIDs(guildIDRaw),
 			MentionRouting: true, // default
 		}
 
@@ -290,7 +313,8 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 
 		b.log.Info("Discord broker phase 1 configured",
 			"application_id", cfg.ApplicationID,
-			"guild_id", cfg.GuildID,
+			"guild_ids", cfg.GuildIDs,
+			"guild_id_raw", cfg.GuildID,
 			"db_path", cfg.DBPath,
 			"mention_routing", cfg.MentionRouting,
 		)
@@ -303,12 +327,12 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 
 		// Create component handlers.
 		appID := ""
-		guildID := ""
+		var guildIDs []string
 		if b.config != nil {
 			appID = b.config.ApplicationID
-			guildID = b.config.GuildID
+			guildIDs = b.config.GuildIDs
 		}
-		b.commands = NewCommandHandler(b.store, b.session, b.hubClient, b.deliverInbound, appID, guildID, b.agentCacheTTL, b.log)
+		b.commands = NewCommandHandler(b.store, b.session, b.hubClient, b.deliverInbound, appID, guildIDs, b.agentCacheTTL, b.log)
 		b.callbacks = NewCallbackHandler(b.store, b.session, b.hubClient, b.deliverInbound, b.log)
 		b.registration = NewRegistrationHandler(b.store, b.session, b.hubURL, b.hmacKey, b.brokerID, b.log)
 
@@ -767,6 +791,29 @@ func (b *DiscordBroker) HealthCheck() (*plugin.HealthStatus, error) {
 	if b.hubURL != "" {
 		details["hub_url"] = b.hubURL
 	}
+	if b.config != nil {
+		if len(b.config.GuildIDs) > 0 {
+			details["guild_ids"] = strings.Join(b.config.GuildIDs, ",")
+			details["command_scope"] = "per-guild"
+		} else {
+			details["command_scope"] = "global"
+		}
+	}
+	// Count connected guilds from session state.
+	if b.session != nil && b.session.State != nil {
+		b.session.State.RLock()
+		details["guilds"] = fmt.Sprintf("%d", len(b.session.State.Guilds))
+		var guildNames []string
+		for _, g := range b.session.State.Guilds {
+			if g.Name != "" {
+				guildNames = append(guildNames, g.Name)
+			}
+		}
+		b.session.State.RUnlock()
+		if len(guildNames) > 0 {
+			details["guild_names"] = strings.Join(guildNames, ", ")
+		}
+	}
 
 	return &plugin.HealthStatus{
 		Status:  "healthy",
@@ -833,14 +880,66 @@ func (b *DiscordBroker) handleGuildCreate(_ *discordgo.Session, g *discordgo.Gui
 		"guild_name", g.Name,
 		"member_count", g.MemberCount,
 	)
+
+	b.mu.RLock()
+	commands := b.commands
+	store := b.store
+	b.mu.RUnlock()
+
+	// Auto-register slash commands for newly joined guilds when running
+	// in per-guild list mode. This ensures commands are available instantly
+	// on servers the bot joins after initial startup.
+	if commands != nil && commands.isListMode() {
+		if err := commands.RegisterCommandsForGuild(g.ID); err != nil {
+			b.log.Error("Failed to auto-register commands for guild",
+				"guild_id", g.ID, "guild_name", g.Name, "error", err)
+		} else {
+			b.log.Info("Auto-registered commands for guild",
+				"guild_id", g.ID, "guild_name", g.Name)
+		}
+	}
+
+	// Update guild_name on any existing channel links for this guild.
+	if store != nil && g.Name != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := store.UpdateGuildName(ctx, g.ID, g.Name); err != nil {
+			b.log.Warn("Failed to update guild name on channel links",
+				"guild_id", g.ID, "guild_name", g.Name, "error", err)
+		}
+	}
 }
 
 // handleGuildDelete is called when the bot is removed from a guild or
-// when a guild becomes unavailable.
+// when a guild becomes unavailable (outage).
 func (b *DiscordBroker) handleGuildDelete(_ *discordgo.Session, g *discordgo.GuildDelete) {
-	b.log.Info("Discord guild unavailable",
+	if g.Unavailable {
+		// Guild is temporarily unavailable (Discord outage) — do not
+		// deactivate links; they should resume when the guild recovers.
+		b.log.Info("Discord guild temporarily unavailable (outage)",
+			"guild_id", g.ID,
+		)
+		return
+	}
+
+	// The bot was actually removed from this guild. Deactivate all
+	// channel links so outbound broadcasts don't fail on every publish.
+	b.log.Info("Discord guild removed — deactivating channel links",
 		"guild_id", g.ID,
 	)
+
+	b.mu.RLock()
+	store := b.store
+	b.mu.RUnlock()
+
+	if store != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := store.DeactivateLinksForGuild(ctx, g.ID); err != nil {
+			b.log.Error("Failed to deactivate links for removed guild",
+				"guild_id", g.ID, "error", err)
+		}
+	}
 }
 
 // handleMessageCreate is called for every new message in channels the bot

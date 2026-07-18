@@ -181,9 +181,18 @@ func (h *CallbackHandler) saveChannelLink(ctx context.Context, i *discordgo.Inte
 	linkedBy := interactionUserID(i)
 	guildID := i.GuildID
 
+	// Resolve guild name from session state for UX display.
+	guildName := ""
+	if guildID != "" && h.session != nil && h.session.State != nil {
+		if guild, err := h.session.State.Guild(guildID); err == nil && guild != nil {
+			guildName = guild.Name
+		}
+	}
+
 	link := &ChannelLink{
 		ChannelID:          i.ChannelID,
 		GuildID:            guildID,
+		GuildName:          guildName,
 		ProjectID:          projectID,
 		ProjectSlug:        projectSlug,
 		DefaultAgent:       agentSlug,
@@ -201,6 +210,7 @@ func (h *CallbackHandler) saveChannelLink(ctx context.Context, i *discordgo.Inte
 		h.log.Info("Channel link saved",
 			"channel_id", i.ChannelID,
 			"guild_id", guildID,
+			"guild_name", guildName,
 			"project_id", projectID,
 		)
 	}

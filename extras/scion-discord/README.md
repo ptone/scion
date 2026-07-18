@@ -88,8 +88,12 @@ server:
           application_id: "your-application-id"
           public_key: "your-public-key"
 
-          # Guild-scoped command registration (instant updates, good for dev).
-          # Leave empty for global commands (can take up to 1 hour to propagate).
+          # Slash command registration scope.
+          # Leave empty for global commands (appear on all servers, ~1h propagation).
+          # Set to a single guild ID for dev, or a comma-separated list for
+          # multi-server deployments with instant command propagation.
+          # guild_id: "987654321098765432"                    # single guild
+          # guild_id: "111222333,444555666,777888999"         # multi-server
           guild_id: ""
 
           # SQLite database for channel links, user mappings, and state.
@@ -222,6 +226,66 @@ Each agent appears in Discord with a distinct username and avatar, powered by Di
 
 If the permission is not granted, messages fall back to the bot's own identity.
 
+## Multi-Server Support
+
+A single Discord bot token can serve multiple servers (guilds) simultaneously. All routing is keyed on Discord channel IDs, which are globally unique snowflakes — the server is implicit in the channel.
+
+### How It Works
+
+- **One bot, many servers.** The Discord Gateway WebSocket receives events from all servers the bot has joined. No additional configuration is needed for inbound message routing — it works automatically.
+- **Channel links are server-aware.** Each `/scion setup` link records the guild ID and guild name. The server name is shown in `/scion info` output and health checks.
+- **Per-guild command registration.** When `guild_id` lists specific servers, `/scion` commands are registered per-guild with instant propagation. When left empty, commands are registered globally (up to ~1 hour propagation to new servers).
+- **Auto-registration.** When running in per-guild list mode, the bot automatically registers commands on newly joined servers.
+- **Guild removal cleanup.** If the bot is removed from a server, all channel links for that server are deactivated so outbound broadcasts don't fail.
+
+### Setup
+
+1. **Create one Discord Application** in the [Developer Portal](https://discord.com/developers/applications) — you only need one bot token.
+
+2. **Invite the bot to each server** using the same OAuth2 URL (same `client_id`, same permissions). Each server admin opens the invite link independently:
+   ```
+   https://discord.com/api/oauth2/authorize?client_id=<APPLICATION_ID>&permissions=329101954112&scope=bot%20applications.commands
+   ```
+
+3. **Configure `guild_id`** in `settings.yaml`:
+   ```yaml
+   # Option A: Global commands (simplest — commands appear everywhere after ~1h)
+   guild_id: ""
+
+   # Option B: Per-guild list (instant propagation, explicit control)
+   guild_id: "111222333444555666,999888777666555444"
+   ```
+
+4. **Run `/scion setup`** in each server's channels to link them to projects. Each channel independently maps to a project.
+
+### Per-Server Permissions
+
+Each server must grant the bot the same permissions:
+
+| Permission | Purpose |
+|-----------|---------|
+| View Channels | Discover linked channels |
+| Send Messages | Post agent responses |
+| Read Message History | Context for conversations |
+| Use Application Commands | `/scion` slash commands |
+| Manage Webhooks | Per-agent identity (name + avatar) |
+
+If a required permission is missing on one server, messages to that server's channels will fail silently (logged as errors). The webhook fallback is soft — without Manage Webhooks, messages are sent as the bot user instead of with per-agent identity.
+
+### Trust Model
+
+One bot token = one trust domain. All servers sharing a bot token share the same project list, agent list, and user registrations:
+
+- `/scion setup` lists **all** hub projects on any server
+- A user registered via `/scion register` on Server A can interact with agents from Server B
+- Agent-to-channel routing is per-channel (not per-server)
+
+If servers have different audiences and you need project isolation, use separate bot tokens (separate Discord Applications) — one per trust domain. Per-guild project scoping may be added in a future release.
+
+### Rate Limits
+
+All servers share one REST API rate-limit budget. A message burst to Server A can briefly throttle sends to Server B. The existing `SendQueue` serializes sends with configurable `send_min_delay`; discordgo handles per-route rate-limit buckets automatically. This is not a concern at typical self-hosted scale (<100 guilds).
+
 ## Configuration Reference
 
 ### Plugin Config Keys
@@ -233,7 +297,7 @@ These keys go in `plugins.broker.discord.config` in `settings.yaml`:
 | `bot_token` | **Yes** | — | Discord bot token |
 | `application_id` | **Yes** | — | Discord application ID |
 | `public_key` | No | — | Discord application public key |
-| `guild_id` | No | — | Guild ID for guild-scoped slash commands (empty = global) |
+| `guild_id` | No | — | Guild ID(s) for per-guild slash commands (comma-separated for multi-server; empty = global) |
 | `db_path` | No | `discord.db` | Path to SQLite database for persistent state |
 | `mention_routing` | No | `true` | Enable @-mention routing for messages |
 | `send_queue_size` | No | `100` | Max queued outbound messages per channel |
@@ -353,7 +417,7 @@ docker run -e DATABASE_URL=... -e DISCORD_BOT_TOKEN=... scion-discord
 | `DISCORD_HUB_URL` | **Yes** | — | Hub base URL for registration API / inbound delivery |
 | `DISCORD_BROKER_ID` | **Yes** | — | Registered broker ID (UUID) |
 | `DISCORD_HMAC_KEY` | **Yes** | — | Base64-encoded HMAC secret for hub authentication |
-| `DISCORD_GUILD_ID` | No | — | Guild ID for guild-scoped commands |
+| `DISCORD_GUILD_ID` | No | — | Guild ID(s) for per-guild commands (comma-separated for multi-server) |
 | `GRPC_PORT` | No | `50051` | gRPC listen port |
 | `CONFIG_FILE` | No | — | Path to local YAML config file |
 | `UPDATE_HOOK` | No | — | Command to run on update signal (default: exit for platform restart) |

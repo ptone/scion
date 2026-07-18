@@ -309,6 +309,30 @@ func TestPublish_ForumChannelWithoutThreadID_ReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "thread ID is required")
 }
 
+func TestParseGuildIDs(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"empty string", "", nil},
+		{"whitespace only", "   ", nil},
+		{"single guild", "12345", []string{"12345"}},
+		{"single guild with spaces", "  12345  ", []string{"12345"}},
+		{"two guilds", "111,222", []string{"111", "222"}},
+		{"two guilds with spaces", " 111 , 222 ", []string{"111", "222"}},
+		{"duplicates removed", "111,222,111", []string{"111", "222"}},
+		{"empty parts ignored", "111,,222,", []string{"111", "222"}},
+		{"three guilds", "111,222,333", []string{"111", "222", "333"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseGuildIDs(tt.raw)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestPublish_MediaChannelWithoutThreadID_ReturnsError(t *testing.T) {
 	session := stubSession([]*discordgo.Channel{
 		{ID: "media123", Type: discordgo.ChannelTypeGuildMedia},

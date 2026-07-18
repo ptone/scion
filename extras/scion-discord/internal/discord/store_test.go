@@ -664,6 +664,67 @@ func TestPendingAskUser(t *testing.T) {
 	})
 }
 
+// --- GuildName ---
+
+func TestUpdateGuildName(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create two links in guild-1 and one in guild-2.
+	for _, chID := range []string{"100", "200"} {
+		require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+			ChannelID: chID,
+			GuildID:   "guild-1",
+			ProjectID: "proj-1",
+			LinkedAt:  time.Now().UTC(),
+			Active:    true,
+		}))
+	}
+	require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID: "300",
+		GuildID:   "guild-2",
+		ProjectID: "proj-2",
+		LinkedAt:  time.Now().UTC(),
+		Active:    true,
+	}))
+
+	// Update guild name for guild-1.
+	require.NoError(t, store.UpdateGuildName(ctx, "guild-1", "My Server"))
+
+	got1, err := store.GetChannelLink(ctx, "100")
+	require.NoError(t, err)
+	assert.Equal(t, "My Server", got1.GuildName)
+
+	got2, err := store.GetChannelLink(ctx, "200")
+	require.NoError(t, err)
+	assert.Equal(t, "My Server", got2.GuildName)
+
+	// guild-2 should be unaffected.
+	got3, err := store.GetChannelLink(ctx, "300")
+	require.NoError(t, err)
+	assert.Equal(t, "", got3.GuildName)
+}
+
+func TestChannelLink_GuildName(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	link := &ChannelLink{
+		ChannelID: "111",
+		GuildID:   "guild-1",
+		GuildName: "Test Server",
+		ProjectID: "proj-1",
+		LinkedAt:  time.Now().UTC(),
+		Active:    true,
+	}
+	require.NoError(t, store.CreateChannelLink(ctx, link))
+
+	got, err := store.GetChannelLink(ctx, "111")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "Test Server", got.GuildName)
+}
+
 // --- Store lifecycle ---
 
 func TestStore_OpenInvalidPath(t *testing.T) {
