@@ -328,3 +328,198 @@ func TestPublish_MediaChannelWithoutThreadID_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "forum/media channel")
 }
+
+// --- Thread inheritance tests ---
+
+func TestResolveChannelLink_ThreadInheritsParent(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create a channel link for the parent channel with a default agent.
+	require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID:    "parent-ch-1",
+		GuildID:      testGuildID,
+		ProjectID:    "proj-1",
+		ProjectSlug:  "my-project",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+
+	// Set up a session with a thread that has parent-ch-1 as its parent.
+	session := stubSession([]*discordgo.Channel{
+		{ID: "parent-ch-1", Type: discordgo.ChannelTypeGuildText},
+		{ID: "thread-1", Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "parent-ch-1"},
+	})
+
+	// Clear the global threadParents cache to test fresh resolution.
+	threadParentsMu.Lock()
+	delete(threadParents, "thread-1")
+	threadParentsMu.Unlock()
+
+	// Resolve channel link for the thread — should fall through to parent.
+	link, err := resolveChannelLink(ctx, session, store, "thread-1")
+	require.NoError(t, err)
+	require.NotNil(t, link, "thread should inherit parent channel link")
+	assert.Equal(t, "parent-ch-1", link.ChannelID)
+	assert.Equal(t, "proj-1", link.ProjectID)
+	assert.Equal(t, "coder", link.DefaultAgent)
+}
+
+func TestResolveChannelLink_ThreadWithOwnLink(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Parent channel has a default agent.
+	require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID:    "parent-ch-2",
+		GuildID:      testGuildID,
+		ProjectID:    "proj-1",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+
+	// Thread has its own explicit link with a different agent.
+	require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID:    "thread-2",
+		GuildID:      testGuildID,
+		ProjectID:    "proj-1",
+		DefaultAgent: "reviewer",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+
+	session := stubSession([]*discordgo.Channel{
+		{ID: "parent-ch-2", Type: discordgo.ChannelTypeGuildText},
+		{ID: "thread-2", Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "parent-ch-2"},
+	})
+
+	// Thread has its own link — should use that, not the parent's.
+	link, err := resolveChannelLink(ctx, session, store, "thread-2")
+	require.NoError(t, err)
+	require.NotNil(t, link)
+	assert.Equal(t, "thread-2", link.ChannelID)
+	assert.Equal(t, "reviewer", link.DefaultAgent)
+}
+
+func TestResolveChannelLink_ChannelNoConfig(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	session := stubSession([]*discordgo.Channel{
+		{ID: "unlinked-ch", Type: discordgo.ChannelTypeGuildText},
+	})
+
+	// Channel with no link should return nil.
+	link, err := resolveChannelLink(ctx, session, store, "unlinked-ch")
+	require.NoError(t, err)
+	assert.Nil(t, link)
+}
+
+func TestResolveChannelLink_PrivateThread(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID:    "parent-ch-3",
+		GuildID:      testGuildID,
+		ProjectID:    "proj-1",
+		DefaultAgent: "ops",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+
+	session := stubSession([]*discordgo.Channel{
+		{ID: "parent-ch-3", Type: discordgo.ChannelTypeGuildText},
+		{ID: "priv-thread-1", Type: discordgo.ChannelTypeGuildPrivateThread, ParentID: "parent-ch-3"},
+	})
+
+	threadParentsMu.Lock()
+	delete(threadParents, "priv-thread-1")
+	threadParentsMu.Unlock()
+
+	link, err := resolveChannelLink(ctx, session, store, "priv-thread-1")
+	require.NoError(t, err)
+	require.NotNil(t, link)
+	assert.Equal(t, "parent-ch-3", link.ChannelID)
+	assert.Equal(t, "ops", link.DefaultAgent)
+}
+
+func TestHandleThreadCreate_CachesParentMapping(t *testing.T) {
+	session := stubSession([]*discordgo.Channel{
+		{ID: "parent-ch-4", Type: discordgo.ChannelTypeGuildText},
+	})
+	b := testBroker(session)
+
+	// Clear any prior state in the global cache.
+	threadParentsMu.Lock()
+	delete(threadParents, "new-thread-1")
+	threadParentsMu.Unlock()
+
+	// Simulate a ThreadCreate event.
+	b.handleThreadCreate(session, &discordgo.ThreadCreate{
+		Channel: &discordgo.Channel{
+			ID:       "new-thread-1",
+			ParentID: "parent-ch-4",
+			Name:     "discussion-thread",
+			Type:     discordgo.ChannelTypeGuildPublicThread,
+		},
+	})
+
+	// Verify the global cache was populated.
+	threadParentsMu.Lock()
+	parentID := threadParents["new-thread-1"]
+	threadParentsMu.Unlock()
+	assert.Equal(t, "parent-ch-4", parentID)
+
+	// Verify the broker-level cache was populated.
+	b.mu.RLock()
+	brokerParent := b.threadParents["new-thread-1"]
+	b.mu.RUnlock()
+	assert.Equal(t, "parent-ch-4", brokerParent)
+}
+
+func TestHandleThreadCreate_NilChannel(t *testing.T) {
+	session := stubSession(nil)
+	b := testBroker(session)
+
+	// Should not panic on nil ThreadCreate.
+	b.handleThreadCreate(session, nil)
+
+	// Should not panic on nil embedded Channel.
+	b.handleThreadCreate(session, &discordgo.ThreadCreate{
+		Channel: nil,
+	})
+}
+
+func TestResolveChannelLink_ThreadWithCachedParent(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Set up parent channel link.
+	require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID:    "parent-ch-5",
+		GuildID:      testGuildID,
+		ProjectID:    "proj-1",
+		DefaultAgent: "devops",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+
+	// Pre-populate the global cache (as handleThreadCreate would do).
+	threadParentsMu.Lock()
+	threadParents["cached-thread-1"] = "parent-ch-5"
+	threadParentsMu.Unlock()
+
+	// Session doesn't need the thread in state — cache should be used.
+	session := stubSession([]*discordgo.Channel{
+		{ID: "parent-ch-5", Type: discordgo.ChannelTypeGuildText},
+	})
+
+	link, err := resolveChannelLink(ctx, session, store, "cached-thread-1")
+	require.NoError(t, err)
+	require.NotNil(t, link)
+	assert.Equal(t, "parent-ch-5", link.ChannelID)
+	assert.Equal(t, "devops", link.DefaultAgent)
+}

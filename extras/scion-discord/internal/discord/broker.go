@@ -791,6 +791,7 @@ func (b *DiscordBroker) startGateway() error {
 	session.AddHandler(b.handleGuildDelete)
 	session.AddHandler(b.handleMessageCreate)
 	session.AddHandler(b.handleInteractionCreate)
+	session.AddHandler(b.handleThreadCreate)
 
 	// Open the gateway connection.
 	if err := session.Open(); err != nil {
@@ -953,6 +954,42 @@ func (b *DiscordBroker) handleInteractionCreate(s *discordgo.Session, i *discord
 			commands.HandleAutocomplete(s, i)
 		}
 	}
+}
+
+// handleThreadCreate is called when a new thread is created in a guild.
+// It caches the thread→parent channel mapping so that resolveChannelLink
+// can immediately fall back to the parent's agent config without an
+// additional API call.
+func (b *DiscordBroker) handleThreadCreate(_ *discordgo.Session, t *discordgo.ThreadCreate) {
+	if t == nil || t.Channel == nil {
+		return
+	}
+
+	threadID := t.ID
+	parentID := t.ParentID
+	if threadID == "" || parentID == "" {
+		return
+	}
+
+	// Populate the global inbound-routing cache (used by resolveChannelLink).
+	threadParentsMu.Lock()
+	threadParents[threadID] = parentID
+	threadParentsMu.Unlock()
+
+	// Populate the broker-level cache (used by resolveThreadParent for
+	// outbound webhook routing).
+	b.mu.Lock()
+	if b.threadParents == nil {
+		b.threadParents = make(map[string]string)
+	}
+	b.threadParents[threadID] = parentID
+	b.mu.Unlock()
+
+	b.log.Debug("Cached thread parent mapping",
+		"thread_id", threadID,
+		"parent_id", parentID,
+		"thread_name", t.Name,
+	)
 }
 
 // --- Inbound message handling ---
