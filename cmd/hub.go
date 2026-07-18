@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/spf13/cobra"
@@ -505,6 +506,16 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 		info.MethodType = "devauth"
 		info.Source = source
 		info.IsDevAuth = true
+		return info
+	}
+
+	// Check if transport auth is active (proxy-auth mode).
+	// When no traditional auth is configured but a transport token source
+	// resolved, the user authenticates via the platform proxy (IAP).
+	if src, _ := transportauth.FromEnv(); src != nil {
+		info.Method = "proxy-auth (transport)"
+		info.MethodType = "proxy_auth"
+		info.Source = "transport token"
 		return info
 	}
 
