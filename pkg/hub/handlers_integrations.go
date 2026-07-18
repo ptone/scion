@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -608,6 +609,44 @@ func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request
 
 	if mgr == nil || !mgr.HasPlugin("broker", name) {
 		NotFound(w, "integration")
+		return
+	}
+
+	// For HA integrations, pushing hub-side config via reconfigureIntegration
+	// would race with the DB-backed Chain C reload (same issue as G2).
+	// Instead, fire a NOTIFY signal so the runtime re-reads from Postgres.
+	if s.isHAIntegration(mgr, name) {
+		if !s.requirePostgres(w) {
+			return
+		}
+		if s.entClient == nil {
+			InternalError(w)
+			return
+		}
+		ctx := r.Context()
+		signal := AdminSignal{
+			Integration: name,
+			Kind:        "config",
+		}
+		payload, err := json.Marshal(signal)
+		if err != nil {
+			slog.Error("Failed to marshal admin signal for HA restart",
+				"plugin", name, "error", err)
+			InternalError(w)
+			return
+		}
+		var result sql.Result
+		if err := s.entClient.Driver().Exec(ctx,
+			"SELECT pg_notify($1, $2)",
+			[]any{adminSignalChannel, string(payload)},
+			&result,
+		); err != nil {
+			slog.Error("Failed to NOTIFY config reload for HA integration restart",
+				"plugin", name, "error", err)
+			InternalError(w)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 

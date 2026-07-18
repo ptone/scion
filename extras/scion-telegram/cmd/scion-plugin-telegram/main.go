@@ -103,11 +103,27 @@ func main() {
 	os.Exit(0)
 }
 
+// useLegacyV1 returns true if the operator has opted into the legacy v1 broker.
+// The SCION_TELEGRAM_V1 env var is the highest-priority override; the
+// broker_version config key (from scion-telegram.yaml or inline config) is the
+// fallback. v2 is the default when neither is set.
+func useLegacyV1(cfg map[string]string) bool {
+	if os.Getenv("SCION_TELEGRAM_V1") == "1" {
+		return true
+	}
+	if v, ok := cfg["broker_version"]; ok && strings.EqualFold(v, "v1") {
+		return true
+	}
+	return false
+}
+
 func servePlugin() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	var impl plugin.MessageBrokerPluginInterface
-	if os.Getenv("SCION_TELEGRAM_V1") == "1" {
+	// In plugin mode the full config map arrives later via Configure() RPC,
+	// so broker_version is only available via the env var here.
+	if useLegacyV1(nil) {
 		impl = telegram.New(log)
 		log.Info("Using Telegram broker v1 (legacy)")
 	} else {
@@ -150,6 +166,7 @@ func serveStandalone() {
 
 	// F2: Create broker and gRPC server early so health probes work during
 	// the runtime's DB-connect retry window.
+	// Standalone/HA always uses v2 (v1 does not support webhook-only mode).
 	broker := telegram.NewV2(log)
 	brokerServer := grpcbroker.NewServer(broker)
 

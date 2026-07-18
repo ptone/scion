@@ -41,7 +41,9 @@ sudo install scion-plugin-telegram /usr/local/bin/
 
 ### 3. Configure settings.yaml
 
-Add the Telegram plugin to the hub's `settings.yaml`:
+Add the Telegram plugin to the hub's `settings.yaml`. Secrets (`bot_token`, `webhook_secret`) should be managed through the **Admin UI** (Settings → Integrations → Telegram) rather than placed inline in `settings.yaml`. The hub's secret backend stores them securely and injects them at runtime.
+
+Non-sensitive settings go in a per-plugin YAML file referenced via `config_file`:
 
 ```yaml
 server:
@@ -58,28 +60,41 @@ plugins:
       # Managed plugin: hub discovers and launches the binary.
       # Set 'path' only if scion-plugin-telegram is not on $PATH.
       # path: /usr/local/bin/scion-plugin-telegram
-      config:
-        bot_token: "123456:ABC-DEF..."
-
-        # Inbound mode: "poll" (default) or "webhook" (recommended).
-        inbound_mode: webhook
-
-        # Webhook settings (required when inbound_mode is "webhook").
-        webhook_url: "https://hub.example.com/telegram/webhook"
-        webhook_listen: ":9094"
-        webhook_secret: "<generate with: openssl rand -hex 16>"
-
-        # SQLite database for group links, user mappings, and state.
-        # Default: telegram_v2.db (relative to hub working directory).
-        db_path: /var/lib/scion/telegram_v2.db
-
-        # Optional tuning.
-        # send_queue_size: 100     # max queued messages per chat
-        # send_min_delay: 50ms     # minimum delay between sends (rate limiting)
-        # agent_cache_ttl: 5m      # how long to cache agent lists from hub
+      config_file: /etc/scion/scion-telegram.yaml
 ```
 
-V2 is the default broker. To fall back to the legacy V1 broker, set:
+Create the per-plugin config file (`/etc/scion/scion-telegram.yaml`):
+
+```yaml
+# Inbound mode: "poll" (default) or "webhook" (recommended).
+inbound_mode: webhook
+
+# Webhook settings (required when inbound_mode is "webhook").
+webhook_url: "https://hub.example.com/telegram/webhook"
+webhook_listen: ":9094"
+
+# SQLite database for group links, user mappings, and state.
+# Default: telegram_v2.db (relative to hub working directory).
+db_path: /var/lib/scion/telegram_v2.db
+
+# Broker version: "v2" (default) or "v1" (legacy).
+# Can also be set via SCION_TELEGRAM_V1=1 env var (overrides this key).
+# broker_version: v2
+
+# Optional tuning.
+# send_queue_size: 100     # max queued messages per chat
+# send_min_delay: 50ms     # minimum delay between sends (rate limiting)
+# agent_cache_ttl: 5m      # how long to cache agent lists from hub
+```
+
+Then add secrets via the Admin UI:
+1. Navigate to **Settings → Integrations → Telegram**
+2. Enter your `bot_token` and `webhook_secret`
+3. Click **Save** — the hub encrypts and stores them in the secret backend
+
+> **Note:** If you place `bot_token` directly in `settings.yaml` or the config file, the hub will automatically migrate it to the secret backend at boot and log a deprecation warning. This inline pattern is deprecated and will be removed in a future release.
+
+V2 is the default broker. To fall back to the legacy V1 broker, set `broker_version: v1` in the config file or:
 
 ```bash
 SCION_TELEGRAM_V1=1
@@ -276,20 +291,28 @@ Codes expire after 15 minutes. Run `/register` again in DM to get a fresh code, 
 
 ### Plugin Config Keys
 
-These keys go in `plugins.broker.telegram.config` in `settings.yaml`:
+These keys go in the per-plugin YAML file (referenced by `config_file` in `settings.yaml`):
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `bot_token` | **Yes** | — | Telegram Bot API token from BotFather |
 | `inbound_mode` | No | `poll` | `poll` (long-polling) or `webhook` |
 | `webhook_url` | Webhook mode | — | Public URL for Telegram to send updates to |
 | `webhook_listen` | No | `:9094` | Local address for the webhook HTTP server |
-| `webhook_secret` | No | — | Secret token for webhook request validation |
 | `db_path` | No | `telegram_v2.db` | Path to SQLite database for persistent state |
+| `broker_version` | No | `v2` | `v2` (default) or `v1` (legacy). Env var `SCION_TELEGRAM_V1=1` overrides |
 | `send_queue_size` | No | `100` | Max queued outbound messages per chat |
 | `send_min_delay` | No | `50ms` | Minimum delay between sends (rate-limit protection) |
 | `agent_cache_ttl` | No | `5m` | TTL for cached agent lists from the hub |
 | `api_base_url` | No | — | Override Telegram API base URL (for testing) |
+
+### Secrets (Admin UI)
+
+These are managed via the Admin UI (Settings → Integrations → Telegram), **not** in config files:
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `bot_token` | **Yes** | Telegram Bot API token from BotFather |
+| `webhook_secret` | No | Secret token for webhook request validation |
 
 ### Hub Environment Variables
 
@@ -311,16 +334,20 @@ server:
 plugins:
   broker:
     broker-log:
-      self_managed: true
+      mode: external
       address: "localhost:9091"
     telegram:
-      config:
-        bot_token: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
-        inbound_mode: webhook
-        webhook_url: "https://hub.example.com/telegram/webhook"
-        webhook_listen: ":9094"
-        webhook_secret: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
-        db_path: /var/lib/scion/telegram_v2.db
+      config_file: /etc/scion/scion-telegram.yaml
+      # Secrets (bot_token, webhook_secret) are set via Admin UI.
+```
+
+Example `scion-telegram.yaml`:
+
+```yaml
+inbound_mode: webhook
+webhook_url: "https://hub.example.com/telegram/webhook"
+webhook_listen: ":9094"
+db_path: /var/lib/scion/telegram_v2.db
 ```
 
 ## Standalone / HA Mode (Mode 3)

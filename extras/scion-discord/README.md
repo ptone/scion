@@ -71,7 +71,7 @@ sudo install scion-plugin-discord /usr/local/bin/
 
 ### 4. Configure settings.yaml
 
-Add the Discord plugin to the hub's `settings.yaml` (note that `plugins` MUST be nested under the `server` block):
+Add the Discord plugin to the hub's `settings.yaml` (note that `plugins` MUST be nested under the `server` block). Secrets (`bot_token`) should be managed through the **Admin UI** (Settings → Integrations → Discord) rather than placed inline in `settings.yaml`. Non-sensitive settings go in a per-plugin YAML file referenced via `config_file`:
 
 ```yaml
 server:
@@ -83,24 +83,36 @@ server:
   plugins:
     broker:
       discord:
-        config:
-          bot_token: "your-bot-token"
-          application_id: "your-application-id"
-          public_key: "your-public-key"
-
-          # Guild-scoped command registration (instant updates, good for dev).
-          # Leave empty for global commands (can take up to 1 hour to propagate).
-          guild_id: ""
-
-          # SQLite database for channel links, user mappings, and state.
-          # Default: discord.db (relative to hub working directory).
-          db_path: /var/lib/scion/discord.db
-
-          # Optional tuning.
-          # send_queue_size: 100     # max queued messages per channel
-          # send_min_delay: 50ms     # minimum delay between sends (rate limiting)
-          # agent_cache_ttl: 5m      # how long to cache agent lists from hub
+        config_file: /etc/scion/scion-discord.yaml
+        # Secrets (bot_token) are set via Admin UI.
 ```
+
+Create the per-plugin config file (`/etc/scion/scion-discord.yaml`):
+
+```yaml
+application_id: "your-application-id"
+public_key: "your-public-key"
+
+# Guild-scoped command registration (instant updates, good for dev).
+# Leave empty for global commands (can take up to 1 hour to propagate).
+guild_id: ""
+
+# SQLite database for channel links, user mappings, and state.
+# Default: discord.db (relative to hub working directory).
+db_path: /var/lib/scion/discord.db
+
+# Optional tuning.
+# send_queue_size: 100     # max queued messages per channel
+# send_min_delay: 50ms     # minimum delay between sends (rate limiting)
+# agent_cache_ttl: 5m      # how long to cache agent lists from hub
+```
+
+Then add the bot token via the Admin UI:
+1. Navigate to **Settings → Integrations → Discord**
+2. Enter your `bot_token`
+3. Click **Save**
+
+> **Note:** If you place `bot_token` directly in `settings.yaml` or the config file, the hub will automatically migrate it to the secret backend at boot and log a deprecation warning. This inline pattern is deprecated and will be removed in a future release.
 
 ### 5. Start the Hub
 
@@ -151,8 +163,9 @@ You can copy and paste the following prompt to have an agent execute this instal
 > 2. Once I provide the Application ID, generate and output my Discord bot server invite link with permissions set to `329101954112`.
 > 3. SSH into the active GCE VM and configure the `/home/scion/.scion/settings.yaml` file:
 >    - Ensure `- discord` is enabled under `server.message_broker.types`.
->    - Add the `server.plugins.broker.discord` block with the provided token and app-id (ensure `plugins` is nested under `server:` and not at the root level).
->    - Set `db_path` to `/home/scion/.scion/discord.db`.
+>    - Add the `server.plugins.broker.discord` block with `config_file` pointing to a per-plugin YAML (ensure `plugins` is nested under `server:` and not at the root level).
+>    - Create the per-plugin YAML with `application_id` and `db_path`.
+>    - Set `bot_token` via the Admin UI (Settings → Integrations → Discord), NOT in the config file.
 > 4. Run `sudo systemctl restart scion-hub` and check the logs via `journalctl` to verify that the message `Discord gateway connected` or `Discord bot ready` is present.
 
 ### 4. Verification Checklist (for the Agent)
@@ -226,11 +239,10 @@ If the permission is not granted, messages fall back to the bot's own identity.
 
 ### Plugin Config Keys
 
-These keys go in `plugins.broker.discord.config` in `settings.yaml`:
+These keys go in the per-plugin YAML file (referenced by `config_file` in `settings.yaml`):
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `bot_token` | **Yes** | — | Discord bot token |
 | `application_id` | **Yes** | — | Discord application ID |
 | `public_key` | No | — | Discord application public key |
 | `guild_id` | No | — | Guild ID for guild-scoped slash commands (empty = global) |
@@ -239,6 +251,14 @@ These keys go in `plugins.broker.discord.config` in `settings.yaml`:
 | `send_queue_size` | No | `100` | Max queued outbound messages per channel |
 | `send_min_delay` | No | `50ms` | Minimum delay between sends (rate-limit protection) |
 | `agent_cache_ttl` | No | `5m` | TTL for cached agent lists from the hub |
+
+### Secrets (Admin UI)
+
+These are managed via the Admin UI (Settings → Integrations → Discord), **not** in config files:
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `bot_token` | **Yes** | Discord bot token from Developer Portal |
 
 ### Example settings.yaml (Complete)
 
@@ -253,15 +273,20 @@ server:
   plugins:
     broker:
       broker-log:
-        self_managed: true
+        mode: external
         address: "localhost:9091"
       discord:
-        config:
-          bot_token: "MTIzNDU2Nzg5.example.token"
-          application_id: "123456789012345678"
-          public_key: "abcdef1234567890abcdef1234567890abcdef1234567890"
-          guild_id: "987654321098765432"
-          db_path: /var/lib/scion/discord.db
+        config_file: /etc/scion/scion-discord.yaml
+        # Secrets (bot_token) are set via Admin UI.
+```
+
+Example `scion-discord.yaml`:
+
+```yaml
+application_id: "123456789012345678"
+public_key: "abcdef1234567890abcdef1234567890abcdef1234567890"
+guild_id: "987654321098765432"
+db_path: /var/lib/scion/discord.db
 ```
 
 ## Architecture

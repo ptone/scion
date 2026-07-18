@@ -124,6 +124,16 @@ func TestResolvedDeploymentMode(t *testing.T) {
 			entry:    PluginEntry{Mode: "grpc", SelfManaged: true, Address: "localhost:9090"},
 			expected: DeploymentModeHA,
 		},
+		{
+			name:     "ha mode alias",
+			entry:    PluginEntry{Mode: "ha", Address: "localhost:9090"},
+			expected: DeploymentModeHA,
+		},
+		{
+			name:     "external mode alias",
+			entry:    PluginEntry{Mode: "external", Address: "localhost:9090"},
+			expected: DeploymentModeExternal,
+		},
 	}
 
 	for _, tt := range tests {

@@ -19,6 +19,7 @@ package plugin
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -112,16 +113,34 @@ type PluginEntry struct {
 
 // ResolvedDeploymentMode returns the deployment mode for this entry,
 // considering both the new Mode field and the legacy SelfManaged flag.
+//
+// Accepted mode values (API words are canonical, YAML words are deprecated):
+//
+//	"plugin"                → DeploymentModePlugin  (default)
+//	"external"              → DeploymentModeExternal (canonical)
+//	"self-managed"          → DeploymentModeExternal (deprecated alias)
+//	"ha"                    → DeploymentModeHA       (canonical)
+//	"grpc"                  → DeploymentModeHA       (deprecated alias)
+//	"" + self_managed: true → DeploymentModeExternal (deprecated flag)
 func (e *PluginEntry) ResolvedDeploymentMode() DeploymentMode {
 	switch e.Mode {
-	case "grpc":
+	case "ha":
 		return DeploymentModeHA
+	case "grpc":
+		slog.Warn("Deprecated mode value in settings.yaml: use 'ha' instead of 'grpc'",
+			"mode", e.Mode)
+		return DeploymentModeHA
+	case "external":
+		return DeploymentModeExternal
 	case "self-managed":
+		slog.Warn("Deprecated mode value in settings.yaml: use 'external' instead of 'self-managed'",
+			"mode", e.Mode)
 		return DeploymentModeExternal
 	case "plugin":
 		return DeploymentModePlugin
 	default:
 		if e.SelfManaged {
+			slog.Warn("Deprecated config in settings.yaml: use 'mode: external' instead of 'self_managed: true'")
 			return DeploymentModeExternal
 		}
 		return DeploymentModePlugin
