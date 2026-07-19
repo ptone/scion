@@ -1980,6 +1980,25 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		return
 	}
 
+	// Refine targets: keep only start-mention agents as primary recipients.
+	// Body-mention agents are removed from targets so they fall through to
+	// the TypeMention delivery loop instead of being grouped as targets.
+	if !isAll && len(classified.StartMentions) > 0 {
+		startAgentSet := make(map[string]bool, len(classified.StartMentions))
+		for _, sm := range classified.StartMentions {
+			if sm.Kind == "agent" {
+				startAgentSet[strings.ToLower(sm.Name)] = true
+			}
+		}
+		refinedTargets := make([]string, 0, len(targets))
+		for _, t := range targets {
+			if startAgentSet[strings.ToLower(t)] {
+				refinedTargets = append(refinedTargets, t)
+			}
+		}
+		targets = refinedTargets
+	}
+
 	// Determine message type: multi-agent @mentions (not @all) use group-set.
 	msgType := messages.TypeInstruction
 	if !isAll && len(targets) > 1 {
