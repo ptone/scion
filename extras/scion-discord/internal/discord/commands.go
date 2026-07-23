@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -370,6 +371,7 @@ func (h *CommandHandler) HandleAutocomplete(s *discordgo.Session, i *discordgo.I
 			return
 		}
 
+		sort.Strings(agents)
 		prefix := strings.ToLower(opt.StringValue())
 		var choices []*discordgo.ApplicationCommandOptionChoice
 
