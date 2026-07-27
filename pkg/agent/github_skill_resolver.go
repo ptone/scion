@@ -63,7 +63,7 @@ type GitHubSkillResolver struct {
 // are reused to avoid redundant GitHub API calls.
 func NewGitHubSkillResolver() *GitHubSkillResolver {
 	var cache *GitHubResolutionCache
-	if cacheDir, err := githubResolutionCacheDir(); err == nil {
+	if cacheDir, err := GitHubResolutionCacheDir(); err == nil {
 		cache, _ = NewGitHubResolutionCache(cacheDir, DefaultResolutionCacheTTL)
 	}
 	return &GitHubSkillResolver{
@@ -79,13 +79,27 @@ func NewGitHubSkillResolver() *GitHubSkillResolver {
 // default token and a named-credential map for per-URI lookup.
 // If defaultToken is empty, falls back to the GITHUB_TOKEN environment variable.
 // provisionCredentials maps secret name → value; may be nil.
-func NewGitHubSkillResolverWithCredentials(defaultToken string, provisionCredentials map[string]string) *GitHubSkillResolver {
-	r := NewGitHubSkillResolver()
-	if defaultToken != "" {
-		r.token = defaultToken
+// If cache is non-nil, it is used as the resolution cache; otherwise a new
+// per-resolver cache is created.
+func NewGitHubSkillResolverWithCredentials(defaultToken string, provisionCredentials map[string]string, cache *GitHubResolutionCache) *GitHubSkillResolver {
+	var resolverCache *GitHubResolutionCache
+	if cache != nil {
+		resolverCache = cache
+	} else {
+		// Fallback: create a new cache (per-request behavior for backward compatibility)
+		if cacheDir, err := GitHubResolutionCacheDir(); err == nil {
+			resolverCache, _ = NewGitHubResolutionCache(cacheDir, DefaultResolutionCacheTTL)
+		}
 	}
-	r.provisionCredentials = provisionCredentials
-	return r
+
+	return &GitHubSkillResolver{
+		httpClient:           &http.Client{Timeout: githubAPITimeout},
+		token:                defaultToken,
+		provisionCredentials: provisionCredentials,
+		apiBase:              githubAPIBase,
+		rawBase:              githubRawBase,
+		resolutionCache:      resolverCache,
+	}
 }
 
 // tokenForRef returns the appropriate GitHub token for the given ref.
