@@ -2,7 +2,7 @@
 
 **Author:** ps-cache-arch-b  
 **Date:** 2026-07-27  
-**Status:** Approved by user — ready for implementation  
+**Status:** Approved by user — ready for implementation (pending PR #878 merge)  
 **Design doc destination (in PR):** `.design/ps-cache-durability.md`
 
 ---
@@ -17,7 +17,12 @@ The GitHub skill resolution cache (`GitHubResolutionCache`) is per-process, ephe
 2. Cache is local to each broker instance — N instances = N independent cold caches for the same URI.
 3. Disk cache is ephemeral on Cloud Run — lost on instance restart.
 
-**Note on Track A:** Track A is addressing the immediate auth-gap symptom (unauthenticated calls, 60/hr limit) and the full-SHA short-circuit. Do not duplicate those changes. Track B is the deeper architectural fix: making the cache actually durable and shared across the broker fleet.
+**Note on Track A / PR #878:** Track A (upstream PR #878, `scion/project-skills-cache-auth-fix`) is addressing the immediate auth-gap symptom and the full-SHA short-circuit. Do not duplicate those changes. PR #878 makes three changes relevant to Track B:
+1. `resolveCommitSHA` short-circuits for full 40-char SHA refs — after #878 lands, SHA refs never reach the Hub's resolve path from Phase 3 (they short-circuit at the broker). The Hub-side SHA TTL constant is still worth defining for completeness.
+2. Cache-init error is now logged — Phase 1's singleton approach moves this from a per-request log to a startup log; both are additive.
+3. `provisionCredentials["GITHUB_TOKEN"]` is now a general fallback token — Phase 3's fallback resolver inherits this behavior.
+
+**Track B must be implemented on a branch rebased onto main after PR #878 merges.** The Phase 1 singleton change touches the same files as #878 (github_skill_resolver.go) — rebase is mandatory before starting Track B implementation.
 
 **Goals:**
 
@@ -149,7 +154,9 @@ func (GitHubResolutionCache) Annotations() []schema.Annotation {
 }
 ```
 
-`GitHubFileEntry` is a value type (not ent entity): `{Path, URL, Hash string; Size int64}`. Stored as JSONB on Postgres.
+`GitHubFileEntry` is a value type (not ent entity): `{Path, URL, Hash string; Size int64}`. Stored as JSONB on Postgres, TEXT (JSON string) on SQLite.
+
+**SQLite compatibility:** Phase 2 works transparently on both SQLite (single-node Hub deployments) and PostgreSQL (HA deployments). The ent `field.JSON()` type maps to JSONB on Postgres and TEXT on SQLite — identical to the existing `HubSetting.value` field pattern. The eviction query only filters by `expires_at` (a standard TIME field); no Postgres-specific JSONB operators are used. The `Get`/`Put` operations are plain row lookups by primary key. SQLite's single-writer model is fine for single-node deployments; Postgres handles concurrent Hub instances for HA.
 
 #### Cache Key Design
 
@@ -351,13 +358,19 @@ This design is three independently-deployable phases:
 
 ## Open Questions
 
-1. **Credential passing for `?token=SECRET_NAME` URIs:** For skills using per-URI named credentials (e.g., `gh://owner/repo/skill@main?token=MY_SECRET`), the Hub needs access to that secret. The Hub already manages project secrets. Proposed: Hub looks up the named secret from the project's secret store using `ProjectID`. If the secret is absent Hub-side, fall back to broker-local resolution with the broker's `ProvisionCredentials` map. **This is the main credential complexity to resolve in implementation.** The developer should confirm Hub has the right secret access path.
+1. **Hub instance count:** If Hub itself runs N > 1 instances for HA, the in-memory tier is absent (no `ghResolutionCache` on Hub), and the DB table is the only shared state. This is correct — the DB provides the cross-Hub-instance durability the user required. Confirm Hub instances share a single PostgreSQL DB (expected: yes, standard for HA Postgres deployments).
 
-2. **Hub instance count:** If Hub itself runs N > 1 instances for HA, the in-memory tier is absent (no `ghResolutionCache` on Hub), and the DB table is the only shared state. This is correct — the DB provides the cross-Hub-instance durability the user required. Confirm Hub instances share a single PostgreSQL DB (expected: yes).
+2. **Monitoring:** The Hub's resolve handler should emit a structured log line distinguishing cache hit vs. miss for `gh://` URIs (`"github_resolution_cache_hit": true/false`). The Phase 3 broker routing change makes these logs the primary observability signal for the new system. Add a metric counter if the Hub has a Prometheus registry.
 
-3. **Monitoring:** The Hub's resolve handler should emit a structured log line distinguishing cache hit vs. miss for `gh://` URIs (`"github_resolution_cache_hit": true/false`). The Phase 3 broker routing change makes these logs the primary observability signal for the new system. Add a metric counter if the Hub has a Prometheus registry.
+3. **GKE broker topology:** The investigation focused on Cloud Run brokers. If brokers also run on GKE (separate deployment), the same design applies — GKE broker instances also share the same Hub, so they benefit from Phase 2 and 3 identically.
 
-4. **GKE broker topology:** The investigation focused on Cloud Run brokers. If brokers also run on GKE (separate deployment), the same design applies — GKE broker instances also share the same Hub, so they benefit from Phase 2 and 3 identically.
+## Resolved Design Decisions (from user sign-off)
+
+- **Credential passing for `?token=SECRET_NAME` URIs:** Hub has access to project secrets via its existing secrets store. Developer should look up the named secret using `ProjectID` via `s.store` (same access path used elsewhere in the Hub for project secret resolution). If the secret is not found Hub-side, fall back to broker-local resolution.
+
+- **SQLite compatibility:** Phase 2 works on both SQLite and Postgres (see note in ent schema section above).
+
+- **PR #878 sequencing:** Track B implementation starts only after PR #878 merges into upstream main. Branch must be rebased onto post-#878 main before starting Phase 1.
 
 ---
 
