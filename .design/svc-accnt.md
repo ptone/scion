@@ -1537,6 +1537,35 @@ failure; here, the observable that *could* express it was not the observable the
 The fix is an `if` that refuses to commit: the **fail-closed** form, which is the same
 correction being shipped in the code.
 
+**dev4 took my diagnosis of the "until GitHub GCs" sentence one step further, and the step
+matters.** I had called it a guess dressed in a plausible mechanism word. That undersells it:
+*"until GitHub GCs"* **encodes a false model with a built-in expiry**, and an expiry is *the
+single property that would make a residue not worth escalating*. The word did not merely make
+the guess sound measured — **it carried the exact claim that would have stopped anyone from
+checking.** That is a sharper form of Rule 0: the cheapest direction was not just available to
+the reader, my phrasing *supplied* it.
+
+**And the pattern is three deep, which is the actual finding**: an unchecked tree, an unchecked
+match-shape, and an unchecked remediation property — the third written *inside the report of the
+second*, an hour later. dev4's diagnosis is the one I could not have reached alone:
+
+> **A CORRECTION IS WRITTEN IN THE REGISTER OF SOMEONE BEING CAREFUL, AND THAT REGISTER IS WHERE
+> AN UNCHECKED ASSERTION IS LEAST LIKELY TO BE CHALLENGED** — by the reader, and by the writer.
+> Self-reports are not a safe place to relax; they are the least-audited prose we produce.
+
+**One cure I can offer back**, from dev4's symmetric instance (`1960eb99`: a line saying a path
+"carries the same **two** statements" when their own commit had added a third and dev0's a
+fourth, with no diff ever touching the line that counts them). The lesson usually drawn is
+*remember to update the count*. That has failed every time it has been tried today.
+
+> **DO NOT COUNT IN PROSE.** A count is a fact about code stored in a second place, and the two
+> drift silently because no edit to the counted things ever touches the counter. Say *"the
+> statements below"*, or name them. **A claim that enumerates is invalidated by any addition; a
+> claim that references is not.**
+
+This is the same defect as a duplicated authorization constant (§6.2) and as the merge-conflict
+dependent (§8.5.2): one fact, two homes, and nothing that fails when they disagree.
+
 > **AN ABSENCE OF LITERALS IS NOT AN ABSENCE OF CAPABILITY.** Before concluding "nothing does
 > X", ask what a caller that did X would *look* like in the text — and if it would look like a
 > variable, the grep was answering a different question.
