@@ -426,28 +426,76 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// checkBrokerDispatchAccess verifies that the current user has dispatch permission
-// on the given broker. Returns true if access is granted. If denied, it writes a
-// 403 response and returns false. If the broker cannot be found, it writes an error
+// checkBrokerDispatchAccess verifies that the caller may have an agent dispatched
+// to the given broker. Returns true if access is granted; on denial it writes the
+// response and returns false. If the broker cannot be found, it writes an error
 // and returns false.
+//
+// Agents may dispatch only to brokers that serve their own project, and only
+// while holding ScopeAgentCreate: broker selection completes a create that
+// authorizeAgentCreate has already authorized, so this re-asserts that gate
+// rather than granting a standalone permission.
+//
+// Auto-provide brokers are shared infrastructure (e.g. a combo hub-broker
+// server's default broker) and stay dispatchable by any authenticated caller.
+// That check is deliberately kept ahead of the identity switch: it is a property
+// of the broker, not of the caller.
+//
+// Be aware that this is a second unconditional allow in the same function, and
+// it is EXPLICITLY OUT OF SCOPE for #591 rather than overlooked. Narrowing it
+// would be a policy decision about who may use shared brokers, which is not the
+// bug being fixed here, and it must not diverge from the twin. One thing about
+// it did change: it now sits BELOW the identity check, so an unauthenticated
+// caller no longer reaches it. Its remaining reach is authenticated callers
+// only, including broker-typed ones.
+//
+// Broker-typed callers reach default: and are denied. CheckAccess already
+// answered them with "unknown identity type"; the nil branch this replaced was
+// the only thing admitting them, and it admitted everyone (#591).
+//
+// This function and canDispatchToBroker (handlers_agent_create_helpers.go) are
+// one decision written twice and must stay structurally identical. The only
+// intended difference is that this one holds a ResponseWriter, so the shared
+// decision is computed by the switch below and the response is written from its
+// result — keeping the switch itself byte-comparable with the twin.
 func (s *Server) checkBrokerDispatchAccess(ctx context.Context, w http.ResponseWriter, brokerID string) bool {
-	userIdent := GetUserIdentityFromContext(ctx)
-	if userIdent == nil {
-		// No user identity (e.g. broker-to-broker) — allow
-		return true
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		// Unauthenticated. Note this branch is inverted from allow to deny, not
+		// deleted: GetIdentityFromContext returns a literal nil interface, which
+		// panics CheckAccess on identity.Type().
+		Unauthorized(w)
+		return false
 	}
 	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return false
 	}
-	// Auto-provide brokers are shared infrastructure (e.g. a combo hub-broker
-	// server's default broker) and are dispatchable by any authenticated user.
 	if broker.AutoProvide {
 		return true
 	}
-	decision := s.authzService.CheckAccess(ctx, userIdent, brokerResource(broker), ActionDispatch)
-	if !decision.Allowed {
+	allowed := func() bool {
+		switch identity.Type() {
+		case "user", "dev":
+			user, ok := identity.(UserIdentity)
+			if !ok {
+				return false
+			}
+			decision := s.authzService.CheckAccess(ctx, user, brokerResource(broker), ActionDispatch)
+			return decision.Allowed
+		case "agent":
+			agentIdent, ok := identity.(AgentIdentity)
+			if !ok {
+				return false
+			}
+			return agentIdent.HasScope(ScopeAgentCreate) &&
+				s.brokerServesProject(ctx, broker.ID, agentIdent.ProjectID())
+		default:
+			return false
+		}
+	}()
+	if !allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"You don't have permission to create agents on this broker", nil)
 		return false
