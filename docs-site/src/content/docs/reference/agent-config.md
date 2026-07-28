@@ -237,10 +237,16 @@ explicitly with `go test ./pkg/hub/`.
 Before this change, `harness_config` departed from the ordering above at levels 2
 and 3: the template was resolved ahead of the project's
 `scion.io/default-harness-config` annotation, so the template always won. It now
-follows the documented ordering, as the other project settings already did. This only affects projects that set **both** a default harness config
-**and** a template naming a *different* harness config; new agents in those projects
-receive the project's harness config. Projects that set only one of the two are
-unaffected, and already-created agents keep the configuration they were created with.
+follows the documented ordering, as the other project settings already did.
+
+Agents created in a project that sets a default harness config will now use it, even
+when the project's template also specifies one. Previously the template won in every
+case: a template's `default_harness_config` took precedence, and failing that, the
+harness name stored on the template did. Since almost every template supplies one or
+the other, the project setting was in practice ignored whenever a template was
+involved — it took effect only for projects whose template specified no harness at all.
+
+Already-created agents keep the configuration they were created with.
 
 Because the project setting is now load-bearing, check that it names a harness config
 that actually exists. The value is not validated when you save Project Settings, and a
