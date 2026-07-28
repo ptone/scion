@@ -134,6 +134,21 @@ func harnessConfigResource(hc *store.HarnessConfig) Resource {
 	// which is what this edit removed. Resolve it by confirming
 	// gcpServiceAccountResource is conditional in the merged tree, then restore
 	// the short form.
+	//
+	// AND REWRITE THE DEPENDENT IN THE SAME ACT. A deliberate conflict alarms at
+	// the text, not at what reasons from it. The AGENT paragraph above the
+	// service-account read gate in createAgentInProject
+	// (handlers_agents_core.go) records why that gate cannot deny an agent
+	// today, and the clause it records is "ParentType project for every scope,
+	// so a hub-scoped account resolves to the hub instance ID: non-empty, and
+	// equal to no project". If the merged gcpServiceAccountResource sets no
+	// project parent for a hub-scoped account, that clause is false: the
+	// resource then yields "" from projectIDForResource and the agent read
+	// baseline is skipped by its pid != "" guard (authz.go) instead of by an ID
+	// mismatch. Same outcome, different reason. The merge performs that half of
+	// the conversion by itself while resolving this hunk, so nobody decides it,
+	// behaviour does not change, and nothing else complains — which is why the
+	// dependent is named here rather than left to be noticed. Found by sa-arch.
 	if hc.Scope == store.HarnessConfigScopeProject && hc.ScopeID != "" {
 		r.ParentType = "project"
 		r.ParentID = hc.ScopeID

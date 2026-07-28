@@ -545,6 +545,17 @@ func (s *Server) createAgentInProject(
 		// baseline's pid != "" guard — same outcome, different clause, and the
 		// reason recorded here would be wrong. Convert both.
 		//
+		// The mirror-image case does not need anyone to convert anything.
+		// Merging svc-accnt P0.2 makes gcpServiceAccountResource conditional on
+		// its own, as a side effect of resolving a comment conflict in
+		// capabilities.go: a hub-scoped account then yields "" and the baseline
+		// is skipped by that same pid != "" guard rather than by an ID
+		// mismatch. Same outcome once more, and again not for the reason stated
+		// above. So whichever half moves first, this paragraph stops being true
+		// before any behaviour does, and only one of the two halves is a
+		// decision someone makes deliberately. Re-derive it at that merge; do
+		// not assume it survived.
+		//
 		// HUMAN callers: this is not a gate now and does not become one. The
 		// seeded hub-member-read-all policy (seed.go) is ResourceType "*",
 		// actions read/list, ScopeType "hub", and matchesResource applies
