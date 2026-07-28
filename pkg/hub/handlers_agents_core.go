@@ -525,9 +525,16 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
-	// Resolve harness config: prefer the user's explicit choice, then template default.
+	// Resolve harness config: prefer the user's explicit choice, then the
+	// project-level default annotation, then the template default. The project
+	// annotation deliberately outranks the template so that harness_config
+	// follows the same precedence as every other project setting
+	// (request > project > template).
 	// Do NOT use req.Template as fallback since it may contain a UUID.
 	harnessConfig := req.HarnessConfig
+	if harnessConfig == "" && project != nil && project.Annotations != nil {
+		harnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
+	}
 	if harnessConfig == "" {
 		harnessConfig = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
 	}
