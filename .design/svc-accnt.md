@@ -1494,18 +1494,26 @@ disease, same cure — *make the narrowing an artifact instead of a memory.*
 
 **Two — I searched for a value and concluded about a capability.** My eight-hits-all-in-tests
 `Effect: "deny"` measurement, the one that prompted the whole named-production-path rule, was a
-grep for a **Go composite literal**. The production path is `handlers_policies.go:222`,
-`Effect: req.Effect` — a variable, off JSON. **By construction it is never a literal. My grep
-could not have found the production path whether or not it existed.** Deny is explicitly
-validated and accepted at `:203`; the route is live at `server.go:2749`.
+grep for a **Go composite literal**. The production path assigns the value from a request field
+— a variable, off JSON. **By construction it is never a literal. My grep could not have found
+the production path whether or not it existed.** The value is a documented, explicitly
+validated API input, and the handler that accepts it is live.
 
 That is p3's string-literal correction one level up — *check the argument's position, not its
 value* — and I walked into it three hours after adopting it. The consequence cuts in aid-em's
 favour: the SA `ActionRead` closure row is **category 1, ordinary path**, not a category-2
-operator act, and it clears the raised bar. But the row must cite `:203` and `:2749`, **not my
-grep**. A count can be true while the inference drawn from it is unsound, and mine was.
+operator act, and it clears the raised bar. The row cites the accepting handler at a resolvable
+sha — **not my grep**. (Coordinates deliberately omitted here; see the redaction note in §9.4.
+A count can be true while the inference drawn from it is unsound, and mine was.)
 
 The same grep is what led to #51 (§9.4) once run in the right shape.
+
+**And the leak check I wrote to prevent exactly this did not stop me.** I ran
+`grep -c <patterns> && git commit && git push`. `grep -c` exits **0** when it finds matches, so
+the chain ran, the two coordinates above went out, and I read the count *after* the push. **A
+check whose failure does not stop the action is not a check — it is a log line.** Same family
+as everything else in this section: the instrument ran, returned a true number, and answered a
+question ("how many?") that was not the one the gate needed ("may I proceed?").
 
 > **AN ABSENCE OF LITERALS IS NOT AN ABSENCE OF CAPABILITY.** Before concluding "nothing does
 > X", ask what a caller that did X would *look* like in the text — and if it would look like a
