@@ -25,8 +25,16 @@ import (
 // handlers. Before these existed, every handler hand-wrote the same
 // fetch-identity → nil-check → CheckAccess → writeError sequence, and the
 // common form of that idiom silently skipped the check for any caller that was
-// not a user (issue #591). Handlers should call these helpers rather than
+// not a user (ptone/scion#591). Handlers should call these helpers rather than
 // reproducing the idiom.
+//
+// THAT REFERENCE IS THE CANONICAL ONE. The same number appears unqualified in
+// comments across this package as a pointer back to here. It is qualified in
+// this one place, because the number is ambiguous: on the fork it is the issue
+// this work fixes, while GoogleCloudPlatform/scion#591 is an unrelated merged
+// PR. GitHub does not autolink inside file contents, so a bare reference in Go
+// source misleads a human rather than producing a wrong link — which is why the
+// pointers elsewhere were left alone rather than churned across 25 files.
 
 // logAuthzDenial emits the structured warning that every authorization denial
 // produces. The defining property of the #591 bypass was that it was silent:

@@ -39,8 +39,10 @@ const (
 )
 
 // authzHelperCaptureLogs redirects the default slog logger into a buffer for the
-// duration of the test and returns the buffer. The denial log line is a
-// deliverable of #591, not decoration, so it is asserted on directly.
+// duration of the test and returns the buffer. The denial log line is part of
+// the fix, not decoration, so it is asserted on directly: the bug being fixed
+// here was silent, and a denial nobody can observe is indistinguishable from a
+// check that never ran. Asserting the log is how that distinction is kept.
 func authzHelperCaptureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	buf := &bytes.Buffer{}

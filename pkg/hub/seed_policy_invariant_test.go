@@ -58,6 +58,7 @@ import (
 //   - seed.go:seedDefaultPoliciesAndGroups   -> hub-member-read-all, hub-member-create-projects
 //   - handlers_projects_core.go:createProjectMembersGroupAndPolicy -> project:<slug>:member-create-agents
 //   - handlers_env_secrets.go:ensureProgenyPolicy -> progeny secret policy
+//
 // Deliberately OUT of scope: the caller-authored policy API
 // (handlers_policies.go), read-hydration in the store adapter, and test
 // fixtures. If you add a new system-created policy site, drive it here too or
@@ -153,7 +154,10 @@ func TestSystemPolicies_NoWildcardOrDispatchAction(t *testing.T) {
 					"list.", p.Name, a, p.ResourceType)
 			require.NotEqualf(t, string(ActionDispatch), a,
 				"system-created policy %q grants %q; no system-created policy may grant "+
-					"the dispatch action on any resource type.", p.Name, a)
+					"the dispatch action on any resource type. The broker dispatch gates are "+
+					"reasoned about on the premise that seeded policy never confers it. If "+
+					"you are adding one deliberately, that reasoning has to be revisited — "+
+					"not this assertion.", p.Name, a)
 		}
 	}
 }

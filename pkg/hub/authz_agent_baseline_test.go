@@ -474,8 +474,10 @@ func TestMatchesResource_ProjectScopeIsAllowList(t *testing.T) {
 // policies appeared to work. The allow-list removed the accident and exposed
 // the defect — project-scoped template policies matched nothing.
 //
-// The two changes therefore belong together, the same way #595 itself does:
-// the matcher stops guessing, so the builder has to tell the truth.
+// The two changes therefore belong together, for one reason: the matcher stops
+// guessing, so the builder has to tell the truth. Landing either alone is a
+// regression — the matcher alone breaks project-scoped template policies, and
+// the builder alone changes nothing a deny-list matcher would notice.
 func TestTemplateResource_ProjectParent(t *testing.T) {
 	t.Run("project-scoped template is a child of its project", func(t *testing.T) {
 		r := templateResource(&store.Template{
@@ -554,7 +556,10 @@ func TestTemplateResource_UATProjectArm_Latent(t *testing.T) {
 	// point the arm below stops being latent and starts being load-bearing.
 	// Change this assertion deliberately, not to make the build green.
 	require.False(t, store.UATValidScopes["template:read"],
-		"no template scope is issuable today; if that changed, this test is now live and #605 has arrived")
+		"no template scope is issuable today, but this assertion just failed, which means "+
+			"UATValidScopes has been widened to include template:read. The cross-project read "+
+			"exercised below is therefore no longer latent — it is reachable. Read the comment "+
+			"above this assertion before changing it; do not edit it to make the build green.")
 
 	// Scope is supplied directly so the second gate always passes and a denial
 	// can only come from the project arm. This is what makes it a unit test of
