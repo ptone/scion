@@ -1,4 +1,4 @@
-# Design: Hub-wide authorization bypass for non-user callers (issue #591)
+# Design: Hub-wide authorization bypass for non-user callers (issue ptone/scion#591)
 
 **Author:** aid-arch
 **Date:** 2026-07-28
@@ -25,7 +25,7 @@ opens from `c96af412` and the PR body says so.**
 >   `444b385f`, `87c1e632`, `c2d12fac`) **or the branch tip explicitly.** Verification performed
 >   after 18:05Z is against `origin/scion/agent-id-fix` @ **`c2d12fac`**.
 > - **A claim true of one tree and false of another must say so on the spot.** The live example is
->   §8.2: *project-scoped template policies match nothing* is true only on a tree carrying the #595
+>   §8.2: *project-scoped template policies match nothing* is true only on a tree carrying the ptone/scion#595
 >   engine fix without the `180debe` builder fix — which is no branch that has ever existed.
 > - **A fact relayed from another agent is marked as relayed**, never folded into a first-person
 >   "verified" (standing rule 8; see §8.1b for the incident that produced it).
@@ -78,12 +78,30 @@ resolutions and §12 for the follow-on track ptone raised.
 > ruled at 15:57Z: *"We are working on fixing these in short order today - so post followups on
 > the fork repo publicly to make sure they are tracked."*
 >
-> All five follow-ups are filed publicly and cross-referenced from #591:
-> **#595** (`matchesResource` engine defect), **#596** (GCP gate alignment), **#598** (route
-> authz manifest), **#599** (ServeMux migration), **#600** (dead-code cleanup).
+> All five follow-ups are filed publicly and cross-referenced from ptone/scion#591:
+> **ptone/scion#595** (`matchesResource` engine defect), **ptone/scion#596** (GCP gate alignment), **ptone/scion#598** (route
+> authz manifest), **ptone/scion#599** (ServeMux migration), **ptone/scion#600** (dead-code cleanup).
 >
-> For the record: `#591` on **upstream** `GoogleCloudPlatform/scion` is an unrelated merged PR
-> (Slack broker plugin). The security issue exists only on the fork.
+> **Issue numbers in this document are qualified deliberately. Do not un-qualify them.**
+> The fork's issue counter shares a number space with upstream's pull requests, so every
+> fork issue we cite has an upstream namesake that is a real, merged, unrelated PR:
+> `GoogleCloudPlatform/scion#591` is a Slack broker plugin, `#595` an auth fallback,
+> `#596` a bootstrap fix, `#598` a vertex-ai auth fix, `#599` a Slack admin UI,
+> `#600` a dead-harness removal, `#604` a pre-start-hook fix, `#605` an auth-detection
+> fix, `#606` an env-overlay fix. Verified against the GitHub API on 2026-07-28.
+>
+> Two of those collide *on topic*, which is what makes a bare reference dangerous rather
+> than merely wrong: our `ptone/scion#600` is a dead-code cleanup and upstream's `#600`
+> removes a dead harness system; this change is largely about broker dispatch and
+> upstream's `#591` adds a broker plugin. A reviewer who clicks a bare `#591` in a PR
+> against upstream lands on a page that renders fine, is on-topic, and is not our issue —
+> so the check that would catch the error instead confirms it.
+>
+> The reverse also holds and is easier to get wrong: `#888`, `#891`, `#892` and `#893`
+> in this document are **upstream** PRs and return 404 on the fork. They are correctly
+> bare. Qualifying every `#NNN` uniformly would break them.
+>
+> The security issue exists only on the fork.
 
 ---
 
@@ -116,8 +134,8 @@ which is otherwise the hardest thing in this PR to justify:
 
 | Looks like | Actually might be | Where |
 |---|---|---|
-| authorization checked | never checked for this identity kind | #591, the whole of §3–§4 |
-| a hub-global resource | a builder that forgot to set the parent, or a genuine many-to-many | #604, §8.2, `ProjectPreStartHook` (§8.5) |
+| authorization checked | never checked for this identity kind | ptone/scion#591, the whole of §3–§4 |
+| a hub-global resource | a builder that forgot to set the parent, or a genuine many-to-many | ptone/scion#604, §8.2, `ProjectPreStartHook` (§8.5) |
 | a protection in place | a comment naming a caller that does not exist | §8.1a, and §8.5 item 6 |
 | a considered exception | work someone abandoned | §7.2 allowlist ruling |
 | a verified fact | a fact relayed from someone else, or read off a stale tree | §8.1b, standing rules 7–8 |
@@ -129,7 +147,7 @@ which is otherwise the hardest thing in this PR to justify:
 **The strongest instance is the last, and it is ours.** `hack/check-authz-guards.sh` reports twenty
 findings. **Zero findings would read identically whether the code is clean or the detector is
 blind** — and §7.2a establishes that this detector is partly blind, in a direction that matters:
-it cannot see `GetIdentityFromContext`, which is the getter our own fix uses. That is #591 pointed
+it cannot see `GetIdentityFromContext`, which is the getter our own fix uses. That is ptone/scion#591 pointed
 at our own tooling, and unlike the handlers, **it would have shipped under our name *as the fix*.**
 
 Two corollaries a reviewer should hold onto:
@@ -286,7 +304,7 @@ alongside cross-project PTY. It also means the missing-`else` fix (sa-inv Q12) a
 >
 > So the ungated create route is the dominant one by real-world volume, and the gated route
 > is the minority path. That inverts the usual "obscure secondary endpoint" reading of this
-> class of finding and should be reflected in how #591 is triaged.
+> class of finding and should be reflected in how ptone/scion#591 is triaged.
 
 **The fourth row is a separate gap, contributed by sa-arch and verified independently by me at `c96af412`.**
 `createProjectAgent` validates name, `cleanupMode`, and labels, then calls
@@ -376,7 +394,7 @@ New file `pkg/hub/authorize.go`:
 //
 //	if !s.authorize(w, r, agentResource(agent), ActionDelete) { return }
 //
-// Unlike the pre-#591 idiom it MUST NOT be wrapped in an identity-kind guard:
+// Unlike the pre-ptone/scion#591 idiom it MUST NOT be wrapped in an identity-kind guard:
 // nil and non-user identities are denied here, not skipped.
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request, resource Resource, action Action) bool {
 	ctx := r.Context()
@@ -900,7 +918,7 @@ func (a *AuthzService) checkAccessForAgent(...) Decision {
     // 3. NEW — project-scoped read baseline.
     //    An agent may perform read-class actions on resources in its own project.
     //    This codifies the project-isolation gate that these paths already relied
-    //    on before #591; it grants nothing that was not already reachable.
+    //    on before ptone/scion#591; it grants nothing that was not already reachable.
     if isReadClassAction(action) {
         if pid := projectIDForResource(resource); pid != "" && pid == agent.ProjectID() {
             return Decision{Allowed: true, Reason: "agent project read baseline", Scope: "project"}
@@ -1042,7 +1060,7 @@ wiring it in today would leave `make ci` red. The condition aid-em and aid-dev4 
 is registered in the `ci` target **when it reports zero**, not when the remaining sites are judged
 to be covered. That distinction was aid-dev4's, raised when the trigger was about to be pulled on a
 site-list judgement with nineteen findings outstanding, and it is the right one: a judgement that
-the survivors are acceptable is exactly the reasoning that produced #591.
+the survivors are acceptable is exactly the reasoning that produced ptone/scion#591.
 
 Two consequences a reviewer should hold onto:
 
@@ -1066,8 +1084,8 @@ Reaching zero **via** an allowlist entry counts as reaching zero, on two conditi
 Condition 2 is what makes the valve safe. **Without a test, "allowlisted" and "unfixed" are
 indistinguishable in the tree**: both present as a site the script does not flag, and a reader
 cannot tell a considered exception from abandoned work. That is the thesis of this whole PR turned
-on our own tooling — an absence with no signal attached is what let #591 survive. An allowlist entry
-with a test is a decision; an allowlist entry without one is #591 with paperwork.
+on our own tooling — an absence with no signal attached is what let ptone/scion#591 survive. An allowlist entry
+with a test is a decision; an allowlist entry without one is ptone/scion#591 with paperwork.
 
 **What the valve must not be used for:** reaching a green build with conversion work outstanding.
 "This site is deliberately open" and "we ran out of time" look identical in an allowlist file and
@@ -1163,9 +1181,9 @@ Two things follow, and both belong in the PR description rather than in tribal m
 
 - The guard is a **regression barrier against reintroducing the idiom**, not a completeness
   check on authorization coverage. Describing it as the latter would be overselling it, and
-  would invite exactly the false confidence that let #591 persist.
+  would invite exactly the false confidence that let ptone/scion#591 persist.
 - Coverage of the absent-check class needs a route manifest that asserts every registered
-  route reaches an authorization decision — filed as **#598**, out of scope here.
+  route reaches an authorization decision — filed as **ptone/scion#598**, out of scope here.
 
 ---
 
@@ -1208,7 +1226,7 @@ latent.** The §8.2.1 heuristic applies unchanged — exploiting it requires a w
 exist — and the reason to be strict about that here is §8.1b's: **overstating this one costs the
 accurate claims standing next to it.** State it as *two same-named constructors with opposite
 security defaults, the permissive one currently unreachable in production* — a trap for whoever
-wires the runtime broker next, which is the #591 shape (an absence that reads as a presence) rather
+wires the runtime broker next, which is the ptone/scion#591 shape (an absence that reads as a presence) rather
 than an exploit today.
 
 > Worth noting how the correction arrived: I wrote the tell, and somebody else applied it to my own
@@ -1225,7 +1243,7 @@ implementation spec.
 **The ruling doc itself carried a defect, now fixed in code.** Its shape specified the agent arm
 as `agent.ProjectID() == <broker's project>` — **not implementable.** Brokers link to projects
 **many-to-many** through `store.ProjectProvider`, and neither dispatch function receives a project
-ID. This is the same three-state finding as #604, reached independently from the dispatch side.
+ID. This is the same three-state finding as ptone/scion#604, reached independently from the dispatch side.
 
 aid-dev2 resolved it at `89bc2039` with a shared helper
 (`handlers_agent_create_helpers.go:885`):
@@ -1273,7 +1291,7 @@ later milestone.
 **The durable finding is the comment, not the unlanded twin.** The twin lands and the drift closes.
 What would have survived is a site the codebase *asserts* is protected: a reviewer who greps
 `brokerServesProject`, reads the comment, and ticks off both functions has been misled by something
-we shipped — an absence that reads as a presence, which is the shape of #591 itself. Note that the
+we shipped — an absence that reads as a presence, which is the shape of ptone/scion#591 itself. Note that the
 defect is invisible in review of the commit that introduced it: `89bc2039`'s diff is entirely
 correct on its own. The defect lives in the gap between two developers' commits, which is the space
 nobody owns.
@@ -1375,7 +1393,7 @@ it must touch **one** definition and you need the compiler to force it.* It is a
 discoverability, not about DRY — applied as a style preference it gives the wrong answer both
 times.
 
-### 8.2 `matchesResource` project scoping — class-level engine defect (filed as #595)
+### 8.2 `matchesResource` project scoping — class-level engine defect (filed as ptone/scion#595)
 
 **Status:** filed publicly as **ptone/scion#595** on ptone's instruction. sa-arch found this
 independently from the `gcp_service_account` and `template` sides during P0.2; I found it from
@@ -1424,7 +1442,7 @@ So **project-scoped templates exist** — created by import (`handlers_resource_
 (`template_handlers.go:782`, `:839`) — and today a project-scoped policy targeting templates in
 *its own* project matches correctly, but **by accident, through the same fallthrough** that
 causes the over-match. Closing the over-match closes the correct match with it: **on a tree that has
-the #595 engine fix but not the `templateResource` builder fix — a state that exists on no branch
+the ptone/scion#595 engine fix but not the `templateResource` builder fix — a state that exists on no branch
 today, since `180debe` landed the builder — that policy would match nothing.** Stated with the tree
 named, per §8.1b rule 2; the earlier temporal-only phrasing ("after the engine fix alone") is the
 same sentence shape that already went wrong once.
@@ -1582,7 +1600,7 @@ that alters behaviour for **user-authored policies** rather than for agents, and
 required by anything else here. It **is** a hard prerequisite if Option A is ever adopted
 (§5.3), so deferring it means Option A carries it as a dependency.
 
-#### 8.2.1 The same defect in `enforceUATConstraints` — a second instance #595 does NOT fix
+#### 8.2.1 The same defect in `enforceUATConstraints` — a second instance ptone/scion#595 does NOT fix
 
 Found by `sa-inv` in the general case; applied to this section by `sa-arch`, who **corrected
 their own earlier de-escalation** of it. Verified against source before recording.
@@ -1602,7 +1620,7 @@ promotes and the **admin bypass at `:121`** grants.
 
 **Reachability — only three of the six downstream checks matter.** Two self-defend:
 `2.6 project owner/admin` (`:147`) keys on `projectIDForResource`, which returns `""` for a
-parentless resource, so it is skipped; `4 policy matching` self-defends once #595 lands. The
+parentless resource, so it is skipped; `4 policy matching` self-defends once ptone/scion#595 lands. The
 grants actually reachable are `1 admin bypass` (`:121`), `2 owner bypass` (`:129`), and
 `2.5 ancestry` (`:136`). The latter two are milder but still real: a UAT pinned to project A
 acting on the holder's own resource in project B defeats the pin, which is supposed to confine
@@ -1632,26 +1650,26 @@ Every genuinely parentless type — templates, brokers, users, hub-scoped config
 because **no token can hold a scope for it.** The narrowness of the scope vocabulary is
 accidentally acting as a security control.
 
-**This inverts the priority between the two #595 instances:**
+**This inverts the priority between the two ptone/scion#595 instances:**
 
 - `matchesResource` — **live on `main`**, needs only an operator-authored project-scoped policy.
 - `enforceUATConstraints` — **latent**, gated behind a vocabulary containing no parentless type.
 
-**What arms it is #605** — ptone's own request to mature UAT scoping. The first `template:read` or
+**What arms it is ptone/scion#605** — ptone's own request to mature UAT scoping. The first `template:read` or
 `broker:use` entry added to `UATValidScopes` makes this live, and it will not look related: an
-addition to a constants map in `store`, versus a missing branch in `hub/authz.go`. #605 carries
+addition to a constants map in `store`, versus a missing branch in `hub/authz.go`. ptone/scion#605 carries
 this as a hard blocking prerequisite.
 
 **How this was missed:** three reviewers analysed the fall-through and all three reasoned about
 the project check without checking what the gate *below* it could admit. It was found while
-writing #605 — by describing the scope vocabulary, not by studying the defect.
+writing ptone/scion#605 — by describing the scope vocabulary, not by studying the defect.
 
-**Fix — a companion to #595, not covered by it.** #595 patches `matchesResource`; this is a
+**Fix — a companion to ptone/scion#595, not covered by it.** ptone/scion#595 patches `matchesResource`; this is a
 different function and stays armed. **But the obvious fix is wrong**, and the reason generalises.
 
 ##### The retracted patch, kept because the error is instructive
 
-I proposed collapsing both arms onto the same helper #595 uses:
+I proposed collapsing both arms onto the same helper ptone/scion#595 uses:
 
 ```go
 // DO NOT APPLY — breaking. Retracted.
@@ -1682,7 +1700,7 @@ The patch fixed *absence-means-unconstrained* by making absence mean **denied** 
 overload with the sign flipped, absence still carrying one meaning across two call sites that
 need two. Anyone re-deriving a fix here will reach for the same symmetry.
 
-##### The actual root cause is in the data model — filed as #604
+##### The actual root cause is in the data model — filed as ptone/scion#604
 
 `sa-arch`'s diagnosis, which supersedes the framing above. The overload is **not** in either
 function. `Resource` (`authz.go:51-59`) has no way to say *"this resource is global"* as distinct
@@ -1696,11 +1714,11 @@ structurally unable to be correct at both.
 
 The durable fix is therefore not a better arm. It is making the two states distinguishable in
 `Resource` so neither function *can* conflate them and the compiler carries the invariant instead
-of a comment. Filed as **#604**, deliberately worded as *"make the states distinguishable"* rather
+of a comment. Filed as **ptone/scion#604**, deliberately worded as *"make the states distinguishable"* rather
 than *"be careful with parentless resources"* — the latter is not a fix and does not survive
 contact with the next contributor.
 
-**#604 does not block anything here.** Steps 1–3 below produce a correct hub; #604 is step 4 and
+**ptone/scion#604 does not block anything here.** Steps 1–3 below produce a correct hub; ptone/scion#604 is step 4 and
 prevents recurrence.
 
 ##### What the fix actually requires: a ruling, then an ordering
@@ -1719,7 +1737,7 @@ and global templates — all genuinely hub-level. The claim holds.
 
 **Interim posture.** Per the correction above, the fail-open is **latent** — unreachable until the
 UAT scope vocabulary widens. So there is no live exposure to race, and the ordering can be
-followed properly rather than under pressure. What must not happen is #605 landing first; that is
+followed properly rather than under pressure. What must not happen is ptone/scion#605 landing first; that is
 recorded there as a blocking prerequisite rather than left to sequencing luck.
 
 **The ruling in step 3 was requested in parallel with step 1** — nothing about asking the question
@@ -1757,7 +1775,7 @@ commit bodies**. It is the same mechanism as the original overclaim, which is wh
 had to be checked separately rather than assumed corrected along with the instance.
 
 **Correct instruction for builder commits:** describe them as regression repairs, and state the
-confinement effect as *latent, contingent on the scope vocabulary widening under #605*.
+confinement effect as *latent, contingent on the scope vocabulary widening under ptone/scion#605*.
 
 Concretely for `templateResource` — **landed as `180debe`**, suite green, `ScopeID` only with no
 deprecated `ProjectID` fallback, broker and user deliberately untouched:
@@ -1795,7 +1813,7 @@ So the fabricated credential is not only a tell about the *hole*; it is a standi
 property, and its name should say which.** Landed at `c2d12fac` as
 `TestTemplateResource_UATProjectArm_Latent`, which additionally asserts
 `store.UATValidScopes["template:read"] == false` (`authz_agent_baseline_test.go:556`). That makes
-the latency premise **machine-checked**: whoever widens the scope vocabulary under #605 gets a
+the latency premise **machine-checked**: whoever widens the scope vocabulary under ptone/scion#605 gets a
 failing test pointing at the explanation, instead of a green suite that has silently changed
 meaning. This is the §7.2 allowlist ruling arriving independently from the test side — a decision
 without a test is indistinguishable from an omission, so pin the premise, not just the behaviour.
@@ -1804,7 +1822,7 @@ without a test is indistinguishable from an omission, so pin the premise, not ju
 parentless**, so they remain outside UAT project confinement entirely. That is the right call — a
 global template is in nobody's project and giving it a parent would be a lie. But it means the
 builder fix **shrinks** the arm fix for templates rather than eliminating it, and it is the
-three-state problem (#604) surfacing on the very first builder: templates split into
+three-state problem (ptone/scion#604) surfacing on the very first builder: templates split into
 project-scoped (now confined) and global (still not), with only the arm fix plus ptone's ruling
 settling the second half. Pinned by a test so it is recorded rather than assumed closed.
 
@@ -1833,9 +1851,9 @@ by project-scoped policy — and, per 8.2.1, *not confined* by a project-pinned 
 find the thing it should not be able to reach. **If this is only tested through the list API,
 the problem is invisible** — that API is the one surface that has been papering over it.
 
-**Tense warning, because it inverts.** Post-#595 the policy path *under*-matches a legacy row
-(denied, safe-but-broken). **Today, pre-#595, it *over*-matches** — that is the #595 defect
-itself. So the row is currently unsafe on *both* paths, and #595 flips one of them. A reader who
+**Tense warning, because it inverts.** Post-ptone/scion#595 the policy path *under*-matches a legacy row
+(denied, safe-but-broken). **Today, pre-ptone/scion#595, it *over*-matches** — that is the ptone/scion#595 defect
+itself. So the row is currently unsafe on *both* paths, and ptone/scion#595 flips one of them. A reader who
 takes "policy matching under-matches" as describing today's hub will wrongly conclude that path
 is already fine.
 
@@ -2038,7 +2056,7 @@ gives §7 something it lacked: a *correct* hub-scoped guard to use as the canoni
 written by someone outside this project.
 
 **4. A fourth guard shape — already correctly ignored, now pinned.** These handlers use
-`GetUserIdentityFromContext` + `identity == nil` → **deny**: the #591 lexical form with the opposite
+`GetUserIdentityFromContext` + `identity == nil` → **deny**: the ptone/scion#591 lexical form with the opposite
 verdict, in the package we are sweeping.
 
 ⚠️ *I predicted false positives on the merged tree. **Falsified*** — aid-dev4 ran it: zero hits on
@@ -2061,13 +2079,13 @@ and dev1's `_Latent` rename — **name what the test is for, or it decays into n
 
 See **§7.2a** for two shape-3 evasions found afterwards, one of which does bear on the count.
 
-**5. `#888` creates a new instance of #604, today.** From its own commit body: *"Hub-scoped rows
+**5. `#888` creates a new instance of ptone/scion#604, today.** From its own commit body: *"Hub-scoped rows
 share the existing table with an empty `project_id`... The explicit `""` default (rather than NULL)
 is load-bearing."* That is **absence-means-global**, deliberately adopted, for a resource whose
 payload is *a script that executes as root in every agent container*. No `capabilities.go` builder
 exists for pre-start hooks yet — so nobody has hit the `templateResource` trap here, because nobody
-has written the code that would hit it. **#604 should be updated to name `ProjectPreStartHook`
-before someone writes that builder**, since the whole point of #604 is that each consumer of the
+has written the code that would hit it. **ptone/scion#604 should be updated to name `ProjectPreStartHook`
+before someone writes that builder**, since the whole point of ptone/scion#604 is that each consumer of the
 overload rediscovers it separately.
 
 **6. `requireHubHookReader`'s doc comment describes a return value it does not return** (aid-em's
@@ -2201,7 +2219,7 @@ replaces, because it is *presented* as the resolved version.
 **Recommended actions, in order:** (a) add the fail-closed nil-guard fixture to the lint script
 — **done, `1e3e3628`**;
 (b) re-run the guard sweep against `main` merged in, not against this branch alone, before claiming
-the inventory is complete; (c) comment on #604 naming this entity; (d) decide whether
+the inventory is complete; (c) comment on ptone/scion#604 naming this entity; (d) decide whether
 `hub_pre_start_hook_handlers.go` is in scope for this PR — my recommendation is **no**, it is
 already fail-closed, but the *claim that the sweep is complete* must then be scoped to exclude it,
 in the PR body, in writing.
