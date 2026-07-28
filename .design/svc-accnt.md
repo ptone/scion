@@ -1083,6 +1083,37 @@ write — reintroducing the second description of who-may-do-what that the rule 
 The creator test then exists at exactly one line and both routes reach it. The flat loader
 tests **scope and nothing else** — a routing fact, not a policy one.
 
+> **🛑 FINDING, 2026-07-28 (`acc4285d`) — the renderer must cover every VERDICT SHAPE, not just
+> every SCOPE.** `authorizeGCPServiceAccountFlat` checks `verdict.allowed` and then falls
+> straight into the scope switch. **It never handles `noIdentity`.** The nested renderer does.
+>
+> So a `noIdentity` verdict renders **403 for hub scope and 404 for user scope** — precisely the
+> leak the flag was introduced to prevent, and which the bullet two lines above says it prevents.
+> **The design specified the mechanism and the table-shaped renderer routed around it**, because
+> a `switch sa.Scope` is exhaustive over the thing its author was thinking about and silent about
+> everything else. *(Same failure as the uniform `Because` column: a structure that looks total
+> and is total over the wrong dimension.)*
+>
+> **Reachable, traced:** `GetUserIdentityFromContext` returns nil for an **agent**, and
+> `UnifiedAuthMiddleware` admits authenticated agents. So an agent on the flat route gets
+> `noIdentity` — and the hub arm's 403 rests on *"every user is joined to `hub-members` on
+> login"*, which is **false for agents**: agent principals never include `hub-members`. **The 403
+> is granted on a premise explicitly false for the caller receiving it.** `reason` is also `""`
+> on this verdict, so the body is empty.
+>
+> **Severity:** an agent-facing *existence oracle* for hub-scoped accounts. Not an access grant —
+> both arms still deny.
+>
+> **Required:** handle `noIdentity` **before** the scope switch, rendering **404** — not the
+> nested route's 403. An identity-less caller has established nothing on any surface, so the user
+> row's reasoning governs. Pin as a divergence test in the same idiom: same agent, same ID,
+> hub-scoped vs user-scoped, **one test asserting the two statuses are now identical.**
+>
+> **The general rule this earns:** where a policy layer returns a *discriminated* verdict, the
+> renderer's exhaustiveness must be checked against the **verdict type**, not the resource
+> taxonomy. Switching on the resource makes the missing arm invisible — there is no `default` to
+> catch it, because the scope *was* matched.
+
 **Test obligation.** Pin the hub-403/user-404 split as a **divergence in a single test** — same
 caller, same action, both denied by policy, only disclosure differing. Two tests asserting two
 values can be silently harmonised by a later "consistency" cleanup; one test asserting that they
