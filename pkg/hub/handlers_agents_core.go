@@ -422,18 +422,38 @@ func (s *Server) createAgentInProject(
 
 	// Validate GCP passthrough mode: only the broker owner (or admin) may use passthrough,
 	// because it exposes the broker's own GCP identity to the agent container.
+	//
+	// This is deliberately still a hand-rolled ownership comparison rather than
+	// s.authorize(brokerResource(broker), ActionDispatch): no policy can grant
+	// passthrough and the project-owner bypass does not apply, so routing it
+	// through the policy engine would change behaviour for *users*, not just
+	// for the non-user callers #591 is about. That alignment is tracked
+	// separately as ptone/scion#596. The fix here is the minimal one — the
+	// comparison is unchanged, and callers that are not users, which previously
+	// skipped the whole block, are now denied explicitly.
 	if req.GCPIdentity != nil && req.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough && runtimeBrokerID != "" {
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			broker, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			if userIdent.Role() != "admin" && broker.CreatedBy != userIdent.ID() {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"GCP identity passthrough requires broker ownership. Only the broker owner can expose the broker's GCP identity to agents.", nil)
-				return
-			}
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			// Agents and brokers reach this and cannot own a broker, so there
+			// is nothing for the comparison below to consult. Deny, rather than
+			// skipping the block as this site did before #591.
+			logAuthzDenial(r, GetIdentityFromContext(ctx),
+				Resource{Type: "broker", ID: runtimeBrokerID}, ActionDispatch,
+				"passthrough is restricted to broker owners and admins")
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"GCP identity passthrough requires broker ownership. Only the broker owner can expose the broker's GCP identity to agents.", nil)
+			return
+		}
+		broker, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if userIdent.Role() != "admin" && broker.CreatedBy != userIdent.ID() {
+			logAuthzDenial(r, userIdent, brokerResource(broker), ActionDispatch, "not broker owner or admin")
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"GCP identity passthrough requires broker ownership. Only the broker owner can expose the broker's GCP identity to agents.", nil)
+			return
 		}
 	}
 
@@ -458,15 +478,11 @@ func (s *Server) createAgentInProject(
 			return
 		}
 
-		// Authorization: any project member who can see the SA can assign it.
+		// Authorization: any caller who can see the SA can assign it.
 		// SA management (create/mint/delete) is gated on ActionManage elsewhere.
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, gcpServiceAccountResource(sa), ActionRead)
-			if !decision.Allowed {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"You don't have permission to assign GCP service accounts in this project", nil)
-				return
-			}
+		if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
+			"You don't have permission to assign GCP service accounts in this project") {
+			return
 		}
 
 		resolvedGCPSA = sa
@@ -1504,6 +1520,13 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 
+	// This handler had no authorization of any kind before #591: any
+	// authenticated caller could rename, relabel and rewrite the config of any
+	// agent on the hub, including its GCP identity.
+	if !s.authorize(w, r, agentResource(agent), ActionUpdate) {
+		return
+	}
+
 	var updates struct {
 		Name         string                 `json:"name,omitempty"`
 		Labels       map[string]string      `json:"labels,omitempty"`
@@ -1681,14 +1704,12 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id string) 
 func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
 	ctx := r.Context()
 
-	// Enforce policy-based authorization: only the agent's creator (owner) or admins can delete
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionDelete)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"Only the agent's creator can delete it", nil)
-			return
-		}
+	// Enforce policy-based authorization for every caller kind. The previous
+	// denial text claimed only the agent's creator could delete it, which was
+	// never true — admins, ancestors and project owners all pass — so the
+	// generic 403 body is used here rather than authorizeMsg.
+	if !s.authorize(w, r, agentResource(agent), ActionDelete) {
+		return
 	}
 
 	query := r.URL.Query()
