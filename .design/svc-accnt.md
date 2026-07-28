@@ -892,7 +892,9 @@ off exactly as today, so nothing existing breaks and the Q1 default stays off.
 > > there had been something to revoke. There never was.
 > >
 > > **The sharpest evidence that this is systemic rather than an oversight in our corner is
-> > four lines below the defect.** `capabilities.go:184-188` carries a careful comment
+> > four lines below the defect** *(this reading is mine — sa-dev-p4 named `authz.go:133-139`
+> > and the unconditional `OwnerID`, and asked that the inference not be logged as theirs)*.
+> > `capabilities.go:184-188` carries a careful comment
 > > explaining why a hub- or user-scoped SA must *not* claim a project parent — the author
 > > reasoned explicitly about handing a bypass to the wrong principal. Two lines above,
 > > `OwnerID` is set unconditionally, uncommented. The care went to one field and not the
@@ -904,10 +906,39 @@ off exactly as today, so nothing existing breaks and the Q1 default stays off.
 > >
 > > **One local lever exists, so #19 has a cheap option and not only an expensive one:** do
 > > not populate `OwnerID` for hub-scoped SAs. Resource-local, one line, does not touch the
-> > engine, and costs nothing *if* hub-scope creation ends up admin-gated — admins already
-> > pass by admin bypass. It is therefore **coupled to Step 5's answer**, which is what #19 is
-> > for. Recorded as an option, not ruled. The general question — whether the owner bypass
+> > engine. Recorded as an option, not ruled. The general question — whether the owner bypass
 > > needs a liveness condition — is an engine-level decision and is explicitly **not** mine.
+> >
+> > > **⚠️ The lever is NOT free, and its cost lands on the very ruling it is offered to.**
+> > > I first priced it at zero. sa-dev-p4 priced it properly, and it is one line to write
+> > > and easy to get wrong.
+> > >
+> > > `gcpServiceAccountResource` has **five** call sites, not the two assign gates:
+> > >
+> > > | Site (`5985b0fd`) | Action |
+> > > |---|---|
+> > > | `handlers_agents_core.go:501`, `:1705` | assign (currently `ActionRead`) |
+> > > | `handlers_gcp_identity.go:127` — `authorizeGCPServiceAccount`, `ScopeHub` arm | manage / **delete** / **verify** |
+> > > | `handlers_gcp_identity.go:342` | `ComputeCapabilitiesBatch`, list |
+> > > | `handlers_gcp_identity_scoped.go:204` | scoped list |
+> > >
+> > > For a hub-scoped SA the `ScopeHub` arm is a bare `CheckAccess` against the parentless
+> > > resource, so **the owner bypass is the only thing admitting a non-admin creator there.**
+> > > Dropping `OwnerID` does not narrow assign alone — it narrows manage, delete and verify
+> > > to admins, and the batch capability calls stop returning caps to the creator, so they
+> > > cannot see their own SA in a list.
+> > >
+> > > **The sharp edge is `ActionVerify` (`handlers_gcp_identity.go:466`), because verification
+> > > is not a later administrative act — it is the second step of creation.** A non-admin hub
+> > > member would create a hub-scoped SA and immediately be unable to verify it, leaving an
+> > > unverified account that every assign site correctly refuses: created-and-unusable, by its
+> > > own creator, with no error that says why.
+> > >
+> > > So the conditional tightens to **if and only if**: the lever is free *iff* hub-scope
+> > > creation is admin-gated, because then the admin bypass already covers verify. If #19
+> > > opens creation to hub members, the lever costs a create-then-verify hole unless verify
+> > > gets its own grant. **One ruling decides both, in opposite directions** — which is
+> > > precisely the thing that must not be discovered after the ruling.
 >
 
 > **⚠️ That protection does NOT exist before the conversion, and the ordering is therefore
