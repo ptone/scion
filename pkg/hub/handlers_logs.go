@@ -118,6 +118,18 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 
 	// Parse query parameters
 	query := r.URL.Query()
+	// KNOWN DEFECT — see #606. ProjectID here makes BuildLogFilter emit a
+	// labels.project_id clause, but most scion-server entries are written
+	// without that label: promoteAttrToLabels attaches agent_id and project_id
+	// independently, and the majority of call sites pass only agent_id. Measured
+	// against a real log store, 63% of scion-server entries carry no project_id
+	// (67–81% per agent), so this endpoint returns roughly a quarter of an
+	// agent's server log lines while its streaming twin — which does not set
+	// ProjectID — returns all of them.
+	//
+	// Left as-is deliberately: the fix is a decision (drop the clause, or make
+	// the server logger attach project_id consistently) and does not belong in
+	// the authorization change that converted this file.
 	opts := LogQueryOptions{
 		AgentID:   agent.ID,
 		ProjectID: agent.ProjectID,
@@ -208,6 +220,19 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 
 	// Parse query filters
 	query := r.URL.Query()
+	// ProjectID is intentionally NOT set here, and must not be added without
+	// reading #606 first. Setting it makes BuildLogFilter emit a
+	// labels.project_id clause, which can only narrow the result set —
+	// promoteAttrToLabels attaches agent_id and project_id independently, and
+	// 63% of scion-server entries (67–81% per agent, measured against a real log
+	// store) carry agent_id with no project_id at all. Filtering on it here would
+	// hide most of the agent's logs. Nothing is lost by its absence: agent IDs
+	// are UUIDs, so labels.agent_id is already uniquely selective.
+	//
+	// The non-streaming twin handleAgentCloudLogs DOES set it, which is why that
+	// endpoint currently under-returns. The asymmetry is a known defect tracked
+	// in #606 — it is not an oversight here, and the fix is to change that site,
+	// not this one.
 	opts := LogQueryOptions{
 		AgentID: agent.ID,
 	}
