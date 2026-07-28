@@ -146,7 +146,7 @@ Scion enforces strict isolation between agents to prevent interference and cross
 
 ### Platform and Workspace Skills
 Scion automatically tailors an agent's operational context by injecting supplemental platform skills based on the workspace environment.
-- **`git-sandbox`**: Injected only for git-associated workspaces, providing instructions on sandbox/worktree environments, local-only operations, and non-interactive conflict resolution.
+- **`workspace`**: Injected into every agent. Orients the agent to `/workspace` — how it is shared with other agents, what is safe to change in each workspace sharing mode, shared directories, and non-interactive git usage. The agent selects the applicable guidance at read time from `SCION_WORKSPACE_MODE` and `SCION_WORKSPACE_GIT`.
 - **Platform Skills**: Core instructions (such as status signaling, messaging, and command operations) are dynamically injected to guide the agent in interacting with the system.
 These platform skills ensure agents understand their specific execution environment without requiring manual configuration in every template.
 

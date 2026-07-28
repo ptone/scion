@@ -26,3 +26,7 @@ at `/workspace/.scion-volumes/<name>` — one location per directory, not both.
 **Shared directories are shared in every workspace mode, including the isolated
 ones.** Treat them as concurrent-access storage regardless of
 `SCION_WORKSPACE_MODE`.
+
+The `workspace` skill has the protocol for your mode — which git commands are safe,
+how branches and history are shared, and how to keep git non-interactive. Read it
+before your first git command or any broad change to `/workspace`.

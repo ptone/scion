@@ -40,7 +40,7 @@ The `harness` field is no longer supported in `scion-agent.yaml`. Templates must
 
 Scion automatically injects contextual platform skills into the agent's environment during provisioning:
 
-- **`git-sandbox`**: Injected if the agent is running in a Git-backed workspace. Provides operational context for git worktree and branch management.
+- **`workspace`**: Injected into every agent. Provides operational context for the agent's `/workspace` directory: the workspace sharing mode and what it makes safe or unsafe to change, branch and history management per mode, shared directories, and non-interactive git usage.
 - **Platform Skills**: Core instructions (such as status signaling, messaging, and command operations) are dynamically injected to guide the agent in interacting with the system.
 
 These platform skills are managed by Scion and do not need to be manually included in your template definition.
