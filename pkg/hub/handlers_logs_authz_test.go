@@ -349,8 +349,19 @@ func (f *logsAuthzFixture) deadLogBackend(t *testing.T) {
 // logsAuthzBackendDeadline bounds how long an allowed caller waits for the dead
 // backend. Without it the gRPC client retries against the closed port until its
 // own default expires, which was measured at 60s per endpoint — 180s for this
-// test alone. A deadline on the REQUEST context is inherited by the handler's
-// child contexts, so it caps the whole call.
+// test alone.
+//
+// The deadline goes on the REQUEST context, and that placement is the whole
+// mechanism rather than a stylistic choice. Handlers derive their contexts from
+// r.Context(), and a child context's effective deadline is the earlier of its
+// own and its parent's, so a bound set here propagates down into the Cloud
+// Logging call without any handler cooperating. Setting it on the client instead
+// does not work: these are the library's own retry defaults and the option to
+// shorten them is not plumbed through logadmin/logv2 construction.
+//
+// Note this bounds a library default we do not own. If the 60s were ours,
+// capping it in a test would be hiding our own bug rather than isolating from
+// someone else's.
 //
 // One second against ~2ms of pre-backend work is a ~500x margin. If it ever were
 // too tight the body assertions fail loudly rather than passing for the wrong
