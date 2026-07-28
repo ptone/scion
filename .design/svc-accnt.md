@@ -1271,10 +1271,55 @@ claiming a protection the wildcard removes.
 > **actions** is currently safe and enumerating **resource types** is not; the first is a
 > **precondition, not a property**, and must be recorded as such.
 
+#### 8.5.1 The enumeration I should have done first (#48)
+
+sa-dev-p5's takeaway from #45 was better than my apology, and it is mechanical where mine was
+penitent:
+
+> **RULE (p5's, adopted).** When you state an invariant about a **resource**, enumerate the
+> **routes that reach that resource** and test it at each. Cheap and mechanical beats noticing by
+> insight.
+
+Done properly, against `0dcf5901`, for every hub call site that loads a `GCPServiceAccount`:
+
+| surface | by-id, caller-supplied | discloses existence? |
+| --- | --- | --- |
+| flat `GET/DELETE/verify /gcp-service-accounts/{id}` | yes | fixed — #42 |
+| nested `GET/DELETE/verify /projects/{pid}/gcp-service-accounts/{id}` | yes | fixed — #45 |
+| project settings PUT (default SA) | yes | **NO — correct, and documented** |
+| agent **create**, `metadataMode: assign` | yes | **YES — #48** |
+| agent **PATCH**, `metadataMode: assign` | yes | **YES — #48, by status code** |
+| agent create, project-default fallback | no (not caller-supplied) | n/a |
+| all list surfaces | no | n/a |
+
+**#48.** `handlers_agents_core.go` create (`:463-479`) and PATCH (`:1701-1718`) separate *"GCP
+service account not found"* from *"does not belong to this project"*. Create differs by message
+(both 400); **PATCH differs by status — 404 vs 400** — which survives any rewording and is
+machine-readable. So any caller who may create or patch an agent in a project can confirm whether
+an arbitrary SA ID exists anywhere in the hub.
+
+**Both checks run BEFORE `authorizeSAAssignment`.** The gate P3 hardened and wired with rule-15
+tests is *downstream of the leak*: hardening it cannot close this, and no test of the gate can
+see it. Disclosure-before-authorization — the mirror of agent-id-fix's
+isolation-after-authorization.
+
+**The fix is not a design question, because this repo already contains the answer.**
+`project_settings_handlers.go:169` collapses exactly these two cases, with the reason written
+out: *"Distinguishing them would make this endpoint an existence oracle… 'Does not exist' and
+'exists but is not yours' are one answer."* The standard is set and documented; two handlers do
+not follow it. Note their own instruction to keep create and PATCH *"greppably identical"* means
+both must change together.
+
+> **RULE.** Before writing a disclosure rule for a resource, grep for **every** load of that
+> resource, not every route in the feature you are designing. A feature boundary is not a
+> security boundary, and the handler that gets it right may be in another file — as it was here.
+
 #### What this section costs me
 
-Two of today's findings originate in this document, and both have the same shape: a claim
-reasoned in a narrow case and written in the general one. §5.5 described a mode without saying
+**Three** of today's findings originate in this document, and all have the same shape: a claim
+reasoned in a narrow case and written in the general one. #48 is the third — §8.4 wrote a
+disclosure rule for *the service-account routes* and the two assignment surfaces load the same
+resource from another file, so the rule simply did not reach them. §5.5 described a mode without saying
 what installs the checker. §8.4 said "the nested routes still render 403" while thinking only
 about refusals that had a reason. **In both cases the implementer built exactly what was
 specified.** The instrument I now owe this document is not a better reviewer — it is the habit
