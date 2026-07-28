@@ -75,3 +75,8 @@ downloads/
 
 # PR review artifacts
 pr-*-review*.md
+
+# Test-run artifacts
+/.agents/
+__pycache__/
+*.pyc
