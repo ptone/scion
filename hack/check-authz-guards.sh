@@ -73,19 +73,19 @@ fi
 #         return true    // "not a user, so allow"
 #     }
 #
-# That was checkBrokerDispatchAccess and canDispatchToBroker before #591.
+# That was checkBrokerDispatchAccess and canDispatchToBroker before ptone/scion#591.
 #
 # WHAT IT CANNOT CHECK
 #
-# A handler with no authorization at all — handleUpdateGitHubApp before #591,
+# A handler with no authorization at all — handleUpdateGitHubApp before ptone/scion#591,
 # createProjectAgent, getGroupMember — has no guard to key on and is invisible
-# to any lexical rule. That gap is the route-authz manifest, issue #598.
+# to any lexical rule. That gap is the route-authz manifest, issue ptone/scion#598.
 #
 # So a green run from this script is NOT a statement that the codebase is
 # authorized correctly, and it must not be read as one. It says only that nobody
 # has reintroduced the specific mis-shaped-guard idiom below; a route that never
 # checks anything in the first place passes silently. Verifying that every route
-# has an authorization check is a separate problem and is tracked in #598.
+# has an authorization check is a separate problem and is tracked in ptone/scion#598.
 #
 # Run `hack/check-authz-guards.sh --self-test` to exercise the classifier
 # against a fixture covering every verdict above.
@@ -107,6 +107,40 @@ fi
 # is deliberate, because a formatting check that silently skips costs a reformat
 # later, while an authorization check that silently skips ships a bypass.
 set -euo pipefail
+
+# --------------------------------------------------------------------------
+# SCAN ROOT
+#
+# Normally the root is this script's own repository, resolved from $0, and it is
+# NOT configurable. The self-test needs to point the reporting path at a fixture
+# — that is the only reason an override exists at all, and it is deliberately an
+# argument rather than an environment variable.
+#
+# An env var would be a laundering vector against the very failure this script
+# exists to catch: export it to an empty directory in CI and you get "0 sites
+# flagged", exit 0, green, with nothing in the build log that looks wrong.
+# Printing the override would only help a reader who is reading, which in CI is
+# nobody. An argument has to appear in the command line, so it shows up in the
+# diff of whatever config invokes it. The variable is rejected outright rather
+# than ignored, so a half-remembered recipe fails loudly instead of scanning the
+# wrong tree quietly.
+scan_root="$(dirname "$0")/.."
+scan_root_overridden=""
+
+if [[ -n "${CHECK_AUTHZ_ROOT:-}" ]]; then
+  echo "check-authz-guards: CHECK_AUTHZ_ROOT is set. This script has no such" >&2
+  echo "  option — the scan root is not configurable by environment. NOTHING WAS" >&2
+  echo "  ANALYSED (refused, not clean)." >&2
+  exit 2
+fi
+
+if [[ "${1:-}" == "--self-test-scan" ]]; then
+  # Internal, used only by --self-test below. Not documented in the usage block
+  # on purpose: no production run has any business scanning anything but its own
+  # repository.
+  scan_root="${2:?--self-test-scan requires a root directory}"
+  scan_root_overridden="$scan_root"
+fi
 
 # Classifier. Walks each candidate guard with a brace-depth counter so the
 # verdict depends on the block's real extent rather than on a fixed indentation
@@ -234,7 +268,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
   cat >"$fixture" <<'FIXTURE'
 package fixture
 
-// Authorization gate inside an identity-kind guard, no else. The #591 shape.
+// Authorization gate inside an identity-kind guard, no else. The ptone/scion#591 shape.
 func (s *Server) gate(w http.ResponseWriter, r *http.Request) {
 	// WANT
 	if user := GetUserIdentityFromContext(ctx); user != nil {
@@ -424,12 +458,12 @@ func (s *Server) failClosedBroadGetter(ctx context.Context) bool {
 	return s.authzService.CheckAccess(ctx, identity, res, ActionRead).Allowed
 }
 
-// Shape 4: the hub-scoped "require" helper. Lexically this is the #591 idiom —
+// Shape 4: the hub-scoped "require" helper. Lexically this is the ptone/scion#591 idiom —
 // same getter, same `== nil` test — but the verdict is inverted: the nil branch
 // writes 401 and returns false. Fail-CLOSED, and correct.
 //
 // Copied from pkg/hub/hub_pre_start_hook_handlers.go on origin/main (db8f6fc,
-// #888), which is not on scion/agent-id-fix yet. aid-arch flagged that these
+// GoogleCloudPlatform/scion#888), which is not on scion/agent-id-fix yet. aid-arch flagged that these
 // would come back as findings once main merges. Verified on a trial merge that
 // they do not: the classifier requires the nil branch to END in an
 // unconditional `return true`, so the verdict is already part of the match.
@@ -472,11 +506,65 @@ FIXTURE
   got="$(awk "$classifier" "$fixture" | cut -d: -f2)"
 
   if [[ "$want" == "$got" ]]; then
-    echo "check-authz-guards self-test: PASS ($(grep -c '// WANT$' "$fixture") flagged, $(grep -c '// WANT-NOT$' "$fixture") correctly ignored)"
-    rm -rf "$fixture_dir"
-    exit 0
+    echo "check-authz-guards self-test: PASS (classifier — $(grep -c '// WANT$' "$fixture") flagged, $(grep -c '// WANT-NOT$' "$fixture") correctly ignored)"
+
+    # ----------------------------------------------------------------------
+    # Second case: THE ZERO-FINDINGS REPORTING PATH.
+    #
+    # The classifier case above exits before any reporting code runs, so until
+    # this existed nothing pinned what the script SAYS when it finds nothing.
+    # That path had also never executed in this project's history — every run
+    # ever made reported six sites — and it was not observable from outside
+    # either, because the scan cds to its own repository root: pointing the
+    # script at a synthetic clean tree silently rescanned this one and
+    # reported the same six. The behaviour range had exactly one point in it,
+    # which is why the gap did not feel like a gap.
+    #
+    # What it must not do is go quiet. A guard that found nothing and a guard
+    # that never ran have to be distinguishable in the output, and the exit
+    # code cannot distinguish them — 0 is also what a scan that examined no
+    # source would return if it forgot to say so.
+    #
+    # ASSERT THE LITERAL SUBSTRING. The zero-findings line has a DIFFERENT
+    # SHAPE from the findings line: it carries no ", N allowlisted, N reported
+    # above" clause. An assertion written against the findings template would
+    # be green against text that never appears in any run.
+    zero_root="$(mktemp -d)"
+    mkdir -p "$zero_root/pkg/hub"
+    cat >"$zero_root/pkg/hub/clean.go" <<'CLEANFIXTURE'
+package hub
+
+// A candidate with no violation. It matches the file-level prefilter, so the
+// scan has something to analyse and does not take the "no candidate files"
+// exit-2 path — the clean result has to come from the classifier clearing it,
+// not from the scan finding nothing to look at. The guard is fail-CLOSED.
+func (s *Server) cleanGate(w http.ResponseWriter, r *http.Request) {
+	identity := GetUserIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+	doTheThing()
+}
+CLEANFIXTURE
+
+    zero_rc=0
+    zero_out="$(bash "$0" --self-test-scan "$zero_root" 2>&1)" || zero_rc=$?
+
+    if [[ "$zero_rc" -eq 0 && "$zero_out" == *"0 sites flagged"* ]]; then
+      echo "check-authz-guards self-test: PASS (zero-findings path states its own total)"
+      rm -rf "$fixture_dir" "$zero_root"
+      exit 0
+    fi
+    echo "check-authz-guards self-test: FAIL — zero-findings reporting path" >&2
+    echo "expected: exit 0, and output containing the literal '0 sites flagged'" >&2
+    echo "actual exit: $zero_rc" >&2
+    echo "actual output:" >&2
+    echo "$zero_out" >&2
+    rm -rf "$fixture_dir" "$zero_root"
+    exit 1
   fi
-  echo "check-authz-guards self-test: FAIL" >&2
+  echo "check-authz-guards self-test: FAIL — classifier" >&2
   echo "expected flagged lines:" >&2
   echo "$want" >&2
   echo "actual flagged lines:" >&2
@@ -485,7 +573,7 @@ FIXTURE
   exit 1
 fi
 
-cd "$(dirname "$0")/.."
+cd "$scan_root"
 
 # Report which tree was actually analysed, on every path.
 #
@@ -498,6 +586,13 @@ cd "$(dirname "$0")/.."
 # or a possibly-stale ref, which relocates the same lie somewhere harder to see.
 provenance() {
   local sha
+  # An overridden root taints every line this function appears on, not just one
+  # summary line, so it is stamped here rather than at the call sites. A run
+  # against a fixture must not be quotable as a run against the repository.
+  if [[ -n "$scan_root_overridden" ]]; then
+    printf 'FIXTURE ROOT %s (NOT THIS REPOSITORY)' "$scan_root_overridden"
+    return
+  fi
   if ! sha="$(git rev-parse --short HEAD 2>/dev/null)"; then
     # Covers both "not a worktree" and "git is not on PATH" — the caller cannot
     # tell those apart from here, so do not claim to.
@@ -548,7 +643,7 @@ fi
 
 # Anchored allowlist. Every entry must carry a comment stating why the guard is
 # safe despite its shape. An empty allowlist is the acceptance criterion for
-# #591 Part 1 — do not add entries to make a red build green. A new hit is
+# ptone/scion#591 Part 1 — do not add entries to make a red build green. A new hit is
 # either a real bypass (fix the call site with s.authorize) or a classifier
 # false positive (fix this script, and extend the self-test fixture above).
 #
@@ -581,7 +676,7 @@ fi
 # Condition 2 is the load-bearing one. Without a test, "allowlisted" and
 # "unfixed" are indistinguishable in the tree — both present as a site this
 # script does not flag, and no reader can tell a considered exception from
-# abandoned work. That is #591's own failure mode with paperwork attached, and
+# abandoned work. That is ptone/scion#591's own failure mode with paperwork attached, and
 # this script exists because of exactly that shape.
 #
 # Running out of time is not condition 1. If sites remain unfixed, the honest

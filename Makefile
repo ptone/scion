@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build install test test-fast vet lint compat-literals golangci-lint web web-typecheck fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build install test test-fast vet lint compat-literals authz-guards golangci-lint web web-typecheck fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -72,6 +72,11 @@ lint:
 ## compat-literals: Check legacy grove literals stay in compatibility surfaces
 compat-literals:
 	@./hack/check-project-compat-literals.sh
+
+## authz-guards: Fail closed on reintroduced identity-kind authorization guards (ptone/scion#591)
+authz-guards:
+	@./hack/check-authz-guards.sh --self-test
+	@./hack/check-authz-guards.sh
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
 golangci-lint:
@@ -139,12 +144,12 @@ fmt-check:
 	@echo "Go formatting OK."
 
 ## ci: Run fast CI checks (format check, vet, compatibility guardrails, tests, build)
-ci: fmt-check lint compat-literals test-fast build
+ci: fmt-check lint compat-literals authz-guards test-fast build
 	@echo ""
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-typecheck lint compat-literals golangci-lint test-fast build
+ci-full: fmt-check web web-typecheck lint compat-literals authz-guards golangci-lint test-fast build
 	@echo ""
 	@echo "CI (full) passed."
 
