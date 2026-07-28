@@ -21,6 +21,31 @@ at; treat an unstamped line number as stale. Superseded reasoning is struck or q
 rather than deleted, because the reasons a wrong conclusion was attractive are what stop it
 being reached again.
 
+> ### ⚠️ Which tree this document describes
+>
+> **Every line number and every source quotation here is relative to
+> `origin/scion/svc-accnt-lead` @ `5985b0fd`, not to `main`.**
+>
+> As of `origin/main` @ `db8f6fc5`, **main contains neither #591 nor #595.** `matchesResource`
+> on main is at `authz.go:357` and still carries the original fail-open form. Both fixes exist
+> only on the integration branch (`4c0b6757` for #595, `fc71ffef` for #591), which is 41 commits
+> ahead and unmerged.
+>
+> This matters in two directions:
+>
+> 1. **Every "discharged" claim in this document — §8.3's hard gate, and the structural
+>    confinement of the assign-grant baseline in §8.2 — is true of the integration branch and
+>    false of main.** A reader who checks out main and greps the cited lines will find fail-open
+>    code, and may reasonably conclude the document is wrong about something else.
+> 2. **#595 is a hard merge predecessor for this project.** Nothing here may be cherry-picked
+>    to main ahead of it. The assign-grant baseline is confined *only* by #595's fail-closed
+>    rejection of parentless resources; on a tree without that fix it grants `assign` on every
+>    hub-scoped SA to every project member — the §8.2 hole again, reached by a different route.
+>
+> Recorded because the discrepancy was found by two agents citing the same clause at different
+> line numbers and both being right. The SHA convention above is what surfaced it; the branch
+> name is the part the convention was missing.
+
 ---
 
 ## 1. Background
@@ -680,6 +705,34 @@ flagged.
 Not the whole feature gated on the toggle — only the hub-scope capability, which is the
 part that is incoherent without it. Project-scoped SAs continue to work with the toggle
 off exactly as today, so nothing existing breaks and the Q1 default stays off.
+
+> **⛔ Constraint on how the toggle may be implemented: it must not revoke a grant by
+> policy name.**
+>
+> A toggle that can be turned *off* implies a revocation path, and revocation by name is
+> unsafe in this codebase. `AccessPolicy` declares `name` as `NotEmpty()` with **no
+> `Unique()`**, and the entity declares no `Indexes()` at all
+> (`pkg/ent/schema/policy.go:39-40` @ `5985b0fd`), so `store.CreatePolicy` cannot detect a
+> duplicate name and several policies may share one. `ListPolicies(Name: X, Limit: 1)`
+> therefore does not return *the* policy — it returns an arbitrary element of a set.
+>
+> Adding is safe under this: duplicate `allow` rows are redundant, not harmful. **Removing
+> or narrowing is not.** A disable path written as "find the grant by name and delete or
+> edit it" will touch one row of N and leave the remainder granting — a toggle that reports
+> itself off while the permission is still live. That is the worst available failure mode
+> for a control whose entire purpose is to be trusted when off.
+>
+> Turn the capability off by a predicate the checker consults, or by deleting *all* matches
+> and asserting the count, never by editing "the" named row.
+>
+> Found by sa-dev-p3 while building P0.4, as a pre-existing defect in unrelated code:
+> the create-then-catch-`ErrAlreadyExists` idempotency branch at
+> `handlers_projects_core.go:604-635` is unreachable for this reason, and duplicate
+> `project:<slug>:member-create-agents` policies accumulate. Measured, not inferred — three
+> calls produced three rows. That defect belongs to hub-core, not to this project; it is
+> recorded *here* because it converts a routine implementation choice of ours into a
+> correctness requirement, and because nothing in the tree revokes by name **yet**, which
+> makes this a trap rather than a bug and means our toggle would be the thing that springs it.
 
 > **Update 2026-07-28 — §8.2 nearly got banked before it was ruled, and the implementation
 > now holds it closed by construction.**
