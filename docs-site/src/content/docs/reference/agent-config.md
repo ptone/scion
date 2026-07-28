@@ -242,9 +242,14 @@ follows the documented ordering, as the other project settings already did.
 Agents created in a project that sets a default harness config will now use it, even
 when the project's template also specifies one. Previously the template won in every
 case: a template's `default_harness_config` took precedence, and failing that, the
-harness name stored on the template did. Since almost every template supplies one or
-the other, the project setting was in practice ignored whenever a template was
-involved — it took effect only for projects whose template specified no harness at all.
+harness name stored on the template did.
+
+The change is triggered by any template that supplies a harness config — either a
+`default_harness_config`, a declared `harness` field, or, when neither is present, a
+template name containing `claude`, `gemini`, `opencode` or `codex`. Three of the eleven
+templates bundled in this repository qualify (`web-dev`, `adk`, `amp`); user templates
+that pin a harness config always will. Projects whose template supplies no harness
+config at all were never affected, and still are not.
 
 Already-created agents keep the configuration they were created with.
 
