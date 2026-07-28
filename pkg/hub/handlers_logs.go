@@ -190,6 +190,22 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Isolation runs before authorization so a cross-project agent gets 404
+	// rather than 403, which would disclose that the agent exists.
+	//
+	// One-shot at connection setup is sufficient only because an agent cannot
+	// change project: nothing mutates the agents project_id column after
+	// creation (UpdateAgent in pkg/store/entadapter/agent_store.go does not
+	// touch it), and opts below is pinned and never rebuilt. If agent
+	// re-parenting is ever added, this check goes stale and a live stream would
+	// keep serving an agent that has since moved to another project.
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if agent.ProjectID != agentIdent.ProjectID() {
+			NotFound(w, "Agent")
+			return
+		}
+	}
+
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionRead)
 		if !decision.Allowed {
@@ -361,6 +377,20 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Isolation before authorization: a cross-project agent must get 404, not
+	// 403, or the response discloses that the agent exists. One-shot at
+	// connection setup is sufficient only because an agent cannot change
+	// project — nothing mutates the agents project_id column after creation
+	// (UpdateAgent in pkg/store/entadapter/agent_store.go does not touch it) and
+	// opts below is pinned for the life of the stream. Adding agent re-parenting
+	// would make this check stale mid-stream.
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if agent.ProjectID != agentIdent.ProjectID() {
+			NotFound(w, "Agent")
+			return
+		}
+	}
+
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionRead)
 		if !decision.Allowed {
@@ -517,6 +547,20 @@ func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.R
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// Isolation before authorization: an agent from another project must get
+	// 404, not 403, or the response discloses that the project exists. One-shot
+	// at connection setup is sufficient because an agent cannot change project —
+	// nothing mutates the agents project_id column after creation (UpdateAgent
+	// in pkg/store/entadapter/agent_store.go does not touch it) and opts below is
+	// pinned for the life of the stream. Adding agent re-parenting would make
+	// this check stale mid-stream.
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if project.ID != agentIdent.ProjectID() {
+			NotFound(w, "Project")
+			return
+		}
 	}
 
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
