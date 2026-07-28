@@ -979,6 +979,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		AgentTokenSvc:      srv.agentTokenService,
 		UserTokenSvc:       srv.userTokenService,
 		UATSvc:             srv.uatService,
+		BrokerAuthSvc:      srv.brokerAuthService,
 		TrustedProxies:     cfg.TrustedProxies,
 		ProxyAuthenticator: cfg.ProxyAuth,
 		AuthMode:           cfg.AuthMode,
