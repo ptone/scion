@@ -1,4 +1,30 @@
 #!/usr/bin/env bash
+# INTERPRETER ASSERTION — must remain the first executable statement, and must
+# remain parseable by a POSIX shell.
+#
+# The shebang only applies when the script is executed directly. Invoked as
+# `sh hack/check-authz-guards.sh` the shebang is ignored, and on a system where
+# /bin/sh is dash this script died at `set -o pipefail` ("Illegal option") after
+# printing nothing else. A caller reading that output saw no findings and a
+# stack of shell noise, which is byte-indistinguishable from a clean tree to
+# anyone skimming, and identical to one for any log scraper keyed on findings.
+#
+# That is this script's own subject matter turned on the script: a check that
+# reports nothing because it never ran, read as a check that found nothing. It
+# matters more here than in most tooling because a green CI check is exactly the
+# artifact people stop re-deriving by hand.
+#
+# Re-exec under bash when it exists; fail loudly and non-zero when it does not.
+# Never continue under an interpreter that cannot run the rest of this file.
+if [ -z "${BASH_VERSION:-}" ]; then
+  if command -v bash >/dev/null 2>&1; then
+    exec bash "$0" "$@"
+  fi
+  echo "check-authz-guards: FATAL — requires bash; not found on PATH." >&2
+  echo "check-authz-guards: NOTHING WAS ANALYSED (skipped, not clean)" >&2
+  exit 2
+fi
+
 # Flags authorization checks that live inside an identity-kind guard with no
 # compensating deny for the other identity kinds.
 #
@@ -68,7 +94,8 @@
 #
 #   0  analysed, no violations
 #   1  analysed, violations found — the list is on stderr
-#   2  COULD NOT ANALYSE (rg missing, no candidate files) — nothing was examined
+#   2  COULD NOT ANALYSE (wrong interpreter, rg missing, no candidate files)
+#      — nothing was examined
 #
 # 2 is separate from 1 on purpose. Both fail a build, which is the point: a run
 # that examined no source must not be indistinguishable from a clean one to
@@ -515,7 +542,7 @@ awk "$classifier" "${candidate_files[@]}" >"$tmp" || true
 
 if [[ ! -s "$tmp" ]]; then
   echo "check-authz-guards: analysed $(provenance), no violations"
-  echo "check-authz-guards: END — ${#candidate_files[@]} files examined, 0 sites flagged"
+  echo "check-authz-guards: END — analysed $(provenance), ${#candidate_files[@]} files examined, 0 sites flagged"
   exit 0
 fi
 
@@ -601,9 +628,9 @@ if [[ -n "$violations" ]]; then
   # missing sites. A worklist was once published sixteen-of-twenty because this
   # output was transcribed through `tail -25` — the sites were reported
   # correctly and read short. Do not move this line; add no output after it.
-  echo "check-authz-guards: END — ${flagged} sites flagged, $(( flagged - reported )) allowlisted, ${reported} reported above" >&2
+  echo "check-authz-guards: END — analysed $(provenance), ${#candidate_files[@]} files examined, ${flagged} sites flagged, $(( flagged - reported )) allowlisted, ${reported} reported above" >&2
   exit 1
 fi
 
 echo "check-authz-guards: analysed $(provenance), no violations"
-echo "check-authz-guards: END — ${#candidate_files[@]} files examined, ${flagged} sites flagged, all allowlisted"
+echo "check-authz-guards: END — analysed $(provenance), ${#candidate_files[@]} files examined, ${flagged} sites flagged, all allowlisted"
