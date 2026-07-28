@@ -44,18 +44,16 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 		return
 	}
 
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionRead)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
-	}
+	// Isolation before authorization: a cross-project agent must get 404, not
+	// 403, or the response discloses that the agent exists.
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if agent.ProjectID != agentIdent.ProjectID() {
 			NotFound(w, "Agent")
 			return
 		}
+	}
+	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		return
 	}
 
 	dispatcher := s.GetDispatcher()
@@ -106,18 +104,16 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 		return
 	}
 
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionRead)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
-	}
+	// Isolation before authorization: a cross-project agent must get 404, not
+	// 403, or the response discloses that the agent exists.
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if agent.ProjectID != agentIdent.ProjectID() {
 			NotFound(w, "Agent")
 			return
 		}
+	}
+	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		return
 	}
 
 	// Parse query parameters
@@ -206,12 +202,8 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionRead)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		return
 	}
 
 	// Parse query filters
@@ -300,18 +292,16 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionRead)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
-	}
+	// Isolation before authorization: a cross-project agent must get 404, not
+	// 403, or the response discloses that the agent exists.
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if agent.ProjectID != agentIdent.ProjectID() {
 			NotFound(w, "Agent")
 			return
 		}
+	}
+	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		return
 	}
 
 	query := r.URL.Query()
@@ -391,12 +381,8 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionRead)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		return
 	}
 
 	opts := LogQueryOptions{
@@ -474,18 +460,16 @@ func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionRead)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
-	}
+	// Isolation before authorization: an agent from another project must get
+	// 404, not 403, or the response discloses that the project exists.
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if project.ID != agentIdent.ProjectID() {
 			NotFound(w, "Project")
 			return
 		}
+	}
+	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
 	}
 
 	query := r.URL.Query()
@@ -563,12 +547,8 @@ func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.R
 		}
 	}
 
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionRead)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
 	}
 
 	opts := LogQueryOptions{
