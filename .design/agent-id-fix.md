@@ -2,7 +2,7 @@
 
 **Author:** aid-arch
 **Date:** 2026-07-28
-**Repo state:** `ptone/scion`, branch `scion/agent-id-fix`, **branched from `c96af412`** (`#893`).
+**Repo state:** `ptone/scion`, branch `scion/agent-id-fix`, **branched from `c96af412`** (`GoogleCloudPlatform/scion#893`).
 Verification after 18:05Z is against branch tip `c2d12fac` or later; `main` is at `db8f6fc5`.
 *(This field previously read `8dbf167`, which is not the branch point — corrected rather than
 annotated, since a reader who reads the header and stops must not get the retracted value.)*
@@ -40,7 +40,7 @@ opens from `c96af412` and the PR body says so.**
 >
 > - **The true branch point is `c96af412`**, not `8dbf167`. The header carried `8dbf167` because
 >   that was the tip when the doc was started, and the branch was rebased afterwards. The chain is
->   three commits — `8dbf1674` (`#891`) → `819df962` (`#892`) → `c96af412` (`#893`) — so `8dbf167`
+>   three commits — `8dbf1674` (`GoogleCloudPlatform/scion#891`) → `819df962` (`GoogleCloudPlatform/scion#892`) → `c96af412` (`GoogleCloudPlatform/scion#893`) — so `8dbf167`
 >   is a real ancestor of both trees, just not the divergence point.
 >
 >   *This clause was challenged twice as unverifiable and survived both times; it is now confirmed
@@ -60,7 +60,7 @@ opens from `c96af412` and the PR body says so.**
 >
 >   *The §1.1 shape in one line: **a commit absent because history was truncated is indistinguishable
 >   from a commit that never existed** — `cat-file -e` does not error under a graft, it answers no.*
-> - **`main` is at `db8f6fc5` and carries one commit this branch does not** — `#888`, hub-scoped
+> - **`main` is at `db8f6fc5` and carries one commit this branch does not** — `GoogleCloudPlatform/scion#888`, hub-scoped
 >   pre-start hooks — which adds **385 lines of new authorization code in a file this document has
 >   never seen**, and touches three files this branch also modifies. **§8.5** covers it.
 >
@@ -82,24 +82,43 @@ resolutions and §12 for the follow-on track ptone raised.
 > **ptone/scion#595** (`matchesResource` engine defect), **ptone/scion#596** (GCP gate alignment), **ptone/scion#598** (route
 > authz manifest), **ptone/scion#599** (ServeMux migration), **ptone/scion#600** (dead-code cleanup).
 >
-> **Issue numbers in this document are qualified deliberately. Do not un-qualify them.**
+> **EVERY ISSUE REFERENCE IN THIS DOCUMENT IS REPO-QUALIFIED. THERE ARE NO BARE `#NNN`
+> REFERENCES AND THERE MUST NOT BE.** Not even where bare would resolve correctly from
+> where you happen to be reading. A bare reference silently defaults to whichever repo the
+> reader is standing in, and this document is read from the fork more often than from
+> upstream while the PR that carries it is filed against upstream. Two namespaces, two
+> syntaxes, no defaults.
+>
 > The fork's issue counter shares a number space with upstream's pull requests, so every
-> fork issue we cite has an upstream namesake that is a real, merged, unrelated PR:
-> `GoogleCloudPlatform/scion#591` is a Slack broker plugin, `#595` an auth fallback,
-> `#596` a bootstrap fix, `#598` a vertex-ai auth fix, `#599` a Slack admin UI,
-> `#600` a dead-harness removal, `#604` a pre-start-hook fix, `#605` an auth-detection
-> fix, `#606` an env-overlay fix. Verified against the GitHub API on 2026-07-28.
+> fork issue cited here has an upstream namesake, and every one of those namesakes is a
+> real merged PR rather than a 404: `GoogleCloudPlatform/scion#591` is a Slack broker
+> plugin, `GoogleCloudPlatform/scion#595` an auth fallback,
+> `GoogleCloudPlatform/scion#596` a bootstrap fix, `GoogleCloudPlatform/scion#598` a
+> vertex-ai auth fix, `GoogleCloudPlatform/scion#599` a Slack admin UI,
+> `GoogleCloudPlatform/scion#600` a dead-harness removal,
+> `GoogleCloudPlatform/scion#604` a pre-start-hook fix, `GoogleCloudPlatform/scion#605` an
+> auth-detection fix, `GoogleCloudPlatform/scion#606` an env-overlay fix. Verified against
+> the GitHub API on 2026-07-28.
 >
-> Two of those collide *on topic*, which is what makes a bare reference dangerous rather
-> than merely wrong: our `ptone/scion#600` is a dead-code cleanup and upstream's `#600`
-> removes a dead harness system; this change is largely about broker dispatch and
-> upstream's `#591` adds a broker plugin. A reviewer who clicks a bare `#591` in a PR
-> against upstream lands on a page that renders fine, is on-topic, and is not our issue —
-> so the check that would catch the error instead confirms it.
+> **Two collide on topic, and that is what turns a broken link into a false belief.** Our
+> `ptone/scion#600` is a dead-code cleanup and `GoogleCloudPlatform/scion#600` removes a
+> dead harness system. This change is largely about broker dispatch and
+> `GoogleCloudPlatform/scion#591` adds a broker plugin. A reviewer who clicks an
+> unqualified fork number from an upstream PR lands on a page that renders fine, reads as
+> on-topic, and is not our issue — so the check that should have caught the mistake
+> ratifies it instead.
 >
-> The reverse also holds and is easier to get wrong: `#888`, `#891`, `#892` and `#893`
-> in this document are **upstream** PRs and return 404 on the fork. They are correctly
-> bare. Qualifying every `#NNN` uniformly would break them.
+> The trap runs both ways. `GoogleCloudPlatform/scion#888`,
+> `GoogleCloudPlatform/scion#891`, `GoogleCloudPlatform/scion#892` and
+> `GoogleCloudPlatform/scion#893` —
+> qualified above and throughout — are upstream PRs that return 404 on the fork. Any
+> uniform rewrite in either direction breaks one namespace or the other; qualification has
+> to be per number, and each one here was checked individually.
+>
+> **Commit subjects on this branch are a separate and unfixable case.** 84 bare references
+> live in them, 72 of them the fork authz issue, across 28 subjects; GitHub autolinks those to upstream
+> on the commits tab. They are pushed history and are not being rewritten. The mitigation
+> is a statement in the pull request body, not an edit here.
 >
 > The security issue exists only on the fork.
 
@@ -1992,12 +2011,12 @@ gate it behind Q2): allow-listing rather than deny-listing in the broker and sid
 mismatch at `agent/run.go:1364`, and both no-validation-on-read symptoms at
 `agent_store.go:136-141`. Not this track.
 
-### 8.5 `main` has moved: `#888` hub-scoped pre-start hooks — 385 unreviewed authz lines inbound
+### 8.5 `main` has moved: `GoogleCloudPlatform/scion#888` hub-scoped pre-start hooks — 385 unreviewed authz lines inbound
 
 **Discovered 18:10Z**, while verifying a topology claim in the reading convention. Verified against
 `origin/main` @ `db8f6fc5` and `origin/scion/agent-id-fix` @ `c2d12fac`.
 
-`db8f6fc5` ("feat(hub): hub-scoped pre-start hooks, web UI, and CLI extension", `#888`) is on `main`
+`db8f6fc5` ("feat(hub): hub-scoped pre-start hooks, web UI, and CLI extension", `GoogleCloudPlatform/scion#888`) is on `main`
 and **not** on this branch. It lands today, from a different track, and it interacts with this
 design in four ways.
 
@@ -2012,7 +2031,7 @@ helpers — `requireHubAdmin:54`, `requireHubHookReader:76`, `isHubAdminIdentity
 
 ⚠️ *I wrote: "the inventory is complete for the tree it was built on and incomplete for the tree we
 merge into." **Falsified.*** aid-dev4 ran the guard script against a **trial merge** of `origin/main`
-into the branch: the survivor count is **20, identical to branch-only**. `#888` adds **zero** sites
+into the branch: the survivor count is **20, identical to branch-only**. `GoogleCloudPlatform/scion#888` adds **zero** sites
 of our shape, so §3 and §4.4 need no re-derivation and the PR's number is 20 on either tree. My
 claim was an inference from *"new authz code exists"* to *"our inventory must have grown"*, and the
 inference does not hold — new authorization code that is written correctly adds nothing to a list
@@ -2029,7 +2048,7 @@ coverage it does not have.
 
 ⚠️ *I wrote: "a rebase is not going to be clean in the one file whose dispatch helpers are mid-fix."
 **Falsified.*** aid-em ran it: 21 commits, exit 0, **zero conflicted paths**, with `go build ./...`
-and `go vet ./pkg/hub/...` both clean on the result. `#888` touches `populateAgentConfig` around
+and `go vet ./pkg/hub/...` both clean on the result. `GoogleCloudPlatform/scion#888` touches `populateAgentConfig` around
 `:262-309`; our work is at `:885` and `:914`. Same file, six hundred lines apart.
 
 **The lesson is worth more than the prediction was: I reasoned at file granularity and `git` merges
@@ -2079,7 +2098,7 @@ and dev1's `_Latent` rename — **name what the test is for, or it decays into n
 
 See **§7.2a** for two shape-3 evasions found afterwards, one of which does bear on the count.
 
-**5. `#888` creates a new instance of ptone/scion#604, today.** From its own commit body: *"Hub-scoped rows
+**5. `GoogleCloudPlatform/scion#888` creates a new instance of ptone/scion#604, today.** From its own commit body: *"Hub-scoped rows
 share the existing table with an empty `project_id`... The explicit `""` default (rather than NULL)
 is load-bearing."* That is **absence-means-global**, deliberately adopted, for a resource whose
 payload is *a script that executes as root in every agent container*. No `capabilities.go` builder
@@ -2117,7 +2136,7 @@ clean worktrees rather than relaying them**, which is the only reason this subse
 | base `c96af412` | **exit 0** | clean |
 | branch tip `e775843f` | **exit 0** | clean; merge-base with `main` still `c96af412` |
 
-Both declarations come from `#888`. Rebasing would inherit a broken test package and present as our
+Both declarations come from `GoogleCloudPlatform/scion#888`. Rebasing would inherit a broken test package and present as our
 PR breaking `pkg/hub` tests — on a security PR, **arriving with a red suite we did not cause is a
 credibility cost we cannot pay and cannot explain in a review comment**. Reported upstream. If it is
 fixed before we open, we rebase; if not, we open from `c96af412` **and say so in the PR body**.
