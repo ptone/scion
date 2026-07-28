@@ -406,6 +406,7 @@ awk "$classifier" "${candidate_files[@]}" >"$tmp" || true
 
 if [[ ! -s "$tmp" ]]; then
   echo "check-authz-guards: analysed $(provenance), no violations"
+  echo "check-authz-guards: END — ${#candidate_files[@]} files examined, 0 sites flagged"
   exit 0
 fi
 
@@ -424,6 +425,23 @@ fi
 # the same shape (addGroupMember does), so file + function is not always unique;
 # where it is not, say so in the entry's comment rather than assuming it pins
 # one site.
+#
+# An entry is admissible only if BOTH hold:
+#   1. the site is fail-open BY DESIGN — intended behaviour, and the entry is
+#      recording a decision that was made;
+#   2. the entry carries a comment saying why, AND a test pinning the fail-open
+#      as intended.
+#
+# Condition 2 is the load-bearing one. Without a test, "allowlisted" and
+# "unfixed" are indistinguishable in the tree — both present as a site this
+# script does not flag, and no reader can tell a considered exception from
+# abandoned work. That is #591's own failure mode with paperwork attached, and
+# this script exists because of exactly that shape.
+#
+# Running out of time is not condition 1. If sites remain unfixed, the honest
+# outcome is that this script ships unwired from `make ci` with the reason
+# stated — not an allowlist that reports green. "Deliberately open" and "not
+# finished" look identical in this file and are entirely different facts.
 allowed_paths=(
   # (intentionally empty)
   "^$"
@@ -432,6 +450,16 @@ allowed_paths=(
 allowlist="$(printf '%s\n' "${allowed_paths[@]}" | sed 's/\$$/:/' | paste -sd '|' -)"
 
 violations="$(grep -Ev "$allowlist" "$tmp" || true)"
+
+# Counted, not inferred. `printf '%s\n' "$violations" | wc -l` reports 1 for the
+# empty string, which would make a clean run claim one finding.
+flagged="$(grep -c '' "$tmp" || true)"
+if [[ -z "$violations" ]]; then
+  reported=0
+else
+  reported="$(printf '%s\n' "$violations" | grep -c '')"
+fi
+
 if [[ -n "$violations" ]]; then
   echo "check-authz-guards: analysed $(provenance) — confirm this is the branch tip before acting on the list below" >&2
   echo >&2
@@ -446,7 +474,17 @@ if [[ -n "$violations" ]]; then
   echo >&2
   echo "See pkg/hub/authorize.go. If a guard is genuinely safe in this shape, add" >&2
   echo "it to allowed_paths in this script with a comment explaining why." >&2
+  echo >&2
+  # Deliberately the LAST line of output, and it states its own totals. A
+  # truncated read of this report (tail -N, a scrollback limit, a paste) is then
+  # self-evidently truncated: if you cannot see this line you are not looking at
+  # the whole list, and if the total here exceeds what you counted, you are
+  # missing sites. A worklist was once published sixteen-of-twenty because this
+  # output was transcribed through `tail -25` — the sites were reported
+  # correctly and read short. Do not move this line; add no output after it.
+  echo "check-authz-guards: END — ${flagged} sites flagged, $(( flagged - reported )) allowlisted, ${reported} reported above" >&2
   exit 1
 fi
 
 echo "check-authz-guards: analysed $(provenance), no violations"
+echo "check-authz-guards: END — ${#candidate_files[@]} files examined, ${flagged} sites flagged, all allowlisted"
