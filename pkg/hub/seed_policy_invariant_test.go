@@ -28,22 +28,33 @@ import (
 )
 
 // TestSystemPolicies_NoWildcardOrDispatchAction pins the invariant that no
-// policy the system creates on its own carries an action wildcard ("*") or the
-// "dispatch" action.
+// policy the system creates on its own grants hub-wide privilege or dispatch.
 //
 // WHY THIS IS A TEST AND NOT A COMMENT. matchesAction (authz.go) grants an
 // action iff the policy's Actions contains "*" or the exact action, and
 // matchesResource treats ResourceType "*" as matching every resource type. So a
-// policy is a dispatch grant on a broker iff Effect=="allow" AND ResourceType in
-// {"*","broker"} AND Actions intersects {"*","dispatch"}. hub-member-read-all
-// already has ResourceType "*", which matches a broker resource; the only thing
-// keeping it from granting dispatch (and everything else) hub-wide is that its
-// Actions stay a concrete list. That is one token of drift, and nothing else in
-// the code enforces it. This test is the enforcement.
+// "*"-resource policy's Actions are the only thing scoping it: whatever action
+// it lists, it grants on every resource type hub-wide. hub-member-read-all
+// already has ResourceType "*"; the only thing keeping it from being a hub-wide
+// grant of anything is its Actions list, and nothing else in the code enforces
+// that. This test is the enforcement.
+//
+// TWO LAYERS, STRICTLY STRONGER TOGETHER — do not simplify one away:
+//   - ALLOWLIST (exhaustive over the policy, the thing we control): any policy
+//     whose ResourceType is "*" must have Actions that are a SUBSET of
+//     {read, list}. This is exhaustive over the policy shape rather than over a
+//     list of dangerous actions we would have to enumerate — assign, create,
+//     delete, manage, dispatch, ... — and could never complete. A denylist of a
+//     few named actions would pass a hub-wide "assign" grant; this does not.
+//   - DENYLIST (for the concrete-resource rows the allowlist never fires on): a
+//     row with a concrete ResourceType such as "broker" and Actions ["dispatch"]
+//     passes the allowlist, so we also forbid the "*" and dispatch actions on
+//     every policy regardless of resource type.
 //
 // THE UNIVERSE (the filter, so a future reader can tell whether a new policy
 // site belongs in scope). "System-created" = every policy the server writes
-// without a caller authoring it. There are exactly four such sites:
+// without a caller authoring it. There are exactly four such sites on this
+// branch:
 //   - seed.go:seedDefaultPoliciesAndGroups   -> hub-member-read-all, hub-member-create-projects
 //   - handlers_projects_core.go:createProjectMembersGroupAndPolicy -> project:<slug>:member-create-agents
 //   - handlers_env_secrets.go:ensureProgenyPolicy -> progeny secret policy
@@ -52,9 +63,19 @@ import (
 // fixtures. If you add a new system-created policy site, drive it here too or
 // this test is no longer the same sentence as the claim it pins.
 //
-// The test drives all four sites for real and then scans every resulting policy,
-// rather than reading the literals, so a wildcard or dispatch action added at any
-// of them fails here.
+// MERGE OBLIGATION — svc-accnt branch. That branch adds a FIFTH system-created
+// site: seed.go:ensureProjectAssignPolicy, creating
+// project:<slug>:assign-gcp-service-accounts (ScopeType project, ResourceType
+// gcp_service_account, Actions ["assign"]). It passes both layers on the merits
+// (concrete resource, no "*"/dispatch). But by the rule above it MUST be driven
+// here and added to the anti-vacuous name list below at merge time. If it is
+// not, this test stays green while measuring less than it claims — the empty-scan
+// failure mode arriving through a merge instead of an empty universe. Neither
+// branch can certify the merged claim alone.
+//
+// The test drives every site for real and then scans every resulting policy,
+// rather than reading the literals, so a forbidden action added at any of them
+// fails here.
 func TestSystemPolicies_NoWildcardOrDispatchAction(t *testing.T) {
 	st, err := newTestStore(":memory:")
 	require.NoError(t, err)
@@ -110,17 +131,29 @@ func TestSystemPolicies_NoWildcardOrDispatchAction(t *testing.T) {
 			"test's universe is stale relative to the code it pins", want)
 	}
 
-	// The invariant. matchesAction grants on "*" or an exact action match, so the
-	// two forbidden tokens are the action wildcard and the dispatch action itself.
+	// Layer 1 — allowlist. A "*" ResourceType matches every resource type, so the
+	// Actions are the only scope; they must stay within {read, list}. Exhaustive
+	// over the policy shape, not over a threat taxonomy we cannot enumerate.
+	wildcardResourceAllowedActions := map[string]bool{"read": true, "list": true}
+
+	// Layer 2 — denylist, for the concrete-resource rows layer 1 never fires on.
 	for _, p := range result.Items {
 		for _, a := range p.Actions {
+			if p.ResourceType == "*" {
+				require.Truef(t, wildcardResourceAllowedActions[a],
+					"system-created policy %q has ResourceType %q, which matches every "+
+						"resource type, and lists action %q — outside the {read, list} "+
+						"allowlist. A wildcard-resource policy grants its actions hub-wide "+
+						"on every resource type, so it may grant only read and list.",
+					p.Name, p.ResourceType, a)
+			}
 			require.NotEqualf(t, "*", a,
-				"system-created policy %q carries the action wildcard %q; with its "+
-					"ResourceType %q this can grant dispatch (and more). Keep Actions a "+
-					"concrete list.", p.Name, a, p.ResourceType)
+				"system-created policy %q carries the action wildcard %q; combined with "+
+					"its ResourceType %q this grants every action. Keep Actions a concrete "+
+					"list.", p.Name, a, p.ResourceType)
 			require.NotEqualf(t, string(ActionDispatch), a,
 				"system-created policy %q grants %q; no system-created policy may grant "+
-					"dispatch (PR #591 invariant).", p.Name, a)
+					"the dispatch action on any resource type.", p.Name, a)
 		}
 	}
 }

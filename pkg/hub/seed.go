@@ -49,13 +49,16 @@ func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
 
 	// 2. Seed hub-member-read-all policy.
 	//
-	// INVARIANT: keep Actions a concrete list; it must never contain the "*"
-	// action wildcard or "dispatch". ResourceType is already "*", so the Actions
-	// slice is the only thing scoping this grant. Because matchesAction (authz.go)
-	// treats "*" as "every action", adding it here would grant every action —
-	// dispatch included — on every resource type hub-wide, and matchesResource has
-	// no wildcard to narrow it back. Pinned by
-	// TestSystemPolicies_NoWildcardOrDispatchAction (seed_policy_invariant_test.go).
+	// INVARIANT: ResourceType is "*", which matches every resource type, so the
+	// Actions slice is the only thing scoping this grant. Keep Actions within
+	// {read, list}. Any action added here is granted hub-wide on every resource
+	// type — read/list, but equally assign, create, delete, manage, dispatch —
+	// because matchesResource (authz.go) has no wildcard to narrow a "*" resource
+	// back down. The pin (TestSystemPolicies_NoWildcardOrDispatchAction in
+	// seed_policy_invariant_test.go) enforces this as an ALLOWLIST — Actions must
+	// be a subset of {read, list} for every "*"-resource policy — and SEPARATELY
+	// forbids the "*" and dispatch actions on concrete-resource rows. The two
+	// layers are strictly stronger together; do not drop either.
 	seedPolicy(ctx, s, group.ID, &store.Policy{
 		ID:           api.NewUUID(),
 		Name:         "hub-member-read-all",
