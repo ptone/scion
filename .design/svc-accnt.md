@@ -725,6 +725,61 @@ off exactly as today, so nothing existing breaks and the Q1 default stays off.
 > Turn the capability off by a predicate the checker consults, or by deleting *all* matches
 > and asserting the count, never by editing "the" named row.
 >
+> **Precedent, and it cuts toward the conservative answer.** `main` @ `db8f6fc5` (#888) ships
+> a hub-scoped resource of its own — hub pre-start hooks — and gates every mutation on
+> `requireHubAdmin` (`pkg/hub/hub_pre_start_hook_handlers.go:54`, used at `:164` and `:260`),
+> a direct role check that is *deliberately* stricter than the policy engine and rejects
+> project-scoped tokens outright. So when this section asks who may assign a hub-scoped SA,
+> "the hub already has a hub-scoped resource and it chose admin-only" is an argument from
+> precedent rather than from analogy. Found by sa-dev-p4.
+>
+> p4 also checked and cleared the obvious hazard: #888 never reaches `matchesResource`, so it
+> does not inherit main's fail-open parentless behaviour. **That clearance is true today and
+> is a trap tomorrow** — the property making it clean is that it bypasses the policy engine,
+> which is precisely the kind of inconsistency someone eventually "harmonizes". A commit
+> moving hub pre-start hooks onto policies, landed on a tree without #595, is a fail-open on
+> a hub-wide resource, and it will arrive looking like a tidy-up. Same shape as the
+> `validate.go:425` sweep guarded against in §5, and as the revoke-by-name trap above.
+
+> ### 🛑 The Q1 toggle is not a kill switch — authorization on the hook surface is write-time only
+>
+> Found by sa-dev-p3 while scoping the execution-identity work; verified at
+> `pkg/hub/lifecycle_hook_executor.go:239-255` @ `5985b0fd`.
+>
+> `resolveIdentityAndToken` fetches the service account by the record ID stored on the hook and
+> goes straight to `GenerateAccessToken` with full `cloud-platform` scope. It does **not**
+> re-check `sa.Verified`, does **not** re-check scope, and has no caller to check against.
+> `validate.go:425`/`:433` are the only scope enforcement on this surface, and they run **once,
+> at write time**. Validation-time state is trusted forever.
+>
+> The immediate consequences are bad enough: an SA de-verified or moved between scopes after the
+> hook is written keeps minting tokens, and an admin who loses `actAs` — or leaves — leaves
+> behind a hook that impersonates on a schedule. The gate is *"who was allowed to write this"*,
+> not *"who is allowed to run this"*.
+>
+> **The consequence for this design is larger. Turning the Q1 toggle ON does not gate anything
+> that already exists.** An operator who enables it believes they have gated impersonation; they
+> have gated new writes. Every hook already in the table continues to run on the authority it
+> was written with, and nothing sweeps them.
+>
+> That is the same defect as the option (c) shape rejected in §5 — a control that presents as
+> applied but does not act — one layer up, and in the feature this document is shipping. It is
+> not acceptable to describe the toggle as an enforcement switch until one of the following is
+> true:
+>
+> - **(a)** enabling the toggle triggers a re-validation sweep of existing hooks, quarantining or
+>   disabling those whose execution identity no longer passes; or
+> - **(b)** the executor re-checks at execution time — which requires deciding *whose* authority
+>   a scheduled hook runs on, since there is no caller; or
+> - **(c)** the toggle's scope is documented honestly as **write-time only**, in the UI string and
+>   not merely in this document.
+>
+> **(c) is the minimum and it is not sufficient on its own for long.** Tracked as its own item;
+> deliberately *not* folded into P3, which has no caller on that surface and would be widened
+> well past its brief. sa-dev-p3 will write the narrow sentence at the site — "was gated, once" —
+> and name the residual, which is the right call: refusing to write a sentence you cannot support
+> is how this was found at all.
+>
 > Found by sa-dev-p3 while building P0.4, as a pre-existing defect in unrelated code:
 > the create-then-catch-`ErrAlreadyExists` idempotency branch at
 > `handlers_projects_core.go:604-635` is unreachable for this reason, and duplicate
