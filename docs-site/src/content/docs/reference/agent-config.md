@@ -156,18 +156,15 @@ kubernetes:
 
 ## Resolution Logic
 
-When an agent starts:
-
-1.  **Template Load**: Scion loads `scion-agent.yaml` from the selected template.
-2.  **Harness Resolution**: It resolves the `harness_config` against the active profile's `harness_configs` map in `settings.yaml`.
-3.  **Overrides**: CLI flags (e.g., `--image`, `--env`) override values in `scion-agent.yaml`.
-4.  **Final Config**: The resolved configuration is written to the agent's runtime directory.
+When an agent starts, Scion loads `scion-agent.yaml` from the selected template,
+resolves each setting through the precedence chain below, and writes the result to
+the agent's runtime directory.
 
 ### Resolution precedence
 
 Every agent setting that can be specified in more than one place — `harness_config`,
-`model`, `thinking_level`, `max_turns`, `max_model_calls`, `max_duration` and
-`resources` — is resolved with the same ordering, highest priority first:
+`model`, `max_turns`, `max_model_calls`, `max_duration` and `resources` — is
+resolved with the same ordering, highest priority first:
 
 1.  **Explicit agent-create request** — the value passed to `scion agent create`
     (or the equivalent API field / web form field).
@@ -185,11 +182,26 @@ A project setting is an *override*: it takes precedence over the template a proj
 uses. Leave a project setting blank to let the template (and then the rest of the
 chain) decide.
 
+:::note[How the ordering is enforced, and where it can bite]
+Levels 1–3 are resolved by the hub, which stamps the winning value onto the agent
+before dispatch. The broker receives that value in its *highest-priority* slot, which
+is what makes it outrank levels 4–7 end-to-end. Levels 4–7 are resolved broker-side
+from `settings.yaml`.
+
+The consequence worth knowing: **any value the hub stamps outranks levels 4–6,
+regardless of which tier it came from.** The ordering above holds only because the
+hub stamps values from levels 1–3, which already sit above them. It is not a
+general-purpose guarantee that a lower level can never overtake a higher one — read
+it as the intended ordering for the fields listed, not as a description of every
+transport path. Per-field deviations exist; `resources` in particular can be
+overridden by a profile's harness overrides.
+:::
+
 :::caution[Behaviour change]
-Before this change, `harness_config` was the one exception to the ordering above:
-the template was resolved ahead of the project's `scion.io/default-harness-config`
-annotation, so the template always won. It now follows the same ordering as every
-other setting. This only affects projects that set **both** a default harness config
+Before this change, `harness_config` departed from the ordering above at levels 2
+and 3: the template was resolved ahead of the project's
+`scion.io/default-harness-config` annotation, so the template always won. It now
+follows the documented ordering, as the other project settings already did. This only affects projects that set **both** a default harness config
 **and** a template naming a *different* harness config; new agents in those projects
 receive the project's harness config. Projects that set only one of the two are
 unaffected, and already-created agents keep the configuration they were created with.
