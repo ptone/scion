@@ -74,11 +74,31 @@ const (
 //
 // Note the scope: these are keys in project.Annotations. project.Labels is a
 // separate map that also carries scion.io/* keys — scion.io/system and
-// scion.io/global on the Global project, and the broker markers
-// scion.io/plugin, scion.io/broker-type and scion.io/broker-role. Every
-// scion.io/* label is a system marker rather than a project setting, and none
-// belongs here. User and organisational labels use the scion.dev/ prefix
-// instead.
+// scion.io/global, set on the Global project at cmd/server_broker.go. Those are
+// system markers rather than project settings, so they do not belong here.
+// (Other scion.io/* keys such as scion.io/plugin, scion.io/broker-type and
+// scion.io/broker-role are RuntimeBroker labels and never appear on a project
+// at all.)
+//
+// Phase 4 (clone) label policy, recorded here because this comment is the
+// nearest thing to a spec for it: clone copies scion.dev/* labels and drops the
+// scion.io/* prefix entirely — a prefix rule rather than a two-key denylist, so
+// that a future system marker is not silently propagated into clones.
+//
+// One scion.dev/ label is excluded: store.LabelWorkspaceMode
+// ("scion.dev/workspace-mode") is NOT copied. It is derived for the new project
+// from the clone request and the new project's git remote, by the same
+// validation the create path applies (handlers_projects_core.go), which sets it
+// only when there is a git remote and the mode is one of the two valid values.
+// Copying it raw would bypass that check and let a clone carry a workspace mode
+// inconsistent with its own remote, which IsSharedWorkspace() and
+// IsWorktreePerAgent() would then evaluate against mismatched state.
+//
+// Finally, do not try to "complete" this list from hubclient.ProjectSettings.
+// That struct also carries Bucket, Runtimes, Harnesses and Profiles, which the
+// settings endpoint accepts on PUT, silently ignores, and never returns on GET.
+// They are not annotation-backed, so their absence here is correct and loses
+// nothing on clone.
 var projectSettingKeys = []string{
 	projectSettingDefaultTemplate,
 	projectSettingDefaultHarnessConfig,
