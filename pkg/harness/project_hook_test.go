@@ -111,6 +111,55 @@ func TestWriteProjectPreStartHook_CreatesDirectory(t *testing.T) {
 	assert.True(t, info.IsDir())
 }
 
+// Regression test for issue #612 bug #7. os.Remove reports ENOTDIR, not
+// ENOENT, when a parent path component exists but is not a directory. The
+// guard used to check only os.IsNotExist, so WriteProjectPreStartHook returned
+// an error and failed the whole ProvisionAgent call — for every agent with no
+// project hook configured, which is the common case.
+func TestWriteProjectPreStartHook_EmptyScript_ParentNotADirectory(t *testing.T) {
+	for _, blocker := range []string{".scion", filepath.Join(".scion", "hooks"),
+		filepath.Join(".scion", "hooks", "pre-start.d")} {
+		t.Run(blocker, func(t *testing.T) {
+			agentHome := t.TempDir()
+			path := filepath.Join(agentHome, blocker)
+			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+			// Occupy the path component with a regular file.
+			require.NoError(t, os.WriteFile(path, []byte("not a directory"), 0644))
+
+			// Sanity check: the underlying os.Remove really does fail here, so
+			// this test would catch a regression rather than pass vacuously.
+			target := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d",
+				ProjectPreStartHookFilename)
+			removeErr := os.Remove(target)
+			require.Error(t, removeErr)
+			require.False(t, os.IsNotExist(removeErr),
+				"expected ENOTDIR (not ENOENT) from os.Remove, got %v", removeErr)
+
+			assert.NoError(t, WriteProjectPreStartHook(agentHome, ""),
+				"no configured hook must not fail provisioning")
+		})
+	}
+}
+
+// A genuine removal failure must still surface. Making the parent directory
+// read-only makes the unlink fail with EACCES, which is neither ENOENT nor
+// ENOTDIR.
+func TestWriteProjectPreStartHook_EmptyScript_RealRemoveErrorSurfaces(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+
+	agentHome := t.TempDir()
+	require.NoError(t, WriteProjectPreStartHook(agentHome, "#!/bin/sh\necho stale\n"))
+
+	dir := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d")
+	require.NoError(t, os.Chmod(dir, 0500))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+
+	err := WriteProjectPreStartHook(agentHome, "")
+	assert.Error(t, err, "a real removal failure must not be swallowed")
+}
+
 func TestWriteProjectPreStartHook_Filename(t *testing.T) {
 	assert.Equal(t, "30-project-custom", ProjectPreStartHookFilename,
 		"filename must be exactly '30-project-custom' to run after 20-harness-provision")

@@ -15,9 +15,11 @@
 package harness
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // ProjectPreStartHookFilename is the name of the staged project hook script
@@ -45,7 +47,13 @@ func WriteProjectPreStartHook(agentHome, scriptContent string) error {
 	if scriptContent == "" {
 		// Nothing staged (no hook directory at all, or no such file) is the
 		// common case and not an error; only a real removal failure is.
-		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		//
+		// ENOTDIR is part of that common case: os.Remove reports it when a
+		// parent path component exists but is not a directory (for example an
+		// agent home where .scion/hooks is a regular file). Like ENOENT it
+		// means "there is no staged hook here", so it must not fail
+		// provisioning for the many agents that configure no project hook.
+		if err := os.Remove(target); err != nil && !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR) {
 			return fmt.Errorf("remove stale pre-start hook: %w", err)
 		}
 		return nil
