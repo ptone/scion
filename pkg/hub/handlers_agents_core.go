@@ -498,6 +498,27 @@ func (s *Server) createAgentInProject(
 		// (gcpServiceAccountResource), so admission depends on a hub-scoped policy
 		// matching rather than on project membership. The PATCH path carries the
 		// same call for the same reason.
+		//
+		// READ THIS BEFORE RELAXING ANYTHING ABOVE. For a hub-scoped account this
+		// call is the SOLE admission control. The scope predicate admits it from
+		// every project by design, so nothing else narrows who may assign it.
+		//
+		// And ActionRead is a wide gate for a parentless resource. checkAccessForUser
+		// skips the project-owner bypass when projectIDForResource returns ""
+		// (authz.go), falling through to policy evaluation, where the seeded
+		// hub-member-read-all policy matches: hub scope, resource type "*",
+		// actions read+list. So today EVERY HUB MEMBER passes this check on EVERY
+		// hub-scoped service account. Agents do not — their project read baseline
+		// needs a project ID and a parentless resource has none — so the exposure
+		// is human callers only.
+		//
+		// That is acceptable only while hub-scoped accounts cannot be created
+		// (hub scope on write is still closed) and only until this action becomes
+		// ActionAssign. ActionAssign is evaluated against a project-scoped policy,
+		// which matchesResource refuses to match against a parentless resource, so
+		// admission narrows to admins and the account's creator. Until that lands,
+		// do not open hub-scope on write: the pair of *_NonHubMemberDenied tests is
+		// what will tell you this comment has gone stale.
 		if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
 			"You don't have permission to assign GCP service accounts in this project") {
 			return
@@ -1699,9 +1720,16 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 				return
 			}
 			// Parity with the create path: any caller who can see the service
-			// account may assign it. See the matching call in
-			// createAgentInProject for why this is narrow today and why it is
-			// nonetheless spelled out at both sites.
+			// account may assign it.
+			//
+			// For a hub-scoped account this is the SOLE admission control — the
+			// scope predicate above admits it from every project by design — and
+			// ActionRead on a parentless resource is satisfied by the seeded
+			// hub-member-read-all policy, so every hub member passes it. The full
+			// reasoning, and why that is only tolerable until the action becomes
+			// ActionAssign, is at the matching call in createAgentInProject. Keep
+			// the two in step: changing one and not the other reopens the PATCH
+			// route as the way around the create route.
 			if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
 				"You don't have permission to assign GCP service accounts in this project") {
 				return
