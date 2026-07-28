@@ -236,8 +236,8 @@ explicitly with `go test ./pkg/hub/`.
 :::caution[Behaviour change]
 Before this change, `harness_config` departed from the ordering above at levels 2
 and 3: the template was resolved ahead of the project's
-`scion.io/default-harness-config` annotation, so the template always won. It now
-follows the documented ordering, as the other project settings already did.
+`scion.io/default-harness-config` annotation, so a template that supplied a harness
+value displaced it. It now follows the ordering above.
 
 Agents created in a project that sets a default harness config will now use it, even
 when the project's template also specifies one.
