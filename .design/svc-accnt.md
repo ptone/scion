@@ -1390,6 +1390,49 @@ prompted it leaves the others certified under the older, unstated one.** Here th
 sentence, because the remaining rows all refuse a caller reachable over the network with no setup
 — but the sentence has to be written, and if any row does not fit it, that is the finding.
 
+#### 8.5.4 Name the other world — the unified form, and two more of my own errors
+
+Three assertion shapes came up today from three people, and they are one rule.
+
+| shape | why it can be vacuous | control |
+|---|---|---|
+| **divergence** ("A ≠ B") | it cannot be — two distinct codes cannot both be the harness default | self-controlling |
+| **sameness** ("A = B = 404") | 404 is also what a dead route returns (p5, #45) | a request that must *not* produce it |
+| **absence** ("no Mint button") | `sl-dialog` keeps both dialogs in the DOM always, so their footers contribute a "Mint" to every scope — one label coincidence from an unfailable green (p5, item C) | a selector that excludes the confound, and a positive control |
+
+> **RULE.** Every assertion is satisfied by a **set of worlds**, and it is evidence only if the
+> world you care about is the only one in that set you cannot rule out. Operationally: **name the
+> other world that satisfies it.** If you can name one — dead route, undisplayed dialog footer,
+> harness default — you need a control that excludes it. If you cannot name one, say so; that is
+> a claim too.
+
+A fourth outcome belongs here. p5 mutated a load-key guard expecting red and **got a hang** —
+`loadAccounts` sets `@state`, which schedules an update, which re-enters. A harness with a timeout
+would have reported that as a failure, and the lesson banked would have been "the mutation went
+red" attached to the wrong mechanism. *How* it failed was the evidence, not *that* it failed.
+
+**And the fourth error of mine, found by p3 while fixing #48.** I reported the PATCH branch as
+answering the message `"GCP service account not found"`. **It never did.** `writeErrorFromErr`'s
+third parameter is `requestID` (`errors.go:105`); the message is hardcoded `"Resource not found"`
+and my quoted literal was going into the response's `requestId` field. The oracle was real and
+*worse* than I described — 404 against 400, readable without the body — but the mechanism I
+supplied was wrong.
+
+> **RULE.** A string literal at a call site is evidence of **the author's intent**, not of the
+> response. Check the **position** of the argument, not its value.
+
+Run mechanically, that rule found **nine more live sites** passing a resource-type literal as
+`requestID` (`handlers_messages.go` ×3, `handlers_notifications.go` ×6). Each one puts a constant
+string in the response's `requestId` **and in the `slog` line**, so an operator correlating a 5xx
+gets `"Subscription"`. Hub-core, filed as **#50**, routed like #25 and #33.
+
+**And a fifth, structural rather than verbal: I had been measuring in the wrong tree.** My working
+branch is ~15,000 lines behind the branch that ships, and two SA handler files totalling ~900 lines
+(`sa_assign_gate.go`, `handlers_gcp_identity_scoped.go`) **do not exist in it**. Every claim I
+re-checked survived — including the one that mattered, that no `ActionCreate` exists in the SA
+handlers — but the method got lucky rather than being right. This is rule 16 with **the tree** as
+the unstated variable. Measure against the shipping branch; say which tree a measurement came from.
+
 #### What this section costs me
 
 **Three** of today's findings originate in this document, and all have the same shape: a claim
