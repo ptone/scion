@@ -89,6 +89,80 @@ type verificationFailedDetails struct {
 	TargetEmail            string `json:"targetEmail"`
 }
 
+// The reachability predicate these handlers use is
+// (*store.GCPServiceAccount).ReachableFromProject. It lives on the store type
+// rather than here because the same question is asked outside this package --
+// see pkg/lifecyclehooks/validate.go -- and packages that cannot import hub
+// would otherwise have to reimplement it. Read its doc comment before changing
+// any caller: it answers visibility only, and the authorization that must
+// follow it for a hub-scoped account is authorizeGCPServiceAccount below.
+
+// authorizeGCPServiceAccount performs the scope-appropriate authorization check
+// for an action on a service account, writing the error response itself and
+// returning false when the caller must stop.
+//
+// The scope split is the substance of it. While every SA was project-scoped, a
+// project-level ActionManage check was a complete statement of authority over
+// one. A hub-scoped SA is reachable from every project, so that same check
+// would let any project's owner delete a credential the whole hub depends on.
+// Hub-scoped SAs are therefore checked against the SA resource itself, which
+// gcpServiceAccountResource leaves parentless for non-project scopes (P0.2) so
+// that only a hub-scoped policy can match it. That containment relies on
+// matchesResource treating a parentless resource as outside every
+// project-scoped policy's reach — the #595 fix, without which a project-scoped
+// policy would match a hub-scoped SA and this branch would not hold.
+//
+// Shape follows deleteHarnessConfig's three-branch scope switch.
+func (s *Server) authorizeGCPServiceAccount(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, action Action) bool {
+	ctx := r.Context()
+
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil {
+		Forbidden(w)
+		return false
+	}
+
+	switch sa.Scope {
+	case store.ScopeHub:
+		decision := s.authzService.CheckAccess(ctx, user, gcpServiceAccountResource(sa), action)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to manage hub-scoped GCP service accounts", nil)
+			return false
+		}
+	case store.ScopeProject:
+		// Unchanged from the pre-Goal-2 behaviour, deliberately: this phase adds
+		// hub scope, it does not retune who may manage a project's own SAs.
+		project, err := s.store.GetProject(ctx, sa.ScopeID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return false
+		}
+		decision := s.authzService.CheckAccess(ctx, user, Resource{
+			Type:    "project",
+			ID:      project.ID,
+			OwnerID: project.OwnerID,
+		}, ActionManage)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to manage GCP service accounts in this project", nil)
+			return false
+		}
+	case store.ScopeUser:
+		if sa.CreatedBy != user.ID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to manage another user's GCP service account", nil)
+			return false
+		}
+	default:
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"Management is not supported for this service account scope", nil)
+		return false
+	}
+
+	return true
+}
+
 type createGCPServiceAccountResponse struct {
 	store.GCPServiceAccount
 	VerificationFailed  bool                       `json:"verificationFailed,omitempty"`
@@ -232,9 +306,24 @@ type ListGCPServiceAccountsResponse struct {
 
 func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
+
+	// This one route serves two callers with opposite needs. The assign picker
+	// wants the project's accounts plus the hub-wide ones, because either can
+	// be given to an agent. The project settings management view wants only the
+	// project's, because listing hub-scoped accounts there offers the user rows
+	// the view cannot edit. Neither is more correct, so the caller says which
+	// it wants and the default stays project-only: every existing client keeps
+	// its current response byte for byte.
+	//
+	// Unlike the top-level route there is no scope parameter to validate
+	// against here -- the route is project-scoped by construction -- so the
+	// flag is accepted unconditionally.
+	includeHubScoped := r.URL.Query().Get("includeHubScoped") == "true"
+
 	sas, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Scope:   store.ScopeProject,
-		ScopeID: projectID,
+		Scope:            store.ScopeProject,
+		ScopeID:          projectID,
+		IncludeHubScoped: includeHubScoped,
 	})
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -271,6 +360,11 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 	var mintQuota *GCPMintQuotaInfo
 	if s.gcpIAMAdmin != nil && s.config.GCPProjectID != "" {
 		managed := true
+		// Deliberately not widened by includeHubScoped. This counts against
+		// GCPMintCapPerProject, so it must stay a count of what this project
+		// minted; hub-scoped accounts are not charged to any one project and
+		// including them would shrink every project's remaining quota by the
+		// hub-wide total.
 		projectCount, _ := s.store.CountGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
 			Scope:   store.ScopeProject,
 			ScopeID: projectID,
@@ -305,21 +399,27 @@ func (s *Server) getGCPServiceAccount(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	if sa.ScopeID != projectID {
+	if !sa.ReachableFromProject(projectID) {
 		NotFound(w, "GCP Service Account")
 		return
+	}
+
+	// Hub-scoped SAs get a real read check. Project-scoped reads are left
+	// exactly as they were — this handler has never had an authorization call,
+	// and adding one here would deny ordinary project members who can read
+	// their project's SAs today. That pre-existing gap is the route-authz
+	// manifest's problem (#598), not this phase's; what must not happen is a
+	// hub-wide credential inheriting the same absence of a check.
+	if sa.Scope == store.ScopeHub {
+		if !s.authorizeGCPServiceAccount(w, r, sa, ActionRead) {
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, sa)
 }
 
 func (s *Server) deleteGCPServiceAccount(w http.ResponseWriter, r *http.Request, projectID, saID string) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil {
-		Forbidden(w)
-		return
-	}
-
 	sa, err := s.store.GetGCPServiceAccount(r.Context(), saID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -330,25 +430,12 @@ func (s *Server) deleteGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if sa.ScopeID != projectID {
+	if !sa.ReachableFromProject(projectID) {
 		NotFound(w, "GCP Service Account")
 		return
 	}
 
-	// Authorization: project owners and admins can manage GCP service accounts
-	project, err := s.store.GetProject(r.Context(), projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	decision := s.authzService.CheckAccess(r.Context(), user, Resource{
-		Type:    "project",
-		ID:      project.ID,
-		OwnerID: project.OwnerID,
-	}, ActionManage)
-	if !decision.Allowed {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"You don't have permission to manage GCP service accounts in this project", nil)
+	if !s.authorizeGCPServiceAccount(w, r, sa, ActionDelete) {
 		return
 	}
 
@@ -361,12 +448,6 @@ func (s *Server) deleteGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request, projectID, saID string) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil {
-		Forbidden(w)
-		return
-	}
-
 	sa, err := s.store.GetGCPServiceAccount(r.Context(), saID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -377,25 +458,12 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if sa.ScopeID != projectID {
+	if !sa.ReachableFromProject(projectID) {
 		NotFound(w, "GCP Service Account")
 		return
 	}
 
-	// Authorization: project owners and admins can manage GCP service accounts
-	project, err := s.store.GetProject(r.Context(), projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	decision := s.authzService.CheckAccess(r.Context(), user, Resource{
-		Type:    "project",
-		ID:      project.ID,
-		OwnerID: project.OwnerID,
-	}, ActionManage)
-	if !decision.Allowed {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"You don't have permission to manage GCP service accounts in this project", nil)
+	if !s.authorizeGCPServiceAccount(w, r, sa, ActionVerify) {
 		return
 	}
 
