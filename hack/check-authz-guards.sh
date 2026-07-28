@@ -637,6 +637,15 @@ awk "$classifier" "${candidate_files[@]}" >"$tmp" || true
 
 if [[ ! -s "$tmp" ]]; then
   echo "check-authz-guards: analysed $(provenance), no violations"
+  # The limit belongs HERE, on the clean path, not only in the header comment
+  # where it already is. This is the one moment a reader is about to over-read
+  # the result, and the header is not on their screen. A zero from this check is
+  # a narrower statement than its name suggests, and nothing about a clean run
+  # looks like it needs qualifying.
+  echo "check-authz-guards: SCOPE — this finds authorization written FAIL-OPEN."
+  echo "  It does NOT find authorization that is ABSENT. A handler with no"
+  echo "  authorization at all has no guard to key on and scores clean here."
+  echo "  Route coverage is a separate problem (ptone/scion#598)."
   echo "check-authz-guards: END — analysed $(provenance), ${#candidate_files[@]} files examined, 0 sites flagged"
   exit 0
 fi
@@ -728,4 +737,11 @@ if [[ -n "$violations" ]]; then
 fi
 
 echo "check-authz-guards: analysed $(provenance), no violations"
+# Same scope note as the zero-findings path above. This exit is MORE in need of
+# it, not less: everything found was waved through, so the reader is one step
+# further from the code than on a genuine zero.
+echo "check-authz-guards: SCOPE — this finds authorization written FAIL-OPEN."
+echo "  It does NOT find authorization that is ABSENT. A handler with no"
+echo "  authorization at all has no guard to key on and scores clean here."
+echo "  Route coverage is a separate problem (ptone/scion#598)."
 echo "check-authz-guards: END — analysed $(provenance), ${#candidate_files[@]} files examined, ${flagged} sites flagged, all allowlisted"
