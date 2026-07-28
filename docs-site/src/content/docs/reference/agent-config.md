@@ -193,8 +193,44 @@ regardless of which tier it came from.** The ordering above holds only because t
 hub stamps values from levels 1–3, which already sit above them. It is not a
 general-purpose guarantee that a lower level can never overtake a higher one — read
 it as the intended ordering for the fields listed, not as a description of every
-transport path. Per-field deviations exist; `resources` in particular can be
-overridden by a profile's harness overrides.
+transport path.
+:::
+
+#### Known per-field limitations
+
+The ordering above is the intended behaviour, and `harness_config`,
+`max_turns`, `max_model_calls` and `max_duration` follow it. Two of the listed
+fields deviate today:
+
+-   **`model` reaches only some harnesses.** `gemini-cli`, `opencode` and `hermes`
+    read the resolved model during provisioning. `claude`, `codex`, `copilot` and
+    `antigravity` do not, and run with whatever model their own configuration
+    selects. The precedence chain still resolves a value on those four — it simply
+    has no effect on the harness.
+
+    Telemetry reads the resolved value regardless of harness. So for a `claude` or
+    `codex` project, a model-usage dashboard reports the model the project *asked
+    for*, not the one that actually ran. Do not act on those figures without
+    confirming the harness honours the setting.
+
+-   **`resources` can be overridden from below.** A profile's harness overrides are
+    applied on top of the resolved value, so for this field a profile beats the
+    template and the project setting rather than sitting at position 5.
+
+:::caution[Harness config relies on transport that is not guaranteed by construction]
+Most project settings travel to the broker inside the agent's inline config, which is
+sent wholesale and merged there — they arrive because of how the mechanism works, not
+because anything specific was written for each one. `harness_config` is different: it
+is a top-level field with its own bespoke mapping onto the dispatch request, and the
+project-over-template behaviour described above depends on that one mapping continuing
+to exist.
+
+Two consequences compound. A dispatcher refactor could sever it, and the tests that
+guard this behaviour are in `pkg/hub/harness_config_precedence_test.go`, which carries
+`//go:build !no_sqlite` — so the default CI test run (`make test-fast`, which builds
+with `no_sqlite`) does not execute them. The behaviour could stop being true with CI
+fully green. If you change how agent configuration reaches the broker, run that file
+explicitly with `go test ./pkg/hub/`.
 :::
 
 :::caution[Behaviour change]
