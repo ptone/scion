@@ -61,6 +61,24 @@ type KubernetesRuntime struct {
 // "a container name must be specified" error.
 const agentContainerName = "agent"
 
+// Kubernetes-specific per-field resource defaults, applied in buildPod to any
+// field the resolved resource spec leaves empty.
+//
+// These are deliberately richer than config.BuiltinDefaultResources(), which
+// only sets a CPU limit because a hard memory limit on Docker/Podman causes
+// opaque OOM kills. Under Kubernetes a pod with no requests is scheduled
+// unpredictably (and rejected outright by GKE Autopilot), so requests and an
+// ephemeral-storage figure are worth the trade.
+//
+// k8sDefaultCPULimit must stay in sync with config.BuiltinDefaultResources().
+const (
+	k8sDefaultCPURequest    = "250m"
+	k8sDefaultMemoryRequest = "512Mi"
+	k8sDefaultCPULimit      = "2"
+	k8sDefaultMemoryLimit   = "4Gi"
+	k8sDefaultDisk          = "10Gi"
+)
+
 var serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
 func NewKubernetesRuntime(client *k8s.Client) *KubernetesRuntime {
@@ -1332,14 +1350,39 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	// Apply resource requests/limits from the common resource spec with safe parsing.
-	// When no resources are specified, apply defaults so that GKE Autopilot
-	// (and other environments) get predictable scheduling behavior.
-	if config.Resources == nil {
-		config.Resources = &api.ResourceSpec{
-			Requests: api.ResourceList{CPU: "250m", Memory: "512Mi"},
-			Limits:   api.ResourceList{CPU: "2", Memory: "4Gi"},
-			Disk:     "10Gi",
+	// Any field left unset gets a Kubernetes-specific default so that GKE
+	// Autopilot (and other environments) get predictable scheduling behavior.
+	//
+	// This defaulting is per-field rather than all-or-nothing. The provision
+	// layer applies config.BuiltinDefaultResources(), which sets limits.cpu and
+	// nothing else, so config.Resources is effectively never nil by the time it
+	// reaches here. A `config.Resources == nil` guard would therefore never fire
+	// and K8s agents would silently lose the memory limit, disk request and
+	// CPU/memory requests below.
+	//
+	// config is a RunConfig value but Resources is a pointer into the caller's
+	// state, so copy before filling in defaults rather than mutating in place.
+	{
+		res := api.ResourceSpec{}
+		if config.Resources != nil {
+			res = *config.Resources
 		}
+		if res.Requests.CPU == "" {
+			res.Requests.CPU = k8sDefaultCPURequest
+		}
+		if res.Requests.Memory == "" {
+			res.Requests.Memory = k8sDefaultMemoryRequest
+		}
+		if res.Limits.CPU == "" {
+			res.Limits.CPU = k8sDefaultCPULimit
+		}
+		if res.Limits.Memory == "" {
+			res.Limits.Memory = k8sDefaultMemoryLimit
+		}
+		if res.Disk == "" {
+			res.Disk = k8sDefaultDisk
+		}
+		config.Resources = &res
 	}
 	if config.Resources != nil {
 		reqs := corev1.ResourceList{}
@@ -2038,7 +2081,7 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 
 	// For Kubernetes, we want to ensure it is in Running phase
 	if !strings.EqualFold(agent.ContainerStatus, string(corev1.PodRunning)) {
-		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion start %s' to resume it", id, agent.ContainerStatus, id)
+		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion resume %s' to resume it", id, agent.ContainerStatus, id)
 	}
 
 	fmt.Printf("Attaching to pod '%s' (use Ctrl-b d to detach)...\n", podName)
