@@ -85,8 +85,15 @@ set -euo pipefail
 # verdict depends on the block's real extent rather than on a fixed indentation
 # level, and so composite literals in the body (Resource{...}) do not confuse it.
 read -r -d '' classifier <<'AWK' || true
+# Strip a trailing line comment before testing a verdict. `return true` and
+# `return true // broker-to-broker` are the same verdict, and an anchored regex
+# that only accepts the first can be defeated by reflowing a comment.
+function strip_comment(l) {
+  sub(/[[:space:]]*\/\/.*$/, "", l)
+  return l
+}
 function is_opener(line) {
-  return (line ~ /^[[:space:]]*(\} else )?if [A-Za-z_][A-Za-z0-9_]* := GetUserIdentityFromContext\(.*\); [A-Za-z_][A-Za-z0-9_]* != nil \{[[:space:]]*$/ ||
+  return (line ~ /^[[:space:]]*(\} else )?if [A-Za-z_][A-Za-z0-9_]* := Get(User)?IdentityFromContext\(.*\); [A-Za-z_][A-Za-z0-9_]* != nil \{[[:space:]]*$/ ||
           line ~ /^[[:space:]]*(\} else )?if [A-Za-z_][A-Za-z0-9_]*, ok := [^;]*\.\(UserIdentity\); ok \{[[:space:]]*$/)
 }
 function open_block(line) {
@@ -119,7 +126,7 @@ FNR == 1 { in_block = 0; in_nil_block = 0; nil_var = ""; cur_func = "?" }
   # Shape 3: an explicit "not a user, so allow" early return. Tracked separately
   # because it is a statement pair, not a guarded block.
   if (!in_block && !in_nil_block) {
-    if ($0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:?=[[:space:]]*GetUserIdentityFromContext\(/) {
+    if ($0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:?=[[:space:]]*Get(User)?IdentityFromContext\(/) {
       nil_var = $0
       sub(/^[[:space:]]*/, "", nil_var)
       sub(/[[:space:]]*:?=.*$/, "", nil_var)
@@ -144,7 +151,7 @@ FNR == 1 { in_block = 0; in_nil_block = 0; nil_var = ""; cur_func = "?" }
   if (in_nil_block) {
     nil_depth += count($0, "\\{") - count($0, "\\}")
     if (nil_depth <= 0) {
-      if (nil_last ~ /^[[:space:]]*return[[:space:]]+true[[:space:]]*$/) {
+      if (strip_comment(nil_last) ~ /^[[:space:]]*return[[:space:]]+true[[:space:]]*$/) {
         occ[FILENAME SUBSEP cur_func]++
         printf "%s:%d: %s()#%d: if %s == nil { ... return true } (fail-open on non-user caller)\n",
           FILENAME, pending_nil_line, cur_func, occ[FILENAME SUBSEP cur_func], pending_nil
@@ -333,6 +340,63 @@ func (s *Server) failClosedAfterBranch(ctx context.Context) bool {
 	return s.authzService.CheckAccess(ctx, userIdent, res, ActionRead).Allowed
 }
 
+// Shape 1 via the broad getter. The opener accepts both getters, and without
+// this fixture that half of the widening was untested — my own mutation run
+// caught it: reverting the opener to the narrow getter alone left the suite
+// green.
+func (s *Server) gateBroadGetter(w http.ResponseWriter, r *http.Request) {
+	// WANT
+	if identity := GetIdentityFromContext(ctx); identity != nil {
+		decision := s.authzService.CheckAccess(ctx, identity, agentResource(a), ActionRead)
+		if !decision.Allowed {
+			Forbidden(w)
+			return
+		}
+	}
+	doTheThing()
+}
+
+// Shape 3 with the verdict comment moved onto the return line. Same verdict,
+// and the anchored `return true$` test used to be defeated by the trailing
+// comment. handlers_runtime_brokers.go:435 is this shape with the comment on
+// its own line — reflowing that one line would have silently un-detected the
+// site this whole check was built for. Found by aid-arch.
+func (s *Server) failOpenTrailingComment(ctx context.Context) bool {
+	userIdent := GetUserIdentityFromContext(ctx)
+	// WANT
+	if userIdent == nil {
+		return true // broker-to-broker
+	}
+	return s.authzService.CheckAccess(ctx, userIdent, res, ActionRead).Allowed
+}
+
+// Shape 3 via GetIdentityFromContext — the getter our OWN FIX uses. The narrow
+// getter returns a literal nil interface that panics CheckAccess, so the
+// dispatch fixes deliberately switched to this one. A detector that only knows
+// GetUserIdentityFromContext is drift protection pointed at the past: it covers
+// the shape the bug had, not the shape the fix has, and would not catch a
+// regression in either of the two functions it exists to protect. Found by
+// aid-arch, who noticed the getter appears zero times in this script.
+func (s *Server) failOpenBroadGetter(ctx context.Context) bool {
+	identity := GetIdentityFromContext(ctx)
+	// WANT
+	if identity == nil {
+		return true
+	}
+	return s.authzService.CheckAccess(ctx, identity, res, ActionRead).Allowed
+}
+
+// The same broad getter used correctly — this is canDispatchToBroker's actual
+// shape after 89bc203. Must stay unflagged or the fix reports itself as a bug.
+func (s *Server) failClosedBroadGetter(ctx context.Context) bool {
+	identity := GetIdentityFromContext(ctx)
+	// WANT-NOT
+	if identity == nil {
+		return false
+	}
+	return s.authzService.CheckAccess(ctx, identity, res, ActionRead).Allowed
+}
+
 // Shape 4: the hub-scoped "require" helper. Lexically this is the #591 idiom —
 // same getter, same `== nil` test — but the verdict is inverted: the nil branch
 // writes 401 and returns false. Fail-CLOSED, and correct.
@@ -429,7 +493,7 @@ fi
 # classifier does the real work; this just keeps it off the other ~1500 Go files.
 mapfile -t candidate_files < <(
   rg -l --glob '*.go' --glob '!**/*_test.go' \
-    -e 'GetUserIdentityFromContext\(' \
+    -e 'Get(User)?IdentityFromContext\(' \
     -e '\.\(UserIdentity\); ok \{' \
     cmd pkg extras 2>/dev/null || true
 )
