@@ -1109,6 +1109,12 @@ tests **scope and nothing else** — a routing fact, not a policy one.
 > row's reasoning governs. Pin as a divergence test in the same idiom: same agent, same ID,
 > hub-scoped vs user-scoped, **one test asserting the two statuses are now identical.**
 >
+> **State the OBSERVABLE in the fix comment, not only the cause** (aid-em). The cause is a
+> renderer that switched on the wrong dimension, and understanding it requires holding two
+> functions in your head. The observable is one sentence: **an identity-less caller must not be
+> able to tell two scopes apart by status code.** That is what a future reader can test for
+> without understanding the renderer at all — and it stays true if the renderer is rewritten.
+>
 > **The general rule this earns:** where a policy layer returns a *discriminated* verdict, the
 > renderer's exhaustiveness must be checked against the **verdict type**, not the resource
 > taxonomy. Switching on the resource makes the missing arm invisible — there is no `default` to
