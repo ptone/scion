@@ -517,53 +517,73 @@ func TestTemplateResource_ProjectParent(t *testing.T) {
 	})
 }
 
-// TestTemplateResource_UATConfinement pins the security consequence of giving
-// project-scoped templates a parent, which is the reason this change is more
-// than a matcher companion fix.
+// TestTemplateResource_UATProjectArm_Latent is a UNIT test of one arm of
+// enforceUATConstraints. It is deliberately NOT a test that a project-pinned
+// user access token cannot read another project's templates end to end, and it
+// must not be read as one.
 //
-// enforceUATConstraints confines a project-pinned user access token with:
+// WHY. enforceUATConstraints has two gates. The project gate denies when
+// resource.ParentType == "project" and ParentID differs from the token's
+// project; a parentless template satisfied neither that arm nor the
+// resource.Type == "project" arm, so it fell through. But the SECOND gate
+// requires the token to hold resource.Type + ":" + action, and
+// store.UATValidScopes is eleven entries — project:read and ten agent:* — with
+// no template scope, enforced at issuance (useraccesstoken.go:85-90). So no
+// real token can address a template at all, and the fall-through was never
+// reachable. The earlier claim that this commit closed a live hole was wrong
+// and was retracted; the value here is LATENT.
 //
-//	resource.ParentType == "project" && resource.ParentID != token project -> deny
+// The subtests below construct "template:read" directly, which is a scope the
+// system cannot issue. That is the tell, and it is worth generalising: if
+// demonstrating a hole requires fabricating a credential that cannot exist, the
+// hole is latent, not live.
 //
-// A parentless template satisfies neither that arm nor the resource.Type ==
-// "project" arm, so before this change a UAT pinned to project A was NOT
-// confined against project B's templates — it fell through to the scope check
-// and, for an admin bearer, on to admin bypass. That is the same #595 defect in
-// its second shape.
-//
-// This test does not touch enforceUATConstraints; it pins the behaviour the
-// builder fix produces.
-func TestTemplateResource_UATConfinement(t *testing.T) {
+// WHAT IS THEREFORE WORTH PINNING. When the UAT vocabulary widens (#605), the
+// one-line change that adds template:read would otherwise ship a cross-project
+// read, protected only by the accidental narrowness of that list and by a
+// fall-through in a function the author is not editing. With the parent set,
+// the widening is safe on arrival. These assertions are what make that true,
+// so they are written against the parent semantics and hold regardless of what
+// the scope vocabulary contains.
+func TestTemplateResource_UATProjectArm_Latent(t *testing.T) {
 	authz := &AuthzService{}
 	const tokenProject = "project-a"
 
-	// Scope is present in every case below, so a denial can only come from the
-	// project constraint — never from a missing scope.
+	// Guard the premise rather than describing it in prose. If someone adds a
+	// template scope, this fails and sends them to the comment above — at which
+	// point the arm below stops being latent and starts being load-bearing.
+	// Change this assertion deliberately, not to make the build green.
+	require.False(t, store.UATValidScopes["template:read"],
+		"no template scope is issuable today; if that changed, this test is now live and #605 has arrived")
+
+	// Scope is supplied directly so the second gate always passes and a denial
+	// can only come from the project arm. This is what makes it a unit test of
+	// that arm, and also what makes it unreachable in production today.
 	scoped := NewScopedUserIdentity(nil, tokenProject, []string{"template:read"})
 
-	t.Run("template in another project is denied", func(t *testing.T) {
+	t.Run("project arm denies a template in another project", func(t *testing.T) {
 		r := templateResource(&store.Template{
 			ID: "tmpl-b", Scope: store.TemplateScopeProject, ScopeID: "project-b",
 		})
 		decision := authz.enforceUATConstraints(scoped, r, ActionRead)
-		require.NotNil(t, decision, "a project-pinned UAT must be confined against another project's template")
+		require.NotNil(t, decision, "parent must be set, or the project arm cannot fire")
 		assert.False(t, decision.Allowed)
 		assert.Equal(t, "token not scoped for this project", decision.Reason)
 	})
 
-	t.Run("template in the token's own project is not denied here", func(t *testing.T) {
+	t.Run("project arm does not fire on the token's own project", func(t *testing.T) {
 		r := templateResource(&store.Template{
 			ID: "tmpl-a", Scope: store.TemplateScopeProject, ScopeID: tokenProject,
 		})
-		assert.Nil(t, authz.enforceUATConstraints(scoped, r, ActionRead),
-			"confinement must not fire on the token's own project")
+		assert.Nil(t, authz.enforceUATConstraints(scoped, r, ActionRead))
 	})
 
-	// Global templates remain parentless and so remain outside UAT project
-	// confinement. That is unchanged by this commit and is called out here so
-	// the gap is recorded rather than assumed fixed: a project-pinned UAT can
-	// still reach global templates, subject to policy.
-	t.Run("global template is still not confined (unchanged)", func(t *testing.T) {
+	// Global templates stay parentless, so the project arm cannot fire on them
+	// and a project-pinned token is not confined against them by this mechanism.
+	// This is a property of the parent semantics, not of the scope vocabulary:
+	// it will read the same way after #605 widens the list, at which point it
+	// becomes a live gap to answer rather than a recorded one.
+	t.Run("project arm cannot confine a global template", func(t *testing.T) {
 		r := templateResource(&store.Template{ID: "tmpl-global", Scope: store.TemplateScopeGlobal})
 		assert.Nil(t, authz.enforceUATConstraints(scoped, r, ActionRead))
 	})

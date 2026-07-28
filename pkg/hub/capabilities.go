@@ -163,6 +163,13 @@ func policyResource(p *store.Policy) Resource {
 }
 
 // brokerResource constructs a Resource from a store.RuntimeBroker for capability computation.
+//
+// Deliberately parentless, and unlike templates this is not a defect: brokers
+// are many-to-many with projects via store.ProjectProvider, which links
+// BrokerID to ProjectID. A many-to-many relation cannot be expressed as one
+// ParentType/ParentID pair, so there is no single project to name here. Do not
+// "fix" this by mirroring templateResource — the correct place to decide
+// whether a caller may use a broker is the dispatch check, not the parent.
 func brokerResource(b *store.RuntimeBroker) Resource {
 	return Resource{
 		Type:    "broker",
