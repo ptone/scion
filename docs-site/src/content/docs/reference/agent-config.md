@@ -193,4 +193,11 @@ other setting. This only affects projects that set **both** a default harness co
 **and** a template naming a *different* harness config; new agents in those projects
 receive the project's harness config. Projects that set only one of the two are
 unaffected, and already-created agents keep the configuration they were created with.
+
+Because the project setting is now load-bearing, check that it names a harness config
+that actually exists. The value is not validated when you save Project Settings, and a
+stale or misspelled name used to be harmless — the template supplied a working value
+instead. It now displaces that template value, and the agent is dispatched without a
+harness-config ID, leaving a remote broker unable to fetch it from Hub storage. The hub
+logs a `harness config not found in project or global scope` warning when this happens.
 :::

@@ -74,6 +74,19 @@ func setProjectHarnessConfigAnnotation(t *testing.T, s store.Store, project *sto
 	require.NoError(t, s.UpdateProject(context.Background(), project))
 }
 
+// setProjectAnnotations merges the given annotations into the project, exactly
+// as PUT /settings would. Used where a test needs more than one setting.
+func setProjectAnnotations(t *testing.T, s store.Store, project *store.Project, annotations map[string]string) {
+	t.Helper()
+	if project.Annotations == nil {
+		project.Annotations = map[string]string{}
+	}
+	for k, v := range annotations {
+		project.Annotations[k] = v
+	}
+	require.NoError(t, s.UpdateProject(context.Background(), project))
+}
+
 // createHarnessTemplate creates a global template whose DefaultHarnessConfig is
 // set. ContentHash is populated so the agent-create handler's "template has no
 // files" guard does not reject it.
@@ -88,6 +101,24 @@ func createHarnessTemplate(t *testing.T, s store.Store, slug, defaultHarnessConf
 		ContentHash:          "d00dfeed",
 		Scope:                store.TemplateScopeGlobal,
 		Status:               "active",
+	}
+	require.NoError(t, s.CreateTemplate(context.Background(), tmpl))
+	return tmpl
+}
+
+// createHarnessOnlyTemplate creates a global template with no
+// DefaultHarnessConfig, so that getHarnessConfigFromTemplate's fallback to the
+// bare Harness field is what supplies the template-tier value.
+func createHarnessOnlyTemplate(t *testing.T, s store.Store, slug, harness string) *store.Template {
+	t.Helper()
+	tmpl := &store.Template{
+		ID:          tid("template-" + slug + "-" + t.Name()),
+		Name:        slug,
+		Slug:        slug,
+		Harness:     harness,
+		ContentHash: "d00dfeed",
+		Scope:       store.TemplateScopeGlobal,
+		Status:      "active",
 	}
 	require.NoError(t, s.CreateTemplate(context.Background(), tmpl))
 	return tmpl
@@ -209,6 +240,177 @@ func TestCreateAgent_RequestHarnessConfigBeatsProjectAndTemplate(t *testing.T) {
 		"an explicit request value outranks both the project annotation and the template")
 }
 
+// TestCreateAgent_ProjectHarnessConfigBeatsProjectDefaultTemplate covers the
+// configuration a user actually produces by filling in both fields of the
+// Project Settings form: the template arrives from the project's own
+// scion.io/default-template annotation rather than from the request, and the
+// harness config from scion.io/default-harness-config. This is the most likely
+// real-world shape of the population whose behaviour changed.
+func TestCreateAgent_ProjectHarnessConfigBeatsProjectDefaultTemplate(t *testing.T) {
+	disp := &capturingDispatcher{createAgentDispatcher: createAgentDispatcher{createPhase: string(state.PhaseRunning)}}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	createHarnessTemplate(t, s, "tmpl-harness", "template-harness")
+	setProjectAnnotations(t, s, project, map[string]string{
+		projectSettingDefaultTemplate:      "tmpl-harness",
+		projectSettingDefaultHarnessConfig: "project-harness",
+	})
+
+	// No Template in the request — it comes from the project annotation.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "prec-both-from-project",
+		ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	assert.True(t, disp.dispatched, "agent should have been dispatched")
+	assert.Equal(t, "project-harness", disp.dispatchedHarnessConfig,
+		"annotation-supplied template must not displace the project's harness config")
+
+	agent, err := s.GetAgent(ctx, resp.Agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, agent.AppliedConfig)
+	assert.Equal(t, "project-harness", agent.AppliedConfig.HarnessConfig)
+	assert.Equal(t, "tmpl-harness", agent.Template,
+		"the template itself still applies — only harness_config is overridden")
+}
+
+// TestCreateAgent_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback pins the
+// precedence against the *other* branch of getHarnessConfigFromTemplate: a
+// template with no DefaultHarnessConfig, whose bare Harness field supplies the
+// template-tier value. The project annotation must still win.
+func TestCreateAgent_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	createHarnessOnlyTemplate(t, s, "tmpl-bare", "claude")
+	setProjectHarnessConfigAnnotation(t, s, project, "project-harness")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "prec-harness-only-tmpl",
+		ProjectID: project.ID,
+		Template:  "tmpl-bare",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	agent, err := s.GetAgent(ctx, resp.Agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, agent.AppliedConfig)
+	assert.Equal(t, "project-harness", agent.AppliedConfig.HarnessConfig,
+		"project annotation outranks the template's Harness-field fallback too")
+}
+
+// TestCreateAgent_TemplateHarnessOnlyFallbackWhenNoProjectAnnotation is the
+// matching regression guard: with no annotation, the Harness-field fallback
+// still supplies the value.
+func TestCreateAgent_TemplateHarnessOnlyFallbackWhenNoProjectAnnotation(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	createHarnessOnlyTemplate(t, s, "tmpl-bare", "claude")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "prec-harness-only-tmpl-noann",
+		ProjectID: project.ID,
+		Template:  "tmpl-bare",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	agent, err := s.GetAgent(ctx, resp.Agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, agent.AppliedConfig)
+	assert.Equal(t, "claude", agent.AppliedConfig.HarnessConfig)
+}
+
+// TestCreateAgent_ProjectHarnessConfigStampsIDWhenResolvable and its
+// counterpart below pin the ID/hash consequence of making the project
+// annotation load-bearing. When the annotation names a harness config that
+// exists in Hub storage, populateAgentConfig stamps its ID and content hash so
+// a remote broker can hydrate the bundle.
+func TestCreateAgent_ProjectHarnessConfigStampsIDWhenResolvable(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	hc := &store.HarnessConfig{
+		ID:          tid("hc-project-harness-" + t.Name()),
+		Name:        "project-harness",
+		Slug:        "project-harness",
+		Harness:     "claude",
+		ContentHash: "beefcafe",
+		Scope:       store.HarnessConfigScopeGlobal,
+	}
+	require.NoError(t, s.CreateHarnessConfig(ctx, hc))
+
+	createHarnessTemplate(t, s, "tmpl-harness", "template-harness")
+	setProjectHarnessConfigAnnotation(t, s, project, "project-harness")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "prec-hc-resolvable",
+		ProjectID: project.ID,
+		Template:  "tmpl-harness",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	agent, err := s.GetAgent(ctx, resp.Agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, agent.AppliedConfig)
+	assert.Equal(t, "project-harness", agent.AppliedConfig.HarnessConfig)
+	assert.Equal(t, hc.ID, agent.AppliedConfig.HarnessConfigID,
+		"a resolvable project harness config must be stamped for broker hydration")
+	assert.Equal(t, "beefcafe", agent.AppliedConfig.HarnessConfigHash)
+}
+
+// TestCreateAgent_ProjectHarnessConfigUnresolvableLeavesIDEmpty documents the
+// downside of D-2 flagged in review: an annotation naming a harness config that
+// does not exist in Hub storage still displaces the template's known-good
+// value, and the agent goes out with no ID or hash. Agent creation deliberately
+// does NOT fail — the broker may still resolve the name from its own search
+// path — but the hub logs a warning, and this test pins the shape so a future
+// change to make it an error is a visible, deliberate decision.
+func TestCreateAgent_ProjectHarnessConfigUnresolvableLeavesIDEmpty(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	createHarnessTemplate(t, s, "tmpl-harness", "template-harness")
+	setProjectHarnessConfigAnnotation(t, s, project, "does-not-exist")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "prec-hc-unresolvable",
+		ProjectID: project.ID,
+		Template:  "tmpl-harness",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	agent, err := s.GetAgent(ctx, resp.Agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, agent.AppliedConfig)
+	assert.Equal(t, "does-not-exist", agent.AppliedConfig.HarnessConfig,
+		"the annotation displaces the template even when it names nothing that exists")
+	assert.Empty(t, agent.AppliedConfig.HarnessConfigID,
+		"no ID can be stamped, so a remote broker cannot hydrate from Hub storage")
+	assert.Empty(t, agent.AppliedConfig.HarnessConfigHash)
+}
+
 // ---------------------------------------------------------------------------
 // Scheduler dispatch path (server.go, dispatchAgentEventHandler)
 // ---------------------------------------------------------------------------
@@ -296,6 +498,46 @@ func TestSchedulerDispatch_AppliedConfigHandedToDispatcher(t *testing.T) {
 	assert.True(t, disp.dispatched, "agent should have been dispatched")
 	assert.Equal(t, "project-harness", disp.dispatchedHarnessConfig,
 		"AppliedConfig handed to the dispatcher should carry the project's harness config")
+}
+
+// TestSchedulerDispatch_ProjectHarnessConfigBeatsProjectDefaultTemplate mirrors
+// the create-path NB-2 case: the template arrives from the project's
+// scion.io/default-template annotation rather than from the event payload. This
+// exercises the default-template block immediately above the changed hunk in
+// dispatchAgentEventHandler, which is the scheduler's counterpart to
+// handlers_agents_core.go's.
+func TestSchedulerDispatch_ProjectHarnessConfigBeatsProjectDefaultTemplate(t *testing.T) {
+	disp := &capturingDispatcher{createAgentDispatcher: createAgentDispatcher{createPhase: string(state.PhaseRunning)}}
+	srv, s, project := setupCreateAgentServer(t, disp)
+
+	createHarnessTemplate(t, s, "tmpl-harness", "template-harness")
+	setProjectAnnotations(t, s, project, map[string]string{
+		projectSettingDefaultTemplate:      "tmpl-harness",
+		projectSettingDefaultHarnessConfig: "project-harness",
+	})
+
+	// Empty template in the payload — it comes from the project annotation.
+	agent := runDispatchAgentEvent(t, srv, s, project.ID, "sched-both-from-project", "")
+	assert.Equal(t, "project-harness", agent.AppliedConfig.HarnessConfig,
+		"annotation-supplied template must not displace the project's harness config")
+	assert.Equal(t, "tmpl-harness", agent.Template,
+		"the template itself still applies — only harness_config is overridden")
+	assert.Equal(t, "project-harness", disp.dispatchedHarnessConfig,
+		"value handed to the dispatcher must match the persisted one")
+}
+
+// TestSchedulerDispatch_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback is
+// the scheduler-side counterpart to the Harness-field fallback case.
+func TestSchedulerDispatch_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+
+	createHarnessOnlyTemplate(t, s, "tmpl-bare", "claude")
+	setProjectHarnessConfigAnnotation(t, s, project, "project-harness")
+
+	agent := runDispatchAgentEvent(t, srv, s, project.ID, "sched-harness-only-tmpl", "tmpl-bare")
+	assert.Equal(t, "project-harness", agent.AppliedConfig.HarnessConfig,
+		"project annotation outranks the template's Harness-field fallback too")
 }
 
 // Note: the scheduler's dispatch_agent payload has no harness-config field, so
