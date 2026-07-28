@@ -563,8 +563,23 @@ func (s *Server) createAgentInProject(
 		// the hub-members group passes ActionRead on any service account
 		// whatever its scope, before and after that conversion. What this call
 		// refuses is a caller outside hub-members, or one carrying an explicit
-		// deny: policy evaluation runs before both mechanisms above, so an
-		// admin-bound deny still wins for either class.
+		// deny — but the PRECEDENCE OF THAT DENY DIFFERS BY CLASS, so it needs
+		// stating per class like everything else here.
+		//
+		// AGENTS: an explicit deny does win. checkAccessForAgent evaluates
+		// policies at authz.go:210, ahead of the project read baseline, and
+		// returns immediately on any matched PolicyID (:211).
+		//
+		// HUMANS: it does not. checkAccessForUser reaches policy evaluation only
+		// at authz.go:177, behind four unconditional allow-returns — admin
+		// bypass (:120), resource owner (:128), ancestry (:137) and project
+		// owner/admin (:148). Each returns Allowed before any policy is fetched,
+		// so a deny bound to an admin never runs for that admin.
+		//
+		// An earlier version of this comment said policy evaluation runs first
+		// and "an admin-bound deny still wins for either class". That is true of
+		// agents and false of humans; do not rely on a deny to constrain a
+		// privileged human caller here.
 		//
 		// The PATCH path carries the same call and the same two statements.
 		if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
