@@ -46,6 +46,46 @@ being reached again.
 > line numbers and both being right. The SHA convention above is what surfaced it; the branch
 > name is the part the convention was missing.
 
+> ### ⚠️ "Hub-scoped" means two opposite things, and that is where the mistakes come from
+>
+> This is the single most error-generating fact in the project. It has produced four wrong
+> claims by three different people in one day, including two of mine, in *opposite* directions.
+> Read it before writing any sentence containing the phrase "hub-scoped".
+>
+> A hub-scoped service account is, at the same time:
+>
+> - **The MOST reachable scope.** `sa.ReachableFromProject(projectID)` returns `true`
+>   unconditionally for `ScopeHub` (`pkg/store/models.go:1552`). A hub-scoped SA is usable from
+>   *every* project. It is the permissive case.
+> - **The LEAST matchable resource.** `gcpServiceAccountResource` leaves it **parentless**, so
+>   `projectIDForResource` returns `""` and — post-#595 — no project-scoped policy can match it
+>   at all. For the policy engine it is the restricted case.
+>
+> The intuition "hub-scoped = special = locked down" is right about policies and wrong about
+> reachability. The intuition "hub-scoped = global = available everywhere" is right about
+> reachability and wrong about policies. **Both intuitions are half-true, so both feel
+> confirmed.**
+>
+> Two consequences that keep being got backwards:
+>
+> - A validator asking *"is this SA usable here?"* must **accept** a hub-scoped SA. Rejecting it
+>   is the error. (`validate.go:425` is the exception that proves this: it asks a *same-scope*
+>   question, not a reachability question, which is exactly why it must not be converted to the
+>   helper.)
+> - An authorization check asking *"who may assign this SA?"* gets **less** confinement from
+>   scope, not more — parentless means the project-owner bypass is skipped (`pid == ""`,
+>   `authz.go:153`) and the wildcard `hub-member-read-all` policy matches. Under `ActionRead`,
+>   that makes a hub-scoped SA assignable by *every hub member*.
+>
+> So the fail-closed state for hub-scoped SAs — assignable only by admins and the creator —
+> looks like breakage and is the ruled answer (§8.2). It has already been reported to me as a
+> regression once, by an agent who had correctly re-derived the design.
+>
+> **Never coordinate "hub-scoped" with "other-project" in a list of things to reject.** They are
+> opposites. I wrote exactly that sentence ninety minutes after ruling the reverse, and it was
+> caught by an implementer who checked the instruction against a test rather than against its
+> author.
+
 ---
 
 ## 1. Background
