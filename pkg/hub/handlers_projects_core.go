@@ -1782,14 +1782,26 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 		// "attribution only" note above is true of creatorName, ancestry and
 		// the notify subscriber, and false of createdBy: it is written to
 		// OwnerID as well as CreatedBy, and OwnerID is an authorization input.
-		// The three sites that test a Resource's OwnerID generically, and so
-		// can see an agent, are checkAccessForUser (authz.go),
-		// ComputeCapabilitiesBatch and checkAccessPrecomputed
-		// (capabilities.go). handlers_groups.go has a fourth owner equality,
-		// likewise guarded, but it reads a group and never sees an agent.
-		// Anchored on function names on purpose: an earlier revision of this
-		// comment cited line numbers, and a comment added elsewhere in
-		// capabilities.go moved them by 19 the same afternoon.
+		// The sites that test a Resource's OwnerID generically, and so can see
+		// an agent, are checkAccessForUser (authz.go), ComputeCapabilitiesBatch
+		// and checkAccessPrecomputed (capabilities.go). handlers_groups.go has
+		// another owner equality, likewise guarded, but it reads a group and
+		// never sees an agent, so it is not in the set.
+		//
+		// Re-derive the set rather than trusting this list:
+		//   grep -rn 'resource\.OwnerID ==' pkg/hub --include='*.go'
+		// returns exactly the three named above and nothing else. The recipe is
+		// here so the claim carries its own filter; the group and project owner
+		// equalities are excluded by the receiver, not by hand.
+		//
+		// Anchored on function names on purpose: an earlier revision cited line
+		// numbers, and a comment added elsewhere in capabilities.go moved them
+		// by 19 the same afternoon. IT ALSO COUNTED THEM, and that was the same
+		// mistake in a second dialect — the numeral was a copy of a fact the
+		// list already stated, and adding a fourth site would touch neither the
+		// numeral nor either of the TWO FILES that carry this note. A claim that
+		// enumerates is invalidated by any addition; a claim that references is
+		// not. Do not reintroduce the count.
 		// That write happens in createAgentInProject in
 		// handlers_agents_core.go — hundreds of lines from one of the two
 		// blocks that feed it and in a different file from the other. Nothing
