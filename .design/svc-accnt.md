@@ -1245,6 +1245,22 @@ right for reasoned refusals and wrong here — for `noIdentity` the two routes m
 assertion whose subject is the agreement cannot be made green by reopening the divergence in
 either direction.
 
+> 🛑 **AND THAT INSTRUCTION IS ITSELF INCOMPLETE — the fourth time today.** A sameness pin here
+> asserts *all rows are 404*, and **404 is also what a dead path returns.** If the route were
+> unregistered or the path built wrongly, `http.ServeMux` answers 404 for every row, the parity
+> holds, and the "nothing was deleted" guard passes too — an unrouted request deletes nothing
+> just as a refused one does. Both guards point the same way and neither separates *"the renderer
+> refused all four"* from *"nothing ran."*
+>
+> **RULE.** An assertion is vacuity-prone exactly when its expected value coincides with the
+> value produced by **not running**. A *divergence* pin is self-controlling — two different codes
+> cannot both be the harness default. A *sameness* pin trades that away, and must buy it back
+> with an explicit **liveness control**: one request through the same route by an authorised
+> caller, asserting a success that a dead path cannot produce.
+>
+> So the sameness idiom is stronger against harmonising cleanups and weaker against a dead
+> harness, and it must always ship with the control. I handed it over without that qualifier.
+
 #### #46 — and the hub-scope read check denies **only** agents
 
 Running aid-dev4's wildcard mechanism against this surface:
