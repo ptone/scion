@@ -237,6 +237,14 @@ func TestAgentCreate_HubScopedSA_AssignableByCreatorAndAdmin(t *testing.T) {
 // reason — the scope predicate rejecting a hub-scoped account, which item F
 // deliberately stopped doing — cannot be mistaken for this test passing.
 func TestAgentCreate_HubScopedSA_PlainHubMemberDenied(t *testing.T) {
+	// THIS ASSERTS THE CURRENT RULED ANSWER TO A QUESTION THAT IS STILL OPEN.
+	// §8.2 confines hub-scoped assignment to admins and the account's creator;
+	// task #19 (with ptone) may yet open it up. If it does, THIS TEST SHOULD
+	// FAIL, legitimately — and the correct response is to INVERT it and name
+	// the ruling that authorised the change in the commit message, NOT to
+	// delete it. Deleting it implements the new ruling and removes the
+	// safeguard against the old hole in one motion, leaving nothing that would
+	// notice if the widening later went further than #19 permitted.
 	f := bypassAgentsSetup(t)
 	ensureHubMembership(context.Background(), f.store, f.owner.ID)
 	sa := hubScopedSAForAgent(t, f, true) // created by a stranger
@@ -274,6 +282,60 @@ func TestAgentCreate_HubScopedSA_NonHubMemberDenied(t *testing.T) {
 		"a caller with no hub-scoped read must not assign a hub-scoped SA; got: %s", rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "does not belong to this project",
 		"the denial must come from authorization, not from the scope predicate")
+}
+
+// removeHubMembership revokes the hub-members membership that
+// ensureHubMembership grants. Only the test below needs it, and it needs it to
+// build a principal who WAS a hub member and is not one now.
+func removeHubMembership(t *testing.T, f *bypassAgentsFixture, userID string) {
+	t.Helper()
+	g, err := f.store.GetGroupBySlug(context.Background(), "hub-members")
+	require.NoError(t, err)
+	require.NoError(t, f.store.RemoveGroupMember(context.Background(), g.ID,
+		store.GroupMemberTypeUser, userID))
+}
+
+// A KNOWN HOLE IN §8.2, RECORDED AS A FAILING TEST RATHER THAN AS AN ABSENCE.
+// Skipped, so it does not block step 2. Raised by sa-arch, who owns it and is
+// taking it to ptone alongside task #19; not p3's to fix in the conversion and
+// not mine to fix in P4.
+//
+// §8.2 grants assignment to "the account's creator". That is served by the
+// resource-owner bypass at authz.go:133-139, resource.OwnerID == user.ID(),
+// which CONSULTS NO MEMBERSHIP OF ANY KIND. So the grant is to whoever created
+// the account, permanently, and removing them from the hub does not remove it.
+// Authority captured at write time and never re-checked — the same shape as
+// the lifecycle-hook escalation, which makes it a pattern here rather than a
+// one-off.
+//
+// Worth knowing before reading the rest of this file: the hole is WIDER than
+// this test's setup implies. TestAgentCreate_HubScopedSA_AssignableByCreatorAndAdmin's
+// "the account's creator" subtest never grants hub membership at all, and
+// passes — the creator does not need to have been a member even once. This
+// test uses grant-then-revoke because that is the case with a victim: access
+// deliberately withdrawn, and still working.
+//
+// It asserts the behaviour we would want, so it fails today. Unskip it when
+// #19 is answered; if the answer keeps a creator grant, it should be scoped to
+// creators who are still members, and this test is then the check that it is.
+func TestAgentCreate_HubScopedSA_FormerHubMemberCreatorDenied(t *testing.T) {
+	t.Skip("known §8.2 hole: the creator grant is a resource-owner bypass and " +
+		"survives removal from the hub; with sa-arch and ptone under task #19")
+
+	f := bypassAgentsSetup(t)
+	ensureHubMembership(context.Background(), f.store, f.owner.ID)
+	sa := hubScopedSACreatedBy(t, f, f.owner.ID, true)
+	removeHubMembership(t, f, f.owner.ID)
+
+	rec := createAgentAsOwner(t, f, CreateAgentRequest{
+		Name: "hub-sa-agent-ex-member",
+		GCPIdentity: &GCPIdentityAssignment{
+			MetadataMode:     store.GCPMetadataModeAssign,
+			ServiceAccountID: sa.ID,
+		},
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"a creator removed from the hub must lose the creator grant; got: %s", rec.Body.String())
 }
 
 // The confinement half, which must survive the widening: another project's
@@ -385,6 +447,12 @@ func TestAgentPatch_HubScopedSA_AssignableByCreatorAndAdmin(t *testing.T) {
 // the two sites is checked, "create clean then PATCH the identity in" is the
 // way around it — which is the reason both sites carry the gate at all.
 func TestAgentPatch_HubScopedSA_PlainHubMemberDenied(t *testing.T) {
+	// Encodes an OPEN question's current answer — see the note in
+	// TestAgentCreate_HubScopedSA_PlainHubMemberDenied. If task #19 opens
+	// hub-scope assignment, invert this test, do not delete it. Inverting one
+	// of the pair and deleting the other is worse than either: it leaves the
+	// create site guarded and the PATCH site not, which is precisely the
+	// asymmetry this twin exists to prevent.
 	f := bypassAgentsSetup(t)
 	ensureHubMembership(context.Background(), f.store, f.owner.ID)
 	sa := hubScopedSAForAgent(t, f, true) // created by a stranger
