@@ -522,8 +522,8 @@ sa.VerificationError = ""
 When the generator is nil, nothing is verified and the SA is still marked `verified` with
 its error cleared. P0.1 made that unearned status **durable** rather than recomputed on read.
 
-It is the *only* site that behaves this way. All four handlers that touch the generator were
-checked (three by sa-rev-p0, and the contrast is the point):
+It is the *only* site that behaves this way. **Every** handler that touches the generator was
+checked (the others by sa-rev-p0, and the contrast is the point):
 
 | Site | Handling of `gcpTokenGenerator == nil` | Result |
 |---|---|---|
@@ -604,9 +604,11 @@ behaviour *is* the sentence I wrote down; the missing half is the sentence I did
    `saAssignChecker` / `hookIdentityChecker`. Per gated surface: a denying checker asserted
    through to the wire, **and an allowing twin** — a denial-only pair proves only that *something*
    denied.
-3. **The release note must name both switches.** `server.go:970`'s
-   *"⚠️ INERT IN THIS RELEASE"* is good practice and should stay; it currently names the switch
-   that is *not* the one holding the feature inert.
+3. **The release note must name the switch that actually holds the feature inert, and every
+   other switch a reader could mistake for it.** `server.go:970`'s *"⚠️ INERT IN THIS RELEASE"*
+   is good practice and should stay; it currently names a switch that is *not* the one holding
+   the feature inert. (Stated as a property rather than a count deliberately — see §8.5.5: a
+   requirement that says "both" is silently under-specified by the arrival of a third.)
 4. **Q7's stated default is `enforce`; the implementation ships `off`.** Deliberate and disclosed
    for this release. Recorded here so the divergence is not later read as drift, and so #19's
    resolution does not silently inherit `off` as though the design had chosen it.
@@ -1322,8 +1324,8 @@ isolation-after-authorization.
 **The fix is not a design question, because this repo already contains the answer.**
 `project_settings_handlers.go:169` collapses exactly these two cases, with the reason written
 out: *"Distinguishing them would make this endpoint an existence oracle… 'Does not exist' and
-'exists but is not yours' are one answer."* The standard is set and documented; two handlers do
-not follow it. Note their own instruction to keep create and PATCH *"greppably identical"* means
+'exists but is not yours' are one answer."* The standard is set and documented; **the agent
+create and PATCH assignment handlers** do not follow it. Note their own instruction to keep create and PATCH *"greppably identical"* means
 both must change together.
 
 > **RULE.** Before writing a disclosure rule for a resource, grep for **every** load of that
@@ -1562,6 +1564,15 @@ fourth, with no diff ever touching the line that counts them). The lesson usuall
 > drift silently because no edit to the counted things ever touches the counter. Say *"the
 > statements below"*, or name them. **A claim that enumerates is invalidated by any addition; a
 > claim that references is not.**
+
+**The refinement came from applying it to this document.** Sweeping for standing counts turned
+up several, and the split is clean: **a count carrying a ref is a dated measurement and is
+safe** — *"eight hits at `bbd5b393`"* stays true forever, because it is a fact about a fixed
+tree. **A count without one is a standing claim about current code, and rots.** The three fixed
+here were all standing claims, and the worst was a *requirement*: "the release note must name
+**both** switches" (§5.5) — a definition-of-done that a third switch would silently satisfy
+while under-specifying. **A count inside an acceptance criterion is the most dangerous
+placement**, because passing it is what stops anyone looking.
 
 This is the same defect as a duplicated authorization constant (§6.2) and as the merge-conflict
 dependent (§8.5.2): one fact, two homes, and nothing that fails when they disagree.
