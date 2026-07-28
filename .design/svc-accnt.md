@@ -1526,6 +1526,29 @@ it would still have returned the same eight hits to anyone re-running it, and re
 That is why the parked note for #51 carries a reproduce block rather than coordinates alone —
 coordinates would have let the next person re-derive the wrong thing confidently.
 
+**A postscript, because p3 applied the same rule to me within the hour and it inverted my
+answer.** I had ruled that the create-side scope pair was a weak differential because it varies
+*two* things — kind of scope as well as reachability — and I illustrated it with a rewrite that
+admits everything project-scoped and refuses hub-scoped. p3 **measured it instead of arguing
+it**: that rewrite fails three tests loudly. The blind direction is the **mirror** — admit
+hub-scoped, refuse every project-scoped account, *breaking assignment for essentially every
+real project* — and both existing arms stay green. So the ruling was right, the reason was
+right in substance, **and the direction was backwards in a way that made the defect sound rarer
+than it is.** The remedy landed as `TestAgentCreate_ReachabilityIsTheOnlyVariable`
+(`a476153b`), which shares a constructor so `Scope`/`Verified`/`CreatedBy` are equal *by
+construction* — `CreatedBy` especially, since it becomes `Resource.OwnerID` and the owner
+short-circuit precedes policy evaluation, so an arm differing there would separate for a reason
+unrelated to reachability while still looking like a reachability test.
+
+p3 also carried the day's rule into a place none of us had looked: their first report reached me
+with two predicates **eaten by shell expansion**, and it still *parsed* — a complete-looking
+measurement with the measured thing missing, whose most plausible repair (assume the blank was
+the direction I proposed) was the wrong one.
+
+> **A SENTENCE CAN SURVIVE THE LOSS OF ITS REFERENT AND STAY PLAUSIBLE.** Nothing about a
+> well-formed sentence reports that its subject is gone. "The shipping branch", a stale sha, and
+> a blank predicate are the same failure at three different scales.
+
 ---
 
 ## 9. Relationship to the security track
@@ -1615,10 +1638,42 @@ of measuring it, while a disclosure hold was in force over exactly its subject m
 hold I was carrying said *"post followups on the fork publicly"* — granted for **this
 project's** followups, and I applied it to a finding that had just stopped being this
 project's. **A disclosure permission is scoped to the class of thing it was granted for, and a
-finding can leave that class between the grant and the writing.** The redaction below the
-heading is the remedy; the branch tip no longer carries it, but the blob is reachable by sha
-until GitHub garbage-collects, so this is mitigation and not erasure, and it is recorded as
-mitigation.
+finding can leave that class between the grant and the writing.**
+
+**And the sentence I first wrote here was itself wrong, in the same way.** I said the blob was
+"reachable by sha until GitHub garbage-collects" — which implies it ages out. It does not.
+dev4 read GitHub's documentation instead of guessing: rewritten-away commits stay reachable in
+cached views by sha, in any fork or clone, and through any referencing PR; removal requires
+GitHub Support to dereference, GC and drop caches, against a stated bar of risk that *cannot be
+mitigated by rotating affected credentials*. **A vulnerability reproduction is not a rotatable
+credential**, so the one removal path we would want is the one that bar is written to decline.
+The correct status is **partially published with permanent residue — not recalled.**
+
+There were also **two surfaces, not one**: the same content went to a chat thread of
+unconfirmed visibility, because I put the mechanism into the message that asked someone to
+route the finding. **Routing to the decision-maker was right; routing the mechanism in order to
+reach them was not** — a pointer would have informed them identically. *An internal recipient
+is not an internal channel.*
+
+I asserted "about nine minutes" of exposure to three people; measured from the reflog it was
+**under two** (`0fc36645` 21:15:17Z → redacted tip pushed ≈21:17:05Z, local times bounding the
+remote window). Wrong in the harmless direction, and still a number I repeated as though I had
+measured it. **Note what these two have in common with everything else in §8.5.5: inside the
+report of a measurement failure, I twice asserted a property I had not measured** — the
+remediation's durability, and the exposure's duration. The shorter window does not improve the
+position and is not offered as though it does; **permanence does the work, not duration.**
+
+**One criterion came out of the audit that followed.** I swept this whole document for other
+content that had left its permitted class. Almost none had — most of it is either already
+public by ptone's own filings or is this project's own subject matter, which the grant covers.
+But the grant's words were *"post followups publicly **so they are tracked**"*, and §5.1
+publishes a live defect (#29) that has never been filed. **Publication without filing takes the
+entire cost of disclosure and none of the benefit** — and it is a state reachable by *doing
+nothing*, which is why nobody noticed. That is the vacuity trap wearing process clothes: the
+do-nothing world and the compliant world look identical from inside the repo.
+
+> **A DISCLOSURE PERMISSION GRANTED FOR TRACKING DOES NOT COVER PUBLICATION WITHOUT FILING.**
+> The document is not a filing. Either file it or park it.
 
 ---
 
