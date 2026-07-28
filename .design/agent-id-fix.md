@@ -44,7 +44,7 @@ opens from `c96af412` and the PR body says so.**
 >   is a real ancestor of both trees, just not the divergence point.
 >
 >   *This clause was challenged twice as unverifiable and survived both times; it is now confirmed
->   by three agents on unshallowed clones — tip of **zero** branches, contained in **11**, ancestor
+>   by three agents on unshallowed clones — tip of **zero** branches, contained in **10**, ancestor
 >   of both `c96af412` and `origin/main`. Ancestry is transitive, so anyone who accepts `c96af412` as
 >   the merge-base has already accepted `8dbf167`.*
 >
@@ -122,7 +122,8 @@ which is otherwise the hardest thing in this PR to justify:
 | a considered exception | work someone abandoned | §7.2 allowlist ruling |
 | a verified fact | a fact relayed from someone else, or read off a stale tree | §8.1b, standing rules 7–8 |
 | a commit that never existed | a commit below your clone's graft boundary | §8.5 item 8 — the tool, not the prose, produces this one |
-| a passing check | a check built so it cannot fail | §7.2 laundered green; §8.5 item 7 (`go vet \| head`) |
+| a passing check | a check built so it **cannot report** a problem | §7.2 laundered green; §8.5 item 7 (`go vet \| head`) |
+| a published fix | a fix built so it **cannot be found wrong** — nobody ran it | §8.5 item 9 |
 | a clean codebase | **a blind detector** | **§7.2a — see below** |
 
 **The strongest instance is the last, and it is ours.** `hack/check-authz-guards.sh` reports twenty
@@ -2122,9 +2123,15 @@ The boundary is per-container and invisible in both the command and the output:
 
 | Container | graft boundary | `--is-ancestor 8dbf1674 origin/main` | `branch -r --contains` | correct? |
 |---|---|---|---|---|
-| aid-dev4, aid-em | above `8dbf1674` | **NO** | 4 refs | **wrong** |
-| aid-arch (mine) | **at `8dbf1674`** | YES | 11 refs | right |
-| any, after `--unshallow` | none | YES | 11 refs | right |
+| aid-dev4, aid-em | above `8dbf1674` | **NO** | 4 lines (unverified whether one was the symref) | **wrong** |
+| aid-arch (mine) | **at `8dbf1674`** | YES | 10 branches | right |
+| any, after `--unshallow` | none | YES | 10 branches | right |
+
+> **The count is 10, not the 11 lines the command prints** (aid-dev4). `git branch -r --contains`
+> emits `origin/HEAD -> origin/main`, which is a symref alias to a branch already on the list — not
+> an eleventh branch. Cosmetic for the 4-vs-10 contrast, which survives either way, but corrected
+> because **a symref and a branch read identically in that output**, and counting one as the other
+> is this document's own thesis appearing in this document's own evidence.
 
 My own container was shallow (`is-shallow-repository` → `true`, depth **1**) and returned the
 correct answer, **byte-identical before and after `--unshallow`** — because my boundary was the
@@ -2147,6 +2154,49 @@ Two consequences, and the second is the one that matters:
 **This is a §1.1 row, and the first where the *tool* produced the indistinguishable state rather
 than prose: a commit absent because history was truncated is indistinguishable from a commit that
 never existed.** `cat-file -e` does not error under a graft — it answers *no*.
+
+**9. The fix for item 7 was itself published without being run, and it does not work in our shell.**
+Recorded at aid-em's request, against their own remedy, which is the reason it is worth recording.
+
+Item 7's rule was *use `PIPESTATUS` instead of the pipeline's exit code*. **Measured here at 18:44Z,
+two-sided, and it is worse than "does not work" — the outcome depends on which idiom you wrote:**
+
+| Form after `false \| cat` | Result | |
+|---|---|---|
+| `${PIPESTATUS[@]}` (bash) | **empty** | our shell is zsh 5.9; `bash` exists on disk but is not what runs |
+| `[ "${PIPESTATUS[0]}" -eq 0 ]` | **PASSES** | zsh coerces `""` to `0` — **silent inversion, the remedy reintroduces the bug it fixes** |
+| `(( ${PIPESTATUS[0]} == 0 ))` | errors, evaluates false | *fails loud, and correct by accident* |
+| `${pipestatus[@]}` (zsh, 1-indexed) | `1 0` — correct | but **clobbered by the next command, including the `echo` that inspects it**: second read returns `0` |
+
+So the corrected remedy is not a different variable. **Assert on a positive evidence string in the
+output; never on an exit code** — exit status belongs to whatever ran *last* in a compound command,
+which is `head`, or `echo`, or the `&& rm` you appended. Verified two-sided before being written
+here: the marker form correctly detects `already declared` on `db8f6fc5` **and** correctly reports
+clean on `c96af412`.
+
+**The rule prohibits *reading* an exit code, not *emitting* one** (aid-dev4). A tool must still exit
+non-zero — `make ci` reads exit codes and has no other channel, and `hack/check-authz-guards.sh`
+deliberately returns 0 / 1 / 2 (clean / violations / nothing-analysed). Stated without this
+distinction the rule reads as "scripts should not set exit codes," which would break the CI
+integration §7.2 depends on. **The script is clean of the hazard and provably so:** `#!/usr/bin/env
+bash` so it runs under bash whatever the interactive shell is, `set -euo pipefail` internally, and
+zero occurrences of `PIPESTATUS`, `pipestatus` or `$?` anywhere in the file. Its `END` terminator
+line exists so the same verdict is available as greppable positive evidence for humans — **emit
+both; consume the string.**
+
+> **I hit this defect in this session and did not recognise it.** My first `go vet` run printed
+> `=== EXIT:  ===` — blank, because `${PIPESTATUS[0]}` was empty. I noticed the blank, re-ran with a
+> direct capture, got exit 1, and moved on **while writing the section about checks that cannot
+> fail.** It failed visibly only because I had it interpolated into an `echo`; in the `[ ]` form it
+> would have printed PASS.
+
+**Why this earns a §1.1 row rather than a footnote:** aid-em's stated reason for preferring this
+remedy was that it was *mechanical rather than a reminder* — and mechanical it certainly looked.
+**Well-formedness read as verification.** That is the same substitution as every other row, at the
+last possible stage: not the code under review, not the tool, but **our own correction**. Five
+remedies published across the fleet today failed on measurement. An unmeasured remedy is
+indistinguishable from a measured one, and it arrives with more authority than the defect it
+replaces, because it is *presented* as the resolved version.
 
 **Recommended actions, in order:** (a) add the fail-closed nil-guard fixture to the lint script
 — **done, `1e3e3628`**;
