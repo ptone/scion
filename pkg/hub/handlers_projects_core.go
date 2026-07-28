@@ -1771,6 +1771,40 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 		notifySubscriberID = userIdent.ID()
 		// User-created agents: ancestry is [userID]
 		ancestry = []string{userIdent.ID()}
+	} else {
+		// UNREACHABLE TODAY. This is a tripwire on an unenforced coupling, not
+		// a fix for a live bug: no caller can reach it, because the arms above
+		// cover authorizeAgentCreate's admissions exactly — it admits "agent",
+		// "user" and "dev" and denies the rest in a terminating default, and
+		// "dev" takes the user arm because it satisfies UserIdentity.
+		//
+		// Why it is worth failing here rather than falling through. The
+		// "attribution only" note above is true of creatorName, ancestry and
+		// the notify subscriber, and false of createdBy: it is written to
+		// OwnerID as well as CreatedBy, and OwnerID is an authorization input,
+		// compared against the caller at authz.go:129 and capabilities.go:314
+		// and :381. That write happens in createAgentInProject in
+		// handlers_agents_core.go — hundreds of lines from one of the two
+		// blocks that feed it and in a different file from the other. Nothing
+		// connects the gate's list of admitted kinds to this if/else chain, and
+		// the two are edited for different reasons.
+		//
+		// So if the gate is widened by one identity kind and this chain is not,
+		// attribution falls through to empty and the hub mints an agent with no
+		// CreatedBy, no OwnerID and no ancestry. Be precise about what that
+		// costs: in this tree it is NOT an escalation. Every OwnerID equality
+		// test guards OwnerID != "", so an unowned agent matches no caller and
+		// loses owner-derived access rather than granting it — it fails closed
+		// on that axis, and the store clears the column rather than defaulting
+		// it. The tripwire is here because that safety is a property of those
+		// three comparison sites, which nothing enforces either, and because an
+		// agent owned by nobody cannot be given an owner afterwards.
+		//
+		// Widening the gate should therefore break loudly, here, at the point
+		// where the two lists disagree — not silently, in a field someone later
+		// compares to a caller.
+		InternalError(w)
+		return
 	}
 	s.createAgentInProject(w, r, req, projectID, createdBy, creatorName, ancestry, notifySubscriberType, notifySubscriberID)
 }
