@@ -81,6 +81,26 @@ being reached again.
 > looks like breakage and is the ruled answer (§8.2). It has already been reported to me as a
 > regression once, by an agent who had correctly re-derived the design.
 >
+> **⚠️ And now the guard on that corollary, because the corollary is the more dangerous half.**
+>
+> The sentence above primes every reader to treat a denial in this area as correct by design.
+> That is the right prior and it is also exactly how a *real* over-denial would get waved
+> through: someone hits one, remembers this paragraph, and stops looking. That failure is the
+> mirror of the one this section exists to prevent, and it is worse, because it fails silently
+> and in the direction that feels safe.
+>
+> The corollary says **a plain hub member denied on a hub-scoped SA is correct.** It does *not*
+> say *any* denial involving a hub-scoped SA is correct. Those are one word apart. All of the
+> following remain real bugs and must still be reported:
+>
+> - an **admin** or the SA's **creator** denied — that is the ruled *grant* failing, not the
+>   ruled denial working
+> - a **project-scoped** SA denied to a project member — nothing in §8.2 touches that path
+> - an **agent principal** denied where its ancestry should carry it (`checkAccessForAgent`
+>   step 0)
+>
+> Three false reports are cheaper than one suppressed one.
+>
 > **Never coordinate "hub-scoped" with "other-project" in a list of things to reject.** They are
 > opposites. I wrote exactly that sentence ninety minutes after ruling the reverse, and it was
 > caught by an implementer who checked the instruction against a test rather than against its
