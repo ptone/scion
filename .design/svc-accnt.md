@@ -563,6 +563,61 @@ still can't hammer the IAM API. Invalidate on SA delete and on Hub-initiated pol
 (feature already inert — no verified SAs exist, so nothing to gate) from "call failed".
 Escape hatch `gcpIamCheckMode: enforce | off`, default `enforce`.
 
+### 5.5 🛑 CORRECTION — the mode and the checker are ONE switch, and this section built two
+
+*Added 2026-07-28, applying aid-em's rule 15 to our own tree. **This is a defect in the section
+above, not in P3's implementation of it.***
+
+Measured at `2836b685`:
+
+- `saAssignCheckerFor` returns `s.saAssignChecker` in mode-`off` **and** in
+  enforce-with-generator — the *same value*. The only behaviour the mode changes is
+  enforce-with-**nil**-generator → the unavailable checker → **deny**.
+- `saAssignChecker` is assigned exactly once, `server.go:981`, to
+  `NewDisabledCallerPermissionChecker()`. Nowhere else in the repo.
+- `SAAssignCheckEnforce` occurs exactly twice: its own doc comment and its own definition.
+
+So flipping the mode to `enforce` — which nothing in the repo can do — **would not turn the
+check on.** The configuration that runs a real check (enforce + generator + a non-disabled
+checker) is unreachable by construction, and `store.EvaluateActAs` never executes via any HTTP
+path.
+
+**Why that is this section's fault.** §5.1 specifies, at length and correctly, that the gate must
+**deny** when `gcpTokenGenerator == nil`. Q7 then specifies a mode with values `enforce | off`.
+**Together those describe exactly one live transition — the deny — and never say what installs
+the checker on the allow path.** P3 built precisely what was written. The mode's entire reachable
+behaviour *is* the sentence I wrote down; the missing half is the sentence I did not.
+
+> **The rule, general:** an enforcement mode and the capability it selects are **one switch, and
+> must be one field**. A mode whose "on" position resolves to the same collaborator as its "off"
+> position is not a feature flag — it is a **label on a decision made somewhere else**, and every
+> release note written from it will describe the wrong control.
+
+**Consequences that are prerequisites, not follow-ups:**
+
+1. **The enforce path must execute in CI before it executes in production.** Presence of the gate
+   on the call path is *not* evidence that the gate can decide — `authorizeSAAssignment` **is**
+   invoked at `:495` and `:1698`, and that is compatible with everything above. This is the
+   acceptance criterion I previously stated as *"check presence, not colour"* and then spent as
+   something stronger than it licenses.
+2. **Tests must vary the *checker*, not the mode.** That needs a test-only installer for
+   `saAssignChecker` / `hookIdentityChecker`. Per gated surface: a denying checker asserted
+   through to the wire, **and an allowing twin** — a denial-only pair proves only that *something*
+   denied.
+3. **The release note must name both switches.** `server.go:970`'s
+   *"⚠️ INERT IN THIS RELEASE"* is good practice and should stay; it currently names the switch
+   that is *not* the one holding the feature inert.
+4. **Q7's stated default is `enforce`; the implementation ships `off`.** Deliberate and disclosed
+   for this release. Recorded here so the divergence is not later read as drift, and so #19's
+   resolution does not silently inherit `off` as though the design had chosen it.
+
+**Why this could not have been caught behaviourally.** No experiment distinguishes "correctly
+wired and inert" from "not wired": the component's behaviour range has **one point**. Rule 15
+(*where the outcome is invariant over a component's full behaviour range, that component is not
+the fix site*) therefore cannot be *applied* here — which is the strongest form of the problem,
+not an exemption from it. **An untestable gate reads as an unwired gate until someone makes it
+varyable.**
+
 ---
 
 ## 6. Authorization shape — the `assign` action
