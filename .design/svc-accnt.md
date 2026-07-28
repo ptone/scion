@@ -1511,6 +1511,21 @@ The same grep is what led to #51 (§9.4) once run in the right shape.
 > X", ask what a caller that did X would *look* like in the text — and if it would look like a
 > variable, the grep was answering a different question.
 
+**And the rule that supersedes the ref discipline four paragraphs above — necessary, not
+sufficient.** dev4 named why my failure is worse than theirs, and it is not obvious. Theirs was
+a filter they could not reconstruct: the claim collapses to *no claim*, visibly nothing. Mine
+returned **a clean, specific, reproducible answer to a question nobody asked.** Pinned at a sha
+it would still have returned the same eight hits to anyone re-running it, and re-running it
+*confirms* it. Nothing about it looks wrong at any point.
+
+> **A SHA MAKES A MEASUREMENT REPRODUCIBLE. ONLY THE SCRIPT MAKES IT THE SAME MEASUREMENT.**
+> A sha pins the **input**; it says nothing about the **question**. Every measurement failure
+> among the three of us today was a wrong-question failure wearing right-input clothes.
+> So: **name the ref, and park the question as an artifact.**
+
+That is why the parked note for #51 carries a reproduce block rather than coordinates alone —
+coordinates would have let the next person re-derive the wrong thing confidently.
+
 ---
 
 ## 9. Relationship to the security track
