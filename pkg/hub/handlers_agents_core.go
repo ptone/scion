@@ -337,9 +337,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// Why it is worth failing here rather than falling through. The
 		// "attribution only" note above is true of creatorName, ancestry and
 		// the notify subscriber, and false of createdBy: it is written to
-		// OwnerID as well as CreatedBy, and OwnerID is an authorization input,
-		// compared against the caller at authz.go:129 and capabilities.go:314
-		// and :381. That write happens in createAgentInProject in
+		// OwnerID as well as CreatedBy, and OwnerID is an authorization input.
+		// The three sites that test a Resource's OwnerID generically, and so
+		// can see an agent, are checkAccessForUser (authz.go),
+		// ComputeCapabilitiesBatch and checkAccessPrecomputed
+		// (capabilities.go). handlers_groups.go has a fourth owner equality,
+		// likewise guarded, but it reads a group and never sees an agent.
+		// Anchored on function names on purpose: an earlier revision of this
+		// comment cited line numbers, and a comment added elsewhere in
+		// capabilities.go moved them by 19 the same afternoon.
+		// That write happens in createAgentInProject in
 		// handlers_agents_core.go — hundreds of lines from one of the two
 		// blocks that feed it and in a different file from the other. Nothing
 		// connects the gate's list of admitted kinds to this if/else chain, and
@@ -354,7 +361,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// on that axis, and the store clears the column rather than defaulting
 		// it. The tripwire is here because that safety is a property of those
 		// three comparison sites, which nothing enforces either, and because an
-		// agent owned by nobody cannot be given an owner afterwards.
+		// agent owned by nobody cannot be given an owner THROUGH THE API: the
+		// only write to an agent's OwnerID in pkg/hub is at creation. The store
+		// itself supports it — entadapter/agent_store.go sets OwnerID when
+		// non-empty and clears it when empty — so this is a missing endpoint,
+		// not unrecoverable data. Those call for different fixes.
 		//
 		// Widening the gate should therefore break loudly, here, at the point
 		// where the two lists disagree — not silently, in a field someone later
