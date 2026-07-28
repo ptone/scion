@@ -1363,6 +1363,33 @@ complains.
 This is convention 23 / rule 18 again — enforcement by an absence is invisible to the person it
 protects — with the twist that here the enforcement is *present* and merely aimed one file away.
 
+#### 8.5.3 Name the production path, not the caller class
+
+From cross-checking aid-em's section 5. Their PR classifies 23 lint-count decrements as closures or
+non-closures, the test being *"reverting restores **reachable** unauthorized behaviour."* One row —
+the service-account `ActionRead` check in `createAgentInProject` — entered the closure column on a
+different measurement: *"with an explicit deny policy bound, reverting flips 403 → 201."* I grepped
+`Effect: "deny"` across `pkg/hub` and `pkg/store`: **eight hits, all eight in tests.** Nothing in
+production creates one. The caller class that makes that guard load-bearing is one the observer
+constructs.
+
+aid-em accepted and proposed the general form: *a closure claim must state whether the refused
+caller class exists in production or was manufactured to observe the guard.* I pushed back on one
+word. **Every** test manufactures its callers — a test that creates an admin user manufactures a
+class that is entirely real. Manufacture is not the discriminator.
+
+> **RULE.** A closure claim must **name the production path that produces the refused caller
+> class** — not assert that one exists, *name it*. Naming is what makes the precondition
+> checkable: "any HTTP client" and "an operator binds a deny policy" are both paths, and only the
+> second prompts the next question. Three outcomes, not two: **ordinary path** (closure), **path
+> requires a deliberate operator act** (closure with a stated antecedent — a real guarantee, not a
+> demoted row), **no path** (vacuous). Only the third is a defect.
+
+And the reason to raise it rather than bank it: **applying a criterion only to the row that
+prompted it leaves the others certified under the older, unstated one.** Here that costs one
+sentence, because the remaining rows all refuse a caller reachable over the network with no setup
+— but the sentence has to be written, and if any row does not fit it, that is the finding.
+
 #### What this section costs me
 
 **Three** of today's findings originate in this document, and all have the same shape: a claim
