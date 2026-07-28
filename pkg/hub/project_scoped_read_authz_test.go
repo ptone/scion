@@ -339,3 +339,143 @@ func TestProjRead_ProjectOwnerStillReads(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Write paths.
+//
+// These are NOT #591 sites. Every one already carries else { Forbidden(w) } and
+// already denies a cross-project agent. What changed is WHICH denial: a 403
+// confirms the project exists to a caller who cannot otherwise establish that,
+// so isolation now runs first and answers 404, matching the read paths.
+//
+// This is a deliberate, observable behaviour change on paths that were already
+// fail-closed, and it is pinned here rather than left implicit. It narrows a
+// disclosure; it does not close an authorization hole, and nothing below should
+// be read as claiming otherwise.
+//
+// The seven write guards, all in the same three files:
+//
+//	project_pre_start_hook_handlers.go  POST create, POST activate, PUT, DELETE
+//	project_settings_handlers.go        PUT
+//	handlers_shared_dirs.go             POST, and DELETE via handleProjectSharedDirByName
+// ---------------------------------------------------------------------------
+
+// writePaths returns the seven mutating endpoints, scoped to projA.
+func (f *projReadFixture) writePaths() []struct{ name, method, path, body string } {
+	base := "/api/v1/projects/" + f.projA.ID
+	hook := base + "/pre-start-hooks/" + f.hook.ID
+	return []struct{ name, method, path, body string }{
+		{"create hook", http.MethodPost, base + "/pre-start-hooks",
+			`{"name":"x","script":"#!/bin/sh\necho x\n"}`},
+		{"activate hook", http.MethodPost, hook + "/activate", ``},
+		{"update hook", http.MethodPut, hook, `{"name":"y"}`},
+		{"delete hook", http.MethodDelete, hook, ``},
+		{"update settings", http.MethodPut, base + "/settings", `{}`},
+		{"create shared dir", http.MethodPost, base + "/shared-dirs",
+			`{"name":"sd","mountPath":"/mnt/sd"}`},
+		{"delete shared dir", http.MethodDelete, base + "/shared-dirs/sd", ``},
+	}
+}
+
+func (f *projReadFixture) agentWrite(t *testing.T, a *store.Agent, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	svc := f.srv.GetAgentTokenService()
+	require.NotNil(t, svc)
+	tok, err := svc.GenerateAgentToken(a.ID, a.ProjectID, nil, nil)
+	require.NoError(t, err)
+	return doRequestWithAgentToken(t, f.srv, method, path, bytes.NewBufferString(body), tok)
+}
+
+func (f *projReadFixture) userWrite(t *testing.T, u *store.User, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	svc := f.srv.GetUserTokenService()
+	require.NotNil(t, svc)
+	tok, _, err := svc.GenerateAccessToken(u.ID, u.Email, u.DisplayName,
+		string(u.Role), ClientTypeAPI)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestProjWrite_CrossProjectAgentGetsNotFound pins the changed answer. Before
+// this change each of these returned 403, which told an agent in an unrelated
+// project that the project exists. The caller is denied either way; only the
+// disclosure differs.
+func TestProjWrite_CrossProjectAgentGetsNotFound(t *testing.T) {
+	f := projReadSetup(t)
+
+	for _, tc := range f.writePaths() {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := f.agentWrite(t, f.stranger, tc.method, tc.path, tc.body)
+			require.Equal(t, http.StatusNotFound, rec.Code,
+				"deliberate change: this path answered 403 before, which confirmed "+
+					"the project's existence. It was already fail-closed — this is a "+
+					"disclosure narrowing, not an authorization fix")
+		})
+	}
+}
+
+// TestProjWrite_SameProjectAgentStillForbidden pins that the change did not
+// widen anything. An agent inside the project passes isolation and is then
+// denied by the write guard exactly as before: agents may not mutate project
+// configuration, and the project read baseline is read-class only.
+func TestProjWrite_SameProjectAgentStillForbidden(t *testing.T) {
+	f := projReadSetup(t)
+
+	for _, tc := range f.writePaths() {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := f.agentWrite(t, f.insider, tc.method, tc.path, tc.body)
+			require.Equal(t, http.StatusForbidden, rec.Code,
+				"an in-project agent must still be denied writes; 404 here would mean "+
+					"isolation is denying on identity kind, 2xx would mean the change "+
+					"widened write access")
+		})
+	}
+}
+
+// TestProjWrite_UnrelatedUserStillForbidden is the constraint that this must not
+// become a user-visible change. A non-member user received 403 before and must
+// receive 403 after — users are not subject to the agent isolation check at all.
+func TestProjWrite_UnrelatedUserStillForbidden(t *testing.T) {
+	f := projReadSetup(t)
+
+	for _, tc := range f.writePaths() {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := f.userWrite(t, f.outsdr, tc.method, tc.path, tc.body)
+			require.Equal(t, http.StatusForbidden, rec.Code,
+				"users keep 403: the isolation check is a no-op for non-agent callers, "+
+					"and turning a user's 403 into a 404 would be an unrelated "+
+					"user-visible change")
+		})
+	}
+}
+
+// TestProjWrite_ProjectOwnerStillWrites is the positive control. The isolation
+// call is a no-op for users, but that is a claim about GetAgentIdentityFromContext
+// returning nil for a user identity, and it is measured here rather than assumed.
+func TestProjWrite_ProjectOwnerStillWrites(t *testing.T) {
+	f := projReadSetup(t)
+	base := "/api/v1/projects/" + f.projA.ID
+
+	tests := []struct{ name, method, path, body string }{
+		{"update settings", http.MethodPut, base + "/settings", `{}`},
+		{"create shared dir", http.MethodPost, base + "/shared-dirs",
+			`{"name":"owner-sd","mountPath":"/mnt/owner-sd"}`},
+		{"create hook", http.MethodPost, base + "/pre-start-hooks",
+			`{"name":"owner-hook","script":"#!/bin/sh\necho hi\n"}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := f.userWrite(t, f.owner, tc.method, tc.path, tc.body)
+			require.Less(t, rec.Code, 300,
+				"the project owner must still be able to write; got %d %s",
+				rec.Code, rec.Body.String())
+		})
+	}
+}

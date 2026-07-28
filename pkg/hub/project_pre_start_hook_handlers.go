@@ -92,6 +92,15 @@ func (s *Server) handleProjectPreStartHooks(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, &ListProjectPreStartHooksResponse{Hooks: hooks})
 
 	case http.MethodPost:
+		// Not a #591 site: the else branch below is present, so this path is
+		// already fail-closed and a cross-project agent is already denied. The
+		// call below narrows WHICH denial it gets, from a 403 that confirms the
+		// project exists to a 404 that does not. Added so this file gives one
+		// answer to a cross-project agent rather than 404 on read and 403 on
+		// write, which would look like a decision and is not.
+		if !s.requireProjectVisibleToAgent(w, r, project) {
+			return
+		}
 		if userIdent, ok := identity.(UserIdentity); ok {
 			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
 				Type:    "project",
@@ -215,6 +224,12 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 			MethodNotAllowed(w)
 			return
 		}
+		// Disclosure narrowing, not an authorization change: already fail-closed
+		// below. See requireProjectVisibleToAgent — 404 rather than a 403 that
+		// confirms the project exists.
+		if !s.requireProjectVisibleToAgent(w, r, project) {
+			return
+		}
 		if userIdent, ok := identity.(UserIdentity); ok {
 			if !s.authzService.CheckAccess(ctx, userIdent, projectRes, ActionUpdate).Allowed {
 				Forbidden(w)
@@ -261,6 +276,12 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusOK, hook)
 
 	case http.MethodPut:
+		// Disclosure narrowing, not an authorization change: already fail-closed
+		// below. See requireProjectVisibleToAgent — 404 rather than a 403 that
+		// confirms the project exists.
+		if !s.requireProjectVisibleToAgent(w, r, project) {
+			return
+		}
 		if userIdent, ok := identity.(UserIdentity); ok {
 			if !s.authzService.CheckAccess(ctx, userIdent, projectRes, ActionUpdate).Allowed {
 				Forbidden(w)
@@ -333,6 +354,12 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusOK, hook)
 
 	case http.MethodDelete:
+		// Disclosure narrowing, not an authorization change: already fail-closed
+		// below. See requireProjectVisibleToAgent — 404 rather than a 403 that
+		// confirms the project exists.
+		if !s.requireProjectVisibleToAgent(w, r, project) {
+			return
+		}
 		if userIdent, ok := identity.(UserIdentity); ok {
 			if !s.authzService.CheckAccess(ctx, userIdent, projectRes, ActionUpdate).Allowed {
 				Forbidden(w)

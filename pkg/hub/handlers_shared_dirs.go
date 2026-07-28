@@ -63,6 +63,12 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 
 	case http.MethodPost:
 		// Write access check
+		// Disclosure narrowing, not an authorization change: already fail-closed
+		// below. See requireProjectVisibleToAgent — 404 rather than a 403 that
+		// confirms the project exists.
+		if !s.requireProjectVisibleToAgent(w, r, project) {
+			return
+		}
 		if userIdent, ok := identity.(UserIdentity); ok {
 			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
 				Type:    "project",
@@ -133,6 +139,12 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 	}
 
 	// Write access check
+	// Disclosure narrowing, not an authorization change: already fail-closed
+	// below. See requireProjectVisibleToAgent — 404 rather than a 403 that
+	// confirms the project exists.
+	if !s.requireProjectVisibleToAgent(w, r, project) {
+		return
+	}
 	if userIdent, ok := identity.(UserIdentity); ok {
 		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
 			Type:    "project",
