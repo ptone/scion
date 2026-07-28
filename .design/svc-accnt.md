@@ -1330,6 +1330,39 @@ both must change together.
 > resource, not every route in the feature you are designing. A feature boundary is not a
 > security boundary, and the handler that gets it right may be in another file — as it was here.
 
+#### 8.5.2 A deliberate merge conflict alarms at the text, not at its dependents (#41)
+
+aid-dev4 made the `gcpServiceAccountResource` collision between `agent-id-fix` and this branch
+**deliberate**, as a tripwire: whoever merges must confirm the function is conditional rather than
+silently take one side. That is the right instrument and it works. It is also **not sufficient**,
+and the measurement below is why.
+
+I went looking for a regression and did not find one. On `agent-id-fix` the create and PATCH
+assign gates became `authorizeMsg`, which is fail-closed for agents, and agents have nothing to
+pass it with: every automatic `AddGroupMember` in the tree is `MemberTypeUser`, no seeded policy
+binds an agent principal, and `gcpServiceAccountResource` sets no `Ancestry`. **The hypothesis is
+dead** — their `checkAccessForAgent` step 3 *agent project read baseline* covers it, exactly as
+their comment claims. Recorded because a dead hypothesis is a measurement.
+
+What is left over is in the same comment. Its AGENT paragraph reasons from **their** version of
+the function — *"it claims ParentType project for every scope, so a hub-scoped account resolves to
+the hub instance ID: non-empty, and equal to no project."* Mine is already conditional, so in the
+merged tree a hub-scoped account yields `pid == ""` and the baseline is skipped by the `pid != ""`
+guard instead. Same outcome, different clause — which is the failure their own next sentence
+names: *"the reason recorded here would be wrong. Convert both."*
+
+**The merge performs one of their two conversions by itself, as a side effect of resolving a
+conflict in a different file.** Nobody decides it, and behaviour does not change, so nothing
+complains.
+
+> **RULE.** A deliberate merge conflict raises its alarm **at the point of textual collision, not
+> at the point of semantic dependency**. If a claim elsewhere is conditioned on which side wins,
+> the conflict does not protect it: name the dependents **inside the conflicting hunk**, so that
+> resolving the conflict and repairing the claim are the same act.
+
+This is convention 23 / rule 18 again — enforcement by an absence is invisible to the person it
+protects — with the twist that here the enforcement is *present* and merely aimed one file away.
+
 #### What this section costs me
 
 **Three** of today's findings originate in this document, and all have the same shape: a claim
