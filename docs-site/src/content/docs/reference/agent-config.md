@@ -162,3 +162,35 @@ When an agent starts:
 2.  **Harness Resolution**: It resolves the `harness_config` against the active profile's `harness_configs` map in `settings.yaml`.
 3.  **Overrides**: CLI flags (e.g., `--image`, `--env`) override values in `scion-agent.yaml`.
 4.  **Final Config**: The resolved configuration is written to the agent's runtime directory.
+
+### Resolution precedence
+
+Every agent setting that can be specified in more than one place — `harness_config`,
+`model`, `thinking_level`, `max_turns`, `max_model_calls`, `max_duration` and
+`resources` — is resolved with the same ordering, highest priority first:
+
+1.  **Explicit agent-create request** — the value passed to `scion agent create`
+    (or the equivalent API field / web form field).
+2.  **Project setting** — the project's default, set in Project Settings and
+    stored as a `scion.io/default-*` annotation on the project.
+3.  **Template** — the value in the selected template's `scion-agent.yaml`.
+4.  **Harness config** — the selected harness config's own defaults.
+5.  **Profile** — the active profile in `settings.yaml`.
+6.  **Hub default** — the hub's agent defaults, set in the admin server config.
+    These are currently resolved broker-side, from the settings the hub writes to
+    `settings.yaml`, so they apply on deployments where the broker reads that file.
+7.  **Compiled default** — the value built into Scion.
+
+A project setting is an *override*: it takes precedence over the template a project
+uses. Leave a project setting blank to let the template (and then the rest of the
+chain) decide.
+
+:::caution[Behaviour change]
+Before this change, `harness_config` was the one exception to the ordering above:
+the template was resolved ahead of the project's `scion.io/default-harness-config`
+annotation, so the template always won. It now follows the same ordering as every
+other setting. This only affects projects that set **both** a default harness config
+**and** a template naming a *different* harness config; new agents in those projects
+receive the project's harness config. Projects that set only one of the two are
+unaffected, and already-created agents keep the configuration they were created with.
+:::
