@@ -652,6 +652,52 @@ reference. Do **not** copy `templateResource()` — it never sets the parent, so
 project-owner bypass silently fails to apply to project-scoped templates (a separate
 pre-existing bug, out of scope here but worth filing).
 
+### 6.2 🛑 `CreatedBy` IS AN AUTHORIZATION INPUT, AND IT IS IMMUTABLE ONLY BY OMISSION
+
+*Found 2026-07-28 running aid-em's upsert shape (rule 18) against our own tree. **Known-good-for-now
+with a named precondition — NOT clean.***
+
+Three facts, each measured at `2836b685`, whose conjunction is the finding:
+
+1. `gcpServiceAccountResource` sets `OwnerID: sa.CreatedBy`.
+2. `checkAccessForUser`'s **owner bypass** — `resource.OwnerID == user.ID()` → `Allowed` — consults
+   **no membership**, and runs before every resource-type rule.
+3. `UpdateGCPServiceAccount` (`entadapter/external_store.go:166`) sets email, projectID,
+   displayName, defaultScopes, verified, verificationStatus, verificationError, managed, managedBy,
+   verifiedAt. It does **not** set `CreatedBy`, `Scope`, `ScopeID` or `Created`.
+
+**So `CreatedBy` — which grants an unconditional authorization bypass — is immutable because a
+line is missing from a setter list.** Nobody wrote that it must be. There is no comment, no
+schema-level immutability, and no test.
+
+> **The natural repair is the violation.** The obvious tidy-up is to make `Update` symmetric with
+> `Create` by adding `.SetCreatedBy(sa.CreatedBy)`. That single line would make the owner bypass
+> **writable through any handler that round-trips an SA through `Update`** — and `Update` is
+> already called on the verify path, so no new route is needed. It would review as consistency
+> work.
+
+**`Scope` and `ScopeID` are in exactly the same position, and Goal 2 is what pressures them.**
+Per §6.1, `gcpServiceAccountResource` branches on `sa.Scope == store.ScopeProject` to decide
+whether the **project-owner bypass** applies. Scope is therefore also an authz input, also
+immutable only by omission — and Step 5 is the change most likely to want a scope mutator.
+
+**Required, as a Step 5 (#23) prerequisite:**
+
+- Assert immutability where it can be enforced rather than observed: reject `CreatedBy`, `Scope`,
+  `ScopeID` and `Created` changes at the store boundary, or make the update path take an explicit
+  field set rather than a whole struct.
+- Until then, a comment **on `UpdateGCPServiceAccount` itself** naming these four fields, why they
+  are absent, and that `CreatedBy`/`Scope` feed authorization bypasses. **The comment must sit
+  where the tempting edit happens**, not in this document.
+- **Observable, not cause** (§8.4): *re-verifying, renaming, or otherwise updating a service
+  account must never change who is allowed to use it.* One test, round-tripping an SA through
+  every handler that calls `Update`, asserting `CreatedBy`/`Scope`/`ScopeID` are unchanged.
+
+**Why this is recorded rather than fixed now:** nothing today writes these fields, so there is no
+live defect. But **the safety is an absence, and an absence leaves nothing in a future diff to
+review** — the violating change would be a one-line addition that makes two functions match.
+Marking this surface "clean" would delete the only warning its future violator would get.
+
 ---
 
 ## 7. Audit
