@@ -875,6 +875,41 @@ off exactly as today, so nothing existing breaks and the Q1 default stays off.
 > while it remains unruled, and the feature is visibly incomplete rather than quietly
 > over-permissive.
 >
+> > **🛑 "the SA's creator" is not a grant this section made. It is engine behaviour I
+> > inherited and described without noticing.**
+> >
+> > `gcpServiceAccountResource` sets `OwnerID: sa.CreatedBy` **unconditionally**
+> > (`capabilities.go:182`), and the owner bypass sits at `authz.go:133-139` — before any
+> > resource-type logic, consulting nothing but ID equality. So the creator passes by engine
+> > bypass whatever this document says. **I cannot un-grant them by ruling.**
+> >
+> > And the grant is wider than "survives removal". sa-dev-p4 measured it:
+> > `TestAgentCreate_HubScopedSA_FormerHubMemberCreatorDenied` fails when unskipped —
+> > expected 403, got 201, agent created with the SA attached. Building it required granting
+> > hub membership and then revoking it, **because the creator subtest never grants
+> > membership at all and passes anyway.** Membership is not merely un-revoked; it is *never
+> > consulted, at any point*. My first statement of this ("removal does not revoke") implied
+> > there had been something to revoke. There never was.
+> >
+> > **The sharpest evidence that this is systemic rather than an oversight in our corner is
+> > four lines below the defect.** `capabilities.go:184-188` carries a careful comment
+> > explaining why a hub- or user-scoped SA must *not* claim a project parent — the author
+> > reasoned explicitly about handing a bypass to the wrong principal. Two lines above,
+> > `OwnerID` is set unconditionally, uncommented. The care went to one field and not the
+> > other, in the same function, by someone thinking about exactly this hazard.
+> >
+> > This is the same shape as the hook-execution escalation earlier in this section:
+> > **authority captured at write time and never re-checked.** Two independent instances in
+> > one codebase is a pattern, not a coincidence.
+> >
+> > **One local lever exists, so #19 has a cheap option and not only an expensive one:** do
+> > not populate `OwnerID` for hub-scoped SAs. Resource-local, one line, does not touch the
+> > engine, and costs nothing *if* hub-scope creation ends up admin-gated — admins already
+> > pass by admin bypass. It is therefore **coupled to Step 5's answer**, which is what #19 is
+> > for. Recorded as an option, not ruled. The general question — whether the owner bypass
+> > needs a liveness condition — is an engine-level decision and is explicitly **not** mine.
+>
+
 > **⚠️ That protection does NOT exist before the conversion, and the ordering is therefore
 > load-bearing.** Under `ActionRead`, a parentless resource causes `checkAccessForUser` to
 > skip the project-owner bypass (`pid == ""`, `authz.go:153`) and fall through to the seeded
