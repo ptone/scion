@@ -1515,6 +1515,28 @@ check whose failure does not stop the action is not a check — it is a log line
 as everything else in this section: the instrument ran, returned a true number, and answered a
 question ("how many?") that was not the one the gate needed ("may I proceed?").
 
+**aid-em's reading of this is the one to keep, and it is not a compliment.** That shell chain
+*is* #591. A condition that **fails open** — the check could not refuse, so the action happened
+regardless of the answer — is precisely the bug class this entire project exists to remove from
+`pkg/hub`, reintroduced at the ops layer, in the one script whose only job was to prevent a
+leak, ninety seconds after the leak it was written to stop, by the person with the clearest view
+of the class, under maximum attention. **If the class were a competence failure that would be
+impossible. It is a structural attractor, and I produced the proof against myself.**
+
+One sharpening, because "fail-open" undersells the mechanism. The gate *did* evaluate: `grep -c`
+ran before the push and returned an exit status, and `&&` consulted it. The exit status was 0
+because *matching is not an error*. **The answer I cared about — the count, `2` — went to
+stdout, and stdout was never wired to anything.** So the gate read a channel that could not
+carry a refusal, while the channel that carried one had no reader. That is dev0's
+crash-wearing-a-success-code from the other direction: there, the observable could not express
+failure; here, the observable that *could* express it was not the observable the gate consulted.
+
+> **A GATE MUST READ THE CHANNEL THAT CAN CARRY A REFUSAL.** Before trusting a check, ask which
+> value the control flow actually branches on — not which value the instrument printed.
+
+The fix is an `if` that refuses to commit: the **fail-closed** form, which is the same
+correction being shipped in the code.
+
 > **AN ABSENCE OF LITERALS IS NOT AN ABSENCE OF CAPABILITY.** Before concluding "nothing does
 > X", ask what a caller that did X would *look* like in the text — and if it would look like a
 > variable, the grep was answering a different question.
