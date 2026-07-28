@@ -71,16 +71,14 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 
 	switch r.Method {
 	case http.MethodGet:
-		if userIdent, ok := identity.(UserIdentity); ok {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type:    "project",
-				ID:      project.ID,
-				OwnerID: project.OwnerID,
-			}, ActionRead)
-			if !decision.Allowed {
-				Forbidden(w)
-				return
-			}
+		// Isolation before authorization: see requireProjectVisibleToAgent. A
+		// cross-project agent must get 404 rather than a 403 that confirms the
+		// project exists.
+		if !s.requireProjectVisibleToAgent(w, r, project) {
+			return
+		}
+		if !s.authorize(w, r, projectResource(project), ActionRead) {
+			return
 		}
 
 		writeJSON(w, http.StatusOK, projectSettingsFromAnnotations(project))

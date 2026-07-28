@@ -74,16 +74,14 @@ func (s *Server) handleProjectPreStartHooks(w http.ResponseWriter, r *http.Reque
 
 	switch r.Method {
 	case http.MethodGet:
-		if userIdent, ok := identity.(UserIdentity); ok {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type:    "project",
-				ID:      project.ID,
-				OwnerID: project.OwnerID,
-			}, ActionRead)
-			if !decision.Allowed {
-				Forbidden(w)
-				return
-			}
+		// Isolation before authorization: an agent outside the project must get
+		// 404, not 403, or the response confirms the project exists to a caller
+		// that cannot otherwise establish it.
+		if !s.requireProjectVisibleToAgent(w, r, project) {
+			return
+		}
+		if !s.authorize(w, r, projectResource(project), ActionRead) {
+			return
 		}
 
 		hooks, err := s.store.ListProjectPreStartHooks(ctx, projectID)
@@ -242,11 +240,14 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 
 	switch r.Method {
 	case http.MethodGet:
-		if userIdent, ok := identity.(UserIdentity); ok {
-			if !s.authzService.CheckAccess(ctx, userIdent, projectRes, ActionRead).Allowed {
-				Forbidden(w)
-				return
-			}
+		// Isolation before authorization: see requireProjectVisibleToAgent. A
+		// cross-project agent must get 404 rather than a 403 that confirms the
+		// project exists.
+		if !s.requireProjectVisibleToAgent(w, r, project) {
+			return
+		}
+		if !s.authorize(w, r, projectRes, ActionRead) {
+			return
 		}
 		hook, err := s.store.GetProjectPreStartHook(ctx, hookID, projectID)
 		if err != nil {

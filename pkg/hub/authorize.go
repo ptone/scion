@@ -280,3 +280,38 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdent
 	}
 	return user, true
 }
+
+// requireProjectVisibleToAgent enforces project isolation for agent callers
+// before authorization runs, answering 404 and returning false when the caller
+// is an agent belonging to a different project.
+//
+// Ordering is the whole point of this helper, so it must be called BEFORE
+// s.authorize rather than after. Authorization alone answers 403 for a
+// cross-project agent, and 403-versus-404 is itself a disclosure: it confirms
+// the project exists to a caller who cannot otherwise establish that. Running
+// isolation first collapses both cases to 404.
+//
+// It is deliberately a no-op for every non-agent caller:
+//
+//   - Users are unaffected. A non-member user already receives 403 from
+//     authorize, that behaviour is long-standing and tested elsewhere, and
+//     changing it here would be an unrelated user-visible change smuggled into
+//     an authorization fix.
+//   - Brokers and unauthenticated callers fall through to authorize, which
+//     denies them. Denying them here instead would answer 404 where 403 and 401
+//     are correct.
+//
+// It grants nothing: every caller it passes still has to clear s.authorize.
+func (s *Server) requireProjectVisibleToAgent(w http.ResponseWriter, r *http.Request, project *store.Project) bool {
+	agentIdent := GetAgentIdentityFromContext(r.Context())
+	if agentIdent == nil {
+		return true
+	}
+	if project.ID != agentIdent.ProjectID() {
+		logAuthzDenial(r, agentIdent, projectResource(project), ActionRead,
+			"agent outside project")
+		NotFound(w, "Project")
+		return false
+	}
+	return true
+}
