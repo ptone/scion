@@ -581,7 +581,17 @@ func (s *Server) createAgentInProject(
 		// agents and false of humans; do not rely on a deny to constrain a
 		// privileged human caller here.
 		//
-		// The PATCH path carries the same call and the same two statements.
+		// THE PATCH PATH DOES NOT DUPLICATE ANY OF THE ABOVE — it carries the
+		// same call and POINTS HERE. This block is the single copy, so a
+		// correction made here is inherited rather than needing to be applied
+		// twice; that is why 798c608a had one hunk and not two. The cost is that
+		// the pointer at the PATCH site is load-bearing: it summarises this
+		// block in one sentence, and a change here that falsifies that summary
+		// leaves a wrong statement sixty lines away that no diff on this hunk
+		// will show. An earlier version of THIS line said the PATCH path
+		// "carries the same two statements", which stopped being true the moment
+		// a third and fourth were added above. Check the PATCH pointer when you
+		// edit this block.
 		if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
 			"You don't have permission to assign GCP service accounts in this project") {
 			return
