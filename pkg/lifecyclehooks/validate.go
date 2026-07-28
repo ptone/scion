@@ -417,23 +417,38 @@ func validateExecutionIdentity(ctx context.Context, hook *store.LifecycleHook, r
 		})
 	}
 
-	// Must be in scope. For hub-scoped hooks, any hub-scoped SA is valid.
-	// For project-scoped hooks, the SA must be in the same project scope.
+	// Must be in scope. The two arms below ask DIFFERENT questions, which is
+	// why only one of them uses the shared reachability predicate.
 	switch hook.ScopeType {
 	case store.LifecycleHookScopeHub:
-		// Hub-scoped hooks can use hub-scoped SAs.
-		if sa.Scope != "hub" {
+		// A same-scope requirement, NOT a reachability question: a hub-scoped
+		// hook must run as a hub-scoped identity, because it fires for agents in
+		// every project and a project-scoped identity would silently confer one
+		// project's credentials on all of them.
+		//
+		// Deliberately NOT converted to GCPServiceAccount.ReachableFromProject
+		// (P4 item F). The helper's hub arm returns true for every project, which
+		// is the opposite of what this line needs — routing this test through it
+		// would admit project-scoped accounts here. The bare literal is correct.
+		// Do not "finish the job" by converting it in a later tidy-up sweep.
+		if sa.Scope != store.ScopeHub {
 			errs = append(errs, FieldError{
 				Field:   "executionIdentity",
 				Message: fmt.Sprintf("hub-scoped hook requires a hub-scoped service account; SA %q has scope %q", sa.Email, sa.Scope),
 			})
 		}
 	case store.LifecycleHookScopeProject:
-		// Project-scoped hooks require the SA to be in the same project.
-		if sa.Scope != "project" || sa.ScopeID != hook.ScopeID {
+		// A reachability question, and so the shared predicate (P4 item F). This
+		// read `sa.Scope != "project" || sa.ScopeID != hook.ScopeID`, which asks
+		// the helper's exact question but answers it with a bare literal that
+		// predates hub scope. Under hub-scoped service accounts a hub-wide
+		// identity must be usable as a project-scoped hook's execution identity —
+		// that is the point of the account being hub-wide — and the literal
+		// denied it while reporting a scope mismatch.
+		if !sa.ReachableFromProject(hook.ScopeID) {
 			errs = append(errs, FieldError{
 				Field:   "executionIdentity",
-				Message: fmt.Sprintf("project-scoped hook requires a service account in the same project; SA %q has scope %s/%s", sa.Email, sa.Scope, sa.ScopeID),
+				Message: fmt.Sprintf("project-scoped hook requires a service account in the same project or a hub-scoped one; SA %q has scope %s/%s", sa.Email, sa.Scope, sa.ScopeID),
 			})
 		}
 	}

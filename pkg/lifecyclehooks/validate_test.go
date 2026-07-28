@@ -74,6 +74,18 @@ func newProjectSA(id, email, scopeID string) *store.GCPServiceAccount {
 	}
 }
 
+// newUserSA returns a mock verified user-scoped GCP SA.
+func newUserSA(id, email, scopeID string) *store.GCPServiceAccount {
+	return &store.GCPServiceAccount{
+		ID:                 id,
+		Scope:              store.ScopeUser,
+		ScopeID:            scopeID,
+		Email:              email,
+		Verified:           true,
+		VerificationStatus: "verified",
+	}
+}
+
 // defaultResolver returns a resolver with a single verified hub SA.
 func defaultResolver() *mockSAResolver {
 	return &mockSAResolver{
@@ -81,6 +93,10 @@ func defaultResolver() *mockSAResolver {
 			"sa-001": newVerifiedHubSA("sa-001", "hooks@example.iam.gserviceaccount.com"),
 			"sa-002": newUnverifiedSA("sa-002", "pending@example.iam.gserviceaccount.com"),
 			"sa-003": newProjectSA("sa-003", "proj@example.iam.gserviceaccount.com", "proj-123"),
+			// A user-scoped account whose ScopeID deliberately collides with
+			// proj-123, so that a scope check which only compares ScopeID
+			// cannot pass these tests by accident.
+			"sa-004": newUserSA("sa-004", "user@example.iam.gserviceaccount.com", "proj-123"),
 		},
 	}
 }
@@ -573,6 +589,71 @@ func TestValidateHook_ExecutionIdentity(t *testing.T) {
 			}(),
 			wantErr: true,
 			errMsg:  "project-scoped hook requires a service account in the same project",
+		},
+		{
+			// P4 item F. The two arms of the scope switch ask different
+			// questions and this is the one that changed: a hub-wide identity
+			// must be usable by a project-scoped hook, which is the point of
+			// the account being hub-wide. The bare literal this replaced
+			// required Scope == "project" and so denied it.
+			name: "valid: hub-scoped SA for project-scoped hook",
+			hook: func() *store.LifecycleHook {
+				h := validHTTPHook()
+				h.ScopeType = store.LifecycleHookScopeProject
+				h.ScopeID = "proj-123"
+				h.ExecutionIdentity = "sa-001" // hub-scoped
+				return h
+			}(),
+			wantErr: false,
+		},
+		{
+			// The other arm did NOT change, and must not: a hub-scoped hook
+			// fires for agents in every project, so a project-scoped identity
+			// there would confer one project's credentials on all of them.
+			// Asserted next to the case above because the reachability
+			// predicate's hub arm returns true for every project — routing
+			// this arm through it would admit exactly this account.
+			name: "invalid: project-scoped SA for hub-scoped hook, after the widening",
+			hook: func() *store.LifecycleHook {
+				h := validHTTPHook()
+				h.ScopeType = store.LifecycleHookScopeHub
+				h.ScopeID = ""
+				h.ExecutionIdentity = "sa-003" // project-scoped
+				return h
+			}(),
+			wantErr: true,
+			errMsg:  "hub-scoped hook requires a hub-scoped service account",
+		},
+		{
+			// A user-scoped account reaches no hook. It was excluded before by
+			// accident (a user ID rarely equals a project ID) and now by the
+			// predicate's fail-closed default arm — asserted because the
+			// ScopeID here is the hook's own scope, so the old literal's second
+			// clause would have passed and only its first stood in the way.
+			name: "invalid: user-scoped SA for project-scoped hook",
+			hook: func() *store.LifecycleHook {
+				h := validHTTPHook()
+				h.ScopeType = store.LifecycleHookScopeProject
+				h.ScopeID = "proj-123"
+				h.ExecutionIdentity = "sa-004" // user-scoped, ScopeID proj-123
+				return h
+			}(),
+			wantErr: true,
+			errMsg:  "project-scoped hook requires a service account",
+		},
+		{
+			// Verification and scope are independent gates; opening the second
+			// must not shadow the first.
+			name: "invalid: unverified hub-scoped SA for project-scoped hook",
+			hook: func() *store.LifecycleHook {
+				h := validHTTPHook()
+				h.ScopeType = store.LifecycleHookScopeProject
+				h.ScopeID = "proj-123"
+				h.ExecutionIdentity = "sa-002" // hub-scoped but unverified
+				return h
+			}(),
+			wantErr: true,
+			errMsg:  "not verified",
 		},
 		{
 			name: "invalid: http action without execution_identity",
