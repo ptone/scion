@@ -961,6 +961,62 @@ off exactly as today, so nothing existing breaks and the Q1 default stays off.
 
 ---
 
+### 8.4 ✅ RULED 2026-07-28 — how an SA refusal is *rendered*: 403 vs 404
+
+Goal 2 adds flat by-id routes (`/api/v1/gcp-service-accounts/{id}/…`) so that hub-scoped SAs
+have an address at all. That raised a question the nested routes never had to answer, and the
+answer is an architectural rule, not a per-endpoint choice.
+
+**The rule.**
+
+> **`authorizeGCPServiceAccount` answers a POLICY question — *may this caller do this*.
+> 403-vs-404 is a DISCLOSURE question — *could this caller have established that this
+> resource exists by some other means?* That is a property of the ROUTE, not of the policy.**
+>
+> **The same verdict may therefore render differently on different routes, and doing so does
+> not create a second description of who may do what.**
+
+**Applied per scope, it does not come out uniform:**
+
+| Scope | Flat by-id route renders | Because |
+|---|---|---|
+| project | **404** | The caller could not reach it via the nested route either; a 403 would confirm the account exists to someone who could not otherwise establish it. |
+| user | **404** | Stronger case. A user-scoped SA is unreachable from *any* project, so the nested route has always 404'd it — **the flat route is the first HTTP address a user-scoped SA has ever had.** That 403 would be a *brand-new* oracle, created by the route we are adding, not an inherited one. (sa-dev-p5's extension of the ruling, approved.) |
+| hub | **403** | Every user is joined to `hub-members` on login, and `hub-member-read-all` grants `read`+`list` on `ResourceType: "*"` at hub scope. **Any authenticated caller can already enumerate hub-scoped SAs**, so there is no existence left to protect. A 404 here would be a lie that protects nothing and costs the debuggability of the exact surface Goal 2 is adding. |
+| *(default)* | **404** | Fail closed: a scope added later arrives with **no disclosure analysis done**. |
+
+**Encode the RULE, not the TABLE.** Each arm must name the specific path that makes existence
+establishable — the hub arm names `hub-member-read-all` explicitly. **The hub row's premise is
+the one expected to move:** if #19 resolves toward admin-gating hub-scope creation, the
+listability this rests on may narrow and the hub arm should then become 404. If the table is
+encoded, that move is invisible; if the rule is encoded, the sentence that becomes false is
+sitting in the arm that has to change.
+
+**Structural prerequisite — this ruling is not implementable without it.**
+`authorizeGCPServiceAccount` *decided and wrote* in one step: every arm called `writeError`
+itself and returned a `bool`. A route therefore could not remap its refusal, which forced the
+flat route's loader to **re-derive `sa.CreatedBy != user.ID()`** to get a 404 in ahead of the
+write — reintroducing the second description of who-may-do-what that the rule exists to avoid.
+**The fix created the hazard rather than avoiding it.** Required split, now implemented:
+
+- `gcpServiceAccountVerdict(…) → (verdict, error)` — writes nothing; carries `allowed`, a
+  reason, and a `noIdentity` flag so a renderer can answer an unauthenticated caller
+  generically rather than leaking which arm it would have hit.
+- `authorizeGCPServiceAccount` — unchanged nested renderer; **every refusal still 403**.
+- `authorizeGCPServiceAccountFlat` — renders per the rule above.
+
+The creator test then exists at exactly one line and both routes reach it. The flat loader
+tests **scope and nothing else** — a routing fact, not a policy one.
+
+**Test obligation.** Pin the hub-403/user-404 split as a **divergence in a single test** — same
+caller, same action, both denied by policy, only disclosure differing. Two tests asserting two
+values can be silently harmonised by a later "consistency" cleanup; one test asserting that they
+*differ* cannot. Plus a regression guard that the nested routes still render 403 after the
+split, because **the way this refactor fails is by leaking the flat disclosure policy into the
+nested route** and quietly turning existing 403s into 404s.
+
+---
+
 ## 9. Relationship to the security track
 
 Issue **#591** documents a hub-wide authorization bypass with the same root
