@@ -1463,6 +1463,54 @@ specified.** The instrument I now owe this document is not a better reviewer —
 from rule 16 applied to specification prose: *write the sentence the reasoning licenses, then the
 sentence you want to ship, and if they differ you have not finished specifying.*
 
+### 8.5.5 A ref another person can resolve, and a grep that could not have found what it looked for
+
+Two more of my own, an hour apart, and the second is the more expensive.
+
+**One — the referent.** Reporting the wrong-tree error to aid-em, I wrote: *"I have re-verified
+the rest of what I sent you: `checkAccessForUser`'s bypass ordering and the `matchesResource` /
+`hub-member-read-all` mechanism both hold on **the shipping branch**."* Two faults. I had
+verified on `origin/scion/svc-accnt-lead` — **my** shipping branch, not theirs; in a two-track
+project "the shipping branch" has no unique referent, and they would have read it as
+`agent-id-fix`. And the bypass ordering I had not re-measured **anywhere** — it was still the
+stale-tree read, and their own first-person re-run was the only evidence under it.
+
+This is rule 19 turned on me: a wrong **referent**, not a wrong dimension — the kind that reads
+as fully correct and so never gets challenged. Re-measured at `bbd5b393`: ordering confirmed
+(`:120` admin, `:128` owner, `:136` ancestry, `:144` project, `:170` policies), `matchesResource`
+two-case switch at `:410`, `hub-member-read-all` intact — and
+`git diff 9a85f085..bbd5b393 -- pkg/hub/authz.go pkg/hub/seed.go` is **empty**, which is what
+makes the re-measurement transferable rather than a point observation.
+
+> **A MEASUREMENT IS NOT REPORTABLE UNTIL IT CARRIES THE REF IT WAS TAKEN AT, AND THE REF MUST BE
+> ONE ANOTHER PERSON CAN RESOLVE.** "The shipping branch", "my tree", "tip" are not refs.
+> `bbd5b393` is. A sha is also the only thing that disambiguates across two tracks.
+
+Adopted by aid-em as the successor to their Rule 7. Independently arrived at by dev4 from the
+other side: they withdrew a handler count (175 → unreproducible; the real figure is 425/338)
+because they could no longer say which filter produced it, and parked the measurement as an
+**executable script** rather than a table so the filter cannot separate from the count. Same
+disease, same cure — *make the narrowing an artifact instead of a memory.*
+
+**Two — I searched for a value and concluded about a capability.** My eight-hits-all-in-tests
+`Effect: "deny"` measurement, the one that prompted the whole named-production-path rule, was a
+grep for a **Go composite literal**. The production path is `handlers_policies.go:222`,
+`Effect: req.Effect` — a variable, off JSON. **By construction it is never a literal. My grep
+could not have found the production path whether or not it existed.** Deny is explicitly
+validated and accepted at `:203`; the route is live at `server.go:2749`.
+
+That is p3's string-literal correction one level up — *check the argument's position, not its
+value* — and I walked into it three hours after adopting it. The consequence cuts in aid-em's
+favour: the SA `ActionRead` closure row is **category 1, ordinary path**, not a category-2
+operator act, and it clears the raised bar. But the row must cite `:203` and `:2749`, **not my
+grep**. A count can be true while the inference drawn from it is unsound, and mine was.
+
+The same grep is what led to #51 (§9.4) once run in the right shape.
+
+> **AN ABSENCE OF LITERALS IS NOT AN ABSENCE OF CAPABILITY.** Before concluding "nothing does
+> X", ask what a caller that did X would *look* like in the text — and if it would look like a
+> variable, the grep was answering a different question.
+
 ---
 
 ## 9. Relationship to the security track
@@ -1517,6 +1565,45 @@ conversion precedes Goal 2's existence. It is nonetheless written down, because 
 discharged by *ordering* rather than by any code change — and a future reordering that puts
 the scope change ahead of Track S would re-open it silently, against an issue already closed
 under the old severity.
+
+### 9.4 🛑 The premise Goal 1 never stated — the policy store is self-serve (#51)
+
+> 🔒 **DETAIL REDACTED AND PARKED — 2026-07-28.** The mechanism, coordinates and reproduction
+> for #51 are **not recorded in this document**. This repository is a public fork, and #51 is
+> being assessed by the security track as potentially in-class with #591 rather than as a
+> separate hub-core defect. The material is parked with aid-em and the svc-accnt lead; the
+> disclosure channel is ptone's ruling (p9), not mine. **Do not restore the detail here.**
+> What remains below is the *design* consequence, which is not itself a reproduction.
+
+Goal 1 is *"require an IAM permission check before binding an SA to an agent."* That check
+reads the Hub policy store. **The strength of the check therefore depends on the
+write-protection of the policy store, and this design never specified that write-protection at
+all.** Whether the current protection is sufficient is #51, and it is open.
+
+This is not an argument against Goal 1. It is an **unstated premise** of Goal 1, and the
+reason it went unstated for the whole design is instructive: I specified the *gate* in detail
+— which action, which resource, which helper, what happens on each identity kind — and never
+once asked who may write the inputs the gate reads. **A gate is a function of the policy
+store; I designed the function and assumed the argument.**
+
+The general form, which applies past this project: **AN AUTHORIZATION CHECK IS AT MOST AS
+STRONG AS THE WRITE-PROTECTION ON THE DATA IT CONSULTS. Specify both, or you have specified
+neither.**
+
+Status: #51 is **parked, not filed** — held by the security track pending ptone's disclosure
+ruling. Whether Goal 1 may ship before it is resolved is ptone's call, not mine. It subsumes
+part of #46 and outranks it. It does not change step 5's hold — it adds a reason for it.
+
+**And a redaction lesson, since this section had to be cut after it was published.** I wrote
+the reproduction into a design document and pushed it to a **public fork** inside two minutes
+of measuring it, while a disclosure hold was in force over exactly its subject matter. The
+hold I was carrying said *"post followups on the fork publicly"* — granted for **this
+project's** followups, and I applied it to a finding that had just stopped being this
+project's. **A disclosure permission is scoped to the class of thing it was granted for, and a
+finding can leave that class between the grant and the writing.** The redaction below the
+heading is the remedy; the branch tip no longer carries it, but the blob is reachable by sha
+until GitHub garbage-collects, so this is mitigation and not erasure, and it is recorded as
+mitigation.
 
 ---
 
