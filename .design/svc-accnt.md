@@ -980,10 +980,30 @@ answer is an architectural rule, not a per-endpoint choice.
 
 | Scope | Flat by-id route renders | Because |
 |---|---|---|
-| project | **404** | The caller could not reach it via the nested route either; a 403 would confirm the account exists to someone who could not otherwise establish it. |
+| project | **404** | ⚠️ **Not a disclosure decision at all** — see the correction below. A project-scoped SA already has a nested address that carries project-level authz; a second, project-free address would be **a second door to the same rows with different authorization on it**. The 404 says *"wrong address"*, not *"you may not know"*. Enforced in `loadParentlessGCPServiceAccount`, which never consults identity. |
 | user | **404** | Stronger case. A user-scoped SA is unreachable from *any* project, so the nested route has always 404'd it — **the flat route is the first HTTP address a user-scoped SA has ever had.** That 403 would be a *brand-new* oracle, created by the route we are adding, not an inherited one. (sa-dev-p5's extension of the ruling, approved.) |
 | hub | **403** | Every user is joined to `hub-members` on login, and `hub-member-read-all` grants `read`+`list` on `ResourceType: "*"` at hub scope. **Any authenticated caller can already enumerate hub-scoped SAs**, so there is no existence left to protect. A 404 here would be a lie that protects nothing and costs the debuggability of the exact surface Goal 2 is adding. |
 | *(default)* | **404** | Fail closed: a scope added later arrives with **no disclosure analysis done**. |
+
+> **🛑 CORRECTION, 2026-07-28 — the project row is a different KIND of decision, and an earlier
+> version of this table got its reason wrong.** I first justified the project 404 as a
+> disclosure control: *"the caller could not reach it via the nested route either."* **That is
+> false**, and sa-dev-p5's test asserts its falsity on purpose —
+> `TestGCPSA_FlatByID_Get_ProjectScopedIs404NotForbidden` has the **same user** receive 404 on
+> the flat route and **200 on the nested one**. The caller *can* reach it. That pairing is what
+> proves the 404 measures **routing**, not permission.
+>
+> **What produced the slip:** the table has one uniform `Because` column, and three of its four
+> rows are disclosure decisions. **A uniform column invites a uniform justification**, and I
+> supplied one for the row that was not that kind of thing. The doc even contradicted itself —
+> it says the loader "tests scope and nothing else", which cannot be true of a rationale that
+> depends on who is asking.
+>
+> **The disclosure concern is still real for project scope, but as a separate constraint:** the
+> refusal body must be **byte-identical** to the missing-row 404, so an existing out-of-scope
+> account cannot be distinguished from a nonexistent one. Pinned by
+> `TestGCPSA_FlatByID_RefusalsAreIndistinguishable`. That is the disclosure control; the 404
+> itself is not.
 
 **Encode the RULE, not the TABLE.** Each arm must name the specific path that makes existence
 establishable — the hub arm names `hub-member-read-all` explicitly. **The hub row's premise is
