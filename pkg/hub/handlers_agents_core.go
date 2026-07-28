@@ -291,46 +291,25 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate GCP identity assignment structure (field-level; SA resolution happens in createAgentInProject)
-	if req.GCPIdentity != nil {
-		switch req.GCPIdentity.MetadataMode {
-		case store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough:
-			if req.GCPIdentity.ServiceAccountID != "" {
-				ValidationError(w, "service_account_id must be empty when metadata_mode is '"+req.GCPIdentity.MetadataMode+"'", nil)
-				return
-			}
-		case store.GCPMetadataModeAssign:
-			if req.GCPIdentity.ServiceAccountID == "" {
-				ValidationError(w, "service_account_id is required when metadata_mode is 'assign'", nil)
-				return
-			}
-		default:
-			ValidationError(w, "metadata_mode must be 'block', 'passthrough', or 'assign'", nil)
-			return
-		}
-	}
-
 	if err := labels.Validate(req.Labels); err != nil {
 		ValidationError(w, "Invalid labels: "+err.Error(), nil)
 		return
 	}
 
-	// Check if the caller is an agent (sub-agent creation)
+	// Authorization for every caller kind. The branch this replaced had no else,
+	// so a caller that was neither agent nor user fell through ungated (#591).
+	// Do not wrap this in an identity-kind test.
+	if !s.authorizeAgentCreate(w, r, req.ProjectID) {
+		return
+	}
+
+	// Attribution only (CreatedBy, creator name, ancestry, --notify subscriber).
+	// Authorization is done above; nothing below this point is a gate.
 	var createdBy string
 	var creatorName string
 	var ancestry []string
 	var notifySubscriberType, notifySubscriberID string // For --notify subscription
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		// Agent callers must have the project:agent:create scope
-		if !agentIdent.HasScope(ScopeAgentCreate) {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
-			return
-		}
-		// Enforce project isolation: agents can only create sub-agents in their own project
-		if req.ProjectID != agentIdent.ProjectID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only create sub-agents within their own project", nil)
-			return
-		}
 		createdBy = agentIdent.ID()
 		// Resolve human-readable creator name and ancestry from the calling agent
 		if creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID()); err == nil {
@@ -348,20 +327,52 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		notifySubscriberID = userIdent.ID()
 		// User-created agents: ancestry is [userID]
 		ancestry = []string{userIdent.ID()}
-		// Enforce policy-based authorization: user must have permission to create agents in this project
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:       "agent",
-			ParentType: "project",
-			ParentID:   req.ProjectID,
-		}, ActionCreate)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You don't have permission to create agents in this project", nil)
-			return
-		}
 	}
 
 	s.createAgentInProject(w, r, req, req.ProjectID, createdBy, creatorName, ancestry, notifySubscriberType, notifySubscriberID)
+}
+
+// validateGCPIdentityRequest performs the field-level validation of a requested
+// GCP identity assignment: the mode must be one of the three known modes, and
+// the service account ID must be present exactly for "assign". It writes a
+// ValidationError and returns false when the request is malformed.
+//
+// It lives here, on the path both create routes funnel through, rather than in
+// each route. It used to be in createAgent only, so POST
+// /api/v1/projects/{id}/agents — the route the CLI actually uses — accepted an
+// unrecognised metadata_mode outright and accepted a service_account_id
+// alongside "block" (#591, design §3.3). Duplicating the block per route would
+// reproduce the drift that caused that; one chokepoint cannot drift, and a
+// future third caller of createAgentInProject is covered by construction.
+//
+// It rejects rather than normalises. An unknown mode is a malformed request and
+// saying so is the signal; coercing it to "block" would hide exactly the
+// cross-layer disagreement documented in design §8.4. (The broker and sidecar
+// correctly fall back to "block" — they only know the value is unusable,
+// whereas here we know the caller's intent is malformed.)
+func validateGCPIdentityRequest(w http.ResponseWriter, cfg *GCPIdentityAssignment) bool {
+	if cfg == nil {
+		return true
+	}
+	switch cfg.MetadataMode {
+	case store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough:
+		if cfg.ServiceAccountID != "" {
+			ValidationError(w, "service_account_id must be empty when metadata_mode is '"+cfg.MetadataMode+"'", nil)
+			return false
+		}
+	case store.GCPMetadataModeAssign:
+		if cfg.ServiceAccountID == "" {
+			ValidationError(w, "service_account_id is required when metadata_mode is 'assign'", nil)
+			return false
+		}
+	default:
+		// Covers the empty mode, i.e. `"gcp_identity": {}`, which previously
+		// fell through the config-building switch below and silently dropped
+		// the project's configured default mode.
+		ValidationError(w, "metadata_mode must be 'block', 'passthrough', or 'assign'", nil)
+		return false
+	}
+	return true
 }
 
 func (s *Server) createAgentInProject(
@@ -377,6 +388,12 @@ func (s *Server) createAgentInProject(
 ) {
 	ctx := r.Context()
 	hubCreateStart := time.Now()
+
+	// Field-level GCP identity validation, before any persistence or SA
+	// resolution. Both create routes reach it here.
+	if !validateGCPIdentityRequest(w, req.GCPIdentity) {
+		return
+	}
 
 	// Verify project exists and get its configuration
 	project, err := s.store.GetProject(ctx, projectID)
@@ -405,18 +422,38 @@ func (s *Server) createAgentInProject(
 
 	// Validate GCP passthrough mode: only the broker owner (or admin) may use passthrough,
 	// because it exposes the broker's own GCP identity to the agent container.
+	//
+	// This is deliberately still a hand-rolled ownership comparison rather than
+	// s.authorize(brokerResource(broker), ActionDispatch): no policy can grant
+	// passthrough and the project-owner bypass does not apply, so routing it
+	// through the policy engine would change behaviour for *users*, not just
+	// for the non-user callers #591 is about. That alignment is tracked
+	// separately as ptone/scion#596. The fix here is the minimal one — the
+	// comparison is unchanged, and callers that are not users, which previously
+	// skipped the whole block, are now denied explicitly.
 	if req.GCPIdentity != nil && req.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough && runtimeBrokerID != "" {
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			broker, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			if userIdent.Role() != "admin" && broker.CreatedBy != userIdent.ID() {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"GCP identity passthrough requires broker ownership. Only the broker owner can expose the broker's GCP identity to agents.", nil)
-				return
-			}
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			// Agents and brokers reach this and cannot own a broker, so there
+			// is nothing for the comparison below to consult. Deny, rather than
+			// skipping the block as this site did before #591.
+			logAuthzDenial(r, GetIdentityFromContext(ctx),
+				Resource{Type: "broker", ID: runtimeBrokerID}, ActionDispatch,
+				"passthrough is restricted to broker owners and admins")
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"GCP identity passthrough requires broker ownership. Only the broker owner can expose the broker's GCP identity to agents.", nil)
+			return
+		}
+		broker, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if userIdent.Role() != "admin" && broker.CreatedBy != userIdent.ID() {
+			logAuthzDenial(r, userIdent, brokerResource(broker), ActionDispatch, "not broker owner or admin")
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"GCP identity passthrough requires broker ownership. Only the broker owner can expose the broker's GCP identity to agents.", nil)
+			return
 		}
 	}
 
@@ -441,15 +478,11 @@ func (s *Server) createAgentInProject(
 			return
 		}
 
-		// Authorization: any project member who can see the SA can assign it.
+		// Authorization: any caller who can see the SA can assign it.
 		// SA management (create/mint/delete) is gated on ActionManage elsewhere.
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, gcpServiceAccountResource(sa), ActionRead)
-			if !decision.Allowed {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"You don't have permission to assign GCP service accounts in this project", nil)
-				return
-			}
+		if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
+			"You don't have permission to assign GCP service accounts in this project") {
+			return
 		}
 
 		resolvedGCPSA = sa
@@ -582,6 +615,18 @@ func (s *Server) createAgentInProject(
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModeBlock,
 			}
+		default:
+			// Unreachable: validateGCPIdentityRequest rejects any other mode at
+			// the top of this function. Asserted rather than assumed — before
+			// the hoist this switch had no default arm, and on the project
+			// route that accident was the *only* thing standing between an
+			// unrecognised mode and the agent container (design §8.4). An
+			// unrecognised mode reaching here now means the validation was
+			// removed or bypassed, which is a server bug, not a client one.
+			slog.Error("unreachable: unvalidated GCP metadata mode reached agent config build",
+				"metadata_mode", req.GCPIdentity.MetadataMode, "project_id", projectID)
+			InternalError(w)
+			return
 		}
 	} else {
 		// No explicit GCP identity — check project default, then fall back to block.
@@ -1432,19 +1477,20 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	// If the caller is an agent, enforce project isolation
+	// If the caller is an agent, enforce project isolation.
+	//
+	// This check MUST run before s.authorize: cross-project access is answered
+	// with 404 rather than 403 so the response does not disclose that the agent
+	// exists. Authorizing first would turn that 404 into a 403 and leak
+	// existence (design §4.2).
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if agent.ProjectID != agentIdent.ProjectID() {
 			NotFound(w, "Agent")
 			return
 		}
 	}
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionRead)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		return
 	}
 
 	// Enrich agent with project and broker names
@@ -1471,6 +1517,13 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 	agent, err := s.store.GetAgent(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// This handler had no authorization of any kind before #591: any
+	// authenticated caller could rename, relabel and rewrite the config of any
+	// agent on the hub, including its GCP identity.
+	if !s.authorize(w, r, agentResource(agent), ActionUpdate) {
 		return
 	}
 
@@ -1651,14 +1704,12 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id string) 
 func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
 	ctx := r.Context()
 
-	// Enforce policy-based authorization: only the agent's creator (owner) or admins can delete
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionDelete)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"Only the agent's creator can delete it", nil)
-			return
-		}
+	// Enforce policy-based authorization for every caller kind. The previous
+	// denial text claimed only the agent's creator could delete it, which was
+	// never true — admins, ancestors and project owners all pass — so the
+	// generic 403 body is used here rather than authorizeMsg.
+	if !s.authorize(w, r, agentResource(agent), ActionDelete) {
+		return
 	}
 
 	query := r.URL.Query()
