@@ -2312,9 +2312,18 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				if tmpl.Slug != "" {
 					agent.Template = tmpl.Slug
 				}
-				harnessConfig := s.getHarnessConfigFromTemplate(tmpl, "")
-				if harnessConfig != "" {
-					agent.AppliedConfig.HarnessConfig = harnessConfig
+				// Only fall back to the template's harness config when the
+				// project has no default-harness-config annotation — the
+				// project setting outranks the template, matching the
+				// default-template block above and the agent-create path.
+				projectHarnessConfig := ""
+				if project != nil && project.Annotations != nil {
+					projectHarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
+				}
+				if projectHarnessConfig == "" {
+					if harnessConfig := s.getHarnessConfigFromTemplate(tmpl, ""); harnessConfig != "" {
+						agent.AppliedConfig.HarnessConfig = harnessConfig
+					}
 				}
 			}
 		}
