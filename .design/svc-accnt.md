@@ -694,13 +694,28 @@ off exactly as today, so nothing existing breaks and the Q1 default stays off.
 >
 > Arm 2 is now **project-scoped**, so `matchesResource`'s #595 fail-closed rejection of
 > parentless resources (`authz.go:415-427`) makes it **structurally unable** to reach a
-> hub-scoped SA. Consequence for this section: when Goal 2's item A lands, hub-scoped SAs
-> will be assignable by admins, the SA's creator, and nobody else. **§8.2 therefore fails
-> closed while it remains unruled** — the feature is visibly incomplete rather than quietly
-> over-permissive, which is the right way for an unruled question to manifest.
+> hub-scoped SA. Consequence: **once the `ActionAssign` conversion has landed**, hub-scoped
+> SAs are assignable by admins, the SA's creator, and nobody else — so §8.2 fails closed
+> while it remains unruled, and the feature is visibly incomplete rather than quietly
+> over-permissive.
 >
-> This does not answer the question. It removes the deadline. Whoever opens hub-scope
-> assignment must do so deliberately, in a commit that cites this ruling.
+> **⚠️ That protection does NOT exist before the conversion, and the ordering is therefore
+> load-bearing.** Under `ActionRead`, a parentless resource causes `checkAccessForUser` to
+> skip the project-owner bypass (`pid == ""`, `authz.go:153`) and fall through to the seeded
+> `hub-member-read-all` policy, which **matches**: its `ScopeType` is `hub`, so
+> `matchesResource`'s switch has no arm and returns `true`; its `ResourceType` is `"*"`; its
+> actions are `read`,`list`. **Every hub member therefore passes the gate on every hub-scoped
+> SA.** If hub-scope creation ships before the conversion, this section's hole is live —
+> a cross-project privilege exposure, human-only (agents are excluded because the project
+> read baseline requires `pid != ""`).
+>
+> So the confinement is not a property of the design; it is a property of the *order*.
+> Recorded because an earlier version of this note stated the safe outcome unconditionally,
+> and the unconditional form is the one that gets cited.
+>
+> None of this answers the question. It removes the deadline, provided the order holds.
+> Whoever opens hub-scope assignment must do so deliberately, in a commit that cites this
+> ruling.
 
 ---
 
