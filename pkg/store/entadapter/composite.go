@@ -177,6 +177,12 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	if err := entc.AutoMigrate(ctx, c.client); err != nil {
 		return err
 	}
+	// Data backfills belong here rather than at the call site: on Postgres this
+	// runs under the schema-migration advisory lock, so replicas booting
+	// together do not race, and the columns being read are guaranteed to exist.
+	if err := c.BackfillGCPVerificationStatus(ctx); err != nil {
+		return err
+	}
 	return c.SeedMaintenanceOperations(ctx)
 }
 
