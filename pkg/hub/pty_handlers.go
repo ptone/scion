@@ -89,17 +89,25 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce policy-based authorization: only the agent's creator (owner) or admins can access PTY
-	if user := GetUserIdentityFromContext(ctx); user != nil {
-		decision := s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionAttach)
-		if !decision.Allowed {
-			slog.Warn("PTY access denied: policy check failed",
-				"agent_id", agentID,
-				"userID", user.ID(),
-				"reason", decision.Reason)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	// Enforce policy-based authorization: only the agent's creator (owner) or admins can access PTY.
+	// Fail closed: the nil-identity check above already rejected unauthenticated
+	// requests, so a nil *user* identity here means an authenticated non-user
+	// (agent or broker) token. Such a caller has no basis to attach to an agent's
+	// PTY; previously this block was skipped entirely for non-user identities,
+	// letting an authenticated agent/broker token attach unchecked (#591 class).
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionAttach)
+	if !decision.Allowed {
+		slog.Warn("PTY access denied: policy check failed",
+			"agent_id", agentID,
+			"userID", user.ID(),
+			"reason", decision.Reason)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+		return
 	}
 
 	// Check if agent has a runtime broker

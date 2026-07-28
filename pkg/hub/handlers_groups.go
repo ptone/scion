@@ -317,13 +317,21 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 		}
 	}
 
-	// Enforce authorization: only group owner or admins can update
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, groupResource(group), ActionUpdate)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	// Enforce authorization: only group owner or admins can update.
+	// Fail closed: unauthenticated requests are already rejected by the auth
+	// middleware, so a nil user identity here means an authenticated non-user
+	// (agent or broker) token. Such a caller has no basis to update a group;
+	// previously this whole block was skipped for non-user identities, admitting
+	// agent/broker tokens straight to the privileged write (#591 class).
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, userIdent, groupResource(group), ActionUpdate)
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+		return
 	}
 
 	var req UpdateGroupRequest
@@ -374,13 +382,20 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 		}
 	}
 
-	// Enforce authorization: only group owner or admins can delete
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, groupResource(group), ActionDelete)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	// Enforce authorization: only group owner or admins can delete.
+	// Fail closed: unauthenticated requests are already rejected by the auth
+	// middleware, so a nil user identity here means an authenticated non-user
+	// (agent or broker) token, which has no basis to delete a group. Previously
+	// this block was skipped for non-user identities (#591 class).
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, userIdent, groupResource(group), ActionDelete)
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+		return
 	}
 
 	if group.GroupType == store.GroupTypeProjectAgents {
@@ -478,13 +493,20 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 	ctx := r.Context()
 	groupID := group.ID
 
-	// Enforce authorization: only group owner or admins can add members
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, groupResource(group), ActionAddMember)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	// Enforce authorization: only group owner or admins can add members.
+	// Fail closed: unauthenticated requests are already rejected by the auth
+	// middleware, so a nil user identity here means an authenticated non-user
+	// (agent or broker) token, which has no basis to add group members.
+	// Previously this block was skipped for non-user identities (#591 class).
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, userIdent, groupResource(group), ActionAddMember)
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+		return
 	}
 
 	var req AddGroupMemberRequest
@@ -515,29 +537,30 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 
 	// Enforce role-hierarchy: only owners can add owners/admins; admins can only add members.
 	// Platform admins and group resource owners bypass the role-hierarchy check.
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		isResourceOwner := group.OwnerID != "" && group.OwnerID == userIdent.ID()
-		isPlatformAdmin := userIdent.Role() == "admin"
-		if !isResourceOwner && !isPlatformAdmin {
-			callerMembership, err := s.store.GetGroupMembership(ctx, groupID, store.GroupMemberTypeUser, userIdent.ID())
-			switch req.Role {
-			case store.GroupMemberRoleOwner, store.GroupMemberRoleAdmin:
-				if err != nil || callerMembership.Role != store.GroupMemberRoleOwner {
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"Only group owners can add owners or admins", nil)
-					return
-				}
-			case store.GroupMemberRoleMember:
-				if err != nil {
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"Only group owners or admins can add members", nil)
-					return
-				}
-				if callerMembership.Role != store.GroupMemberRoleOwner && callerMembership.Role != store.GroupMemberRoleAdmin {
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"Only group owners or admins can add members", nil)
-					return
-				}
+	// userIdent is guaranteed non-nil by the authorization gate above (a non-user
+	// identity has already been rejected), so this runs unconditionally rather than
+	// being skipped for non-user callers.
+	isResourceOwner := group.OwnerID != "" && group.OwnerID == userIdent.ID()
+	isPlatformAdmin := userIdent.Role() == "admin"
+	if !isResourceOwner && !isPlatformAdmin {
+		callerMembership, err := s.store.GetGroupMembership(ctx, groupID, store.GroupMemberTypeUser, userIdent.ID())
+		switch req.Role {
+		case store.GroupMemberRoleOwner, store.GroupMemberRoleAdmin:
+			if err != nil || callerMembership.Role != store.GroupMemberRoleOwner {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"Only group owners can add owners or admins", nil)
+				return
+			}
+		case store.GroupMemberRoleMember:
+			if err != nil {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"Only group owners or admins can add members", nil)
+				return
+			}
+			if callerMembership.Role != store.GroupMemberRoleOwner && callerMembership.Role != store.GroupMemberRoleAdmin {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"Only group owners or admins can add members", nil)
+				return
 			}
 		}
 	}
@@ -697,13 +720,20 @@ func (s *Server) getGroupMember(w http.ResponseWriter, r *http.Request, groupID,
 func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group *store.Group, memberType, memberID string) {
 	ctx := r.Context()
 
-	// Enforce authorization: only group owner or admins can remove members
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, groupResource(group), ActionRemoveMember)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	// Enforce authorization: only group owner or admins can remove members.
+	// Fail closed: unauthenticated requests are already rejected by the auth
+	// middleware, so a nil user identity here means an authenticated non-user
+	// (agent or broker) token, which has no basis to remove group members.
+	// Previously this block was skipped for non-user identities (#591 class).
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, userIdent, groupResource(group), ActionRemoveMember)
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+		return
 	}
 
 	// Prevent removing the last owner of a group
