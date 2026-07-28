@@ -60,6 +60,15 @@ import (
 // exact mistake produced a false pass earlier in P4.)
 func hubScopedSAForAgent(t *testing.T, f *bypassAgentsFixture, verified bool) *store.GCPServiceAccount {
 	t.Helper()
+	return hubScopedSACreatedBy(t, f, tid("a-stranger"), verified)
+}
+
+// hubScopedSACreatedBy is the same, with the creator named. Who created the
+// account is not bookkeeping here: the creator is one of the two principals
+// §8.2 permits to assign it, and they are admitted through the resource-owner
+// bypass, so this parameter selects between the admitted and refused cases.
+func hubScopedSACreatedBy(t *testing.T, f *bypassAgentsFixture, creator string, verified bool) *store.GCPServiceAccount {
+	t.Helper()
 	sa := &store.GCPServiceAccount{
 		ID:    uuid.New().String(),
 		Scope: store.ScopeHub,
@@ -68,12 +77,30 @@ func hubScopedSAForAgent(t *testing.T, f *bypassAgentsFixture, verified bool) *s
 		ScopeID:   "some-hub-instance",
 		Email:     fmt.Sprintf("hub-sa-%s@proj.iam.gserviceaccount.com", uuid.New().String()[:8]),
 		ProjectID: "gcp-proj",
-		CreatedBy: tid("a-stranger"),
+		CreatedBy: creator,
 		Verified:  verified,
 		CreatedAt: time.Now(),
 	}
 	require.NoError(t, f.store.CreateGCPServiceAccount(context.Background(), sa))
 	return sa
+}
+
+// hubAdminUser creates a hub administrator. Admins reach a hub-scoped account
+// through the admin bypass, which is a different mechanism from the creator's
+// resource-owner bypass — hence a distinct principal rather than a variation
+// of the same one.
+func hubAdminUser(t *testing.T, f *bypassAgentsFixture) *store.User {
+	t.Helper()
+	u := &store.User{
+		ID:          tid("hub-admin"),
+		Email:       "hub-admin@example.com",
+		DisplayName: "Hub Admin",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, f.store.CreateUser(context.Background(), u))
+	return u
 }
 
 // createAgentAsOwner posts to the project agent route as the project owner.
@@ -124,49 +151,114 @@ func patchAgentSAAsOwner(t *testing.T, f *bypassAgentsFixture, agentID, saID str
 // Site 1 — agent create
 // ============================================================================
 
-// A hub-scoped account is assignable at create by a caller who can read it.
+// A hub-scoped account is assignable at create by the two principals §8.2
+// permits: the account's creator and a hub admin. Nobody else.
 //
-// Hub membership is granted explicitly. A hub-scoped account is parentless, so
-// the assign-time ActionRead check cannot be satisfied by project membership;
-// it needs a hub-scoped policy, which is what hub-members carries. That is not
-// incidental setup — it is the mechanism by which hub-scoped accounts are
-// gated, and a version of this test that passed without it would mean the
-// authorization was not running.
-func TestAgentCreate_HubScopedSA_IsAssignable(t *testing.T) {
+// This test previously asserted the opposite of its denial half — that ANY hub
+// member could assign ANY hub-scoped account — and passed, because ActionRead
+// on a parentless resource is satisfied by the seeded hub-member-read-all
+// policy ("*", read+list). That was §8.2's hole, and the test documented the
+// mechanism of the exposure as though it were the design. Step 2's conversion
+// of this gate to ActionAssign closes it: ActionAssign is granted only by
+// project-scoped policies, which matchesResource will not match against a
+// parentless resource, so the policy path admits nobody and only the two
+// bypasses remain.
+//
+// The two principals are therefore reached by DIFFERENT mechanisms, which is
+// why both are exercised: the creator through the resource-owner bypass
+// (gcpServiceAccountResource carries OwnerID from CreatedBy), the admin
+// through the admin bypass. A change that broke either one would leave the
+// other passing.
+func TestAgentCreate_HubScopedSA_AssignableByCreatorAndAdmin(t *testing.T) {
+	assertAssigned := func(t *testing.T, f *bypassAgentsFixture, rec *httptest.ResponseRecorder, sa *store.GCPServiceAccount) {
+		t.Helper()
+		require.Equal(t, http.StatusCreated, rec.Code,
+			"a permitted principal must be able to assign a hub-scoped SA from any project; got: %s",
+			rec.Body.String())
+
+		var resp CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.NotNil(t, resp.Agent)
+
+		got, err := f.store.GetAgent(context.Background(), resp.Agent.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.AppliedConfig)
+		require.NotNil(t, got.AppliedConfig.GCPIdentity)
+		assert.Equal(t, store.GCPMetadataModeAssign, got.AppliedConfig.GCPIdentity.MetadataMode)
+		assert.Equal(t, sa.ID, got.AppliedConfig.GCPIdentity.ServiceAccountID)
+		assert.Equal(t, sa.Email, got.AppliedConfig.GCPIdentity.ServiceAccountEmail)
+	}
+
+	t.Run("the account's creator", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		// Created BY the caller this time. The stranger-created fixture used
+		// elsewhere in this file exists to defeat the resource-owner
+		// short-circuit; here that short-circuit is the admitting path, because
+		// the creator is one of the two principals §8.2 permits.
+		sa := hubScopedSACreatedBy(t, f, f.owner.ID, true)
+
+		rec := createAgentAsOwner(t, f, CreateAgentRequest{
+			Name: "hub-sa-agent-creator",
+			GCPIdentity: &GCPIdentityAssignment{
+				MetadataMode:     store.GCPMetadataModeAssign,
+				ServiceAccountID: sa.ID,
+			},
+		})
+		assertAssigned(t, f, rec, sa)
+	})
+
+	t.Run("a hub admin", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		sa := hubScopedSAForAgent(t, f, true) // created by a stranger
+		admin := hubAdminUser(t, f)
+
+		f.srv.createProjectMembersGroupAndPolicy(context.Background(), f.proj, f.owner.ID)
+		rec := doRequestAsUser(t, f.srv, admin, http.MethodPost,
+			"/api/v1/projects/"+f.proj.ID+"/agents", CreateAgentRequest{
+				Name: "hub-sa-agent-admin",
+				GCPIdentity: &GCPIdentityAssignment{
+					MetadataMode:     store.GCPMetadataModeAssign,
+					ServiceAccountID: sa.ID,
+				},
+			})
+		assertAssigned(t, f, rec, sa)
+	})
+}
+
+// A plain hub member — not the creator, not an admin — is refused.
+//
+// This is the assertion that closes §8.2's hole, and it is the one to look at
+// if a future change makes hub-scoped accounts assignable again. The caller
+// here holds hub membership, so the seeded hub-member-read-all policy applies
+// to them; the request must still fail. Reverting the gate to ActionRead makes
+// this test fail and is the intended tripwire.
+//
+// The scope message is asserted absent so that a denial arriving for the wrong
+// reason — the scope predicate rejecting a hub-scoped account, which item F
+// deliberately stopped doing — cannot be mistaken for this test passing.
+func TestAgentCreate_HubScopedSA_PlainHubMemberDenied(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	ensureHubMembership(context.Background(), f.store, f.owner.ID)
-	sa := hubScopedSAForAgent(t, f, true)
+	sa := hubScopedSAForAgent(t, f, true) // created by a stranger
 
 	rec := createAgentAsOwner(t, f, CreateAgentRequest{
-		Name: "hub-sa-agent",
+		Name: "hub-sa-agent-member",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode:     store.GCPMetadataModeAssign,
 			ServiceAccountID: sa.ID,
 		},
 	})
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"a hub-scoped SA must be assignable from any project; got: %s", rec.Body.String())
-
-	var resp CreateAgentResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.NotNil(t, resp.Agent)
-
-	got, err := f.store.GetAgent(context.Background(), resp.Agent.ID)
-	require.NoError(t, err)
-	require.NotNil(t, got.AppliedConfig)
-	require.NotNil(t, got.AppliedConfig.GCPIdentity)
-	assert.Equal(t, store.GCPMetadataModeAssign, got.AppliedConfig.GCPIdentity.MetadataMode)
-	assert.Equal(t, sa.ID, got.AppliedConfig.GCPIdentity.ServiceAccountID)
-	assert.Equal(t, sa.Email, got.AppliedConfig.GCPIdentity.ServiceAccountEmail)
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"hub membership alone must not confer assignment of a hub-scoped SA; got: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "does not belong to this project",
+		"the denial must come from authorization, not from the scope predicate")
 }
 
-// The same request from a caller who is not a hub member is refused, and
-// refused by authorization rather than by scope.
-//
-// This is the test that gives the one above its meaning: it shows the scope
-// widening did not make hub-scoped accounts free for all, and it pins which
-// gate is doing the work. Asserting the status alone would not distinguish the
-// two failure modes, so the scope message is asserted absent.
+// The same request from a caller who is not a hub member at all is refused
+// too. Kept alongside the test above because they fail for different reasons —
+// this one has no hub-scoped policy applying to it, that one has one that no
+// longer grants the action — and a regression that restores the hub-member
+// path would leave this test passing.
 func TestAgentCreate_HubScopedSA_NonHubMemberDenied(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	sa := hubScopedSAForAgent(t, f, true)
@@ -246,23 +338,68 @@ func TestAgentCreate_UserScopedSA_RejectedEvenWhenScopeIDMatches(t *testing.T) {
 
 // The PATCH path carries a near-duplicate of the create checks precisely
 // because "create clean, then PATCH the identity in" would otherwise walk
-// around them. So the widening is asserted separately at both sites rather
-// than assumed to travel.
-func TestAgentPatch_HubScopedSA_IsAssignable(t *testing.T) {
+// around them. Every assertion made about create is therefore made here too:
+// a gate that closed only at create would be no gate at all.
+func TestAgentPatch_HubScopedSA_AssignableByCreatorAndAdmin(t *testing.T) {
+	t.Run("the account's creator", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		sa := hubScopedSACreatedBy(t, f, f.owner.ID, true)
+		a := pendingAgentForPatch(t, f, "hub-sa-patch-creator")
+
+		rec := patchAgentSAAsOwner(t, f, a.ID, sa.ID)
+		require.Equal(t, http.StatusOK, rec.Code,
+			"PATCH must admit a hub-scoped SA for its creator, as create does; got: %s", rec.Body.String())
+
+		got, err := f.store.GetAgent(context.Background(), a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.AppliedConfig)
+		require.NotNil(t, got.AppliedConfig.GCPIdentity)
+		assert.Equal(t, sa.ID, got.AppliedConfig.GCPIdentity.ServiceAccountID)
+	})
+
+	t.Run("a hub admin", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		sa := hubScopedSAForAgent(t, f, true) // created by a stranger
+		admin := hubAdminUser(t, f)
+		a := pendingAgentForPatch(t, f, "hub-sa-patch-admin")
+
+		rec := doRequestAsUser(t, f.srv, admin, http.MethodPatch, "/api/v1/agents/"+a.ID,
+			map[string]interface{}{
+				"gcp_identity": map[string]interface{}{
+					"metadata_mode":      store.GCPMetadataModeAssign,
+					"service_account_id": sa.ID,
+				},
+			})
+		require.Equal(t, http.StatusOK, rec.Code,
+			"PATCH must admit a hub-scoped SA for an admin, as create does; got: %s", rec.Body.String())
+
+		got, err := f.store.GetAgent(context.Background(), a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.AppliedConfig)
+		require.NotNil(t, got.AppliedConfig.GCPIdentity)
+		assert.Equal(t, sa.ID, got.AppliedConfig.GCPIdentity.ServiceAccountID)
+	})
+}
+
+// The PATCH twin of the confinement that closes §8.2's hole. If only one of
+// the two sites is checked, "create clean then PATCH the identity in" is the
+// way around it — which is the reason both sites carry the gate at all.
+func TestAgentPatch_HubScopedSA_PlainHubMemberDenied(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	ensureHubMembership(context.Background(), f.store, f.owner.ID)
-	sa := hubScopedSAForAgent(t, f, true)
-	a := pendingAgentForPatch(t, f, "hub-sa-patch")
+	sa := hubScopedSAForAgent(t, f, true) // created by a stranger
+	a := pendingAgentForPatch(t, f, "hub-sa-patch-member")
 
 	rec := patchAgentSAAsOwner(t, f, a.ID, sa.ID)
-	require.Equal(t, http.StatusOK, rec.Code,
-		"PATCH must admit a hub-scoped SA just as create does; got: %s", rec.Body.String())
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"hub membership alone must not confer assignment via PATCH; got: %s", rec.Body.String())
 
 	got, err := f.store.GetAgent(context.Background(), a.ID)
 	require.NoError(t, err)
-	require.NotNil(t, got.AppliedConfig)
-	require.NotNil(t, got.AppliedConfig.GCPIdentity)
-	assert.Equal(t, sa.ID, got.AppliedConfig.GCPIdentity.ServiceAccountID)
+	if got.AppliedConfig != nil {
+		assert.Nil(t, got.AppliedConfig.GCPIdentity,
+			"the denied service account must not have been attached")
+	}
 }
 
 func TestAgentPatch_HubScopedSA_NonHubMemberDenied(t *testing.T) {
