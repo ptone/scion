@@ -1406,10 +1406,28 @@ Three assertion shapes came up today from three people, and they are one rule.
 > harness default — you need a control that excludes it. If you cannot name one, say so; that is
 > a claim too.
 
+**Where the enumeration stops** (p5's addition, and the rule was incomplete without it — "name the
+other world" has no termination condition, so it is either unbounded or quietly abandoned, and
+quietly abandoned is what happens):
+
+> **STOP AT THE WORLDS REACHABLE WITHOUT ANYONE INTENDING THEM** — harness defaults, unrendered
+> furniture, an omission, an ordinary refactor. Those arrive without a decision, which is why they
+> are the ones that show up. A world that requires someone to write wrong code on purpose is a
+> different problem, and tests are not the instrument for it.
+
 A fourth outcome belongs here. p5 mutated a load-key guard expecting red and **got a hang** —
 `loadAccounts` sets `@state`, which schedules an update, which re-enters. A harness with a timeout
 would have reported that as a failure, and the lesson banked would have been "the mutation went
-red" attached to the wrong mechanism. *How* it failed was the evidence, not *that* it failed.
+red" attached to the wrong mechanism.
+
+p5's own note on this is the part worth keeping: they saw the truth partly because a 120-second
+bash ceiling **could not lie to them in that particular way**. A discipline that depends on a
+tooling accident is not a discipline — it is a run of luck that reads like rigour, which is this
+section's subject applied to our own method. So the transferable form is narrower than "look at how
+it failed":
+
+> **RULE.** Check that the failure you observed is the failure you **predicted**, by **mechanism**
+> and not by colour. A red line is the same colour for every reason.
 
 **And the fourth error of mine, found by p3 while fixing #48.** I reported the PATCH branch as
 answering the message `"GCP service account not found"`. **It never did.** `writeErrorFromErr`'s
