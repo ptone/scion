@@ -434,20 +434,31 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 // Agents may dispatch only to brokers that serve their own project, and only
 // while holding ScopeAgentCreate: broker selection completes a create that
 // authorizeAgentCreate has already authorized, so this re-asserts that gate
-// rather than granting a standalone permission.
+// rather than granting a standalone permission. That outer-gate reasoning holds
+// HERE because this function has exactly one caller, createAgent
+// (handlers_agents_core.go:418) — but it does NOT hold for the twin, which has
+// six callers, four of them harness-config image endpoints with no outer gate at
+// all. Do not copy this paragraph across without copying that qualification.
 //
-// Auto-provide brokers are shared infrastructure (e.g. a combo hub-broker
-// server's default broker) and stay dispatchable by any authenticated caller.
-// That check is deliberately kept ahead of the identity switch: it is a property
-// of the broker, not of the caller.
+// AUTO-PROVIDE IS AN INTENTIONAL EXCEPTION, NOT AN UNFIXED FAIL-OPEN SITE. Auto-
+// provide brokers are shared infrastructure (e.g. a combo hub-broker server's
+// default broker) declared available-to-all by a hub admin, so they stay usable
+// by any authenticated caller, and that check is deliberately kept ahead of the
+// identity switch: it is a property of the broker, not of the caller. Retaining
+// it was ruled on for #591 rather than overlooked.
 //
-// Be aware that this is a second unconditional allow in the same function, and
-// it is EXPLICITLY OUT OF SCOPE for #591 rather than overlooked. Narrowing it
-// would be a policy decision about who may use shared brokers, which is not the
-// bug being fixed here, and it must not diverge from the twin. One thing about
-// it did change: it now sits BELOW the identity check, so an unauthenticated
-// caller no longer reaches it. Its remaining reach is authenticated callers
-// only, including broker-typed ones.
+// It is nonetheless a second unconditional allow, so be precise about its reach.
+// It returns BEFORE the project-linkage query, so it is not bounded by whether
+// the broker serves the caller's project — it applies even to an auto-provide
+// broker that serves no project at all. On THIS path that means an authenticated
+// caller may have an agent dispatched to a shared broker. On the twin's path the
+// same allow was MEASURED to admit image operations as well as dispatch; see the
+// caller-set note on canDispatchToBroker. One thing did change here: the allow
+// now sits BELOW the identity check, so unauthenticated callers no longer reach
+// it.
+//
+// Do not narrow AutoProvide in one twin alone. If it moves, it moves in both
+// files in the same commit.
 //
 // Broker-typed callers reach default: and are denied. CheckAccess already
 // answered them with "unknown identity type"; the nil branch this replaced was

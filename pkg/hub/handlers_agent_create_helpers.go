@@ -890,20 +890,54 @@ func (s *Server) brokerServesProject(ctx context.Context, brokerID, projectID st
 	return err == nil && provider != nil
 }
 
-// canDispatchToBroker reports whether the caller may have an agent dispatched to
-// this broker. It writes no HTTP response.
+// canDispatchToBroker reports whether the caller may use this broker. It writes
+// no HTTP response.
 //
-// Dispatch here is not a standalone permission: it is the broker-selection step
-// inside agent creation, reached only after authorizeAgentCreate has already
-// authorized the create itself. So agents may dispatch only to brokers that serve
-// their own project, and only when their template granted ScopeAgentCreate —
-// re-asserting the create gate rather than widening the Part 2 read-class baseline
-// to ActionDispatch.
+// READ THE CALLER SET BEFORE REASONING ABOUT WHAT THIS GATES. It has six callers
+// and only two are the create flow:
 //
-// Auto-provide brokers are shared infrastructure (e.g. a combo hub-broker server's
-// default broker) and stay dispatchable by any authenticated caller. That check is
+//	handlers_agent_create_helpers.go:829, :849, :859  — broker selection in agent create
+//	harness_config_handlers.go:715   handleHarnessConfigCheckImage
+//	harness_config_handlers.go:1159  handleHarnessConfigImageStatus
+//	harness_config_handlers.go:1323  handleHarnessConfigDeleteLocalImage
+//	harness_config_handlers.go:1397  handleHarnessConfigPullImage
+//
+// An earlier version of this comment said this function is "reached only after
+// authorizeAgentCreate has already authorized the create itself". That is true of
+// the three create-flow callers and FALSE of the other four, which reach it
+// directly with no create gate in front of them. Do not reason about what this
+// function may safely allow by assuming an outer gate: on the image paths it is
+// the authorization.
+//
+// Within the create flow, dispatch is not a standalone permission: agents may
+// dispatch only to brokers that serve their own project, and only when their
+// template granted ScopeAgentCreate — re-asserting the create gate rather than
+// widening the Part 2 read-class baseline to ActionDispatch.
+//
+// AUTO-PROVIDE IS AN INTENTIONAL EXCEPTION, NOT AN UNFIXED FAIL-OPEN SITE. Auto-
+// provide brokers are shared infrastructure (e.g. a combo hub-broker server's
+// default broker) declared available-to-all by a hub admin, and that check is
 // deliberately kept ahead of the identity switch: it is a property of the broker,
-// not of the caller.
+// not of the caller. Retaining it was ruled on for #591 rather than overlooked.
+//
+// Two things about its reach that a reader is likely to assume the other way, both
+// measured against a running server rather than read:
+//
+//   - IT IS NOT BOUNDED BY PROJECT LINKAGE. The allow returns before the
+//     project-provider query runs, so it applies even to an auto-provide broker
+//     that serves no project at all.
+//   - IT IS NOT LIMITED TO DISPATCH. Because four callers are image endpoints, the
+//     same allow admits image operations: for an auto-provide, node-bound broker,
+//     any authenticated caller — including a broker-typed one, and an agent
+//     WITHOUT ScopeAgentCreate — gets 200 and the hub forwards the operation to
+//     the broker. Non-auto-provide brokers answer 403 and forward nothing, which
+//     is what isolates AutoProvide as the cause.
+//
+// That consequence is DISCLOSED, not closed here, and deliberately so: narrowing
+// AutoProvide inside this predicate would be patching the wrong layer and would
+// change hub-broker topology. The remedy belongs at the endpoints. If you do ever
+// change AutoProvide, change it in checkBrokerDispatchAccess in the SAME commit or
+// the twins drift.
 //
 // Broker-typed callers reach default: and are denied. CheckAccess already answered
 // them with "unknown identity type"; the nil branch this replaced was the only
