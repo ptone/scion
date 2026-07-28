@@ -72,10 +72,18 @@ being reached again.
 >   is the error. (`validate.go:425` is the exception that proves this: it asks a *same-scope*
 >   question, not a reachability question, which is exactly why it must not be converted to the
 >   helper.)
-> - An authorization check asking *"who may assign this SA?"* gets **less** confinement from
->   scope, not more — parentless means the project-owner bypass is skipped (`pid == ""`,
->   `authz.go:153`) and the wildcard `hub-member-read-all` policy matches. Under `ActionRead`,
->   that makes a hub-scoped SA assignable by *every hub member*.
+> - An authorization check asking *"who may assign this SA?"* **splits by caller class, and the
+>   two halves point in opposite directions.** ~~gets less confinement from scope, not more~~ —
+>   see below. This bullet originally said only the human half, flat, and was corrected within
+>   the hour by aid-em, who noticed they were about to apply it to an agent-caller comment.
+>
+>   | Caller | Result under `ActionRead` on a parentless (hub-scoped) SA | Why |
+>   |---|---|---|
+>   | **Human** | **PASSES — every hub member** | Project-owner bypass skipped (`pid == ""`, `authz.go:153`); `hub-member-read-all` matches, because `matchesResource`'s scope switch has **no arm for `ScopeType: "hub"`** and falls through to `true` (`:415-433`). Bound to `hub-members` by `seed.go:51`; `handlers_auth.go:1243` ensures every user into that group on login. |
+>   | **Agent** | **DENIES** | Principals come from `GetEffectiveGroupsForAgent` (`:200-206`) — the agent's own groups, which never include `hub-members`, so the wildcard policy is never even fetched. The project read baseline then requires `pid != ""` (`:245`), which a parentless resource fails; that guard is documented at `:235-238` as load-bearing for exactly this case. Falls through to delegation, then default deny. |
+>
+>   So hub scope removes confinement for humans and *adds* it for agents. **Any single sentence
+>   about "the gate" on this path is half wrong.** Say which caller you mean.
 >
 > So the fail-closed state for hub-scoped SAs — assignable only by admins and the creator —
 > looks like breakage and is the ruled answer (§8.2). It has already been reported to me as a
