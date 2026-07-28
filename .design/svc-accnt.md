@@ -1173,6 +1173,114 @@ values can be silently harmonised by a later "consistency" cleanup; one test ass
 split, because **the way this refactor fails is by leaking the flat disclosure policy into the
 nested route** and quietly turning existing 403s into 404s.
 
+> 🛑 **THE PARAGRAPH ABOVE IS WRONG AS WRITTEN AND IT SHIPPED. See §8.5.**
+
+---
+
+### 8.5 🛑 CORRECTION — I told them to pin the defect, and they did (#45, #46)
+
+**This is the second finding today whose cause is this document rather than an implementation.**
+The first was §5.5. The mechanism is identical and worth naming before the detail: *a sentence I
+reasoned about in one case, written without the qualifier that made it true.*
+
+#### What I wrote, and what it licensed
+
+§8.4's test obligation ends: *"a regression guard that the nested routes still render 403 after
+the split."* I was reasoning about **reasoned refusals** — a caller who was evaluated against a
+policy and lost. For those, 403 on the nested route is right, and the justification in
+`authorizeGCPServiceAccount` is right with it: to reach a nested by-id route the caller named the
+project, so a 403 discloses nothing they did not supply.
+
+But `noIdentity` refusals are also "the nested routes". sa-dev-p5 did exactly as instructed and
+pinned the nested 403 in a test alongside the #42 fix. **The pin is faithful to my sentence.** It
+is also now a defect with a test asserting it, which is strictly worse than an unpinned defect:
+it reads as specified behaviour, and correcting it reads as a regression.
+
+#### The measurement (#45), at `d0fb638c`
+
+- `models.go:1552` `ReachableFromProject` — `case ScopeHub: return true`, **unconditionally**.
+- `handlers_gcp_identity.go:451` `getGCPServiceAccount` — 404 if not reachable, then an
+  `ActionRead` check **only when `Scope == ScopeHub`**.
+- `:482` `deleteGCPServiceAccount` — 404 if not reachable, then the check **unconditionally**.
+- `:218` `authorizeGCPServiceAccount` — `noIdentity` renders **403**.
+
+For an identity-less caller naming any project `P` it can reach, on nested DELETE:
+
+| account | status |
+| --- | --- |
+| does not exist | 404 |
+| project-scoped in some `Q != P` | 404 |
+| project-scoped in `P` | **403** |
+| hub-scoped | **403**, for every `P` |
+
+So the status code separates hub scope from project scope, existence from non-existence, and — by
+iterating `P` — attributes a project-scoped account to its project. That is p5's own invariant,
+violated one route over: *an identity-less caller must not be able to tell two scopes apart by
+status code.*
+
+#### Why the justification did not catch it — the general rule
+
+`handlers_gcp_identity.go:203` says a nested 403 "discloses nothing they did not supply
+themselves." True. p5's commit says "a nested caller supplied the project themselves." Also true.
+**Both sentences are about the PROJECT. What the 403 discloses is the ACCOUNT** — its existence,
+its scope, and its project.
+
+> **RULE.** A disclosure justification must name the object disclosed, not the object supplied.
+> "The caller already knows *X*" is only a defence when *X* is the thing being revealed. This is
+> rule 16 applied to a justification rather than to a measurement: the claim that was verified
+> and the claim being spent were about **different nouns**, and nothing in either sentence's
+> grammar shows that.
+
+#### The fix, and why it is free
+
+`noIdentity` arises exactly when `GetUserIdentityFromContext` is nil. **No caller with a user
+identity is ever inside that arm** — they get the scope-specific 403 and its reason string,
+unchanged. So rendering `noIdentity` as **404 in both renderers** cannot alter any user-visible
+behaviour, and the nested renderer's "unchanged behaviour is the requirement" does not protect
+that arm, because no identified caller is in it.
+
+**Replace the pin, do not delete it.** The corrected obligation: pin the **sameness** of the
+`noIdentity` status *across both routes*. My original "assert the routes differ" instinct was
+right for reasoned refusals and wrong here — for `noIdentity` the two routes must agree, and an
+assertion whose subject is the agreement cannot be made green by reopening the divergence in
+either direction.
+
+#### #46 — and the hub-scope read check denies **only** agents
+
+Running aid-dev4's wildcard mechanism against this surface:
+
+- `authz.go:492` — the `matchesResource` scope switch has cases `"project"` and `"resource"`
+  **only**. `ScopeType: "hub"` matches neither, falls out of the switch, and **no scope filter is
+  applied at all**.
+- `authz.go:482` — `ResourceType: "*"` matches `gcp_service_account`.
+- `seed.go:51` — `hub-member-read-all` is exactly that policy, actions `read` + `list`.
+- `handlers_auth.go:1243` and `web.go:1716` — every user joins `hub-members` on login.
+
+Therefore `ActionRead` on a hub-scoped service account is **allowed for every logged-in user**.
+The check whose comment says a hub-wide credential must not inherit the absence of a check is,
+for the entire human population, a pass. **The only callers it ever denies are identity-less
+ones** — and against them its sole observable effect is #45's leak.
+
+That is not automatically wrong: hub members reading hub-scoped SA *metadata* may well be
+intended, and that is a Goal 2 policy question I own and am taking. What is wrong is a comment
+claiming a protection the wildcard removes.
+
+> **RULE (aid-dev4's, adopted).** A wildcard policy defeats any reasoning that enumerates literal
+> resource types. This codebase has a wildcard on **both** dimensions — `matchesAction:470`
+> honours `"*"` too — and the default seed uses it on the resource dimension only. So enumerating
+> **actions** is currently safe and enumerating **resource types** is not; the first is a
+> **precondition, not a property**, and must be recorded as such.
+
+#### What this section costs me
+
+Two of today's findings originate in this document, and both have the same shape: a claim
+reasoned in a narrow case and written in the general one. §5.5 described a mode without saying
+what installs the checker. §8.4 said "the nested routes still render 403" while thinking only
+about refusals that had a reason. **In both cases the implementer built exactly what was
+specified.** The instrument I now owe this document is not a better reviewer — it is the habit
+from rule 16 applied to specification prose: *write the sentence the reasoning licenses, then the
+sentence you want to ship, and if they differ you have not finished specifying.*
+
 ---
 
 ## 9. Relationship to the security track
