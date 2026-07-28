@@ -279,3 +279,112 @@ func TestBypassBrokers_TwinsAgree(t *testing.T) {
 		}
 	}
 }
+
+// TestBypassBrokers_UpdateAndDeleteBroker covers the other two #591 sites in
+// handlers_runtime_brokers.go: updateRuntimeBroker (:342 before conversion) and
+// deleteRuntimeBroker (:387). Both had the Group A shape —
+//
+//	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil { check }
+//
+// — so the check ran for users and was skipped in silence for every other caller
+// kind. These are separate from the dispatch fail-open above; they are in the
+// same file and are converted in the same pass.
+//
+// Requests are driven through the full middleware chain via Server.Handler(),
+// not by calling the handler, because the point is what a real credential can
+// do end to end.
+func TestBypassBrokers_UpdateAndDeleteBroker(t *testing.T) {
+	t.Run("broker-typed caller cannot rename a broker", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		target := bypassBrokersRestrictedBroker(t, f, f.proj.ID)
+		rec := f.asBroker(t, http.MethodPatch, "/api/v1/runtime-brokers/"+target.ID,
+			map[string]interface{}{"name": "hijacked"})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+		got, err := f.store.GetRuntimeBroker(context.Background(), target.ID)
+		require.NoError(t, err)
+		assert.NotEqual(t, "hijacked", got.Name, "the denied update must not have been applied")
+	})
+
+	t.Run("agent caller cannot rename a broker", func(t *testing.T) {
+		// Even a broker that serves the agent's own project: dispatching to a
+		// broker and administering one are different permissions.
+		f := bypassAgentsSetup(t)
+		target := bypassBrokersRestrictedBroker(t, f, f.proj.ID)
+		rec := f.asAgent(t, http.MethodPatch, "/api/v1/runtime-brokers/"+target.ID,
+			map[string]interface{}{"name": "hijacked"}, ScopeAgentCreate)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+		got, err := f.store.GetRuntimeBroker(context.Background(), target.ID)
+		require.NoError(t, err)
+		assert.NotEqual(t, "hijacked", got.Name)
+	})
+
+	t.Run("broker-typed caller cannot delete a broker", func(t *testing.T) {
+		// Delete is the worst of the two: it also unlinks the broker from every
+		// project and clears their default_runtime_broker_id.
+		f := bypassAgentsSetup(t)
+		target := bypassBrokersRestrictedBroker(t, f, f.proj.ID)
+		rec := f.asBroker(t, http.MethodDelete, "/api/v1/runtime-brokers/"+target.ID, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+		_, err := f.store.GetRuntimeBroker(context.Background(), target.ID)
+		assert.NoError(t, err, "the broker must still exist after a denied delete")
+	})
+
+	t.Run("agent caller cannot delete a broker", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		target := bypassBrokersRestrictedBroker(t, f, f.proj.ID)
+		rec := f.asAgent(t, http.MethodDelete, "/api/v1/runtime-brokers/"+target.ID, nil, ScopeAgentCreate)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+		_, err := f.store.GetRuntimeBroker(context.Background(), target.ID)
+		assert.NoError(t, err)
+	})
+
+	t.Run("a broker cannot delete itself", func(t *testing.T) {
+		// The most plausible-sounding case, and still no: broker lifecycle is
+		// administered from the hub side. Deregistration has its own path.
+		f := bypassAgentsSetup(t)
+		rec := f.asBroker(t, http.MethodDelete, "/api/v1/runtime-brokers/"+f.broker.ID, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+		_, err := f.store.GetRuntimeBroker(context.Background(), f.broker.ID)
+		assert.NoError(t, err, "a broker must not be able to delete its own registration")
+	})
+
+	t.Run("user path is unchanged", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		target := bypassBrokersRestrictedBroker(t, f, f.proj.ID)
+
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/runtime-brokers/"+target.ID,
+			map[string]interface{}{"name": "renamed-by-owner"})
+		assert.Equal(t, http.StatusOK, rec.Code, "the broker's creator must still rename it; body: %s",
+			rec.Body.String())
+		got, err := f.store.GetRuntimeBroker(context.Background(), target.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "renamed-by-owner", got.Name, "the allowed update must have been applied")
+
+		rec = doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, "/api/v1/runtime-brokers/"+target.ID, nil)
+		assert.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("unrelated user is denied", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		target := bypassBrokersRestrictedBroker(t, f, f.proj.ID)
+		stranger := &store.User{
+			ID:          tid("bypass-brokers-admin-stranger"),
+			Email:       "stranger-admin@example.com",
+			DisplayName: "Stranger",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, f.store.CreateUser(context.Background(), stranger))
+
+		rec := doRequestAsUser(t, f.srv, stranger, http.MethodDelete, "/api/v1/runtime-brokers/"+target.ID, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+		_, err := f.store.GetRuntimeBroker(context.Background(), target.ID)
+		assert.NoError(t, err)
+	})
+}

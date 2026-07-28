@@ -338,13 +338,13 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	// Enforce authorization: only the broker owner or admins can update
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, brokerResource(broker), ActionUpdate)
-		if !decision.Allowed {
-			Forbidden(w)
-			return
-		}
+	// Enforce authorization: only the broker owner or admins can update.
+	// Previously this ran only when the caller was a UserIdentity, so every
+	// other caller kind — agent tokens, broker identities, unauthenticated
+	// requests — skipped it in silence and could rename any broker or rewrite
+	// its labels hub-wide (#591).
+	if !s.authorize(w, r, brokerResource(broker), ActionUpdate) {
+		return
 	}
 
 	var updates struct {
@@ -382,15 +382,21 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	// Enforce authorization: only the broker owner or admins can delete
+	// Enforce authorization: only the broker owner or admins can delete.
+	// Same shape as updateRuntimeBroker above — the check was conditional on the
+	// caller being a UserIdentity, so any other caller kind deleted the broker,
+	// unlinked it from every project and cleared those projects'
+	// default_runtime_broker_id without ever being authorized (#591).
+	if !s.authorize(w, r, brokerResource(broker), ActionDelete) {
+		return
+	}
+
+	// Audit actor, resolved after the gate. Non-user callers cannot reach here,
+	// so an empty actorID means the identity kind has no user ID to record, not
+	// that the request was unauthenticated.
 	var actorID string
 	if user := GetUserIdentityFromContext(ctx); user != nil {
 		actorID = user.ID()
-		decision := s.authzService.CheckAccess(ctx, user, brokerResource(broker), ActionDelete)
-		if !decision.Allowed {
-			Forbidden(w)
-			return
-		}
 	}
 
 	brokerName := broker.Name
