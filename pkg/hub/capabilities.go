@@ -118,11 +118,12 @@ func harnessConfigResource(hc *store.HarnessConfig) Resource {
 	//
 	// NOT A PAIR ON THIS BRANCH. This line previously ended "(mirrors
 	// gcpServiceAccountResource)". It does not mirror it here: that function is
-	// unconditional in this tree. svc-accnt P0.2 makes it conditional and
-	// restores the pairing. Until that merges the two differ, and reading this
-	// line as a statement that gcpServiceAccountResource already scopes its
-	// parent is the specific mistake that would cause that conversion to be
-	// skipped.
+	// unconditional in this tree and claims ParentType "project" for every
+	// scope, including hub- and user-scoped accounts whose ScopeID is not a
+	// project ID at all. svc-accnt P0.2 makes it conditional and restores the
+	// pairing. Until that merges the two differ, and reading this line as a
+	// statement that gcpServiceAccountResource already scopes its parent is the
+	// specific mistake that would cause that conversion to be skipped.
 	//
 	// This comment is expected to CONFLICT TEXTUALLY with the svc-accnt tree at
 	// merge. That is deliberate, and it is the cheaper failure: a comment
