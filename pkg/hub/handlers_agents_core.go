@@ -480,6 +480,19 @@ func (s *Server) createAgentInProject(
 
 		// Authorization: any caller who can see the SA can assign it.
 		// SA management (create/mint/delete) is gated on ActionManage elsewhere.
+		//
+		// Read this before assuming it constrains agents — today it does not.
+		// The ScopeID equality above has already confined the service account to
+		// the caller's own project, and an agent holds read access across its own
+		// project, so for agent callers this call cannot deny anything. It is a
+		// real gate for users: a user with update rights on the agent but no read
+		// access to the service account is refused here.
+		//
+		// It stops being a no-op once hub-scoped service accounts become pickable
+		// in any project, because that turns the ScopeID equality into a
+		// scope-aware check and service accounts outside the caller's project
+		// start reaching this line. The PATCH path carries the same call for the
+		// same reason.
 		if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
 			"You don't have permission to assign GCP service accounts in this project") {
 			return
@@ -1638,6 +1651,35 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 			sa, err := s.store.GetGCPServiceAccount(ctx, updates.GCPIdentity.ServiceAccountID)
 			if err != nil {
 				writeErrorFromErr(w, err, "GCP service account not found")
+				return
+			}
+			// These two checks mirror the create path (see the assign branch of
+			// createAgentInProject) deliberately, character for character. Without
+			// them, "create with no service account, then PATCH one in" walks
+			// straight around the hardened create path — it needs only update
+			// rights on the agent, which the creator has by definition.
+			//
+			// Kept as a near-duplicate rather than factored into a shared helper on
+			// purpose: hub-scoped service accounts are to become pickable in any
+			// project, which turns the ScopeID equality test into a scope-aware
+			// check at BOTH sites. A duplicate that greps identically is what makes
+			// the second site impossible to miss during that pass; a DRY version
+			// that diverges here would present as a service-account bug rather than
+			// a missed conversion.
+			if sa.ScopeID != agent.ProjectID {
+				ValidationError(w, "GCP service account does not belong to this project", nil)
+				return
+			}
+			if !sa.Verified {
+				ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
+				return
+			}
+			// Parity with the create path: any caller who can see the service
+			// account may assign it. See the matching call in
+			// createAgentInProject for why this is narrow today and why it is
+			// nonetheless spelled out at both sites.
+			if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
+				"You don't have permission to assign GCP service accounts in this project") {
 				return
 			}
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
