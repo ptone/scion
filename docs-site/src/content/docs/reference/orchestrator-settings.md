@@ -38,7 +38,7 @@ Files without `schema_version` are treated as legacy format. Run `scion config m
 | `default_max_turns` | int | Default maximum number of turns an agent can take before termination. |
 | `default_max_model_calls` | int | Default maximum number of LLM model calls an agent can make. |
 | `default_max_duration` | string | Default maximum execution time (e.g., `"2h"`, `"45m"`) for an agent. |
-| `default_resources` | object | Default resource constraints (CPU, memory, disk). See [Resource Specification](#resource-specification-resources) below. |
+| `default_resources` | object | Default resource constraints for agents, as nested `requests` / `limits` / `disk`. See [Resource Specification](#resource-specification-resources) below. |
 
 ## CLI Configuration (`cli`)
 
@@ -149,22 +149,51 @@ harness_configs:
 
 ### Resource Specification (`resources`)
 
-Defines the hardware constraints for an agent's execution environment.
+Defines the hardware constraints for an agent's execution environment. The
+structure follows Kubernetes resource conventions: CPU and memory are split
+into `requests` and `limits`, with `disk` as a single top-level value.
 
 ```yaml
 resources:
-  cpu: "2"
-  memory: "4Gi"
-  disk: "20Gi"
-  gpu: 0
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "2"
+    memory: ""
+  disk: "10Gi"
 ```
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `cpu` | string | `"1"` | CPU cores (can be fractional, e.g., `"0.5"`). |
-| `memory` | string | `"2Gi"` | Memory limit (e.g., `"1Gi"`, `"512Mi"`). |
-| `disk` | string | `"10Gi"` | Ephemeral disk space request. |
-| `gpu` | int | `0` | Number of GPUs to request (requires compatible runtime). |
+| `requests.cpu` | string | `""` | CPU cores reserved for the agent (can be fractional, e.g., `"500m"` or `"0.5"`). Kubernetes only — ignored by Docker and Podman. |
+| `requests.memory` | string | `""` | Memory reserved for the agent (e.g., `"1Gi"`, `"512Mi"`). Maps to the Kubernetes memory request and to `--memory-reservation` (a soft limit) on Docker/Podman. |
+| `limits.cpu` | string | `"2"` | CPU ceiling. Maps to `--cpus` on Docker/Podman and to the Kubernetes CPU limit. |
+| `limits.memory` | string | `""` | Memory ceiling (e.g., `"4Gi"`). Maps to `--memory` on Docker/Podman. Empty means unlimited. |
+| `disk` | string | `""` | Ephemeral disk space, applied as both request and limit. Kubernetes only. |
+
+:::caution[Use the nested form]
+The flat form (`resources: {cpu: "1", memory: "512Mi"}`) is **not** recognised.
+It parses to an empty spec with no error or warning, so the values you wrote are
+silently discarded and the agent falls back to the built-in defaults below.
+Always nest under `requests` / `limits`.
+:::
+
+:::note[Defaults]
+When no tier in the resolution chain specifies resources, Scion applies a
+built-in default of `limits.cpu: "2"` and nothing else. A memory limit is
+deliberately not applied by default: exceeding it makes the kernel OOM-kill the
+largest process in the cgroup, which is often the agent harness rather than the
+build that caused the growth. Kubernetes agents additionally receive
+per-field defaults of `requests.cpu: "250m"`, `requests.memory: "512Mi"`,
+`limits.memory: "4Gi"` and `disk: "10Gi"` for any field left unset, because a
+pod with no requests schedules unpredictably and is rejected by GKE Autopilot.
+:::
+
+There is no `gpu` field. GPUs and other extended resources are not part of this
+spec — request them under `kubernetes.resources`, which accepts arbitrary
+Kubernetes resource names such as `nvidia.com/gpu`. See the
+[Agent Configuration Reference](/scion/reference/agent-config/#kubernetes-specifics-kubernetes).
 
 ### Required Secrets
 
