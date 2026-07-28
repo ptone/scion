@@ -481,18 +481,36 @@ func (s *Server) createAgentInProject(
 		// Authorization: any caller who can see the SA can assign it.
 		// SA management (create/mint/delete) is gated on ActionManage elsewhere.
 		//
-		// Read this before assuming it constrains agents — today it does not.
-		// The ScopeID equality above has already confined the service account to
-		// the caller's own project, and an agent holds read access across its own
-		// project, so for agent callers this call cannot deny anything. It is a
-		// real gate for users: a user with update rights on the agent but no read
-		// access to the service account is refused here.
+		// Read this before assuming it constrains anyone. Under the seeded
+		// default policies it denies neither caller class, and it stops being a
+		// no-op for only one of them, so it needs stating per class — a single
+		// sentence about "the gate" here is half wrong whichever way it is
+		// written.
 		//
-		// It stops being a no-op once hub-scoped service accounts become pickable
-		// in any project, because that turns the ScopeID equality into a
-		// scope-aware check and service accounts outside the caller's project
-		// start reaching this line. The PATCH path carries the same call for the
-		// same reason.
+		// AGENT callers: this cannot deny today. The ScopeID equality above has
+		// already confined the service account to the agent's own project, and
+		// the agent project read baseline (authz.go:240) allows read-class on any
+		// resource that resolves to that project. It becomes a live deny once
+		// hub-scoped service accounts are pickable in any project — but only if
+		// gcpServiceAccountResource (capabilities.go) becomes scope-aware in the
+		// same pass. As written here it claims ParentType "project" for every
+		// scope, so a hub-scoped account resolves to the hub instance ID: non-
+		// empty, and equal to no project. Converting the equality test alone
+		// still produces a deny, via the delegation fallback rather than the
+		// baseline's pid != "" guard — same outcome, different clause, and the
+		// reason recorded here would be wrong. Convert both.
+		//
+		// HUMAN callers: this is not a gate now and does not become one. The
+		// seeded hub-member-read-all policy (seed.go) is ResourceType "*",
+		// actions read/list, ScopeType "hub", and matchesResource applies
+		// hub-scoped policies to resources in any project — so every member of
+		// the hub-members group passes ActionRead on any service account
+		// whatever its scope, before and after that conversion. What this call
+		// refuses is a caller outside hub-members, or one carrying an explicit
+		// deny: policy evaluation runs before both mechanisms above, so an
+		// admin-bound deny still wins for either class.
+		//
+		// The PATCH path carries the same call and the same two statements.
 		if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
 			"You don't have permission to assign GCP service accounts in this project") {
 			return
@@ -1675,9 +1693,13 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 				return
 			}
 			// Parity with the create path: any caller who can see the service
-			// account may assign it. See the matching call in
-			// createAgentInProject for why this is narrow today and why it is
-			// nonetheless spelled out at both sites.
+			// account may assign it. Under the seeded default policies this
+			// denies neither caller class — agents because the ScopeID equality
+			// above already confined the account to their own project, humans
+			// because hub-member-read-all covers read on every resource type in
+			// any scope. See the matching call in createAgentInProject for the
+			// per-class detail and for what must change alongside the ScopeID
+			// equality for it to start denying agents.
 			if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
 				"You don't have permission to assign GCP service accounts in this project") {
 				return
