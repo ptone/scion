@@ -145,8 +145,9 @@ FNR == 1 { in_block = 0; in_nil_block = 0; nil_var = ""; cur_func = "?" }
     nil_depth += count($0, "\\{") - count($0, "\\}")
     if (nil_depth <= 0) {
       if (nil_last ~ /^[[:space:]]*return[[:space:]]+true[[:space:]]*$/) {
-        printf "%s:%d: %s(): if %s == nil { ... return true } (fail-open on non-user caller)\n",
-          FILENAME, pending_nil_line, cur_func, pending_nil
+        occ[FILENAME SUBSEP cur_func]++
+        printf "%s:%d: %s()#%d: if %s == nil { ... return true } (fail-open on non-user caller)\n",
+          FILENAME, pending_nil_line, cur_func, occ[FILENAME SUBSEP cur_func], pending_nil
       }
       in_nil_block = 0
       next
@@ -163,7 +164,8 @@ FNR == 1 { in_block = 0; in_nil_block = 0; nil_var = ""; cur_func = "?" }
       if (has_authz &&
           $0 !~ /\}[[:space:]]*else\b/ &&
           last_body !~ /^[[:space:]]*(return|continue|break|panic\()/) {
-        printf "%s:%d: %s(): %s\n", FILENAME, start, cur_func, opener
+        occ[FILENAME SUBSEP cur_func]++
+        printf "%s:%d: %s()#%d: %s\n", FILENAME, start, cur_func, occ[FILENAME SUBSEP cur_func], opener
       }
       in_block = 0
       # A `} else if <ident>, ok := ...` line closes one guard and opens the
@@ -330,6 +332,49 @@ func (s *Server) failClosedAfterBranch(ctx context.Context) bool {
 	}
 	return s.authzService.CheckAccess(ctx, userIdent, res, ActionRead).Allowed
 }
+
+// Shape 4: the hub-scoped "require" helper. Lexically this is the #591 idiom —
+// same getter, same `== nil` test — but the verdict is inverted: the nil branch
+// writes 401 and returns false. Fail-CLOSED, and correct.
+//
+// Copied from pkg/hub/hub_pre_start_hook_handlers.go on origin/main (db8f6fc,
+// #888), which is not on scion/agent-id-fix yet. aid-arch flagged that these
+// would come back as findings once main merges. Verified on a trial merge that
+// they do not: the classifier requires the nil branch to END in an
+// unconditional `return true`, so the verdict is already part of the match.
+// This fixture exists to keep it that way — the property currently holds by
+// construction and nothing pinned it, and a check that cries wolf on the one
+// hub-scoped handler set that got authorization right teaches the next author
+// to ignore its output.
+func (s *Server) requireHubAdmin(w http.ResponseWriter, r *http.Request) (UserIdentity, bool) {
+	identity := GetUserIdentityFromContext(r.Context())
+	// WANT-NOT
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return nil, false
+	}
+	if identity.Role() != store.UserRoleAdmin {
+		Forbidden(w)
+		return nil, false
+	}
+	if _, scoped := identity.(*ScopedUserIdentity); scoped {
+		Forbidden(w)
+		return nil, false
+	}
+	return identity, true
+}
+
+// Shape 4, minimal form: bare helper call in the nil branch rather than an
+// explicit writeError. Same verdict, less to pattern-match on.
+func (s *Server) requireHubHookReader(w http.ResponseWriter, r *http.Request) (UserIdentity, bool) {
+	identity := GetUserIdentityFromContext(r.Context())
+	// WANT-NOT
+	if identity == nil {
+		Unauthorized(w)
+		return nil, false
+	}
+	return identity, true
+}
 FIXTURE
 
   want="$(grep -n '^[[:space:]]*// WANT$' "$fixture" | cut -d: -f1 | awk '{print $1 + 1}')"
@@ -420,17 +465,27 @@ fi
 # + guard shape, NOT on the line number. Line numbers move whenever anything
 # above them is edited, and a stale line-anchored entry fails in the dangerous
 # direction: it can drift onto an unrelated site and mask a real bypass that was
-# never reviewed. Findings are printed as `file:line: function(): guard` for
-# exactly this reason. Note that a function may contain more than one guard of
-# the same shape (addGroupMember does), so file + function is not always unique;
-# where it is not, say so in the entry's comment rather than assuming it pins
-# one site.
+# never reviewed. Findings are printed as `file:line: function()#N: guard` for
+# exactly this reason.
 #
-# An entry is admissible only if BOTH hold:
+# The `#N` is the occurrence index of the guard within its enclosing function,
+# and it exists because file + function is NOT unique: addGroupMember holds two
+# guards of the same shape whose findings are otherwise byte-identical. Without
+# the index, a single entry there would silently suppress both — pinning the one
+# site somebody reasoned about and a second site nobody ever reviewed. Anchor on
+# `function()#N`. The index is deliberately not stable across inserting or
+# deleting a guard inside the same function, which is exactly when a stale entry
+# should stop matching.
+#
+# An entry is admissible only if ALL THREE hold:
 #   1. the site is fail-open BY DESIGN — intended behaviour, and the entry is
 #      recording a decision that was made;
 #   2. the entry carries a comment saying why, AND a test pinning the fail-open
-#      as intended.
+#      as intended;
+#   3. if the entry's file + function matches more than one flagged guard, it
+#      must either name the occurrence explicitly via `#N`, or carry a test
+#      pinning EVERY guard in that function. Prefer naming: a test that pins two
+#      guards in order to make one exception legible is a test nobody maintains.
 #
 # Condition 2 is the load-bearing one. Without a test, "allowlisted" and
 # "unfixed" are indistinguishable in the tree — both present as a site this
