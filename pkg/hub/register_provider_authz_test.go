@@ -409,8 +409,9 @@ func (f *rpGateFixture) requireVictimUnserved(t *testing.T, because string) {
 // one to overlook: this helper's single call site is the refused-caller matrix
 // below, whose arms are all stopped by the gate before the branch runs. So
 // repopulating the field alone leaves this file green — measured by aid-rev1,
-// who restored the emission on the limb these routes take and watched
-// TestRPGate pass while a live secret went out in the body.
+// who restored the emission and watched TestRPGate pass while the same tree
+// turned register_secret_disclosure_test.go red: a live secret was going out
+// in register responses on the allowed limb, and this file never saw one.
 //
 // It is kept for that case and not deleted, but the real disclosure coverage is
 // register_secret_disclosure_test.go, which drives the callers the gate ALLOWS
