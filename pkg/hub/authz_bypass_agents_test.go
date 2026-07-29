@@ -1452,3 +1452,83 @@ func TestBypassAgents_RestoreAgentGate(t *testing.T) {
 		assert.False(t, isDeleted(t, f, f.child.ID), "the authorized restore must have un-deleted the descendant")
 	})
 }
+
+// TestBypassAgents_UpdateAgentStatusGate covers updateAgentStatus, reached by
+// POST /api/v1/agents/{id}/status (flat) and
+// POST /api/v1/projects/{p}/agents/{id}/status (nested). One shared sink serves
+// both routes and neither route pre-gates the status action.
+//
+// Before the fix the handler gated only two caller kinds: an agent (self + the
+// status:update scope) and the anonymous nil identity (401). A user/dev caller
+// fell through both branches and reached s.store.UpdateAgentStatus with no
+// authorization, so any authenticated user could write any agent's status
+// hub-wide. The fix adds an else arm that gates non-agent callers with
+// s.authorize(agentResource, ActionUpdate); the agent-self path is left
+// unchanged. Because the sink is shared, the one gate closes both routes.
+//
+// The user-caller denial arms are RED (200) without the else arm; the agent
+// self-report positive is the load-bearing Rule-2a control that must survive.
+func TestBypassAgents_UpdateAgentStatusGate(t *testing.T) {
+	statusPath := func(projectID, agentID string) string {
+		return fmt.Sprintf("/api/v1/projects/%s/agents/%s/status", projectID, agentID)
+	}
+	body := map[string]interface{}{"activity": "coding"}
+
+	t.Run("outsider member is denied", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		outsider := &store.User{
+			ID:          tid("bypass-status-outsider"),
+			Email:       "status-outsider@example.com",
+			DisplayName: "Status Outsider",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, f.store.CreateUser(context.Background(), outsider))
+
+		rec := doRequestAsUser(t, f.srv, outsider, http.MethodPost, statusPath(f.proj.ID, f.sibling.ID), body)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"an unrelated member must not write an agent's status; got %d: %s", rec.Code, rec.Body.String())
+	})
+
+	t.Run("broker caller is denied", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := f.asBroker(t, http.MethodPost, statusPath(f.proj.ID, f.sibling.ID), body)
+		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+			rec.Code, "broker-authenticated caller must not write an agent's status; got %d: %s", rec.Code, rec.Body.String())
+	})
+
+	t.Run("anonymous is denied", func(t *testing.T) {
+		// Unaffected by the new arm (the nil branch already returned 401); an
+		// authentication control alongside the authorization arms.
+		f := bypassAgentsSetup(t)
+		rec := doRequestNoAuth(t, f.srv, http.MethodPost, statusPath(f.proj.ID, f.sibling.ID), body)
+		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden},
+			rec.Code, "unauthenticated caller must be rejected on status; got %d: %s", rec.Code, rec.Body.String())
+	})
+
+	t.Run("agent cannot write a peer's status", func(t *testing.T) {
+		// Pre-existing agent-branch behaviour (self-only), unchanged by the fix:
+		// an agent may only write its own status.
+		f := bypassAgentsSetup(t)
+		rec := f.asAgent(t, http.MethodPost, statusPath(f.proj.ID, f.sibling.ID), body, ScopeAgentStatusUpdate)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"an agent must not write a peer's status; got %d: %s", rec.Code, rec.Body.String())
+	})
+
+	// Positive arms — load-bearing (Rule 2a). The agent self-report path is the
+	// critical one to preserve: agents report their own status constantly.
+	t.Run("agent reports its own status", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := f.asAgent(t, http.MethodPost, statusPath(f.proj.ID, f.caller.ID), body, ScopeAgentStatusUpdate)
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"an agent must still report its own status; got %d: %s", rec.Code, rec.Body.String())
+	})
+
+	t.Run("project owner writes the agent's status", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, statusPath(f.proj.ID, f.sibling.ID), body)
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"the project owner must still write an agent's status; got %d: %s", rec.Code, rec.Body.String())
+	})
+}

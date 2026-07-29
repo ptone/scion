@@ -46,6 +46,20 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	} else if identity == nil {
 		Unauthorized(w)
 		return
+	} else {
+		// Non-agent (user / dev) caller. The agent self-report branch above is
+		// self- and scope-gated; this branch previously fell through with no
+		// authorization at all. Gate it like the other agent-mutation handlers.
+		// This single sink serves both the flat and nested status routes, so the
+		// one gate closes both; the agent-self path above is left unchanged.
+		agent, err := s.store.GetAgent(ctx, id)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !s.authorize(w, r, agentResource(agent), ActionUpdate) {
+			return
+		}
 	}
 
 	var status store.AgentStatusUpdate
