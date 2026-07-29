@@ -276,6 +276,26 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			// is reached by anyone who can name an existing project's ID, which
 			// is not evidence of any relationship to it. Ownership comes from
 			// creating the project, below.
+			//
+			// Not granting ownership is not enough on its own: reaching here still
+			// returned the named project's stored record to the caller and ran the
+			// backfill WRITE on it. Gate on the project READ baseline first — the
+			// same helper, in the same position, that getProject and the matched
+			// branch of register use on this same object. No new policy is invented
+			// here; the existing one is propagated to this branch. Denials render the
+			// missing-project body, so the refusal itself carries nothing.
+			//
+			// WHAT THIS DOES NOT CLOSE, on this verb: an id that is free falls
+			// through to the create below and answers 201, so a caller can still
+			// learn that an id is TAKEN by getting 404 where they would otherwise
+			// have got a new project. That distinction is inherent to idempotent
+			// create by client-supplied id — the alternative is to create a second
+			// project on a colliding id — and it is not what this gate is for. The
+			// gate removes the disclosure of the existing project's stored record
+			// and the backfill write on it; it does not claim to hide collisions.
+			if !s.authorizeProjectReadNoOracle(w, r, existing) {
+				return
+			}
 			s.createProjectGroup(ctx, existing)
 			s.createProjectMembersGroupAndPolicy(ctx, existing)
 			writeJSON(w, http.StatusOK, existing)

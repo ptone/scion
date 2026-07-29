@@ -619,12 +619,20 @@ func TestOGGrant_BackfillStillPromotesSomeoneElse(t *testing.T) {
 // backfill with an existing project and an arbitrary caller: createProject's
 // idempotency branch and getProject call the same function.
 //
-// The two routes below are not equally load-bearing, and the difference was
-// measured rather than assumed:
+// NEITHER ROUTE BELOW REACHES THE BACKFILL ANY MORE, and this comment used to
+// say the opposite. Both arms now measure a read gate rather than the promotion
+// constraint, and the change was measured rather than assumed: reverting the
+// constraint leaves both green.
 //
-//   - POST /projects with an existing ID reaches the backfill and is refused
-//     there. Reverting the constraint reds this arm, so a fix written into
-//     registerProject alone would have left this door open.
+//   - POST /projects with an existing ID DID reach the backfill and was refused
+//     there, which is what this arm was written to pin. The idempotency branch is
+//     now gated by authorizeProjectReadNoOracle ahead of the same backfill, and a
+//     plain member has no read on the project, so the 404 arrives first. The
+//     end-to-end coverage this arm used to carry was moved, not dropped:
+//     TestCIGate_GateDoesNotShadowSelfPromotionRefusal drives a caller who gets
+//     PAST that gate — a hub admin who is the sole member of an ownerless project
+//     — into the backfill, and reds when the constraint is reverted. The arm is
+//     kept for the reason the GET arm is kept, below.
 //   - GET /projects/{id} does NOT reach the backfill today. getProject is gated
 //     ahead of its group backfill by authorizeProjectReadNoOracle, and a plain
 //     member has no read on the project, so the 404 arrives first. Reverting
@@ -642,7 +650,7 @@ func TestOGGrant_SelfPromotionRefusedByEveryRoute(t *testing.T) {
 		want int
 		call func(*ogGrantFixture, *store.Project) *httptest.ResponseRecorder
 	}{
-		{"POST /projects with an existing ID", http.StatusOK,
+		{"POST /projects with an existing ID", http.StatusNotFound,
 			func(f *ogGrantFixture, p *store.Project) *httptest.ResponseRecorder {
 				return f.asUser(t, f.intruder, http.MethodPost, "/api/v1/projects",
 					CreateProjectRequest{ID: p.ID, Name: p.Name})
