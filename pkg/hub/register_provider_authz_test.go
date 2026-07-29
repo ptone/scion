@@ -444,6 +444,20 @@ func rpGateVictimBaseline(t *testing.T, f *rpGateFixture) int {
 // baseline is asserted inside each case rather than once, because each case
 // gets a fresh fixture and a baseline that silently stopped being 409 would
 // make every "unserved" assertion below it meaningless.
+// THE REFUSALS IN BOTH TABLES BELOW MOVED FROM 403 TO 404, and nothing else in
+// this file changed. The matched branch of register — the one these cases reach,
+// because the victim already exists — now gates on the project READ baseline
+// (authorizeProjectReadNoOracle) before it does anything with the project, and
+// that helper renders the missing-project body on every denial so a refusal
+// cannot confirm the project is real. It fires ahead of the provider-write gate
+// further down, which is what used to answer 403 here and is unchanged. So these
+// callers are refused earlier and told less; the store invariants each case
+// asserts — no provider row, workspace path unchanged, the victim's own read
+// still 409 and still free of the attacker's bytes — are the guarantee, and they
+// are asserted before the status code and all still hold. The comment on the
+// cross-project agent arm names requireProjectVisibleToAgent as the source of its
+// 404: that arm's 404 now comes from the read gate's own agent-isolation check
+// first, which renders the same body for the same reason.
 func TestRPGate_CrossTenantProviderWriteDenied(t *testing.T) {
 	type caller struct {
 		name string
@@ -451,7 +465,7 @@ func TestRPGate_CrossTenantProviderWriteDenied(t *testing.T) {
 		do   func(*testing.T, *rpGateFixture, any) *httptest.ResponseRecorder
 	}
 	callers := []caller{
-		{"unrelated user", http.StatusForbidden,
+		{"unrelated user", http.StatusNotFound,
 			func(t *testing.T, f *rpGateFixture, body any) *httptest.ResponseRecorder {
 				return f.asUser(t, f.outsdr, http.MethodPost, rpGateRegisterPath, body)
 			}},
@@ -463,7 +477,7 @@ func TestRPGate_CrossTenantProviderWriteDenied(t *testing.T) {
 			func(t *testing.T, f *rpGateFixture, body any) *httptest.ResponseRecorder {
 				return f.asAgent(t, f.stranger, http.MethodPost, rpGateRegisterPath, body)
 			}},
-		{"broker", http.StatusForbidden,
+		{"broker", http.StatusNotFound,
 			func(t *testing.T, f *rpGateFixture, body any) *httptest.ResponseRecorder {
 				return f.asBroker(t, http.MethodPost, rpGateRegisterPath, body)
 			}},
@@ -605,7 +619,7 @@ func TestRPGate_CrossTenantCannotOverwriteLiveWorkspace(t *testing.T) {
 		want int
 		do   func(*testing.T, *rpGateFixture, any) *httptest.ResponseRecorder
 	}{
-		{"unrelated user", http.StatusForbidden,
+		{"unrelated user", http.StatusNotFound,
 			func(t *testing.T, f *rpGateFixture, body any) *httptest.ResponseRecorder {
 				return f.asUser(t, f.outsdr, http.MethodPost, rpGateRegisterPath, body)
 			}},
@@ -613,7 +627,7 @@ func TestRPGate_CrossTenantCannotOverwriteLiveWorkspace(t *testing.T) {
 			func(t *testing.T, f *rpGateFixture, body any) *httptest.ResponseRecorder {
 				return f.asAgent(t, f.stranger, http.MethodPost, rpGateRegisterPath, body)
 			}},
-		{"broker", http.StatusForbidden,
+		{"broker", http.StatusNotFound,
 			func(t *testing.T, f *rpGateFixture, body any) *httptest.ResponseRecorder {
 				return f.asBroker(t, http.MethodPost, rpGateRegisterPath, body)
 			}},

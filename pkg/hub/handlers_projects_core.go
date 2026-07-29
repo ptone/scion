@@ -1210,6 +1210,24 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// slug — and a match is not evidence of any relationship to it. Register
 		// is how a client announces a project it believes in; it is not proof of
 		// title. Ownership comes from creating the project, in the branch above.
+		//
+		// Not granting ownership is not enough on its own: reaching here still
+		// returned the matched project's stored record to the caller and ran the
+		// backfill WRITE on it. Gate on the project READ baseline first, using the
+		// same helper and the same placement getProject already uses on this same
+		// object (gate, then the identical two backfill calls) — no new policy is
+		// invented here, the existing one is propagated to this branch. Every
+		// denial renders the missing-project body, so a matched-but-unreadable
+		// project is indistinguishable from no match at all.
+		//
+		// A READ baseline on a POST is deliberate: being able to see an existing
+		// project is the prerequisite for announcing or linking it. It is the
+		// weaker of the two checks on this path — the provider-write gate below
+		// (ActionUpdate) is unchanged and still applies on top when a broker is
+		// being linked.
+		if !s.authorizeProjectReadNoOracle(w, r, project) {
+			return
+		}
 		slog.Debug("ensuring groups for existing project during register",
 			"project_id", project.ID, "slug", project.Slug)
 		s.createProjectGroup(ctx, project)
