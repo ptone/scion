@@ -305,3 +305,42 @@ func TestGroupAPI_ListMembersGate(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	})
 }
+
+// TestGroupAPI_GetMemberGate pins the gate on the fourth (singleton) group read,
+// getGroupMember (N77, completes N63): GET /api/v1/groups/{id|slug}/members/
+// {type}/{memberID}, the cross-tenant membership-confirmation oracle. The gate
+// lives in getGroupMember, NOT in the handleGroupMemberByID dispatcher, because
+// the dispatcher also routes DELETE -> removeGroupMember, which carries its own
+// CheckAccess; gating the read path only leaves the write authz untouched. Both
+// the id-path and the slug-path (GetGroupBySlug fallback) arms are covered — the
+// slug is the same reachability vector N63 closed for getGroup/listGroupMembers.
+func TestGroupAPI_GetMemberGate(t *testing.T) {
+	f := setupGroupReadAuthz(t)
+	// The seeded owner is a member (role owner) of the seeded group.
+	idPath := "/api/v1/groups/" + f.group.ID + "/members/user/" + f.owner.ID
+	slugPath := "/api/v1/groups/" + f.group.Slug + "/members/user/" + f.owner.ID
+
+	for _, c := range f.deniedCallers(t) {
+		t.Run(c.name+" (by id)", func(t *testing.T) {
+			rec := c.do(http.MethodGet, idPath, nil)
+			require.Equal(t, c.want, rec.Code, "body: %s", rec.Body.String())
+		})
+		t.Run(c.name+" (by slug)", func(t *testing.T) {
+			rec := c.do(http.MethodGet, slugPath, nil)
+			require.Equal(t, c.want, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
+
+	t.Run("hub admin succeeds (by id)", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, idPath, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var m store.GroupMember
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &m))
+		require.Equal(t, f.owner.ID, m.MemberID, "admin must read the seeded membership")
+	})
+
+	t.Run("hub admin succeeds (by slug)", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, slugPath, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	})
+}

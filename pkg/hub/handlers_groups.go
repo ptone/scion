@@ -732,6 +732,17 @@ func (s *Server) handleGroupMemberByID(w http.ResponseWriter, r *http.Request, g
 }
 
 func (s *Server) getGroupMember(w http.ResponseWriter, r *http.Request, groupID, memberType, memberID string) {
+	// #591 (N77, completes N63): admin-only, mirroring listGroupMembers
+	// (see listGroups). This singleton read was the fourth ungated group read —
+	// reached via handleGroupMemberByID with the same GetGroupBySlug fallback —
+	// a cross-tenant membership-confirmation oracle (supply a slug plus a
+	// member type/id, learn membership and role). Gate the READ path only; the
+	// DELETE sibling removeGroupMember carries its own CheckAccess. Fail closed
+	// at the entry.
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 
 	member, err := s.store.GetGroupMembership(ctx, groupID, memberType, memberID)
