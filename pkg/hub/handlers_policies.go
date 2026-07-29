@@ -510,15 +510,11 @@ func (s *Server) addPolicyBinding(w http.ResponseWriter, r *http.Request, policy
 	// Policy writes are gated to hub admins (ptone/scion#591). Binding a policy
 	// to a principal is the grant-conferring step; before this gate any
 	// authenticated caller could bind a self-authored policy to themselves. Fail
-	// closed at the entry, before any parsing.
-	//
-	// Caveat for a future fixer: this handler's own gate is fail-closed, but its
-	// dispatcher handlePolicyBindings calls store.GetPolicy before dispatching
-	// here (and handlePolicyBindingByID does the same for unbind), so a caller
-	// learns whether a policy ID exists — a 404-vs-gate split — ahead of the
-	// admin check. Harmless while policy reads are open to all; it becomes a live
-	// existence oracle the moment policy reads are gated, at which point the
-	// GetPolicy calls in those two dispatchers must move behind the admin check.
+	// closed at the entry, before any parsing. This per-handler gate is defence in
+	// depth: the dispatcher handlePolicyBindings already runs requireAdmin ahead of
+	// its store.GetPolicy existence check (see the note there), so the former
+	// existence-oracle gap — a non-admin learning whether a policy ID exists via a
+	// 404-vs-gate split — is closed; a non-admin never reaches here.
 	//
 	// Hub-admin-only is the ratified interim per the EM/lead ruling 2026-07-29 —
 	// stricter than the design's scope-relative `manage` (see createPolicy and

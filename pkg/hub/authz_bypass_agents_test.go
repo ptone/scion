@@ -219,6 +219,14 @@ func (f *bypassAgentsFixture) asAgent(t *testing.T, method, path string, body in
 // asBroker issues an HMAC-signed broker request. Brokers implement neither
 // UserIdentity nor AgentIdentity, so before #591 they slipped through every one
 // of these guards exactly as agents did.
+//
+// It depends on exactly three fields of the fixture: f.srv (whose
+// brokerAuthService signs the canonical string and serves the request), f.broker
+// (its ID goes in the X-Broker-Id header), and f.brokerSecret (the HMAC key).
+// Callers that build a partial bypassAgentsFixture literal just to reuse this
+// helper (e.g. the policy-authz broker deniedCaller) must set those three; if
+// asBroker ever grows a fourth dependency, update this list so such literals do
+// not nil-deref.
 func (f *bypassAgentsFixture) asBroker(t *testing.T, method, path string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	var raw []byte

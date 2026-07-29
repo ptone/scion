@@ -801,9 +801,13 @@ GET /api/v1/policies
 > **Implementation note (ptone/scion#591):** the shipped gate is **hub-admin
 > only** (via `requireAdmin`), stricter than the scope-relative viewability
 > described here: the listing previously returned every policy to any
-> authenticated caller, disclosing the hub's full authorization posture. Interim
-> pending maintainer ratification and a later relaxation toward scope-relative
-> viewability; PR-body behaviour-change #12; EM/lead ruling 2026-07-29.
+> authenticated caller, disclosing the hub's full authorization posture. Listing
+> a policy's bindings (GET `.../principals`) is likewise hub-admin-only in this
+> interim, for the same reason. The admin-only interim was **extended to reads by
+> the coordinating maintainer** (Rule 13 decision 2026-07-29 01:40Z) — not a
+> direct maintainer ratification of the read gate; the later relaxation toward
+> scope-relative viewability remains a tracked follow-on. See PR-body
+> behaviour-change #12.
 
 #### Get Policy
 ```
@@ -812,9 +816,11 @@ GET /api/v1/policies/{policyId}
 
 **Authorization:** Hub admins only (via `requireAdmin`), gated as part of
 ptone/scion#591. The gate runs before the store lookup, so a non-admin receives
-403 rather than 404 for any policy ID, avoiding an existence oracle. Interim
-pending maintainer ratification and a later relaxation toward scope-relative
-viewability; PR-body behaviour-change #12; EM/lead ruling 2026-07-29.
+403 rather than 404 for any policy ID, avoiding an existence oracle. The
+admin-only interim was extended to reads by the coordinating maintainer (Rule 13
+decision 2026-07-29 01:40Z) — not a direct maintainer ratification of the read
+gate; scope-relative relaxation remains a tracked follow-on. See PR-body
+behaviour-change #12.
 
 #### Create Policy
 ```
@@ -843,11 +849,15 @@ POST /api/v1/policies
 > **Implementation note (ptone/scion#591):** the shipped gate is deliberately
 > **stricter** than this spec — **hub-admin only** (via `requireAdmin`), not the
 > scope-relative `manage` described here. This is the conservative interim that
-> fully closes the measured authorization-bypass (arms B and C): the write
-> handlers were previously ungated, so any authenticated caller could author a
-> policy and bind it to themselves. It is pending maintainer ratification and a
-> planned later relaxation back toward scope-relative `manage`. See PR-body
-> behaviour-change #12. EM/lead ruling 2026-07-29.
+> fully closes the measured authorization-bypass. The write handlers were
+> previously ungated, so any authenticated caller could author a policy and bind
+> it to themselves, which enabled two escalations: **arm B** — a caller grants
+> itself access to a resource it otherwise cannot reach; **arm C** — a caller's
+> resource-scoped `allow` overrides an admin's hub-scoped `deny`, because a more
+> specific scope (resource) outranks a broader one (hub) in evaluation. The
+> admin-only gate for these write ops was **ratified by the maintainer (ptone)
+> 2026-07-29**; a later relaxation back toward scope-relative `manage` remains a
+> tracked follow-on. See PR-body behaviour-change #12.
 
 #### Update Policy
 ```
@@ -857,9 +867,9 @@ PATCH /api/v1/policies/{policyId}
 **Authorization:** Requires `manage` action on the policy's scope.
 
 > **Implementation note (ptone/scion#591):** shipped gate is hub-admin only, not
-> scope-relative `manage` — see the note under Create Policy. Interim pending
-> maintainer ratification; PR-body behaviour-change #12; EM/lead ruling
-> 2026-07-29.
+> scope-relative `manage` — see the note under Create Policy. Ratified by the maintainer
+> (ptone) 2026-07-29; scope-relative relaxation remains a tracked follow-on.
+> PR-body behaviour-change #12.
 
 #### Delete Policy
 ```
@@ -869,9 +879,9 @@ DELETE /api/v1/policies/{policyId}
 **Authorization:** Requires `manage` action on the policy's scope.
 
 > **Implementation note (ptone/scion#591):** shipped gate is hub-admin only, not
-> scope-relative `manage` — see the note under Create Policy. Interim pending
-> maintainer ratification; PR-body behaviour-change #12; EM/lead ruling
-> 2026-07-29.
+> scope-relative `manage` — see the note under Create Policy. Ratified by the maintainer
+> (ptone) 2026-07-29; scope-relative relaxation remains a tracked follow-on.
+> PR-body behaviour-change #12.
 
 #### Add Principal to Policy
 ```
@@ -886,22 +896,23 @@ POST /api/v1/policies/{policyId}/principals
 }
 ```
 
-**Authorization:** Hub admins only (via `requireAdmin`), gated in ptone/scion#591.
-Binding a policy to a principal is the grant-conferring step; before the gate any
-authenticated caller could bind a self-authored policy to themselves. Interim
-pending maintainer ratification; PR-body behaviour-change #12; EM/lead ruling
-2026-07-29.
+**Authorization:** Hub admins only (via `requireAdmin`) — see the note under
+Create Policy. Binding a policy to a principal is the grant-conferring step;
+before the gate any authenticated caller could bind a self-authored policy to
+themselves. Ratified by the maintainer (ptone) 2026-07-29; scope-relative
+relaxation remains a tracked follow-on. PR-body behaviour-change #12.
 
 #### Remove Principal from Policy
 ```
 DELETE /api/v1/policies/{policyId}/principals/{principalType}/{principalId}
 ```
 
-**Authorization:** Hub admins only (via `requireAdmin`), gated in ptone/scion#591.
-A policy reaches a principal only through a binding, so unbinding overrides the
-policy it carried; left ungated a caller could shed an admin-established deny by
-removing its binding. Interim pending maintainer ratification; PR-body
-behaviour-change #12; EM/lead ruling 2026-07-29.
+**Authorization:** Hub admins only (via `requireAdmin`) — see the note under
+Create Policy. A policy reaches a principal only through a binding, so unbinding
+overrides the policy it carried; left ungated a caller could shed an
+admin-established deny by removing its binding. Ratified by the maintainer
+(ptone) 2026-07-29; scope-relative relaxation remains a tracked follow-on.
+PR-body behaviour-change #12.
 
 #### Evaluate Access (Debug/Test)
 ```

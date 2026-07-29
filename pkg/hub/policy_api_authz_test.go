@@ -30,12 +30,19 @@ package hub
 // service is intentionally NOT granted here; relaxing to it is a separate, later
 // change.
 //
-// The covered set is the full policy-write API — five operations:
+// The covered set is the five CALLER-AUTHORED policy-write endpoints:
 //
 //   createPolicy, updatePolicy, deletePolicy, addPolicyBinding
 //       gated in 536d8f5c (the four authoring/binding ops)
 //   removePolicyBinding
 //       gated in b5f230a3 (the follow-up)
+//
+// "Caller-authored" is deliberate: an auditor grepping the store layer finds
+// roughly a dozen policy-write calls, but the other (server-authored) ones —
+// seed/migration writers and internal reconcilers that run with no HTTP caller
+// identity — are out of scope for this gate and must not be wrapped in
+// requireAdmin. This gate covers only the five endpoints an authenticated HTTP
+// caller can drive.
 //
 // removePolicyBinding is load-bearing, not incidental: a policy reaches a
 // principal only through a binding (see GetPoliciesForPrincipals in
@@ -457,27 +464,51 @@ func TestPolicyAPI_ListBindingsGate(t *testing.T) {
 
 // TestPolicyAPI_BindingsOracleClosed pins the I2 existence-oracle close: the
 // bindings dispatchers gate before their GetPolicy existence check, so a
-// non-admin cannot distinguish an existing policy from a missing one — both the
-// GET (list) and DELETE (unbind) paths return 403, never 404, for a policy ID
-// that does not exist. The admin arm confirms the underlying 404 is real (the
-// oracle exists; it is merely shut to non-admins), so a regression that dropped
-// the dispatcher gate would flip the non-admin arms to 404 and fail here.
+// non-admin cannot distinguish an existing policy from a missing one. The
+// acceptance property (aid-rev1) is stronger than "403 not 404": the response to
+// a non-admin must be BYTE-IDENTICAL — same status AND same body — for an
+// existing vs a non-existing policy id, at BOTH the GET (list) and DELETE
+// (unbind) dispatchers, so nothing (not even response length) leaks existence.
+// The admin arm confirms the underlying 404 is real (the oracle exists; it is
+// merely shut to non-admins), so a regression dropping either dispatcher gate
+// flips the non-admin arm to a distinguishable 404 and fails here.
 func TestPolicyAPI_BindingsOracleClosed(t *testing.T) {
 	f := setupPolicyAuthz(t)
-	missing := tid("pa-oracle-missing-policy")
-	listPath := "/api/v1/policies/" + missing + "/bindings"
-	unbindPath := "/api/v1/policies/" + missing + "/bindings/user/" + f.member.ID
+	ctx := context.Background()
 
-	t.Run("non-admin list on missing policy is 403 not 404", func(t *testing.T) {
-		rec := doRequestAsUser(t, f.srv, f.member, http.MethodGet, listPath, nil)
-		require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	// One policy that exists (with a binding) and one id that does not.
+	existing := f.seedPolicy(t, "pa-oracle-existing-policy")
+	require.NoError(t, f.store.AddPolicyBinding(ctx, &store.PolicyBinding{
+		PolicyID:      existing.ID,
+		PrincipalType: store.PolicyPrincipalTypeUser,
+		PrincipalID:   f.member.ID,
+	}))
+	missing := tid("pa-oracle-missing-policy")
+
+	assertIdentical := func(t *testing.T, method, existPath, missPath string) {
+		t.Helper()
+		recExist := doRequestAsUser(t, f.srv, f.member, method, existPath, nil)
+		recMiss := doRequestAsUser(t, f.srv, f.member, method, missPath, nil)
+		require.Equal(t, http.StatusForbidden, recExist.Code,
+			"non-admin on an existing policy must be 403, body: %s", recExist.Body.String())
+		require.Equal(t, recExist.Code, recMiss.Code, "status must not leak policy existence")
+		require.Equal(t, recExist.Body.String(), recMiss.Body.String(),
+			"body must not leak policy existence")
+	}
+
+	t.Run("list dispatcher: existing vs missing identical for non-admin", func(t *testing.T) {
+		assertIdentical(t, http.MethodGet,
+			"/api/v1/policies/"+existing.ID+"/bindings",
+			"/api/v1/policies/"+missing+"/bindings")
 	})
-	t.Run("non-admin unbind on missing policy is 403 not 404", func(t *testing.T) {
-		rec := doRequestAsUser(t, f.srv, f.member, http.MethodDelete, unbindPath, nil)
-		require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	t.Run("unbind dispatcher: existing vs missing identical for non-admin", func(t *testing.T) {
+		assertIdentical(t, http.MethodDelete,
+			"/api/v1/policies/"+existing.ID+"/bindings/user/"+f.member.ID,
+			"/api/v1/policies/"+missing+"/bindings/user/"+f.member.ID)
 	})
-	t.Run("admin sees the real 404 (oracle exists, is merely shut)", func(t *testing.T) {
-		rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, listPath, nil)
+	t.Run("admin sees the real 404 for missing (oracle exists, is merely shut)", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet,
+			"/api/v1/policies/"+missing+"/bindings", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
 	})
 }
