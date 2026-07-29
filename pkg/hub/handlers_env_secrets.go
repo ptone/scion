@@ -1607,8 +1607,10 @@ func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) 
 // that the gate and the switches below cannot drift into disagreeing about
 // which requests exist and what each one does — if a verb is added to either
 // switch, the compiler will not notice, but a reader comparing these two places
-// will. Anything not routed here (a PUT, a GET on a broker) is left to the
-// switches to answer 405 exactly as before; whether that 405 is itself a verb
+// will. Anything not routed here (a PUT/PATCH on the collection, a non-DELETE
+// verb on a broker) is answered 405 by the else branch in handleProjectProviders
+// BEFORE the existence check, not left to the method switches, so an unrouted
+// verb cannot become an existence oracle; whether that 405 is itself a verb
 // oracle for callers who would have been refused is a separate open question
 // and deliberately not decided here.
 func providerRouteAction(method, subPath string) (Action, bool) {
@@ -1634,10 +1636,15 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 
 	// Verify project exists.
 	//
-	// The lookup happens here, but its ANSWER is withheld until after the gate
-	// below, because "this project does not exist" and "you may not touch this
-	// project" must be indistinguishable to a caller who is not entitled to
-	// either fact. See the gate for how that is arranged.
+	// The lookup happens here, but its ANSWER is withheld until existence can no
+	// longer be inferred, because "this project does not exist" and "you may not
+	// touch this project" must be indistinguishable to a caller entitled to
+	// neither fact. Two paths arrange that, and the guarantee is scoped to them:
+	// a ROUTED request is refused by the gate below in words identical to the
+	// missing-project answer; an UNROUTED verb is caught by the write-verb
+	// dispatch path (the else branch below) and answered 405 BEFORE the notFound
+	// check, so it too returns the same response whether or not the project
+	// exists. See the gate and that else branch for how.
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeErrorFromErr(w, err, "")
@@ -1691,6 +1698,20 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 		if !s.authorize(w, r, projectResource(gated), action) {
 			return
 		}
+	} else {
+		// UNROUTED verb (a PUT/PATCH on the collection, or any non-DELETE verb on
+		// a broker id). It never entered the gate above, so answer its 405 HERE,
+		// before the notFound check below, rather than leaving it to the method
+		// switches. Otherwise an unrouted verb is an existence oracle with no
+		// authorization at all: it fell through to `if notFound` and returned 404
+		// for a missing project but 405 for an existing one, telling any caller —
+		// unrelated user, cross-project agent, or broker — whether the project
+		// exists in a single request. Answering 405 for both closes that tell.
+		// This does NOT decide whether 405 is itself a verb oracle for a
+		// would-be-refused caller; that question stays exactly as open as
+		// providerRouteAction leaves it.
+		MethodNotAllowed(w)
+		return
 	}
 
 	if notFound {

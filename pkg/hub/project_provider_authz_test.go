@@ -702,14 +702,95 @@ func TestPVGate_ExistenceNotDisclosed(t *testing.T) {
 	})
 }
 
-// TestPVGate_MethodDispatchUnchanged records that an unsupported verb still
-// answers 405 rather than being caught by the gate, because providerRouteAction
-// routes only GET and POST on the collection and DELETE on a broker. Not an
-// authorization property; here so that a future reorder is visible, and so that
-// the day someone decides that 405 is itself a verb oracle, the change shows up
-// as this test failing rather than as nothing.
+// TestPVGate_MethodDispatchUnchanged records that an unrouted verb answers 405,
+// and — the property N37 adds — that it answers 405 for EVERY caller class and
+// regardless of whether the project exists. providerRouteAction routes only GET
+// and POST on the collection and DELETE on a broker; every other verb is
+// unrouted and is answered 405 by the write-verb dispatch path (the else branch
+// in handleProjectProviders) BEFORE the existence check, so it is neither an
+// authorization decision nor an existence oracle.
+//
+// The refused caller classes — an unrelated user, a cross-project agent, a
+// broker — are the population the still-open "is 405 itself a verb oracle for
+// callers who would have been refused" question is about, so they are pinned
+// here and not just the owner, for whom the question does not arise. The owner's
+// original PUT row is kept as the control.
+//
+// Each caller asserts real-vs-missing equality on status AND body (the I54
+// standard). Before the 405-before-notFound fix an unrouted verb fell past the
+// (skipped) gate to the unconditional existence check and returned 405 for an
+// existing project but 404 for a missing one, leaking existence to precisely
+// these callers with no authorization at all; reverting that reordering reds
+// exactly these missing-vs-real arms while the routed GET/POST/DELETE arms in
+// the sibling tests stay green.
+//
+// This does NOT decide the open verb-oracle question: every class gets the same
+// 405, so the 405 still says nothing about whether the caller would have been
+// refused a routed verb. It only closes the existence tell the unrouted verbs
+// carried.
 func TestPVGate_MethodDispatchUnchanged(t *testing.T) {
-	f := pvGateSetup(t)
-	rec := f.asUser(t, f.owner, http.MethodPut, f.collectionPath(), nil)
-	require.Equal(t, http.StatusMethodNotAllowed, rec.Code, "body=%s", rec.Body.String())
+	missingBase := "/api/v1/projects/" + tid("pvgate-no-such-project-dispatch") + "/providers"
+
+	// The unrouted surface: PUT/PATCH on the collection (GET/POST are routed),
+	// and any non-DELETE verb on a broker id (DELETE is routed). Each combination
+	// must answer 405 before the existence check for every caller below.
+	paths := []struct {
+		name  string
+		real  func(f *pvGateFixture) string
+		fake  func(f *pvGateFixture) string
+		verbs []string
+	}{
+		{
+			"collection",
+			func(f *pvGateFixture) string { return f.collectionPath() },
+			func(f *pvGateFixture) string { return missingBase },
+			[]string{http.MethodPut, http.MethodPatch},
+		},
+		{
+			"broker id",
+			func(f *pvGateFixture) string { return f.resourcePath() },
+			func(f *pvGateFixture) string { return missingBase + "/" + f.attachable.ID },
+			[]string{http.MethodGet, http.MethodPut, http.MethodPatch},
+		},
+	}
+
+	callers := []struct {
+		name string
+		call func(t *testing.T, f *pvGateFixture, method, path string) *httptest.ResponseRecorder
+	}{
+		{"owner", func(t *testing.T, f *pvGateFixture, m, p string) *httptest.ResponseRecorder {
+			return f.asUser(t, f.owner, m, p, nil)
+		}},
+		{"unrelated user", func(t *testing.T, f *pvGateFixture, m, p string) *httptest.ResponseRecorder {
+			return f.asUser(t, f.outsdr, m, p, nil)
+		}},
+		{"cross-project agent", func(t *testing.T, f *pvGateFixture, m, p string) *httptest.ResponseRecorder {
+			return f.asAgent(t, f.stranger, m, p, nil)
+		}},
+		{"broker", func(t *testing.T, f *pvGateFixture, m, p string) *httptest.ResponseRecorder {
+			return f.asBroker(t, m, p, nil)
+		}},
+	}
+
+	for _, p := range paths {
+		for _, verb := range p.verbs {
+			for _, c := range callers {
+				t.Run(p.name+"/"+verb+"/"+c.name, func(t *testing.T) {
+					f := pvGateSetup(t)
+					f.seedProvider(t)
+
+					real := c.call(t, f, verb, p.real(f))
+					fake := c.call(t, f, verb, p.fake(f))
+
+					require.Equal(t, http.StatusMethodNotAllowed, real.Code,
+						"an unrouted verb must answer 405 before the gate and the "+
+							"existence check; body=%s", real.Body.String())
+					require.Equal(t, real.Code, fake.Code,
+						"the status of an unrouted verb reveals whether the project exists")
+					require.Equal(t, real.Body.String(), fake.Body.String(),
+						"the body of an unrouted verb reveals whether the project exists")
+				})
+			}
+		}
+	}
 }
