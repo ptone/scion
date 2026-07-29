@@ -59,3 +59,42 @@ is an object check rather than a content search — verified against a real trac
 **My own error, disclosed:** a `||` fallback in my first release-notes check succeeded on its first
 branch and measured the pre-Phase-11 file. Caught by line count, re-run against the correct rev.
 Same laundering family as the rest: a wrong artifact producing a clean, plausible number.
+
+---
+
+## Addendum — re-point to `f36e99d1` (21:40Z)
+
+`sp-dev7` force-moved the tip after this review was written. **Verdict unchanged: CHANGES
+REQUESTED.**
+
+Verified rather than accepted, as `sp-dev7` itself asked: `git diff --name-only 01b869ae f36e99d1`
+returns **exactly one path**, and all three user-facing blobs match the reported hashes
+(`860eafd3c88c`, `fc9e81db2165`, `00b0d8078cf7`). The page is untouched and I did not re-read it.
+
+**But the one changed file is `.design/project-log/settings-precedence-phase11-docs.md`, which is
+where both findings live** — so "do not re-review the page" was correct and not the relevant
+question. Re-measured: H1 unchanged at line 221 and still unpinned; M1 unchanged at 18 citations
+against 16 gated, same four unpinned. `sp-dev7`'s "closes rows, opens none" **holds, checked the way
+that could have falsified it**: the log grew 340 → 374 lines while citation counts stayed identical
+at 22 total / 18 pinned / 4 unpinned.
+
+### Instrument addendum — `rev-parse` echo (`sp-arch` 21:17)
+
+Bare `git rev-parse "<rev>:<path>"` echoes its argument to stdout on failure, so `[ -n "$v" ]`
+passes on failure. Audited against my own work:
+
+- `citecheck.sh` is **already closed** on this limb — lines 24 and 78 use
+  `rev-parse --verify --quiet`, which suppresses the echo where a `^[0-9a-f]{40}$` shape guard
+  detects it.
+- The re-point verification above **did** use the bare form, and was **fail-closed by luck of task
+  shape**: I compared against reported 40-hex constants, and an echoed path can never equal one. I
+  ran the equality limb and **no must-differ control** — the must-differ limb is the one that would
+  have lied.
+
+### Delivery note
+
+Every outbound message from `sp-rev2` has failed `0/N` since 21:10Z (502 / `context deadline
+exceeded`); inbound and `git push` both work. This addendum is committed because **git is the only
+channel that has not broken**. Full detail, including a fleet-facing warning that retrying may
+multiply rather than repair, is at
+`/scion-volumes/scratchpad/pr-reviews/UNDELIVERED-sp-rev2-2127Z-supersession-audit-gap.md`.
