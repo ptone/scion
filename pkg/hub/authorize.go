@@ -116,22 +116,27 @@ func (s *Server) authorizeWithMessage(w http.ResponseWriter, r *http.Request, re
 
 // authorizeProjectReadNoOracle gates a project READ so that the observable answer
 // is the same whether the project does not exist or the caller may not read it.
-// It runs requireProjectVisibleToAgent (which already collapses a cross-project
-// agent to 404) and then CheckAccess for ActionRead; on denial it renders 404 —
-// NOT the 403 that s.authorize would — so a caller cannot use the endpoint as an
-// existence oracle over project IDs. Use it exactly like s.authorize:
+// It checks agent project-isolation, then CheckAccess for ActionRead; on ANY
+// denial it renders the byte-identical response the handler's missing-project
+// path renders — writeErrorFromErr on store.ErrNotFound: 404 / code not_found /
+// message "Resource not found" — so a refused-real project and a missing one
+// cannot be told apart on status, error code, OR message. Use it like s.authorize:
 //
 //	if !s.authorizeProjectReadNoOracle(w, r, project) { return }
 //
-// It is deliberately stricter than the eight s.authorize gates, which keep a
-// 403-vs-404 existence split; harmonizing those PR-wide is an open lead call. It
-// matches the provider gate's no-oracle shape, and here it introduces no oracle
-// at all relative to the pre-#591 behaviour, where the full 200 record disclosed
-// existence outright. Read-only: for a mutating verb use s.authorize instead.
+// The message-parity is load-bearing: an earlier revision rendered
+// NotFound(w, "Project") ("Project not found") on denial, which agreed with the
+// missing path on status and code but not message, leaving a one-bit existence
+// oracle over project ids (aid-verify (c) on 3e753be5); corrected forward here.
+//
+// It inlines the agent-isolation check rather than calling
+// requireProjectVisibleToAgent so the isolation denial renders that same missing
+// body — requireProjectVisibleToAgent answers "Project not found", which is right
+// for its other callers but would reopen the oracle here. It is deliberately
+// stricter than the eight s.authorize gates, which keep a 403-vs-404 existence
+// split; harmonizing those PR-wide is an open lead call. Read-only: for a
+// mutating verb use s.authorize instead.
 func (s *Server) authorizeProjectReadNoOracle(w http.ResponseWriter, r *http.Request, project *store.Project) bool {
-	if !s.requireProjectVisibleToAgent(w, r, project) {
-		return false
-	}
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -139,10 +144,22 @@ func (s *Server) authorizeProjectReadNoOracle(w http.ResponseWriter, r *http.Req
 		return false
 	}
 	resource := projectResource(project)
-	if !s.authzService.CheckAccess(ctx, identity, resource, ActionRead).Allowed {
-		logAuthzDenial(r, identity, resource, ActionRead, "project read denied (rendered 404, no existence oracle)")
-		NotFound(w, "Project")
+
+	// Every denial renders the same body the missing-project path renders, so no
+	// arm distinguishes real-but-forbidden from missing.
+	deny := func(reason string) bool {
+		logAuthzDenial(r, identity, resource, ActionRead, reason)
+		writeErrorFromErr(w, store.ErrNotFound, "")
 		return false
+	}
+
+	// Agent isolation first (mirrors requireProjectVisibleToAgent's ordering): a
+	// cross-project agent must not learn the project exists.
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil && project.ID != agentIdent.ProjectID() {
+		return deny("agent outside project (rendered as missing, no existence oracle)")
+	}
+	if !s.authzService.CheckAccess(ctx, identity, resource, ActionRead).Allowed {
+		return deny("project read denied (rendered as missing, no existence oracle)")
 	}
 	return true
 }

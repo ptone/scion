@@ -79,36 +79,58 @@ func gpGateRequireRecordAbsent(t *testing.T, body string) {
 		"a refused getProject must not enrich/leak the owner display name; body=%s", body)
 }
 
-// TestGPGate_AttackArmsRefusedRecordAbsent covers the two caller classes measured
-// as 200-with-record: an unrelated user and a cross-project agent. Both must be
-// refused AND the record must be absent from the body.
+// gpGateMissingBody returns the exact response body the handler renders for a
+// project that does not exist. getProject calls s.store.GetProject before the
+// gate, so a nonexistent id short-circuits to writeErrorFromErr(store.ErrNotFound)
+// for any authenticated caller — this is the "missing" body every refused-real
+// arm below must be byte-identical to (no existence oracle over project ids).
+func gpGateMissingBody(t *testing.T, f *wsGateFixture) string {
+	t.Helper()
+	rec := f.asUser(t, f.owner, http.MethodGet, "/api/v1/projects/"+tid("gpgate-nonexistent"), nil)
+	require.Equal(t, http.StatusNotFound, rec.Code,
+		"a nonexistent project must be 404; body=%s", rec.Body.String())
+	return rec.Body.String()
+}
+
+// TestGPGate_AttackArmsRefusedRecordAbsent covers the caller classes measured as
+// 200-with-record: an unrelated user, a cross-project agent, and a broker. Each
+// must be refused, the record must be absent from the body, AND — the no-oracle
+// property — the refused body must be byte-identical to the missing-project body,
+// so status, error code, and message all agree with "this project does not
+// exist". A 404 whose message reads "Project not found" while missing reads
+// "Resource not found" is a one-bit existence oracle; this asserts the full body.
 func TestGPGate_AttackArmsRefusedRecordAbsent(t *testing.T) {
 	f := wsGateSetup(t)
 	p := gpGateProject(t, f)
 	path := "/api/v1/projects/" + p.ID
+	missing := gpGateMissingBody(t, f)
 
 	t.Run("unrelated user", func(t *testing.T) {
 		rec := f.asUser(t, f.outsdr, http.MethodGet, path, nil)
-		// No-oracle: an unrelated user is answered exactly as a missing project.
 		require.Equal(t, http.StatusNotFound, rec.Code,
 			"unrelated user must be refused; body=%s", rec.Body.String())
 		gpGateRequireRecordAbsent(t, rec.Body.String())
+		require.Equal(t, missing, rec.Body.String(),
+			"refused-real must be byte-identical to missing (no existence oracle)")
 	})
 
 	t.Run("cross-project agent", func(t *testing.T) {
 		rec := f.asAgent(t, f.stranger, http.MethodGet, path, nil)
 		require.Equal(t, http.StatusNotFound, rec.Code,
-			"cross-project agent must get 404 (requireProjectVisibleToAgent); body=%s",
-			rec.Body.String())
+			"cross-project agent must get 404; body=%s", rec.Body.String())
 		gpGateRequireRecordAbsent(t, rec.Body.String())
+		require.Equal(t, missing, rec.Body.String(),
+			"refused-real must be byte-identical to missing (no existence oracle)")
 	})
 
 	t.Run("broker", func(t *testing.T) {
 		rec := f.asBroker(t, http.MethodGet, path, nil)
-		// CheckAccess has no broker arm; the no-oracle renderer answers 404.
+		// CheckAccess has no broker arm; the no-oracle renderer answers as missing.
 		require.Equal(t, http.StatusNotFound, rec.Code,
 			"a broker must be refused; body=%s", rec.Body.String())
 		gpGateRequireRecordAbsent(t, rec.Body.String())
+		require.Equal(t, missing, rec.Body.String(),
+			"refused-real must be byte-identical to missing (no existence oracle)")
 	})
 }
 
