@@ -272,6 +272,13 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 // deliberate (design Q3): the scope is template-administered rather than
 // ambient, and handleProjectBroadcast already reads it as conferring exactly
 // this authority. Narrowing it later is a change to this one function.
+//
+// Because the agent arm authorizes on scope alone and never calls CheckAccess,
+// an explicit deny policy binding does NOT restrain a scoped agent's lifecycle
+// actions: an operator who binds a deny to stop one agent from restarting its
+// peers will find it has no effect here (deny bindings remain effective for user
+// callers, which go through CheckAccess). This is the user-approved Q3 behaviour,
+// not an oversight.
 func (s *Server) authorizeAgentLifecycle(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
 	ctx := r.Context()
 
@@ -343,6 +350,15 @@ func (s *Server) authorizeAgentLifecycle(w http.ResponseWriter, r *http.Request,
 // merely produced a wrong status code (an authenticated agent was told
 // "Authentication required"), but the distinction is worth keeping honest:
 // this helper gates the hub's admin endpoints.
+//
+// CAUTION: this is a plain role comparison, not a call to authorize()/
+// CheckAccess. A user access token embeds the MINTING user's role, so an
+// admin-minted, project-scoped, zero-scope UAT PASSES this guard and reaches
+// every one of the endpoints that use it — even though authorize() rejects the
+// same token, because enforceUATConstraints (authz.go) runs BEFORE the admin
+// bypass there and this helper has no equivalent. The exposure today is bounded
+// only by which sites call requireAdmin; do not route new admin sites through it
+// until that gap is closed.
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdentity, bool) {
 	// Synthetic resource: requireAdmin is a role check on the hub itself
 	// rather than a policy check on an addressable resource.

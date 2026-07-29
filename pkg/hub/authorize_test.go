@@ -306,6 +306,14 @@ func TestAuthorizeAgentCreate_IdentityKinds(t *testing.T) {
 			wantAllow: true,
 		},
 		{
+			// 'dev' is a live switch arm alongside "user"; DevUser.Role() is
+			// "admin", so this is the admin-equivalent path. Without this arm,
+			// removing 'dev' from the case label reds nothing.
+			name:      "dev-auth identity is allowed (admin-equivalent)",
+			identity:  NewDevUser(DevUserConfig{Username: "dev"}),
+			wantAllow: true,
+		},
+		{
 			name:       "user denied by policy",
 			identity:   authzHelperMember(),
 			wantAllow:  false,
@@ -412,6 +420,14 @@ func TestAuthorizeAgentLifecycle_IdentityKinds(t *testing.T) {
 		{
 			name:      "user allowed by policy",
 			identity:  authzHelperAdmin(),
+			wantAllow: true,
+		},
+		{
+			// 'dev' is a live switch arm alongside "user"; DevUser.Role() is
+			// "admin", so this is the admin-equivalent path. Without this arm,
+			// removing 'dev' from the case label reds nothing.
+			name:      "dev-auth identity is allowed (admin-equivalent)",
+			identity:  NewDevUser(DevUserConfig{Username: "dev"}),
 			wantAllow: true,
 		},
 		{
