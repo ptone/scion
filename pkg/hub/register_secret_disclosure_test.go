@@ -468,11 +468,16 @@ func TestRSD_CreateLimbIssuesNoSecret(t *testing.T) {
 				"the deprecated branch did not run to completion, so this arm "+
 					"proves nothing about the secret it might have returned")
 
-			// The teeth. A credential minted for a broker this request created
+			// The teeth, and they are deliberately on the STORE rather than on
+			// the body. A credential minted for a broker this request created
 			// is a credential handed to whoever made the request, since the
-			// broker itself has not authenticated and receives nothing. The
-			// seeded-broker arms cannot see this, which is why it is asserted
-			// against the created id specifically.
+			// broker itself has not authenticated and receives nothing — but
+			// the harder case is a mint that never reaches the response at all,
+			// which is what someone would write while making this limb
+			// "consistent" with the other one. Measured both ways: restoring
+			// the mint here reds this arm whether or not the response carries
+			// the value. The seeded-broker arms see neither, which is why this
+			// is asserted against the created id specifically.
 			_, err = f.store.GetBrokerSecret(context.Background(), created.ID)
 			require.Error(t, err,
 				"registering a project minted a stored secret for the broker it "+
