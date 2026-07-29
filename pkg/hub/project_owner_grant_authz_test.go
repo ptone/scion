@@ -394,3 +394,237 @@ func TestOGGrant_OwnerReregisteringKeepsOwnership(t *testing.T) {
 		require.Contains(t, rec.Body.String(), ogGrantCanaryContent)
 	})
 }
+
+// ---------------------------------------------------------------------------
+// The residual: the same escalation through the other source of ownership.
+//
+// Removing the caller-supplied grant above left a second way to become an
+// owner. createProjectMembersGroupAndPolicy promotes the sole member of a group
+// that has no owners — a backfill for projects created before ownership was
+// enforced. That promotion did not ask who was asking, so a plain member of an
+// ownerless project could trigger it against themselves by POSTing the
+// project's own ID to /projects/register: they were the only member, so they
+// became the owner, and the owner-or-admin short-circuit did the rest.
+//
+// The two tests below are the two states that leave a group ownerless with a
+// live member in it. Neither is hypothetical: the first is old data, and the
+// second is the trusted-proxy deployment the FK-retry path in that function is
+// written to support. They are separate tests rather than one table because
+// they arrive at the same group through different failures, and a fix that
+// covered one and not the other would be worth seeing as one red test.
+// ---------------------------------------------------------------------------
+
+// ownerlessProjectWithSoleIntruderMember builds the precondition and asserts it.
+// The project is seeded through the store and the group through the real
+// function under a context carrying no identity, because this is the project's
+// past, not a request: the escalation is the single request made afterwards.
+//
+// createdBy models the two ownerless states — empty for a legacy project, or a
+// user ID that is not in the store for the trusted-proxy case.
+func (f *ogGrantFixture) ownerlessProjectWithSoleIntruderMember(
+	t *testing.T, name, createdBy string) *store.Project {
+	t.Helper()
+	ctx := context.Background()
+
+	p := &store.Project{
+		ID:        api.NewUUID(),
+		Name:      name,
+		Slug:      api.Slugify(name),
+		GitRemote: "https://example.invalid/" + api.Slugify(name) + ".git",
+		CreatedBy: createdBy,
+	}
+	require.NoError(t, f.store.CreateProject(ctx, p))
+	f.srv.createProjectMembersGroupAndPolicy(ctx, p)
+
+	group, err := f.store.GetGroupBySlug(ctx, "project:"+p.Slug+":members")
+	require.NoError(t, err)
+	require.NoError(t, f.store.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    group.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   f.intruder.ID,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	require.NoError(t, f.store.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: p.ID, BrokerID: f.embeddedBrokerID,
+		BrokerName: "oggrant-embedded", LocalPath: f.workspacePath,
+	}))
+
+	// Both halves of the precondition are asserted, because the backfill fires
+	// only on their conjunction. If a future change to the seeding left an owner
+	// behind or a second member in the group, the promotion would never have
+	// been attempted and every assertion below would pass without measuring
+	// anything.
+	owners, err := f.store.CountGroupMembersByRole(ctx, group.ID, store.GroupMemberRoleOwner)
+	require.NoError(t, err)
+	require.Zero(t, owners,
+		"precondition: the project must have no owner, or the backfill never runs")
+	members, err := f.store.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+	require.Len(t, members, 1,
+		"precondition: the intruder must be the group's SOLE member, or the "+
+			"backfill never runs")
+	require.False(t, f.isRecordedOwner(t, f.intruder, p),
+		"precondition: the intruder starts as a plain member")
+
+	stored, err := f.store.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	return stored
+}
+
+// ogGrantAssertNoSelfPromotion runs the escalation and checks the three things
+// that must all hold. The store read comes first deliberately: the role is what
+// was actually granted, and the workspace 403 is only its consequence. A change
+// that made the workspace route refuse owners would satisfy the HTTP assertion
+// while the grant went through.
+func ogGrantAssertNoSelfPromotion(t *testing.T, f *ogGrantFixture, p *store.Project) {
+	t.Helper()
+
+	before := f.readWorkspace(t, f.intruder, p)
+	require.Equal(t, http.StatusForbidden, before.Code,
+		"precondition: a plain member must start out refused the workspace; body=%s",
+		before.Body.String())
+
+	reg := f.asUser(t, f.intruder, http.MethodPost, "/api/v1/projects/register",
+		RegisterProjectRequest{ID: p.ID, Name: p.Name, GitRemote: p.GitRemote})
+
+	require.False(t, f.isRecordedOwner(t, f.intruder, p),
+		"a plain member of an ownerless project promoted themselves to owner by "+
+			"registering it (register returned %d)", reg.Code)
+
+	after := f.readWorkspace(t, f.intruder, p)
+	require.Equal(t, http.StatusForbidden, after.Code,
+		"the member read the workspace after registering the project (register "+
+			"returned %d); body=%s", reg.Code, after.Body.String())
+	require.NotContains(t, after.Body.String(), ogGrantCanaryContent)
+}
+
+// TestOGGrant_SoleMemberCannotSelfPromoteOnLegacyProject is the first ownerless
+// state: a project recorded with no creator at all, which is what projects
+// created before ownership enforcement look like.
+func TestOGGrant_SoleMemberCannotSelfPromoteOnLegacyProject(t *testing.T) {
+	f := ogGrantSetup(t)
+	p := f.ownerlessProjectWithSoleIntruderMember(t, "OG Grant Legacy Ownerless", "")
+	ogGrantAssertNoSelfPromotion(t, f, p)
+}
+
+// TestOGGrant_SoleMemberCannotSelfPromoteOnAbsentCreator is the second: the
+// creator is recorded, but no user row exists for them. That is not corrupt
+// data — it is the trusted-proxy deployment where authentication comes from
+// proxy headers and no DB user is provisioned, which the FK retry in
+// createProjectMembersGroupAndPolicy exists to keep working. The recorded
+// creator cannot be added as an owner, so the group is left ownerless with
+// whoever else is in it.
+func TestOGGrant_SoleMemberCannotSelfPromoteOnAbsentCreator(t *testing.T) {
+	f := ogGrantSetup(t)
+	p := f.ownerlessProjectWithSoleIntruderMember(t,
+		"OG Grant Absent Creator", tid("oggrant-creator-not-in-store"))
+	ogGrantAssertNoSelfPromotion(t, f, p)
+}
+
+// TestOGGrant_BackfillStillPromotesSomeoneElse is the control that keeps the
+// constraint honest about its own shape. The refusal is on the caller, not on
+// the promotion: the same group, the same sole member, reached by a request
+// from somebody else still backfills as it always did.
+//
+// This is recorded as behaviour rather than endorsed as a design. It means an
+// ownerless project's sole member can still acquire ownership when an admin
+// happens to touch the project, which is ownership assignment by accident.
+// Deliberate assignment wants its own administrative flow; there isn't one yet,
+// and this test is where its absence is visible.
+func TestOGGrant_BackfillStillPromotesSomeoneElse(t *testing.T) {
+	f := ogGrantSetup(t)
+	p := f.ownerlessProjectWithSoleIntruderMember(t, "OG Grant Backfill By Other", "")
+
+	admin := &store.User{
+		ID: tid("oggrant-admin"), Email: "oggrant-admin@example.com",
+		DisplayName: "Admin", Role: store.UserRoleAdmin, Status: "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, f.store.CreateUser(context.Background(), admin))
+
+	rec := f.asUser(t, admin, http.MethodPost, "/api/v1/projects/register",
+		RegisterProjectRequest{ID: p.ID, Name: p.Name, GitRemote: p.GitRemote})
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+
+	require.True(t, f.isRecordedOwner(t, f.intruder, p),
+		"the sole-member backfill no longer fires for anyone, which is a wider "+
+			"change than refusing to promote the caller")
+}
+
+// TestOGGrant_SelfPromotionRefusedByEveryRoute pins the placement of the
+// constraint. It is inside createProjectMembersGroupAndPolicy rather than in
+// registerProject, because register is not the only handler that reaches that
+// backfill with an existing project and an arbitrary caller: createProject's
+// idempotency branch and getProject call the same function.
+//
+// The two routes below are not equally load-bearing, and the difference was
+// measured rather than assumed:
+//
+//   - POST /projects with an existing ID reaches the backfill and is refused
+//     there. Reverting the constraint reds this arm, so a fix written into
+//     registerProject alone would have left this door open.
+//   - GET /projects/{id} does NOT reach the backfill today. getProject is gated
+//     ahead of its group backfill by authorizeProjectReadNoOracle, and a plain
+//     member has no read on the project, so the 404 arrives first. Reverting
+//     the constraint leaves this arm green: it measures the read gate, not this
+//     one. It is kept because the backfill sits a few lines below that gate in
+//     the same function — public-project read is a documented follow-on, and
+//     relaxing the gate would put this route straight back onto the promotion
+//     with nothing between them.
+func TestOGGrant_SelfPromotionRefusedByEveryRoute(t *testing.T) {
+	routes := []struct {
+		name string
+		// want records what the route answers a plain member of an ownerless
+		// project, so that a change in how far the request gets is visible here
+		// rather than silent.
+		want int
+		call func(*ogGrantFixture, *store.Project) *httptest.ResponseRecorder
+	}{
+		{"POST /projects with an existing ID", http.StatusOK,
+			func(f *ogGrantFixture, p *store.Project) *httptest.ResponseRecorder {
+				return f.asUser(t, f.intruder, http.MethodPost, "/api/v1/projects",
+					CreateProjectRequest{ID: p.ID, Name: p.Name})
+			}},
+		{"GET /projects/{id}", http.StatusNotFound,
+			func(f *ogGrantFixture, p *store.Project) *httptest.ResponseRecorder {
+				return f.asUser(t, f.intruder, http.MethodGet, "/api/v1/projects/"+p.ID, nil)
+			}},
+	}
+
+	for _, rt := range routes {
+		t.Run(rt.name, func(t *testing.T) {
+			f := ogGrantSetup(t)
+			p := f.ownerlessProjectWithSoleIntruderMember(t, "OG Grant Route "+api.Slugify(rt.name), "")
+
+			rec := rt.call(f, p)
+			require.Equal(t, rt.want, rec.Code,
+				"%s no longer answers a plain member the way this test was "+
+					"measured against; body=%s", rt.name, rec.Body.String())
+			require.False(t, f.isRecordedOwner(t, f.intruder, p),
+				"the sole member was promoted to owner by their own %s", rt.name)
+
+			after := f.readWorkspace(t, f.intruder, p)
+			require.Equal(t, http.StatusForbidden, after.Code, "body=%s", after.Body.String())
+		})
+	}
+}
+
+// TestOGGrant_SelfPromotionUnauthenticated records that the route is closed to
+// anonymous callers upstream of any of this. Not evidence about the constraint —
+// an unauthenticated caller has no identity to promote — but the arm has to be
+// stated to be known.
+func TestOGGrant_SelfPromotionUnauthenticated(t *testing.T) {
+	f := ogGrantSetup(t)
+	p := f.ownerlessProjectWithSoleIntruderMember(t, "OG Grant Anonymous", "")
+
+	body, err := json.Marshal(RegisterProjectRequest{ID: p.ID, Name: p.Name, GitRemote: p.GitRemote})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "body=%s", rec.Body.String())
+	require.False(t, f.isRecordedOwner(t, f.intruder, p))
+}

@@ -474,17 +474,30 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 // createProjectMembersGroupAndPolicy creates an explicit members group for a project
 // and a policy allowing members to create agents. Best-effort; failures are logged.
 // If the group already exists (e.g., project was deleted and recreated with the same
-// slug), the existing group is reused and the creator is still added as a member.
+// slug), the existing group is reused and the creator is still added as an owner of
+// it (role=owner at the AddGroupMember call below, not role=member).
 //
-// Ownership is granted from project.CreatedBy and from nothing else. There is
-// deliberately no parameter for granting it to the caller instead. There used to
-// be one, and because the on-existing paths of create and register passed it, any
-// authenticated user who named an existing project became its owner and inherited
-// the whole project through the owner-or-admin short-circuit in CheckAccess. Do
-// not reintroduce a caller-supplied owner grant here: whoever calls this is often
-// answering a request whose subject they have not been authorized against, and
-// this function has no way to tell those callers apart. Grant ownership at the
-// point where the entitlement is actually established, not here.
+// OWNERSHIP HAS TWO SOURCES IN THIS FUNCTION, and both are constrained. Ownership
+// is worth naming carefully because isProjectOwnerOrAdmin is a short-circuit near
+// the top of CheckAccess: one owner record grants every action on everything in
+// the project at once.
+//
+// The first source is project.CreatedBy, recorded when the project was created;
+// that user is added with role=owner below. There is deliberately no parameter
+// for granting ownership to the caller instead. There used to be one, and because
+// the on-existing paths of create and register passed it, any authenticated user
+// who named an existing project became its owner. Do not reintroduce a
+// caller-supplied owner grant here: whoever calls this is often answering a
+// request whose subject they have not been authorized against, and this function
+// has no way to tell those callers apart. Grant ownership at the point where the
+// entitlement is actually established, not here.
+//
+// The second source is the sole-member backfill further down, which promotes the
+// single member of a group that has no owners. That one is a real grant too, and
+// until #591 it could be triggered by its own beneficiary. It now refuses exactly
+// one target — the caller of the current request. The reasoning, the measurement
+// and what it still leaves open are all recorded at that block; read it before
+// widening either source.
 func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project *store.Project) {
 	membersSlug := "project:" + project.Slug + ":members"
 
@@ -563,11 +576,50 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	// Backfill: if the group has exactly one member and no owners, promote
 	// that member to owner. This handles projects created before ownership
 	// enforcement was added, where the creator was added as "member".
+	//
+	// #591: the promotion refuses one target — the user who made the request
+	// that led here. This was a self-grant. A plain member of an ownerless
+	// project POSTed that project's own ID to /projects/register, reached this
+	// function through the existing-project backfill, was the group's only
+	// member, and was promoted to owner by their own request. Measured
+	// end-to-end: role=member and workspace read 403, one register call,
+	// role=owner and workspace read 200. Ownership is granted to the initial
+	// creator by the act that created the project — not to a later caller who
+	// re-announces it and happens to be standing alone in the members group.
+	//
+	// Two states leave a group ownerless enough to reach here, and both are
+	// live rather than merely historical: CreatedBy empty, on projects predating
+	// ownership; and CreatedBy set to a user who does not exist in the store,
+	// which is the trusted-proxy deployment the FK retry above is written for
+	// and says it supports.
+	//
+	// The constraint is on the CALLER, not on the route, and it sits here rather
+	// than in registerProject on purpose: register, createProject's idempotency
+	// branch and getProject all reach this function with an already-existing
+	// project and an arbitrary authenticated caller, so closing it at one route
+	// would leave the other two open. Initial creation is unaffected, and not by
+	// exemption — the creator is added with role=owner above, so ownerCount is
+	// non-zero and this block does not run at all.
+	//
+	// WHAT IT STILL DOES NOT DO. It does not decide who should own an ownerless
+	// project; it only refuses to let the asker answer that question about
+	// themselves. The sole member can still be promoted by somebody else's
+	// request touching the project — an admin's, for instance. Assigning an
+	// owner deliberately is an administrative act and wants its own flow. That
+	// flow does not exist yet, and until it does, an ownerless project stays
+	// ownerless unless something other than its would-be owner walks past.
+	//
+	// Rule 18a: making this promotion unconditional again, or calling this
+	// function with a context whose user identity has been dropped, restores the
+	// escalation exactly as measured.
 	ownerCount, err := s.store.CountGroupMembersByRole(ctx, membersGroup.ID, store.GroupMemberRoleOwner)
 	if err == nil && ownerCount == 0 {
 		members, err := s.store.GetGroupMembers(ctx, membersGroup.ID)
 		if err == nil && len(members) == 1 && members[0].MemberType == store.GroupMemberTypeUser {
-			if promoteErr := s.store.UpdateGroupMemberRole(ctx, membersGroup.ID,
+			if caller := GetUserIdentityFromContext(ctx); caller != nil && caller.ID() == members[0].MemberID {
+				slog.Warn("refusing to promote sole project member to owner: the promotion would be granted to the caller of this request",
+					"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID)
+			} else if promoteErr := s.store.UpdateGroupMemberRole(ctx, membersGroup.ID,
 				members[0].MemberType, members[0].MemberID, store.GroupMemberRoleOwner); promoteErr != nil {
 				slog.Warn("failed to promote sole member to owner",
 					"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID, "error", promoteErr.Error())
