@@ -482,9 +482,28 @@ func (a *AuthzService) checkAccessPrecomputed(identity Identity, _ []store.Princ
 		}
 	}
 
-	// Ancestry bypass (already handled in batch caller, but kept for single-resource calls)
-	if canAccessAsAncestor(identity.ID(), resource) {
-		return Decision{Allowed: true, Reason: "ancestor access"}
+	// Ancestry bypass (already handled in batch caller, but kept for single-resource calls).
+	//
+	// #591 (N87): canAccessAsAncestor keys on the BARE identity.ID() — the only
+	// untyped identity comparison in this function (the :472 scoped assertion and
+	// the owner bypass above are type-guarded). It is the slow-path twin of the
+	// batch OwnerID/ancestry fast paths that change 3 gated to the user family:
+	// this evaluator is reached by non-user identities that skip those fast paths,
+	// so without a guard here a self-minted broker whose id collides with a victim
+	// user id (Type "broker", ID victimID) is granted "ancestor access" and lists
+	// the victim's descendant agents. Every user-created agent carries BOTH OwnerID
+	// and Ancestry (the owner-only shape is never produced), so this leaks on the
+	// production and ancestry-only shapes. Gate it to the identity families that can
+	// be a GENUINE ancestor: a real user (UserIdentity) or a legitimate descendant
+	// agent (AgentIdentity). This is user-OR-agent, NOT user-only — agents are
+	// legitimate ancestors; a broker (and any future non-user-family type) is denied
+	// before reaching canAccessAsAncestor.
+	_, isUser := identity.(UserIdentity)
+	_, isAgent := identity.(AgentIdentity)
+	if isUser || isAgent {
+		if canAccessAsAncestor(identity.ID(), resource) {
+			return Decision{Allowed: true, Reason: "ancestor access"}
+		}
 	}
 
 	return a.evaluatePolicies(policies, resource, action)

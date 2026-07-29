@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 )
 
 // Regression pins for the N79 arm of #591. The N73 root fix (Role() -> "")
@@ -434,12 +435,19 @@ func TestN79_Invariant_AllowImpliesEnforceUATConstraintsNil(t *testing.T) {
 // user. change 1 (scoped skip) does nothing for a broker, so this pin FAILS if
 // change 3 is reverted; the scoped-UAT pins above FAIL if change 1 is reverted.
 //
-// The forged-broker assertion uses the OWNED axis only: the OwnerID axis is
-// FULLY closed (fast path here + slow-path owner bypass under a UserIdentity
-// assertion), whereas the ancestry SLOW path (checkAccessPrecomputed) remains
-// bare-ID (T1r, a follow-on the lead ruled non-blocking), so a broker-ancestry
-// row would NOT flip and is deliberately not asserted for the broker. The
-// descendant row is used only for the genuine-user no-regression check.
+// The forged-broker assertion uses the PRODUCTION resource shape and the
+// ancestry-only shape (#591 / N87). Every user-created agent carries BOTH OwnerID
+// and Ancestry (handlers_agents_core.go sets ancestry=[userID] and OwnerID=
+// createdBy; agentResource copies both), so the owner-ONLY fixture used by the
+// earlier version of this pin is NEVER produced by the create path — and that fix-
+// ture is closed by change 3 (fast path) + the UserIdentity-guarded owner bypass,
+// which manufactured a green while the LIVE shapes leaked. On the production and
+// ancestry-only shapes the forged broker reached the bare-ID ancestry grant in
+// checkAccessPrecomputed (the slow-path twin of the fast paths), so N87 gates that
+// grant to the user-or-agent family. This pin therefore asserts the forged broker
+// is DENIED on BOTH live shapes, keeps the genuine-user no-regression check, and
+// adds a genuine-AGENT-ancestor no-regression arm (the guard is user-OR-agent, not
+// user-only; a legitimate descendant agent must still get ancestor access).
 // -----------------------------------------------------------------------------
 
 func TestN79_T1_ForgedBrokerBatch_Differential(t *testing.T) {
@@ -451,44 +459,69 @@ func TestN79_T1_ForgedBrokerBatch_Differential(t *testing.T) {
 	victim := n79StoreUser(t, s, victimID, "N79 T1 Victim")
 	agentActions := ResourceActions["agent"]
 
-	// R1 owned by the victim (OwnerID axis — fully closed by change 3).
-	owned := Resource{Type: "agent", ID: tid("n79_t1_owned"), OwnerID: victimID, ParentType: "project", ParentID: tid("n79_t1_proj")}
-	// R2 a descendant of the victim (ancestry axis) — used ONLY for the genuine
-	// user no-regression check, never asserted against the broker (T1r open).
-	descendant := Resource{Type: "agent", ID: tid("n79_t1_desc"), Ancestry: []string{victimID}, ParentType: "project", ParentID: tid("n79_t1_proj")}
+	// PRODUCTION shape: a real user-created agent carries BOTH OwnerID and Ancestry
+	// set to its creator. This is the shape the create path actually produces.
+	production := Resource{Type: "agent", ID: tid("n79_t1_prod"), OwnerID: victimID, Ancestry: []string{victimID}, ParentType: "project", ParentID: tid("n79_t1_proj")}
+	// ANCESTRY-ONLY shape: a descendant of the victim with no direct OwnerID match,
+	// isolating the bare-ID ancestry grant that N87 closes.
+	ancestryOnly := Resource{Type: "agent", ID: tid("n79_t1_anc"), Ancestry: []string{victimID}, ParentType: "project", ParentID: tid("n79_t1_proj")}
 
 	forged := NewBrokerIdentity(victimID)               // ID collides with the victim
 	control := NewBrokerIdentity(tid("n79_t1_control")) // non-colliding broker
 
-	// Preconditions: the forged broker's ID matches the resource owner (the leak
-	// primitive) and it is not a UserIdentity (so change 3's gate applies).
-	if forged.ID() != owned.OwnerID {
-		t.Fatalf("test setup: forged broker id does not collide with owner; pin vacuous")
+	// Preconditions: the forged broker's ID matches the victim (the leak primitive)
+	// and it satisfies NEITHER UserIdentity NOR AgentIdentity, so the N87 guard
+	// denies it before canAccessAsAncestor.
+	if forged.ID() != victimID {
+		t.Fatalf("test setup: forged broker id does not collide with victim; pin vacuous")
 	}
 	if _, ok := forged.(UserIdentity); ok {
-		t.Fatalf("test setup: broker unexpectedly satisfies UserIdentity; change-3 gate would not apply")
+		t.Fatalf("test setup: broker unexpectedly satisfies UserIdentity")
+	}
+	if _, ok := forged.(AgentIdentity); ok {
+		t.Fatalf("test setup: broker unexpectedly satisfies AgentIdentity")
 	}
 
-	// DIFFERENTIAL 1: forged broker denied on all actions, MATCHING the
-	// non-colliding control broker.
-	fCaps := az.ComputeCapabilitiesBatch(ctx, forged, []Resource{owned}, "agent")
+	// DIFFERENTIAL 1: forged broker DENIED on BOTH live shapes (production and
+	// ancestry-only), MATCHING the non-colliding control broker (also denied). Prior
+	// to N87 the forged broker was granted 7/7 on both via the bare-ID :486 grant.
+	fCaps := az.ComputeCapabilitiesBatch(ctx, forged, []Resource{production, ancestryOnly}, "agent")
 	if len(fCaps[0].Actions) != 0 {
-		t.Errorf("T1 forged-broker leak: batch granted %d/%d actions on a victim-owned resource via the bare-ID OwnerID fast path; actions=%v",
+		t.Errorf("N87 forged-broker leak (production shape, owner+ancestry): batch granted %d/%d actions via the bare-ID ancestry grant; actions=%v",
 			len(fCaps[0].Actions), len(agentActions), fCaps[0].Actions)
 	}
-	cCaps := az.ComputeCapabilitiesBatch(ctx, control, []Resource{owned}, "agent")
-	if len(cCaps[0].Actions) != 0 {
-		t.Errorf("control (non-colliding) broker unexpectedly granted %v; forged and control brokers must agree at deny", cCaps[0].Actions)
+	if len(fCaps[1].Actions) != 0 {
+		t.Errorf("N87 forged-broker leak (ancestry-only shape): batch granted %d/%d actions via the bare-ID ancestry grant; actions=%v",
+			len(fCaps[1].Actions), len(agentActions), fCaps[1].Actions)
+	}
+	cCaps := az.ComputeCapabilitiesBatch(ctx, control, []Resource{production, ancestryOnly}, "agent")
+	if len(cCaps[0].Actions) != 0 || len(cCaps[1].Actions) != 0 {
+		t.Errorf("control (non-colliding) broker unexpectedly granted %v/%v; forged and control brokers must agree at deny", cCaps[0].Actions, cCaps[1].Actions)
 	}
 
-	// DIFFERENTIAL 2: the genuine victim user keeps batch access on BOTH its owned
-	// and descendant rows (change 3 must not regress real users).
-	uCaps := az.ComputeCapabilitiesBatch(ctx, victim, []Resource{owned, descendant}, "agent")
+	// DIFFERENTIAL 2: the genuine victim USER keeps batch access on BOTH shapes
+	// (the guard must not regress real users).
+	uCaps := az.ComputeCapabilitiesBatch(ctx, victim, []Resource{production, ancestryOnly}, "agent")
 	if len(uCaps[0].Actions) != len(agentActions) {
-		t.Errorf("regression: victim user lost owned-row access; got %v want all %d actions", uCaps[0].Actions, len(agentActions))
+		t.Errorf("regression: victim user lost production-row access; got %v want all %d actions", uCaps[0].Actions, len(agentActions))
 	}
 	if len(uCaps[1].Actions) != len(agentActions) {
-		t.Errorf("regression: victim user lost descendant-row (ancestry) access; got %v want all %d actions", uCaps[1].Actions, len(agentActions))
+		t.Errorf("regression: victim user lost ancestry-only-row access; got %v want all %d actions", uCaps[1].Actions, len(agentActions))
+	}
+
+	// DIFFERENTIAL 3 (N87): a genuine AGENT ancestor keeps ancestor access — the
+	// guard is user-OR-agent, not user-only. The agent's ID is a legitimate
+	// ancestor of the resource; it is not a UserIdentity, so it reaches the guarded
+	// :486 grant as an AgentIdentity and must be granted.
+	agentAncestorID := tid("n79_t1_agent_anc")
+	var agentAncestor AgentIdentity = &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agentAncestorID},
+		ProjectID: tid("n79_t1_proj"),
+	}}
+	agentDescendant := Resource{Type: "agent", ID: tid("n79_t1_agent_desc"), Ancestry: []string{agentAncestorID}, ParentType: "project", ParentID: tid("n79_t1_proj")}
+	aCaps := az.ComputeCapabilitiesBatch(ctx, agentAncestor, []Resource{agentDescendant}, "agent")
+	if len(aCaps[0].Actions) != len(agentActions) {
+		t.Errorf("regression: genuine AGENT ancestor lost descendant access under the N87 user-or-agent guard; got %v want all %d actions", aCaps[0].Actions, len(agentActions))
 	}
 }
 
@@ -512,6 +545,15 @@ func TestN79_T1_ForgedBrokerBatch_Differential(t *testing.T) {
 // satisfy UserIdentity and CheckAccess denies "invalid user identity"; with a
 // value receiver the value satisfies UserIdentity and CheckAccess returns
 // allow "resource owner" (the regression this pin catches).
+//
+// #591 (N89): arms 1-4 exercise the SINGLE path (CheckAccess). rev1 measured that
+// a value was NOT fail-closed on the BATCH path before the N87 :486 allowlist —
+// batched over an ancestry row whose ancestor is the minting user, the value took
+// the bare-ID ancestry grant in checkAccessPrecomputed and was list-admitted 7/7.
+// Arm 5 asserts the batch path too, closed by the same N87 allowlist landing in
+// this commit (a value is neither UserIdentity nor AgentIdentity), so the value is
+// fail-closed on BOTH paths and the unqualified name is honest — no interim rename
+// is needed because the code fix and this control land together.
 func TestN79_PointerReceiverFootgun_ValueIsFailClosed(t *testing.T) {
 	srv, _ := testServer(t)
 	az := srv.authzService
@@ -550,5 +592,100 @@ func TestN79_PointerReceiverFootgun_ValueIsFailClosed(t *testing.T) {
 	}
 	if r := ptr.Role(); r != "" {
 		t.Errorf("Role() = %q, want \"\" (fail-closed for a UAT)", r)
+	}
+
+	// 5. BATCH-PATH lock (#591 / N89). Batched over an ancestry row whose ancestor
+	//    is the minting user, the value must get 0/7 — the N87 :486 allowlist denies
+	//    it (neither UserIdentity nor AgentIdentity) before canAccessAsAncestor.
+	//    Pre-N87 this was 7/7 (the batch-path miss twin of the single-path arms).
+	ancRow := Resource{Type: "agent", ID: tid("n79_fg_anc"), Ancestry: []string{minter.ID()}, ParentType: "project", ParentID: tid("n79_fg_P2")}
+	vCaps := az.ComputeCapabilitiesBatch(ctx, val, []Resource{ancRow}, "agent")
+	if len(vCaps[0].Actions) != 0 {
+		t.Errorf("value ScopedUserIdentity granted %d/%d on an ancestry row via the BATCH path; the N87 :486 allowlist must deny a non-user-family value; actions=%v",
+			len(vCaps[0].Actions), len(ResourceActions["agent"]), vCaps[0].Actions)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// N87 identity-kind matrix on the checkAccessPrecomputed ancestry grant (:486).
+// The ruling requires EVERY concrete Identity kind bucketed on one ancestry row,
+// so a future kind cannot silently re-open the leak ("identity kind seven"). Each
+// row constructs an identity whose ID is the sole ancestor of an ancestry-only
+// resource and asserts allow/deny through ComputeCapabilitiesBatch. The gate is a
+// POSITIVE ALLOWLIST (UserIdentity OR AgentIdentity proceed; all else denied), so
+// the deny cells fail CLOSED for any unknown future kind.
+//
+// The seven concrete Identity implementers in this package:
+//   *AuthenticatedUser (user)    -> allow via user-family ancestry
+//   *DevUser (dev)               -> allow (user-family; admin-role over-determines)
+//   *ScopedUserIdentity (ptr)    -> DENY, but by enforceUATConstraints (change 2),
+//                                    NOT :486 — bounded out of its project
+//   ScopedUserIdentity (value)   -> DENY at :486 (neither UserIdentity nor
+//                                    AgentIdentity) — the N89 value residual
+//   *agentIdentityWrapper (agent)-> allow via agent-family ancestry (:486)
+//   *evaluateAgentIdentity(agent)-> allow via agent-family ancestry (:486) — kind 7
+//   *brokerIdentityImpl (broker) -> DENY at :486 — the N87 forged-broker leak
+// -----------------------------------------------------------------------------
+
+func TestN87_AncestryGrant_IdentityKindMatrix(t *testing.T) {
+	srv, _ := testServer(t)
+	az := srv.authzService
+	ctx := context.Background()
+	nAgent := len(ResourceActions["agent"])
+
+	proj := tid("n87m_proj")
+	otherProj := tid("n87m_other")
+
+	memberID := tid("n87m_member")
+	member := NewAuthenticatedUser(memberID, "n87m-member@test.com", "N87M Member", store.UserRoleMember, "api")
+
+	dev := NewDevUser(DevUserConfig{Username: "n87m-dev", DisplayName: "N87M Dev", Email: "n87m-dev@test.com"})
+
+	scopedMinterID := tid("n87m_scoped_minter")
+	scopedMinter := NewAuthenticatedUser(scopedMinterID, "n87m-sm@test.com", "N87M SM", store.UserRoleMember, "api")
+	// Scoped to otherProj while the row lives in proj: enforceUATConstraints denies.
+	scopedPtr := NewScopedUserIdentity(scopedMinter, otherProj, []string{"agent:read", "agent:update", "agent:delete"})
+
+	valMinterID := tid("n87m_val_minter")
+	valMinter := NewAuthenticatedUser(valMinterID, "n87m-vm@test.com", "N87M VM", store.UserRoleMember, "api")
+	valScoped := *NewScopedUserIdentity(valMinter, otherProj, []string{"agent:read"})
+
+	agentID := tid("n87m_agent")
+	agentWrapper := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: agentID}, ProjectID: proj}}
+
+	evalAgentID := tid("n87m_evalagent")
+	evalAgent := &evaluateAgentIdentity{id: evalAgentID, projectID: proj}
+
+	brokerID := tid("n87m_broker")
+	broker := NewBrokerIdentity(brokerID)
+
+	cases := []struct {
+		name       string
+		identity   Identity
+		ancestorID string // put into the row's Ancestry; the identity's own ID
+		wantAllow  bool
+		closedBy   string
+	}{
+		{"AuthenticatedUser(member)", member, memberID, true, "user-family ancestry"},
+		{"DevUser(dev)", dev, dev.ID(), true, "user-family (admin over-determines)"},
+		{"ScopedUserIdentity(ptr,out-of-scope)", scopedPtr, scopedMinterID, false, "enforceUATConstraints (change 2)"},
+		{"ScopedUserIdentity(value)", valScoped, valMinterID, false, ":486 allowlist (N89)"},
+		{"agentIdentityWrapper(agent)", agentWrapper, agentID, true, "agent-family ancestry (:486)"},
+		{"evaluateAgentIdentity(agent)", evalAgent, evalAgentID, true, "agent-family ancestry (:486)"},
+		{"brokerIdentityImpl(broker)", broker, brokerID, false, ":486 allowlist (N87)"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := Resource{Type: "agent", ID: tid("n87m_row_" + tc.name), Ancestry: []string{tc.ancestorID}, ParentType: "project", ParentID: proj}
+			caps := az.ComputeCapabilitiesBatch(ctx, tc.identity, []Resource{row}, "agent")
+			got := len(caps[0].Actions)
+			if tc.wantAllow && got != nAgent {
+				t.Errorf("%s: got %d/%d actions, want ALLOW (all %d) via %s; actions=%v", tc.name, got, nAgent, nAgent, tc.closedBy, caps[0].Actions)
+			}
+			if !tc.wantAllow && got != 0 {
+				t.Errorf("%s: got %d/%d actions, want DENY (0) closed by %s; actions=%v", tc.name, got, nAgent, tc.closedBy, caps[0].Actions)
+			}
+		})
 	}
 }
