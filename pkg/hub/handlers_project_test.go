@@ -1403,7 +1403,15 @@ func TestProjectRegister_CreatesMembershipGroup(t *testing.T) {
 
 // TestProjectRegister_ExistingProject_CreatesMembershipGroup verifies that
 // registering against an existing project (linking) still creates the membership
-// group and adds the linking user as owner.
+// group, backfilling it for projects that predate group support.
+//
+// It also pins the half of that behaviour which was removed. This test used to
+// assert that the linking user became an owner of the group, and that assertion
+// is now inverted: the linking user must NOT be an owner. Registering against a
+// project only means the caller named it, and naming it is not evidence of any
+// relationship to it — see TestOGGrant_RegisterOnExistingGrantsNothing in
+// project_owner_grant_authz_test.go for the escalation this allowed. The
+// backfill itself is unchanged and is still asserted below.
 func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -1443,7 +1451,8 @@ func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
 	require.NoError(t, err, "members group should have been created on link")
 	assert.Equal(t, project.ID, group.ProjectID)
 
-	// Both the original creator and the linking user should be owners
+	// The original creator should be an owner. The linking user should not be:
+	// this request supplied nothing but the project's own ID.
 	members, err := s.GetGroupMembers(ctx, group.ID)
 	require.NoError(t, err)
 
@@ -1454,7 +1463,8 @@ func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
 		}
 	}
 	assert.True(t, ownerIDs[creatorID], "original creator should be an owner")
-	assert.True(t, ownerIDs[DevUserID], "linking user should be an owner")
+	assert.False(t, ownerIDs[DevUserID],
+		"the linking user was made an owner of a project they only named")
 }
 
 // TestCreateProjectMembersGroup_OwnerNotInStore verifies that when the project

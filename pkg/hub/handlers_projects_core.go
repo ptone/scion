@@ -264,14 +264,16 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		existing, err := s.store.GetProject(ctx, req.ID)
 		if err == nil {
 			// Project already exists — ensure associated groups exist (backfill for
-			// projects created before group support was added). Pass the caller
-			// so they get added as an owner of the members group.
-			var callerID string
-			if user := GetUserIdentityFromContext(ctx); user != nil {
-				callerID = user.ID()
-			}
+			// projects created before group support was added). These calls are
+			// idempotent and grant ownership only to the project's recorded
+			// creator.
+			//
+			// The caller is deliberately NOT granted ownership here. This branch
+			// is reached by anyone who can name an existing project's ID, which
+			// is not evidence of any relationship to it. Ownership comes from
+			// creating the project, below.
 			s.createProjectGroup(ctx, existing)
-			s.createProjectMembersGroupAndPolicy(ctx, existing, callerID)
+			s.createProjectMembersGroupAndPolicy(ctx, existing)
 			writeJSON(w, http.StatusOK, existing)
 			return
 		}
@@ -473,10 +475,17 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 // and a policy allowing members to create agents. Best-effort; failures are logged.
 // If the group already exists (e.g., project was deleted and recreated with the same
 // slug), the existing group is reused and the creator is still added as a member.
-// callerUserID, when non-empty, is also added as an owner of the members group
-// (e.g. the user who linked the project). It is safe to pass the same value as
-// project.CreatedBy — duplicate additions are handled gracefully.
-func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project *store.Project, callerUserID ...string) {
+//
+// Ownership is granted from project.CreatedBy and from nothing else. There is
+// deliberately no parameter for granting it to the caller instead. There used to
+// be one, and because the on-existing paths of create and register passed it, any
+// authenticated user who named an existing project became its owner and inherited
+// the whole project through the owner-or-admin short-circuit in CheckAccess. Do
+// not reintroduce a caller-supplied owner grant here: whoever calls this is often
+// answering a request whose subject they have not been authorized against, and
+// this function has no way to tell those callers apart. Grant ownership at the
+// point where the entitlement is actually established, not here.
+func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project *store.Project) {
 	membersSlug := "project:" + project.Slug + ":members"
 
 	slog.Debug("ensuring project members group",
@@ -548,20 +557,6 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			slog.Warn("failed to add creator as owner of project members group",
 				"project_id", project.ID, "user", project.CreatedBy, "error", err.Error())
-		}
-	}
-
-	// Add the caller (e.g. the user who linked the project) as an owner too.
-	// This is a no-op when callerUserID matches project.CreatedBy.
-	if len(callerUserID) > 0 && callerUserID[0] != "" && callerUserID[0] != project.CreatedBy {
-		if err := s.store.AddGroupMember(ctx, &store.GroupMember{
-			GroupID:    membersGroup.ID,
-			MemberType: store.GroupMemberTypeUser,
-			MemberID:   callerUserID[0],
-			Role:       store.GroupMemberRoleOwner,
-		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-			slog.Warn("failed to add caller as owner of project members group",
-				"project_id", project.ID, "user", callerUserID[0], "error", err.Error())
 		}
 	}
 
@@ -1053,17 +1048,20 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		s.autoLinkProviders(ctx, project)
 	} else {
 		// Existing project — ensure associated groups exist (backfill for
-		// projects created before group support was added). Pass the
-		// authenticated user so they are added as owner of the members
-		// group (the person linking deserves membership).
-		var callerID string
-		if user := GetUserIdentityFromContext(ctx); user != nil {
-			callerID = user.ID()
-		}
+		// projects created before group support was added). These calls are
+		// idempotent and grant ownership only to the project's recorded
+		// creator.
+		//
+		// The caller is deliberately NOT granted ownership here, and this is the
+		// load-bearing half of the fix. Reaching this branch means the request
+		// matched a project that already existed — by ID, by git remote, or by
+		// slug — and a match is not evidence of any relationship to it. Register
+		// is how a client announces a project it believes in; it is not proof of
+		// title. Ownership comes from creating the project, in the branch above.
 		slog.Debug("ensuring groups for existing project during register",
-			"project_id", project.ID, "slug", project.Slug, "caller", callerID)
+			"project_id", project.ID, "slug", project.Slug)
 		s.createProjectGroup(ctx, project)
-		s.createProjectMembersGroupAndPolicy(ctx, project, callerID)
+		s.createProjectMembersGroupAndPolicy(ctx, project)
 	}
 
 	// Handle broker linking - two paths:

@@ -100,7 +100,7 @@ func TestSystemPolicies_NoWildcardOrDispatchAction(t *testing.T) {
 		OwnerID: owner.ID, CreatedBy: owner.ID,
 	}
 	require.NoError(t, st.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project, owner.ID)
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
 
 	// Site 4: the implicit progeny-secret policy.
 	progenyMeta := &secret.SecretMeta{
