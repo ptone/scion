@@ -115,8 +115,11 @@ func (s *Server) listPolicies(w http.ResponseWriter, r *http.Request) {
 	// entire authorization posture — which policies exist, their scopes, effects,
 	// and principals. Fail closed at the entry.
 	//
-	// Hub-admin-only is the ratified interim per the EM/lead ruling 2026-07-29 —
-	// stricter than the design's scope-relative viewability (permissions-design.md
+	// Attribution (read gate): the admin-only interim for reads is a COORDINATOR
+	// extension, not a direct maintainer ratification. The maintainer (ptone)
+	// ratified the five WRITE gates 2026-07-29; the coordinating maintainer then
+	// extended that interim to reads under a Rule 13 decision (2026-07-29 01:40Z).
+	// Stricter than the design's scope-relative viewability (permissions-design.md
 	// §6.2), which a future change may relax toward. See PR-body behaviour-change
 	// #12.
 	if _, ok := s.requireAdmin(w, r); !ok {
@@ -187,8 +190,8 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 	// and overriding an admin-established deny. Fail closed at the entry, before
 	// any parsing.
 	//
-	// Scope: hub-admin-only is the ratified interim per the EM/lead ruling
-	// 2026-07-29 — deliberately stricter than the design's scope-relative
+	// Scope (write gate): hub-admin-only is the interim ratified by the maintainer
+	// (ptone) 2026-07-29 — deliberately stricter than the design's scope-relative
 	// `manage` (permissions-design.md §6.2), which a future change may relax
 	// toward. See PR-body behaviour-change #12.
 	if _, ok := s.requireAdmin(w, r); !ok {
@@ -324,9 +327,11 @@ func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request, id string) {
 	// Policy reads are gated to hub admins (ptone/scion#591). The gate runs
 	// before the store lookup, so a non-admin gets 403 (not 404) even for a
 	// non-existent ID — deliberate, to keep the read from becoming an existence
-	// oracle. Hub-admin-only is the ratified interim per the EM/lead ruling
-	// 2026-07-29 (see listPolicies and permissions-design.md §6.2; PR-body
-	// behaviour-change #12).
+	// oracle. Attribution (read gate): admin-only for reads is a COORDINATOR
+	// extension (Rule 13 decision 2026-07-29 01:40Z), not a direct maintainer
+	// ratification — ptone ratified the write gates; the coordinating maintainer
+	// extended the interim to reads (see listPolicies and permissions-design.md
+	// §6.2; PR-body behaviour-change #12).
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
@@ -349,9 +354,9 @@ func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request, id string) {
 
 func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request, id string) {
 	// Policy writes are gated to hub admins (ptone/scion#591). Fail closed at
-	// the entry, before any parsing. Hub-admin-only is the ratified interim per
-	// the EM/lead ruling 2026-07-29 — stricter than the design's scope-relative
-	// `manage` (see createPolicy and permissions-design.md §6.2; PR-body
+	// the entry, before any parsing. Hub-admin-only is the write interim ratified
+	// by the maintainer (ptone) 2026-07-29 — stricter than the design's scope-
+	// relative `manage` (see createPolicy and permissions-design.md §6.2; PR-body
 	// behaviour-change #12).
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
@@ -425,9 +430,9 @@ func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request, id string)
 	// becoming an existence oracle (a 404-vs-403 split would leak whether a
 	// policy ID exists). Admin callers see the unchanged 204/404.
 	//
-	// Hub-admin-only is the ratified interim per the EM/lead ruling 2026-07-29 —
-	// stricter than the design's scope-relative `manage` (see createPolicy and
-	// permissions-design.md §6.2; PR-body behaviour-change #12).
+	// Hub-admin-only is the write interim ratified by the maintainer (ptone)
+	// 2026-07-29 — stricter than the design's scope-relative `manage` (see
+	// createPolicy and permissions-design.md §6.2; PR-body behaviour-change #12).
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
@@ -450,9 +455,12 @@ func (s *Server) handlePolicyBindings(w http.ResponseWriter, r *http.Request, po
 	// ID exists (404 vs 403) across the whole /bindings subtree — an existence
 	// oracle. requireAdmin at the dispatcher entry closes it for both the GET
 	// (list) and POST (add) paths. The per-handler gates remain as defence in
-	// depth; this dispatcher gate is the one that shuts the oracle. Admin-only per
-	// the EM/lead ruling 2026-07-29; ships as part of the one #591 read-hardening
-	// commit (PR-body behaviour-change #12).
+	// depth; this dispatcher gate is the one that shuts the oracle. Attribution is
+	// mixed at this dispatcher: the POST (add-binding) write is ratified by the
+	// maintainer (ptone) 2026-07-29; the GET (list-bindings) read is a COORDINATOR
+	// extension (Rule 13 decision 2026-07-29 01:40Z), not a direct maintainer
+	// ratification. Ships as part of the one #591 read-hardening commit (PR-body
+	// behaviour-change #12).
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
@@ -480,15 +488,21 @@ func (s *Server) listPolicyBindings(w http.ResponseWriter, r *http.Request, poli
 	// Policy reads are gated to hub admins (ptone/scion#591): a policy's binding
 	// list names the principals it grants or denies, so it discloses the same
 	// authorization posture as the policy itself. Fail closed at the entry.
-	// Hub-admin-only is the ratified interim per the EM/lead ruling 2026-07-29
-	// (see listPolicies and permissions-design.md §6.2; PR-body behaviour-change
-	// #12).
+	// Attribution (read gate): admin-only for reads is a COORDINATOR extension
+	// (Rule 13 decision 2026-07-29 01:40Z), not a direct maintainer ratification —
+	// ptone ratified the write gates; the coordinating maintainer extended the
+	// interim to reads (see listPolicies and permissions-design.md §6.2; PR-body
+	// behaviour-change #12).
 	//
-	// This per-handler gate is defence in depth: the dispatcher
-	// handlePolicyBindings already runs requireAdmin ahead of its GetPolicy
-	// existence check (closing the I2 existence oracle), so a non-admin never
-	// reaches here. Kept so the read gate is self-evident at the handler and
-	// survives any future change to the dispatch path.
+	// N19 (Rule 18a): this per-handler gate is currently SHADOWED — the dispatcher
+	// handlePolicyBindings runs requireAdmin ahead of its GetPolicy existence check
+	// (closing the I2 oracle), so a non-admin never reaches here and this gate
+	// defends nothing today; deleting it alone leaves the suite green. It is kept
+	// deliberately: it becomes load-bearing again the moment that dispatcher gate
+	// moves or the read is relaxed toward the scope-relative viewability the spec
+	// anticipates (permissions-design.md §6.2). Whoever relaxes the read must
+	// revisit this gate — it is the read baseline once the blanket admin-only
+	// dispatcher gate is gone.
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
@@ -516,9 +530,9 @@ func (s *Server) addPolicyBinding(w http.ResponseWriter, r *http.Request, policy
 	// existence-oracle gap — a non-admin learning whether a policy ID exists via a
 	// 404-vs-gate split — is closed; a non-admin never reaches here.
 	//
-	// Hub-admin-only is the ratified interim per the EM/lead ruling 2026-07-29 —
-	// stricter than the design's scope-relative `manage` (see createPolicy and
-	// permissions-design.md §6.2; PR-body behaviour-change #12).
+	// Hub-admin-only is the write interim ratified by the maintainer (ptone)
+	// 2026-07-29 — stricter than the design's scope-relative `manage` (see
+	// createPolicy and permissions-design.md §6.2; PR-body behaviour-change #12).
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
@@ -568,8 +582,10 @@ func (s *Server) handlePolicyBindingByID(w http.ResponseWriter, r *http.Request,
 	// in handlePolicyBindings, the GetPolicy below would otherwise leak
 	// policy-existence (404 vs 403) to a non-admin before removePolicyBinding's own
 	// gate runs. requireAdmin here shuts that oracle for the unbind path; the
-	// per-handler removePolicyBinding gate stays as defence in depth. Admin-only
-	// per the EM/lead ruling 2026-07-29; part of the one #591 read-hardening commit.
+	// per-handler removePolicyBinding gate stays as defence in depth. Unbind is a
+	// WRITE op — the admin-only interim here is ratified by the maintainer (ptone)
+	// 2026-07-29; it ships in the one #591 read-hardening commit because that is
+	// where the I2 oracle-close landed (PR-body behaviour-change #12).
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
@@ -618,9 +634,9 @@ func (s *Server) removePolicyBinding(w http.ResponseWriter, r *http.Request, pol
 	// This gate closes both and completes the caller-authored policy-API write-op
 	// gate begun in 536d8f5c (the four authoring/binding ops).
 	//
-	// Hub-admin-only is the ratified interim per the EM/lead ruling 2026-07-29 —
-	// stricter than the design's scope-relative `manage` (see createPolicy and
-	// permissions-design.md §6.2; PR-body behaviour-change #12).
+	// Hub-admin-only is the write interim ratified by the maintainer (ptone)
+	// 2026-07-29 — stricter than the design's scope-relative `manage` (see
+	// createPolicy and permissions-design.md §6.2; PR-body behaviour-change #12).
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}

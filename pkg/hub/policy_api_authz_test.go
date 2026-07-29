@@ -506,10 +506,27 @@ func TestPolicyAPI_BindingsOracleClosed(t *testing.T) {
 			"/api/v1/policies/"+existing.ID+"/bindings/user/"+f.member.ID,
 			"/api/v1/policies/"+missing+"/bindings/user/"+f.member.ID)
 	})
-	t.Run("admin sees the real 404 for missing (oracle exists, is merely shut)", func(t *testing.T) {
+	t.Run("admin sees the real 404 for missing (list oracle exists, is merely shut)", func(t *testing.T) {
 		rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet,
 			"/api/v1/policies/"+missing+"/bindings", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+	})
+	// N20: the LIST admin control above proves the list oracle is real. The UNBIND
+	// leg needs its own admin control, and it only bites with a seeded binding:
+	// without one, admin sees 404-vs-404 (missing-policy and missing-binding both
+	// 404), which is indistinguishable from "no oracle". With the seeded binding,
+	// admin sees 204 (existing binding removed) vs 404 (missing policy) — the real
+	// existence difference the gate hides from a non-admin. Runs last so the 204
+	// deletion cannot perturb the byte-identical subtests above.
+	t.Run("admin sees 204-vs-404 for unbind (unbind oracle exists, is merely shut)", func(t *testing.T) {
+		recMiss := doRequestAsUser(t, f.srv, f.admin, http.MethodDelete,
+			"/api/v1/policies/"+missing+"/bindings/user/"+f.member.ID, nil)
+		require.Equal(t, http.StatusNotFound, recMiss.Code,
+			"admin unbind on a missing policy must be a real 404; body: %s", recMiss.Body.String())
+		recExist := doRequestAsUser(t, f.srv, f.admin, http.MethodDelete,
+			"/api/v1/policies/"+existing.ID+"/bindings/user/"+f.member.ID, nil)
+		require.Equal(t, http.StatusNoContent, recExist.Code,
+			"admin unbind on the seeded binding must succeed (204); body: %s", recExist.Body.String())
 	})
 }
 
