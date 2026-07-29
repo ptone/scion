@@ -486,7 +486,7 @@ func (a *AuthzService) checkAccessPrecomputed(identity Identity, _ []store.Princ
 	// Ancestry bypass (already handled in batch caller, but kept for single-resource calls).
 	//
 	// #591 (N87): canAccessAsAncestor keys on the BARE identity.ID() — the only
-	// untyped identity comparison in this function (the :472 scoped assertion and
+	// untyped identity comparison in this function (the :473 scoped assertion and
 	// the owner bypass above are type-guarded). It is the slow-path twin of the
 	// batch OwnerID/ancestry fast paths that change 3 gated to the user family:
 	// this evaluator is reached by non-user identities that skip those fast paths,
@@ -494,9 +494,9 @@ func (a *AuthzService) checkAccessPrecomputed(identity Identity, _ []store.Princ
 	// the principal kind the id names. INVARIANT (N87): "ancestor access" is for
 	// principals that can genuinely BE an ancestor; identifier equality alone is
 	// not ancestry. Every user-created agent carries BOTH OwnerID and Ancestry
-	// (the owner-only shape is never produced), so on both shapes the create path
-	// really emits it is this guard and not the owner bypass above that holds the
-	// invariant. Gate it to the identity families that can
+	// (the owner-only shape is never produced). On both of the shapes the create
+	// path really emits, it is therefore THIS guard — not the owner bypass above —
+	// that holds the invariant. Gate it to the identity families that can
 	// be a GENUINE ancestor: a real user (UserIdentity) or a legitimate descendant
 	// agent (AgentIdentity). This is user-OR-agent, NOT user-only — agents are
 	// legitimate ancestors; a broker (and any future non-user-family type) is denied

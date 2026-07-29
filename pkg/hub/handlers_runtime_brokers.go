@@ -441,10 +441,11 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 // while holding ScopeAgentCreate: broker selection completes a create that
 // authorizeAgentCreate has already authorized, so this re-asserts that gate
 // rather than granting a standalone permission. That outer-gate reasoning holds
-// HERE because this function has exactly one caller, createAgent
-// (handlers_agents_core.go:418) — but it does NOT hold for the twin, which has
-// six callers, four of them harness-config image endpoints with no outer gate at
-// all. Do not copy this paragraph across without copying that qualification.
+// HERE because this function has exactly one production caller,
+// createAgentInProject (handlers_agents_core.go:475) — but it does NOT hold for
+// the twin, which has seven, four of them harness-config image endpoints with no
+// outer gate at all. Do not copy this paragraph across without copying that
+// qualification.
 //
 // AUTO-PROVIDE INVARIANT: it relaxes ONLY the project-linkage requirement, never
 // identity-type and never scope. An auto-provide broker is shared infrastructure

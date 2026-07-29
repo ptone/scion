@@ -893,14 +893,14 @@ func (s *Server) brokerServesProject(ctx context.Context, brokerID, projectID st
 // canDispatchToBroker reports whether the caller may use this broker. It writes
 // no HTTP response.
 //
-// READ THE CALLER SET BEFORE REASONING ABOUT WHAT THIS GATES. It has six callers
-// and only two are the create flow:
+// READ THE CALLER SET BEFORE REASONING ABOUT WHAT THIS GATES. It has SEVEN
+// production call sites and only three of them are the create flow:
 //
 //	handlers_agent_create_helpers.go:829, :849, :859  — broker selection in agent create
-//	harness_config_handlers.go:715   handleHarnessConfigCheckImage
-//	harness_config_handlers.go:1159  handleHarnessConfigImageStatus
-//	harness_config_handlers.go:1323  handleHarnessConfigDeleteLocalImage
-//	harness_config_handlers.go:1397  handleHarnessConfigPullImage
+//	harness_config_handlers.go:928   handleHarnessConfigCheckImage
+//	harness_config_handlers.go:1389  handleHarnessConfigImageStatus
+//	harness_config_handlers.go:1553  handleHarnessConfigDeleteLocalImage
+//	harness_config_handlers.go:1627  handleHarnessConfigPullImage
 //
 // An earlier version of this comment said this function is "reached only after
 // authorizeAgentCreate has already authorized the create itself". That is true of
@@ -923,8 +923,8 @@ func (s *Server) brokerServesProject(ctx context.Context, brokerID, projectID st
 // the available-to-all feature); an agent is allowed iff it holds ScopeAgentCreate
 // (project-linkage is the only thing skipped for it). A nil identity, a
 // broker-typed identity, and an agent lacking ScopeAgentCreate are all still
-// DENIED (#591). This matters more here than on the twin: four of the six callers
-// are image endpoints with no outer create gate, so on those paths the
+// DENIED (#591). This matters more here than on the twin: four of the seven call
+// sites are image endpoints with no outer create gate, so on those paths the
 // identity-type and scope checks below ARE the authorization. Auto-provide is
 // checked inside each branch, below the identity-type switch, so it never short-
 // circuits those gates.
