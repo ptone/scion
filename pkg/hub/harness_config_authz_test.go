@@ -521,8 +521,41 @@ func TestHCAuthz_UpdateAuthorizesStoredScopeNotSubmittedScope(t *testing.T) {
 	spoof.ScopeID = f.projA.ID
 	spoof.Config = &store.HarnessConfigData{Image: hcAuthzAttackerImage}
 
+	// Liveness control on the exact verb, and it is load-bearing here rather
+	// than decorative. The refusal below is a 401, and the authentication
+	// middleware also answers 401 with the same body for a caller it rejects
+	// outright, so the status alone cannot tell "the gate refused" from "this
+	// credential never got in". The same agent, the same PUT, the same route,
+	// against a record whose STORED scope is this agent's own project, is
+	// accepted — so the credential demonstrably works on this verb and the
+	// refusal below is about the scope decision.
+	inScope := f.seedConfig(t, "hcauthz-scope-live", store.HarnessConfigScopeProject, f.projA.ID, "")
+	edit := *inScope
+	edit.DisplayName = "written by the same identity that is refused below"
+	live := f.asAgent(t, f.insider, http.MethodPut, "/api/v1/harness-configs/"+inScope.ID, edit)
+	require.Equal(t, http.StatusOK, live.Code,
+		"the control write was refused, so the refusal below is not evidence "+
+			"about scope; body=%s", live.Body.String())
+
 	rec := f.asAgent(t, f.insider, http.MethodPut, "/api/v1/harness-configs/"+hc.ID, spoof)
-	require.NotEqual(t, http.StatusOK, rec.Code,
+	// The specific code, not "anything but 200". A 404, a 500 from panic
+	// recovery, or a middleware rejection would all satisfy a not-200
+	// assertion while meaning the request never reached the scope decision,
+	// and this case would then report a refusal it did not measure.
+	//
+	// 401 is the measured answer and it comes from the gate, not from the
+	// middleware: authorizeHarnessConfigScope takes the global arm because the
+	// STORED record is global, and that arm requires a user identity, which an
+	// agent principal does not have (harness_config_handlers.go). 403 is not
+	// reachable on this arm for an agent — CheckAccess is never consulted. The
+	// spoof is what makes this evidence: had the SUBMITTED scope been
+	// authorized, the request would have taken the project arm on projA, where
+	// this agent is allowed, and the control above shows that path answers 200.
+	//
+	// The record-existence limb is already carried: requireImageUnchanged reads
+	// the config back under require.NoError, so a vanished record reds rather
+	// than passing by absence.
+	require.Equal(t, http.StatusUnauthorized, rec.Code,
 		"the submitted scope must not be the one authorized; body=%s", rec.Body.String())
 	f.requireImageUnchanged(t, hc.ID)
 }
