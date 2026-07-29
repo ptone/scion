@@ -230,18 +230,30 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 		return &Capabilities{Actions: []string{}}
 	}
 
-	// Admin short-circuit: return all actions
-	if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
-		return allActions(actions)
-	}
+	// #591 (N73/N79): a project-scoped UAT must not take ANY fast-path
+	// short-circuit below. Admin and project-owner are keyed on the MINTING
+	// user's role/ID, so they would confer access outside the token's project +
+	// scope bounds. Skip them and fall to the per-action loop, which routes
+	// through CheckAccess -> enforceUATConstraints. The fast paths remain for
+	// every non-scoped identity (a real optimisation). See
+	// ComputeCapabilitiesBatch and checkAccessPrecomputed for the batch-path
+	// equivalents.
+	_, scoped := identity.(*ScopedUserIdentity)
 
-	// Project owner/admin short-circuit: full access on project and project-scoped
-	// resources. Mirrors the bypass in checkAccessForUser so capability lists
-	// match what the user can actually do.
-	if user, ok := identity.(UserIdentity); ok {
-		if projectID := projectIDForResource(resource); projectID != "" {
-			if a.isProjectOwnerOrAdmin(ctx, user.ID(), projectID) {
-				return allActions(actions)
+	if !scoped {
+		// Admin short-circuit: return all actions
+		if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
+			return allActions(actions)
+		}
+
+		// Project owner/admin short-circuit: full access on project and
+		// project-scoped resources. Mirrors the bypass in checkAccessForUser so
+		// capability lists match what the user can actually do.
+		if user, ok := identity.(UserIdentity); ok {
+			if projectID := projectIDForResource(resource); projectID != "" {
+				if a.isProjectOwnerOrAdmin(ctx, user.ID(), projectID) {
+					return allActions(actions)
+				}
 			}
 		}
 	}
@@ -266,9 +278,15 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 		return &Capabilities{Actions: []string{}}
 	}
 
+	// #591 (N73/N79): a scoped UAT skips the fast-path short-circuits and falls
+	// to the enforced per-action loop. See ComputeCapabilities.
+	_, scoped := identity.(*ScopedUserIdentity)
+
 	// Admin short-circuit
-	if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
-		return allActions(actions)
+	if !scoped {
+		if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
+			return allActions(actions)
+		}
 	}
 
 	resource := Resource{
@@ -279,9 +297,11 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 
 	// Project owner/admin short-circuit at scope level (e.g. agent:create
 	// inside a project the user owns).
-	if user, ok := identity.(UserIdentity); ok && scopeType == "project" && scopeID != "" {
-		if a.isProjectOwnerOrAdmin(ctx, user.ID(), scopeID) {
-			return allActions(actions)
+	if !scoped {
+		if user, ok := identity.(UserIdentity); ok && scopeType == "project" && scopeID != "" {
+			if a.isProjectOwnerOrAdmin(ctx, user.ID(), scopeID) {
+				return allActions(actions)
+			}
 		}
 	}
 
@@ -310,14 +330,23 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		return caps
 	}
 
+	// #591 (N73/N79): a project-scoped UAT skips every fast-path short-circuit —
+	// admin here, and resource-owner / ancestry / project-owner inside the loop
+	// below — because all are keyed on the MINTING user's role/ID. It falls to
+	// the per-action checkAccessPrecomputed loop, which enforceUATConstraints
+	// gates at its top. The fast paths remain for every non-scoped identity.
+	_, scoped := identity.(*ScopedUserIdentity)
+
 	// Admin short-circuit: return all actions for all resources
-	if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
-		allCap := allActions(actions)
-		caps := make([]*Capabilities, len(resources))
-		for i := range caps {
-			caps[i] = allCap
+	if !scoped {
+		if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
+			allCap := allActions(actions)
+			caps := make([]*Capabilities, len(resources))
+			for i := range caps {
+				caps[i] = allCap
+			}
+			return caps
 		}
-		return caps
 	}
 
 	// Pre-fetch principals and policies once for the identity
@@ -344,20 +373,25 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 
 	caps := make([]*Capabilities, len(resources))
 	for i, resource := range resources {
-		// Owner short-circuit
-		if resource.OwnerID != "" && resource.OwnerID == identity.ID() {
-			caps[i] = allActions(actions)
-			continue
-		}
-		// Ancestry short-circuit: ancestors get full access
-		if canAccessAsAncestor(identity.ID(), resource) {
-			caps[i] = allActions(actions)
-			continue
-		}
-		// Project owner/admin short-circuit
-		if isProjectOwner(projectIDForResource(resource)) {
-			caps[i] = allActions(actions)
-			continue
+		// #591 (N73/N79): these three fast paths carry NO type assertion and key
+		// on identity.ID() (the minting user), so a scoped UAT must skip them and
+		// fall to checkAccessPrecomputed (enforceUATConstraints-gated) below.
+		if !scoped {
+			// Owner short-circuit
+			if resource.OwnerID != "" && resource.OwnerID == identity.ID() {
+				caps[i] = allActions(actions)
+				continue
+			}
+			// Ancestry short-circuit: ancestors get full access
+			if canAccessAsAncestor(identity.ID(), resource) {
+				caps[i] = allActions(actions)
+				continue
+			}
+			// Project owner/admin short-circuit
+			if isProjectOwner(projectIDForResource(resource)) {
+				caps[i] = allActions(actions)
+				continue
+			}
 		}
 
 		var allowed []string
@@ -410,6 +444,21 @@ func (a *AuthzService) precomputeForIdentity(ctx context.Context, identity Ident
 
 // checkAccessPrecomputed evaluates access using pre-fetched principals and policies.
 func (a *AuthzService) checkAccessPrecomputed(identity Identity, _ []store.PrincipalRef, policies []store.Policy, resource Resource, action Action) Decision {
+	// #591 (N73/N79): this evaluator is the batch/precomputed path and never
+	// calls CheckAccess, so it is the ONLY place a scoped UAT's project + scope
+	// bounds are enforced on this path. Run enforceUATConstraints ahead of the
+	// two ID-keyed grants below; a non-nil decision denies. dev5's carol witness
+	// (plain member, no ownership, no ancestry, token scoped to project P) proves
+	// this change is MEASURED-necessary: she bypasses admin and all four
+	// owner/ancestry paths by construction, reaching an allow only via
+	// evaluatePolicies here — so change (1) alone provably cannot bound her.
+	// No-op (nil) for every non-scoped identity, so no blast-radius change.
+	if scoped, ok := identity.(*ScopedUserIdentity); ok {
+		if denied := a.enforceUATConstraints(scoped, resource, action); denied != nil {
+			return *denied
+		}
+	}
+
 	// Owner bypass (already handled in batch caller, but kept for single-resource calls)
 	if user, ok := identity.(UserIdentity); ok {
 		if resource.OwnerID != "" && resource.OwnerID == user.ID() {

@@ -188,8 +188,12 @@ func TestListProjects_ScopedAdminUAT_SubsetOnly(t *testing.T) {
 	ctx := context.Background()
 	admin := n73AdminUser()
 
-	// P is owned by the minting admin (control: stays visible via the owner
-	// short-circuit, which keys on ID(), unchanged by the fix).
+	// P is owned by the minting admin. Under the N79 arm the batch list path no
+	// longer lets the owner short-circuit BYPASS the token's scope (that bypass is
+	// skipped for a ScopedUserIdentity and the request now flows through
+	// enforceUATConstraints), so the token is given project:read below and P stays
+	// visible via the owner bypass INSIDE checkAccessPrecomputed, gated behind a
+	// passing project+scope check — the intended intersection model.
 	owned := &store.Project{
 		ID: tid("n73_proj_owned"), Name: "Owned", Slug: "n73-owned",
 		OwnerID: admin.ID(), Created: time.Now(), Updated: time.Now(),
@@ -206,7 +210,7 @@ func TestListProjects_ScopedAdminUAT_SubsetOnly(t *testing.T) {
 		t.Fatalf("seed other project: %v", err)
 	}
 
-	adminUAT := NewScopedUserIdentity(admin, owned.ID, []string{"hub:manage"})
+	adminUAT := NewScopedUserIdentity(admin, owned.ID, []string{"hub:manage", "project:read"})
 	rec := httptest.NewRecorder()
 	srv.listProjects(rec, n73Request(http.MethodGet, "/api/v1/projects", adminUAT))
 	if rec.Code != http.StatusOK {
