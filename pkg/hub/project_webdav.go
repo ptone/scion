@@ -392,6 +392,24 @@ func (r *ProjectSyncStatusResponse) UnmarshalJSON(data []byte) error {
 }
 
 // handleProjectSyncStatus returns the sync status for a project.
+//
+// KNOWINGLY UNGATED. This is the second entry handler in this file, and unlike
+// handleProjectWebDAV above it has no authorization call: any caller the
+// middleware authenticates can read the sync state of any project, which
+// discloses the IDs of the brokers serving it along with its file and byte
+// counts. That is the same #591-class exposure the rest of this file's gate
+// closed, and it is left open here only because closing it is a separate
+// decision that is pending, not because it was judged safe.
+//
+// If you are adding a gate to this handler: it wants
+// authorizeProjectWorkspaceAccess (project_workspace_handlers.go) on a GET,
+// which resolves to a read, placed immediately after the GetProject below and
+// before ListProjectSyncStates — the same ordering as every other gate in this
+// file and in project_cache.go, whose cache/status handler discloses the same
+// broker IDs and is gated. Do not invent a different shape for it.
+//
+// If you are adding another handler to this file: this comment is about THIS
+// function only. It is not a precedent, and an unguarded new handler is a bug.
 func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)

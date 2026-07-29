@@ -76,6 +76,19 @@ import (
 // status code. A 403 returned after the file was already deleted is still a
 // vulnerability, and a status-code-only assertion cannot tell the two apart.
 //
+// On the case count: `go test -v` reports 115 lines here (9 tests, 106
+// subtests), and that is not 115 cases of gate coverage. Neutering
+// authorizeProjectWorkspaceAccess to `return true` turns 68 of them red; the
+// 47 survivors decompose, measured rather than estimated, as 17
+// positive-control allow cases that a disabled gate necessarily still passes,
+// 16 unauthenticated cases whose 401 comes from the auth middleware upstream
+// of the gate, the 9 read cases of TestWSGate_InProjectAgentMayReadNotWrite
+// (its write half does go red), and 5 from
+// TestWSGate_WebDAVAndWorkspaceAgreePerCaller for the same two reasons. Before
+// that test was given per-caller expected verdicts, all 12 of its cases
+// survived the neuter and the figure was 60. The number that means something
+// is the mutation result, not the total.
+//
 // Test naming: everything file-local is prefixed wsGate.
 
 type wsGateFixture struct {
@@ -559,9 +572,15 @@ func TestWSGate_SharedDirExistenceNotDisclosed(t *testing.T) {
 
 // TestWSGate_WebDAVAndWorkspaceAgreePerCaller. The two endpoints serve the same
 // bytes from the same resolveProjectWebDAVPath. If they ever disagree about a
-// caller, the stricter one is decorative — the caller just uses the other. This
-// test compares them per caller class rather than pinning codes, so it keeps
-// holding if the codes themselves are later revised together.
+// caller, the stricter one is decorative — the caller just uses the other.
+//
+// Agreement alone is not enough to assert, and this test used to assert only
+// that. Two endpoints that both serve everyone agree perfectly: neutering the
+// gate left all twelve cases green, because both arms went permissive
+// together. So each caller now also declares the verdict it is supposed to
+// receive, and the equality check is what remains of the original point. The
+// expected verdicts are written as classify() strings rather than raw codes so
+// that the WebDAV and JSON success codes (201 vs 200) can still differ.
 func TestWSGate_WebDAVAndWorkspaceAgreePerCaller(t *testing.T) {
 	f := wsGateSetup(t)
 	base := "/api/v1/projects/" + f.projA.ID
@@ -569,14 +588,26 @@ func TestWSGate_WebDAVAndWorkspaceAgreePerCaller(t *testing.T) {
 	type caller struct {
 		name string
 		do   func(method, path string, body []byte) *httptest.ResponseRecorder
+
+		// wantRead and wantWrite are classify() verdicts. The in-project agent
+		// is the row that differs between them: the authz.go:239 read baseline
+		// lets it read its own project and ActionUpdate is not read-class.
+		wantRead  string
+		wantWrite string
 	}
 	callers := []caller{
-		{"owner", func(m, p string, b []byte) *httptest.ResponseRecorder { return f.asUser(t, f.owner, m, p, b) }},
-		{"unrelated user", func(m, p string, b []byte) *httptest.ResponseRecorder { return f.asUser(t, f.outsdr, m, p, b) }},
-		{"cross-project agent", func(m, p string, b []byte) *httptest.ResponseRecorder { return f.asAgent(t, f.stranger, m, p, b) }},
-		{"in-project agent", func(m, p string, b []byte) *httptest.ResponseRecorder { return f.asAgent(t, f.insider, m, p, b) }},
-		{"broker", func(m, p string, b []byte) *httptest.ResponseRecorder { return f.asBroker(t, m, p, b) }},
-		{"unauthenticated", func(m, p string, b []byte) *httptest.ResponseRecorder { return f.anonymous(t, m, p, b) }},
+		{"owner", func(m, p string, b []byte) *httptest.ResponseRecorder { return f.asUser(t, f.owner, m, p, b) },
+			"allowed", "allowed"},
+		{"unrelated user", func(m, p string, b []byte) *httptest.ResponseRecorder { return f.asUser(t, f.outsdr, m, p, b) },
+			"refused:403", "refused:403"},
+		{"cross-project agent", func(m, p string, b []byte) *httptest.ResponseRecorder { return f.asAgent(t, f.stranger, m, p, b) },
+			"refused:404", "refused:404"},
+		{"in-project agent", func(m, p string, b []byte) *httptest.ResponseRecorder { return f.asAgent(t, f.insider, m, p, b) },
+			"allowed", "refused:403"},
+		{"broker", func(m, p string, b []byte) *httptest.ResponseRecorder { return f.asBroker(t, m, p, b) },
+			"refused:403", "refused:403"},
+		{"unauthenticated", func(m, p string, b []byte) *httptest.ResponseRecorder { return f.anonymous(t, m, p, b) },
+			"refused:401", "refused:401"},
 	}
 
 	for _, c := range callers {
@@ -587,6 +618,8 @@ func TestWSGate_WebDAVAndWorkspaceAgreePerCaller(t *testing.T) {
 			require.Equal(t, viaFiles, viaDAV,
 				"/workspace/files and /dav/ serve the same bytes and must reach the "+
 					"same verdict for %s", c.name)
+			require.Equal(t, c.wantRead, viaFiles,
+				"both endpoints agreed, but on the wrong verdict for %s", c.name)
 		})
 		t.Run(c.name+" write", func(t *testing.T) {
 			f.seedCanaries(t)
@@ -596,6 +629,8 @@ func TestWSGate_WebDAVAndWorkspaceAgreePerCaller(t *testing.T) {
 			require.Equal(t, viaFiles, viaDAV,
 				"/workspace/files and /dav/ write the same bytes and must reach the "+
 					"same verdict for %s", c.name)
+			require.Equal(t, c.wantWrite, viaFiles,
+				"both endpoints agreed, but on the wrong verdict for %s", c.name)
 		})
 	}
 }

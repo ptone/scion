@@ -608,10 +608,19 @@ func TestProjectWorkspaceWrite_PathTraversalRejected(t *testing.T) {
 	// before the path validation this test is about is ever reached. The gate
 	// is not relaxed for the test: the context is given exactly the identity
 	// the middleware itself constructs for the dev token that doRequest sends
-	// on this test's siblings (auth.go:268-269). The 400 asserted below is
-	// therefore a post-authorization 400, which is what it was always meant to
-	// be — the sibling tests reach it through the router with the same
-	// credential.
+	// on this test's siblings (auth.go:269, userContextKey{}; auth.go:270,
+	// contextWithIdentity). The 400 asserted below is therefore a
+	// post-authorization 400, which is what it was always meant to be — the
+	// sibling tests reach it through the router with the same credential.
+	//
+	// Only contextWithIdentity is set here, where the middleware sets three
+	// things: userContextKey{}, the identity, and contextWithAuthType. That
+	// divergence is deliberate and minimal — the gate reads the identity and
+	// nothing else, so supplying the other two would be scenery, and scenery
+	// is how a test starts to look like it is arranging a pass. If a future
+	// gate on this path reads the auth type, this line will need to grow, and
+	// it should grow by copying what the middleware does rather than by
+	// whatever makes the test green.
 	req = req.WithContext(contextWithIdentity(req.Context(),
 		NewDevUser(srv.config.DevUserConfig)))
 

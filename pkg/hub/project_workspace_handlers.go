@@ -589,6 +589,12 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Gate before the path resolves. resolveProjectWebDAVPath answers 409 with
+	// a message describing the project's shape, and the os.Stat below turns
+	// into a 404 that says whether a workspace exists — both are facts about a
+	// project this caller may have no standing to ask about. Everything past
+	// this point also streams the whole workspace as a zip, so this is the last
+	// point at which refusing is cheap.
 	if !s.authorizeProjectWorkspaceAccess(w, r, project) {
 		return
 	}

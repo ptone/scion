@@ -311,6 +311,21 @@ func (s *Server) authorizeHarnessConfigScope(w http.ResponseWriter, r *http.Requ
 		return false
 
 	case store.HarnessConfigScopeUser:
+		// DELIBERATE ABSENCE, and it is load-bearing: HarnessConfig.OwnerID is
+		// never populated anywhere in this codebase today — not on create, not
+		// on clone, not in the store. So on an existing record ownerID is
+		// always "", the comparison below can never match, and this arm is
+		// dead-deny by construction for update, patch and delete. That is not
+		// an accident being tolerated; it fails closed, which is why it is
+		// preserved rather than "fixed" here. Whether OwnerID should be
+		// populated is a pending decision held outside this change.
+		//
+		// If you are the one who makes it populated: this arm and the one in
+		// handleHarnessConfigReimport come alive in the same commit as your
+		// change, and so do the update, patch and delete paths that reach this
+		// one. Re-review them together. A single line elsewhere turns five
+		// currently-unreachable allow paths into reachable ones at once, and
+		// none of them will announce themselves.
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
@@ -1150,6 +1165,13 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	case store.HarnessConfigScopeUser:
+		// DELIBERATE ABSENCE, as at the user arm of authorizeHarnessConfigScope
+		// above: HarnessConfig.OwnerID is never populated anywhere today, so
+		// hc.OwnerID is always "", the comparison never matches, and this arm
+		// is dead-deny by construction. It fails closed, so it is preserved as
+		// written. Whether OwnerID should be populated is a pending decision
+		// held outside this change; whoever makes it must re-review this arm
+		// together with the one above, because both come alive at once.
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
