@@ -907,6 +907,28 @@ type ListBrokerProjectsResponse struct {
 func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, brokerID string) {
 	ctx := r.Context()
 
+	// Admin-only, and gated BEFORE the broker lookup below. This handler returns
+	// the broker's served-project list — ProjectID, name, GitRemote, AgentCount
+	// and, the load-bearing field, LocalPath, the directory on the broker that IS
+	// each project's workspace. It was reachable by any authenticated caller: an
+	// unrelated user, a cross-project agent, and a broker each received 200 and
+	// the full list, LocalPath included — the READ half of the fact the provider
+	// gate (handleProjectProviders, handlers_env_secrets.go) protects at its own
+	// site, leaked from this one.
+	//
+	// requireAdmin is the conservative posture the rest of this PR uses (the
+	// policy API and the UAT gate): a genuine unconstrained hub admin proceeds; an
+	// agent or broker fails the UserIdentity assertion (403); a nil identity is
+	// 401; a project-scoped UAT is denied by the enforceUATConstraints check now
+	// inside requireAdmin. A scope-filtered relaxation (let a caller see only the
+	// projects it is party to) is a deliberate follow-on requiring security
+	// review, not this gate. Placing it ahead of GetRuntimeBroker means a missing
+	// broker id and an existing one answer identically, so this handler is not a
+	// broker-existence oracle either.
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	// Verify broker exists
 	_, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {

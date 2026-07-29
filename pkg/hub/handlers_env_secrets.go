@@ -1669,6 +1669,12 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 	// measured before this gate, an unrelated user, a cross-project agent and a
 	// broker each received 200 and the full provider list, LocalPath included.
 	//
+	// This branch closes only the project->providers read. The mirror image —
+	// the broker's served-project list, which carries the same LocalPath per
+	// project — is served by getBrokerProjects (handlers_runtime_brokers.go) and
+	// is gated separately there (requireAdmin); closing it here would not have
+	// reached that route (Rule 18a).
+	//
 	// The action comes from providerRouteAction: read for the list, update for
 	// the two writes. The in-project agent is admitted to the list by the agent
 	// project read baseline (authz.go:239) and still refused both writes, which
