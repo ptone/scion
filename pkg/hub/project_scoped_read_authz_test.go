@@ -41,7 +41,7 @@ import (
 //	if userIdent, ok := identity.(UserIdentity); ok { ...CheckAccess... }
 //
 // with no else. The bypass there was the type ASSERTION rather than a nil check:
-// identity is non-nil for an agent or a broker — both were rejected by the
+// identity is non-nil for an agent or a broker — so both passed the
 // explicit nil guard above these sites — and it was the assertion to UserIdentity
 // that failed, so the body was skipped in silence and the handler served the
 // resource.
