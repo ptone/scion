@@ -84,6 +84,13 @@ func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Req
 				"You don't have permission to import templates in this project", nil)
 			return
 		}
+		// #591 N78: the create check above is a WRITE grant; the import path also
+		// read-enumerates the project subtree, so require ActionRead too. Mirrors
+		// the agent arm (authorizeImportAgentRead) a few lines up, whose denial
+		// reason was already caller agnostic.
+		if !s.authorizeImportUserRead(ctx, w, userIdent, projectID, "import templates") {
+			return
+		}
 	} else {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 		return
@@ -202,6 +209,11 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You don't have permission to import harness-configs in this project", nil)
+			return
+		}
+		// #591 N78: create is a WRITE grant; this path also read-enumerates the
+		// project subtree. See authorizeImportUserRead.
+		if !s.authorizeImportUserRead(ctx, w, userIdent, projectID, "import harness-configs") {
 			return
 		}
 	} else {
@@ -513,7 +525,11 @@ func (s *Server) authorizeProjectImport(ctx context.Context, w http.ResponseWrit
 				"You don't have permission to import "+noun+" in this project", nil)
 			return false
 		}
-		return true
+		// #591 N78: create is a WRITE grant; the project-scope import/discover
+		// paths also read-enumerate the project subtree. This is the shared user
+		// branch behind the resources/import and resources/discover routes, so
+		// the gate covers both. See authorizeImportUserRead.
+		return s.authorizeImportUserRead(ctx, w, userIdent, projectID, "import "+noun)
 	}
 	writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 	return false
@@ -568,6 +584,11 @@ func (s *Server) handleProjectDiscoverTemplates(w http.ResponseWriter, r *http.R
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You don't have permission to discover templates in this project", nil)
+			return
+		}
+		// #591 N78: create is a WRITE grant; discovery IS the read enumeration.
+		// See authorizeImportUserRead.
+		if !s.authorizeImportUserRead(ctx, w, userIdent, projectID, "discover templates") {
 			return
 		}
 	} else {
@@ -655,6 +676,11 @@ func (s *Server) handleProjectDiscoverHarnessConfigs(w http.ResponseWriter, r *h
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You don't have permission to discover harness-configs in this project", nil)
+			return
+		}
+		// #591 N78: create is a WRITE grant; discovery IS the read enumeration.
+		// See authorizeImportUserRead.
+		if !s.authorizeImportUserRead(ctx, w, userIdent, projectID, "discover harness-configs") {
 			return
 		}
 	} else {

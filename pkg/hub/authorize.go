@@ -218,6 +218,45 @@ func (s *Server) authorizeImportAgentRead(ctx context.Context, w http.ResponseWr
 	return false
 }
 
+// authorizeImportUserRead is the USER-branch counterpart of
+// authorizeImportAgentRead, and closes the same hole on the other caller kind.
+// 1b72a060 fixed the agent branch only, while the denial reason it wrote —
+// "create scope does not authorize read enumeration" — was already caller
+// agnostic: the fix was scoped narrower than its own justification. The user
+// branch kept authorizing a READ enumeration with a WRITE grant (ActionCreate),
+// so a project member holding only agent-create could enumerate a project
+// subtree it has no read access to. No deny policy is required to reach it.
+//
+// Call only INSIDE the user branch and only AFTER the ActionCreate check, so a
+// caller needs BOTH create and read. Not usable on the global-scope arms of
+// handleResourcesImport/handleResourcesDiscover: those pass no project (the
+// resource there is deliberately ownerless and parentless, hub-admin by
+// construction), and this check keys on Resource{Type: "project", ID: projectID},
+// which is meaningless with an empty ID.
+//
+// WHY 403 AND NOT THE 404 OF authorizeProjectReadNoOracle — and note this is NOT
+// the reason the agent helper above gives. That one relies on the caller being
+// an in-project agent that already knows its own project exists. A user calling
+// with an arbitrary project id knows no such thing, so that reasoning does not
+// transfer and must not be copied. The reason here is ordering: this check is
+// unreachable until the caller has ALREADY passed ActionCreate on this same
+// project, which itself 403s. Anyone who can see this denial has already been
+// told the project exists and that they may create in it, so the 403 discloses
+// nothing the preceding check did not. If this call is ever moved ahead of the
+// create check, that argument dies and the no-oracle 404 becomes the right
+// response — re-derive it if you reorder, do not assume it survived.
+func (s *Server) authorizeImportUserRead(ctx context.Context, w http.ResponseWriter, user UserIdentity, projectID, verb string) bool {
+	resource := Resource{Type: "project", ID: projectID}
+	if s.authzService.CheckAccess(ctx, user, resource, ActionRead).Allowed {
+		return true
+	}
+	logAuthzDenial(nil, user, resource, ActionRead,
+		"import/discover user read denied (create scope does not authorize read enumeration)")
+	writeError(w, http.StatusForbidden, ErrCodeForbidden,
+		"You don't have permission to "+verb+" in this project", nil)
+	return false
+}
+
 // authorizeAgentCreate gates agent creation for every caller kind. Exhaustive
 // and fail-closed. Replaces the caller-kind branch in createAgent, which had no
 // else clause, and supplies the gate createProjectAgent never had.
