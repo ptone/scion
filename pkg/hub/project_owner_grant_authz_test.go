@@ -223,13 +223,19 @@ func (f *ogGrantFixture) isRecordedOwner(t *testing.T, u *store.User, p *store.P
 	ctx := context.Background()
 
 	// "No owner row" and "nothing left that could hold an owner row" are
-	// different answers, and only the first is evidence. A deleted project
-	// lists no groups and so returns false — which is the answer every refusal
-	// case here asserts — making a request that destroyed its own subject
-	// indistinguishable from one that was refused. That was measured, not
-	// supposed. Both containers are checked in either polarity, because a
-	// positive control whose group vanished should fail as a broken fixture
-	// rather than as "the backfill stopped promoting anyone".
+	// different answers, and only the first is evidence. Measured: a deleted
+	// project returns false here, which is the answer every refusal case
+	// asserts, so a request that destroyed its own subject would be
+	// indistinguishable from one that was refused.
+	//
+	// Why it returns false is a separate question from that observation, and
+	// the two guards below do not depend on settling it. aid-verify measured
+	// that DeleteProject in this store leaves a project's explicit groups
+	// behind rather than cascading them, so "the project is gone" and "the
+	// groups are gone" are separately reachable states; there is one guard for
+	// each. Both run in either polarity, because a positive control whose
+	// group vanished should fail as a broken fixture rather than as "the
+	// backfill stopped promoting anyone".
 	_, err := f.store.GetProject(ctx, p.ID)
 	require.NoError(t, err,
 		"the project no longer exists, so this answer would be false by "+
