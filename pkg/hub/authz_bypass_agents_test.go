@@ -1157,3 +1157,94 @@ func TestBypassAgents_UnauthenticatedDenied(t *testing.T) {
 		})
 	}
 }
+
+// TestBypassAgents_NestedGetProjectAgentGate covers the nested agent read path,
+// GET /api/v1/projects/{projectId}/agents/{agentId}, served by getProjectAgent.
+//
+// It is a parallel path to the flat GET /api/v1/agents/{id} (getAgent): both
+// return the same store.Agent. getAgent authorizes it with
+// s.authorize(agentResource, ActionRead); the nested leaf did only an
+// agent.ProjectID == projectID consistency check and then returned the record,
+// so the guard the flat path applies was absent on the second path. The tables
+// above pin the flat route (broker, unauthenticated) but never exercised the
+// nested route, which is why this drift was invisible. Each denial arm below is
+// RED if the s.authorize call is removed from getProjectAgent.
+func TestBypassAgents_NestedGetProjectAgentGate(t *testing.T) {
+	nested := func(projectID, agentID string) string {
+		return fmt.Sprintf("/api/v1/projects/%s/agents/%s", projectID, agentID)
+	}
+
+	t.Run("outsider member is denied", func(t *testing.T) {
+		// A role=member user with no relationship to the project: not an admin,
+		// not the owner, not a member. The flat route already denies this; the
+		// nested route must agree.
+		f := bypassAgentsSetup(t)
+		outsider := &store.User{
+			ID:          tid("bypass-outsider"),
+			Email:       "outsider@example.com",
+			DisplayName: "Outsider",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, f.store.CreateUser(context.Background(), outsider))
+
+		rec := doRequestAsUser(t, f.srv, outsider, http.MethodGet, nested(f.proj.ID, f.sibling.ID), nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"an unrelated member must not read an agent via the nested route; got %d: %s",
+			rec.Code, rec.Body.String())
+	})
+
+	t.Run("cross-project agent is denied", func(t *testing.T) {
+		// f.caller lives in f.proj; it reads the stranger agent in f.other via
+		// that project's nested route. The stranger really belongs to f.other,
+		// so the ProjectID consistency check passes and the authorization gate
+		// is the only thing that can refuse it.
+		f := bypassAgentsSetup(t)
+		rec := f.asAgent(t, http.MethodGet, nested(f.other.ID, f.stranger.ID), nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"an agent must not read an agent in another project via the nested route; got %d: %s",
+			rec.Code, rec.Body.String())
+	})
+
+	t.Run("broker caller is denied", func(t *testing.T) {
+		// brokerIdentityImpl is neither UserIdentity nor AgentIdentity and has no
+		// project baseline, so it must be refused here exactly as it is on the
+		// flat route's broker table above.
+		f := bypassAgentsSetup(t)
+		rec := f.asBroker(t, http.MethodGet, nested(f.proj.ID, f.sibling.ID), nil)
+		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+			rec.Code,
+			"broker-authenticated caller must not read an agent via the nested route; got %d: %s",
+			rec.Code, rec.Body.String())
+	})
+
+	t.Run("anonymous is denied", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := doRequestNoAuth(t, f.srv, http.MethodGet, nested(f.proj.ID, f.sibling.ID), nil)
+		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden},
+			rec.Code, "unauthenticated caller must be rejected on the nested route; got %d: %s",
+			rec.Code, rec.Body.String())
+	})
+
+	// Positive arms — load-bearing. A gate that denied these would pass every
+	// denial above while being an outage. These are what distinguish the fix
+	// from over-denial (Rule 2a: a legitimately authorized caller still 200).
+	t.Run("in-project agent reads a peer", func(t *testing.T) {
+		// The same allow the flat route grants via the Part 2 read-class project
+		// baseline; the nested route must not be stricter.
+		f := bypassAgentsSetup(t)
+		rec := f.asAgent(t, http.MethodGet, nested(f.proj.ID, f.sibling.ID), nil)
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"an in-project agent must still read a peer via the nested route; got %d: %s",
+			rec.Code, rec.Body.String())
+	})
+
+	t.Run("project owner reads the agent", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, nested(f.proj.ID, f.sibling.ID), nil)
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"the project owner must still read an agent via the nested route; got %d: %s",
+			rec.Code, rec.Body.String())
+	})
+}

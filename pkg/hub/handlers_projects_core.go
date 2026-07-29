@@ -2137,6 +2137,14 @@ func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, project
 		}
 	}
 
+	// Gate the read. This nested read path mirrors the flat getAgent handler,
+	// which authorizes the same store.Agent with s.authorize(agentResource,
+	// ActionRead) before returning the record. Without this the two read paths
+	// disagree on the authorization decision for one resource.
+	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		return
+	}
+
 	// Enrich agent with project and broker names
 	s.enrichAgent(ctx, agent, nil, nil)
 
