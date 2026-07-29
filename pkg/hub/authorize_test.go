@@ -653,3 +653,72 @@ func TestRequireAdmin_DenialReasons(t *testing.T) {
 		})
 	}
 }
+
+// TestRequireAdmin_ScopedUATRejected pins the B7 code fix: a User Access Token (a
+// ScopedUserIdentity) must NOT pass requireAdmin even when its minting user is a
+// hub admin. A UAT is project-scoped by construction and carries no hub
+// authority, but requireAdmin was a plain role comparison on the minting user's
+// role, so an admin-minted, project-scoped, zero-scope UAT returned ok=true (200)
+// here while authorize() returned 403 for the same token. The fix runs
+// enforceUATConstraints before the role check, mirroring checkAccessForUser.
+//
+// The attack arm (admin-minted UAT) is the assertion that reds without the fix;
+// the genuine unconstrained admin control must stay green so the fix is a scope
+// check, not a blanket denial.
+func TestRequireAdmin_ScopedUATRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	adminUser := NewAuthenticatedUser("uat-admin", "uat-admin@test.com", "UAT Admin", store.UserRoleAdmin, "api")
+	memberUser := NewAuthenticatedUser("uat-member", "uat-member@test.com", "UAT Member", "member", "api")
+
+	// rev1's measured control: an admin-minted UAT scoped to one project with
+	// zero scopes. Same shape, member-minted, for the negative control.
+	adminUAT := NewScopedUserIdentity(adminUser, "uat-project", nil)
+	memberUAT := NewScopedUserIdentity(memberUser, "uat-project", nil)
+
+	t.Run("admin-minted UAT is denied 403", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		user, ok := srv.requireAdmin(rec, authzHelperRequest(adminUAT))
+		if ok {
+			t.Fatalf("expected an admin-minted project-scoped UAT to be denied, got ok=true user=%v", user)
+		}
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("parity: authorize() also denies the same UAT", func(t *testing.T) {
+		req := authzHelperRequest(adminUAT)
+		resource := Resource{Type: "hub", ID: req.URL.Path}
+		if srv.authzService.CheckAccess(req.Context(), adminUAT, resource, ActionManage).Allowed {
+			t.Fatal("expected CheckAccess to deny the admin-minted UAT (parity with requireAdmin)")
+		}
+	})
+
+	t.Run("member-minted UAT stays denied 403", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		if _, ok := srv.requireAdmin(rec, authzHelperRequest(memberUAT)); ok {
+			t.Fatal("expected a member-minted UAT to be denied")
+		}
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("genuine unconstrained hub admin still passes", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		if _, ok := srv.requireAdmin(rec, authzHelperRequest(adminUser)); !ok {
+			t.Fatalf("expected a genuine hub admin to pass; status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("unauthenticated is 401", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		if _, ok := srv.requireAdmin(rec, authzHelperRequest(nil)); ok {
+			t.Fatal("expected an unauthenticated caller to be denied")
+		}
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("status = %d, want 401", rec.Code)
+		}
+	})
+}

@@ -351,14 +351,14 @@ func (s *Server) authorizeAgentLifecycle(w http.ResponseWriter, r *http.Request,
 // "Authentication required"), but the distinction is worth keeping honest:
 // this helper gates the hub's admin endpoints.
 //
-// CAUTION: this is a plain role comparison, not a call to authorize()/
-// CheckAccess. A user access token embeds the MINTING user's role, so an
-// admin-minted, project-scoped, zero-scope UAT PASSES this guard and reaches
-// every one of the endpoints that use it — even though authorize() rejects the
-// same token, because enforceUATConstraints (authz.go) runs BEFORE the admin
-// bypass there and this helper has no equivalent. The exposure today is bounded
-// only by which sites call requireAdmin; do not route new admin sites through it
-// until that gap is closed.
+// A user access token embeds the MINTING user's role, so a plain role
+// comparison would let an admin-minted, project-scoped UAT pass and reach every
+// endpoint using this helper — even though authorize() rejects the same token.
+// To match authorize(), requireAdmin runs enforceUATConstraints on a scoped
+// identity BEFORE the role comparison, exactly as checkAccessForUser runs it
+// before its admin bypass (authz.go). A UAT is project-scoped by construction
+// and never carries the hub:manage scope this synthetic hub resource demands, so
+// it is denied here just as it is in authorize().
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdentity, bool) {
 	// Synthetic resource: requireAdmin is a role check on the hub itself
 	// rather than a policy check on an addressable resource.
@@ -381,6 +381,21 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdent
 		Forbidden(w)
 		return nil, false
 	}
+
+	// A UAT is project-scoped by construction and must not confer hub-wide admin
+	// authority just because its minting user is an admin. Enforce the token's
+	// constraints first, mirroring authorize()'s ordering (enforceUATConstraints
+	// before the admin bypass); a scoped token lacking hub:manage is denied here
+	// exactly as it is there. A non-scoped identity (a genuine session user or a
+	// dev user) is unaffected.
+	if scoped, ok := user.(*ScopedUserIdentity); ok {
+		if denied := s.authzService.enforceUATConstraints(scoped, resource, ActionManage); denied != nil {
+			logAuthzDenial(r, identity, resource, ActionManage, denied.Reason)
+			Forbidden(w)
+			return nil, false
+		}
+	}
+
 	if user.Role() != store.UserRoleAdmin {
 		logAuthzDenial(r, identity, resource, ActionManage, "not an admin")
 		Forbidden(w)
