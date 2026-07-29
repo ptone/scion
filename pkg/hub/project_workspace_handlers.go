@@ -203,6 +203,65 @@ type ProjectWorkspaceUploadResponse struct {
 	Files []ProjectWorkspaceFile `json:"files"`
 }
 
+// workspaceActionForMethod maps an HTTP method on a workspace, shared-dir or
+// WebDAV route to the authorization action it requires.
+//
+// The default arm is ActionUpdate, not ActionRead. A method this function has
+// never heard of is gated as a WRITE, so adding a verb to one of the dispatch
+// switches below cannot silently acquire read-level authorization: whoever adds
+// it has to come here and say what it is. A switch that is exhaustive over the
+// verbs its author had in mind, and silent about every other, is how a miss
+// renders as a hit.
+//
+// The read arm names the WebDAV read verbs as well as the plain-HTTP ones,
+// because handleProjectWebDAV (project_webdav.go) serves the same bytes from
+// the same resolveProjectWebDAVPath and shares this mapping. The remaining
+// WebDAV verbs — PUT, DELETE, MKCOL, MOVE, COPY, PROPPATCH, LOCK, UNLOCK — are
+// deliberately absent: they mutate, and the default arm already gates them as
+// writes without anyone having to enumerate them correctly.
+//
+// OPTIONS here is the WebDAV capability query, not a CORS preflight: a
+// preflight carries an Origin header and is answered 204 by corsMiddleware
+// (server.go:2929) before routing, so it never reaches this mapping.
+func workspaceActionForMethod(method string) Action {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, "PROPFIND":
+		return ActionRead
+	default:
+		return ActionUpdate
+	}
+}
+
+// authorizeProjectWorkspaceAccess is the entry gate for every route in this
+// file: the workspace file routes, the workspace and shared-dir archives, the
+// shared-dir file routes, and the shared-workspace pull.
+//
+// Before this existed the file contained no authorization code at all — not a
+// skipped guard, no guard. Measured at 9a85f085 against an unmodified tree, a
+// cross-project agent, an unrelated user and a broker could each list, read,
+// write and delete files in an arbitrary project's workspace and shared
+// directories, and download a zip of either.
+//
+// Two calls, in this order, and the order is load-bearing:
+//
+//  1. requireProjectVisibleToAgent collapses a cross-project agent to 404.
+//     Running it after s.authorize would answer 403, which confirms to that
+//     caller that the project exists.
+//  2. s.authorize is fail-closed for every identity kind, including the broker
+//     and nil identities that the pre-#591 idiom skipped in silence, and it
+//     emits the structured denial log.
+//
+// The action is derived from the request method rather than passed in, because
+// three of the five entry handlers dispatch on the method themselves and a gate
+// applied per-branch inside those switches is a gate that a new branch can be
+// added beside.
+func (s *Server) authorizeProjectWorkspaceAccess(w http.ResponseWriter, r *http.Request, project *store.Project) bool {
+	if !s.requireProjectVisibleToAgent(w, r, project) {
+		return false
+	}
+	return s.authorize(w, r, projectResource(project), workspaceActionForMethod(r.Method))
+}
+
 // handleProjectWorkspace dispatches project workspace file operations.
 // Routes:
 //   - GET  (filePath="")  → list files
@@ -215,6 +274,13 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Gate before the path resolves. resolveProjectWebDAVPath answers 409 with
+	// a message describing the project's shape, so authorizing after it would
+	// leak that shape to a caller the gate is about to refuse.
+	if !s.authorizeProjectWorkspaceAccess(w, r, project) {
 		return
 	}
 
@@ -523,6 +589,10 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	if !s.authorizeProjectWorkspaceAccess(w, r, project) {
+		return
+	}
+
 	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
 	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
 	if err != nil {
@@ -567,6 +637,14 @@ func (s *Server) handleProjectSharedDirArchive(w http.ResponseWriter, r *http.Re
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Gate before the declared-dir check below. That check is an existence
+	// oracle: "Shared directory not found" versus anything else tells an
+	// unauthorized caller which shared dirs a project declares, one guess at a
+	// time, without ever reading a byte of their contents.
+	if !s.authorizeProjectWorkspaceAccess(w, r, project) {
 		return
 	}
 
@@ -729,6 +807,17 @@ func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, pr
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Gate here, at the dispatch point, and before the declared-dir existence
+	// oracle below. The five verb handlers this fans out to
+	// (handleSharedDirFileList, handleProjectWorkspaceDownload,
+	// handleProjectWorkspaceUpload, handleProjectWorkspaceWrite,
+	// handleProjectWorkspaceDelete) receive a resolved filesystem path and no
+	// identity, so none of them can authorize anything. This is the last point
+	// on the path where the caller is still knowable.
+	if !s.authorizeProjectWorkspaceAccess(w, r, project) {
 		return
 	}
 
@@ -898,6 +987,13 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// POST, so workspaceActionForMethod yields ActionUpdate: a pull rewrites
+	// the workspace's working tree. Gated before the IsSharedWorkspace check,
+	// which otherwise discloses the project's workspace shape.
+	if !s.authorizeProjectWorkspaceAccess(w, r, project) {
 		return
 	}
 

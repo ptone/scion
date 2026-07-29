@@ -602,6 +602,19 @@ func TestProjectWorkspaceWrite_PathTraversalRejected(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
+
+	// Calling the handler directly skips UnifiedAuthMiddleware, so nothing has
+	// put an identity in the context and the workspace gate now answers 401
+	// before the path validation this test is about is ever reached. The gate
+	// is not relaxed for the test: the context is given exactly the identity
+	// the middleware itself constructs for the dev token that doRequest sends
+	// on this test's siblings (auth.go:268-269). The 400 asserted below is
+	// therefore a post-authorization 400, which is what it was always meant to
+	// be — the sibling tests reach it through the router with the same
+	// credential.
+	req = req.WithContext(contextWithIdentity(req.Context(),
+		NewDevUser(srv.config.DevUserConfig)))
+
 	rec := httptest.NewRecorder()
 	srv.handleProjectWorkspace(rec, req, project.ID, "../../../etc/passwd")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)

@@ -59,6 +59,22 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 
+	// Gate before the path resolves, for the same reason as the workspace file
+	// routes: resolveProjectWebDAVPath answers 409 with a message describing the
+	// project's shape, so authorizing after it would leak that shape to a caller
+	// the gate is about to refuse.
+	//
+	// This is the same gate as the /workspace/files routes, and it has to be.
+	// Both endpoints serve the same bytes out of the same directory returned by
+	// the same resolveProjectWebDAVPath. Gating /workspace/files while leaving
+	// /dav/ open would not be a partial fix; it would be no fix, because PUT and
+	// DELETE through this handler reach the same files. Whatever the two gates
+	// say, they must say the same thing — hence the shared
+	// workspaceActionForMethod rather than a second method table here.
+	if !s.authorizeProjectWorkspaceAccess(w, r, project) {
+		return
+	}
+
 	// Determine workspace path based on project type
 	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
 	if err != nil {
