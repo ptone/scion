@@ -1185,6 +1185,13 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	var broker *store.RuntimeBroker
 	var brokerToken string
 
+	// echoBroker is what the RESPONSE reports, which is not always the whole of
+	// what broker holds: linking a broker the caller does not own must not also
+	// read that record back to them (#107). Every path that sets broker sets
+	// this too, so a new path that forgets returns no broker at all rather than
+	// silently echoing a stored record.
+	var echoBroker *store.RuntimeBroker
+
 	if req.BrokerID != "" {
 		// NEW FLOW: Link to existing broker registered via two-phase /brokers + /brokers/join
 		existingBroker, err := s.store.GetRuntimeBroker(ctx, req.BrokerID)
@@ -1200,6 +1207,12 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		broker = existingBroker
+		// The brokerId flow echoes the record as it always has. It is reached by
+		// supplying a broker ID rather than a guessable name, and narrowing it is
+		// a separate question from #107, which is about the record this branch
+		// used to overwrite. Recorded here so the difference is deliberate and
+		// visible rather than an oversight.
+		echoBroker = broker
 
 		// Add as project provider. When the project already existed and the
 		// broker is already a provider, preserve the existing localPath to
@@ -1276,20 +1289,41 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if existingBroker != nil {
-			// Update existing broker
+			// Link to the existing record; do NOT overwrite it (#107).
+			//
+			// This used to assign Name, Slug, Version, Status, ConnectionState,
+			// Capabilities and Profiles from the request and persist them. The
+			// record being written is resolved from caller-supplied lookup keys
+			// and belongs to whoever registered the broker, so matching it is
+			// not consent to rewrite it: a caller could repoint another party's
+			// broker record by naming it. Registering a project links a broker;
+			// it does not administer one.
+			//
+			// The skip is unconditional on "an existing record was found",
+			// deliberately NOT limited to the by-name lookup. Resolution is
+			// ID-first and name-second, so a skip that only covered the name
+			// match would leave the whole mutation reachable by supplying the
+			// target's broker ID instead of its name — and a broker ID is not a
+			// secret and not a boundary. Rule 18a: if a future change needs this
+			// branch to refresh broker metadata, that is a broker-administration
+			// route with its own authorization, not a re-added assignment here.
+			//
+			// No liveness cost: Status, ConnectionState, Version and
+			// LastHeartbeat are set on the supported paths that DO authenticate
+			// the broker — CompleteBrokerJoin (brokerauth.go) and the broker's
+			// own startup in cmd/server_broker.go — so a broker that really is
+			// online still says so without this branch asserting it on hearsay.
 			broker = existingBroker
-			broker.Name = req.Broker.Name
-			broker.Slug = api.Slugify(req.Broker.Name)
-			broker.Version = req.Broker.Version
-			broker.Status = store.BrokerStatusOnline
-			broker.ConnectionState = "connected"
-			broker.Capabilities = req.Broker.Capabilities
-			broker.Profiles = req.Broker.Profiles
 
-			if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
+			// The response echoes the resolved broker, so skipping the overwrite
+			// turns write-by-name into read-by-name: fields that used to be the
+			// caller's own input reflected back would now come back AS STORED,
+			// making this a lookup oracle on a record the caller does not own,
+			// keyed by a guessed name. Narrower than the write, and closed in
+			// the same change rather than left as its residue. Only the identity
+			// of the linked broker goes back; the full record stays internal to
+			// the linking below.
+			echoBroker = &store.RuntimeBroker{ID: broker.ID, Name: broker.Name}
 		} else {
 			// Create new broker
 			if brokerID == "" {
@@ -1311,6 +1345,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				writeErrorFromErr(w, err, "")
 				return
 			}
+			// A record this request just created out of its own input: echoing
+			// it back tells the caller nothing they did not supply.
+			echoBroker = broker
 		}
 
 		// Add as project provider. When the project already existed and the
@@ -1399,7 +1436,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, RegisterProjectResponse{
 		Project:       project,
 		LegacyProject: project,
-		Broker:        broker,
+		Broker:        echoBroker,
 		Created:       created,
 		Matches:       matches,
 		BrokerToken:   brokerToken,

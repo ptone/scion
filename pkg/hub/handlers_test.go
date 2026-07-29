@@ -1080,7 +1080,7 @@ func TestProjectRegisterMultipleGitRemoteMatches(t *testing.T) {
 }
 
 func TestProjectRegisterBrokerDeduplication(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
 
 	// Register a project with a broker
 	body1 := map[string]interface{}{
@@ -1129,9 +1129,31 @@ func TestProjectRegisterBrokerDeduplication(t *testing.T) {
 		t.Errorf("expected same broker ID for case-insensitive match, got %q and %q", brokerID1, resp2.Broker.ID)
 	}
 
-	// The version should be updated
-	if resp2.Broker.Version != "1.0.1" {
-		t.Errorf("expected broker version to be updated to '1.0.1', got %q", resp2.Broker.Version)
+	// The version must NOT be updated (#107). This test previously required the
+	// opposite: the second register carried version 1.0.1 and the branch wrote
+	// it to the matched record. Deduplication is a lookup, and matching a record
+	// is not authority to rewrite it — the request that matches may come from
+	// anyone who can guess the name, so the fields the broker itself reports are
+	// left to the paths that authenticate the broker (/brokers/join and the
+	// broker's own startup). Reuse of the record, which is what this test is
+	// named for, is unchanged and asserted above.
+	stored, err := s.GetRuntimeBroker(context.Background(), brokerID1)
+	if err != nil {
+		t.Fatalf("failed to read the broker back: %v", err)
+	}
+	if stored.Version != "1.0.0" {
+		t.Errorf("register overwrote the stored version of an existing broker: got %q, want %q",
+			stored.Version, "1.0.0")
+	}
+
+	// And the matched record is not echoed: the response carries an id+name
+	// projection, so a name lookup does not read back a record's contents.
+	if resp2.Broker.Version != "" {
+		t.Errorf("expected an id+name projection for the matched broker, got version %q",
+			resp2.Broker.Version)
+	}
+	if resp2.Broker.Name == "" {
+		t.Error("expected the projection to still carry the broker name")
 	}
 }
 
