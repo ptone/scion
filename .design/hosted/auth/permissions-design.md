@@ -827,6 +827,15 @@ POST /api/v1/policies
 
 **Authorization:** Requires `manage` action on the scope (hub or grove).
 
+> **Implementation note (ptone/scion#591):** the shipped gate is deliberately
+> **stricter** than this spec — **hub-admin only** (via `requireAdmin`), not the
+> scope-relative `manage` described here. This is the conservative interim that
+> fully closes the measured authorization-bypass (arms B and C): the write
+> handlers were previously ungated, so any authenticated caller could author a
+> policy and bind it to themselves. It is pending maintainer ratification and a
+> planned later relaxation back toward scope-relative `manage`. See PR-body
+> behaviour-change #12. EM/lead ruling 2026-07-29.
+
 #### Update Policy
 ```
 PATCH /api/v1/policies/{policyId}
@@ -834,12 +843,22 @@ PATCH /api/v1/policies/{policyId}
 
 **Authorization:** Requires `manage` action on the policy's scope.
 
+> **Implementation note (ptone/scion#591):** shipped gate is hub-admin only, not
+> scope-relative `manage` — see the note under Create Policy. Interim pending
+> maintainer ratification; PR-body behaviour-change #12; EM/lead ruling
+> 2026-07-29.
+
 #### Delete Policy
 ```
 DELETE /api/v1/policies/{policyId}
 ```
 
 **Authorization:** Requires `manage` action on the policy's scope.
+
+> **Implementation note (ptone/scion#591):** shipped gate is hub-admin only, not
+> scope-relative `manage` — see the note under Create Policy. Interim pending
+> maintainer ratification; PR-body behaviour-change #12; EM/lead ruling
+> 2026-07-29.
 
 #### Add Principal to Policy
 ```

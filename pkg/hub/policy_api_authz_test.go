@@ -18,20 +18,39 @@ package hub
 
 // Regression tests for the policy-write authorization gate (ptone/scion#591).
 //
-// Before the gate, createPolicy, updatePolicy, deletePolicy and addPolicyBinding
-// performed no authorization at all: any authenticated caller — user, agent, or
-// broker — could author a policy and bind it to any principal. That is the
-// mechanism behind the measured privilege escalation (arm B: a caller grants
-// itself access to a resource it cannot reach; arm C: a resource-scoped self-
-// allow overrides an admin's hub-scoped deny).
+// Before the gate, every policy-write handler performed no authorization at all:
+// any authenticated caller — user, agent, or broker — could author a policy,
+// bind it to any principal, or unbind an existing one. That is the mechanism
+// behind the measured privilege escalation (arm B: a caller grants itself access
+// to a resource it cannot reach; arm C: a resource-scoped self-allow overrides
+// an admin's hub-scoped deny).
 //
-// The gate is deliberately the most conservative one that closes both arms:
-// hub-admin only, via requireAdmin, at the entry of each write handler. Project-
-// owner self-service is intentionally NOT granted here; relaxing to it is a
-// separate, later change. These tests pin exactly that contract:
+// The gate is deliberately the most conservative one available: hub-admin only,
+// via requireAdmin, at the entry of each write handler. Project-owner self-
+// service is intentionally NOT granted here; relaxing to it is a separate, later
+// change.
+//
+// The covered set is the full policy-write API — five operations:
+//
+//   createPolicy, updatePolicy, deletePolicy, addPolicyBinding
+//       gated in 536d8f5c (the four authoring/binding ops)
+//   removePolicyBinding
+//       gated in b5f230a3 (the follow-up)
+//
+// removePolicyBinding is load-bearing, not incidental: a policy reaches a
+// principal only through a binding (see GetPoliciesForPrincipals in
+// pkg/store/entadapter/policy_store.go, which joins policies via their binding
+// edges), so detaching a binding is equivalent to overriding the policy it
+// carried. Left ungated, unbinding would reopen the arm-C escape from the other
+// side — a caller could shed an admin's deny by removing its binding. So the
+// gate closes both arms only with removePolicyBinding included; the four-op form
+// at 536d8f5c did not, and this file must not claim it did.
+//
+// These tests pin exactly that contract, for each of the five operations:
 //
 //   unauthenticated            -> 401
 //   agent (any scopes)         -> 403
+//   broker (HMAC-signed)       -> 403
 //   non-admin user             -> 403
 //   project owner (non-admin)  -> 403
 //   hub admin                  -> success
@@ -52,18 +71,23 @@ import (
 )
 
 type policyAuthzFixture struct {
-	srv        *Server
-	store      store.Store
-	admin      *store.User
-	member     *store.User
-	owner      *store.User
-	project    *store.Project
-	agentToken string
+	srv          *Server
+	store        store.Store
+	admin        *store.User
+	member       *store.User
+	owner        *store.User
+	project      *store.Project
+	agentToken   string
+	broker       *store.RuntimeBroker
+	brokerSecret []byte
 }
 
 func setupPolicyAuthz(t *testing.T) *policyAuthzFixture {
 	t.Helper()
-	srv, s := testServer(t)
+	// testServerWithBrokerAuth (not the stock testServer) so a real HMAC-signed
+	// broker request can reach the policy handlers — the broker caller kind is
+	// one of the identities the #591 idiom silently admitted.
+	srv, s := testServerWithBrokerAuth(t)
 	ctx := context.Background()
 
 	mkUser := func(name, role string) *store.User {
@@ -105,10 +129,30 @@ func setupPolicyAuthz(t *testing.T) *policyAuthzFixture {
 		[]AgentTokenScope{ScopeAgentCreate, ScopeAgentLifecycle}, nil)
 	require.NoError(t, err)
 
+	// A broker with an active HMAC secret, so a real signed broker request can
+	// authenticate and reach the policy handlers.
+	brokerSecret := []byte("pa-broker-hmac-secret-key-for-tests")
+	broker := &store.RuntimeBroker{
+		ID:      tid("pa-broker"),
+		Name:    "pa-broker",
+		Slug:    "pa-broker",
+		Status:  store.BrokerStatusOnline,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.CreateBrokerSecret(ctx, &store.BrokerSecret{
+		BrokerID:  broker.ID,
+		SecretKey: brokerSecret,
+		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+		Status:    store.BrokerSecretStatusActive,
+	}))
+
 	return &policyAuthzFixture{
 		srv: srv, store: s,
 		admin: admin, member: member, owner: owner,
 		project: project, agentToken: atok,
+		broker: broker, brokerSecret: brokerSecret,
 	}
 }
 
@@ -140,6 +184,10 @@ type deniedCaller struct {
 func (f *policyAuthzFixture) deniedCallers(t *testing.T) []deniedCaller {
 	return []deniedCaller{
 		{
+			// The 401 here is supplied by the auth middleware on this route, not
+			// by the gate: requireAdmin never runs for an unauthenticated caller,
+			// so this row does NOT go red if the gate is reverted. It is a
+			// contract assertion (unauth is rejected), not a gate-liveness probe.
 			name: "unauthenticated",
 			do: func(m, p string, b interface{}) *httptest.ResponseRecorder {
 				return doRequestNoAuth(t, f.srv, m, p, b)
@@ -150,6 +198,19 @@ func (f *policyAuthzFixture) deniedCallers(t *testing.T) []deniedCaller {
 			name: "agent",
 			do: func(m, p string, b interface{}) *httptest.ResponseRecorder {
 				return doRequestWithAgentToken(t, f.srv, m, p, b, f.agentToken)
+			},
+			want: http.StatusForbidden,
+		},
+		{
+			// A real HMAC-signed broker request. Brokers satisfy neither
+			// UserIdentity nor AgentIdentity — the caller kind the #591 idiom
+			// skipped — so requireAdmin must reject it. Reuses the signing helper
+			// from the bypass-agents suite (same package) rather than duplicating
+			// the HMAC construction.
+			name: "broker",
+			do: func(m, p string, b interface{}) *httptest.ResponseRecorder {
+				bf := &bypassAgentsFixture{srv: f.srv, broker: f.broker, brokerSecret: f.brokerSecret}
+				return bf.asBroker(t, m, p, b)
 			},
 			want: http.StatusForbidden,
 		},

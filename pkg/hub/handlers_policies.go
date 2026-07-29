@@ -172,6 +172,11 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 	// author a policy — including one granting themselves access to a resource
 	// and overriding an admin-established deny. Fail closed at the entry, before
 	// any parsing.
+	//
+	// Scope: hub-admin-only is the ratified interim per the EM/lead ruling
+	// 2026-07-29 — deliberately stricter than the design's scope-relative
+	// `manage` (permissions-design.md §6.2), which a future change may relax
+	// toward. See PR-body behaviour-change #12.
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
@@ -320,7 +325,10 @@ func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request, id string) {
 
 func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request, id string) {
 	// Policy writes are gated to hub admins (ptone/scion#591). Fail closed at
-	// the entry, before any parsing.
+	// the entry, before any parsing. Hub-admin-only is the ratified interim per
+	// the EM/lead ruling 2026-07-29 — stricter than the design's scope-relative
+	// `manage` (see createPolicy and permissions-design.md §6.2; PR-body
+	// behaviour-change #12).
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
@@ -384,8 +392,18 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request, id string)
 
 func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request, id string) {
 	// Policy writes are gated to hub admins (ptone/scion#591). Fail closed at
-	// the entry, before any processing. Existing not-found behavior is unchanged:
-	// the gate needs no resource fetch.
+	// the entry, before any processing — the gate needs no resource fetch.
+	//
+	// This changes the not-found behavior for a non-admin caller: the gate runs
+	// before the store lookup, so a non-admin deleting a policy now gets 403
+	// even for a non-existent ID, where the ungated handler returned 404. That
+	// is deliberate — deciding on the caller before the fetch keeps delete from
+	// becoming an existence oracle (a 404-vs-403 split would leak whether a
+	// policy ID exists). Admin callers see the unchanged 204/404.
+	//
+	// Hub-admin-only is the ratified interim per the EM/lead ruling 2026-07-29 —
+	// stricter than the design's scope-relative `manage` (see createPolicy and
+	// permissions-design.md §6.2; PR-body behaviour-change #12).
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
@@ -440,6 +458,18 @@ func (s *Server) addPolicyBinding(w http.ResponseWriter, r *http.Request, policy
 	// to a principal is the grant-conferring step; before this gate any
 	// authenticated caller could bind a self-authored policy to themselves. Fail
 	// closed at the entry, before any parsing.
+	//
+	// Caveat for a future fixer: this handler's own gate is fail-closed, but its
+	// dispatcher handlePolicyBindings calls store.GetPolicy before dispatching
+	// here (and handlePolicyBindingByID does the same for unbind), so a caller
+	// learns whether a policy ID exists — a 404-vs-gate split — ahead of the
+	// admin check. Harmless while policy reads are open to all; it becomes a live
+	// existence oracle the moment policy reads are gated, at which point the
+	// GetPolicy calls in those two dispatchers must move behind the admin check.
+	//
+	// Hub-admin-only is the ratified interim per the EM/lead ruling 2026-07-29 —
+	// stricter than the design's scope-relative `manage` (see createPolicy and
+	// permissions-design.md §6.2; PR-body behaviour-change #12).
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
@@ -517,11 +547,16 @@ func (s *Server) handlePolicyBindingByID(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) removePolicyBinding(w http.ResponseWriter, r *http.Request, policyID, principalType, principalID string) {
-	// Policy writes are gated to hub admins (ptone/scion#591). Unbinding a
-	// policy from a principal removes a grant or a deny; left ungated, a caller
-	// could escape an admin-established deny simply by unbinding it. Fail closed
-	// at the entry. Completes the caller-authored policy-API write-op gate begun
-	// in 536d8f5c.
+	// Policy writes are gated to hub admins (ptone/scion#591). A policy reaches a
+	// principal only through a binding, so unbinding is equivalent to overriding
+	// the policy it carried: left ungated, a caller could shed an admin's deny by
+	// removing its binding — the arm-C escape from the other side. This gate
+	// closes that detach-equals-override path and completes the caller-authored
+	// policy-API write-op gate begun in 536d8f5c (the four authoring/binding ops).
+	//
+	// Hub-admin-only is the ratified interim per the EM/lead ruling 2026-07-29 —
+	// stricter than the design's scope-relative `manage` (see createPolicy and
+	// permissions-design.md §6.2; PR-body behaviour-change #12).
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
