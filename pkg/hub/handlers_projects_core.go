@@ -2193,6 +2193,15 @@ func (s *Server) updateProjectAgent(w http.ResponseWriter, r *http.Request, proj
 		}
 	}
 
+	// Gate the mutation. This nested update path mirrors the flat updateAgent
+	// handler, which authorizes the same store.Agent with s.authorize(
+	// agentResource, ActionUpdate) before applying any field change. Without
+	// this gate the two write paths disagree on the authorization decision for
+	// one resource.
+	if !s.authorize(w, r, agentResource(agent), ActionUpdate) {
+		return
+	}
+
 	var updates struct {
 		Name         string            `json:"name,omitempty"`
 		Labels       map[string]string `json:"labels,omitempty"`

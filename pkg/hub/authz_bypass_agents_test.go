@@ -1248,3 +1248,106 @@ func TestBypassAgents_NestedGetProjectAgentGate(t *testing.T) {
 			rec.Code, rec.Body.String())
 	})
 }
+
+// TestBypassAgents_NestedUpdateProjectAgentGate covers the nested agent write
+// path, PATCH /api/v1/projects/{projectId}/agents/{agentId}, served by
+// updateProjectAgent.
+//
+// It is a parallel path to the flat PATCH /api/v1/agents/{id} (updateAgent):
+// both mutate the same store.Agent via s.store.UpdateAgent. updateAgent gates
+// s.authorize(agentResource, ActionUpdate); the nested leaf did only the
+// slug/UUID + ProjectID consistency lookup and then applied the field changes,
+// so the guard the flat write path applies was absent on the second write path.
+// Each denial arm below is RED (200 + a mutated record) if the s.authorize call
+// is removed from updateProjectAgent; the positive arms are Rule-2a controls.
+func TestBypassAgents_NestedUpdateProjectAgentGate(t *testing.T) {
+	nested := func(projectID, agentID string) string {
+		return fmt.Sprintf("/api/v1/projects/%s/agents/%s", projectID, agentID)
+	}
+	patch := func(name string) map[string]interface{} {
+		return map[string]interface{}{"name": name}
+	}
+
+	t.Run("outsider member is denied and nothing is mutated", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		outsider := &store.User{
+			ID:          tid("bypass-upd-outsider"),
+			Email:       "upd-outsider@example.com",
+			DisplayName: "Update Outsider",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, f.store.CreateUser(context.Background(), outsider))
+
+		rec := doRequestAsUser(t, f.srv, outsider, http.MethodPatch,
+			nested(f.proj.ID, f.sibling.ID), patch("n92-hijacked"))
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"an unrelated member must not update an agent via the nested route; got %d: %s",
+			rec.Code, rec.Body.String())
+
+		got, err := f.store.GetAgent(context.Background(), f.sibling.ID)
+		require.NoError(t, err)
+		assert.NotEqual(t, "n92-hijacked", got.Name,
+			"the denied nested update must not have been applied")
+	})
+
+	t.Run("agent updating a project peer is denied", func(t *testing.T) {
+		// Mirrors the flat route, which denies an agent updating a peer (only
+		// descendants are allowed). The stranger/sibling really is in the project
+		// so the ProjectID consistency check passes and the gate is what refuses.
+		f := bypassAgentsSetup(t)
+		rec := f.asAgent(t, http.MethodPatch, nested(f.proj.ID, f.sibling.ID), patch("n92-hijacked"))
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"an agent must not update a project peer via the nested route; got %d: %s",
+			rec.Code, rec.Body.String())
+	})
+
+	t.Run("cross-project agent is denied", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := f.asAgent(t, http.MethodPatch, nested(f.other.ID, f.stranger.ID), patch("n92-hijacked"))
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"an agent must not update an agent in another project via the nested route; got %d: %s",
+			rec.Code, rec.Body.String())
+	})
+
+	t.Run("broker caller is denied", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := f.asBroker(t, http.MethodPatch, nested(f.proj.ID, f.sibling.ID), patch("n92-hijacked"))
+		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+			rec.Code,
+			"broker-authenticated caller must not update an agent via the nested route; got %d: %s",
+			rec.Code, rec.Body.String())
+	})
+
+	t.Run("anonymous is denied", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := doRequestNoAuth(t, f.srv, http.MethodPatch, nested(f.proj.ID, f.sibling.ID), patch("n92-hijacked"))
+		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden},
+			rec.Code, "unauthenticated caller must be rejected on the nested write route; got %d: %s",
+			rec.Code, rec.Body.String())
+	})
+
+	// Positive arms — load-bearing (Rule 2a): a legitimately authorized caller
+	// must still be able to write, exactly as on the flat route.
+	t.Run("agent updates its descendant", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := f.asAgent(t, http.MethodPatch, nested(f.proj.ID, f.child.ID), patch("n92-child-renamed"))
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"an agent must still update its descendant via the nested route; got %d: %s",
+			rec.Code, rec.Body.String())
+
+		got, err := f.store.GetAgent(context.Background(), f.child.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "n92-child-renamed", got.Name, "the authorized update must have been applied")
+	})
+
+	t.Run("project owner updates the agent", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch,
+			nested(f.proj.ID, f.sibling.ID), patch("n92-owner-renamed"))
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"the project owner must still update an agent via the nested route; got %d: %s",
+			rec.Code, rec.Body.String())
+	})
+}
