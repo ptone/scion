@@ -89,6 +89,16 @@ func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
+	// #591 (N63): group reads are gated to hub admins, mirroring the listPolicies
+	// gate (handlers_policies.go:111-127). This listing previously returned every
+	// group to any authenticated caller — annotated with per-item capabilities but
+	// not filtered by them — disclosing group structure and membership hub-wide.
+	// Fail closed at the entry. See listPolicies for the read-gate attribution
+	// (admin-only read interim extended from the ratified write gates, Rule 13).
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 	query := r.URL.Query()
 
@@ -275,6 +285,14 @@ func (s *Server) handleGroupRoutes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getGroup(w http.ResponseWriter, r *http.Request, id string) {
+	// #591 (N63): admin-only, mirroring listPolicies (handlers_policies.go:111-127).
+	// Without this a non-admin could resolve project:<slug>:members by guessing a
+	// project slug (the GetGroupBySlug fallback below) and read its membership.
+	// Fail closed at the entry; see listGroups.
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 
 	group, err := s.store.GetGroup(ctx, id)
@@ -441,6 +459,14 @@ func (s *Server) handleGroupMembers(w http.ResponseWriter, r *http.Request, grou
 }
 
 func (s *Server) listGroupMembers(w http.ResponseWriter, r *http.Request, groupID string) {
+	// #591 (N63): admin-only, mirroring listPolicies (handlers_policies.go:111-127).
+	// This returned group membership enriched with display names and roles to any
+	// authenticated caller — a cross-tenant disclosure. Fail closed at the entry;
+	// see listGroups.
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 
 	members, err := s.store.GetGroupMembers(ctx, groupID)
