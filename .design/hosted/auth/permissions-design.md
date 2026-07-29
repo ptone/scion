@@ -798,10 +798,23 @@ GET /api/v1/policies
 
 **Authorization:** Returns only policies the caller can view (based on scope access).
 
+> **Implementation note (ptone/scion#591):** the shipped gate is **hub-admin
+> only** (via `requireAdmin`), stricter than the scope-relative viewability
+> described here: the listing previously returned every policy to any
+> authenticated caller, disclosing the hub's full authorization posture. Interim
+> pending maintainer ratification and a later relaxation toward scope-relative
+> viewability; PR-body behaviour-change #12; EM/lead ruling 2026-07-29.
+
 #### Get Policy
 ```
 GET /api/v1/policies/{policyId}
 ```
+
+**Authorization:** Hub admins only (via `requireAdmin`), gated as part of
+ptone/scion#591. The gate runs before the store lookup, so a non-admin receives
+403 rather than 404 for any policy ID, avoiding an existence oracle. Interim
+pending maintainer ratification and a later relaxation toward scope-relative
+viewability; PR-body behaviour-change #12; EM/lead ruling 2026-07-29.
 
 #### Create Policy
 ```
@@ -873,10 +886,22 @@ POST /api/v1/policies/{policyId}/principals
 }
 ```
 
+**Authorization:** Hub admins only (via `requireAdmin`), gated in ptone/scion#591.
+Binding a policy to a principal is the grant-conferring step; before the gate any
+authenticated caller could bind a self-authored policy to themselves. Interim
+pending maintainer ratification; PR-body behaviour-change #12; EM/lead ruling
+2026-07-29.
+
 #### Remove Principal from Policy
 ```
 DELETE /api/v1/policies/{policyId}/principals/{principalType}/{principalId}
 ```
+
+**Authorization:** Hub admins only (via `requireAdmin`), gated in ptone/scion#591.
+A policy reaches a principal only through a binding, so unbinding overrides the
+policy it carried; left ungated a caller could shed an admin-established deny by
+removing its binding. Interim pending maintainer ratification; PR-body
+behaviour-change #12; EM/lead ruling 2026-07-29.
 
 #### Evaluate Access (Debug/Test)
 ```

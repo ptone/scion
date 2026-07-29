@@ -109,6 +109,20 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listPolicies(w http.ResponseWriter, r *http.Request) {
+	// Policy reads are gated to hub admins (ptone/scion#591). The listing
+	// previously returned every policy to any authenticated caller (annotated
+	// with per-item capabilities but not filtered by them), disclosing the hub's
+	// entire authorization posture — which policies exist, their scopes, effects,
+	// and principals. Fail closed at the entry.
+	//
+	// Hub-admin-only is the ratified interim per the EM/lead ruling 2026-07-29 —
+	// stricter than the design's scope-relative viewability (permissions-design.md
+	// §6.2), which a future change may relax toward. See PR-body behaviour-change
+	// #12.
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 	query := r.URL.Query()
 
@@ -307,6 +321,16 @@ func (s *Server) handlePolicyRoutes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request, id string) {
+	// Policy reads are gated to hub admins (ptone/scion#591). The gate runs
+	// before the store lookup, so a non-admin gets 403 (not 404) even for a
+	// non-existent ID — deliberate, to keep the read from becoming an existence
+	// oracle. Hub-admin-only is the ratified interim per the EM/lead ruling
+	// 2026-07-29 (see listPolicies and permissions-design.md §6.2; PR-body
+	// behaviour-change #12).
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 
 	policy, err := s.store.GetPolicy(ctx, id)
@@ -420,6 +444,19 @@ func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request, id string)
 
 // handlePolicyBindings handles GET and POST on /api/v1/policies/{policyId}/bindings
 func (s *Server) handlePolicyBindings(w http.ResponseWriter, r *http.Request, policyID string) {
+	// Gate ahead of the existence check (ptone/scion#591, closes aid-rev1 nit I2).
+	// The GetPolicy below runs before the per-handler gates in listPolicyBindings /
+	// addPolicyBinding, so without a gate here a non-admin learns whether a policy
+	// ID exists (404 vs 403) across the whole /bindings subtree — an existence
+	// oracle. requireAdmin at the dispatcher entry closes it for both the GET
+	// (list) and POST (add) paths. The per-handler gates remain as defence in
+	// depth; this dispatcher gate is the one that shuts the oracle. Admin-only per
+	// the EM/lead ruling 2026-07-29; ships as part of the one #591 read-hardening
+	// commit (PR-body behaviour-change #12).
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 
 	// Verify policy exists
@@ -440,6 +477,22 @@ func (s *Server) handlePolicyBindings(w http.ResponseWriter, r *http.Request, po
 }
 
 func (s *Server) listPolicyBindings(w http.ResponseWriter, r *http.Request, policyID string) {
+	// Policy reads are gated to hub admins (ptone/scion#591): a policy's binding
+	// list names the principals it grants or denies, so it discloses the same
+	// authorization posture as the policy itself. Fail closed at the entry.
+	// Hub-admin-only is the ratified interim per the EM/lead ruling 2026-07-29
+	// (see listPolicies and permissions-design.md §6.2; PR-body behaviour-change
+	// #12).
+	//
+	// This per-handler gate is defence in depth: the dispatcher
+	// handlePolicyBindings already runs requireAdmin ahead of its GetPolicy
+	// existence check (closing the I2 existence oracle), so a non-admin never
+	// reaches here. Kept so the read gate is self-evident at the handler and
+	// survives any future change to the dispatch path.
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 
 	bindings, err := s.store.GetPolicyBindings(ctx, policyID)
@@ -515,6 +568,16 @@ func (s *Server) addPolicyBinding(w http.ResponseWriter, r *http.Request, policy
 
 // handlePolicyBindingByID handles DELETE on /api/v1/policies/{policyId}/bindings/{type}/{id}
 func (s *Server) handlePolicyBindingByID(w http.ResponseWriter, r *http.Request, policyID, bindingPath string) {
+	// Gate at the dispatcher entry (ptone/scion#591, closes aid-rev1 nit I2). As
+	// in handlePolicyBindings, the GetPolicy below would otherwise leak
+	// policy-existence (404 vs 403) to a non-admin before removePolicyBinding's own
+	// gate runs. requireAdmin here shuts that oracle for the unbind path; the
+	// per-handler removePolicyBinding gate stays as defence in depth. Admin-only
+	// per the EM/lead ruling 2026-07-29; part of the one #591 read-hardening commit.
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 
 	// Parse bindingPath as "type/id"

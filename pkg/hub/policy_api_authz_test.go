@@ -46,7 +46,16 @@ package hub
 // gate closes both arms only with removePolicyBinding included; the four-op form
 // at 536d8f5c did not, and this file must not claim it did.
 //
-// These tests pin exactly that contract, for each of the five operations:
+// Policy READS are gated on the same #591 hardening (N3): listPolicies,
+// getPolicy, and listPolicyBindings are hub-admin only, because the policy
+// listing and a policy's binding list disclose the hub's full authorization
+// posture (which policies exist, their scopes, effects, and principals). They
+// share the same deniedCallers contract. The bindings dispatchers gate ahead of
+// their GetPolicy existence check, so a non-admin gets 403 (not 404) even for a
+// non-existent policy ID — the I2 existence oracle is closed in this commit;
+// TestPolicyAPI_BindingsOracleClosed pins that.
+//
+// These tests pin exactly that contract, for each of the gated operations:
 //
 //   unauthenticated            -> 401
 //   agent (any scopes)         -> 403
@@ -379,6 +388,97 @@ func TestPolicyAPI_RemoveBindingGate(t *testing.T) {
 		rec := doRequestAsUser(t, f.srv, f.admin, http.MethodDelete, path, nil)
 		require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 		require.False(t, hasBinding(policyID), "admin unbind must remove the binding")
+	})
+}
+
+func TestPolicyAPI_ListGate(t *testing.T) {
+	f := setupPolicyAuthz(t)
+	const path = "/api/v1/policies"
+	// Seed one policy so a successful admin list is non-trivially populated.
+	f.seedPolicy(t, "pa-list-seed")
+
+	for _, c := range f.deniedCallers(t) {
+		t.Run(c.name, func(t *testing.T) {
+			rec := c.do(http.MethodGet, path, nil)
+			require.Equal(t, c.want, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
+
+	t.Run("hub admin succeeds", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var resp ListPoliciesResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.NotEmpty(t, resp.Policies, "admin list must return the seeded policy")
+	})
+}
+
+func TestPolicyAPI_GetGate(t *testing.T) {
+	f := setupPolicyAuthz(t)
+	p := f.seedPolicy(t, "pa-get-target")
+	path := "/api/v1/policies/" + p.ID
+
+	for _, c := range f.deniedCallers(t) {
+		t.Run(c.name, func(t *testing.T) {
+			rec := c.do(http.MethodGet, path, nil)
+			require.Equal(t, c.want, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
+
+	t.Run("hub admin succeeds", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	})
+}
+
+func TestPolicyAPI_ListBindingsGate(t *testing.T) {
+	f := setupPolicyAuthz(t)
+	ctx := context.Background()
+	p := f.seedPolicy(t, "pa-listbindings-target")
+	require.NoError(t, f.store.AddPolicyBinding(ctx, &store.PolicyBinding{
+		PolicyID:      p.ID,
+		PrincipalType: store.PolicyPrincipalTypeUser,
+		PrincipalID:   f.member.ID,
+	}))
+	path := "/api/v1/policies/" + p.ID + "/bindings"
+
+	for _, c := range f.deniedCallers(t) {
+		t.Run(c.name, func(t *testing.T) {
+			rec := c.do(http.MethodGet, path, nil)
+			require.Equal(t, c.want, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
+
+	t.Run("hub admin succeeds", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	})
+}
+
+// TestPolicyAPI_BindingsOracleClosed pins the I2 existence-oracle close: the
+// bindings dispatchers gate before their GetPolicy existence check, so a
+// non-admin cannot distinguish an existing policy from a missing one — both the
+// GET (list) and DELETE (unbind) paths return 403, never 404, for a policy ID
+// that does not exist. The admin arm confirms the underlying 404 is real (the
+// oracle exists; it is merely shut to non-admins), so a regression that dropped
+// the dispatcher gate would flip the non-admin arms to 404 and fail here.
+func TestPolicyAPI_BindingsOracleClosed(t *testing.T) {
+	f := setupPolicyAuthz(t)
+	missing := tid("pa-oracle-missing-policy")
+	listPath := "/api/v1/policies/" + missing + "/bindings"
+	unbindPath := "/api/v1/policies/" + missing + "/bindings/user/" + f.member.ID
+
+	t.Run("non-admin list on missing policy is 403 not 404", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.member, http.MethodGet, listPath, nil)
+		require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	})
+	t.Run("non-admin unbind on missing policy is 403 not 404", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.member, http.MethodDelete, unbindPath, nil)
+		require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	})
+	t.Run("admin sees the real 404 (oracle exists, is merely shut)", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, listPath, nil)
+		require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
 	})
 }
 
