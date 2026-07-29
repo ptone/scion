@@ -67,6 +67,12 @@ func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only import templates within their own project", nil)
 			return
 		}
+		// #591 (Rule 18a): the create scope above is a WRITE; without this the
+		// import path also read-enumerates the project subtree and ignored a deny
+		// policy revoking the agent's read baseline. Honour it here too.
+		if !s.authorizeImportAgentRead(ctx, w, agentIdent, projectID, "import templates") {
+			return
+		}
 	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
 			Type:       "agent",
@@ -179,6 +185,12 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 		}
 		if projectID != agentIdent.ProjectID() {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only import harness-configs within their own project", nil)
+			return
+		}
+		// #591 (Rule 18a): the create scope above is a WRITE; without this the
+		// import path also read-enumerates the project subtree and ignored a deny
+		// policy revoking the agent's read baseline. Honour it here too.
+		if !s.authorizeImportAgentRead(ctx, w, agentIdent, projectID, "import harness-configs") {
 			return
 		}
 	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
@@ -483,7 +495,12 @@ func (s *Server) authorizeProjectImport(ctx context.Context, w http.ResponseWrit
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only import "+noun+" within their own project", nil)
 			return false
 		}
-		return true
+		// #591 (Rule 18a): the create scope above is a WRITE; without this the
+		// import path also read-enumerates the project subtree and ignored a deny
+		// policy revoking the agent's read baseline. Honour it here too — this is
+		// the shared branch behind the generic-import and harness-config-import
+		// routes, so the gate applies to them as well.
+		return s.authorizeImportAgentRead(ctx, w, agentIdent, projectID, "import "+noun)
 	}
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
@@ -533,6 +550,13 @@ func (s *Server) handleProjectDiscoverTemplates(w http.ResponseWriter, r *http.R
 		}
 		if projectID != agentIdent.ProjectID() {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only discover templates within their own project", nil)
+			return
+		}
+		// #591 (Rule 18a): the create scope above is a WRITE; without this the
+		// discover path read-enumerated the project subtree (disclosing sibling
+		// directory names) and ignored a deny policy revoking the agent's read
+		// baseline. Honour it here too.
+		if !s.authorizeImportAgentRead(ctx, w, agentIdent, projectID, "discover templates") {
 			return
 		}
 	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
@@ -613,6 +637,13 @@ func (s *Server) handleProjectDiscoverHarnessConfigs(w http.ResponseWriter, r *h
 		}
 		if projectID != agentIdent.ProjectID() {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only discover harness-configs within their own project", nil)
+			return
+		}
+		// #591 (Rule 18a): the create scope above is a WRITE; without this the
+		// discover path read-enumerated the project subtree (disclosing sibling
+		// directory names) and ignored a deny policy revoking the agent's read
+		// baseline. Honour it here too.
+		if !s.authorizeImportAgentRead(ctx, w, agentIdent, projectID, "discover harness-configs") {
 			return
 		}
 	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {

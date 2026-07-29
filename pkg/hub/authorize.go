@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 
@@ -144,6 +145,39 @@ func (s *Server) authorizeProjectReadNoOracle(w http.ResponseWriter, r *http.Req
 		return false
 	}
 	return true
+}
+
+// authorizeImportAgentRead gates the resource-import/discover AGENT branch on the
+// project read baseline, IN ADDITION to the create scope and project-match checks
+// the caller has already passed at the call site (those stay — do not remove them).
+//
+// #591 (Rule 18a): ScopeAgentCreate is a WRITE capability. Before this, holding
+// it (and being in-project) also authorized READ enumeration of the project
+// subtree — discoverFromWorkspace/importFromWorkspace os.ReadDir the workspace
+// and disclose sibling directory names — and an explicit deny policy revoking the
+// agent's read baseline (authz.go:239, revocable by design) was ignored here even
+// though authorizeProjectWorkspaceAccess honours that same deny for the same
+// caller on the same project. This closes that divergence: the create scope no
+// longer authorizes read enumeration, and a revoked read is refused here too.
+//
+// It renders 403 on denial, NOT the 404 that authorizeProjectReadNoOracle renders,
+// because the caller is an in-project agent that already knows its own project
+// exists (the project-match check above constant-403s every other project id), so
+// refusing with 403 introduces no existence oracle. The resource keys on the
+// project scope alone (Type/ID), which is all the agent read decision consults
+// (checkAccessForAgent → projectIDForResource → the read baseline / project-scoped
+// policies); owner/labels are not needed and the project need not be pre-loaded.
+// Call only inside the agent branch, after the scope and project-match checks pass.
+func (s *Server) authorizeImportAgentRead(ctx context.Context, w http.ResponseWriter, agent AgentIdentity, projectID, verb string) bool {
+	resource := Resource{Type: "project", ID: projectID}
+	if s.authzService.CheckAccess(ctx, agent, resource, ActionRead).Allowed {
+		return true
+	}
+	logAuthzDenial(nil, agent, resource, ActionRead,
+		"import/discover agent read denied (create scope does not authorize read enumeration)")
+	writeError(w, http.StatusForbidden, ErrCodeForbidden,
+		"You don't have permission to "+verb+" in this project", nil)
+	return false
 }
 
 // authorizeAgentCreate gates agent creation for every caller kind. Exhaustive
