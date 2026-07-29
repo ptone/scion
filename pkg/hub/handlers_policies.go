@@ -167,6 +167,15 @@ func (s *Server) listPolicies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
+	// Policy writes are gated to hub admins (ptone/scion#591). Before this gate
+	// the handler performed no authorization, so any authenticated caller could
+	// author a policy — including one granting themselves access to a resource
+	// and overriding an admin-established deny. Fail closed at the entry, before
+	// any parsing.
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 
 	var req CreatePolicyRequest
@@ -310,6 +319,12 @@ func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request, id string) {
+	// Policy writes are gated to hub admins (ptone/scion#591). Fail closed at
+	// the entry, before any parsing.
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 
 	policy, err := s.store.GetPolicy(ctx, id)
@@ -368,6 +383,13 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request, id string)
 }
 
 func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request, id string) {
+	// Policy writes are gated to hub admins (ptone/scion#591). Fail closed at
+	// the entry, before any processing. Existing not-found behavior is unchanged:
+	// the gate needs no resource fetch.
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 
 	if err := s.store.DeletePolicy(ctx, id); err != nil {
@@ -414,6 +436,14 @@ func (s *Server) listPolicyBindings(w http.ResponseWriter, r *http.Request, poli
 }
 
 func (s *Server) addPolicyBinding(w http.ResponseWriter, r *http.Request, policyID string) {
+	// Policy writes are gated to hub admins (ptone/scion#591). Binding a policy
+	// to a principal is the grant-conferring step; before this gate any
+	// authenticated caller could bind a self-authored policy to themselves. Fail
+	// closed at the entry, before any parsing.
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 
 	var req AddPolicyBindingRequest
