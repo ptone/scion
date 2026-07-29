@@ -815,3 +815,162 @@ func TestOGGrant_AgentReadDoesNotPromoteSoleMember(t *testing.T) {
 		"the sole member was promoted to owner by their own agent's read of the "+
 			"project — the measured B10 escalation")
 }
+
+// ---------------------------------------------------------------------------
+// I74 + I75: the principal-class edges of the same backfill.
+//
+// I74 — the B10 skip keyed on caller.Type() != "user", but DevUser.Type() is
+// "dev" (devauth.go) and the codebase classes "user" and "dev" as one principal
+// class (authz.go:96, case "user", "dev":). So a dev-auth caller who was NOT the
+// sole member was skipped and never got the legitimate owner backfill an
+// equivalent user gets — a fail-closed but undisclosed behaviour change. The fix
+// treats dev as user-class, restoring the backfill for dev.
+//
+// I75 — with a nil wide identity the backfill fell through to the default promote
+// arm and promoted the sole member. No route reaches here with a nil identity
+// today (all are authenticated), but that protection was purely positional; the
+// fix fails closed on nil (skip + warn) so it no longer depends on position.
+// ---------------------------------------------------------------------------
+
+// ogGrantSoleMemberRole reads f.intruder's exact role in the project's members
+// group. It requires the group and the membership to still exist, so a "member"
+// result means the promotion was refused, NOT that the subject was destroyed —
+// the same liveness contract isRecordedOwner carries (I69(b)). A role read over
+// an absent subject would report "member" by absence and silently pass a refusal
+// arm whose subject had gone away.
+func (f *ogGrantFixture) ogGrantSoleMemberRole(t *testing.T, p *store.Project) string {
+	t.Helper()
+	ctx := context.Background()
+	group, err := f.store.GetGroupBySlug(ctx, "project:"+p.Slug+":members")
+	require.NoError(t, err,
+		"the members group is gone, so this role would be reported by absence "+
+			"rather than because no promotion happened")
+	m, err := f.store.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, f.intruder.ID)
+	require.NoError(t, err,
+		"the sole member's membership is gone, so \"member\" would be reported by "+
+			"absence rather than because the promotion was refused")
+	return m.Role
+}
+
+// TestOGGrant_BackfillPrincipalClassRoleMatrix pins the exact role the backfill
+// leaves the sole member holding for each caller principal class — the matrix
+// rev1 measured during the B10 (c), asserting the role STRING rather than a
+// derived boolean. I74 is the change it protects: a dev-auth caller is user-class
+// (authz.go:96 classes "user","dev" together; DevUser.Type()=="dev"), so a dev
+// caller who is NOT the sole member promotes the member exactly as an equivalent
+// user does. The pre-fix != "user" skip lumped dev with agents and brokers and
+// never promoting — a silent behaviour change this matrix reds without the fix.
+func TestOGGrant_BackfillPrincipalClassRoleMatrix(t *testing.T) {
+	cases := []struct {
+		name     string
+		caller   func(f *ogGrantFixture, p *store.Project) context.Context
+		wantRole string
+	}{
+		{
+			// I74, RED-WITHOUT-FIX: on the pre-fix skip (caller.Type() != "user") a
+			// dev caller was skipped and this stays member; the fix classes dev with
+			// user, so the sole member is promoted to owner like the user arm below.
+			"dev caller not sole member promotes",
+			func(f *ogGrantFixture, p *store.Project) context.Context {
+				dev := NewDevUser(DevUserConfig{
+					Username: "dev", DisplayName: "Dev", Email: "dev@localhost",
+				})
+				return contextWithIdentity(context.Background(), dev)
+			},
+			store.GroupMemberRoleOwner,
+		},
+		{
+			// CONTROL: dev SELF-grant still refused. dev is user-class, so a dev whose
+			// ID is the sole member hits the same self-grant branch as a user
+			// (06e21ac7) and is NOT promoted.
+			"sole-member dev caller refused",
+			func(f *ogGrantFixture, p *store.Project) context.Context {
+				dev := &DevUser{
+					id: f.intruder.ID, username: "dev",
+					displayName: "Dev", email: "dev@localhost",
+				}
+				return contextWithIdentity(context.Background(), dev)
+			},
+			store.GroupMemberRoleMember,
+		},
+		{
+			// CONTROL: the unrelated user-class baseline the dev arm must match — a
+			// user who is not the sole member promotes it, with AND without the fix.
+			"unrelated user not sole member promotes",
+			func(f *ogGrantFixture, p *store.Project) context.Context {
+				other := NewAuthenticatedUser(tid("oggrant-matrix-user"),
+					"oggrant-matrix-user@example.com", "Other",
+					string(store.UserRoleMember), string(ClientTypeAPI))
+				return contextWithIdentity(context.Background(), other)
+			},
+			store.GroupMemberRoleOwner,
+		},
+		{
+			// CONTROL: agent still skipped (B10) — the skip stays scoped to non-user
+			// principals, not widened to dev nor narrowed away.
+			"agent skipped",
+			func(f *ogGrantFixture, p *store.Project) context.Context {
+				claims := &AgentTokenClaims{ProjectID: p.ID, Ancestry: []string{f.intruder.ID}}
+				claims.Subject = tid("oggrant-matrix-agent")
+				return context.WithValue(context.Background(), agentContextKey{}, claims)
+			},
+			store.GroupMemberRoleMember,
+		},
+		{
+			// CONTROL: broker still skipped (B10).
+			"broker skipped",
+			func(f *ogGrantFixture, p *store.Project) context.Context {
+				return contextWithIdentity(context.Background(),
+					NewBrokerIdentity(tid("oggrant-matrix-broker")))
+			},
+			store.GroupMemberRoleMember,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := ogGrantSetup(t) // fresh fixture per arm (I76)
+			p := f.ownerlessProjectWithSoleIntruderMember(t,
+				"OG Grant Role "+api.Slugify(c.name), "")
+			require.Equal(t, store.GroupMemberRoleMember, f.ogGrantSoleMemberRole(t, p),
+				"precondition: the sole member must start as a plain member, or the "+
+					"role check below measures nothing")
+
+			f.srv.createProjectMembersGroupAndPolicy(c.caller(f, p), p)
+
+			require.Equal(t, c.wantRole, f.ogGrantSoleMemberRole(t, p),
+				"backfill left the sole member with the wrong role for caller %q", c.name)
+		})
+	}
+}
+
+// TestOGGrant_NilCallerDoesNotPromote is the I75 direct-call unit assertion: a
+// backfill reached with NO identity in context is failed closed — the sole member
+// stays a plain member and a warning is logged — rather than falling through to
+// the promote arm. It is a direct call because no route reaches this function
+// with a nil wide identity today (every route is authenticated); the fix removes
+// the purely positional protection that fact provided.
+//
+// RED-WITHOUT-FIX: on the pre-fix code a nil caller fell to the default promote
+// arm and the sole member became owner; this arm reds there. The logged warning
+// is asserted so "still a member" is convicted as the skip firing, not as a
+// promotion that silently failed on the store write.
+func TestOGGrant_NilCallerDoesNotPromote(t *testing.T) {
+	f := ogGrantSetup(t)
+	p := f.ownerlessProjectWithSoleIntruderMember(t, "OG Grant Nil Caller", "")
+	require.Equal(t, store.GroupMemberRoleMember, f.ogGrantSoleMemberRole(t, p),
+		"precondition: the sole member must start as a plain member")
+
+	// Capture after the seeding call above so the buffer holds only this call's log.
+	logs := authzHelperCaptureLogs(t)
+
+	// context.Background() carries no identity, so GetIdentityFromContext is nil.
+	f.srv.createProjectMembersGroupAndPolicy(context.Background(), p)
+
+	require.Equal(t, store.GroupMemberRoleMember, f.ogGrantSoleMemberRole(t, p),
+		"a nil-identity call promoted the sole member to owner (fail-open) — the "+
+			"positional protection this fix was meant to remove")
+	require.Contains(t, logs.String(), "no identity in context",
+		"the nil-caller skip must log its refusal, so the skip is observable and "+
+			"not confused with a promotion that silently failed")
+}

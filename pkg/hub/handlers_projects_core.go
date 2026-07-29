@@ -591,11 +591,17 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	// creator by the act that created the project — not to a later caller who
 	// re-announces it and happens to be standing alone in the members group.
 	//
-	// Two states leave a group ownerless enough to reach here, and both are
-	// live rather than merely historical: CreatedBy empty, on projects predating
-	// ownership; and CreatedBy set to a user who does not exist in the store,
-	// which is the trusted-proxy deployment the FK retry above is written for
-	// and says it supports.
+	// This block runs whenever the members group has no owner (ownerCount==0), and
+	// promotes only when that ownerless group ALSO has exactly one member. The owner
+	// backfill above adds the creator as owner ONLY when CreatedBy is non-empty (the
+	// `if project.CreatedBy != ""` guard), and CreatedBy is set only from
+	// GetUserIdentityFromContext — nil for an agent or broker. So ownerless groups
+	// arise, all live rather than merely historical: on projects predating ownership
+	// enforcement (CreatedBy empty); RIGHT NOW on every agent- or broker-registered
+	// project, whose register/create records no CreatedBy for a non-user principal
+	// (an ownerless project created just now, with an EMPTY members group); and on
+	// the trusted-proxy deployment where CreatedBy names a user who does not exist in
+	// the store (the FK retry above is written for it).
 	//
 	// The constraint is on the CALLER, not on the route, and it sits here rather
 	// than in registerProject on purpose: register and createProject's idempotency
@@ -603,22 +609,39 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	// authenticated caller, and getProject reaches it too for any caller who passes
 	// its ActionRead gate (added in 6a12b679) — which still includes an in-project
 	// agent reading its own project, the B10 vector — so closing it at one route
-	// would leave the others open. Initial creation is unaffected, and not by
-	// exemption — the creator is added with role=owner above, so ownerCount is
-	// non-zero and this block does not run at all.
+	// would leave the others open.
+	//
+	// Initial creation is safe for a DIFFERENT reason per path, not the single one
+	// this comment used to give ("the creator is added as owner, so this block does
+	// not run") — which rev1 measured FALSE for a non-user register (N45):
+	//   - user create/register: the creator IS added with role=owner above, so
+	//     ownerCount is non-zero and this block does not run at all;
+	//   - agent/broker register: the creator is NOT added (the fail-open ownership
+	//     idiom in register/createProject sets CreatedBy/OwnerID only for a non-nil
+	//     user identity), so an ownerless project is created and this block DOES run
+	//     — harmless there only because that members group is EMPTY (len==0, not 1),
+	//     so the promotion below never fires, and post-d65a045e also because the
+	//     non-user skip covers the caller. Creating ownerless projects at all is the
+	//     separate governance follow-on (#125), upstream of this PR; not fixed here.
+	// The hazard N45 guards is a future editor who makes agent/broker register add
+	// the registering principal as a MEMBER: that would create the len==1 precondition
+	// on an already-ownerless group and the promotion would fire but for the skip.
 	//
 	// #591 (B10): that refusal is keyed on the WIDE identity
 	// (GetIdentityFromContext), and a SECOND refusal sits beside it — the backfill
-	// is skipped for ANY non-user principal (agent or broker), not only for a user
-	// asking about themselves. The original refusal keyed on
-	// GetUserIdentityFromContext, which returns nil for an agent or broker, so the
-	// else-if stayed reachable: an agent-driven request fell through and promoted
-	// the sole USER member — which for an agent is the user who owns it. A user
-	// refused the self-grant above therefore obtained it by routing the same
-	// request through an agent they own. Measured at fa93e4b6: an agent's
-	// GET /projects/{id} flipped the sole member member->owner while the user arm
-	// stayed member. Broker principals have no route reaching here today, but the
-	// skip pins that the else-if can never promote one either.
+	// is skipped for a non-user-CLASS principal (an agent or a broker), not only
+	// for a user asking about themselves. "User-class" is decided with the same
+	// case as authz.go:96 (case "user", "dev":): a dev-auth caller reports
+	// Type()=="dev" (devauth.go) and is user-class, so it is NOT skipped and keeps
+	// the legitimate owner backfill (I74) — the skip is agents and brokers only.
+	// The original refusal keyed on GetUserIdentityFromContext, which returns nil
+	// for an agent or broker, so the else-if stayed reachable: an agent-driven
+	// request fell through and promoted the sole USER member — which for an agent is
+	// the user who owns it. A user refused the self-grant above therefore obtained
+	// it by routing the same request through an agent they own. Measured at
+	// fa93e4b6: an agent's GET /projects/{id} flipped the sole member member->owner
+	// while the user arm stayed member. Broker principals have no route reaching
+	// here today, but the skip pins that the else-if can never promote one either.
 	//
 	// WHAT IT STILL DOES NOT DO. It does not decide who should own an ownerless
 	// project; it only refuses to let the asker answer that question about
@@ -628,46 +651,76 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	// flow does not exist yet, and until it does, an ownerless project stays
 	// ownerless unless something other than its would-be owner walks past.
 	//
-	// Rule 18a: the populations that reach the promotion below are exactly (a) a
-	// user caller who is NOT the sole member (an admin touching the project — the
-	// accidental-assignment case above) and (b) an identity-less internal call
-	// (the seeding/creation path). A user caller who IS the sole member is refused,
-	// and any agent or broker principal is skipped. Restoring the escalation takes
-	// only narrowing the refusal back to GetUserIdentityFromContext, or dropping
-	// the non-user skip: either makes the else-if reachable by an agent again.
+	// Rule 18a: the only population that reaches the promotion below is a
+	// user-class caller (user or dev, per authz.go:96) who is NOT the sole member —
+	// an admin touching the project, the accidental-assignment case above. Every
+	// other caller is refused or skipped: a user-class caller who IS the sole
+	// member is refused (self-grant, 06e21ac7); any agent or broker principal is
+	// skipped (B10); and a nil caller is skipped fail-closed (I75) rather than
+	// promoted, so the identity-less internal/seeding path no longer confers
+	// ownership. Restoring the escalation now takes one of three edits: narrowing
+	// the refusal back to GetUserIdentityFromContext (an agent falls through again),
+	// dropping the non-user default skip (an agent or broker reaches the promote
+	// arm), or dropping the nil-caller skip AND making a route that reaches this
+	// function callable without authentication (a nil identity then falls to the
+	// promote arm). Each re-opens the else-if to a principal that must not reach it.
 	ownerCount, err := s.store.CountGroupMembersByRole(ctx, membersGroup.ID, store.GroupMemberRoleOwner)
 	if err == nil && ownerCount == 0 {
 		members, err := s.store.GetGroupMembers(ctx, membersGroup.ID)
 		if err == nil && len(members) == 1 && members[0].MemberType == store.GroupMemberTypeUser {
 			caller := GetIdentityFromContext(ctx)
-			switch {
-			case caller != nil && caller.Type() != "user":
-				// #591 (B10): the request driving this backfill came from a non-user
-				// principal — an agent or a broker. Skip the promotion entirely: an
-				// agent's or broker's read has no legitimate reading under which it
-				// should confer project ownership, and the target here is the sole
-				// USER member, which for an agent is the user who owns it. Keyed on
-				// caller.Type() rather than on GetUserIdentityFromContext returning
-				// nil, so the skip is explicit and also covers a broker principal,
-				// which has no route reaching here today but must never promote.
-				slog.Warn("refusing to promote sole project member to owner: request was made by a non-user principal",
-					"project_id", project.ID, "group", membersGroup.ID,
-					"user", members[0].MemberID, "principal_type", caller.Type())
-			case caller != nil && caller.ID() == members[0].MemberID:
-				// #591 (06e21ac7): the promotion would be granted to the caller of
-				// this request — a self-grant. Keyed on the WIDE identity above
-				// (GetIdentityFromContext) so the refusal no longer depends on a
-				// user-only helper returning nil for non-user principals.
-				slog.Warn("refusing to promote sole project member to owner: the promotion would be granted to the caller of this request",
+			if caller == nil {
+				// #591 (I75): the request reached the backfill with no identity in
+				// context. Fail closed — SKIP the promotion rather than fall through to
+				// the promote arm. No production path passes nil today: the five
+				// non-test call sites are all inside authenticated HTTP handlers, where
+				// the wide GetIdentityFromContext is non-nil for user/dev/agent/broker,
+				// and there is no cron/startup-seeder/migration caller. That made the
+				// protection ENTIRELY POSITIONAL — it rested on every route being
+				// authenticated, enforced nowhere near this code and asserted by no
+				// test. Skipping on nil removes the positional dependency and matches
+				// default-deny (Rule 17a). FORWARD GUIDANCE: a future seeding or
+				// migration path that legitimately needs the backfill must pass an
+				// explicit marker identity, never rely on nil reaching the promote arm.
+				slog.Warn("refusing to promote sole project member to owner: request reached the backfill with no identity in context",
 					"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID)
-			default:
-				if promoteErr := s.store.UpdateGroupMemberRole(ctx, membersGroup.ID,
-					members[0].MemberType, members[0].MemberID, store.GroupMemberRoleOwner); promoteErr != nil {
-					slog.Warn("failed to promote sole member to owner",
-						"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID, "error", promoteErr.Error())
-				} else {
-					slog.Info("promoted sole project member to owner",
-						"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID)
+			} else {
+				// #591 (I74): the principal class is decided with the SAME construct as
+				// authz.go:96 (case "user", "dev":), the codebase's canonical
+				// user-principal class. A dev-auth caller reports Type()=="dev"
+				// (DevUser.Type(), devauth.go) and is user-class here — eligible for the
+				// legitimate owner backfill, NOT skipped alongside agents and brokers.
+				// Keying on the shared case rather than an open-coded != "user" compare
+				// keeps this and authz.go:96 from drifting apart again.
+				switch caller.Type() {
+				case "user", "dev":
+					if caller.ID() == members[0].MemberID {
+						// #591 (06e21ac7): the promotion would be granted to the caller of
+						// this request — a self-grant. Keyed on the WIDE identity above
+						// (GetIdentityFromContext); refused for a dev caller as well as a
+						// user, since dev is user-class here.
+						slog.Warn("refusing to promote sole project member to owner: the promotion would be granted to the caller of this request",
+							"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID)
+					} else if promoteErr := s.store.UpdateGroupMemberRole(ctx, membersGroup.ID,
+						members[0].MemberType, members[0].MemberID, store.GroupMemberRoleOwner); promoteErr != nil {
+						slog.Warn("failed to promote sole member to owner",
+							"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID, "error", promoteErr.Error())
+					} else {
+						slog.Info("promoted sole project member to owner",
+							"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID)
+					}
+				default:
+					// #591 (B10): a non-user-class principal — an agent or a broker —
+					// drove this backfill. Skip the promotion entirely: an agent's or
+					// broker's read has no reading under which it should confer project
+					// ownership, and the target here is the sole USER member, which for
+					// an agent is the user who owns it. This is the default arm, not a
+					// narrow != "user" compare, so agent, broker, and any future
+					// principal type that is not user-class are all skipped by default
+					// (Rule 17a) — the else-if can never promote one.
+					slog.Warn("refusing to promote sole project member to owner: request was made by a non-user principal",
+						"project_id", project.ID, "group", membersGroup.ID,
+						"user", members[0].MemberID, "principal_type", caller.Type())
 				}
 			}
 		}
