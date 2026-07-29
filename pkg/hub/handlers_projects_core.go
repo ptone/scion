@@ -1489,7 +1489,17 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// authenticates the broker itself. RegisterProjectResponse.SecretKey is
 		// DEPRECATED and is no longer populated anywhere.
 		//
-		// Removing the secret from the response is the whole of the change. The
+		// Removing the call also stops this flow PROVISIONING a secret, which is
+		// a second effect worth naming rather than leaving to be rediscovered.
+		// The removed method is get-or-create, so on a broker that had none it
+		// wrote a BrokerSecret row as well as returning it. That row was dead on
+		// arrival: it was minted for a broker that never received it, since the
+		// value went to the register caller. /brokers/join is unaffected either
+		// way, because it deletes any existing secret and mints a fresh one
+		// (brokerauth.go) rather than reusing what it finds, so nothing depended
+		// on the row this flow used to leave behind.
+		//
+		// Otherwise the change is confined to the response. The
 		// BrokerAuthService method that used to be called here is deliberately
 		// NOT modified: its get-or-create behaviour is relied on by its three
 		// other callers - getPluginHubCreds in handlers_integrations.go, and the

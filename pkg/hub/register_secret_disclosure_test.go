@@ -392,6 +392,104 @@ func TestRSD_RegisterNeverReturnsBrokerSecret(t *testing.T) {
 	}
 }
 
+// TestRSD_CreateLimbIssuesNoSecret drives the limb the matrix above never
+// reaches, and it is a coverage gap rather than a second defect: the removal is
+// correct here too, this case is what makes that measured instead of assumed.
+//
+// Every arm above names a broker rsdSetup seeded, so all of them resolve an
+// existing record. The branch that CREATES a broker when the name matches
+// nothing was undriven — and a create limb is exactly where minting a
+// credential is the natural thing for someone to write. It is also invisible to
+// requireSecretIntact, which inspects only the two seeded brokers: a secret
+// minted for a newly created third broker is neither a changed byte nor an
+// extra active record on either of them, so the matrix would stay green.
+//
+// The teeth are therefore on the broker the RESPONSE reports: it must have been
+// created, it must be linked, and it must hold no secret at all.
+func TestRSD_CreateLimbIssuesNoSecret(t *testing.T) {
+	for _, a := range []struct {
+		name  string
+		agent bool
+	}{
+		// The user arm is the one measured against the create limb. The agent
+		// arm reaches it too, because the gate allows an agent creating a NEW
+		// project, and it is included so that identity is crossed with this
+		// limb the way it is crossed with the other one.
+		{"user", false},
+		{"agent", true},
+	} {
+		a := a
+		t.Run(a.name, func(t *testing.T) {
+			f := rsdSetup(t)
+			brokerName := "rsd-unseeded-" + a.name
+
+			// The limb is selected by the name matching nothing, so that is
+			// established rather than assumed. If a future fixture seeded this
+			// name, the request would quietly take the existing-record path and
+			// this case would go back to measuring what the matrix already
+			// covers, while still passing.
+			_, err := f.store.GetRuntimeBrokerByName(context.Background(), brokerName)
+			require.Error(t, err,
+				"a broker already answers to this name, so this arm would drive "+
+					"the existing-record limb rather than the create limb")
+
+			projectID := tid("rsd-create-limb-" + a.name)
+			body := rsdByName(projectID, "RSD Create Limb "+a.name, brokerName, f.workspace)
+
+			var rec *httptest.ResponseRecorder
+			if a.agent {
+				rec = f.asAgent(t, http.MethodPost, rsdRegisterPath, body)
+			} else {
+				rec = f.asUser(t, http.MethodPost, rsdRegisterPath, body)
+			}
+
+			// Body first, as above: it is the thing that leaves the process.
+			f.requireNoSecretInBody(t, rec, "create limb/"+a.name)
+			require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+
+			var resp RegisterProjectResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Empty(t, resp.SecretKey,
+				"the deprecated response field was populated again")
+			require.NotNil(t, resp.Broker,
+				"the response does not name the broker it created")
+
+			// The limb really ran: a broker now answers to a name that matched
+			// nothing a moment ago, and it is the one the response reports.
+			created, err := f.store.GetRuntimeBrokerByName(context.Background(), brokerName)
+			require.NoError(t, err,
+				"no broker was created, so this arm is not on the create limb "+
+					"and proves nothing about it")
+			require.Equal(t, created.ID, resp.Broker.ID,
+				"the response reports a different broker than the one created")
+
+			_, err = f.store.GetProjectProvider(context.Background(), projectID, created.ID)
+			require.NoError(t, err,
+				"the deprecated branch did not run to completion, so this arm "+
+					"proves nothing about the secret it might have returned")
+
+			// The teeth. A credential minted for a broker this request created
+			// is a credential handed to whoever made the request, since the
+			// broker itself has not authenticated and receives nothing. The
+			// seeded-broker arms cannot see this, which is why it is asserted
+			// against the created id specifically.
+			_, err = f.store.GetBrokerSecret(context.Background(), created.ID)
+			require.Error(t, err,
+				"registering a project minted a stored secret for the broker it "+
+					"created")
+			active, err := f.store.GetActiveSecrets(context.Background(), created.ID)
+			require.NoError(t, err)
+			require.Empty(t, active,
+				"registering a project left an active credential on the broker "+
+					"it created, for a broker that never authenticated")
+
+			// And no collateral on the pair the matrix watches.
+			f.requireSecretIntact(t, f.embeddedID, rsdEmbeddedSecret, "create limb/"+a.name)
+			f.requireSecretIntact(t, f.plainID, rsdStandaloneSecret, "create limb/"+a.name)
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Controls. Removing an emission is trivially achievable by breaking the route,
 // so what registration is FOR has to stay working, and the supported way for a

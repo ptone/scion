@@ -224,18 +224,26 @@ func (f *ogGrantFixture) isRecordedOwner(t *testing.T, u *store.User, p *store.P
 
 	// "No owner row" and "nothing left that could hold an owner row" are
 	// different answers, and only the first is evidence. Measured: a deleted
-	// project returns false here, which is the answer every refusal case
-	// asserts, so a request that destroyed its own subject would be
-	// indistinguishable from one that was refused.
+	// project returns false here FOR A CALLER WHO HOLDS NO OWNER ROW, which is
+	// the answer every refusal case asserts, so a request that destroyed its
+	// own subject would be indistinguishable from one that was refused.
 	//
-	// Why it returns false is a separate question from that observation, and
-	// the two guards below do not depend on settling it. aid-verify measured
-	// that DeleteProject in this store leaves a project's explicit groups
-	// behind rather than cascading them, so "the project is gone" and "the
-	// groups are gone" are separately reachable states; there is one guard for
-	// each. Both run in either polarity, because a positive control whose
-	// group vanished should fail as a broken fixture rather than as "the
-	// backfill stopped promoting anyone".
+	// The qualifier is load-bearing and was itself measured, by aid-rev1: an
+	// owner membership also survives DeleteProject, so on a deleted project a
+	// raw walk reads TRUE for a caller who WAS a recorded owner. The false
+	// answer is therefore a property of the caller's own rows, not of the
+	// project being gone, and the guards below are what make either polarity
+	// mean something.
+	//
+	// Why the walk answers as it does is a separate question, and the guards do
+	// not depend on settling it. aid-verify measured that DeleteProject in this
+	// store leaves a project's explicit groups behind rather than cascading
+	// them, so "the project is gone" and "the groups are gone" are separately
+	// reachable states; there is one guard for each. Both run in either
+	// polarity — the project guard because a positive control would otherwise
+	// read true against a deleted project, and the group guard because a
+	// control whose group vanished should fail as a broken fixture rather than
+	// as "the backfill stopped promoting anyone".
 	_, err := f.store.GetProject(ctx, p.ID)
 	require.NoError(t, err,
 		"the project no longer exists, so this answer would be false by "+

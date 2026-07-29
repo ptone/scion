@@ -127,7 +127,13 @@ type RegisterProjectResponse struct {
 	Created       bool           `json:"created"`               // True if project was newly created
 	Matches       []ProjectMatch `json:"matches,omitempty"`     // Populated when multiple projects share the same git remote
 	BrokerToken   string         `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
-	SecretKey     string         `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
+
+	// SecretKey is DEPRECATED and is never populated by the hub (#591).
+	// Registering a project does not authenticate the broker, so the response
+	// cannot be where a broker secret is handed out; /brokers/join is. A client
+	// reading this field will always find it empty, and nothing should assign
+	// to it. It is kept so that older payloads still decode.
+	SecretKey string `json:"secretKey,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support legacy grove field.

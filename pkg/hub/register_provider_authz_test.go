@@ -398,13 +398,20 @@ func (f *rpGateFixture) requireVictimUnserved(t *testing.T, because string) {
 			"directory after a refused register (%s)", because)
 }
 
-// requireNoBrokerSecret pins the second thing a refused register must not hand
-// back. The deprecated by-name branch used to return a broker HMAC secret in
-// the response body alongside the provider link; that emission is gone
-// (#591, see the note in handleProjectRegister and the dedicated coverage in
-// register_secret_disclosure_test.go, which holds it closed for allowed
-// callers too). This assertion keeps the refused case tied to it: a caller the
-// gate refuses comes away with neither the provider write nor a credential.
+// requireNoBrokerSecret is a TRIPWIRE, and it cannot fire as things stand. Be
+// clear about that rather than let it read as coverage: the deprecated by-name
+// branch used to return a broker HMAC secret in the response body alongside the
+// provider link, that emission is gone (#591), and the response field is
+// omitempty and never populated — so the substring it looks for cannot appear
+// in any register response, refused or allowed. It convicts nothing today, and
+// it would only start convicting if something repopulated the field.
+//
+// It is kept for that case and not deleted, but the real disclosure coverage is
+// register_secret_disclosure_test.go, which drives the callers the gate ALLOWS
+// through to the branch — including the limb that creates a broker — and checks
+// the stored secrets and the body by value. A refused caller never reaches the
+// branch at all, so value assertions here would duplicate that file's work
+// while implying this file measures something it does not.
 func (f *rpGateFixture) requireNoBrokerSecret(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	require.NotContains(t, rec.Body.String(), "secretKey",
