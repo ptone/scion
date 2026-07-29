@@ -658,12 +658,23 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	// member is refused (self-grant, 06e21ac7); any agent or broker principal is
 	// skipped (B10); and a nil caller is skipped fail-closed (I75) rather than
 	// promoted, so the identity-less internal/seeding path no longer confers
-	// ownership. Restoring the escalation now takes one of three edits: narrowing
-	// the refusal back to GetUserIdentityFromContext (an agent falls through again),
-	// dropping the non-user default skip (an agent or broker reaches the promote
-	// arm), or dropping the nil-caller skip AND making a route that reaches this
-	// function callable without authentication (a nil identity then falls to the
-	// promote arm). Each re-opens the else-if to a principal that must not reach it.
+	// ownership. Of the three edits that could restore the escalation, only ONE
+	// actually re-opens it now, because I75's nil-skip overlaps the B10 skip.
+	// Narrowing the refusal back to GetUserIdentityFromContext does NOT re-open it
+	// (N49): an agent then reaches the nil-caller skip instead, since
+	// GetUserIdentityFromContext returns nil for an agent (identity.go:167-176), so
+	// this alone no longer promotes — it merely makes the B10 refusal dead code
+	// under that edit and leaves the whole non-user defence resting on I75. Dropping
+	// the non-user default skip DOES re-open it: an agent or broker reaches the
+	// promote arm. Dropping the nil-caller skip does NOT re-open it either (N50): a
+	// nil identity then dereferences in the else-arm at the switch below, so
+	// restoring the promotion takes a deliberate rewrite, not a deletion. Only the
+	// middle edit re-opens the else-if to a principal that must not reach it.
+	// I79: because I75 also skips an agent (whose GetUserIdentityFromContext is nil),
+	// the B10 skip is no longer the sole guard on that path — I75 MASKS the B10
+	// mutation. The B10 arms above therefore now pin the OUTCOME (an agent is not
+	// promoted), not the B10 MECHANISM; any future removal of I75 would silently
+	// re-arm the B10 mutation with no test to notice the transition.
 	ownerCount, err := s.store.CountGroupMembersByRole(ctx, membersGroup.ID, store.GroupMemberRoleOwner)
 	if err == nil && ownerCount == 0 {
 		members, err := s.store.GetGroupMembers(ctx, membersGroup.ID)
