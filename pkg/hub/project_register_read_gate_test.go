@@ -40,13 +40,13 @@ import (
 // handleProjectRegister — the branch reached when the request named a project
 // that already exists.
 //
-// WHAT THE BRANCH DID BEFORE THIS GATE. Any authenticated caller who named an
-// existing project by id, git remote or slug reached it. The response was 200
-// carrying that project's STORED record, and the two group/policy backfill calls
-// ran on it. So the branch answered "yes, that project exists, here it is" to
-// callers with no relationship to the project, and performed a write on their
-// behalf against an object they could not otherwise read. Ownership was already
-// no longer granted there (#591); this is the remainder.
+// WHAT THESE MEASURE. That branch answers with the matched project's stored
+// record and backfills that project's groups, so it is a read: a caller who may
+// not read the project must be refused there, must be refused in the shape of a
+// project that is not there, and must leave no backfill write behind. The three
+// caller classes who MAY read it must still get through, or the gate has broken
+// the flow it is guarding. Ownership is separately constrained (#591) and is
+// asserted here as a standing invariant, not as this gate's job.
 //
 // WHAT THE GATE IS. Not a new policy — the project READ baseline this branch
 // already ships on the same object, via the same helper and in the same position

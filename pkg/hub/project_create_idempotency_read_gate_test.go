@@ -30,10 +30,10 @@ import (
 // — the branch reached when POST /projects carries an "id" that already belongs
 // to a project.
 //
-// It is the same branch as the matched branch of register, on a different route:
-// authenticated caller names an existing project, gets 200 with that project's
-// stored record, and the group/policy backfill runs on it. A gate on one route
-// and not the other is not a gate, so this file drives the identical caller
+// It is the same shape as the matched branch of register on a different route:
+// it answers with an existing project's stored record and backfills that
+// project's groups, so it is a read and is gated as one. A gate on one route and
+// not the other is not a gate, so this file drives the identical caller
 // matrix through POST /projects and asserts the identical outcomes. It reuses the
 // register gate's fixture deliberately: two fixtures that drifted apart would let
 // the two routes agree on paper and diverge in fact.
@@ -42,12 +42,10 @@ import (
 // reason recorded in project_register_read_gate_test.go: a refusal that is
 // distinguishable from absence is still an answer about the project.
 //
-// WHAT THIS GATE DOES NOT CLAIM. A free id still falls through to the create
-// below and answers 201, so a caller can learn that an id is TAKEN by getting 404
-// where they would otherwise have received a new project. That is inherent to
-// idempotent create by client-supplied id. TestCIGate_FreeIDStillCreates pins it
-// as known behaviour rather than leaving it to be discovered as a surprise: what
-// the gate removes is the existing project's record and the write on it.
+// SCOPE. The gate covers this branch only — the one where the supplied id names
+// a project that exists. An id that names nothing is not a matched project and
+// reaches the create below on its own terms, which TestCIGate_FreeIDStillCreates
+// pins so that boundary is stated rather than assumed.
 //
 // Test naming: everything file-local is prefixed ciGate.
 
@@ -226,9 +224,9 @@ func TestCIGate_GateDoesNotShadowSelfPromotionRefusal(t *testing.T) {
 		"the sole member was promoted to owner by their own request")
 }
 
-// TestCIGate_FreeIDStillCreates is the boundary of the gate's condition, and the
-// honest record of what it leaves in place. An id nobody holds is not a matched
-// project: the caller gets 201 and a project of their own, exactly as before.
+// TestCIGate_FreeIDStillCreates is the boundary of the gate's condition. An id
+// nobody holds is not a matched project, so it does not reach the gated branch:
+// the caller gets 201 and a project of their own, as before.
 func TestCIGate_FreeIDStillCreates(t *testing.T) {
 	f := rrGateSetup(t)
 	newID := tid("cigate-free-id")
