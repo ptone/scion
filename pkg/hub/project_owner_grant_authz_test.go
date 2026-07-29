@@ -628,3 +628,135 @@ func TestOGGrant_SelfPromotionUnauthenticated(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, rec.Code, "body=%s", rec.Body.String())
 	require.False(t, f.isRecordedOwner(t, f.intruder, p))
 }
+
+// ---------------------------------------------------------------------------
+// B10: the same backfill, reached by a NON-USER principal.
+//
+// The self-grant refusal above was keyed on GetUserIdentityFromContext, which
+// returns nil for an agent or broker. So the promotion's else-if stayed
+// reachable by any non-user principal: an agent-authenticated request fell
+// through and promoted the sole USER member — which for an agent is the user
+// who owns it. A user refused the self-grant therefore obtained it by making
+// the same request through an agent they own. Measured live by aid-rev1 at
+// fa93e4b6 (agent-driven GET /projects/{id} flipped the sole member
+// member->owner while the user arm stayed member).
+//
+// The fix skips the backfill for ANY non-user principal and keys the user
+// refusal on the wide identity (GetIdentityFromContext). The two tests below are
+// the direct-call table over every principal kind — including a broker, which
+// has no HTTP route reaching this function today but must be pinned so the
+// else-if can never promote one — and the end-to-end reproduction of rev1's
+// measured agent vector at the HTTP boundary.
+// ---------------------------------------------------------------------------
+
+// TestOGGrant_NonUserPrincipalCannotTriggerBackfill calls the real backfill
+// directly with a context carrying one principal kind per arm. f.intruder is the
+// group's sole member throughout; the arm asserts whether that member ended up
+// promoted. The direct call is used rather than a route because the broker arm
+// has no route reaching here, and the property under test is the function's
+// behaviour for every principal, routable or not.
+func TestOGGrant_NonUserPrincipalCannotTriggerBackfill(t *testing.T) {
+	cases := []struct {
+		name string
+		// caller builds the identity-bearing context for the arm. p is the seeded
+		// ownerless project whose members group has f.intruder as its sole member.
+		caller       func(f *ogGrantFixture, p *store.Project) context.Context
+		wantPromoted bool
+	}{
+		{
+			// The measured attack: the victim's agent. GetUserIdentityFromContext is
+			// nil for it, which is exactly what let it through before the fix. Its
+			// ancestry root is the sole member, modelling "an agent they own".
+			"agent principal is skipped",
+			func(f *ogGrantFixture, p *store.Project) context.Context {
+				claims := &AgentTokenClaims{ProjectID: p.ID, Ancestry: []string{f.intruder.ID}}
+				claims.Subject = tid("oggrant-attacker-agent")
+				return context.WithValue(context.Background(), agentContextKey{}, claims)
+			},
+			false,
+		},
+		{
+			// The same nil path, no route today — pinned so the else-if can never
+			// reach a broker either. Reverting the fix reds this arm too.
+			"broker principal is skipped",
+			func(f *ogGrantFixture, p *store.Project) context.Context {
+				return contextWithIdentity(context.Background(),
+					NewBrokerIdentity(tid("oggrant-attacker-broker")))
+			},
+			false,
+		},
+		{
+			// CONTROL: the skip is scoped to non-user principals, not a blanket
+			// disable. A user caller who is NOT the sole member still backfills — the
+			// admin-touches-an-ownerless-project case — promoting with AND without
+			// the fix. If this arm reds, the fix over-reached into the legitimate
+			// backfill.
+			"unrelated user principal still backfills",
+			func(f *ogGrantFixture, p *store.Project) context.Context {
+				other := NewAuthenticatedUser(tid("oggrant-other-user"),
+					"oggrant-other@example.com", "Other",
+					string(store.UserRoleMember), string(ClientTypeAPI))
+				return contextWithIdentity(context.Background(), other)
+			},
+			true,
+		},
+		{
+			// CONTROL: the 06e21ac7 self-grant refusal, now keyed on the wide
+			// identity — a user caller who IS the sole member is still refused, with
+			// AND without the fix.
+			"sole-member user principal is refused",
+			func(f *ogGrantFixture, p *store.Project) context.Context {
+				self := NewAuthenticatedUser(f.intruder.ID, f.intruder.Email,
+					f.intruder.DisplayName, string(f.intruder.Role), string(ClientTypeAPI))
+				return contextWithIdentity(context.Background(), self)
+			},
+			false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := ogGrantSetup(t)
+			p := f.ownerlessProjectWithSoleIntruderMember(t,
+				"OG Grant Principal "+api.Slugify(c.name), "")
+
+			f.srv.createProjectMembersGroupAndPolicy(c.caller(f, p), p)
+
+			require.Equal(t, c.wantPromoted, f.isRecordedOwner(t, f.intruder, p),
+				"sole-member promotion outcome wrong for caller %q", c.name)
+		})
+	}
+}
+
+// TestOGGrant_AgentReadDoesNotPromoteSoleMember reproduces rev1's measured live
+// vector end to end at the HTTP boundary: the sole member's own agent reads the
+// project it belongs to. getProject gates on ActionRead, which an agent passes
+// for its own project (the project-read baseline, authz.go), and then reaches
+// the backfill — the door a plain user GET does not get through (that read is
+// refused before the backfill; see TestOGGrant_SelfPromotionRefusedByEveryRoute).
+//
+// The 200 is asserted, not incidental: it proves the request reached the
+// backfill, so the not-promoted check below is not vacuously true because the
+// read was refused short of it. Reverting the fix reds this test — the read
+// returns 200 and the sole member becomes owner.
+func TestOGGrant_AgentReadDoesNotPromoteSoleMember(t *testing.T) {
+	f := ogGrantSetup(t)
+	p := f.ownerlessProjectWithSoleIntruderMember(t, "OG Grant Agent Read", "")
+
+	svc := f.srv.GetAgentTokenService()
+	require.NotNil(t, svc)
+	// An agent belonging to the project, whose ancestry root is the sole member:
+	// the user who owns the agent and would be the beneficiary of the escalation.
+	tok, err := svc.GenerateAgentToken(tid("oggrant-agent"), p.ID,
+		[]AgentTokenScope{ScopeAgentStatusUpdate}, []string{f.intruder.ID})
+	require.NoError(t, err)
+
+	rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/projects/"+p.ID, nil, tok)
+	require.Equal(t, http.StatusOK, rec.Code,
+		"the agent must reach the backfill (read its own project) or this test "+
+			"proves nothing; body=%s", rec.Body.String())
+
+	require.False(t, f.isRecordedOwner(t, f.intruder, p),
+		"the sole member was promoted to owner by their own agent's read of the "+
+			"project — the measured B10 escalation")
+}

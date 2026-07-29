@@ -605,6 +605,19 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	// exemption — the creator is added with role=owner above, so ownerCount is
 	// non-zero and this block does not run at all.
 	//
+	// #591 (B10): that refusal is keyed on the WIDE identity
+	// (GetIdentityFromContext), and a SECOND refusal sits beside it — the backfill
+	// is skipped for ANY non-user principal (agent or broker), not only for a user
+	// asking about themselves. The original refusal keyed on
+	// GetUserIdentityFromContext, which returns nil for an agent or broker, so the
+	// else-if stayed reachable: an agent-driven request fell through and promoted
+	// the sole USER member — which for an agent is the user who owns it. A user
+	// refused the self-grant above therefore obtained it by routing the same
+	// request through an agent they own. Measured at fa93e4b6: an agent's
+	// GET /projects/{id} flipped the sole member member->owner while the user arm
+	// stayed member. Broker principals have no route reaching here today, but the
+	// skip pins that the else-if can never promote one either.
+	//
 	// WHAT IT STILL DOES NOT DO. It does not decide who should own an ownerless
 	// project; it only refuses to let the asker answer that question about
 	// themselves. The sole member can still be promoted by somebody else's
@@ -613,23 +626,47 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	// flow does not exist yet, and until it does, an ownerless project stays
 	// ownerless unless something other than its would-be owner walks past.
 	//
-	// Rule 18a: making this promotion unconditional again, or calling this
-	// function with a context whose user identity has been dropped, restores the
-	// escalation exactly as measured.
+	// Rule 18a: the populations that reach the promotion below are exactly (a) a
+	// user caller who is NOT the sole member (an admin touching the project — the
+	// accidental-assignment case above) and (b) an identity-less internal call
+	// (the seeding/creation path). A user caller who IS the sole member is refused,
+	// and any agent or broker principal is skipped. Restoring the escalation takes
+	// only narrowing the refusal back to GetUserIdentityFromContext, or dropping
+	// the non-user skip: either makes the else-if reachable by an agent again.
 	ownerCount, err := s.store.CountGroupMembersByRole(ctx, membersGroup.ID, store.GroupMemberRoleOwner)
 	if err == nil && ownerCount == 0 {
 		members, err := s.store.GetGroupMembers(ctx, membersGroup.ID)
 		if err == nil && len(members) == 1 && members[0].MemberType == store.GroupMemberTypeUser {
-			if caller := GetUserIdentityFromContext(ctx); caller != nil && caller.ID() == members[0].MemberID {
+			caller := GetIdentityFromContext(ctx)
+			switch {
+			case caller != nil && caller.Type() != "user":
+				// #591 (B10): the request driving this backfill came from a non-user
+				// principal — an agent or a broker. Skip the promotion entirely: an
+				// agent's or broker's read has no legitimate reading under which it
+				// should confer project ownership, and the target here is the sole
+				// USER member, which for an agent is the user who owns it. Keyed on
+				// caller.Type() rather than on GetUserIdentityFromContext returning
+				// nil, so the skip is explicit and also covers a broker principal,
+				// which has no route reaching here today but must never promote.
+				slog.Warn("refusing to promote sole project member to owner: request was made by a non-user principal",
+					"project_id", project.ID, "group", membersGroup.ID,
+					"user", members[0].MemberID, "principal_type", caller.Type())
+			case caller != nil && caller.ID() == members[0].MemberID:
+				// #591 (06e21ac7): the promotion would be granted to the caller of
+				// this request — a self-grant. Keyed on the WIDE identity above
+				// (GetIdentityFromContext) so the refusal no longer depends on a
+				// user-only helper returning nil for non-user principals.
 				slog.Warn("refusing to promote sole project member to owner: the promotion would be granted to the caller of this request",
 					"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID)
-			} else if promoteErr := s.store.UpdateGroupMemberRole(ctx, membersGroup.ID,
-				members[0].MemberType, members[0].MemberID, store.GroupMemberRoleOwner); promoteErr != nil {
-				slog.Warn("failed to promote sole member to owner",
-					"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID, "error", promoteErr.Error())
-			} else {
-				slog.Info("promoted sole project member to owner",
-					"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID)
+			default:
+				if promoteErr := s.store.UpdateGroupMemberRole(ctx, membersGroup.ID,
+					members[0].MemberType, members[0].MemberID, store.GroupMemberRoleOwner); promoteErr != nil {
+					slog.Warn("failed to promote sole member to owner",
+						"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID, "error", promoteErr.Error())
+				} else {
+					slog.Info("promoted sole project member to owner",
+						"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID)
+				}
 			}
 		}
 	}
