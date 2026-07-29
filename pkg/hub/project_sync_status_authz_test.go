@@ -30,8 +30,10 @@ import (
 // Until the gate landed it had no authorization call at all: measured at
 // c48db01a and confirmed independently, a cross-project agent, an unrelated
 // user and a runtime broker each received 200 and a full ProjectSyncState —
-// the IDs of the brokers serving the project and its file and byte counts —
-// while the gated workspace routes in the same file refused all three. The
+// every field of it: the IDs of the brokers serving the project, its file and
+// byte counts, and LastCommitSHA and LastSyncTime, which between them identify
+// the project's exact code state and when it last moved — while the gated
+// workspace routes in the same file refused all three. The
 // exposure was reachable by asking a neighbouring route the same question.
 //
 // These tests reuse pcGateFixture from project_cache_authz_test.go, and that

@@ -397,8 +397,12 @@ func (r *ProjectSyncStatusResponse) UnmarshalJSON(data []byte) error {
 // had no authorization call of any kind: any caller the middleware
 // authenticated — a user with no relationship to the project, an agent
 // belonging to a different project, a runtime broker — could read any
-// project's sync state, which names the brokers serving that project and
-// reports its file and byte counts. The workspace sibling in this same file
+// project's sync state. That is every field of store.ProjectSyncState, and
+// naming only some of them undersells it: the IDs of the brokers serving the
+// project, its file and byte counts, and — the two most sensitive and the two
+// most easily overlooked — LastCommitSHA, which identifies the exact code
+// state of the project, and LastSyncTime, which says when it last moved.
+// The workspace sibling in this same file
 // refused those same callers, so the exposure was reachable by asking a
 // neighbouring route the same question.
 //

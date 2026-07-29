@@ -46,9 +46,11 @@ import (
 //
 // What each route is, and therefore what it is gated as:
 //
-//	cache/status   read  — but not a harmless one. The response carries the ID
-//	                       of the broker that last served this project, plus
-//	                       its file and byte counts.
+//	cache/status   read  — but not a harmless one. The response carries whole
+//	                       store.ProjectSyncState records: the ID of the broker
+//	                       that last served this project, its file and byte
+//	                       counts, and LastCommitSHA and LastSyncTime — the
+//	                       project's exact code state and when it last moved.
 //	cache/refresh  write — tells a broker to upload the workspace to GCS and
 //	                       overwrites the hub's local cache with the result.
 //	cache/notify   write — runs SyncFromGCS over the hub's cache directory for

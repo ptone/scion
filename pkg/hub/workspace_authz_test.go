@@ -79,12 +79,18 @@ import (
 // On the case count: `go test -v` reports 115 lines here (9 tests, 106
 // subtests), and that is not 115 cases of gate coverage. Neutering
 // authorizeProjectWorkspaceAccess to `return true` turns 68 of them red; the
-// 47 survivors decompose, measured rather than estimated, as 17
-// positive-control allow cases that a disabled gate necessarily still passes,
-// 16 unauthenticated cases whose 401 comes from the auth middleware upstream
+// 47 survivors decompose, measured rather than estimated, as 17 reported lines
+// of positive-control allows that a disabled gate necessarily still passes,
+// 16 unauthenticated lines whose 401 comes from the auth middleware upstream
 // of the gate, the 9 read cases of TestWSGate_InProjectAgentMayReadNotWrite
 // (its write half does go red), and 5 from
-// TestWSGate_WebDAVAndWorkspaceAgreePerCaller for the same two reasons. Before
+// TestWSGate_WebDAVAndWorkspaceAgreePerCaller for three reasons rather than
+// two: owner_read and owner_write are positive controls, unauthenticated_read
+// and unauthenticated_write are middleware 401s, and in-project_agent_read
+// survives for the read-baseline reason — the same reason as the 9 read cases
+// named just above. Every figure in this paragraph counts reported lines, not
+// leaves: a top-level test and each of its subtests each contribute a line, so
+// e.g. the 17 are 15 subtests plus a parent line plus a whole-test line. Before
 // that test was given per-caller expected verdicts, all 12 of its cases
 // survived the neuter and the figure was 60. The number that means something
 // is the mutation result, not the total.

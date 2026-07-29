@@ -311,21 +311,44 @@ func (s *Server) authorizeHarnessConfigScope(w http.ResponseWriter, r *http.Requ
 		return false
 
 	case store.HarnessConfigScopeUser:
-		// DELIBERATE ABSENCE, and it is load-bearing: HarnessConfig.OwnerID is
-		// never populated anywhere in this codebase today — not on create, not
-		// on clone, not in the store. So on an existing record ownerID is
-		// always "", the comparison below can never match, and this arm is
-		// dead-deny by construction for update, patch and delete. That is not
-		// an accident being tolerated; it fails closed, which is why it is
-		// preserved rather than "fixed" here. Whether OwnerID should be
-		// populated is a pending decision held outside this change.
+		// DELIBERATE ABSENCE, and it is load-bearing. Read the next paragraph
+		// carefully, because an earlier version of this note got it wrong in a
+		// way that would have made a reader relax.
 		//
-		// If you are the one who makes it populated: this arm and the one in
-		// handleHarnessConfigReimport come alive in the same commit as your
+		// The store persists OwnerID perfectly well: written and read back
+		// unchanged, measured. What is missing is any code path that SETS it.
+		// createHarnessConfig builds the record field by field from a typed
+		// request and omits OwnerID; clone does the same. So on every record
+		// that exists today ownerID is "", the comparison below never matches,
+		// and this arm denies update, patch and delete for everyone.
+		//
+		// It is dead by the contingent absence of an assignment, not "by
+		// construction" — which is precisely why it needs a note rather than a
+		// deletion. It fails closed today, so it is preserved rather than
+		// "fixed" here. Whether OwnerID should be populated is a pending
+		// decision held outside this change.
+		//
+		// One assignment did exist and was removed: updateHarnessConfig wrote
+		// the whole record from the request body, so a PUT carrying ownerId
+		// stored it. Measured on the pre-fix shape — an in-project agent PUT
+		// scope "user" with an attacker-chosen ownerId and the store took all
+		// of it. What stops that now is a single line, and it is not near here:
+		//
+		//	updateHarnessConfig, `hc.OwnerID = existing.OwnerID`
+		//
+		// This arm's safety depends on that line. If it goes, this arm becomes
+		// live and attacker-controlled in the same edit, and the edit will look
+		// like housekeeping.
+		//
+		// If you are the one who makes OwnerID populated: this arm and the one
+		// in handleHarnessConfigReimport come alive in the same commit as your
 		// change, and so do the update, patch and delete paths that reach this
-		// one. Re-review them together. A single line elsewhere turns five
-		// currently-unreachable allow paths into reachable ones at once, and
-		// none of them will announce themselves.
+		// one. Re-review them together. Note what "alive" means here, because
+		// it is not only an allow — measured with OwnerID populated, the
+		// recorded owner is admitted and a hub admin is REFUSED on the same
+		// record, since this arm compares identity and never consults role.
+		// A single line elsewhere turns four currently-unreachable paths into
+		// reachable ones at once, and none of them will announce themselves.
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
@@ -617,6 +640,23 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 	// which reads like success. If re-scope is ever wanted as a feature, do
 	// not simply delete these lines: authorize the destination scope the way
 	// clone does, in addition to the source scope gated above.
+	//
+	// The OwnerID line specifically carries more weight than its neighbours,
+	// and it is not obvious from here. Two authorization arms — the user-scope
+	// arm of authorizeHarnessConfigScope and its twin in
+	// handleHarnessConfigReimport — decide by comparing a record's OwnerID
+	// against the caller. They are safe today only because no code path ever
+	// sets OwnerID, so the comparison never matches and both arms deny. This
+	// line is what keeps that true: without it a PUT body sets OwnerID to
+	// whatever it likes.
+	//
+	// Composed with the scope line above, removing them hands an attacker who
+	// may write any project-scoped config a record that is user-scoped and
+	// owned by them — after which those arms admit the attacker and refuse
+	// everyone else, hub admins included, because they compare identity and
+	// never consult role. The config stays active and image-bearing and nobody
+	// can update or delete it. Measured on the pre-fix shape: PUT returned 200
+	// and the store held scope "user", scopeID "", ownerID as submitted.
 	hc.Scope = existing.Scope
 	hc.ScopeID = existing.ScopeID
 	hc.OwnerID = existing.OwnerID
@@ -1206,13 +1246,32 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	case store.HarnessConfigScopeUser:
-		// DELIBERATE ABSENCE, as at the user arm of authorizeHarnessConfigScope
-		// above: HarnessConfig.OwnerID is never populated anywhere today, so
-		// hc.OwnerID is always "", the comparison never matches, and this arm
-		// is dead-deny by construction. It fails closed, so it is preserved as
-		// written. Whether OwnerID should be populated is a pending decision
-		// held outside this change; whoever makes it must re-review this arm
-		// together with the one above, because both come alive at once.
+		// DELIBERATE ABSENCE — the twin of the user arm of
+		// authorizeHarnessConfigScope, and read that note in full before
+		// touching this one.
+		//
+		// In short: the store persists OwnerID faithfully (written and read
+		// back unchanged, measured); what is absent is any code path that sets
+		// it, so on every record today hc.OwnerID is "" and this comparison
+		// never matches. That makes the arm dead by the contingent absence of
+		// an assignment — not "by construction". It fails closed, so it is
+		// preserved as written rather than "fixed" here.
+		//
+		// The assignment that did exist has been removed, and what holds the
+		// property now is one line elsewhere:
+		//
+		//	updateHarnessConfig, `hc.OwnerID = existing.OwnerID`
+		//
+		// Before it, a PUT body's ownerId flowed straight to the store
+		// (measured), which would have made this arm live and
+		// attacker-controlled. If that line goes, this arm and its twin come
+		// alive in the same edit.
+		//
+		// Whether OwnerID should be populated is a pending decision held
+		// outside this change. Whoever makes it must re-review this arm
+		// together with the one above: they come alive at once, and "alive"
+		// includes refusing hub admins on a record whose recorded owner is
+		// someone else, since neither arm consults role.
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
