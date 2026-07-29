@@ -200,10 +200,7 @@ const JoinTokenPrefix = "scion_join_"
 
 // ErrBrokerIDRejected is returned when a client-supplied broker identifier is
 // refused. It is a sentinel so a handler can map the refusal to a client error
-// rather than an internal one; the wrapped text is deliberately vague, because
-// distinguishing "malformed" from "already belongs to something else" would
-// turn this endpoint into a membership oracle for identifiers the caller does
-// not otherwise get to test.
+// rather than an internal one.
 var ErrBrokerIDRejected = errors.New("brokerId rejected")
 
 // validateBrokerIDFormat requires a client-supplied broker identifier to be a
@@ -321,7 +318,7 @@ func validateCredentialedBrokerID(ctx context.Context, s store.Store, brokerID s
 }
 
 // CreateBrokerRegistration creates a new broker with a join token.
-// Requires admin authentication.
+// Requires authentication.
 func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
 	if req.Name == "" {
 		return nil, errors.New("name is required")

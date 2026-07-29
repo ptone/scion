@@ -1263,10 +1263,11 @@ func TestBypassAgents_NestedGetProjectAgentGate(t *testing.T) {
 // s.authorize(agentResource, ActionUpdate); the nested leaf did only the
 // slug/UUID + ProjectID consistency lookup and then applied the field changes,
 // so the guard the flat write path applies was absent on the second write path.
-// The authenticated denial arms below are RED (200 + a mutated record) if the
-// s.authorize call is removed from updateProjectAgent; the anonymous arm is a
-// floor control denied upstream by the auth middleware, not a gate-liveness
-// witness. The positive arms are Rule-2a controls.
+// The authenticated denial arms below (outsider member, agent peer, cross-project
+// agent, broker) are RED (200 + a mutated record) if the s.authorize call is
+// removed from updateProjectAgent, and each re-reads the store to prove no
+// mutation. The anonymous arm is a floor control denied upstream by the auth
+// middleware, not a gate-liveness witness. The positive arms are Rule-2a controls.
 func TestBypassAgents_NestedUpdateProjectAgentGate(t *testing.T) {
 	nested := func(projectID, agentID string) string {
 		return fmt.Sprintf("/api/v1/projects/%s/agents/%s", projectID, agentID)
@@ -1308,6 +1309,11 @@ func TestBypassAgents_NestedUpdateProjectAgentGate(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code,
 			"an agent must not update a project peer via the nested route; got %d: %s",
 			rec.Code, rec.Body.String())
+
+		got, err := f.store.GetAgent(context.Background(), f.sibling.ID)
+		require.NoError(t, err)
+		assert.NotEqual(t, "n92-hijacked", got.Name,
+			"the denied nested peer update must not have been applied")
 	})
 
 	t.Run("cross-project agent is denied", func(t *testing.T) {
@@ -1316,6 +1322,11 @@ func TestBypassAgents_NestedUpdateProjectAgentGate(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code,
 			"an agent must not update an agent in another project via the nested route; got %d: %s",
 			rec.Code, rec.Body.String())
+
+		got, err := f.store.GetAgent(context.Background(), f.stranger.ID)
+		require.NoError(t, err)
+		assert.NotEqual(t, "n92-hijacked", got.Name,
+			"the denied cross-project nested update must not have been applied")
 	})
 
 	t.Run("broker caller is denied", func(t *testing.T) {
@@ -1325,6 +1336,11 @@ func TestBypassAgents_NestedUpdateProjectAgentGate(t *testing.T) {
 			rec.Code,
 			"broker-authenticated caller must not update an agent via the nested route; got %d: %s",
 			rec.Code, rec.Body.String())
+
+		got, err := f.store.GetAgent(context.Background(), f.sibling.ID)
+		require.NoError(t, err)
+		assert.NotEqual(t, "n92-hijacked", got.Name,
+			"the denied broker nested update must not have been applied")
 	})
 
 	t.Run("anonymous is denied", func(t *testing.T) {
@@ -1481,8 +1497,10 @@ func TestBypassAgents_RestoreAgentGate(t *testing.T) {
 // s.authorize(agentResource, ActionUpdate); the agent-self path is left
 // unchanged. Because the sink is shared, the one gate closes both routes.
 //
-// The user-caller denial arms are RED (200) without the else arm; the agent
-// self-report positive is the load-bearing Rule-2a control that must survive.
+// The non-agent (user and broker) denial arms are RED (200 + a mutated record)
+// without the else arm, and each re-reads the store to prove no mutation; the
+// agent self-report positive is the load-bearing Rule-2a control that must
+// survive.
 func TestBypassAgents_UpdateAgentStatusGate(t *testing.T) {
 	statusPath := func(projectID, agentID string) string {
 		return fmt.Sprintf("/api/v1/projects/%s/agents/%s/status", projectID, agentID)
@@ -1504,6 +1522,11 @@ func TestBypassAgents_UpdateAgentStatusGate(t *testing.T) {
 		rec := doRequestAsUser(t, f.srv, outsider, http.MethodPost, statusPath(f.proj.ID, f.sibling.ID), body)
 		assert.Equal(t, http.StatusForbidden, rec.Code,
 			"an unrelated member must not write an agent's status; got %d: %s", rec.Code, rec.Body.String())
+
+		got, err := f.store.GetAgent(context.Background(), f.sibling.ID)
+		require.NoError(t, err)
+		assert.NotEqual(t, "coding", got.Activity,
+			"the denied status write must not have been applied")
 	})
 
 	t.Run("broker caller is denied", func(t *testing.T) {
@@ -1511,6 +1534,11 @@ func TestBypassAgents_UpdateAgentStatusGate(t *testing.T) {
 		rec := f.asBroker(t, http.MethodPost, statusPath(f.proj.ID, f.sibling.ID), body)
 		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 			rec.Code, "broker-authenticated caller must not write an agent's status; got %d: %s", rec.Code, rec.Body.String())
+
+		got, err := f.store.GetAgent(context.Background(), f.sibling.ID)
+		require.NoError(t, err)
+		assert.NotEqual(t, "coding", got.Activity,
+			"the denied broker status write must not have been applied")
 	})
 
 	t.Run("anonymous is denied", func(t *testing.T) {

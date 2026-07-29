@@ -45,14 +45,15 @@ import (
 // must not disagree, so the fix is a SINGLE SHARED validation function both call
 // — not two hand-rolled guards.
 //
-// SEQUENCING (aid-em/lead ruling 12:51Z): these pins are shape-independent and
-// are built first. They assert store invariants (no broker row minted at a
-// malformed or cross-namespace ID) and a legitimate registration still
-// succeeding — not any particular error code — so they hold regardless of the
-// helper's exact refusal shape. Until dev6 exposes the F3b guard as a reusable
-// package-level function and it is wired at the two embedded-flow sites, the
-// three refusal arms are RED (today the malformed/colliding broker is accepted
-// and persisted). Do not push this file without the wiring that turns them green.
+// These pins are shape-independent: they assert store invariants (no broker row
+// minted at a malformed or cross-namespace ID) and a legitimate registration
+// still succeeding — not any particular error code — so they hold regardless of
+// the helper's exact refusal shape. The attributable arms are the non-canonical
+// arm and the two cross-namespace (user/agent) arms: those are RED without the
+// shared validateNewBrokerID wiring and GREEN with it. The plain-malformed arm
+// is NOT attributable — the ent store already refuses a non-parseable ID one
+// layer down (project_store.go parseUUID), so it holds both before and after the
+// guard, as a defense-in-depth control. See the per-test comments below.
 //
 // Test naming: everything file-local is prefixed bn.
 
