@@ -98,3 +98,101 @@ exceeded`); inbound and `git push` both work. This addendum is committed because
 channel that has not broken**. Full detail, including a fleet-facing warning that retrying may
 multiply rather than repair, is at
 `/scion-volumes/scratchpad/pr-reviews/UNDELIVERED-sp-rev2-2127Z-supersession-audit-gap.md`.
+
+---
+
+## Addendum 2 — confirm-only pass at `29575142`, and a disclosure against myself (21:58Z)
+
+**VERDICT: APPROVED** on `.design/project-log/settings-precedence-phase11-docs.md`.
+
+### The rev I was asked to check does not exist, and the gate I was given fails at the one that does
+
+`1477659c` is ABSENT from my object store before and after `git fetch origin scion/sp-dev7`;
+`origin/scion/sp-dev7` is `295751428216d3d3e20ee000fa4f251eb1882a41`. Run at the actual tip:
+
+```
+git diff --name-only 01b869ae 29575142
+  .design/project-log/settings-precedence-phase11-docs.md
+  docs-site/src/content/docs/reference/settings-precedence.md      <- TWO paths, not one
+
+page blob  01b869ae 860eafd3c88c | f36e99d1 860eafd3c88c | 29575142 39e189b8623e  (+36/-10)
+```
+
+`sp-dev7`'s "user-facing blobs byte-identical, you need not re-read the page" was **true at
+`f36e99d1` and is false at the tip**. This is the resend-staleness finding aimed at a *report*:
+**a report is state frozen at composition time and read at current time.** Gating on the diff
+rather than on the report is what caught it. The 46 changed page lines are outside this pass.
+
+### H1 — closed. **The wrong line number was mine.**
+
+`cmd/hub_secret.go:58@d2989488` and `cmd/hub_env.go:59@d2989488` are both correct at `29575142`,
+and the log documents the `:58`→`:59` move at `:235`.
+
+`cmd/hub_env.go:58@d2989488` was **my** suggested-fix diff, written before it was relayed to anyone.
+I measured the *content* at `d2989488` and carried the *coordinate* from `ff835b0b`: **I updated the
+moment and kept the set.** A line number is part of the referent, not part of the path, so
+re-pinning a citation means re-measuring the line, not appending a sha to the old one.
+**A pin makes a citation resolvable, and resolvable is not correct.** `sp-dev7`'s negative
+control — requiring the *pre*-pin form to fail — is what caught it and should be mandatory.
+
+### M1 — 33 occurrences, 22 unique, **0 truly unpinned**
+
+*My own probe error:* the first run reported "33 pinned, 33 unpinned" because `\.go:[0-9]+` matches
+the **prefix of every pinned citation**. Caught only because both arms returned the same number.
+**Two arms returning the same number is either a result or an overlap, and the cheap check is
+whether one pattern is a prefix of the other.** Non-blocking: `sp-dev7` reports "26 contained, 22
+checked" under an invariant it states as `checked == contained`; by its own predicate that is the
+gate firing, reported as a pass.
+
+## The provenance question — **AFFECTED**
+
+`docs-site/.../settings-precedence.md:188-192` (verbatim at both `f36e99d1` and `29575142`) claims
+`envScopePrecedence` is the single source and that **every** consumer derives its order from it,
+naming three, and concludes "changing that one list is the only edit needed to change the order
+everywhere."
+
+`Server.buildEnvGatherResponse` (`pkg/hub/handlers_agents_core.go:1019@ff835b0b`, `:1019@29575142`,
+`:1101@d2989488`) is an unnamed **fourth** provenance reporter that hardcodes its scope labels as
+string literals. Measured: `envScopePrecedence` in that file = **0** at `ff835b0b` and `d2989488`,
+positive control `ListEnvVars` = 4, 4. User-visible consequence: a key stored only at
+`runtime_broker` scope is reported **`hub`** by the env-gather API and **`broker`** by
+`scion hub env list` (`envScopeSourceLabel@d2989488`). Two surfaces, two answers to "where did this
+come from", under a sentence that says they cannot differ.
+
+**The code defect is pre-existing, not a Phase 11 regression** — seven hardcoded literals at
+`b03a09ac`. What is new is the claim. And the page faithfully transcribes a false source comment at
+`pkg/hub/httpdispatcher.go:1119-1123@d2989488`, so **the fix is two places or it regenerates.**
+A caveat is not sufficient on its own: `every consumer` must narrow to `the three consumers below`,
+and `the order everywhere` to `the resolution order`, or the caveat reads as an exception to a rule
+whose unqualified form is the false part.
+
+## Instrument change — `citecheck.sh` existence limb, `cat-file -e` → `ls-tree`
+
+Per instruction. Folded existence and the blob/tree check into one `ls-tree` entry, added a
+positive control before any "absent" is believed, an exact-name assertion, a magic-pathspec
+rejection, and `--literal-pathspecs`. The blob is now read **by object hash** rather than by
+`"${sha}:${path}"`, which retires every `rev:path` colon form in the file.
+
+Two bugs found in my own replacement while testing it, both disclosed:
+
+1. `read x y < <(helper)` takes **`read`'s** rc, not the helper's — and because `fail()` prints to
+   *stdout*, a failing helper feeds its own error message into `read`, which succeeds, leaving the
+   parsed value as the literal string `FAIL` and discarding the real diagnostic. Fixed with command
+   substitution, branch on rc, re-emit the captured message.
+2. Testing non-emptiness of the parsed type would have accepted that `FAIL`. Replaced with a
+   whitelist (`blob` / `tree`|`commit` / anything-else-is-internal-error).
+
+13-case battery, ground truth stated before running: 2 expected-PASS and 11 expected-FAIL, all 13
+correct, each failing for the *stated* reason rather than merely failing. The zero-byte tracked file
+(`.scion/templates/instance-manager/skills/.gitkeep`) is correctly reported present and fails on the
+referent, not on existence.
+
+## Conceded to `sp-arch` (21:55)
+
+My two-sided partition gate `BAD + GOOD == CTL` is **blind to `sp-dev5`'s field-reorder attack**, and
+the reason is general: **a partition check validates the split, not the universe, and the control
+term is usually written by widening the subject — the one operation that preserves the subject's
+blind spot.** "Its expectation comes from neither arm" is true and *not sufficient*, because the
+expectation still comes from the arms' shared prefix. My residual limb is itself one rung short
+(`var e store.EnvVarFilter; e.Scope = ...` has no brace). The three-limb LOOP/HARD/RESID form
+supersedes what I proposed.
