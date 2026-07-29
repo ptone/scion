@@ -24,7 +24,8 @@ import (
 
 // handleBrokersEndpoint handles POST /api/v1/brokers.
 // Creates a new broker registration with join token.
-// Requires authentication.
+// Any authenticated member may register a broker and becomes its owner; this
+// endpoint intentionally does NOT require the admin role (#591).
 func (s *Server) handleBrokersEndpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
@@ -183,7 +184,9 @@ func (s *Server) handleBrokerByIDRoutes(w http.ResponseWriter, r *http.Request) 
 
 // handleBrokerRotateSecret handles POST /api/v1/brokers/{id}/rotate-secret.
 // Rotates the HMAC secret for a broker.
-// Requires admin authentication or broker self-rotation.
+// Authorized for three arms: an admin user, the broker itself (self-rotation),
+// or the broker's owner. Under the registration posture the owner is any
+// authenticated member who registered that broker, not only an admin (#591).
 func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request, brokerID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
