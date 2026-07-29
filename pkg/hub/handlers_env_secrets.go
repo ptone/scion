@@ -1592,18 +1592,39 @@ func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) 
 	}
 }
 
-// isProviderMutation reports whether a request to the providers routes is one
-// of the two that change stored state: POST on the collection (attach, which is
-// an upsert) and DELETE on a broker (detach). It is written as a function of the
-// dispatch inputs rather than inlined so that the gate and the switch below
-// cannot drift into disagreeing about which requests mutate — if a mutating verb
-// is added to either switch, the compiler will not notice, but a reader
-// comparing these two places will.
-func isProviderMutation(method, subPath string) bool {
+// providerRouteAction maps a request on the providers routes to the action it
+// must be authorized for, and reports whether it routes to a handler at all.
+//
+// There are exactly three routed requests: GET on the collection (list, a
+// read), POST on the collection (attach, an upsert and therefore a write), and
+// DELETE on a broker (detach, also a write on the project's provider set). The
+// two writes ask for update rather than delete because both modify the
+// project's provider set rather than the project; demanding project:delete for
+// a detach would refuse owners who may manage a project without being able to
+// destroy it.
+//
+// It is written as a function of the dispatch inputs rather than inlined so
+// that the gate and the switches below cannot drift into disagreeing about
+// which requests exist and what each one does — if a verb is added to either
+// switch, the compiler will not notice, but a reader comparing these two places
+// will. Anything not routed here (a PUT, a GET on a broker) is left to the
+// switches to answer 405 exactly as before; whether that 405 is itself a verb
+// oracle for callers who would have been refused is a separate open question
+// and deliberately not decided here.
+func providerRouteAction(method, subPath string) (Action, bool) {
 	if subPath == "" {
-		return method == http.MethodPost
+		switch method {
+		case http.MethodGet:
+			return ActionRead, true
+		case http.MethodPost:
+			return ActionUpdate, true
+		}
+		return "", false
 	}
-	return method == http.MethodDelete
+	if method == http.MethodDelete {
+		return ActionUpdate, true
+	}
+	return "", false
 }
 
 // handleProjectProviders handles provider operations for a project.
@@ -1613,10 +1634,10 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 
 	// Verify project exists.
 	//
-	// The lookup happens here, but its ANSWER is withheld until after the
-	// mutation gate below, because "this project does not exist" and "you may
-	// not touch this project" must be indistinguishable to a caller who is not
-	// entitled to either fact. See the gate for how that is arranged.
+	// The lookup happens here, but its ANSWER is withheld until after the gate
+	// below, because "this project does not exist" and "you may not touch this
+	// project" must be indistinguishable to a caller who is not entitled to
+	// either fact. See the gate for how that is arranged.
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeErrorFromErr(w, err, "")
@@ -1624,28 +1645,37 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 	}
 	notFound := err != nil
 
-	// Authorization for the mutating verbs. Adding a provider was reachable by
-	// any authenticated caller: an unrelated user, an agent belonging to a
+	// Authorization for every routed request. Adding a provider was reachable
+	// by any authenticated caller: an unrelated user, an agent belonging to a
 	// different project, and a runtime broker each received 201 on a project
 	// they had no relationship to, and because the store's AddProjectProvider
 	// is an upsert on (projectID, brokerID), a second POST silently overwrote
 	// the victim's existing provider record. DELETE was ungated on the same
-	// path. Both are gated here, at the dispatcher, so that neither the
-	// handlers below nor any verb added beside them can be reached first.
+	// path. The gate sits at the dispatcher, so that neither the handlers below
+	// nor any verb added beside them can be reached first.
 	//
-	// The resource is the project and the action is update, not delete, for
-	// both verbs: attaching or detaching a provider modifies the project's
-	// provider set. Requiring project:delete for DELETE would demand a stronger
-	// permission than the operation warrants and would deny owners who may
-	// legitimately manage their project without being able to destroy it.
+	// READING IS NOT THE HARMLESS HALF, which is why GET is gated here too and
+	// not left as a courtesy. A provider record carries LocalPath: the
+	// directory on the serving broker that IS the project's workspace. Gating
+	// who may rewrite that while letting anyone read it back leaves the target
+	// enumerable to precisely the callers the write gate exists to keep out —
+	// measured before this gate, an unrelated user, a cross-project agent and a
+	// broker each received 200 and the full provider list, LocalPath included.
+	//
+	// The action comes from providerRouteAction: read for the list, update for
+	// the two writes. The in-project agent is admitted to the list by the agent
+	// project read baseline (authz.go:239) and still refused both writes, which
+	// is the read/write split the baseline is for and not a gap in this gate.
 	//
 	// CONSERVATIVE CLOSURE (Rule 18a): this denies brokers as well as users and
 	// agents outside the project, because CheckAccess has no broker arm and a
-	// broker therefore reaches its default deny. If a legitimate broker
-	// self-registration flow needs to attach a provider, reopening it is a
-	// deliberate relaxation requiring security review and ptone's agreement —
-	// do not add a broker allow-arm here to make a failing caller pass.
-	if isProviderMutation(r.Method, subPath) {
+	// broker therefore reaches its default deny. That now covers reads as well
+	// as writes: a broker cannot list the providers of a project it is not
+	// party to. If a legitimate broker self-registration or discovery flow
+	// needs either, reopening it is a deliberate relaxation requiring security
+	// review and ptone's agreement — do not add a broker allow-arm here to make
+	// a failing caller pass.
+	if action, routed := providerRouteAction(r.Method, subPath); routed {
 		// When the project is missing, authorize against a bare resource
 		// carrying only the requested ID. Everyone who is not an admin is
 		// refused by it, and refused in exactly the same words as a caller who
@@ -1658,7 +1688,7 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 		if !s.requireProjectVisibleToAgent(w, r, gated) {
 			return
 		}
-		if !s.authorize(w, r, projectResource(gated), ActionUpdate) {
+		if !s.authorize(w, r, projectResource(gated), action) {
 			return
 		}
 	}

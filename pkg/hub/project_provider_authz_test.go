@@ -38,15 +38,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Regression tests for the provider mutation gate on
-// /api/v1/projects/{id}/providers.
+// Regression tests for the provider gate on /api/v1/projects/{id}/providers.
 //
-// Until this gate landed, both mutating verbs were reachable by any
+// Until this gate landed, every routed request here was reachable by any
 // authenticated caller. Independently measured: an unrelated user, an agent
 // belonging to a different project, and a runtime broker each received 201
-// attaching a provider to a project they had no relationship to. Only anonymous
-// requests were stopped, and that was the authentication middleware rather than
-// any authorization decision.
+// attaching a provider to a project they had no relationship to, and each
+// received 200 and the full provider list — LocalPath included — reading one
+// back. Only anonymous requests were stopped, and that was the authentication
+// middleware rather than any authorization decision.
+//
+// The read half is not a lesser finding than the write half. LocalPath is what
+// the workspace routes resolve to, so an ungated list hands the exact target
+// the write gate exists to protect to the same callers the write gate refuses.
 //
 // A provider is not an inert label. It is the record that says which broker
 // serves the project and, through LocalPath, which directory on that broker is
@@ -57,10 +61,10 @@ import (
 // is why the overwrite case below asserts the stored LocalPath rather than the
 // status code, and it is the assertion this file exists for.
 //
-// SCOPE. These tests cover WHO may mutate providers. They say nothing about
-// WHERE LocalPath may point: an authorized owner can still name any existing
-// directory outside the restricted system prefixes. Constraining that is a
-// separate question, deliberately not answered here.
+// SCOPE. These tests cover WHO may read and WHO may mutate providers. They say
+// nothing about WHERE LocalPath may point: an authorized owner can still name
+// any existing directory outside the restricted system prefixes. Constraining
+// that is a separate question, deliberately not answered here.
 //
 // Test naming: everything file-local is prefixed pvGate.
 
@@ -320,6 +324,143 @@ func (f *pvGateFixture) requireOwnedPathIntact(t *testing.T, because string) {
 			"what decides where the project's workspace lives (%s)", because)
 }
 
+// requireNoProviderLeak is the real signal for the list cases. A refusal that
+// still ships the record is not a refusal, so the status code is checked
+// alongside the body and neither alone would do: the finding is the LocalPath,
+// and the broker ID and name that say who serves the project travel with it.
+func (f *pvGateFixture) requireNoProviderLeak(t *testing.T, rec *httptest.ResponseRecorder,
+	because string) {
+	t.Helper()
+	body := rec.Body.String()
+	require.NotContains(t, body, f.ownedPath,
+		"a refused list disclosed the provider LocalPath, which is where the "+
+			"project's workspace lives (%s)", because)
+	require.NotContains(t, body, f.attachable.ID,
+		"a refused list disclosed the ID of the broker serving the project (%s)", because)
+	require.NotContains(t, body, f.attachable.Name,
+		"a refused list disclosed the name of the broker serving the project (%s)", because)
+}
+
+// ---------------------------------------------------------------------------
+// List: the read half. These callers used to receive 200 and the LocalPath.
+// ---------------------------------------------------------------------------
+
+func TestPVGate_ListDenied(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		want int
+		call func(*testing.T, *pvGateFixture) *httptest.ResponseRecorder
+	}{
+		{"unrelated user", http.StatusForbidden,
+			func(t *testing.T, f *pvGateFixture) *httptest.ResponseRecorder {
+				return f.asUser(t, f.outsdr, http.MethodGet, f.collectionPath(), nil)
+			}},
+		{
+			// 404 for the same reason as the write cases:
+			// requireProjectVisibleToAgent runs before the authorization
+			// decision, so the refusal does not confirm the project exists.
+			"cross-project agent", http.StatusNotFound,
+			func(t *testing.T, f *pvGateFixture) *httptest.ResponseRecorder {
+				return f.asAgent(t, f.stranger, http.MethodGet, f.collectionPath(), nil)
+			}},
+		{"broker", http.StatusForbidden,
+			func(t *testing.T, f *pvGateFixture) *httptest.ResponseRecorder {
+				return f.asBroker(t, http.MethodGet, f.collectionPath(), nil)
+			}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := pvGateSetup(t)
+			f.seedProvider(t)
+			rec := c.call(t, f)
+			require.Equal(t, c.want, rec.Code, "body=%s", rec.Body.String())
+			f.requireNoProviderLeak(t, rec, c.name)
+		})
+	}
+}
+
+// TestPVGate_ListAllowed is the positive control for the read arm, and it
+// asserts the payload rather than the status: a 200 that returned an empty list
+// to everyone would satisfy every refusal above while breaking the feature.
+//
+// The in-project agent is here rather than in the denied set on purpose. The
+// agent project read baseline (authz.go:239) admits an agent to read-class
+// actions on its own project, and listing is read-class, so it may see the
+// providers of the project it belongs to while still being refused every write
+// to them (TestPVGate_AttachDenied and TestPVGate_DetachDenied pin that half).
+func TestPVGate_ListAllowed(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		call func(*testing.T, *pvGateFixture) *httptest.ResponseRecorder
+	}{
+		{"owner", func(t *testing.T, f *pvGateFixture) *httptest.ResponseRecorder {
+			return f.asUser(t, f.owner, http.MethodGet, f.collectionPath(), nil)
+		}},
+		{"admin", func(t *testing.T, f *pvGateFixture) *httptest.ResponseRecorder {
+			return f.asUser(t, f.admin, http.MethodGet, f.collectionPath(), nil)
+		}},
+		{"in-project agent", func(t *testing.T, f *pvGateFixture) *httptest.ResponseRecorder {
+			return f.asAgent(t, f.insider, http.MethodGet, f.collectionPath(), nil)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := pvGateSetup(t)
+			f.seedProvider(t)
+			rec := c.call(t, f)
+			require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+			require.Contains(t, rec.Body.String(), f.ownedPath,
+				"the gate refused a caller entitled to the provider list, or the "+
+					"list came back empty, which would make every refusal above "+
+					"vacuous (%s)", c.name)
+		})
+	}
+}
+
+// TestPVGate_ListUnauthenticatedDenied records that the anonymous refusal comes
+// from the authentication middleware and not from this gate — the one refusal
+// here that is not evidence about it.
+func TestPVGate_ListUnauthenticatedDenied(t *testing.T) {
+	f := pvGateSetup(t)
+	f.seedProvider(t)
+
+	rec := f.anonymous(http.MethodGet, f.collectionPath(), nil)
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "body=%s", rec.Body.String())
+	f.requireNoProviderLeak(t, rec, "anonymous")
+}
+
+// TestPVGate_ListExistenceNotDisclosed is the read counterpart of
+// TestPVGate_ExistenceNotDisclosed below: the list route must not become the
+// oracle the mutation routes refuse to be.
+func TestPVGate_ListExistenceNotDisclosed(t *testing.T) {
+	f := pvGateSetup(t)
+	f.seedProvider(t)
+	missing := "/api/v1/projects/" + tid("pvgate-no-such-project-list") + "/providers"
+
+	t.Run("unrelated user cannot tell missing from forbidden", func(t *testing.T) {
+		real := f.asUser(t, f.outsdr, http.MethodGet, f.collectionPath(), nil)
+		fake := f.asUser(t, f.outsdr, http.MethodGet, missing, nil)
+		require.Equal(t, http.StatusForbidden, real.Code)
+		require.Equal(t, real.Code, fake.Code,
+			"the response reveals whether the project exists")
+		require.Equal(t, real.Body.String(), fake.Body.String(),
+			"the body reveals whether the project exists")
+	})
+
+	t.Run("cross-project agent cannot either", func(t *testing.T) {
+		real := f.asAgent(t, f.stranger, http.MethodGet, f.collectionPath(), nil)
+		fake := f.asAgent(t, f.stranger, http.MethodGet, missing, nil)
+		require.Equal(t, http.StatusNotFound, real.Code)
+		require.Equal(t, real.Code, fake.Code,
+			"the response reveals whether the project exists")
+		require.Equal(t, real.Body.String(), fake.Body.String(),
+			"the body reveals whether the project exists")
+	})
+
+	t.Run("an authorized caller still gets the truth", func(t *testing.T) {
+		rec := f.asUser(t, f.admin, http.MethodGet, missing, nil)
+		require.Equal(t, http.StatusNotFound, rec.Code, "body=%s", rec.Body.String())
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Attach: the three caller classes that used to receive 201.
 // ---------------------------------------------------------------------------
@@ -562,9 +703,11 @@ func TestPVGate_ExistenceNotDisclosed(t *testing.T) {
 }
 
 // TestPVGate_MethodDispatchUnchanged records that an unsupported verb still
-// answers 405 rather than being caught by the gate, because isProviderMutation
-// selects only POST-on-collection and DELETE-on-broker. Not an authorization
-// property; here so that a future reorder is visible.
+// answers 405 rather than being caught by the gate, because providerRouteAction
+// routes only GET and POST on the collection and DELETE on a broker. Not an
+// authorization property; here so that a future reorder is visible, and so that
+// the day someone decides that 405 is itself a verb oracle, the change shows up
+// as this test failing rather than as nothing.
 func TestPVGate_MethodDispatchUnchanged(t *testing.T) {
 	f := pvGateSetup(t)
 	rec := f.asUser(t, f.owner, http.MethodPut, f.collectionPath(), nil)
