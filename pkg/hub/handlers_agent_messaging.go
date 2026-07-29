@@ -333,6 +333,16 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
+	// Gate the mutation. Restore is the semantic inverse of a soft-delete, and
+	// both the flat (handlers_agents_core.go) and nested
+	// (handlers_projects_core.go) restore routes funnel through this single
+	// sink, which authorized nothing. There is no dedicated ActionRestore, so
+	// this mirrors the delete twin performAgentDelete, which gates ActionDelete:
+	// the authority to restore an agent is the authority to delete it.
+	if !s.authorize(w, r, agentResource(agent), ActionDelete) {
+		return
+	}
+
 	if agent.DeletedAt.IsZero() {
 		BadRequest(w, "Agent is not in deleted state")
 		return

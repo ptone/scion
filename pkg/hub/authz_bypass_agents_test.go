@@ -1351,3 +1351,104 @@ func TestBypassAgents_NestedUpdateProjectAgentGate(t *testing.T) {
 			rec.Code, rec.Body.String())
 	})
 }
+
+// TestBypassAgents_RestoreAgentGate covers the agent-restore sink, reached by
+// POST /api/v1/projects/{projectId}/agents/{agentId}/restore (nested) and
+// POST /api/v1/agents/{agentId}/restore (flat), both served by restoreAgent.
+//
+// restoreAgent un-does a soft-delete (clears DeletedAt) with s.store.UpdateAgent
+// and authorized nothing: the nested route has no pre-switch lifecycle guard for
+// restore, so any authenticated caller could resurrect any soft-deleted agent.
+// Restore is the semantic inverse of delete, so the sink now gates ActionDelete,
+// mirroring the delete twin performAgentDelete. This one sink serves both routes,
+// so the single gate closes both. Each denial arm below is RED (200 + the agent
+// un-deleted) if the s.authorize call is removed from restoreAgent.
+func TestBypassAgents_RestoreAgentGate(t *testing.T) {
+	restorePath := func(projectID, agentID string) string {
+		return fmt.Sprintf("/api/v1/projects/%s/agents/%s/restore", projectID, agentID)
+	}
+	// softDelete puts the target in the deleted state so restore is applicable;
+	// the authorization gate runs before the deleted-state check, so denial arms
+	// are refused regardless, and this lets them assert the agent stays deleted.
+	softDelete := func(t *testing.T, f *bypassAgentsFixture, id string) {
+		t.Helper()
+		a, err := f.store.GetAgent(context.Background(), id)
+		require.NoError(t, err)
+		a.DeletedAt = time.Now()
+		require.NoError(t, f.store.UpdateAgent(context.Background(), a))
+	}
+	isDeleted := func(t *testing.T, f *bypassAgentsFixture, id string) bool {
+		t.Helper()
+		a, err := f.store.GetAgent(context.Background(), id)
+		require.NoError(t, err)
+		return !a.DeletedAt.IsZero()
+	}
+
+	t.Run("outsider member is denied and the agent stays deleted", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		softDelete(t, f, f.sibling.ID)
+		outsider := &store.User{
+			ID:          tid("bypass-restore-outsider"),
+			Email:       "restore-outsider@example.com",
+			DisplayName: "Restore Outsider",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, f.store.CreateUser(context.Background(), outsider))
+
+		rec := doRequestAsUser(t, f.srv, outsider, http.MethodPost, restorePath(f.proj.ID, f.sibling.ID), nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"an unrelated member must not restore an agent; got %d: %s", rec.Code, rec.Body.String())
+		assert.True(t, isDeleted(t, f, f.sibling.ID), "the denied restore must not have un-deleted the agent")
+	})
+
+	t.Run("cross-project agent is denied", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		softDelete(t, f, f.stranger.ID)
+		rec := f.asAgent(t, http.MethodPost, restorePath(f.other.ID, f.stranger.ID), nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"an agent must not restore an agent in another project; got %d: %s", rec.Code, rec.Body.String())
+		assert.True(t, isDeleted(t, f, f.stranger.ID), "the denied cross-project restore must not have un-deleted the agent")
+	})
+
+	t.Run("broker caller is denied", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		softDelete(t, f, f.sibling.ID)
+		rec := f.asBroker(t, http.MethodPost, restorePath(f.proj.ID, f.sibling.ID), nil)
+		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+			rec.Code, "broker-authenticated caller must not restore an agent; got %d: %s", rec.Code, rec.Body.String())
+		assert.True(t, isDeleted(t, f, f.sibling.ID), "the denied broker restore must not have un-deleted the agent")
+	})
+
+	t.Run("anonymous is denied", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		softDelete(t, f, f.sibling.ID)
+		rec := doRequestNoAuth(t, f.srv, http.MethodPost, restorePath(f.proj.ID, f.sibling.ID), nil)
+		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden},
+			rec.Code, "unauthenticated caller must be rejected on restore; got %d: %s", rec.Code, rec.Body.String())
+		assert.True(t, isDeleted(t, f, f.sibling.ID), "the denied anonymous restore must not have un-deleted the agent")
+	})
+
+	// Positive arms — load-bearing (Rule 2a): a caller with delete authority
+	// must still be able to restore. ActionDelete is the ratified grant, so the
+	// project owner and an agent restoring its own descendant (both hold delete
+	// authority, cf. the delete positives) must still succeed.
+	t.Run("project owner restores the agent", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		softDelete(t, f, f.sibling.ID)
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, restorePath(f.proj.ID, f.sibling.ID), nil)
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"the project owner must still restore an agent; got %d: %s", rec.Code, rec.Body.String())
+		assert.False(t, isDeleted(t, f, f.sibling.ID), "the authorized restore must have un-deleted the agent")
+	})
+
+	t.Run("agent restores its descendant", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		softDelete(t, f, f.child.ID)
+		rec := f.asAgent(t, http.MethodPost, restorePath(f.proj.ID, f.child.ID), nil)
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"an agent with delete authority must still restore its descendant; got %d: %s", rec.Code, rec.Body.String())
+		assert.False(t, isDeleted(t, f, f.child.ID), "the authorized restore must have un-deleted the descendant")
+	})
+}
