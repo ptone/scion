@@ -36,11 +36,39 @@ git diff 5b0fb1c5 0de59f5c -- '*_test.go' | grep -cE '^\+func Test'   ->  16   P
 
 Reconciliation: `21 = Phase 8's 16 + Phase 6's 5`.
 
-**Derive the base, never quote it:**
+**Derive the base, never quote it** — corrected 2026-07-29 23:5xZ, defect found by `sp-dev8`:
+
+~~`BASE=$(git merge-base a13ff174 <phase-8 parent lineage>)`~~ **This was unrunnable and is withdrawn.**
+The placeholder has no correct fill. Measured, every candidate:
 
 ```
-BASE=$(git merge-base a13ff174 <phase-8 parent lineage>)      # = 5b0fb1c5
+fill=5b0fb1c5  merge-base=5b0fb1c5  ancestor of a13ff174  -> 16   returns the answer you must already know
+fill=ff835b0b  merge-base=ff835b0b  ancestor of a13ff174  -> 21   the natural first-parent fill; the bug
+fill=b03a09ac  merge-base=b03a09ac  ancestor of a13ff174  -> 43
+fill=0de59f5c  merge-base=a13ff174  not an ancestor       ->  6
 ```
+
+`merge-base` cannot derive a base that is already an ancestor of the tip — it can only return it once
+you have supplied it. So the "derivation" was a citation wearing a method's clothes, and the one fill
+a reader would reach for first reproduces the 21 this criterion exists to correct.
+
+> **A DERIVATION WITH A HOLE IN IT IS WORSE THAN THE BARE CONSTANT IT REPLACED, BECAUSE THE CONSTANT
+> LOOKED LIKE AN ASSERTION AND THIS LOOKS LIKE A METHOD.** (`sp-dev8`) I wrote §2 of my own F1
+> correction warning that a derivation moves the unprovenanced value from the answer into the
+> argument — and then shipped one whose argument was a placeholder. **I DIAGNOSED THE FREE PARAMETER
+> AND THEN LEFT IT LITERALLY UNBOUND.**
+
+Working form (`sp-dev8`'s repair, reproduced here independently, three controls):
+
+```
+BASE=$(git log --diff-filter=A -1 --format=%H a13ff174 -- pkg/hub/hub_agent_defaults_test.go)
+[ -n "$BASE" ] || exit 1                                   # empty-on-typo guard   -> fires: typo gives 0 bytes
+git merge-base --is-ancestor "$BASE" a13ff174 || exit 1     # ancestry guard        -> PASS
+                                                            # -> 5b0fb1c5, count 16
+```
+
+This derives the phase boundary from the artifact that *marks* it — the Phase 6 file whose presence in
+the range caused the miscount — rather than from a rev quoted out of the design document.
 
 > **A DERIVATION IS ONLY AS GOOD AS ITS BASE. SUBSTITUTING A DERIVATION FOR A COUNT MOVES THE
 > UNPROVENANCED VALUE FROM THE ANSWER INTO THE ARGUMENT — IT DOES NOT REMOVE IT**, and it makes it
@@ -168,7 +196,39 @@ Non-vacuous — the same search fires elsewhere: `pkg/hub/auth_test.go` 12, `pkg
 ## Running rules
 
 - `-count=1`.
-- **Never `-race` on `pkg/hub`** — the whole-package race build hangs indefinitely.
+- ~~**Never `-race` on `pkg/hub`** — the whole-package race build hangs indefinitely.~~
+  **WITHDRAWN 2026-07-29. The ban was false and it disarmed the fifth test in this very row.**
+  Refuted by `sp-dev8`; reproduced here, and the reproduction explains where the ban came from.
+
+  ```
+  go test -race -c -o /dev/null ./pkg/hub/     COLD cache  rc=0  258s
+  go test -race -c -o /dev/null ./pkg/hub/     WARM cache  rc=0   19s     (sp-dev8 measured 18s)
+  go test ./pkg/hub -race -count=1 -v -timeout 120s \
+      -run '^TestHubAgentDefaults_ConcurrentWithApplySnapshot$'
+                                               rc=0  1 PASS  0 DATA RACE  ok 1.628s
+  ```
+
+  **`TestHubAgentDefaults_ConcurrentWithApplySnapshot` is a concurrency test whose failure mode IS a
+  data race.** Without `-race` it cannot fail for the reason it was written. The ban and the row
+  shipped in the same commit, so the row arrived pre-disarmed.
+
+  > **A BLANKET BAN ON AN INSTRUMENT, WRITTEN TO AVOID A COST, SILENTLY CONVERTS EVERY TEST THAT
+  > DEPENDS ON THAT INSTRUMENT INTO A TEST THAT CANNOT FAIL.** (`sp-dev8`)
+
+  **And the 14x cold/warm spread is the rest of the story, in both directions.** A cold race build of
+  `pkg/hub` prints nothing for four minutes; that is indistinguishable from a hang to anyone whose
+  patience is bounded below 258s, which is how "hangs indefinitely" was born — I did not observe a
+  hang, I observed a cold build and named it one. But the refutation has the mirror defect: `18s` is
+  a warm number, taken minutes after a full `go test ./...`, and published without its cache state.
+  The next person runs it cold, kills it at 60s, and re-derives the ban.
+
+  > **THE BAN AND ITS REFUTATION ARE THE SAME COMMAND MEASURED IN TWO CACHE STATES, AND NEITHER OF US
+  > PUBLISHED THE STATE. A WALL-CLOCK NUMBER FROM A CACHED TOOLCHAIN IS NOT A PROPERTY OF THE
+  > COMMAND.** Publish the state or publish a bound: run it under `timeout` and report `rc`, which is
+  > cache-invariant, rather than seconds, which is not.
+
+  Working rule: `-race` with an explicit `-run` filter and an explicit `-timeout`. Bound the
+  instrument instead of banning it — a `timeout` distinguishes "slow" from "hung", and the ban did not.
 - Gate any pass claim on positive `=== RUN` / `--- PASS` lines in the same invocation, never on `ok`
   alone.
 - **Disk, scoped:** ENOSPC makes `TempDir` fail, which is `t.Fatal`, which is a **red**. It cannot
