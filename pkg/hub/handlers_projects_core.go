@@ -1116,6 +1116,64 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		s.createProjectMembersGroupAndPolicy(ctx, project)
 	}
 
+	// AUTHORIZATION FOR THE PROVIDER WRITE ON A PROJECT THIS CALLER DID NOT
+	// CREATE. Both broker-linking paths below end in AddProjectProvider with a
+	// caller-supplied LocalPath, and until this gate existed neither had any
+	// authorization behind it: register authenticates and then attributes, and
+	// attribution is not permission.
+	//
+	// What that allowed, measured independently: a victim's pre-existing
+	// git-backed project declares a shared directory but has no provider on the
+	// hub's embedded broker yet — a co-located broker that has not attached, or
+	// a remote-only project. The owner's own shared-dir read answers 409,
+	// because there is nothing serving it. An unrelated user, an agent from
+	// another project, or a runtime broker registers that project's ID naming
+	// the embedded broker and a directory of their own, a provider row is
+	// created for the EMBEDDED broker with the attacker's LocalPath, and the
+	// owner's next read of their own shared directory answers 200 with the
+	// attacker's bytes. Reads exfiltrate and writes land in attacker storage.
+	// Both branches below were live, including the deprecated by-name one, and
+	// the "you must know the embedded broker's ID" precondition was self-served
+	// from an ungated provider list until bb3c45da.
+	//
+	// The preservation blocks below (localPath is kept when the project already
+	// existed and this broker is already a provider) look like they cover this
+	// and do not: they only protect a provider row that is already there. The
+	// attack is an ATTACH, not an overwrite, so it goes straight past them.
+	// They are workspace-continuity logic and were never an authorization
+	// boundary; this gate is.
+	//
+	// Scope of the condition. It fires only when the project already existed
+	// (created == false) and the request actually asks to link a broker. A
+	// caller registering a genuinely new project is creating it and owns the
+	// result, so nothing there needs this; a register with no broker in it
+	// writes no provider. Same shape as the /providers gate (b51fc49c):
+	// isolation first, so an agent outside the project cannot tell an existing
+	// project from a missing one, then ActionUpdate on the project — attaching
+	// a provider configures the project, so it is a project write.
+	//
+	// CONSERVATIVE CLOSURE (Rule 18a). This denies brokers too: CheckAccess has
+	// no broker arm, so a broker identity reaches its default deny, and a
+	// broker can therefore no longer point a pre-existing project it is not
+	// party to at a directory of its choosing. If a real self-registration flow
+	// needs that, it is a deliberate relaxation requiring security review and
+	// ptone's agreement — do not add a broker allow-arm here to make a failing
+	// caller pass.
+	//
+	// NOT CLOSED HERE, and deliberately: register still writes req.Path into
+	// AddProjectProvider without the absolute-path, existing-directory and
+	// system-directory validation that the /providers attach applies. That is
+	// the LocalPath trust-sink question, held as its own piece of work. This
+	// gate answers WHO may write a provider, not WHERE it may point.
+	if !created && (req.BrokerID != "" || req.Broker != nil) {
+		if !s.requireProjectVisibleToAgent(w, r, project) {
+			return
+		}
+		if !s.authorize(w, r, projectResource(project), ActionUpdate) {
+			return
+		}
+	}
+
 	// Handle broker linking - two paths:
 	// 1. New flow (preferred): BrokerID provided - link to existing broker (no secret generation)
 	// 2. Deprecated flow: Broker object provided - create/update broker AND generate secret
@@ -1142,6 +1200,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// Add as project provider. When the project already existed and the
 		// broker is already a provider, preserve the existing localPath to
 		// avoid converting a hub-native git project into a linked project.
+		//
+		// This is continuity logic, NOT the security boundary — it protects a
+		// provider row that already exists and does nothing about attaching a
+		// new one. What keeps a caller who does not own this project from
+		// reaching here at all is the authorization gate above.
 		localPath := req.Path
 		if !created {
 			if existingProvider, err := s.store.GetProjectProvider(ctx, project.ID, broker.ID); err == nil {
@@ -1248,6 +1311,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// Add as project provider. When the project already existed and the
 		// broker is already a provider, preserve the existing localPath to
 		// avoid converting a hub-native git project into a linked project.
+		//
+		// As in the branch above: continuity logic, not the boundary. This
+		// deprecated by-name path reached the same unauthorized write, so the
+		// gate above covers both and neither preservation block may be read as
+		// standing in for it.
 		localPath := req.Path
 		if !created {
 			if existingProvider, err := s.store.GetProjectProvider(ctx, project.ID, broker.ID); err == nil {
