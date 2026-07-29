@@ -50,6 +50,10 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"os"
 	"regexp"
@@ -340,13 +344,28 @@ func TestRIUserGate_AgentArmsAgreeOnTheSameRoutes(t *testing.T) {
 // TestRIUserGate_EveryProjectScopeUserArmIsGated is the inventory, and it is the
 // reason an EIGHTH arm cannot be added silently. It does not compare against a
 // number written down here — a literal count is a measurement with its filter
-// amputated, and it goes stale on the first addition. It DERIVES both sides from
-// the handler source and asserts a RELATIONSHIP between them: every user-branch
-// create check of the project-scoped shape must be accompanied by a read gate.
+// amputated, and it goes stale on the first addition. It derives every site from
+// the handler source and asserts ADJACENCY: each project-scoped user create check
+// must be followed by a read gate IN ITS OWN ARM.
 //
-// Add a project-scoped user arm without authorizeImportUserRead and the two
-// derived counts diverge and this reds, naming the shortfall. Add one WITH the
-// gate and it stays green, correctly.
+// IT ASSERTS ADJACENCY BECAUSE CARDINALITY WAS NOT ENOUGH, and that is measured,
+// not anticipated (N84, rev1, against b6e8ddb9). The first version of this test
+// compared two derived totals, project-scope arms against read gates. rev1 moved
+// the discover-templates gate into the import-templates arm — one arm with two
+// gates, one with none, totals still 5 == 5 — and this test PASSED, as did the
+// cardinality tripwire below. Only the behavioural table caught it. A COUNT
+// SURVIVES ANY REARRANGEMENT THAT PRESERVES THE TOTAL, so it can see absence but
+// never displacement. The AST walk below compares positions against enclosing
+// blocks instead, which makes displacement unsayable rather than merely unlikely,
+// and names the offending arm by line.
+//
+// The behavioural table is not a substitute for this. Its six rows are HAND
+// WRITTEN literals, so a NEW project-scope arm whose gate lands in the wrong arm
+// is invisible to it — there is no row for a route nobody added a row for. That
+// is the exact gap this test now closes, and it is why the two are kept together.
+//
+// Add a project-scoped user arm without authorizeImportUserRead and this reds,
+// naming the arm. Add one WITH the gate and it stays green, correctly.
 //
 // The two global-scope arms of handleResourcesImport/handleResourcesDiscover are
 // excluded by SHAPE, not by name or line: they pass Resource{Type: authzType},
@@ -357,40 +376,143 @@ func TestRIUserGate_AgentArmsAgreeOnTheSameRoutes(t *testing.T) {
 // filed separately as N80 and must be measured on its own justification — do not
 // fold it in here by widening this filter.
 func TestRIUserGate_EveryProjectScopeUserArmIsGated(t *testing.T) {
-	src, err := os.ReadFile(riUserSourceFile)
-	require.NoError(t, err, "inventory cannot run if %s moved; update riUserSourceFile", riUserSourceFile)
-	text := string(src)
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, riUserSourceFile, nil, parser.SkipObjectResolution)
+	require.NoError(t, err, "inventory cannot run if %s moved or stopped parsing; update riUserSourceFile", riUserSourceFile)
 
-	// Every user-branch authorization check in the file.
-	allUserChecks := strings.Count(text, "CheckAccess(ctx, userIdent,")
-	require.Greater(t, allUserChecks, 0,
-		"found no user CheckAccess calls in %s — the filter has stopped matching and this "+
-			"test is measuring nothing (a green here would be indistinguishable from a clean file)",
-		riUserSourceFile)
+	// All block statements, so the ARM an expression sits in can be identified
+	// structurally instead of by counting lines between it and its neighbour.
+	var blocks []*ast.BlockStmt
+	ast.Inspect(file, func(n ast.Node) bool {
+		if b, ok := n.(*ast.BlockStmt); ok {
+			blocks = append(blocks, b)
+		}
+		return true
+	})
+	// The arm is the SMALLEST block containing the position. Smallest matters:
+	// every one of these calls is also inside its function body, and comparing
+	// function bodies would let two arms in one function be treated as one.
+	arm := func(pos token.Pos) *ast.BlockStmt {
+		var best *ast.BlockStmt
+		for _, b := range blocks {
+			if b.Pos() <= pos && pos <= b.End() {
+				if best == nil || b.Pos() > best.Pos() {
+					best = b
+				}
+			}
+		}
+		return best
+	}
 
-	// The global-scope shape, excluded above. Matched on the parentless resource
-	// literal so the exclusion travels with the property that justifies it.
-	globalArms := regexp.MustCompile(
-		`CheckAccess\(ctx, userIdent, Resource\{Type: authzType\}, ActionCreate\)`).
-		FindAllString(text, -1)
+	isIdent := func(e ast.Expr, name string) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && id.Name == name
+	}
+	// GLOBAL SHAPE, excluded BY SHAPE and not by name or line: a resource literal
+	// whose only field is Type. Those arms are deliberately ownerless and
+	// parentless and carry no project id, so the mirror is undefined there rather
+	// than merely unapplied (N80 measures them separately — do not fold them in
+	// here by widening this filter).
+	isGlobalResource := func(e ast.Expr) bool {
+		lit, ok := e.(*ast.CompositeLit)
+		if !ok || len(lit.Elts) != 1 {
+			return false
+		}
+		kv, ok := lit.Elts[0].(*ast.KeyValueExpr)
+		return ok && isIdent(kv.Key, "Type")
+	}
 
-	// Real calls only: the prose references in comments say "authorizeImportUserRead"
-	// without the receiver, so requiring "s." and the open paren excludes them.
-	readGates := strings.Count(text, "s.authorizeImportUserRead(")
+	var projectCreates, gates []token.Pos
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "CheckAccess":
+			if len(call.Args) == 4 && isIdent(call.Args[1], "userIdent") &&
+				isIdent(call.Args[3], "ActionCreate") && !isGlobalResource(call.Args[2]) {
+				projectCreates = append(projectCreates, call.Pos())
+			}
+		case "authorizeImportUserRead":
+			gates = append(gates, call.Pos())
+		}
+		return true
+	})
 
-	projectScopedArms := allUserChecks - len(globalArms)
+	// ANTI-VACUITY, both sides. A filter that has stopped matching produces a
+	// green indistinguishable from a clean file.
+	require.NotEmpty(t, projectCreates,
+		"found no project-scope user create checks in %s — the AST filter has stopped "+
+			"matching and this test is measuring nothing", riUserSourceFile)
+	require.NotEmpty(t, gates,
+		"zero authorizeImportUserRead calls found: the fix has been removed wholesale, or "+
+			"the call form changed and this inventory is now blind")
 
-	require.Equal(t, projectScopedArms, readGates,
-		"every project-scope user arm in %s must be followed by authorizeImportUserRead: "+
-			"derived %d project-scope user create checks (%d user checks total, minus %d "+
-			"global-scope parentless arms) but only %d read gates. A new user arm was most "+
-			"likely added without the read check — add it, or if the new arm is global-scope "+
-			"and genuinely parentless, confirm it matches the excluded shape.",
-		riUserSourceFile, projectScopedArms, allUserChecks, len(globalArms), readGates)
+	// ADJACENCY, not cardinality. Each project-scope create must be followed by a
+	// gate IN ITS OWN ARM. Totals cannot launder a displacement: moving a gate out
+	// of one arm and into another keeps every count identical and reds here twice,
+	// naming both the starved arm and the doubled one by line.
+	gatesFor := func(block *ast.BlockStmt, after token.Pos) int {
+		n := 0
+		for _, g := range gates {
+			if arm(g) == block && g > after {
+				n++
+			}
+		}
+		return n
+	}
+	//
+	// Every offending arm is collected and reported TOGETHER rather than failing
+	// on the first. A displacement always produces at least two faults — a starved
+	// arm and a doubled one — and stopping at the first names only one of them,
+	// which reads as a simple missing gate and invites exactly the wrong repair:
+	// adding a second gate to the arm that already has two.
+	var offenders []string
+	for _, c := range projectCreates {
+		pos := fset.Position(c)
+		block := arm(c)
+		require.NotNil(t, block, "%s:%d: create check is not inside any block", pos.Filename, pos.Line)
+		if n := gatesFor(block, c); n != 1 {
+			offenders = append(offenders, fmt.Sprintf(
+				"  %s:%d has %d in-arm read gates, want exactly 1", pos.Filename, pos.Line, n))
+		}
+	}
+	require.Empty(t, offenders,
+		"every project-scope user create check must be followed by exactly one "+
+			"s.authorizeImportUserRead IN ITS OWN ARM. Offending arms:\n%s\n"+
+			"Either a new arm was added without the read gate, or a gate was moved into a "+
+			"neighbouring arm — which leaves every total unchanged, so counting cannot see "+
+			"it. If one arm shows 0 and another shows 2, that is a DISPLACEMENT: move the "+
+			"gate back, do not add a new one.",
+		strings.Join(offenders, "\n"))
 
-	require.Greater(t, readGates, 0,
-		"zero read gates found: the fix has been removed wholesale, or the call form changed "+
-			"and this inventory is now blind")
+	// The converse: no gate may sit in an arm that has no project-scope create.
+	// Without this, the destination of a displacement is only implicated through
+	// the arm it robbed, and a gate parked in an unrelated block passes unnoticed.
+	for _, g := range gates {
+		pos := fset.Position(g)
+		block := arm(g)
+		found := false
+		for _, c := range projectCreates {
+			if arm(c) == block && g > c {
+				found = true
+				break
+			}
+		}
+		require.True(t, found,
+			"%s:%d — this authorizeImportUserRead does not follow any project-scope user "+
+				"create check in its own arm. A read gate that is not behind a create check "+
+				"is either misplaced or guarding an arm this inventory does not model.",
+			pos.Filename, pos.Line)
+	}
+
+	t.Logf("adjacency verified: %d project-scope user arms, %d read gates, each paired in-arm",
+		len(projectCreates), len(gates))
 }
 
 // TestN78_BranchCoverage is the CARDINALITY control, authored by rev1 and kept
