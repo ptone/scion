@@ -651,6 +651,49 @@ func (s *Server) removePolicyBinding(w http.ResponseWriter, r *http.Request, pol
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// evaluatablePrincipalTypes is the set of principal types handlePolicyEvaluate
+// knows how to build a subject for. It must stay in step with the
+// `switch req.PrincipalType` below; TestPolicyEvaluate_EvaluatableTypesMatchHandler
+// pins that.
+//
+// The self-arm consults this set so that an identity whose Type() is not an
+// evaluatable principal type cannot reach the self-arm at all, rather than
+// passing it and being refused later by the switch. Authorization decided at
+// the gate and authorization decided by a downstream lookup failure are not the
+// same thing: the second depends on the lookup continuing to fail.
+var evaluatablePrincipalTypes = map[string]bool{
+	"user":  true,
+	"agent": true,
+}
+
+// callerIsEvaluatedPrincipal reports whether the caller IS the principal named
+// in the request.
+//
+// A principal is a PAIR — a type and an id — and both halves come from the
+// caller's own request body. Identity ids in this hub are not unique across
+// kinds: user ids and agent ids are hub-minted UUIDs, but a broker id is
+// accepted from the registering client, so "some identity has id X" does not
+// imply "the principal (user, X)" or "the principal (agent, X)". Comparing only
+// ids therefore answers a question nobody asked, and answers it as if it were
+// identity.
+//
+// Both halves are compared here, and the type half is compared FIRST in
+// meaning: the caller must be the same KIND of thing as the principal it names
+// before its id is allowed to mean anything. Do not relax this to an id-only
+// comparison, and do not narrow it to users only — an agent evaluating its own
+// policy is the same documented case as a user evaluating its own
+// (see .design/hosted/auth/permissions-design.md), and principalType "agent" is
+// an implemented, supported value.
+func callerIsEvaluatedPrincipal(caller Identity, principalType, principalID string) bool {
+	if caller == nil || principalType == "" || principalID == "" {
+		return false
+	}
+	if !evaluatablePrincipalTypes[principalType] {
+		return false
+	}
+	return caller.Type() == principalType && caller.ID() == principalID
+}
+
 // handlePolicyEvaluate handles POST /api/v1/policies/evaluate
 func (s *Server) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -686,13 +729,10 @@ func (s *Server) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Authorization: only admins or the evaluated principal can call this
-	if callerUser, ok := callerIdentity.(UserIdentity); ok {
-		if callerUser.Role() != "admin" && callerIdentity.ID() != req.PrincipalID {
-			Forbidden(w)
-			return
-		}
-	} else if callerIdentity.ID() != req.PrincipalID {
+	// Authorization: only hub admins, or the evaluated principal itself.
+	callerUser, callerIsUser := callerIdentity.(UserIdentity)
+	isAdmin := callerIsUser && callerUser.Role() == "admin"
+	if !isAdmin && !callerIsEvaluatedPrincipal(callerIdentity, req.PrincipalType, req.PrincipalID) {
 		Forbidden(w)
 		return
 	}
