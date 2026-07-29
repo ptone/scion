@@ -331,18 +331,9 @@ func TestPolicyAPI_AddBindingGate(t *testing.T) {
 func TestPolicyAPI_RemoveBindingGate(t *testing.T) {
 	f := setupPolicyAuthz(t)
 	ctx := context.Background()
-	p := f.seedPolicy(t, "pa-unbind-target")
 
-	// A binding to remove. Left ungated, unbinding is arm-C-adjacent: a caller
-	// could unbind an admin's deny to escape it.
-	require.NoError(t, f.store.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID:      p.ID,
-		PrincipalType: store.PolicyPrincipalTypeUser,
-		PrincipalID:   f.member.ID,
-	}))
-
-	hasBinding := func() bool {
-		bs, err := f.store.GetPolicyBindings(ctx, p.ID)
+	hasBinding := func(policyID string) bool {
+		bs, err := f.store.GetPolicyBindings(ctx, policyID)
 		require.NoError(t, err)
 		for _, b := range bs {
 			if b.PrincipalType == store.PolicyPrincipalTypeUser && b.PrincipalID == f.member.ID {
@@ -352,22 +343,42 @@ func TestPolicyAPI_RemoveBindingGate(t *testing.T) {
 		return false
 	}
 
-	path := "/api/v1/policies/" + p.ID + "/bindings/user/" + f.member.ID
+	// Each subtest gets its OWN freshly-seeded policy+binding, so every arm
+	// detects the gate on its own precondition rather than inheriting an intact
+	// binding cascaded from the negative subtests. In particular the admin
+	// success arm must remove a binding it seeded itself — otherwise a silently
+	// missing gate that let the first negative caller through would leave the
+	// admin arm asserting a removal that already happened. (Mirrors sibling
+	// TestPolicyAPI_DeleteGate, which seeds a fresh policy for its admin arm.)
+	seedBinding := func(t *testing.T, name string) string {
+		t.Helper()
+		p := f.seedPolicy(t, name)
+		require.NoError(t, f.store.AddPolicyBinding(ctx, &store.PolicyBinding{
+			PolicyID:      p.ID,
+			PrincipalType: store.PolicyPrincipalTypeUser,
+			PrincipalID:   f.member.ID,
+		}))
+		return p.ID
+	}
 
 	for _, c := range f.deniedCallers(t) {
 		t.Run(c.name, func(t *testing.T) {
-			require.True(t, hasBinding(), "precondition: binding present")
+			policyID := seedBinding(t, "pa-unbind-neg-"+c.name)
+			path := "/api/v1/policies/" + policyID + "/bindings/user/" + f.member.ID
+			require.True(t, hasBinding(policyID), "precondition: binding present")
 			rec := c.do(http.MethodDelete, path, nil)
 			require.Equal(t, c.want, rec.Code, "body: %s", rec.Body.String())
-			require.True(t, hasBinding(), "denied unbind must leave the binding intact")
+			require.True(t, hasBinding(policyID), "denied unbind must leave the binding intact")
 		})
 	}
 
 	t.Run("hub admin succeeds", func(t *testing.T) {
-		require.True(t, hasBinding(), "precondition: binding present")
+		policyID := seedBinding(t, "pa-unbind-admin")
+		path := "/api/v1/policies/" + policyID + "/bindings/user/" + f.member.ID
+		require.True(t, hasBinding(policyID), "precondition: binding present")
 		rec := doRequestAsUser(t, f.srv, f.admin, http.MethodDelete, path, nil)
 		require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
-		require.False(t, hasBinding(), "admin unbind must remove the binding")
+		require.False(t, hasBinding(policyID), "admin unbind must remove the binding")
 	})
 }
 

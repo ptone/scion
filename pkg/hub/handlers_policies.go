@@ -549,10 +549,15 @@ func (s *Server) handlePolicyBindingByID(w http.ResponseWriter, r *http.Request,
 func (s *Server) removePolicyBinding(w http.ResponseWriter, r *http.Request, policyID, principalType, principalID string) {
 	// Policy writes are gated to hub admins (ptone/scion#591). A policy reaches a
 	// principal only through a binding, so unbinding is equivalent to overriding
-	// the policy it carried: left ungated, a caller could shed an admin's deny by
-	// removing its binding — the arm-C escape from the other side. This gate
-	// closes that detach-equals-override path and completes the caller-authored
-	// policy-API write-op gate begun in 536d8f5c (the four authoring/binding ops).
+	// the policy it carried. The route takes an arbitrary (policyID, principal),
+	// so left ungated it is abusable two ways:
+	//   - deny-escape: a caller sheds an admin's deny by removing its binding —
+	//     the arm-C escape from the other side (detach == override); and
+	//   - cross-principal allow-stripping: a caller unbinds a policy from any
+	//     OTHER principal, revoking their granted access — a denial-of-service on
+	//     the hub's authorization config, not merely a self-serving escalation.
+	// This gate closes both and completes the caller-authored policy-API write-op
+	// gate begun in 536d8f5c (the four authoring/binding ops).
 	//
 	// Hub-admin-only is the ratified interim per the EM/lead ruling 2026-07-29 —
 	// stricter than the design's scope-relative `manage` (see createPolicy and
