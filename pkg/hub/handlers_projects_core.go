@@ -598,10 +598,12 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	// and says it supports.
 	//
 	// The constraint is on the CALLER, not on the route, and it sits here rather
-	// than in registerProject on purpose: register, createProject's idempotency
-	// branch and getProject all reach this function with an already-existing
-	// project and an arbitrary authenticated caller, so closing it at one route
-	// would leave the other two open. Initial creation is unaffected, and not by
+	// than in registerProject on purpose: register and createProject's idempotency
+	// branch reach this function with an already-existing project and an arbitrary
+	// authenticated caller, and getProject reaches it too for any caller who passes
+	// its ActionRead gate (added in 6a12b679) — which still includes an in-project
+	// agent reading its own project, the B10 vector — so closing it at one route
+	// would leave the others open. Initial creation is unaffected, and not by
 	// exemption — the creator is added with role=owner above, so ownerCount is
 	// non-zero and this block does not run at all.
 	//

@@ -119,6 +119,20 @@ func TestBrokerProjectsGate_Denied(t *testing.T) {
 			},
 		},
 		{
+			// I71: f.owner OWNS f.proj, which this broker actually serves, and is
+			// still refused under the admin-only deny posture — rev1 measured this
+			// (real vs missing identical, no leak). Owners are exactly the population
+			// the named scope-filter relaxation follow-on is about, so pinning the
+			// 403 here forces that follow-on to edit this arm deliberately rather
+			// than relaxing owners silently with no test forced to change.
+			"project owner", http.StatusForbidden,
+			func(t *testing.T, f *bypassAgentsFixture) func(string) *httptest.ResponseRecorder {
+				return func(p string) *httptest.ResponseRecorder {
+					return doRequestAsUser(t, f.srv, f.owner, http.MethodGet, p, nil)
+				}
+			},
+		},
+		{
 			// f.caller is an agent in a project the broker actually serves, so this
 			// is the strongest read of "an agent": even an in-serving-project agent
 			// is refused, because listing a broker's projects is an admin action.

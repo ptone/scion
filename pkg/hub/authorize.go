@@ -134,13 +134,34 @@ func (s *Server) authorizeWithMessage(w http.ResponseWriter, r *http.Request, re
 // body — requireProjectVisibleToAgent answers "Project not found", which is right
 // for its other callers but would reopen the oracle here. It is deliberately
 // stricter than the eight s.authorize gates, which keep a 403-vs-404 existence
-// split; harmonizing those PR-wide is an open lead call. Read-only: for a
-// mutating verb use s.authorize instead.
+// split.
+//
+// CONSEQUENCE - the no-oracle property is VERB-LOCAL. It holds for the READ
+// verb here, but PATCH (updateProject, ActionUpdate) and DELETE (deleteProject,
+// ActionDelete) on the SAME project url still render 403-for-real /
+// 404-for-missing, so a caller learns whether a project id exists by switching
+// verb - the existence oracle survives one verb away (rev1 measured 6/6:
+// outsider-user, cross-project-agent and broker, both verbs, all differ).
+// Whether the eight s.authorize gates should harmonize to 404 is a security
+// decision, not one to settle inline; it is re-filed to the lead (Rule 13) as
+// the harmonization follow-on and is deliberately NOT resolved in this PR.
+// Read-only: for a mutating verb use s.authorize instead.
 func (s *Server) authorizeProjectReadNoOracle(w http.ResponseWriter, r *http.Request, project *store.Project) bool {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
+		return false
+	}
+	if project == nil {
+		// Caller bug, not a policy outcome: every call site fetches the project and
+		// returns on the store error before calling this. Fail closed rather than
+		// panic in projectResource/project.ID below (I68, recurrence of I56), and
+		// render the same missing body every other denial here renders so the guard
+		// cannot itself become an existence oracle. Mirrors the nil-project guard in
+		// requireProjectVisibleToAgent.
+		logAuthzDenial(r, identity, Resource{Type: "project"}, ActionRead, "nil project")
+		writeErrorFromErr(w, store.ErrNotFound, "")
 		return false
 	}
 	resource := projectResource(project)
@@ -428,6 +449,11 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdent
 // Every caller it passes still faces the endpoint's own authorization — at the
 // seven current call sites that is the raw GetUserIdentityFromContext-plus-else
 // idiom, not an s.authorize call.
+//
+// Rule 18a: authorizeProjectReadNoOracle inlines an INDEPENDENT COPY of this
+// agent-isolation check (it renders the missing body rather than "Project not
+// found" to avoid an existence oracle). The two are not wired together, so
+// anyone hardening the isolation logic here must edit that copy in step.
 func (s *Server) requireProjectVisibleToAgent(w http.ResponseWriter, r *http.Request, project *store.Project) bool {
 	agentIdent := GetAgentIdentityFromContext(r.Context())
 	if agentIdent == nil {

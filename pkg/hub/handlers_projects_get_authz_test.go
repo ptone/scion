@@ -80,15 +80,23 @@ func gpGateRequireRecordAbsent(t *testing.T, body string) {
 }
 
 // gpGateMissingBody returns the exact response body the handler renders for a
-// project that does not exist. getProject calls s.store.GetProject before the
-// gate, so a nonexistent id short-circuits to writeErrorFromErr(store.ErrNotFound)
-// for any authenticated caller — this is the "missing" body every refused-real
-// arm below must be byte-identical to (no existence oracle over project ids).
-func gpGateMissingBody(t *testing.T, f *wsGateFixture) string {
+// project that does not exist, AS SEEN BY THE GIVEN CALLER. getProject calls
+// s.store.GetProject before the gate, so a nonexistent id short-circuits to
+// writeErrorFromErr(store.ErrNotFound) for any authenticated caller — this is the
+// "missing" body a refused-real arm must be byte-identical to (no existence
+// oracle over project ids).
+//
+// N39: the missing body is taken through the same caller-bound `call` as the
+// refused-real request, not once as the owner. The property under test is that
+// the ATTACKER cannot tell missing from refused, so the control must belong to
+// the attacker; principal-independence of the missing body is the assumption
+// this test exists to protect, and so is the one thing it must verify rather
+// than assume.
+func gpGateMissingBody(t *testing.T, call func(path string) *httptest.ResponseRecorder) string {
 	t.Helper()
-	rec := f.asUser(t, f.owner, http.MethodGet, "/api/v1/projects/"+tid("gpgate-nonexistent"), nil)
+	rec := call("/api/v1/projects/" + tid("gpgate-nonexistent"))
 	require.Equal(t, http.StatusNotFound, rec.Code,
-		"a nonexistent project must be 404; body=%s", rec.Body.String())
+		"a nonexistent project must be 404 for this caller; body=%s", rec.Body.String())
 	return rec.Body.String()
 }
 
@@ -103,35 +111,38 @@ func TestGPGate_AttackArmsRefusedRecordAbsent(t *testing.T) {
 	f := wsGateSetup(t)
 	p := gpGateProject(t, f)
 	path := "/api/v1/projects/" + p.ID
-	missing := gpGateMissingBody(t, f)
 
-	t.Run("unrelated user", func(t *testing.T) {
-		rec := f.asUser(t, f.outsdr, http.MethodGet, path, nil)
-		require.Equal(t, http.StatusNotFound, rec.Code,
-			"unrelated user must be refused; body=%s", rec.Body.String())
-		gpGateRequireRecordAbsent(t, rec.Body.String())
-		require.Equal(t, missing, rec.Body.String(),
-			"refused-real must be byte-identical to missing (no existence oracle)")
-	})
+	arms := []struct {
+		name string
+		// call issues the GET as one attacker principal; the same call fetches
+		// both the refused-real body and this arm's own missing-project control.
+		call func(path string) *httptest.ResponseRecorder
+	}{
+		{"unrelated user", func(path string) *httptest.ResponseRecorder {
+			return f.asUser(t, f.outsdr, http.MethodGet, path, nil)
+		}},
+		{"cross-project agent", func(path string) *httptest.ResponseRecorder {
+			return f.asAgent(t, f.stranger, http.MethodGet, path, nil)
+		}},
+		{"broker", func(path string) *httptest.ResponseRecorder {
+			// CheckAccess has no broker arm; the no-oracle renderer answers as missing.
+			return f.asBroker(t, http.MethodGet, path, nil)
+		}},
+	}
 
-	t.Run("cross-project agent", func(t *testing.T) {
-		rec := f.asAgent(t, f.stranger, http.MethodGet, path, nil)
-		require.Equal(t, http.StatusNotFound, rec.Code,
-			"cross-project agent must get 404; body=%s", rec.Body.String())
-		gpGateRequireRecordAbsent(t, rec.Body.String())
-		require.Equal(t, missing, rec.Body.String(),
-			"refused-real must be byte-identical to missing (no existence oracle)")
-	})
+	for _, arm := range arms {
+		t.Run(arm.name, func(t *testing.T) {
+			missing := gpGateMissingBody(t, arm.call)
 
-	t.Run("broker", func(t *testing.T) {
-		rec := f.asBroker(t, http.MethodGet, path, nil)
-		// CheckAccess has no broker arm; the no-oracle renderer answers as missing.
-		require.Equal(t, http.StatusNotFound, rec.Code,
-			"a broker must be refused; body=%s", rec.Body.String())
-		gpGateRequireRecordAbsent(t, rec.Body.String())
-		require.Equal(t, missing, rec.Body.String(),
-			"refused-real must be byte-identical to missing (no existence oracle)")
-	})
+			rec := arm.call(path)
+			require.Equal(t, http.StatusNotFound, rec.Code,
+				"%s must be refused; body=%s", arm.name, rec.Body.String())
+			gpGateRequireRecordAbsent(t, rec.Body.String())
+			require.Equal(t, missing, rec.Body.String(),
+				"refused-real must be byte-identical to missing FOR THE SAME CALLER "+
+					"(no existence oracle)")
+		})
+	}
 }
 
 // TestGPGate_Unauthenticated is the middleware control: no credential is 401,
@@ -198,6 +209,15 @@ func TestGPGate_PositiveControls(t *testing.T) {
 		require.Equal(t, gpGateSecretName, got.Name)
 		require.Equal(t, gpGateSecretSlug, got.Slug)
 		require.Equal(t, gpGateSecretGitRemote, got.GitRemote)
+		// N40: positive control for the anti-enrichment check in
+		// gpGateRequireRecordAbsent, which asserts NotContains(body,
+		// `"ownerName":"Owner"`). Without a sibling green proving the owner display
+		// name CAN appear in a served body, a renamed json tag, a dropped field, or
+		// added indentation would make that NotContains pass vacuously forever and
+		// silently retire the check. f.owner's DisplayName is "Owner" (wsGateSetup).
+		require.Equal(t, "Owner", got.OwnerName,
+			"served getProject must enrich the owner display name, which is the "+
+				"presence half that makes the refusal-arm NotContains non-vacuous")
 	}
 
 	t.Run("owner", func(t *testing.T) {

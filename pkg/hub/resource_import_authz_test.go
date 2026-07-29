@@ -252,9 +252,16 @@ func TestRIGate_SharedImportHelperGatesRevokedRead(t *testing.T) {
 	routes := []struct {
 		name string
 		path string
+		// code is the specific content-bearing downstream error a caller who PASSED
+		// the gate hits on the unreachable source URL: handleResourcesDiscover
+		// renders 400 "discover_failed" (handlers_resource_import.go:807),
+		// handleResourcesImport 400 "import_failed" (:408). Pinning it distinguishes
+		// "passed the gate, failed downstream" from "never reached the handler"
+		// (dead route/rename/401), which a NotEqual(403) allow arm cannot (N44).
+		code string
 	}{
-		{"resources/discover", "/api/v1/resources/discover"},
-		{"resources/import", "/api/v1/resources/import"},
+		{"resources/discover", "/api/v1/resources/discover", "discover_failed"},
+		{"resources/import", "/api/v1/resources/import", "import_failed"},
 	}
 
 	t.Run("read-revoked agent refused at shared gate", func(t *testing.T) {
@@ -276,11 +283,20 @@ func TestRIGate_SharedImportHelperGatesRevokedRead(t *testing.T) {
 		for _, route := range routes {
 			t.Run(route.name, func(t *testing.T) {
 				rec := riGateAsAgentCreate(t, f, good, http.MethodPost, route.path, body("template"))
-				require.NotEqual(t, http.StatusForbidden, rec.Code,
-					"default-config create-scope agent must pass the gate (downstream failure is fine); body=%s",
+				// N44: pin the specific content-bearing downstream failure, not a
+				// NotEqual(403). A dead route, a rename, or a moved middleware would
+				// return 404/401 — which passes NotEqual(403)+NotContains("permission")
+				// vacuously — so the old allow arm would stay green through exactly the
+				// refactor this file exists to catch. 400 + the kind-specific code
+				// proves the caller REACHED the handler and only then failed on the
+				// unreachable source URL.
+				require.Equal(t, http.StatusBadRequest, rec.Code,
+					"default-config create-scope agent must pass the gate and fail downstream "+
+						"on the unreachable source (400), not be refused or dead-routed; body=%s",
 					rec.Body.String())
-				require.NotContains(t, rec.Body.String(), "permission",
-					"a passed gate must not render the read-gate denial; body=%s", rec.Body.String())
+				require.Contains(t, rec.Body.String(), route.code,
+					"a passed gate must reach the handler and render its downstream failure "+
+						"code %q, proving the request was not dead-routed; body=%s", route.code, rec.Body.String())
 			})
 		}
 	})
