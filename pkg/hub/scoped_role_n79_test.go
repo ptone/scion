@@ -491,3 +491,64 @@ func TestN79_T1_ForgedBrokerBatch_Differential(t *testing.T) {
 		t.Errorf("regression: victim user lost descendant-row (ancestry) access; got %v want all %d actions", uCaps[1].Actions, len(agentActions))
 	}
 }
+
+// -----------------------------------------------------------------------------
+// Pointer-receiver foot-gun lock (rev1 latent finding on the N73 root fix).
+// ScopedUserIdentity.Role() is a POINTER-receiver override of the embedded
+// UserIdentity's promoted Role(). Because it is declared on the outer type it
+// shadows the promoted method for value selection too, so a VALUE-typed
+// ScopedUserIdentity has NO Role() in its value method set and does NOT satisfy
+// UserIdentity — CheckAccess rejects it as "invalid user identity" (fail-closed).
+//
+// The hazard rev1 flagged is a FUTURE "hardening" that switches Role() to a
+// VALUE receiver: that would put Role() (empty) into the value method set,
+// making a value SATISFY UserIdentity while STILL escaping the *ScopedUserIdentity
+// assertion that gates enforceUATConstraints (a value is not the pointer type).
+// Such a value would then be treated as an UNSCOPED member and take the owner
+// bypass with no scope enforcement. This pin locks the current fail-closed
+// property so any such receiver flip goes RED here.
+//
+// Measured both ways: with the current pointer receiver the value fails to
+// satisfy UserIdentity and CheckAccess denies "invalid user identity"; with a
+// value receiver the value satisfies UserIdentity and CheckAccess returns
+// allow "resource owner" (the regression this pin catches).
+func TestN79_PointerReceiverFootgun_ValueIsFailClosed(t *testing.T) {
+	srv, _ := testServer(t)
+	az := srv.authzService
+	ctx := context.Background()
+
+	minter := n79Minter()
+	// A VALUE (not pointer) ScopedUserIdentity, the exact shape rev1's foot-gun
+	// warns a future refactor could reintroduce as a caller construction.
+	val := *NewScopedUserIdentity(minter, tid("n79_fg_P"), []string{"agent:read"})
+
+	// 1. Fail-closed at the type layer: a value must NOT satisfy UserIdentity
+	//    (pointer-receiver Role() shadows the promoted method out of the value
+	//    method set). A value-receiver flip makes this true and trips the pin.
+	if _, ok := any(val).(UserIdentity); ok {
+		t.Errorf("value ScopedUserIdentity satisfies UserIdentity; pointer-receiver Role() must keep it out of the value method set (a value-receiver flip re-opens the N73 bypass)")
+	}
+	// 2. A value is not the pointer type, so it also escapes the
+	//    *ScopedUserIdentity assertion that gates enforceUATConstraints — which
+	//    is exactly why (1) fail-closed is load-bearing.
+	if _, ok := any(val).(*ScopedUserIdentity); ok {
+		t.Errorf("value unexpectedly matched *ScopedUserIdentity")
+	}
+	// 3. Behavioural lock: CheckAccess on an OWNER-MATCHED resource must DENY.
+	//    Under the pointer receiver it denies "invalid user identity"; a
+	//    value-receiver flip would route to the owner bypass and allow
+	//    "resource owner" with no scope enforcement.
+	res := Resource{Type: "agent", ID: tid("n79_fg_agent"), OwnerID: minter.ID(), ParentType: "project", ParentID: tid("n79_fg_B")}
+	if d := az.CheckAccess(ctx, val, res, ActionRead); d.Allowed {
+		t.Errorf("CheckAccess granted a VALUE ScopedUserIdentity on an owner-matched resource (reason=%q); value must be fail-closed, not treated as an unscoped owner", d.Reason)
+	}
+	// 4. The pointer construction is unaffected: it satisfies UserIdentity and
+	//    Role() is the fail-closed empty string (never the minting admin).
+	ptr := NewScopedUserIdentity(minter, tid("n79_fg_P"), []string{"agent:read"})
+	if _, ok := any(ptr).(UserIdentity); !ok {
+		t.Errorf("pointer ScopedUserIdentity must satisfy UserIdentity")
+	}
+	if r := ptr.Role(); r != "" {
+		t.Errorf("Role() = %q, want \"\" (fail-closed for a UAT)", r)
+	}
+}

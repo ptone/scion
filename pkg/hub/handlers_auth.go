@@ -50,14 +50,17 @@ type UserResponse struct {
 	ID          string `json:"id"`
 	Email       string `json:"email"`
 	DisplayName string `json:"displayName"`
-	Role        string `json:"role"`
+	Role        string `json:"role,omitempty"`
 	AvatarURL   string `json:"avatarUrl,omitempty"`
 	// TokenScoped is true when the caller authenticated with a project-scoped
-	// User Access Token (UAT). For such a caller Role reports the MINTING
-	// user's role for attribution (via MintingUserRole), NOT the token's
-	// authority — a UAT has no hub-wide role by construction (#591 / N73).
-	// ScopedProjectID and Scopes report the token's bounds so the response
-	// neither overstates authority nor understates identity.
+	// User Access Token (UAT). For such a caller Role is OMITTED from the wire — a
+	// UAT has no hub-wide role by construction (#591 / N73) — and the minting
+	// user's true role travels only under MintingUserRole, its own name, so a
+	// downstream consumer (e.g. the a2a bridge, which discards the tokenScoped
+	// marker) can never mistake the attribution string for authority (#591 / N82).
+	// ScopedProjectID and Scopes report the token's bounds so the response neither
+	// overstates authority nor understates identity.
+	MintingUserRole string   `json:"mintingUserRole,omitempty"`
 	TokenScoped     bool     `json:"tokenScoped,omitempty"`
 	ScopedProjectID string   `json:"scopedProjectId,omitempty"`
 	Scopes          []string `json:"scopes,omitempty"`
@@ -572,13 +575,15 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		Role:        user.Role(),
 	}
 	// A UAT-authenticated caller has an empty Role() by construction (#591 /
-	// N73), so /auth/me must report the MINTING user's true role for
-	// attribution and mark the identity token-scoped with its project and
-	// scopes. Otherwise the response would either overstate authority (the
-	// pre-fix "admin") or, under a naive fix, understate identity (a bare "").
-	// This is attribution only; no authorization is decided here.
+	// N73), so Role above is already "" and, being omitempty, is OMITTED from
+	// the wire — the response never carries a hub-wide authority string for a
+	// token that has none. The minting user's true role travels ONLY under
+	// mintingUserRole, its own name, so a downstream consumer that discards the
+	// tokenScoped marker (e.g. the a2a bridge) can never mistake attribution for
+	// authority (#591 / N82). ScopedProjectID and Scopes report the token's
+	// bounds. This is attribution only; no authorization is decided here.
 	if scoped, ok := user.(*ScopedUserIdentity); ok {
-		resp.Role = scoped.MintingUserRole()
+		resp.MintingUserRole = scoped.MintingUserRole()
 		resp.TokenScoped = true
 		resp.ScopedProjectID = scoped.ScopedProjectID()
 		resp.Scopes = scoped.ScopedScopes()

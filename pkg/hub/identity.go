@@ -136,6 +136,18 @@ func (s *ScopedUserIdentity) HasScope(scope string) bool {
 // the minting user's role or a demoted real role (that re-opens the bypass and
 // makes Role() lie): ask enforceUATConstraints for authority, and
 // MintingUserRole() for attribution.
+//
+// Role() is deliberately a POINTER receiver. Declared on the outer type, it
+// SHADOWS the embedded UserIdentity's promoted Role() for value selection too,
+// so a VALUE-typed ScopedUserIdentity has no Role() in its method set and does
+// not satisfy UserIdentity at all — CheckAccess rejects such a value as an
+// "invalid user identity" (fail-closed; measured). Do NOT "harden" this by
+// switching to a value receiver: that would place Role() (empty) into the value
+// method set, making a value SATISFY UserIdentity while still escaping the
+// *ScopedUserIdentity assertion that gates enforceUATConstraints — a value UAT
+// would then be treated as an UNSCOPED member and take the owner/policy paths
+// with no scope enforcement (measured: CheckAccess returns allow, "resource
+// owner"). TestN79_PointerReceiverFootgun_ValueIsFailClosed pins this.
 func (s *ScopedUserIdentity) Role() string { return "" }
 
 // MintingUserRole returns the true role of the user who MINTED this token, for

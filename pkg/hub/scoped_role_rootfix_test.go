@@ -462,10 +462,20 @@ func TestAuthMe_ScopedUAT_Attribution(t *testing.T) {
 	if pid, _ := m["scopedProjectId"].(string); pid != "n73-project" {
 		t.Errorf("scopedProjectId = %q, want %q", pid, "n73-project")
 	}
-	// Attribution must report the minting user's true role, not the empty
-	// authority role and not a bare "".
-	if role, _ := m["role"].(string); role != store.UserRoleAdmin {
-		t.Errorf("role = %q, want minting role %q (via MintingUserRole)", role, store.UserRoleAdmin)
+	// Authority: role MUST be omitted from the wire for a UAT (#591 / N82). A
+	// UAT has no hub-wide role by construction (#591 / N73), so the response
+	// must not carry a "role" key at all — a downstream consumer that discards
+	// the tokenScoped marker (e.g. the a2a bridge) must not find an authority
+	// string where there is none.
+	if raw, present := m["role"]; present {
+		if role, _ := raw.(string); role != "" {
+			t.Errorf("role = %q, want omitted/empty for a UAT (N82); attribution belongs in mintingUserRole", role)
+		}
+	}
+	// Attribution: the minting user's true role travels under mintingUserRole,
+	// its own name (#591 / N82) — never as authority.
+	if mur, _ := m["mintingUserRole"].(string); mur != store.UserRoleAdmin {
+		t.Errorf("mintingUserRole = %q, want minting role %q", mur, store.UserRoleAdmin)
 	}
 	// Scopes echoed back.
 	scopes, _ := m["scopes"].([]any)
