@@ -424,11 +424,24 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdent
 //     denies them. Denying them here instead would answer 404 where 403 and 401
 //     are correct.
 //
-// It grants nothing: every caller it passes still has to clear s.authorize.
+// It grants nothing: it only narrows a cross-project agent's answer to 404.
+// Every caller it passes still faces the endpoint's own authorization — at the
+// seven current call sites that is the raw GetUserIdentityFromContext-plus-else
+// idiom, not an s.authorize call.
 func (s *Server) requireProjectVisibleToAgent(w http.ResponseWriter, r *http.Request, project *store.Project) bool {
 	agentIdent := GetAgentIdentityFromContext(r.Context())
 	if agentIdent == nil {
 		return true
+	}
+	if project == nil {
+		// Caller bug rather than a policy outcome; deny rather than panic, as
+		// authorizeAgentLifecycle does for a nil agent. Not reachable at the
+		// current call sites (each fetches the project and returns on error
+		// before calling this), but the next call site inherits the guard rather
+		// than a nil dereference (Rule 18a).
+		logAuthzDenial(r, agentIdent, Resource{Type: "project"}, ActionRead, "nil project")
+		NotFound(w, "Project")
+		return false
 	}
 	if project.ID != agentIdent.ProjectID() {
 		logAuthzDenial(r, agentIdent, projectResource(project), ActionRead,

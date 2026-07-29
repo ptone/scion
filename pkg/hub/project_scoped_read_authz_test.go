@@ -416,6 +416,16 @@ func TestProjWrite_CrossProjectAgentGetsNotFound(t *testing.T) {
 				"deliberate change: this path answered 403 before, which confirmed "+
 					"the project's existence. It was already fail-closed — this is a "+
 					"disclosure narrowing, not an authorization fix")
+			// Pin WHO produced the 404. Several of these endpoints emit a second,
+			// resource-level 404 (e.g. delete shared dir answers "Shared directory
+			// not found" to a legitimate owner). Asserting the status alone would
+			// stay green if a future reorder moved that resource lookup ahead of the
+			// isolation gate, returning the resource-level 404 to a cross-project
+			// agent while the gate is dead. Requiring the isolation message keeps the
+			// assertion tied to the gate.
+			require.Contains(t, rec.Body.String(), "Project not found",
+				"the 404 must come from the project-isolation gate, not from a "+
+					"resource lookup that ran ahead of it")
 		})
 	}
 }
