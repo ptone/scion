@@ -1462,6 +1462,25 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			// Create new broker
 			if brokerID == "" {
 				brokerID = api.NewUUID()
+			} else {
+				// brokerID came from the client. Validate it through the single
+				// shared source of truth that brokerauth.go's broker-registration
+				// path also calls (validateNewBrokerID), so the two broker-mint
+				// paths cannot disagree on what a valid new broker id is. It
+				// enforces canonical-UUID format and rejects an id that already
+				// resolves to a user, agent, group or project: a broker id is
+				// caller-chosen, so without this a minted broker could take the id
+				// of another principal. It is not needed for the hub-generated id
+				// above, nor for the reuse/link branch, which mints no new
+				// principal and issues no credential.
+				if err := validateNewBrokerID(ctx, s.store, brokerID); err != nil {
+					if errors.Is(err, ErrBrokerIDRejected) {
+						ValidationError(w, err.Error(), map[string]interface{}{"field": "brokerId"})
+					} else {
+						writeErrorFromErr(w, err, "")
+					}
+					return
+				}
 			}
 
 			broker = &store.RuntimeBroker{
