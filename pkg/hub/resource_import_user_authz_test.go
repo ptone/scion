@@ -422,10 +422,18 @@ func TestRIUserGate_EveryProjectScopeUserArmIsGated(t *testing.T) {
 		return ok && isIdent(kv.Key, "Type")
 	}
 
-	var projectCreates, gates []token.Pos
+	var projectCreates, globalCreates, gates []token.Pos
+	var userBranches []token.Pos
+	var residue []string
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
+			return true
+		}
+		// The identity-branch entry points, counted for the cross-population
+		// invariant below. Plain function call, so no selector.
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "GetUserIdentityFromContext" {
+			userBranches = append(userBranches, call.Pos())
 			return true
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -434,8 +442,38 @@ func TestRIUserGate_EveryProjectScopeUserArmIsGated(t *testing.T) {
 		}
 		switch sel.Sel.Name {
 		case "CheckAccess":
-			if len(call.Args) == 4 && isIdent(call.Args[1], "userIdent") &&
-				isIdent(call.Args[3], "ActionCreate") && !isGlobalResource(call.Args[2]) {
+			// RESIDUE BUCKET (N88). Membership of the population below is keyed on
+			// the identifier SPELLING "userIdent", and a key like that fails OPEN by
+			// default: an arm that spells its identity variable anything else simply
+			// stops being measured, taking its missing gate with it. Every CheckAccess
+			// in this file must therefore land in the population or be NAMED here —
+			// silence is not an option the key gets to exercise.
+			//
+			// Measured at 148f8526: all 7 CheckAccess calls in this file pass
+			// userIdent and none passes agentIdent (the agent arms delegate to
+			// authorizeImportAgentRead, whose own check lives in authorize.go), so
+			// this bucket has no false positives today. If a legitimate non-userIdent
+			// caller is added here, widen the population deliberately — do not delete
+			// this check to make it quiet.
+			if len(call.Args) != 4 || !isIdent(call.Args[1], "userIdent") {
+				pos := fset.Position(call.Pos())
+				spelled := "«not a plain identifier»"
+				if len(call.Args) > 1 {
+					if id, ok := call.Args[1].(*ast.Ident); ok {
+						spelled = id.Name
+					}
+				}
+				residue = append(residue, fmt.Sprintf(
+					"  %s:%d CheckAccess with %d args whose identity argument is %s",
+					pos.Filename, pos.Line, len(call.Args), spelled))
+				return true
+			}
+			if !isIdent(call.Args[3], "ActionCreate") {
+				return true
+			}
+			if isGlobalResource(call.Args[2]) {
+				globalCreates = append(globalCreates, call.Pos())
+			} else {
 				projectCreates = append(projectCreates, call.Pos())
 			}
 		case "authorizeImportUserRead":
@@ -444,14 +482,36 @@ func TestRIUserGate_EveryProjectScopeUserArmIsGated(t *testing.T) {
 		return true
 	})
 
+	require.Empty(t, residue,
+		"every CheckAccess in %s must be part of the measured population, and these are "+
+			"not:\n%s\nThe population is keyed on the identifier spelling %q, so an arm using "+
+			"a different name would silently leave it — along with any missing read gate. "+
+			"Rename the variable back, or widen the population on purpose.",
+		riUserSourceFile, strings.Join(residue, "\n"), "userIdent")
+
 	// ANTI-VACUITY, both sides. A filter that has stopped matching produces a
-	// green indistinguishable from a clean file.
+	// green indistinguishable from a clean file. NOTE these check PRESENCE, not
+	// STABILITY: they see 5 -> 0 and are blind to 5 -> 4, which is exactly the
+	// hole the residue bucket above and the invariant below close.
 	require.NotEmpty(t, projectCreates,
 		"found no project-scope user create checks in %s — the AST filter has stopped "+
 			"matching and this test is measuring nothing", riUserSourceFile)
 	require.NotEmpty(t, gates,
 		"zero authorizeImportUserRead calls found: the fix has been removed wholesale, or "+
 			"the call form changed and this inventory is now blind")
+
+	// CROSS-POPULATION INVARIANT (N88). Three counts derived by INDEPENDENT
+	// filters must agree: every user identity branch performs exactly one create
+	// check, project-scoped or global. Nothing previously compared them, so a
+	// branch could drop out of the create population while its entry point stayed
+	// put and every surviving assertion still passed.
+	require.Equal(t, len(userBranches), len(projectCreates)+len(globalCreates),
+		"%s has %d user identity branches but %d create checks (%d project-scope + %d "+
+			"global): every user branch must perform exactly one. A branch whose create "+
+			"check left the measured population is the likely cause — check the residue "+
+			"list above, and do not reconcile these numbers by editing this assertion.",
+		riUserSourceFile, len(userBranches), len(projectCreates)+len(globalCreates),
+		len(projectCreates), len(globalCreates))
 
 	// ADJACENCY, not cardinality. Each project-scope create must be followed by a
 	// gate IN ITS OWN ARM. Totals cannot launder a displacement: moving a gate out
