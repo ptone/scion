@@ -168,6 +168,20 @@ func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Gate before the linked-project test below. That test answers 409 with a
+	// message that tells the caller whether this project's workspace lives on a
+	// broker, which is a fact about a project the gate may be about to refuse to
+	// acknowledge at all. Authorization first, then shape.
+	//
+	// Refresh is a write: it makes the broker upload the workspace to GCS and
+	// then overwrites the hub's local cache directory with what comes back.
+	if !s.requireProjectVisibleToAgent(w, r, project) {
+		return
+	}
+	if !s.authorize(w, r, projectResource(project), ActionUpdate) {
+		return
+	}
+
 	// Hub-managed projects don't need cache refresh — they are the source of truth
 	if project.GitRemote == "" && !s.isLinkedProject(ctx, project) {
 		Conflict(w, "Cache refresh is only applicable to linked projects with remote workspaces")
@@ -211,6 +225,17 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Status is a read, but not a harmless one: the response carries the ID of
+	// the broker that last served this project's workspace, its file count and
+	// its byte count. Gate before the disk is stat'd, so that the existence of a
+	// cache is not disclosed either.
+	if !s.requireProjectVisibleToAgent(w, r, project) {
+		return
+	}
+	if !s.authorize(w, r, projectResource(project), ActionRead) {
 		return
 	}
 
@@ -263,6 +288,27 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Notify is a write with an unusually large blast radius: it runs
+	// SyncFromGCS over the hub's local cache directory for this project, so an
+	// unauthorized caller could overwrite one project's cached workspace on
+	// demand. Gate before any of that, and before the storage check, which
+	// otherwise reports on hub configuration to a caller with no standing.
+	//
+	// Plain s.authorize, deliberately. Below, this handler reads a broker
+	// identity out of the context to record which broker pushed — that is who
+	// the endpoint was written for, but "the endpoint was written for brokers"
+	// is not an authorization rule, and there is no broker arm anywhere in
+	// AuthzService.CheckAccess (authz.go) for this to appeal to. Inventing a
+	// broker-provider check here would put a bespoke rule in one handler that
+	// exists nowhere else in pkg/hub, and a bespoke rule is exactly the kind of
+	// thing that later drifts from the general one. A broker therefore falls to
+	// CheckAccess's default deny, the same as any other identity it does not
+	// recognize, and brokerID below stays empty for authorized non-broker
+	// callers as it already did.
+	if !s.authorize(w, r, projectResource(project), ActionUpdate) {
 		return
 	}
 
