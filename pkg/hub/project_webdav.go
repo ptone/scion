@@ -393,23 +393,20 @@ func (r *ProjectSyncStatusResponse) UnmarshalJSON(data []byte) error {
 
 // handleProjectSyncStatus returns the sync status for a project.
 //
-// KNOWINGLY UNGATED. This is the second entry handler in this file, and unlike
-// handleProjectWebDAV above it has no authorization call: any caller the
-// middleware authenticates can read the sync state of any project, which
-// discloses the IDs of the brokers serving it along with its file and byte
-// counts. That is the same #591-class exposure the rest of this file's gate
-// closed, and it is left open here only because closing it is a separate
-// decision that is pending, not because it was judged safe.
+// This is the second entry handler in this file. Until this gate was added it
+// had no authorization call of any kind: any caller the middleware
+// authenticated — a user with no relationship to the project, an agent
+// belonging to a different project, a runtime broker — could read any
+// project's sync state, which names the brokers serving that project and
+// reports its file and byte counts. The workspace sibling in this same file
+// refused those same callers, so the exposure was reachable by asking a
+// neighbouring route the same question.
 //
-// If you are adding a gate to this handler: it wants
-// authorizeProjectWorkspaceAccess (project_workspace_handlers.go) on a GET,
-// which resolves to a read, placed immediately after the GetProject below and
-// before ListProjectSyncStates — the same ordering as every other gate in this
-// file and in project_cache.go, whose cache/status handler discloses the same
-// broker IDs and is gated. Do not invent a different shape for it.
-//
-// If you are adding another handler to this file: this comment is about THIS
-// function only. It is not a precedent, and an unguarded new handler is a bug.
+// It shares authorizeProjectWorkspaceAccess with the routes above rather than
+// growing a rule of its own. GET maps to a read, and project_cache.go's
+// cache/status handler — which discloses the very same ProjectSyncState
+// records — is gated as a read too. Two endpoints that return the same records
+// must answer the same callers the same way, or the stricter one is decorative.
 func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
@@ -419,9 +416,14 @@ func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request,
 	ctx := r.Context()
 
 	// Verify project exists
-	_, err := s.store.GetProject(ctx, projectID)
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Gate before the sync states are read, which is the disclosure itself.
+	if !s.authorizeProjectWorkspaceAccess(w, r, project) {
 		return
 	}
 
