@@ -274,8 +274,13 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleProjectCacheNotify handles a notification from a broker that it has pushed
-// workspace updates to GCS and the hub cache should be refreshed.
+// handleProjectCacheNotify re-pulls the project's workspace from GCS into the
+// hub's local cache. It is available to a caller with update on the project;
+// brokers, which is who it was originally written for, no longer reach it —
+// see the gate below and the broker-identity read further down, which is now
+// vestigial. Read as "refresh this project's cache from object storage", not
+// as "a broker is telling us it pushed": the second reading is what the name
+// suggests and is no longer what the endpoint is.
 // POST /api/v1/projects/{projectId}/workspace/cache/notify
 func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
