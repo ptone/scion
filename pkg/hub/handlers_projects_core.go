@@ -664,7 +664,10 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	// leaves an agent falling out of the switch entirely, promoted by nothing (N57,
 	// measured). Restoring the escalation takes an ADDITION: widening the case list
 	// to a non-user-class Type(), or replacing the default body with a promote. That
-	// is what to refuse in review.
+	// is what to refuse in review. None of the three deletions is an improvement
+	// either — they hollow out the B10 arm, turn a fail-closed skip into a 500, and
+	// drop the explicit refusal and its log respectively. Do not make them without
+	// security review.
 	ownerCount, err := s.store.CountGroupMembersByRole(ctx, membersGroup.ID, store.GroupMemberRoleOwner)
 	if err == nil && ownerCount == 0 {
 		members, err := s.store.GetGroupMembers(ctx, membersGroup.ID)
