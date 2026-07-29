@@ -185,8 +185,11 @@ func (s *Server) handleBrokerByIDRoutes(w http.ResponseWriter, r *http.Request) 
 // handleBrokerRotateSecret handles POST /api/v1/brokers/{id}/rotate-secret.
 // Rotates the HMAC secret for a broker.
 // Authorized for three arms: an admin user, the broker itself (self-rotation),
-// or the broker's owner. Under the registration posture the owner is any
-// authenticated member who registered that broker, not only an admin (#591).
+// or the broker's owner. The owner arm recognizes the registrant only where
+// ownership was recorded: the POST /api/v1/brokers path sets CreatedBy, so that
+// registrant is the owner; the register-by-name path records no CreatedBy, so
+// brokers minted that way have no owner arm (the CreatedBy not-empty guard).
+// This PR does not reconcile the two paths (#591, #221).
 func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request, brokerID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
