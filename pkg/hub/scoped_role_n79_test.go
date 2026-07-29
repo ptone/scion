@@ -40,13 +40,15 @@ import (
 //	CHANGE (3) COARSE type gate at the batch OwnerID/ancestry fast paths: only the
 //	           user family enters; every non-user identity (broker, agent, ...)
 //	           skips them. Change 1 is the FINE gate nested inside it (a scoped
-//	           UAT, though user-family, still skips). This closes T1 — a live
-//	           forged-broker leak whose ID collides with a victim user id.
+//	           UAT, though user-family, still skips). This is T1, whose INVARIANT
+//	           is that a bare-ID fast path never authorizes a caller of a
+//	           different principal kind from the one the id names.
 //
 // Neither layer alone satisfies the invariant: change 3 admits a *ScopedUserIdentity
-// (it is user-family) so change 1 is still needed to stop the UAT scope escape;
-// change 1 does nothing for a broker so change 3 is still needed to stop the
-// forged-broker leak. The pins below therefore FAIL if EITHER change is reverted.
+// (it is user-family) so change 1 is still needed to bound a UAT to its scope;
+// change 1 says nothing about principal kind so change 3 is still needed to hold
+// T1 for a non-user-family caller. The pins below therefore FAIL if EITHER change
+// is reverted.
 //
 // The acceptance invariant (TestN79_Invariant_*) is: no path may return an
 // allow for a *ScopedUserIdentity without enforceUATConstraints returning nil
@@ -421,19 +423,22 @@ func TestN79_Invariant_AllowImpliesEnforceUATConstraintsNil(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// Pin 9 / T1 — FORGED-BROKER batch leak, pinning CHANGE (3) as a DIFFERENTIAL.
+// Pin 9 / T1 — batch fast paths vs. principal kind, pinning CHANGE (3) as a
+// DIFFERENTIAL.
 // A broker identity implements only ID()/Type()/BrokerID() — no Email/
 // DisplayName/Role — so it is NOT a UserIdentity. The batch OwnerID/ancestry
-// fast paths key on bare identity.ID(), so a self-minted broker whose ID
-// collides with a victim user id trips them and lists the victim's owned
-// resources. This leaks TODAY, independent of F3b.
+// fast paths key on bare identity.ID() and so cannot tell principal kinds apart
+// by themselves. T1 is the INVARIANT that they must not authorize a caller of a
+// kind other than the one the id names; this pin is what holds it, and it is
+// independent of F3b.
 //
-// change 3 gates the fast paths on the user family, so the forged broker flips
-// from allow-on-all to deny-on-all — MATCHING a non-colliding control broker
-// (always denied) — WHILE the genuine victim user keeps batch access on its
-// owned and descendant rows. The guard closes the broker without regressing the
-// user. change 1 (scoped skip) does nothing for a broker, so this pin FAILS if
-// change 3 is reverted; the scoped-UAT pins above FAIL if change 1 is reverted.
+// change 3 gates the fast paths on the user family, so a non-user-family
+// identity carrying that id is denied on every row — MATCHING a control broker
+// whose id names nothing (also denied) — WHILE the genuine user keeps batch
+// access on its owned and descendant rows. The guard holds the invariant without
+// regressing the user. change 1 (scoped skip) says nothing about principal kind,
+// so this pin FAILS if change 3 is reverted; the scoped-UAT pins above FAIL if
+// change 1 is reverted.
 //
 // The forged-broker assertion uses the PRODUCTION resource shape and the
 // ancestry-only shape (#591 / N87). Every user-created agent carries BOTH OwnerID
@@ -469,9 +474,9 @@ func TestN79_T1_ForgedBrokerBatch_Differential(t *testing.T) {
 	forged := NewBrokerIdentity(victimID)               // ID collides with the victim
 	control := NewBrokerIdentity(tid("n79_t1_control")) // non-colliding broker
 
-	// Preconditions: the forged broker's ID matches the victim (the leak primitive)
-	// and it satisfies NEITHER UserIdentity NOR AgentIdentity, so the N87 guard
-	// denies it before canAccessAsAncestor.
+	// Preconditions for the differential: the two identities agree on ID and
+	// differ only in kind, and this one satisfies NEITHER UserIdentity NOR
+	// AgentIdentity, so the N87 guard denies it before canAccessAsAncestor.
 	if forged.ID() != victimID {
 		t.Fatalf("test setup: forged broker id does not collide with victim; pin vacuous")
 	}
@@ -482,9 +487,11 @@ func TestN79_T1_ForgedBrokerBatch_Differential(t *testing.T) {
 		t.Fatalf("test setup: broker unexpectedly satisfies AgentIdentity")
 	}
 
-	// DIFFERENTIAL 1: forged broker DENIED on BOTH live shapes (production and
-	// ancestry-only), MATCHING the non-colliding control broker (also denied). Prior
-	// to N87 the forged broker was granted 7/7 on both via the bare-ID :486 grant.
+	// DIFFERENTIAL 1: the non-user-family identity is DENIED on BOTH live shapes
+	// (production and ancestry-only), MATCHING the control broker whose id names
+	// nothing (also denied). Reverting the N87 guard reds both arms, because the
+	// bare-ID :486 grant then admits a caller of a kind it cannot vouch for — so
+	// these zeros are the guard's doing and not a vacuous deny.
 	fCaps := az.ComputeCapabilitiesBatch(ctx, forged, []Resource{production, ancestryOnly}, "agent")
 	if len(fCaps[0].Actions) != 0 {
 		t.Errorf("N87 forged-broker leak (production shape, owner+ancestry): batch granted %d/%d actions via the bare-ID ancestry grant; actions=%v",

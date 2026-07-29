@@ -19,11 +19,12 @@ package hub
 // Client-supplied broker identifiers (ptone/scion#591).
 //
 // Every other identity id in this hub is minted by the hub. A broker id is not:
-// the registering client may name itself, and whatever it names is what gets a
-// credential and what every id-keyed comparison downstream will see. These
-// tests pin the two properties that makes necessary — the id must be a
-// well-formed identifier, and it must not already denote some other kind of
-// principal — together with the registrations that must keep working.
+// it is client-supplied, so it is the one identifier the hub does not choose.
+// INVARIANT: an identifier admitted here must have exactly one spelling and must
+// not already denote a principal of another kind, so that it cannot stand for
+// anything but the broker it names. These tests pin those two properties —
+// well-formed, and not already taken in another namespace — together with the
+// registrations that must keep working.
 
 import (
 	"context"
@@ -348,12 +349,12 @@ func TestBrokerID_CrossNamespaceRejected(t *testing.T) {
 			assert.False(t, f.brokerExists(t, id),
 				"the colliding broker row must not be persisted")
 
-			// The refusal must not say WHICH namespace matched. Otherwise the
-			// endpoint answers "does this identifier name a user / an agent / a
-			// group / a project" for any identifier a caller cares to submit.
+			// INVARIANT: every rejection reason collapses to one generic
+			// refusal, so the namespace that matched must not appear in it. See
+			// the ErrBrokerIDRejected doc, which this row is the test for.
 			assert.NotContains(t, err.Error(), ns,
-				"the refusal names the namespace it matched, which makes this "+
-					"endpoint a membership oracle for identifiers")
+				"the refusal names the namespace it matched, so refusals are "+
+					"distinguishable by reason")
 		})
 	}
 }

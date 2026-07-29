@@ -333,9 +333,10 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 	// #591 (N73/N79): two nested gates protect the fast-path short-circuits below.
 	// COARSE (N79 change 3): only the user family enters the fast paths; every
 	// non-user identity (broker, agent, anything else) skips them so it cannot
-	// trip the bare-ID OwnerID/ancestry paths — this closes T1, a self-minted
-	// broker whose ID collides with a victim user id that would otherwise list
-	// the victim's owned and descendant resources. FINE (N79 change 1): a
+	// trip the bare-ID OwnerID/ancestry paths. INVARIANT (T1): a grant keyed on a
+	// bare identity.ID() must never authorize a caller of a different principal
+	// kind from the one that id names — equal identifiers across kinds are not
+	// the same principal. FINE (N79 change 1): a
 	// project-scoped UAT, though it IS a UserIdentity, still skips them and falls
 	// to the per-action checkAccessPrecomputed loop, which enforceUATConstraints
 	// gates at its top (change 2). The fast paths remain for every non-scoped
@@ -381,10 +382,10 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 	for i, resource := range resources {
 		// #591 (N73/N79): the OwnerID and ancestry fast paths below carry NO type
 		// assertion and key on bare identity.ID(), so they are double-gated.
-		// COARSE (change 3): only the user family enters — a non-user identity
-		// (e.g. a self-minted broker whose ID collides with a victim user id)
-		// would otherwise trip OwnerID/ancestry and list the victim's owned and
-		// descendant resources (T1, a live leak). FINE (change 1): a scoped UAT,
+		// COARSE (change 3): only the user family enters, because on their own
+		// these paths cannot tell principal kinds apart. INVARIANT (T1): a
+		// bare-ID OwnerID/ancestry grant must be unreachable by a caller that is
+		// not of the principal kind the id names. FINE (change 1): a scoped UAT,
 		// though it IS a UserIdentity, still skips them and falls to
 		// checkAccessPrecomputed (enforceUATConstraints-gated) below. NOTE the
 		// ancestry SLOW path in checkAccessPrecomputed remains bare-ID (T1r,
@@ -489,11 +490,13 @@ func (a *AuthzService) checkAccessPrecomputed(identity Identity, _ []store.Princ
 	// the owner bypass above are type-guarded). It is the slow-path twin of the
 	// batch OwnerID/ancestry fast paths that change 3 gated to the user family:
 	// this evaluator is reached by non-user identities that skip those fast paths,
-	// so without a guard here a self-minted broker whose id collides with a victim
-	// user id (Type "broker", ID victimID) is granted "ancestor access" and lists
-	// the victim's descendant agents. Every user-created agent carries BOTH OwnerID
-	// and Ancestry (the owner-only shape is never produced), so this leaks on the
-	// production and ancestry-only shapes. Gate it to the identity families that can
+	// so without a guard here the grant is reachable by a caller that is not of
+	// the principal kind the id names. INVARIANT (N87): "ancestor access" is for
+	// principals that can genuinely BE an ancestor; identifier equality alone is
+	// not ancestry. Every user-created agent carries BOTH OwnerID and Ancestry
+	// (the owner-only shape is never produced), so on both shapes the create path
+	// really emits it is this guard and not the owner bypass above that holds the
+	// invariant. Gate it to the identity families that can
 	// be a GENUINE ancestor: a real user (UserIdentity) or a legitimate descendant
 	// agent (AgentIdentity). This is user-OR-agent, NOT user-only — agents are
 	// legitimate ancestors; a broker (and any future non-user-family type) is denied

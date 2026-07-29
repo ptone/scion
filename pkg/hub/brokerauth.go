@@ -234,10 +234,10 @@ func validateBrokerIDFormat(brokerID string) error {
 	if err != nil {
 		return ErrBrokerIDRejected
 	}
-	// Broker ids are pinned to canonical UUID form to prevent id-collision /
-	// spoofing across principal namespaces: a non-canonical spelling could be
-	// registered under one form and resolved under another. See #591. The
-	// refusal is deliberately generic — see ErrBrokerIDRejected.
+	// Canonical form is the INVARIANT this enforces: one identifier has exactly
+	// one spelling, so the same id cannot be registered in one form and resolved
+	// in another. See #591. The refusal is deliberately generic — see
+	// ErrBrokerIDRejected.
 	if parsed.String() != brokerID {
 		return ErrBrokerIDRejected
 	}

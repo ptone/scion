@@ -21,10 +21,10 @@ package hub
 //
 // The endpoint admits two callers: a hub admin, and the principal being
 // evaluated. "The principal being evaluated" is a PAIR — a principalType and a
-// principalId — and both halves are supplied by the caller. A gate that
-// compares only the id half treats "same id" as "same principal", so an
-// identity of one kind whose ID() equals a principal of another kind is
-// admitted as that other principal.
+// principalId — and both halves are supplied by the caller. INVARIANT: the
+// self-arm must match on the caller's principal KIND as well as its id, because
+// "same id" is not "same principal" — an identity of one kind is never the
+// principal of another kind, whatever identifiers happen to be equal.
 //
 // The tests below are a TABLE over every concrete Identity implementation in
 // this package, not a pair of examples. The census in
@@ -553,7 +553,7 @@ func f3Cases() []f3Case {
 			"agent", idAgent, http.StatusForbidden,
 			"a non-admin user may not evaluate an agent it is not"},
 
-		// ---- cross-kind by ID collision: the defect ----
+		// ---- cross-kind, ids equal: the rows the kind half of the gate is for ----
 		{"brokerIdentityImpl", "broker whose ID equals a user's", asBroker(func(f *f3Fixture) f3Broker { return f.brokerAsUser }),
 			"user", idVictimAllow, http.StatusForbidden,
 			"a broker is not the user whose id it carries"},
