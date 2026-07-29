@@ -34,16 +34,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Regression tests for the four project-scoped READ guards that use the second
+// Regression tests for the four project-scoped READ guards that used the second
 // #591 idiom:
 //
 //	identity := GetIdentityFromContext(ctx)
 //	if userIdent, ok := identity.(UserIdentity); ok { ...CheckAccess... }
 //
-// with no else. The bypass here is the type ASSERTION rather than a nil check:
-// identity is non-nil for an agent or a broker — both are rejected by the
-// explicit nil guard above these sites — and it is the assertion to UserIdentity
-// that fails, so the body is skipped in silence and the handler serves the
+// with no else. The bypass there was the type ASSERTION rather than a nil check:
+// identity is non-nil for an agent or a broker — both were rejected by the
+// explicit nil guard above these sites — and it was the assertion to UserIdentity
+// that failed, so the body was skipped in silence and the handler served the
 // resource.
 //
 // The four sites:
@@ -53,16 +53,19 @@ import (
 //	project_settings_handlers.go:74         handleProjectSettings          GET
 //	handlers_shared_dirs.go:47              handleProjectSharedDirs        GET
 //
-// What makes this set unusually clear-cut: in all three files every MUTATING
-// method in the same switch statement already carries the else { Forbidden(w) }
-// clause, and only the read paths lack it. The intended shape is present in the
-// same function, a few lines away, in every case. These are omissions, not a
+// What made this set unusually clear-cut: in all three files every MUTATING
+// method in the same switch statement already carried the else { Forbidden(w) }
+// clause, and only the read paths lacked it. The intended shape was present in the
+// same function, a few lines away, in every case. These were omissions, not a
 // deliberate policy that non-user callers may read project configuration.
 //
 // Reachability: UnifiedAuthMiddleware validates agent tokens with no path
 // allowlist and BrokerAuthMiddleware establishes a broker identity for any path
-// once the HMAC verifies, so both kinds reach these handlers with credentials
-// the hub itself issues. This is a live bypass, not a latent one.
+// once the HMAC verifies, so both kinds could reach these handlers with credentials
+// the hub itself issues. This WAS a live bypass, not a latent one, on the pre-fix
+// shape. Fixed in 3dc0551f: each GET arm now runs requireProjectVisibleToAgent then
+// s.authorize(project, ActionRead), and the no-else UserIdentity shape is gone from
+// all four read paths; these tests are the regression pins for that fix.
 //
 // Test naming: everything file-local is prefixed projRead.
 
