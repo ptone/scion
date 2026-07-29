@@ -376,10 +376,12 @@ func (f *rpGateFixture) requireVictimUnserved(t *testing.T, because string) {
 }
 
 // requireNoBrokerSecret pins the second thing a refused register must not hand
-// back. The deprecated by-name branch does not only link a broker; it also
-// returns a broker HMAC secret in the response body. So a caller the gate
-// refuses must come away with neither the provider write nor that credential,
-// and the refusal is measured against both rather than against the write alone.
+// back. The deprecated by-name branch used to return a broker HMAC secret in
+// the response body alongside the provider link; that emission is gone
+// (#591, see the note in handleProjectRegister and the dedicated coverage in
+// register_secret_disclosure_test.go, which holds it closed for allowed
+// callers too). This assertion keeps the refused case tied to it: a caller the
+// gate refuses comes away with neither the provider write nor a credential.
 func (f *rpGateFixture) requireNoBrokerSecret(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	require.NotContains(t, rec.Body.String(), "secretKey",

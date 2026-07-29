@@ -104,7 +104,11 @@ type RegisterProjectResponse struct {
 	Created       bool                     `json:"created"`
 	Matches       []hubclient.ProjectMatch `json:"matches,omitempty"`     // Populated when multiple projects share the same git remote
 	BrokerToken   string                   `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
-	SecretKey     string                   `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
+	// SecretKey is DEPRECATED and is never populated (#591). Registering a
+	// project does not authenticate the broker, so this response cannot be a
+	// place to hand out a broker secret; /brokers/join is. The field is kept
+	// only so old clients still decode the body. Do not assign to it.
+	SecretKey string `json:"secretKey,omitempty"`
 }
 
 // AddProviderRequest is the request for adding a broker as a project provider.
@@ -1175,11 +1179,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle broker linking - two paths:
-	// 1. New flow (preferred): BrokerID provided - link to existing broker (no secret generation)
-	// 2. Deprecated flow: Broker object provided - create/update broker AND generate secret
+	// 1. New flow (preferred): BrokerID provided - link to existing broker
+	// 2. Deprecated flow: Broker object provided - create/update broker
+	// Neither path issues a broker secret; secrets come only from /brokers/join.
 	var broker *store.RuntimeBroker
 	var brokerToken string
-	var secretKey string
 
 	if req.BrokerID != "" {
 		// NEW FLOW: Link to existing broker registered via two-phase /brokers + /brokers/join
@@ -1244,7 +1248,8 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 		// No secret returned - broker already has credentials from /brokers/join
 	} else if req.Broker != nil {
-		// DEPRECATED FLOW: Embedded broker registration (creates broker and generates secret)
+		// DEPRECATED FLOW: Embedded broker registration (creates or links a broker;
+		// no secret is generated or returned - see the note further down)
 		util.Debugf("Warning: embedded Broker field in project registration is deprecated. Use two-phase registration: POST /brokers + POST /brokers/join, then pass brokerId")
 
 		brokerID := req.Broker.ID
@@ -1345,18 +1350,33 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Generate HMAC credentials for the broker if broker auth service is available
-		// (deprecated flow only - new flow gets secrets from /brokers/join)
-		if s.brokerAuthService != nil {
-			var err error
-			secretKey, err = s.brokerAuthService.GenerateAndStoreSecret(ctx, broker.ID)
-			if err != nil {
-				// Log but don't fail - broker is registered, can complete join later
-				util.Debugf("Warning: failed to generate broker secret: %v", err)
-				// Fall back to simple token for backward compatibility
-				brokerToken = "broker_" + api.NewShortID() + "_" + api.NewShortID()
-			}
-		} else {
+		// This branch does NOT mint or return a broker HMAC secret (#591).
+		//
+		// A register response is not a credential-issuing channel. The response
+		// body of this route goes back to whoever made the request, so a broker
+		// secret placed in it is handed to that caller rather than to the broker
+		// the secret belongs to. The supported way for a broker to obtain its
+		// secret is the two-phase POST /brokers + POST /brokers/join flow, which
+		// authenticates the broker itself. RegisterProjectResponse.SecretKey is
+		// DEPRECATED and is no longer populated anywhere.
+		//
+		// Removing the secret from the response is the whole of the change. The
+		// BrokerAuthService method that used to be called here is deliberately
+		// NOT modified: its get-or-create behaviour is relied on by its three
+		// other callers - getPluginHubCreds in handlers_integrations.go, and the
+		// startup plugin-broker and co-located-broker paths in
+		// cmd/server_foreground.go, where returning the existing key is what
+		// lets multiple instances share one secret. The problem was the audience
+		// of this response, not the behaviour of that function.
+		//
+		// The no-auth-service fallback below is preserved exactly: hubsync reads
+		// resp.BrokerToken and persists it as hub.brokerToken
+		// (pkg/hubsync/sync.go:1263), so it still has a live in-repo consumer and
+		// dropping it would be a behaviour change beyond this fix. What does go
+		// away with the secret is the second emission of that token, which fired
+		// only when secret generation failed - with no secret generated there is
+		// no such failure to fall back from.
+		if s.brokerAuthService == nil {
 			// No broker auth service - use simple token
 			brokerToken = "broker_" + api.NewShortID() + "_" + api.NewShortID()
 		}
@@ -1383,7 +1403,6 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		Created:       created,
 		Matches:       matches,
 		BrokerToken:   brokerToken,
-		SecretKey:     secretKey,
 	})
 }
 
