@@ -198,6 +198,128 @@ type BrokerJoinResponse struct {
 // JoinTokenPrefix is the prefix for join tokens.
 const JoinTokenPrefix = "scion_join_"
 
+// ErrBrokerIDRejected is returned when a client-supplied broker identifier is
+// refused. It is a sentinel so a handler can map the refusal to a client error
+// rather than an internal one; the wrapped text is deliberately vague, because
+// distinguishing "malformed" from "already belongs to something else" would
+// turn this endpoint into a membership oracle for identifiers the caller does
+// not otherwise get to test.
+var ErrBrokerIDRejected = errors.New("brokerId rejected")
+
+// validateBrokerIDFormat requires a client-supplied broker identifier to be a
+// UUID in canonical form.
+//
+// Canonical form, not merely "parses as a UUID": uuid.Parse also accepts
+// braced, URN and unhyphenated spellings, and accepting several spellings of
+// the same value means the same broker can be registered and looked up under
+// strings that are equal as UUIDs and unequal as ids — every id-keyed
+// comparison in the hub is a string comparison. One spelling per identifier.
+//
+// This regresses nothing that is produced today: the only client that supplies
+// a broker id is the broker itself, which sends either a uuid.New().String()
+// or the value the hub previously handed it, both canonical.
+func validateBrokerIDFormat(brokerID string) error {
+	parsed, err := uuid.Parse(brokerID)
+	if err != nil {
+		return fmt.Errorf("%w: must be a UUID", ErrBrokerIDRejected)
+	}
+	if parsed.String() != brokerID {
+		return fmt.Errorf("%w: must be a UUID in canonical lowercase hyphenated form", ErrBrokerIDRejected)
+	}
+	return nil
+}
+
+// brokerIDReservedNamespace is one principal namespace a broker identifier must
+// not be drawn from, and the lookup that decides whether a given identifier is
+// already taken in it.
+type brokerIDReservedNamespace struct {
+	// name is for the enumeration test, not for the error message.
+	name  string
+	taken func(context.Context, store.Store, string) (bool, error)
+}
+
+// brokerIDReservedNamespaces enumerates the principal namespaces whose
+// identifiers a broker may not adopt.
+//
+// The set is the principal types the policy layer binds against — see
+// AddPolicyBindingRequest, whose principalType is "user", "group" or "agent" —
+// plus projects, which are the other id that ownership and scope checks key on.
+// The hub compares principal ids as opaque strings across all of these, so an
+// identifier that exists in one of them does not uniquely denote a broker, and
+// a credential issued for it is a credential for an ambiguous name.
+//
+// TestBrokerID_ReservedNamespacesCoverPolicyPrincipalTypes pins this against
+// the policy layer's principal types, so a principal type added there without
+// being reserved here fails rather than passing silently.
+func brokerIDReservedNamespaces() []brokerIDReservedNamespace {
+	return []brokerIDReservedNamespace{
+		{"user", func(ctx context.Context, s store.Store, id string) (bool, error) {
+			v, err := s.GetUser(ctx, id)
+			return v != nil, err
+		}},
+		{"agent", func(ctx context.Context, s store.Store, id string) (bool, error) {
+			v, err := s.GetAgent(ctx, id)
+			return v != nil, err
+		}},
+		{"group", func(ctx context.Context, s store.Store, id string) (bool, error) {
+			v, err := s.GetGroup(ctx, id)
+			return v != nil, err
+		}},
+		{"project", func(ctx context.Context, s store.Store, id string) (bool, error) {
+			v, err := s.GetProject(ctx, id)
+			return v != nil, err
+		}},
+	}
+}
+
+// checkBrokerIDNamespace refuses a broker identifier that already denotes some
+// other kind of principal.
+//
+// A lookup error that is not "not found" is propagated rather than read as
+// "free": the question being asked is whether the identifier is available, and
+// an unanswered question is not a yes.
+func checkBrokerIDNamespace(ctx context.Context, s store.Store, brokerID string) error {
+	for _, ns := range brokerIDReservedNamespaces() {
+		taken, err := ns.taken(ctx, s, brokerID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("failed to check brokerId availability: %w", err)
+		}
+		if taken {
+			return fmt.Errorf("%w: identifier is not available", ErrBrokerIDRejected)
+		}
+	}
+	return nil
+}
+
+// validateNewBrokerID is THE entry point for any code path about to create a
+// broker row under an identifier the CLIENT chose. It takes a store rather than
+// hanging off BrokerAuthService precisely so that every such path can call it:
+// broker rows are created from more than one handler, and two paths each with
+// their own idea of a valid broker id is the drift this work exists to remove.
+// Mirror this by CALLING it, not by copying it.
+//
+// It does not need to be called for an id the hub generates itself.
+func validateNewBrokerID(ctx context.Context, s store.Store, brokerID string) error {
+	if err := validateBrokerIDFormat(brokerID); err != nil {
+		return err
+	}
+	return checkBrokerIDNamespace(ctx, s, brokerID)
+}
+
+// validateCredentialedBrokerID is the entry point for a path about to issue a
+// credential for a broker identifier that ALREADY has a row.
+//
+// It is the namespace half only. The format half is deliberately absent: an
+// existing row's id is resolved by lookup rather than allocated, and rows
+// created before any format rule existed must still be able to re-register.
+// The namespace half is NOT skippable here — an existing row is not evidence
+// that its id was ever checked, because rows are created by more than one path
+// and outlive the code that created them, and re-registration issues a fresh
+// credential.
+func validateCredentialedBrokerID(ctx context.Context, s store.Store, brokerID string) error {
+	return checkBrokerIDNamespace(ctx, s, brokerID)
+}
+
 // CreateBrokerRegistration creates a new broker with a join token.
 // Requires admin authentication.
 func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
@@ -230,6 +352,20 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 		}
 		if existingByID != nil {
 			existingBroker = existingByID
+		}
+	}
+
+	// A broker identifier is the only identity id in this hub that the client
+	// chooses. Validate it before anything is written or any credential is
+	// issued, in both the new-broker and the re-registration case. See the two
+	// entry points for why they differ.
+	if existingBroker != nil {
+		if err := validateCredentialedBrokerID(ctx, s.store, existingBroker.ID); err != nil {
+			return nil, err
+		}
+	} else if req.BrokerID != "" {
+		if err := validateNewBrokerID(ctx, s.store, req.BrokerID); err != nil {
+			return nil, err
 		}
 	}
 

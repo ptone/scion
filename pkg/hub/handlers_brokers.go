@@ -16,6 +16,7 @@
 package hub
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -65,6 +66,11 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	// Create the broker registration
 	resp, err := s.brokerAuthService.CreateBrokerRegistration(r.Context(), req, user.ID())
 	if err != nil {
+		// A rejected brokerId is the client's input, not a hub fault.
+		if errors.Is(err, ErrBrokerIDRejected) {
+			ValidationError(w, err.Error(), map[string]interface{}{"field": "brokerId"})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to create broker registration: "+err.Error(), nil)
 		return
