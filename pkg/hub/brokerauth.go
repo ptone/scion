@@ -201,6 +201,12 @@ const JoinTokenPrefix = "scion_join_"
 // ErrBrokerIDRejected is returned when a client-supplied broker identifier is
 // refused. It is a sentinel so a handler can map the refusal to a client error
 // rather than an internal one.
+//
+// Every rejection reason — bad format and already-taken alike — collapses to
+// this one generic error carrying no distinguishing detail, so the broker
+// registration endpoint cannot be used as a membership oracle for existing
+// principals. Keep new reject paths uniform: return this sentinel, do not wrap
+// it with a reason the caller can tell apart. See #591.
 var ErrBrokerIDRejected = errors.New("brokerId rejected")
 
 // validateBrokerIDFormat requires a client-supplied broker identifier to be a
@@ -216,10 +222,14 @@ var ErrBrokerIDRejected = errors.New("brokerId rejected")
 func validateBrokerIDFormat(brokerID string) error {
 	parsed, err := uuid.Parse(brokerID)
 	if err != nil {
-		return fmt.Errorf("%w: must be a UUID", ErrBrokerIDRejected)
+		return ErrBrokerIDRejected
 	}
+	// Broker ids are pinned to canonical UUID form to prevent id-collision /
+	// spoofing across principal namespaces: a non-canonical spelling could be
+	// registered under one form and resolved under another. See #591. The
+	// refusal is deliberately generic — see ErrBrokerIDRejected.
 	if parsed.String() != brokerID {
-		return fmt.Errorf("%w: must be a UUID in canonical lowercase hyphenated form", ErrBrokerIDRejected)
+		return ErrBrokerIDRejected
 	}
 	return nil
 }
@@ -280,7 +290,10 @@ func checkBrokerIDNamespace(ctx context.Context, s store.Store, brokerID string)
 			return fmt.Errorf("failed to check brokerId availability: %w", err)
 		}
 		if taken {
-			return fmt.Errorf("%w: identifier is not available", ErrBrokerIDRejected)
+			// The same generic refusal as a bad-format id: the two reasons
+			// must stay indistinguishable to the caller. See #591 and
+			// ErrBrokerIDRejected.
+			return ErrBrokerIDRejected
 		}
 	}
 	return nil
