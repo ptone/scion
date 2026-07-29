@@ -207,10 +207,8 @@ var ErrBrokerIDRejected = errors.New("brokerId rejected")
 // UUID in canonical form.
 //
 // Canonical form, not merely "parses as a UUID": uuid.Parse also accepts
-// braced, URN and unhyphenated spellings, and accepting several spellings of
-// the same value means the same broker can be registered and looked up under
-// strings that are equal as UUIDs and unequal as ids — every id-keyed
-// comparison in the hub is a string comparison. One spelling per identifier.
+// braced, URN and unhyphenated spellings, and one identifier must have one
+// spelling so it cannot be registered under one and looked up under another.
 //
 // This regresses nothing that is produced today: the only client that supplies
 // a broker id is the broker itself, which sends either a uuid.New().String()
@@ -352,10 +350,9 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 		}
 	}
 
-	// A broker identifier is the only identity id in this hub that the client
-	// chooses. Validate it before anything is written or any credential is
-	// issued, in both the new-broker and the re-registration case. See the two
-	// entry points for why they differ.
+	// Validate the broker identifier through the shared helper before anything is
+	// written or any credential is issued, in both the new-broker and the
+	// re-registration case. See the two entry points for why they differ.
 	if existingBroker != nil {
 		if err := validateCredentialedBrokerID(ctx, s.store, existingBroker.ID); err != nil {
 			return nil, err

@@ -37,13 +37,11 @@ import (
 // ID is taken from req.Broker.ID VERBATIM and passed to CreateRuntimeBroker with
 // no format check and no cross-namespace check.
 //
-// This is the same class as F3b in brokerauth.go: a caller chooses the ID of the
-// principal it creates, so it can mint a broker whose ID() collides with an
-// existing user's or agent's UUID. Any authorization site that compares an ID to
-// identity.ID() then resolves the broker to that other-type principal. The two
-// mint sites (register's embedded flow and brokerauth's broker registration)
-// must not disagree, so the fix is a SINGLE SHARED validation function both call
-// — not two hand-rolled guards.
+// It shares the fix with F3b in brokerauth.go: both mint sites (register's
+// embedded flow and brokerauth's broker registration) route the client-supplied
+// id through a SINGLE SHARED validation helper (validateNewBrokerID: canonical
+// UUID + namespace check) rather than a hand-rolled guard, so the two paths
+// cannot disagree.
 //
 // These pins are shape-independent: they assert store invariants (no broker row
 // minted at a malformed or cross-namespace ID) and a legitimate registration

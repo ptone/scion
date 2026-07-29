@@ -670,20 +670,13 @@ var evaluatablePrincipalTypes = map[string]bool{
 // in the request.
 //
 // A principal is a PAIR — a type and an id — and both halves come from the
-// caller's own request body. Identity ids in this hub are not unique across
-// kinds: user ids and agent ids are hub-minted UUIDs, but a broker id is
-// accepted from the registering client, so "some identity has id X" does not
-// imply "the principal (user, X)" or "the principal (agent, X)". Comparing only
-// ids therefore answers a question nobody asked, and answers it as if it were
-// identity.
-//
-// Both halves are compared here, and the type half is compared FIRST in
-// meaning: the caller must be the same KIND of thing as the principal it names
-// before its id is allowed to mean anything. Do not relax this to an id-only
-// comparison, and do not narrow it to users only — an agent evaluating its own
-// policy is the same documented case as a user evaluating its own
-// (see .design/hosted/auth/permissions-design.md), and principalType "agent" is
-// an implemented, supported value.
+// caller's own request body. Both halves are compared here, and the type half
+// is compared FIRST in meaning: the caller must be the same KIND of thing as the
+// principal it names before its id is allowed to mean anything. Do not relax
+// this to an id-only comparison, and do not narrow it to users only — an agent
+// evaluating its own policy is the same documented case as a user evaluating its
+// own (see .design/hosted/auth/permissions-design.md), and principalType "agent"
+// is an implemented, supported value.
 func callerIsEvaluatedPrincipal(caller Identity, principalType, principalID string) bool {
 	if caller == nil || principalType == "" || principalID == "" {
 		return false
