@@ -89,24 +89,40 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce policy-based authorization: only the agent's creator (owner) or admins can access PTY.
-	// Fail closed: the nil-identity check above already rejected unauthenticated
-	// requests, so a nil *user* identity here means an authenticated non-user
-	// (agent or broker) token. Such a caller has no basis to attach to an agent's
-	// PTY; previously this block was skipped entirely for non-user identities,
-	// letting an authenticated agent/broker token attach unchecked (#591 class).
-	user := GetUserIdentityFromContext(ctx)
-	if user == nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-		return
-	}
-	decision := s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionAttach)
-	if !decision.Allowed {
-		slog.Warn("PTY access denied: policy check failed",
-			"agent_id", agentID,
-			"userID", user.ID(),
-			"reason", decision.Reason)
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+	// Enforce policy-based authorization on the PTY attach.
+	//
+	// This is the design:598 check — s.authorize with agentResource and
+	// ActionAttach — and it replaces a blanket inline deny of every non-user
+	// caller. That blanket deny failed CLOSED, so it was never a hole, but it
+	// OVER-DENIED: it refused an ancestor attaching to its OWN DESCENDANT's PTY,
+	// which design 5.5 retains via the ancestry bypass (NB-8D7-1).
+	//
+	// What each caller kind gets, all of it decided in the engine rather than
+	// here — see checkAccessForAgent, whose step 0 is the ancestry bypass:
+	//   - an ANCESTOR of this agent (user or agent): allowed, "ancestor access";
+	//   - a SIBLING agent in the same project: DENIED. The project read baseline
+	//     that would otherwise pass it is read-class only and deliberately
+	//     excludes ActionAttach, because attach mutates a running agent
+	//     (authz.go step 3, property 3);
+	//   - a CROSS-PROJECT agent: denied, no ancestry and no baseline;
+	//   - a BROKER: denied. Type "broker" is neither "user" nor "agent", so
+	//     CheckAccess returns "unknown identity type" before any bypass runs.
+	//
+	// Deliberately NOT authorizeAgentLifecycle, which authorizes an agent caller
+	// on SCOPE ALONE and by design admits project peers (Q3). That would let a
+	// sibling attach to a PTY it has no ancestry claim on — wider than the flow
+	// this restores.
+	//
+	// PRECONDITION, and it is load-bearing: s.authorize resolves identity from
+	// the REQUEST CONTEXT, while the ticket branch above resolves it into a local
+	// variable. Those agree today only because validatePTYTicket is a stub that
+	// always returns nil, so a non-nil identity here can only have come from the
+	// context. If tickets are ever implemented, this call will 401 valid ticket
+	// holders unless the ticket identity is first injected with
+	// contextWithIdentity and r rebuilt with r.WithContext. That precondition is
+	// pinned by TestPTYAttach_TicketStubPreconditionForContextAuthorize — when
+	// that test fails, fix THIS call, do not just update the test.
+	if !s.authorize(w, r, agentResource(agent), ActionAttach) {
 		return
 	}
 
