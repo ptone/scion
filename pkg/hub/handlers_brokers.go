@@ -207,7 +207,14 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if broker.CreatedBy == user.ID() {
+		// #591 (N59): the `!= ""` guard is defence-in-depth against an empty
+		// CreatedBy. The register-by-name broker path (handlers_projects_core.go)
+		// constructs a RuntimeBroker without setting CreatedBy, so it can be empty;
+		// safety today rests only on user.ID() never being empty and no live bypass
+		// was constructible (latent). The four sibling owner-equality checks carry
+		// the same guard (capabilities.go:348,:415; authz.go:129;
+		// handlers_groups.go:543).
+		if broker.CreatedBy != "" && broker.CreatedBy == user.ID() {
 			authorized = true
 		}
 	}
