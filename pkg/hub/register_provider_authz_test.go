@@ -360,6 +360,20 @@ func (f *rpGateFixture) embeddedProvider(t *testing.T, p *store.Project) (*store
 // reader even if the row looks innocuous.
 func (f *rpGateFixture) requireVictimUnserved(t *testing.T, because string) {
 	t.Helper()
+
+	// The subject is proven alive before anything below counts as a refusal.
+	// Every assertion in this helper is also satisfied by a victim that stopped
+	// existing: GetProjectProvider finds no row for a deleted project, and the
+	// shared-dir read answers 404. A request that destroyed the project it was
+	// refused on would therefore have passed here, which was measured with a
+	// throwaway probe rather than reasoned about. Checking the project first
+	// means a destroyed subject fails as a destroyed subject instead of reading
+	// as a clean refusal.
+	_, err := f.store.GetProject(context.Background(), f.victim.ID)
+	require.NoError(t, err,
+		"the victim project no longer exists, so every assertion below would "+
+			"pass by absence rather than by refusal (%s)", because)
+
 	_, ok := f.embeddedProvider(t, f.victim)
 	require.False(t, ok,
 		"a refused register created a provider row on the victim's embedded "+
@@ -368,8 +382,17 @@ func (f *rpGateFixture) requireVictimUnserved(t *testing.T, because string) {
 	rec := f.asUser(t, f.owner, http.MethodGet,
 		"/api/v1/projects/"+f.victim.ID+"/shared-dirs/"+rpGateSharedDir+
 			"/files/"+rpGateEvilName, nil)
-	require.NotEqual(t, http.StatusOK, rec.Code,
-		"the victim's own shared-dir read was served after a refused register (%s)", because)
+	// Equality against the measured baseline, not "anything but 200". A
+	// not-200 assertion is satisfied by a 404 from a subject that no longer
+	// exists and by a route that broke for everyone, so it can only ever
+	// convict the exact success code. 409 is what rpGateVictimBaseline reads
+	// off this same request before the attack runs, so this is that
+	// observation repeating, not a constant picked to make the test pass.
+	require.Equal(t, http.StatusConflict, rec.Code,
+		"the victim's own shared-dir read no longer answers the 409 baseline "+
+			"after a refused register: 200 means the attacker's workspace was "+
+			"served, and any other code means the subject or the route moved "+
+			"underneath this assertion (%s)", because)
 	require.NotContains(t, rec.Body.String(), rpGateEvilBody,
 		"the victim was served attacker-controlled bytes from their own shared "+
 			"directory after a refused register (%s)", because)

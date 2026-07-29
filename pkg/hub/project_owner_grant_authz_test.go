@@ -221,10 +221,27 @@ func (f *ogGrantFixture) readWorkspace(t *testing.T, u *store.User, p *store.Pro
 func (f *ogGrantFixture) isRecordedOwner(t *testing.T, u *store.User, p *store.Project) bool {
 	t.Helper()
 	ctx := context.Background()
+
+	// "No owner row" and "nothing left that could hold an owner row" are
+	// different answers, and only the first is evidence. A deleted project
+	// lists no groups and so returns false — which is the answer every refusal
+	// case here asserts — making a request that destroyed its own subject
+	// indistinguishable from one that was refused. That was measured, not
+	// supposed. Both containers are checked in either polarity, because a
+	// positive control whose group vanished should fail as a broken fixture
+	// rather than as "the backfill stopped promoting anyone".
+	_, err := f.store.GetProject(ctx, p.ID)
+	require.NoError(t, err,
+		"the project no longer exists, so this answer would be false by "+
+			"absence rather than because no grant was recorded")
+
 	groups, err := f.store.ListGroups(ctx, store.GroupFilter{
 		ProjectID: p.ID, GroupType: store.GroupTypeExplicit,
 	}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
+	require.NotEmpty(t, groups.Items,
+		"the project has no explicit group left to record ownership in, so "+
+			"this answer would be false by absence")
 	for _, g := range groups.Items {
 		m, err := f.store.GetGroupMembership(ctx, g.ID, store.GroupMemberTypeUser, u.ID)
 		if err != nil {
@@ -235,6 +252,35 @@ func (f *ogGrantFixture) isRecordedOwner(t *testing.T, u *store.User, p *store.P
 		}
 	}
 	return false
+}
+
+// requireIntruderStillPlainMember proves a refusal was a refusal and not a
+// subject that went away. The ownerless escalation needs the intruder to be the
+// group's sole member: if the request removed that membership, or the group,
+// the intruder is not an owner afterwards and isRecordedOwner reports exactly
+// what a successful defence reports. Asserting the membership survived with its
+// role unchanged keeps "the promotion was refused" separable from "there is no
+// longer anyone to promote".
+//
+// This is only meaningful where the intruder is a member to begin with, so it
+// belongs to the ownerless-project cases. In the two createVictimProject
+// attacks the intruder is an outsider and the subject's liveness is carried by
+// the project check inside isRecordedOwner plus the workspace read, which is
+// asserted equal to 403 and would fail on the 404 a deleted project returns.
+func (f *ogGrantFixture) requireIntruderStillPlainMember(t *testing.T, p *store.Project) {
+	t.Helper()
+	ctx := context.Background()
+	group, err := f.store.GetGroupBySlug(ctx, "project:"+p.Slug+":members")
+	require.NoError(t, err,
+		"the project's members group is gone after the refusal, so there is "+
+			"nothing left the intruder could have been promoted in")
+	m, err := f.store.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, f.intruder.ID)
+	require.NoError(t, err,
+		"the intruder's membership is gone after the refusal, so \"not an "+
+			"owner\" no longer means the promotion was refused")
+	require.Equal(t, store.GroupMemberRoleMember, m.Role,
+		"the intruder is no longer a plain member, so the state this case was "+
+			"measured against is not the state it ended in")
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +534,7 @@ func ogGrantAssertNoSelfPromotion(t *testing.T, f *ogGrantFixture, p *store.Proj
 	reg := f.asUser(t, f.intruder, http.MethodPost, "/api/v1/projects/register",
 		RegisterProjectRequest{ID: p.ID, Name: p.Name, GitRemote: p.GitRemote})
 
+	f.requireIntruderStillPlainMember(t, p)
 	require.False(t, f.isRecordedOwner(t, f.intruder, p),
 		"a plain member of an ownerless project promoted themselves to owner by "+
 			"registering it (register returned %d)", reg.Code)
@@ -601,6 +648,7 @@ func TestOGGrant_SelfPromotionRefusedByEveryRoute(t *testing.T) {
 			require.Equal(t, rt.want, rec.Code,
 				"%s no longer answers a plain member the way this test was "+
 					"measured against; body=%s", rt.name, rec.Body.String())
+			f.requireIntruderStillPlainMember(t, p)
 			require.False(t, f.isRecordedOwner(t, f.intruder, p),
 				"the sole member was promoted to owner by their own %s", rt.name)
 
@@ -626,6 +674,7 @@ func TestOGGrant_SelfPromotionUnauthenticated(t *testing.T) {
 	f.srv.Handler().ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code, "body=%s", rec.Body.String())
+	f.requireIntruderStillPlainMember(t, p)
 	require.False(t, f.isRecordedOwner(t, f.intruder, p))
 }
 
