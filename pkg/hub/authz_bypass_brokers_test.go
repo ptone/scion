@@ -159,12 +159,38 @@ func TestBypassBrokers_CheckBrokerDispatchAccess(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
 
-	t.Run("auto-provide brokers stay open to authenticated callers", func(t *testing.T) {
-		// Unchanged behaviour, pinned because combo hub-broker deployments
-		// depend on it and the identity switch sits behind it.
+	t.Run("auto-provide broker is open to authorized callers, not to every caller", func(t *testing.T) {
+		// #591 behaviour change (task 27): AutoProvide relaxes ONLY the
+		// project-linkage requirement, never identity-type or scope. So an
+		// auto-provide broker stays open to any AUTHORIZED caller — a scoped agent
+		// from ANY project, and an authenticated user — but a scopeless agent is
+		// denied on it just as on a restricted broker.
 		f := bypassAgentsSetup(t)
-		allowed, _ := bypassBrokersCheck(t, f, bypassBrokersAgentCtx(f, f.proj.ID), f.broker.ID)
-		assert.True(t, allowed)
+
+		// A scoped agent whose project the auto-provide broker does NOT serve:
+		// allowed, because linkage is the only thing AutoProvide skips.
+		allowedAgent, _ := bypassBrokersCheck(t, f, bypassBrokersAgentCtx(f, f.other.ID, ScopeAgentCreate), f.broker.ID)
+		assert.True(t, allowedAgent, "a scoped agent from any project may use an available-to-all broker")
+
+		// An authenticated non-owner user: allowed (the available-to-all user path).
+		stranger := &store.User{
+			ID:          tid("bypass-brokers-autoprovide-user"),
+			Email:       "autoprovide-brokers-user@example.com",
+			DisplayName: "Stranger",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, f.store.CreateUser(context.Background(), stranger))
+		strangerCtx := contextWithIdentity(context.Background(),
+			NewAuthenticatedUser(stranger.ID, stranger.Email, stranger.DisplayName, string(stranger.Role), "cli"))
+		allowedUser, _ := bypassBrokersCheck(t, f, strangerCtx, f.broker.ID)
+		assert.True(t, allowedUser, "an authenticated user may use an available-to-all broker")
+
+		// A scopeless agent: denied even here — scope is enforced regardless of AutoProvide.
+		deniedAgent, rec := bypassBrokersCheck(t, f, bypassBrokersAgentCtx(f, f.proj.ID), f.broker.ID)
+		assert.False(t, deniedAgent, "a scopeless agent is denied even on an auto-provide broker")
+		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
 
 	t.Run("user path is unchanged", func(t *testing.T) {

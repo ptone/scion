@@ -72,6 +72,11 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 			ValidationError(w, err.Error(), map[string]interface{}{"field": "brokerId"})
 			return
 		}
+		// Re-registration by a non-owner is an authorization failure, not a hub fault.
+		if errors.Is(err, ErrBrokerReregisterForbidden) {
+			Forbidden(w)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to create broker registration: "+err.Error(), nil)
 		return

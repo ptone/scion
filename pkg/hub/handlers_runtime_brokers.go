@@ -446,25 +446,20 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 // six callers, four of them harness-config image endpoints with no outer gate at
 // all. Do not copy this paragraph across without copying that qualification.
 //
-// AUTO-PROVIDE IS AN INTENTIONAL EXCEPTION, NOT AN UNFIXED FAIL-OPEN SITE. Auto-
-// provide brokers are shared infrastructure (e.g. a combo hub-broker server's
-// default broker) declared available-to-all by a hub admin, so they stay usable
-// by any authenticated caller, and that check is deliberately kept ahead of the
-// identity switch: it is a property of the broker, not of the caller. Retaining
-// it was ruled on for #591 rather than overlooked.
+// AUTO-PROVIDE INVARIANT: it relaxes ONLY the project-linkage requirement, never
+// identity-type and never scope. An auto-provide broker is shared infrastructure
+// (e.g. a combo hub-broker server's default broker) declared available-to-all by
+// a hub admin, so an authorized caller from ANY project may use it — but "any
+// authorized caller" still means one that clears the identity-type switch and the
+// scope check. Concretely, per branch: an authenticated user is allowed (this is
+// the available-to-all feature); an agent is allowed iff it holds ScopeAgentCreate
+// (project-linkage is the only thing skipped for it). A nil identity, a
+// broker-typed identity, and an agent lacking ScopeAgentCreate are all still
+// DENIED (#591). Auto-provide is checked inside each branch, below the
+// identity-type switch, so it is never an admit-all shortcut ahead of those gates.
 //
-// It is nonetheless a second unconditional allow, so be precise about its reach.
-// It returns BEFORE the project-linkage query, so it is not bounded by whether
-// the broker serves the caller's project — it applies even to an auto-provide
-// broker that serves no project at all. On THIS path that means an authenticated
-// caller may have an agent dispatched to a shared broker. On the twin's path the
-// same allow was MEASURED to admit image operations as well as dispatch; see the
-// caller-set note on canDispatchToBroker. One thing did change here: the allow
-// now sits BELOW the identity check, so unauthenticated callers no longer reach
-// it.
-//
-// Do not narrow AutoProvide in one twin alone. If it moves, it moves in both
-// files in the same commit.
+// Do not narrow or widen AutoProvide in one twin alone. If it moves, it moves in
+// both files in the same commit.
 //
 // Broker-typed callers reach default: and are denied. CheckAccess already
 // answered them with "unknown identity type"; the nil branch this replaced was
@@ -489,15 +484,15 @@ func (s *Server) checkBrokerDispatchAccess(ctx context.Context, w http.ResponseW
 		writeErrorFromErr(w, err, "")
 		return false
 	}
-	if broker.AutoProvide {
-		return true
-	}
 	allowed := func() bool {
 		switch identity.Type() {
 		case "user", "dev":
 			user, ok := identity.(UserIdentity)
 			if !ok {
 				return false
+			}
+			if broker.AutoProvide {
+				return true
 			}
 			decision := s.authzService.CheckAccess(ctx, user, brokerResource(broker), ActionDispatch)
 			return decision.Allowed
@@ -506,8 +501,10 @@ func (s *Server) checkBrokerDispatchAccess(ctx context.Context, w http.ResponseW
 			if !ok {
 				return false
 			}
-			return agentIdent.HasScope(ScopeAgentCreate) &&
-				s.brokerServesProject(ctx, broker.ID, agentIdent.ProjectID())
+			if !agentIdent.HasScope(ScopeAgentCreate) {
+				return false
+			}
+			return broker.AutoProvide || s.brokerServesProject(ctx, broker.ID, agentIdent.ProjectID())
 		default:
 			return false
 		}

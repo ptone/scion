@@ -1073,11 +1073,39 @@ func TestBypassAgents_CanDispatchToBroker(t *testing.T) {
 			"holding the create scope must not reach brokers outside the agent's project")
 	})
 
-	t.Run("auto-provide brokers stay open to authenticated callers", func(t *testing.T) {
-		// Unchanged behaviour, pinned because combo hub-broker deployments
-		// depend on it and the identity switch sits behind it.
+	t.Run("auto-provide broker is open to authorized callers, not to every caller", func(t *testing.T) {
+		// #591 behaviour change (task 27): AutoProvide relaxes ONLY the
+		// project-linkage requirement, never identity-type or scope. So an
+		// auto-provide broker stays open to any AUTHORIZED caller — a scoped agent
+		// from ANY project, and an authenticated user — but a scopeless agent is
+		// denied on it just as on a restricted broker. Combo hub-broker
+		// deployments depend on the open path; the callers they run hold the
+		// create scope.
 		f := bypassAgentsSetup(t)
-		assert.True(t, f.srv.canDispatchToBroker(agentCtx(f, f.proj.ID), f.broker))
+
+		// A scoped agent whose project the auto-provide broker does NOT serve:
+		// allowed, because linkage is the only thing AutoProvide skips.
+		assert.True(t, f.srv.canDispatchToBroker(agentCtx(f, f.other.ID, ScopeAgentCreate), f.broker),
+			"a scoped agent from any project may use an available-to-all broker")
+
+		// An authenticated non-owner user: allowed (the available-to-all user path).
+		stranger := &store.User{
+			ID:          tid("bypass-autoprovide-user"),
+			Email:       "autoprovide-user@example.com",
+			DisplayName: "Stranger",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, f.store.CreateUser(context.Background(), stranger))
+		strangerCtx := contextWithIdentity(context.Background(),
+			NewAuthenticatedUser(stranger.ID, stranger.Email, stranger.DisplayName, string(stranger.Role), "cli"))
+		assert.True(t, f.srv.canDispatchToBroker(strangerCtx, f.broker),
+			"an authenticated user may use an available-to-all broker")
+
+		// A scopeless agent: denied even here — scope is enforced regardless of AutoProvide.
+		assert.False(t, f.srv.canDispatchToBroker(agentCtx(f, f.proj.ID), f.broker),
+			"a scopeless agent is denied even on an auto-provide broker")
 	})
 
 	t.Run("user path is unchanged", func(t *testing.T) {

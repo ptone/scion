@@ -209,6 +209,16 @@ const JoinTokenPrefix = "scion_join_"
 // it with a reason the caller can tell apart. See #591.
 var ErrBrokerIDRejected = errors.New("brokerId rejected")
 
+// ErrBrokerReregisterForbidden is returned when a caller who is not the broker's
+// recorded owner attempts to re-register an existing broker. Re-registration
+// overwrites broker settings (e.g. AutoProvide) and mints a fresh join token, so
+// where an owner is recorded it is restricted to that owner. The N59/#149
+// empty-guard means an empty recorded owner never matches a caller id; a broker
+// with no recorded owner is the register-by-name divergence (#221) and is left to
+// its existing restart behaviour, so this sentinel closes only the recorded-owner
+// mismatch (#591).
+var ErrBrokerReregisterForbidden = errors.New("not authorized to re-register this broker")
+
 // validateBrokerIDFormat requires a client-supplied broker identifier to be a
 // UUID in canonical form.
 //
@@ -377,6 +387,16 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 	}
 
 	if existingBroker != nil {
+		// Re-registration is an ownership-control path: it overwrites broker
+		// settings (AutoProvide below) and mints a fresh join token, so where an
+		// owner is recorded only that owner may perform it. The `!= ""` guard
+		// (N59/#149) keeps an empty recorded owner from matching an absent/empty
+		// caller id; a broker with no recorded owner is the register-by-name
+		// divergence (#221), left untouched here (deferred), so its restart flow
+		// still works — this commit only closes the recorded-owner mismatch (#591).
+		if existingBroker.CreatedBy != "" && existingBroker.CreatedBy != createdBy {
+			return nil, ErrBrokerReregisterForbidden
+		}
 		// Reuse existing broker - update its metadata
 		brokerID = existingBroker.ID
 		reregistered = true

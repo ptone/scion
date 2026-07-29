@@ -914,30 +914,23 @@ func (s *Server) brokerServesProject(ctx context.Context, brokerID, projectID st
 // template granted ScopeAgentCreate — re-asserting the create gate rather than
 // widening the Part 2 read-class baseline to ActionDispatch.
 //
-// AUTO-PROVIDE IS AN INTENTIONAL EXCEPTION, NOT AN UNFIXED FAIL-OPEN SITE. Auto-
-// provide brokers are shared infrastructure (e.g. a combo hub-broker server's
-// default broker) declared available-to-all by a hub admin, and that check is
-// deliberately kept ahead of the identity switch: it is a property of the broker,
-// not of the caller. Retaining it was ruled on for #591 rather than overlooked.
+// AUTO-PROVIDE INVARIANT: it relaxes ONLY the project-linkage requirement, never
+// identity-type and never scope. An auto-provide broker is shared infrastructure
+// (e.g. a combo hub-broker server's default broker) declared available-to-all by
+// a hub admin, so an authorized caller from ANY project may use it — but "any
+// authorized caller" still means one that clears the identity-type switch and the
+// scope check. Concretely, per branch: an authenticated user is allowed (this is
+// the available-to-all feature); an agent is allowed iff it holds ScopeAgentCreate
+// (project-linkage is the only thing skipped for it). A nil identity, a
+// broker-typed identity, and an agent lacking ScopeAgentCreate are all still
+// DENIED (#591). This matters more here than on the twin: four of the six callers
+// are image endpoints with no outer create gate, so on those paths the
+// identity-type and scope checks below ARE the authorization. Auto-provide is
+// checked inside each branch, below the identity-type switch, so it never short-
+// circuits those gates.
 //
-// Two things about its reach that a reader is likely to assume the other way, both
-// measured against a running server rather than read:
-//
-//   - IT IS NOT BOUNDED BY PROJECT LINKAGE. The allow returns before the
-//     project-provider query runs, so it applies even to an auto-provide broker
-//     that serves no project at all.
-//   - IT IS NOT LIMITED TO DISPATCH. Because four callers are image endpoints, the
-//     same allow admits image operations: for an auto-provide, node-bound broker,
-//     any authenticated caller — including a broker-typed one, and an agent
-//     WITHOUT ScopeAgentCreate — gets 200 and the hub forwards the operation to
-//     the broker. Non-auto-provide brokers answer 403 and forward nothing, which
-//     is what isolates AutoProvide as the cause.
-//
-// That consequence is DISCLOSED, not closed here, and deliberately so: narrowing
-// AutoProvide inside this predicate would be patching the wrong layer and would
-// change hub-broker topology. The remedy belongs at the endpoints. If you do ever
-// change AutoProvide, change it in checkBrokerDispatchAccess in the SAME commit or
-// the twins drift.
+// If you change AutoProvide, change it in checkBrokerDispatchAccess in the SAME
+// commit or the twins drift.
 //
 // Broker-typed callers reach default: and are denied. CheckAccess already answered
 // them with "unknown identity type"; the nil branch this replaced was the only
@@ -953,14 +946,14 @@ func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeB
 		// panics CheckAccess on identity.Type().
 		return false
 	}
-	if broker.AutoProvide {
-		return true
-	}
 	switch identity.Type() {
 	case "user", "dev":
 		user, ok := identity.(UserIdentity)
 		if !ok {
 			return false
+		}
+		if broker.AutoProvide {
+			return true
 		}
 		decision := s.authzService.CheckAccess(ctx, user, brokerResource(broker), ActionDispatch)
 		return decision.Allowed
@@ -969,8 +962,10 @@ func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeB
 		if !ok {
 			return false
 		}
-		return agentIdent.HasScope(ScopeAgentCreate) &&
-			s.brokerServesProject(ctx, broker.ID, agentIdent.ProjectID())
+		if !agentIdent.HasScope(ScopeAgentCreate) {
+			return false
+		}
+		return broker.AutoProvide || s.brokerServesProject(ctx, broker.ID, agentIdent.ProjectID())
 	default:
 		return false
 	}
