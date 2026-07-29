@@ -2112,6 +2112,22 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	// #591 (Rule 18a): this endpoint was ungated. Every authenticated caller —
+	// regardless of relationship to the project or the project's visibility —
+	// received the full record (name/slug/gitRemote/ownerId, plus the ownerName
+	// enriched below). That is the read counterpart to the ActionUpdate gate on
+	// updateProject and the delete gate on deleteProject, and it is the record
+	// that supplies the slug the owner-self-grant route consumed. Gate here,
+	// before the group backfill and the ownerName enrichment, so no owner display
+	// name is fetched for a caller who may not read the project. READ verb, so
+	// ActionRead — which keeps the in-project agent read baseline (authz.go:239)
+	// passing for an agent reading its own project. Fail closed for ALL projects,
+	// private and public alike; public-project read is a documented follow-on and
+	// is deliberately NOT branched here.
+	if !s.authorizeProjectReadNoOracle(w, r, project) {
+		return
+	}
+
 	// Ensure associated groups exist (backfill for projects created before
 	// group support was added). These calls are idempotent.
 	s.createProjectGroup(ctx, project)

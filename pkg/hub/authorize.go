@@ -113,6 +113,39 @@ func (s *Server) authorizeWithMessage(w http.ResponseWriter, r *http.Request, re
 	return true
 }
 
+// authorizeProjectReadNoOracle gates a project READ so that the observable answer
+// is the same whether the project does not exist or the caller may not read it.
+// It runs requireProjectVisibleToAgent (which already collapses a cross-project
+// agent to 404) and then CheckAccess for ActionRead; on denial it renders 404 —
+// NOT the 403 that s.authorize would — so a caller cannot use the endpoint as an
+// existence oracle over project IDs. Use it exactly like s.authorize:
+//
+//	if !s.authorizeProjectReadNoOracle(w, r, project) { return }
+//
+// It is deliberately stricter than the eight s.authorize gates, which keep a
+// 403-vs-404 existence split; harmonizing those PR-wide is an open lead call. It
+// matches the provider gate's no-oracle shape, and here it introduces no oracle
+// at all relative to the pre-#591 behaviour, where the full 200 record disclosed
+// existence outright. Read-only: for a mutating verb use s.authorize instead.
+func (s *Server) authorizeProjectReadNoOracle(w http.ResponseWriter, r *http.Request, project *store.Project) bool {
+	if !s.requireProjectVisibleToAgent(w, r, project) {
+		return false
+	}
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	resource := projectResource(project)
+	if !s.authzService.CheckAccess(ctx, identity, resource, ActionRead).Allowed {
+		logAuthzDenial(r, identity, resource, ActionRead, "project read denied (rendered 404, no existence oracle)")
+		NotFound(w, "Project")
+		return false
+	}
+	return true
+}
+
 // authorizeAgentCreate gates agent creation for every caller kind. Exhaustive
 // and fail-closed. Replaces the caller-kind branch in createAgent, which had no
 // else clause, and supplies the gate createProjectAgent never had.
