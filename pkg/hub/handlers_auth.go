@@ -52,6 +52,15 @@ type UserResponse struct {
 	DisplayName string `json:"displayName"`
 	Role        string `json:"role"`
 	AvatarURL   string `json:"avatarUrl,omitempty"`
+	// TokenScoped is true when the caller authenticated with a project-scoped
+	// User Access Token (UAT). For such a caller Role reports the MINTING
+	// user's role for attribution (via MintingUserRole), NOT the token's
+	// authority — a UAT has no hub-wide role by construction (#591 / N73).
+	// ScopedProjectID and Scopes report the token's bounds so the response
+	// neither overstates authority nor understates identity.
+	TokenScoped     bool     `json:"tokenScoped,omitempty"`
+	ScopedProjectID string   `json:"scopedProjectId,omitempty"`
+	Scopes          []string `json:"scopes,omitempty"`
 }
 
 // AuthTokenRequest is the request body for /api/v1/auth/token.
@@ -556,12 +565,25 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, UserResponse{
+	resp := UserResponse{
 		ID:          user.ID(),
 		Email:       user.Email(),
 		DisplayName: user.DisplayName(),
 		Role:        user.Role(),
-	})
+	}
+	// A UAT-authenticated caller has an empty Role() by construction (#591 /
+	// N73), so /auth/me must report the MINTING user's true role for
+	// attribution and mark the identity token-scoped with its project and
+	// scopes. Otherwise the response would either overstate authority (the
+	// pre-fix "admin") or, under a naive fix, understate identity (a bare "").
+	// This is attribution only; no authorization is decided here.
+	if scoped, ok := user.(*ScopedUserIdentity); ok {
+		resp.Role = scoped.MintingUserRole()
+		resp.TokenScoped = true
+		resp.ScopedProjectID = scoped.ScopedProjectID()
+		resp.Scopes = scoped.ScopedScopes()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleTokens routes user access token requests.

@@ -116,6 +116,40 @@ func (s *ScopedUserIdentity) HasScope(scope string) bool {
 	return false
 }
 
+// Role reports the authority role for authorization decisions and is
+// deliberately the EMPTY STRING for a UAT — never the minting user's role.
+//
+// This override is load-bearing, not a bug (#591 / N73). ScopedUserIdentity
+// embeds the UserIdentity interface, which would otherwise PROMOTE the minting
+// user's Role(): an admin-minted, project-scoped token would then answer
+// "admin" to every hub-wide authority check (the ~20 `Role() != "admin"`
+// guards, the hub-secrets `!= store.UserRoleAdmin` check, and the
+// `Role() == "admin"` capability short-circuits), conferring hub admin on a
+// token that is project-scoped by construction. A UAT must not answer a
+// hub-wide authority question at all; the token's project and scopes are
+// enforced by enforceUATConstraints, and requireAdmin is absolute for any UAT.
+//
+// Empty is fail-closed BY CONSTRUCTION, not by convention: "" can never equal
+// store.UserRoleAdmin (nor member/viewer, nor any role constant added later),
+// so every admin comparison resolves to deny for a scoped token, including
+// ones written in future with no knowledge of N73. Do NOT "fix" this to return
+// the minting user's role or a demoted real role (that re-opens the bypass and
+// makes Role() lie): ask enforceUATConstraints for authority, and
+// MintingUserRole() for attribution.
+func (s *ScopedUserIdentity) Role() string { return "" }
+
+// MintingUserRole returns the true role of the user who MINTED this token, for
+// ATTRIBUTION and audit only (e.g. /auth/me). It is named for the minting user
+// deliberately, so that routing an authorization decision through it reads
+// wrong at the call site. Never make an authz decision from this value — use
+// Role() (empty for a UAT, #591 / N73) gated by enforceUATConstraints.
+func (s *ScopedUserIdentity) MintingUserRole() string {
+	if s.UserIdentity == nil {
+		return ""
+	}
+	return s.UserIdentity.Role()
+}
+
 // agentIdentityWrapper wraps AgentTokenClaims to implement AgentIdentity.
 type agentIdentityWrapper struct {
 	*AgentTokenClaims

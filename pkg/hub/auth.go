@@ -531,6 +531,12 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 				return
 			}
 
+			// NOTE (#591 / N73): RequireRole is currently dead code (zero
+			// callers). If it is ever wired up it MUST be made UAT-aware first:
+			// a ScopedUserIdentity returns an empty Role() by construction, so
+			// roleSet[user.Role()] would reject every UAT outright instead of
+			// enforcing the token's project+scope constraints. Gate scoped
+			// identities through enforceUATConstraints, not this role-set test.
 			if !roleSet[user.Role()] {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden,
 					"insufficient permissions", nil)
