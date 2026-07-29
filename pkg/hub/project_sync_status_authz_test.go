@@ -51,16 +51,18 @@ func ssGatePath(f *pcGateFixture) string {
 }
 
 // TestSSGate_OwnerAllowed is the positive control, and it asserts on the
-// payload rather than on the status code alone: the 200 must carry the broker
-// ID that every refused caller below must not see. Without this, "did not
-// disclose the broker ID" would be satisfied by an endpoint that discloses it
-// to nobody.
+// payload rather than on the status code alone: the 200 must carry both fields
+// that every refused caller below must not see. Without this, "did not disclose
+// them" would be satisfied by an endpoint that discloses them to nobody.
 func TestSSGate_OwnerAllowed(t *testing.T) {
 	f := pcGateSetup(t)
 	rec := f.asUser(t, f.owner, http.MethodGet, ssGatePath(f))
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	require.Contains(t, rec.Body.String(), pcGateSecretBrokerID,
 		"the positive control must actually disclose, or the denials below prove nothing")
+	require.Contains(t, rec.Body.String(), pcGateSecretCommitSHA,
+		"the response carries LastCommitSHA, so the denials must be measured "+
+			"against it too — a canary the payload never contains is not a canary")
 }
 
 // TestSSGate_InProjectAgentMayRead pins the agent project read baseline
@@ -105,6 +107,9 @@ func TestSSGate_Denied(t *testing.T) {
 			require.Equal(t, c.want, rec.Code, "body: %s", rec.Body.String())
 			require.NotContains(t, rec.Body.String(), pcGateSecretBrokerID,
 				"a refused response disclosed the serving broker's ID")
+			require.NotContains(t, rec.Body.String(), pcGateSecretCommitSHA,
+				"a refused response disclosed LastCommitSHA, which identifies the "+
+					"project's exact code state")
 			require.NotContains(t, rec.Body.String(), "totalBytes",
 				"a refused response returned a sync-status payload")
 		})

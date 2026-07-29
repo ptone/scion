@@ -297,7 +297,24 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 	// demand. Gate before any of that, and before the storage check, which
 	// otherwise reports on hub configuration to a caller with no standing.
 	//
-	// Plain s.authorize, deliberately. Below, this handler reads a broker
+	// The isolation call comes first, as it does on status and refresh. It was
+	// missing here when this gate first landed, and the effect was an
+	// asymmetry with no justification behind it: an agent belonging to another
+	// project was refused all three routes, but two of them answered 404 and
+	// this one answered 403 — and a 403 on a project an agent cannot see
+	// confirms that the project exists. Three sibling routes on one resource
+	// answering the same caller two different ways is also how the next reader
+	// concludes the difference must be meaningful.
+	//
+	// It changes exactly one caller class. requireProjectVisibleToAgent returns
+	// true for every non-agent identity, so users and brokers reach the
+	// authorize call below unchanged; only the cross-project agent's refusal
+	// moves from 403 to 404.
+	if !s.requireProjectVisibleToAgent(w, r, project) {
+		return
+	}
+
+	// Then plain s.authorize, deliberately. Below, this handler reads a broker
 	// identity out of the context to record which broker pushed — that is who
 	// the endpoint was written for, but "the endpoint was written for brokers"
 	// is not an authorization rule, and there is no broker arm anywhere in

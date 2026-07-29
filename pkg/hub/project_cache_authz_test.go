@@ -59,10 +59,10 @@ import (
 //
 // The caller classes the brief requires, plus a broker:
 //
-//	cross-project agent  -> 404 on status and refresh (isolation runs before
-//	                        authorization, so the response does not confirm the
-//	                        project exists); 403 on notify — see the note on
-//	                        pcGateExpect below, this asymmetry is deliberate
+//	cross-project agent  -> 404 on all three (isolation runs before
+//	                        authorization, so no response confirms the project
+//	                        exists). notify answered 403 when this gate first
+//	                        landed; see the note on pcGateExpect below
 //	unrelated user       -> 403
 //	broker               -> 403, INCLUDING on cache/notify, whose body reads a
 //	                        broker identity out of the context. Being the
@@ -104,6 +104,20 @@ const (
 	pcGateSeededFileCount  = 7
 	pcGateSeededTotalBytes = 4242
 )
+
+// pcGateSecretCommitSHA is the second disclosure canary, and the one the first
+// version of these tests left uncovered. /sync/status returns whole
+// store.ProjectSyncState records, so LastCommitSHA travels with the broker ID —
+// and a commit SHA identifies the exact code state of a project, which is worth
+// at least as much to an outsider as the ID of the broker serving it. It is not
+// a plausible SHA on purpose: it must be searchable in a response body, and
+// nothing else in a payload can produce it by coincidence.
+//
+// cache/status does NOT echo this field (ProjectCacheStatusResponse carries
+// brokerId, fileCount, totalBytes and lastRefresh only), so it is asserted on
+// the /sync/status tests and not on the cache ones, where a NotContains would
+// pass without measuring anything.
+const pcGateSecretCommitSHA = "commit-sha-must-not-leak"
 
 func pcGateSetup(t *testing.T) *pcGateFixture {
 	t.Helper()
@@ -198,11 +212,12 @@ func (f *pcGateFixture) seedSyncState(t *testing.T) {
 	when := time.Unix(1700000000, 0).UTC()
 	require.NoError(t, f.store.UpsertProjectSyncState(context.Background(),
 		&store.ProjectSyncState{
-			ProjectID:    f.projA.ID,
-			BrokerID:     pcGateSecretBrokerID,
-			LastSyncTime: &when,
-			FileCount:    pcGateSeededFileCount,
-			TotalBytes:   pcGateSeededTotalBytes,
+			ProjectID:     f.projA.ID,
+			BrokerID:      pcGateSecretBrokerID,
+			LastSyncTime:  &when,
+			LastCommitSHA: pcGateSecretCommitSHA,
+			FileCount:     pcGateSeededFileCount,
+			TotalBytes:    pcGateSeededTotalBytes,
 		}))
 }
 
@@ -221,6 +236,8 @@ func (f *pcGateFixture) requireSyncStateUnchanged(t *testing.T) {
 		"a request the gate refused rewrote the sync state's file count")
 	require.Equal(t, int64(pcGateSeededTotalBytes), states[0].TotalBytes,
 		"a request the gate refused rewrote the sync state's byte count")
+	require.Equal(t, pcGateSecretCommitSHA, states[0].LastCommitSHA,
+		"a request the gate refused rewrote the sync state's commit SHA")
 }
 
 // ---------------------------------------------------------------------------
@@ -327,13 +344,19 @@ func (f *pcGateFixture) routes() []pcGateRoute {
 
 // pcGateExpect is the expected refusal code per route for a given caller.
 //
-// It is a per-route map rather than one code because cache/notify genuinely
-// differs from the other two for one caller: status and refresh run
-// requireProjectVisibleToAgent first, which collapses a cross-project agent to
-// 404 so the response does not confirm projA exists, whereas notify is a plain
-// s.authorize and answers 403. That is the ruled shape for notify, and the
-// asymmetry is recorded here rather than smoothed over, so that a later change
-// to either handler's ordering shows up as a test diff.
+// It is a per-route map rather than one code so that any future divergence
+// between the three routes has to be written down here to pass, rather than
+// being absorbed by a single shared number. All three currently agree for
+// every caller: each runs requireProjectVisibleToAgent before its
+// authorization call, so a cross-project agent is collapsed to 404 on all of
+// them and no route confirms that projA exists.
+//
+// This shape is the correction of one that shipped: notify originally had no
+// isolation call and answered that agent 403 while its siblings answered 404.
+// Nothing was gained by it — the caller was refused either way — and two things
+// were lost: the 403 confirmed the project's existence, and the disagreement
+// between three routes on one resource invited the next reader to assume the
+// difference was meaningful.
 type pcGateExpect map[string]int
 
 func (f *pcGateFixture) requireRefused(t *testing.T, want pcGateExpect,
@@ -399,14 +422,15 @@ func TestPCGate_UnrelatedUserDenied(t *testing.T) {
 func TestPCGate_CrossProjectAgentDenied(t *testing.T) {
 	f := pcGateSetup(t)
 	f.requireRefused(t, pcGateExpect{
-		// 404, not 403: requireProjectVisibleToAgent runs first on these two,
-		// so an agent outside the project cannot use the response to learn
-		// that the project exists.
+		// 404, not 403, on all three: requireProjectVisibleToAgent runs
+		// before the authorization decision, so an agent outside the project
+		// cannot use any of these responses to learn that the project exists.
+		// notify answered 403 when this gate first landed and now matches its
+		// siblings — the asymmetry was an oversight, not a design, and a 403
+		// on a project an agent cannot see is itself the disclosure.
 		"status":  http.StatusNotFound,
 		"refresh": http.StatusNotFound,
-		// 403: notify is a plain s.authorize by ruling. Refused either way;
-		// only the amount it admits differs.
-		"notify": http.StatusForbidden,
+		"notify":  http.StatusNotFound,
 	}, func(t *testing.T, method, path string) *httptest.ResponseRecorder {
 		return f.asAgent(t, f.stranger, method, path)
 	})
