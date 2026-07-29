@@ -277,22 +277,16 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			// is not evidence of any relationship to it. Ownership comes from
 			// creating the project, below.
 			//
-			// Not granting ownership is not enough on its own: reaching here still
-			// returned the named project's stored record to the caller and ran the
-			// backfill WRITE on it. Gate on the project READ baseline first — the
-			// same helper, in the same position, that getProject and the matched
-			// branch of register use on this same object. No new policy is invented
-			// here; the existing one is propagated to this branch. Denials render the
-			// missing-project body, so the refusal itself carries nothing.
+			// This branch READS: it answers with an existing project's stored record
+			// and backfills that project's groups. So it is gated on the project read
+			// baseline, using the same helper in the same position that getProject and
+			// the matched branch of register use on this same object. No new policy is
+			// invented here; the existing one is propagated to this branch. Denials
+			// render the missing-project body.
 			//
-			// WHAT THIS DOES NOT CLOSE, on this verb: an id that is free falls
-			// through to the create below and answers 201, so a caller can still
-			// learn that an id is TAKEN by getting 404 where they would otherwise
-			// have got a new project. That distinction is inherent to idempotent
-			// create by client-supplied id — the alternative is to create a second
-			// project on a colliding id — and it is not what this gate is for. The
-			// gate removes the disclosure of the existing project's stored record
-			// and the backfill write on it; it does not claim to hide collisions.
+			// SCOPE: the gate covers this branch only — the one where the supplied id
+			// names a project that exists. An id that names nothing is not a matched
+			// project and reaches the create below on its own terms.
 			if !s.authorizeProjectReadNoOracle(w, r, existing) {
 				return
 			}
@@ -1231,14 +1225,13 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// is how a client announces a project it believes in; it is not proof of
 		// title. Ownership comes from creating the project, in the branch above.
 		//
-		// Not granting ownership is not enough on its own: reaching here still
-		// returned the matched project's stored record to the caller and ran the
-		// backfill WRITE on it. Gate on the project READ baseline first, using the
-		// same helper and the same placement getProject already uses on this same
-		// object (gate, then the identical two backfill calls) — no new policy is
-		// invented here, the existing one is propagated to this branch. Every
-		// denial renders the missing-project body, so a matched-but-unreadable
-		// project is indistinguishable from no match at all.
+		// This branch READS: it answers with an existing project's stored record and
+		// backfills that project's groups. So it is gated on the project read
+		// baseline, using the same helper and the same placement getProject uses on
+		// this same object — authorizeProjectReadNoOracle, then the identical two
+		// backfill calls. No new policy is invented here; the existing one is
+		// propagated to this branch. Every denial renders the missing-project body,
+		// so a matched-but-unreadable project is indistinguishable from no match.
 		//
 		// A READ baseline on a POST is deliberate: being able to see an existing
 		// project is the prerequisite for announcing or linking it. It is the
