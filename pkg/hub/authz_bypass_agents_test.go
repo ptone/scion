@@ -1167,8 +1167,10 @@ func TestBypassAgents_UnauthenticatedDenied(t *testing.T) {
 // agent.ProjectID == projectID consistency check and then returned the record,
 // so the guard the flat path applies was absent on the second path. The tables
 // above pin the flat route (broker, unauthenticated) but never exercised the
-// nested route, which is why this drift was invisible. Each denial arm below is
-// RED if the s.authorize call is removed from getProjectAgent.
+// nested route, which is why this drift was invisible. The authenticated denial
+// arms below (outsider member, cross-project agent, broker) are RED if the
+// s.authorize call is removed from getProjectAgent; the anonymous arm is a floor
+// control denied upstream by the auth middleware, not a gate-liveness witness.
 func TestBypassAgents_NestedGetProjectAgentGate(t *testing.T) {
 	nested := func(projectID, agentID string) string {
 		return fmt.Sprintf("/api/v1/projects/%s/agents/%s", projectID, agentID)
@@ -1220,6 +1222,9 @@ func TestBypassAgents_NestedGetProjectAgentGate(t *testing.T) {
 	})
 
 	t.Run("anonymous is denied", func(t *testing.T) {
+		// Floor control: an anonymous caller is denied upstream by the auth
+		// middleware, so this arm stays green with or without the leaf gate. Not
+		// a gate-liveness witness.
 		f := bypassAgentsSetup(t)
 		rec := doRequestNoAuth(t, f.srv, http.MethodGet, nested(f.proj.ID, f.sibling.ID), nil)
 		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden},
@@ -1258,8 +1263,10 @@ func TestBypassAgents_NestedGetProjectAgentGate(t *testing.T) {
 // s.authorize(agentResource, ActionUpdate); the nested leaf did only the
 // slug/UUID + ProjectID consistency lookup and then applied the field changes,
 // so the guard the flat write path applies was absent on the second write path.
-// Each denial arm below is RED (200 + a mutated record) if the s.authorize call
-// is removed from updateProjectAgent; the positive arms are Rule-2a controls.
+// The authenticated denial arms below are RED (200 + a mutated record) if the
+// s.authorize call is removed from updateProjectAgent; the anonymous arm is a
+// floor control denied upstream by the auth middleware, not a gate-liveness
+// witness. The positive arms are Rule-2a controls.
 func TestBypassAgents_NestedUpdateProjectAgentGate(t *testing.T) {
 	nested := func(projectID, agentID string) string {
 		return fmt.Sprintf("/api/v1/projects/%s/agents/%s", projectID, agentID)
@@ -1321,6 +1328,9 @@ func TestBypassAgents_NestedUpdateProjectAgentGate(t *testing.T) {
 	})
 
 	t.Run("anonymous is denied", func(t *testing.T) {
+		// Floor control: an anonymous caller is denied upstream by the auth
+		// middleware, so this arm stays green with or without the leaf gate. Not
+		// a gate-liveness witness.
 		f := bypassAgentsSetup(t)
 		rec := doRequestNoAuth(t, f.srv, http.MethodPatch, nested(f.proj.ID, f.sibling.ID), patch("n92-hijacked"))
 		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden},
@@ -1361,8 +1371,10 @@ func TestBypassAgents_NestedUpdateProjectAgentGate(t *testing.T) {
 // restore, so any authenticated caller could resurrect any soft-deleted agent.
 // Restore is the semantic inverse of delete, so the sink now gates ActionDelete,
 // mirroring the delete twin performAgentDelete. This one sink serves both routes,
-// so the single gate closes both. Each denial arm below is RED (200 + the agent
-// un-deleted) if the s.authorize call is removed from restoreAgent.
+// so the single gate closes both. The authenticated denial arms below are RED
+// (200 + the agent un-deleted) if the s.authorize call is removed from
+// restoreAgent; the anonymous arm is a floor control denied upstream by the auth
+// middleware, not a gate-liveness witness.
 func TestBypassAgents_RestoreAgentGate(t *testing.T) {
 	restorePath := func(projectID, agentID string) string {
 		return fmt.Sprintf("/api/v1/projects/%s/agents/%s/restore", projectID, agentID)
@@ -1422,6 +1434,9 @@ func TestBypassAgents_RestoreAgentGate(t *testing.T) {
 	})
 
 	t.Run("anonymous is denied", func(t *testing.T) {
+		// Floor control: an anonymous caller is denied upstream by the auth
+		// middleware, so this arm stays green with or without the sink gate. Not
+		// a gate-liveness witness.
 		f := bypassAgentsSetup(t)
 		softDelete(t, f, f.sibling.ID)
 		rec := doRequestNoAuth(t, f.srv, http.MethodPost, restorePath(f.proj.ID, f.sibling.ID), nil)
