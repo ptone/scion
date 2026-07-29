@@ -222,6 +222,70 @@ func TestRIGate_AllFourRoutesRefuseRevokedRead(t *testing.T) {
 	}
 }
 
+// TestRIGate_SharedImportHelperGatesRevokedRead pins the FIFTH gate site — the
+// shared authorizeProjectImport helper reached via the generic
+// POST /api/v1/resources/discover and /resources/import routes (scope=project) —
+// with its own committed red-without-fix arm, matching the four per-project
+// routes. The lead ratified keeping this site as a real gate; without a committed
+// test a refactor that drops the shared-helper gate would pass CI. These generic
+// routes are remote-URL only (no local workspace enumeration), so the property
+// under test is that a read-revoked in-project create-scope agent is REFUSED at
+// the gate (403) before any discovery/import runs, while a default agent passes
+// the gate (and only then fails downstream on the unreachable source URL).
+func TestRIGate_SharedImportHelperGatesRevokedRead(t *testing.T) {
+	f := wsGateSetup(t)
+	// The generic handlers nil-check storage before reaching the scope gate.
+	f.srv.SetStorage(newMockStorage("test-bucket"))
+
+	// A remote source URL that will fail to fetch — a caller who PASSES the gate
+	// falls through to that failure (non-403), which is exactly how we distinguish
+	// "gate passed" from "gate refused" without needing a real remote.
+	const bogusSource = "https://example.invalid/does-not-exist.git"
+	body := func(kind string) []byte {
+		b, err := json.Marshal(map[string]string{
+			"kind": kind, "scope": "project", "scopeId": f.projA.ID, "sourceUrl": bogusSource,
+		})
+		require.NoError(t, err)
+		return b
+	}
+
+	routes := []struct {
+		name string
+		path string
+	}{
+		{"resources/discover", "/api/v1/resources/discover"},
+		{"resources/import", "/api/v1/resources/import"},
+	}
+
+	t.Run("read-revoked agent refused at shared gate", func(t *testing.T) {
+		attacker := riGateCreateAgent(t, f, "rigate-shared-attacker")
+		riGateRevokeRead(t, f, attacker.ID)
+		for _, route := range routes {
+			t.Run(route.name, func(t *testing.T) {
+				rec := riGateAsAgentCreate(t, f, attacker, http.MethodPost, route.path, body("template"))
+				require.Equal(t, http.StatusForbidden, rec.Code,
+					"read-revoked agent must be refused at the shared import gate; body=%s", rec.Body.String())
+				require.Contains(t, rec.Body.String(), "permission",
+					"the refusal must be the read-gate denial, not a downstream error; body=%s", rec.Body.String())
+			})
+		}
+	})
+
+	t.Run("default agent passes the shared gate", func(t *testing.T) {
+		good := riGateCreateAgent(t, f, "rigate-shared-default")
+		for _, route := range routes {
+			t.Run(route.name, func(t *testing.T) {
+				rec := riGateAsAgentCreate(t, f, good, http.MethodPost, route.path, body("template"))
+				require.NotEqual(t, http.StatusForbidden, rec.Code,
+					"default-config create-scope agent must pass the gate (downstream failure is fine); body=%s",
+					rec.Body.String())
+				require.NotContains(t, rec.Body.String(), "permission",
+					"a passed gate must not render the read-gate denial; body=%s", rec.Body.String())
+			})
+		}
+	})
+}
+
 // TestRIGate_UnchangedControls confirms the fix leaves the pre-existing controls
 // intact: the gate is additive, not a replacement.
 func TestRIGate_UnchangedControls(t *testing.T) {
