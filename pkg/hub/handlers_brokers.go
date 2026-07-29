@@ -24,7 +24,7 @@ import (
 
 // handleBrokersEndpoint handles POST /api/v1/brokers.
 // Creates a new broker registration with join token.
-// Requires admin authentication.
+// Requires authentication.
 func (s *Server) handleBrokersEndpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
