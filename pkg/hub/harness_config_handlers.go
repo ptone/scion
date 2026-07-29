@@ -214,6 +214,138 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// harnessConfigUserScope describes, for a user-scoped harness config, which
+// user it must belong to for the caller to be allowed to act on it.
+//
+// The two fields exist because "no owner recorded" has to mean opposite things
+// on the two kinds of call, and collapsing them into one empty-string rule
+// would be a fail-open:
+//
+//   - On an EXISTING record, ownerID is the record's OwnerID and an empty value
+//     means the record names no owner, so no caller can prove they are it, so
+//     everyone is denied. This is what deleteHarnessConfig has always done.
+//   - On a CREATE, there is no record yet; ownerID is the requested target user
+//     and an empty value means "for myself", which is allowed. Set isNew.
+type harnessConfigUserScope struct {
+	ownerID string
+	isNew   bool
+}
+
+// authorizeHarnessConfigScope is the scope-aware gate for the harness-config
+// write endpoints. It is the switch that deleteHarnessConfig has carried since
+// it was written, lifted out so the other write endpoints share it rather than
+// each growing their own copy.
+//
+// They had grown their own copies, and the copies had diverged, which is the
+// reason this is a function and not a fourth transcription:
+//
+//   - createHarnessConfig had no switch at all. POST /api/v1/harness-configs
+//     performed no authorization, so any authenticated caller could create a
+//     harness config at global scope with an attacker-chosen Config.Image, and
+//     broker nodes pull that image on the next agent start.
+//   - updateHarnessConfig and patchHarnessConfig had no switch either, and
+//     update rewrites Config.Image on an existing record — the same effect as
+//     the create hole, reached by a different verb.
+//   - handleHarnessConfigClone had a switch with a global arm and a project arm
+//     and nothing else. A clone whose destination scope was "user", or was any
+//     string the switch did not name, fell straight out of the bottom and was
+//     created unauthorized. A switch over a request-controlled string is
+//     exhaustive over the values its author had in mind and silent about every
+//     other, and silence here rendered as permission.
+//
+// Hence the default arm, which denies. Adding a scope constant without adding
+// an arm here now refuses that scope instead of admitting it, and the person
+// adding it has to come here and say what it means.
+//
+// This gate authorizes WHO may write a harness config. It says nothing about
+// WHAT the config contains: the image reference, its registry, and the branch
+// it names are not validated here and are a separate layer (wave-2). Keep the
+// two orthogonal — a caller who is allowed to write is not thereby vouched for.
+//
+// verb is the lowercase action word used in the denial messages ("create",
+// "update", "delete"), so a refusal names the thing that was refused.
+func (s *Server) authorizeHarnessConfigScope(w http.ResponseWriter, r *http.Request,
+	scope, scopeID string, userScope harnessConfigUserScope, action Action, verb string) bool {
+	ctx := r.Context()
+
+	switch scope {
+	case store.HarnessConfigScopeGlobal:
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return false
+		}
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "harness_config"}, action)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You do not have permission to "+verb+" global resources", nil)
+			return false
+		}
+		return true
+
+	case store.HarnessConfigScopeProject:
+		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			if !agentIdent.HasScope(ScopeAgentCreate) {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)
+				return false
+			}
+			if scopeID != agentIdent.ProjectID() {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"Agents can only manage resources within their own project", nil)
+				return false
+			}
+			return true
+		}
+		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+				Type: "harness_config", ParentType: "project", ParentID: scopeID,
+			}, action)
+			if !decision.Allowed {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"You do not have permission to "+verb+" resources in this project", nil)
+				return false
+			}
+			return true
+		}
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return false
+
+	case store.HarnessConfigScopeUser:
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return false
+		}
+		if userScope.isNew && userScope.ownerID == "" {
+			// Creating a user-scoped config with no target named: it is the
+			// caller's own.
+			return true
+		}
+		if userScope.ownerID != userIdent.ID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You do not have permission to "+verb+" another user's harness config", nil)
+			return false
+		}
+		return true
+
+	default:
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			capitalizeFirst(verb)+" is not supported for this resource scope", nil)
+		return false
+	}
+}
+
+// capitalizeFirst uppercases the first byte of an ASCII word. Used only to
+// render the verb passed to authorizeHarnessConfigScope at the start of a
+// sentence, so that the caller supplies one verb rather than two spellings of
+// it that could disagree.
+func capitalizeFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
 // createHarnessConfig creates a harness config with optional file upload URLs.
 func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -257,6 +389,17 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if hc.Visibility == "" {
 		hc.Visibility = store.VisibilityPrivate
+	}
+
+	// Gate after the scope defaulting above and before anything is written.
+	// After, because an omitted scope means global and global is the most
+	// privileged of the three — authorizing the empty string the caller sent
+	// rather than the global scope it resolves to would gate the request that
+	// was typed instead of the one that will execute. Before, because this is
+	// the last point at which nothing has happened yet.
+	if !s.authorizeHarnessConfigScope(w, r, hc.Scope, hc.ScopeID,
+		harnessConfigUserScope{ownerID: hc.ScopeID, isNew: true}, ActionCreate, "create") {
+		return
 	}
 
 	// If no files provided, mark as active immediately
@@ -411,6 +554,21 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
+	// Fetch, then authorize on the STORED record's scope — not on any scope the
+	// body carries. This handler unmarshals the whole record from the request,
+	// including Scope, ScopeID and Config.Image; authorizing on the submitted
+	// scope would let a caller name a scope they are allowed to write and then
+	// rewrite a record in one they are not.
+	//
+	// It has to be gated at all because an update rewrites Config.Image on an
+	// existing config, which is the same attacker-image effect that gating
+	// create closes — reached by PUT instead of POST. Gating create alone would
+	// have moved the hole rather than shut it.
+	if !s.authorizeHarnessConfigScope(w, r, existing.Scope, existing.ScopeID,
+		harnessConfigUserScope{ownerID: existing.OwnerID}, ActionUpdate, "update") {
+		return
+	}
+
 	var hc store.HarnessConfig
 	if err := readJSON(r, &hc); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -439,6 +597,18 @@ func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, id s
 	existing, err := s.store.GetHarnessConfig(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Same gate as updateHarnessConfig, on the stored record's scope, and
+	// deliberately not a weaker one. PATCH touches fewer fields than PUT today
+	// — it cannot currently reach Config.Image — but the two verbs address the
+	// same record through the same route, and a caller who may not PUT it must
+	// not be able to rename and re-scope it by PATCH instead. Which fields the
+	// struct below happens to list is not an authorization boundary; it is a
+	// list that grows.
+	if !s.authorizeHarnessConfigScope(w, r, existing.Scope, existing.ScopeID,
+		harnessConfigUserScope{ownerID: existing.OwnerID}, ActionUpdate, "update") {
 		return
 	}
 
@@ -494,55 +664,15 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	// Authorize: check source scope for ActionDelete
-	switch existing.Scope {
-	case store.HarnessConfigScopeGlobal:
-		userIdent := GetUserIdentityFromContext(ctx)
-		if userIdent == nil {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
-			return
-		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "harness_config"}, ActionDelete)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete global resources", nil)
-			return
-		}
-	case store.HarnessConfigScopeProject:
-		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-			if !agentIdent.HasScope(ScopeAgentCreate) {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)
-				return
-			}
-			if existing.ScopeID != agentIdent.ProjectID() {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only manage resources within their own project", nil)
-				return
-			}
-		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type: "harness_config", ParentType: "project", ParentID: existing.ScopeID,
-			}, ActionDelete)
-			if !decision.Allowed {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete resources in this project", nil)
-				return
-			}
-		} else {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
-			return
-		}
-	case store.HarnessConfigScopeUser:
-		userIdent := GetUserIdentityFromContext(ctx)
-		if userIdent == nil {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
-			return
-		}
-		if existing.OwnerID != userIdent.ID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You do not have permission to delete another user's harness config", nil)
-			return
-		}
-	default:
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"Delete is not supported for this resource scope", nil)
+	// Authorize: check source scope for ActionDelete.
+	//
+	// This switch was the original and the other write endpoints were meant to
+	// match it; instead one of them copied two of its four arms and the rest
+	// had none. It is now a call to the extracted helper — same four arms, same
+	// messages, same decisions — so that the endpoints cannot drift apart
+	// again. Behaviour here is unchanged; the tests that pinned it still pass.
+	if !s.authorizeHarnessConfigScope(w, r, existing.Scope, existing.ScopeID,
+		harnessConfigUserScope{ownerID: existing.OwnerID}, ActionDelete, "delete") {
 		return
 	}
 
@@ -886,40 +1016,18 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 	if destScope == "" {
 		destScope = store.HarnessConfigScopeGlobal
 	}
-	switch destScope {
-	case store.HarnessConfigScopeGlobal:
-		userIdent := GetUserIdentityFromContext(ctx)
-		if userIdent == nil {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
-			return
-		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "harness_config"}, ActionCreate)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global resources", nil)
-			return
-		}
-	case store.HarnessConfigScopeProject:
-		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-			if !agentIdent.HasScope(ScopeAgentCreate) {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)
-				return
-			}
-			if scopeID != agentIdent.ProjectID() {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only manage resources within their own project", nil)
-				return
-			}
-		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type: "harness_config", ParentType: "project", ParentID: scopeID,
-			}, ActionCreate)
-			if !decision.Allowed {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create resources in this project", nil)
-				return
-			}
-		} else {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
-			return
-		}
+	// This switch used to be written out here with a global arm, a project arm,
+	// and no others. A clone to "user" scope, or to any scope string the two
+	// arms did not name, matched nothing and fell through to the create below
+	// with no authorization performed at all — the miss rendered as a hit.
+	// destScope comes from the request body, so the set of values that reached
+	// the bottom was the caller's to choose.
+	//
+	// The shared helper supplies the missing user arm and, more importantly, a
+	// default arm that denies.
+	if !s.authorizeHarnessConfigScope(w, r, destScope, scopeID,
+		harnessConfigUserScope{ownerID: scopeID, isNew: true}, ActionCreate, "create") {
+		return
 	}
 
 	clone := &store.HarnessConfig{
