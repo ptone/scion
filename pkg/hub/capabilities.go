@@ -330,11 +330,17 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		return caps
 	}
 
-	// #591 (N73/N79): a project-scoped UAT skips every fast-path short-circuit —
-	// admin here, and resource-owner / ancestry / project-owner inside the loop
-	// below — because all are keyed on the MINTING user's role/ID. It falls to
-	// the per-action checkAccessPrecomputed loop, which enforceUATConstraints
-	// gates at its top. The fast paths remain for every non-scoped identity.
+	// #591 (N73/N79): two nested gates protect the fast-path short-circuits below.
+	// COARSE (N79 change 3): only the user family enters the fast paths; every
+	// non-user identity (broker, agent, anything else) skips them so it cannot
+	// trip the bare-ID OwnerID/ancestry paths — this closes T1, a self-minted
+	// broker whose ID collides with a victim user id that would otherwise list
+	// the victim's owned and descendant resources. FINE (N79 change 1): a
+	// project-scoped UAT, though it IS a UserIdentity, still skips them and falls
+	// to the per-action checkAccessPrecomputed loop, which enforceUATConstraints
+	// gates at its top (change 2). The fast paths remain for every non-scoped
+	// genuine user (a real optimisation).
+	_, isUser := identity.(UserIdentity)
 	_, scoped := identity.(*ScopedUserIdentity)
 
 	// Admin short-circuit: return all actions for all resources
@@ -373,24 +379,34 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 
 	caps := make([]*Capabilities, len(resources))
 	for i, resource := range resources {
-		// #591 (N73/N79): these three fast paths carry NO type assertion and key
-		// on identity.ID() (the minting user), so a scoped UAT must skip them and
-		// fall to checkAccessPrecomputed (enforceUATConstraints-gated) below.
-		if !scoped {
-			// Owner short-circuit
-			if resource.OwnerID != "" && resource.OwnerID == identity.ID() {
-				caps[i] = allActions(actions)
-				continue
-			}
-			// Ancestry short-circuit: ancestors get full access
-			if canAccessAsAncestor(identity.ID(), resource) {
-				caps[i] = allActions(actions)
-				continue
-			}
-			// Project owner/admin short-circuit
-			if isProjectOwner(projectIDForResource(resource)) {
-				caps[i] = allActions(actions)
-				continue
+		// #591 (N73/N79): the OwnerID and ancestry fast paths below carry NO type
+		// assertion and key on bare identity.ID(), so they are double-gated.
+		// COARSE (change 3): only the user family enters — a non-user identity
+		// (e.g. a self-minted broker whose ID collides with a victim user id)
+		// would otherwise trip OwnerID/ancestry and list the victim's owned and
+		// descendant resources (T1, a live leak). FINE (change 1): a scoped UAT,
+		// though it IS a UserIdentity, still skips them and falls to
+		// checkAccessPrecomputed (enforceUATConstraints-gated) below. NOTE the
+		// ancestry SLOW path in checkAccessPrecomputed remains bare-ID (T1r,
+		// follow-on); the OwnerID axis is fully closed here plus the slow-path
+		// owner bypass sits under a UserIdentity assertion.
+		if isUser {
+			if !scoped {
+				// Owner short-circuit
+				if resource.OwnerID != "" && resource.OwnerID == identity.ID() {
+					caps[i] = allActions(actions)
+					continue
+				}
+				// Ancestry short-circuit: ancestors get full access
+				if canAccessAsAncestor(identity.ID(), resource) {
+					caps[i] = allActions(actions)
+					continue
+				}
+				// Project owner/admin short-circuit
+				if isProjectOwner(projectIDForResource(resource)) {
+					caps[i] = allActions(actions)
+					continue
+				}
 			}
 		}
 

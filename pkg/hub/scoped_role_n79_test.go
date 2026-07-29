@@ -28,7 +28,7 @@ import (
 // closes the admin-role promotion; it does NOT close the ID-KEYED fast-path
 // short-circuits in the capability evaluators, which key on the MINTING user's
 // ID (resource owner, ancestry, project owner) and so still confer access
-// outside a UAT's project + scope bounds. The N79 arm is two changes:
+// outside a UAT's project + scope bounds. The N79 arm is three changes:
 //
 //	CHANGE (1) skip all 8 fast-path short-circuits for a *ScopedUserIdentity in
 //	           ComputeCapabilities / ComputeScopeCapabilities /
@@ -36,6 +36,16 @@ import (
 //	CHANGE (2) run enforceUATConstraints at the TOP of checkAccessPrecomputed —
 //	           the batch/precomputed evaluator, which never calls CheckAccess and
 //	           so was the ONLY allow path with no scope check.
+//	CHANGE (3) COARSE type gate at the batch OwnerID/ancestry fast paths: only the
+//	           user family enters; every non-user identity (broker, agent, ...)
+//	           skips them. Change 1 is the FINE gate nested inside it (a scoped
+//	           UAT, though user-family, still skips). This closes T1 — a live
+//	           forged-broker leak whose ID collides with a victim user id.
+//
+// Neither layer alone satisfies the invariant: change 3 admits a *ScopedUserIdentity
+// (it is user-family) so change 1 is still needed to stop the UAT scope escape;
+// change 1 does nothing for a broker so change 3 is still needed to stop the
+// forged-broker leak. The pins below therefore FAIL if EITHER change is reverted.
 //
 // The acceptance invariant (TestN79_Invariant_*) is: no path may return an
 // allow for a *ScopedUserIdentity without enforceUATConstraints returning nil
@@ -406,5 +416,78 @@ func TestN79_Invariant_AllowImpliesEnforceUATConstraintsNil(t *testing.T) {
 	inScope := resources[3]
 	if !capabilityAllows(az.ComputeCapabilities(ctx, scoped, inScope), ActionRead) {
 		t.Errorf("liveness: the in-scope owned read was denied; the invariant test is vacuous")
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Pin 9 / T1 — FORGED-BROKER batch leak, pinning CHANGE (3) as a DIFFERENTIAL.
+// A broker identity implements only ID()/Type()/BrokerID() — no Email/
+// DisplayName/Role — so it is NOT a UserIdentity. The batch OwnerID/ancestry
+// fast paths key on bare identity.ID(), so a self-minted broker whose ID
+// collides with a victim user id trips them and lists the victim's owned
+// resources. This leaks TODAY, independent of F3b.
+//
+// change 3 gates the fast paths on the user family, so the forged broker flips
+// from allow-on-all to deny-on-all — MATCHING a non-colliding control broker
+// (always denied) — WHILE the genuine victim user keeps batch access on its
+// owned and descendant rows. The guard closes the broker without regressing the
+// user. change 1 (scoped skip) does nothing for a broker, so this pin FAILS if
+// change 3 is reverted; the scoped-UAT pins above FAIL if change 1 is reverted.
+//
+// The forged-broker assertion uses the OWNED axis only: the OwnerID axis is
+// FULLY closed (fast path here + slow-path owner bypass under a UserIdentity
+// assertion), whereas the ancestry SLOW path (checkAccessPrecomputed) remains
+// bare-ID (T1r, a follow-on the lead ruled non-blocking), so a broker-ancestry
+// row would NOT flip and is deliberately not asserted for the broker. The
+// descendant row is used only for the genuine-user no-regression check.
+// -----------------------------------------------------------------------------
+
+func TestN79_T1_ForgedBrokerBatch_Differential(t *testing.T) {
+	srv, s := testServer(t)
+	az := srv.authzService
+	ctx := context.Background()
+
+	victimID := tid("n79_t1_victim")
+	victim := n79StoreUser(t, s, victimID, "N79 T1 Victim")
+	agentActions := ResourceActions["agent"]
+
+	// R1 owned by the victim (OwnerID axis — fully closed by change 3).
+	owned := Resource{Type: "agent", ID: tid("n79_t1_owned"), OwnerID: victimID, ParentType: "project", ParentID: tid("n79_t1_proj")}
+	// R2 a descendant of the victim (ancestry axis) — used ONLY for the genuine
+	// user no-regression check, never asserted against the broker (T1r open).
+	descendant := Resource{Type: "agent", ID: tid("n79_t1_desc"), Ancestry: []string{victimID}, ParentType: "project", ParentID: tid("n79_t1_proj")}
+
+	forged := NewBrokerIdentity(victimID)               // ID collides with the victim
+	control := NewBrokerIdentity(tid("n79_t1_control")) // non-colliding broker
+
+	// Preconditions: the forged broker's ID matches the resource owner (the leak
+	// primitive) and it is not a UserIdentity (so change 3's gate applies).
+	if forged.ID() != owned.OwnerID {
+		t.Fatalf("test setup: forged broker id does not collide with owner; pin vacuous")
+	}
+	if _, ok := forged.(UserIdentity); ok {
+		t.Fatalf("test setup: broker unexpectedly satisfies UserIdentity; change-3 gate would not apply")
+	}
+
+	// DIFFERENTIAL 1: forged broker denied on all actions, MATCHING the
+	// non-colliding control broker.
+	fCaps := az.ComputeCapabilitiesBatch(ctx, forged, []Resource{owned}, "agent")
+	if len(fCaps[0].Actions) != 0 {
+		t.Errorf("T1 forged-broker leak: batch granted %d/%d actions on a victim-owned resource via the bare-ID OwnerID fast path; actions=%v",
+			len(fCaps[0].Actions), len(agentActions), fCaps[0].Actions)
+	}
+	cCaps := az.ComputeCapabilitiesBatch(ctx, control, []Resource{owned}, "agent")
+	if len(cCaps[0].Actions) != 0 {
+		t.Errorf("control (non-colliding) broker unexpectedly granted %v; forged and control brokers must agree at deny", cCaps[0].Actions)
+	}
+
+	// DIFFERENTIAL 2: the genuine victim user keeps batch access on BOTH its owned
+	// and descendant rows (change 3 must not regress real users).
+	uCaps := az.ComputeCapabilitiesBatch(ctx, victim, []Resource{owned, descendant}, "agent")
+	if len(uCaps[0].Actions) != len(agentActions) {
+		t.Errorf("regression: victim user lost owned-row access; got %v want all %d actions", uCaps[0].Actions, len(agentActions))
+	}
+	if len(uCaps[1].Actions) != len(agentActions) {
+		t.Errorf("regression: victim user lost descendant-row (ancestry) access; got %v want all %d actions", uCaps[1].Actions, len(agentActions))
 	}
 }
