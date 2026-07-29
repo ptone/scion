@@ -594,6 +594,33 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 	hc.ID = existing.ID
 	hc.Created = existing.Created
 	hc.CreatedBy = existing.CreatedBy
+
+	// Scope, ScopeID and OwnerID are preserved from the stored record, and that
+	// is an authorization boundary, not housekeeping.
+	//
+	// The gate above authorizes the scope the record IS in. Everything below
+	// writes the record from the body. Without these three lines those are two
+	// different scopes: an agent authorized on its own project's record PUT it
+	// back with scope "global" and an attacker-chosen Config.Image and got 200,
+	// and the store then held a global record carrying that image — measured,
+	// and pinned by TestHCAuthz_UpdateCannotPromoteScope. The gate checked
+	// where the record was and never where the caller was moving it to, which
+	// is precisely the end state gating create was supposed to prevent,
+	// reached by PUT instead of POST. handleHarnessConfigClone got this right
+	// by authorizing its destination scope; update authorized no destination
+	// at all.
+	//
+	// Preserving rather than rejecting is deliberate and is the conservative
+	// reading: re-scoping is not a supported operation today, so there is no
+	// destination to authorize. Note the consequence, because it is a real
+	// one — a caller who submits a changed scope receives 200 and no move,
+	// which reads like success. If re-scope is ever wanted as a feature, do
+	// not simply delete these lines: authorize the destination scope the way
+	// clone does, in addition to the source scope gated above.
+	hc.Scope = existing.Scope
+	hc.ScopeID = existing.ScopeID
+	hc.OwnerID = existing.OwnerID
+
 	if hc.Slug == "" {
 		hc.Slug = api.Slugify(hc.Name)
 	}
@@ -616,12 +643,13 @@ func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	// Same gate as updateHarnessConfig, on the stored record's scope, and
-	// deliberately not a weaker one. PATCH touches fewer fields than PUT today
-	// — it cannot currently reach Config.Image — but the two verbs address the
-	// same record through the same route, and a caller who may not PUT it must
-	// not be able to rename and re-scope it by PATCH instead. Which fields the
-	// struct below happens to list is not an authorization boundary; it is a
-	// list that grows.
+	// deliberately not a weaker one. PATCH touches fewer fields than PUT today:
+	// the struct below lists name, slug, displayName, description and
+	// visibility, so it cannot reach Config.Image and cannot re-scope — it
+	// mutates the record already fetched. The gate is not justified by what
+	// PATCH can do today. It is justified because which fields that struct
+	// happens to list is not an authorization boundary; it is a list that
+	// grows, and it grows in a diff that will not look like a security change.
 	if !s.authorizeHarnessConfigScope(w, r, existing.Scope, existing.ScopeID,
 		harnessConfigUserScope{ownerID: existing.OwnerID}, ActionUpdate, "update") {
 		return
@@ -1148,6 +1176,19 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	sourceURL = config.NormalizeTemplateSourceURL(sourceURL)
 
 	// Authorize: same as import — harness_config:create on the owning scope.
+	//
+	// DO NOT convert this switch to authorizeHarnessConfigScope. It looks like
+	// the fourth copy of that switch and it is deliberately the last one left:
+	// its project arm calls s.authorizeProjectImport, which the shared helper
+	// does not and must not, because import authorization is a different
+	// question from write authorization. Folding this in would silently drop
+	// that call, and the resulting diff would look like tidying.
+	//
+	// It is also not a template. The other three copies of this switch had
+	// drifted from each other — one of them was missing arms entirely and let
+	// unnamed scopes through — which is why they were consolidated. If you need
+	// a scope switch somewhere new, call authorizeHarnessConfigScope; do not
+	// copy this one.
 	switch hc.Scope {
 	case store.HarnessConfigScopeGlobal:
 		userIdent := GetUserIdentityFromContext(ctx)

@@ -60,11 +60,27 @@ import (
 // author had in mind and silent about every other, and the silence read as
 // permission.
 //
+// A fourth: PUT authorized the scope the record was IN and then wrote the
+// record from the body, scope field included. An agent authorized on its own
+// project's config PUT it back as "global" with an attacker image and got 200.
+// The gate asked where the record was and never where the caller was moving it
+// to. updateHarnessConfig now preserves Scope, ScopeID and OwnerID from the
+// stored record, and TestHCAuthz_UpdateCannotPromoteScope is red without that.
+//
 // All four endpoints now call authorizeHarnessConfigScope, which is the switch
-// deleteHarnessConfig always carried — four arms and a default that denies —
-// lifted out so that the endpoints share one copy instead of diverging copies.
-// deleteHarnessConfig was converted to the same call with its behaviour and its
-// messages unchanged.
+// deleteHarnessConfig always carried — three named arms (global, project, user)
+// and a default that denies — lifted out so that the endpoints share one copy
+// instead of diverging copies. deleteHarnessConfig was converted to the same
+// call with its behaviour and its messages unchanged.
+//
+// One inherited wart, preserved rather than fixed and pinned below so that it
+// is a decision on the record: the global and user arms answer 401
+// "Authentication required" to an agent or a broker, which are authenticated
+// callers. They require a UserIdentity and read its absence as missing
+// authentication rather than as insufficient permission. 403 would be the
+// honest code. It is deliberately not changed here, because it is
+// deleteHarnessConfig's long-standing behaviour and this commit's claim is that
+// the extraction changed nothing.
 //
 // This gate decides WHO may write. It does not inspect WHAT is written: the
 // image reference is not validated here. The two are separate layers and these
@@ -637,4 +653,114 @@ func TestHCAuthz_DeleteUnchangedByExtraction(t *testing.T) {
 		rec := f.asUser(t, f.admin, http.MethodDelete, "/api/v1/harness-configs/"+hc.ID, nil)
 		require.Equal(t, http.StatusNoContent, rec.Code, "body=%s", rec.Body.String())
 	})
+
+	// The three subtests above exercise the global and project arms. They do
+	// not touch the user arm or the default arm — which are the two arms the
+	// extraction ADDS to what delete's caller reaches, and therefore the two
+	// this test is least entitled to leave unmeasured. A test that pins half a
+	// switch is evidence about half a switch.
+
+	t.Run("user-scoped: another user's config denied", func(t *testing.T) {
+		hc := f.seedConfig(t, "hcauthz-del-4", store.HarnessConfigScopeUser, "",
+			f.admin.ID)
+		rec := f.asUser(t, f.outsdr, http.MethodDelete, "/api/v1/harness-configs/"+hc.ID, nil)
+		require.Equal(t, http.StatusForbidden, rec.Code, "body=%s", rec.Body.String())
+		require.Contains(t, rec.Body.String(), "another user's harness config")
+		_, err := f.store.GetHarnessConfig(context.Background(), hc.ID)
+		require.NoError(t, err, "a refused DELETE removed the record anyway")
+	})
+
+	// The next two are the dead-deny arm documented at authorizeHarnessConfigScope:
+	// HarnessConfig.OwnerID is never populated, so a stored user-scoped record
+	// names no owner and nobody can prove they are it. Admin is included
+	// precisely because the answer is the same for admin — this arm compares
+	// identity, it does not consult role — and that is the surprising half.
+	t.Run("user-scoped: owner unrecorded denies an ordinary user", func(t *testing.T) {
+		hc := f.seedConfig(t, "hcauthz-del-5", store.HarnessConfigScopeUser, "", "")
+		rec := f.asUser(t, f.outsdr, http.MethodDelete, "/api/v1/harness-configs/"+hc.ID, nil)
+		require.Equal(t, http.StatusForbidden, rec.Code, "body=%s", rec.Body.String())
+		require.Contains(t, rec.Body.String(), "another user's harness config")
+	})
+
+	t.Run("user-scoped: owner unrecorded denies an admin too", func(t *testing.T) {
+		hc := f.seedConfig(t, "hcauthz-del-6", store.HarnessConfigScopeUser, "", "")
+		rec := f.asUser(t, f.admin, http.MethodDelete, "/api/v1/harness-configs/"+hc.ID, nil)
+		require.Equal(t, http.StatusForbidden, rec.Code, "body=%s", rec.Body.String())
+		require.Contains(t, rec.Body.String(), "another user's harness config")
+		_, err := f.store.GetHarnessConfig(context.Background(), hc.ID)
+		require.NoError(t, err, "a refused DELETE removed the record anyway")
+	})
+
+	t.Run("unknown scope denied by the default arm", func(t *testing.T) {
+		hc := f.seedConfig(t, "hcauthz-del-7", "organization", "", "")
+		rec := f.asUser(t, f.admin, http.MethodDelete, "/api/v1/harness-configs/"+hc.ID, nil)
+		require.Equal(t, http.StatusForbidden, rec.Code, "body=%s", rec.Body.String())
+		require.Contains(t, rec.Body.String(), "Delete is not supported for this resource scope",
+			"the default arm must name the refused verb, and admin must not bypass it")
+		_, err := f.store.GetHarnessConfig(context.Background(), hc.ID)
+		require.NoError(t, err, "a refused DELETE removed the record anyway")
+	})
+}
+
+// TestHCAuthz_UpdateCannotPromoteScope is the red-without-fix control for the
+// scope-promotion hole. Before updateHarnessConfig preserved Scope, ScopeID and
+// OwnerID from the stored record, this exact request returned 200 and the store
+// then held a GLOBAL config carrying the attacker's image — the end state that
+// gating create was supposed to prevent, reached by PUT instead of POST.
+//
+// The status code is the weakest part of this test and is asserted last on
+// purpose. What matters is the store read-back: a handler that answers 200 and
+// silently declines the move is correct here, and a handler that answers 200
+// and performs it is the vulnerability. Only the read-back separates them.
+func TestHCAuthz_UpdateCannotPromoteScope(t *testing.T) {
+	f := hcAuthzSetup(t)
+	seeded := f.seedConfig(t, "hcauthz-promote", store.HarnessConfigScopeProject, f.projA.ID, "")
+
+	promoted := *seeded
+	promoted.Scope = store.HarnessConfigScopeGlobal
+	promoted.ScopeID = ""
+	promoted.OwnerID = "hcauthz-not-a-real-owner"
+	promoted.Config = &store.HarnessConfigData{Image: hcAuthzAttackerImage}
+
+	rec := f.asAgent(t, f.insider, http.MethodPut,
+		"/api/v1/harness-configs/"+seeded.ID, promoted)
+
+	after, err := f.store.GetHarnessConfig(context.Background(), seeded.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.HarnessConfigScopeProject, after.Scope,
+		"a PUT promoted a project-scoped config to global (status was %d)", rec.Code)
+	require.Equal(t, f.projA.ID, after.ScopeID,
+		"a PUT moved the config out of its project (status was %d)", rec.Code)
+	require.Equal(t, "", after.OwnerID,
+		"a PUT set an owner the store never populates, which would flip the "+
+			"dead-deny user arm into a live allow for whoever was named")
+
+	// The caller IS authorized on this record's real scope, so the write of the
+	// fields it may write is expected to succeed. This is what makes the
+	// assertions above meaningful rather than incidental: the request was not
+	// refused, it was performed within the scope it was authorized for.
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+}
+
+// TestHCAuthz_UpdateStillWritesWithinScope is the positive control for the
+// preservation above: pinning "the scope did not change" is satisfiable by an
+// update that does nothing at all, so this asserts a legitimate in-scope edit
+// still lands.
+func TestHCAuthz_UpdateStillWritesWithinScope(t *testing.T) {
+	f := hcAuthzSetup(t)
+	seeded := f.seedConfig(t, "hcauthz-inscope", store.HarnessConfigScopeProject, f.projA.ID, "")
+
+	edit := *seeded
+	edit.DisplayName = "renamed by an authorized caller"
+
+	rec := f.asAgent(t, f.insider, http.MethodPut,
+		"/api/v1/harness-configs/"+seeded.ID, edit)
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+
+	after, err := f.store.GetHarnessConfig(context.Background(), seeded.ID)
+	require.NoError(t, err)
+	require.Equal(t, "renamed by an authorized caller", after.DisplayName,
+		"preserving scope must not have turned update into a no-op")
+	require.Equal(t, store.HarnessConfigScopeProject, after.Scope)
+	require.Equal(t, f.projA.ID, after.ScopeID)
 }
