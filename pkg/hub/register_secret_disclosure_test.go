@@ -411,10 +411,13 @@ func TestRSD_CreateLimbIssuesNoSecret(t *testing.T) {
 		name  string
 		agent bool
 	}{
-		// The user arm is the one measured against the create limb. The agent
-		// arm reaches it too, because the gate allows an agent creating a NEW
-		// project, and it is included so that identity is crossed with this
-		// limb the way it is crossed with the other one.
+		// The user arm is the one measured against the create limb: a user may
+		// mint a broker here, and the teeth below are that the minted broker
+		// holds no secret. The agent arm no longer reaches the mint — #221
+		// refuses a non-user caller on this create limb, because a broker minted
+		// there records an owner and ownership is a user concept — so it is
+		// crossed with this limb to pin that refusal, and that a refusal
+		// discloses no secret either.
 		{"user", false},
 		{"agent", true},
 	} {
@@ -445,6 +448,21 @@ func TestRSD_CreateLimbIssuesNoSecret(t *testing.T) {
 
 			// Body first, as above: it is the thing that leaves the process.
 			f.requireNoSecretInBody(t, rec, "create limb/"+a.name)
+
+			if a.agent {
+				// #221: a non-user caller is refused on the create limb before any
+				// broker is minted, so past the no-secret check there is nothing
+				// to observe — no broker was created, and a refusal discloses no
+				// secret on the seeded pair either.
+				require.Equal(t, http.StatusForbidden, rec.Code, "body=%s", rec.Body.String())
+				_, err := f.store.GetRuntimeBrokerByName(context.Background(), brokerName)
+				require.Error(t, err,
+					"the refused agent create-limb still minted a broker")
+				f.requireSecretIntact(t, f.embeddedID, rsdEmbeddedSecret, "create limb/"+a.name)
+				f.requireSecretIntact(t, f.plainID, rsdStandaloneSecret, "create limb/"+a.name)
+				return
+			}
+
 			require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
 
 			var resp RegisterProjectResponse

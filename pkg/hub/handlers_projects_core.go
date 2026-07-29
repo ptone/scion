@@ -1476,6 +1476,22 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
+			// Broker ownership: this register-by-name mint records the caller as
+			// the broker's owner in CreatedBy — the same field the POST /brokers
+			// path sets and that the owner-equality guards read. Ownership is a
+			// user concept: those guards compare CreatedBy against a user id, so
+			// only a user caller may mint an owned broker here. A non-user
+			// principal (agent or broker token, for which
+			// GetUserIdentityFromContext returns nil) is refused rather than
+			// minting an ownerless broker that every owner guard reads as unowned
+			// (#591, #221). This sets ownership on this one mint branch; it does
+			// not otherwise reconcile the two broker-mint paths.
+			user := GetUserIdentityFromContext(ctx)
+			if user == nil {
+				Forbidden(w)
+				return
+			}
+
 			broker = &store.RuntimeBroker{
 				ID:              brokerID,
 				Name:            req.Broker.Name,
@@ -1485,6 +1501,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				ConnectionState: "connected",
 				Capabilities:    req.Broker.Capabilities,
 				Profiles:        req.Broker.Profiles,
+				CreatedBy:       user.ID(),
 			}
 
 			if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {
