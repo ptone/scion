@@ -517,6 +517,15 @@ func (s *Server) handlePolicyBindingByID(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) removePolicyBinding(w http.ResponseWriter, r *http.Request, policyID, principalType, principalID string) {
+	// Policy writes are gated to hub admins (ptone/scion#591). Unbinding a
+	// policy from a principal removes a grant or a deny; left ungated, a caller
+	// could escape an admin-established deny simply by unbinding it. Fail closed
+	// at the entry. Completes the caller-authored policy-API write-op gate begun
+	// in 536d8f5c.
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
 	ctx := r.Context()
 
 	if err := s.store.RemovePolicyBinding(ctx, policyID, principalType, principalID); err != nil {

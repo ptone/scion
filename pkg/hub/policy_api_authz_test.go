@@ -267,6 +267,49 @@ func TestPolicyAPI_AddBindingGate(t *testing.T) {
 	})
 }
 
+func TestPolicyAPI_RemoveBindingGate(t *testing.T) {
+	f := setupPolicyAuthz(t)
+	ctx := context.Background()
+	p := f.seedPolicy(t, "pa-unbind-target")
+
+	// A binding to remove. Left ungated, unbinding is arm-C-adjacent: a caller
+	// could unbind an admin's deny to escape it.
+	require.NoError(t, f.store.AddPolicyBinding(ctx, &store.PolicyBinding{
+		PolicyID:      p.ID,
+		PrincipalType: store.PolicyPrincipalTypeUser,
+		PrincipalID:   f.member.ID,
+	}))
+
+	hasBinding := func() bool {
+		bs, err := f.store.GetPolicyBindings(ctx, p.ID)
+		require.NoError(t, err)
+		for _, b := range bs {
+			if b.PrincipalType == store.PolicyPrincipalTypeUser && b.PrincipalID == f.member.ID {
+				return true
+			}
+		}
+		return false
+	}
+
+	path := "/api/v1/policies/" + p.ID + "/bindings/user/" + f.member.ID
+
+	for _, c := range f.deniedCallers(t) {
+		t.Run(c.name, func(t *testing.T) {
+			require.True(t, hasBinding(), "precondition: binding present")
+			rec := c.do(http.MethodDelete, path, nil)
+			require.Equal(t, c.want, rec.Code, "body: %s", rec.Body.String())
+			require.True(t, hasBinding(), "denied unbind must leave the binding intact")
+		})
+	}
+
+	t.Run("hub admin succeeds", func(t *testing.T) {
+		require.True(t, hasBinding(), "precondition: binding present")
+		rec := doRequestAsUser(t, f.srv, f.admin, http.MethodDelete, path, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+		require.False(t, hasBinding(), "admin unbind must remove the binding")
+	})
+}
+
 // TestPolicyAPI_ArmBSelfServiceSevered is the end-to-end assertion: the measured
 // privilege-escalation chain (create a self-authored policy, then bind it to
 // yourself) is stopped at its first HTTP step for a non-admin caller, so no
