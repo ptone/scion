@@ -200,6 +200,58 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]Age
 	return agents, nil
 }
 
+func (c *httpHubClient) ListTemplates(ctx context.Context, projectID string) ([]TemplateInfo, error) {
+	// Merge global and project-scoped templates.
+	var all []TemplateInfo
+
+	for _, scope := range []string{"global", "project"} {
+		url := fmt.Sprintf("%s/api/v1/templates?scope=%s&status=active", c.hubURL, scope)
+		if scope == "project" {
+			url += "&projectId=" + projectID
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create list templates request (%s): %w", scope, err)
+		}
+
+		if err := c.signRequest(req); err != nil {
+			return nil, fmt.Errorf("sign request: %w", err)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("list templates request failed (%s): %w", scope, err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			slog.Debug("Hub returned non-OK for list templates", "status", resp.StatusCode, "scope", scope)
+			continue // non-fatal: one scope may be empty
+		}
+
+		var result hubTemplatesResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return nil, fmt.Errorf("decode list templates response (%s): %w", scope, err)
+		}
+
+		for _, t := range result.Templates {
+			all = append(all, TemplateInfo{Slug: t.Slug, Name: t.Name})
+		}
+	}
+
+	return all, nil
+}
+
+type hubTemplatesResponse struct {
+	Templates []hubTemplate `json:"templates"`
+}
+
+type hubTemplate struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
 func (c *httpHubClient) signRequest(req *http.Request) error {
 	if c.brokerID == "" || c.hmacKey == "" {
 		return nil
