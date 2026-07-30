@@ -357,7 +357,7 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		}
 		inlineCfg.AuthSelectedType = opts.HarnessAuth
 	}
-	agentDir, _, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
+	agentDir, agentHome, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
 	if err == nil {
 		_ = UpdateAgentConfig(opts.Name, opts.ProjectPath, "created", m.Runtime.Name(), opts.Profile)
 	}
@@ -370,11 +370,16 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	// pre-start.d/30-project-custom so it runs after the harness provisioner
 	// (20-harness-provision). A staging failure is fatal — the project owner
 	// explicitly configured this script and a silent skip would be misleading.
-	if opts.ProjectPreStartHookScript != "" {
-		agentHome := config.GetAgentHomePath(opts.ProjectPath, opts.Name)
-		if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
-			return cfg, fmt.Errorf("stage project pre-start hook: %w", err)
-		}
+	//
+	// Called unconditionally: with an empty script the helper removes any
+	// previously staged file, so a hook that no longer applies cannot survive
+	// on a reused agent home.
+	//
+	// Use agentHome from GetAgent (which resolves the project path correctly
+	// for non-git/external projects) rather than recomputing from opts.ProjectPath,
+	// which may be a marker file rather than a directory for such projects.
+	if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
+		return cfg, fmt.Errorf("stage project pre-start hook: %w", err)
 	}
 
 	// Persist harness auth override to the on-disk config (for sciontool).
@@ -1105,8 +1110,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if settings.Telemetry != nil {
 				settingsCfg.Telemetry = config.ConvertV1TelemetryToAPI(settings.Telemetry)
 			}
-			// Template has highest priority, so it should override settings.
-			// We construct a config with ONLY the settings env, then merge finalScionCfg over it.
+			// Template has highest priority IN THIS MERGE, so it overrides
+			// settings here. We construct a config with ONLY the settings env,
+			// then merge finalScionCfg over it.
+			//
+			// This is no longer the whole story for the CONTAINER env. In
+			// broker mode, harness-config env is separately injected into
+			// opts.Env by resolveAuthEnvOverlay (run.go), and opts.Env is
+			// passed as extraEnv to buildAgentEnv (run.go), where it overrides
+			// finalScionCfg.Env. So for a key declared by both the template and
+			// the harness config, the harness-config value is what reaches the
+			// container, even though the template wins the merge below.
+			// Pinned by TestBrokerMode_HarnessConfigEnvOutranksTemplateEnv.
 			finalScionCfg = config.MergeScionConfig(settingsCfg, finalScionCfg)
 		}
 
@@ -1132,6 +1147,54 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
+	// Hub operational agent_defaults: below the template and below inline
+	// config (both of which have already populated finalScionCfg by the merge
+	// at step 2b), above this broker's own settings.yaml defaults (applied
+	// immediately below). Same only-if-zero shape as that block, so the two
+	// tiers compose without either needing to know about the other.
+	//
+	// The placement IS the design. Move this after the settings block and the
+	// hub tier loses to settings.yaml; stamp these values hub-side into
+	// InlineConfig instead and they arrive as top-of-chain and beat a
+	// template's explicit max_turns — the inversion this channel exists to
+	// avoid (design §3.2.1, rejected alternative A5).
+	//
+	// The hub sends nothing in file mode, so this never fires there and
+	// file-mode behaviour is unchanged: a co-located broker reads the same
+	// settings.yaml and applies these values itself at the BOTTOM tier below.
+	// The rank of hub agent_defaults is therefore mode-dependent — bottom of
+	// the broker chain in file mode, just above broker settings in Postgres
+	// mode. That is deliberate; see design §3.2.4 and alternative A7.
+	//
+	// Note the asymmetry for Resources: "above this broker's own settings.yaml
+	// defaults" means default_resources ONLY. Broker profile resources and
+	// harness overrides live in that same file but are merged in step 2e ABOVE,
+	// so they win per-field over the hub default_resources applied here — while
+	// broker default_max_turns loses to hub default_max_turns. The hub tier
+	// therefore sits in a different place for Resources than for the three
+	// scalars. That falls out of the insertion point the design specifies and is
+	// the conservative direction (§3.2.4 explicitly does not want hub defaults
+	// silently overriding broker profile resources).
+	if hd := api.HubAgentDefaultsFromContext(ctx); hd != nil && finalScionCfg != nil {
+		if finalScionCfg.MaxTurns == 0 && hd.MaxTurns > 0 {
+			finalScionCfg.MaxTurns = hd.MaxTurns
+		}
+		if finalScionCfg.MaxModelCalls == 0 && hd.MaxModelCalls > 0 {
+			finalScionCfg.MaxModelCalls = hd.MaxModelCalls
+		}
+		if finalScionCfg.MaxDuration == "" && hd.MaxDuration != "" {
+			finalScionCfg.MaxDuration = hd.MaxDuration
+		}
+		if hd.Resources != nil {
+			// Hub defaults in BASE position: per-field merge with the
+			// agent/template value winning any field it sets. MergeResourceSpec
+			// returns base itself when override is nil, so copy first rather
+			// than aliasing the context's spec into the persisted config.
+			base := *hd.Resources
+			finalScionCfg.Resources = config.MergeResourceSpec(&base, finalScionCfg.Resources)
+		}
+	}
+
 	// Apply default limits from settings (hub global defaults) if not already set
 	// by template or inline config. Priority: agent > template > settings defaults.
 	if settings != nil && finalScionCfg != nil {
@@ -1152,6 +1215,23 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				// Merge: settings defaults are lower priority, so use them as base
 				finalScionCfg.Resources = config.MergeResourceSpec(settings.DefaultResources, finalScionCfg.Resources)
 			}
+		}
+	}
+
+	// Apply built-in resource defaults as the LOWEST-priority tier, below the
+	// settings defaults above. Docker and Podman emit cgroup flags only for
+	// non-empty fields, so an agent that reaches this point with no CPU limit
+	// runs completely unconstrained and can saturate every core on the host.
+	//
+	// Only the CPU limit is filled in, and only when nothing else supplied one;
+	// MergeResourceSpec keeps every field that a higher tier already set, so an
+	// explicit memory-only configuration still gains a CPU limit here.
+	// Gated by runtime.enforce_resource_defaults (default true) so an operator
+	// can restore the previous unlimited behaviour without a rollback.
+	if finalScionCfg != nil && config.ShouldEnforceResourceDefaults(settings) {
+		if finalScionCfg.Resources == nil || finalScionCfg.Resources.Limits.CPU == "" {
+			finalScionCfg.Resources = config.MergeResourceSpec(
+				config.BuiltinDefaultResources(), finalScionCfg.Resources)
 		}
 	}
 

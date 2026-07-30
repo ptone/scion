@@ -162,9 +162,10 @@ the agent's runtime directory.
 
 ### Resolution precedence
 
-Every agent setting that can be specified in more than one place — `harness_config`,
-`model`, `max_turns`, `max_model_calls`, `max_duration` and `resources` — is
-resolved with the same ordering, highest priority first:
+Most agent settings that can be specified in more than one place — `harness_config`,
+`model`, `max_turns`, `max_model_calls` and `max_duration` — resolve with the same
+ordering, highest priority first. **`resources` is the exception**; it interleaves and
+cannot be given one rank, and is covered separately below.
 
 1.  **Explicit agent-create request** — the value passed to `scion agent create`
     (or the equivalent API field / web form field).
@@ -174,13 +175,29 @@ resolved with the same ordering, highest priority first:
 4.  **Harness config** — the selected harness config's own defaults.
 5.  **Profile** — the active profile in `settings.yaml`.
 6.  **Hub default** — the hub's agent defaults, set in the admin server config.
-    These are currently resolved broker-side, from the settings the hub writes to
-    `settings.yaml`, so they apply on deployments where the broker reads that file.
+    **This position is not settled.** The intended model is a low-priority fallback,
+    but they are currently applied at agent-create time, which behaves as though they
+    sat near the top. The rank also varies with the hub's storage mode. Do not build
+    on either reading — see [Settings Precedence](/reference/settings-precedence/)
+    and [issue #623](https://github.com/ptone/scion/issues/623).
 7.  **Compiled default** — the value built into Scion.
 
 A project setting is an *override*: it takes precedence over the template a project
 uses. Leave a project setting blank to let the template (and then the rest of the
 chain) decide.
+
+| Field | Project setting |
+| --- | --- |
+| `harness_config` | `scion.io/default-harness-config` |
+| `model` | `scion.io/default-model` |
+| Active profile | `scion.io/active-profile` |
+| `max_turns` | `scion.io/default-max-turns` |
+| `max_model_calls` | `scion.io/default-max-model-calls` |
+| `max_duration` | `scion.io/default-max-duration` |
+| `resources` | `scion.io/default-resources-cpu-request`, `-memory-request`, `-cpu-limit`, `-memory-limit`, `-disk` |
+
+Blank means **unset, falls through** — it does not mean "set to whatever the
+default happens to be".
 
 :::note[How the ordering is enforced, and where it can bite]
 Levels 1–3 are resolved by the hub, which stamps the winning value onto the agent
@@ -195,6 +212,19 @@ general-purpose guarantee that a lower level can never overtake a higher one —
 it as the intended ordering for the fields listed, not as a description of every
 transport path.
 :::
+
+:::note[This ordering does not cover environment variables]
+Environment variables are governed by a **separate** precedence system that ranks
+the same-named sources differently. A rule taken from one and applied to the other
+gives answers backwards.
+
+See **[Settings Precedence](/reference/settings-precedence/)** for both systems in
+full, the `SCION_*` variables Scion injects, and the known gaps.
+:::
+
+`resources` merges **field by field** rather than as a whole block. A template
+that sets only a memory limit keeps that limit and still picks up the project's
+CPU and disk defaults. The same is true of the three limit fields.
 
 #### Known per-field limitations
 
@@ -213,9 +243,11 @@ fields deviate today:
     for*, not the one that actually ran. Do not act on those figures without
     confirming the harness honours the setting.
 
--   **`resources` can be overridden from below.** A profile's harness overrides are
-    applied on top of the resolved value, so for this field a profile beats the
-    template and the project setting rather than sitting at position 5.
+-   **`resources` does not follow the ordering above at all.** The broker's own
+    `settings.yaml` contributes at *three* separate ranks, two of them above the hub
+    tier, and the highest — `harness_overrides.<hc>.resources` — beats even the
+    template. There is no single rank for it that could be written into the list.
+    See [Settings Precedence](/reference/settings-precedence/) for the full chain.
 
 :::caution[Harness config relies on transport that is not guaranteed by construction]
 Most project settings travel to the broker inside the agent's inline config, which is
@@ -234,12 +266,28 @@ explicitly with `go test ./pkg/hub/`.
 :::
 
 :::caution[Behaviour change]
-Before this change, `harness_config` departed from the ordering above at levels 2
-and 3: the template was resolved ahead of the project's
-`scion.io/default-harness-config` annotation. It now follows the ordering above.
+Before this was corrected, three project settings were accepted and persisted
+but never reached the agent:
 
-Agents created in a project that sets a default harness config will now use it, even
-when the project's template also specifies one.
+-   **`scion.io/default-harness-config`** was silently outranked by the
+    template's `harness_config`, on both the interactive and scheduled
+    agent-create paths.
+-   **`scion.io/active-profile`** was never applied at all. Agents ran under the
+    broker's own active profile instead. This one has the widest reach — the
+    profile selects the runtime and manager, and is also consulted when
+    resolving harness configs and extracting the agent's env vars and secrets.
+-   **Project `resources`** were discarded in full whenever the template set any
+    single resource field.
+
+If you had set any of these on a project and worked around them being ignored —
+for example by pinning the value in the template instead — that workaround now
+competes with the project setting, and the project setting wins. Review your
+project defaults before upgrading.
+:::
+
+:::caution[Project harness config is now load-bearing]
+The behaviour change above has one consequence that needs action before you
+upgrade.
 
 Previously the template won whenever it supplied a harness value: a
 `default_harness_config`, or failing that the harness name stored on the template.

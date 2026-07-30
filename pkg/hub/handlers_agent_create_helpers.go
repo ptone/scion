@@ -218,6 +218,25 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// by slug (project scope first, then global) and stamp its ID and content
 	// hash so the broker can fetch it from Hub storage.
 	hcName := agent.AppliedConfig.HarnessConfig
+	// Record where the name came from, for the not-found log level below. A
+	// name that arrived from the project's default-harness-config annotation
+	// is operator-supplied and displaced the template, so failing to resolve
+	// it is worth a warning. Anything else — most often the template's bare
+	// Harness type — is the pre-existing normal case.
+	hcFromProjectAnnotation := hcName != "" && project != nil && project.Annotations != nil &&
+		project.Annotations[projectSettingDefaultHarnessConfig] == hcName
+	// A third provenance: the hub operational default_harness_config, applied
+	// by applyHubAgentDefaults just above the call to this function. Carried on
+	// the context rather than inferred by comparing hcName back against the
+	// setting — that comparison cannot tell "the hub defaulted it" from "the
+	// user named the same config the hub defaults to". Without this an operator
+	// cannot tell a bad hub default from a bad project annotation in the log.
+	// The !hcFromProjectAnnotation conjunct cannot currently be false when the
+	// ctx flag is true — if the annotation supplied the name then the slot was
+	// occupied and applyHubAgentDefaults never fired — so it is defence in
+	// depth, not a live case. Kept so the two provenances stay mutually
+	// exclusive by construction rather than by that reasoning holding.
+	hcFromHubDefault := hcName != "" && !hcFromProjectAnnotation && hubDefaultHarnessConfigFromContext(ctx)
 	if hcName == "" && resolvedTemplate != nil {
 		hcName = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
 	}
@@ -261,31 +280,90 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 			}
 		} else {
 			// Not-found is not an error here — the broker may still resolve the
-			// name from its own search path — but it must not be silent. A
-			// project's scion.io/default-harness-config annotation now outranks
-			// the template, so a stale or misspelled annotation displaces a
-			// known-good template value and the agent dispatches with no ID or
-			// hash for the broker to hydrate from Hub storage.
+			// name from its own search path — but it should not be entirely
+			// silent either. The level tracks provenance:
+			//
+			//   WARN  — the name came from the project's
+			//           scion.io/default-harness-config annotation. That
+			//           annotation now outranks the template, so a stale or
+			//           misspelled value displaced a known-good template value
+			//           and the agent dispatches with no ID or hash for the
+			//           broker to hydrate from Hub storage. An operator can fix
+			//           it, so say so loudly.
+			//
+			//   WARN  — the name came from the hub operational
+			//           agent_defaults.default_harness_config. Same argument,
+			//           one tier lower and deployment-wide: a stale hub default
+			//           silently costs every agent in the deployment its ID and
+			//           hash. The two are distinguished in the log attributes
+			//           so an operator knows which knob to turn.
+			//
+			//   DEBUG — anything else. Most often hcName is the template's bare
+			//           Harness type ("claude") rather than a stored
+			//           harness-config slug, via getHarnessConfigFromTemplate's
+			//           second branch. Harness configs are created through the
+			//           API rather than seeded, so "no HarnessConfig row whose
+			//           slug matches the harness type" is the default state of a
+			//           fresh deployment. Warning there would fire on every
+			//           single agent create and train operators to ignore it.
 			projectID := ""
 			if project != nil {
 				projectID = project.ID
 			}
-			s.agentLifecycleLog.Warn("harness config not found in project or global scope; "+
-				"agent will be dispatched without a config ID/hash and the broker must resolve it locally",
-				"slug", hcName, "agent_id", agent.ID, "project_id", projectID)
+			level := slog.LevelDebug
+			if hcFromProjectAnnotation || hcFromHubDefault {
+				level = slog.LevelWarn
+			}
+			s.agentLifecycleLog.Log(ctx, level,
+				"harness config not found in project or global scope; "+
+					"agent will be dispatched without a config ID/hash and the broker must resolve it locally",
+				"slug", hcName, "agent_id", agent.ID, "project_id", projectID,
+				"from_project_annotation", hcFromProjectAnnotation,
+				"from_hub_default", hcFromHubDefault)
 		}
 	}
 
-	// Stamp project pre-start hook for broker delivery.
-	// Resolve the active hook for the project and inline its script content into
-	// AppliedConfig so the broker can stage it without an extra Hub round-trip.
-	// Mirrors the HarnessConfigID stamping pattern above.
+	// Stamp the pre-start hook for broker delivery.
+	// Resolve the active hook and inline its script content into AppliedConfig
+	// so the broker can stage it without an extra Hub round-trip. Mirrors the
+	// HarnessConfigID stamping pattern above.
+	//
+	// Resolution is a two-step fallback (see
+	// .design/project-prestart-hooks-extensions.md section 1):
+	//   1. The project's active hook wins outright.
+	//   2. Otherwise the hub-wide active hook applies, if any.
+	//   3. Neither → no script staged.
+	// Either way the broker stages a single file (30-project-custom) and
+	// AppliedConfig.ProjectPreStartHookID records which hook it came from, so
+	// no scope-specific fields are needed downstream.
+	//
+	// The hub fallback is entered only on a definitive "no project hook"
+	// (ErrNotFound). Any other project-lookup failure (DB blip, duplicate rows)
+	// is ambiguous: the project may well have an override we simply failed to
+	// read, and silently staging the hub script in that case would run the
+	// wrong code. On an ambiguous error we log and stage nothing.
 	if project != nil && agent.AppliedConfig.ProjectPreStartHookID == "" {
 		hook, hookErr := s.store.GetActiveProjectPreStartHook(ctx, project.ID)
-		if hookErr != nil && !errors.Is(hookErr, store.ErrNotFound) {
-			s.agentLifecycleLog.Warn("failed to resolve project pre-start hook",
+		switch {
+		case hookErr == nil:
+			// 1. Project-scoped hook found — it takes precedence.
+		case errors.Is(hookErr, store.ErrNotFound):
+			// 2. No project hook — fall back to the hub-scoped hook, if any.
+			var hubErr error
+			hook, hubErr = s.store.GetActiveHubPreStartHook(ctx)
+			if hubErr != nil {
+				if !errors.Is(hubErr, store.ErrNotFound) {
+					s.agentLifecycleLog.Warn("failed to resolve hub pre-start hook", "error", hubErr)
+				}
+				hook = nil
+			}
+		default:
+			// 3. Ambiguous project lookup failure — stage nothing.
+			s.agentLifecycleLog.Warn("failed to resolve project pre-start hook; skipping hook staging",
 				"project_id", project.ID, "error", hookErr)
+			hook = nil
 		}
+
 		if hook != nil {
 			agent.AppliedConfig.ProjectPreStartHookID = hook.ID
 			agent.AppliedConfig.ProjectPreStartHookScript = hook.Script
@@ -502,6 +580,31 @@ func (s *Server) createNotifySubscription(ctx context.Context, agentID, projectI
 	}
 }
 
+// resumeInPlaceDecision decides whether an existing agent in a terminal-ish
+// phase may be restarted in place rather than rejected as a duplicate, and
+// whether the harness should be handed its resume flag when that happens.
+//
+// Local (non-Hub) mode applies the same contract in localResumeDecision
+// (cmd/common.go); keep the two in step.
+//
+// A stopped agent restarts with a *fresh* harness session even when resume was
+// requested, mirroring the local CLI's effectiveResume. A forced recovery is
+// the opposite case: the agent died without a clean shutdown (typically a host
+// crash), so the whole point is to continue the interrupted session.
+//
+// phase=running is deliberately not forceable. A live agent must not be
+// recreated out from under itself, and an operator who truly wants that can
+// stop it first.
+func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, forcedRecovery bool) {
+	if !resume {
+		return false, false
+	}
+	if force && phase == string(state.PhaseError) {
+		return true, true
+	}
+	return phase == string(state.PhaseStopped), false
+}
+
 // handleExistingAgent encapsulates the full decision tree for an agent that
 // already exists when a create/start request arrives.
 //
@@ -592,8 +695,8 @@ func (s *Server) handleExistingAgent(
 			existingAgent.Phase == string(state.PhaseStopped) ||
 			existingAgent.Phase == string(state.PhaseError)) {
 
-		// Resume a stopped agent in-place when explicitly requested.
-		if req.Resume && existingAgent.Phase == string(state.PhaseStopped) {
+		resumeInPlace, forcedRecovery := resumeInPlaceDecision(existingAgent.Phase, req.Resume, req.ForceResume)
+		if resumeInPlace {
 			if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
 				existingAgent.RuntimeBrokerID = runtimeBrokerID
 			}
@@ -615,7 +718,15 @@ func (s *Server) handleExistingAgent(
 
 			// A stopped agent restarts with a fresh harness session even when
 			// resume was requested (mirrors the local CLI's effectiveResume).
-			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
+			// A forced recovery is the opposite: the whole point is to continue
+			// the session the crash interrupted, so the harness resume flag is
+			// passed through.
+			if forcedRecovery {
+				s.agentLifecycleLog.Warn("Force-resuming agent from error phase",
+					"agent_id", existingAgent.ID, "agent", existingAgent.Name,
+					"container_status", existingAgent.ContainerStatus)
+			}
+			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
 				if isContainerNameConflict(err) {
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 				} else {

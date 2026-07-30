@@ -754,10 +754,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// Inject skill resolver from Hub connection for skill provisioning.
 	if conn := s.resolveHubConnection(r); conn != nil && conn.HubClient != nil {
 		hubResolver := agent.NewHubSkillResolver(conn.HubClient.Skills())
-		router := agent.NewRoutingSkillResolver(hubResolver)
 		defaultGHToken := req.ResolvedEnv["GITHUB_TOKEN"]
-		ghResolver := agent.NewGitHubSkillResolverWithCredentials(defaultGHToken, req.ProvisionCredentials)
-		router.Register("gh", ghResolver)
+		ghResolver := agent.NewGitHubSkillResolverWithCredentials(defaultGHToken, req.ProvisionCredentials, s.ghResolutionCache)
 
 		// GCP resolver uses Hub API for registry alias lookup.
 		registrySvc := conn.HubClient.SkillRegistries()
@@ -776,13 +774,20 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				Status:   reg.Status,
 			}, nil
 		}
-		router.Register("gcp-skill", agent.NewGCPSkillResolver(gcpLookup))
+
+		router := buildSkillRouter(hubResolver, ghResolver, agent.NewGCPSkillResolver(gcpLookup))
 
 		var resolver agent.SkillResolver = router
 		if s.skCache != nil {
 			resolver = agent.NewCachingSkillResolver(resolver, s.skCache)
 		}
 		ctx = agent.ContextWithSkillResolver(ctx, resolver)
+		// Credential for install-phase downloads of gh:// skills resolved by
+		// the Hub, which returns raw.githubusercontent.com URLs but not the
+		// token behind them. Only ever sent to GitHub hosts.
+		if defaultGHToken != "" {
+			ctx = agent.ContextWithGitHubToken(ctx, defaultGHToken)
+		}
 		if req.ProjectID != "" {
 			ctx = agent.ContextWithResolveProjectID(ctx, req.ProjectID)
 		}
@@ -790,6 +795,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			ctx = agent.ContextWithResolveUserID(ctx, req.UserID)
 		}
 	}
+
+	// Carry the hub's operational agent_defaults into provisioning. No-op when
+	// the hub sent none, which is every local and file-mode dispatch.
+	ctx = withHubAgentDefaults(ctx, req.Config)
 
 	// Branch based on provision-only flag
 	if req.ProvisionOnly {

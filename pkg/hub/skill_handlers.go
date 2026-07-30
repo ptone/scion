@@ -24,14 +24,21 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+)
+
+const (
+	githubAPIBase = "https://api.github.com"
+	githubRawBase = "https://raw.githubusercontent.com"
 )
 
 // CreateSkillRequest is the request body for creating a skill.
@@ -1296,7 +1303,43 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 	var resolved []ResolvedSkillResponse
 	var resolveErrors []ResolveSkillError
 
+	// Resolving a gh:// URI with a non-empty ProjectID makes the Hub mint that
+	// project's GitHub App token, so the caller must be authorized for the
+	// project — otherwise anyone could borrow another project's installation to
+	// read its private repositories. An empty ProjectID resolves anonymously
+	// (no token minted) and needs no check. Evaluated once, up front, and only
+	// when the request actually contains a gh:// URI.
+	ghProjectAllowed := true
+	if req.ProjectID != "" && hasGitHubSkillRef(req.Skills) {
+		ghProjectAllowed = s.canUseProjectGitHubToken(ctx, req.ProjectID)
+	}
+
+	// Per-request memo for (owner,repo,ref,tokenScope) → commitSHA.
+	// URIs sharing the same tuple — the common case for a skill bundle in one
+	// repo — perform a single ref→SHA lookup instead of one per URI.
+	refSHAMemo := make(map[string]string)
+
 	for _, skillRef := range req.Skills {
+		// GitHub skill resolution: gh:// URIs are handled by the Hub's GitHub resolution cache
+		if strings.HasPrefix(skillRef.URI, "gh://") {
+			if !ghProjectAllowed {
+				resolveErrors = append(resolveErrors, ResolveSkillError{
+					URI: skillRef.URI, Code: "forbidden",
+					Message: "you do not have permission to resolve GitHub skills for this project",
+				})
+				continue
+			}
+			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID, refSHAMemo)
+			if err != nil {
+				resolveErrors = append(resolveErrors, ResolveSkillError{
+					URI: skillRef.URI, Code: "resolve_failed", Message: err.Error(),
+				})
+			} else {
+				resolved = append(resolved, *ghResolved)
+			}
+			continue
+		}
+
 		uri, err := api.ParseSkillURI(skillRef.URI)
 		if err != nil {
 			resolveErrors = append(resolveErrors, ResolveSkillError{
@@ -1471,4 +1514,258 @@ func skillResource(s *store.Skill) Resource {
 		r.ParentID = s.ScopeID
 	}
 	return r
+}
+
+// hasGitHubSkillRef reports whether any reference in the batch is a gh:// URI.
+func hasGitHubSkillRef(refs []ResolveSkillRef) bool {
+	for _, ref := range refs {
+		if strings.HasPrefix(ref.URI, "gh://") {
+			return true
+		}
+	}
+	return false
+}
+
+// canUseProjectGitHubToken reports whether the caller in ctx is permitted to have
+// the Hub mint projectID's GitHub App token on their behalf. Agents are confined
+// to their own project; users must hold read access on the project's skills;
+// brokers must be registered as a provider for the project.
+// Unauthenticated callers are always denied.
+func (s *Server) canUseProjectGitHubToken(ctx context.Context, projectID string) bool {
+	// A BrokerIdentity is NOT a global privilege: broker join is unauthenticated,
+	// so anyone can mint one. A broker may only borrow the token of a project it
+	// is registered to serve, which GetProjectProvider confirms.
+	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil {
+		if s.store == nil {
+			return false
+		}
+		_, err := s.store.GetProjectProvider(ctx, projectID, brokerIdent.BrokerID())
+		return err == nil
+	}
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		return agentIdent.ProjectID() == projectID
+	}
+	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		if s.authzService == nil {
+			return false
+		}
+		return s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type: "skill", ParentType: "project", ParentID: projectID,
+		}, ActionRead).Allowed
+	}
+	return false
+}
+
+// resolveGitHubToken determines the GitHub token scope and mints a token if needed.
+// Returns (installID, token, error).
+// - installID is the GitHub App installation ID (as string) or "public" for unauthenticated.
+// - token is the minted GitHub App token (or empty for public).
+func (s *Server) resolveGitHubToken(ctx context.Context, projectID string) (installID, token string, err error) {
+	if projectID == "" {
+		return "public", "", nil
+	}
+
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get project: %w", err)
+	}
+	if project == nil {
+		return "", "", fmt.Errorf("project %s not found", projectID)
+	}
+
+	if project.GitHubInstallationID == nil {
+		return "public", "", nil
+	}
+
+	mintedToken, _, err := s.mintGitHubAppToken(ctx, project)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to mint GitHub App token: %w", err)
+	}
+
+	installID = strconv.FormatInt(*project.GitHubInstallationID, 10)
+	return installID, mintedToken, nil
+}
+
+// resolveGitHubSkill resolves a gh:// skill URI via the Hub's GitHub resolution cache.
+// This method is called by handleSkillsResolve for gh:// URIs. It:
+// 1. Parses the gh:// URI
+// 2. Determines the token scope (GitHub App installation ID or "public")
+// 3. Checks the DB-backed resolution cache
+// 4. On cache miss, calls GitHub API to resolve commit SHA and file list
+// 5. Stores the result in the cache and returns it
+//
+// refSHAMemo is a per-request memo map keyed by "(owner)/(repo)@(ref):(tokenScope)"
+// that is shared across all URIs in one handleSkillsResolve call. It prevents
+// redundant commits/{ref} API lookups for URIs that share the same tuple. Pass a
+// non-nil map to enable memoisation; nil disables it (treated as always-miss).
+func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID string, refSHAMemo map[string]string) (*ResolvedSkillResponse, error) {
+	// 1. Parse gh:// URI
+	ghRef, err := agent.ParseGitHubSkillURI(rawURI)
+	if err != nil {
+		return nil, fmt.Errorf("invalid gh:// URI: %w", err)
+	}
+
+	// gh:// URIs with ?token= name a ProvisionCredentials secret that lives on
+	// the broker, not the Hub. Resolving here would silently substitute the
+	// project's GitHub App token and hand back raw.githubusercontent.com URLs
+	// the broker cannot authenticate. Return an error so the per-URI fallback
+	// routes these to the local resolver, which looks up the named secret.
+	if ghRef.TokenSecretName != "" {
+		return nil, fmt.Errorf("gh:// URI with ?token= must be resolved by the local resolver")
+	}
+
+	// Default an omitted ref to HEAD, matching the local resolver
+	// (github_skill_resolver.go resolveCommitSHA). Doing this before the cache
+	// key is computed also means gh://o/r/p and gh://o/r/p@HEAD share one
+	// entry rather than each missing the other's.
+	if ghRef.Ref == "" {
+		ghRef.Ref = "HEAD"
+	}
+
+	// 2. Determine token scope
+	installID, token, err := s.resolveGitHubToken(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Compute cache key
+	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, installID)
+
+	// 4. Check cache
+	if s.ghResolutionStore != nil {
+		entry, hit, err := s.ghResolutionStore.Get(ctx, cacheKey)
+		if err != nil {
+			slog.WarnContext(ctx, "github_resolution_cache: cache lookup failed",
+				"uri", rawURI, "error", err)
+		} else if hit {
+			slog.InfoContext(ctx, "github_resolution_cache: cache hit",
+				"uri", rawURI, "commit_sha", safeShortSHA(entry.CommitSHA), "cache_hit", true)
+			return buildResolvedSkillResponse(ghRef, entry), nil
+		}
+	}
+
+	// 5. Cache miss: call GitHub API
+	apiBase := githubAPIBase
+	if s.config.GitHubAppConfig.APIBaseURL != "" {
+		apiBase = s.config.GitHubAppConfig.APIBaseURL
+	}
+	rawBase := githubRawBase
+	if s.config.GitHubAppConfig.RawBaseURL != "" {
+		rawBase = s.config.GitHubAppConfig.RawBaseURL
+	}
+
+	// Resolve ref → commit SHA, reusing a prior lookup if this (owner, repo,
+	// ref, tokenScope) tuple was already resolved within this request.
+	// The separators "/" "@" ":" are safe for GitHub names: owner/repo names
+	// cannot contain "@" or ":", and Git ref names cannot contain ":". The
+	// installID suffix is the same for every URI in one request (shared
+	// projectID → shared installation) but is included for forward-safety.
+	memoKey := strings.ToLower(ghRef.Owner) + "/" + strings.ToLower(ghRef.Repo) + "@" + ghRef.Ref + ":" + installID
+	commitSHA, seen := "", false
+	if refSHAMemo != nil {
+		commitSHA, seen = refSHAMemo[memoKey]
+	}
+	if !seen {
+		var err error
+		commitSHA, err = ghResolveCommitSHA(ctx, apiBase, ghRef.Owner, ghRef.Repo, ghRef.Ref, token)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve commit SHA: %w", err)
+		}
+		if refSHAMemo != nil {
+			refSHAMemo[memoKey] = commitSHA
+		}
+	}
+
+	fileEntries, err := ghListContents(ctx, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list contents: %w", err)
+	}
+
+	if len(fileEntries) == 0 {
+		return nil, fmt.Errorf("no files found at %s in %s/%s", ghRef.SkillPath, ghRef.Owner, ghRef.Repo)
+	}
+
+	// 6. Compute bundle hash
+	bundleHash := computeBundleHash(fileEntries)
+
+	// 7. Determine TTL based on ref type
+	var ttl time.Duration
+	if isFullCommitSHA(ghRef.Ref) {
+		ttl = agent.DefaultSHAResolutionCacheTTL
+	} else {
+		ttl = agent.DefaultResolutionCacheTTL
+	}
+
+	// 8. Store in cache
+	entry := GitHubCacheEntry{
+		CommitSHA:   commitSHA,
+		FileEntries: fileEntries,
+		BundleHash:  bundleHash,
+		TokenScope:  installID,
+		ExpiresAt:   time.Now().Add(ttl),
+		OriginalURI: rawURI,
+	}
+
+	if s.ghResolutionStore != nil {
+		if err := s.ghResolutionStore.Put(ctx, cacheKey, entry); err != nil {
+			slog.WarnContext(ctx, "github_resolution_cache: failed to store entry",
+				"uri", rawURI, "error", err)
+		}
+	}
+
+	slog.InfoContext(ctx, "github_resolution_cache: cache miss, resolved via API",
+		"uri", rawURI, "commit_sha", safeShortSHA(commitSHA), "files", len(fileEntries), "cache_hit", false)
+
+	return buildResolvedSkillResponse(ghRef, &entry), nil
+}
+
+// buildResolvedSkillResponse constructs a ResolvedSkillResponse from a cache entry.
+//
+// Hash values here are git blob object IDs (bare 40-char hex), not the
+// "sha256:<hex>" digests used elsewhere in the API: the Hub resolves gh://
+// skills from GitHub metadata alone and never downloads the bytes, so a
+// sha256 digest is not available to it. The client recognises the format and
+// verifies accordingly (see hashFileAs in pkg/agent/skill_resolver.go).
+// ContentHash is likewise a digest over the git blob IDs.
+func buildResolvedSkillResponse(ghRef *agent.GitHubSkillRef, entry *GitHubCacheEntry) *ResolvedSkillResponse {
+	files := make([]DownloadURLInfo, len(entry.FileEntries))
+	for i, f := range entry.FileEntries {
+		files[i] = DownloadURLInfo{
+			Path: f.Path,
+			URL:  f.URL,
+			Size: f.Size,
+			Hash: f.Hash,
+		}
+	}
+
+	return &ResolvedSkillResponse{
+		URI:             ghRef.Raw,
+		Name:            ghRef.SkillName,
+		ResolvedVersion: safeShortSHA(entry.CommitSHA), // Short SHA for display
+		ContentHash:     entry.BundleHash,
+		Files:           files,
+	}
+}
+
+// safeShortSHA returns the first 12 characters of a SHA string, or the full
+// string if it is shorter than 12 characters (e.g. in tests or after DB
+// corruption). Prevents a panic on bare sha[:12] slicing.
+func safeShortSHA(sha string) string {
+	if len(sha) < 12 {
+		return sha
+	}
+	return sha[:12]
+}
+
+// computeBundleHash computes the content hash from file entries.
+func computeBundleHash(files []GitHubFileEntry) string {
+	// Convert to transfer.FileInfo for hash computation
+	fileInfos := make([]transfer.FileInfo, len(files))
+	for i, f := range files {
+		fileInfos[i] = transfer.FileInfo{
+			Path: f.Path,
+			Hash: f.Hash,
+		}
+	}
+	return transfer.ComputeContentHash(fileInfos)
 }

@@ -78,5 +78,7 @@ pr-*-review*.md
 
 # Test-run artifacts
 /.agents/
+
+# Python bytecode (harness provisioner unit tests)
 __pycache__/
 *.pyc
