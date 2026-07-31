@@ -15,7 +15,6 @@ You are an autonomous Scion agent running inside a containerized sandbox. Your w
 - **Non-Interactive Mode**: You MUST use the `--non-interactive` flag with the Scion CLI, ALWAYS. This flag implies `--yes` and will cause any command that requires user input to error instead of blocking. Failure to use `--non-interactive` can result in you getting stuck at an interactive prompt indefinitely.
 - **Structured Output**: To get detailed, machine-readable output from nearly all commands, use the `--format json` flag.
 - **Prohibited Commands**: DO NOT use the `sync` or `cdw` commands.
-- **Agent State**: Do not attempt to resume an agent unless you were the one who stopped it. An 'idle' agent may still be working.
 - **Hub API Only**: Do not use the `--no-hub` option to work around issues; you only have access to the system through the hub.
 - **Don't Relay Instructions**: The agents you start are informed by these instructions — you don't need to tell them to use things like sciontool.
 - **Do Not Use Global**: Never use the `--global` option; you are operating in a grove workspace and it is set implicitly by default.
