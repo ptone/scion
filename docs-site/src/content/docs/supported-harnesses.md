@@ -59,6 +59,12 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
 - **scion-agent.yaml**: Can be configured via `agent_instructions` and `system_prompt` fields in the template.
 - **Config File**: `~/.claude.json`. Scion manages project-specific settings in this file to ensure the agent respects the workspace boundaries.
 - **Projects**: Scion automatically configures the current workspace as a project in `.claude.json`.
+- **Model Resolution & Aliases:** The Claude harness's container-side `provision.py` dynamically resolves the requested model (provided via `--model` / `SCION_MODEL`) using the harness configuration's `model_aliases` mapping:
+  - `small` &rarr; `haiku` (or whatever `ANTHROPIC_DEFAULT_HAIKU_MODEL` resolves to)
+  - `medium` &rarr; `sonnet`
+  - `large` &rarr; `opus`
+  - `extra-large` &rarr; `fable`
+  The resolved model is set in the environment overlay as `ANTHROPIC_MODEL`. If no model is requested, it falls back to the default model `opus`. Note that setting `ANTHROPIC_MODEL` directly in your settings or a template environment block acts as an explicit, non-overridable pin.
 
 ### Known Limitations
 - Claude Code is a beta tool and its configuration format may change.

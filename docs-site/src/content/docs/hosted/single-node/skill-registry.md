@@ -28,7 +28,29 @@ By default a skill reference resolves against the local Hub. Federation lets the
 
 ### GitHub source (`gh://`)
 
-Skills can be sourced directly from a GitHub repository path. The resolver uses the GitHub Contents API and caches its resolutions locally; provide a `GITHUB_TOKEN` (or `GH_TOKEN`) in the agent environment for authenticated access and higher rate limits. Requests are retried with exponential backoff, and individual files are capped at 10 MB.
+Skills can be sourced directly from a GitHub repository path. Scion features a highly optimized, two-layer federated caching and resolution system for `gh://` URIs:
+
+#### 1. Resolution Layer (Hub-side Cache)
+* **Hub-side primary resolution:** In a Hub-connected environment, the Hub serves as the primary resolver and caches `gh://` resolutions centrally. This leverages centralized GitHub credentials or GitHub App tokens, protects upstream rate limits, and provides unified access.
+* **Fail-safe fallback:** Using `RegisterFallback("gh", local)` routing, the Runtime Broker tries to resolve the URI via the Hub first. If the Hub is unreachable or fails (with context-cancellation safety), the broker falls back to local resolution.
+* **In-memory lookup deduplication:** Within a single resolve request, the Hub deduplicates redundant `ref -> SHA` commit lookups using a case-insensitive `owner/repo` memoization key, avoiding unnecessary GitHub API round-trips.
+* **Security & Validation:** Resolution includes strict cross-project authorization checks to prevent cross-tenant cache leaks, correct SHA hash formatting, graceful handling of expiring GitHub URLs, and automatic defaulting of omitted refs to `HEAD`.
+
+#### 2. Content Layer (Broker-side Content Cache)
+* **Content caching:** Once resolved, the actual skill file contents are cached locally on disk by the Runtime Broker under `~/.scion/cache/skills/`, keyed by their SHA-256 content hashes.
+* **Verification:** Cache hits are validated against their SHA-256 hashes upon read; any mismatch triggers eviction and a fresh download.
+
+#### Observability & Logs
+Both layers emit detailed structured logs (`slog`) for visibility:
+* **Hub Resolution Logs:**
+  - Cache Hit: `github_resolution_cache: cache hit` (with `cache_hit: true`)
+  - Cache Miss: `github_resolution_cache: cache miss, resolved via API` (with `cache_hit: false`)
+* **Broker Content Logs:**
+  - Cache Hit: `skill_content_cache: cache hit` (with `cache_hit: true`)
+  - Cache Miss: `skill_content_cache: cache miss, will download` (with `cache_hit: false`)
+  - Verification Failure: `skill_content_cache: cache error, re-downloading` (with `cache_hit: false`)
+
+To support authenticated access and higher GitHub API rate limits, provide a `GITHUB_TOKEN` (or `GH_TOKEN`) in the environment. Requests are retried with exponential backoff, and individual files are capped at 10 MB.
 
 ### GCP Vertex AI source (`gcp-skill://`)
 
