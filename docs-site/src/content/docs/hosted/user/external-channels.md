@@ -42,19 +42,39 @@ For a guided Workstation walkthrough, see [Setting Up Telegram](/scion/getting-s
 
 ## Discord
 
-Discord integration provides **outbound-only** webhook notifications — agents can push messages to a Discord channel, but cannot receive inbound messages from Discord.
+Scion supports two options for Discord integration: outbound-only webhook notifications, or a full bidirectional conversation bot with agent control.
+
+### Option 1: Outbound-Only Webhook Notifications
+
+This method provides simple, outbound-only notifications to a specific Discord channel via webhooks.
 
 - **Severity-based color coding:** Messages are color-coded by severity (info, warning, error, urgent).
 - **@mentions:** Urgent messages and explicit `ask_user` requests can trigger `@user` or `@role` mentions.
 
-### Configuration
+#### Configuration
 
 Set the webhook URL in one of two ways:
 
 - **settings.yaml:** Set `server.discord_webhook_url` in the Hub configuration.
 - **Environment variable:** Set `SCION_DISCORD_WEBHOOK_URL`.
 
-For more details, see [Hub Setup — Discord Integration](/scion/hosted/single-node/hub-server/#discord-integration).
+For details, see [Hub Setup — Discord Integration](/scion/hosted/single-node/hub-server/#discord-integration).
+
+### Option 2: Bidirectional Discord Bot Integration
+
+The Discord message broker plugin (`scion-plugin-discord`) enables bidirectional chat between Discord channels/threads and Scion agents. It can run as a Hub-managed go-plugin subprocess or as a standalone service in HA deployments.
+
+- **Per-Agent Identity:** Uses dynamic Discord webhooks so each agent posts with its own name and custom avatar.
+- **Interactive Commands:** Use `/scion setup` in a channel to link it to a project, and `/scion register` to bind your Discord identity to your Scion profile.
+- **Observer & Commentary Mode:** Allows teams to watch agents collaborate. When enabled via `/settings`, agent-to-agent messages and state transitions are broadcast to the channel.
+
+#### Observer Filtering and Thread Support
+
+To protect sensitive operational data, Scion uses a **fail-closed** observation filter:
+- **Fail-Closed by Default:** If a channel or thread does not have an active channel link, or if the lookup fails, agent-to-agent traffic and state changes are completely filtered out (preventing leaks into unlinked spaces).
+- **Automatic Thread-to-Parent Fallback:** Because Discord channel links are only persisted on parent channels, the filter automatically resolves thread messages using a fallback to their parent channel's link status. This ensures that observer mode works seamlessly inside active threads instead of being incorrectly blocked by the fail-closed filter.
+
+For advanced setup and standalone installation instructions, see [extras/scion-discord/README.md](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-discord).
 
 ## A2A Protocol Bridge
 

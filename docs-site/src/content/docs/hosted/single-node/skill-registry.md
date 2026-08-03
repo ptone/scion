@@ -30,6 +30,10 @@ By default a skill reference resolves against the local Hub. Federation lets the
 
 Skills can be sourced directly from a GitHub repository path. The resolver uses the GitHub Contents API and caches its resolutions locally; provide a `GITHUB_TOKEN` (or `GH_TOKEN`) in the agent environment for authenticated access and higher rate limits. Requests are retried with exponential backoff, and individual files are capped at 10 MB.
 
+:::note
+For private repository skills, the resolver preserves credentials end-to-end to prevent unauthenticated 404 errors during multi-step downloading. See [Secrets & Environment — Convention-based project secrets](/scion/hosted/user/secrets/#naming-convention) for configuring credentials for external private repositories.
+:::
+
 ### GCP Vertex AI source (`gcp-skill://`)
 
 The `gcp-skill://<alias>/<skillId>` form resolves the alias to a registered `gcp`-type registry endpoint and fetches the skill using GCP Application Default Credentials (ADC) with the `cloud-platform` scope. Ensure the broker/agent environment has ADC available.
