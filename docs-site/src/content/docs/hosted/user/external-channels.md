@@ -42,19 +42,46 @@ For a guided Workstation walkthrough, see [Setting Up Telegram](/scion/getting-s
 
 ## Discord
 
-Discord integration provides **outbound-only** webhook notifications — agents can push messages to a Discord channel, but cannot receive inbound messages from Discord.
+Scion supports two distinct modes for integrating with Discord: simple outbound webhook notifications, or a full-featured bidirectional Discord bot plugin.
+
+### 1. Outbound-Only Webhook Notifications (Simple)
+
+This is a lightweight setup where agents push one-way alerts and notifications directly to a Discord channel, but cannot receive replies from Discord.
 
 - **Severity-based color coding:** Messages are color-coded by severity (info, warning, error, urgent).
 - **@mentions:** Urgent messages and explicit `ask_user` requests can trigger `@user` or `@role` mentions.
 
-### Configuration
+#### Configuration
 
-Set the webhook URL in one of two ways:
-
-- **settings.yaml:** Set `server.discord_webhook_url` in the Hub configuration.
+Configure the target webhook URL in one of two ways:
+- **settings.yaml:** Set `server.discord_webhook_url` under the Hub server configuration.
 - **Environment variable:** Set `SCION_DISCORD_WEBHOOK_URL`.
 
-For more details, see [Hub Setup — Discord Integration](/scion/hosted/single-node/hub-server/#discord-integration).
+For details, see [Hub Setup — Discord Webhooks](/scion/hosted/single-node/hub-server/#discord-integration).
+
+### 2. Bidirectional Discord Bot (Full)
+
+For complete interactive communication, the Discord message broker plugin (`scion-plugin-discord`) enables full two-way messaging. Users can chat with running agents, execute commands, and send files directly from Discord channels.
+
+- **Gateway Mode (Plugin):** Runs as a hub-managed subprocess or standalone gRPC service, connecting to Discord via real-time WebSocket Gateway.
+- **Slash Commands:** Offers complete interactive control via `/scion` commands:
+  - `/scion setup`: Link the channel to a Scion project.
+  - `/scion agents`: List active agents and their statuses.
+  - `/scion register`: Connect your Discord account to your Hub identity.
+  - `/scion send <path>`: Query and send files from a configured search root to a channel.
+- **Per-Agent Identity (Webhooks):** Automatically creates channel webhooks so that agent responses appear with the agent's custom name and RoboHash avatar rather than the generic bot's.
+- **Enterprise-ready Protection:** Supports running behind Google Cloud's Identity-Aware Proxy (IAP) with automated IAP transport inheritance for long-running operations.
+
+#### Advanced Configuration Keys
+
+The bot is configured under `plugins.broker.discord.config` inside `settings.yaml` (or via `DISCORD_` environment variables in standalone mode):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `register_url` | *(defaults to hub_url)* | Public URL for user-facing registration links. Helpful for fixing broken registration links when the Hub sits behind auth proxies. |
+| `send_search_root` | `/scion-volumes/` | The base directory used when searching for files with `/scion send`. |
+
+For complete compilation, deployment, and standalone HA (high availability) instructions, see the [scion-plugin-discord README](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-discord).
 
 ## A2A Protocol Bridge
 

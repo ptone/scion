@@ -29,6 +29,7 @@ const hostedUserGuide = {
 		{ label: 'Connecting to a Hub', slug: 'hosted/user/hosted-user' },
 		{ label: 'User Access Tokens', slug: 'hosted/user/personal-access-tokens' },
 		{ label: 'Secrets & Environment', slug: 'hosted/user/secrets' },
+		{ label: 'Agent Port Forwarding', slug: 'hosted/user/port-forwarding' },
 		{ label: 'Messaging & Notifications', slug: 'hosted/user/messaging' },
 		{ label: 'External Channels', slug: 'hosted/user/external-channels' },
 	],

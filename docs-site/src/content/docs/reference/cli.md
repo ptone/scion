@@ -109,6 +109,7 @@ Sends a message to a running agent's harness by enqueuing it into its input stre
     - `-b, --broadcast`: Send the message to all running agents in the current project.
     - `-a, --all`: Send the message to all running agents across all projects.
     - `--notify`: Get notified when the target agent(s) respond or reach a terminal state after receiving the message.
+    - `--attach <path>`: Attach one or more files to the message. Paths must reside under `/workspace` or `/scion-volumes`. Scion strictly validates file existence, permissions, and ensures they are regular files (not directories or symlinks) before sending the message, failing fast with a descriptive error on any validation failure. Only available in Hub mode.
 
 ### `scion messages` (aliases: `msgs`, `inbox`)
 

@@ -291,6 +291,8 @@ These keys go in `plugins.broker.discord.config` in `settings.yaml`:
 | `send_queue_size` | No | `100` | Max queued outbound messages per channel |
 | `send_min_delay` | No | `50ms` | Minimum delay between sends (rate-limit protection) |
 | `agent_cache_ttl` | No | `5m` | TTL for cached agent lists from the hub |
+| `register_url` | No | `hub_url` | Public URL for user-facing registration links. Used instead of internal `hub_url` to fix broken links behind auth proxies. |
+| `send_search_root` | No | `/scion-volumes/` | Configurable base directory for file searches when executing `/scion send` commands. |
 
 ### Example settings.yaml (Complete)
 
