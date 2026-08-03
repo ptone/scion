@@ -31,6 +31,7 @@ const hostedUserGuide = {
 		{ label: 'Secrets & Environment', slug: 'hosted/user/secrets' },
 		{ label: 'Messaging & Notifications', slug: 'hosted/user/messaging' },
 		{ label: 'External Channels', slug: 'hosted/user/external-channels' },
+		{ label: 'Port Forwarding & Auto-Expose', slug: 'hosted/user/port-forwarding' },
 	],
 };
 
