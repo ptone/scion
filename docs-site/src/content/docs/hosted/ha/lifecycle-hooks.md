@@ -3,6 +3,12 @@ title: Lifecycle Hooks
 description: Hub-side, admin-authored automation that fires HTTP or webhook actions on agent phase transitions.
 ---
 
+:::note[Lifecycle Hooks vs. Pre-Start Hooks]
+Scion features two distinct kinds of hooks that serve different purposes:
+1. **Lifecycle Hooks (This guide):** Hub-side, admin-authored automation rules that run **outside the agent container** on the Hub *after* an agent has successfully crossed a phase transition (e.g. `running`, `stopped`). Execution is asynchronous and does not block the agent's startup or state changes.
+2. **Pre-Start Hooks:** Custom shell scripts running **inside the agent container** on the Runtime Broker *before* the agent process starts (configured by project owners or hub admins). If a pre-start hook fails, agent startup is aborted. See the [Pre-Start Hooks User Guide](/scion/hosted/user/pre-start-hooks/).
+:::
+
 Lifecycle hooks are Hub-side, admin-authored automation rules that fire an HTTP
 or webhook action when an agent crosses an **authoritative phase transition**.
 They are stored in the Hub database, managed entirely through the admin API, and

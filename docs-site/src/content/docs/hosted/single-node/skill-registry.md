@@ -28,7 +28,14 @@ By default a skill reference resolves against the local Hub. Federation lets the
 
 ### GitHub source (`gh://`)
 
-Skills can be sourced directly from a GitHub repository path. The resolver uses the GitHub Contents API and caches its resolutions locally; provide a `GITHUB_TOKEN` (or `GH_TOKEN`) in the agent environment for authenticated access and higher rate limits. Requests are retried with exponential backoff, and individual files are capped at 10 MB.
+Skills can be sourced directly from a GitHub repository path. The resolver uses the GitHub Contents API and caches its resolutions; provide a `GITHUB_TOKEN` (or `GH_TOKEN`) in the agent environment for authenticated access and higher rate limits. Requests are retried with exponential backoff, and individual files are capped at 10 MB.
+
+#### Resolution Caching and Performance
+
+To optimize performance and avoid hitting GitHub API rate limits during concurrent agent launches, the Runtime Broker implements a robust **broker-level singleton resolution cache**:
+- **Broker-Level Singleton:** The cache is a long-lived, shared singleton service running within the Runtime Broker daemon, rather than a per-request ephemeral cache.
+- **Extended TTLs:** General resolution metadata remains cached for **30 minutes** (increased from the previous 5-minute default).
+- **Git SHA Resolution (24h TTL):** Once a reference (like a branch or tag name) has been fully resolved to a specific Git commit SHA, the SHA resolution is cached for **24 hours**. This ensures that immutable content-addressed references bypass external API queries entirely on subsequent requests.
 
 ### GCP Vertex AI source (`gcp-skill://`)
 
