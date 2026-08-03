@@ -28,7 +28,14 @@ By default a skill reference resolves against the local Hub. Federation lets the
 
 ### GitHub source (`gh://`)
 
-Skills can be sourced directly from a GitHub repository path. The resolver uses the GitHub Contents API and caches its resolutions locally; provide a `GITHUB_TOKEN` (or `GH_TOKEN`) in the agent environment for authenticated access and higher rate limits. Requests are retried with exponential backoff, and individual files are capped at 10 MB.
+Skills can be sourced directly from a GitHub repository path. The resolver uses the GitHub Contents API and caches its resolutions locally; individual files are capped at 10 MB and requests are retried with exponential backoff.
+
+The GitHub resolver includes several optimizations and fallbacks for reliability:
+
+* **Authentication Fallback**: To authenticate with GitHub and avoid rate limits, the resolver first searches for a `GITHUB_TOKEN` or `GH_TOKEN` in the environment. If neither is set, it gracefully falls back to using the project-scoped `GITHUB_TOKEN` provisioned credential on the Hub.
+* **Unauthenticated Warning**: If no token can be resolved, the resolver executes the call unauthenticated, but emits a clear warning log. Because unauthenticated requests are heavily rate-limited by GitHub (60 requests/hour), providing a token is highly recommended.
+* **Full SHA Short-Circuit**: If the requested `@<ref>` is a full 40-character git SHA (commit hash), the resolver **short-circuits** and bypasses all GitHub API branch-existence checks. It constructs the raw download URL directly, eliminating API round-trips and completely saving rate-limit quota.
+* **Cache Diagnostics**: Cache initialization errors are recorded with detailed logging, giving operators immediate visibility into disk/memory permission or serialization issues during resolver startup.
 
 ### GCP Vertex AI source (`gcp-skill://`)
 
