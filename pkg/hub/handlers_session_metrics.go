@@ -227,6 +227,12 @@ func (s *Server) handleAgentMetricsSummary(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Require authentication before any data access (defense-in-depth).
+	if GetIdentityFromContext(ctx) == nil {
+		Unauthorized(w)
+		return
+	}
+
 	// Verify the agent exists and the caller can view it.
 	agent, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
@@ -296,6 +302,12 @@ func (s *Server) handleSessionMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Require authentication before any data access (defense-in-depth).
+	if GetIdentityFromContext(ctx) == nil {
+		Unauthorized(w)
+		return
+	}
+
 	id := extractID(r, "/api/v1/metrics/session")
 	if id == "" {
 		NotFound(w, "Session metrics")
@@ -338,6 +350,13 @@ func (s *Server) handleProjectSessionMetricsSummary(w http.ResponseWriter, r *ht
 		return
 	}
 
+	// Require authentication before any data access (defense-in-depth).
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
 	// Verify the project exists.
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
@@ -346,13 +365,6 @@ func (s *Server) handleProjectSessionMetricsSummary(w http.ResponseWriter, r *ht
 			return
 		}
 		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Authorize: any authenticated identity with view access.
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
 		return
 	}
 
