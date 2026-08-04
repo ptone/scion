@@ -340,6 +340,26 @@ export class StateManager extends EventTarget {
       if (!delta._capabilities && base._capabilities) {
         updated._capabilities = base._capabilities;
       }
+      // SSE "created" events don't include per-resource _capabilities, so
+      // action buttons (stop, delete, attach, etc.) won't render. Derive
+      // capabilities from an existing agent in the state, or fall back to
+      // scope-level capabilities. Both carry the same action list because
+      // capabilities are role-based, not agent-specific.
+      if (!updated._capabilities) {
+        let donor: import('../shared/types.js').Capabilities | undefined;
+        for (const a of this.state.agents.values()) {
+          if (a._capabilities) {
+            donor = a._capabilities;
+            break;
+          }
+        }
+        if (!donor && this.state.scopeCapabilities) {
+          donor = this.state.scopeCapabilities;
+        }
+        if (donor) {
+          updated._capabilities = donor;
+        }
+      }
       this.state.agents.set(agentId, updated as Agent);
     }
     this.notify('agents-updated');
