@@ -1,0 +1,4333 @@
+{
+  "version": 1,
+  "projectId": "seq-demo",
+  "projectName": "seq-demo",
+  "startedAt": "2026-03-22T16:00:00Z",
+  "endedAt": "2026-03-22T16:06:00Z",
+  "durationMs": 360000,
+  "lifelines": [
+    {
+      "id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "name": "orchestrator",
+      "harness": "claude",
+      "color": "#9c755f",
+      "ancestry": [],
+      "depth": 0,
+      "order": 0,
+      "slot": 0,
+      "birthMs": 0,
+      "deathMs": 360000,
+      "died": false,
+      "logId": "synth-0000003"
+    },
+    {
+      "id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "name": "architect-1",
+      "harness": "claude",
+      "color": "#4e79a7",
+      "parentId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "ancestry": [
+        "c7bb8186-39ac-48a4-c6af-a2f1581a8b95"
+      ],
+      "depth": 1,
+      "order": 1,
+      "slot": 1,
+      "birthMs": 50262.819,
+      "deathMs": 332647.329,
+      "died": true,
+      "logId": "synth-0000009"
+    },
+    {
+      "id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "name": "bench-2",
+      "harness": "claude",
+      "color": "#76b7b2",
+      "parentId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "ancestry": [
+        "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+        "68927f2b-2ff8-36f7-3578-db0fa54c29f7"
+      ],
+      "depth": 2,
+      "order": 2,
+      "slot": 2,
+      "birthMs": 59252.916,
+      "deathMs": 360000,
+      "died": false,
+      "logId": "synth-0000015"
+    },
+    {
+      "id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "name": "probe-7",
+      "harness": "claude",
+      "color": "#bab0ac",
+      "parentId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "ancestry": [
+        "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+        "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+        "92ca43f1-93de-e47f-5915-49f597a811c8"
+      ],
+      "depth": 3,
+      "order": 3,
+      "slot": 7,
+      "birthMs": 104203.405,
+      "deathMs": 334668.063,
+      "died": true,
+      "logId": "synth-0000045"
+    },
+    {
+      "id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "name": "docs-3",
+      "harness": "claude",
+      "color": "#b07aa1",
+      "parentId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "ancestry": [
+        "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+        "68927f2b-2ff8-36f7-3578-db0fa54c29f7"
+      ],
+      "depth": 2,
+      "order": 4,
+      "slot": 3,
+      "birthMs": 68243.014,
+      "deathMs": 360000,
+      "died": false,
+      "logId": "synth-0000021"
+    },
+    {
+      "id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "name": "bench-4",
+      "harness": "claude",
+      "color": "#59a14f",
+      "parentId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "ancestry": [
+        "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+        "68927f2b-2ff8-36f7-3578-db0fa54c29f7"
+      ],
+      "depth": 2,
+      "order": 5,
+      "slot": 4,
+      "birthMs": 77233.112,
+      "deathMs": 338478.144,
+      "died": true,
+      "logId": "synth-0000027"
+    },
+    {
+      "id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "name": "triage-5",
+      "harness": "claude",
+      "color": "#76b7b2",
+      "parentId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "ancestry": [
+        "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+        "68927f2b-2ff8-36f7-3578-db0fa54c29f7"
+      ],
+      "depth": 2,
+      "order": 6,
+      "slot": 5,
+      "birthMs": 86223.21,
+      "deathMs": 360000,
+      "died": false,
+      "logId": "synth-0000033"
+    },
+    {
+      "id": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "name": "scout-8",
+      "harness": "claude",
+      "color": "#f28e2b",
+      "parentId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "ancestry": [
+        "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+        "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+        "8d7e4127-dbfd-477a-32f5-fe708a29bf06"
+      ],
+      "depth": 3,
+      "order": 7,
+      "slot": 1,
+      "birthMs": 343375,
+      "deathMs": 360000,
+      "died": false,
+      "logId": "synth-0000180"
+    },
+    {
+      "id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "name": "integrator-6",
+      "harness": "claude",
+      "color": "#ff9da7",
+      "parentId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "ancestry": [
+        "c7bb8186-39ac-48a4-c6af-a2f1581a8b95"
+      ],
+      "depth": 1,
+      "order": 8,
+      "slot": 6,
+      "birthMs": 95213.307,
+      "deathMs": 360000,
+      "died": false,
+      "logId": "synth-0000039"
+    },
+    {
+      "id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "name": "bench-9",
+      "harness": "claude",
+      "color": "#edc948",
+      "parentId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "ancestry": [
+        "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+        "f957763e-ea0d-af62-d65d-ce5ba524f735"
+      ],
+      "depth": 2,
+      "order": 9,
+      "slot": 4,
+      "birthMs": 346125,
+      "deathMs": 360000,
+      "died": false,
+      "logId": "synth-0000186"
+    },
+    {
+      "id": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "name": "scout-10",
+      "harness": "claude",
+      "color": "#4e79a7",
+      "parentId": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "ancestry": [
+        "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+        "f957763e-ea0d-af62-d65d-ce5ba524f735",
+        "4d277158-aa81-281c-8ab5-476a841bf223"
+      ],
+      "depth": 3,
+      "order": 10,
+      "slot": 7,
+      "birthMs": 348875,
+      "deathMs": 360000,
+      "died": false,
+      "logId": "synth-0000192"
+    },
+    {
+      "id": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "name": "bench-11",
+      "harness": "claude",
+      "color": "#e15759",
+      "parentId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "ancestry": [
+        "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+        "f957763e-ea0d-af62-d65d-ce5ba524f735"
+      ],
+      "depth": 2,
+      "order": 11,
+      "slot": 8,
+      "birthMs": 351625,
+      "deathMs": 360000,
+      "died": false,
+      "logId": "synth-0000198"
+    },
+    {
+      "id": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "name": "architect-12",
+      "harness": "claude",
+      "color": "#f28e2b",
+      "parentId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "ancestry": [
+        "c7bb8186-39ac-48a4-c6af-a2f1581a8b95"
+      ],
+      "depth": 1,
+      "order": 12,
+      "slot": 9,
+      "birthMs": 354375,
+      "deathMs": 360000,
+      "died": false,
+      "logId": "synth-0000204"
+    },
+    {
+      "id": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "name": "triage-13",
+      "harness": "claude",
+      "color": "#e15759",
+      "parentId": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "ancestry": [
+        "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+        "8479c82a-23b3-7929-ddb5-76194ed12aae"
+      ],
+      "depth": 2,
+      "order": 13,
+      "slot": 10,
+      "birthMs": 357125,
+      "deathMs": 360000,
+      "died": false,
+      "logId": "synth-0000210"
+    }
+  ],
+  "intervals": [
+    {
+      "id": "iv0",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 0,
+      "endMs": 360000,
+      "label": "orchestrator",
+      "confidence": "open",
+      "logId": "synth-0000003"
+    },
+    {
+      "id": "iv1",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 420,
+      "endMs": 353175,
+      "confidence": "inferred",
+      "logId": "synth-0000005"
+    },
+    {
+      "id": "iv2",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 23604.733,
+      "endMs": 34271.897,
+      "confidence": "measured",
+      "logId": "synth-0000048"
+    },
+    {
+      "id": "iv3",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 25257.589,
+      "endMs": 28516.892,
+      "label": "Write",
+      "confidence": "measured",
+      "logId": "synth-0000049"
+    },
+    {
+      "id": "iv4",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 29497.463,
+      "endMs": 30102.224,
+      "label": "Edit",
+      "confidence": "measured",
+      "logId": "synth-0000051"
+    },
+    {
+      "id": "iv5",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 30508.93,
+      "endMs": 33092.336,
+      "label": "Edit",
+      "confidence": "measured",
+      "logId": "synth-0000053"
+    },
+    {
+      "id": "iv6",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 47762.819,
+      "endMs": 49062.819,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000006"
+    },
+    {
+      "id": "iv7",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 49166.527,
+      "endMs": 59434.886,
+      "confidence": "measured",
+      "logId": "synth-0000056"
+    },
+    {
+      "id": "iv8",
+      "lifelineId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 50262.819,
+      "endMs": 332647.329,
+      "label": "architect-1",
+      "confidence": "measured",
+      "logId": "synth-0000009"
+    },
+    {
+      "id": "iv9",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 50585.158,
+      "endMs": 51277.282,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000057"
+    },
+    {
+      "id": "iv10",
+      "lifelineId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 50682.819,
+      "endMs": 332497.329,
+      "confidence": "measured",
+      "logId": "synth-0000011"
+    },
+    {
+      "id": "iv11",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 51998.804,
+      "endMs": 53164.689,
+      "label": "Write",
+      "confidence": "measured",
+      "logId": "synth-0000059"
+    },
+    {
+      "id": "iv12",
+      "lifelineId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 52793.328,
+      "endMs": 59561.415,
+      "confidence": "measured",
+      "logId": "synth-0000082"
+    },
+    {
+      "id": "iv13",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 54124.434,
+      "endMs": 57736.147,
+      "label": "Grep",
+      "confidence": "measured",
+      "logId": "synth-0000061"
+    },
+    {
+      "id": "iv14",
+      "lifelineId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 54127.463,
+      "endMs": 58369.326,
+      "label": "Edit",
+      "confidence": "measured",
+      "logId": "synth-0000083"
+    },
+    {
+      "id": "iv15",
+      "lifelineId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 56752.916,
+      "endMs": 58052.916,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000012"
+    },
+    {
+      "id": "iv16",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 59252.916,
+      "endMs": 360000,
+      "label": "bench-2",
+      "confidence": "open",
+      "logId": "synth-0000015"
+    },
+    {
+      "id": "iv17",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 59672.916,
+      "endMs": 360000,
+      "confidence": "inferred",
+      "logId": "synth-0000017"
+    },
+    {
+      "id": "iv18",
+      "lifelineId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 64880.448,
+      "endMs": 74656.544,
+      "confidence": "measured",
+      "logId": "synth-0000086"
+    },
+    {
+      "id": "iv19",
+      "lifelineId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 65743.014,
+      "endMs": 68797.102,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000018"
+    },
+    {
+      "id": "iv20",
+      "lifelineId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 66827.799,
+      "endMs": 67043.014,
+      "label": "Write",
+      "confidence": "measured",
+      "logId": "synth-0000087"
+    },
+    {
+      "id": "iv21",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 68243.014,
+      "endMs": 360000,
+      "label": "docs-3",
+      "confidence": "open",
+      "logId": "synth-0000021"
+    },
+    {
+      "id": "iv22",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 68663.014,
+      "endMs": 360000,
+      "confidence": "inferred",
+      "logId": "synth-0000023"
+    },
+    {
+      "id": "iv23",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 69177.262,
+      "endMs": 71939.065,
+      "confidence": "measured",
+      "logId": "synth-0000092"
+    },
+    {
+      "id": "iv24",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 69751.144,
+      "endMs": 85585.062,
+      "confidence": "measured",
+      "logId": "synth-0000112"
+    },
+    {
+      "id": "iv25",
+      "lifelineId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 70340.807,
+      "endMs": 73807.496,
+      "label": "Grep",
+      "confidence": "measured",
+      "error": true,
+      "logId": "synth-0000089"
+    },
+    {
+      "id": "iv26",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 70382.841,
+      "endMs": 71727.544,
+      "label": "Grep",
+      "confidence": "measured",
+      "logId": "synth-0000093"
+    },
+    {
+      "id": "iv27",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 71674.194,
+      "endMs": 74653.052,
+      "label": "WebFetch",
+      "confidence": "measured",
+      "logId": "synth-0000113"
+    },
+    {
+      "id": "iv28",
+      "lifelineId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 74733.112,
+      "endMs": 76033.112,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000024"
+    },
+    {
+      "id": "iv29",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 75488.46,
+      "endMs": 87462.623,
+      "confidence": "measured",
+      "logId": "synth-0000064"
+    },
+    {
+      "id": "iv30",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 75720.878,
+      "endMs": 79823.371,
+      "label": "Grep",
+      "confidence": "measured",
+      "logId": "synth-0000115"
+    },
+    {
+      "id": "iv31",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 75742.655,
+      "endMs": 87712.749,
+      "confidence": "measured",
+      "logId": "synth-0000096"
+    },
+    {
+      "id": "iv32",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 76035.848,
+      "endMs": 77338.897,
+      "label": "WebFetch",
+      "confidence": "measured",
+      "logId": "synth-0000065"
+    },
+    {
+      "id": "iv33",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 77171.781,
+      "endMs": 78859.237,
+      "label": "Read",
+      "confidence": "measured",
+      "logId": "synth-0000097"
+    },
+    {
+      "id": "iv34",
+      "lifelineId": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 77233.112,
+      "endMs": 338478.144,
+      "label": "bench-4",
+      "confidence": "measured",
+      "logId": "synth-0000027"
+    },
+    {
+      "id": "iv35",
+      "lifelineId": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 77653.112,
+      "endMs": 338328.144,
+      "confidence": "measured",
+      "logId": "synth-0000029"
+    },
+    {
+      "id": "iv36",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 77857.738,
+      "endMs": 81938.517,
+      "label": "WebFetch",
+      "confidence": "measured",
+      "logId": "synth-0000067"
+    },
+    {
+      "id": "iv37",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 79585.938,
+      "endMs": 81540.262,
+      "label": "Read",
+      "confidence": "measured",
+      "logId": "synth-0000099"
+    },
+    {
+      "id": "iv38",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 80759.562,
+      "endMs": 84761.434,
+      "label": "Grep",
+      "confidence": "measured",
+      "logId": "synth-0000117"
+    },
+    {
+      "id": "iv39",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 81820.941,
+      "endMs": 83417.636,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000101"
+    },
+    {
+      "id": "iv40",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 82606.346,
+      "endMs": 84855.303,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000069"
+    },
+    {
+      "id": "iv41",
+      "lifelineId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 83723.21,
+      "endMs": 85023.21,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000030"
+    },
+    {
+      "id": "iv42",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 84073.34,
+      "endMs": 87059.446,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000103"
+    },
+    {
+      "id": "iv43",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 85655.585,
+      "endMs": 87232.91,
+      "label": "Read",
+      "confidence": "measured",
+      "logId": "synth-0000071"
+    },
+    {
+      "id": "iv44",
+      "lifelineId": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 85767.608,
+      "endMs": 96892.02,
+      "confidence": "measured",
+      "logId": "synth-0000130"
+    },
+    {
+      "id": "iv45",
+      "lifelineId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 86223.21,
+      "endMs": 360000,
+      "label": "triage-5",
+      "confidence": "open",
+      "logId": "synth-0000033"
+    },
+    {
+      "id": "iv46",
+      "lifelineId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 86643.21,
+      "endMs": 350608.498,
+      "confidence": "inferred",
+      "logId": "synth-0000035"
+    },
+    {
+      "id": "iv47",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 87665.066,
+      "endMs": 104138.177,
+      "confidence": "measured",
+      "logId": "synth-0000120"
+    },
+    {
+      "id": "iv48",
+      "lifelineId": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 87666.34,
+      "endMs": 89766.956,
+      "label": "Write",
+      "confidence": "measured",
+      "logId": "synth-0000131"
+    },
+    {
+      "id": "iv49",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 88503.345,
+      "endMs": 92759.874,
+      "label": "Read",
+      "confidence": "measured",
+      "logId": "synth-0000121"
+    },
+    {
+      "id": "iv50",
+      "lifelineId": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 91445.947,
+      "endMs": 94129.143,
+      "label": "Glob",
+      "confidence": "inferred",
+      "logId": "synth-0000133"
+    },
+    {
+      "id": "iv51",
+      "lifelineId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 91516.653,
+      "endMs": 97404.663,
+      "confidence": "measured",
+      "logId": "synth-0000141"
+    },
+    {
+      "id": "iv52",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 92713.307,
+      "endMs": 94013.307,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000036"
+    },
+    {
+      "id": "iv53",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 93415.704,
+      "endMs": 94421.663,
+      "label": "Task",
+      "confidence": "measured",
+      "logId": "synth-0000123"
+    },
+    {
+      "id": "iv54",
+      "lifelineId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 93464.661,
+      "endMs": 96451.332,
+      "label": "Task",
+      "confidence": "measured",
+      "logId": "synth-0000142"
+    },
+    {
+      "id": "iv55",
+      "lifelineId": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 94129.143,
+      "endMs": 95313.138,
+      "label": "Edit",
+      "confidence": "measured",
+      "logId": "synth-0000134"
+    },
+    {
+      "id": "iv56",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 95007.474,
+      "endMs": 99773.926,
+      "label": "Edit",
+      "confidence": "inferred",
+      "logId": "synth-0000125"
+    },
+    {
+      "id": "iv57",
+      "lifelineId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 95213.307,
+      "endMs": 360000,
+      "label": "integrator-6",
+      "confidence": "open",
+      "logId": "synth-0000039"
+    },
+    {
+      "id": "iv58",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 95575.365,
+      "endMs": 106220.131,
+      "confidence": "measured",
+      "logId": "synth-0000074"
+    },
+    {
+      "id": "iv59",
+      "lifelineId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 95633.307,
+      "endMs": 360000,
+      "confidence": "inferred",
+      "logId": "synth-0000041"
+    },
+    {
+      "id": "iv60",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 97395.281,
+      "endMs": 97838.299,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000075"
+    },
+    {
+      "id": "iv61",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 98807.931,
+      "endMs": 102004.847,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000077"
+    },
+    {
+      "id": "iv62",
+      "lifelineId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 99599.976,
+      "endMs": 113341.502,
+      "confidence": "measured",
+      "logId": "synth-0000145"
+    },
+    {
+      "id": "iv63",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 99773.926,
+      "endMs": 103873.676,
+      "label": "Read",
+      "confidence": "measured",
+      "logId": "synth-0000126"
+    },
+    {
+      "id": "iv64",
+      "lifelineId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 100397.443,
+      "endMs": 103324.836,
+      "label": "Read",
+      "confidence": "measured",
+      "logId": "synth-0000146"
+    },
+    {
+      "id": "iv65",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 101703.405,
+      "endMs": 103003.405,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000042"
+    },
+    {
+      "id": "iv66",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 103476.097,
+      "endMs": 104767.475,
+      "label": "Task",
+      "confidence": "measured",
+      "logId": "synth-0000079"
+    },
+    {
+      "id": "iv67",
+      "lifelineId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 103897.71,
+      "endMs": 107277.594,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000148"
+    },
+    {
+      "id": "iv68",
+      "lifelineId": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 104203.405,
+      "endMs": 334668.063,
+      "label": "probe-7",
+      "confidence": "measured",
+      "logId": "synth-0000045"
+    },
+    {
+      "id": "iv69",
+      "lifelineId": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 104623.405,
+      "endMs": 334518.063,
+      "confidence": "measured",
+      "logId": "synth-0000047"
+    },
+    {
+      "id": "iv70",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 106772.435,
+      "endMs": 116630.293,
+      "confidence": "measured",
+      "logId": "synth-0000106"
+    },
+    {
+      "id": "iv71",
+      "lifelineId": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 107150.37,
+      "endMs": 116224.538,
+      "confidence": "measured",
+      "logId": "synth-0000153"
+    },
+    {
+      "id": "iv72",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 108197.818,
+      "endMs": 112268.848,
+      "label": "Read",
+      "confidence": "measured",
+      "logId": "synth-0000107"
+    },
+    {
+      "id": "iv73",
+      "lifelineId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 108244.603,
+      "endMs": 112523.028,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000150"
+    },
+    {
+      "id": "iv74",
+      "lifelineId": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 108795.656,
+      "endMs": 111621.049,
+      "label": "Task",
+      "confidence": "measured",
+      "error": true,
+      "logId": "synth-0000154"
+    },
+    {
+      "id": "iv75",
+      "lifelineId": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 112669.849,
+      "endMs": 114779.78,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000156"
+    },
+    {
+      "id": "iv76",
+      "lifelineId": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 112672.614,
+      "endMs": 116167.399,
+      "confidence": "measured",
+      "logId": "synth-0000137"
+    },
+    {
+      "id": "iv77",
+      "lifelineId": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 113469.706,
+      "endMs": 115818.794,
+      "label": "Edit",
+      "confidence": "measured",
+      "logId": "synth-0000138"
+    },
+    {
+      "id": "iv78",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 113473.754,
+      "endMs": 360000,
+      "confidence": "inferred",
+      "logId": "synth-0000129"
+    },
+    {
+      "id": "iv79",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 113751.813,
+      "endMs": 115682.345,
+      "label": "Write",
+      "confidence": "measured",
+      "logId": "synth-0000109"
+    },
+    {
+      "id": "iv80",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 328497.329,
+      "endMs": 329497.329,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000167"
+    },
+    {
+      "id": "iv81",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 330518.063,
+      "endMs": 331518.063,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000174"
+    },
+    {
+      "id": "iv82",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 331532.458,
+      "endMs": 341228.648,
+      "confidence": "measured",
+      "logId": "synth-0000235"
+    },
+    {
+      "id": "iv83",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 331813.725,
+      "endMs": 335093.286,
+      "confidence": "measured",
+      "logId": "synth-0000221"
+    },
+    {
+      "id": "iv84",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 332773.141,
+      "endMs": 336515.573,
+      "label": "Task",
+      "confidence": "measured",
+      "logId": "synth-0000236"
+    },
+    {
+      "id": "iv85",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 333132.898,
+      "endMs": 334145.789,
+      "label": "Read",
+      "confidence": "measured",
+      "logId": "synth-0000222"
+    },
+    {
+      "id": "iv86",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 333477.285,
+      "endMs": 344630.667,
+      "confidence": "measured",
+      "logId": "synth-0000213"
+    },
+    {
+      "id": "iv87",
+      "lifelineId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 334578.901,
+      "endMs": 350425,
+      "confidence": "inferred",
+      "logId": "synth-0000263"
+    },
+    {
+      "id": "iv88",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 334874.294,
+      "endMs": 338309.266,
+      "label": "Write",
+      "confidence": "measured",
+      "logId": "synth-0000214"
+    },
+    {
+      "id": "iv89",
+      "lifelineId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 335015.79,
+      "endMs": 338915.409,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000264"
+    },
+    {
+      "id": "iv90",
+      "lifelineId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 336254.342,
+      "endMs": 350608.498,
+      "confidence": "measured",
+      "logId": "synth-0000253"
+    },
+    {
+      "id": "iv91",
+      "lifelineId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 337685.1,
+      "endMs": 343580.355,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000254"
+    },
+    {
+      "id": "iv92",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 338062.5,
+      "endMs": 338677.694,
+      "label": "Grep",
+      "confidence": "measured",
+      "logId": "synth-0000238"
+    },
+    {
+      "id": "iv93",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 339514.018,
+      "endMs": 340041.346,
+      "label": "WebFetch",
+      "confidence": "measured",
+      "logId": "synth-0000240"
+    },
+    {
+      "id": "iv94",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 339787.29,
+      "endMs": 340298.343,
+      "label": "Write",
+      "confidence": "measured",
+      "logId": "synth-0000216"
+    },
+    {
+      "id": "iv95",
+      "lifelineId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 340196.695,
+      "endMs": 341928.476,
+      "label": "Edit",
+      "confidence": "measured",
+      "logId": "synth-0000266"
+    },
+    {
+      "id": "iv96",
+      "lifelineId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 340875,
+      "endMs": 340876.404,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000177"
+    },
+    {
+      "id": "iv97",
+      "lifelineId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 341225.401,
+      "endMs": 342175,
+      "label": "WebFetch",
+      "confidence": "measured",
+      "logId": "synth-0000256"
+    },
+    {
+      "id": "iv98",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 341658.937,
+      "endMs": 343678.766,
+      "label": "Write",
+      "confidence": "measured",
+      "logId": "synth-0000218"
+    },
+    {
+      "id": "iv99",
+      "lifelineId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 342528.3,
+      "endMs": 345928.615,
+      "label": "Grep",
+      "confidence": "measured",
+      "logId": "synth-0000268"
+    },
+    {
+      "id": "iv100",
+      "lifelineId": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 343375,
+      "endMs": 360000,
+      "label": "scout-8",
+      "confidence": "open",
+      "logId": "synth-0000180"
+    },
+    {
+      "id": "iv101",
+      "lifelineId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 343625,
+      "endMs": 344925,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000183"
+    },
+    {
+      "id": "iv102",
+      "lifelineId": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 343795,
+      "endMs": 357611.877,
+      "confidence": "inferred",
+      "logId": "synth-0000182"
+    },
+    {
+      "id": "iv103",
+      "lifelineId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 344787.193,
+      "endMs": 348130.491,
+      "label": "Task",
+      "confidence": "measured",
+      "logId": "synth-0000258"
+    },
+    {
+      "id": "iv104",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 345554.381,
+      "endMs": 360000,
+      "confidence": "measured",
+      "logId": "synth-0000243"
+    },
+    {
+      "id": "iv105",
+      "lifelineId": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 346125,
+      "endMs": 360000,
+      "label": "bench-9",
+      "confidence": "open",
+      "logId": "synth-0000186"
+    },
+    {
+      "id": "iv106",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 346278.316,
+      "endMs": 349818.362,
+      "label": "Task",
+      "confidence": "measured",
+      "logId": "synth-0000244"
+    },
+    {
+      "id": "iv107",
+      "lifelineId": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 346375,
+      "endMs": 347675,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000189"
+    },
+    {
+      "id": "iv108",
+      "lifelineId": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 346545,
+      "endMs": 360000,
+      "confidence": "inferred",
+      "logId": "synth-0000188"
+    },
+    {
+      "id": "iv109",
+      "lifelineId": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 346656.655,
+      "endMs": 357611.877,
+      "confidence": "measured",
+      "logId": "synth-0000272"
+    },
+    {
+      "id": "iv110",
+      "lifelineId": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 347804.809,
+      "endMs": 351884.896,
+      "label": "Read",
+      "confidence": "measured",
+      "logId": "synth-0000273"
+    },
+    {
+      "id": "iv111",
+      "lifelineId": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 348875,
+      "endMs": 360000,
+      "label": "scout-10",
+      "confidence": "open",
+      "logId": "synth-0000192"
+    },
+    {
+      "id": "iv112",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 348890.791,
+      "endMs": 360000,
+      "confidence": "measured",
+      "logId": "synth-0000225"
+    },
+    {
+      "id": "iv113",
+      "lifelineId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 348932.975,
+      "endMs": 349984.949,
+      "label": "Read",
+      "confidence": "measured",
+      "logId": "synth-0000260"
+    },
+    {
+      "id": "iv114",
+      "lifelineId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 349125,
+      "endMs": 350425,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000195"
+    },
+    {
+      "id": "iv115",
+      "lifelineId": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 349295,
+      "endMs": 360000,
+      "confidence": "inferred",
+      "logId": "synth-0000194"
+    },
+    {
+      "id": "iv116",
+      "lifelineId": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 349628.641,
+      "endMs": 360000,
+      "confidence": "measured",
+      "logId": "synth-0000279"
+    },
+    {
+      "id": "iv117",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 349953.754,
+      "endMs": 350360.944,
+      "label": "WebFetch",
+      "confidence": "measured",
+      "logId": "synth-0000226"
+    },
+    {
+      "id": "iv118",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 350037.083,
+      "endMs": 354245.174,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000246"
+    },
+    {
+      "id": "iv119",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 350786.861,
+      "endMs": 354042.047,
+      "label": "Write",
+      "confidence": "measured",
+      "logId": "synth-0000228"
+    },
+    {
+      "id": "iv120",
+      "lifelineId": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 350984.284,
+      "endMs": 353530.076,
+      "label": "Read",
+      "confidence": "inferred",
+      "logId": "synth-0000280"
+    },
+    {
+      "id": "iv121",
+      "lifelineId": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 351625,
+      "endMs": 360000,
+      "label": "bench-11",
+      "confidence": "open",
+      "logId": "synth-0000198"
+    },
+    {
+      "id": "iv122",
+      "lifelineId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 351875,
+      "endMs": 353175,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000201"
+    },
+    {
+      "id": "iv123",
+      "lifelineId": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 352045,
+      "endMs": 360000,
+      "confidence": "inferred",
+      "logId": "synth-0000200"
+    },
+    {
+      "id": "iv124",
+      "lifelineId": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 352064.137,
+      "endMs": 360000,
+      "confidence": "measured",
+      "logId": "synth-0000287"
+    },
+    {
+      "id": "iv125",
+      "lifelineId": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 352640.067,
+      "endMs": 353876.265,
+      "label": "Task",
+      "confidence": "inferred",
+      "logId": "synth-0000275"
+    },
+    {
+      "id": "iv126",
+      "lifelineId": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 353019.51,
+      "endMs": 360000,
+      "confidence": "measured",
+      "logId": "synth-0000293"
+    },
+    {
+      "id": "iv127",
+      "lifelineId": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 353530.076,
+      "endMs": 354122.635,
+      "label": "Grep",
+      "confidence": "measured",
+      "logId": "synth-0000281"
+    },
+    {
+      "id": "iv128",
+      "lifelineId": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 353876.265,
+      "endMs": 357177.814,
+      "label": "WebFetch",
+      "confidence": "measured",
+      "logId": "synth-0000276"
+    },
+    {
+      "id": "iv129",
+      "lifelineId": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 353926.148,
+      "endMs": 355446.087,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000288"
+    },
+    {
+      "id": "iv130",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 354368.304,
+      "endMs": 357868.094,
+      "label": "WebFetch",
+      "confidence": "measured",
+      "logId": "synth-0000230"
+    },
+    {
+      "id": "iv131",
+      "lifelineId": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 354375,
+      "endMs": 360000,
+      "label": "architect-12",
+      "confidence": "open",
+      "logId": "synth-0000204"
+    },
+    {
+      "id": "iv132",
+      "lifelineId": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 354625,
+      "endMs": 355925,
+      "label": "Bash",
+      "confidence": "measured",
+      "logId": "synth-0000207"
+    },
+    {
+      "id": "iv133",
+      "lifelineId": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 354715.383,
+      "endMs": 355344.78,
+      "label": "Read",
+      "confidence": "measured",
+      "logId": "synth-0000294"
+    },
+    {
+      "id": "iv134",
+      "lifelineId": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 354795,
+      "endMs": 360000,
+      "confidence": "inferred",
+      "logId": "synth-0000206"
+    },
+    {
+      "id": "iv135",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 355256.301,
+      "endMs": 357431.397,
+      "label": "Edit",
+      "confidence": "measured",
+      "logId": "synth-0000248"
+    },
+    {
+      "id": "iv136",
+      "lifelineId": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 355420.017,
+      "endMs": 360000,
+      "confidence": "measured",
+      "logId": "synth-0000299"
+    },
+    {
+      "id": "iv137",
+      "lifelineId": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 355655.932,
+      "endMs": 359014.292,
+      "label": "Read",
+      "confidence": "inferred",
+      "logId": "synth-0000283"
+    },
+    {
+      "id": "iv138",
+      "lifelineId": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 355893.078,
+      "endMs": 359010.665,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000296"
+    },
+    {
+      "id": "iv139",
+      "lifelineId": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 356734.001,
+      "endMs": 360000,
+      "label": "Grep",
+      "confidence": "measured",
+      "logId": "synth-0000290"
+    },
+    {
+      "id": "iv140",
+      "lifelineId": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 356953.781,
+      "endMs": 360000,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000300"
+    },
+    {
+      "id": "iv141",
+      "lifelineId": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "kind": "lifecycle",
+      "depth": 0,
+      "startMs": 357125,
+      "endMs": 360000,
+      "label": "triage-13",
+      "confidence": "open",
+      "logId": "synth-0000210"
+    },
+    {
+      "id": "iv142",
+      "lifelineId": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "kind": "session",
+      "depth": 1,
+      "startMs": 357545,
+      "endMs": 360000,
+      "confidence": "inferred",
+      "logId": "synth-0000212"
+    },
+    {
+      "id": "iv143",
+      "lifelineId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 358387.025,
+      "endMs": 360000,
+      "label": "Read",
+      "confidence": "measured",
+      "logId": "synth-0000232"
+    },
+    {
+      "id": "iv144",
+      "lifelineId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 358442.329,
+      "endMs": 360000,
+      "label": "Edit",
+      "confidence": "measured",
+      "logId": "synth-0000250"
+    },
+    {
+      "id": "iv145",
+      "lifelineId": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 358555.393,
+      "endMs": 360000,
+      "confidence": "measured",
+      "logId": "synth-0000303"
+    },
+    {
+      "id": "iv146",
+      "lifelineId": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 359014.292,
+      "endMs": 360000,
+      "label": "Glob",
+      "confidence": "measured",
+      "logId": "synth-0000284"
+    },
+    {
+      "id": "iv147",
+      "lifelineId": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "kind": "tool",
+      "depth": 3,
+      "startMs": 359253.589,
+      "endMs": 360000,
+      "label": "Read",
+      "confidence": "measured",
+      "error": true,
+      "logId": "synth-0000304"
+    },
+    {
+      "id": "iv148",
+      "lifelineId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "kind": "turn",
+      "depth": 2,
+      "startMs": 359898.519,
+      "endMs": 360000,
+      "confidence": "measured",
+      "logId": "synth-0000270"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "kind": "message",
+      "fromId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "toId": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "sendMs": 28246.105,
+      "recvMs": 104203.405,
+      "recvConfidence": "inferred",
+      "msgType": "review",
+      "label": "found a race in the playback engine",
+      "broadcast": true,
+      "logId": "synth-0000164"
+    },
+    {
+      "id": "e1",
+      "kind": "message",
+      "fromId": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "toId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "sendMs": 42057.556,
+      "recvMs": 47762.819,
+      "recvConfidence": "inferred",
+      "msgType": "review",
+      "label": "handing the integration work back to you",
+      "logId": "synth-0000161"
+    },
+    {
+      "id": "e2",
+      "kind": "message",
+      "fromId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "toId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "sendMs": 48081.029,
+      "recvMs": 95213.307,
+      "recvConfidence": "inferred",
+      "msgType": "status",
+      "label": "please review the velocity planner maths",
+      "broadcast": true,
+      "logId": "synth-0000160"
+    },
+    {
+      "id": "e3",
+      "kind": "spawn",
+      "fromId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "toId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "sendMs": 50262.819,
+      "recvMs": 50262.819,
+      "recvConfidence": "measured",
+      "label": "spawn architect-1",
+      "logId": "synth-0000009"
+    },
+    {
+      "id": "e4",
+      "kind": "spawn",
+      "fromId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "toId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "sendMs": 59252.916,
+      "recvMs": 59252.916,
+      "recvConfidence": "measured",
+      "label": "spawn bench-2",
+      "logId": "synth-0000015"
+    },
+    {
+      "id": "e5",
+      "kind": "spawn",
+      "fromId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "toId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "sendMs": 68243.014,
+      "recvMs": 68243.014,
+      "recvConfidence": "measured",
+      "label": "spawn docs-3",
+      "logId": "synth-0000021"
+    },
+    {
+      "id": "e6",
+      "kind": "message",
+      "fromId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "toId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "sendMs": 71816.352,
+      "recvMs": 95213.307,
+      "recvConfidence": "inferred",
+      "msgType": "review",
+      "label": "done - shutting down",
+      "logId": "synth-0000159"
+    },
+    {
+      "id": "e7",
+      "kind": "message",
+      "fromId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "toId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "sendMs": 76387.935,
+      "recvMs": 77171.781,
+      "recvConfidence": "inferred",
+      "msgType": "question",
+      "label": "handing the integration work back to you",
+      "logId": "synth-0000162"
+    },
+    {
+      "id": "e8",
+      "kind": "spawn",
+      "fromId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "toId": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "sendMs": 77233.112,
+      "recvMs": 77233.112,
+      "recvConfidence": "measured",
+      "label": "spawn bench-4",
+      "logId": "synth-0000027"
+    },
+    {
+      "id": "e9",
+      "kind": "spawn",
+      "fromId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "toId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "sendMs": 86223.21,
+      "recvMs": 86223.21,
+      "recvConfidence": "measured",
+      "label": "spawn triage-5",
+      "logId": "synth-0000033"
+    },
+    {
+      "id": "e10",
+      "kind": "message",
+      "fromId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "toId": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "sendMs": 92478.542,
+      "recvMs": 93415.704,
+      "recvConfidence": "inferred",
+      "msgType": "answer",
+      "label": "found a race in the playback engine",
+      "logId": "synth-0000163"
+    },
+    {
+      "id": "e11",
+      "kind": "spawn",
+      "fromId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "toId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "sendMs": 95213.307,
+      "recvMs": 95213.307,
+      "recvConfidence": "measured",
+      "label": "spawn integrator-6",
+      "logId": "synth-0000039"
+    },
+    {
+      "id": "e12",
+      "kind": "spawn",
+      "fromId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "toId": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "sendMs": 104203.405,
+      "recvMs": 104203.405,
+      "recvConfidence": "measured",
+      "label": "spawn probe-7",
+      "logId": "synth-0000045"
+    },
+    {
+      "id": "e13",
+      "kind": "message",
+      "fromId": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "toId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "sendMs": 330781.167,
+      "recvMs": 333477.285,
+      "recvConfidence": "inferred",
+      "msgType": "answer",
+      "label": "picking up the parser refactor now",
+      "logId": "synth-0000308"
+    },
+    {
+      "id": "e14",
+      "kind": "destroy",
+      "fromId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "toId": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "sendMs": 332647.329,
+      "recvMs": 332647.329,
+      "recvConfidence": "measured",
+      "label": "destroy architect-1"
+    },
+    {
+      "id": "e15",
+      "kind": "destroy",
+      "fromId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "toId": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "sendMs": 334668.063,
+      "recvMs": 334668.063,
+      "recvConfidence": "measured",
+      "label": "destroy probe-7"
+    },
+    {
+      "id": "e16",
+      "kind": "spawn",
+      "fromId": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "toId": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "sendMs": 343375,
+      "recvMs": 343375,
+      "recvConfidence": "measured",
+      "label": "spawn scout-8",
+      "logId": "synth-0000180"
+    },
+    {
+      "id": "e17",
+      "kind": "message",
+      "fromId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "toId": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "sendMs": 344005.829,
+      "recvMs": 348875,
+      "recvConfidence": "inferred",
+      "msgType": "answer",
+      "label": "blocked on the schema change, need a decision",
+      "logId": "synth-0000310"
+    },
+    {
+      "id": "e18",
+      "kind": "message",
+      "fromId": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "toId": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "sendMs": 344410.451,
+      "recvMs": 351625,
+      "recvConfidence": "inferred",
+      "msgType": "handoff",
+      "label": "done - shutting down",
+      "logId": "synth-0000307"
+    },
+    {
+      "id": "e19",
+      "kind": "spawn",
+      "fromId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "toId": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "sendMs": 346125,
+      "recvMs": 346125,
+      "recvConfidence": "measured",
+      "label": "spawn bench-9",
+      "logId": "synth-0000186"
+    },
+    {
+      "id": "e20",
+      "kind": "spawn",
+      "fromId": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "toId": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "sendMs": 348875,
+      "recvMs": 348875,
+      "recvConfidence": "measured",
+      "label": "spawn scout-10",
+      "logId": "synth-0000192"
+    },
+    {
+      "id": "e21",
+      "kind": "spawn",
+      "fromId": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "toId": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "sendMs": 351625,
+      "recvMs": 351625,
+      "recvConfidence": "measured",
+      "label": "spawn bench-11",
+      "logId": "synth-0000198"
+    },
+    {
+      "id": "e22",
+      "kind": "spawn",
+      "fromId": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "toId": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "sendMs": 354375,
+      "recvMs": 354375,
+      "recvConfidence": "measured",
+      "label": "spawn architect-12",
+      "logId": "synth-0000204"
+    },
+    {
+      "id": "e23",
+      "kind": "spawn",
+      "fromId": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "toId": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "sendMs": 357125,
+      "recvMs": 357125,
+      "recvConfidence": "measured",
+      "label": "spawn triage-13",
+      "logId": "synth-0000210"
+    },
+    {
+      "id": "e24",
+      "kind": "message",
+      "fromId": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "toId": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "sendMs": 358577.22,
+      "recvMs": 358577.22,
+      "recvConfidence": "open",
+      "msgType": "handoff",
+      "label": "tests are green on my branch",
+      "logId": "synth-0000309"
+    }
+  ],
+  "density": {
+    "bucketMs": 1000,
+    "samples": [
+      0.17157258064516123,
+      0.1699619771863117,
+      0.16882882882882885,
+      0.16878216123499137,
+      0.16967213114754096,
+      0.1707547169811321,
+      0.17201210287443267,
+      0.17343065693430657,
+      0.17500000000000002,
+      0.17671232876712328,
+      0.1785619174434088,
+      0.18054474708171206,
+      0.18455696202531643,
+      0.1886138613861386,
+      0.19272727272727275,
+      0.19690844233055887,
+      0.20116822429906545,
+      0.20666666666666664,
+      0.21392978482446204,
+      0.22279329608938542,
+      0.2360927152317881,
+      0.25087336244541486,
+      0.26670270270270274,
+      0.2829581993569132,
+      0.2992553191489361,
+      0.31564482029598306,
+      0.3311251314405889,
+      0.3472251308900523,
+      0.3644050104384134,
+      0.3818749999999999,
+      0.3976066597294485,
+      0.41082206035379804,
+      0.42611862643080123,
+      0.4414151925078043,
+      0.4569198751300729,
+      0.4726326742976065,
+      0.4893860561914672,
+      0.5065556711758584,
+      0.5272632674297607,
+      0.5500520291363161,
+      0.5749219562955253,
+      0.603225806451613,
+      0.6315296566077003,
+      0.657127991675338,
+      0.6845993756503643,
+      0.7151925078043705,
+      0.7488033298647244,
+      0.7880332986472423,
+      0.8255983350676379,
+      0.8614984391259105,
+      0.8955254942767948,
+      0.9231009365244538,
+      0.9488033298647243,
+      0.9738813735691988,
+      0.9999999999999999,
+      1.0259105098855357,
+      1.0549427679500516,
+      1.0866805411030178,
+      1.1186264308012484,
+      1.149323621227888,
+      1.1740894901144632,
+      1.2019771071800205,
+      1.2343392299687823,
+      1.268782518210198,
+      1.305098855359001,
+      1.3453694068678457,
+      1.3848074921956293,
+      1.4240374609781477,
+      1.463475546305931,
+      1.4979188345473458,
+      1.5292403746097818,
+      1.5574401664932362,
+      1.5791883454734654,
+      1.6042663891779396,
+      1.6340270551508846,
+      1.6600416233090531,
+      1.6812695109261186,
+      1.697918834547346,
+      1.7064516129032254,
+      1.7151925078043706,
+      1.7225806451612906,
+      1.729760665972945,
+      1.7402705515088446,
+      1.7536940686784592,
+      1.7656607700312175,
+      1.7751300728407902,
+      1.78210197710718,
+      1.7828303850156084,
+      1.7771071800208107,
+      1.7697190426638916,
+      1.7623309053069722,
+      1.7588969823100933,
+      1.751300728407908,
+      1.7376690946930278,
+      1.7198751300728405,
+      1.6983350676378774,
+      1.666597294484911,
+      1.6342351716961494,
+      1.5991675338189386,
+      1.5624349635796047,
+      1.5250780437044746,
+      1.4877211238293442,
+      1.450364203954214,
+      1.4156087408949012,
+      1.3741935483870966,
+      1.3252861602497392,
+      1.2782518210197709,
+      1.2314255983350675,
+      1.1847034339229965,
+      1.13735691987513,
+      1.0904266389177941,
+      1.0449531737773152,
+      0.9996878251821021,
+      0.9504682622268468,
+      0.8952133194588967,
+      0.8405827263267428,
+      0.7861602497398542,
+      0.7321540062434964,
+      0.6812695109261183,
+      0.634131113423517,
+      0.5880332986472425,
+      0.5423517169614984,
+      0.4966701352757543,
+      0.4530697190426639,
+      0.41248699271592093,
+      0.37398543184183136,
+      0.33735691987513,
+      0.30634755463059304,
+      0.27617065556711756,
+      0.24786680541103015,
+      0.2206035379812695,
+      0.19542143600416229,
+      0.1712799167533819,
+      0.14817898022892823,
+      0.1254942767950052,
+      0.10613943808532776,
+      0.090738813735692,
+      0.0753381893860562,
+      0.06139438085327782,
+      0.048907388137356914,
+      0.03954214360041623,
+      0.03017689906347555,
+      0.02081165452653486,
+      0.011862643080124866,
+      0.005827263267429762,
+      0.003329864724245579,
+      0.0012486992715920906,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0.001040582726326742,
+      0.0024973985431841843,
+      0.006555671175858479,
+      0.013111342351716963,
+      0.02258064516129032,
+      0.03413111342351717,
+      0.05005202913631633,
+      0.06742976066597295,
+      0.08626430801248697,
+      0.10613943808532778,
+      0.12913631633714878,
+      0.15421436004162328,
+      0.1826222684703434,
+      0.2139438085327783,
+      0.2467221644120707,
+      0.2844953173777315,
+      0.3272632674297606,
+      0.37148803329864716,
+      0.42195629552549413,
+      0.4738813735691987,
+      0.5303850156087409,
+      0.5918834547346514,
+      0.6577523413111339,
+      0.7271592091571278,
+      0.7996878251821017,
+      0.8767950052029135,
+      0.9613943808532774,
+      1.051404786680541,
+      1.1434963579604576,
+      1.2403746097814774,
+      1.3419354838709678,
+      1.4507804370447444,
+      1.5604166666666661,
+      1.666805845511482,
+      1.770471204188482,
+      1.8708727655099893,
+      1.9699788583509514,
+      2.063404255319149,
+      2.1573419078242226,
+      2.2521081081081076,
+      2.348908296943231,
+      2.443708609271522,
+      2.538994413407821,
+      2.6323895809739524,
+      2.725057471264367,
+      2.8205607476635515,
+      2.9112960760998807,
+      2.997333333333333,
+      3.087128712871287,
+      3.169620253164557,
+      3.2565499351491574,
+      3.340612516644473,
+      3.4208219178082198,
+      3.498870056497174,
+      3.577226277372262,
+      3.6574886535552205,
+      3.7358490566037728,
+      3.803278688524591,
+      3.865523156089193,
+      3.9336936936936935,
+      3.9992395437262362,
+      4.0625
+    ],
+    "peak": 4.0625
+  },
+  "warp": {
+    "knots": [
+      {
+        "tauMs": 0,
+        "wallMs": 0,
+        "velocity": 34.97062279670976
+      },
+      {
+        "tauMs": 28.595430107526873,
+        "wallMs": 1000,
+        "velocity": 35.30201342281881
+      },
+      {
+        "tauMs": 56.922426305245494,
+        "wallMs": 2000,
+        "velocity": 35.53895410885805
+      },
+      {
+        "tauMs": 85.06056444338364,
+        "wallMs": 3000,
+        "velocity": 35.23252692108648
+      },
+      {
+        "tauMs": 113.44342787636396,
+        "wallMs": 4000,
+        "velocity": 34.66022148292021
+      },
+      {
+        "tauMs": 142.29494576100234,
+        "wallMs": 5000,
+        "velocity": 34.07830619683266
+      },
+      {
+        "tauMs": 171.63912719490656,
+        "wallMs": 6000,
+        "velocity": 33.48628007475724
+      },
+      {
+        "tauMs": 201.50210384586708,
+        "wallMs": 7000,
+        "velocity": 32.88359702412562
+      },
+      {
+        "tauMs": 231.91240230763003,
+        "wallMs": 8000,
+        "velocity": 32.26965994932521
+      },
+      {
+        "tauMs": 262.90126310041046,
+        "wallMs": 9000,
+        "velocity": 31.643813822690266
+      },
+      {
+        "tauMs": 294.50301646690724,
+        "wallMs": 10000,
+        "velocity": 31.00533749606805
+      },
+      {
+        "tauMs": 326.75552783295234,
+        "wallMs": 11000,
+        "velocity": 30.353433961334318
+      },
+      {
+        "tauMs": 359.7007293964344,
+        "wallMs": 12000,
+        "velocity": 29.68721868490013
+      },
+      {
+        "tauMs": 393.3852591132122,
+        "wallMs": 13000,
+        "velocity": 29.005705529172765
+      },
+      {
+        "tauMs": 427.8612348482013,
+        "wallMs": 14000,
+        "velocity": 28.307789621323025
+      },
+      {
+        "tauMs": 463.1872003643059,
+        "wallMs": 15000,
+        "velocity": 27.592226319111756
+      },
+      {
+        "tauMs": 499.42929219244337,
+        "wallMs": 16000,
+        "velocity": 26.857605128623874
+      },
+      {
+        "tauMs": 536.6626938755381,
+        "wallMs": 17000,
+        "velocity": 26.10231700912935
+      },
+      {
+        "tauMs": 574.9734691086428,
+        "wallMs": 18000,
+        "velocity": 25.324512892553006
+      },
+      {
+        "tauMs": 614.4609018676778,
+        "wallMs": 19000,
+        "velocity": 24.522050347495078
+      },
+      {
+        "tauMs": 655.240526158032,
+        "wallMs": 20000,
+        "velocity": 23.69242396305375
+      },
+      {
+        "tauMs": 697.4481112307714,
+        "wallMs": 21000,
+        "velocity": 22.83267293255618
+      },
+      {
+        "tauMs": 741.2449983912816,
+        "wallMs": 22000,
+        "velocity": 21.93925598658905
+      },
+      {
+        "tauMs": 786.8253954936845,
+        "wallMs": 23000,
+        "velocity": 21.00787836134538
+      },
+      {
+        "tauMs": 834.4265850474095,
+        "wallMs": 24000,
+        "velocity": 20.03324619838441
+      },
+      {
+        "tauMs": 884.3436074858721,
+        "wallMs": 25000,
+        "velocity": 19.008707300736774
+      },
+      {
+        "tauMs": 936.9510775352026,
+        "wallMs": 26000,
+        "velocity": 18.12003810733566
+      },
+      {
+        "tauMs": 992.1385994419674,
+        "wallMs": 27000,
+        "velocity": 17.27985524728589
+      },
+      {
+        "tauMs": 1050.0094545903094,
+        "wallMs": 28000,
+        "velocity": 16.465196218848465
+      },
+      {
+        "tauMs": 1110.7436229967116,
+        "wallMs": 29000,
+        "velocity": 15.711947626841248
+      },
+      {
+        "tauMs": 1174.3894563300448,
+        "wallMs": 30000,
+        "velocity": 15.090290499869145
+      },
+      {
+        "tauMs": 1240.6572329516196,
+        "wallMs": 31000,
+        "velocity": 14.604863221884502
+      },
+      {
+        "tauMs": 1309.1275763439191,
+        "wallMs": 32000,
+        "velocity": 14.080586080586082
+      },
+      {
+        "tauMs": 1380.1473474157194,
+        "wallMs": 33000,
+        "velocity": 13.592644978783595
+      },
+      {
+        "tauMs": 1453.7165461670202,
+        "wallMs": 34000,
+        "velocity": 13.131405146891368
+      },
+      {
+        "tauMs": 1529.869858688699,
+        "wallMs": 35000,
+        "velocity": 12.694848084544256
+      },
+      {
+        "tauMs": 1608.6419710716334,
+        "wallMs": 36000,
+        "velocity": 12.260259408887945
+      },
+      {
+        "tauMs": 1690.2063137702112,
+        "wallMs": 37000,
+        "velocity": 11.84470008216927
+      },
+      {
+        "tauMs": 1774.6322589661877,
+        "wallMs": 38000,
+        "velocity": 11.379514505624629
+      },
+      {
+        "tauMs": 1862.5094702044812,
+        "wallMs": 39000,
+        "velocity": 10.908059023836554
+      },
+      {
+        "tauMs": 1954.1848083938671,
+        "wallMs": 40000,
+        "velocity": 10.436199095022626
+      },
+      {
+        "tauMs": 2050.0051344431213,
+        "wallMs": 41000,
+        "velocity": 9.946524064171122
+      },
+      {
+        "tauMs": 2150.5427688517234,
+        "wallMs": 42000,
+        "velocity": 9.500741473059811
+      },
+      {
+        "tauMs": 2255.7977116196735,
+        "wallMs": 43000,
+        "velocity": 9.130641330166274
+      },
+      {
+        "tauMs": 2365.3190435655633,
+        "wallMs": 44000,
+        "velocity": 8.764249886000911
+      },
+      {
+        "tauMs": 2479.418939507291,
+        "wallMs": 45000,
+        "velocity": 8.389349628982977
+      },
+      {
+        "tauMs": 2598.6176908080192,
+        "wallMs": 46000,
+        "velocity": 8.012784880489159
+      },
+      {
+        "tauMs": 2723.418245785473,
+        "wallMs": 47000,
+        "velocity": 7.6138914564901645
+      },
+      {
+        "tauMs": 2854.757128893347,
+        "wallMs": 48000,
+        "velocity": 7.267456516259138
+      },
+      {
+        "tauMs": 2992.3568514046196,
+        "wallMs": 49000,
+        "velocity": 6.96460925232516
+      },
+      {
+        "tauMs": 3135.9399245922714,
+        "wallMs": 50000,
+        "velocity": 6.699976760399722
+      },
+      {
+        "tauMs": 3285.1941736384038,
+        "wallMs": 51000,
+        "velocity": 6.499830909705782
+      },
+      {
+        "tauMs": 3439.0443297258125,
+        "wallMs": 52000,
+        "velocity": 6.323755209475762
+      },
+      {
+        "tauMs": 3597.1782180366,
+        "wallMs": 53000,
+        "velocity": 6.160914627631157
+      },
+      {
+        "tauMs": 3759.491780298133,
+        "wallMs": 54000,
+        "velocity": 6.000000000000001
+      },
+      {
+        "tauMs": 3926.1584469647996,
+        "wallMs": 55000,
+        "velocity": 5.848463332995234
+      },
+      {
+        "tauMs": 4097.143531945722,
+        "wallMs": 56000,
+        "velocity": 5.687512329848099
+      },
+      {
+        "tauMs": 4272.9673266040645,
+        "wallMs": 57000,
+        "velocity": 5.521401896006894
+      },
+      {
+        "tauMs": 4454.080750121234,
+        "wallMs": 58000,
+        "velocity": 5.36372093023256
+      },
+      {
+        "tauMs": 4640.518488588109,
+        "wallMs": 59000,
+        "velocity": 5.220461747397011
+      },
+      {
+        "tauMs": 4832.072425459423,
+        "wallMs": 60000,
+        "velocity": 5.110342993884609
+      },
+      {
+        "tauMs": 5027.754007145168,
+        "wallMs": 61000,
+        "velocity": 4.991775603843824
+      },
+      {
+        "tauMs": 5228.083525008505,
+        "wallMs": 62000,
+        "velocity": 4.860900354071827
+      },
+      {
+        "tauMs": 5433.806730003302,
+        "wallMs": 63000,
+        "velocity": 4.728942836053473
+      },
+      {
+        "tauMs": 5645.2704830383345,
+        "wallMs": 64000,
+        "velocity": 4.597352894275235
+      },
+      {
+        "tauMs": 5862.786958931501,
+        "wallMs": 65000,
+        "velocity": 4.459741666022122
+      },
+      {
+        "tauMs": 6087.015193409476,
+        "wallMs": 66000,
+        "velocity": 4.332732191163211
+      },
+      {
+        "tauMs": 6317.816442108747,
+        "wallMs": 67000,
+        "velocity": 4.213372305443917
+      },
+      {
+        "tauMs": 6555.156018938438,
+        "wallMs": 68000,
+        "velocity": 4.099829351535837
+      },
+      {
+        "tauMs": 6799.0686099894265,
+        "wallMs": 69000,
+        "velocity": 4.005557485237932
+      },
+      {
+        "tauMs": 7048.721749080651,
+        "wallMs": 70000,
+        "velocity": 3.9235166031573208
+      },
+      {
+        "tauMs": 7303.595144848948,
+        "wallMs": 71000,
+        "velocity": 3.8524754459811583
+      },
+      {
+        "tauMs": 7563.168505931154,
+        "wallMs": 72000,
+        "velocity": 3.7994201370585126
+      },
+      {
+        "tauMs": 7826.366563510065,
+        "wallMs": 73000,
+        "velocity": 3.740027242654213
+      },
+      {
+        "tauMs": 8093.744295039722,
+        "wallMs": 74000,
+        "velocity": 3.6719098261478695
+      },
+      {
+        "tauMs": 8366.082137564868,
+        "wallMs": 75000,
+        "velocity": 3.6143672036607533
+      },
+      {
+        "tauMs": 8642.755741449711,
+        "wallMs": 76000,
+        "velocity": 3.568731819025809
+      },
+      {
+        "tauMs": 8922.967326604065,
+        "wallMs": 77000,
+        "velocity": 3.5337378194521065
+      },
+      {
+        "tauMs": 9205.953799028623,
+        "wallMs": 78000,
+        "velocity": 3.5160680529300574
+      },
+      {
+        "tauMs": 9490.36240117916,
+        "wallMs": 79000,
+        "velocity": 3.4981496086877386
+      },
+      {
+        "tauMs": 9776.227819146556,
+        "wallMs": 80000,
+        "velocity": 3.48314606741573
+      },
+      {
+        "tauMs": 10063.324593340105,
+        "wallMs": 81000,
+        "velocity": 3.468687962461649
+      },
+      {
+        "tauMs": 10351.61803766893,
+        "wallMs": 82000,
+        "velocity": 3.447739775173404
+      },
+      {
+        "tauMs": 10641.66312958707,
+        "wallMs": 83000,
+        "velocity": 3.4213493146620793
+      },
+      {
+        "tauMs": 10933.945474366814,
+        "wallMs": 84000,
+        "velocity": 3.398161244695898
+      },
+      {
+        "tauMs": 11228.222269372016,
+        "wallMs": 85000,
+        "velocity": 3.3800339996482807
+      },
+      {
+        "tauMs": 11524.077281512147,
+        "wallMs": 86000,
+        "velocity": 3.366810697185566
+      },
+      {
+        "tauMs": 11821.094277696677,
+        "wallMs": 87000,
+        "velocity": 3.365435125196989
+      },
+      {
+        "tauMs": 12118.232675199279,
+        "wallMs": 88000,
+        "velocity": 3.3762735683335303
+      },
+      {
+        "tauMs": 12414.417205202748,
+        "wallMs": 89000,
+        "velocity": 3.3903686717234085
+      },
+      {
+        "tauMs": 12709.370378980064,
+        "wallMs": 90000,
+        "velocity": 3.404581955597543
+      },
+      {
+        "tauMs": 13003.092196531226,
+        "wallMs": 91000,
+        "velocity": 3.4112287759569315
+      },
+      {
+        "tauMs": 13296.241693582908,
+        "wallMs": 92000,
+        "velocity": 3.426024955436721
+      },
+      {
+        "tauMs": 13588.125148317558,
+        "wallMs": 93000,
+        "velocity": 3.452901371339602
+      },
+      {
+        "tauMs": 13877.73666409973,
+        "wallMs": 94000,
+        "velocity": 3.4886253630203297
+      },
+      {
+        "tauMs": 14164.38251911187,
+        "wallMs": 95000,
+        "velocity": 3.532871760308804
+      },
+      {
+        "tauMs": 14447.438363718184,
+        "wallMs": 96000,
+        "velocity": 3.6001498501498514
+      },
+      {
+        "tauMs": 14725.20457946567,
+        "wallMs": 97000,
+        "velocity": 3.671442215854824
+      },
+      {
+        "tauMs": 14997.577108081694,
+        "wallMs": 98000,
+        "velocity": 3.751952108276939
+      },
+      {
+        "tauMs": 15264.10503038485,
+        "wallMs": 99000,
+        "velocity": 3.84015984015984
+      },
+      {
+        "tauMs": 15524.510857648118,
+        "wallMs": 100000,
+        "velocity": 3.934224890829694
+      },
+      {
+        "tauMs": 15778.690531598864,
+        "wallMs": 101000,
+        "velocity": 4.033013919003987
+      },
+      {
+        "tauMs": 16026.644052237089,
+        "wallMs": 102000,
+        "velocity": 4.136891950064573
+      },
+      {
+        "tauMs": 16268.37141956279,
+        "wallMs": 103000,
+        "velocity": 4.2384592766833284
+      },
+      {
+        "tauMs": 16504.30620971194,
+        "wallMs": 104000,
+        "velocity": 4.366197183098592
+      },
+      {
+        "tauMs": 16733.338467776455,
+        "wallMs": 105000,
+        "velocity": 4.5273241206030175
+      },
+      {
+        "tauMs": 16954.219494484743,
+        "wallMs": 106000,
+        "velocity": 4.693910778248129
+      },
+      {
+        "tauMs": 17167.261464654704,
+        "wallMs": 107000,
+        "velocity": 4.872401554841981
+      },
+      {
+        "tauMs": 17372.499064377214,
+        "wallMs": 108000,
+        "velocity": 5.064558629776022
+      },
+      {
+        "tauMs": 17569.949636697715,
+        "wallMs": 109000,
+        "velocity": 5.275388838060384
+      },
+      {
+        "tauMs": 17759.50912334357,
+        "wallMs": 110000,
+        "velocity": 5.502433438305181
+      },
+      {
+        "tauMs": 17941.246896496537,
+        "wallMs": 111000,
+        "velocity": 5.7418840868352925
+      },
+      {
+        "tauMs": 18115.405758792756,
+        "wallMs": 112000,
+        "velocity": 6.001873633808681
+      },
+      {
+        "tauMs": 18282.020396323107,
+        "wallMs": 113000,
+        "velocity": 6.312677906722139
+      },
+      {
+        "tauMs": 18440.431773360913,
+        "wallMs": 114000,
+        "velocity": 6.702313146576778
+      },
+      {
+        "tauMs": 18589.63399327073,
+        "wallMs": 115000,
+        "velocity": 7.137905422134193
+      },
+      {
+        "tauMs": 18729.731114325186,
+        "wallMs": 116000,
+        "velocity": 7.6320317670416955
+      },
+      {
+        "tauMs": 18860.757822615164,
+        "wallMs": 117000,
+        "velocity": 8.19499715747584
+      },
+      {
+        "tauMs": 18982.783490322414,
+        "wallMs": 118000,
+        "velocity": 8.807087215518562
+      },
+      {
+        "tauMs": 19096.3284088101,
+        "wallMs": 119000,
+        "velocity": 9.461765671151955
+      },
+      {
+        "tauMs": 19202.01692771402,
+        "wallMs": 120000,
+        "velocity": 10.203503804636346
+      },
+      {
+        "tauMs": 19300.02247748856,
+        "wallMs": 121000,
+        "velocity": 11.062931696085956
+      },
+      {
+        "tauMs": 19390.41443031548,
+        "wallMs": 122000,
+        "velocity": 12.080452545568827
+      },
+      {
+        "tauMs": 19473.19278619477,
+        "wallMs": 123000,
+        "velocity": 13.242994947175012
+      },
+      {
+        "tauMs": 19548.704406035213,
+        "wallMs": 124000,
+        "velocity": 14.545913218970735
+      },
+      {
+        "tauMs": 19617.452238154532,
+        "wallMs": 125000,
+        "velocity": 15.861386804873892
+      },
+      {
+        "tauMs": 19680.498427765942,
+        "wallMs": 126000,
+        "velocity": 17.0758189078541
+      },
+      {
+        "tauMs": 19739.060772880766,
+        "wallMs": 127000,
+        "velocity": 18.209436876900604
+      },
+      {
+        "tauMs": 19793.977353045226,
+        "wallMs": 128000,
+        "velocity": 19.27650360863784
+      },
+      {
+        "tauMs": 19845.85398069008,
+        "wallMs": 129000,
+        "velocity": 20.287523046784877
+      },
+      {
+        "tauMs": 19895.145360307688,
+        "wallMs": 130000,
+        "velocity": 21.250496261824747
+      },
+      {
+        "tauMs": 19942.20308487464,
+        "wallMs": 131000,
+        "velocity": 22.171684450528957
+      },
+      {
+        "tauMs": 19987.305657132118,
+        "wallMs": 132000,
+        "velocity": 23.056096620499915
+      },
+      {
+        "tauMs": 20030.678133248082,
+        "wallMs": 133000,
+        "velocity": 23.907814441596866
+      },
+      {
+        "tauMs": 20072.505461398167,
+        "wallMs": 134000,
+        "velocity": 24.730216161081724
+      },
+      {
+        "tauMs": 20112.941824488826,
+        "wallMs": 135000,
+        "velocity": 25.52613545709236
+      },
+      {
+        "tauMs": 20152.117358978994,
+        "wallMs": 136000,
+        "velocity": 26.297976944507113
+      },
+      {
+        "tauMs": 20190.143097693046,
+        "wallMs": 137000,
+        "velocity": 27.047801969362087
+      },
+      {
+        "tauMs": 20227.11467864194,
+        "wallMs": 138000,
+        "velocity": 27.777393530960165
+      },
+      {
+        "tauMs": 20263.115176632706,
+        "wallMs": 139000,
+        "velocity": 28.488306221567957
+      },
+      {
+        "tauMs": 20298.217298612948,
+        "wallMs": 140000,
+        "velocity": 29.181905204661117
+      },
+      {
+        "tauMs": 20332.485109195797,
+        "wallMs": 141000,
+        "velocity": 29.85939703634063
+      },
+      {
+        "tauMs": 20365.975403684428,
+        "wallMs": 142000,
+        "velocity": 30.521854323972974
+      },
+      {
+        "tauMs": 20398.73881279403,
+        "wallMs": 143000,
+        "velocity": 31.170235664393488
+      },
+      {
+        "tauMs": 20430.82070048865,
+        "wallMs": 144000,
+        "velocity": 31.80540192127475
+      },
+      {
+        "tauMs": 20462.261900397873,
+        "wallMs": 145000,
+        "velocity": 32.42812963113703
+      },
+      {
+        "tauMs": 20493.09932492327,
+        "wallMs": 146000,
+        "velocity": 33.039122133825344
+      },
+      {
+        "tauMs": 20523.36647294099,
+        "wallMs": 147000,
+        "velocity": 33.63901888245
+      },
+      {
+        "tauMs": 20553.093855998577,
+        "wallMs": 148000,
+        "velocity": 34.22840328402462
+      },
+      {
+        "tauMs": 20582.30935844846,
+        "wallMs": 149000,
+        "velocity": 34.80780934465465
+      },
+      {
+        "tauMs": 20611.038543617753,
+        "wallMs": 150000,
+        "velocity": 35.377727334777
+      },
+      {
+        "tauMs": 20639.304915579327,
+        "wallMs": 151000,
+        "velocity": 35.93860864549193
+      },
+      {
+        "tauMs": 20667.130144147974,
+        "wallMs": 152000,
+        "velocity": 36.49086997282783
+      },
+      {
+        "tauMs": 20694.534259225104,
+        "wallMs": 153000,
+        "velocity": 37.034896940235
+      },
+      {
+        "tauMs": 20721.535819445828,
+        "wallMs": 154000,
+        "velocity": 37.57104724883015
+      },
+      {
+        "tauMs": 20748.152059163,
+        "wallMs": 155000,
+        "velocity": 38.09965342852645
+      },
+      {
+        "tauMs": 20774.399017074993,
+        "wallMs": 156000,
+        "velocity": 38.62102525016429
+      },
+      {
+        "tauMs": 20800.291649223484,
+        "wallMs": 157000,
+        "velocity": 39.135451848341134
+      },
+      {
+        "tauMs": 20825.84392862159,
+        "wallMs": 158000,
+        "velocity": 39.64320359625125
+      },
+      {
+        "tauMs": 20851.068933396295,
+        "wallMs": 159000,
+        "velocity": 40.14453376705013
+      },
+      {
+        "tauMs": 20875.97892502312,
+        "wallMs": 160000,
+        "velocity": 40.63968001072139
+      },
+      {
+        "tauMs": 20900.58541798114,
+        "wallMs": 161000,
+        "velocity": 41.12886567088652
+      },
+      {
+        "tauMs": 20924.899241950952,
+        "wallMs": 162000,
+        "velocity": 41.61230096226148
+      },
+      {
+        "tauMs": 20948.930597508697,
+        "wallMs": 163000,
+        "velocity": 42.09018402637161
+      },
+      {
+        "tauMs": 20972.68910612851,
+        "wallMs": 164000,
+        "velocity": 42.562701880564724
+      },
+      {
+        "tauMs": 20996.183855188523,
+        "wallMs": 165000,
+        "velocity": 43.03003127321461
+      },
+      {
+        "tauMs": 21019.423438577403,
+        "wallMs": 166000,
+        "velocity": 43.492339456205706
+      },
+      {
+        "tauMs": 21042.41599341587,
+        "wallMs": 167000,
+        "velocity": 43.9497848842725
+      },
+      {
+        "tauMs": 21065.16923333805,
+        "wallMs": 168000,
+        "velocity": 44.40251784948493
+      },
+      {
+        "tauMs": 21087.69047871854,
+        "wallMs": 169000,
+        "velocity": 44.85068105808236
+      },
+      {
+        "tauMs": 21109.98668418095,
+        "wallMs": 170000,
+        "velocity": 45.29441015593235
+      },
+      {
+        "tauMs": 21132.064463680832,
+        "wallMs": 171000,
+        "velocity": 45.73383420809836
+      },
+      {
+        "tauMs": 21153.930113419487,
+        "wallMs": 172000,
+        "velocity": 46.16907613732191
+      },
+      {
+        "tauMs": 21175.5896328135,
+        "wallMs": 173000,
+        "velocity": 46.600253125641146
+      },
+      {
+        "tauMs": 21197.04874371798,
+        "wallMs": 174000,
+        "velocity": 47.02747698286426
+      },
+      {
+        "tauMs": 21218.312908077987,
+        "wallMs": 175000,
+        "velocity": 47.45085448518106
+      },
+      {
+        "tauMs": 21239.387344162427,
+        "wallMs": 176000,
+        "velocity": 47.87048768681835
+      },
+      {
+        "tauMs": 21260.277041517136,
+        "wallMs": 177000,
+        "velocity": 48.28647420731635
+      },
+      {
+        "tauMs": 21280.98677475851,
+        "wallMs": 178000,
+        "velocity": 48.69890749671729
+      },
+      {
+        "tauMs": 21301.521116315707,
+        "wallMs": 179000,
+        "velocity": 49.107877080707
+      },
+      {
+        "tauMs": 21321.884448217766,
+        "wallMs": 180000,
+        "velocity": 49.51346878753121
+      },
+      {
+        "tauMs": 21342.080973011678,
+        "wallMs": 181000,
+        "velocity": 49.9157649583158
+      },
+      {
+        "tauMs": 21362.11472388848,
+        "wallMs": 182000,
+        "velocity": 50.31484464225073
+      },
+      {
+        "tauMs": 21381.989574086474,
+        "wallMs": 183000,
+        "velocity": 50.71078377794833
+      },
+      {
+        "tauMs": 21401.70924563363,
+        "wallMs": 184000,
+        "velocity": 51.10365536215416
+      },
+      {
+        "tauMs": 21421.27731748511,
+        "wallMs": 185000,
+        "velocity": 51.49352960687224
+      },
+      {
+        "tauMs": 21440.697233106246,
+        "wallMs": 186000,
+        "velocity": 51.880474085862275
+      },
+      {
+        "tauMs": 21459.972307546486,
+        "wallMs": 187000,
+        "velocity": 52.264553871374694
+      },
+      {
+        "tauMs": 21479.105734045468,
+        "wallMs": 188000,
+        "velocity": 52.64583166190679
+      },
+      {
+        "tauMs": 21498.10059020848,
+        "wallMs": 189000,
+        "velocity": 53.02436790169052
+      },
+      {
+        "tauMs": 21516.95984378514,
+        "wallMs": 190000,
+        "velocity": 53.4002208925565
+      },
+      {
+        "tauMs": 21535.686358082,
+        "wallMs": 191000,
+        "velocity": 53.77344689876061
+      },
+      {
+        "tauMs": 21554.282897037046,
+        "wallMs": 192000,
+        "velocity": 54.14410024530676
+      },
+      {
+        "tauMs": 21572.75212998153,
+        "wallMs": 193000,
+        "velocity": 54.5122334102523
+      },
+      {
+        "tauMs": 21591.09663611237,
+        "wallMs": 194000,
+        "velocity": 54.8778971114403
+      },
+      {
+        "tauMs": 21609.318908696343,
+        "wallMs": 195000,
+        "velocity": 55.24114038806429
+      },
+      {
+        "tauMs": 21627.421359025484,
+        "wallMs": 196000,
+        "velocity": 55.602010677437086
+      },
+      {
+        "tauMs": 21645.406320141392,
+        "wallMs": 197000,
+        "velocity": 55.96055388730375
+      },
+      {
+        "tauMs": 21663.27605034481,
+        "wallMs": 198000,
+        "velocity": 56.3168144640109
+      },
+      {
+        "tauMs": 21681.032736505374,
+        "wallMs": 199000,
+        "velocity": 56.67083545681877
+      },
+      {
+        "tauMs": 21698.678497185258,
+        "wallMs": 200000,
+        "velocity": 57.02265857861967
+      },
+      {
+        "tauMs": 21716.215385589385,
+        "wallMs": 201000,
+        "velocity": 57.3723242633051
+      },
+      {
+        "tauMs": 21733.645392353807,
+        "wallMs": 202000,
+        "velocity": 57.71987172000495
+      },
+      {
+        "tauMs": 21750.970448182947,
+        "wallMs": 203000,
+        "velocity": 58.06533898440469
+      },
+      {
+        "tauMs": 21768.19242634566,
+        "wallMs": 204000,
+        "velocity": 58.408762967330745
+      },
+      {
+        "tauMs": 21785.313145039177,
+        "wallMs": 205000,
+        "velocity": 58.75017950077963
+      },
+      {
+        "tauMs": 21802.33436962942,
+        "wallMs": 206000,
+        "velocity": 59.089623381553444
+      },
+      {
+        "tauMs": 21819.257814775498,
+        "wallMs": 207000,
+        "velocity": 59.427128412651975
+      },
+      {
+        "tauMs": 21836.085146445574,
+        "wallMs": 208000,
+        "velocity": 59.762727442560944
+      },
+      {
+        "tauMs": 21852.8179838309,
+        "wallMs": 209000,
+        "velocity": 60.09645240256555
+      },
+      {
+        "tauMs": 21869.457901164147,
+        "wallMs": 210000,
+        "velocity": 60.42833434220926
+      },
+      {
+        "tauMs": 21886.006429447865,
+        "wallMs": 211000,
+        "velocity": 60.75840346300936
+      },
+      {
+        "tauMs": 21902.46505809845,
+        "wallMs": 212000,
+        "velocity": 61.08668915053285
+      },
+      {
+        "tauMs": 21918.83523651057,
+        "wallMs": 213000,
+        "velocity": 61.41322000492913
+      },
+      {
+        "tauMs": 21935.118375546754,
+        "wallMs": 214000,
+        "velocity": 61.738023870009215
+      },
+      {
+        "tauMs": 21951.315848956423,
+        "wallMs": 215000,
+        "velocity": 62.06112786095518
+      },
+      {
+        "tauMs": 21967.42899472845,
+        "wallMs": 216000,
+        "velocity": 62.382558390737934
+      },
+      {
+        "tauMs": 21983.459116380986,
+        "wallMs": 217000,
+        "velocity": 62.702341195316045
+      },
+      {
+        "tauMs": 21999.407484192085,
+        "wallMs": 218000,
+        "velocity": 63.02050135768381
+      },
+      {
+        "tauMs": 22015.275336374412,
+        "wallMs": 219000,
+        "velocity": 63.33706333083203
+      },
+      {
+        "tauMs": 22031.063880197114,
+        "wallMs": 220000,
+        "velocity": 63.563440460812394
+      },
+      {
+        "tauMs": 22046.796194130256,
+        "wallMs": 221000,
+        "velocity": 63.24801153566207
+      },
+      {
+        "tauMs": 22062.606967871914,
+        "wallMs": 222000,
+        "velocity": 62.93100160664251
+      },
+      {
+        "tauMs": 22078.49738713221,
+        "wallMs": 223000,
+        "velocity": 62.61238665963183
+      },
+      {
+        "tauMs": 22094.46866779008,
+        "wallMs": 224000,
+        "velocity": 62.292142066357314
+      },
+      {
+        "tauMs": 22110.522056978956,
+        "wallMs": 225000,
+        "velocity": 61.97024256217852
+      },
+      {
+        "tauMs": 22126.65883422324,
+        "wallMs": 226000,
+        "velocity": 61.64666222282632
+      },
+      {
+        "tauMs": 22142.880312628437,
+        "wallMs": 227000,
+        "velocity": 61.321374440037154
+      },
+      {
+        "tauMs": 22159.187840128132,
+        "wallMs": 228000,
+        "velocity": 60.99435189601773
+      },
+      {
+        "tauMs": 22175.582800791126,
+        "wallMs": 229000,
+        "velocity": 60.66556653667089
+      },
+      {
+        "tauMs": 22192.06661619233,
+        "wallMs": 230000,
+        "velocity": 60.334989543508186
+      },
+      {
+        "tauMs": 22208.64074685127,
+        "wallMs": 231000,
+        "velocity": 60.002591304169876
+      },
+      {
+        "tauMs": 22225.30669374231,
+        "wallMs": 232000,
+        "velocity": 59.668341381466625
+      },
+      {
+        "tauMs": 22242.065999881,
+        "wallMs": 233000,
+        "velocity": 59.332208480851634
+      },
+      {
+        "tauMs": 22258.92025199135,
+        "wallMs": 234000,
+        "velocity": 58.99416041622461
+      },
+      {
+        "tauMs": 22275.871082259033,
+        "wallMs": 235000,
+        "velocity": 58.654164073961894
+      },
+      {
+        "tauMs": 22292.920170176116,
+        "wallMs": 236000,
+        "velocity": 58.31218537505898
+      },
+      {
+        "tauMs": 22310.069244483107,
+        "wallMs": 237000,
+        "velocity": 57.968189235262834
+      },
+      {
+        "tauMs": 22327.320085214764,
+        "wallMs": 238000,
+        "velocity": 57.62213952306216
+      },
+      {
+        "tauMs": 22344.67452585645,
+        "wallMs": 239000,
+        "velocity": 57.27399901539304
+      },
+      {
+        "tauMs": 22362.134455618492,
+        "wallMs": 240000,
+        "velocity": 56.9237293509064
+      },
+      {
+        "tauMs": 22379.70182183646,
+        "wallMs": 241000,
+        "velocity": 56.571290980631176
+      },
+      {
+        "tauMs": 22397.378632506072,
+        "wallMs": 242000,
+        "velocity": 56.21664311585353
+      },
+      {
+        "tauMs": 22415.166958961978,
+        "wallMs": 243000,
+        "velocity": 55.85974367301771
+      },
+      {
+        "tauMs": 22433.068938710643,
+        "wallMs": 244000,
+        "velocity": 55.50054921543788
+      },
+      {
+        "tauMs": 22451.086778428198,
+        "wallMs": 245000,
+        "velocity": 55.139014891592346
+      },
+      {
+        "tauMs": 22469.22275713522,
+        "wallMs": 246000,
+        "velocity": 54.77509436975205
+      },
+      {
+        "tauMs": 22487.479229561348,
+        "wallMs": 247000,
+        "velocity": 54.408739768673584
+      },
+      {
+        "tauMs": 22505.858629713817,
+        "wallMs": 248000,
+        "velocity": 54.03990158406325
+      },
+      {
+        "tauMs": 22524.36347466518,
+        "wallMs": 249000,
+        "velocity": 53.66852861049241
+      },
+      {
+        "tauMs": 22542.996368576947,
+        "wallMs": 250000,
+        "velocity": 53.294567858415384
+      },
+      {
+        "tauMs": 22561.76000697733,
+        "wallMs": 251000,
+        "velocity": 52.91796446590933
+      },
+      {
+        "tauMs": 22580.657181312978,
+        "wallMs": 252000,
+        "velocity": 52.53866160471964
+      },
+      {
+        "tauMs": 22599.69078379649,
+        "wallMs": 253000,
+        "velocity": 52.15660038015555
+      },
+      {
+        "tauMs": 22618.863812573505,
+        "wallMs": 254000,
+        "velocity": 51.7717197243364
+      },
+      {
+        "tauMs": 22638.179377235538,
+        "wallMs": 255000,
+        "velocity": 51.38395628224088
+      },
+      {
+        "tauMs": 22657.640704707235,
+        "wallMs": 256000,
+        "velocity": 50.9932442899571
+      },
+      {
+        "tauMs": 22677.25114553963,
+        "wallMs": 257000,
+        "velocity": 50.59951544447083
+      },
+      {
+        "tauMs": 22697.014180644135,
+        "wallMs": 258000,
+        "velocity": 50.20269876426209
+      },
+      {
+        "tauMs": 22716.933428505603,
+        "wallMs": 259000,
+        "velocity": 49.80272043990411
+      },
+      {
+        "tauMs": 22737.012652916783,
+        "wallMs": 260000,
+        "velocity": 49.39950367377432
+      },
+      {
+        "tauMs": 22757.255771280965,
+        "wallMs": 261000,
+        "velocity": 48.99296850789144
+      },
+      {
+        "tauMs": 22777.666863534723,
+        "wallMs": 262000,
+        "velocity": 48.5830316387856
+      },
+      {
+        "tauMs": 22798.25018174827,
+        "wallMs": 263000,
+        "velocity": 48.16960621818744
+      },
+      {
+        "tauMs": 22819.01016046743,
+        "wallMs": 264000,
+        "velocity": 47.75260163818556
+      },
+      {
+        "tauMs": 22839.95142786846,
+        "wallMs": 265000,
+        "velocity": 47.331923299346734
+      },
+      {
+        "tauMs": 22861.078817805173,
+        "wallMs": 266000,
+        "velocity": 46.907472360118085
+      },
+      {
+        "tauMs": 22882.397382837262,
+        "wallMs": 267000,
+        "velocity": 46.47914546563052
+      },
+      {
+        "tauMs": 22903.912408339173,
+        "wallMs": 268000,
+        "velocity": 46.046834453795434
+      },
+      {
+        "tauMs": 22925.629427801246,
+        "wallMs": 269000,
+        "velocity": 45.61042603632685
+      },
+      {
+        "tauMs": 22947.554239448556,
+        "wallMs": 270000,
+        "velocity": 45.1698014520237
+      },
+      {
+        "tauMs": 22969.69292431885,
+        "wallMs": 271000,
+        "velocity": 44.724836089305484
+      },
+      {
+        "tauMs": 22992.05186595931,
+        "wallMs": 272000,
+        "velocity": 44.275399074601715
+      },
+      {
+        "tauMs": 23014.637771922917,
+        "wallMs": 273000,
+        "velocity": 43.82135282274204
+      },
+      {
+        "tauMs": 23037.45769726947,
+        "wallMs": 274000,
+        "velocity": 43.36255254496952
+      },
+      {
+        "tauMs": 23060.519070304716,
+        "wallMs": 275000,
+        "velocity": 42.8988457095904
+      },
+      {
+        "tauMs": 23083.829720823604,
+        "wallMs": 276000,
+        "velocity": 42.4300714495656
+      },
+      {
+        "tauMs": 23107.397911162116,
+        "wallMs": 277000,
+        "velocity": 41.95605991052118
+      },
+      {
+        "tauMs": 23131.232370406684,
+        "wallMs": 278000,
+        "velocity": 41.47663153168592
+      },
+      {
+        "tauMs": 23155.342332162763,
+        "wallMs": 279000,
+        "velocity": 40.99159625112497
+      },
+      {
+        "tauMs": 23179.737576345833,
+        "wallMs": 280000,
+        "velocity": 40.50075262529379
+      },
+      {
+        "tauMs": 23204.428475531135,
+        "wallMs": 281000,
+        "velocity": 40.003886851345364
+      },
+      {
+        "tauMs": 23229.426046485078,
+        "wallMs": 282000,
+        "velocity": 39.50077167873106
+      },
+      {
+        "tauMs": 23254.74200760435,
+        "wallMs": 283000,
+        "velocity": 38.99116519437759
+      },
+      {
+        "tauMs": 23280.38884311221,
+        "wallMs": 284000,
+        "velocity": 38.47480946301414
+      },
+      {
+        "tauMs": 23306.37987500962,
+        "wallMs": 285000,
+        "velocity": 37.95142900096441
+      },
+      {
+        "tauMs": 23332.729343957802,
+        "wallMs": 286000,
+        "velocity": 37.42072905777281
+      },
+      {
+        "tauMs": 23359.452500485728,
+        "wallMs": 287000,
+        "velocity": 36.882393675238085
+      },
+      {
+        "tauMs": 23386.56570818058,
+        "wallMs": 288000,
+        "velocity": 36.33608348756429
+      },
+      {
+        "tauMs": 23414.086560843258,
+        "wallMs": 289000,
+        "velocity": 35.78143321913255
+      },
+      {
+        "tauMs": 23442.03401599062,
+        "wallMs": 290000,
+        "velocity": 35.21804882748677
+      },
+      {
+        "tauMs": 23470.428547581465,
+        "wallMs": 291000,
+        "velocity": 34.64550422804151
+      },
+      {
+        "tauMs": 23499.29232146156,
+        "wallMs": 292000,
+        "velocity": 34.06333752313831
+      },
+      {
+        "tauMs": 23528.649397799738,
+        "wallMs": 293000,
+        "velocity": 33.47104664057045
+      },
+      {
+        "tauMs": 23558.525965770215,
+        "wallMs": 294000,
+        "velocity": 32.868084264453906
+      },
+      {
+        "tauMs": 23588.950616989743,
+        "wallMs": 295000,
+        "velocity": 32.25385191283736
+      },
+      {
+        "tauMs": 23619.954665830246,
+        "wallMs": 296000,
+        "velocity": 31.6276929796538
+      },
+      {
+        "tauMs": 23651.57252681819,
+        "wallMs": 297000,
+        "velocity": 30.988884510663535
+      },
+      {
+        "tauMs": 23683.842162069366,
+        "wallMs": 298000,
+        "velocity": 30.3366274199233
+      },
+      {
+        "tauMs": 23716.80561532862,
+        "wallMs": 299000,
+        "velocity": 29.670034769363557
+      },
+      {
+        "tauMs": 23750.50965402535,
+        "wallMs": 300000,
+        "velocity": 28.988117621108866
+      },
+      {
+        "tauMs": 23785.00654730661,
+        "wallMs": 301000,
+        "velocity": 28.289767818333935
+      },
+      {
+        "tauMs": 23820.355016987294,
+        "wallMs": 302000,
+        "velocity": 27.57373683807188
+      },
+      {
+        "tauMs": 23856.621410834185,
+        "wallMs": 303000,
+        "velocity": 26.838609561883832
+      },
+      {
+        "tauMs": 23893.881165207607,
+        "wallMs": 304000,
+        "velocity": 26.082771386784078
+      },
+      {
+        "tauMs": 23932.220649351024,
+        "wallMs": 305000,
+        "velocity": 25.304366485159083
+      },
+      {
+        "tauMs": 23971.739520554005,
+        "wallMs": 306000,
+        "velocity": 24.501244115661603
+      },
+      {
+        "tauMs": 24012.55377452737,
+        "wallMs": 307000,
+        "velocity": 23.67088851765481
+      },
+      {
+        "tauMs": 24054.799759474412,
+        "wallMs": 308000,
+        "velocity": 22.810325802479067
+      },
+      {
+        "tauMs": 24098.639554164733,
+        "wallMs": 309000,
+        "velocity": 21.915997883172974
+      },
+      {
+        "tauMs": 24144.268322944994,
+        "wallMs": 310000,
+        "velocity": 20.98358794904347
+      },
+      {
+        "tauMs": 24191.924615206757,
+        "wallMs": 311000,
+        "velocity": 20.007772570059924
+      },
+      {
+        "tauMs": 24241.90519133028,
+        "wallMs": 312000,
+        "velocity": 18.981858792416574
+      },
+      {
+        "tauMs": 24294.587070957343,
+        "wallMs": 313000,
+        "velocity": 17.897233395562633
+      },
+      {
+        "tauMs": 24350.461628655627,
+        "wallMs": 314000,
+        "velocity": 16.742489755566297
+      },
+      {
+        "tauMs": 24410.189901726095,
+        "wallMs": 315000,
+        "velocity": 15.501966430593324
+      },
+      {
+        "tauMs": 24474.69784686178,
+        "wallMs": 316000,
+        "velocity": 14.153125563466267
+      },
+      {
+        "tauMs": 24545.353617950346,
+        "wallMs": 317000,
+        "velocity": 12.661396574440055
+      },
+      {
+        "tauMs": 24624.333846878548,
+        "wallMs": 318000,
+        "velocity": 11.312536786344909
+      },
+      {
+        "tauMs": 24712.731349480004,
+        "wallMs": 319000,
+        "velocity": 10.137130801687764
+      },
+      {
+        "tauMs": 24811.37859193578,
+        "wallMs": 320000,
+        "velocity": 9.12197437114381
+      },
+      {
+        "tauMs": 24921.003982154303,
+        "wallMs": 321000,
+        "velocity": 8.251287922152263
+      },
+      {
+        "tauMs": 25042.19718368049,
+        "wallMs": 322000,
+        "velocity": 7.502927781392326
+      },
+      {
+        "tauMs": 25175.47848787751,
+        "wallMs": 323000,
+        "velocity": 6.843104676002849
+      },
+      {
+        "tauMs": 25321.610988744662,
+        "wallMs": 324000,
+        "velocity": 6.240935166143524
+      },
+      {
+        "tauMs": 25481.84338555354,
+        "wallMs": 325000,
+        "velocity": 5.70665083135392
+      },
+      {
+        "tauMs": 25657.077516666963,
+        "wallMs": 326000,
+        "velocity": 5.247065247065248
+      },
+      {
+        "tauMs": 25847.660242993705,
+        "wallMs": 327000,
+        "velocity": 4.837248322147652
+      },
+      {
+        "tauMs": 26054.389344623953,
+        "wallMs": 328000,
+        "velocity": 4.471153846153846
+      },
+      {
+        "tauMs": 26278.045258602448,
+        "wallMs": 329000,
+        "velocity": 4.135705063835894
+      },
+      {
+        "tauMs": 26519.841998109903,
+        "wallMs": 330000,
+        "velocity": 3.8451268357810426
+      },
+      {
+        "tauMs": 26779.91144255435,
+        "wallMs": 331000,
+        "velocity": 3.5996993987975956
+      },
+      {
+        "tauMs": 27057.712416806262,
+        "wallMs": 332000,
+        "velocity": 3.3889283179559966
+      },
+      {
+        "tauMs": 27352.790950837676,
+        "wallMs": 333000,
+        "velocity": 3.207059352517986
+      },
+      {
+        "tauMs": 27664.603078422675,
+        "wallMs": 334000,
+        "velocity": 3.0457179652285897
+      },
+      {
+        "tauMs": 27992.932888147832,
+        "wallMs": 335000,
+        "velocity": 2.9078160445452665
+      },
+      {
+        "tauMs": 28336.83359736769,
+        "wallMs": 336000,
+        "velocity": 2.781200317965024
+      },
+      {
+        "tauMs": 28696.39058200506,
+        "wallMs": 337000,
+        "velocity": 2.664170506912443
+      },
+      {
+        "tauMs": 29071.74193335641,
+        "wallMs": 338000,
+        "velocity": 2.5543781372002234
+      },
+      {
+        "tauMs": 29463.226649513614,
+        "wallMs": 339000,
+        "velocity": 2.4552845528455296
+      },
+      {
+        "tauMs": 29870.511417725535,
+        "wallMs": 340000,
+        "velocity": 2.363140292202077
+      },
+      {
+        "tauMs": 30293.677153293505,
+        "wallMs": 341000,
+        "velocity": 2.279297883324729
+      },
+      {
+        "tauMs": 30732.408750122497,
+        "wallMs": 342000,
+        "velocity": 2.2017884258478158
+      },
+      {
+        "tauMs": 31186.584995333225,
+        "wallMs": 343000,
+        "velocity": 2.1272365805168985
+      },
+      {
+        "tauMs": 31656.67845327715,
+        "wallMs": 344000,
+        "velocity": 2.060937755268747
+      },
+      {
+        "tauMs": 32141.894465960464,
+        "wallMs": 345000,
+        "velocity": 2.0017793594306053
+      },
+      {
+        "tauMs": 32641.45002151602,
+        "wallMs": 346000,
+        "velocity": 1.9435535599743425
+      },
+      {
+        "tauMs": 33155.97147366124,
+        "wallMs": 347000,
+        "velocity": 1.8929712460063897
+      },
+      {
+        "tauMs": 33684.24151585533,
+        "wallMs": 348000,
+        "velocity": 1.842440656364505
+      },
+      {
+        "tauMs": 34226.99983838019,
+        "wallMs": 349000,
+        "velocity": 1.7960778061224494
+      },
+      {
+        "tauMs": 34783.768591154265,
+        "wallMs": 350000,
+        "velocity": 1.7539644401729935
+      },
+      {
+        "tauMs": 35353.90557745563,
+        "wallMs": 351000,
+        "velocity": 1.7148393347327633
+      },
+      {
+        "tauMs": 35937.05058687183,
+        "wallMs": 352000,
+        "velocity": 1.6772771792360435
+      },
+      {
+        "tauMs": 36533.25496643387,
+        "wallMs": 353000,
+        "velocity": 1.640469887491727
+      },
+      {
+        "tauMs": 37142.836408693074,
+        "wallMs": 354000,
+        "velocity": 1.6060606060606064
+      },
+      {
+        "tauMs": 37765.477918127035,
+        "wallMs": 355000,
+        "velocity": 1.5775862068965514
+      },
+      {
+        "tauMs": 38399.3576995478,
+        "wallMs": 356000,
+        "velocity": 1.5521831735889247
+      },
+      {
+        "tauMs": 39043.611558896,
+        "wallMs": 357000,
+        "velocity": 1.5252839868083548
+      },
+      {
+        "tauMs": 39699.227174511616,
+        "wallMs": 358000,
+        "velocity": 1.500285225328009
+      },
+      {
+        "tauMs": 40365.767098465985,
+        "wallMs": 359000,
+        "velocity": 1.476923076923077
+      },
+      {
+        "tauMs": 41042.85043179932,
+        "wallMs": 360000,
+        "velocity": 1.476923076923077
+      }
+    ],
+    "totalTauMs": 41042.85043179932,
+    "minVelocity": 1.476923076923077,
+    "maxVelocity": 63.563440460812394
+  },
+  "stats": {
+    "lifelineCount": 14,
+    "intervalCount": 149,
+    "edgeCount": 25,
+    "maxConcurrent": 11,
+    "measuredIntervals": 120,
+    "inferredIntervals": 18,
+    "openIntervals": 11,
+    "inferredEdges": 9,
+    "compressionRatio": 8.771320612787605
+  }
+}

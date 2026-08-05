@@ -1,0 +1,4650 @@
+[
+  {
+    "insertId": "synth-0000001",
+    "jsonPayload": {
+      "message": "Project created",
+      "slug": "seq-demo"
+    },
+    "timestamp": "2026-03-22T16:00:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000002",
+    "jsonPayload": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "message": "Agent created",
+      "name": "orchestrator",
+      "slug": "orchestrator"
+    },
+    "timestamp": "2026-03-22T16:00:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000003",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:00:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000004",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:00:00.180000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000005",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:00:00.420000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000048",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:00:23.604733Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000049",
+    "jsonPayload": {
+      "file_path": "/workspace/src/orchestrator/mod_2.go",
+      "message": "agent.tool.call",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:00:25.257589Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000164",
+    "jsonPayload": {
+      "broadcasted": true,
+      "message": "message dispatched",
+      "message_content": "found a race in the playback engine",
+      "msg_type": "review",
+      "recipient": "agent:probe-7",
+      "recipient_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "sender": "agent:bench-2",
+      "sender_id": "92ca43f1-93de-e47f-5915-49f597a811c8"
+    },
+    "timestamp": "2026-03-22T16:00:28.246105Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo",
+      "recipient": "agent:probe-7",
+      "recipient_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "sender": "agent:bench-2",
+      "sender_id": "92ca43f1-93de-e47f-5915-49f597a811c8"
+    },
+    "logName": "projects/seq-demo/logs/scion-messages"
+  },
+  {
+    "insertId": "synth-0000050",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:00:28.516892Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000051",
+    "jsonPayload": {
+      "file_path": "/workspace/src/orchestrator/mod_3.go",
+      "message": "agent.tool.call",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:00:29.497463Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000052",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:00:30.102224Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000053",
+    "jsonPayload": {
+      "file_path": "/workspace/src/orchestrator/mod_0.go",
+      "message": "agent.tool.call",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:00:30.508930Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000054",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:00:33.092336Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000055",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:00:34.271897Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000161",
+    "jsonPayload": {
+      "broadcasted": false,
+      "message": "message dispatched",
+      "message_content": "handing the integration work back to you",
+      "msg_type": "review",
+      "recipient": "agent:orchestrator",
+      "recipient_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "sender": "agent:probe-7",
+      "sender_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847"
+    },
+    "timestamp": "2026-03-22T16:00:42.057556Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo",
+      "recipient": "agent:orchestrator",
+      "recipient_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "sender": "agent:probe-7",
+      "sender_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847"
+    },
+    "logName": "projects/seq-demo/logs/scion-messages"
+  },
+  {
+    "insertId": "synth-0000006",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:00:47.762819Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000160",
+    "jsonPayload": {
+      "broadcasted": true,
+      "message": "message dispatched",
+      "message_content": "please review the velocity planner maths",
+      "msg_type": "status",
+      "recipient": "agent:integrator-6",
+      "recipient_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "sender": "agent:triage-5",
+      "sender_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06"
+    },
+    "timestamp": "2026-03-22T16:00:48.081029Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo",
+      "recipient": "agent:integrator-6",
+      "recipient_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "sender": "agent:triage-5",
+      "sender_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06"
+    },
+    "logName": "projects/seq-demo/logs/scion-messages"
+  },
+  {
+    "insertId": "synth-0000007",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:00:49.062819Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000056",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:00:49.166527Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000008",
+    "jsonPayload": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "message": "Agent created",
+      "name": "architect-1",
+      "slug": "architect-1"
+    },
+    "timestamp": "2026-03-22T16:00:50.062819Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000009",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:00:50.262819Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000010",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:00:50.442819Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000057",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:00:50.585158Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000011",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:00:50.682819Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000058",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:00:51.277282Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000059",
+    "jsonPayload": {
+      "file_path": "/workspace/src/orchestrator/mod_0.go",
+      "message": "agent.tool.call",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:00:51.998804Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000082",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:00:52.793328Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000060",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:00:53.164689Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000061",
+    "jsonPayload": {
+      "file_path": "/workspace/src/orchestrator/mod_0.go",
+      "message": "agent.tool.call",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:00:54.124434Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000083",
+    "jsonPayload": {
+      "file_path": "/workspace/src/architect-1/mod_5.go",
+      "message": "agent.tool.call",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:00:54.127463Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000012",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:00:56.752916Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000062",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:00:57.736147Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000013",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:00:58.052916Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000084",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:00:58.369326Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000014",
+    "jsonPayload": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "message": "Agent created",
+      "name": "bench-2",
+      "slug": "bench-2"
+    },
+    "timestamp": "2026-03-22T16:00:59.052916Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000015",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:00:59.252916Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000016",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:00:59.432916Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000063",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:00:59.434886Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000085",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:00:59.561415Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000017",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:00:59.672916Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000086",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:04.880448Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000018",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:01:05.743014Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000087",
+    "jsonPayload": {
+      "file_path": "/workspace/src/architect-1/mod_3.go",
+      "message": "agent.tool.call",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:01:06.827799Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000019",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:01:07.043014Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000020",
+    "jsonPayload": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "message": "Agent created",
+      "name": "docs-3",
+      "slug": "docs-3"
+    },
+    "timestamp": "2026-03-22T16:01:08.043014Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000021",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:01:08.243014Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000022",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:01:08.423014Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000023",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:01:08.663014Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000088",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:01:08.797102Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000092",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:09.177262Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000112",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:09.751144Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000089",
+    "jsonPayload": {
+      "file_path": "/workspace/src/architect-1/mod_4.go",
+      "message": "agent.tool.call",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:01:10.340807Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000093",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-2/mod_0.go",
+      "message": "agent.tool.call",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:01:10.382841Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000113",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:01:11.674194Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000094",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:01:11.727544Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000159",
+    "jsonPayload": {
+      "broadcasted": false,
+      "message": "message dispatched",
+      "message_content": "done - shutting down",
+      "msg_type": "review",
+      "recipient": "agent:integrator-6",
+      "recipient_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "sender": "agent:docs-3",
+      "sender_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726"
+    },
+    "timestamp": "2026-03-22T16:01:11.816352Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo",
+      "recipient": "agent:integrator-6",
+      "recipient_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "sender": "agent:docs-3",
+      "sender_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726"
+    },
+    "logName": "projects/seq-demo/logs/scion-messages"
+  },
+  {
+    "insertId": "synth-0000095",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:01:11.939065Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000090",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "success": false,
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:01:13.807496Z",
+    "severity": "ERROR",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000114",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:01:14.653052Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000091",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:01:14.656544Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000024",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:01:14.733112Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000064",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:15.488460Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000115",
+    "jsonPayload": {
+      "file_path": "/workspace/src/docs-3/mod_3.go",
+      "message": "agent.tool.call",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:01:15.720878Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000096",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:15.742655Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000025",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:01:16.033112Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000065",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:01:16.035848Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000162",
+    "jsonPayload": {
+      "broadcasted": false,
+      "message": "message dispatched",
+      "message_content": "handing the integration work back to you",
+      "msg_type": "question",
+      "recipient": "agent:bench-2",
+      "recipient_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "sender": "agent:orchestrator",
+      "sender_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95"
+    },
+    "timestamp": "2026-03-22T16:01:16.387935Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo",
+      "recipient": "agent:bench-2",
+      "recipient_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "sender": "agent:orchestrator",
+      "sender_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95"
+    },
+    "logName": "projects/seq-demo/logs/scion-messages"
+  },
+  {
+    "insertId": "synth-0000026",
+    "jsonPayload": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "message": "Agent created",
+      "name": "bench-4",
+      "slug": "bench-4"
+    },
+    "timestamp": "2026-03-22T16:01:17.033112Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000097",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-2/mod_3.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:17.171781Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000027",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:01:17.233112Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000066",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:01:17.338897Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000028",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:01:17.413112Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000029",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:01:17.653112Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000067",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:01:17.857738Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000098",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:18.859237Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000099",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-2/mod_5.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:19.585938Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000116",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:01:19.823371Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000117",
+    "jsonPayload": {
+      "file_path": "/workspace/src/docs-3/mod_3.go",
+      "message": "agent.tool.call",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:01:20.759562Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000100",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:21.540262Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000101",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:21.820941Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000068",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:01:21.938517Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000069",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:22.606346Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000102",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:23.417636Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000030",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:01:23.723210Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000103",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:24.073340Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000118",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:01:24.761434Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000070",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:24.855303Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000031",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:01:25.023210Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000119",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:01:25.585062Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000071",
+    "jsonPayload": {
+      "file_path": "/workspace/src/orchestrator/mod_0.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:25.655585Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000130",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:25.767608Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000032",
+    "jsonPayload": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "message": "Agent created",
+      "name": "triage-5",
+      "slug": "triage-5"
+    },
+    "timestamp": "2026-03-22T16:01:26.023210Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000033",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:01:26.223210Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000034",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:01:26.403210Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000035",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:01:26.643210Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000104",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:27.059446Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000072",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:27.232910Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000073",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:01:27.462623Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000120",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:27.665066Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000131",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-4/mod_1.go",
+      "message": "agent.tool.call",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:01:27.666340Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000105",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:01:27.712749Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000121",
+    "jsonPayload": {
+      "file_path": "/workspace/src/docs-3/mod_5.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:28.503345Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000132",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:01:29.766956Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000133",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:31.445947Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000141",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:31.516653Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000163",
+    "jsonPayload": {
+      "broadcasted": false,
+      "message": "message dispatched",
+      "message_content": "found a race in the playback engine",
+      "msg_type": "answer",
+      "recipient": "agent:docs-3",
+      "recipient_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "sender": "agent:bench-2",
+      "sender_id": "92ca43f1-93de-e47f-5915-49f597a811c8"
+    },
+    "timestamp": "2026-03-22T16:01:32.478542Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo",
+      "recipient": "agent:docs-3",
+      "recipient_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "sender": "agent:bench-2",
+      "sender_id": "92ca43f1-93de-e47f-5915-49f597a811c8"
+    },
+    "logName": "projects/seq-demo/logs/scion-messages"
+  },
+  {
+    "insertId": "synth-0000036",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:01:32.713307Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000122",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:32.759874Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000123",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:01:33.415704Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000142",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:01:33.464661Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000037",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:01:34.013307Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000134",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-4/mod_2.go",
+      "message": "agent.tool.call",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:01:34.129143Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000124",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:01:34.421663Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000125",
+    "jsonPayload": {
+      "file_path": "/workspace/src/docs-3/mod_3.go",
+      "message": "agent.tool.call",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:01:35.007474Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000038",
+    "jsonPayload": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "message": "Agent created",
+      "name": "integrator-6",
+      "slug": "integrator-6"
+    },
+    "timestamp": "2026-03-22T16:01:35.013307Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000039",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:01:35.213307Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000135",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:01:35.313138Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000040",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:01:35.393307Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000074",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:35.575365Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000041",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:01:35.633307Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000143",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:01:36.451332Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000136",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:01:36.892020Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000075",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:37.395281Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000144",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:01:37.404663Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000076",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:37.838299Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000077",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:38.807931Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000145",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:39.599976Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000126",
+    "jsonPayload": {
+      "file_path": "/workspace/src/docs-3/mod_4.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:39.773926Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000146",
+    "jsonPayload": {
+      "file_path": "/workspace/src/integrator-6/mod_3.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:40.397443Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000042",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:01:41.703405Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000078",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:42.004847Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000043",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:01:43.003405Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000147",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:43.324836Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000079",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:01:43.476097Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000127",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:43.873676Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000148",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:43.897710Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000044",
+    "jsonPayload": {
+      "agent_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "message": "Agent created",
+      "name": "probe-7",
+      "slug": "probe-7"
+    },
+    "timestamp": "2026-03-22T16:01:44.003405Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000128",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:01:44.138177Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000045",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:01:44.203405Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000046",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:01:44.383405Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000047",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:01:44.623405Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000080",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:01:44.767475Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000081",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:01:46.220131Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000106",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:46.772435Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000153",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:47.150370Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000149",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:47.277594Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000107",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-2/mod_4.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:48.197818Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000150",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:48.244603Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000154",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:01:48.795656Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000155",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "success": false,
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:01:51.621049Z",
+    "severity": "ERROR",
+    "labels": {
+      "agent_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000108",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:01:52.268848Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000151",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:52.523028Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000156",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:52.669849Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000137",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:52.672614Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000152",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:01:53.341502Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000138",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-4/mod_5.go",
+      "message": "agent.tool.call",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:01:53.469706Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000129",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:01:53.473754Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000109",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-2/mod_0.go",
+      "message": "agent.tool.call",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:01:53.751813Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000157",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:01:54.779780Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000110",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:01:55.682345Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000139",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:01:55.818794Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000140",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:01:56.167399Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000158",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:01:56.224538Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000111",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:01:56.630293Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000167",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:05:28.497329Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000168",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:05:29.497329Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000169",
+    "jsonPayload": {},
+    "timestamp": "2026-03-22T16:05:30.497329Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion_request_log",
+    "httpRequest": {
+      "requestMethod": "DELETE",
+      "requestUrl": "https://scion.example/v1/agents/architect-1"
+    }
+  },
+  {
+    "insertId": "synth-0000174",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:05:30.518063Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000308",
+    "jsonPayload": {
+      "broadcasted": false,
+      "message": "message dispatched",
+      "message_content": "picking up the parser refactor now",
+      "msg_type": "answer",
+      "recipient": "agent:orchestrator",
+      "recipient_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "sender": "agent:bench-9",
+      "sender_id": "4d277158-aa81-281c-8ab5-476a841bf223"
+    },
+    "timestamp": "2026-03-22T16:05:30.781167Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo",
+      "recipient": "agent:orchestrator",
+      "recipient_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "sender": "agent:bench-9",
+      "sender_id": "4d277158-aa81-281c-8ab5-476a841bf223"
+    },
+    "logName": "projects/seq-demo/logs/scion-messages"
+  },
+  {
+    "insertId": "synth-0000175",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:05:31.518063Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000235",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:31.532458Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000221",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:31.813725Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000165",
+    "jsonPayload": {
+      "message": "agent.session.end"
+    },
+    "timestamp": "2026-03-22T16:05:32.497329Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000176",
+    "jsonPayload": {},
+    "timestamp": "2026-03-22T16:05:32.518063Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion_request_log",
+    "httpRequest": {
+      "requestMethod": "DELETE",
+      "requestUrl": "https://scion.example/v1/agents/probe-7"
+    }
+  },
+  {
+    "insertId": "synth-0000166",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_stop"
+    },
+    "timestamp": "2026-03-22T16:05:32.647329Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "68927f2b-2ff8-36f7-3578-db0fa54c29f7",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000236",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:05:32.773141Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000222",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-2/mod_3.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:05:33.132898Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000213",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:33.477285Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000223",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:05:34.145789Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000172",
+    "jsonPayload": {
+      "message": "agent.session.end"
+    },
+    "timestamp": "2026-03-22T16:05:34.518063Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000263",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:34.578901Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000173",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_stop"
+    },
+    "timestamp": "2026-03-22T16:05:34.668063Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b83220cf-5863-6cbc-40cf-ac9aeb3cc847",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000214",
+    "jsonPayload": {
+      "file_path": "/workspace/src/orchestrator/mod_4.go",
+      "message": "agent.tool.call",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:05:34.874294Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000264",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:05:35.015790Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000224",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:05:35.093286Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000253",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:36.254342Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000237",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:05:36.515573Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000254",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:05:37.685100Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000238",
+    "jsonPayload": {
+      "file_path": "/workspace/src/docs-3/mod_4.go",
+      "message": "agent.tool.call",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:05:38.062500Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000215",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:05:38.309266Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000170",
+    "jsonPayload": {
+      "message": "agent.session.end"
+    },
+    "timestamp": "2026-03-22T16:05:38.328144Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000171",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_stop"
+    },
+    "timestamp": "2026-03-22T16:05:38.478144Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000239",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:05:38.677694Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000265",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:05:38.915409Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000240",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:05:39.514018Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000216",
+    "jsonPayload": {
+      "file_path": "/workspace/src/orchestrator/mod_4.go",
+      "message": "agent.tool.call",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:05:39.787290Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000241",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:05:40.041346Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000266",
+    "jsonPayload": {
+      "file_path": "/workspace/src/integrator-6/mod_3.go",
+      "message": "agent.tool.call",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:05:40.196695Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000217",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:05:40.298343Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000177",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:05:40.875000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000255",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:05:40.876404Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000256",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:05:41.225401Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000242",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:05:41.228648Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000218",
+    "jsonPayload": {
+      "file_path": "/workspace/src/orchestrator/mod_2.go",
+      "message": "agent.tool.call",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:05:41.658937Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000267",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:05:41.928476Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000178",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:05:42.175000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000268",
+    "jsonPayload": {
+      "file_path": "/workspace/src/integrator-6/mod_0.go",
+      "message": "agent.tool.call",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:05:42.528300Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000179",
+    "jsonPayload": {
+      "agent_id": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "message": "Agent created",
+      "name": "scout-8",
+      "slug": "scout-8"
+    },
+    "timestamp": "2026-03-22T16:05:43.175000Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000180",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:05:43.375000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000181",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:05:43.555000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000257",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:05:43.580355Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000183",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:05:43.625000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000219",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:05:43.678766Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000182",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:05:43.795000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000310",
+    "jsonPayload": {
+      "broadcasted": false,
+      "message": "message dispatched",
+      "message_content": "blocked on the schema change, need a decision",
+      "msg_type": "answer",
+      "recipient": "agent:scout-10",
+      "recipient_id": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "sender": "agent:orchestrator",
+      "sender_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95"
+    },
+    "timestamp": "2026-03-22T16:05:44.005829Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo",
+      "recipient": "agent:scout-10",
+      "recipient_id": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "sender": "agent:orchestrator",
+      "sender_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95"
+    },
+    "logName": "projects/seq-demo/logs/scion-messages"
+  },
+  {
+    "insertId": "synth-0000307",
+    "jsonPayload": {
+      "broadcasted": false,
+      "message": "message dispatched",
+      "message_content": "done - shutting down",
+      "msg_type": "handoff",
+      "recipient": "agent:bench-11",
+      "recipient_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "sender": "agent:architect-12",
+      "sender_id": "8479c82a-23b3-7929-ddb5-76194ed12aae"
+    },
+    "timestamp": "2026-03-22T16:05:44.410451Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo",
+      "recipient": "agent:bench-11",
+      "recipient_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "sender": "agent:architect-12",
+      "sender_id": "8479c82a-23b3-7929-ddb5-76194ed12aae"
+    },
+    "logName": "projects/seq-demo/logs/scion-messages"
+  },
+  {
+    "insertId": "synth-0000220",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:05:44.630667Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000258",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:05:44.787193Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000184",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:05:44.925000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000243",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:45.554381Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000185",
+    "jsonPayload": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "message": "Agent created",
+      "name": "bench-9",
+      "slug": "bench-9"
+    },
+    "timestamp": "2026-03-22T16:05:45.925000Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000269",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:05:45.928615Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000186",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:05:46.125000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000244",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:05:46.278316Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000187",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:05:46.305000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000189",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:05:46.375000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000188",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:05:46.545000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000272",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:46.656655Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000190",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:05:47.675000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000273",
+    "jsonPayload": {
+      "file_path": "/workspace/src/scout-8/mod_0.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:05:47.804809Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000259",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:05:48.130491Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000191",
+    "jsonPayload": {
+      "agent_id": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "message": "Agent created",
+      "name": "scout-10",
+      "slug": "scout-10"
+    },
+    "timestamp": "2026-03-22T16:05:48.675000Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000192",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:05:48.875000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000225",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:48.890791Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000260",
+    "jsonPayload": {
+      "file_path": "/workspace/src/triage-5/mod_0.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:05:48.932975Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000193",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:05:49.055000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000195",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:05:49.125000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000194",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:05:49.295000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000279",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:49.628641Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000245",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:05:49.818362Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000226",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:05:49.953754Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000261",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:05:49.984949Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000246",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:05:50.037083Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000227",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:05:50.360944Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000196",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:05:50.425000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000262",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:05:50.608498Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000228",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-2/mod_4.go",
+      "message": "agent.tool.call",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:05:50.786861Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000280",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-9/mod_3.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:05:50.984284Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000197",
+    "jsonPayload": {
+      "agent_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "message": "Agent created",
+      "name": "bench-11",
+      "slug": "bench-11"
+    },
+    "timestamp": "2026-03-22T16:05:51.425000Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000198",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:05:51.625000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000199",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:05:51.805000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000201",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:05:51.875000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000274",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:05:51.884896Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000200",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:05:52.045000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000287",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:52.064137Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000275",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Task"
+    },
+    "timestamp": "2026-03-22T16:05:52.640067Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000293",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:53.019510Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000202",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:05:53.175000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000281",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-9/mod_2.go",
+      "message": "agent.tool.call",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:05:53.530076Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000276",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:05:53.876265Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000288",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:05:53.926148Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000229",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Write"
+    },
+    "timestamp": "2026-03-22T16:05:54.042047Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000282",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:05:54.122635Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000203",
+    "jsonPayload": {
+      "agent_id": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "message": "Agent created",
+      "name": "architect-12",
+      "slug": "architect-12"
+    },
+    "timestamp": "2026-03-22T16:05:54.175000Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000247",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:05:54.245174Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000230",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:05:54.368304Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000204",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:05:54.375000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000205",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:05:54.555000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000207",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Bash"
+    },
+    "timestamp": "2026-03-22T16:05:54.625000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000294",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-11/mod_0.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:05:54.715383Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000206",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:05:54.795000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000248",
+    "jsonPayload": {
+      "file_path": "/workspace/src/docs-3/mod_1.go",
+      "message": "agent.tool.call",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:05:55.256301Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000295",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:05:55.344780Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000299",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:55.420017Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000289",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:05:55.446087Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000283",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-9/mod_1.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:05:55.655932Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000296",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:05:55.893078Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000208",
+    "jsonPayload": {
+      "message": "agent.tool.result"
+    },
+    "timestamp": "2026-03-22T16:05:55.925000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000290",
+    "jsonPayload": {
+      "file_path": "/workspace/src/scout-10/mod_1.go",
+      "message": "agent.tool.call",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:05:56.734001Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000209",
+    "jsonPayload": {
+      "agent_id": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "message": "Agent created",
+      "name": "triage-13",
+      "slug": "triage-13"
+    },
+    "timestamp": "2026-03-22T16:05:56.925000Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo"
+    },
+    "logName": "projects/seq-demo/logs/scion-server"
+  },
+  {
+    "insertId": "synth-0000300",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:05:56.953781Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000210",
+    "jsonPayload": {
+      "message": "agent.lifecycle.pre_start"
+    },
+    "timestamp": "2026-03-22T16:05:57.125000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000277",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:05:57.177814Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000211",
+    "jsonPayload": {
+      "message": "agent.lifecycle.post_start"
+    },
+    "timestamp": "2026-03-22T16:05:57.305000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000249",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:05:57.431397Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000212",
+    "jsonPayload": {
+      "message": "agent.session.start"
+    },
+    "timestamp": "2026-03-22T16:05:57.545000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000278",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:05:57.611877Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "dc1d543a-4df3-eddb-1946-f85bf3e52c4b",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000231",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "WebFetch"
+    },
+    "timestamp": "2026-03-22T16:05:57.868094Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000232",
+    "jsonPayload": {
+      "file_path": "/workspace/src/bench-2/mod_0.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:05:58.387025Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000250",
+    "jsonPayload": {
+      "file_path": "/workspace/src/docs-3/mod_4.go",
+      "message": "agent.tool.call",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:05:58.442329Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000303",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:58.555393Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000309",
+    "jsonPayload": {
+      "broadcasted": false,
+      "message": "message dispatched",
+      "message_content": "tests are green on my branch",
+      "msg_type": "handoff",
+      "recipient": "agent:bench-2",
+      "recipient_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "sender": "agent:bench-11",
+      "sender_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e"
+    },
+    "timestamp": "2026-03-22T16:05:58.577220Z",
+    "severity": "INFO",
+    "labels": {
+      "grove_id": "seq-demo",
+      "recipient": "agent:bench-2",
+      "recipient_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "sender": "agent:bench-11",
+      "sender_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e"
+    },
+    "logName": "projects/seq-demo/logs/scion-messages"
+  },
+  {
+    "insertId": "synth-0000297",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:05:59.010665Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000284",
+    "jsonPayload": {
+      "message": "agent.tool.call",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:05:59.014292Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000304",
+    "jsonPayload": {
+      "file_path": "/workspace/src/triage-13/mod_1.go",
+      "message": "agent.tool.call",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:05:59.253589Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000270",
+    "jsonPayload": {
+      "message": "agent.turn.start"
+    },
+    "timestamp": "2026-03-22T16:05:59.898519Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000233",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000234",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "92ca43f1-93de-e47f-5915-49f597a811c8",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000251",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Edit"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000252",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000271",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000285",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000286",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "4d277158-aa81-281c-8ab5-476a841bf223",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000291",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Grep"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000292",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "51f9b519-80cd-f806-6b31-f623841cb6bf",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000298",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "d84f8404-db4b-71e4-aef2-d6e92a16429e",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000301",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "tool_name": "Glob"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000302",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8479c82a-23b3-7929-ddb5-76194ed12aae",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000305",
+    "jsonPayload": {
+      "message": "agent.tool.result",
+      "success": false,
+      "tool_name": "Read"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "ERROR",
+    "labels": {
+      "agent_id": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  },
+  {
+    "insertId": "synth-0000306",
+    "jsonPayload": {
+      "message": "agent.turn.end"
+    },
+    "timestamp": "2026-03-22T16:06:00.000000Z",
+    "severity": "INFO",
+    "labels": {
+      "agent_id": "8e906fc7-f1f0-64d1-620b-bd5b491c141c",
+      "grove_id": "seq-demo",
+      "scion.harness": "claude"
+    },
+    "logName": "projects/seq-demo/logs/scion-agents"
+  }
+]

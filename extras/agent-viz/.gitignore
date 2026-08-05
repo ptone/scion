@@ -7,3 +7,8 @@ web-seq/node_modules/
 web-seq/public/shoelace/
 internal/seqserver/dist/*
 !internal/seqserver/dist/.gitkeep
+
+# Demo data. demo/sample/ is committed (small, and doubles as the frontend test
+# fixture); everything else regenerates byte-identically via demo/regenerate.sh
+# and would only bloat history.
+demo/generated/

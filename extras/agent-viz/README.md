@@ -2,6 +2,16 @@
 
 A standalone tool that replays agent activity from Google Cloud Logging exports as a 2D force-directed graph visualization. A Go binary parses log files and serves a web-based visualizer over WebSocket, enabling playback at variable speeds.
 
+> **Two tools live in this directory.** This README covers `agent-viz`, the
+> force-directed graph replay. There is also **[`seq-viz`](SEQ-VIZ.md)** — a
+> sequence diagram with a metric wall-clock time axis and an elastic sliding
+> window, built on the same log parser. Try it with `make seq-run`, or read
+> [SEQ-VIZ.md](SEQ-VIZ.md). Sample data for it is in [demo/](demo/README.md).
+>
+> They answer different questions: `agent-viz` shows *where* activity is
+> happening across the file tree; `seq-viz` shows *when*, and how long things
+> took relative to each other.
+
 ## What it shows
 
 - **File graph** -- force-directed graph of the project's file/directory tree (center)

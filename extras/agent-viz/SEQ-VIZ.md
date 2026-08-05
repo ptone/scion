@@ -1,31 +1,53 @@
 # seq-viz — sliding-window sequence visualizer
 
-An experimental way to look at a multi-agent run: a **sequence diagram whose
-vertical axis is metric wall-clock time**, viewed through a sliding window that
-speeds up and slows down so that the *interesting* parts play at a readable
-speed.
+An experimental view of a multi-agent run: a **sequence diagram whose vertical
+axis is metric wall-clock time**, seen through a sliding window that speeds up
+and slows down so the interesting parts play at a readable pace.
 
+```bash
+cd extras/agent-viz
+make seq-run          # build everything, serve a synthetic 60-agent run
 ```
-make seq-run          # build everything, serve a synthetic 60-agent run on :8090
-```
 
-Then open <http://localhost:8090>.
+Open <http://localhost:8090>. No log file or credentials needed — it
+synthesizes a run.
 
-## Why not a trace, and why not a sequence diagram
+---
 
-A **flame graph / trace** lays time out left-to-right and stacks call depth
-vertically. It is excellent for one request through many services, but it
-destroys *actor identity*: if agent `planner` participates five times, it
-appears as five unrelated boxes in five places.
+## Contents
+
+- [Why this exists](#why-this-exists)
+- [Core ideas](#core-ideas)
+- [Using it](#using-it)
+- [Command line](#command-line)
+- [Demo data](#demo-data)
+- [Architecture](#architecture)
+- [The digest format](#the-digest-format)
+- [Development](#development)
+- [Testing](#testing)
+- [Promotion into the main web UI](#promotion-into-the-main-web-ui)
+- [Limitations](#limitations)
+- [Deferred ideas](#deferred-ideas)
+
+---
+
+## Why this exists
+
+Two existing visualizations each solve half the problem.
+
+A **flame graph or distributed trace** lays time out left-to-right and stacks
+call depth vertically. It is excellent for one request through many services,
+but it destroys *actor identity*: if agent `planner` participates five times, it
+appears as five unrelated boxes in five places. You cannot ask "what was the
+planner doing all afternoon?"
 
 A **UML sequence diagram** keeps one lifeline per actor, so an actor is a single
-stable column no matter how often it participates. But it is conventionally
-*untimed* — vertical position means "after", not "how long after" — and it is
-static.
+stable column no matter how often it participates. But conventionally its
+vertical axis is *ordinal*, not metric — position means "after", not "how long
+after" — and it is a static picture.
 
-seq-viz takes the sequence diagram's actor-per-column axis and makes the
-vertical axis **metric**. That single change is what makes the two views
-compose:
+seq-viz keeps the sequence diagram's actor-per-column axis and makes the
+vertical axis **metric**. That one change is what lets the two compose:
 
 - An activation box and a span become **the same object**. Nested activations
   (session > turn > tool) render as a flame graph running *down* each lifeline,
@@ -33,157 +55,454 @@ compose:
 - Message arrows become **sloped**, and the slope *is* the delivery latency.
   This is the Lamport space-time diagram, not UML.
 
-## The two things worth understanding
+Everything else in the design follows from committing to a metric time axis.
+
+## Core ideas
 
 ### 1. Time is warped temporally, never spatially
 
-A run is mostly idle. The obvious fix is to squeeze idle gaps in the layout —
-but then a bar's height no longer means its duration, and every visual
+A run is mostly idle. The obvious fix is to squeeze the idle gaps in the layout
+— but then a bar's height no longer means its duration, and every visual
 comparison silently lies.
 
-Instead `msPerPx` is **constant everywhere on the canvas**, and we vary how fast
+Instead **`msPerPx` is constant everywhere on the canvas**, and we vary how fast
 the playhead *travels*. Boring stretches are crossed at high velocity; bursts
-slow to 1x. Geometry stays honest; only the clock is elastic.
+slow toward 1×. Geometry stays honest; only the clock is elastic. The minimap
+stays strictly linear in wall time, so the compression is always legible
+alongside the truth.
 
-The mapping is a precomputed monotonic function `T_viewer → T_wall`
-(`Warp`, a list of piecewise-linear knots). The scrubber, the minimap, the
-timestamp readout and deep links are all *projections of this one function*, so
-they cannot disagree with each other, and playback is deterministic.
+The mapping is a precomputed monotonic function `T_viewer → T_wall` (`Warp`, a
+list of piecewise-linear knots). The scrubber, minimap, timestamp readout and
+deep links are all *projections of this one function*, so they cannot disagree
+with each other, and playback is deterministic — the same digest plays the same
+way for everyone.
 
 The invariant the planner targets is **constant events per second of viewer
-attention**, not constant wall-time per second: `v = R / density(t)`.
+attention**, not constant wall-time per second:
+
+```
+v(t) = target_rate / density(t)
+```
 
 ### 2. Acceleration is planned, not reactive
 
-Snapping to a new velocity when a burst arrives is jarring and, worse, arrives
-*late* — you are already inside the burst before slowing down.
+Snapping to a new velocity when a burst appears is jarring, and worse, it
+arrives *late* — you are already inside the burst before the view slows.
 
-The velocity profile is planned ahead like a CNC feed rate. The constraint
-`|dv/dτ| ≤ A` is awkward because `dτ = dt/v`, but under the substitution
-`u = v²/2` it collapses to simply `|du/dt| ≤ A`. A forward pass limits
-acceleration and a **backward pass limits deceleration**, which is what
-guarantees the view has already slowed down by the time a burst enters frame.
+So the velocity profile is planned ahead, like a CNC feed rate. The natural
+constraint `|dv/dτ| ≤ A` is awkward because `dτ = dt/v`. Under the substitution
+`u = v²/2` it collapses to:
 
-## The three zones
+```
+|du/dt| ≤ A
+```
+
+which is linear and solvable in two sweeps. A **forward pass** limits
+acceleration; a **backward pass** limits deceleration. The backward pass is the
+important one: it is what guarantees the view has *already* slowed down by the
+time a burst reaches the frame.
+
+Density is also smoothed with a frame-sized kernel before planning, so
+deceleration begins before a burst enters the viewport rather than as it lands.
+
+### 3. Three zones
 
 ```
    ┌──────────────┐
    │     WAKE     │  above frame: already seen, fading out
-   ├──────────────┤  ← frameTop
+   ├──────────────┤  ← frameTop     (30% of height)
    │              │
    │    FRAME     │  readable, honest wall-clock
    │              │
-   ├──────────────┤  ← frameBottom == playhead
+   ├──────────────┤  ← frameBottom  (78%) == playhead
    │   STAGING    │  below frame: the future, rushing up.
    └──────────────┘    at speed, bars cross-fade into motion streaks
 ```
 
-Streaks are a deliberate signal: when the staging zone is moving too fast to
-read, it *looks* too fast to read, rather than strobing as if it were data.
+Future below, past above. Streaks are a deliberate signal: when the staging zone
+is moving too fast to read, it should *look* too fast to read, rather than
+strobing as though it were data you were meant to parse.
 
-## Columns
+### 4. The column axis is a tree
 
-- The column axis is a **tree**, keyed on each agent's persisted `Ancestry`. A
-  collapsed parent absorbs its whole subtree into one composite column
-  (Perfetto-style track groups), which is what makes solo/pin fall out for free.
+- Columns are keyed on each agent's persisted `Ancestry`. A **collapsed parent
+  absorbs its whole subtree into one composite column** (like Perfetto track
+  groups), which is what makes solo and pin fall out for free.
 - **Slot recycling**: columns are reused by non-overlapping lifelines via greedy
   interval-graph colouring, so 100 agents with 12 concurrent need ~12 columns,
   not 100.
-- Idle subtrees auto-fold to a narrow stripe. This is throttled and hysteretic
-  (see `LAYOUT_REFRESH_MS` in `seq-viz.ts`) — recomputing it every frame would
-  make the axis shimmer and destroy object constancy.
+- **Auto-fold** collapses idle subtrees to a narrow stripe. This is throttled
+  and hysteretic — recomputing per frame would make the axis shimmer and destroy
+  object constancy. See `LAYOUT_REFRESH_MS` and `ACTIVITY_WINDOW_FACTOR` in
+  `seq-viz.ts`.
 
-Note the symmetry: **time** compresses *temporally* (velocity), **columns**
-compress *spatially* (collapse/fold). Spatial compression is safe here only
-because a column's horizontal position carries no metric meaning.
+Note the symmetry: **time** compresses *temporally* (velocity); **columns**
+compress *spatially* (collapse/fold). Spatial compression is only safe on the
+column axis because horizontal position carries no metric meaning there.
 
-## Honesty features
+### 5. Confidence is a first-class field
 
-These exist because agent telemetry is genuinely incomplete, and a view that
-hides that is worse than useless for diagnosis.
+Agent telemetry is genuinely incomplete. A view that hides that is worse than
+useless for diagnosis.
 
 | Confidence | Meaning | Rendered |
 |---|---|---|
 | `measured` | both endpoints observed | solid |
 | `inferred` | an endpoint reconstructed from neighbouring events | hatched |
-| `open` | started, never ended (still running at window edge) | faded, unterminated |
+| `open` | started, never ended (still running at the window edge) | faded, unterminated |
 
-A duration is **never fabricated**. In hook-per-process deployments many tool
-spans would otherwise collapse to zero duration; they are marked, not invented.
+**A duration is never fabricated.** In hook-per-process deployments many tool
+spans would otherwise collapse to zero; they are marked, not invented.
 
-**Edge stubs**: when a message's peer is offscreen, hidden or more than 8
-columns away, the arrow is replaced by a labelled stub rather than dropped. A
-cropped window that silently omits edges lies about connectivity.
+Inference is also constrained to preserve nesting: an end is only propagated
+from a strictly deeper kind to a shallower one, never between siblings, so an
+inferred parent end always still contains its children.
 
-### Known limitation: sloped arrows are only half-real
+### 6. Edge stubs
 
-The Cloud Logging message stream carries a single timestamp per message, so true
-send→receive latency is not available. The digest infers arrival as the
-recipient's next observed activity and marks it `inferred`; where nothing can be
-inferred the edge stays horizontal and dashed. Sourcing the digest from the
-`messages` table instead (which has both `created` and `dispatched_at`) would
-upgrade these to genuinely `measured`.
+When a message's peer is offscreen, hidden by a collapse, or more than 8 columns
+away, the arrow is replaced by a labelled stub rather than dropped. A cropped
+window that silently omits edges lies about connectivity. Stub reasons:
+`offscreen`, `hidden`, `distant`.
 
-## Live vs replay
+### 7. Live and replay are the same thing
 
 There is no separate live mode. "Live" is just the playhead pinned to
-`now - 5min` at 1x. The lag budget is a resource the express lane spends to
-catch up, which dissolves the usual live/replay dual-mode complexity into a
+`now − 5 min` at 1×. The lag budget is a resource the express lane spends to
+catch up. This dissolves the usual live/replay dual-mode complexity into a
 single scrubbable timeline.
 
-## Layout
+## Using it
 
 ```
-cmd/seq-viz/               entrypoint
-internal/digest/           digest builder + velocity planner (the contract lives in types.go)
-internal/seqserver/        static server + /api/digest
+┌──────────────────────────────────────────────────────────┬────┐
+│ header: run name · counts · auto-fold · zoom · ratio     │    │
+├──────────────┬───────────────────────────────────────────┤ m  │
+│              │                                           │ i  │
+│  lifeline    │            canvas                         │ n  │
+│  tree        │            (the three zones)              │ i  │
+│              │                                           │ m  │
+│              │   [detail panel appears here on click]    │ a  │
+│  legend ↖    │                                           │ p  │
+├──────────────┴───────────────────────────────────────────┴────┤
+│ transport: play · scrubber · clock · rate · velocity          │
+└───────────────────────────────────────────────────────────────┘
+```
+
+### Keyboard
+
+| Key | Action |
+|---|---|
+| `Space` | play / pause |
+| `↓` / `↑` | step forward / back 1 s of viewer time |
+| `+` / `-` | zoom the time axis (in / out) |
+| `Esc` | clear selection |
+
+Shortcuts are ignored while typing in an input.
+
+### Mouse
+
+- **Click a bar** — open the detail panel: kind, duration, confidence, and a
+  Cloud Logging deep link carrying the project and a ±5 min window around the
+  event, so it lands on the right rows rather than a default last-hour view.
+- **Click an arrow** — inspect the message: type, endpoints, and whether the
+  arrival time was measured or inferred.
+- **Click a stub** — jump the playhead to the peer end of that message.
+- **Click the minimap** — seek to that wall time.
+
+### Left tree
+
+Toggle collapse on any parent, or solo a subtree. Active lifelines are
+highlighted; the tree is the affordance for drilling into a run that starts
+mostly collapsed (anything below depth 1 with children begins collapsed,
+because a hundred columns at once is unreadable).
+
+### Transport
+
+Play/pause, a scrubber over viewer time, the wall clock, and a rate selector
+(0.25× – 8×). The rate multiplies the planned profile; it does not replace it.
+
+The clock readout blurs and glows in proportion to `log(velocity)`, with an
+"N× express" pill, so you can tell at a glance that time is being skipped.
+
+### Header
+
+Lifeline/interval/edge counts, an **auto-fold** toggle, zoom controls with the
+current scale (e.g. `1.2s/100px`), and the overall compression ratio.
+
+## Command line
+
+```bash
+./seq-viz [flags]
+```
+
+### Input (pick one; defaults to synthetic)
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--log-file` | — | GCP Cloud Logging JSON export |
+| `--fs-log` | — | fs-watcher NDJSON log (optional, pairs with `--log-file`) |
+| `--digest-file` | — | precomputed digest JSON; skips parsing and synthesis |
+| `--max-depth` | `3` | max directory depth for file graph nodes (`0` = unlimited) |
+
+### Synthetic run
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--synth-agents` | `60` | agents over the whole run |
+| `--synth-duration` | `45m` | wall-clock length |
+| `--synth-seed` | `1` | same seed ⇒ byte-identical run |
+| `--synth-concurrency` | `0` | agents alive at once (`0` = default 8–12); raise it to pressure the column axis |
+
+### Velocity planner
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--frame` | `1m` | wall-clock duration visible at velocity 1 |
+| `--target-rate` | `6` | target events per second of viewer attention |
+| `--max-velocity` | `120` | ceiling, in wall-ms per viewer-ms |
+| `--max-accel` | `0.02` | max rate of change of `v²/2` w.r.t. wall time |
+
+Tuning notes:
+
+- Playback feels rushed → lower `--target-rate`.
+- Idle stretches drag → raise `--max-velocity`.
+- Speed changes feel abrupt or nauseating → lower `--max-accel`.
+- Bars are too cramped to read → raise `--frame`.
+
+### Output and serving
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--dump-digest` | — | write the digest to a path and exit |
+| `--dump-log` | — | write the synthetic log export to a path and exit |
+| `--port` | `8090` | port |
+| `--dev` | `false` | serve web assets from disk instead of the embedded bundle |
+
+### HTTP endpoints
+
+| Path | Returns |
+|---|---|
+| `/api/digest` | the whole precomputed digest, as JSON |
+| `/api/healthz` | `ok` |
+| anything else | the SPA (`index.html`), so deep links survive a reload |
+
+There is no WebSocket and no server-side playback engine. The digest is computed
+once and the client owns the clock — which is exactly why a shared link lands on
+the same moment for everyone.
+
+## Demo data
+
+See **[demo/README.md](demo/README.md)**. Short version:
+
+```bash
+make seq-demo              # serve the committed sample
+./demo/regenerate.sh       # regenerate all scenarios (~5s)
+```
+
+Scenarios cover column pressure (`wide`, ~35 concurrent), volume (`stress`,
+3,200 intervals), and time pressure (`idle`, 27× compression). If you change the
+layout or the planner, check `wide` and `idle` before the pretty one.
+
+## Architecture
+
+```
+cmd/seq-viz/              entrypoint, flags
+internal/digest/
+  types.go                the contract (SchemaVersion, all wire structs)
+  build.go                logs -> digest: lifelines, intervals, edges, slots
+  velocity.go             density -> warp knots (the two-pass planner)
+  synth.go                deterministic synthetic runs
+internal/seqserver/       static assets + /api/digest
+demo/                     sample data + regenerate.sh
 web-seq/
-  src/seq/core/            DOM-free: warp, clock, columns, frame, render
-  src/seq/components/      Lit components (canvas host, transport, minimap, tree, detail, legend)
+  src/seq/core/           DOM-free logic
+    types.ts              mirror of the Go contract
+    warp.ts               T_viewer <-> T_wall
+    clock.ts              playback state machine
+    columns.ts            ancestry forest, collapse/solo/fold, slot layout
+    frame.ts              digest + layout + time -> a drawable FrameModel
+    render.ts             FrameModel -> canvas; hit testing
+  src/seq/components/     Lit components
+    seq-viz.ts            root: state, rAF loop, wiring
+    seq-canvas.ts         thin canvas host
+    seq-transport.ts      play/scrub/rate
+    seq-minimap.ts        honest linear overview
+    seq-lifeline-tree.ts  ancestry tree, collapse/solo
+    seq-detail-panel.ts   selection details + Cloud Logging deep link
+    seq-legend.ts         confidence and edge legend
 ```
 
-`src/seq/core/` deliberately has **no DOM dependency** — it is plain functions
-over plain data, unit-tested without a browser, which is also what makes it
-portable into the main web UI later.
+Data flow:
 
-`internal/digest/types.go` and `web-seq/src/seq/core/types.ts` are a **frozen
-mirrored contract** (`SchemaVersion = 1`). Change them together.
-`web-seq/src/seq/core/integration.test.ts` runs a real Go-generated digest
-through the TypeScript read path, which is the only place drift between the two
-is actually caught.
+```
+GCP logs ──parse──> entries ──build──> Digest ──JSON──> browser
+                                 │
+                            density ──plan──> Warp
+                                                 │
+   clock.tick ─> τ ─> warp.wallAt(τ) ─> wallMs ──┴─> buildFrame ─> renderFrame
+```
+
+Two boundaries are load-bearing:
+
+- **`src/seq/core/` has no DOM dependency.** Plain functions over plain data,
+  unit-testable without a browser, and portable into the main UI unchanged.
+- **`internal/digest/types.go` and `core/types.ts` are a mirrored frozen
+  contract.** Change them together and bump `SchemaVersion`.
+
+Rendering is canvas, not SVG or DOM: 50–100 columns × thousands of intervals
+must hold 60fps, and a node per interval will not.
+
+## The digest format
+
+One JSON document, computed once. Abridged:
+
+```jsonc
+{
+  "version": 1,
+  "projectId": "...", "startedAt": "2026-03-22T16:00:00Z", "durationMs": 2700000,
+
+  "lifelines": [{
+    "id": "...", "name": "planner", "color": "#...",
+    "parentId": "...", "ancestry": ["root", "...", "parent"],
+    "depth": 1, "order": 3, "slot": 2,      // slot = recycled column
+    "birthMs": 0, "deathMs": 812000, "died": true
+  }],
+
+  "intervals": [{
+    "id": "...", "lifelineId": "...",
+    "kind": "tool",                          // lifecycle|session|turn|tool
+    "depth": 3,                              // nesting within the lifeline
+    "startMs": 1000, "endMs": 1400,
+    "confidence": "measured",                // measured|inferred|open
+    "error": false, "logId": "..."           // logId -> Cloud Logging deep link
+  }],
+
+  "edges": [{
+    "id": "...", "kind": "message",          // message|spawn|destroy
+    "fromId": "...", "toId": "...",
+    "sendMs": 1200, "recvMs": 1350,          // slope == latency
+    "recvConfidence": "inferred",
+    "msgType": "instruction", "broadcast": false
+  }],
+
+  "density": { "bucketMs": 1000, "samples": [...], "peak": 4.2 },
+
+  "warp": {                                  // the T_viewer -> T_wall function
+    "knots": [{ "tauMs": 0, "wallMs": 0, "velocity": 16.2 }],
+    "totalTauMs": 241198, "minVelocity": 1.3, "maxVelocity": 75.3
+  },
+
+  "stats": { "lifelineCount": 59, "maxConcurrent": 12, "compressionRatio": 11.19 }
+}
+```
+
+All times are **milliseconds since `startedAt`**, never absolute — so the whole
+document is relative and the client only needs one absolute anchor.
+
+Payload sizes: ~100 KB for 14 agents / 6 min, ~650 KB for 60 agents / 45 min,
+~2.5 MB for 120 agents / 3 h. Warp knots dominate at long durations (one per
+density bucket, merged only where velocity is exactly equal).
 
 ## Development
 
 ```bash
-make seq-test                       # typecheck + vitest + go test
-make seq-dev                        # frontend on :3100, proxies /api to :8090
-go run ./cmd/seq-viz --dev          # backend, serving web-seq from disk
-
-go run ./cmd/seq-viz --log-file run.json      # a real GCP log export
-go run ./cmd/seq-viz --synth-agents 80        # synthetic, no logs needed
+make seq            # build frontend + binary
+make seq-web        # frontend only (emits into internal/seqserver/dist)
+make seq-test       # typecheck + vitest + go test
+make seq-run        # serve a synthetic run
+make seq-demo       # serve the committed demo sample
+make seq-demo-data  # regenerate all demo datasets
 ```
 
-Tuning flags: `--frame`, `--target-rate`, `--max-velocity`, `--max-accel`.
-
-Regenerate the integration fixture after any contract change:
+Live-reload loop — two terminals:
 
 ```bash
-go run ./cmd/seq-viz --synth-agents 14 --synth-duration 6m --port 8098 &
-curl -s localhost:8098/api/digest -o web-seq/src/seq/core/__fixtures__/synthetic-digest.json
+go run ./cmd/seq-viz --dev     # backend on :8090
+make seq-dev                   # vite on :3100, proxies /api to :8090
 ```
+
+Then use <http://localhost:3100>.
+
+Notes:
+
+- `web-seq/tsconfig.json` uses `NodeNext` resolution, so **relative imports need
+  `.js` extensions** even in TypeScript.
+- The built bundle is embedded via `//go:embed dist/*`, which needs at least one
+  file present — hence the committed `internal/seqserver/dist/.gitkeep`, which
+  `npm run postbuild` restores after Vite empties the directory.
+
+## Testing
+
+```bash
+make seq-test
+```
+
+| Suite | Covers |
+|---|---|
+| `internal/digest/build_test.go` | interval nesting, confidence inference, slot recycling, edge resolution, cycle safety |
+| `internal/digest/velocity_test.go` | warp monotonicity, round-trip inverse, accel limits, decelerate-before-burst, uniform-density linearity |
+| `internal/seqserver/server_test.go` | SPA fallback, asset serving, API 404s, digest round-trip |
+| `core/*.test.ts` | warp, clock, columns, frame geometry |
+| `components/*.test.ts` | transport and tree rendering and events |
+| **`core/integration.test.ts`** | **a real Go-generated digest driven through the whole TypeScript read path** |
+
+The integration test deserves the emphasis. Every other test uses hand-written
+fixtures, so they would all keep passing while the Go writer and the TypeScript
+reader drifted apart. That test reads the committed demo sample directly — the
+same bytes a person opens in the viewer — and asserts referential integrity,
+nesting containment, `recvMs >= sendMs`, warp/velocity agreement across the
+language boundary, and that bar height equals `duration / msPerPx` on real data.
 
 ## Promotion into the main web UI
 
-`web-seq/` is a separate Vite project, but its dependency ranges and resolved
-versions are matched to `/workspace/web` (lit 3.3.2, Shoelace 2.20.1,
-TypeScript 5.3.3, Vite 7.3.2), it uses the same `--scion-*` design tokens, and
-it follows the same conventions (`NodeNext` resolution, so relative imports
-carry `.js` extensions). Components should move over without a rewrite.
+`web-seq/` is a separate Vite project, but it is deliberately not divergent:
 
-## Deferred
+- Dependency ranges **and resolved versions** match `/workspace/web`
+  (lit 3.3.2, Shoelace 2.20.1, TypeScript 5.3.3, Vite 7.3.2).
+- Same `--scion-*` design tokens, same dark-theme defaults.
+- Same conventions: `NodeNext`, `experimentalDecorators`, strict mode,
+  `exactOptionalPropertyTypes`.
+- All logic lives in DOM-free `core/`; components are thin.
+
+Promotion should be a move plus a router entry, not a rewrite. The likely work
+is swapping `/api/digest` for the real backend route and adding auth.
+
+## Limitations
+
+**Nothing here has been validated against a real run.** All sample data is
+synthetic. See the honesty section in [demo/README.md](demo/README.md) for the
+four specific ways that matters — the most important being that the generator
+was written to satisfy the parser's parent-attribution heuristic, so the clean
+ancestry in the demos is partly circular.
+
+**Sloped arrows are only half-real.** The Cloud Logging message stream carries a
+single timestamp per message, so true send→receive latency is not available. The
+digest infers arrival as the recipient's next observed activity and marks it
+`inferred`; where nothing can be inferred, the edge stays horizontal and dashed.
+A digest sourced from the `messages` table (which has both `created` and
+`dispatched_at`) would upgrade these to genuinely `measured`. This is the single
+highest-value follow-up.
+
+**Warp payload is exact, not decimated.** One knot per density bucket, merged
+only on exactly equal velocity — ~10,800 knots for a 3-hour run, roughly half
+the payload. Error-tolerant decimation would shrink it, at the cost of slightly
+changing the mapping.
+
+**No dropped-edge stat.** Edges whose endpoints cannot be resolved are logged
+but have nowhere to go in the frozen `Stats` struct.
+
+**Not yet built:** URL deep links into a specific moment or selection (the warp
+makes this straightforward — it is just `τ` plus a selection id), and any
+persistence of collapse/solo state across reloads.
+
+## Deferred ideas
 
 The velocity profile is currently driven by raw event density. The more
-interesting version drives it by **relevance to a selected causal chain** — pick
+interesting version drives it by **relevance to a selected causal chain**: pick
 a failure, and the view automatically lingers on what contributed to it and
-races through what did not. The warp is already pluggable; only the planner
-input would change.
+races through what did not. The warp is already pluggable — only the planner's
+input changes.
+
+That is the point where this stops being a nicer timeline and starts being a
+debugger.

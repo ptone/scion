@@ -1,4 +1,4 @@
-.PHONY: build clean dev test web seq seq-web seq-dev seq-test seq-run
+.PHONY: build clean dev test web seq seq-web seq-dev seq-test seq-run seq-demo seq-demo-data
 
 # Build the web frontend and Go binary
 build: web
@@ -50,3 +50,11 @@ seq-test:
 # Serve a synthetic run without needing real logs
 seq-run: seq
 	./seq-viz --synth-agents 60
+
+# Serve the committed demo sample (small; see demo/README.md)
+seq-demo: seq
+	./seq-viz --digest-file demo/sample/run.digest.json
+
+# Regenerate every demo dataset, including the committed sample
+seq-demo-data:
+	./demo/regenerate.sh

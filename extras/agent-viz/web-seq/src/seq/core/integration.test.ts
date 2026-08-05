@@ -21,16 +21,16 @@
  * the whole read path with it, which is the only place that drift can be
  * caught.
  *
- * Regenerate the fixture with:
+ * The fixture is the committed demo sample, read directly rather than copied,
+ * so the data the tests assert against and the data a person actually opens in
+ * the viewer are the same bytes and cannot drift. Regenerate it with:
  *
- *   go run ./cmd/seq-viz --synth-agents 14 --synth-duration 6m --port 8098 &
- *   curl -s localhost:8098/api/digest -o \
- *     web-seq/src/seq/core/__fixtures__/synthetic-digest.json
+ *   ./demo/regenerate.sh sample
  */
 
 import { describe, it, expect } from 'vitest';
 
-import digestJson from './__fixtures__/synthetic-digest.json';
+import digestJson from '../../../../demo/sample/run.digest.json';
 import { SCHEMA_VERSION, type Digest } from './types.js';
 import { WarpFn } from './warp.js';
 import { PlaybackClock } from './clock.js';

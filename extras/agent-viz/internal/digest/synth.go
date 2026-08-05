@@ -77,6 +77,18 @@ var synthContent = []string{
 // and a scattering of unpaired tool events so the inferred and open confidence
 // paths are populated.
 func SynthesizeLog(seed int64, agentCount int, durationMs float64) []logparser.GCPLogEntry {
+	return SynthesizeLogWith(seed, agentCount, durationMs, 0)
+}
+
+// SynthesizeLogWith is SynthesizeLog with control over how many agents are
+// alive simultaneously.
+//
+// Concurrency is what the column axis has to absorb, and it is independent of
+// agentCount: a run can churn through 200 agents while never exceeding 10 at
+// once. Passing 0 keeps the default 8-12, which is the realistic case; raising
+// it is how the demo exercises collapse, fold and solo, which only earn their
+// keep once there are more columns than fit on screen.
+func SynthesizeLogWith(seed int64, agentCount int, durationMs float64, concurrency int) []logparser.GCPLogEntry {
 	if agentCount < 1 {
 		agentCount = 1
 	}
@@ -84,9 +96,10 @@ func SynthesizeLog(seed int64, agentCount int, durationMs float64) []logparser.G
 		durationMs = 45 * 60 * 1000
 	}
 	s := &synth{
-		rng:      rand.New(rand.NewSource(seed)),
-		duration: durationMs,
-		byName:   map[string]bool{},
+		rng:         rand.New(rand.NewSource(seed)),
+		duration:    durationMs,
+		byName:      map[string]bool{},
+		concurrency: concurrency,
 	}
 	s.run(agentCount)
 	sort.SliceStable(s.entries, func(i, j int) bool {
@@ -101,7 +114,15 @@ func SynthesizeLog(seed int64, agentCount int, durationMs float64) []logparser.G
 // agent naming and requestedBy attribution are only reachable via
 // logparser.ParseLogFile.
 func BuildSyntheticDigest(seed int64, agentCount int, durationMs float64, opts Options) (*Digest, error) {
-	entries := SynthesizeLog(seed, agentCount, durationMs)
+	return BuildSyntheticDigestWith(seed, agentCount, durationMs, 0, opts)
+}
+
+// BuildSyntheticDigestWith is BuildSyntheticDigest with a concurrency cap.
+// See SynthesizeLogWith.
+func BuildSyntheticDigestWith(
+	seed int64, agentCount int, durationMs float64, concurrency int, opts Options,
+) (*Digest, error) {
+	entries := SynthesizeLogWith(seed, agentCount, durationMs, concurrency)
 	data, err := json.Marshal(entries)
 	if err != nil {
 		return nil, fmt.Errorf("encoding synthetic log: %w", err)
@@ -145,6 +166,26 @@ type synth struct {
 	byName   map[string]bool
 	seq      int
 	pressure bool
+	// concurrency caps how many agents are alive at once; 0 means the default
+	// 8-12 band. See SynthesizeLogWith.
+	concurrency int
+}
+
+// concurrencyTarget picks how many agents should be alive in a window. The
+// default band is 8-12; an explicit cap gets the same +/-20% jitter so the
+// column count still moves and fold/recycle are actually exercised.
+func (s *synth) concurrencyTarget() int {
+	if s.concurrency <= 0 {
+		return 8 + s.rng.Intn(5)
+	}
+	if s.concurrency < 3 {
+		return s.concurrency
+	}
+	spread := s.concurrency / 5
+	if spread < 1 {
+		spread = 1
+	}
+	return s.concurrency - spread + s.rng.Intn(2*spread+1)
 }
 
 func (s *synth) run(agentCount int) {
@@ -161,7 +202,7 @@ func (s *synth) run(agentCount int) {
 		remaining := agentCount - len(s.agents)
 		s.pressure = remaining > 5*(len(windows)-wi)
 
-		target := 8 + s.rng.Intn(5)
+		target := s.concurrencyTarget()
 		hires := target - s.aliveCount()
 		if max := agentCount - len(s.agents); hires > max {
 			hires = max
