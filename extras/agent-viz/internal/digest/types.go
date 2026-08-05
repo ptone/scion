@@ -219,6 +219,21 @@ type Edge struct {
 	MsgType   string `json:"msgType,omitempty"`
 	Label     string `json:"label,omitempty"`
 	Broadcast bool   `json:"broadcast,omitempty"`
+	Urgent    bool   `json:"urgent,omitempty"`
+
+	// Body is the message content, for the reader that opens an arrow.
+	//
+	// Kept separate from Label, which is the one-line form the canvas draws and
+	// is aggressively short. Bodies are the largest single contributor to digest
+	// size on a chatty run -- 738 messages in one real 49-minute export came to
+	// 342 KB of text -- so they are capped by Options.MaxBodyLen and can be
+	// switched off entirely.
+	Body string `json:"body,omitempty"`
+
+	// BodyTruncated reports that Body is only the beginning of the message. The
+	// viewer says so rather than presenting a clipped message as the whole
+	// thing, and points at the Cloud Logging record for the rest.
+	BodyTruncated bool `json:"bodyTruncated,omitempty"`
 
 	LogID string `json:"logId,omitempty"`
 }
@@ -347,6 +362,12 @@ type Options struct {
 	// and invent an absurd latency. Beyond this window the dispatch falls back
 	// to an inferred arrival.
 	PairDeliveryWindowMs float64
+
+	// MaxBodyLen caps the stored message body, in runes. Zero means the
+	// default; a negative value omits bodies entirely, which is the right
+	// choice when the digest is being shipped somewhere the message text should
+	// not go.
+	MaxBodyLen int
 }
 
 // DefaultOptions returns tuned defaults suitable for typical Scion runs.
@@ -360,5 +381,6 @@ func DefaultOptions() Options {
 		DensityBucketMs:             1_000,
 		InferRecvWindowMs:           120_000,
 		PairDeliveryWindowMs:        300_000,
+		MaxBodyLen:                  2_000,
 	}
 }

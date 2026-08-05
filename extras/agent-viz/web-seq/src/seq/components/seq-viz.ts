@@ -48,8 +48,10 @@ import './seq-transport.js';
 import './seq-minimap.js';
 import './seq-lifeline-tree.js';
 import './seq-detail-panel.js';
+import './seq-message-overlay.js';
 import './seq-legend.js';
 import type { SeqSelection } from './seq-detail-panel.js';
+import type { SeqMessageView } from './seq-message-overlay.js';
 import type { SeqMinimapMarker } from './seq-minimap.js';
 
 /** Column geometry, px. */
@@ -108,6 +110,9 @@ export class ScionSeqViz extends LitElement {
   @state() private selectedLifelineId: string | null = null;
 
   @state() private legendOpen = false;
+
+  /** Edge whose message body is open in the reader; null when it is closed. */
+  @state() private messageEdgeId: string | null = null;
 
   /**
    * Whether the run-overview rail is expanded.
@@ -459,6 +464,15 @@ export class ScionSeqViz extends LitElement {
 
   private onKeydown(e: KeyboardEvent): void {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // The message reader is modal: play/seek/zoom underneath it would move the
+    // diagram out from under whatever the viewer came back to look at.
+    if (this.messageEdgeId !== null) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this.messageEdgeId = null;
+      }
+      return;
+    }
     const target = e.composedPath()[0];
     if (target instanceof HTMLElement) {
       const tag = target.tagName.toLowerCase();
@@ -561,16 +575,42 @@ export class ScionSeqViz extends LitElement {
       this.selectedLifelineId = hit.interval.lifelineId;
       return;
     }
-    if (hit.type === 'edge') {
+    if (hit.type === 'edge' || hit.type === 'edge-bubble') {
       const edge = this.edgeById.get(hit.edge.id);
       const from = this.lifelineById.get(hit.edge.fromId);
       const to = this.lifelineById.get(hit.edge.toId);
       this.selection = edge && from && to ? { kind: 'edge', edge, from, to } : null;
       return;
     }
+    if (hit.type !== 'stub') return;
     // A stub is connectivity information: jump to the peer rather than inspect.
     const edge = this.edgeById.get(hit.stub.edgeId);
     if (edge) this.seekWall(hit.stub.direction === 'outgoing' ? edge.recvMs : edge.sendMs);
+  }
+
+  /**
+   * Opens the message reader for an edge, and stops the clock.
+   *
+   * Pausing is not incidental. Reading takes seconds, and the diagram would
+   * otherwise carry the arrow being read off the top of the screen while its
+   * text sat open — so on closing the reader the viewer would be somewhere
+   * else entirely, with no idea how they got there.
+   */
+  private onMessageOpen(edgeId: string): void {
+    if (!this.edgeById.has(edgeId)) return;
+    this.messageEdgeId = edgeId;
+    if (this.playing) this.togglePlay();
+  }
+
+  /** Resolves the open message against the digest, or null if it is closed. */
+  private messageView(): SeqMessageView | null {
+    const id = this.messageEdgeId;
+    if (!id) return null;
+    const edge = this.edgeById.get(id);
+    if (!edge) return null;
+    const from = this.lifelineById.get(edge.fromId);
+    const to = this.lifelineById.get(edge.toId);
+    return from && to ? { edge, from, to } : null;
   }
 
   private onViewport(startMs: number, endMs: number, widthPx: number): void {
@@ -674,6 +714,8 @@ export class ScionSeqViz extends LitElement {
           .msPerPx=${this.msPerPx}
           @seq-select=${(e: CustomEvent<{ hit: HitResult | null }>): void =>
             this.onCanvasSelect(e.detail.hit)}
+          @seq-message-open=${(e: CustomEvent<{ edgeId: string }>): void =>
+            this.onMessageOpen(e.detail.edgeId)}
           @seq-viewport=${(
             e: CustomEvent<{ startMs: number; endMs: number; widthPx: number }>
           ): void => this.onViewport(e.detail.startMs, e.detail.endMs, e.detail.widthPx)}
@@ -690,6 +732,17 @@ export class ScionSeqViz extends LitElement {
                 }}
               ></scion-seq-detail-panel>
             </div>`
+          : nothing}
+
+        ${this.messageEdgeId !== null
+          ? html`<scion-seq-message-overlay
+              .message=${this.messageView()}
+              .projectId=${d.projectId}
+              .startedAt=${d.startedAt}
+              @seq-close-message=${(): void => {
+                this.messageEdgeId = null;
+              }}
+            ></scion-seq-message-overlay>`
           : nothing}
 
         <div class="legend-dock">

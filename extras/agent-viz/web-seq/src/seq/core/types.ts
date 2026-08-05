@@ -158,6 +158,20 @@ export interface Edge {
   msgType?: string;
   label?: string;
   broadcast?: boolean;
+  urgent?: boolean;
+
+  /**
+   * The message content, for the reader who opens an arrow.
+   *
+   * Separate from `label`, which is the one-line form the canvas draws. Capped
+   * server-side by `Options.MaxBodyLen` and omitted entirely when bodies are
+   * switched off, so treat absence as "not exported", not "empty message".
+   */
+  body?: string;
+
+  /** True when `body` is only the beginning of the message. */
+  bodyTruncated?: boolean;
+
   logId?: string;
 }
 

@@ -74,7 +74,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message rejected: recipient not accepting",
-      "message_content": "found a race in the playback engine",
+      "message_content": "Heads up: I am seeing a race in the playback engine.\n\nReproduce by scrubbing while playing. The rAF callback and the scrub handler\nboth write playheadMs, and the rAF one wins about one time in five, so the\nplayhead snaps back to where it was a frame earlier. It looks like a dropped\nclick but it is a lost write.\n\nSuggested fix is to make the scrub set a pending target that the rAF loop\nconsumes, rather than having two writers.",
       "msg_type": "question",
       "recipient": "agent:bench-4",
       "recipient_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
@@ -157,7 +157,7 @@
     "jsonPayload": {
       "broadcasted": true,
       "message": "message dispatched",
-      "message_content": "picking up the parser refactor now",
+      "message_content": "done - shutting down",
       "msg_type": "handoff",
       "recipient": "agent:bench-4",
       "recipient_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
@@ -180,7 +180,7 @@
     "jsonPayload": {
       "broadcasted": true,
       "message": "message accepted (buffered)",
-      "message_content": "picking up the parser refactor now",
+      "message_content": "done - shutting down",
       "msg_type": "handoff",
       "recipient": "agent:bench-4",
       "recipient_id": "b41f7901-9d89-2be9-9303-b2be5882f324",
@@ -425,7 +425,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message dispatched",
-      "message_content": "picking up the parser refactor now",
+      "message_content": "Status on the parser refactor.\n\nDone: the entry loader now sorts by resolved timestamp rather than by the\nraw string, so out-of-order exports stop producing negative durations.\n\nIn progress: pairing the two message phases. The awkward part is that the\nacknowledgement carries no reference to the dispatch, so the key has to be\n(sender, recipient, content) and the match has to be FIFO within a window.\n\nBlocked on: whether we care about messages whose recipient never acked. I\nhave been treating those as inferred arrivals; say if you would rather drop\nthem.",
       "msg_type": "review",
       "recipient": "agent:docs-3",
       "recipient_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
@@ -448,7 +448,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message accepted (buffered)",
-      "message_content": "picking up the parser refactor now",
+      "message_content": "Status on the parser refactor.\n\nDone: the entry loader now sorts by resolved timestamp rather than by the\nraw string, so out-of-order exports stop producing negative durations.\n\nIn progress: pairing the two message phases. The awkward part is that the\nacknowledgement carries no reference to the dispatch, so the key has to be\n(sender, recipient, content) and the match has to be FIFO within a window.\n\nBlocked on: whether we care about messages whose recipient never acked. I\nhave been treating those as inferred arrivals; say if you would rather drop\nthem.",
       "msg_type": "review",
       "recipient": "agent:docs-3",
       "recipient_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
@@ -928,7 +928,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message dispatched",
-      "message_content": "done - shutting down",
+      "message_content": "Review notes on the velocity planner:\n\n1. The forward pass looks right, but the backward pass is doing the work\n   twice for the last bucket. Harmless, just wasteful.\n2. u = v^2/2 is the right substitution, though the comment explaining why\n   should say that it makes the acceleration limit linear in u.\n3. Please add a test for the case where every bucket is empty. Right now\n   that divides by the peak, which is zero.\n\nNothing blocking. Ship it once (3) is covered.",
       "msg_type": "review",
       "recipient": "agent:integrator-6",
       "recipient_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
@@ -965,7 +965,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message accepted (buffered)",
-      "message_content": "done - shutting down",
+      "message_content": "Review notes on the velocity planner:\n\n1. The forward pass looks right, but the backward pass is doing the work\n   twice for the last bucket. Harmless, just wasteful.\n2. u = v^2/2 is the right substitution, though the comment explaining why\n   should say that it makes the acceleration limit linear in u.\n3. Please add a test for the case where every bucket is empty. Right now\n   that divides by the peak, which is zero.\n\nNothing blocking. Ship it once (3) is covered.",
       "msg_type": "review",
       "recipient": "agent:integrator-6",
       "recipient_id": "f957763e-ea0d-af62-d65d-ce5ba524f735",
@@ -1684,7 +1684,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message dispatched",
-      "message_content": "found a race in the playback engine",
+      "message_content": "please review the velocity planner maths",
       "msg_type": "answer",
       "recipient": "agent:docs-3",
       "recipient_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
@@ -1737,7 +1737,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message accepted (buffered)",
-      "message_content": "found a race in the playback engine",
+      "message_content": "please review the velocity planner maths",
       "msg_type": "answer",
       "recipient": "agent:docs-3",
       "recipient_id": "031ebd9c-6aa4-e982-9f22-4be8eaf66726",
@@ -2956,7 +2956,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message dispatched",
-      "message_content": "please review the velocity planner maths",
+      "message_content": "Heads up: I am seeing a race in the playback engine.\n\nReproduce by scrubbing while playing. The rAF callback and the scrub handler\nboth write playheadMs, and the rAF one wins about one time in five, so the\nplayhead snaps back to where it was a frame earlier. It looks like a dropped\nclick but it is a lost write.\n\nSuggested fix is to make the scrub set a pending target that the rAF loop\nconsumes, rather than having two writers.",
       "msg_type": "instruction",
       "recipient": "agent:orchestrator",
       "recipient_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
@@ -2994,7 +2994,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message accepted (buffered)",
-      "message_content": "please review the velocity planner maths",
+      "message_content": "Heads up: I am seeing a race in the playback engine.\n\nReproduce by scrubbing while playing. The rAF callback and the scrub handler\nboth write playheadMs, and the rAF one wins about one time in five, so the\nplayhead snaps back to where it was a frame earlier. It looks like a dropped\nclick but it is a lost write.\n\nSuggested fix is to make the scrub set a pending target that the rAF loop\nconsumes, rather than having two writers.",
       "msg_type": "instruction",
       "recipient": "agent:orchestrator",
       "recipient_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
@@ -3401,7 +3401,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message dispatched",
-      "message_content": "found a race in the playback engine",
+      "message_content": "handing the integration work back to you",
       "msg_type": "instruction",
       "recipient": "agent:orchestrator",
       "recipient_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
@@ -3424,7 +3424,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message accepted (buffered)",
-      "message_content": "found a race in the playback engine",
+      "message_content": "handing the integration work back to you",
       "msg_type": "instruction",
       "recipient": "agent:orchestrator",
       "recipient_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
@@ -3648,7 +3648,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message dispatched",
-      "message_content": "blocked on the schema change, need a decision",
+      "message_content": "picking up the parser refactor now",
       "msg_type": "instruction",
       "recipient": "agent:orchestrator",
       "recipient_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
@@ -3671,7 +3671,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message accepted (buffered)",
-      "message_content": "blocked on the schema change, need a decision",
+      "message_content": "picking up the parser refactor now",
       "msg_type": "instruction",
       "recipient": "agent:orchestrator",
       "recipient_id": "c7bb8186-39ac-48a4-c6af-a2f1581a8b95",
@@ -3828,7 +3828,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message dispatched",
-      "message_content": "handing the integration work back to you",
+      "message_content": "found a race in the playback engine",
       "msg_type": "answer",
       "recipient": "agent:impl-9",
       "recipient_id": "f223c1c0-6e51-f9b5-1980-cdf8066b31f6",
@@ -3866,7 +3866,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message accepted (buffered)",
-      "message_content": "handing the integration work back to you",
+      "message_content": "found a race in the playback engine",
       "msg_type": "answer",
       "recipient": "agent:impl-9",
       "recipient_id": "f223c1c0-6e51-f9b5-1980-cdf8066b31f6",
@@ -4018,7 +4018,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message dispatched",
-      "message_content": "handing the integration work back to you",
+      "message_content": "please review the velocity planner maths",
       "msg_type": "handoff",
       "recipient": "agent:triage-5",
       "recipient_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",
@@ -4041,7 +4041,7 @@
     "jsonPayload": {
       "broadcasted": false,
       "message": "message accepted (buffered)",
-      "message_content": "handing the integration work back to you",
+      "message_content": "please review the velocity planner maths",
       "msg_type": "handoff",
       "recipient": "agent:triage-5",
       "recipient_id": "8d7e4127-dbfd-477a-32f5-fe708a29bf06",

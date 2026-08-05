@@ -26,7 +26,7 @@
  */
 
 import { LitElement, html, css } from 'lit';
-import { customElement, property, query } from 'lit/decorators.js';
+import { customElement, property, query, state } from 'lit/decorators.js';
 
 import type { Digest } from '../core/types.js';
 import type { ColumnLayout } from '../core/columns.js';
@@ -57,6 +57,15 @@ export class ScionSeqCanvas extends LitElement {
 
   /** Most recently built frame, exposed for hit-testing and viewport reporting. */
   private lastFrame: FrameModel | null = null;
+
+  /**
+   * Edge under the pointer, which grows a clickable bubble at its midpoint.
+   *
+   * Reactive state rather than a plain field so the canvas repaints when it
+   * changes; the setter only fires on a real change, so sliding along one arrow
+   * costs a hit-test and nothing else.
+   */
+  @state() private hoverEdgeId: string | null = null;
 
   private resizeObserver?: ResizeObserver;
   private cssWidth = 0;
@@ -160,7 +169,13 @@ export class ScionSeqCanvas extends LitElement {
     );
     this.lastFrame = model;
 
-    renderFrame(ctx, model, DEFAULT_THEME);
+    // A hovered edge can scroll out from under a stationary pointer while
+    // playing, so drop the highlight when the id is no longer in the frame
+    // rather than leaving a bubble attached to nothing.
+    if (this.hoverEdgeId && !model.edges.some((e) => e.id === this.hoverEdgeId)) {
+      this.hoverEdgeId = null;
+    }
+    renderFrame(ctx, model, DEFAULT_THEME, { hoverEdgeId: this.hoverEdgeId });
 
     // Tell the parent which slice of wall time is on screen, so the minimap can
     // draw the viewport rectangle against the true-linear overview.
@@ -186,12 +201,32 @@ export class ScionSeqCanvas extends LitElement {
     }
   }
 
-  private onClick(e: MouseEvent): void {
+  /** Hit-tests at a client point, including the transient hover affordance. */
+  private hitAt(e: MouseEvent): HitResult | null {
     const model = this.lastFrame;
     const canvas = this.canvasEl;
-    if (!model || !canvas) return;
+    if (!model || !canvas) return null;
     const rect = canvas.getBoundingClientRect();
-    const hit: HitResult | null = hitTest(model, e.clientX - rect.left, e.clientY - rect.top);
+    return hitTest(model, e.clientX - rect.left, e.clientY - rect.top, {
+      hoverEdgeId: this.hoverEdgeId,
+    });
+  }
+
+  private onClick(e: MouseEvent): void {
+    if (!this.lastFrame) return;
+    const hit = this.hitAt(e);
+    // The bubble is a distinct affordance from the arrow it hangs off: the line
+    // selects (side panel), the bubble opens the message itself.
+    if (hit?.type === 'edge-bubble') {
+      this.dispatchEvent(
+        new CustomEvent('seq-message-open', {
+          detail: { edgeId: hit.edge.id },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      return;
+    }
     this.dispatchEvent(
       new CustomEvent('seq-select', {
         detail: { hit },
@@ -201,8 +236,27 @@ export class ScionSeqCanvas extends LitElement {
     );
   }
 
+  private onMouseMove(e: MouseEvent): void {
+    const canvas = this.canvasEl;
+    if (!this.lastFrame || !canvas) return;
+    const hit = this.hitAt(e);
+    // Passing the current hover into the hit test makes the bubble sticky: its
+    // top edge is further from the line than the click tolerance, so without
+    // that the affordance would vanish as the pointer reached for it.
+    this.hoverEdgeId = hit?.type === 'edge' || hit?.type === 'edge-bubble' ? hit.edge.id : null;
+    canvas.style.cursor = hit?.type === 'edge-bubble' ? 'pointer' : 'crosshair';
+  }
+
+  private onMouseLeave(): void {
+    this.hoverEdgeId = null;
+  }
+
   override render(): unknown {
-    return html`<canvas @click=${(e: MouseEvent): void => this.onClick(e)}></canvas>`;
+    return html`<canvas
+      @click=${(e: MouseEvent): void => this.onClick(e)}
+      @mousemove=${(e: MouseEvent): void => this.onMouseMove(e)}
+      @mouseleave=${(): void => this.onMouseLeave()}
+    ></canvas>`;
   }
 }
 

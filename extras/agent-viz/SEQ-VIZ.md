@@ -248,8 +248,19 @@ Shortcuts are ignored while typing in an input.
   event, so it lands on the right rows rather than a default last-hour view.
 - **Click an arrow** — inspect the message: type, endpoints, and whether the
   arrival time was measured or inferred.
+- **Hover an arrow** — the arrow highlights and a chat bubble appears at its
+  midspan. **Click the bubble** to read the message itself: the body, both
+  endpoints, send and arrival times, latency, arrival confidence, and any
+  broadcast/urgent flags. Playback pauses when the reader opens, because reading
+  takes seconds and the arrow would otherwise be gone by the time you closed it.
+  `Esc` closes it.
 - **Click a stub** — jump the playhead to the peer end of that message.
 - **Click the minimap** — seek to that wall time.
+
+Hit-testing follows paint order — bubble, then arrows and stubs, then bars.
+Arrows are drawn *over* the bars they cross and nearly every arrow crosses one,
+so resolving to the bar first made most arrows unreachable. The cost is a ~5px
+band along each arrow where the bar underneath cannot be clicked.
 
 ### Left tree
 
@@ -442,7 +453,9 @@ One JSON document, computed once. Abridged:
     "fromId": "...", "toId": "...",
     "sendMs": 1200, "recvMs": 1350,          // slope == latency
     "recvConfidence": "inferred",
-    "msgType": "instruction", "broadcast": false
+    "msgType": "instruction", "broadcast": false, "urgent": false,
+    "body": "...", "bodyTruncated": false,   // capped by --max-body
+    "logId": "..."
   }],
 
   "density": { "bucketMs": 1000, "samples": [...], "peak": 4.2 },
@@ -462,6 +475,13 @@ document is relative and the client only needs one absolute anchor.
 Payload sizes: ~100 KB for 14 agents / 6 min, ~650 KB for 60 agents / 45 min,
 ~2.5 MB for 120 agents / 3 h. Warp knots dominate at long durations (one per
 density bucket, merged only where velocity is exactly equal).
+
+Message bodies are inlined so the reader needs no round trip, but they are not
+free: 738 messages in one real 49-minute export came to 342 KB of text. They are
+capped at 2,000 characters each (`--max-body`, `-1` to omit them entirely), and
+`bodyTruncated` says so explicitly rather than letting a clipped body pass for
+a whole one. An absent `body` means "not exported", never "empty message" — the
+reader states that distinction rather than guessing.
 
 ## Development
 

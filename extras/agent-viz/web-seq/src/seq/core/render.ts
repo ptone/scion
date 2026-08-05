@@ -86,6 +86,15 @@ export interface RenderTheme {
   /** Edge whose arrival time is unknown; drawn dashed and horizontal. */
   edgeOpen: string;
 
+  /** Highlight laid over the edge under the pointer. */
+  edgeHover: string;
+  /** Fill of the message bubble affordance. */
+  bubbleFill: string;
+  /** Outline of the message bubble affordance. */
+  bubbleStroke: string;
+  /** The speech-lines glyph inside the bubble. */
+  bubbleGlyph: string;
+
   /** Stub segment and arrowhead. */
   stub: string;
   /** Stub peer-name text. */
@@ -150,6 +159,11 @@ export const DEFAULT_THEME: RenderTheme = {
   edgeDestroy: 'rgba(248, 81, 73, 0.75)',
   edgeOpen: 'rgba(230, 237, 243, 0.40)',
 
+  edgeHover: 'rgba(255, 212, 121, 0.95)',
+  bubbleFill: '#f0b429',
+  bubbleStroke: 'rgba(13, 17, 23, 0.85)',
+  bubbleGlyph: 'rgba(13, 17, 23, 0.9)',
+
   stub: 'rgba(230, 237, 243, 0.55)',
   stubLabel: 'rgba(230, 237, 243, 0.70)',
 
@@ -172,10 +186,33 @@ export const DEFAULT_THEME: RenderTheme = {
 export type HitResult =
   | { type: 'interval'; interval: FrameInterval }
   | { type: 'edge'; edge: FrameEdge }
+  /** The message bubble affordance at an edge's midpoint. */
+  | { type: 'edge-bubble'; edge: FrameEdge }
   | { type: 'stub'; stub: FrameEdgeStub };
+
+/**
+ * Transient pointer state.
+ *
+ * Deliberately not part of {@link FrameModel}: the frame is a pure projection
+ * of the digest at an instant, and mixing in where the mouse happens to be
+ * would mean rebuilding it on every mouse move.
+ */
+export interface FrameInteraction {
+  /** Edge currently under the pointer, which grows a bubble at its midpoint. */
+  hoverEdgeId?: string | null;
+}
 
 /** Click tolerance around a one-dimensional edge, in px. */
 const EDGE_HIT_TOLERANCE = 5;
+/** Radius of the message bubble affordance, px. */
+export const EDGE_BUBBLE_RADIUS = 9;
+/**
+ * Shortest edge that gets a bubble, px.
+ *
+ * A bubble on a segment barely longer than itself covers the thing it is
+ * annotating, and its hit area swallows the neighbouring edges.
+ */
+const MIN_BUBBLE_EDGE_LENGTH = 34;
 /** Below this bar height a label cannot be legible, so it is skipped. */
 const MIN_LABEL_HEIGHT = 11;
 /** Below this bar width a label cannot be legible either. */
@@ -187,6 +224,7 @@ export function renderFrame(
   ctx: CanvasRenderingContext2D,
   model: FrameModel,
   theme: RenderTheme,
+  interaction?: FrameInteraction,
 ): void {
   const g = model.geom;
 
@@ -202,6 +240,7 @@ export function renderFrame(
   for (const s of model.stubs) drawStub(ctx, s, theme);
   drawStaging(ctx, model, theme);
   drawLabels(ctx, model, theme);
+  drawHoverBubble(ctx, model, theme, interaction);
 
   ctx.restore();
 }
@@ -509,6 +548,88 @@ function drawArrowhead(
   ctx.fill();
 }
 
+/**
+ * Highlights the hovered edge and draws its bubble affordance.
+ *
+ * Drawn last, over labels: the bubble is the click target, so nothing may
+ * overlap it, and the whole point of the highlight is to pick one arrow out of
+ * a thicket of them.
+ */
+function drawHoverBubble(
+  ctx: CanvasRenderingContext2D,
+  model: FrameModel,
+  theme: RenderTheme,
+  interaction?: FrameInteraction,
+): void {
+  const id = interaction?.hoverEdgeId;
+  if (!id) return;
+  const e = model.edges.find((c) => c.id === id);
+  if (!e) return;
+  const at = edgeBubbleAt(e);
+  if (!at) return;
+
+  ctx.save();
+  // Full opacity even for a faded edge: the pointer is on it, so it has been
+  // singled out, and a ghostly highlight would read as a rendering glitch.
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = theme.edgeHover;
+  ctx.lineWidth = e.broadcast ? 2.5 : 1.75;
+  setDash(ctx, []);
+  ctx.beginPath();
+  ctx.moveTo(e.x1, e.y1);
+  ctx.lineTo(e.x2, e.y2);
+  ctx.stroke();
+  drawArrowhead(ctx, e.x1, e.y1, e.x2, e.y2, theme.edgeHover);
+
+  drawBubbleGlyph(ctx, at.x, at.y, EDGE_BUBBLE_RADIUS, theme);
+  ctx.restore();
+}
+
+/** Paints a rounded speech bubble with a tail and three text lines. */
+function drawBubbleGlyph(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  r: number,
+  theme: RenderTheme,
+): void {
+  const w = r * 2;
+  const h = r * 1.55;
+  const x = cx - w / 2;
+  const y = cy - h / 2 - r * 0.2;
+  const rad = Math.min(3.5, h / 2);
+
+  ctx.beginPath();
+  // roundRect is not in happy-dom's canvas stub, and older Safari lacks it.
+  if (typeof ctx.roundRect === 'function') {
+    ctx.roundRect(x, y, w, h, rad);
+  } else {
+    ctx.rect(x, y, w, h);
+  }
+  // The tail, pointing down-left, is what makes a rounded rectangle read as
+  // speech at 18px rather than as a button.
+  ctx.moveTo(x + w * 0.28, y + h);
+  ctx.lineTo(x + w * 0.24, y + h + r * 0.62);
+  ctx.lineTo(x + w * 0.55, y + h);
+  ctx.closePath();
+
+  ctx.fillStyle = theme.bubbleFill;
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = theme.bubbleStroke;
+  ctx.stroke();
+
+  ctx.strokeStyle = theme.bubbleGlyph;
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 2; i++) {
+    const ly = Math.round(y + h * (0.36 + i * 0.32)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(x + w * 0.22, ly);
+    ctx.lineTo(x + w * (i === 0 ? 0.78 : 0.62), ly);
+    ctx.stroke();
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Stubs                                                                      */
 /* -------------------------------------------------------------------------- */
@@ -636,27 +757,52 @@ function ellipsize(
 /* -------------------------------------------------------------------------- */
 
 /**
+ * Centre of the message bubble for an edge, or null where one cannot be drawn.
+ *
+ * The midpoint is the only stable anchor on a sloped segment: both endpoints
+ * are already crowded by the lifeline column and the arrowhead, and a fixed
+ * offset from either end drifts as the slope changes.
+ */
+export function edgeBubbleAt(e: FrameEdge): { x: number; y: number } | null {
+  if (e.kind !== 'message') return null;
+  if (e.opacity <= 0.05) return null;
+  if (Math.hypot(e.x2 - e.x1, e.y2 - e.y1) < MIN_BUBBLE_EDGE_LENGTH) return null;
+  return { x: (e.x1 + e.x2) / 2, y: (e.y1 + e.y2) / 2 };
+}
+
+/**
  * Topmost thing under `(x, y)`.
+ *
+ * Resolution follows paint order, because what the viewer is pointing at is
+ * whatever they can see: the hover bubble first, then edges and stubs, then
+ * intervals. Arrows are drawn over the bars they cross, and nearly every arrow
+ * crosses one; searching intervals first made those arrows unreachable, which
+ * is most of them. The cost is a ~5px band along each arrow where a bar cannot
+ * be clicked, and a bar is a far larger target than a hairline.
  *
  * Intervals are searched last-drawn first, which is deepest first, so clicking
  * a nested tool span selects the tool and not the session that encloses it.
- * Edges and stubs are only considered where no interval was hit, since they are
- * one-dimensional and would otherwise steal clicks from the bars beneath them.
  */
-export function hitTest(model: FrameModel, x: number, y: number): HitResult | null {
-  for (let i = model.intervals.length - 1; i >= 0; i--) {
-    const iv = model.intervals[i];
-    if (iv.opacity <= 0.01) continue;
-    if (
-      x >= iv.x &&
-      x <= iv.x + Math.max(1, iv.width) &&
-      y >= iv.y &&
-      y <= iv.y + Math.max(1, iv.height)
-    ) {
-      return { type: 'interval', interval: iv };
+export function hitTest(
+  model: FrameModel,
+  x: number,
+  y: number,
+  interaction?: FrameInteraction,
+): HitResult | null {
+  // The bubble is only present while its edge is hovered, and while present it
+  // outranks everything: it is a small deliberate target drawn on top.
+  const hoverId = interaction?.hoverEdgeId;
+  if (hoverId) {
+    const e = model.edges.find((c) => c.id === hoverId);
+    const b = e ? edgeBubbleAt(e) : null;
+    if (e && b && Math.hypot(x - b.x, y - b.y) <= EDGE_BUBBLE_RADIUS + 2) {
+      return { type: 'edge-bubble', edge: e };
     }
   }
+  return hitTestStatic(model, x, y);
+}
 
+function hitTestStatic(model: FrameModel, x: number, y: number): HitResult | null {
   let best: HitResult | null = null;
   let bestDist = EDGE_HIT_TOLERANCE;
   for (let i = model.edges.length - 1; i >= 0; i--) {
@@ -677,7 +823,21 @@ export function hitTest(model: FrameModel, x: number, y: number): HitResult | nu
       best = { type: 'stub', stub: s };
     }
   }
-  return best;
+  if (best) return best;
+
+  for (let i = model.intervals.length - 1; i >= 0; i--) {
+    const iv = model.intervals[i];
+    if (iv.opacity <= 0.01) continue;
+    if (
+      x >= iv.x &&
+      x <= iv.x + Math.max(1, iv.width) &&
+      y >= iv.y &&
+      y <= iv.y + Math.max(1, iv.height)
+    ) {
+      return { type: 'interval', interval: iv };
+    }
+  }
+  return null;
 }
 
 function distanceToSegment(

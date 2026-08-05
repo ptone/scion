@@ -110,7 +110,7 @@ function pad(n: number, width = 2): string {
 }
 
 /** Parses RFC3339 / RFC3339Nano, truncating beyond millisecond precision. */
-function parseInstantMs(value: string): number | null {
+export function parseInstantMs(value: string): number | null {
   if (!value) return null;
   const normalized = value.replace(/(\.\d{3})\d+/, '$1');
   const t = Date.parse(normalized);
@@ -118,7 +118,7 @@ function parseInstantMs(value: string): number | null {
 }
 
 /** Absolute local timestamp for a run-relative offset. */
-function formatAbsolute(baseMs: number | null, offsetMs: number): string {
+export function formatAbsolute(baseMs: number | null, offsetMs: number): string {
   if (baseMs === null) return '—';
   const d = new Date(baseMs + offsetMs);
   return (

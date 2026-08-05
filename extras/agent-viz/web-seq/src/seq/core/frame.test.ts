@@ -16,9 +16,9 @@ import { describe, expect, it } from 'vitest';
 
 import type { ColumnLayout } from './columns.js';
 import { computeColumns } from './columns.js';
-import type { FrameGeometry, FrameModel } from './frame.js';
+import type { FrameEdge, FrameGeometry, FrameModel } from './frame.js';
 import { buildFrame, resolveGeometry, streakFactorFor } from './frame.js';
-import { hitTest } from './render.js';
+import { EDGE_BUBBLE_RADIUS, edgeBubbleAt, hitTest } from './render.js';
 import type {
   Confidence,
   Digest,
@@ -723,5 +723,101 @@ describe('hitTest', () => {
   it('returns null over empty space', () => {
     const model = frameOf(digest);
     expect(hitTest(model, 299, 399)).toBeNull();
+  });
+
+  it('prefers an arrow to the bar it crosses', () => {
+    // Almost every arrow passes over an activation bar somewhere along its
+    // length. Resolving to the bar there made those arrows unhoverable, and so
+    // unreadable, which is the bug this ordering exists to prevent.
+    const overlap = makeDigest(
+      TWO_AGENTS,
+      [{ id: 'tool', lifelineId: 'a', startMs: 3500, endMs: 4500, depth: 1 }],
+      [{ id: 'm2', fromId: 'a', toId: 'b', sendMs: 4000, recvMs: 4050 }],
+    );
+    const model = frameOf(overlap);
+    const e = model.edges[0];
+    const iv = model.intervals.find((i) => i.id === 'tool');
+    expect(iv).toBeDefined();
+    const t = 0.05;
+    const x = e.x1 + (e.x2 - e.x1) * t;
+    const y = e.y1 + (e.y2 - e.y1) * t;
+    expect(x).toBeGreaterThanOrEqual(iv!.x);
+    expect(x).toBeLessThanOrEqual(iv!.x + iv!.width);
+    expect(y).toBeGreaterThanOrEqual(iv!.y);
+    expect(y).toBeLessThanOrEqual(iv!.y + iv!.height);
+    expect(hitTest(model, x, y)?.type).toBe('edge');
+  });
+
+  it('prefers the bubble over the line it hangs on', () => {
+    const model = frameOf(digest);
+    const e = model.edges[0];
+    const at = edgeBubbleAt(e);
+    expect(at).not.toBeNull();
+    const hit = hitTest(model, at!.x, at!.y, { hoverEdgeId: 'm' });
+    expect(hit?.type).toBe('edge-bubble');
+  });
+
+  it('has no bubble until its edge is hovered', () => {
+    const model = frameOf(digest);
+    const at = edgeBubbleAt(model.edges[0])!;
+    expect(hitTest(model, at.x, at.y)?.type).toBe('edge');
+    // A different edge being hovered must not conjure one here either.
+    expect(hitTest(model, at.x, at.y, { hoverEdgeId: 'other' })?.type).toBe('edge');
+  });
+
+  it('extends the hit area beyond the line tolerance, so the bubble is reachable', () => {
+    const model = frameOf(digest);
+    const e = model.edges[0];
+    const at = edgeBubbleAt(e)!;
+    // Perpendicular to the segment, further out than the 5px line tolerance:
+    // without the bubble the pointer would fall off the arrow on the way to it.
+    const len = Math.hypot(e.x2 - e.x1, e.y2 - e.y1);
+    const nx = -(e.y2 - e.y1) / len;
+    const ny = (e.x2 - e.x1) / len;
+    const off = EDGE_BUBBLE_RADIUS - 1;
+    const hit = hitTest(model, at.x + nx * off, at.y + ny * off, { hoverEdgeId: 'm' });
+    expect(hit?.type).toBe('edge-bubble');
+  });
+
+});
+
+describe('edgeBubbleAt', () => {
+  const base = (over: Partial<FrameEdge> = {}): FrameEdge => ({
+    id: 'e',
+    kind: 'message',
+    fromId: 'a',
+    toId: 'b',
+    x1: 0,
+    y1: 0,
+    x2: 200,
+    y2: 40,
+    sendMs: 0,
+    recvMs: 100,
+    latencyMs: 100,
+    recvConfidence: 'measured',
+    broadcast: false,
+    colorKey: '#fff',
+    zone: 'frame',
+    opacity: 1,
+    ...over,
+  });
+
+  it('sits at the midpoint', () => {
+    expect(edgeBubbleAt(base())).toEqual({ x: 100, y: 20 });
+  });
+
+  it('refuses non-message edges', () => {
+    // Spawn and destroy arrows have no body to read, so an affordance
+    // promising one would be a lie.
+    expect(edgeBubbleAt(base({ kind: 'spawn' }))).toBeNull();
+    expect(edgeBubbleAt(base({ kind: 'destroy' }))).toBeNull();
+  });
+
+  it('refuses segments too short to hold the glyph', () => {
+    expect(edgeBubbleAt(base({ x2: 20, y2: 4 }))).toBeNull();
+  });
+
+  it('refuses edges that have all but faded out', () => {
+    expect(edgeBubbleAt(base({ opacity: 0.02 }))).toBeNull();
   });
 });

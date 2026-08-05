@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -940,4 +941,72 @@ func TestSyntheticRunRespectsContainment(t *testing.T) {
 		t.Fatalf("BuildSyntheticDigest: %v", err)
 	}
 	assertContainment(t, d)
+}
+
+// The overlay shows the message text, so the digest has to carry it -- and has
+// to be honest when it is only carrying the beginning of it.
+func TestMessageBodyIsCarriedAndCapped(t *testing.T) {
+	long := strings.Repeat("é", 500) // multi-byte on purpose
+	entries := []logparser.GCPLogEntry{
+		agentEntry("a", 0, msgPreStart, nil),
+		agentEntry("b", 0, msgPreStart, nil),
+		msgEntry("a", "alpha", "b", "beta", 1000, "short and sweet"),
+		msgEntry("a", "alpha", "b", "beta", 2000, long),
+	}
+	opts := DefaultOptions()
+	opts.MaxBodyLen = 100
+	d := mustBuild(t, entries, manifest(agent("a", "alpha"), agent("b", "beta")), opts)
+
+	var msgs []Edge
+	for _, e := range d.Edges {
+		if e.Kind == EdgeMessage {
+			msgs = append(msgs, e)
+		}
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("want 2 message edges, got %d", len(msgs))
+	}
+
+	if msgs[0].Body != "short and sweet" || msgs[0].BodyTruncated {
+		t.Errorf("short message = %q truncated=%v, want it carried whole",
+			msgs[0].Body, msgs[0].BodyTruncated)
+	}
+
+	if !msgs[1].BodyTruncated {
+		t.Error("long message should be flagged as truncated")
+	}
+	if n := len([]rune(msgs[1].Body)); n != 100 {
+		t.Errorf("body is %d runes, want the 100-rune cap", n)
+	}
+	// Byte-slicing a multi-byte string would leave a mangled final character.
+	if strings.ContainsRune(msgs[1].Body, '�') {
+		t.Error("body was cut mid-rune")
+	}
+}
+
+// A digest may need to travel somewhere the message text should not.
+func TestMessageBodyCanBeDisabled(t *testing.T) {
+	entries := []logparser.GCPLogEntry{
+		agentEntry("a", 0, msgPreStart, nil),
+		agentEntry("b", 0, msgPreStart, nil),
+		msgEntry("a", "alpha", "b", "beta", 1000, "confidential"),
+	}
+	opts := DefaultOptions()
+	opts.MaxBodyLen = -1
+	d := mustBuild(t, entries, manifest(agent("a", "alpha"), agent("b", "beta")), opts)
+	for _, e := range d.Edges {
+		if e.Kind != EdgeMessage {
+			continue
+		}
+		if e.Body != "" {
+			t.Errorf("body = %q, want it omitted", e.Body)
+		}
+		if !e.BodyTruncated {
+			t.Error("omitting a non-empty body should still be flagged as truncated")
+		}
+		// The one-line label is a separate, much shorter field and stays.
+		if e.Label == "" {
+			t.Error("label should survive when bodies are disabled")
+		}
+	}
 }

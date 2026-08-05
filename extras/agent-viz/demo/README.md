@@ -86,6 +86,10 @@ Load `wide`, since it has the most going on:
   recomputing per frame would make columns shimmer.
 - **Click any bar** for details, including a Cloud Logging deep link (it carries
   project and a ±5 min window, so it lands on the right rows).
+- **Hover a message arrow.** It highlights and grows a chat bubble at its
+  midspan; click that to read the message text with its timings, latency and
+  arrival confidence. Playback pauses while the reader is open. Bodies are
+  capped at 2,000 characters (`--max-body`), and a truncated one says so.
 - **`+` / `-`** zoom the time axis. Bar heights scale exactly with duration at
   every zoom level — that invariant is asserted in the tests.
 - Check the **run overview** rail on the right. It stays strictly linear in wall

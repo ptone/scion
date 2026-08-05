@@ -1531,6 +1531,7 @@
       "msgType": "instruction",
       "label": "found a race in the playback engine",
       "broadcast": true,
+      "body": "found a race in the playback engine",
       "logId": "synth-0000167"
     },
     {
@@ -1542,8 +1543,9 @@
       "recvMs": 25221.622,
       "recvConfidence": "measured",
       "msgType": "handoff",
-      "label": "picking up the parser refactor now",
+      "label": "done - shutting down",
       "broadcast": true,
+      "body": "done - shutting down",
       "logId": "synth-0000161"
     },
     {
@@ -1566,7 +1568,8 @@
       "recvMs": 51133.021,
       "recvConfidence": "measured",
       "msgType": "review",
-      "label": "picking up the parser refactor now",
+      "label": "Status on the parser refactor.  Done: the entry loader now sorts by resolved timestamp rather than by the raw string, so out-of-order export…",
+      "body": "Status on the parser refactor.\n\nDone: the entry loader now sorts by resolved timestamp rather than by the\nraw string, so out-of-order exports stop producing negative durations.\n\nIn progress: pairing the two message phases. The awkward part is that the\nacknowledgement carries no reference to the dispatch, so the key has to be\n(sender, recipient, content) and the match has to be FIFO within a window.\n\nBlocked on: whether we care about messages whose recipient never acked. I\nhave been treating those as inferred arrivals; say if you would rather drop\nthem.",
       "logId": "synth-0000163"
     },
     {
@@ -1600,7 +1603,8 @@
       "recvMs": 72428.111,
       "recvConfidence": "measured",
       "msgType": "review",
-      "label": "done - shutting down",
+      "label": "Review notes on the velocity planner:  1. The forward pass looks right, but the backward pass is doing the work    twice for the last bucket…",
+      "body": "Review notes on the velocity planner:\n\n1. The forward pass looks right, but the backward pass is doing the work\n   twice for the last bucket. Harmless, just wasteful.\n2. u = v^2/2 is the right substitution, though the comment explaining why\n   should say that it makes the acceleration limit linear in u.\n3. Please add a test for the case where every bucket is empty. Right now\n   that divides by the peak, which is zero.\n\nNothing blocking. Ship it once (3) is covered.",
       "logId": "synth-0000159"
     },
     {
@@ -1634,7 +1638,8 @@
       "recvMs": 92915.885,
       "recvConfidence": "measured",
       "msgType": "answer",
-      "label": "found a race in the playback engine",
+      "label": "please review the velocity planner maths",
+      "body": "please review the velocity planner maths",
       "logId": "synth-0000165"
     },
     {
@@ -1670,6 +1675,7 @@
       "msgType": "review",
       "label": "please review the velocity planner maths",
       "broadcast": true,
+      "body": "please review the velocity planner maths",
       "logId": "synth-0000269"
     },
     {
@@ -1691,7 +1697,8 @@
       "recvMs": 338597.007,
       "recvConfidence": "measured",
       "msgType": "instruction",
-      "label": "please review the velocity planner maths",
+      "label": "Heads up: I am seeing a race in the playback engine.  Reproduce by scrubbing while playing. The rAF callback and the scrub handler both writ…",
+      "body": "Heads up: I am seeing a race in the playback engine.\n\nReproduce by scrubbing while playing. The rAF callback and the scrub handler\nboth write playheadMs, and the rAF one wins about one time in five, so the\nplayhead snaps back to where it was a frame earlier. It looks like a dropped\nclick but it is a lost write.\n\nSuggested fix is to make the scrub set a pending target that the rAF loop\nconsumes, rather than having two writers.",
       "logId": "synth-0000263"
     },
     {
@@ -1714,7 +1721,8 @@
       "recvMs": 346554.889,
       "recvConfidence": "measured",
       "msgType": "instruction",
-      "label": "found a race in the playback engine",
+      "label": "handing the integration work back to you",
+      "body": "handing the integration work back to you",
       "logId": "synth-0000261"
     },
     {
@@ -1737,7 +1745,8 @@
       "recvMs": 352633.259,
       "recvConfidence": "measured",
       "msgType": "instruction",
-      "label": "blocked on the schema change, need a decision",
+      "label": "picking up the parser refactor now",
+      "body": "picking up the parser refactor now",
       "logId": "synth-0000267"
     },
     {
@@ -1749,7 +1758,8 @@
       "recvMs": 355664.469,
       "recvConfidence": "measured",
       "msgType": "answer",
-      "label": "handing the integration work back to you",
+      "label": "found a race in the playback engine",
+      "body": "found a race in the playback engine",
       "logId": "synth-0000265"
     },
     {
@@ -1772,7 +1782,8 @@
       "recvMs": 357988.12,
       "recvConfidence": "measured",
       "msgType": "handoff",
-      "label": "handing the integration work back to you",
+      "label": "please review the velocity planner maths",
+      "body": "please review the velocity planner maths",
       "logId": "synth-0000259"
     }
   ],

@@ -159,6 +159,13 @@ func normalizeOptions(o Options) Options {
 	if o.InferRecvWindowMs < 0 {
 		o.InferRecvWindowMs = def.InferRecvWindowMs
 	}
+	if o.MaxBodyLen == 0 {
+		o.MaxBodyLen = def.MaxBodyLen
+	} else if o.MaxBodyLen < 0 {
+		// Explicitly disabled. clipRunes treats any non-positive limit as "clip
+		// everything", so normalise to exactly zero.
+		o.MaxBodyLen = 0
+	}
 	return o
 }
 
@@ -891,6 +898,7 @@ func (b *builder) buildEdges(parsed *logparser.ParseResult) {
 			// than guessed, and it is what makes the arrow's slope honest.
 			recv, conf = ackMs, ConfidenceMeasured
 		}
+		body, bodyCut := clipRunes(meta.content, b.opts.MaxBodyLen)
 		b.edges = append(b.edges, Edge{
 			Kind:           EdgeMessage,
 			FromID:         fromID,
@@ -901,6 +909,9 @@ func (b *builder) buildEdges(parsed *logparser.ParseResult) {
 			MsgType:        meta.msgType,
 			Label:          truncateLabel(meta.content),
 			Broadcast:      meta.broadcast,
+			Urgent:         meta.urgent,
+			Body:           body,
+			BodyTruncated:  bodyCut,
 			LogID:          ev.entry.InsertID,
 		})
 	}
@@ -1076,6 +1087,7 @@ type messageMeta struct {
 	msgType   string
 	content   string
 	broadcast bool
+	urgent    bool
 }
 
 // messageEndpoints resolves a message entry's sender and recipient to lifeline
@@ -1095,6 +1107,7 @@ func (b *builder) messageEndpoints(ev logEvent) (fromID, toID string, meta messa
 		msgType:   firstNonEmpty(payloadStr(jp, "msg_type"), ev.entry.Labels["msg_type"]),
 		content:   payloadStr(jp, "message_content"),
 		broadcast: payloadBool(jp, "broadcasted"),
+		urgent:    payloadBool(jp, "urgent"),
 	}
 	return b.resolveAgentRefAt(sender, senderID, ev.ms),
 		b.resolveAgentRefAt(recipient, recipientID, ev.ms),
@@ -1282,9 +1295,28 @@ func shortID(id string) string {
 }
 
 func truncateLabel(s string) string {
-	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
-	if len(s) <= maxLabelLen {
-		return s
+	out, cut := clipRunes(strings.TrimSpace(strings.ReplaceAll(s, "\n", " ")), maxLabelLen)
+	if cut {
+		return out + "…"
 	}
-	return s[:maxLabelLen] + "…"
+	return out
+}
+
+// clipRunes truncates to at most n runes, reporting whether anything was
+// removed. Runes rather than bytes: slicing a UTF-8 string by byte count
+// happily cuts a multi-byte character in half and emits a replacement glyph.
+// A limit of 0 clips everything, which is how bodies are switched off.
+func clipRunes(s string, n int) (string, bool) {
+	if n <= 0 {
+		return "", s != ""
+	}
+	if len(s) <= n {
+		// Bytes >= runes, so this is a safe fast path.
+		return s, false
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s, false
+	}
+	return string(r[:n]), true
 }

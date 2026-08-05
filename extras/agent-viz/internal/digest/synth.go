@@ -56,6 +56,13 @@ var synthTools = []string{"Read", "Edit", "Write", "Grep", "Glob", "WebFetch", "
 
 var synthMsgTypes = []string{"instruction", "status", "question", "answer", "review", "handoff"}
 
+// synthContent is the pool of message bodies.
+//
+// The long, multi-line entries are not padding. Real agent traffic averages a
+// few hundred characters and reaches well past a thousand -- on one production
+// export, a median of 376 and a maximum of 1489 -- so a pool of one-line
+// pleasantries would make the message overlay look effortless and hide every
+// wrapping, scrolling and truncation problem until someone loaded a real run.
 var synthContent = []string{
 	"picking up the parser refactor now",
 	"blocked on the schema change, need a decision",
@@ -65,6 +72,37 @@ var synthContent = []string{
 	"found a race in the playback engine",
 	"spawning two helpers for the sweep",
 	"done - shutting down",
+	`Status on the parser refactor.
+
+Done: the entry loader now sorts by resolved timestamp rather than by the
+raw string, so out-of-order exports stop producing negative durations.
+
+In progress: pairing the two message phases. The awkward part is that the
+acknowledgement carries no reference to the dispatch, so the key has to be
+(sender, recipient, content) and the match has to be FIFO within a window.
+
+Blocked on: whether we care about messages whose recipient never acked. I
+have been treating those as inferred arrivals; say if you would rather drop
+them.`,
+	`Review notes on the velocity planner:
+
+1. The forward pass looks right, but the backward pass is doing the work
+   twice for the last bucket. Harmless, just wasteful.
+2. u = v^2/2 is the right substitution, though the comment explaining why
+   should say that it makes the acceleration limit linear in u.
+3. Please add a test for the case where every bucket is empty. Right now
+   that divides by the peak, which is zero.
+
+Nothing blocking. Ship it once (3) is covered.`,
+	`Heads up: I am seeing a race in the playback engine.
+
+Reproduce by scrubbing while playing. The rAF callback and the scrub handler
+both write playheadMs, and the rAF one wins about one time in five, so the
+playhead snaps back to where it was a frame earlier. It looks like a dropped
+click but it is a lost write.
+
+Suggested fix is to make the scrub set a pending target that the rAF loop
+consumes, rather than having two writers.`,
 }
 
 // SynthesizeLog produces a deterministic, realistic-looking Cloud Logging

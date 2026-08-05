@@ -51,12 +51,15 @@ func main() {
 		"Maximum playback velocity, in wall-ms per viewer-ms")
 	maxAccel := flag.Float64("max-accel", opts.MaxAccel,
 		"Maximum rate of change of v^2/2 with respect to wall time")
+	maxBody := flag.Int("max-body", opts.MaxBodyLen,
+		"Characters of message text to carry in the digest (-1 to omit bodies entirely)")
 	flag.Parse()
 
 	opts.FrameMs = float64(frame.Milliseconds())
 	opts.TargetEventsPerViewerSecond = *targetRate
 	opts.MaxVelocity = *maxVelocity
 	opts.MaxAccel = *maxAccel
+	opts.MaxBodyLen = *maxBody
 
 	// --dump-log writes the raw synthetic export. Kept separate from the digest
 	// path so demo data can exercise the real log parser rather than bypassing
