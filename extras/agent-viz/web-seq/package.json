@@ -1,0 +1,30 @@
+{
+  "name": "scion-seq-viz",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Sliding-window sequence visualizer for multi-agent activity. Dependency versions are pinned to match /workspace/web so components can be promoted into the main UI with minimal churn.",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "postinstall": "npm run copy:shoelace-icons",
+    "copy:shoelace-icons": "node scripts/copy-shoelace-icons.mjs",
+    "dev": "npm run copy:shoelace-icons && vite",
+    "build": "npm run copy:shoelace-icons && vite build",
+    "postbuild": "node -e \"require('fs').closeSync(require('fs').openSync('../internal/seqserver/dist/.gitkeep','a'))\"",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@shoelace-style/shoelace": "^2.19.0",
+    "lit": "^3.1.2"
+  },
+  "devDependencies": {
+    "happy-dom": "^20.10.6",
+    "typescript": "^5.3.3",
+    "vite": "^7.3.2",
+    "vitest": "^4.1.10"
+  }
+}

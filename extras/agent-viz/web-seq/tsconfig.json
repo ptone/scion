@@ -1,0 +1,29 @@
+{
+  "//": "Mirrors /workspace/web/tsconfig.json so components authored here compile unchanged when promoted into the main UI. Note NodeNext resolution: all relative imports must carry a .js extension, and decorators are legacy TS decorators (useDefineForClassFields false) as Lit expects.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+
+    "experimentalDecorators": true,
+    "useDefineForClassFields": false,
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true,
+
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*.ts", "src/vite-env.d.ts"],
+  "exclude": ["src/**/*.test.ts", "node_modules", "dist"]
+}

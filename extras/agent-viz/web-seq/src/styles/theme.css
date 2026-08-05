@@ -1,0 +1,133 @@
+/*
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/*
+ * Condensed subset of /workspace/web/src/styles/theme.css, using identical
+ * token names so components authored here inherit the real theme unchanged
+ * when promoted into the main UI. As there, --sl-* is remapped onto --scion-*
+ * so Shoelace picks up the theme automatically and components need no
+ * dark-mode code of their own.
+ */
+
+:root {
+  --scion-primary-50: #eff6ff;
+  --scion-primary-100: #dbeafe;
+  --scion-primary-300: #93c5fd;
+  --scion-primary: #3b82f6;
+  --scion-primary-600: #2563eb;
+  --scion-primary-700: #1d4ed8;
+
+  --scion-success: #10b981;
+  --scion-success-600: #059669;
+  --scion-warning: #f59e0b;
+  --scion-warning-600: #d97706;
+  --scion-danger: #ef4444;
+  --scion-danger-600: #dc2626;
+
+  --scion-neutral-100: #f1f5f9;
+  --scion-neutral-300: #cbd5e1;
+  --scion-neutral-400: #94a3b8;
+  --scion-neutral-500: #64748b;
+  --scion-neutral-700: #334155;
+  --scion-neutral-800: #1e293b;
+  --scion-neutral-900: #0f172a;
+
+  /* Semantic layer - the only thing dark mode overrides. */
+  --scion-bg: #ffffff;
+  --scion-bg-subtle: #f8fafc;
+  --scion-surface: #ffffff;
+  --scion-surface-raised: #ffffff;
+  --scion-text: #0f172a;
+  --scion-text-secondary: #334155;
+  --scion-text-muted: #64748b;
+  --scion-text-disabled: #94a3b8;
+  --scion-border: #e2e8f0;
+  --scion-border-hover: #cbd5e1;
+  --scion-border-active: #94a3b8;
+
+  --scion-font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --scion-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+
+  --scion-font-size-xs: 0.75rem;
+  --scion-font-size-sm: 0.875rem;
+  --scion-font-size-base: 1rem;
+  --scion-font-size-lg: 1.125rem;
+  --scion-font-size-xl: 1.25rem;
+
+  --scion-radius-sm: 0.25rem;
+  --scion-radius: 0.5rem;
+  --scion-radius-md: 0.5rem;
+  --scion-radius-lg: 0.75rem;
+  --scion-radius-full: 9999px;
+
+  --scion-space-1: 0.25rem;
+  --scion-space-2: 0.5rem;
+  --scion-space-3: 0.75rem;
+  --scion-space-4: 1rem;
+  --scion-space-6: 1.5rem;
+
+  --scion-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --scion-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+  --scion-shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+
+  --scion-transition-fast: 150ms ease;
+  --scion-transition-normal: 250ms ease;
+}
+
+.sl-theme-dark,
+[data-theme='dark'],
+:root.dark {
+  --scion-bg: #0f172a;
+  --scion-bg-subtle: #131c31;
+  --scion-surface: #1e293b;
+  --scion-surface-raised: #263449;
+  --scion-text: #f1f5f9;
+  --scion-text-secondary: #cbd5e1;
+  --scion-text-muted: #94a3b8;
+  --scion-text-disabled: #64748b;
+  --scion-border: #334155;
+  --scion-border-hover: #475569;
+  --scion-border-active: #64748b;
+
+  --scion-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+  --scion-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.5);
+  --scion-shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.6);
+}
+
+/* Remap Shoelace onto the scion tokens. */
+:root,
+.sl-theme-dark,
+[data-theme='dark'] {
+  --sl-color-primary-600: var(--scion-primary-600);
+  --sl-color-primary-500: var(--scion-primary);
+  --sl-color-success-600: var(--scion-success-600);
+  --sl-color-warning-600: var(--scion-warning-600);
+  --sl-color-danger-600: var(--scion-danger-600);
+  --sl-color-neutral-0: var(--scion-surface);
+  --sl-color-neutral-500: var(--scion-text-muted);
+  --sl-color-neutral-700: var(--scion-text-secondary);
+  --sl-color-neutral-1000: var(--scion-text);
+  --sl-panel-background-color: var(--scion-surface);
+  --sl-panel-border-color: var(--scion-border);
+  --sl-input-background-color: var(--scion-surface);
+  --sl-input-border-color: var(--scion-border);
+  --sl-input-color: var(--scion-text);
+  --sl-font-sans: var(--scion-font-sans);
+  --sl-font-mono: var(--scion-font-mono);
+  --sl-border-radius-medium: var(--scion-radius);
+  --sl-border-radius-large: var(--scion-radius-lg);
+}

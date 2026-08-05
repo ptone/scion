@@ -1,4 +1,9 @@
 /agent-viz
+/seq-viz
 web/node_modules/
 internal/server/dist/*
 !internal/server/dist/.gitkeep
+web-seq/node_modules/
+web-seq/public/shoelace/
+internal/seqserver/dist/*
+!internal/seqserver/dist/.gitkeep
