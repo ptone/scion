@@ -218,6 +218,11 @@ export interface Stats {
   inferredIntervals: number;
   openIntervals: number;
   inferredEdges: number;
+  /**
+   * Edges whose arrival time came from the log rather than from inference.
+   * Only these arrows have an honest slope.
+   */
+  measuredEdges: number;
 
   /** `durationMs / warp.totalTauMs`: speedup over real time at 1x. */
   compressionRatio: number;

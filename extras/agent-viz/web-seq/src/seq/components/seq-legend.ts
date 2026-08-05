@@ -431,17 +431,37 @@ export class ScionSeqLegend extends LitElement {
           <span class="count open" title="Intervals with no observed end"
             >${stats.openIntervals} open</span
           >
-          <span class="count edges" title="Edges whose arrival time was inferred"
+          <span
+            class="count edges"
+            title="Arrows whose arrival time was inferred from recipient activity; their slope is a guess"
             >${stats.inferredEdges} inferred edges</span
           >
         </div>
         <div class="ratio">
           ${measuredPct}% of ${stats.intervalCount} intervals are fully measured across
-          ${stats.lifelineCount} lifelines.
+          ${stats.lifelineCount} lifelines. ${edgeSlopeNote(stats)}
         </div>
       </div>
     `;
   }
+}
+
+/**
+ * One sentence on how far the arrow slopes can be trusted.
+ *
+ * Slope is the most seductive thing on the canvas -- it looks like latency
+ * whether or not anyone measured it -- so the legend says outright what share
+ * of it is real for this particular run.
+ */
+function edgeSlopeNote(stats: Stats): string {
+  const total = stats.measuredEdges + stats.inferredEdges;
+  if (total === 0) return '';
+  if (stats.measuredEdges === 0) {
+    return 'No arrival times were logged, so every arrow slope is inferred.';
+  }
+  const pct = Math.round((stats.measuredEdges / total) * 100);
+  if (pct >= 99) return 'Arrow slopes are measured delivery latency.';
+  return `${pct}% of arrow slopes are measured delivery latency; the rest are inferred.`;
 }
 
 declare global {

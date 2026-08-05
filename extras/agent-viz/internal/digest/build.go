@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -180,6 +181,9 @@ type builder struct {
 	lifelines []*Lifeline
 	byID      map[string]*Lifeline
 	idByName  map[string]string
+	// idsByName holds every lifeline sharing a name, in creation order. Names
+	// are not unique: a restarted agent reuses its name with a fresh ID.
+	idsByName map[string][]string
 	firstSeen map[string]float64
 
 	intervals []Interval
@@ -234,6 +238,7 @@ func (b *builder) loadEntries(entries []logparser.GCPLogEntry) error {
 func (b *builder) initLifelines(parsed *logparser.ParseResult) {
 	b.byID = make(map[string]*Lifeline)
 	b.idByName = make(map[string]string)
+	b.idsByName = make(map[string][]string)
 	b.firstSeen = make(map[string]float64)
 
 	add := func(id, name, harness, color string) *Lifeline {
@@ -261,6 +266,7 @@ func (b *builder) initLifelines(parsed *logparser.ParseResult) {
 		if _, ok := b.idByName[name]; !ok {
 			b.idByName[name] = id
 		}
+		b.idsByName[name] = append(b.idsByName[name], id)
 		return l
 	}
 
@@ -379,7 +385,9 @@ func (b *builder) resolveAncestry(parsed *logparser.ParseResult) {
 			if !ok || child.ParentID != "" {
 				continue
 			}
-			if pid := b.resolveAgentRef(lc.RequestedBy, ""); pid != "" && pid != child.ID {
+			// Resolve as of the child's birth: whoever created it had to be
+			// alive at that moment, which disambiguates a recycled name.
+			if pid := b.resolveAgentRefAt(lc.RequestedBy, "", child.BirthMs); pid != "" && pid != child.ID {
 				child.ParentID = pid
 			}
 		}
@@ -587,6 +595,84 @@ func (b *builder) lifelineIntervals(l *Lifeline, evs []logEvent) []Interval {
 		}
 	}
 
+	// closeNested ends every still-open span deeper than depth at end.
+	//
+	// A span cannot outlive the thing that contains it: a turn ending is itself
+	// evidence that any tool call inside it finished, whatever the log did or
+	// did not say. Without this a dropped tool result leaves the call floating
+	// until some unrelated later event happens to close it, and the bar draws
+	// hundreds of seconds outside its parent -- which in a per-lifeline flame
+	// graph reads as nonsense. The end is inferred, not measured: all we know is
+	// that it happened no later than this.
+	closeNested := func(depth int, end float64) {
+		var nested []*openSpan
+		for k, st := range stacks {
+			if kindDepth[k] <= depth {
+				continue
+			}
+			nested = append(nested, st...)
+			stacks[k] = nil
+		}
+		if len(nested) == 0 {
+			return
+		}
+		// Deepest first so an enclosing span is emitted after what it contains,
+		// and deterministically ordered: `stacks` is a map, and interval IDs are
+		// assigned by position, so an unstable order would make regeneration
+		// non-reproducible.
+		sort.SliceStable(nested, func(i, j int) bool {
+			a, c := nested[i], nested[j]
+			if da, dc := kindDepth[a.kind], kindDepth[c.kind]; da != dc {
+				return da > dc
+			}
+			if a.startMs != c.startMs {
+				return a.startMs < c.startMs
+			}
+			return a.logID < c.logID
+		})
+		for _, sp := range nested {
+			e := end
+			if e < sp.startMs {
+				e = sp.startMs
+			}
+			emit(sp.kind, sp.startMs, e, sp.label, sp.logID, ConfidenceInferred, sp.err)
+		}
+	}
+
+	// popEnd finds the open span that an end event closes, plus any spans left
+	// stranded above it on the stack.
+	//
+	// For tools the name matters. Results go missing often enough that a
+	// name-blind pop will close an `Edit` using a `Bash`'s result, inventing a
+	// duration and attaching it to the wrong label. When both sides name the
+	// tool we only pair like with like; a result naming a tool nobody called is
+	// left to the dangling-end path, which infers a start instead.
+	popEnd := func(kind IntervalKind, ev logEvent) (sp *openSpan, stranded []*openSpan, ok bool) {
+		st := stacks[kind]
+		if len(st) == 0 {
+			return nil, nil, false
+		}
+		idx := len(st) - 1
+		if kind == KindTool {
+			if name := payloadStr(ev.entry.JSONPayload, "tool_name"); name != "" {
+				idx = -1
+				for i := len(st) - 1; i >= 0; i-- {
+					if st[i].label == name {
+						idx = i
+						break
+					}
+				}
+				if idx < 0 {
+					return nil, nil, false
+				}
+			}
+		}
+		sp = st[idx]
+		stranded = append(stranded, st[idx+1:]...)
+		stacks[kind] = st[:idx]
+		return sp, stranded, true
+	}
+
 	for i, ev := range evs {
 		kind, isStart, ok := classifyEvent(ev.msg)
 		if !ok {
@@ -604,14 +690,21 @@ func (b *builder) lifelineIntervals(l *Lifeline, evs []logEvent) []Interval {
 			continue
 		}
 
-		st := stacks[kind]
-		if n := len(st); n > 0 {
-			sp := st[n-1]
-			stacks[kind] = st[:n-1]
+		if sp, stranded, matched := popEnd(kind, ev); matched {
 			end := ev.ms
 			if sp.childEnd > end {
 				end = sp.childEnd
 			}
+			// Calls that were still open on this stack never got a result of
+			// their own; they cannot have outlasted the one that just closed.
+			for _, s := range stranded {
+				e := end
+				if e < s.startMs {
+					e = s.startMs
+				}
+				emit(s.kind, s.startMs, e, s.label, s.logID, ConfidenceInferred, s.err)
+			}
+			closeNested(kindDepth[kind], end)
 			emit(kind, sp.startMs, end, sp.label, sp.logID, ConfidenceMeasured, sp.err || entryIsError(ev.entry))
 			noteClose(kind, end)
 			continue
@@ -626,6 +719,19 @@ func (b *builder) lifelineIntervals(l *Lifeline, evs []logEvent) []Interval {
 		if start > ev.ms {
 			start = ev.ms
 		}
+		// Anything still open inside this one must have begun after it did, so
+		// pull the inferred start back far enough to actually contain them.
+		for k, st := range stacks {
+			if kindDepth[k] <= kindDepth[kind] {
+				continue
+			}
+			for _, sp := range st {
+				if sp.startMs < start {
+					start = sp.startMs
+				}
+			}
+		}
+		closeNested(kindDepth[kind], ev.ms)
 		emit(kind, start, ev.ms, intervalLabel(kind, l, ev), ev.entry.InsertID, ConfidenceInferred, entryIsError(ev.entry))
 		noteClose(kind, ev.ms)
 	}
@@ -755,11 +861,19 @@ func (b *builder) buildEdges(parsed *logparser.ParseResult) {
 		return sendMs, ConfidenceOpen
 	}
 
+	pairs := b.pairDeliveries()
+
 	for _, ev := range b.events {
 		if ev.stream != "scion-messages" {
 			continue
 		}
 		if strings.Contains(ev.msg, "rejected") {
+			continue
+		}
+		// A paired acknowledgement is not a message of its own: it is the
+		// arrival half of a dispatch we are about to emit. Folding the two rows
+		// into one edge is what stops every message being drawn twice.
+		if pairs.consumedAcks[ev.entry.InsertID] {
 			continue
 		}
 		fromID, toID, meta := b.messageEndpoints(ev)
@@ -771,6 +885,12 @@ func (b *builder) buildEdges(parsed *logparser.ParseResult) {
 			continue
 		}
 		recv, conf := inferRecv(toID, ev.ms)
+		if ackMs, ok := pairs.arrivalMs[ev.entry.InsertID]; ok {
+			// The log told us when the recipient actually took the message.
+			// This is the only place an arrival time is ever measured rather
+			// than guessed, and it is what makes the arrow's slope honest.
+			recv, conf = ackMs, ConfidenceMeasured
+		}
 		b.edges = append(b.edges, Edge{
 			Kind:           EdgeMessage,
 			FromID:         fromID,
@@ -819,15 +939,15 @@ func (b *builder) buildEdges(parsed *logparser.ParseResult) {
 			if !ok {
 				continue
 			}
-			fromID := b.resolveAgentRef(lc.RequestedBy, "")
-			if fromID == "" || fromID == target.ID {
-				continue
-			}
 			t, err := logparser.TimestampToTime(ev.Timestamp)
 			if err != nil {
 				continue
 			}
 			ms := float64(t.Sub(b.start)) / float64(time.Millisecond)
+			fromID := b.resolveAgentRefAt(lc.RequestedBy, "", ms)
+			if fromID == "" || fromID == target.ID {
+				continue
+			}
 			b.edges = append(b.edges, Edge{
 				Kind:           EdgeDestroy,
 				FromID:         fromID,
@@ -852,6 +972,102 @@ func (b *builder) buildEdges(parsed *logparser.ParseResult) {
 	for i := range b.edges {
 		b.edges[i].ID = fmt.Sprintf("e%d", i)
 	}
+}
+
+// Message rows in scion-messages come in two phases. The broker logs the
+// hand-off to the recipient's container, and then the recipient's side logs
+// that it took the message into its inbox. Both rows carry the same endpoints
+// and the same content, so without pairing they look like two separate
+// messages -- which is why an unpaired build reports roughly twice as many
+// edges as there were messages.
+type msgPhase int
+
+const (
+	phaseOther msgPhase = iota
+	phaseSend           // "message dispatched"
+	phaseAck            // "message accepted (buffered)"
+)
+
+func messagePhase(msg string) msgPhase {
+	switch {
+	case strings.Contains(msg, "dispatched"):
+		return phaseSend
+	case strings.Contains(msg, "accepted"):
+		return phaseAck
+	}
+	return phaseOther
+}
+
+// deliveryPairs is the result of matching dispatch rows to acknowledgement
+// rows: the measured arrival time for each dispatch, and the set of
+// acknowledgements that have been folded into one and must not be drawn again.
+type deliveryPairs struct {
+	arrivalMs    map[string]float64 // dispatch InsertID -> arrival offset (ms)
+	consumedAcks map[string]bool    // ack InsertID
+}
+
+// pairDeliveries matches each "message dispatched" row with the
+// "message accepted" row for the same message.
+//
+// There is no message ID in the export, so the key is (sender, recipient,
+// content) and matching is FIFO within that key -- a repeated message is
+// matched oldest-dispatch-first, which is the only ordering consistent with a
+// queue. Pairs are rejected if the acknowledgement precedes the dispatch or
+// falls outside PairDeliveryWindowMs.
+//
+// Exports that carry only one of the two phases pair nothing and fall through
+// to the inference path unchanged, so this is safe on partial logs.
+func (b *builder) pairDeliveries() deliveryPairs {
+	pairs := deliveryPairs{
+		arrivalMs:    make(map[string]float64),
+		consumedAcks: make(map[string]bool),
+	}
+	if b.opts.PairDeliveryWindowMs <= 0 {
+		return pairs
+	}
+
+	type pending struct {
+		insertID string
+		ms       float64
+	}
+	// Keyed on the logical message; each key holds dispatches still awaiting
+	// an acknowledgement, oldest first.
+	waiting := make(map[string][]pending)
+
+	for _, ev := range b.events {
+		if ev.stream != "scion-messages" || strings.Contains(ev.msg, "rejected") {
+			continue
+		}
+		phase := messagePhase(ev.msg)
+		if phase == phaseOther {
+			continue
+		}
+		fromID, toID, meta := b.messageEndpoints(ev)
+		if !meta.valid || fromID == "" || toID == "" {
+			continue
+		}
+		key := fromID + "\x00" + toID + "\x00" + meta.content
+
+		switch phase {
+		case phaseSend:
+			waiting[key] = append(waiting[key], pending{ev.entry.InsertID, ev.ms})
+		case phaseAck:
+			q := waiting[key]
+			// Discard dispatches that have aged out: their acknowledgement
+			// was never logged, so they should keep an inferred arrival.
+			for len(q) > 0 && ev.ms-q[0].ms > b.opts.PairDeliveryWindowMs {
+				q = q[1:]
+			}
+			if len(q) == 0 {
+				waiting[key] = nil
+				continue
+			}
+			pairs.arrivalMs[q[0].insertID] = ev.ms
+			pairs.consumedAcks[ev.entry.InsertID] = true
+			waiting[key] = q[1:]
+		}
+	}
+	return pairs
 }
 
 // messageMeta carries the non-endpoint fields of a message log entry.
@@ -880,12 +1096,28 @@ func (b *builder) messageEndpoints(ev logEvent) (fromID, toID string, meta messa
 		content:   payloadStr(jp, "message_content"),
 		broadcast: payloadBool(jp, "broadcasted"),
 	}
-	return b.resolveAgentRef(sender, senderID), b.resolveAgentRef(recipient, recipientID), meta
+	return b.resolveAgentRefAt(sender, senderID, ev.ms),
+		b.resolveAgentRefAt(recipient, recipientID, ev.ms),
+		meta
 }
 
 // resolveAgentRef maps an agent reference (an ID, a name, or an "agent:name"
-// token) onto a lifeline ID, preferring the ID.
+// token) onto a lifeline ID, without regard to when the reference was made.
+// Prefer resolveAgentRefAt where a timestamp is available.
 func (b *builder) resolveAgentRef(ref, id string) string {
+	return b.resolveAgentRefAt(ref, id, math.NaN())
+}
+
+// resolveAgentRefAt maps an agent reference onto a lifeline ID, preferring the
+// explicit ID and otherwise resolving the name as of time ms.
+//
+// The timestamp matters because a name is not a unique key. An agent that
+// fails to start and is recreated leaves two lifelines called "planner", and
+// most message rows carry only the name -- so a name-only lookup will happily
+// attribute an hour of traffic to a lifeline that lived for three seconds.
+// Resolving against the reference time keeps those arrows on the instance that
+// was actually alive to send or receive them.
+func (b *builder) resolveAgentRefAt(ref, id string, ms float64) string {
 	if id != "" {
 		if _, ok := b.byID[id]; ok {
 			return id
@@ -895,15 +1127,52 @@ func (b *builder) resolveAgentRef(ref, id string) string {
 	if _, ok := b.byID[name]; ok {
 		return name
 	}
-	if lid, ok := b.idByName[name]; ok {
+	if lid := b.pickByName(name, ms); lid != "" {
 		return lid
 	}
 	if id != "" {
-		if lid, ok := b.idByName[id]; ok {
+		if lid := b.pickByName(id, ms); lid != "" {
 			return lid
 		}
 	}
 	return ""
+}
+
+// pickByName chooses among the lifelines sharing a name. With a usable
+// timestamp it prefers one that was alive then, then the nearest by time;
+// otherwise it falls back to the first seen, which is the historical behaviour.
+func (b *builder) pickByName(name string, ms float64) string {
+	ids := b.idsByName[name]
+	switch len(ids) {
+	case 0:
+		return ""
+	case 1:
+		return ids[0]
+	}
+	if math.IsNaN(ms) {
+		return ids[0]
+	}
+	best, bestGap := "", math.Inf(1)
+	for _, id := range ids {
+		l, ok := b.byID[id]
+		if !ok {
+			continue
+		}
+		if ms >= l.BirthMs && ms <= l.DeathMs {
+			return id
+		}
+		gap := l.BirthMs - ms
+		if gap < 0 {
+			gap = ms - l.DeathMs
+		}
+		if gap < bestGap {
+			best, bestGap = id, gap
+		}
+	}
+	if best == "" {
+		return ids[0]
+	}
+	return best
 }
 
 func computeStats(d *Digest, slotCount int) Stats {
@@ -924,8 +1193,11 @@ func computeStats(d *Digest, slotCount int) Stats {
 		}
 	}
 	for _, e := range d.Edges {
-		if e.RecvConfidence == ConfidenceInferred {
+		switch e.RecvConfidence {
+		case ConfidenceInferred:
 			s.InferredEdges++
+		case ConfidenceMeasured:
+			s.MeasuredEdges++
 		}
 	}
 	s.CompressionRatio = 1

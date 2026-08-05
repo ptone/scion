@@ -93,8 +93,10 @@ describe('Go-generated digest', () => {
     for (const list of byLifeline.values()) {
       const sorted = [...list].sort((a, b) => a.depth - b.depth || a.startMs - b.startMs);
       for (const child of sorted) {
+        // Strictly inside: a child that begins at the exact instant a candidate
+        // parent ends is a sibling that followed it, not something nested in it.
         const parent = sorted.find(
-          (p) => p.depth === child.depth - 1 && p.startMs <= child.startMs && p.endMs >= child.startMs
+          (p) => p.depth === child.depth - 1 && p.startMs <= child.startMs && p.endMs > child.startMs
         );
         if (parent) expect(child.endMs).toBeLessThanOrEqual(parent.endMs + 1e-6);
       }

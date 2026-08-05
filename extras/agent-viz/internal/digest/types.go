@@ -301,6 +301,11 @@ type Stats struct {
 	// activity rather than measured.
 	InferredEdges int `json:"inferredEdges"`
 
+	// MeasuredEdges counts edges whose arrival time came from the log itself --
+	// a dispatch row paired with the recipient's acknowledgement. Only these
+	// arrows have an honest slope; the rest are a plausible guess.
+	MeasuredEdges int `json:"measuredEdges"`
+
 	// CompressionRatio is DurationMs / Warp.TotalTauMs: how many times faster
 	// than real time the run plays at 1x under the density-driven profile.
 	CompressionRatio float64 `json:"compressionRatio"`
@@ -334,6 +339,14 @@ type Options struct {
 	// InferRecvWindowMs caps how far ahead to look for recipient activity when
 	// inferring a message arrival time. Beyond this the edge is left horizontal.
 	InferRecvWindowMs float64
+
+	// PairDeliveryWindowMs caps how far after a dispatch we will accept a
+	// delivery acknowledgement as belonging to the same message. Pairing is
+	// keyed on endpoints plus content, which is unique enough in practice, but
+	// a repeated message ("ping") could otherwise be matched across a huge gap
+	// and invent an absurd latency. Beyond this window the dispatch falls back
+	// to an inferred arrival.
+	PairDeliveryWindowMs float64
 }
 
 // DefaultOptions returns tuned defaults suitable for typical Scion runs.
@@ -346,5 +359,6 @@ func DefaultOptions() Options {
 		MaxAccel:                    0.02,
 		DensityBucketMs:             1_000,
 		InferRecvWindowMs:           120_000,
+		PairDeliveryWindowMs:        300_000,
 	}
 }

@@ -480,6 +480,150 @@ func TestRejectedMessagesIgnored(t *testing.T) {
 	}
 }
 
+// ackEntry is the recipient-side half of a message: the row a real export
+// writes when the agent takes the message into its inbox.
+func ackEntry(fromID, fromName, toID, toName string, ms float64, content string) logparser.GCPLogEntry {
+	e := msgEntry(fromID, fromName, toID, toName, ms, content)
+	e.InsertID = "ack@" + at(ms)
+	e.JSONPayload["message"] = "message accepted (buffered)"
+	return e
+}
+
+// A dispatch and its acknowledgement are one message, not two, and the gap
+// between them is a measured latency rather than a guess.
+func TestDeliveryPairingYieldsMeasuredArrival(t *testing.T) {
+	entries := []logparser.GCPLogEntry{
+		agentEntry("a", 0, msgPreStart, nil),
+		agentEntry("b", 0, msgPreStart, nil),
+		msgEntry("a", "alpha", "b", "beta", 5000, "hello"),
+		ackEntry("a", "alpha", "b", "beta", 6200, "hello"),
+		// b starts working shortly after; inference would have picked this up
+		// and produced a different (wrong) arrival, so it also proves the
+		// measured value wins.
+		agentEntry("b", 8000, msgTurnStart, nil),
+	}
+	d := mustBuild(t, entries, manifest(agent("a", "alpha"), agent("b", "beta")), DefaultOptions())
+
+	var msgs []Edge
+	for _, e := range d.Edges {
+		if e.Kind == EdgeMessage {
+			msgs = append(msgs, e)
+		}
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("dispatch+ack must fold into one edge, got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].SendMs != 5000 || msgs[0].RecvMs != 6200 {
+		t.Errorf("edge = %v -> %v, want 5000 -> 6200", msgs[0].SendMs, msgs[0].RecvMs)
+	}
+	if msgs[0].RecvConfidence != ConfidenceMeasured {
+		t.Errorf("RecvConfidence = %s, want measured", msgs[0].RecvConfidence)
+	}
+	if d.Stats.InferredEdges != 0 {
+		t.Errorf("InferredEdges = %d, want 0", d.Stats.InferredEdges)
+	}
+}
+
+// Repeated identical messages must pair oldest-first, the only ordering a
+// queue can produce. Interleaving them is the case naive keying gets wrong.
+func TestDeliveryPairingIsFIFOForRepeatedContent(t *testing.T) {
+	entries := []logparser.GCPLogEntry{
+		agentEntry("a", 0, msgPreStart, nil),
+		agentEntry("b", 0, msgPreStart, nil),
+		msgEntry("a", "alpha", "b", "beta", 1000, "ping"),
+		msgEntry("a", "alpha", "b", "beta", 2000, "ping"),
+		ackEntry("a", "alpha", "b", "beta", 3000, "ping"),
+		ackEntry("a", "alpha", "b", "beta", 4000, "ping"),
+	}
+	d := mustBuild(t, entries, manifest(agent("a", "alpha"), agent("b", "beta")), DefaultOptions())
+
+	var msgs []Edge
+	for _, e := range d.Edges {
+		if e.Kind == EdgeMessage {
+			msgs = append(msgs, e)
+		}
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("want 2 edges, got %d", len(msgs))
+	}
+	want := [][2]float64{{1000, 3000}, {2000, 4000}}
+	for i, w := range want {
+		if msgs[i].SendMs != w[0] || msgs[i].RecvMs != w[1] {
+			t.Errorf("edge%d = %v -> %v, want %v -> %v",
+				i, msgs[i].SendMs, msgs[i].RecvMs, w[0], w[1])
+		}
+	}
+}
+
+// Most exports carry only one of the two phases. Those must keep working, and
+// keep saying honestly that the arrival was inferred.
+func TestDispatchWithoutAckStillInfers(t *testing.T) {
+	entries := []logparser.GCPLogEntry{
+		agentEntry("a", 0, msgPreStart, nil),
+		agentEntry("b", 0, msgPreStart, nil),
+		msgEntry("a", "alpha", "b", "beta", 5000, "hello"),
+		agentEntry("b", 6000, msgTurnStart, nil),
+	}
+	d := mustBuild(t, entries, manifest(agent("a", "alpha"), agent("b", "beta")), DefaultOptions())
+	for _, e := range d.Edges {
+		if e.Kind != EdgeMessage {
+			continue
+		}
+		if e.RecvMs != 6000 || e.RecvConfidence != ConfidenceInferred {
+			t.Errorf("edge = %v -> %v %s, want 5000 -> 6000 inferred",
+				e.SendMs, e.RecvMs, e.RecvConfidence)
+		}
+	}
+}
+
+// An acknowledgement whose dispatch aged out must not invent a huge latency.
+func TestDeliveryPairingRespectsWindow(t *testing.T) {
+	opts := DefaultOptions()
+	opts.PairDeliveryWindowMs = 1000
+	entries := []logparser.GCPLogEntry{
+		agentEntry("a", 0, msgPreStart, nil),
+		agentEntry("b", 0, msgPreStart, nil),
+		msgEntry("a", "alpha", "b", "beta", 1000, "hello"),
+		ackEntry("a", "alpha", "b", "beta", 50_000, "hello"),
+	}
+	d := mustBuild(t, entries, manifest(agent("a", "alpha"), agent("b", "beta")), opts)
+	for _, e := range d.Edges {
+		if e.Kind == EdgeMessage && e.RecvConfidence == ConfidenceMeasured {
+			t.Errorf("stale ack was paired anyway: %v -> %v", e.SendMs, e.RecvMs)
+		}
+	}
+}
+
+// An agent that fails to start and is recreated leaves two lifelines with the
+// same name. Most message rows carry only the name, so without a time-aware
+// lookup every later message is attributed to the dead first instance.
+func TestNameResolutionPrefersTheInstanceAliveAtTheTime(t *testing.T) {
+	// "runner" #1 lives 0..3s; "runner" #2 lives 10s..end.
+	msgNoSenderID := msgEntry("", "runner", "b", "beta", 20_000, "hello")
+	delete(msgNoSenderID.JSONPayload, "sender_id")
+	msgNoSenderID.JSONPayload["sender_id"] = ""
+
+	entries := []logparser.GCPLogEntry{
+		agentEntry("r1", 0, msgPreStart, nil),
+		agentEntry("r1", 3000, msgPreStop, nil),
+		agentEntry("b", 5000, msgPreStart, nil),
+		agentEntry("r2", 10_000, msgPreStart, nil),
+		msgNoSenderID,
+		agentEntry("r2", 30_000, msgTurnStart, nil),
+	}
+	parsed := manifest(agent("r1", "runner"), agent("r2", "runner"), agent("b", "beta"))
+	d := mustBuild(t, entries, parsed, DefaultOptions())
+
+	for _, e := range d.Edges {
+		if e.Kind != EdgeMessage {
+			continue
+		}
+		if e.FromID != "r2" {
+			t.Errorf("message at 20s attributed to %q; want r2, the instance alive then", e.FromID)
+		}
+	}
+}
+
 func TestSpawnAndDestroyEdges(t *testing.T) {
 	entries := []logparser.GCPLogEntry{
 		agentEntry("r", 0, msgPreStart, nil),
@@ -568,6 +712,13 @@ func TestSyntheticRunEndToEnd(t *testing.T) {
 	}
 	if s.InferredEdges == 0 {
 		t.Error("want at least one edge with an inferred arrival")
+	}
+	// The generator emits both message phases, so most arrivals should have
+	// been read out of the log rather than guessed. If this ever inverts, the
+	// dispatch/acknowledgement pairing has stopped matching.
+	if s.MeasuredEdges <= s.InferredEdges {
+		t.Errorf("stats = %d measured / %d inferred arrivals, want measured to dominate",
+			s.MeasuredEdges, s.InferredEdges)
 	}
 	if s.CompressionRatio < 1.5 || s.CompressionRatio > 120 {
 		t.Errorf("CompressionRatio = %v, want a sane speed-up", s.CompressionRatio)
@@ -675,4 +826,118 @@ func TestSynthesizeLogIsDeterministic(t *testing.T) {
 	if c := SynthesizeLog(8, 30, 10*60*1000); len(c) == len(a) && c[len(c)/2].Timestamp == a[len(a)/2].Timestamp {
 		t.Error("different seeds produced a suspiciously identical run")
 	}
+}
+
+// findInterval returns the first interval matching kind and label.
+func findInterval(d *Digest, kind IntervalKind, label string) *Interval {
+	for i := range d.Intervals {
+		if d.Intervals[i].Kind == kind && d.Intervals[i].Label == label {
+			return &d.Intervals[i]
+		}
+	}
+	return nil
+}
+
+// A tool call whose result never arrived must not be closed by the *next*
+// tool's result. Doing so mislabels the span and invents its duration -- and
+// because both stay on one stack, every later tool on that lifeline is shifted
+// too.
+func TestToolResultsPairByName(t *testing.T) {
+	entries := []logparser.GCPLogEntry{
+		agentEntry("a", 0, msgPreStart, nil),
+		agentEntry("a", 1000, msgTurnStart, nil),
+		agentEntry("a", 2000, msgToolCall, map[string]any{"tool_name": "Edit"}),
+		agentEntry("a", 3000, msgToolCall, map[string]any{"tool_name": "Read"}),
+		// No result for Edit; Read's result must close Read, not Edit.
+		agentEntry("a", 4000, msgToolRes, map[string]any{"tool_name": "Read"}),
+		agentEntry("a", 5000, msgTurnEnd, nil),
+	}
+	d := mustBuild(t, entries, manifest(agent("a", "alpha")), DefaultOptions())
+
+	read := findInterval(d, KindTool, "Read")
+	if read == nil {
+		t.Fatal("no Read interval")
+	}
+	if read.StartMs != 3000 || read.EndMs != 4000 || read.Confidence != ConfidenceMeasured {
+		t.Errorf("Read = %v..%v %s, want 3000..4000 measured",
+			read.StartMs, read.EndMs, read.Confidence)
+	}
+
+	edit := findInterval(d, KindTool, "Edit")
+	if edit == nil {
+		t.Fatal("no Edit interval")
+	}
+	if edit.StartMs != 2000 {
+		t.Errorf("Edit starts at %v, want 2000", edit.StartMs)
+	}
+	if edit.Confidence != ConfidenceInferred {
+		t.Errorf("Edit confidence = %s, want inferred: its end was never logged", edit.Confidence)
+	}
+	if edit.EndMs > 5000 {
+		t.Errorf("Edit ends at %v, past the turn that contained it", edit.EndMs)
+	}
+}
+
+// An unclosed tool call cannot survive the turn it was made in: the turn ending
+// is evidence enough that the tool finished. Left open, the call floats until
+// some unrelated later event closes it and draws far outside its parent.
+func TestOpenToolIsClosedByItsTurn(t *testing.T) {
+	entries := []logparser.GCPLogEntry{
+		agentEntry("a", 0, msgPreStart, nil),
+		agentEntry("a", 1000, msgTurnStart, nil),
+		agentEntry("a", 2000, msgToolCall, map[string]any{"tool_name": "Edit"}),
+		agentEntry("a", 3000, msgTurnEnd, nil),
+		// A second turn, much later, with a dangling result that would
+		// otherwise be claimed by the Edit above.
+		agentEntry("a", 90_000, msgTurnStart, nil),
+		agentEntry("a", 95_000, msgToolRes, map[string]any{"tool_name": "Bash"}),
+		agentEntry("a", 96_000, msgTurnEnd, nil),
+	}
+	d := mustBuild(t, entries, manifest(agent("a", "alpha")), DefaultOptions())
+
+	edit := findInterval(d, KindTool, "Edit")
+	if edit == nil {
+		t.Fatal("no Edit interval")
+	}
+	if edit.EndMs != 3000 || edit.Confidence != ConfidenceInferred {
+		t.Errorf("Edit = %v..%v %s, want it clamped to the turn end at 3000, inferred",
+			edit.StartMs, edit.EndMs, edit.Confidence)
+	}
+	assertContainment(t, d)
+}
+
+// assertContainment checks the invariant the flame graph depends on: a child
+// interval that begins inside a parent must also end inside it.
+func assertContainment(t *testing.T, d *Digest) {
+	t.Helper()
+	byLifeline := map[string][]Interval{}
+	for _, iv := range d.Intervals {
+		byLifeline[iv.LifelineID] = append(byLifeline[iv.LifelineID], iv)
+	}
+	for id, ivs := range byLifeline {
+		for _, c := range ivs {
+			for _, p := range ivs {
+				// Strictly inside: a child that begins at the exact instant its
+				// candidate parent ends is a sibling that followed it, not
+				// something nested within it.
+				if p.Depth != c.Depth-1 || p.StartMs > c.StartMs || p.EndMs <= c.StartMs {
+					continue
+				}
+				if c.EndMs > p.EndMs+1e-6 {
+					t.Errorf("%s: %s %q (%v..%v) escapes %s (%v..%v)",
+						id, c.Kind, c.Label, c.StartMs, c.EndMs, p.Kind, p.StartMs, p.EndMs)
+				}
+			}
+		}
+	}
+}
+
+// The invariant must hold across a whole realistically messy run, not just the
+// hand-built cases above.
+func TestSyntheticRunRespectsContainment(t *testing.T) {
+	d, err := BuildSyntheticDigest(11, 30, 10*60*1000, DefaultOptions())
+	if err != nil {
+		t.Fatalf("BuildSyntheticDigest: %v", err)
+	}
+	assertContainment(t, d)
 }

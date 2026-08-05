@@ -152,7 +152,9 @@ func summarize(d *digest.Digest) {
 		s.LifelineCount, s.MaxConcurrent, s.MaxConcurrent)
 	log.Printf("  intervals: %d (%d measured / %d inferred / %d open)",
 		s.IntervalCount, s.MeasuredIntervals, s.InferredIntervals, s.OpenIntervals)
-	log.Printf("  edges:     %d (%d with inferred arrival)", s.EdgeCount, s.InferredEdges)
+	log.Printf("  edges:     %d (%d measured arrival / %d inferred / %d open)",
+		s.EdgeCount, s.MeasuredEdges, s.InferredEdges,
+		s.EdgeCount-s.MeasuredEdges-s.InferredEdges)
 	log.Printf("  playback:  %.1f min of viewing at 1x (%.1fx compression, velocity %.1f..%.1f, %d warp knots)",
 		d.Warp.TotalTauMs/60_000, s.CompressionRatio,
 		d.Warp.MinVelocity, d.Warp.MaxVelocity, len(d.Warp.Knots))

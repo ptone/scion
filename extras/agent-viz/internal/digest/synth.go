@@ -502,35 +502,86 @@ func (s *synth) emitAgentPayload(a *synthAgent, at float64, payload map[string]a
 	})
 }
 
+// emitMessage writes the log rows for one message.
+//
+// A delivered message produces *two* rows, as a real Scion export does: the
+// broker's "message dispatched" and the recipient's "message accepted
+// (buffered)" some time later. That second row is what makes an arrival time
+// measurable rather than guessed, and therefore what makes the arrow's slope
+// real latency. Emitting only the dispatch would make the demo quietly
+// understate what the digest can do on production logs -- and would leave the
+// pairing path in the builder untested by the demo pipeline.
+//
+// A rejected message has no arrival: nobody took it.
 func (s *synth) emitMessage(from, to *synthAgent, at float64, rejected bool) {
 	msg := "message dispatched"
 	if rejected {
 		msg = "message rejected: recipient not accepting"
 	}
+	// Drawn before the early return so that the rejected path consumes the same
+	// number of random values as the delivered one, keeping the stream (and so
+	// the whole synthetic run) stable if the branch weighting ever changes.
 	broadcast := s.rng.Float64() < 0.1
-	s.append(logparser.GCPLogEntry{
-		InsertID:  s.nextID(),
-		Timestamp: s.stamp(at),
-		Severity:  "INFO",
-		LogName:   synthLogMessages,
-		Labels: map[string]string{
-			"sender":       "agent:" + from.name,
-			"sender_id":    from.id,
-			"recipient":    "agent:" + to.name,
-			"recipient_id": to.id,
-			"grove_id":     synthProject,
-		},
-		JSONPayload: map[string]any{
-			"message":         msg,
-			"sender":          "agent:" + from.name,
-			"sender_id":       from.id,
-			"recipient":       "agent:" + to.name,
-			"recipient_id":    to.id,
-			"msg_type":        synthMsgTypes[s.rng.Intn(len(synthMsgTypes))],
-			"message_content": synthContent[s.rng.Intn(len(synthContent))],
-			"broadcasted":     broadcast,
-		},
-	})
+	msgType := synthMsgTypes[s.rng.Intn(len(synthMsgTypes))]
+	content := synthContent[s.rng.Intn(len(synthContent))]
+	latency := s.deliveryLatencyMs()
+
+	row := func(at float64, message string) {
+		s.append(logparser.GCPLogEntry{
+			InsertID:  s.nextID(),
+			Timestamp: s.stamp(at),
+			Severity:  "INFO",
+			LogName:   synthLogMessages,
+			Labels: map[string]string{
+				"sender":       "agent:" + from.name,
+				"sender_id":    from.id,
+				"recipient":    "agent:" + to.name,
+				"recipient_id": to.id,
+				"grove_id":     synthProject,
+			},
+			JSONPayload: map[string]any{
+				"message":         message,
+				"sender":          "agent:" + from.name,
+				"sender_id":       from.id,
+				"recipient":       "agent:" + to.name,
+				"recipient_id":    to.id,
+				"msg_type":        msgType,
+				"message_content": content,
+				"broadcasted":     broadcast,
+			},
+		})
+	}
+
+	// A small share of deliveries are never acknowledged -- the recipient dies,
+	// or the export window clips the second row. Real exports show a couple of
+	// percent; keeping some here means the demo also shows what an *inferred*
+	// arrival looks like next to the measured ones.
+	acked := s.rng.Float64() > 0.04
+
+	row(at, msg)
+	if rejected || !acked {
+		return
+	}
+	row(at+latency, "message accepted (buffered)")
+}
+
+// deliveryLatencyMs samples the gap between dispatch and acceptance.
+//
+// Shaped to match what a real export looks like: a floor of a couple of
+// hundred milliseconds, a long right tail from recipients that are mid-turn
+// and do not check their inbox promptly, and a hard cap so no single arrow
+// slopes off the bottom of the run.
+func (s *synth) deliveryLatencyMs() float64 {
+	const (
+		floorMs = 200
+		meanMs  = 900
+		capMs   = 5000
+	)
+	d := floorMs + s.rng.ExpFloat64()*meanMs
+	if d > capMs {
+		d = capMs
+	}
+	return d
 }
 
 func (s *synth) emitServer(at float64, message string, payload map[string]any) {
