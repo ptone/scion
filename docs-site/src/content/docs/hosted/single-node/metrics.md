@@ -187,7 +187,9 @@ All metrics and traces emitted by Scion are enriched with context-aware OpenTele
 - `scion.harness`: The type of harness running the agent (e.g., `gemini`, `claude`, `codex`).
 - `scion.model`: The specific LLM model being used.
 - `scion.broker`: The ID of the Runtime Broker executing the agent.
-- `project_id`: The ID of the agent's parent project.
+- `scion.project.id`: The ID of the agent's parent project (resolved from the `SCION_PROJECT_ID` environment variable, falling back to legacy `SCION_GROVE_ID` if present).
+- `scion.agent.slug`: The user-friendly identifier slug of the agent (set from `SCION_AGENT_SLUG`), enabling filtering and grouping of telemetry signals by agent slug.
+- `service.instance.id`: The unique ID of the agent session (set from `SCION_AGENT_ID`).
 
 ### Automated Metrics Collection
 
