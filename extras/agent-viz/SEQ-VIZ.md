@@ -25,6 +25,7 @@ synthesizes a run.
 - [The digest format](#the-digest-format)
 - [Development](#development)
 - [Testing](#testing)
+- [Live sessions (design)](#live-sessions-design)
 - [Promotion into the main web UI](#promotion-into-the-main-web-ui)
 - [Limitations](#limitations)
 - [Deferred ideas](#deferred-ideas)
@@ -557,6 +558,195 @@ reader drifted apart. That test reads the committed demo sample directly — the
 same bytes a person opens in the viewer — and asserts referential integrity,
 nesting containment, `recvMs >= sendMs`, warp/velocity agreement across the
 language boundary, and that bar height equals `duration / msPerPx` on real data.
+
+## Live sessions (design)
+
+Not built yet. This is the plan for starting from a project and a hub instead of
+a file, and it is written down first because the naive version — poll, rebuild,
+re-render — breaks the two things the tool is actually for: a stable playhead
+and honest confidence.
+
+### A session is not a run
+
+A file is a run: it has a beginning, an end, and a full density profile the
+planner can see all of. A live feed has none of those, so the unit becomes a
+**viewing session**: a fixed origin (the moment you opened it, minus a seeded
+history window of 10–15 minutes), an open end, and a scale that only grows. The
+session's `startedAt` is chosen once and never moves. Everything downstream —
+every `*Ms` offset in the digest, the minimap's coordinate system, the tau axis
+— is anchored to it, so re-anchoring would shift the entire diagram under a
+reader who is looking at it. A date-range chooser, later, is the same machinery
+with a closed end; a log file is a session that was already over when it opened.
+
+### The lag budget is the whole design
+
+Section 7 states the principle: live is the playhead pinned to `now − 5 min` at
+1×. That lag is not a UI preference, it is the resource that makes every other
+part legal, and its size is determined by the planner's own constants.
+
+The acceleration limiter works in `u = v²/2` and moves at most
+`MaxAccel × bucketMs` per bucket, so decelerating from express speed to reading
+speed takes a fixed amount of wall time, and the two are the same knob:
+
+```
+v_max = sqrt(2 · MaxAccel · lagMs)
+```
+
+At the shipped `MaxAccel = 0.02`, a 6-minute lag buys exactly the 120× cap the
+planner already uses; a 5-minute lag buys 110×; a 1-minute lag buys 49×. **You
+cannot have both a short lag and a fast express lane** — with less runway the
+profile physically cannot have slowed to reading speed by the time a burst
+arrives, which is the one promise section 2 makes.
+
+Three other windows need lookahead and all fit inside that budget: the density
+smoothing kernel is symmetric with radius `FrameMs/2` (30 s), receive-time
+inference looks ahead `InferRecvWindowMs` (120 s), and dispatch/ack pairing
+spans `PairDeliveryWindowMs` (300 s).
+
+So the session has a **watermark** at `now − lag`, and three regions:
+
+| region | wall time | status |
+|---|---|---|
+| settled | `< watermark` | immutable; warp knots frozen; the playhead lives here |
+| provisional | `watermark … now` | fetched and drawn in the staging zone, but every unresolved end is `open` and may be revised |
+| unknown | `> now` | empty staging, honestly |
+
+The invariant that holds the whole thing together: **the playhead never crosses
+the watermark**, so the warp is only ever replanned ahead of where the reader
+is. Already-consumed tau never shifts, and the playhead never teleports. This is
+also why `WarpFn` needing a rebuild is harmless — appending knots past the last
+consumed tau leaves the existing prefix mapping identical.
+
+The provisional region is not a fudge. An in-flight turn genuinely has no end
+yet and a just-sent message genuinely has no arrival yet; the confidence model
+already has `open` for exactly that, and the live tail is simply the part of the
+run where `open` is the truth rather than a gap in the export. Events resolve
+`open → inferred → measured` as more log arrives, which is the same promotion
+the file path already performs, just observed happening.
+
+### Polling, on both hops
+
+The transport question answers itself once the lag budget exists: with the
+playhead five minutes behind, **latency below a few seconds is worth nothing**.
+So neither hop needs streaming.
+
+- **Cloud Logging → server.** Poll `entries.list` every ~3 s, filtered to
+  `scion-agents` and `scion-messages` for the hub, asking for
+  `timestamp >= cursor − overlap`. Dedupe on `insertId`, which the pipeline
+  already carries end-to-end as `logId`. The overlap (~2 min) covers late
+  arrival; anything later than that still lands in the provisional region rather
+  than rewriting settled history. `TailLogEntries` is available and
+  lower-latency, but it drops entries under `RATE_LIMIT` and reports only a
+  count — a bad trade for a tool whose premise is not lying about what it saw.
+  It is worth revisiting only if the lag budget ever needs to shrink.
+- **Server → browser.** Poll a delta endpoint on the same cadence. SSE would
+  work and there is a proven pattern for it in `pkg/hub/handlers_logs.go`, but a
+  long-lived connection buys nothing here and costs reconnection handling.
+
+Reuse `pkg/hub.LogQueryService` (`Query`, `Tail`, `BuildLogFilter`, ADC auth)
+rather than writing a second filter-and-credentials implementation — noting that
+`Query` currently caps at 1000 entries and would need its `NextPageToken`
+plumbed through to backfill a 15-minute seed.
+
+### Rebuild the digest; do not make the builder incremental
+
+`Build` is already a pure function of `([]entry, *ParseResult, Options)`, and on
+the 49-minute reference export — 3,700 entries, 8 lifelines, 1,134 intervals,
+758 edges — it takes **11 ms**. Scaling is roughly linear, so an eight-hour
+session is on the order of 100 ms per rebuild, or ~3% of one core at a 3-second
+cadence.
+
+That number kills the hard problem. Making the builder incremental would mean
+incrementalising slot colouring, DFS ordering, ancestry attribution, receive
+inference and delivery pairing — every one of which is a whole-run pass today,
+and several of which exist specifically to *revise* earlier conclusions. Instead
+the server keeps the accumulated entries and re-derives the whole digest each
+poll, which makes late arrivals and retroactive resolution free and correct by
+construction, then diffs against the previous digest to send the client a delta.
+
+Three changes to the builder are still required, and the first two are worth
+making regardless:
+
+1. **Stable identity.** Interval and edge IDs are positional (`iv%d`, `e%d`), so
+   a single insertion renumbers everything after it — silently moving the
+   reader's selection, the open message reader, and any future deep link onto a
+   different event. Derive them from `insertId`, which is already carried.
+2. **Stable columns.** Slot assignment and DFS `order` are computed over the
+   full lifetime set, so a new agent can retroactively change where an existing
+   one sits. A live agent must keep its column for the life of the session.
+3. **A pinned origin.** `b.start` is `stamps[0]`; it has to become an explicit
+   input, or a late entry that predates the current first one shifts every
+   offset in the digest.
+
+### The minimap anchors and grows; it never rolls
+
+The rail could scroll like a terminal, keeping a fixed window and letting the
+beginning fall off the top. It should not. Its entire contract is "where am I
+and what did I skip", and a session that discards its own beginning cannot
+answer that. Memory is not the constraint that makes the decision — the
+reference run is 1,134 intervals and a 1.13 MB digest, so even a long session is
+a rounding error — so the honest default is to keep everything and let the rail
+compress, exactly as it already does for a long file.
+
+What growth actually costs is redrawing. `durationMs` is the rail's whole
+coordinate system, so every increase rescales it: lanes shift, tick granularity
+jumps, the cached static raster is thrown away, and a drag in progress finds the
+scale moving under it. The fix is to **grow the declared span in quantised
+steps** — round up to the next 5 minutes, with headroom — so the rail rescales a
+few times an hour instead of continuously, the raster survives in between, and
+new intervals can be drawn straight into the existing layer. Freeze the span for
+the duration of an active drag.
+
+If a session ever does run long enough to be useless at that scale, trimming
+should be an explicit user action with a visible consequence, never a silent
+eviction.
+
+### Where the playhead starts, and what "following" means
+
+Start it at the beginning of the seeded history, not at the live edge. The
+express lane is precisely the mechanism for catching up — fifteen minutes of
+mostly-idle history plays in a minute or two — so the reader sees how the run
+got to its current state and arrives at the live edge naturally. **The velocity
+planner is the catch-up controller**; no new machinery is needed.
+
+On reaching the watermark the session is *following*: velocity clamps to 1× and
+the view rides the edge. Scrubbing away drops out of follow; a "jump to live"
+affordance re-enters it. Two clock behaviours are wrong for this and must change:
+`tick()` pauses on reaching `totalTauMs`, and `play()` restarts from zero when
+already at the end — which would throw a following viewer back to the start of
+the session. `atEnd` needs to split into "end of a closed run" and "at the live
+edge", where the latter stalls while remaining `playing`.
+
+### Client-side merge
+
+`adopt()` resets tau to 0, rebuilds every id map, recomputes the default collapse
+set and restarts the loop; calling it on each poll would reset the reader's
+world every three seconds. A live session needs a `merge()` that preserves tau,
+collapse, solo and selection, and:
+
+- pushes into the frame index instead of discarding it — the `WeakMap` in
+  `frame.ts` is keyed on digest identity and its `prefixMaxEnd`/`prefixMaxT`
+  arrays are append-friendly, so monotone appends are four `push`es rather than
+  an O(n log n) rebuild;
+- swaps `WarpFn`/`PlaybackClock` (both hold `readonly` refs) while carrying over
+  tau, rate and playing;
+- refreshes `stats`, `durationMs`, `totalTauMs` and `maxVelocity` together,
+  since the header and transport read them straight off the wire object;
+- memoises `markers()`, which currently rescans every interval inside `render()`.
+
+The other known hotspot is `activeLifelineIds`, an unindexed full scan of all
+intervals and edges that auto-fold runs ~2.5×/s.
+
+### Open questions
+
+- Which "project" scopes a session: the GCP project owns the log, but
+  `labels.hub` and the Scion project id both narrow it, and the right primary
+  key for a session is probably (hub, Scion project) with the GCP project as
+  where to look.
+- Whether `extras/agent-viz` should require the root module (a `replace ../..`)
+  to reuse `pkg/hub`'s log query, or vendor a minimal client of its own. The
+  former is the right end state given promotion into the main web UI, where this
+  ingestion becomes a hub endpoint.
 
 ## Promotion into the main web UI
 
