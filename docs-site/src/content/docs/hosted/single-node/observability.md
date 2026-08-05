@@ -316,6 +316,31 @@ jsonPayload.recipient = "target-agent"
 jsonPayload.project_id = "my-project-id"
 ```
 
+#### Agent Telemetry Logs
+
+:::note[OTel Log Label Deduplication]
+To eliminate redundancy and reduce indexing costs, the GCP exporter no longer duplicates identifiers like `agent_id`, `grove_id`, and `project_id` as top-level log labels (e.g., `labels.project_id` or `labels.agent_id`) on GCP log entries. Instead, they are carried exclusively as canonical OpenTelemetry resource attributes.
+
+When querying agent telemetry logs in Google Cloud Logging, use these canonical resource attribute labels:
+- Use `labels."scion.project.id"` instead of `labels.project_id` or `labels.grove_id`.
+- Use `labels."scion.agent.slug"` to filter or group logs by agent slug.
+- Use `labels."service.instance.id"` instead of `labels.agent_id`.
+:::
+
+```
+-- Filter agent telemetry logs by project ID
+logName="projects/YOUR_PROJECT/logs/scion"
+labels."scion.project.id" = "my-project-id"
+
+-- Filter agent telemetry logs by agent slug (using the new agent slug label)
+logName="projects/YOUR_PROJECT/logs/scion"
+labels."scion.agent.slug" = "my-agent-slug"
+
+-- Filter agent telemetry logs by agent ID (service instance ID)
+logName="projects/YOUR_PROJECT/logs/scion"
+labels."service.instance.id" = "my-agent-id"
+```
+
 #### Auth and Security Auditing
 
 ```
