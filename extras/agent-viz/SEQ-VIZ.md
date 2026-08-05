@@ -255,7 +255,16 @@ Shortcuts are ignored while typing in an input.
   takes seconds and the arrow would otherwise be gone by the time you closed it.
   `Esc` closes it.
 - **Click a stub** — jump the playhead to the peer end of that message.
-- **Click the minimap** — seek to that wall time.
+- **Wheel over the canvas** — scrub time. The gesture is metric like the axis
+  is: N pixels of wheel moves the diagram by exactly the N pixels' worth of wall
+  time it would take to cover that distance on screen, so scrolling feels like
+  dragging the paper rather than turning an abstract dial. Scrolling pauses
+  playback — you have taken the wheel. Line- and page-mode deltas (mouse wheels,
+  page keys) are normalised to pixels first, or a wheel notch would advance the
+  view by three milliseconds.
+- **Ctrl/⌘ + wheel** — zoom the time axis, matching the pinch-zoom convention
+  every map and browser already trained the reader on.
+- **Drag the minimap window** — seek. It is a drag, not a click: see below.
 
 Hit-testing follows paint order — bubble, then arrows and stubs, then bars.
 Arrows are drawn *over* the bars they cross and nearly every arrow crosses one,
@@ -291,9 +300,25 @@ and what did I skip". Three bands:
 
 The lanes are the reason it needs the width: knowing *something* was busy at
 32:00 is much less useful than seeing it was `kael` and `scribe` and nobody
-else. Hover for a readout, click to seek, and collapse the whole rail to 22px
-when the canvas needs the room. The static bands are rastered to an offscreen
-canvas and blitted, so hover and the viewport rectangle cost nothing per frame.
+else. Collapse the whole rail to 22px when the canvas needs the room. The static
+bands are rastered to an offscreen canvas and blitted, so hover and the viewport
+rectangle cost nothing per frame.
+
+Seeking means **grabbing the highlighted viewport window and dragging it**, and
+nothing else in the rail responds to a press. The rail is full-height along the
+edge of the window, so the pointer crosses it constantly on the way somewhere
+else; when a bare click seeked, a slip of the hand threw the playhead minutes
+away with no undo. The window is the handle, it keeps its grip (the drag applies
+a delta, so the point you grabbed stays under the cursor rather than snapping to
+centre), and it carries a 7px margin so that a sub-pixel window — a 6s viewport
+on a 49-minute run — is still catchable. The cursor turns to `grab` over it, and
+the window brightens and grows edge grips, so the affordance is visible before
+the press.
+
+The hover readout waits ~220ms for the pointer to stop. Passing through should
+not raise a tooltip; asking should. It also stays off the window itself, where
+it would cover the handle to report a time the transport clock is already
+showing.
 
 ### Header
 

@@ -90,13 +90,19 @@ Load `wide`, since it has the most going on:
   midspan; click that to read the message text with its timings, latency and
   arrival confidence. Playback pauses while the reader is open. Bodies are
   capped at 2,000 characters (`--max-body`), and a truncated one says so.
+- **Scroll the canvas.** The wheel scrubs time one-to-one with the geometry: a
+  100px scroll moves the diagram by exactly the wall time 100px of it represents.
+  Ctrl/⌘ + wheel zooms instead.
 - **`+` / `-`** zoom the time axis. Bar heights scale exactly with duration at
   every zoom level — that invariant is asserted in the tests.
 - Check the **run overview** rail on the right. It stays strictly linear in wall
   time while the main view's speed varies, which is what makes the compression
   legible rather than deceptive. One lane per lifeline, so you can see *which*
-  agents were busy in a stretch you just raced through; hover for a readout,
-  click to seek, collapse it with the chevron when you want the room.
+  agents were busy in a stretch you just raced through. **Grab the highlighted
+  window and drag it** to seek — the rail deliberately ignores bare clicks, since
+  it runs the full height of the window and the pointer crosses it on the way to
+  everything else. Rest on it for a moment to get a wall-time readout; collapse
+  it with the chevron when you want the room.
 
 Look for hatched and faded bars: those are `inferred` and `open` confidence,
 where an endpoint was reconstructed or never observed.

@@ -33,6 +33,19 @@ import type { ColumnLayout } from '../core/columns.js';
 import { buildFrame, type FrameModel } from '../core/frame.js';
 import { renderFrame, hitTest, DEFAULT_THEME, type HitResult } from '../core/render.js';
 
+/**
+ * Pixels per line for wheels that report deltas in lines rather than pixels.
+ *
+ * Mouse wheels on Windows and Linux report `DOM_DELTA_LINE`; trackpads report
+ * pixels. Without normalising, one flavour of hardware scrolls a hundred times
+ * further than the other.
+ */
+const WHEEL_LINE_PX = 16;
+/** Pixels per page, for the rare wheel that reports whole pages. */
+const WHEEL_PAGE_PX = 400;
+/** Wheel pixels for one e-fold of zoom under ctrl/⌘. */
+const WHEEL_ZOOM_SCALE = 320;
+
 /** Fraction of the canvas height where the readable frame begins. */
 const DEFAULT_FRAME_TOP = 0.3;
 /** Fraction of the canvas height where the readable frame ends (the playhead). */
@@ -251,12 +264,69 @@ export class ScionSeqCanvas extends LitElement {
     this.hoverEdgeId = null;
   }
 
+  /**
+   * Wheel scrolls time; ctrl/⌘-wheel zooms the axis.
+   *
+   * The mapping is deliberately one-to-one with the geometry: `msPerPx` is
+   * constant everywhere on this canvas, so scrolling N pixels moves N pixels'
+   * worth of wall time and the diagram tracks the wheel exactly as a document
+   * would. Anything cleverer - scrolling in viewer time, or a fixed step per
+   * notch - would make the content slide at a rate unrelated to the gesture,
+   * which is precisely the disorientation the constant scale exists to avoid.
+   *
+   * The component reports the intent rather than acting on it: the clock and
+   * the warp live in the host, and this element deliberately owns no state
+   * beyond what it draws.
+   */
+  private onWheel(e: WheelEvent): void {
+    const px = wheelPixels(e);
+    if (px === 0) return;
+    // Both gestures are ours: without this, ctrl-wheel zooms the browser and a
+    // trackpad flick can trigger the back-navigation overscroll.
+    e.preventDefault();
+
+    if (e.ctrlKey || e.metaKey) {
+      this.dispatchEvent(
+        new CustomEvent('seq-zoom', {
+          // Up (negative) zooms in, matching every map and editor.
+          detail: { factor: Math.exp(px / WHEEL_ZOOM_SCALE) },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      return;
+    }
+
+    this.dispatchEvent(
+      new CustomEvent('seq-scroll-time', {
+        // Down advances time, because time runs down the canvas: the content
+        // moves under the pointer in the same direction as in any scroll view.
+        detail: { deltaWallMs: px * this.msPerPx },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
   override render(): unknown {
     return html`<canvas
       @click=${(e: MouseEvent): void => this.onClick(e)}
       @mousemove=${(e: MouseEvent): void => this.onMouseMove(e)}
       @mouseleave=${(): void => this.onMouseLeave()}
+      @wheel=${(e: WheelEvent): void => this.onWheel(e)}
     ></canvas>`;
+  }
+}
+
+/** A wheel event's vertical delta in CSS pixels, whatever unit it arrived in. */
+export function wheelPixels(e: WheelEvent): number {
+  switch (e.deltaMode) {
+    case 1:
+      return e.deltaY * WHEEL_LINE_PX;
+    case 2:
+      return e.deltaY * WHEEL_PAGE_PX;
+    default:
+      return e.deltaY;
   }
 }
 

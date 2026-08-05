@@ -68,6 +68,25 @@ const HEAT_W = 9;
 /** Lanes narrower than this are not worth drawing separately. */
 const MIN_LANE_W = 2;
 
+/**
+ * Extra grab margin around the viewport rectangle, in CSS pixels.
+ *
+ * On a long run the window is legitimately a two-pixel sliver, which is not a
+ * target anyone can hit. The margin makes it one without making the whole strip
+ * draggable.
+ */
+const VIEWPORT_GRAB_PAD = 7;
+
+/**
+ * How long the pointer must linger before the hover readout appears, in ms.
+ *
+ * Without it the readout fires on the way past: the strip sits against the edge
+ * of the window, so the pointer crosses it constantly on its way somewhere
+ * else, and a dashed line plus a floating label flashing on every transit is
+ * noise. A short dwell makes it appear only when it was asked for.
+ */
+const HOVER_DWELL_MS = 220;
+
 /** Target vertical spacing between time labels, in CSS pixels. */
 const TICK_SPACING_PX = 58;
 
@@ -134,9 +153,31 @@ export class ScionSeqMinimap extends LitElement {
   @state()
   private dragging = false;
 
+  /** True while the pointer is over the draggable viewport window. */
+  @state()
+  private overViewport = false;
+
   /** Wall time under the cursor, or null when the pointer is away. */
   @state()
   private hoverWallMs: number | null = null;
+
+  /** Pending dwell timer; the readout only appears when it fires. */
+  private hoverTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Last pointer offset within the strip, in CSS pixels. */
+  private hoverY = 0;
+
+  /**
+   * Wall time under the pointer when the drag began, and the playhead's wall
+   * time at that instant.
+   *
+   * The drag is relative to these rather than absolute, so the window keeps the
+   * exact grip the pointer took on it. Seeking to the pointer's own position
+   * would snap the window's centre under the cursor the moment it moved.
+   */
+  private dragAnchorWallMs = 0;
+  private dragStartWallMs = 0;
+  /** Element holding the pointer capture for the current drag. */
+  private captured: Element | null = null;
 
   private resizeObserver: ResizeObserver | null = null;
 
@@ -154,7 +195,9 @@ export class ScionSeqMinimap extends LitElement {
       width: 100%;
       height: 100%;
       background: var(--scion-bg-subtle, #f8fafc);
-      cursor: crosshair;
+      /* Default cursor, because most of the strip does nothing on a press.
+         Only the window is a control, and it is the part that says grab. */
+      cursor: default;
       touch-action: none;
       user-select: none;
     }
@@ -169,7 +212,11 @@ export class ScionSeqMinimap extends LitElement {
       height: 100%;
     }
 
-    .grabbing {
+    canvas.grab {
+      cursor: grab;
+    }
+
+    canvas.grabbing {
       cursor: grabbing;
     }
 
@@ -206,6 +253,7 @@ export class ScionSeqMinimap extends LitElement {
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.layer = null;
+    this.clearHover();
     super.disconnectedCallback();
   }
 
@@ -235,11 +283,22 @@ export class ScionSeqMinimap extends LitElement {
     return PAD_Y + (clamped / span) * usable;
   }
 
-  /** Inverse of {@link yFor}: a pointer position back to a wall time. */
-  private wallFor(y: number, height: number): number {
+  /**
+   * Inverse of {@link yFor}: a pointer position back to a wall time.
+   *
+   * `clamp` is off during a drag. A viewport window at either end of the run
+   * hangs off the strip -- the window is wider than the run's remaining time --
+   * so a grab near the origin lands on a y whose wall time is negative. Pinning
+   * that to zero makes the drag delta short by however far off the end the grab
+   * was, and the window slides out from under the pointer exactly where the
+   * geometry is tightest. Off the ends the mapping stays linear; the clock
+   * clamps the resulting seek anyway.
+   */
+  private wallFor(y: number, height: number, clamp = true): number {
     const span = Math.max(1, this.durationMs);
     const usable = Math.max(1, height - PAD_Y * 2);
     const fraction = (y - PAD_Y) / usable;
+    if (!clamp) return fraction * span;
     return Math.min(Math.max(fraction, 0), 1) * span;
   }
 
@@ -249,10 +308,7 @@ export class ScionSeqMinimap extends LitElement {
     return { x, w: Math.max(0, width - x) };
   }
 
-  private emitSeek(clientY: number): void {
-    const rect = this.getBoundingClientRect();
-    if (rect.height <= 0) return;
-    const wallMs = this.wallFor(clientY - rect.top, rect.height);
+  private emitSeek(wallMs: number): void {
     this.dispatchEvent(
       new CustomEvent<{ wallMs: number }>('seq-seek-wall', {
         detail: { wallMs },
@@ -262,38 +318,124 @@ export class ScionSeqMinimap extends LitElement {
     );
   }
 
+  /**
+   * Vertical extent of the grabbable window, in CSS pixels, or null when there
+   * is no window to grab.
+   */
+  private grabBand(height: number): { top: number; bottom: number } | null {
+    if (this.viewportEndMs <= this.viewportStartMs) return null;
+    const top = this.yFor(this.viewportStartMs, height);
+    const bottom = Math.max(top + 2, this.yFor(this.viewportEndMs, height));
+    return { top: top - VIEWPORT_GRAB_PAD, bottom: bottom + VIEWPORT_GRAB_PAD };
+  }
+
+  /** True when a pointer at this offset would take hold of the window. */
+  private isOnViewport(y: number, height: number): boolean {
+    const band = this.grabBand(height);
+    return band !== null && y >= band.top && y <= band.bottom;
+  }
+
+  /**
+   * Begins a drag, but only on the window itself.
+   *
+   * Seeking used to happen on any press anywhere in the strip, which made the
+   * whole right-hand edge of the app a trapdoor: a stray click while reaching
+   * for the scrollbar threw the playhead across the run with nothing to undo
+   * it. Now the window is a handle, and everywhere else is inert.
+   */
   private onPointerDown(e: PointerEvent): void {
+    const rect = this.getBoundingClientRect();
+    if (rect.height <= 0) return;
+    const y = e.clientY - rect.top;
+    if (!this.isOnViewport(y, rect.height)) return;
+
     this.dragging = true;
-    try {
-      this.setPointerCapture(e.pointerId);
-    } catch {
-      // Pointer capture is unavailable in some test environments; dragging
-      // still works via the pointermove listener on this element.
+    this.clearHover();
+    this.dragAnchorWallMs = this.wallFor(y, rect.height, false);
+    this.dragStartWallMs = this.wallMs;
+    // Capture on the canvas, not the host. The listeners are on the canvas,
+    // and capturing on the host retargets every subsequent pointermove to the
+    // host -- which is an ancestor, so the events never reach the listener and
+    // the drag silently does nothing after the initial press.
+    const target = e.currentTarget;
+    if (target instanceof Element) {
+      try {
+        target.setPointerCapture(e.pointerId);
+        this.captured = target;
+      } catch {
+        // Pointer capture is unavailable in some test environments; the drag
+        // still works as long as the pointer stays over the strip.
+      }
     }
-    this.emitSeek(e.clientY);
   }
 
   private onPointerMove(e: PointerEvent): void {
     const rect = this.getBoundingClientRect();
-    if (rect.height > 0) {
-      this.hoverWallMs = this.wallFor(e.clientY - rect.top, rect.height);
+    if (rect.height <= 0) return;
+    const y = e.clientY - rect.top;
+
+    if (this.dragging) {
+      const moved = this.wallFor(y, rect.height, false) - this.dragAnchorWallMs;
+      this.emitSeek(this.dragStartWallMs + moved);
+      return;
     }
-    if (!this.dragging) return;
-    this.emitSeek(e.clientY);
+
+    this.overViewport = this.isOnViewport(y, rect.height);
+    if (this.overViewport) {
+      // No readout on the handle. It would sit directly over the window --
+      // hiding the grab affordance at the moment the reader is reaching for it
+      // -- to report a time the transport clock is already showing, since the
+      // window is where the playhead is.
+      this.clearHover();
+      return;
+    }
+    this.trackHover(y, rect.height);
+  }
+
+  /**
+   * Updates the hover readout, subject to the dwell delay.
+   *
+   * Once the readout is up it follows the pointer immediately - the delay is
+   * about not appearing unbidden, not about lagging behind once it has.
+   * Movement under a pixel is ignored so a resting hand does not repaint.
+   */
+  private trackHover(y: number, height: number): void {
+    if (Math.round(y) === Math.round(this.hoverY) && this.hoverTimer !== null) return;
+    this.hoverY = y;
+    if (this.hoverWallMs !== null) {
+      this.hoverWallMs = this.wallFor(y, height);
+      return;
+    }
+    if (this.hoverTimer !== null) return;
+    this.hoverTimer = setTimeout(() => {
+      this.hoverTimer = null;
+      const rect = this.getBoundingClientRect();
+      if (rect.height > 0) this.hoverWallMs = this.wallFor(this.hoverY, rect.height);
+    }, HOVER_DWELL_MS);
+  }
+
+  private clearHover(): void {
+    if (this.hoverTimer !== null) {
+      clearTimeout(this.hoverTimer);
+      this.hoverTimer = null;
+    }
+    this.hoverWallMs = null;
   }
 
   private onPointerUp(e: PointerEvent): void {
     if (!this.dragging) return;
     this.dragging = false;
     try {
-      this.releasePointerCapture(e.pointerId);
+      this.captured?.releasePointerCapture(e.pointerId);
     } catch {
       // See onPointerDown.
     }
+    this.captured = null;
   }
 
   private onPointerLeave(): void {
-    this.hoverWallMs = null;
+    this.overViewport = false;
+    this.clearHover();
   }
 
   /**
@@ -526,15 +668,32 @@ export class ScionSeqMinimap extends LitElement {
     // visible rather than letting it vanish.
     const h = Math.max(2, bottom - top);
     const accent = this.token('--scion-primary', FALLBACK.viewport);
+    // The window is the only handle on the strip, so it has to look like one
+    // the moment the pointer is near it.
+    const active = this.overViewport || this.dragging;
 
     ctx.save();
-    ctx.globalAlpha = 0.16;
+    ctx.globalAlpha = active ? 0.28 : 0.16;
     ctx.fillStyle = accent;
     ctx.fillRect(1, top, width - 2, h);
     ctx.globalAlpha = 1;
     ctx.strokeStyle = accent;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = active ? 2 : 1;
     ctx.strokeRect(1.5, top + 0.5, width - 3, Math.max(1, h - 1));
+
+    if (active) {
+      // Grip bars on both edges: the conventional "this moves" marking, and
+      // they stay visible when the window itself is only a few pixels tall.
+      ctx.globalAlpha = 0.9;
+      ctx.lineWidth = 2;
+      const cx = width / 2;
+      for (const y of [top, top + h]) {
+        ctx.beginPath();
+        ctx.moveTo(cx - 7, y);
+        ctx.lineTo(cx + 7, y);
+        ctx.stroke();
+      }
+    }
     ctx.restore();
   }
 
@@ -586,7 +745,7 @@ export class ScionSeqMinimap extends LitElement {
   override render() {
     const label =
       `Run overview, ${Math.round(this.durationMs / 1000)} seconds at uniform scale. ` +
-      `Click or drag to seek.`;
+      `Drag the highlighted window to seek.`;
     // The readout is DOM rather than canvas text so it stays crisp and
     // selectable-looking at any device pixel ratio.
     const readout =
@@ -600,7 +759,7 @@ export class ScionSeqMinimap extends LitElement {
           </div>`;
     return html`
       <canvas
-        class=${this.dragging ? 'grabbing' : ''}
+        class=${this.dragging ? 'grabbing' : this.overViewport ? 'grab' : ''}
         role="slider"
         aria-label=${label}
         aria-valuemin="0"

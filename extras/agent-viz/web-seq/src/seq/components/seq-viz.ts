@@ -613,6 +613,19 @@ export class ScionSeqViz extends LitElement {
     return from && to ? { edge, from, to } : null;
   }
 
+  /**
+   * Moves the playhead by a wall-time delta, from a wheel gesture.
+   *
+   * Scrolling stops playback. A scroll is a request to look at something, and
+   * leaving the clock running would carry it back off the screen a second
+   * later - the user would be fighting the machine for the viewport.
+   */
+  private onScrollTime(deltaWallMs: number): void {
+    if (!this.clock || deltaWallMs === 0) return;
+    if (this.playing) this.togglePlay();
+    this.seekWall(this.wallMs + deltaWallMs);
+  }
+
   private onViewport(startMs: number, endMs: number, widthPx: number): void {
     this.viewportStartMs = startMs;
     this.viewportEndMs = endMs;
@@ -716,6 +729,9 @@ export class ScionSeqViz extends LitElement {
             this.onCanvasSelect(e.detail.hit)}
           @seq-message-open=${(e: CustomEvent<{ edgeId: string }>): void =>
             this.onMessageOpen(e.detail.edgeId)}
+          @seq-scroll-time=${(e: CustomEvent<{ deltaWallMs: number }>): void =>
+            this.onScrollTime(e.detail.deltaWallMs)}
+          @seq-zoom=${(e: CustomEvent<{ factor: number }>): void => this.zoom(e.detail.factor)}
           @seq-viewport=${(
             e: CustomEvent<{ startMs: number; endMs: number; widthPx: number }>
           ): void => this.onViewport(e.detail.startMs, e.detail.endMs, e.detail.widthPx)}
