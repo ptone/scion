@@ -72,8 +72,13 @@ export interface RenderTheme {
   intervalErrorStroke: string;
   /** Diagonal hatching drawn over `inferred` intervals. */
   intervalHatch: string;
-  /** Text drawn inside an interval bar. */
+  /** Text drawn inside a saturated interval bar. */
   intervalLabel: string;
+  /**
+   * Text drawn inside a faded (outer) interval bar, where the dark ink used on
+   * a saturated fill would vanish into the background.
+   */
+  intervalLabelFaint: string;
 
   edgeMessage: string;
   edgeSpawn: string;
@@ -98,6 +103,19 @@ export interface RenderTheme {
   alphaInferred: number;
   /** Fill alpha at the terminated end of an `open` interval. */
   alphaOpen: number;
+
+  /**
+   * Per-nesting-level fill alpha multiplier, indexed by inset level; the last
+   * entry applies to anything deeper.
+   *
+   * A lifeline's outermost bar spans its whole life, so at full saturation it
+   * paints the column solid and swallows every tool call nested inside it --
+   * exactly the information the viewer came for. Fading the containers turns
+   * them into an envelope and lets the innermost, most specific work read as
+   * the foreground. This is the reverse of the usual flame-graph convention,
+   * and deliberately so: here the enclosing frame is context, not content.
+   */
+  alphaByInset: readonly number[];
 }
 
 /**
@@ -125,6 +143,7 @@ export const DEFAULT_THEME: RenderTheme = {
   intervalErrorStroke: '#f85149',
   intervalHatch: 'rgba(255, 255, 255, 0.35)',
   intervalLabel: 'rgba(13, 17, 23, 0.92)',
+  intervalLabelFaint: 'rgba(230, 237, 243, 0.85)',
 
   edgeMessage: 'rgba(230, 237, 243, 0.75)',
   edgeSpawn: 'rgba(126, 231, 135, 0.75)',
@@ -142,6 +161,11 @@ export const DEFAULT_THEME: RenderTheme = {
   alphaMeasured: 0.95,
   alphaInferred: 0.4,
   alphaOpen: 0.85,
+  // Deliberately low at the top: lifecycle, session and turn bars all span
+  // most of a lifeline and are painted one over another, so their alphas
+  // compound. Values that look reasonable in isolation add up to an opaque
+  // column that hides every tool call inside it.
+  alphaByInset: [0.1, 0.14, 0.26, 1],
 };
 
 /** What sits under a point, for click-to-inspect. */
@@ -327,6 +351,14 @@ function drawColumnRule(
 /* Intervals                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/** Fill-alpha multiplier for a nesting level; deeper than the table saturates. */
+export function insetAlpha(theme: RenderTheme, insetLevel: number): number {
+  const table = theme.alphaByInset;
+  if (!table || table.length === 0) return 1;
+  const i = Math.max(0, Math.min(table.length - 1, Math.floor(insetLevel)));
+  return table[i] ?? 1;
+}
+
 function drawInterval(
   ctx: CanvasRenderingContext2D,
   iv: FrameInterval,
@@ -336,6 +368,8 @@ function drawInterval(
   const w = Math.max(1, iv.width);
   const h = Math.max(1, iv.height);
 
+  const nest = insetAlpha(theme, iv.insetLevel);
+
   ctx.save();
   ctx.globalAlpha = iv.opacity;
 
@@ -344,7 +378,7 @@ function drawInterval(
     const grad = ctx.createLinearGradient(0, iv.y, 0, iv.y + h);
     grad.addColorStop(0, iv.colorKey);
     grad.addColorStop(1, 'transparent');
-    ctx.globalAlpha = iv.opacity * theme.alphaOpen;
+    ctx.globalAlpha = iv.opacity * theme.alphaOpen * nest;
     ctx.fillStyle = grad;
     ctx.fillRect(iv.x, iv.y, w, h);
 
@@ -363,6 +397,7 @@ function drawInterval(
 
   ctx.globalAlpha =
     iv.opacity *
+    nest *
     (iv.confidence === 'inferred' ? theme.alphaInferred : theme.alphaMeasured);
   ctx.fillStyle = iv.colorKey;
   ctx.fillRect(iv.x, iv.y, w, h);
@@ -374,7 +409,7 @@ function drawInterval(
     ctx.beginPath();
     ctx.rect(iv.x, iv.y, w, h);
     ctx.clip();
-    ctx.globalAlpha = iv.opacity * 0.7;
+    ctx.globalAlpha = iv.opacity * nest * 0.7;
     ctx.strokeStyle = theme.intervalHatch;
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -547,13 +582,23 @@ function drawLabels(
   // Interval labels, only where they can actually be read.
   ctx.font = theme.smallFont;
   ctx.textAlign = 'left';
-  ctx.fillStyle = theme.intervalLabel;
   for (const iv of model.intervals) {
     if (iv.label === undefined) continue;
+    // The lifecycle bar's label is the agent's name, which the column header
+    // already shows permanently. Drawing it again would be harmless if the bar
+    // were short, but it spans most of the run, so its label sticks to the top
+    // edge and sits directly under the header -- every column captioned twice.
+    if (iv.kind === 'lifecycle') continue;
     if (quiet && iv.zone === 'staging') continue;
     if (iv.height < MIN_LABEL_HEIGHT || iv.width < MIN_LABEL_WIDTH) continue;
     const y = Math.max(6, Math.min(g.height - 6, iv.y + 7));
     ctx.globalAlpha = iv.opacity;
+    // Dark ink reads on a saturated bar and disappears on a faded one, so the
+    // ink follows the fill rather than the other way round.
+    const filled =
+      insetAlpha(theme, iv.insetLevel) *
+      (iv.confidence === 'inferred' ? theme.alphaInferred : theme.alphaMeasured);
+    ctx.fillStyle = filled >= 0.55 ? theme.intervalLabel : theme.intervalLabelFaint;
     ctx.fillText(ellipsize(ctx, iv.label, iv.width - 6), iv.x + 3, y);
   }
 

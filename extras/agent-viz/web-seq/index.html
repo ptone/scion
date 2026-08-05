@@ -15,8 +15,13 @@
         font-family:
           -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       }
+      /*
+        Only size the host here. Do NOT set `display`: a document-level rule on
+        the host element beats the component's own `:host` rule in the cascade,
+        so `display: block` here would silently override the component's
+        `display: grid` and collapse its entire layout.
+      */
       #root {
-        display: block;
         height: 100vh;
       }
     </style>

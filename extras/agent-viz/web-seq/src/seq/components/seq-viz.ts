@@ -34,7 +34,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 
 import type { Digest, Interval, Edge, Lifeline } from '../core/types.js';
 import { SCHEMA_VERSION } from '../core/types.js';
@@ -53,7 +53,8 @@ import type { SeqSelection } from './seq-detail-panel.js';
 import type { SeqMinimapMarker } from './seq-minimap.js';
 
 /** Column geometry, px. */
-const COLUMN_WIDTH = 104;
+const MIN_COLUMN_WIDTH = 104;
+const MAX_COLUMN_WIDTH = 240;
 const COLUMN_GAP = 10;
 const FOLDED_WIDTH = 8;
 
@@ -108,8 +109,19 @@ export class ScionSeqViz extends LitElement {
 
   @state() private legendOpen = false;
 
+  /**
+   * Whether the run-overview rail is expanded.
+   *
+   * Reflected to an attribute because the rail's width lives in this host's
+   * `grid-template-columns`, and `:host()` selectors are the only way a shadow
+   * root can restyle its own host.
+   */
+  @property({ type: Boolean, reflect: true, attribute: 'rail-collapsed' })
+  railCollapsed = false;
+
   @state() private viewportStartMs = 0;
   @state() private viewportEndMs = 0;
+  @state() private canvasWidthPx = 0;
 
   private warp: WarpFn | null = null;
   private clock: PlaybackClock | null = null;
@@ -128,7 +140,12 @@ export class ScionSeqViz extends LitElement {
   static override styles = css`
     :host {
       display: grid;
-      grid-template-columns: 250px 1fr 64px;
+      /*
+        The overview rail is 200px because it has to carry a lane per lifeline
+        plus a time gutter. At scrollbar width it can only be a progress
+        indicator, which is not worth the screen edge it occupies.
+      */
+      grid-template-columns: 250px 1fr 200px;
       grid-template-rows: auto 1fr auto;
       height: 100%;
       background: var(--scion-bg, #0f172a);
@@ -206,12 +223,46 @@ export class ScionSeqViz extends LitElement {
       inset: 0;
     }
 
+    :host([rail-collapsed]) {
+      grid-template-columns: 250px 1fr 22px;
+    }
+
     .rail {
       grid-row: 2;
       border-left: 1px solid var(--scion-border, #334155);
       background: var(--scion-surface, #1e293b);
       display: flex;
       flex-direction: column;
+      overflow: hidden;
+    }
+    .rail-head {
+      display: flex;
+      align-items: center;
+      gap: var(--scion-space-1, 0.25rem);
+      padding: 2px 2px 2px 6px;
+      border-bottom: 1px solid var(--scion-border, #334155);
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--scion-text-muted, #94a3b8);
+      white-space: nowrap;
+    }
+    .rail-head .spacer {
+      flex: 1;
+    }
+    .rail-head button {
+      background: none;
+      border: none;
+      color: var(--scion-text-muted, #94a3b8);
+      cursor: pointer;
+      font-size: 11px;
+      line-height: 1;
+      padding: 3px 4px;
+      border-radius: var(--scion-radius-sm, 0.25rem);
+    }
+    .rail-head button:hover {
+      background: var(--scion-surface-raised, #263449);
+      color: var(--scion-text, #f1f5f9);
     }
     scion-seq-minimap {
       flex: 1;
@@ -369,15 +420,41 @@ export class ScionSeqViz extends LitElement {
     }
     this.activeIds = activeIds;
 
-    this.layout = computeColumns(digest.lifelines, {
+    const opts = {
       collapsed: this.collapsed,
       solo: this.solo,
       ...(this.autoFold ? { activeWindow: { startMs, endMs }, activeIds } : {}),
-      columnWidth: COLUMN_WIDTH,
       gap: COLUMN_GAP,
       foldedWidth: FOLDED_WIDTH,
+    };
+
+    // Lay out once at the minimum width to learn how many columns survive
+    // folding, then widen them to use the canvas. A run with seven agents
+    // should not leave half the window empty; a run with forty should not try.
+    const probe = computeColumns(digest.lifelines, { ...opts, columnWidth: MIN_COLUMN_WIDTH });
+    this.layout = computeColumns(digest.lifelines, {
+      ...opts,
+      columnWidth: this.fittedColumnWidth(probe),
     });
     this.layoutDirty = false;
+  }
+
+  /**
+   * Column width that fills the canvas without exceeding a readable maximum.
+   *
+   * Widening is purely cosmetic and therefore safe: unlike the vertical axis,
+   * horizontal position carries no metric meaning, so nothing about the
+   * geometry becomes less honest when a column gets wider.
+   */
+  private fittedColumnWidth(probe: ColumnLayout): number {
+    const avail = this.canvasWidthPx;
+    if (avail <= 0) return MIN_COLUMN_WIDTH;
+    const full = probe.columns.filter((c) => !c.folded).length;
+    if (full === 0) return MIN_COLUMN_WIDTH;
+    const foldedPx = probe.columns.filter((c) => c.folded).length * (FOLDED_WIDTH + COLUMN_GAP);
+    const usable = avail - foldedPx - COLUMN_GAP * (full + 1);
+    const each = usable / full;
+    return clamp(Math.floor(each), MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
   }
 
   private onKeydown(e: KeyboardEvent): void {
@@ -496,9 +573,13 @@ export class ScionSeqViz extends LitElement {
     if (edge) this.seekWall(hit.stub.direction === 'outgoing' ? edge.recvMs : edge.sendMs);
   }
 
-  private onViewport(startMs: number, endMs: number): void {
+  private onViewport(startMs: number, endMs: number, widthPx: number): void {
     this.viewportStartMs = startMs;
     this.viewportEndMs = endMs;
+    if (widthPx > 0 && widthPx !== this.canvasWidthPx) {
+      this.canvasWidthPx = widthPx;
+      this.layoutDirty = true;
+    }
   }
 
   private markers(): SeqMinimapMarker[] {
@@ -593,8 +674,9 @@ export class ScionSeqViz extends LitElement {
           .msPerPx=${this.msPerPx}
           @seq-select=${(e: CustomEvent<{ hit: HitResult | null }>): void =>
             this.onCanvasSelect(e.detail.hit)}
-          @seq-viewport=${(e: CustomEvent<{ startMs: number; endMs: number }>): void =>
-            this.onViewport(e.detail.startMs, e.detail.endMs)}
+          @seq-viewport=${(
+            e: CustomEvent<{ startMs: number; endMs: number; widthPx: number }>
+          ): void => this.onViewport(e.detail.startMs, e.detail.endMs, e.detail.widthPx)}
         ></scion-seq-canvas>
 
         ${this.selection
@@ -622,13 +704,30 @@ export class ScionSeqViz extends LitElement {
       </main>
 
       <div class="rail">
+        <div class="rail-head">
+          ${this.railCollapsed ? nothing : html`<span>run overview</span>`}
+          <span class="spacer"></span>
+          <button
+            title=${this.railCollapsed ? 'Show run overview' : 'Hide run overview'}
+            aria-label=${this.railCollapsed ? 'Show run overview' : 'Hide run overview'}
+            aria-expanded=${String(!this.railCollapsed)}
+            @click=${(): void => {
+              this.railCollapsed = !this.railCollapsed;
+            }}
+          >
+            ${this.railCollapsed ? '‹' : '›'}
+          </button>
+        </div>
         <scion-seq-minimap
           .density=${d.density}
+          .lifelines=${d.lifelines}
+          .intervals=${d.intervals}
           .durationMs=${d.durationMs}
           .wallMs=${this.wallMs}
           .viewportStartMs=${this.viewportStartMs}
           .viewportEndMs=${this.viewportEndMs}
           .markers=${this.markers()}
+          .highlightLifelineId=${this.selectedLifelineId}
           @seq-seek-wall=${(e: CustomEvent<{ wallMs: number }>): void =>
             this.seekWall(e.detail.wallMs)}
         ></scion-seq-minimap>

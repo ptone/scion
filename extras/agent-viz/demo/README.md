@@ -2,7 +2,8 @@
 
 Sample runs for the sequence visualizer. Everything here is **synthetic** — see
 [Honesty about this data](#honesty-about-this-data) at the bottom, which is the
-most important section on this page.
+most important section on this page, and which now also records the three real
+bugs that only a production log export exposed.
 
 ## Quick start
 
@@ -23,7 +24,7 @@ make seq-run                     # synthesizes 60 agents / 45 min on the fly
 ```
 demo/
   sample/          committed
-    run.log.json      raw Cloud Logging export, 310 entries
+    run.log.json      raw Cloud Logging export, 270 entries
     run.digest.json   digest built from that log
   generated/       gitignored, produced by regenerate.sh
     default.digest.json
@@ -55,7 +56,7 @@ Each one pressures a different axis of the design.
 
 | Scenario | Shape | What it's for |
 |---|---|---|
-| `sample` | 14 agents / 6 min, 11 concurrent | Small enough to read end to end. Doubles as the test fixture. |
+| `sample` | 14 agents / 6 min, 8 concurrent | Small enough to read end to end. Doubles as the test fixture. |
 | `default` | 60 agents / 45 min, 12 concurrent | The headline case, and the shape the design targets: a handful of agents of interest on screen, drawn from a much larger population. 11× compression. |
 | `wide` | 90 agents / 30 min, **~35 concurrent** | **Column pressure.** More columns than fit on screen — the only condition under which collapse, auto-fold and solo actually matter. |
 | `stress` | 120 agents / 3 h | **Volume.** ~3,200 intervals and ~10,800 warp knots. Checks culling, the binary-search frame build, and that the payload stays sane (2.5 MB). |
@@ -87,9 +88,11 @@ Load `wide`, since it has the most going on:
   project and a ±5 min window, so it lands on the right rows).
 - **`+` / `-`** zoom the time axis. Bar heights scale exactly with duration at
   every zoom level — that invariant is asserted in the tests.
-- Check the **minimap** on the right. It stays strictly linear in wall time
-  while the main view's speed varies, which is what makes the compression
-  legible rather than deceptive.
+- Check the **run overview** rail on the right. It stays strictly linear in wall
+  time while the main view's speed varies, which is what makes the compression
+  legible rather than deceptive. One lane per lifeline, so you can see *which*
+  agents were busy in a stretch you just raced through; hover for a readout,
+  click to seek, collapse it with the chevron when you want the room.
 
 Look for hatched and faded bars: those are `inferred` and `open` confidence,
 where an endpoint was reconstructed or never observed.
@@ -109,15 +112,17 @@ check on `/api/digest`.
 
 ## Honesty about this data
 
-**No real agent run has ever been through this tool.** Everything here comes
-from `internal/digest/synth.go`. That matters in four specific ways:
+Everything in this directory comes from `internal/digest/synth.go`. One real
+production export (49 min, 8 agents, ~4,600 rows) has since been through the
+full pipeline, which corrected several things the synthetic data had quietly
+got wrong — but the demo files are still invented, and that matters:
 
 1. **It is partly circular.** The generator emits spawns shaped like the
    shell-call pattern the parser's parent-attribution heuristic looks for. The
    clean 4-layer ancestry in these demos partly reflects that it was fed data
    built to be understood. Real logs may produce a flatter or wrong tree — and
    the column tree is load-bearing for the whole design.
-2. **The confidence mix is probably too optimistic.** `default` is 93%
+2. **The confidence mix is probably too optimistic.** `default` is ~90%
    `measured`. Real hook-per-process telemetry leaves far more spans with one
    endpoint, and a mostly-hatched view reads very differently.
 3. **Velocity defaults are fitted to invented density.** `--target-rate 6`,
@@ -125,8 +130,48 @@ from `internal/digest/synth.go`. That matters in four specific ways:
    structure that was made up. Real runs are likely burstier.
 4. **The event vocabulary may be incomplete.** Unhandled event types or payload
    keys in real exports would yield a much sparser view.
+5. **One real run is not a sample.** It is one project, one harness, one
+   workload shape.
 
 So this data demonstrates the *mechanism* honestly — the warp, slot recycling,
-nesting and geometry provably work — but it supports no claim about how the
-tool reads on a real run. Point `--log-file` at a genuine Cloud Logging export
-to find out.
+nesting and geometry provably work — but treat the way it *reads* as a
+hypothesis. Point `--log-file` at your own export to test it.
+
+### What the real run changed
+
+Worth recording, because each of these was invisible in synthetic data and each
+was a real defect:
+
+- **Messages were drawn twice.** Real exports log `message dispatched` and then
+  `message accepted (buffered)`. The generator emitted only the first, so
+  nothing ever exercised the second. It now emits both, which also means
+  arrivals in the demo are `measured` rather than inferred — matching what a
+  real export supports. About 4% of deliveries are deliberately left
+  unacknowledged, so the inferred path stays exercised and visible.
+- **Names were treated as unique keys.** A restarted agent reuses its name with
+  a new UUID; most message rows carry only the name. Resolution is now
+  timestamp-aware.
+- **Tool results were paired by stack position, not name.** A dropped result let
+  an `Edit` be closed by an unrelated later `Bash`, drawing a bar minutes
+  outside its turn. Results now pair by `tool_name`, and anything still open
+  when its turn ends is closed there.
+
+### Running against your own export
+
+```bash
+./seq-viz --log-file /path/to/export.json
+```
+
+The fs-watcher log (`--fs-log`) is **optional** and normally absent; the
+`scion-messages` and `scion-agents` streams alone are enough. Everything is
+derived from those, and the startup banner reports what it found:
+
+```
+lifelines: 8 (max 7 concurrent, so 7 columns)
+intervals: 1134 (1003 measured / 131 inferred / 0 open)
+edges:     758 (744 measured arrival / 14 inferred / 0 open)
+playback:  7.6 min of viewing at 1x (6.5x compression)
+```
+
+If `measured arrival` is 0, your export has only the dispatch phase and every
+arrow slope is inferred; the legend will say so too.

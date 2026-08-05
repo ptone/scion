@@ -136,9 +136,15 @@ strobing as though it were data you were meant to parse.
   object constancy. See `LAYOUT_REFRESH_MS` and `ACTIVITY_WINDOW_FACTOR` in
   `seq-viz.ts`.
 
+- **Adaptive width**: layout runs once at the minimum column width to learn how
+  many columns survive folding, then widens them to fill the canvas (clamped to
+  104–240px). A run with seven agents should not leave half the window empty; a
+  run with forty should not try.
+
 Note the symmetry: **time** compresses *temporally* (velocity); **columns**
 compress *spatially* (collapse/fold). Spatial compression is only safe on the
-column axis because horizontal position carries no metric meaning there.
+column axis because horizontal position carries no metric meaning there —
+which is also why widening columns to fill the canvas costs no honesty.
 
 ### 5. Confidence is a first-class field
 
@@ -157,6 +163,41 @@ spans would otherwise collapse to zero; they are marked, not invented.
 Inference is also constrained to preserve nesting: an end is only propagated
 from a strictly deeper kind to a shallower one, never between siblings, so an
 inferred parent end always still contains its children.
+
+Containment runs the other way too. Ends go missing often enough that a
+name-blind stack pop would close an `Edit` with a `Bash`'s result, and a tool
+call left open would float until some unrelated later event closed it —
+drawing a bar hundreds of seconds outside the turn it belonged to. So tool
+results pair by `tool_name` when both sides carry one, and anything still open
+when its enclosing span ends is closed at that boundary and marked `inferred`.
+A turn ending *is* evidence that the tools inside it finished. The invariant
+"a child that starts inside a parent also ends inside it" is asserted on the
+Go side and again on the generated digest from the frontend tests.
+
+### 5b. Arrival times are measured where the log allows it
+
+A real Scion export writes two rows per delivered message: the broker's
+`message dispatched`, and the recipient's `message accepted (buffered)` when it
+takes the message into its inbox. The digest pairs them — FIFO, keyed on
+endpoints plus content, within a bounded window — and folds the pair into one
+edge.
+
+This matters twice over. Not pairing them draws **every message twice**. Pairing
+them makes the arrival time `measured` rather than a guess, which is what makes
+the arrow's slope real latency instead of a plausible-looking fiction. On a real
+49-minute run: 1490 message rows → 758 edges, 744 of them with measured arrival.
+
+Where the acknowledgement is missing — the recipient died, or the export window
+clipped it — the edge falls back to the inferred arrival described above. The
+legend states the measured share for the loaded run, because slope is the most
+seductive thing on the canvas: it looks like latency whether or not anyone
+measured it.
+
+Names are also not unique keys. A restarted agent reuses its name with a fresh
+UUID, and most message rows carry only the name — so name→ID resolution happens
+*as of the row's timestamp*, preferring the instance that was actually alive
+then. Without that, one real run attributed 112 edges and six child agents to an
+instance that had lived for three seconds.
 
 ### 6. Edge stubs
 
@@ -224,6 +265,24 @@ Play/pause, a scrubber over viewer time, the wall clock, and a rate selector
 
 The clock readout blurs and glows in proportion to `log(velocity)`, with an
 "N× express" pill, so you can tell at a glance that time is being skipped.
+
+### Run overview (the minimap)
+
+A 200px rail down the right-hand side, in **true linear wall time** — the one
+place in the UI that is not warped, so it is the honest answer to "where am I
+and what did I skip". Three bands:
+
+| band | shows |
+|---|---|
+| time gutter | `mm:ss` ticks at a readable spacing |
+| density heat | overall event intensity, the input to the velocity planner |
+| lifeline lanes | one lane per lifeline, coloured where that agent was active |
+
+The lanes are the reason it needs the width: knowing *something* was busy at
+32:00 is much less useful than seeing it was `kael` and `scribe` and nobody
+else. Hover for a readout, click to seek, and collapse the whole rail to 22px
+when the canvas needs the room. The static bands are rastered to an offscreen
+canvas and blitted, so hover and the viewport rectangle cost nothing per frame.
 
 ### Header
 
@@ -470,19 +529,26 @@ is swapping `/api/digest` for the real backend route and adding auth.
 
 ## Limitations
 
-**Nothing here has been validated against a real run.** All sample data is
-synthetic. See the honesty section in [demo/README.md](demo/README.md) for the
-four specific ways that matters — the most important being that the generator
-was written to satisfy the parser's parent-attribution heuristic, so the clean
-ancestry in the demos is partly circular.
+**Validated against one real run, not many.** A 49-minute, 8-agent production
+export has been through the whole pipeline end to end, and it is what found the
+double-counted messages, the recycled-name misattribution and the mispaired tool
+spans. But it is still one run, from one project, with one harness. The
+synthetic generator remains partly circular: it was written to satisfy the
+parser's parent-attribution heuristic, so the clean ancestry in the demos proves
+less than it looks like it does. See the honesty section in
+[demo/README.md](demo/README.md).
 
-**Sloped arrows are only half-real.** The Cloud Logging message stream carries a
-single timestamp per message, so true send→receive latency is not available. The
-digest infers arrival as the recipient's next observed activity and marks it
-`inferred`; where nothing can be inferred, the edge stays horizontal and dashed.
-A digest sourced from the `messages` table (which has both `created` and
-`dispatched_at`) would upgrade these to genuinely `measured`. This is the single
-highest-value follow-up.
+**Slope is measured only where the recipient acknowledged.** With both message
+phases present the arrival time is real (744 of 758 edges on the run above).
+Without them — an export carrying only `message dispatched`, or a recipient that
+died before acknowledging — arrival falls back to the recipient's next observed
+activity, marked `inferred`; where nothing can be inferred at all the edge stays
+horizontal and dashed. The legend reports the split for whatever is loaded.
+
+**Only `scion-messages` and `scion-agents` are required.** The fs-watcher log is
+optional and usually absent; without it the file-graph-derived detail is simply
+missing and everything else works. Runs with no `agent.lifecycle` rows fall back
+to manifest-derived lifelines.
 
 **Warp payload is exact, not decimated.** One knot per density bucket, merged
 only on exactly equal velocity — ~10,800 knots for a 3-hour run, roughly half

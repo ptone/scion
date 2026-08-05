@@ -65,6 +65,7 @@ export class ScionSeqCanvas extends LitElement {
   /** Viewport bounds last reported, to avoid redundant events. */
   private reportedStart = NaN;
   private reportedEnd = NaN;
+  private reportedWidth = NaN;
 
   static override styles = css`
     :host {
@@ -163,12 +164,21 @@ export class ScionSeqCanvas extends LitElement {
 
     // Tell the parent which slice of wall time is on screen, so the minimap can
     // draw the viewport rectangle against the true-linear overview.
-    if (model.visibleStartMs !== this.reportedStart || model.visibleEndMs !== this.reportedEnd) {
+    if (
+      model.visibleStartMs !== this.reportedStart ||
+      model.visibleEndMs !== this.reportedEnd ||
+      this.cssWidth !== this.reportedWidth
+    ) {
       this.reportedStart = model.visibleStartMs;
       this.reportedEnd = model.visibleEndMs;
+      this.reportedWidth = this.cssWidth;
       this.dispatchEvent(
         new CustomEvent('seq-viewport', {
-          detail: { startMs: model.visibleStartMs, endMs: model.visibleEndMs },
+          detail: {
+            startMs: model.visibleStartMs,
+            endMs: model.visibleEndMs,
+            widthPx: this.cssWidth,
+          },
           bubbles: true,
           composed: true,
         })
