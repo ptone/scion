@@ -35,6 +35,8 @@
 // being drawn shorter, so a bar's length never lies about duration.
 package digest
 
+import "time"
+
 // SchemaVersion is incremented on breaking changes to the wire format. The
 // frontend refuses to render a digest whose version it does not recognize.
 const SchemaVersion = 1
@@ -304,8 +306,11 @@ type Stats struct {
 	IntervalCount int `json:"intervalCount"`
 	EdgeCount     int `json:"edgeCount"`
 
-	// MaxConcurrent is the largest number of simultaneously alive lifelines,
-	// which equals the number of column slots required.
+	// MaxConcurrent is the number of column slots required, which for a build
+	// colored from scratch equals the largest number of simultaneously alive
+	// lifelines. Pinned columns (Options.PinnedSlots) can leave a slot empty
+	// after its occupants have all died, so on a live rebuild this is an upper
+	// bound on concurrency rather than a measurement of it.
 	MaxConcurrent int `json:"maxConcurrent"`
 
 	MeasuredIntervals int `json:"measuredIntervals"`
@@ -368,6 +373,41 @@ type Options struct {
 	// choice when the digest is being shipped somewhere the message text should
 	// not go.
 	MaxBodyLen int
+
+	// Origin pins t=0 of the run. The zero value means "the first entry", which
+	// is the right answer for a finished export and the wrong one for a session
+	// that is still being read: every rebuild that picks up an earlier entry
+	// would shift the whole timeline underneath the reader, moving the playhead,
+	// the minimap and every cached position at once.
+	//
+	// A caller reading a live tail should pin this once -- to the start of the
+	// history window it asked for -- and pass the same value on every rebuild.
+	// Entries that predate a pinned origin are kept and clamped to 0 rather than
+	// dropped, so nothing silently disappears; the count is logged.
+	Origin time.Time
+
+	// PinnedSlots holds the column each lifeline already occupies, keyed by
+	// lifeline ID, carried over from the previous build of the same session with
+	// SlotsOf. Nil -- the right value for a one-shot build of a finished export
+	// -- colors the columns from scratch.
+	//
+	// An entry for a lifeline that no longer exists is ignored, and a pin that
+	// cannot be honored is dropped with a log line rather than allowed to
+	// overlap.
+	PinnedSlots map[string]int
+}
+
+// SlotsOf extracts the column assignment of a digest, for feeding back in as
+// Options.PinnedSlots on the next rebuild of the same session.
+func SlotsOf(d *Digest) map[string]int {
+	if d == nil {
+		return nil
+	}
+	out := make(map[string]int, len(d.Lifelines))
+	for _, l := range d.Lifelines {
+		out[l.ID] = l.Slot
+	}
+	return out
 }
 
 // DefaultOptions returns tuned defaults suitable for typical Scion runs.

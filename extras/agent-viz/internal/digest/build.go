@@ -21,6 +21,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -198,6 +199,7 @@ type builder struct {
 
 	slotCount    int
 	droppedEdges int
+	beforeOrigin int
 }
 
 // loadEntries filters out unparseable timestamps, sorts chronologically and
@@ -220,8 +222,18 @@ func (b *builder) loadEntries(entries []logparser.GCPLogEntry) error {
 	}
 	sort.SliceStable(stamps, func(i, j int) bool { return stamps[i].t.Before(stamps[j].t) })
 
+	// The origin is normally the first entry, but a caller rebuilding a digest
+	// as more log arrives pins it, so that an entry turning up from before the
+	// previously-first one lengthens the run at the top instead of sliding every
+	// other event backwards.
 	b.start = stamps[0].t
+	if !b.opts.Origin.IsZero() {
+		b.start = b.opts.Origin
+	}
 	b.end = stamps[len(stamps)-1].t
+	if b.end.Before(b.start) {
+		b.end = b.start
+	}
 	b.durationMs = float64(b.end.Sub(b.start)) / float64(time.Millisecond)
 	if b.durationMs < 0 {
 		b.durationMs = 0
@@ -230,12 +242,24 @@ func (b *builder) loadEntries(entries []logparser.GCPLogEntry) error {
 	b.events = make([]logEvent, 0, len(stamps))
 	for _, s := range stamps {
 		e := &entries[s.idx]
+		ms := float64(s.t.Sub(b.start)) / float64(time.Millisecond)
+		// An entry older than a pinned origin is evidence we asked not to see,
+		// but dropping it would lose a session start or a spawn that the rest of
+		// the digest depends on. Clamp it to the origin instead.
+		if ms < 0 {
+			ms = 0
+			b.beforeOrigin++
+		}
 		b.events = append(b.events, logEvent{
 			entry:  e,
-			ms:     float64(s.t.Sub(b.start)) / float64(time.Millisecond),
+			ms:     ms,
 			stream: logStream(e.LogName),
 			msg:    payloadStr(e.JSONPayload, "message"),
 		})
+	}
+	if b.beforeOrigin > 0 {
+		log.Printf("digest: %d entries predate the pinned origin %s; clamped to t=0",
+			b.beforeOrigin, b.start.Format(time.RFC3339))
 	}
 	return nil
 }
@@ -484,8 +508,25 @@ func (b *builder) assignOrder() {
 	}
 }
 
+// lifetime is one lifeline's occupancy of a column, half-open: [birth, death).
+type lifetime struct{ birth, death float64 }
+
+// overlaps reports whether two occupancies of the same column would collide.
+// Half-open, so a lifeline may be born at the instant its predecessor died.
+func (o lifetime) overlaps(p lifetime) bool {
+	return o.birth < p.death && p.birth < o.death
+}
+
 // assignSlots performs greedy interval-graph coloring over lifetimes so that
 // non-overlapping lifelines share a rendered column.
+//
+// Options.PinnedSlots makes the result stable across rebuilds of a session that
+// is still being read. Left to itself the coloring is a pure function of the
+// whole lifetime set, which means a newly discovered agent -- or an existing
+// agent's death moving in from "still open" to a measured time -- can reseat an
+// agent that has been sitting in the same column on screen for ten minutes.
+// Pinned lifelines are placed first, at the column they already had; everything
+// else is colored around them.
 func (b *builder) assignSlots() {
 	idx := make([]*Lifeline, len(b.lifelines))
 	copy(idx, b.lifelines)
@@ -496,23 +537,53 @@ func (b *builder) assignSlots() {
 		return idx[i].Order < idx[j].Order
 	})
 
-	var slotFree []float64 // death time of the current occupant of each slot
-	for _, l := range idx {
-		assigned := -1
-		for s, free := range slotFree {
-			if free <= l.BirthMs {
-				assigned = s
-				break
+	occupied := map[int][]lifetime{}
+	maxSlot := -1
+	take := func(l *Lifeline, slot int) {
+		occupied[slot] = append(occupied[slot], lifetime{l.BirthMs, l.DeathMs})
+		if slot > maxSlot {
+			maxSlot = slot
+		}
+		l.Slot = slot
+	}
+	fits := func(l *Lifeline, slot int) bool {
+		want := lifetime{l.BirthMs, l.DeathMs}
+		for _, o := range occupied[slot] {
+			if o.overlaps(want) {
+				return false
 			}
 		}
-		if assigned < 0 {
-			slotFree = append(slotFree, 0)
-			assigned = len(slotFree) - 1
-		}
-		slotFree[assigned] = l.DeathMs
-		l.Slot = assigned
+		return true
 	}
-	b.slotCount = len(slotFree)
+
+	pending := idx
+	if len(b.opts.PinnedSlots) > 0 {
+		pending = pending[:0:0]
+		for _, l := range idx {
+			slot, pinned := b.opts.PinnedSlots[l.ID]
+			if !pinned || slot < 0 {
+				pending = append(pending, l)
+				continue
+			}
+			// A pin can only conflict if a lifetime grew across rebuilds, which
+			// the watermark is meant to prevent. Honor the earlier-born claim and
+			// recolor the other rather than draw two agents down one column.
+			if !fits(l, slot) {
+				log.Printf("digest: lifeline %s could not keep column %d; recoloring", l.ID, slot)
+				pending = append(pending, l)
+				continue
+			}
+			take(l, slot)
+		}
+	}
+
+	for _, l := range pending {
+		slot := 0
+		for ; !fits(l, slot); slot++ {
+		}
+		take(l, slot)
+	}
+	b.slotCount = maxSlot + 1
 }
 
 // openSpan is an interval whose start has been seen but whose end has not.
@@ -555,8 +626,77 @@ func (b *builder) buildIntervals() {
 		}
 		return a.LifelineID < c.LifelineID
 	})
-	for i := range b.intervals {
-		b.intervals[i].ID = fmt.Sprintf("iv%d", i)
+	uniquify(len(b.intervals), func(i int) string { return intervalKey(b.intervals[i]) },
+		func(i int, id string) { b.intervals[i].ID = id })
+}
+
+// msKey renders a millisecond offset for use inside an identifier. Sub-
+// millisecond precision distinguishes nothing a reader can see, and rounding
+// keeps the identifier readable.
+func msKey(ms float64) string {
+	return strconv.FormatInt(int64(math.Round(ms)), 10)
+}
+
+// intervalKey derives an interval's identity from the log entry that opened it.
+//
+// The obvious alternative -- numbering intervals by position, as this did until
+// the identities had to survive a growing digest -- is only stable for a run
+// that is already over. Insert one earlier event and every later interval takes
+// the identity of its neighbour, which silently moves the reader's selection,
+// the open message reader and any deep link onto a different event. Identity
+// therefore comes from the log, which cannot be renumbered: `insertId` is
+// already carried through the whole pipeline as `LogID`.
+//
+// The kind is part of the key because one entry can legitimately produce two
+// intervals -- a lifeline whose only evidence is a session row gets both a
+// session bar and the synthesised lifecycle bar that contains it.
+func intervalKey(iv Interval) string {
+	if iv.LogID != "" {
+		return "iv." + string(iv.Kind) + "." + iv.LogID
+	}
+	// A lifeline with no lifecycle rows at all still gets one synthesised
+	// lifecycle bar, which no entry produced. There is exactly one per lifeline,
+	// so the lifeline names it -- and deliberately without its start time, which
+	// is only "first seen" and moves whenever earlier evidence turns up.
+	if iv.Kind == KindLifecycle {
+		return "iv.lifecycle." + iv.LifelineID
+	}
+	// Anything else without an entry (an export with no insert ids) falls back
+	// to position in time, which is stable only as far as the origin is.
+	return "iv." + string(iv.Kind) + "." + iv.LifelineID + "@" + msKey(iv.StartMs)
+}
+
+// edgeKey derives an edge's identity the same way, per kind.
+func edgeKey(e Edge) string {
+	// A spawn edge is the child's birth, so the child names it. Its LogID is the
+	// lifeline's own entry, which is empty for manifest-derived agents.
+	if e.Kind == EdgeSpawn {
+		return "e.spawn." + e.ToID
+	}
+	if e.LogID != "" {
+		return "e." + string(e.Kind) + "." + e.LogID
+	}
+	// Destroy edges come from the parser's event stream, which does not carry an
+	// insert id.
+	return "e." + string(e.Kind) + "." + e.FromID + ">" + e.ToID + "@" + msKey(e.SendMs)
+}
+
+// uniquify assigns each item its key, disambiguating any repeat with a suffix.
+//
+// Keys are meant to be unique and the tests assert that they are on real and
+// synthetic runs alike, but a duplicate must not silently collapse two events
+// into one identity -- an id is what selection, deep links and delta updates
+// are matched on. The suffix is applied in the caller's existing sort order, so
+// it is deterministic for a given set of events.
+func uniquify(n int, key func(int) string, set func(int, string)) {
+	seen := make(map[string]int, n)
+	for i := 0; i < n; i++ {
+		k := key(i)
+		seen[k]++
+		if c := seen[k]; c > 1 {
+			k = k + "~" + strconv.Itoa(c)
+		}
+		set(i, k)
 	}
 }
 
@@ -980,9 +1120,8 @@ func (b *builder) buildEdges(parsed *logparser.ParseResult) {
 		}
 		return b.edges[i].ToID < b.edges[j].ToID
 	})
-	for i := range b.edges {
-		b.edges[i].ID = fmt.Sprintf("e%d", i)
-	}
+	uniquify(len(b.edges), func(i int) string { return edgeKey(b.edges[i]) },
+		func(i int, id string) { b.edges[i].ID = id })
 }
 
 // Message rows in scion-messages come in two phases. The broker logs the

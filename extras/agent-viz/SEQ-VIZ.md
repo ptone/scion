@@ -498,6 +498,17 @@ One JSON document, computed once. Abridged:
 All times are **milliseconds since `startedAt`**, never absolute — so the whole
 document is relative and the client only needs one absolute anchor.
 
+**IDs are derived, not positional.** An interval is
+`iv.<kind>.<insertId>`, an edge `e.<kind>.<insertId>`, and a spawn arrow
+`e.spawn.<childLifelineId>`, so the same event keeps the same name in every
+rebuild of a session that is still being read. Where no log row produced the
+row — the synthesised lifecycle bar a lifeline gets when it has no lifecycle
+events at all — the fallback is `iv.lifecycle.<lifelineId>`, deliberately
+without a time, because that bar's start is only "first seen" and moves whenever
+earlier evidence turns up. Everything else falls back to
+`<kind>.<lifelineId>@<startMs>`, and any residual collision gets a `~2`, `~3`
+suffix in sort order. Treat IDs as opaque; the format is not a wire contract.
+
 Payload sizes: ~100 KB for 14 agents / 6 min, ~650 KB for 60 agents / 45 min,
 ~2.5 MB for 120 agents / 3 h. Warp knots dominate at long durations (one per
 density bucket, merged only where velocity is exactly equal).
@@ -546,6 +557,8 @@ make seq-test
 | Suite | Covers |
 |---|---|
 | `internal/digest/build_test.go` | interval nesting, confidence inference, slot recycling, edge resolution, cycle safety |
+| `internal/digest/identity_test.go` | interval and edge IDs surviving an earlier insertion and an interval closing; uniqueness on a real 1,134-interval export |
+| `internal/digest/stability_test.go` | pinned columns surviving a new agent and a death arriving; unhonourable pins dropped; pinned origin holding offsets still; pre-origin entries clamped |
 | `internal/digest/velocity_test.go` | warp monotonicity, round-trip inverse, accel limits, decelerate-before-burst, uniform-density linearity |
 | `internal/seqserver/server_test.go` | SPA fallback, asset serving, API 404s, digest round-trip |
 | `core/*.test.ts` | warp, clock, columns, frame geometry |
@@ -664,19 +677,37 @@ the server keeps the accumulated entries and re-derives the whole digest each
 poll, which makes late arrivals and retroactive resolution free and correct by
 construction, then diffs against the previous digest to send the client a delta.
 
-Three changes to the builder are still required, and the first two are worth
-making regardless:
+Three changes to the builder were required first, all of them worth making
+regardless of ingestion, and **all three are now in**. Each is the same bug in a
+different coordinate: something the reader is looking at moves because of news
+about something else.
 
-1. **Stable identity.** Interval and edge IDs are positional (`iv%d`, `e%d`), so
-   a single insertion renumbers everything after it — silently moving the
+1. **Stable identity.** Interval and edge IDs were positional (`iv%d`, `e%d`),
+   so a single insertion renumbered everything after it — silently moving the
    reader's selection, the open message reader, and any future deep link onto a
-   different event. Derive them from `insertId`, which is already carried.
-2. **Stable columns.** Slot assignment and DFS `order` are computed over the
-   full lifetime set, so a new agent can retroactively change where an existing
-   one sits. A live agent must keep its column for the life of the session.
-3. **A pinned origin.** `b.start` is `stamps[0]`; it has to become an explicit
-   input, or a late entry that predates the current first one shifts every
-   offset in the digest.
+   different event. They are now derived from `insertId`, which the digest
+   already carried as `logId`. See *The digest format* for the scheme.
+2. **Stable columns.** Slot assignment is greedy interval-graph colouring over
+   the full lifetime set, so a newly discovered agent — or an existing agent's
+   death arriving and shrinking its lifetime from "still open" to a measured
+   time — could reseat an agent that had been in the same column for ten
+   minutes. `Options.PinnedSlots` (fed from `SlotsOf(previous)`) places pinned
+   lifelines first, at the column they already had, and colours everything else
+   around them. Nil pins reproduce the old colouring exactly, so a one-shot
+   export is unaffected. A pin that cannot be honoured without overlapping is
+   dropped with a log line rather than allowed to draw two agents down one
+   column.
+3. **A pinned origin.** `b.start` was `stamps[0]`, so one late entry predating
+   the current first one shifted every offset in the digest at once.
+   `Options.Origin` pins t=0; the zero value keeps the "first entry" behaviour.
+   Entries older than a pinned origin are clamped to 0 and counted rather than
+   dropped — they may be the session start a later interval depends on.
+
+Still open, and belonging with the ingestion work rather than the builder: DFS
+`order` is stable only in the relative sense (a new agent inserted mid-forest
+renumbers its successors), which is fine because `order` only sorts, and a
+**horizon** input so that an idle session's `durationMs` keeps up with the clock
+instead of stopping at the last entry.
 
 ### The minimap anchors and grows; it never rolls
 
