@@ -18,12 +18,19 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
+
+// oidcNBFSkew is the clock-skew tolerance subtracted from the NotBefore claim
+// to prevent token rejection by external systems whose clocks are slightly behind.
+// This is standard practice — GitHub Actions OIDC tokens use a similar approach.
+const oidcNBFSkew = 30 * time.Second
 
 // oidcDiscoveryDocument represents the OpenID Connect Provider Metadata
 // returned by the /.well-known/openid-configuration endpoint.
@@ -60,11 +67,14 @@ func (s *Server) handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 		ScopesSupported: []string{"openid"},
 	}
 
+	data, err := json.Marshal(doc)
+	if err != nil {
+		http.Error(w, "failed to encode discovery document", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
-	if err := json.NewEncoder(w).Encode(doc); err != nil {
-		http.Error(w, "failed to encode discovery document", http.StatusInternalServerError)
-	}
+	w.Write(data)
 }
 
 // handleJWKS serves the JSON Web Key Set at GET /.well-known/jwks.json.
@@ -76,11 +86,14 @@ func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
 
 	jwks := s.oidcKeyManager.JWKS()
 
+	data, err := json.Marshal(jwks)
+	if err != nil {
+		http.Error(w, "failed to encode JWKS", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
-	if err := json.NewEncoder(w).Encode(jwks); err != nil {
-		http.Error(w, "failed to encode JWKS", http.StatusInternalServerError)
-	}
+	w.Write(data)
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +157,15 @@ func (s *Server) handleAgentIdentityToken(w http.ResponseWriter, r *http.Request
 	// 5. Look up agent record from store.
 	agentRecord, err := s.store.GetAgent(r.Context(), agent.Subject)
 	if err != nil {
-		NotFound(w, "Agent")
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Agent")
+		} else {
+			slog.Error("Failed to look up agent for identity token",
+				"agent_id", agent.Subject,
+				"error", err,
+			)
+			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to look up agent", nil)
+		}
 		return
 	}
 
@@ -175,7 +196,7 @@ func (s *Server) handleAgentIdentityToken(w http.ResponseWriter, r *http.Request
 			Audience:  jwt.Audience{req.Audience},
 			IssuedAt:  jwt.NewNumericDate(now),
 			Expiry:    jwt.NewNumericDate(expiresAt),
-			NotBefore: jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now.Add(-oidcNBFSkew)),
 			ID:        base64.RawURLEncoding.EncodeToString(jti),
 		},
 		ProjectID: agent.ProjectID,

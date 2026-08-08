@@ -1021,10 +1021,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			Log:                     logging.Subsystem("hub.oidc"),
 		})
 		if err != nil {
-			if isGCPBackend || cfg.RequireStableSigningKey {
-				return nil, fmt.Errorf("OIDC key manager: %w", err)
-			}
-			slog.Warn("Failed to initialize OIDC key manager", "error", err)
+			// OIDC is explicitly enabled — fail to start rather than
+			// running without the feature the operator requested.
+			return nil, fmt.Errorf("OIDC key manager: %w", err)
 		} else {
 			srv.oidcKeyManager = oidcMgr
 			srv.oidcIssuerURL = oidcIssuerURL

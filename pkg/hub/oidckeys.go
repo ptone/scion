@@ -245,6 +245,16 @@ func (m *OIDCKeyManager) RotateKey(ctx context.Context) error {
 	}
 
 	// 4. Swap keys under write lock (only after successful persistence).
+	//
+	// Safety: the new key is persisted to the backend/store ABOVE before we
+	// touch in-memory state. If persistence fails, we return an error and the
+	// old active key remains untouched — no data is lost on restart.
+	//
+	// Note: the old key's deactivation metadata (DeactivatedAt, Active=false)
+	// is in-memory only and does NOT survive restarts. On restart, only the
+	// single persisted active key is loaded and previously-rotated keys are
+	// absent from the JWKS. This is a documented known limitation (see
+	// NewOIDCKeyManager comment and the design doc's "Key Rotation" section).
 	newKey := &OIDCSigningKey{
 		KeyID:      newKID,
 		PrivateKey: newPrivKey,
