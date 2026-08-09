@@ -64,6 +64,7 @@ func TestDetectRemoteType(t *testing.T) {
 		{"rclone s3", ":s3:bucket/path", RemoteTypeRclone},
 		{"unknown http", "https://example.com/folder", RemoteTypeUnknown},
 		{"invalid url", "not-a-url", RemoteTypeUnknown},
+		{"normalized git+https github URL detects as GitHub", "https://github.com/GoogleCloudPlatform/scion/harnesses/claude", RemoteTypeGitHub},
 	}
 
 	for _, tt := range tests {
@@ -298,6 +299,21 @@ func TestNormalizeTemplateSourceURL(t *testing.T) {
 			input:    "github.com/org/repo/.scion/templates/mytmpl",
 			expected: "https://github.com/org/repo/.scion/templates/mytmpl",
 		},
+		{
+			name:     "git+https scheme stripped to https",
+			input:    "git+https://github.com/GoogleCloudPlatform/scion/harnesses/claude",
+			expected: "https://github.com/GoogleCloudPlatform/scion/harnesses/claude",
+		},
+		{
+			name:     "git+http scheme stripped to http",
+			input:    "git+http://github.com/org/repo/tree/main/templates",
+			expected: "http://github.com/org/repo/tree/main/templates",
+		},
+		{
+			name:     "git+https bare org/repo gets scion templates path",
+			input:    "git+https://github.com/org/repo",
+			expected: "https://github.com/org/repo/tree/main/.scion/templates",
+		},
 	}
 
 	for _, tt := range tests {
@@ -505,6 +521,34 @@ func TestSparseGitCheckout_AuthTokenInURL(t *testing.T) {
 		// "Authentication failed" instead of "could not read Username"
 		assert.Contains(t, err.Error(), "Authentication failed")
 	})
+}
+
+func TestNormalizeAndDetect_GitPlusHTTPS(t *testing.T) {
+	// Regression: git+https:// source URLs stored in the database must normalize
+	// to valid GitHub URLs that DetectRemoteType can identify. Before the fix,
+	// NormalizeTemplateSourceURL prepended https:// to git+https://, producing the
+	// malformed URL "https://git+https://github.com/..." which DetectRemoteType
+	// classified as RemoteTypeUnknown, breaking harness-config reimport.
+	inputs := []string{
+		"git+https://github.com/GoogleCloudPlatform/scion/harnesses/claude",
+		"git+https://github.com/GoogleCloudPlatform/scion/harnesses/antigravity",
+		"git+https://github.com/GoogleCloudPlatform/scion/harnesses/codex",
+	}
+
+	for _, raw := range inputs {
+		t.Run(raw, func(t *testing.T) {
+			normalized := NormalizeTemplateSourceURL(raw)
+
+			// Normalized URL must not contain git+https
+			assert.NotContains(t, normalized, "git+https://",
+				"NormalizeTemplateSourceURL should strip the git+ prefix")
+
+			// DetectRemoteType must recognize the normalized URL as GitHub
+			remoteType := DetectRemoteType(normalized)
+			assert.Equal(t, RemoteTypeGitHub, remoteType,
+				"after normalization, the URL should be detected as a GitHub URL")
+		})
+	}
 }
 
 func TestIsArchiveURL(t *testing.T) {
