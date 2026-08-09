@@ -717,6 +717,29 @@ func (s *Server) createAgentInProject(
 		if requestedRole == "" {
 			requestedRole = projectMax
 		}
+
+		// Fail-loud if the user explicitly requests a role above their ceiling.
+		// Silent clamping hides misconfiguration. Only check when the user explicitly
+		// set a role (empty = "give me the default" = never an error).
+		userCeiling := AgentRoleBaseline
+		if userHubRole == "admin" {
+			userCeiling = AgentRoleFull
+		}
+		if req.AgentRole != "" && CompareRoles(AgentRole(req.AgentRole), userCeiling) > 0 {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				fmt.Sprintf("Cannot grant agent role %q: your hub role (%s) allows a maximum of %q",
+					req.AgentRole, userHubRole, userCeiling), nil)
+			return
+		}
+
+		// Also check against project max when explicitly requested
+		if req.AgentRole != "" && CompareRoles(AgentRole(req.AgentRole), projectMax) > 0 {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				fmt.Sprintf("Cannot grant agent role %q: project maximum agent role is %q",
+					req.AgentRole, projectMax), nil)
+			return
+		}
+
 		effectiveRole = ResolveEffectiveRole(requestedRole, userHubRole, projectMax)
 	} else {
 		// No identity (should not happen in practice) - default to baseline

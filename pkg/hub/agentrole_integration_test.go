@@ -30,8 +30,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupAgentRoleTest creates a server with a member user and project.
+// setupAgentRoleTest creates a server with a member user, project, and runtime broker.
 // The user is the project creator and is in the hub-members group.
+// The broker is linked to the project so agent creation reaches role resolution.
 func setupAgentRoleTest(t *testing.T) (*Server, store.Store, *store.User, *store.Project) {
 	t.Helper()
 	srv, s := testServer(t)
@@ -48,17 +49,34 @@ func setupAgentRoleTest(t *testing.T) (*Server, store.Store, *store.User, *store
 	require.NoError(t, s.CreateUser(ctx, user))
 	ensureHubMembership(ctx, s, user.ID)
 
-	project := &store.Project{
-		ID:        tid("project-role-test"),
-		Name:      "role-test-project",
-		Slug:      "role-test-project",
-		OwnerID:   user.ID,
+	broker := &store.RuntimeBroker{
+		ID:        tid("broker-role-test"),
+		Name:      "role-test-broker",
+		Slug:      "role-test-broker",
+		Endpoint:  "http://localhost:9800",
+		Status:    store.BrokerStatusOnline,
 		CreatedBy: user.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	project := &store.Project{
+		ID:                    tid("project-role-test"),
+		Name:                  "role-test-project",
+		Slug:                  "role-test-project",
+		OwnerID:               user.ID,
+		CreatedBy:             user.ID,
+		DefaultRuntimeBrokerID: broker.ID,
+		Created:               time.Now(),
+		Updated:               time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
 
 	return srv, s, user, project
 }
@@ -184,24 +202,41 @@ func TestCreateAgent_RoleNone_SetsNoAuth(t *testing.T) {
 }
 
 func TestCreateAgent_RoleFull_CappedByMemberCeiling(t *testing.T) {
-	srv, s, user, project := setupAgentRoleTest(t)
+	srv, _, user, project := setupAgentRoleTest(t)
 
-	_ = doAgentRoleRequest(t, srv, user, CreateAgentRequest{
+	rec := doAgentRoleRequest(t, srv, user, CreateAgentRequest{
 		Name:      "test-full-capped",
 		ProjectID: project.ID,
 		AgentRole: "full",
 	})
 
-	if role, ok := getStoredAgentRole(t, s, project.ID, "test-full-capped"); ok {
-		// Member user ceiling is baseline, so full should be capped.
-		assert.Equal(t, "baseline", role,
-			"member user requesting full should be capped to baseline")
-	}
+	// Phase 4: member requesting full now gets a 403 instead of silent clamping.
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"member user requesting full should get 403; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "your hub role (member) allows a maximum")
 }
 
 func TestCreateAgent_AdminGetsFull(t *testing.T) {
-	srv, s, _, project := setupAgentRoleTest(t)
+	srv, s, _, _ := setupAgentRoleTest(t)
 	ctx := context.Background()
+
+	// Phase 4: use a project with max-agent-role=full so both ceilings pass.
+	// The default project has baseline max, which would now trigger a 403.
+	fullProject := &store.Project{
+		ID:   tid("project-full-max"),
+		Name: "full-max-project",
+		Slug: "full-max-project",
+		Annotations: map[string]string{
+			"scion.dev/max-agent-role": "full",
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, fullProject))
+	srv.createProjectMembersGroupAndPolicy(ctx, fullProject)
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: fullProject.ID, BrokerID: tid("broker-role-test"), BrokerName: "role-test-broker",
+	}))
 
 	admin := &store.User{
 		ID:          tid("user-admin-role"),
@@ -216,13 +251,13 @@ func TestCreateAgent_AdminGetsFull(t *testing.T) {
 
 	_ = doAgentRoleRequest(t, srv, admin, CreateAgentRequest{
 		Name:      "test-admin-full",
-		ProjectID: project.ID,
+		ProjectID: fullProject.ID,
 		AgentRole: "full",
 	})
 
-	if role, ok := getStoredAgentRole(t, s, project.ID, "test-admin-full"); ok {
+	if role, ok := getStoredAgentRole(t, s, fullProject.ID, "test-admin-full"); ok {
 		assert.Equal(t, "full", role,
-			"admin user requesting full should get full")
+			"admin user requesting full in full-project should get full")
 	}
 }
 
@@ -243,6 +278,9 @@ func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: tid("broker-role-test"), BrokerName: "role-test-broker",
+	}))
 
 	admin := &store.User{
 		ID:          tid("user-admin-cap"),
@@ -255,14 +293,195 @@ func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, admin))
 	ensureHubMembership(ctx, s, admin.ID)
 
-	_ = doAgentRoleRequest(t, srv, admin, CreateAgentRequest{
+	rec := doAgentRoleRequest(t, srv, admin, CreateAgentRequest{
 		Name:      "test-admin-capped",
 		ProjectID: project.ID,
 		AgentRole: "full",
 	})
 
-	if role, ok := getStoredAgentRole(t, s, project.ID, "test-admin-capped"); ok {
-		assert.Equal(t, "readonly", role,
-			"admin requesting full in readonly-max project should get readonly")
+	// Phase 4: admin requesting full in readonly-max project now gets 403.
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"admin requesting full in readonly-max project should get 403; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "project maximum agent role")
+
+	// Verify agent was NOT persisted.
+	_, err := s.GetAgentBySlug(ctx, project.ID, "test-admin-capped")
+	assert.ErrorIs(t, err, store.ErrNotFound, "agent should not be persisted after 403")
+}
+
+// ── Phase 4 integration tests: fail-loud ceiling enforcement ──
+
+func TestCreateAgent_MemberRequestsFull_403(t *testing.T) {
+	srv, _, user, project := setupAgentRoleTest(t)
+
+	rec := doAgentRoleRequest(t, srv, user, CreateAgentRequest{
+		Name:      "test-member-full-403",
+		ProjectID: project.ID,
+		AgentRole: "full",
+	})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"member requesting full should get 403; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "your hub role (member) allows a maximum of")
+}
+
+func TestCreateAgent_MemberRequestsBaseline_OK(t *testing.T) {
+	srv, s, user, project := setupAgentRoleTest(t)
+
+	rec := doAgentRoleRequest(t, srv, user, CreateAgentRequest{
+		Name:      "test-member-baseline-ok",
+		ProjectID: project.ID,
+		AgentRole: "baseline",
+	})
+
+	// Should not be rejected — baseline is within the member ceiling.
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"member requesting baseline should not get 403; got: %s", rec.Body.String())
+
+	if role, ok := getStoredAgentRole(t, s, project.ID, "test-member-baseline-ok"); ok {
+		assert.Equal(t, "baseline", role,
+			"member requesting baseline should get baseline")
+	}
+}
+
+func TestCreateAgent_AdminRequestsFull_OK(t *testing.T) {
+	srv, s, _, _ := setupAgentRoleTest(t)
+	ctx := context.Background()
+
+	// Create a project that allows full role.
+	fullProject := &store.Project{
+		ID:   tid("project-full-admin-ok"),
+		Name: "full-admin-ok-project",
+		Slug: "full-admin-ok-project",
+		Annotations: map[string]string{
+			"scion.dev/max-agent-role": "full",
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, fullProject))
+	srv.createProjectMembersGroupAndPolicy(ctx, fullProject)
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: fullProject.ID, BrokerID: tid("broker-role-test"), BrokerName: "role-test-broker",
+	}))
+
+	admin := &store.User{
+		ID:          tid("user-admin-full-ok"),
+		Email:       "admin-full-ok@test.com",
+		DisplayName: "Admin Full OK",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	ensureHubMembership(ctx, s, admin.ID)
+
+	rec := doAgentRoleRequest(t, srv, admin, CreateAgentRequest{
+		Name:      "test-admin-full-ok",
+		ProjectID: fullProject.ID,
+		AgentRole: "full",
+	})
+
+	// Admin requesting full in a full-project should succeed.
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"admin requesting full in full-project should not get 403; got: %s", rec.Body.String())
+
+	if role, ok := getStoredAgentRole(t, s, fullProject.ID, "test-admin-full-ok"); ok {
+		assert.Equal(t, "full", role,
+			"admin requesting full in full-project should get full")
+	}
+}
+
+func TestCreateAgent_ExceedsProjectMax_403(t *testing.T) {
+	srv, s, _, _ := setupAgentRoleTest(t)
+	ctx := context.Background()
+
+	// Create a project with max-agent-role=baseline.
+	baselineProject := &store.Project{
+		ID:   tid("project-baseline-max"),
+		Name: "baseline-max-project",
+		Slug: "baseline-max-project",
+		Annotations: map[string]string{
+			"scion.dev/max-agent-role": "baseline",
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, baselineProject))
+	srv.createProjectMembersGroupAndPolicy(ctx, baselineProject)
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: baselineProject.ID, BrokerID: tid("broker-role-test"), BrokerName: "role-test-broker",
+	}))
+
+	admin := &store.User{
+		ID:          tid("user-admin-proj-cap"),
+		Email:       "admin-proj-cap@test.com",
+		DisplayName: "Admin Proj Cap",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	ensureHubMembership(ctx, s, admin.ID)
+
+	rec := doAgentRoleRequest(t, srv, admin, CreateAgentRequest{
+		Name:      "test-exceeds-proj-max",
+		ProjectID: baselineProject.ID,
+		AgentRole: "full",
+	})
+
+	// Admin requesting full in baseline-project should get 403 with project max message.
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"admin requesting full in baseline-project should get 403; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "project maximum agent role is")
+
+	// Verify agent was NOT persisted.
+	_, err := s.GetAgentBySlug(ctx, baselineProject.ID, "test-exceeds-proj-max")
+	assert.ErrorIs(t, err, store.ErrNotFound, "agent should not be persisted after 403")
+}
+
+func TestCreateAgent_NoRoleFlag_DefaultOK(t *testing.T) {
+	srv, s, user, project := setupAgentRoleTest(t)
+	ctx := context.Background()
+
+	// Member with no --role should get baseline (default) without error.
+	rec := doAgentRoleRequest(t, srv, user, CreateAgentRequest{
+		Name:      "test-member-default",
+		ProjectID: project.ID,
+		// AgentRole intentionally omitted
+	})
+
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"member with no --role should not get 403; got: %s", rec.Body.String())
+
+	if role, ok := getStoredAgentRole(t, s, project.ID, "test-member-default"); ok {
+		assert.Equal(t, "baseline", role,
+			"member with no --role should get baseline")
+	}
+
+	// Admin with no --role should also get baseline (project default) without error.
+	admin := &store.User{
+		ID:          tid("user-admin-default"),
+		Email:       "admin-default@test.com",
+		DisplayName: "Admin Default",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	ensureHubMembership(ctx, s, admin.ID)
+
+	rec = doAgentRoleRequest(t, srv, admin, CreateAgentRequest{
+		Name:      "test-admin-default",
+		ProjectID: project.ID,
+		// AgentRole intentionally omitted
+	})
+
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"admin with no --role should not get 403; got: %s", rec.Body.String())
+
+	if role, ok := getStoredAgentRole(t, s, project.ID, "test-admin-default"); ok {
+		assert.Equal(t, "baseline", role,
+			"admin with no --role in baseline-max project should get baseline")
 	}
 }
