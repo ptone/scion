@@ -719,11 +719,15 @@ func (s *Server) createAgentInProject(
 		}
 		effectiveRole = ResolveEffectiveRole(requestedRole, userHubRole, projectMax)
 	} else {
-		// No identity (should not happen in practice) - default to baseline
+		// No identity context — should not happen in practice.
+		// Defensive cap to baseline to prevent unchecked role grants.
 		if requestedRole == "" {
 			requestedRole = AgentRoleBaseline
 		}
 		effectiveRole = requestedRole
+		if CompareRoles(effectiveRole, AgentRoleBaseline) > 0 {
+			effectiveRole = AgentRoleBaseline
+		}
 	}
 
 	// Map role=none to NoAuth behavior
