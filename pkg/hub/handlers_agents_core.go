@@ -108,6 +108,10 @@ type CreateAgentRequest struct {
 	// NoAuth indicates the agent should start with zero injected credentials.
 	// When true, the Hub skips secret resolution and the broker skips credential injection.
 	NoAuth bool `json:"noAuth,omitempty"`
+	// AgentRole specifies the requested authorization role for the agent.
+	// Valid values: "none", "readonly", "baseline", "full".
+	// When omitted, defaults to the effective ceiling (project max intersected with caller ceiling).
+	AgentRole string `json:"agentRole,omitempty"`
 	// GCPIdentity specifies the GCP identity assignment for the agent.
 	// Controls metadata server behavior and optional service account binding.
 	GCPIdentity *GCPIdentityAssignment `json:"gcp_identity,omitempty"`
@@ -319,6 +323,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			ValidationError(w, "metadata_mode must be 'block', 'passthrough', or 'assign'", nil)
 			return
 		}
+	}
+
+	if req.AgentRole != "" && !ValidAgentRole(AgentRole(req.AgentRole)) {
+		ValidationError(w, fmt.Sprintf("invalid agentRole %q: must be one of none, readonly, baseline, full", req.AgentRole), nil)
+		return
 	}
 
 	if err := labels.Validate(req.Labels); err != nil {
@@ -678,7 +687,74 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
-	agent.AppliedConfig = s.buildAppliedConfig(req, harnessConfig, creatorName)
+	// Resolve effective agent role using the authority lattice.
+	var effectiveRole AgentRole
+	requestedRole := AgentRole(req.AgentRole)
+
+	// Read project max agent role from annotations (default: baseline)
+	projectMax := AgentRoleBaseline
+	if project != nil && project.Annotations != nil {
+		if maxStr := project.Annotations["scion.dev/max-agent-role"]; maxStr != "" {
+			if ValidAgentRole(AgentRole(maxStr)) {
+				projectMax = AgentRole(maxStr)
+			}
+		}
+	}
+
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		// Agent caller: ceiling is the parent agent's own role.
+		// TODO(F2P1): read the parent's effective role from its stored AgentRole
+		// and pass it as an additional ceiling to minRole, so a baseline parent
+		// cannot escalate a child to full. Until then, only projectMax caps.
+		// Default requested role to project max if not specified
+		if requestedRole == "" {
+			requestedRole = projectMax
+		}
+		effectiveRole = minRole(requestedRole, projectMax)
+	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		// User caller: ceiling based on hub role
+		userHubRole := userIdent.Role()
+		if requestedRole == "" {
+			requestedRole = projectMax
+		}
+
+		// Fail-loud if the user explicitly requests a role above their ceiling.
+		// Silent clamping hides misconfiguration. Only check when the user explicitly
+		// set a role (empty = "give me the default" = never an error).
+		userCeiling := AgentRoleBaseline
+		if userHubRole == "admin" {
+			userCeiling = AgentRoleFull
+		}
+		if req.AgentRole != "" && CompareRoles(AgentRole(req.AgentRole), userCeiling) > 0 {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				fmt.Sprintf("Cannot grant agent role %q: your hub role (%s) allows a maximum of %q",
+					req.AgentRole, userHubRole, userCeiling), nil)
+			return
+		}
+
+		// Also check against project max when explicitly requested
+		if req.AgentRole != "" && CompareRoles(AgentRole(req.AgentRole), projectMax) > 0 {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				fmt.Sprintf("Cannot grant agent role %q: project maximum agent role is %q",
+					req.AgentRole, projectMax), nil)
+			return
+		}
+
+		effectiveRole = ResolveEffectiveRole(requestedRole, userHubRole, projectMax)
+	} else {
+		// No identity (should not happen in practice) - default to baseline
+		if requestedRole == "" {
+			requestedRole = AgentRoleBaseline
+		}
+		effectiveRole = requestedRole
+	}
+
+	// Map role=none to NoAuth behavior
+	if effectiveRole == AgentRoleNone {
+		req.NoAuth = true
+	}
+
+	agent.AppliedConfig = s.buildAppliedConfig(req, harnessConfig, creatorName, effectiveRole)
 
 	// Populate GCP identity in applied config.
 	// Default to "block" mode when no GCP identity is specified, so agents
