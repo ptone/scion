@@ -51,6 +51,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/integration/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	brokerv1 "github.com/GoogleCloudPlatform/scion/proto/broker/v1"
 )
@@ -157,7 +158,30 @@ func main() {
 	}
 	adminAuth := identity.NewMintingAuth(minter, hubUserID, cfg.Hub.User, "admin", 15*time.Minute)
 
-	adminClient, err := hubclient.New(cfg.Hub.Endpoint, hubclient.WithAuthenticator(adminAuth))
+	// Resolve transport auth for IAP/Cloud Run invoker.
+	transportSrc, transportMode, transportErr := transportauth.FromSettings(
+		&transportauth.TransportSettings{
+			Mode:     os.Getenv("SCION_TRANSPORT_MODE"),
+			Audience: os.Getenv("SCION_TRANSPORT_AUDIENCE"),
+		},
+		nil,
+	)
+	if transportErr != nil {
+		log.Warn("transport auth setup failed, proceeding without", "error", transportErr)
+	}
+	if transportSrc == nil {
+		transportSrc, transportErr = transportauth.FromEnv()
+		if transportErr != nil {
+			log.Warn("transport auth env detection failed", "error", transportErr)
+		}
+	}
+
+	hubOpts := []hubclient.Option{hubclient.WithAuthenticator(adminAuth)}
+	if transportSrc != nil {
+		hubOpts = append(hubOpts, hubclient.WithTransportAuth(transportSrc, transportMode))
+		log.Info("transport auth enabled for hub client", "mode", transportMode)
+	}
+	adminClient, err := hubclient.New(cfg.Hub.Endpoint, hubOpts...)
 	if err != nil {
 		log.Error("failed to create hub client", "error", err)
 		os.Exit(1)
@@ -413,7 +437,30 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	}
 	adminAuth := identity.NewMintingAuth(minter, hubUserID, cfg.Hub.User, "admin", 15*time.Minute)
 
-	hubClient, err := hubclient.New(cfg.Hub.Endpoint, hubclient.WithAuthenticator(adminAuth))
+	// Resolve transport auth for IAP/Cloud Run invoker.
+	transportSrc, transportMode, transportErr := transportauth.FromSettings(
+		&transportauth.TransportSettings{
+			Mode:     os.Getenv("SCION_TRANSPORT_MODE"),
+			Audience: os.Getenv("SCION_TRANSPORT_AUDIENCE"),
+		},
+		nil,
+	)
+	if transportErr != nil {
+		log.Warn("transport auth setup failed, proceeding without", "error", transportErr)
+	}
+	if transportSrc == nil {
+		transportSrc, transportErr = transportauth.FromEnv()
+		if transportErr != nil {
+			log.Warn("transport auth env detection failed", "error", transportErr)
+		}
+	}
+
+	hubOpts := []hubclient.Option{hubclient.WithAuthenticator(adminAuth)}
+	if transportSrc != nil {
+		hubOpts = append(hubOpts, hubclient.WithTransportAuth(transportSrc, transportMode))
+		log.Info("transport auth enabled for hub client", "mode", transportMode)
+	}
+	hubClient, err := hubclient.New(cfg.Hub.Endpoint, hubOpts...)
 	if err != nil {
 		log.Error("failed to create hub client", "error", err)
 		os.Exit(1)
