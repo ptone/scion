@@ -455,3 +455,14 @@ func TestPerAgentTaskIsolation(t *testing.T) {
 		t.Fatal("Agent should NOT be able to cancel user's task")
 	}
 }
+
+func TestFederationTokenHeaderMatchesHub(t *testing.T) {
+	// The bridge and hub define FederationTokenHeader independently because
+	// they live in different packages (internal/bridge vs pkg/hub). This test
+	// catches silent drift between the two constants.
+	const hubFederationTokenHeader = "X-Scion-Federation-Token" // from pkg/hub/federation_auth.go
+	if FederationTokenHeader != hubFederationTokenHeader {
+		t.Errorf("bridge.FederationTokenHeader = %q, want %q (must match pkg/hub/federation_auth.go)",
+			FederationTokenHeader, hubFederationTokenHeader)
+	}
+}

@@ -109,11 +109,7 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		senderLabel := fmt.Sprintf("user:%s", e.bridge.config.Hub.User)
 
 		if caller != nil {
-			if caller.IsAgent() {
-				senderLabel = fmt.Sprintf("agent:%s", caller.AgentID)
-			} else {
-				senderLabel = fmt.Sprintf("user:%s", caller.Email)
-			}
+			senderLabel = caller.SenderLabel()
 			var clientErr error
 			writeClient, clientErr = e.bridge.callerHubClient(caller)
 			if clientErr != nil {
@@ -274,11 +270,7 @@ func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorCont
 			var cancelClient hubclient.Client = e.bridge.hubClient
 			senderLabel := fmt.Sprintf("user:%s", e.bridge.config.Hub.User)
 			if caller != nil {
-				if caller.IsAgent() {
-					senderLabel = fmt.Sprintf("agent:%s", caller.AgentID)
-				} else {
-					senderLabel = fmt.Sprintf("user:%s", caller.Email)
-				}
+				senderLabel = caller.SenderLabel()
 				if cc, err := e.bridge.callerHubClient(caller); err == nil {
 					cancelClient = cc
 				} else {

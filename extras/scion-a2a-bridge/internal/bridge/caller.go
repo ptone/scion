@@ -42,10 +42,6 @@ type CallerIdentity struct {
 	// ProjectID is the agent's project (from `project_id` claim).
 	ProjectID string
 
-	// Scopes are the agent's authorized scopes (from `scopes` claim).
-	// Not enforced on the bridge — stored for logging and future use.
-	Scopes []string
-
 	// Ancestry is the agent's lineage chain (from `ancestry` claim).
 	Ancestry []string
 }
@@ -54,6 +50,15 @@ type CallerIdentity struct {
 // (federation auth, not a local user).
 func (c *CallerIdentity) IsAgent() bool {
 	return c.AgentID != ""
+}
+
+// SenderLabel returns the formatted sender string for Hub messages.
+// Agent callers use "agent:<id>", user callers use "user:<email>".
+func (c *CallerIdentity) SenderLabel() string {
+	if c.IsAgent() {
+		return "agent:" + c.AgentID
+	}
+	return "user:" + c.Email
 }
 
 // CallerKey returns a stable identifier for task-store isolation.

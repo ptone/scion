@@ -24,6 +24,8 @@ import (
 
 // FederationTokenHeader is the HTTP header used to pass federation OIDC
 // identity tokens from the bridge to the hub.
+// IMPORTANT: must match pkg/hub/federation_auth.go:FederationTokenHeader.
+// See TestFederationTokenHeaderMatchesHub in federation_test.go.
 const FederationTokenHeader = "X-Scion-Federation-Token"
 
 // federationJWTClaims holds the JWT claims we extract from a federation

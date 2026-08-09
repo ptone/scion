@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 var (
@@ -85,6 +86,12 @@ type Bridge struct {
 	agentCacheMu sync.RWMutex
 	agentCache   map[string]*agentCacheEntry
 
+	// transportSrc and transportMode hold the resolved transport-layer OIDC
+	// auth (IAP / Cloud Run invoker). Stored so callerHubClient can compose
+	// transport auth into per-caller hub clients.
+	transportSrc  transportauth.TokenSource
+	transportMode transportauth.HeaderMode
+
 	// shutdownCtx is cancelled during graceful shutdown.
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
@@ -102,8 +109,21 @@ type activeTaskEntry struct {
 	createdAt time.Time
 }
 
-// New creates a new Bridge instance.
-func New(store state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, metrics *Metrics, log *slog.Logger) *Bridge {
+// BridgeOption configures optional Bridge behaviour.
+type BridgeOption func(*Bridge)
+
+// WithTransportAuth stores the resolved transport-layer OIDC auth so that
+// per-caller hub clients include it in their HTTP transport chain.
+func WithTransportAuth(src transportauth.TokenSource, mode transportauth.HeaderMode) BridgeOption {
+	return func(b *Bridge) {
+		b.transportSrc = src
+		b.transportMode = mode
+	}
+}
+
+// New creates a new Bridge instance. Options (e.g. WithTransportAuth) are
+// applied after construction.
+func New(store state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, metrics *Metrics, log *slog.Logger, opts ...BridgeOption) *Bridge {
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &Bridge{
 		store:          store,
@@ -119,6 +139,9 @@ func New(store state.Store, hubClient hubclient.Client, minter *identity.TokenMi
 		agentCache:     make(map[string]*agentCacheEntry),
 		shutdownCtx:    ctx,
 		shutdownCancel: cancel,
+	}
+	for _, opt := range opts {
+		opt(b)
 	}
 	b.wg.Add(1)
 	go b.janitor()
@@ -422,11 +445,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	senderLabel := fmt.Sprintf("user:%s", b.config.Hub.User)
 
 	if caller != nil {
-		if caller.IsAgent() {
-			senderLabel = fmt.Sprintf("agent:%s", caller.AgentID)
-		} else {
-			senderLabel = fmt.Sprintf("user:%s", caller.Email)
-		}
+		senderLabel = caller.SenderLabel()
 		var clientErr error
 		writeClient, clientErr = b.callerHubClient(caller)
 		if clientErr != nil {
@@ -568,11 +587,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 	writeClient := b.hubClient
 	senderLabel := fmt.Sprintf("user:%s", b.config.Hub.User)
 	if caller != nil {
-		if caller.IsAgent() {
-			senderLabel = fmt.Sprintf("agent:%s", caller.AgentID)
-		} else {
-			senderLabel = fmt.Sprintf("user:%s", caller.Email)
-		}
+		senderLabel = caller.SenderLabel()
 		var clientErr error
 		writeClient, clientErr = b.callerHubClient(caller)
 		if clientErr != nil {
@@ -758,11 +773,7 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 		cancelClient := b.hubClient
 		senderLabel := fmt.Sprintf("user:%s", b.config.Hub.User)
 		if caller != nil {
-			if caller.IsAgent() {
-				senderLabel = fmt.Sprintf("agent:%s", caller.AgentID)
-			} else {
-				senderLabel = fmt.Sprintf("user:%s", caller.Email)
-			}
+			senderLabel = caller.SenderLabel()
 			if cc, err := b.callerHubClient(caller); err == nil {
 				cancelClient = cc
 			} else {
@@ -1103,19 +1114,29 @@ func truncate(s string, n int) string {
 // For JWT callers, a fresh 5-minute JWT is minted for the caller's identity.
 // For federation callers, the bridge's admin auth is used with the federation
 // token passed via X-Scion-Federation-Token header.
+//
+// All cases compose transport auth (IAP / Cloud Run invoker) into the HTTP
+// transport chain when configured, so per-caller clients can reach hubs behind
+// identity-aware proxies.
 func (b *Bridge) callerHubClient(caller *CallerIdentity) (hubclient.Client, error) {
 	switch caller.TokenType {
 	case "uat":
-		return hubclient.New(b.config.Hub.Endpoint,
-			hubclient.WithBearerToken(caller.RawToken))
+		opts := []hubclient.Option{hubclient.WithBearerToken(caller.RawToken)}
+		if b.transportSrc != nil {
+			opts = append(opts, hubclient.WithTransportAuth(b.transportSrc, b.transportMode))
+		}
+		return hubclient.New(b.config.Hub.Endpoint, opts...)
 	case "jwt":
 		// Re-mint a 5-minute JWT for the caller's identity using the bridge's
 		// signing key. This is the same infrastructure used for the bridge's
 		// own admin identity.
 		mintAuth := identity.NewMintingAuth(b.minter,
 			caller.UserID, caller.Email, caller.Role, 5*time.Minute)
-		return hubclient.New(b.config.Hub.Endpoint,
-			hubclient.WithAuthenticator(mintAuth))
+		opts := []hubclient.Option{hubclient.WithAuthenticator(mintAuth)}
+		if b.transportSrc != nil {
+			opts = append(opts, hubclient.WithTransportAuth(b.transportSrc, b.transportMode))
+		}
+		return hubclient.New(b.config.Hub.Endpoint, opts...)
 	case "federation":
 		// For federation callers, use the bridge's admin auth for Hub API
 		// access, but inject the X-Scion-Federation-Token header so the Hub
@@ -1128,11 +1149,16 @@ func (b *Bridge) callerHubClient(caller *CallerIdentity) (hubclient.Client, erro
 		}
 		mintAuth := identity.NewMintingAuth(b.minter,
 			hubUserID, b.config.Hub.User, "admin", 5*time.Minute)
+		// Compose: transport auth (IAP/invoker) → federation header injection.
+		base := http.DefaultTransport
+		if b.transportSrc != nil {
+			base = transportauth.Wrap(base, b.transportSrc, b.transportMode)
+		}
 		return hubclient.New(b.config.Hub.Endpoint,
 			hubclient.WithAuthenticator(mintAuth),
 			hubclient.WithHTTPClient(&http.Client{
 				Transport: &federationHeaderTransport{
-					base:  http.DefaultTransport,
+					base:  base,
 					token: caller.RawToken,
 				},
 			}))
