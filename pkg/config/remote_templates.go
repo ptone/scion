@@ -75,6 +75,17 @@ func remoteCacheDir() (string, error) {
 func NormalizeTemplateSourceURL(raw string) string {
 	s := strings.TrimSpace(raw)
 
+	// Strip git+ prefix from git+https:// and git+http:// URLs.
+	// These are valid Git URL schemes (used by pip, Go modules, etc.) but the
+	// git+ prefix is not meaningful for HTTPS fetches. The bundled harness-config
+	// catalog also uses git+https:// as a provenance marker — stripping it here
+	// makes those source URLs round-trip safely through reimport.
+	if strings.HasPrefix(s, "git+https://") {
+		s = strings.TrimPrefix(s, "git+")
+	} else if strings.HasPrefix(s, "git+http://") {
+		s = strings.TrimPrefix(s, "git+")
+	}
+
 	// Add https:// scheme if missing (not rclone and not already http/https)
 	if !strings.HasPrefix(s, ":") && !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
 		s = "https://" + s
