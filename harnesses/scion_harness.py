@@ -237,6 +237,51 @@ def warn(message: str) -> None:
     print(f"scion_harness: {message}", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# Model alias constants and helpers
+# ---------------------------------------------------------------------------
+
+# Canonical model alias names. Mirrors Go-side KnownModelAliases in
+# pkg/config/templates.go. Keep in sync.
+KNOWN_MODEL_ALIASES: frozenset[str] = frozenset({
+    "small", "medium", "large", "extra-large",
+})
+
+# Single-letter shorthands. Mirrors Go-side NormalizeModelAlias in
+# pkg/config/templates.go. Keep in sync.
+MODEL_ALIAS_SHORTHAND: dict[str, str] = {
+    "s": "small",
+    "m": "medium",
+    "l": "large",
+    "xl": "extra-large",
+}
+
+
+def normalize_model_alias(raw: str) -> str:
+    """Lowercase and expand shorthand aliases to canonical form.
+
+    Mirrors Go-side NormalizeModelAlias in pkg/config/templates.go.
+    """
+    lowered = raw.strip().lower()
+    return MODEL_ALIAS_SHORTHAND.get(lowered, lowered)
+
+
+def resolve_model_alias(ctx, raw_model: str) -> str:
+    """Normalize a model string and resolve it via harness config aliases.
+
+    If the normalized model is a known alias, look it up in
+    ctx.harness_config["model_aliases"]. Otherwise return as-is (concrete model).
+
+    Returns the concrete model string. The caller is responsible for writing it
+    to the appropriate output (env var, config file, etc.).
+    """
+    normalized = normalize_model_alias(raw_model)
+    if normalized not in KNOWN_MODEL_ALIASES:
+        return normalized
+    aliases = ctx.harness_config.get("model_aliases", {})
+    return aliases.get(normalized, normalized)
+
+
 # ===========================================================================
 # New API — §3.1 layers
 # ===========================================================================

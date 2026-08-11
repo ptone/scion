@@ -178,31 +178,19 @@ def _apply_native_system_prompt(ctx: scion_harness.ProvisionContext) -> bool:
     return _is_meaningful_system_prompt(system_prompt)
 
 
-def _resolve_model_alias(ctx: scion_harness.ProvisionContext) -> None:
-    """Resolve SCION_MODEL alias using harness_config model_aliases.
+def _apply_model(ctx: scion_harness.ProvisionContext) -> None:
+    """Resolve SCION_MODEL alias and update ~/.gemini/settings.json.
 
     When SCION_MODEL is a tier name (e.g. 'large', 'L', 'Small') rather
-    than a concrete model string, resolve it via the model_aliases map
-    from config.yaml and update ~/.gemini/settings.json accordingly.
+    than a concrete model string, resolve it via the shared model alias
+    helpers and write the concrete model into ~/.gemini/settings.json so
+    the CLI uses it.
     """
     raw_model = os.environ.get("SCION_MODEL", "")
     if not raw_model:
         return
 
-    aliases: dict[str, str] = ctx.harness_config.get("model_aliases") or {}
-    if not aliases:
-        return
-
-    # Normalize: lowercase, handle single-letter and shorthand aliases.
-    normalized = raw_model.lower()
-    _shorthand = {"s": "small", "m": "medium", "l": "large", "xl": "extra-large"}
-    normalized = _shorthand.get(normalized, normalized)
-
-    concrete = aliases.get(normalized)
-    if not concrete:
-        # Already a concrete model name (not a known alias) — nothing to do.
-        return
-
+    concrete = scion_harness.resolve_model_alias(ctx, raw_model)
     if concrete == raw_model:
         return
 
@@ -252,7 +240,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     # Resolve model alias (e.g. 'large' → 'gemini-3.1-pro-preview') and
     # update ~/.gemini/settings.json so the CLI uses the concrete model.
-    _resolve_model_alias(ctx)
+    _apply_model(ctx)
 
     harness_cfg = ctx.harness_config
     instructions_file = str(harness_cfg.get("instructions_file") or ".gemini/GEMINI.md")

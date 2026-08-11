@@ -78,22 +78,6 @@ CLAUDE_AUTH_FILE = "~/.claude/.credentials.json"
 # requested model impossible to apply.
 DEFAULT_MODEL = "opus"
 
-# The canonical size aliases, mirroring config.KnownModelAliases
-# (pkg/config/templates.go). Only these four resolve through config.yaml's
-# model_aliases map; anything else is treated as a concrete model name.
-KNOWN_MODEL_ALIASES = frozenset({"small", "medium", "large", "extra-large"})
-
-# Shorthand spellings for those aliases, mirroring config.NormalizeModelAlias
-# (pkg/config/templates.go). Deliberately no extra spellings: a form accepted
-# here but not there would make ANTHROPIC_MODEL disagree with the --model flag
-# the Go side computes from the same request.
-MODEL_ALIAS_SHORTHAND = {
-    "s": "small",
-    "m": "medium",
-    "l": "large",
-    "xl": "extra-large",
-}
-
 AUTH = scion_harness.AuthSpec(
     harness="claude",
     methods=[
@@ -240,46 +224,6 @@ def _update_project_paths(ctx: scion_harness.ProvisionContext) -> None:
     scion_harness.atomic_write_json(claude_json_path, cfg)
 
 
-def _normalize_model_alias(model: str) -> str:
-    """Lower-case a model string and expand the single-letter shorthands.
-
-    Mirrors config.NormalizeModelAlias (pkg/config/templates.go) exactly so the
-    model this script derives cannot disagree with the one the Go side derives
-    for --model / SCION_MODEL. Keep the two in sync.
-    """
-    normalized = model.strip().lower()
-    return MODEL_ALIAS_SHORTHAND.get(normalized, normalized)
-
-
-def _resolve_model_alias(ctx: scion_harness.ProvisionContext, raw_model: str) -> str:
-    """Resolve a size alias (e.g. 'medium') to a concrete Claude model name.
-
-    Mirrors config.ResolveModelAlias (pkg/config/templates.go): only the four
-    canonical tiers are treated as aliases, and the concrete name they map to
-    comes from config.yaml's model_aliases block so operators can re-point the
-    tiers without touching this script. Anything else (e.g. 'sonnet' or
-    'claude-sonnet-4-5') is a concrete model name and passes through.
-    """
-    if not raw_model:
-        return ""
-
-    normalized = _normalize_model_alias(raw_model)
-    if normalized not in KNOWN_MODEL_ALIASES:
-        return normalized
-
-    aliases = ctx.harness_config.get("model_aliases") or {}
-    if not isinstance(aliases, dict):
-        return normalized
-
-    concrete = aliases.get(normalized)
-    if not concrete:
-        return normalized
-
-    if str(concrete) != raw_model:
-        ctx.info(f"resolved model alias {raw_model!r} → {concrete!r}")
-    return str(concrete)
-
-
 def _apply_model(ctx: scion_harness.ProvisionContext, env: dict[str, str]) -> str:
     """Resolve the requested model and publish it as ANTHROPIC_MODEL.
 
@@ -300,7 +244,7 @@ def _apply_model(ctx: scion_harness.ProvisionContext, env: dict[str, str]) -> st
     Returns the concrete model name that was applied.
     """
     requested = os.environ.get("SCION_MODEL", "").strip()
-    model = _resolve_model_alias(ctx, requested) or DEFAULT_MODEL
+    model = scion_harness.resolve_model_alias(ctx, requested) or DEFAULT_MODEL
 
     preset = os.environ.get("ANTHROPIC_MODEL", "").strip()
     if requested and preset and preset != model:
