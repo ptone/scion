@@ -244,6 +244,108 @@ func TestComposition_CommonFiles(t *testing.T) {
 	}
 }
 
+func TestComposition_TmuxConfContent(t *testing.T) {
+	// Verifies that the .tmux.conf provisioned into agent home contains the
+	// critical keybindings that the web UI terminal toolbar relies on for
+	// switching between the "agent" and "shell" tmux windows.
+	_, globalScionDir, projectScionDir := setupCompositionTest(t)
+
+	seedTestHarnessConfig(t, globalScionDir, "tmux-hc", "claude")
+
+	tplDir := filepath.Join(globalScionDir, "templates", "tmux-test")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: tmux-hc\n"), 0644)
+
+	agentHome, _, _, err := ProvisionAgent(context.Background(), "tmux-agent", "tmux-test", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(agentHome, ".tmux.conf"))
+	if err != nil {
+		t.Fatalf("expected .tmux.conf in agent home: %v", err)
+	}
+
+	tmuxConf := string(data)
+
+	// The web UI toolbar sends prefix+A and prefix+S to switch tmux windows.
+	// These bindings must be present for the UI widget to function.
+	for _, required := range []struct {
+		directive   string
+		description string
+	}{
+		{"bind A select-window -t scion:agent", "agent window switch binding (used by web UI toolbar)"},
+		{"bind S if-shell", "shell window switch binding (used by web UI toolbar)"},
+		{"set-hook -g pane-exited", "pane-exited hook for agent exit detection"},
+		{"set -g mouse on", "mouse support enabled"},
+	} {
+		if !strings.Contains(tmuxConf, required.directive) {
+			t.Errorf(".tmux.conf missing critical directive: %s (%s)", required.directive, required.description)
+		}
+	}
+
+	// Verify the embedded source matches what was provisioned
+	embeddedData, err := config.EmbedsFS.ReadFile("embeds/templates/default/home/.tmux.conf")
+	if err != nil {
+		t.Fatalf("failed to read embedded .tmux.conf: %v", err)
+	}
+	if string(data) != string(embeddedData) {
+		t.Errorf(".tmux.conf content mismatch: provisioned (%d bytes) != embedded (%d bytes)", len(data), len(embeddedData))
+	}
+}
+
+func TestComposition_MissingDefaultTemplateLosesHomeFiles(t *testing.T) {
+	// When the default template is not on the filesystem, a non-default
+	// template's provisioned agent home will be missing the home files that
+	// the default template provides (.tmux.conf, .zshrc, .gitconfig).
+	// This documents the bug: the template chain silently drops the default
+	// template and agents lose critical configuration.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+
+	// Deliberately do NOT seed the default template — simulating a broker
+	// that hasn't hydrated it from storage.
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	seedTestHarnessConfig(t, globalScionDir, "no-default-hc", "claude")
+
+	// Create a non-default template without its own home directory
+	tplDir := filepath.Join(globalScionDir, "templates", "custom-only")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: no-default-hc\n"), 0644)
+
+	agentHome, _, _, err := ProvisionAgent(context.Background(), "no-default-agent", "custom-only", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+
+	// These files come exclusively from the default template. Without it,
+	// they should be absent — documenting the impact of the silent drop.
+	for _, file := range []string{".tmux.conf", ".zshrc", ".gitconfig"} {
+		_, err := os.Stat(filepath.Join(agentHome, file))
+		if err == nil {
+			// If the file IS present, the bug has been fixed — the default
+			// template is being included even without filesystem presence.
+			t.Logf("GOOD: %s is present even without default template on filesystem (bug fixed?)", file)
+		} else if os.IsNotExist(err) {
+			// This is the current (buggy) behavior: file is missing.
+			t.Logf("KNOWN ISSUE: %s is missing because default template was silently dropped from chain", file)
+		} else {
+			t.Errorf("unexpected error checking %s: %v", file, err)
+		}
+	}
+}
+
 func TestComposition_HarnessConfigResolution(t *testing.T) {
 	_, globalScionDir, projectScionDir := setupCompositionTest(t)
 

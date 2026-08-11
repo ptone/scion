@@ -697,6 +697,74 @@ func TestGetTemplateChainInProjectWithDefault(t *testing.T) {
 	}
 }
 
+func TestGetTemplateChainInProject_MissingDefaultDropsSilently(t *testing.T) {
+	// When a non-default template is requested but the default template is not
+	// found on the filesystem, GetTemplateChainInProject silently produces a
+	// 1-link chain (just the requested template) instead of the expected 2-link
+	// chain [default, custom]. This test documents this behavior — any agent
+	// provisioned with this shorter chain will be missing the home files that
+	// come from the default template (e.g. .tmux.conf, .zshrc, .gitconfig).
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	origWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(tmpDir)
+
+	projectPath := filepath.Join(tmpDir, "project", DotScion)
+
+	// Create ONLY the custom template — no default template on filesystem
+	customTplDir := filepath.Join(projectPath, "templates", "custom")
+	if err := os.MkdirAll(customTplDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	chain, err := GetTemplateChainInProject("custom", projectPath)
+	if err != nil {
+		t.Fatalf("GetTemplateChainInProject failed: %v", err)
+	}
+
+	// The chain should have only 1 entry (the custom template) because
+	// the default template was silently dropped.
+	if len(chain) != 1 {
+		t.Fatalf("expected chain length 1 (default silently dropped), got %d", len(chain))
+	}
+	if chain[0].Path != customTplDir {
+		t.Errorf("expected chain[0] path %q, got %q", customTplDir, chain[0].Path)
+	}
+
+	// Verify that the embedded default template has the critical files that
+	// would be missing from agent home when the default template is dropped.
+	criticalFiles := []string{
+		"embeds/templates/default/home/.tmux.conf",
+		"embeds/templates/default/home/.zshrc",
+		"embeds/templates/default/home/.gitconfig",
+	}
+	for _, f := range criticalFiles {
+		data, err := EmbedsFS.ReadFile(f)
+		if err != nil {
+			t.Errorf("embedded default template missing critical file %s: %v", f, err)
+			continue
+		}
+		if len(data) == 0 {
+			t.Errorf("embedded default template file %s is empty", f)
+		}
+	}
+
+	// Verify the embedded .tmux.conf contains the keybindings that the
+	// web UI terminal toolbar depends on for window switching.
+	tmuxData, _ := EmbedsFS.ReadFile("embeds/templates/default/home/.tmux.conf")
+	tmuxConf := string(tmuxData)
+	for _, required := range []string{
+		"bind A select-window -t scion:agent",
+		"bind S if-shell",
+		"set-hook -g pane-exited",
+	} {
+		if !strings.Contains(tmuxConf, required) {
+			t.Errorf("embedded .tmux.conf missing critical directive %q", required)
+		}
+	}
+}
+
 func TestImageFieldLoadingAndMerging(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "scion-test-image-field")
 	if err != nil {
