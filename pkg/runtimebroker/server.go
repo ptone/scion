@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -182,6 +183,17 @@ func DefaultServerConfig() ServerConfig {
 	}
 }
 
+// SettingsOverlay holds DB-backed settings pushed by the co-located hub.
+// Nil when no overlay exists (standalone broker or file-only deployment).
+// Written by SetSettingsOverlay (called from the hub's ApplySnapshot callback).
+// Read by resolveEffectiveSettings (called from every dispatch path).
+type SettingsOverlay struct {
+	Runtimes       map[string]config.V1RuntimeConfig
+	Profiles       map[string]config.V1ProfileConfig
+	HarnessConfigs map[string]config.HarnessConfigEntry
+	ImageRegistry  string
+}
+
 // Server is the Runtime Broker API HTTP server.
 type Server struct {
 	config     ServerConfig
@@ -254,6 +266,12 @@ type Server struct {
 	agentLifecycleLog *slog.Logger
 	messageLog        *slog.Logger
 	envSecretLog      *slog.Logger
+
+	// settingsOverlay holds DB-backed settings pushed by the co-located hub.
+	// Nil when no overlay exists (standalone broker or file-only deployment).
+	// Written by SetSettingsOverlay (called from the hub's ApplySnapshot
+	// callback). Read by resolveEffectiveSettings on every dispatch path.
+	settingsOverlay atomic.Pointer[SettingsOverlay]
 }
 
 // auxiliaryRuntime pairs a runtime with its manager for non-default runtimes.
@@ -1093,6 +1111,55 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 				"runtime", resolved.Name(), "profile", profileName)
 		}
 	}
+}
+
+// SetSettingsOverlay stores a new overlay from the co-located hub. The overlay
+// is read on every dispatch via resolveEffectiveSettings. Thread-safe (uses
+// atomic.Pointer).
+func (s *Server) SetSettingsOverlay(overlay SettingsOverlay) {
+	s.settingsOverlay.Store(&overlay)
+}
+
+// resolveEffectiveSettings loads settings from files, then overlays DB-backed
+// values from the hub (if an overlay exists). The overlay replaces entire
+// sections atomically (whole-section semantics matching the admin API).
+//
+// For ImageRegistry, the env var SCION_IMAGE_REGISTRY takes precedence over
+// the DB-backed value — the overlay only applies when the env var is not set.
+func (s *Server) resolveEffectiveSettings(projectDir string) (*config.VersionedSettings, []string, error) {
+	vs, warnings, err := config.LoadEffectiveSettings(projectDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if vs == nil {
+		return nil, warnings, nil
+	}
+
+	overlay := s.settingsOverlay.Load()
+	if overlay == nil {
+		return vs, warnings, nil
+	}
+
+	// Apply overlay: DB values replace file values.
+	// nil means "no DB row" — keep file values.
+	// Non-nil (including empty map) means "DB owns this section."
+	if overlay.Runtimes != nil {
+		vs.Runtimes = overlay.Runtimes
+	}
+	if overlay.Profiles != nil {
+		vs.Profiles = overlay.Profiles
+	}
+	if overlay.HarnessConfigs != nil {
+		vs.HarnessConfigs = overlay.HarnessConfigs
+	}
+	// ImageRegistry: env var (SCION_IMAGE_REGISTRY) > DB overlay > file.
+	// LoadEffectiveSettings already merged env > file. Only apply the overlay
+	// when the env var is not set, to preserve env > DB precedence.
+	if overlay.ImageRegistry != "" && os.Getenv("SCION_IMAGE_REGISTRY") == "" {
+		vs.ImageRegistry = overlay.ImageRegistry
+	}
+
+	return vs, warnings, nil
 }
 
 // LookupContainerID implements AgentLookup interface.
