@@ -999,7 +999,40 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 	s.config.AgentDefaults = newDefaults
 
+	// Runtimes / Profiles / HarnessConfigs / ImageRegistry: apply DB-backed
+	// values to the in-memory config so the co-located broker picks them up
+	// via the settings overlay callback (#985).
+	if snap.Runtimes != nil {
+		s.config.Runtimes = snap.Runtimes
+		applied = append(applied, "runtimes")
+	}
+	if snap.Profiles != nil {
+		s.config.Profiles = snap.Profiles
+		applied = append(applied, "profiles")
+	}
+	if snap.HarnessConfigs != nil {
+		s.config.HarnessConfigs = snap.HarnessConfigs
+		applied = append(applied, "harness_configs")
+	}
+	s.config.ImageRegistry = snap.ImageRegistry
+	if snap.ImageRegistry != "" {
+		applied = append(applied, "image_registry")
+	}
+
+	// Capture the overlay values while holding s.mu so the read is consistent.
+	overlay := SettingsOverlay{
+		Runtimes:       s.config.Runtimes,
+		Profiles:       s.config.Profiles,
+		HarnessConfigs: s.config.HarnessConfigs,
+		ImageRegistry:  s.config.ImageRegistry,
+	}
+
 	s.mu.Unlock()
+
+	// Push overlay to the co-located broker (if callback is wired).
+	// Called after s.mu.Unlock() to avoid deadlock if the broker takes its
+	// own lock inside the callback (#985).
+	s.pushSettingsOverlay(overlay)
 
 	// Propagate hub_name to the GCP secret backend so new secrets get the
 	// correct label value. Log handlers have a similar limitation (§7.4).
@@ -1008,19 +1041,6 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 			gcpBackend.SetHubName(snap.HubName)
 		}
 	}
-
-	// NOTE: Runtimes, Profiles, and HarnessConfigs are deliberately NOT
-	// applied here. The provisioning system reads these fresh from disk via
-	// config.LoadEffectiveSettings() on every provisioning request — it has
-	// no DB awareness. Making it consume DB values requires wiring the
-	// provisioning path to the DB layer (design doc OQ1: koanf overlay
-	// injection for co-located brokers, API-based fetch for standalone).
-	// Until that follow-up ships, the immediate value is admin persistence
-	// + GET/PUT correctness + cross-replica propagation of the GET response.
-	//
-	// TODO(#939): Wire runtimes/profiles/harness_configs into the
-	// provisioning path so that DB changes take effect without restart.
-	// See layer1-registration design doc, Open Question OQ1.
 
 	// NOTE: Maintenance state is deliberately NOT applied here.
 	// Maintenance is runtime/API-owned state. In file mode, reloadSettings

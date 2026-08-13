@@ -268,6 +268,23 @@ type ServerConfig struct {
 	// configured durable mount instead of the node-local home directory.
 	// Nil or Backend=="" / "local" preserves the legacy ephemeral behavior.
 	WorkspaceStorageConfig *config.V1WorkspaceStorageConfig
+
+	// Runtimes holds the current DB-backed or bootstrap-loaded runtime
+	// configs, keyed by runtime name. Written only by ApplySnapshot under
+	// s.mu. Read by hubAgentDefaults() and the settings overlay callback.
+	Runtimes map[string]config.V1RuntimeConfig
+
+	// Profiles holds the current DB-backed or bootstrap-loaded profile
+	// configs, keyed by profile name.
+	Profiles map[string]config.V1ProfileConfig
+
+	// HarnessConfigs holds the current DB-backed or bootstrap-loaded
+	// harness configurations, keyed by harness config name.
+	HarnessConfigs map[string]config.HarnessConfigEntry
+
+	// ImageRegistry holds the DB-backed image registry prefix (e.g.,
+	// "ghcr.io/myorg"). Empty string means no DB-level override.
+	ImageRegistry string
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -710,8 +727,9 @@ type Server struct {
 	// statelessEmbeddedBroker is true when the embedded broker identity is a
 	// replica-independent API adapter rather than a process-owned control channel.
 	statelessEmbeddedBroker bool
-	runtimeReloadFunc       func() bool // Callback to reload the co-located broker runtime; returns true if swapped
-	workstation             bool        // True when running in workstation (non-production) mode
+	runtimeReloadFunc       func() bool            // Callback to reload the co-located broker runtime; returns true if swapped
+	settingsOverlayFunc     func(SettingsOverlay)  // Callback to push DB-backed settings to the co-located broker; nil when no co-located broker exists
+	workstation             bool                   // True when running in workstation (non-production) mode
 	// webdavLocks stores per-project WebDAV lock systems keyed by project ID.
 	// This replaces the per-request webdav.NewMemLS() so that locks survive
 	// across HTTP requests within a single instance.
@@ -1794,6 +1812,38 @@ func (s *Server) SetRuntimeReloadFunc(fn func() bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.runtimeReloadFunc = fn
+}
+
+// SettingsOverlay carries DB-backed settings from the hub to the co-located
+// runtime broker. Fields with nil maps mean "no DB row exists, file values
+// are the fallback." Non-nil maps (including empty) mean "DB owns this section."
+type SettingsOverlay struct {
+	Runtimes       map[string]config.V1RuntimeConfig
+	Profiles       map[string]config.V1ProfileConfig
+	HarnessConfigs map[string]config.HarnessConfigEntry
+	ImageRegistry  string
+}
+
+// SetSettingsOverlayCallback registers a callback that pushes DB-backed
+// runtimes/profiles/harness_configs/image_registry to the co-located runtime
+// broker. Called during startup wiring in cmd/server_foreground.go.
+// The callback is invoked from ApplySnapshot (which holds s.mu) whenever
+// the four overlay fields change.
+func (s *Server) SetSettingsOverlayCallback(fn func(SettingsOverlay)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settingsOverlayFunc = fn
+}
+
+// pushSettingsOverlay pushes the given overlay to the co-located broker via
+// the registered callback. Called from ApplySnapshot after s.mu is released,
+// so the broker can safely acquire its own lock without deadlock risk.
+func (s *Server) pushSettingsOverlay(overlay SettingsOverlay) {
+	fn := s.settingsOverlayFunc
+	if fn == nil {
+		return
+	}
+	fn(overlay)
 }
 
 // GetEmbeddedBrokerID returns the co-located broker ID, if any.
