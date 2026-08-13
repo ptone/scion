@@ -736,8 +736,9 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	buildAllowed := make(map[string]bool, len(harness.AllHarnessNames()))
-	for _, n := range harness.AllHarnessNames() {
+	allBuildNames := harness.AllHarnessNames()
+	buildAllowed := make(map[string]bool, len(allBuildNames))
+	for _, n := range allBuildNames {
 		buildAllowed[n] = true
 	}
 	for _, h := range req.Harnesses {
