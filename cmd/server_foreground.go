@@ -2397,6 +2397,34 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		})
 	}
 
+	// Wire settings overlay so DB-backed runtimes/profiles/harness_configs/
+	// image_registry are consumed by the co-located broker's dispatch path
+	// (#985). Only wired in co-located mode (hub + broker in same process).
+	if hubSrv != nil && colocatedBrokerRegistered {
+		// Compute initial overlay from the hub's current snapshot so the
+		// broker starts with DB-backed values immediately (before any
+		// subsequent ApplySnapshot fires).
+		if ops := hubSrv.GetOperationalSettings(); ops != nil {
+			snap := ops.Snapshot()
+			rhSrv.SetSettingsOverlay(runtimebroker.SettingsOverlay{
+				Runtimes:       snap.Runtimes,
+				Profiles:       snap.Profiles,
+				HarnessConfigs: snap.HarnessConfigs,
+				ImageRegistry:  snap.ImageRegistry,
+			})
+		}
+
+		// Wire the callback so future ApplySnapshot calls push updates.
+		hubSrv.SetSettingsOverlayCallback(func(overlay hub.SettingsOverlay) {
+			rhSrv.SetSettingsOverlay(runtimebroker.SettingsOverlay{
+				Runtimes:       overlay.Runtimes,
+				Profiles:       overlay.Profiles,
+				HarnessConfigs: overlay.HarnessConfigs,
+				ImageRegistry:  overlay.ImageRegistry,
+			})
+		})
+	}
+
 	if webSrv != nil {
 		webSrv.SetBrokerHealthProvider(func(ctx context.Context) interface{} {
 			return rhSrv.GetHealthInfo(ctx)
