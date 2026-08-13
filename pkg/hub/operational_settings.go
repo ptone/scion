@@ -825,10 +825,12 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 //
 // NOTE: Only fields that the old reloadSettings() consumed are populated here.
 // Fields like SoftDeleteRetention, DefaultTemplate, DefaultMaxTurns, PublicURL,
-// ImageRegistry, DefaultResources, and NotificationChannels remain at zero
-// values — the old reloadSettings never applied those on config reload (they
-// are consumed at startup, not on reload). In postgres mode, the full koanf-based
-// Snapshot() populates all fields. See the Layer1Snapshot type comment for details.
+// DefaultResources, and NotificationChannels remain at zero values — the old
+// reloadSettings never applied those on config reload (they are consumed at
+// startup, not on reload). ImageRegistry is populated from VersionedSettings
+// so that file-mode config reloads pick up registry changes. In postgres mode,
+// the full koanf-based Snapshot() populates all fields. See the Layer1Snapshot
+// type comment for details.
 func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap := Layer1Snapshot{
 		AdminEmails:        gc.Hub.AdminEmails,
@@ -857,6 +859,13 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// Federation — read from GlobalConfig
 	if gc.Federation.Enabled || len(gc.Federation.TrustedIssuers) > 0 {
 		snap.FederationConfig = &gc.Federation
+	}
+
+	// Image registry — loaded from VersionedSettings because GlobalConfig
+	// does not carry this field. Same pattern used by resolveMaintenanceConfig
+	// in cmd/server_foreground.go.
+	if vs, err := config.LoadVersionedSettings(""); err == nil {
+		snap.ImageRegistry = vs.ResolveImageRegistry("")
 	}
 
 	return snap
@@ -962,6 +971,16 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if snap.HubName != "" {
 		s.config.HubName = snap.HubName
 		applied = append(applied, "hub_name")
+	}
+
+	// Image registry — propagate the DB-backed value to
+	// MaintenanceConfig so that resolveImageRegistry() picks it up.
+	if snap.ImageRegistry != "" {
+		old := s.config.MaintenanceConfig.ImageRegistry
+		s.config.MaintenanceConfig.ImageRegistry = snap.ImageRegistry
+		if old != snap.ImageRegistry {
+			applied = append(applied, "image_registry")
+		}
 	}
 
 	// Agent defaults (hub operational agent_defaults section).

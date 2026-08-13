@@ -523,6 +523,91 @@ func TestApplySnapshot_UserAccessModeCleared(t *testing.T) {
 	}
 }
 
+func TestApplySnapshot_ImageRegistry(t *testing.T) {
+	t.Run("sets MaintenanceConfig.ImageRegistry from snapshot", func(t *testing.T) {
+		srv := &Server{
+			maintenance: NewMaintenanceState(false, ""),
+		}
+
+		snap := Layer1Snapshot{
+			ImageRegistry: "ghcr.io/myorg",
+		}
+
+		results := ApplySnapshot(srv, snap)
+
+		if srv.config.MaintenanceConfig.ImageRegistry != "ghcr.io/myorg" {
+			t.Errorf("MaintenanceConfig.ImageRegistry: want %q, got %q",
+				"ghcr.io/myorg", srv.config.MaintenanceConfig.ImageRegistry)
+		}
+
+		applied := results["applied"].([]string)
+		found := false
+		for _, a := range applied {
+			if a == "image_registry" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Error("expected 'image_registry' in applied list")
+		}
+	})
+
+	t.Run("not applied when empty", func(t *testing.T) {
+		srv := &Server{
+			config: ServerConfig{
+				MaintenanceConfig: MaintenanceConfig{
+					ImageRegistry: "existing-registry.io/org",
+				},
+			},
+			maintenance: NewMaintenanceState(false, ""),
+		}
+
+		snap := Layer1Snapshot{
+			ImageRegistry: "",
+		}
+
+		results := ApplySnapshot(srv, snap)
+
+		// Empty snapshot value must not overwrite existing config.
+		if srv.config.MaintenanceConfig.ImageRegistry != "existing-registry.io/org" {
+			t.Errorf("MaintenanceConfig.ImageRegistry: want %q (unchanged), got %q",
+				"existing-registry.io/org", srv.config.MaintenanceConfig.ImageRegistry)
+		}
+
+		applied := results["applied"].([]string)
+		for _, a := range applied {
+			if a == "image_registry" {
+				t.Error("image_registry should not appear in applied list when snapshot value is empty")
+			}
+		}
+	})
+
+	t.Run("not in applied list when value unchanged", func(t *testing.T) {
+		srv := &Server{
+			config: ServerConfig{
+				MaintenanceConfig: MaintenanceConfig{
+					ImageRegistry: "ghcr.io/same",
+				},
+			},
+			maintenance: NewMaintenanceState(false, ""),
+		}
+
+		snap := Layer1Snapshot{
+			ImageRegistry: "ghcr.io/same",
+		}
+
+		results := ApplySnapshot(srv, snap)
+
+		applied := results["applied"].([]string)
+		for _, a := range applied {
+			if a == "image_registry" {
+				t.Error("image_registry should not appear in applied list when value is unchanged")
+			}
+		}
+	})
+}
+
 func TestBuildLayer1SnapshotFromFile(t *testing.T) {
 	telEnabled := true
 	gc := &config.GlobalConfig{
