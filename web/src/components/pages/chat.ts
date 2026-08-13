@@ -663,6 +663,23 @@ export class ScionPageChat extends LitElement {
     const dmMatch = path.match(/\/chat\/dm\/(.+)$/);
     if (dmMatch) {
       const key = decodeURIComponent(dmMatch[1]);
+
+      // Guard: already viewing this exact DM — skip to avoid overwriting
+      // peer metadata that was populated by handleDMSelect or resolveDMByPeerId.
+      if (this.v2Conversation?.isDM && this.v2Conversation.conversationKey === key) {
+        return;
+      }
+
+      // Guard: don't overwrite a valid DM key with a malformed one.
+      const dmKeyRegex = /^dm:(user|agent):[0-9a-f-]{36}:(user|agent):[0-9a-f-]{36}$/;
+      if (
+        this.v2Conversation?.isDM &&
+        dmKeyRegex.test(this.v2Conversation.conversationKey) &&
+        !dmKeyRegex.test(key)
+      ) {
+        return;
+      }
+
       this.v2Conversation = {
         conversationKey: key,
         projectId: '',
@@ -939,19 +956,118 @@ export class ScionPageChat extends LitElement {
     };
     if (!detail) return;
 
-    const userId = this.pageData?.user?.id || '';
-    let dmKey: string;
-
-    if (detail.memberKind === 'agent') {
-      dmKey = `dm:agent:${detail.memberId}:user:${userId}`;
-    } else {
-      // Sort UUIDs lexically for consistent DM keys
-      const ids = [detail.memberId, userId].sort();
-      dmKey = `dm:user:${ids[0]}:user:${ids[1]}`;
+    const dmKey = this.buildDMKey(detail.memberId, detail.memberKind);
+    if (dmKey) {
+      navigateTo(`/chat/dm/${encodeURIComponent(dmKey)}`);
+      return;
     }
 
-    // Navigate to the DM
-    navigateTo(`/chat/dm/${encodeURIComponent(dmKey)}`);
+    // User ID not available — resolve via API
+    void this.resolveDMByPeerId(detail.memberId, detail.memberKind, detail.displayName);
+  }
+
+  /**
+   * Safely construct a DM conversation key. Returns null if the current user
+   * ID is not available, preventing broken keys with empty segments.
+   */
+  private buildDMKey(peerId: string, peerKind: 'user' | 'agent'): string | null {
+    const userId = this.pageData?.user?.id;
+    if (!userId) return null; // Cannot construct key without user ID
+
+    if (peerKind === 'agent') {
+      return `dm:agent:${peerId}:user:${userId}`;
+    }
+    const ids = [peerId, userId].sort();
+    return `dm:user:${ids[0]}:user:${ids[1]}`;
+  }
+
+  /**
+   * Resolve a DM conversation by peer ID without requiring the current user
+   * ID up-front. Tries the DM list API first (server-provided keys), then
+   * falls back to fetching the user identity from /api/v1/auth/me.
+   */
+  private async resolveDMByPeerId(
+    peerId: string,
+    peerKind: 'user' | 'agent',
+    displayName: string
+  ): Promise<void> {
+    // 1. Try to find an existing DM via the DM list API (no user ID needed).
+    try {
+      const res = await apiFetch('/api/v1/chat/dms');
+      if (res.ok) {
+        const data = (await res.json()) as {
+          dms?: Array<{
+            conversationKey: string;
+            peerId: string;
+            peerKind: string;
+            peerName?: string;
+          }>;
+        };
+        const dm = data.dms?.find((d) => d.peerId === peerId);
+        if (dm) {
+          navigateTo(`/chat/dm/${encodeURIComponent(dm.conversationKey)}`);
+          this.v2Conversation = {
+            conversationKey: dm.conversationKey,
+            projectId: '',
+            threadName: '',
+            defaultAgent: '',
+            isDM: true,
+            peerName: dm.peerName || displayName,
+            peerId,
+            peerKind,
+          };
+          this.classList.add('thread-open');
+          dispatchPageTitle(this, dm.peerName || displayName, 'Chat');
+          return;
+        }
+      }
+    } catch {
+      // continue to fallback
+    }
+
+    // 2. Try fetching user ID from /api/v1/auth/me (handles token-based auth).
+    if (!this.pageData?.user?.id) {
+      try {
+        const authRes = await apiFetch('/api/v1/auth/me');
+        if (authRes.ok) {
+          const authData = (await authRes.json()) as { id?: string };
+          if (authData.id && this.pageData) {
+            if (this.pageData.user) {
+              this.pageData.user.id = authData.id;
+            } else {
+              this.pageData = {
+                ...this.pageData,
+                user: { id: authData.id, email: '', name: '' },
+              };
+            }
+          }
+        }
+      } catch {
+        // continue
+      }
+    }
+
+    // 3. Retry key construction with the potentially-refreshed user ID.
+    const key = this.buildDMKey(peerId, peerKind);
+    if (key) {
+      navigateTo(`/chat/dm/${encodeURIComponent(key)}`);
+      this.v2Conversation = {
+        conversationKey: key,
+        projectId: '',
+        threadName: '',
+        defaultAgent: '',
+        isDM: true,
+        peerName: displayName,
+        peerId,
+        peerKind,
+      };
+      this.classList.add('thread-open');
+      dispatchPageTitle(this, displayName, 'Chat');
+      return;
+    }
+
+    // 4. Unable to resolve — show user-friendly error.
+    console.error('Unable to open DM — user identity not available. Please refresh the page.');
   }
 
   // =========================================================================
