@@ -180,7 +180,7 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 // buildInfoProfiles enumerates configured profiles from effective settings.
 // Falls back to a single "default" profile when no profiles are configured.
 func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
-	vs, _, err := config.LoadEffectiveSettings("")
+	vs, _, err := s.resolveEffectiveSettings("")
 	if err != nil || len(vs.Profiles) == 0 {
 		return []BrokerProfile{
 			{Name: "default", Type: defaultRuntimeType, Available: true},
@@ -2059,7 +2059,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 		}
 	}
 	if settingsPath != "" {
-		vs, _, err := config.LoadEffectiveSettings(settingsPath)
+		vs, _, err := s.resolveEffectiveSettings(settingsPath)
 		if err == nil {
 			settings = vs
 			if s.config.Debug {
@@ -2591,7 +2591,7 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 	// Load settings to check if the profile/active-profile specifies a
 	// different runtime than the broker's auto-detected default.
 	projectDir, _ := config.GetResolvedProjectDir(opts.ProjectPath)
-	vs, _, _ := config.LoadEffectiveSettings(projectDir)
+	vs, _, _ := s.resolveEffectiveSettings(projectDir)
 	if vs == nil {
 		return s.manager
 	}

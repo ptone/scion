@@ -1083,7 +1083,7 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 	discovered := make(map[string]bool)
 
 	for _, gp := range projectPaths {
-		vs, _, _ := config.LoadEffectiveSettings(gp)
+		vs, _, _ := s.resolveEffectiveSettings(gp)
 		if vs == nil {
 			continue
 		}
