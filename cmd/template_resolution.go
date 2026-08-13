@@ -505,6 +505,12 @@ func detectHarnessType(tpl *config.Template) (string, error) {
 		return "codex", nil
 	case strings.Contains(name, "opencode"):
 		return "opencode", nil
+	case strings.Contains(name, "antigravity"):
+		return "antigravity", nil
+	case strings.Contains(name, "copilot"):
+		return "copilot", nil
+	case strings.Contains(name, "hermes"):
+		return "hermes", nil
 	}
 
 	return "", nil

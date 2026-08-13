@@ -25,7 +25,8 @@ import (
 )
 
 func canonicalHarnessName(name string) string {
-	switch strings.ToLower(strings.TrimSpace(name)) {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	switch lower {
 	case "claude":
 		return "claude"
 	case "gemini", "gemini-cli":
@@ -37,6 +38,15 @@ func canonicalHarnessName(name string) string {
 	case "generic":
 		return "generic"
 	default:
+		// If it's a known bundled harness, return as-is. This covers
+		// harnesses like antigravity, copilot, and hermes that have no
+		// alias issues, and prevents future gaps when new harnesses are
+		// added to the harnesses/ directory.
+		for _, n := range harness.AllHarnessNames() {
+			if n == lower {
+				return lower
+			}
+		}
 		return ""
 	}
 }
