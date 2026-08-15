@@ -195,6 +195,8 @@ func (s *Server) handleChatSpaceRoutes(w http.ResponseWriter, r *http.Request) {
 		s.handleSpaceMembers(w, r, projectID)
 	case "read":
 		s.handleSpaceRead(w, r, projectID)
+	case "interagent":
+		s.handleSpaceInteragent(w, r, projectID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1404,19 +1406,15 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 	seen := make(map[string]bool, len(result.Items))
 	filtered := make([]store.Message, 0, len(result.Items)+len(senderResult.Items))
 	for _, m := range result.Items {
-		if strings.HasPrefix(m.Sender, "agent:") && strings.HasPrefix(m.Recipient, "agent:") {
-			if !seen[m.ID] {
-				seen[m.ID] = true
-				filtered = append(filtered, m)
-			}
+		if isInteragentMessage(m) && !seen[m.ID] {
+			seen[m.ID] = true
+			filtered = append(filtered, m)
 		}
 	}
 	for _, m := range senderResult.Items {
-		if strings.HasPrefix(m.Sender, "agent:") && strings.HasPrefix(m.Recipient, "agent:") {
-			if !seen[m.ID] {
-				seen[m.ID] = true
-				filtered = append(filtered, m)
-			}
+		if isInteragentMessage(m) && !seen[m.ID] {
+			seen[m.ID] = true
+			filtered = append(filtered, m)
 		}
 	}
 
@@ -1426,6 +1424,117 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 // interagentResponse is the response for the interagent endpoint.
 type interagentResponse struct {
 	Messages []store.Message `json:"messages"`
+}
+
+// isInteragentMessage reports whether both ends of a message are agents —
+// the traffic the Agent Chatter view and the DM inter-agent markers show.
+func isInteragentMessage(m store.Message) bool {
+	return strings.HasPrefix(m.Sender, "agent:") && strings.HasPrefix(m.Recipient, "agent:")
+}
+
+// Scanning bounds for the project-wide inter-agent history. The store cannot
+// filter on "both participants are agents", so the handler pages through the
+// project's messages and post-filters. The page size keeps each round-trip
+// small; the page cap keeps a chatty project from turning one request into an
+// unbounded table scan — the client pages with `before` instead.
+const (
+	spaceInteragentPageSize = 200
+	spaceInteragentMaxPages = 10
+)
+
+// spaceInteragentResponse is the response for the project-wide inter-agent
+// history endpoint. Messages are newest-first, matching the store's ordering.
+// NextBefore is the timestamp to pass back as `before` for the next page.
+type spaceInteragentResponse struct {
+	Messages   []store.Message `json:"messages"`
+	NextBefore string          `json:"nextBefore,omitempty"`
+	HasMore    bool            `json:"hasMore"`
+}
+
+// handleSpaceInteragent handles GET /api/v1/chat/spaces/{projectId}/interagent.
+// It returns the project's agent-to-agent messages — every exchange the user
+// is not a party to — which backs the Agent Chatter thread.
+func (s *Server) handleSpaceInteragent(w http.ResponseWriter, r *http.Request, projectID string) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+	if user := GetUserIdentityFromContext(ctx); user == nil {
+		Forbidden(w)
+		return
+	}
+
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		NotFound(w, "Project")
+		return
+	}
+	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+
+	q := r.URL.Query()
+
+	limit := 100
+	if l := q.Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+
+	filter := store.MessageFilter{ProjectID: projectID}
+	if v := q.Get("before"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			BadRequest(w, "invalid before timestamp — expected RFC3339")
+			return
+		}
+		filter.Before = t
+	}
+
+	var (
+		msgs    = make([]store.Message, 0, limit)
+		cursor  string
+		hasMore bool
+	)
+	for page := 0; page < spaceInteragentMaxPages; page++ {
+		result, err := s.store.ListMessages(ctx, filter, store.ListOptions{
+			Limit:  spaceInteragentPageSize,
+			Cursor: cursor,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL",
+				"failed to fetch inter-agent messages", nil)
+			return
+		}
+		for _, m := range result.Items {
+			if !isInteragentMessage(m) {
+				continue
+			}
+			if len(msgs) == limit {
+				hasMore = true
+				break
+			}
+			msgs = append(msgs, m)
+		}
+		cursor = result.NextCursor
+		if hasMore || cursor == "" {
+			break
+		}
+		// Out of scan budget with pages still unread: report more so the
+		// client can ask for the next window rather than assume it has all.
+		if page == spaceInteragentMaxPages-1 {
+			hasMore = true
+		}
+	}
+
+	resp := spaceInteragentResponse{Messages: msgs, HasMore: hasMore}
+	if hasMore && len(msgs) > 0 {
+		resp.NextBefore = msgs[len(msgs)-1].CreatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ---------------------------------------------------------------------------

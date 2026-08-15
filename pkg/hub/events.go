@@ -55,6 +55,10 @@ type EventPublisher interface {
 	// participants of a DM on user.<peerID>.chat.read-state so the sender can
 	// render "seen" without polling.
 	PublishChatReadStateEvent(ctx context.Context, conversationKey, userID, messageID string)
+	// PublishInteragentMessage publishes an agent→agent message on
+	// project.<projectID>.chat.interagent so the Agent Chatter view can stream
+	// the project's agent traffic in real time.
+	PublishInteragentMessage(ctx context.Context, projectID string, msg *store.Message)
 	// Subscribe returns a channel that receives events matching the given
 	// subject patterns, along with an unsubscribe function. Patterns use
 	// NATS-style wildcards: '*' matches a single token, '>' matches the
@@ -87,6 +91,8 @@ func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)      
 func (noopEventPublisher) PublishChatTopicEvent(_ context.Context, _ string, _ string, _ WebChatTopic) {
 }
 func (noopEventPublisher) PublishChatReadStateEvent(_ context.Context, _, _, _ string) {}
+func (noopEventPublisher) PublishInteragentMessage(_ context.Context, _ string, _ *store.Message) {
+}
 func (noopEventPublisher) PublishRaw(_ string, _ interface{}) {}
 func (noopEventPublisher) Close()                             {}
 
@@ -713,6 +719,34 @@ func (p *eventBuilder) PublishChatReadStateEvent(_ context.Context, conversation
 		}
 		p.sink("user."+participantID+".chat.read-state", evt)
 	}
+}
+
+// PublishInteragentMessage fans an agent→agent message out on
+// project.<projectID>.chat.interagent. Chat clients already subscribe to
+// project.<id>.chat.> for the space, so the Agent Chatter view receives these
+// without widening its subscription.
+//
+// Only agent→agent messages belong here: the view exists to eavesdrop on
+// traffic the user is not a party to, and anything involving a user is already
+// delivered by PublishUserMessage.
+func (p *eventBuilder) PublishInteragentMessage(_ context.Context, projectID string, msg *store.Message) {
+	if projectID == "" || msg == nil {
+		return
+	}
+	if !strings.HasPrefix(msg.Sender, "agent:") || !strings.HasPrefix(msg.Recipient, "agent:") {
+		return
+	}
+	p.sink("project."+projectID+".chat.interagent", InteragentEvent{
+		ID:          msg.ID,
+		ProjectID:   projectID,
+		Sender:      msg.Sender,
+		SenderID:    msg.SenderID,
+		Recipient:   msg.Recipient,
+		RecipientID: msg.RecipientID,
+		Msg:         msg.Msg,
+		Type:        msg.Type,
+		CreatedAt:   msg.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
+	})
 }
 
 // PublishDispatchDone emits a slim completion event when a broker_dispatch row

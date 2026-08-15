@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -2158,5 +2159,143 @@ func TestChatV2_ClearTopicDefaultAgent(t *testing.T) {
 	}
 	if other.DefaultAgent != "reviewer" {
 		t.Errorf("unrelated topic default changed: got %q", other.DefaultAgent)
+	}
+}
+
+// --- Agent Chatter: project-wide inter-agent history ---
+
+func TestChatV2_SpaceInteragent(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("chatter-test"), Name: "chatter", Slug: "chatter", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	base := time.Now().UTC().Add(-time.Hour)
+	msgs := []struct {
+		id        string
+		sender    string
+		recipient string
+		offset    time.Duration
+	}{
+		{tid("ia-1"), "agent:planner", "agent:coder", 0},
+		{tid("user-1"), "user:alice", "agent:coder", time.Minute},
+		{tid("ia-2"), "agent:coder", "agent:reviewer", 2 * time.Minute},
+		{tid("reply-1"), "agent:coder", "user:alice", 3 * time.Minute},
+	}
+	for _, m := range msgs {
+		if err := s.CreateMessage(ctx, &store.Message{
+			ID:        m.id,
+			ProjectID: proj.ID,
+			Sender:    m.sender,
+			Recipient: m.recipient,
+			Msg:       "hello",
+			Type:      "instruction",
+			CreatedAt: base.Add(m.offset),
+		}); err != nil {
+			t.Fatalf("CreateMessage(%s): %v", m.id, err)
+		}
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces/"+proj.ID+"/interagent", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp spaceInteragentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Messages) != 2 {
+		t.Fatalf("expected 2 agent-to-agent messages, got %d: %+v", len(resp.Messages), resp.Messages)
+	}
+	// Newest first.
+	if resp.Messages[0].ID != tid("ia-2") || resp.Messages[1].ID != tid("ia-1") {
+		t.Errorf("unexpected order: %s, %s", resp.Messages[0].ID, resp.Messages[1].ID)
+	}
+	if resp.HasMore {
+		t.Error("expected hasMore=false when everything fits in one page")
+	}
+}
+
+func TestChatV2_SpaceInteragent_LimitAndPaging(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("chatter-page"), Name: "chatter", Slug: "chatter-page", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	base := time.Now().UTC().Add(-time.Hour)
+	for i := range 3 {
+		if err := s.CreateMessage(ctx, &store.Message{
+			ID:        tid(fmt.Sprintf("page-ia-%d", i)),
+			ProjectID: proj.ID,
+			Sender:    "agent:planner",
+			Recipient: "agent:coder",
+			Msg:       "hello",
+			CreatedAt: base.Add(time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("CreateMessage: %v", err)
+		}
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces/"+proj.ID+"/interagent?limit=2", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var first spaceInteragentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&first); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(first.Messages) != 2 || !first.HasMore || first.NextBefore == "" {
+		t.Fatalf("expected 2 messages with a next page, got %d hasMore=%v next=%q",
+			len(first.Messages), first.HasMore, first.NextBefore)
+	}
+
+	rec = doRequest(t, srv, http.MethodGet,
+		"/api/v1/chat/spaces/"+proj.ID+"/interagent?limit=2&before="+url.QueryEscape(first.NextBefore), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var second spaceInteragentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&second); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(second.Messages) != 1 {
+		t.Fatalf("expected the remaining message, got %d", len(second.Messages))
+	}
+	if second.Messages[0].ID != tid("page-ia-0") {
+		t.Errorf("expected oldest message, got %s", second.Messages[0].ID)
+	}
+	if second.HasMore {
+		t.Error("expected hasMore=false on the last page")
+	}
+}
+
+func TestChatV2_SpaceInteragent_RejectsBadBefore(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("chatter-bad"), Name: "chatter", Slug: "chatter-bad", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces/"+proj.ID+"/interagent?before=yesterday", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for an unparseable before, got %d", rec.Code)
+	}
+}
+
+func TestChatV2_SpaceInteragent_RequiresAuth(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/chat/spaces/"+tid("nope")+"/interagent", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without auth, got %d", rec.Code)
 	}
 }

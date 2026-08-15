@@ -664,6 +664,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Persist to message store before delivery attempt. Set dispatch_state
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
+	// persistedMsg is kept so the observer publish below can emit the stored
+	// row (with its ID and timestamp) rather than reconstructing one.
+	var persistedMsg *store.Message
 	if structuredMsg != nil {
 		storeMsg := &store.Message{
 			ID:            api.NewUUID(),
@@ -693,6 +696,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			s.messageLog.Error("Failed to persist message", "error", err)
 		} else {
 			persistedMsgID = storeMsg.ID
+			persistedMsg = storeMsg
 		}
 		// Publish SSE event so connected browser clients can update the
 		// per-agent conversation view in real time — mirrors the agent→user
@@ -782,6 +786,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					"agent_id", agent.ID, "error", err)
 			}
 		}
+		// Mirror the message onto the chat SSE stream so the web Agent Chatter
+		// view sees it live. The broker publish above only reaches plugin
+		// observers; web clients subscribe to project.<id>.chat.>.
+		s.events.PublishInteragentMessage(ctx, agent.ProjectID, persistedMsg)
 	}
 
 	// Create notification subscription if requested
@@ -941,6 +949,9 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 							"recipient", recipStr, "error", err)
 					}
 				}
+				// Agent Chatter sees group[] fan-out too — one entry per
+				// agent recipient, same as the per-recipient delivery.
+				s.events.PublishInteragentMessage(ctx, projectID, storeMsg)
 			}
 
 			results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "delivered"}

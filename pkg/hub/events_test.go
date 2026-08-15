@@ -995,3 +995,76 @@ func TestPublishChatReadStateEvent_IgnoresTopics(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+// --- Agent Chatter: PublishInteragentMessage ---
+
+func TestPublishInteragentMessage(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	// The chat view subscribes to the space wildcard, not the exact subject.
+	ch, unsub := pub.Subscribe("project.proj1.chat.>")
+	defer unsub()
+
+	created := time.Date(2026, 8, 15, 10, 30, 0, 0, time.UTC)
+	pub.PublishInteragentMessage(context.Background(), "proj1", &store.Message{
+		ID:          "msg-ia-1",
+		ProjectID:   "proj1",
+		Sender:      "agent:planner",
+		SenderID:    "agent-uuid-1",
+		Recipient:   "agent:coder",
+		RecipientID: "agent-uuid-2",
+		Msg:         "take the next task",
+		Type:        "instruction",
+		CreatedAt:   created,
+	})
+
+	select {
+	case evt := <-ch:
+		if evt.Subject != "project.proj1.chat.interagent" {
+			t.Errorf("expected subject project.proj1.chat.interagent, got %s", evt.Subject)
+		}
+		var payload InteragentEvent
+		if err := json.Unmarshal(evt.Data, &payload); err != nil {
+			t.Fatalf("failed to unmarshal event: %v", err)
+		}
+		if payload.ID != "msg-ia-1" || payload.Sender != "agent:planner" ||
+			payload.Recipient != "agent:coder" || payload.Msg != "take the next task" {
+			t.Errorf("unexpected payload: %+v", payload)
+		}
+		if payload.CreatedAt != "2026-08-15T10:30:00.000Z" {
+			t.Errorf("unexpected createdAt: %s", payload.CreatedAt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for chat.interagent event")
+	}
+}
+
+func TestPublishInteragentMessage_SkipsNonAgentPairs(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	ch, unsub := pub.Subscribe(">")
+	defer unsub()
+
+	cases := []struct {
+		name      string
+		projectID string
+		msg       *store.Message
+	}{
+		{"agent to user", "proj1", &store.Message{Sender: "agent:planner", Recipient: "user:alice"}},
+		{"user to agent", "proj1", &store.Message{Sender: "user:alice", Recipient: "agent:coder"}},
+		{"no project", "", &store.Message{Sender: "agent:planner", Recipient: "agent:coder"}},
+		{"nil message", "proj1", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pub.PublishInteragentMessage(context.Background(), tc.projectID, tc.msg)
+			select {
+			case evt := <-ch:
+				t.Fatalf("expected no event, got %s", evt.Subject)
+			case <-time.After(50 * time.Millisecond):
+			}
+		})
+	}
+}

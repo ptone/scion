@@ -59,7 +59,9 @@ import { navigateTo, stateManager } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { isFeatureEnabled, NATIVE_CHAT_V2_FLAG } from '../../utils/feature-flags.js';
 import { hashColor, getInitials } from '../shared/chat/chat-avatar.js';
+import { parseChatterKey } from '../shared/chat/chatter-key.js';
 import '../shared/chat/chat-thread.js';
+import '../shared/chat/chat-chatter.js';
 
 // Lazy-load the space rail only when v2 is active
 const loadSpaceRail = () => import('../shared/chat/chat-space-rail.js');
@@ -1476,7 +1478,11 @@ export class ScionPageChat extends LitElement {
     const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + threadPath : threadPath;
     window.history.pushState({}, '', browserPath);
 
-    dispatchPageTitle(this, `#${detail.threadName}`, 'Chat');
+    dispatchPageTitle(
+      this,
+      parseChatterKey(detail.conversationKey) ? detail.threadName : `#${detail.threadName}`,
+      'Chat'
+    );
     void this.loadV2Members(detail.projectId);
   }
 
@@ -1514,6 +1520,12 @@ export class ScionPageChat extends LitElement {
 
   /** Title the page for a thread and fetch whatever the route did not carry. */
   private applyThreadMeta(conversationKey: string, known: ThreadMeta): void {
+    // Agent Chatter has no topic row behind it — there is nothing to fetch,
+    // and asking for one would 404.
+    if (parseChatterKey(conversationKey)) {
+      dispatchPageTitle(this, 'Agent Chatter', 'Chat');
+      return;
+    }
     dispatchPageTitle(this, known.threadName ? `#${known.threadName}` : 'Thread', 'Chat');
     if (!known.threadName || !known.defaultAgent) {
       void this.fetchThreadDetails(conversationKey);
@@ -2344,6 +2356,7 @@ export class ScionPageChat extends LitElement {
                   selectedKey=${this.v2Conversation?.conversationKey || ''}
                   @thread-select=${this.handleThreadSelect}
                   @reset-view=${this.handleResetView}
+                  @chatter-closed=${this.handleResetView}
                 ></scion-chat-space-rail>
               `
             : html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`}
@@ -2455,6 +2468,26 @@ export class ScionPageChat extends LitElement {
   private renderV2Conversation() {
     if (!this.v2Conversation) return nothing;
     const conv = this.v2Conversation;
+
+    // Agent Chatter is a feed of the space's agent-to-agent traffic, not a
+    // conversation: no composer, and nothing for message search to look at.
+    const chatterProjectId = parseChatterKey(conv.conversationKey);
+    if (chatterProjectId) {
+      return html`
+        <div class="v2-thread-header">
+          ${this.renderMobileBackButton()}
+          <sl-icon name="chat-dots" style="color: var(--scion-text-muted, #64748b)"></sl-icon>
+          <span>Agent Chatter</span>
+          <div
+            class="header-actions"
+            style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;"
+          >
+            ${this.renderMembersButtons()}
+          </div>
+        </div>
+        <scion-chat-chatter projectId=${chatterProjectId}></scion-chat-chatter>
+      `;
+    }
 
     // Look up the project slug for agent DMs
     const agentProjectSlug = conv.isDM && conv.peerKind === 'agent' && conv.peerId

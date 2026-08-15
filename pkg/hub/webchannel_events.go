@@ -33,3 +33,23 @@ type ChatReadStateEvent struct {
 	MessageID string `json:"messageId"`
 	ReadAt    string `json:"readAt"`
 }
+
+// InteragentEvent is published on project.<id>.chat.interagent when one agent
+// messages another. It backs the Agent Chatter view, which streams a project's
+// agent-to-agent traffic live.
+//
+// The field names deliberately mirror store.Message so the client can append a
+// live event to the list it loaded from the interagent history endpoint
+// without a second shape to reconcile.
+type InteragentEvent struct {
+	ID        string `json:"id,omitempty"`
+	ProjectID string `json:"projectId"`
+	Sender    string `json:"sender"`
+	SenderID  string `json:"senderId,omitempty"`
+	Recipient string `json:"recipient"`
+	// RecipientID is the recipient agent's UUID.
+	RecipientID string `json:"recipientId,omitempty"`
+	Msg         string `json:"msg"`
+	Type        string `json:"type,omitempty"`
+	CreatedAt   string `json:"createdAt"`
+}
