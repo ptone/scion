@@ -36,7 +36,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
 import { showConfirm } from '../confirm-dialog.js';
-import { chatterKey, chatterPrefKey, isChatterEnabled } from './chatter-key.js';
 import './chat-avatar.js';
 
 /** A space (project) in the rail. */
@@ -292,23 +291,6 @@ export class ScionChatSpaceRail extends LitElement {
     .thread-item .pin-icon {
       font-size: 0.625rem;
       color: var(--scion-text-muted, #64748b);
-      flex-shrink: 0;
-    }
-
-    /* Agent Chatter — a read-only feed, set slightly back from real threads */
-    .thread-item.chatter-thread {
-      color: var(--scion-text-muted, #64748b);
-      font-style: italic;
-    }
-
-    .thread-item.chatter-thread.selected {
-      color: var(--scion-text, #1e293b);
-      font-style: normal;
-    }
-
-    .thread-item .chatter-icon {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #94a3b8);
       flex-shrink: 0;
     }
 
@@ -754,43 +736,6 @@ export class ScionChatSpaceRail extends LitElement {
     );
   }
 
-  /**
-   * Flip the Agent Chatter thread on or off for a space. The preference is
-   * per-browser rather than per-account: it controls nothing but whether this
-   * client renders the entry, so there is no server state to keep in step.
-   */
-  private toggleChatter(projectId: string): void {
-    const enabled = !isChatterEnabled(projectId);
-    if (enabled) {
-      localStorage.setItem(chatterPrefKey(projectId), 'true');
-    } else {
-      localStorage.removeItem(chatterPrefKey(projectId));
-      // Turning it off while it is open would leave the page on a thread the
-      // rail no longer lists, so hand the selection back.
-      if (this.selectedKey === chatterKey(projectId)) {
-        this.dispatchEvent(new CustomEvent('chatter-closed', { bubbles: true, composed: true }));
-      }
-    }
-    this.requestUpdate();
-  }
-
-  /** Open a space's Agent Chatter view. */
-  private handleChatterClick(space: ChatSpace): void {
-    this.dispatchEvent(
-      new CustomEvent<ThreadSelectDetail>('thread-select', {
-        detail: {
-          conversationKey: chatterKey(space.projectId),
-          projectId: space.projectId,
-          projectSlug: space.projectSlug || '',
-          threadName: 'Agent Chatter',
-          defaultAgent: '',
-        },
-        bubbles: true,
-        composed: true,
-      })
-    );
-  }
-
   private handleSpaceHeaderClick(space: ChatSpace): void {
     if (this.collapsedSpaces.has(space.projectId)) {
       // Expanding — do nothing special
@@ -1130,21 +1075,12 @@ export class ScionChatSpaceRail extends LitElement {
                   const value = detail?.item?.getAttribute('value');
                   if (value === 'new-thread') {
                     this.startCreateThread(space.projectId);
-                  } else if (value === 'toggle-chatter') {
-                    this.toggleChatter(space.projectId);
                   }
                 }}
               >
                 <sl-menu-item value="new-thread">
                   <sl-icon slot="prefix" name="plus-lg"></sl-icon>
                   New thread
-                </sl-menu-item>
-                <sl-menu-item
-                  value="toggle-chatter"
-                  type="checkbox"
-                  ?checked=${isChatterEnabled(space.projectId)}
-                >
-                  Show Agent Chatter
                 </sl-menu-item>
               </sl-menu>
             </sl-dropdown>
@@ -1157,7 +1093,6 @@ export class ScionChatSpaceRail extends LitElement {
                 ${this.creatingThread === space.projectId
                   ? this.renderCreateThread(space.projectId)
                   : nothing}
-                ${isChatterEnabled(space.projectId) ? this.renderChatterThread(space) : nothing}
               </div>
             `
           : nothing}
@@ -1208,25 +1143,6 @@ export class ScionChatSpaceRail extends LitElement {
           : thread.hasUnread
             ? html`<span class="unread-dot"></span>`
             : nothing}
-      </div>
-    `;
-  }
-
-  /**
-   * The Agent Chatter entry — a virtual thread, listed last and styled apart
-   * from the real ones because it is a read-only feed rather than somewhere
-   * the user can post.
-   */
-  private renderChatterThread(space: ChatSpace) {
-    const isSelected = this.selectedKey === chatterKey(space.projectId);
-    return html`
-      <div
-        class="thread-item chatter-thread ${isSelected ? 'selected' : ''}"
-        title="All agent-to-agent messages in this space"
-        @click=${() => this.handleChatterClick(space)}
-      >
-        <sl-icon name="chat-dots" class="chatter-icon"></sl-icon>
-        <span class="thread-name">Agent Chatter</span>
       </div>
     `;
   }

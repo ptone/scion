@@ -374,3 +374,138 @@ describe('scion-chat-thread typing self-filter', () => {
     expect(el.shadowRoot?.querySelector('.typing-indicator')).not.toBeNull();
   });
 });
+
+/**
+ * Agent-to-agent markers are available in every thread, not only agent DMs,
+ * but they start hidden: the traffic is background noise for most readers and
+ * its history is only worth a request once someone asks to see it.
+ */
+describe('scion-chat-thread inter-agent markers', () => {
+  const PROJECT_ID = 'proj-1';
+  const AGENT_DM_KEY = 'dm:agent:agent-1:user:user-me';
+
+  /** Mount a space thread (not a DM) with its history load settled. */
+  async function mountThread(): Promise<ScionChatThread> {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.projectId = PROJECT_ID;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    return el;
+  }
+
+  /** Click the eye icon in the inter-agent toolbar. */
+  async function clickEye(el: ScionChatThread): Promise<void> {
+    const eye = el.shadowRoot?.querySelector(
+      '.interagent-icons sl-icon-button'
+    ) as HTMLElement | null;
+    expect(eye).not.toBeNull();
+    eye?.click();
+    await el.updateComplete;
+  }
+
+  /** URLs of every inter-agent history request issued so far. */
+  function interagentCalls(): string[] {
+    return apiFetch.mock.calls.map((c) => String(c[0])).filter((u) => u.includes('/interagent'));
+  }
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    localStorage.clear();
+  });
+
+  it('offers the toggle in a space thread and fetches nothing until asked', async () => {
+    const el = await mountThread();
+
+    expect(el.shadowRoot?.querySelector('.interagent-toggle-bar')).not.toBeNull();
+    expect(interagentCalls()).toEqual([]);
+  });
+
+  it('fetches the project-wide history on first show and remembers the choice', async () => {
+    const el = await mountThread();
+
+    await clickEye(el);
+
+    await vi.waitFor(() => expect(interagentCalls().length).toBe(1));
+    expect(interagentCalls()[0]).toContain(`/api/v1/chat/spaces/${PROJECT_ID}/interagent`);
+    expect(localStorage.getItem(`scion-chat-interagent-${CONVERSATION_KEY}`)).toBe('true');
+
+    // Hiding again drops the preference rather than storing a false.
+    await clickEye(el);
+    expect(localStorage.getItem(`scion-chat-interagent-${CONVERSATION_KEY}`)).toBeNull();
+  });
+
+  it('loads the history up front when the saved preference is on', async () => {
+    localStorage.setItem(`scion-chat-interagent-${CONVERSATION_KEY}`, 'true');
+
+    await mountThread();
+
+    await vi.waitFor(() => expect(interagentCalls().length).toBe(1));
+  });
+
+  it('uses the per-conversation endpoint for an agent DM', async () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = AGENT_DM_KEY;
+    el.isDM = true;
+    el.projectId = PROJECT_ID;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+
+    await clickEye(el);
+
+    await vi.waitFor(() => expect(interagentCalls().length).toBe(1));
+    expect(interagentCalls()[0]).toContain('/api/v1/chat/conversations/');
+  });
+
+  it('shows no toggle in a human DM', async () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:user:user-them:user:user-me';
+    el.isDM = true;
+    el.projectId = PROJECT_ID;
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.interagent-toggle-bar')).toBeNull();
+  });
+
+  it('appends live traffic for its own project and ignores other projects', async () => {
+    const el = await mountThread();
+    await clickEye(el);
+    await vi.waitFor(() => expect(interagentCalls().length).toBe(1));
+
+    const emit = (id: string, projectId: string): void => {
+      fakeStateManager.dispatchEvent(
+        new CustomEvent('chat-interagent-received', {
+          detail: {
+            state: {},
+            data: {
+              id,
+              projectId,
+              sender: 'agent:a',
+              recipient: 'agent:b',
+              msg: 'hi',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+          },
+        })
+      );
+    };
+
+    emit('ia-1', PROJECT_ID);
+    emit('ia-1', PROJECT_ID); // duplicate delivery
+    emit('ia-2', 'other-project');
+    await el.updateComplete;
+
+    const markers = el.shadowRoot?.querySelectorAll('scion-chat-interagent-marker');
+    expect(markers?.length).toBe(1);
+    expect(markers?.[0].getAttribute('messageCount') ?? markers?.[0].messageCount).toBe(1);
+  });
+});

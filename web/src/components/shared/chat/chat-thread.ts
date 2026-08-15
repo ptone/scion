@@ -89,6 +89,13 @@ const SEEN_VISIBLE_MS = 5 * 60 * 1000;
 /** Typing send throttle in ms. */
 const TYPING_SEND_THROTTLE_MS = 4000;
 
+/**
+ * localStorage key prefix for the per-conversation "show agent chatter"
+ * preference. The preference is per-browser: it governs nothing but what this
+ * client renders, so there is no server state to keep in step.
+ */
+const INTERAGENT_PREF_PREFIX = 'scion-chat-interagent-';
+
 @customElement('scion-chat-thread')
 export class ScionChatThread extends LitElement {
   // DEPRECATED(wave-1): agentId-based mode — remove after v2 is stable and flag is permanently ON.
@@ -176,14 +183,20 @@ export class ScionChatThread extends LitElement {
   /** Mention results keyed by message ID (for "also notified" footer per message). */
   @state() private mentionResultsByMessageId = new Map<string, MentionResult[]>();
 
-  /** Raw inter-agent messages to render as inline markers in agent DMs. */
+  /** Raw inter-agent messages to render as inline markers. */
   @state() private interagentMessages: Message[] = [];
 
   /** Global expand/collapse state for all inter-agent markers. */
   @state() private interagentExpandAll = false;
 
-  /** Whether inter-agent markers are visible (eye toggle). */
-  @state() private interagentVisible = true;
+  /**
+   * Whether inter-agent markers are visible (eye toggle).
+   *
+   * Off by default: agent chatter is background noise for most readers, and
+   * the history behind it is only fetched once someone asks to see it. The
+   * choice is remembered per conversation in localStorage.
+   */
+  @state() private interagentVisible = false;
 
   /** W7: Attachment refs keyed by message ID (from history endpoint + send response). */
   private v2AttachmentMap = new Map<string, import('./chat-message.js').AttachmentRefInfo[]>();
@@ -202,6 +215,12 @@ export class ScionChatThread extends LitElement {
 
   /** Bound listener for v2 SSE read-state events (DM "seen" receipts). */
   private _v2ReadStateHandler = this.handleV2ReadStateEvent.bind(this);
+
+  /** Bound listener for v2 SSE agent-to-agent message events. */
+  private _v2InteragentHandler = this.handleV2InteragentEvent.bind(this);
+
+  /** Single-flight guard for the inter-agent history request. */
+  private _interagentFetchInFlight = false;
 
   // ---- DM read receipt ("seen") state ----
 
@@ -539,10 +558,12 @@ export class ScionChatThread extends LitElement {
     this.pinnedToBottom = true;
     this.loadingOlder = false;
 
-    // Clear inter-agent state
+    // Clear inter-agent state. Visibility is re-read from the new
+    // conversation's saved preference in initialLoadV2().
+    stateManager.removeEventListener('chat-interagent-received', this._v2InteragentHandler);
     this.interagentMessages = [];
     this.interagentExpandAll = false;
-    this.interagentVisible = true;
+    this.interagentVisible = false;
 
     // Clear typing state
     for (const entry of this.typingUsers.values()) {
@@ -567,6 +588,7 @@ export class ScionChatThread extends LitElement {
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
+    stateManager.removeEventListener('chat-interagent-received', this._v2InteragentHandler);
     this.clearSeenState();
     // Clean up typing timers
     for (const entry of this.typingUsers.values()) {
@@ -907,6 +929,10 @@ export class ScionChatThread extends LitElement {
   private async initialLoadV2(): Promise<void> {
     this.loading = true;
     this.error = null;
+    // Agent chatter is opt-in and remembered per conversation. The preference
+    // is read before the first await, so a reader who flips the toggle while
+    // history is still loading is not overruled by a stale value.
+    this.interagentVisible = this.readInteragentPref();
 
     try {
       await this.fetchHistoryV2();
@@ -914,8 +940,8 @@ export class ScionChatThread extends LitElement {
       // Set up read tracking
       window.addEventListener('focus', this._focusHandler);
       window.addEventListener('blur', this._blurHandler);
-      // Fetch inter-agent exchanges for agent DMs (non-blocking).
-      if (this.isAgentDM) {
+      // Only the reader who asked for chatter pays for its history fetch.
+      if (this.interagentVisible) {
         void this.fetchInteragentExchanges();
       }
       // Human DMs show a read receipt — seed it so "Seen" survives a reload
@@ -980,6 +1006,7 @@ export class ScionChatThread extends LitElement {
     stateManager.addEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.addEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.addEventListener('chat-read-state-updated', this._v2ReadStateHandler);
+    stateManager.addEventListener('chat-interagent-received', this._v2InteragentHandler);
     // Seed the typing self-filter. The scope may not exist yet — see selfUserId.
     const scope = stateManager.currentScope;
     if (scope && scope.type === 'chat') {
@@ -1159,14 +1186,25 @@ export class ScionChatThread extends LitElement {
   // Inter-agent exchange loading
   // ---------------------------------------------------------------------------
 
-  /** Whether this conversation is an agent DM (eligible for inter-agent markers). */
+  /** Whether this conversation is an agent DM. */
   private get isAgentDM(): boolean {
     return this.isDM && this.conversationKey.startsWith('dm:agent:');
   }
 
+  /**
+   * Whether inter-agent markers apply here.
+   *
+   * An agent DM shows the DM agent's exchanges with other agents; a space
+   * thread shows the whole space's agent traffic. A human-to-human DM has no
+   * agent behind it and no project to scope a query to, so it shows nothing.
+   */
+  private get canShowInteragent(): boolean {
+    return this.isAgentDM || (!this.isDM && this.projectId.length > 0);
+  }
+
   /** Whether there are inter-agent markers to render in this conversation. */
   private get hasInteragentMessages(): boolean {
-    return this.isAgentDM && this.interagentMessages.length > 0;
+    return this.canShowInteragent && this.interagentMessages.length > 0;
   }
 
   /** Whether this is a human-to-human DM (the only place read receipts apply). */
@@ -1279,28 +1317,117 @@ export class ScionChatThread extends LitElement {
     return new Date(msg.createdAt).getTime() <= new Date(watermark.createdAt).getTime();
   }
 
-  /** Fetch inter-agent messages for inline markers. Stores the raw flat list. */
-  private async fetchInteragentExchanges(): Promise<void> {
-    if (!this.isAgentDM) return;
-
+  /**
+   * The history endpoint for this conversation's inter-agent traffic, or ''
+   * where there is none to show.
+   *
+   * An agent DM asks for the DM agent's exchanges; a space thread asks for the
+   * project's, since a thread has no single agent to scope the query to.
+   */
+  private interagentHistoryUrl(): string {
     const params = new URLSearchParams({ limit: '200' });
+    if (this.isAgentDM) {
+      return `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/interagent?${params.toString()}`;
+    }
+    if (!this.isDM && this.projectId) {
+      return `/api/v1/chat/spaces/${encodeURIComponent(this.projectId)}/interagent?${params.toString()}`;
+    }
+    return '';
+  }
+
+  /**
+   * Fetch inter-agent messages for inline markers. Stores the raw flat list.
+   *
+   * Single-flight: the toggle and the initial load can both ask for the same
+   * history when a reader flips the eye while the thread is still loading.
+   */
+  private async fetchInteragentExchanges(): Promise<void> {
+    const url = this.interagentHistoryUrl();
+    if (!url || this._interagentFetchInFlight) return;
+
     const currentId = this.fetchId;
+    this._interagentFetchInFlight = true;
 
     try {
-      const res = await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/interagent?${params.toString()}`
-      );
+      const res = await apiFetch(url);
       if (!res.ok || currentId !== this.fetchId) return;
 
       const data = (await res.json()) as { messages?: Message[] };
       if (currentId !== this.fetchId) return;
       const msgs = data?.messages ?? [];
-      // Store sorted flat list — grouping by DM gaps happens in renderMessages().
+      // Store sorted flat list — grouping by message gaps happens in
+      // renderMessages(). The space endpoint returns newest-first.
       this.interagentMessages = [...msgs].sort(
         (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
       );
     } catch {
       // Non-critical
+    } finally {
+      this._interagentFetchInFlight = false;
+    }
+  }
+
+  /**
+   * Append an agent-to-agent message arriving over SSE.
+   *
+   * Only messages this conversation would have fetched are kept: a space
+   * thread takes its own project's traffic, an agent DM takes only exchanges
+   * the DM agent is party to. Ignored entirely while the markers are hidden —
+   * turning them on fetches history, which includes whatever was missed.
+   */
+  private handleV2InteragentEvent(e: Event): void {
+    if (!this.interagentVisible || !this.canShowInteragent) return;
+
+    type InteragentData = {
+      id?: string;
+      projectId?: string;
+      sender?: string;
+      senderId?: string;
+      recipient?: string;
+      recipientId?: string;
+      msg?: string;
+      type?: string;
+      createdAt?: string;
+    };
+    const detail = (e as CustomEvent).detail as
+      | ({ data?: InteragentData } & InteragentData)
+      | undefined;
+    const data: InteragentData | undefined = detail?.data ?? detail;
+    if (!data?.id || !data.createdAt) return;
+
+    if (this.isAgentDM) {
+      const dmAgentId = this.conversationKey.split(':')[2] || '';
+      if (data.senderId !== dmAgentId && data.recipientId !== dmAgentId) return;
+    } else if (data.projectId !== this.projectId) {
+      return;
+    }
+
+    if (this.interagentMessages.some((m) => m.id === data.id)) return;
+
+    const msg: Message = {
+      id: data.id,
+      projectId: data.projectId || this.projectId,
+      sender: data.sender || '',
+      senderId: data.senderId || '',
+      recipient: data.recipient || '',
+      recipientId: data.recipientId || '',
+      msg: data.msg || '',
+      type: data.type || '',
+      agentId: '',
+      createdAt: data.createdAt,
+    };
+    this.interagentMessages = [...this.interagentMessages, msg].sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+  }
+
+  /** Read this conversation's saved "show agent chatter" preference. */
+  private readInteragentPref(): boolean {
+    try {
+      return localStorage.getItem(INTERAGENT_PREF_PREFIX + this.conversationKey) === 'true';
+    } catch {
+      // Storage can be unavailable (private mode, blocked cookies).
+      return false;
     }
   }
 
@@ -1697,9 +1824,15 @@ export class ScionChatThread extends LitElement {
     `;
   }
 
-  /** Render the toolbar with label + eye (show/hide) + expand/collapse icons. */
+  /**
+   * Render the toolbar with label + eye (show/hide) + expand/collapse icons.
+   *
+   * The bar is offered wherever agent chatter could exist, not only where it
+   * already loaded: history is fetched on the first show, so gating the
+   * control on having messages would leave no way to ask for them.
+   */
   private renderInteragentToggle() {
-    if (!this.hasInteragentMessages) return nothing;
+    if (!this.canShowInteragent) return nothing;
 
     return html`
       <div class="interagent-toggle-bar">
@@ -1724,9 +1857,24 @@ export class ScionChatThread extends LitElement {
     `;
   }
 
-  /** Toggle visibility of all inter-agent markers. */
+  /**
+   * Toggle visibility of all inter-agent markers, remembering the choice for
+   * this conversation and loading history the first time it is asked for.
+   */
   private toggleInteragentVisibility(): void {
     this.interagentVisible = !this.interagentVisible;
+    try {
+      if (this.interagentVisible) {
+        localStorage.setItem(INTERAGENT_PREF_PREFIX + this.conversationKey, 'true');
+      } else {
+        localStorage.removeItem(INTERAGENT_PREF_PREFIX + this.conversationKey);
+      }
+    } catch {
+      // Storage can be unavailable — the toggle still works for this session.
+    }
+    if (this.interagentVisible && this.interagentMessages.length === 0) {
+      void this.fetchInteragentExchanges();
+    }
   }
 
   /** Toggle all inter-agent markers expanded/collapsed. */
@@ -1842,10 +1990,13 @@ export class ScionChatThread extends LitElement {
     let prevSender = '';
     let prevTimestamp = 0;
 
-    // Pre-sort inter-agent messages by time for gap-based grouping.
-    const iaMessages = [...this.interagentMessages].sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-    );
+    // Pre-sort inter-agent messages by time for gap-based grouping. A message
+    // the thread itself already shows is dropped: the project-wide feed can
+    // overlap the thread's own history, and a message rendered twice reads as
+    // two exchanges.
+    const iaMessages = this.interagentMessages
+      .filter((m) => !this.messageMap.has(m.id))
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     let iaIdx = 0;
     const hasIA = this.hasInteragentMessages;
 

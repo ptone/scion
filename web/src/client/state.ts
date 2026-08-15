@@ -310,7 +310,7 @@ export class StateManager extends EventTarget {
         } else if (chatEventType === 'typing') {
           this.notifyWithData('chat-typing-received', chatDetail);
         } else if (chatEventType === 'interagent') {
-          // Agent-to-agent traffic — only the Agent Chatter view listens.
+          // Agent-to-agent traffic — the thread's inter-agent markers listen.
           this.notifyWithData('chat-interagent-received', chatDetail);
         }
         // Also dispatch the legacy user-message-created for v1 compat
