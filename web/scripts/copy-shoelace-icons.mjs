@@ -141,6 +141,8 @@ const USED_ICONS = [
   'person',
   'person-circle',
   'person-plus',
+  'pin-angle',
+  'pin-angle-fill',
   'play-circle',
   'plus-circle',
   'plug',

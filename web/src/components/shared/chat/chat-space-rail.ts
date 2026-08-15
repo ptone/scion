@@ -72,6 +72,12 @@ interface RailPrefs {
 /** Viewport width at or below which the chat panels are separate screens. */
 const MOBILE_BREAKPOINT_PX = 768;
 
+/**
+ * localStorage key for pinned spaces. Space pins are per-device: unlike thread
+ * pins there is no server-side column for them yet.
+ */
+const PINNED_SPACES_KEY = 'scion-chat-pinned-spaces';
+
 /** Event detail for thread selection. */
 export interface ThreadSelectDetail {
   conversationKey: string;
@@ -108,6 +114,8 @@ export class ScionChatSpaceRail extends LitElement {
   @state() private renameValue = '';
   /** Space filter: 'all' shows everything, 'unread' shows only spaces with unread. */
   @state() private spaceFilter: 'all' | 'unread' = 'all';
+  /** Project IDs the user pinned to the top of the rail (client-local). */
+  @state() private pinnedSpaces = new Set<string>();
 
   static override styles = css`
     :host {
@@ -176,6 +184,12 @@ export class ScionChatSpaceRail extends LitElement {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .space-header .pin-icon {
+      font-size: 0.6875rem;
+      color: var(--scion-text-muted, #64748b);
+      flex-shrink: 0;
     }
 
     .space-header .unread-badge {
@@ -449,6 +463,7 @@ export class ScionChatSpaceRail extends LitElement {
     // Restore persisted filter/sort from localStorage
     const savedFilter = localStorage.getItem('scion-chat-space-filter');
     if (savedFilter === 'unread') this.spaceFilter = 'unread';
+    this.loadPinnedSpaces();
     void this.loadData();
     // Close context menu on outside click
     this._outsideClickHandler = this.handleOutsideClick.bind(this);
@@ -631,12 +646,49 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
+  /** Restore pinned spaces from localStorage. */
+  private loadPinnedSpaces(): void {
+    const saved = localStorage.getItem(PINNED_SPACES_KEY);
+    if (!saved) return;
+    try {
+      const ids = JSON.parse(saved) as unknown;
+      if (Array.isArray(ids)) {
+        this.pinnedSpaces = new Set(ids.filter((id): id is string => typeof id === 'string'));
+      }
+    } catch {
+      // Corrupt entry — fall back to no pins.
+    }
+  }
+
+  private isSpacePinned(projectId: string): boolean {
+    return this.pinnedSpaces.has(projectId);
+  }
+
+  /** Toggle a space's pin and persist the set to localStorage. */
+  private toggleSpacePin(projectId: string): void {
+    const next = new Set(this.pinnedSpaces);
+    if (!next.delete(projectId)) {
+      next.add(projectId);
+    }
+    this.pinnedSpaces = next;
+    localStorage.setItem(PINNED_SPACES_KEY, JSON.stringify([...next]));
+  }
+
   // ---------------------------------------------------------------------------
   // Sorting
   // ---------------------------------------------------------------------------
 
+  /** Sort spaces by the active sort mode, with pinned spaces hoisted to the top. */
   private getSortedSpaces(): ChatSpace[] {
-    const spaces = [...this.spaces];
+    const sorted = this.sortSpaces([...this.spaces]);
+    if (this.pinnedSpaces.size === 0) return sorted;
+    return [
+      ...sorted.filter((s) => this.isSpacePinned(s.projectId)),
+      ...sorted.filter((s) => !this.isSpacePinned(s.projectId)),
+    ];
+  }
+
+  private sortSpaces(spaces: ChatSpace[]): ChatSpace[] {
     switch (this.prefs.spaceSortMode) {
       case 'alpha':
         spaces.sort((a, b) => a.projectName.localeCompare(b.projectName));
@@ -775,6 +827,26 @@ export class ScionChatSpaceRail extends LitElement {
     e.stopPropagation();
     this.contextMenuTarget = { type: 'thread', thread, projectId };
     this.contextMenuPos = { x: e.clientX, y: e.clientY };
+  }
+
+  /** Toggle a thread's pinned flag. Pin state is per-user, stored server-side. */
+  private async handleTogglePin(thread: ChatSpaceThread, projectId: string): Promise<void> {
+    this.contextMenuTarget = null;
+    const pinned = !thread.pinned;
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(thread.id)}/pin`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pinned }),
+        }
+      );
+      if (!res.ok) return;
+      this.updateThread(projectId, thread.id, { pinned });
+    } catch {
+      // Non-critical
+    }
   }
 
   private async handleMarkRead(thread: ChatSpaceThread, projectId: string): Promise<void> {
@@ -1057,6 +1129,9 @@ export class ScionChatSpaceRail extends LitElement {
         >
           <sl-icon name="chevron-down" class="chevron ${isCollapsed ? 'collapsed' : ''}"></sl-icon>
           <span class="space-name">${space.projectName}</span>
+          ${this.isSpacePinned(space.projectId)
+            ? html`<sl-icon name="pin-angle-fill" class="pin-icon"></sl-icon>`
+            : nothing}
           <div class="space-actions" @click=${(e: Event) => e.stopPropagation()}>
             ${space.hasUnreadMention
               ? html`<span class="mention-badge">@</span>`
@@ -1075,12 +1150,21 @@ export class ScionChatSpaceRail extends LitElement {
                   const value = detail?.item?.getAttribute('value');
                   if (value === 'new-thread') {
                     this.startCreateThread(space.projectId);
+                  } else if (value === 'toggle-pin-space') {
+                    this.toggleSpacePin(space.projectId);
                   }
                 }}
               >
                 <sl-menu-item value="new-thread">
                   <sl-icon slot="prefix" name="plus-lg"></sl-icon>
                   New thread
+                </sl-menu-item>
+                <sl-menu-item value="toggle-pin-space">
+                  <sl-icon
+                    slot="prefix"
+                    name=${this.isSpacePinned(space.projectId) ? 'pin-angle-fill' : 'pin-angle'}
+                  ></sl-icon>
+                  ${this.isSpacePinned(space.projectId) ? 'Unpin space' : 'Pin space to top'}
                 </sl-menu-item>
               </sl-menu>
             </sl-dropdown>
@@ -1137,7 +1221,9 @@ export class ScionChatSpaceRail extends LitElement {
       >
         <span class="hash">#</span>
         <span class="thread-name ${thread.hasUnread ? 'unread' : ''}">${thread.name}</span>
-        ${thread.pinned ? html`<sl-icon name="star-fill" class="pin-icon"></sl-icon>` : nothing}
+        ${thread.pinned
+          ? html`<sl-icon name="pin-angle-fill" class="pin-icon"></sl-icon>`
+          : nothing}
         ${thread.hasUnreadMention
           ? html`<span class="mention-dot"></span>`
           : thread.hasUnread
@@ -1186,6 +1272,10 @@ export class ScionChatSpaceRail extends LitElement {
         style="left: ${this.contextMenuPos.x}px; top: ${this.contextMenuPos.y}px"
         @click=${(e: Event) => e.stopPropagation()}
       >
+        <div class="context-menu-item" @click=${() => this.handleTogglePin(thread, projectId)}>
+          <sl-icon name=${thread.pinned ? 'pin-angle-fill' : 'pin-angle'}></sl-icon>
+          ${thread.pinned ? 'Unpin' : 'Pin to top'}
+        </div>
         <div class="context-menu-item" @click=${() => this.handleMarkRead(thread, projectId)}>
           <sl-icon name="check-circle"></sl-icon>
           Mark as read

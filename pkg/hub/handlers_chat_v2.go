@@ -207,6 +207,7 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 	// Parse: /api/v1/chat/conversations/{key}/messages
 	//        /api/v1/chat/conversations/{key}/read
 	//        /api/v1/chat/conversations/{key}/typing
+	//        /api/v1/chat/conversations/{key}/pin
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/")
 	parts := strings.SplitN(path, "/", 2)
 
@@ -227,6 +228,8 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 		s.handleConversationMessages(w, r, key)
 	case "read":
 		s.handleConversationRead(w, r, key)
+	case "pin":
+		s.handleConversationPin(w, r, key)
 	case "typing":
 		s.handleConversationTyping(w, r, key)
 	case "interagent":
@@ -1581,31 +1584,9 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Authorize.
 	isDM := strings.HasPrefix(key, "dm:")
-	if isDM {
-		if !validDMKey(key) {
-			BadRequest(w, "invalid DM key format")
-			return
-		}
-		if !isDMParticipant(key, user.ID()) {
-			Forbidden(w)
-			return
-		}
-	} else {
-		topic, err := wcs.GetTopic(ctx, key)
-		if err != nil || topic == nil {
-			NotFound(w, "Thread")
-			return
-		}
-		project, err := s.store.GetProject(ctx, topic.ProjectID)
-		if err != nil {
-			NotFound(w, "Project")
-			return
-		}
-		if !s.authorize(w, r, projectResource(project), ActionRead) {
-			return
-		}
+	if !s.authorizeConversationRead(w, r, wcs, key, user.ID()) {
+		return
 	}
 
 	if r.Method == http.MethodGet {
@@ -1670,6 +1651,83 @@ func (s *Server) writeConversationReadState(
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// authorizeConversationRead reports whether the caller may read the given
+// conversation, writing the rejection response itself when they may not. DM
+// keys are checked by participation; topic keys by read access to the owning
+// project.
+func (s *Server) authorizeConversationRead(
+	w http.ResponseWriter, r *http.Request, wcs WebChatStore, key, userID string,
+) bool {
+	ctx := r.Context()
+
+	if strings.HasPrefix(key, "dm:") {
+		if !validDMKey(key) {
+			BadRequest(w, "invalid DM key format")
+			return false
+		}
+		if !isDMParticipant(key, userID) {
+			Forbidden(w)
+			return false
+		}
+		return true
+	}
+
+	topic, err := wcs.GetTopic(ctx, key)
+	if err != nil || topic == nil {
+		NotFound(w, "Thread")
+		return false
+	}
+	project, err := s.store.GetProject(ctx, topic.ProjectID)
+	if err != nil {
+		NotFound(w, "Project")
+		return false
+	}
+	return s.authorize(w, r, projectResource(project), ActionRead)
+}
+
+// handleConversationPin handles PUT /api/v1/chat/conversations/{key}/pin.
+// Pin state is per-user, so any user who can read the conversation may pin it.
+func (s *Server) handleConversationPin(w http.ResponseWriter, r *http.Request, key string) {
+	if r.Method != http.MethodPut {
+		MethodNotAllowed(w)
+		return
+	}
+
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		return
+	}
+
+	if !s.authorizeConversationRead(w, r, wcs, key, user.ID()) {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
+	var body struct {
+		Pinned bool `json:"pinned"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+
+	if err := wcs.SetPinned(r.Context(), user.ID(), key, body.Pinned); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update pin state", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"pinned": body.Pinned})
 }
 
 // handleSpaceRead handles POST /api/v1/chat/spaces/{projectId}/read.

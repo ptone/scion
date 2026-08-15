@@ -809,6 +809,92 @@ func TestChatV2_ConversationRead(t *testing.T) {
 	}
 }
 
+func TestChatV2_ConversationPin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("pin-test"), Name: "pin-test", Slug: "pin-test", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	wcs := NewWebChatStore(db, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        "topic-pin",
+		ProjectID: proj.ID,
+		Name:      "pinnable",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// threadPinned reports the caller's pin state as the thread listing sees it.
+	threadPinned := func() bool {
+		t.Helper()
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces/"+proj.ID+"/threads", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list threads: expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var listResp chatTopicListResponse
+		if err := json.NewDecoder(rec.Body).Decode(&listResp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		for _, th := range listResp.Threads {
+			if th.ID == "topic-pin" {
+				return th.Pinned
+			}
+		}
+		t.Fatal("topic-pin missing from thread listing")
+		return false
+	}
+
+	if threadPinned() {
+		t.Fatal("thread should start unpinned")
+	}
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/chat/conversations/topic-pin/pin",
+		map[string]bool{"pinned": true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pin: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !threadPinned() {
+		t.Error("thread should be pinned after PUT pinned=true")
+	}
+
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/chat/conversations/topic-pin/pin",
+		map[string]bool{"pinned": false})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unpin: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if threadPinned() {
+		t.Error("thread should be unpinned after PUT pinned=false")
+	}
+
+	// Unknown thread is a 404, not a silently written read-state row.
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/chat/conversations/topic-missing/pin",
+		map[string]bool{"pinned": true})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown thread: expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Only PUT toggles the pin.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/topic-pin/pin", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET pin: expected 405, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestChatV2_DMs_Empty(t *testing.T) {
 	srv, _ := testServer(t)
 
