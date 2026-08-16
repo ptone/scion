@@ -140,6 +140,18 @@ func init() {
 			New: func() any { return &FederationSettings{} },
 		},
 		{
+			// native_chat is hot-reloadable: the /api/v1/chat/* routes are
+			// always registered and guarded per request, so flipping the
+			// toggle takes effect without a restart. Absent row = compiled
+			// default (enabled).
+			Name: "native_chat",
+			KoanfPaths: []string{
+				"server.native_chat",
+				"server.native_chat.enabled",
+			},
+			New: func() any { return &NativeChatSettings{} },
+		},
+		{
 			// runtimes is a map-of-objects section: one hub_settings row stores
 			// the entire map as JSONB. Prefix-only KoanfPath ("runtimes") means
 			// OwningSection walks up from any nested key (e.g. "runtimes.docker.type")
@@ -454,6 +466,15 @@ func compileSchemas() {
 				},
 				"refresh_interval":  map[string]interface{}{"type": "string"},
 				"debounce_interval": map[string]interface{}{"type": "string"},
+			},
+			"additionalProperties": false,
+		},
+		// native_chat schema is hand-written — the canonical
+		// settings-v1.schema.json has no $defs for the native chat toggle.
+		"native_chat": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"enabled": map[string]interface{}{"type": "boolean"},
 			},
 			"additionalProperties": false,
 		},

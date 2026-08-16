@@ -30,11 +30,30 @@ type PublicSettingsResponse struct {
 // nativeChatEnabled reports whether the built-in chat feature is active.
 // Chat shipped default-on, so an absent config means enabled; only an
 // explicit server.native_chat.enabled: false turns it off.
+//
+// The toggle is Layer-1, so ApplySnapshot can rewrite it while requests are in
+// flight — read it under the config lock.
 func (s *Server) nativeChatEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.config.NativeChatEnabled == nil {
 		return true
 	}
 	return *s.config.NativeChatEnabled
+}
+
+// requireNativeChat guards a chat route, returning 404 when native chat is
+// disabled at runtime. The /api/v1/chat/* routes are always registered so the
+// toggle can be flipped without a restart; this guard makes them behave as if
+// they were never registered while the feature is off.
+func (s *Server) requireNativeChat(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.nativeChatEnabled() {
+			http.NotFound(w, r)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {

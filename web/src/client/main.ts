@@ -146,18 +146,27 @@ async function fetchCurrentUser(): Promise<User | null> {
  * Apply server-published public settings to the client feature-flag layer.
  *
  * The hub owns the native chat toggle (server.native_chat.enabled); when it is
- * off the chat API endpoints are not even registered, so the UI must not offer
- * chat. Resolving this before the first render keeps the /chat route gate in
- * renderRoute() honest. Failures leave the compiled defaults in place — a
- * transient settings fetch error should not hide a working feature.
+ * off the chat API endpoints return 404 and the UI must not offer chat.
+ * Resolving this before the first render keeps the /chat route gate in
+ * renderRoute() honest.
+ *
+ * The toggle is hot-reloadable, so `web.native_chat` is written in both
+ * directions: re-enabling chat on the hub must restore it here too. The v2
+ * flag only picks between the wave-1 and wave-2 chat UIs and is not
+ * server-published, so it is forced off with chat but otherwise left to the
+ * client (its localStorage override is the documented wave-1 rollback).
+ *
+ * Failures leave the compiled defaults in place — a transient settings fetch
+ * error should not hide a working feature.
  */
 async function applyServerFeatureFlags(): Promise<void> {
   try {
     const res = await fetch('/api/v1/settings/public', { credentials: 'include' });
     if (!res.ok) return;
     const settings = (await res.json()) as { nativeChatEnabled?: boolean };
-    if (settings.nativeChatEnabled === false) {
-      setFeatureFlag('web.native_chat', false);
+    const enabled = settings.nativeChatEnabled !== false;
+    setFeatureFlag('web.native_chat', enabled);
+    if (!enabled) {
       setFeatureFlag('web.native_chat_v2', false);
     }
   } catch {

@@ -90,6 +90,10 @@ type Layer1Snapshot struct {
 	// Auto-expose ports
 	AutoExposePortsEnabled *bool
 
+	// NativeChatEnabled mirrors server.native_chat.enabled for hot-reload.
+	// Nil means the toggle is unset, which reads as enabled (chat is default-on).
+	NativeChatEnabled *bool
+
 	// Project defaults
 	DefaultScratchpad *bool
 
@@ -719,6 +723,12 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		snap.AutoExposePortsEnabled = &v
 	}
 
+	// Native chat
+	if k.Exists("server.native_chat.enabled") {
+		v := k.Bool("server.native_chat.enabled")
+		snap.NativeChatEnabled = &v
+	}
+
 	// Project defaults
 	if k.Exists("project_defaults.default_scratchpad") {
 		v := k.Bool("project_defaults.default_scratchpad")
@@ -854,6 +864,9 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// Project defaults — read from settings.yaml project_defaults section
 	snap.DefaultScratchpad = gc.DefaultScratchpad
 
+	// Native chat — nil receiver is safe and means "no preference expressed".
+	snap.NativeChatEnabled = gc.NativeChat.EnabledSetting()
+
 	// Federation — read from GlobalConfig
 	if gc.Federation.Enabled || len(gc.Federation.TrustedIssuers) > 0 {
 		snap.FederationConfig = &gc.Federation
@@ -893,6 +906,16 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		s.config.AutoExposePortsDefault = snap.AutoExposePortsEnabled
 		if oldVal == nil || *oldVal != *snap.AutoExposePortsEnabled {
 			applied = append(applied, "auto_expose_ports_default")
+		}
+	}
+
+	// Native chat — the /api/v1/chat/* routes are always registered and
+	// guarded per request, so this takes effect without a restart.
+	if snap.NativeChatEnabled != nil {
+		oldVal := s.config.NativeChatEnabled
+		s.config.NativeChatEnabled = snap.NativeChatEnabled
+		if oldVal == nil || *oldVal != *snap.NativeChatEnabled {
+			applied = append(applied, "native_chat_enabled")
 		}
 	}
 

@@ -32,7 +32,7 @@ import (
 func TestRegistryHasAllSections(t *testing.T) {
 	expected := []string{"access", "lifecycle", "maintenance", "telemetry",
 		"agent_defaults", "endpoints", "github_app", "notifications",
-		"project_defaults", "auto_expose_ports", "federation"}
+		"project_defaults", "auto_expose_ports", "federation", "native_chat"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
 			t.Errorf("section %q not found in registry", name)
@@ -119,6 +119,8 @@ func TestOwningSection(t *testing.T) {
 		{"server.federation.algorithms", "federation"},
 		{"server.federation.refresh_interval", "federation"},
 		{"server.federation.debounce_interval", "federation"},
+		{"server.native_chat", "native_chat"},
+		{"server.native_chat.enabled", "native_chat"},
 	}
 	for _, tt := range tests {
 		got := OwningSection(tt.key)
@@ -865,8 +867,6 @@ func TestClassifyKeys_AllLayer0Prefixes(t *testing.T) {
 		"server.hub.cors",
 		"server.message_broker",
 		"server.plugins",
-		"server.native_chat",
-		"server.native_chat.enabled",
 	}
 
 	_, l0, unclassified := ClassifyKeys(layer0Keys)
@@ -1176,6 +1176,54 @@ func TestAutoExposePortsEmptyExtract(t *testing.T) {
 	}
 	if len(doc) != 0 {
 		t.Errorf("expected empty doc for absent auto_expose_ports, got %v", doc)
+	}
+}
+
+// TestNativeChatKoanfRoundTrip verifies that the native chat toggle survives
+// the extract/reload cycle, including an explicit false — the value an
+// operator sets when turning chat off.
+func TestNativeChatKoanfRoundTrip(t *testing.T) {
+	k := koanf.New(".")
+	err := k.Load(confmap.Provider(map[string]interface{}{
+		"server.native_chat.enabled": false,
+	}, "."), nil)
+	if err != nil {
+		t.Fatalf("load koanf: %v", err)
+	}
+
+	raw, err := ExtractSectionFromKoanf(k, "native_chat")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc["enabled"] != false {
+		t.Errorf("expected enabled=false in extracted doc, got %v", doc["enabled"])
+	}
+
+	reloaded, err := LoadSectionsIntoKoanf(map[string]json.RawMessage{"native_chat": raw})
+	if err != nil {
+		t.Fatalf("load sections: %v", err)
+	}
+	if !reloaded.Exists("server.native_chat.enabled") {
+		t.Fatal("expected server.native_chat.enabled to exist in reloaded koanf")
+	}
+	if reloaded.Bool("server.native_chat.enabled") {
+		t.Error("expected server.native_chat.enabled=false after reload")
+	}
+}
+
+// TestNativeChatValidatesEnabled pins the section schema: only the boolean
+// enabled field is accepted.
+func TestNativeChatValidatesEnabled(t *testing.T) {
+	if errs := Validate("native_chat", json.RawMessage(`{"enabled":false}`)); len(errs) > 0 {
+		t.Errorf("expected valid doc to pass, got %v", errs)
+	}
+	if errs := Validate("native_chat", json.RawMessage(`{"enabled":"nope"}`)); len(errs) == 0 {
+		t.Error("expected non-boolean enabled to fail validation")
 	}
 }
 

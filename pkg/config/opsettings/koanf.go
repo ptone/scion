@@ -65,8 +65,6 @@ var layer0Prefixes = []string{
 	// Messaging/plugins
 	"server.message_broker",
 	"server.plugins",
-	// Native chat — routes are registered at startup, so toggling it needs a restart.
-	"server.native_chat",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0
@@ -120,6 +118,9 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.federation.refresh_interval":  "refresh_interval",
 		"server.federation.debounce_interval": "debounce_interval",
 	},
+	"native_chat": {
+		"server.native_chat.enabled": "enabled",
+	},
 }
 
 // jsonFieldToKoanfPaths maps section name → json field → koanf path for the
@@ -159,6 +160,9 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"algorithms":        "server.federation.algorithms",
 		"refresh_interval":  "server.federation.refresh_interval",
 		"debounce_interval": "server.federation.debounce_interval",
+	},
+	"native_chat": {
+		"enabled": "server.native_chat.enabled",
 	},
 }
 

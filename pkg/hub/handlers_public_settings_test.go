@@ -47,6 +47,79 @@ func TestNativeChatEnabled(t *testing.T) {
 	}
 }
 
+// TestRequireNativeChat covers the per-request guard that replaced the
+// startup-time route gate: the chat routes stay registered, so the guard is
+// what makes them disappear when an admin turns chat off at runtime.
+func TestRequireNativeChat(t *testing.T) {
+	enabled, disabled := true, false
+
+	tests := []struct {
+		name       string
+		setting    *bool
+		wantStatus int
+		wantCalled bool
+	}{
+		{"unset passes through", nil, http.StatusOK, true},
+		{"explicit true passes through", &enabled, http.StatusOK, true},
+		{"explicit false 404s", &disabled, http.StatusNotFound, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &Server{config: ServerConfig{NativeChatEnabled: tc.setting}}
+			called := false
+			handler := srv.requireNativeChat(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/chat/prefs", nil)
+			rr := httptest.NewRecorder()
+			handler(rr, req)
+
+			if rr.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d", rr.Code, tc.wantStatus)
+			}
+			if called != tc.wantCalled {
+				t.Errorf("handler called = %v, want %v", called, tc.wantCalled)
+			}
+		})
+	}
+}
+
+// TestRequireNativeChatFollowsRuntimeToggle pins the hot-reload contract: a
+// guard built once at route registration must observe a later config change,
+// because ApplySnapshot rewrites the toggle in place.
+func TestRequireNativeChatFollowsRuntimeToggle(t *testing.T) {
+	srv := &Server{}
+	handler := srv.requireNativeChat(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	call := func() int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/chat/prefs", nil)
+		rr := httptest.NewRecorder()
+		handler(rr, req)
+		return rr.Code
+	}
+
+	if got := call(); got != http.StatusOK {
+		t.Fatalf("default-on: status = %d, want 200", got)
+	}
+
+	disabled := false
+	ApplySnapshot(srv, Layer1Snapshot{NativeChatEnabled: &disabled})
+	if got := call(); got != http.StatusNotFound {
+		t.Errorf("after disable: status = %d, want 404", got)
+	}
+
+	enabled := true
+	ApplySnapshot(srv, Layer1Snapshot{NativeChatEnabled: &enabled})
+	if got := call(); got != http.StatusOK {
+		t.Errorf("after re-enable: status = %d, want 200", got)
+	}
+}
+
 // TestPublicSettingsNativeChat verifies the toggle reaches the web UI through
 // the public (non-admin) settings endpoint, which is how the client decides
 // whether to expose the chat routes.

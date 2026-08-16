@@ -249,6 +249,15 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		}
 	}
 
+	// Native chat — the snapshot is authoritative, so an explicit DB false
+	// overrides a file-loaded true. A nil snapshot value means the toggle is
+	// unset everywhere, which the UI renders as the default-on state.
+	if snap.NativeChatEnabled != nil {
+		resp.Server.NativeChat = &config.V1NativeChatConfig{
+			Enabled: snap.NativeChatEnabled,
+		}
+	}
+
 	// Federation — populate from snapshot's FederationConfig.
 	if snap.FederationConfig != nil {
 		gc := &config.GlobalConfig{Federation: *snap.FederationConfig}
@@ -872,11 +881,11 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		if srv.MessageBroker != nil && !isZeroStruct(srv.MessageBroker) {
 			keys = append(keys, "server.message_broker")
 		}
-		// native_chat carries a *bool, so an explicit "enabled: false" is a
-		// non-zero struct and still reaches the Layer-0 rejection below —
-		// unlike a plain bool, which would look like an absent UI artifact.
-		if srv.NativeChat != nil && !isZeroStruct(srv.NativeChat) {
-			keys = append(keys, "server.native_chat")
+		// native_chat is Layer-1: the toggle carries a *bool, so an explicit
+		// "enabled: false" is distinguishable from an omitted field and the
+		// key is only emitted when the operator actually set it.
+		if srv.NativeChat != nil && srv.NativeChat.Enabled != nil {
+			keys = append(keys, "server.native_chat.enabled")
 		}
 		if srv.Plugins != nil && !isZeroStruct(srv.Plugins) {
 			keys = append(keys, "server.plugins")
@@ -1131,6 +1140,13 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 	case "auto_expose_ports":
 		if req.AutoExposePorts != nil {
 			doc = req.AutoExposePorts
+		} else {
+			return nil, nil
+		}
+
+	case "native_chat":
+		if req.Server != nil && req.Server.NativeChat != nil {
+			doc = &opsettings.NativeChatSettings{Enabled: req.Server.NativeChat.Enabled}
 		} else {
 			return nil, nil
 		}

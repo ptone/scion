@@ -100,6 +100,14 @@ type FederationSettings struct {
 	DebounceInterval string                         `json:"debounce_interval,omitempty"`
 }
 
+// NativeChatSettings holds the Layer-1 native chat toggle.
+type NativeChatSettings struct {
+	// Enabled controls whether the chat UI and the /api/v1/chat/* endpoints
+	// are available. Nil (section absent) means enabled — chat shipped
+	// default-on, so an operator must opt out explicitly.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
 // ProjectDefaultsSettings holds Layer-1 project creation defaults.
 type ProjectDefaultsSettings struct {
 	// DefaultScratchpad controls whether new projects automatically get a

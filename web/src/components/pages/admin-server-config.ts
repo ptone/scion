@@ -359,6 +359,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'server.hub.gcp_iam_deny_unknown_policy': 'Deny Policy Fallback',
   // auto_expose_ports section
   'auto_expose_ports.enabled': 'Auto-Expose Ports Enabled',
+  // native_chat section
+  'server.native_chat.enabled': 'Native Chat Enabled',
   // telemetry section
   'telemetry.enabled': 'Telemetry Enabled',
   'telemetry.cloud.enabled': 'Cloud Export Enabled',
@@ -1752,7 +1754,12 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     if (Object.keys(auth).length > 0) server.auth = auth;
 
-    // Broker, database, storage, secrets, message_broker, native_chat —
+    // Native chat — Layer-1, hot-reloadable
+    if (ok('server.native_chat.enabled')) {
+      server.native_chat = { enabled: this.nativeChatEnabled };
+    }
+
+    // Broker, database, storage, secrets, message_broker —
     // all Layer-0, omitted
 
     // Preserve notification channels and GitHub App from raw config
@@ -3275,7 +3282,8 @@ export class ScionPageAdminServerConfig extends LitElement {
             )}
             <span class="hint"
               >When enabled, the chat interface is available in the web UI and the chat API
-              endpoints are active. Requires a server restart to take effect.</span
+              endpoints are active. When disabled, the chat interface is hidden from the web UI and
+              API endpoints return 404.</span
             >
           </div>
         </div>
