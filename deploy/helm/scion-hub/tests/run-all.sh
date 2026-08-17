@@ -105,7 +105,7 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=4
-EXPECTED_ASSERTIONS=107   # 106 + chart-integrity.sh's base-url channel tripwire.
+EXPECTED_ASSERTIONS=140   # 107 + 33 in render-guards.sh: 12 name-axis separator rows (F2), 7 multi-line-leaf rows, and 14 anchor-class rows (4 single-line, 1 indented PEM, 5 prose negative controls, 1 floor cost, 3 argv attribution).
 EXPECTED_FILES=6        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 
 # Enumerated by name, not globbed into a loop. A glob would run whatever is
