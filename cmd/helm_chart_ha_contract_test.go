@@ -150,8 +150,17 @@ func TestHelmChartHAGateWalk(t *testing.T) {
 	}
 	// THE DENOMINATOR. A glob that silently returns two files would produce a
 	// shorter artifact that still round-trips against itself.
-	if len(goldens) != 5 {
-		t.Fatalf("expected 5 chart goldens, found %d (%v). The walk's corpus is the chart's golden set; if that set changed, this number changes with it in the same commit.",
+	//
+	// 5 -> 6 in Phase 3 (gd-p3-dev), which added golden/session-existing.yaml
+	// for auth.existingSecret. This constant belongs to gd-p1-dev; it is
+	// changed here rather than left red because the assertion says in its own
+	// message that the phase changing the golden set changes the number with
+	// it, and because a rebased branch that does not build is not evidence
+	// about anything. gd-p1-dev has been told. The artifact below is
+	// regenerated in the same commit, so the new arm is derived and not
+	// asserted.
+	if len(goldens) != 6 {
+		t.Fatalf("expected 6 chart goldens, found %d (%v). The walk's corpus is the chart's golden set; if that set changed, this number changes with it in the same commit.",
 			len(goldens), goldens)
 	}
 	sort.Strings(goldens)

@@ -18,11 +18,12 @@
 # Neither half is sufficient alone and the shell step names the other.
 #
 # GOLDEN DIGESTS (sha256, as walked)
-#   existing-secret.yaml     1b9440a25f7ee00a8eab940440c07e53f55e6493606def810709c23dfb73b444
-#   minimal.yaml             16a25ce35aab46e683282abea9b3fd15ed36569a0f197bc95016b1c39ecfa733
-#   settings-oauth.yaml      59460200e09c7bd3165bbb1d1fb30421f09e43f9cd9f814de221cb25e8db2242
-#   settings.yaml            ef77c053b3f9b1b9bb16535557e2d5147ad486bc83b8537948a5647d3b3784c3
-#   varied.yaml              0db33f533c9672a9b08d37ea0f741b8f1c6eb19f5409ce82a0085eb1259433f2
+#   existing-secret.yaml     6c53be0672c398ae2bbc0b444524188017d2a9048725e5620c707a2d785828ed
+#   minimal.yaml             af8b9cb7dcb7bbd64821fabe83f45e303e3e5898f51f30e24f124ea919b23f2a
+#   session-existing.yaml    aefd49a94207ad46636c7c9f034f9abdd6c7e27fa587c92da52196f3ceb9725f
+#   settings-oauth.yaml      680b7486c7fceb3d1bf41db01e7b34fee077e1903d864b1c692f4d2acb4f5eb3
+#   settings.yaml            70ee6829b78457233aefe2370b7033f89b453f366bcd6830808c24a192af6d73
+#   varied.yaml              13006f53153b8ea510a06dad165e3aab7e6466c9a2b6e64ea25e78b86cecd206
 
 ===== existing-secret.yaml
 NO RENDERED settings.yaml: no "settings.yaml: |" block in this golden
@@ -34,6 +35,16 @@ TERMINATED no gates: the preflight does not run for this shape.
 
 ===== minimal.yaml [audience malformed = "my-iap-audience"]
 config   mode="hosted" hub_id="ci-minimal" driver="sqlite" storage="local" auth.mode="proxy"
+routes   isHADeployment=false hostedHAGuardsRequired=false
+TERMINATED no gates: the preflight does not run for this shape.
+
+===== session-existing.yaml [audience well-formed = "/projects/1/locations/us-central1/services/hub"]
+config   mode="hosted" hub_id="ci-session-existing" driver="sqlite" storage="local" auth.mode="proxy"
+routes   isHADeployment=false hostedHAGuardsRequired=false
+TERMINATED no gates: the preflight does not run for this shape.
+
+===== session-existing.yaml [audience malformed = "my-iap-audience"]
+config   mode="hosted" hub_id="ci-session-existing" driver="sqlite" storage="local" auth.mode="proxy"
 routes   isHADeployment=false hostedHAGuardsRequired=false
 TERMINATED no gates: the preflight does not run for this shape.
 
