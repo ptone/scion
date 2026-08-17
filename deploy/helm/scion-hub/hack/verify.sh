@@ -126,7 +126,12 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # NOTHING HERE, and that is worth knowing rather than assuming: the mutation
 # probe reports fixed-shape totals, not one assertion per leaf, and all four are
 # refused under config.existingSecret so none of them reaches the transfer list.
-EXPECTED_TOTAL=269
+#
+# 269 -> 273: +4 kubeconform positive controls. Every other kubeconform
+# assertion in this file is that something was NOT invalid, which a validator
+# that has stopped validating satisfies in the same words as a clean run. These
+# four show it rejecting first.
+EXPECTED_TOTAL=273
 
 failures=0
 assertions=0
@@ -306,6 +311,100 @@ if [[ "$(printf '%s\n' "${EXPECTED_DOCS[@]}" | sort -u | wc -l)" -ge 2 ]]; then
 else
   fail "every permutation expects the same document count - the count check cannot see the Secret that config.existingSecret suppresses"
 fi
+
+# --------------------------------------------------------------------------
+step "kubeconform's positive controls"
+# --------------------------------------------------------------------------
+# EVERY KUBECONFORM ASSERTION BELOW IS THAT SOMETHING WAS *NOT* INVALID, and a
+# validator that has stopped validating satisfies all of them at once, in the
+# same words as a clean run, forever. The document-count assertion narrows that
+# but does not close it: a tool that parsed the stream and approved everything
+# would report "Valid: 8, Invalid: 0, Errors: 0, Skipped: 0" and be believed.
+#
+# 🔴 MEASURED, NOT ARGUED. Run this file with KUBECONFORM= pointed at a stub
+# that counts the documents on stdin and declares them all valid, and all SIX
+# real rows go green - with the right per-permutation totals, including the 6
+# that only existing-secret produces:
+#
+#   ok  kubeconform minimal validated 8 documents, none skipped
+#   ok  kubeconform existing-secret validated 6 documents, none skipped
+#   ...
+#
+# The document-count assertion was supposed to be the thing that stopped this
+# and it does not, because the stub reads the count off the same stream. The
+# four controls below are the only lines that go red.
+#
+# So the tool is first shown REJECTING, on inputs whose defects are known,
+# before it is trusted to accept. Four controls, because the real invocation
+# makes four separate claims and each can fail on its own:
+#
+#   (1) it validates field types at all
+#   (2) -strict is in effect - without it, an unknown field is VALID
+#   (3) a kind it has no schema for is an ERROR, not a quiet pass
+#   (4) --ignore-missing-schemas turns (3) into a SKIP, which is what makes
+#       "Skipped: 0" on the real renders a live claim rather than a formality
+#
+# (4) is the only place in this file that runs kubeconform with a flag the
+# chart's own checks must never use. It is here precisely so the difference the
+# flag makes is measured rather than asserted in a comment - the failure mode is
+# someone adding it to line 333 to make a red run green, and the summary field
+# that would betray them is one this file would otherwise never have seen move.
+#
+# Measured against kubeconform v0.6.7 (self-reports "development" when built
+# with go install; the build is tied to P0's published result at 7a54ba7c).
+cat >"$WORK/kc-badtype.yaml" <<'KCEOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: positive-control
+spec:
+  replicas: three
+  selector:
+    matchLabels: {app: x}
+  template:
+    metadata:
+      labels: {app: x}
+    spec:
+      containers:
+        - name: c
+          image: i
+KCEOF
+cat >"$WORK/kc-unknownfield.yaml" <<'KCEOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: positive-control-strict
+  notAMetadataField: x
+data:
+  k: v
+KCEOF
+cat >"$WORK/kc-unknownkind.yaml" <<'KCEOF'
+apiVersion: example.invalid/v1
+kind: NotARealKind
+metadata:
+  name: positive-control-skip
+KCEOF
+
+# THE SUMMARY LINE, NOT THE EXIT STATUS, for the same reason as the real checks:
+# every field is asserted, so a control that started failing for a NEW reason -
+# an Error where an Invalid was expected - is a failure and not a pass.
+kc_control() { # <label> <fixture> <expected summary tail> [extra kubeconform flags...]
+  local label="$1" fixture="$2" want="$3"; shift 3
+  local out; out="$("$KUBECONFORM" -strict "$@" -summary <"$WORK/$fixture" 2>&1 || true)"
+  if grep -qF "$want" <<<"$out"; then
+    pass "kubeconform positive control: $label"
+  else
+    fail "kubeconform positive control '$label': wanted '$want', got '$out'"
+  fi
+}
+kc_control "a non-integer replicas count is INVALID" \
+  kc-badtype.yaml "Valid: 0, Invalid: 1, Errors: 0, Skipped: 0"
+kc_control "-strict is in effect, so an unknown metadata field is INVALID" \
+  kc-unknownfield.yaml "Valid: 0, Invalid: 1, Errors: 0, Skipped: 0"
+kc_control "a kind with no schema is an ERROR, not a quiet pass" \
+  kc-unknownkind.yaml "Valid: 0, Invalid: 0, Errors: 1, Skipped: 0"
+kc_control "--ignore-missing-schemas would turn that error into a SKIP, which is what Skipped: 0 rules out" \
+  kc-unknownkind.yaml "Valid: 0, Invalid: 0, Errors: 0, Skipped: 1" -ignore-missing-schemas
 
 render_failures=0
 for name in "${PERMUTATIONS[@]}"; do
