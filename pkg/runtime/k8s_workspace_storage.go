@@ -85,7 +85,7 @@ func shouldSyncWorkspaceToPod(cfg RunConfig) bool {
 	if cfg.Workspace == "" {
 		return false
 	}
-	return !(usesSharedWorkspacePVC(cfg) && workspacePopulatedOnVolume(cfg))
+	return !usesSharedWorkspacePVC(cfg) || !workspacePopulatedOnVolume(cfg)
 }
 
 // workspaceListingIsEmpty interprets the output of listing the pod's workspace
