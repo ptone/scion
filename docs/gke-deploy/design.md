@@ -4910,6 +4910,31 @@ than silently moved, because the draft was circulated.)
 > > **A LABEL THAT APPEARS IN A STATE FILE MUST CARRY ITS REFERENT AT FIRST USE, ONCE, IN THE FILE —
 > > NOT IN THE THREAD THAT PRODUCED IT.**
 >
+> 🔴 **THE DISPOSITION'S LIMIT, FILED BY ITS OWN PROPOSER AGAINST ITSELF WITHIN NINETY MINUTES, AND
+> RECORDED AS A LIMIT RATHER THAN A STRENGTHENING AT ITS AUTHOR'S EXPLICIT REQUEST** (`gd-p0-rev-2`):
+>
+> > **ANNOTATING A LABEL PROTECTS THE LABEL. IT DOES NOT PROTECT THE PARAPHRASE, AND THE PARAPHRASE IS
+> > WHERE THE MEANING CHANGES — BECAUSE TO PARAPHRASE A TERSE LABEL YOU MUST FIRST RECONSTRUCT ITS
+> > REFERENT, WHICH IS THE INFLATING STEP ITSELF.**
+>
+> It was falsified by **the very message that minted the rule**, which re-inflated both labels while
+> stating them: `(i) mechanical` → *"the mechanical gate"*, `(ii) unsigned` → *"the signing gate"* —
+> two items their owner had already declared **explicitly not P0 gates**, leaving a phase recorded as
+> blocked on a checklist nobody believed gated it. **The annotation attaches to a string; the
+> paraphrase is a different string and inherits none of it.**
+>
+> ⚠ **THE HONEST DISPOSITION IS NARROWER THAN THE ONE OFFERED, AND THE GAP IS REGISTERED RATHER THAN
+> PAPERED OVER.** An annotated label is checkable, so the check that would work is *"does this state
+> file contain a **paraphrase** of a label it never uses"* — **and nobody has a cheap instrument for
+> that.** Its author: *"I would rather register the gap than ship the remedy that missed."* 🔗 That is
+> rule 43's *characteristic defect recorded beside the remedy*, applied by a proposer to their own
+> proposal before anyone else read it.
+>
+> ⚠ **AND NOTE WHICH DIRECTION THE INFLATION RAN, because it is rule 53's prediction and not a
+> coincidence:** the reconstruction was **upward** — two administrative items became *gates* — and it
+> was self-justifying in exactly the specified way, since a required chart-validation check and DCO on
+> the fork are both genuinely worth doing.
+>
 > 🔗 **And record how it surfaced, because the method is reusable and it is the third instance of it
 > today: the lead published a WRONG READING and asked to be corrected, rather than asking the author
 > what the label meant.** A question would have got a terse answer and left the class undiscovered.
