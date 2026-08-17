@@ -299,8 +299,9 @@ done
 # replacing the coverage.
 EXPECTED_VERIFY_ASSERTIONS=267
 # hack/ IS OUTSIDE THIS DIRECTORY, SO THE FILE SCAN BELOW CANNOT SEE IT, AND
-# NAMING ITS CONTENTS HERE IS THE ONLY THING THAT MAKES THEM DISCOVERABLE. Two
-# files, both stated: verify.sh, gated below, and run-all-mutations.sh, which is
+# NAMING ITS CONTENTS HERE IS THE ONLY THING THAT MAKES THEM DISCOVERABLE. Three
+# files, all stated: verify.sh, gated below; check-secret-placement.sh, gated
+# below it, added by the session-secret phase; and run-all-mutations.sh, which is
 # the driver that produces the MM table at the top of this file. That driver is
 # not run from here - it copies this tree ten times and each copy runs this
 # script, so it would recurse and it takes minutes - but its ABSENCE is reported,
@@ -325,6 +326,38 @@ else
     real_failure=1
   else
     echo ">>> hack/verify.sh: ok (${_vn} assertions, goldens current)"
+  fi
+fi
+
+# hack/check-secret-placement.sh -- criterion 4 of the session-secret phase: no
+# secret material in args, a ConfigMap, or an annotation, over every ci fixture.
+#
+# GATED HERE RATHER THAN LEFT FOR PHASE 6 because a check nothing runs is a check
+# that does not exist, and this one is all negative assertions - precisely the
+# shape that reports a clean result forever once it breaks. Its own --self-test
+# is run FIRST and its failure is a meta-failure, not a chart failure: the scan
+# saying "no leaks" means nothing until the scanner has been shown finding leaks
+# it was pointed at. Exit 2 from either arm is "nothing was analysed".
+#
+# NOT SUMMED INTO EXPECTED_ASSERTIONS, for the same reason hack/verify.sh is not:
+# it is not one of the enumerated scripts and does not emit ASSERTIONS_EXECUTED.
+# Phase 6 owns CI wiring and may move this; it must not delete it without
+# replacing the coverage.
+_placement="${HERE}/../hack/check-secret-placement.sh"
+if [ ! -f "$_placement" ]; then
+  note "hack/check-secret-placement.sh is missing, so nothing checked that the session secret stays out of argv, ConfigMaps and annotations."
+else
+  if _pself="$(bash "$_placement" --self-test 2>&1)"; then
+    _pout="$(bash "$_placement" 2>&1)"; _prc=$?
+    case "$_prc" in
+      0) echo ">>> hack/check-secret-placement.sh: ok ($(printf '%s\n' "$_pout" | tail -1 | sed 's/^check-secret-placement: //'))" ;;
+      1) echo ">>> hack/check-secret-placement.sh: LEAK FOUND (exit 1)"
+         printf '%s\n' "$_pout" | sed 's/^/    /'
+         real_failure=1 ;;
+      *) note "hack/check-secret-placement.sh exited ${_prc} - nothing was analysed. $(printf '%s\n' "$_pout" | tail -2 | tr '\n' ' ')" ;;
+    esac
+  else
+    note "hack/check-secret-placement.sh --self-test FAILED, so its scan is not evidence and was not run. $(printf '%s\n' "$_pself" | tail -1)"
   fi
 fi
 
