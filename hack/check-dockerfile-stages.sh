@@ -971,6 +971,27 @@ AS final" | expect 1 \
     errors="$(wc -l < "$FAILLOG" | tr -d ' ')"
   fi
 
+  # ...AND THE OTHER HALF OF THAT TRIPWIRE, WHICH IS THE HALF THAT WAS MISSING.
+  # The case count catches a case with no guard. NOTHING caught a guard with no
+  # case: add a 30th rule with no fixture of its own and this suite runs 74
+  # cases, passes all of them and exits 0. The new rule is untested and the
+  # suite says so in no way at all. Only the guard-defeat matrix would notice,
+  # and the matrix is not in this repo and does not run in CI. Either number
+  # alone is inert; the pair is the tripwire. (gd-p7-rev-4 measured both arms.)
+  #
+  # Guard call sites are counted in EITHER STATE -- `fail "` or the
+  # `true "NEUTERED ` a defeated one becomes -- because the meta case and the
+  # matrix both run this suite against a copy with one guard neutered, and a
+  # count that dropped to 28 there would report a drift that is the measurement
+  # itself. The anchor keeps prose out: comments start with '#'.
+  want_guards=29
+  got_guards="$(grep -c -E '^[[:space:]]*(fail "|true "NEUTERED )' "$SELF")"
+  if [ "$got_guards" -ne "$want_guards" ]; then
+    echo "self-test: expected $want_guards guard call sites in $SELF, found $got_guards. A rule was added or removed. If it was added, it has no case here until you write one, and 'all $ran cases pass' does not cover it: re-run verification/p7-guard-defeat-matrix.sh, confirm the new guard reddens a case of its own, and bump want_guards and want_cases together." >&2
+    echo "$got_guards guard call sites" >> "$FAILLOG"
+    errors="$(wc -l < "$FAILLOG" | tr -d ' ')"
+  fi
+
   if [ "$errors" -eq 0 ]; then
     echo "self-test passed: $ran cases -- every mutation above was caught, every legal variation was not, and a neutered guard still moves the exit code."
     return 0
