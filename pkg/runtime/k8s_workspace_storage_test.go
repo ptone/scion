@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	corev1 "k8s.io/api/core/v1"
@@ -225,28 +226,66 @@ func TestGetRuntime_Kubernetes_NoWorkspaceStorageConfigured(t *testing.T) {
 // Run -> applyWorkspaceStorage, so removing that call (or the derivation
 // inside it) changes the measured volume from a PVC to an EmptyDir.
 
-// runAndCapturePod runs the agent against the fake clientset and returns the
-// pod that was created. Run always errors here — waitForPodReady never sees a
-// Ready pod from a fake clientset — but the pod spec has already been
-// submitted by then, which is what we assert on.
-func runAndCapturePod(t *testing.T, r *KubernetesRuntime, cfg RunConfig) *corev1.Pod {
+// listPods returns every pod the fake clientset has recorded.
+func listPods(t *testing.T, r *KubernetesRuntime) []corev1.Pod {
 	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	_, runErr := r.Run(ctx, cfg)
-	if runErr == nil {
-		t.Fatal("expected Run to fail at waitForPodReady with a fake clientset")
-	}
-
 	pods, err := r.Client.Clientset.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		t.Fatalf("list pods: %v", err)
 	}
-	if len(pods.Items) != 1 {
-		t.Fatalf("expected exactly 1 pod created, got %d (Run error: %v)", len(pods.Items), runErr)
+	return pods.Items
+}
+
+// runAndCapturePod runs the agent against the fake clientset and returns the
+// pod that was created. Run cannot complete here — waitForPodReady never sees
+// a Ready pod from a fake clientset — so it runs in the background until the
+// pod spec has been submitted, which is what we assert on, and is then
+// cancelled. Waiting for the pod rather than for a fixed deadline keeps the
+// test fast and keeps a loaded machine from turning it into a flake.
+func runAndCapturePod(t *testing.T, r *KubernetesRuntime, cfg RunConfig) *corev1.Pod {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.Run(ctx, cfg)
+		done <- err
+	}()
+
+	deadline := time.After(10 * time.Second)
+	for {
+		if pods := listPods(t, r); len(pods) == 1 {
+			cancel()
+			<-done
+			return &pods[0]
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("Run returned before creating a pod: %v", err)
+		case <-deadline:
+			t.Fatal("timed out waiting for the pod to be created")
+		case <-time.After(2 * time.Millisecond):
+		}
 	}
-	return &pods.Items[0]
+}
+
+// runExpectingFailure drives Run for a configuration that must not reach pod
+// creation, and returns the error. The generous deadline is never consumed
+// when the code is correct — it only bounds the failure case, where Run would
+// otherwise sit in waitForPodReady.
+func runExpectingFailure(t *testing.T, r *KubernetesRuntime, cfg RunConfig, why string) error {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := r.Run(ctx, cfg)
+	if err == nil {
+		t.Fatalf("expected Run to fail: %s", why)
+	}
+	return err
 }
 
 // workspaceVolume returns the pod's workspace volume and the agent
@@ -438,22 +477,76 @@ func TestRun_MisconfiguredSharedBackend_FailsInsteadOfEmptyDir(t *testing.T) {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	_, err := r.Run(ctx, baseRunConfig("scion-test-misconfigured"))
-	if err == nil {
-		t.Fatal("expected Run to fail for a shared backend that cannot resolve")
-	}
+	err := runExpectingFailure(t, r, baseRunConfig("scion-test-misconfigured"),
+		"a shared backend that cannot resolve")
 	if !strings.Contains(err.Error(), "gke-shared-volume") {
 		t.Errorf("error should name the backend, got: %v", err)
 	}
-
-	pods, listErr := r.Client.Clientset.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{})
-	if listErr != nil {
-		t.Fatalf("list pods: %v", listErr)
+	if n := len(listPods(t, r)); n != 0 {
+		t.Errorf("misconfigured backend should create no pods, got %d", n)
 	}
-	if len(pods.Items) != 0 {
-		t.Errorf("misconfigured backend should create no pods, got %d", len(pods.Items))
+}
+
+func TestRun_SharedBackendWithoutPVClaimName_FailsInsteadOfEmptyDir(t *testing.T) {
+	// A backend that resolves and realizes but yields no claim name is the
+	// nastiest shape of misconfiguration: without the guard the pod comes up
+	// with an EmptyDir AND the workspace sync skipped, which is strictly worse
+	// than #1075. Delete the desc.PVClaimName == "" check in
+	// applyWorkspaceStorage and both of these go red.
+	tests := []struct {
+		name    string
+		storage *config.V1WorkspaceStorageConfig
+		backend string
+	}{
+		{
+			name: "gke-shared-volume without pv_claim_name",
+			storage: &config.V1WorkspaceStorageConfig{
+				Backend: "gke-shared-volume",
+				GKESharedVolume: &config.V1GKESharedVolumeConfig{
+					VolumeName:  "scion-workspaces",
+					SubPathRoot: "projects",
+					// pv_claim_name missing: Resolve and Realize both succeed
+				},
+			},
+			backend: "gke-shared-volume",
+		},
+		{
+			name: "nfs without shares[0].pv_name",
+			storage: &config.V1WorkspaceStorageConfig{
+				Backend: "nfs",
+				NFS: &config.V1NFSConfig{
+					MountRoot:   "/mnt/nfs",
+					SubPathRoot: "projects",
+					Shares: []config.V1NFSShare{{
+						ID:     "share0",
+						Server: "10.0.0.2",
+						Export: "/scion-workspaces",
+						// pv_name missing
+					}},
+				},
+			},
+			backend: "nfs",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newNFSTestK8sRuntime()
+			r.WorkspaceStorage = tc.storage
+
+			err := runExpectingFailure(t, r, baseRunConfig("scion-test-no-claim"),
+				"a shared backend that resolved no PVC name")
+			if !strings.Contains(err.Error(), tc.backend) {
+				t.Errorf("error should name the backend %q, got: %v", tc.backend, err)
+			}
+			// The operator has to be told which setting to fill in.
+			if !strings.Contains(err.Error(), "pv_claim_name") || !strings.Contains(err.Error(), "pv_name") {
+				t.Errorf("error should name the setting to fix, got: %v", err)
+			}
+			if n := len(listPods(t, r)); n != 0 {
+				t.Errorf("expected no pod to be created, got %d", n)
+			}
+		})
 	}
 }
 
@@ -465,10 +558,137 @@ func TestRun_MissingProjectID_FailsInsteadOfEmptyDir(t *testing.T) {
 	cfg := baseRunConfig("scion-test-no-project")
 	cfg.ProjectID = ""
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	if _, err := r.Run(ctx, cfg); err == nil {
-		t.Fatal("expected Run to fail when the shared backend has no ProjectID to scope the subPath")
+	err := runExpectingFailure(t, r, cfg,
+		"the shared backend has no ProjectID to scope the subPath")
+	if !strings.Contains(err.Error(), "gke-shared-volume") {
+		t.Errorf("error should name the backend, got: %v", err)
+	}
+	if n := len(listPods(t, r)); n != 0 {
+		t.Errorf("expected no pod to be created, got %d", n)
+	}
+}
+
+// --- The workspace-sync decision on shared storage ---
+//
+// These pin the decision function rather than the branch in Run: the sync
+// stage runs after waitForPodReady, and a fake clientset can neither make a
+// pod Ready nor serve the exec subresource the sync uses (its RESTClient()
+// panics in rest.NewRequest). See the PR body's known-gap note.
+
+func TestShouldSyncWorkspaceToPod(t *testing.T) {
+	sharedCfg := func(name string, env ...string) RunConfig {
+		return RunConfig{
+			Name:                 name,
+			Workspace:            "/host/projects/demo",
+			WorkspaceBackendName: "gke-shared-volume",
+			NFSPVClaimName:       "scion-workspaces-pvc",
+			Env:                  env,
+		}
+	}
+
+	withInitClone := sharedCfg("init-container")
+	withInitClone.GitCloneForInit = &api.GitCloneConfig{URL: "https://example.com/demo.git"}
+
+	tests := []struct {
+		name string
+		cfg  RunConfig
+		want bool
+		why  string
+	}{
+		{
+			name: "shared volume, no populating mechanism",
+			cfg:  sharedCfg("non-git"),
+			want: true,
+			why:  "nothing else puts the project bytes on the volume, so skipping leaves /workspace empty",
+		},
+		{
+			name: "shared volume, container clones itself",
+			cfg:  sharedCfg("git-backed", "SCION_GIT_CLONE_URL=https://example.com/demo.git"),
+			want: false,
+			why:  "the container populates the volume during init",
+		},
+		{
+			name: "shared volume, provisioning init container",
+			cfg:  withInitClone,
+			want: false,
+			why:  "the init container populates the volume before the agent starts",
+		},
+		{
+			name: "shared volume, clone URL present but empty",
+			cfg:  sharedCfg("empty-clone-url", "SCION_GIT_CLONE_URL="),
+			want: true,
+			why:  "an empty value clones nothing",
+		},
+		{
+			name: "local backend keeps today's behaviour",
+			cfg:  RunConfig{Name: "local", Workspace: "/host/projects/demo"},
+			want: true,
+			why:  "the EmptyDir has no other source of bytes",
+		},
+		{
+			name: "local backend, git-backed, still syncs",
+			cfg:  RunConfig{Name: "local-git", Workspace: "/host/p", Env: []string{"SCION_GIT_CLONE_URL=https://x/y.git"}},
+			want: true,
+			why:  "the shared-storage reasoning must not change local pods",
+		},
+		{
+			name: "shared backend without a claim name is not a shared volume",
+			cfg:  RunConfig{Name: "no-claim", Workspace: "/host/p", WorkspaceBackendName: "nfs"},
+			want: true,
+			why:  "no PVC is mounted, so the pod is on an EmptyDir",
+		},
+		{
+			name: "no host workspace, nothing to copy",
+			cfg:  RunConfig{Name: "no-workspace", WorkspaceBackendName: "nfs", NFSPVClaimName: "pvc"},
+			want: false,
+			why:  "there is no source path to sync from",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldSyncWorkspaceToPod(tc.cfg); got != tc.want {
+				t.Errorf("shouldSyncWorkspaceToPod() = %v, want %v — %s", got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+func TestWorkspaceListingIsEmpty(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"empty directory", "", true},
+		{"newline only", "\n", true},
+		{"whitespace only", "  \n\t", true},
+		{"a file", "README.md\n", false},
+		{"a lone .git", ".git\n", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := workspaceListingIsEmpty(tc.out); got != tc.want {
+				t.Errorf("workspaceListingIsEmpty(%q) = %v, want %v", tc.out, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSharedWorkspaceNeedsSeeding_ChecksUnavailable pins the failure policy:
+// when the volume cannot be inspected we seed it. An unpopulated workspace is
+// the worse outcome, and the failure surfaces through the sync rather than as
+// a pod that quietly came up empty.
+func TestSharedWorkspaceNeedsSeeding_ChecksUnavailable(t *testing.T) {
+	r := gkeSharedVolumeRuntime(t) // fake clientset: execInPod cannot run
+	cfg := baseRunConfig("scion-test-seed-check")
+	cfg.Workspace = "/host/projects/demo"
+	cfg.WorkspaceBackendName = "gke-shared-volume"
+	cfg.NFSPVClaimName = "scion-workspaces-pvc"
+
+	if !r.sharedWorkspaceNeedsSeeding(context.Background(), "default", "some-pod", cfg) {
+		t.Error("an unavailable volume check must fall back to seeding, not to skipping the sync")
 	}
 }
 

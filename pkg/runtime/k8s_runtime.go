@@ -417,14 +417,27 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
-	// Workspace sync: shared-volume pods have workspace bytes pre-populated by
-	// the init container (N2-2), so skip the kubectl-cp workspace sync. This
-	// avoids redundantly copying workspace contents that already exist on the
-	// shared volume. Local-backend pods RETAIN the existing workspace sync.
+	// Workspace sync. The skip for shared-volume pods tracks the mechanism that
+	// populates the volume, not the backend name: skip only when the bytes
+	// arrive some other way (the provisioning init container, or the
+	// container's own git clone). A shared-volume pod with neither would
+	// otherwise mount the PVC and find /workspace empty.
 	//
-	// Home-dir sync and the startup gate (/tmp/.scion-home-ready) are RETAINED
-	// for both backends — they carry agent dotfiles and secrets, not workspace code.
-	if config.Workspace != "" && !sharedWorkspaceBackend(config.WorkspaceBackendName) {
+	// One further condition applies on shared storage, checked against the
+	// volume once the pod is up: a shared volume outlives the pod and is shared
+	// by every agent in the project, so the host copy seeds it only while it is
+	// empty. Re-extracting a stale host tar over a volume another agent is
+	// working in would overwrite live edits — see sharedWorkspaceNeedsSeeding.
+	//
+	// Local-backend pods are untouched by all of this and RETAIN today's
+	// behaviour. Home-dir sync and the startup gate (/tmp/.scion-home-ready)
+	// are RETAINED for both backends — they carry agent dotfiles and secrets,
+	// not workspace code.
+	syncWorkspace := shouldSyncWorkspaceToPod(config)
+	if syncWorkspace && usesSharedWorkspacePVC(config) {
+		syncWorkspace = r.sharedWorkspaceNeedsSeeding(ctx, namespace, createdPod.Name, config)
+	}
+	if syncWorkspace {
 		runtimeLog.Info("Syncing workspace", "agent", config.Name, "source", config.Workspace, "phase", "workspace-sync")
 		fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
 		err = r.syncWithRetry(ctx, func() error {
@@ -438,10 +451,11 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
 			runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
 		}
-	} else if sharedWorkspaceBackend(config.WorkspaceBackendName) {
-		runtimeLog.Info("Skipping workspace sync (shared workspace volume: pre-populated by init container)",
-			"backend", config.WorkspaceBackendName,
-			"agent", config.Name, "phase", "workspace-sync-skip")
+	} else if usesSharedWorkspacePVC(config) {
+		runtimeLog.Info("Skipping workspace sync (shared workspace volume: bytes come from the volume, not from a host copy)",
+			"backend", config.WorkspaceBackendName, "agent", config.Name,
+			"populated_on_volume", workspacePopulatedOnVolume(config),
+			"phase", "workspace-sync-skip")
 	}
 
 	// Signal the startup gate: all files are synced and ownership is fixed,
@@ -1201,12 +1215,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	//     writable by the broker user.
 	const containerUID int64 = 1000
 	fsGroupGID := int64(os.Getgid()) // default: host GID (local backend)
-	if sharedWorkspaceBackend(config.WorkspaceBackendName) {
-		nfsGID := config.NFSGID
-		if nfsGID == 0 {
-			nfsGID = 1000 // design default
+	if usesSharedWorkspacePVC(config) {
+		sharedGID := config.NFSGID
+		if sharedGID == 0 {
+			sharedGID = 1000 // design default
 		}
-		fsGroupGID = int64(nfsGID)
+		fsGroupGID = int64(sharedGID)
 	}
 	runAsNonRoot := true
 	allowPrivilegeEscalation := false

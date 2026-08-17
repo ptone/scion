@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -28,6 +29,12 @@ import (
 // runtime at Run time.
 const workspaceModeEnvKey = "SCION_WORKSPACE_MODE"
 
+// gitCloneURLEnvKey is the agent env var the broker sets for a git-backed
+// project (runtimebroker/start_context.go). The container clones itself from
+// it during init (cmd/sciontool/commands/init.go), which is what populates a
+// shared workspace volume in the absence of the provisioning init container.
+const gitCloneURLEnvKey = "SCION_GIT_CLONE_URL"
+
 // sharedWorkspaceBackend reports whether a backend name denotes shared,
 // cluster-attached workspace storage as opposed to node-local storage.
 // Both shared backends realize as a PVC in the pod spec; the difference is
@@ -38,12 +45,88 @@ func sharedWorkspaceBackend(name string) bool {
 }
 
 // usesSharedWorkspacePVC reports whether this pod's workspace is served by a
-// shared PVC rather than the node-local EmptyDir. It is the single condition
-// behind every shared-workspace branch in the K8s pod path, named once so a
-// future backend is admitted everywhere at once rather than at seven of eight
-// call sites.
+// shared PVC rather than the node-local EmptyDir. Every shared-workspace
+// branch in the K8s pod path tests exactly this — the advisory lock, the
+// workspace sync skip, the shared-dir PVCs, fsGroup, the workspace volume and
+// the provisioning init container — so a future backend is admitted at all of
+// them at once rather than at seven of eight.
 func usesSharedWorkspacePVC(cfg RunConfig) bool {
 	return sharedWorkspaceBackend(cfg.WorkspaceBackendName) && cfg.NFSPVClaimName != ""
+}
+
+// workspacePopulatedOnVolume reports whether something other than the
+// kubectl-cp sync puts the project's bytes on the shared volume: the
+// provisioning init container (N2-2), or the container cloning itself from the
+// broker's clone URL during init.
+//
+// This is the property the workspace-sync skip must track. Tracking the
+// backend *name* instead is what made the skip fire for pods that had no
+// populating mechanism at all, leaving /workspace empty.
+func workspacePopulatedOnVolume(cfg RunConfig) bool {
+	if cfg.GitCloneForInit != nil {
+		return true
+	}
+	for _, e := range cfg.Env {
+		if k, v, ok := strings.Cut(e, "="); ok && k == gitCloneURLEnvKey && v != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// shouldSyncWorkspaceToPod reports whether Run should copy the host workspace
+// into the pod. It is the sync decision that can be made before the pod
+// exists; shared volumes take one further runtime check (see
+// sharedWorkspaceNeedsSeeding).
+//
+// Local-backend pods are unaffected by the shared-storage logic and keep
+// today's behaviour exactly: sync whenever there is a host workspace.
+func shouldSyncWorkspaceToPod(cfg RunConfig) bool {
+	if cfg.Workspace == "" {
+		return false
+	}
+	return !(usesSharedWorkspacePVC(cfg) && workspacePopulatedOnVolume(cfg))
+}
+
+// workspaceListingIsEmpty interprets the output of listing the pod's workspace
+// directory. Anything at all on the volume — including a lone .git — means a
+// previous agent already populated it.
+func workspaceListingIsEmpty(lsOutput string) bool {
+	return strings.TrimSpace(lsOutput) == ""
+}
+
+// sharedWorkspaceNeedsSeeding reports whether the host copy should be extracted
+// onto the shared volume, which is true only while the volume is still empty.
+//
+// A shared volume is not a fresh EmptyDir. It outlives the pod and, in
+// shared-plain, every agent in the project mounts the same subPath
+// (projects/<pid>/workspace — the backends put no agent component in it). The
+// host copy is refreshed only when someone runs `scion sync --direction from`;
+// nothing syncs pod→host automatically. So re-extracting it on each start
+// would restore stale bytes over whatever the agents currently working in that
+// directory have written — syncToPod runs `tar -xz`, which overwrites
+// same-named files in place.
+//
+// Seeding once while the directory is empty gives the first agent a populated
+// workspace and every later agent the shared one, with nothing overwritten.
+//
+// If the check itself fails we seed: an unpopulated workspace is the worse
+// outcome, and a broken exec channel surfaces as a sync error rather than as a
+// pod that quietly came up empty.
+func (r *KubernetesRuntime) sharedWorkspaceNeedsSeeding(ctx context.Context, namespace, podName string, cfg RunConfig) bool {
+	out, err := r.execInPod(ctx, namespace, podName, []string{"sh", "-c", "ls -A /workspace 2>/dev/null | head -1"})
+	if err != nil {
+		runtimeLog.Warn("Could not inspect shared workspace volume; seeding it from the host copy",
+			"agent", cfg.Name, "backend", cfg.WorkspaceBackendName, "error", err)
+		return true
+	}
+	if workspaceListingIsEmpty(out) {
+		return true
+	}
+	runtimeLog.Info("Shared workspace volume already populated; leaving it as it is",
+		"agent", cfg.Name, "backend", cfg.WorkspaceBackendName,
+		"pvc", cfg.NFSPVClaimName, "subpath", cfg.NFSSubPath, "phase", "workspace-sync-skip")
+	return false
 }
 
 // workspaceSharingModeFromEnv reads the project's workspace sharing mode from
@@ -118,10 +201,12 @@ func (r *KubernetesRuntime) applyWorkspaceStorage(cfg RunConfig) (RunConfig, err
 	cfg.NFSPVClaimName = desc.PVClaimName
 	cfg.NFSSubPath = desc.SubPath
 
+	// Only NFSGID is read on the K8s path (the fsGroup branch in buildPod).
+	// NFSUID and NFSStorageClass are deliberately left alone: the docker and
+	// cloudrun paths read them, this one does not, and setting fields nothing
+	// consumes is how wiring comes to look live when it is not.
 	if nfs := r.WorkspaceStorage.NFS; nfs != nil && backend.Name() == "nfs" {
-		cfg.NFSUID = nfs.UID
 		cfg.NFSGID = nfs.GID
-		cfg.NFSStorageClass = nfs.StorageClass
 	}
 
 	runtimeLog.Info("Workspace storage resolved for pod",
