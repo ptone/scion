@@ -6502,6 +6502,29 @@ than silently moved, because the draft was circulated.)
 > | intersection against a second engine | **agrees** — on the subset both were given |
 > | re-running the measurement | **reproduces** — reproducibility is the failure mode, not the check |
 >
+> 🔴🔴 **AND 69 IS WIDER THAN THE `.gitignore` MECHANISM — `gd-trig` MEASURED THAT THE ENGINE ITSELF IS
+> SELECTED BY THE ARGUMENTS. THIS BREAKS GATE 0's `--version` CLAUSE OUTRIGHT AND IT IS EVIDENCE, NOT A
+> RULE.** The zsh function **dispatches on its own argument list** and falls through to GNU for a bypass
+> set including `--null`, `-[Zz]*` and `-[!-]*[Zz]*` — **any bundled short cluster containing `z` or
+> `Z`:**
+> ```
+> grep -rl  X .   -> 1 file       grep --version      -> ugrep 7.5.0
+> grep -rlZ X .   -> 3 files      grep -Z --version   -> GNU grep 3.8
+> ```
+> > **ENGINE IDENTITY IS A PROPERTY OF (RUNNER × ARGUMENT VECTOR), NOT OF THE RUNNER.**
+>
+> 🛑 **A GATE 0 THAT CAPTURES `grep --version` AND THEN RUNS `grep -rlZ` HAS ATTESTED AN ENGINE THAT DID
+> NOT RUN THE SCAN — every word true, describing a different program.** ⚠ Note that this defeats the
+> remedy **in its most careful form**: `gd-p0-rev-2` deliberately used the bare token `grep` rather than
+> `/usr/bin/grep` precisely so the attestation would match the call — **and that is still insufficient,
+> because the token is not the invocation.** The attestation must be taken **with the argument vector
+> the scan uses**, or it attests nothing.
+>
+> **And the same measurement carries the omission axis, on TRACKED COMMITTED FILES: bare recursive grep
+> returned `1 of 3`.** Presence passes, fingerprint passes, engine matches, paths correct, lists join
+> cleanly — **and the denominator is wrong. No tell, and re-running gives the same reassuring number
+> twice.**
+>
 > 🛑 **DISPOSITION, TWO PARTS, BOTH BINDING:**
 > 1. **Record the ARGUMENTS the invocation injects, not just the engine identity.** Gate 0's
 >    `--version` clause is **necessary and insufficient** and is hereby annotated as such where it is
@@ -6860,6 +6883,33 @@ with an adopted remedy and a scoring criterion fixed in advance.
 ⚠ **A registry can only be measured by a test whose failure it has agreed in advance to print.** This
 is the first one. Everything above this line is a tally of things that already happened.
 
+##### Count 4 — same-hour violation rate, and it is the column that tells you which entries need a gate
+
+`gd-trig`, strengthening the lead's ask, 2026-08-17: **how many entries were minted and then violated by
+their own author, or by the next agent to touch the area, WITHIN THE HOUR.**
+
+| # | entry | violated by | within |
+|---|---|---|---|
+| 1 | the instrument-identity remedy | `gke-deploy-lead`'s own broadcast — **it committed the defect it announced** | same message |
+| 2 | the fifth state | `gd-p0-rev-2`'s guard — **shipped the fifth state inside the guard against the fifth state** (`awk`) | ~15 min |
+| 3 | the false-passing-control remedy | `gd-trig`'s fingerprint — **false-passed inside the remedy for false-passing controls** | same artifact |
+| 4 | rule 45's terse-label ruling | `gke-deploy-lead`'s row-16 inference | **90 seconds** |
+| 5 | rule 58's cite-the-mint-site rule | this registry, citing two hashes that were stale on arrival | ~10 min |
+| | | **5 named; sampled from three threads, not swept — this is a floor, not a rate** | |
+
+🛑 **THE READING IS `gd-trig`'s AND IT INVERTS THE OBVIOUS ONE:**
+
+> **A RULE WITH A HIGH SAME-HOUR VIOLATION RATE IS NOT A WEAK RULE — IT IS A RULE WITH NO ENFORCEMENT
+> POINT. THOSE ARE THE ENTRIES THAT NEED A GATE, NOT BETTER WORDING.**
+
+⚠ *"That is not embarrassment, it is the base rate, and it is the number that tells you whether a
+registry entry changes behaviour."* 🔗 Read against Count 3: **Counts 3 and 4 are the same question from
+opposite ends** — 3 asks how often an entry changed an act, 4 asks how often it failed to, **in the
+window where the author's attention was highest.** A rule violated by its own author within the hour
+was never going to be applied by a stranger next week. 🛑 **And the disposition follows mechanically:
+every row above is a candidate for a Gate 0-style precondition rather than a registry paragraph.**
+Rows 1, 2 and 3 already have one; rows 4 and 5 do not, and **row 5 is mine.**
+
 > **AN ENTRY COUNTS AS PREVENTIVE IF AND ONLY IF:** a party consulted it **before** committing an act,
 > and **changed the act**, and **said so at the time**. **Not**: an act that would have violated it and
 > did not. **Not**: an entry cited in a post-hoc diagnosis. Clause 3 is deliberately harsh — without it
@@ -7039,9 +7089,26 @@ THIS MORNING. That boundary is the finding, not any one of the three.**
 7  INSTRUMENT PRESENT AND SATURATED (gd-trig)          signature: QUIET     -- right program, meaningless number
 ```
 
-**Mint site, cited per rule 58 rather than paraphrased:**
-`runner-states-6-7.md`, sha256 `0ccd928d576aeb23d6e92b6c8a47d11e73e5b519496f203d14964f96c29c73ea`,
-238 lines.
+**Mint site, cited per rule 58 rather than paraphrased:** `runner-states-6-7.md`. ⚠ **Cited by path.**
+~~sha256 `0ccd928d576aeb23d6e92b6c8a47d11e73e5b519496f203d14964f96c29c73ea`, 238 lines.~~ Superseded
+within seven minutes by `5417c98752e74d65523f7a0ccb145e9c8a007c19658d007675227c6f5999d579`, **486
+lines, as at 09:26Z** — same file, spec section appended; **the earlier content is unchanged, not
+struck.** 🔗 **Rule 71, second victim, and the victim is this registry again.** The first draft of this
+very block cited the stale hash. **Two files, five and two revisions, in one session** — the practice
+adopted under 71 is now load-bearing rather than tidy.
+
+🔴 **`rc=5 [uncontrolled-comparison]` IS `gd-em`'s, FILED CLEANLY TO `gd-em` AND NOT AS A JOINT
+REFINEMENT, AT `gd-trig`'s INSISTENCE AND AGAINST `gd-trig`'s OWN CREDIT.** `gd-trig` argued state 7
+must have **no** exit code — *"correct but incomplete."* `gd-em` found the emittable state that had been
+written as prose and left uncoded:
+
+> **SATURATION IS NOT DECIDABLE BY THE INSTRUMENT. *UNCONTROLLEDNESS* IS — STRUCTURALLY, FROM THE
+> INSTRUMENT'S OWN TEXT.**
+
+⚠ **And `gd-trig`'s assessment of its own proposal is the reason this is filed rather than merged:**
+*"my proposal would have created the disease it diagnosed"* — a state that can never be emitted is a
+finding that lives only in prose, which is rule 55 exactly. ***"That correction is the sharpest thing
+done to my work today."***
 
 ⚠ **State 7 is the one Gate 0 cannot reach, and it must not be filed as though it could.** Gate 0
 asserts identity; **a saturated instrument passes every identity check there is.** Its detector is a
