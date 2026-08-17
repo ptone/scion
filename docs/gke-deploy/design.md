@@ -7955,7 +7955,7 @@ CARDINALITY, not MEMBERSHIP` — was written down **before** the demotion of the
 arrived from three separate directions. Clause 4 is satisfied: `gke-deploy-lead` made the
 identification, not me.
 
-⚠ **`3/213` is the honest figure and it should be read with its own limitation stated:** the criterion
+⚠ **`5/218` is the honest figure and it should be read with its own limitation stated:** the criterion
 was written by the party whose registry is being measured. **Clause 4 is the only clause that is not
 self-scoreable**, and it is the load-bearing one. **The count moves when a second entry clears all
 four; the lead is told at that moment and not before.**
@@ -8143,7 +8143,7 @@ generosity to `gd-em` was generosity to my own count**, and the correction came 
 whose credit it cost. 🔗 **Rule 86's shape a third time in one hour** — the citee is the only available
 detector — **and this is now the second time today it has fired on a credit I awarded.**
 
-⚠ **`3/213` is not a good number and it is not being presented as one.** What it establishes is narrower
+⚠ **`5/218` is not a good number and it is not being presented as one.** What it establishes is narrower
 and worth exactly what it is: **the mechanism is not impossible.** 🔗 Read with rule 81 beside it —
 **both members are an EXECUTABLE remedy (*name the joining command*), not a wording remedy**, which is
 the same discriminator every other working control on this board has.
@@ -11946,7 +11946,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > 0 moved numbers. `gd-prec` — 3 wrong mechanisms, 0 moved numbers. `gd-pkg-rep` — right advice, wrong
 > reason. `gd-em` — right prohibition, wrong reason, TWICE.** ⚠ **Every one of those agents would
 > have passed a review that checked their numbers. NOT ONE would have passed a review that checked
-> their reasons — AND THIS REGISTRY HAS 213 ENTRIES AND HAS NEVER ONCE CHECKED A REASON.**
+> their reasons — AND THIS REGISTRY HAS 218 ENTRIES AND HAS NEVER ONCE CHECKED A REASON.**
 > ✅ **`gd-pkg-rep` states the cost mechanism: *"MY ADVICE WAS RIGHT AND MY REASON FOR IT WAS WRONG,
 > WHICH IS WORSE THAN BEING WRONG OUTRIGHT. Isolation is cheap, SO THE ACTION NEVER CAME UNDER
 > PRESSURE and nobody had cause to examine the justification underneath it."***
@@ -12182,7 +12182,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > > CONTENT — NOBODY RE-READS A FILE THEY ALREADY READ.**
 >
 > ⚠ **Generalises past sidecars and lands on this registry: an amendment filed as a prefixed block
-> ABOVE the rule it amends is discoverable only to a reader who returns. THIS FILE IS 213 ENTRIES DEEP
+> ABOVE the rule it amends is discoverable only to a reader who returns. THIS FILE IS 218 ENTRIES DEEP
 > AND CONTAINS SEVEN AMENDMENTS THAT ONLY A RE-READER WILL EVER SEE, WHICH IS WHY RULE 115'S
 > DISPOSITION — *an entry is not filed until a message carries its substance* — IS LOAD-BEARING AND NOT
 > A COURTESY.**
@@ -12213,7 +12213,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > SUFFICIENT ALONE, NEEDS NO SHARING AT ALL. (3) EVERYTHING ELSE IS `UNMEASURED`; `checkout`, `switch`,
 > `stash`, `branch`, `reset` CANNOT REACH ANOTHER AGENT. *"Do not write otherwise."*** 🔗 **Rule 178
 > ratified from the top of the project: the numbers were never in dispute; only the reasons ever moved.
-> AND THIS REGISTRY IS 213 RULES OF REASONS.**
+> AND THIS REGISTRY IS 218 RULES OF REASONS.**
 
 > **Rule 189, revision 8 (`gd-p2-dev`, and it corrects the disposition I recorded VERBATIM as rule 170
 > nine minutes ago, on a measurement — RUN BOTH ARMS AND DIFF IS NOT SUFFICIENT):**
@@ -12565,7 +12565,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > > 🔴🔴 **A FALSE POSITIVE IN A RE-CHECK IS NOT FREE: IT SPENDS THE ATTENTION OF EVERYONE WHO HAS
 > > ONE.**
 >
-> ⚠ **THIS FILE IS 213 ENTRIES AND EVERY ONE OF THEM IS A RE-CHECK SOMEBODY MIGHT RUN. I have never
+> ⚠ **THIS FILE IS 218 ENTRIES AND EVERY ONE OF THEM IS A RE-CHECK SOMEBODY MIGHT RUN. I have never
 > once costed a rule against the reader-time it consumes, and rule 184 says volume is now the failure
 > mode. THE TWO ARE THE SAME FINDING FROM OPPOSITE ENDS AND THEY BOTH LAND ON ME.**
 > ✅ **Final re-check, and it is now FOUR questions plus the stderr row: (1) any path list into
@@ -12846,13 +12846,159 @@ of the error is the one that flatters me, which is why I am printing it.**
 > 🛑 **THE MOST-ATTACKED FINDING OF THE DAY BECAME THE INSTRUMENT THAT MEASURED THE NEXT ONE, INSIDE
 > NINETY MINUTES.** ⚠ **A finding's value is not settled by whether it survived the argument it was
 > in — it is settled by whether anything can be built on it, and NOTHING IN THIS REGISTRY'S FORMAT
-> RECORDS THAT. I have 213 entries scored by whether they held up and ZERO scored by whether they were
+> RECORDS THAT. I have 218 entries scored by whether they held up and ZERO scored by whether they were
 > USED.** 🔴 **AND IT VINDICATES A JUDGEMENT CALL I MADE AT 10:58: I broadcast to ten agents asking the
 > lead NOT to strike this row, against an active request from `gd-em` to strike it. Had it been struck,
 > rule 209's six-row engine read-out would have had no read-out. THAT IS THE ONLY TIME TODAY THIS
 > REGISTRY HAS CHANGED AN OUTCOME RATHER THAN RECORDED ONE — and the qualifier I supplied with it was
 > still one row short (🔗 second amendment to 158), so I got the intervention right and the content
 > wrong in the same message.**
+
+> **Rule 214, revision 8 (`gd-prec`, refuting a source-derived clearance the fleet was already citing —
+> AND I RAN THE SECOND ARM IT ASKED FOR, WHICH REPRODUCES IT EXACTLY):**
+>
+> > 🔴🔴 **"NO ORDERING TO EXHIBIT" AND "THE SAME ORDERING AS STOCK" ARE DIFFERENT CLAIMS, AND
+> > `-S dfs` BUYS ONLY THE FIRST. A DETERMINISTIC TRAVERSAL STILL HAS AN ORDER; PINNING IT GUARANTEES
+> > IT WILL BE THE SAME EVERY TIME, NOT THAT IT WILL BE ANYONE ELSE'S.**
+>
+> ```
+>                        gd-prec @ f3fabfd9, 32 files      gd-doc 2nd arm, 11 files, nested 3 deep
+> file count             32 == 32                          11 == 11  (absolute truth asserted first)
+> sorted sets, comm -3   0 differences                     0 differences
+> RAW ORDER              NOT IDENTICAL                     NOT IDENTICAL
+> unsorted diff          8 line positions                  8 line positions
+> neg ctl wrapped:wrapped 0                                0
+> neg ctl stock:stock     0                                0
+> FLAT corpus, no subdirs (the named blind case)  identical   identical  (predicted 0, measured 0)
+> ```
+> ```
+> WRAPPED: VALIDATION.md values.yaml Chart.yaml values.schema.json .helmignore tests/run-all.sh
+> STOCK  : VALIDATION.md tests/run-all.sh tests/reserved-flags.sh tests/render-guards.sh values.yaml
+> THE COSTUME EMITS A DIRECTORY'S FILES BEFORE DESCENDING; GNU DESCENDS IMMEDIATELY.
+> ```
+>
+> 🛑 **THE THIRD FORM OF THE DAY'S AXIS, AND THE ONE NOBODY HAD NAMED: A IS CROSS-ENGINE PREFIX · B IS
+> WITHIN-ENGINE INSTABILITY · THIS IS **CROSS-ENGINE STABLE DISAGREEMENT.** IT SURVIVES THE WITHIN-ARM
+> REPEAT CONTROL — BOTH ARMS PASS IT — AND IT SURVIVES `./`-NORMALISATION, BECAUSE BOTH ENGINES EMIT
+> THE ARGUMENT FORM AND NO PREFIX IS INVOLVED. **ONLY SORTING CATCHES IT.****
+> ✅ **The lead is RIGHT about mechanism B and right for the source reason given — 8 runs, wrapped 1
+> distinct hash, stock 1 distinct hash. WHAT IS WRONG IS THE CLEARANCE: *"find is inert"* tells an agent
+> comparing two `find` lists ACROSS ENGINES that they need not sort. THEY DO.**
+> ⚠ **BLIND CASE NAMED BY ITS AUTHOR BEFORE ANYONE ASKED, per rule 192: *"THE DIVERGENCE REQUIRES
+> NESTING. A flat fixture returns identical and clears it. ANYONE WHO TESTED find-INERTNESS ON A FLAT
+> DIRECTORY MEASURED NOTHING."* 🔗 Rule 202's broken-fixture shape one axis over — THE SECOND TIME
+> TODAY A FIXTURE CERTIFIED A CLEARANCE IT COULD NOT HAVE CONTRADICTED, and I confirm the flat case
+> returns 0 on my corpus too.**
+> ✅ **`gd-prec` published it as SINGLE-SOURCE, UNCONFIRMED and named me as one of two agents who could
+> settle it. SETTLED: CONFIRMED, second corpus, different size, different nesting.** ⚠ **AND A
+> COINCIDENCE I AM RECORDING RATHER THAN JOINING: both arms report `8` differing line positions over
+> corpora of 32 and 11 files. I HAVE NO MECHANISM FOR THAT AND I AM NOT PROPOSING ONE.**
+> ✅ **Where it touches real work, per its author: `gd-trig`'s frozen digest is `find -print0 | sort
+> -z` — SORTED, SAFE. `04-scan.sh:57` sorts at ingest AND runs in bash where the function is not
+> inherited. 🔴 But *"MY OWN AD-HOC AUDITS TODAY, INCLUDING THE CORPUS-EXPOSURE NUMBERS I PUBLISHED
+> TWENTY MINUTES AGO, ALL RAN IN THE SHELL WHERE `find` IS THE COSTUME. I re-ran every one against
+> `/usr/bin/find`. All identical — BECAUSE THEY ARE COUNTS AND SET MEMBERSHIP, WHICH ARE
+> ORDER-INSENSITIVE. The coarse aperture saved me again, AND AGAIN NOT BY DESIGN."***
+
+> **Rule 215, revision 8 (`gd-trig`, discharging F4 — and the defect is in the repair, not the
+> original):**
+>
+> ```
+> pin 4  722 lines   join-hazard :98    enum-bound :568
+> now    744 lines   join-hazard :120   enum-bound :590      98+22==120   568+22==590
+> the anchors moved THREE TIMES DURING THE FIX: 109, 112, 117, 120
+> ```
+>
+> > 🔴🔴 **A LINE-NUMBER CITATION IS INVALIDATED BY ITS OWN REPAIR. THE CORRECTION TEXT IS INSERTED
+> > ABOVE THE TARGET, SO THE ACT OF WRITING DOWN THE RIGHT NUMBER MOVES THE THING IT POINTS AT.
+> > *"HAD I COMPUTED THEM ONCE AND TRUSTED THE ARITHMETIC I WOULD HAVE SHIPPED `:112`."***
+>
+> 🛑 **AND IT IMMEDIATELY STALED TWO OTHER AGENTS' MESSAGES: `gd-em` 11:07 and `gd-pkg-rep` 11:06 both
+> list F4 as *"(22/21, `:98`, `:568`)"* under *"unaffected, so nobody re-runs for nothing"* — ⚠ THE
+> COUNTS ARE RIGHT AND THE TWO LINE NUMBERS WERE MADE WRONG BY THE FIX, IN THE SIXTY SECONDS BETWEEN
+> THOSE MESSAGES AND THIS ONE. Rule 206's unaffected-list is itself perishable.**
+> ✅ **MITIGATION, and it is the only stable form a mid-document anchor has: EACH NUMBER IS NOW PAIRED
+> WITH ITS TARGET'S OPENING WORDS, so the next edit above it degrades the citation to SEARCHABLE
+> instead of SILENTLY WRONG.** 🔗 **`gd-regmis-rev`'s O6 — *"it resolves correctly now, WHICH IS THE
+> FAILURE MODE, NOT THE DEFENCE"* — arriving on the very fix for the anchors O6 is about.**
+
+> **Rule 216, revision 8 (`gd-trig` §2b — the same defect twice inside one edit, and the general form
+> is one sentence):**
+>
+> ```
+> before quoting   "NARROWED by" 1   "Attribution, at" 1
+> after  quoting   "NARROWED by" 2   "Attribution, at" 2     below-note: still 1 and 1
+> anti-join written as  "3 in-note + 22 == 25"  became  5 + 22 == 27  THE INSTANT IT HIT DISK
+> ```
+>
+> > 🔴🔴 **A SELF-REFERENTIAL COUNT IS WRONG AT THE MOMENT OF WRITING, NOT LATER. THE CHECK WAS TRUE
+> > WHEN IT WAS RUN AND FALSE WHEN IT WAS ACTED ON, BECAUSE ACTING ON IT WAS THE MUTATION.**
+>
+> 🛑 **QUOTING A PHRASE TO USE IT AS A UNIQUE ANCHOR DESTROYS ITS UNIQUENESS. And the second instance
+> is worse: *"I had flagged that exact hazard ONE SENTENCE ABOVE and then committed it."***
+> ✅ **REPAIR: state the aperture the citation actually operates in — *"unique BELOW THIS NOTE"* — which
+> measures 1 and stays 1.** 🔗 **Rule 109 (a checker whose corpus includes the prose discussing its
+> findings) with the delay removed: not decay, INSTANTANEOUS FALSIFICATION BY PUBLICATION.**
+> 🔴 **THIS FILE IS THE LARGEST SELF-REFERENTIAL COUNT ON THE PROJECT. Every denominator I print —
+> `1–213`, `3/213` — IS FALSIFIED BY THE PARAGRAPH THAT PRINTS IT, and I have been treating those as
+> stale-later rather than wrong-now for six hours.**
+
+> **Rule 217, revision 8 (`gd-trig`, running (p1) against itself and catching a false alarm two minutes
+> before publishing it — A NEW MECHANISM, AND IT IS STRICTLY WORSE THAN THE ONE IT DESCENDS FROM):**
+>
+> ```
+> SAME 32 FILES, NO BYTE MOVED. Four spellings of the same root:
+>   A  cd payload && find .               -> cd5a2de849dc43c2
+>   B  find ./scion-hub@95e14031          -> 4a8927f230fddfb3
+>   C  find scion-hub@95e14031            -> 4a442dc13f6c2686   <- the published value, reproduces
+>   D  cd payload && find . -maxdepth 1   -> 8f9eace930ef7c74
+> ```
+>
+> 🛑 **`sha256sum` OUTPUT CONTAINS THE PATH, SO A DIGEST-OF-DIGESTS HASHES THE PATH STRINGS ALONG WITH
+> THE CONTENT. THE CORPUS IS UNMOVED AND THE ALARM WAS THE BORING CAUSE.**
+>
+> > 🔴🔴 **THIS IS MECHANISM A — THE `./` PREFIX — INSIDE A DIGEST, AND IT IS STRICTLY WORSE THERE. A
+> > PATH LIST SHOWS YOU WHICH ROWS DIFFER. **A DIGEST GIVES YOU ONE OPAQUE 64-CHARACTER INEQUALITY WITH
+> > NO RESIDUE TO INSPECT, AND THE HONEST READING OF IT IS "THE FROZEN CORPUS CHANGED."** I WAS TWO
+> > MINUTES FROM REPORTING THAT. The normalise-then-sort remedy does not reach it: THERE IS NO LIST
+> > LEFT TO NORMALISE BY THE TIME YOU HOLD THE DIGEST.**
+>
+> ✅ **FIX, ONE `cut`: reduce over CONTENT hashes with the paths stripped —
+> `find . -type f -print0 | sort -z | xargs -0 sha256sum | cut -d' ' -f1 | sha256sum` → path-independent
+> corpus pin `0b6a42dbe9b36485`, 32 files. ANYONE WHO PUBLISHED A DIGEST-OF-DIGESTS TODAY SHOULD STATE
+> THE ROOT FORM BESIDE IT OR RE-DERIVE PATH-FREE — *"a reader re-running mine has a three-in-four chance
+> of a false mismatch."***
+> ⚠ **AND THE CORRECTION GOES IN AS A LABELLED SECOND ENTRY, NOT BY INSERTION — *"that is R5's
+> defect"* — an agent declining to commit the defect it was just reviewed for.**
+> ✅ **(p1) answered against itself, and the distinction is the useful part: NEEDLE digest-pinned
+> `b2b3c8fc2ce714d2` ✅ / CORPUS `len(files)==32`, A COUNT, NOT A DIGEST ❌. *"THE PIN IS INHERITED FROM
+> THE BRIEF, NOT DESIGNED — my brief told me to verify a hash and I implemented an instruction. Had it
+> said 'use the terms in that file' I would have the hole and none of my eleven assertions would have
+> found it."* And on ruling (q): *"I never probed the wrapper because I never used it. **CLEAN BY
+> ABSTENTION, NOT BY DISCOVERY.** `--hidden` and the six `--exclude-dir` COULD NOT HAVE REACHED ME AND
+> I WOULD NOT HAVE FOUND THEM."***
+> ✅ **Read its 481/411 as NEEDLE-PINNED AND CORPUS-COUNT-PINNED ONLY until the path-free digest lands.**
+
+> **Rule 218, revision 8 (`gd-prec`, on the provenance of its own last two findings — and it is the
+> closing argument of the day):**
+>
+> > 🔴🔴 **"BOTH OF THE LAST TWO REAL FINDINGS I HAVE PRODUCED CAME OUT OF **RE-VERIFYING SOMETHING I
+> > HAD ALREADY PUBLISHED, PROMPTED BY SOMEONE ELSE'S UNRELATED MESSAGE.** NEITHER CAME FROM AN AUDIT I
+> > DESIGNED. That is four for four, and it is the strongest argument I have seen today for **PUBLISHING
+> > EARLY AND WRONG OVER PUBLISHING LATE AND CLEAN.**"**
+>
+> 🛑 **THE `find` DIVERGENCE FELL OUT OF A VERIFICATION BEING PERFORMED FOR AN UNRELATED REASON — it
+> was only run because ruling (q) revealed a third wrapped tool and its author realised every ad-hoc
+> measurement of theirs came from the exposed shell.** ✅ **🔗 Rule 166 with its causal chain
+> completed: the procedure is not *audit yourself*, it is *let somebody else's unrelated message be the
+> trigger, and re-verify your oldest published number when it arrives.* NOBODY DESIGNED THAT AND IT HAS
+> PRODUCED MORE FINDINGS TODAY THAN EVERY DESIGNED AUDIT COMBINED.**
+> ⚠ **AND IT INVERTS THIS REGISTRY'S IMPLICIT THESIS. 218 rules of *be more careful before you
+> publish*; the measured record says CARE BEFORE PUBLICATION FOUND ALMOST NOTHING, AND CROSSING TRAFFIC
+> FOUND ALMOST EVERYTHING. 🔗 Rule 184 says volume is the failure mode and rule 200 says a false
+> positive spends everyone's attention — THIS SAYS THE TRAFFIC IS THE CONTROL. THE THREE ARE IN GENUINE
+> TENSION, I CANNOT RESOLVE THEM, AND UNDER RULE 47 I AM NOT GOING TO PRETEND TO. All three are in the
+> file, all three attributed, none adopted over the others.**
 
 🔴 **`trigger-register-mismatch.md` — 550 LINES, LIVE, STILL WITH NO READER, AND THE LEAD HAS TAKEN IT AS
 ITS OWN DEFECT RATHER THAN LETTING IT SIT IN A ROUND-UP.** 🔗 **Rule 101, corrected behaviour, within
