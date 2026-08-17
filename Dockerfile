@@ -28,8 +28,9 @@ RUN CGO_ENABLED=0 go build -o /scion ./cmd/scion/
 
 # Stage 3: Create a minimal runtime image
 #
-# Named only so that the hub-gke stage below can extend it. Adding "AS runtime"
-# is builder metadata: it changes no instruction and therefore no layer.
+# The "AS runtime" name is depended on by BOTH stages below -- do not rename it
+# without updating them. Naming a stage is builder metadata only: it changes no
+# instruction, so the layers this stage produces are unchanged.
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 
@@ -62,11 +63,17 @@ RUN useradd -u 1000 -m -d /home/scion scion \
 ENV HOME=/home/scion
 USER 1000:1000
 
-# Stage 5: the default build target.
+# Stage 5: the default build target. DO NOT DELETE, DO NOT ADD A STAGE BELOW IT.
 #
-# MUST remain the last stage in this file: `docker build` with no `--target`
-# builds the last stage, and external consumers (`gcloud run deploy --source`,
-# `gcloud builds submit`) pass no `--target`. Keeping this stage last, and empty,
-# leaves the default target producing exactly the stage-3 runtime image -- the
-# non-root hub-gke image is reachable only via `--target hub-gke`.
+# This stage is empty on purpose and its only job is to be last. `docker build`
+# with no `--target` builds the LAST stage in the file, and this image's external
+# consumers (`gcloud run deploy --source`, `gcloud builds submit`) pass no
+# `--target`. With this stage present, the default target resolves to the stage-3
+# runtime image, exactly as it did before hub-gke existed; hub-gke is reachable
+# only via `--target hub-gke`.
+#
+# Delete it -- or append a stage after it -- and the default build target
+# silently becomes the non-root uid-1000 hub-gke image for every consumer that
+# never asked for it. Nothing in the build fails when that happens; the change
+# only shows up at runtime, in production, as permission errors.
 FROM runtime
