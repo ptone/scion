@@ -56,19 +56,9 @@ ENTRYPOINT ["/usr/local/bin/scion"]
 # disable in-cluster ServiceAccount auth. Also deliberately absent: any CMD, so
 # no arguments (and no secrets in them) are baked into the image; the chart
 # supplies them.
-#
-# Also deliberately absent, after review: a pre-created `$HOME/.scion`. The
-# server only calls config.InitGlobal when that directory does NOT exist
-# (cmd/server_foreground.go), so creating it here would make this image skip a
-# startup step the plain runtime image runs -- a behaviour difference that buys
-# nothing, because the chart mounts an emptyDir at exactly that path and the
-# directory exists at runtime either way. `useradd -m` already creates
-# /home/scion owned by uid 1000, which is all a writable HOME requires.
 FROM runtime AS hub-gke
-# The chown is not redundant with `useradd -m`: -m sets the owner, but the gid
-# is whichever one useradd allocates, and `USER 1000:1000` names gid 1000
-# explicitly. Pinned rather than assumed.
 RUN useradd -u 1000 -m -d /home/scion scion \
+ && mkdir -p /home/scion/.scion \
  && chown -R 1000:1000 /home/scion
 ENV HOME=/home/scion
 USER 1000:1000
