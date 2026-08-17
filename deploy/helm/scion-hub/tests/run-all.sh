@@ -115,7 +115,7 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=4
-EXPECTED_ASSERTIONS=162   # 56 chart-integrity + 71 render-guards + 31 reserved-flags + 4 update-strategy.
+EXPECTED_ASSERTIONS=164   # 58 chart-integrity + 71 render-guards + 31 reserved-flags + 4 update-strategy.
 EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 
 # Enumerated by name, not globbed into a loop. A glob would run whatever is
@@ -134,7 +134,7 @@ SCRIPTS=(
   reserved-flags.sh     # 31 - the reserved-flag lists
   update-strategy.sh    #  4 - the updateStrategy derivation
   render-guards.sh      # 71 - every other render-time refusal, incl. the HA-unlanded gate
-  chart-integrity.sh    # 56 - .helmignore breadth, the packaged file set, base-url, signing key
+  chart-integrity.sh    # 58 - .helmignore breadth, the packaged file set, base-url, signing key
 )
 
 # Each annotation above must equal that script's own committed EXPECTED_TOTAL,

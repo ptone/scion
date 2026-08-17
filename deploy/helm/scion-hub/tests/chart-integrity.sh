@@ -90,7 +90,7 @@ BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real
 # honest encoding of the hold, and bumping it would be the defeat gd-p0-dev
 # warned about. Lifting the hold is a two-line change: 26 -> 35 here, and
 # 107 -> 116 in run-all.sh, in one diff.
-EXPECTED_TOTAL=56
+EXPECTED_TOTAL=58
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output
@@ -1008,7 +1008,64 @@ if grep -q 'ROTATING AN OAUTH CLIENT SECRET' "$_e11_off"; then
 else
   pass "NOTES.txt omits the OAuth rotation restart when no OAuth credentials are set (the condition is a condition, not a constant)"
 fi
-rm -f "$_e11_on" "$_e11_off"
+
+# THE PAIRING, NOT THE TEXT. NOTES.txt carried a "WHAT THIS RELEASE DOES NOT YET
+# DO" list naming "the session secret, the OAuth client secret" long after this
+# chart began configuring both. The same render emitted
+# SCION_SERVER_SESSION_SECRET twice and a client_secret, and NOTES.txt printed a
+# whole section headed ROTATING AN OAUTH CLIENT SECRET REQUIRES A RESTART 45
+# lines above the paragraph saying the OAuth client secret was not configured.
+# The file contradicted itself in one output and the wrong half is the half an
+# operator acts on.
+#
+# Asserting the corrected WORDS would decay at the next phase, exactly as the
+# original did - the list is a standing invitation to go stale, because every
+# phase that lands a feature has to remember to delete a line of prose. So this
+# asserts the PAIRING: whatever the render emits must not appear in the
+# not-yet list. A future phase that lands Filestore and forgets the prose gets a
+# red row instead of a quiet lie.
+#
+# THE CLAUSE IS ISOLATED, NOT THE PARAGRAPH. The paragraph now says both "it
+# configures the session secret and the OAuth client secret" AND "it does not yet
+# configure ...", so grepping the paragraph would match the affirmative half and
+# report a contradiction that is not there. Only the text between "does not yet
+# configure" and the closing sentence is searched.
+#
+# WHITESPACE IS SQUEEZED BEFORE MATCHING, and that is not cosmetic. NOTES.txt is
+# hard-wrapped prose with a two-space indent, so the phrase this depends on is
+# routinely split across a line break - "it does\n  not yet configure" - and a
+# newline-to-space translation alone leaves three spaces in the middle of it.
+# The first run of this arm failed for exactly that reason, on a NOTES.txt edit
+# made in the same commit, and it failed as a META-FAILURE rather than passing
+# against an empty clause. That is the arm working: an absence check that cannot
+# tell "nothing to report" from "I could not read the file" is the defect this
+# whole section keeps finding.
+_e11_notyet="$(tr '\n' ' ' <"$_e11_on" | tr -s ' ' | sed -n 's/.*does not yet configure\(.*\)Do not treat this as a production install.*/\1/p')"
+if [ -z "$_e11_notyet" ]; then
+  echo "META-FAILURE: E11 could not isolate the 'does not yet configure' clause from the rendered NOTES.txt, so the pairing assertions below would pass against an empty string. Either the sentence was reworded or the probe changed shape; both need a human, neither is a pass." >&2
+  rm -f "$_e11_on" "$_e11_off"; exit 2
+fi
+_e11_mf="$(mktemp)"
+"$HELM" template t "$CHART" "${BASE[@]}" --set auth.mode=oauth \
+  --set-string auth.oauth.web.google.clientId=e11-client-id \
+  --set-string auth.oauth.web.google.clientSecret=e11-client-secret-value >"$_e11_mf" 2>/dev/null
+for _e11_pair in \
+  "SCION_SERVER_SESSION_SECRET:session secret:the session secret" \
+  "client_secret:OAuth client secret:the OAuth client secret"
+do
+  _e11_needle="${_e11_pair%%:*}"; _e11_rest="${_e11_pair#*:}"
+  _e11_label="${_e11_rest%%:*}"; _e11_claim="${_e11_rest#*:}"
+  if ! grep -q "$_e11_needle" "$_e11_mf"; then
+    echo "META-FAILURE: E11's pairing arm expected the render to emit $_e11_needle and it does not, so this arm cannot distinguish 'NOTES is honest' from 'the feature was removed'. If the feature really was removed, the not-yet list should gain the line back and this arm should be inverted deliberately." >&2
+    rm -f "$_e11_on" "$_e11_off" "$_e11_mf"; exit 2
+  fi
+  if printf '%s' "$_e11_notyet" | grep -q "$_e11_claim"; then
+    fail "the render emits $_e11_needle, and NOTES.txt still lists \"$_e11_claim\" among the things this release does not yet configure. Every operator is told on every install and upgrade that a thing which IS configured is not, and NOTES.txt is the one document they read. Delete it from the not-yet list in the same diff that lands the feature."
+  else
+    pass "NOTES.txt does not claim the $_e11_label is unconfigured while the render configures it (the pairing, so the list cannot go stale silently)"
+  fi
+done
+rm -f "$_e11_on" "$_e11_off" "$_e11_mf"
 
 # ---------------------------------------------------------------------------
 # E12. EVERY credential-guard call site in templates/ has a witness, and the

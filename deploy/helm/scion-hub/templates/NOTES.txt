@@ -220,10 +220,11 @@ SCHEMA_VERSION IS LOAD-BEARING
 
 WHAT THIS RELEASE DOES NOT YET DO
 
-  The chart is being built incrementally. It renders the hub's settings.yaml,
-  but it does not yet configure Cloud SQL and the database URL, GCS credentials
-  beyond the bucket name, Filestore, the session secret, the OAuth client
-  secret, Ingress or IAP. Do not treat this as a production install.
+  The chart is being built incrementally. It renders the hub's settings.yaml
+  and it configures the session secret and the OAuth client secret, but it does
+  not yet configure Cloud SQL and the database URL, GCS credentials beyond the
+  bucket name, Filestore, Ingress or IAP. Do not treat this as a production
+  install.
 
   THIS RELEASE CAN TURN THE HUB'S HA PREFLIGHT ON, AND IT CANNOT SATISFY IT, SO
   THE CHART REFUSES TO RENDER THOSE SHAPES. Three of the settings this chart
