@@ -978,7 +978,7 @@ fi
 # and refusing it is how a guard earns its deletion.
 if [ -n "$BASE_IDX" ]; then
   USER_OUTSIDE=""
-  ONBUILD_USER=""
+  ONBUILD_IN_CHAIN=""
   for i in $IN_CHAIN; do
     if [ "$i" != "$GKE_IDX" ] && stage_verbs "$i" | grep -qx "USER"; then
       USER_OUTSIDE="$USER_OUTSIDE stage-$i($(stage_name "$i"))"
@@ -998,9 +998,22 @@ if [ -n "$BASE_IDX" ]; then
     # arguments), each defeating a different rule. Enumerating verbs would leave
     # the next one open, and the whole class is unnecessary here: nothing in a
     # leaf application image needs an ONBUILD trigger.
+    #
+    # WHAT THIS RULE DEPENDS ON, AND THEREFORE DOES NOT ITSELF GUARANTEE.
+    # Refusing the construct is only as strong as (a) the line model spelling
+    # ONBUILD the way Docker does -- `ONBUIL\` + `D USER 1000:1000` is not this
+    # verb to a reader that joins continuations wrongly, and it was not this
+    # verb to the awk this file used to carry -- and (b) IN_CHAIN containing
+    # every stage the runtime image actually inherits from. Both are enforced
+    # elsewhere: (a) by reading 2 being buildkit's own parser rather than a
+    # second implementation of it, (b) by rule 17's fatal refusal of a
+    # build-arg-substituted base inside the chain. If either is weakened, this
+    # rule weakens with it SILENTLY, because it will still print its ok line.
+    # Both scopes were live bypasses (corpus 100, 98/99) at the head where the
+    # sentence above was first written.
     ONBUILD_VERB="$(stage_lines_of "$i" ONBUILD | awk 'NF {print toupper($1)}' | sort -u | tr '\n' ',' | sed 's/,$//')"
     if [ -n "$ONBUILD_VERB" ]; then
-      ONBUILD_USER="$ONBUILD_USER stage-$i($(stage_name "$i")):ONBUILD $ONBUILD_VERB"
+      ONBUILD_IN_CHAIN="$ONBUILD_IN_CHAIN stage-$i($(stage_name "$i")):ONBUILD $ONBUILD_VERB"
     fi
   done
   if [ -n "$USER_OUTSIDE" ]; then
@@ -1008,8 +1021,8 @@ if [ -n "$BASE_IDX" ]; then
   else
     ok "no USER instruction in the runtime chain outside '$GKE_STAGE'"
   fi
-  if [ -n "$ONBUILD_USER" ]; then
-    fail "an ONBUILD trigger appears in the runtime chain:$ONBUILD_USER. An ONBUILD fires in every stage built FROM that stage -- which includes the empty trailing stage that is the default build target -- so it adds an instruction to the published image that appears nowhere in the stage the image is built from. Every rule in this script reads instructions, so every one of them can be walked past this way: ONBUILD USER sets the default target's uid, ONBUILD ENV bakes a KUBECONFIG, ONBUILD CMD and ONBUILD ENTRYPOINT bake arguments. The construct is refused outright rather than filtered by verb, because a leaf application image has no use for it and enumerating the dangerous verbs leaves the next one open."
+  if [ -n "$ONBUILD_IN_CHAIN" ]; then
+    fail "an ONBUILD trigger appears in the runtime chain:$ONBUILD_IN_CHAIN. An ONBUILD fires in every stage built FROM that stage -- which includes the empty trailing stage that is the default build target -- so it adds an instruction to the published image that appears nowhere in the stage the image is built from. Every rule in this script reads instructions, so every one of them can be walked past this way: ONBUILD USER sets the default target's uid, ONBUILD ENV bakes a KUBECONFIG, ONBUILD CMD and ONBUILD ENTRYPOINT bake arguments. The construct is refused outright rather than filtered by verb, because a leaf application image has no use for it and enumerating the dangerous verbs leaves the next one open."
   else
     ok "no ONBUILD trigger in the runtime chain"
   fi

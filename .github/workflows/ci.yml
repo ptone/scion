@@ -84,11 +84,11 @@ jobs:
 
       # Guards the root Dockerfile's default build target: `docker build` with no
       # --target must keep producing the plain runtime image, not the non-root
-      # hub-gke image added for GKE. --self-test proves the check can still fail.
+      # hub-gke image added for GKE. The target also runs --self-test, which is
+      # what proves the check can still fail; it is not repeated here, so this
+      # job and a local `make ci` run exactly the same thing.
       - name: Check Dockerfile Stages
-        run: |
-          make dockerfile-stages
-          ./hack/check-dockerfile-stages.sh --self-test
+        run: make dockerfile-stages
 
       - name: Run Tests
         run: make test-fast

@@ -81,6 +81,11 @@ compat-literals:
 	@./hack/check-project-compat-literals.sh
 
 ## dockerfile-stages: Check the root Dockerfile's default build target is still the runtime image
+# The self-test belongs to the target, not to the CI step, so that `make ci`
+# locally and the CI job run the same two commands. It was briefly in both and
+# ran twice; one place is enough, and the guard's own test should travel with
+# the guard rather than with one caller. Output is silenced on success only --
+# a failing case prints to stderr and is not silenced.
 dockerfile-stages:
 	@./hack/check-dockerfile-stages.sh
 	@./hack/check-dockerfile-stages.sh --self-test >/dev/null
