@@ -284,6 +284,16 @@ raw_tail() {
       for (i = (lastfrom > 0 ? lastfrom : 1); i <= NR; i++) {
         if (lines[i] ~ /\\[ \t]*$/) printf "TAILCONT %d %s\n", i, lines[i]
       }
+      # THE ORDER OF THESE THREE TESTS IS DELIBERATE. Continuation is tested
+      # BEFORE comment, so a comment ending in a backslash directly above the
+      # final FROM is reported as PRECONT and the file is refused -- even though
+      # BuildKit strips comments before joining continuations and therefore
+      # builds that file correctly. Reading 1 exists because our comment-versus-
+      # continuation model was wrong four times; having it re-derive that model
+      # in order to be lenient would remove the only reason to have it. It
+      # refuses what it cannot resolve. Pinned by corpus fixture
+      # 103-comment-backslash-directly-above-final-from, so the trade is
+      # something a future reader has to argue with rather than rediscover.
       for (i = lastfrom - 1; i >= 1; i--) {
         if (lines[i] ~ /^[ \t]*$/) continue
         if (lines[i] ~ /\\[ \t]*$/) { printf "PRECONT %d %s\n", i, lines[i]; break }
@@ -374,7 +384,13 @@ raw_tail() {
 self_test() {
   local tmp errors ran
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
+  # The meta case below writes an executable copy of this script into hack/.
+  # It is removed on the way out of every path, including an interrupted run:
+  # a stray copy of the guard, sitting in the directory the guard lives in, is
+  # exactly the kind of thing that gets committed by accident.
+  META_MUTANT="$REPO_ROOT/hack/.selftest-meta-mutant.$$.sh"
+  trap 'rm -rf "$tmp"; rm -f "$META_MUTANT"' RETURN
+  trap 'rm -rf "$tmp"; rm -f "$META_MUTANT"; exit 130' INT TERM
 
   # THE FAILURE COUNTER IS A FILE, AND THAT IS THE WHOLE POINT.
   #
@@ -819,7 +835,7 @@ AS final" | expect 1 \
   # any of the three.
   if [ -z "${DOCKERFILE_STAGES_META:-}" ]; then
     echo "a neutered guard makes the whole suite exit non-zero" >> "$RANLOG"
-    meta_mutant="$REPO_ROOT/hack/.selftest-meta-mutant.$$.sh"
+    meta_mutant="$META_MUTANT"
     # ANCHORED, and the anchor is load-bearing. The first version of this matched
     # /fail "USER appears/ unanchored -- and the only line it found was the awk
     # program on THIS line, which contains that text as a pattern. The suite then
