@@ -40,6 +40,13 @@
 #   8. `hub-gke` sets `ENV HOME`                          (positive twin of 7)
 #   9. `hub-gke` declares no CMD                          (no baked args/secrets)
 #
+# plus two structural preconditions, fatal rather than counted because every
+# check above assumes them:
+#
+#  10. stage names are unique. A second `AS runtime` later in the file silently
+#      repoints the trailing stage at a different image.
+#  11. the file contains nothing this parser cannot read (see below).
+#
 # WHAT IT CANNOT CHECK, AND MUST NOT BE READ AS SAYING
 #
 # It parses one text file. It does not build anything, so:
@@ -57,9 +64,13 @@
 #   - It assumes the current Docker semantics that an untargeted build resolves
 #     to the last stage. If that ever changes, this script is measuring the
 #     wrong thing and will not notice.
-#   - Its parser is line-based. Exotic-but-legal Dockerfile syntax (a custom
-#     `escape` directive, heredocs) is not modelled; the checks would misread it
-#     rather than fail loudly.
+#   - Its parser is line-based and models a subset of Dockerfile syntax. Where a
+#     construct would be *misread* rather than merely missed -- an `escape`
+#     directive, a heredoc -- the script now refuses the file instead of
+#     guessing, because both were demonstrated to pass silently on broken files.
+#     So the limit is enforced, not just declared; but the subset is still a
+#     subset, and the next construct like that will not be known until someone
+#     writes it.
 #
 # Run `hack/check-dockerfile-stages.sh --self-test` to see the script fail on
 # each mutation it is meant to catch.
@@ -87,37 +98,76 @@ ok() { echo "ok: $*"; }
 # ---------------------------------------------------------------------------
 parse() {
   awk '
-    # Join backslash continuations into a single logical line.
-    {
-      line = $0
-      sub(/\r$/, "", line)
-      if (cont != "") { line = cont " " line; cont = "" }
-      if (line ~ /\\[ \t]*$/) { sub(/\\[ \t]*$/, "", line); cont = line; next }
-      logical = line
-    }
-    logical ~ /^[ \t]*#/ { next }        # comment
-    logical ~ /^[ \t]*$/ { next }        # blank
-    {
-      # verb is the first token, uppercased
+    # Stage names are case-insensitive to Docker, so the table lowercases them
+    # and the base refs that point at them. Image refs are lowercase anyway.
+    function emit(logical,   l, n, tok, verb, base, name, rest) {
+      if (logical ~ /^[ \t]*#/) return        # comment
+      if (logical ~ /^[ \t]*$/) return        # blank
       l = logical
       sub(/^[ \t]+/, "", l)
       n = split(l, tok, /[ \t]+/)
-      verb = toupper(tok[1])
+      verb = toupper(tok[1])                  # verb is the first token
       if (verb == "FROM") {
         stage++
-        base = tok[2]
+        base = tolower(tok[2])
         name = "-"
-        if (n >= 4 && toupper(tok[3]) == "AS") { name = tok[4] }
+        if (n >= 4 && toupper(tok[3]) == "AS") { name = tolower(tok[4]) }
         printf "STAGE %d %s %s\n", stage, base, name
       } else if (verb == "ARG" && stage == 0) {
-        next                              # pre-FROM ARG: not part of any stage
+        return                                # pre-FROM ARG: not part of any stage
       } else {
         rest = l
         sub(/^[^ \t]+[ \t]*/, "", rest)
         printf "INSTR %d %s %s\n", stage, verb, rest
       }
     }
+    # Join backslash continuations into a single logical line.
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      if (cont != "") { line = cont " " line; cont = "" }
+      if (line ~ /\\[ \t]*$/) { sub(/\\[ \t]*$/, "", line); cont = line; next }
+      emit(line)
+    }
+    # A continuation left open at EOF is still an instruction to Docker. Dropping
+    # it would let `USER 1000 \` as the final line of the file -- one stray
+    # backslash, no exotic syntax -- pass as an empty last stage.
+    END { if (cont != "") emit(cont) }
   ' "$1"
+}
+
+# ---------------------------------------------------------------------------
+# Parser competence gate.
+#
+# The parser above models a line-based subset of Dockerfile syntax. Two legal
+# constructs change what a line MEANS, so the parser does not merely miss them,
+# it misreads them -- and a misread here reads as a pass:
+#
+#   - `# escape=` redefines the line-continuation character, so lines this
+#     parser joins are separate instructions to Docker (and vice versa).
+#   - heredocs make body lines data, not instructions; a body line reading
+#     `FROM runtime` invents a stage that does not exist, and with a
+#     comment-shaped delimiter the invented stage looks like the empty trailing
+#     stage this script is here to insist on.
+#
+# Both are verified silent passes on genuinely broken files, so neither is
+# merely declared: the script refuses the file instead. A refusal is loud, says
+# what to do, and is the honest answer for a script whose whole job is to be the
+# thing that does not silently pass.
+# ---------------------------------------------------------------------------
+refuse_unparseable() {
+  local f="$1" hits=0
+  if grep -nqiE '^[ \t]*#[ \t]*escape[ \t]*=' "$f"; then
+    fail "$f sets a '# escape=' parser directive, which redefines the line-continuation character. This script joins continuations itself and would misread the file rather than fail on it. Remove the directive, or teach parse() to honour it before re-enabling this check."
+    hits=1
+  fi
+  # `<<` must be preceded by start-of-line, whitespace or '=' to count, so shell
+  # left-shifts inside a RUN (`$((1<<3))`) are not mistaken for a heredoc.
+  if grep -nqE '(^|[ \t=])<<-?['"'"'"]?[A-Za-z_#]' "$f"; then
+    fail "$f uses a heredoc. This script treats every line as an instruction, so heredoc bodies are misread -- a body line starting with FROM or USER is scored as real. Rewrite without the heredoc, or teach parse() to skip heredoc bodies before re-enabling this check."
+    hits=1
+  fi
+  return "$hits"
 }
 
 # ---------------------------------------------------------------------------
@@ -211,7 +261,33 @@ ENV KUBECONFIG=\/home\/scion\/.kube\/config}" | expect 1 \
   echo "${good/ENV HOME=\/home\/scion/RUN true}" | expect 1 \
     "hub-gke with no ENV HOME is rejected" "sets no ENV HOME"
 
-  # 9. a CMD baked into hub-gke
+  # 9. the last line of the file left hanging on a continuation. No exotic
+  #    syntax, one stray backslash -- and an earlier version of this script
+  #    dropped the line entirely and called the last stage empty.
+  printf '%s\nUSER 1000 \\\n' "$good" | expect 1 \
+    "a dangling continuation in the last stage is rejected" "contains 1 instruction"
+
+  # 10. a duplicate stage name silently repoints the trailing FROM
+  echo "${good/FROM alpine AS builder/FROM alpine AS runtime}" | expect 1 \
+    "a duplicate stage name is rejected" "duplicate stage name"
+
+  # 11. constructs the parser cannot read are refused, not guessed at
+  printf '# escape=`\n%s\n' "$good" | expect 1 \
+    "an 'escape' parser directive is refused" "escape"
+  echo "${good/RUN useradd/RUN <<EOT
+useradd}" | expect 1 \
+    "a heredoc is refused" "heredoc"
+
+  # ...and the twin: the heredoc gate must not fire on a left-shift in a RUN,
+  # or the refusal becomes a nuisance that gets deleted.
+  echo "${good/RUN echo build/RUN echo \$((1<<3))}" | expect 0 \
+    "a shell left-shift in a RUN is not mistaken for a heredoc"
+
+  # 12. Docker matches stage names case-insensitively, and so must this
+  echo "${good%FROM runtime}FROM RunTime" | expect 0 \
+    "a case-variant reference to the runtime stage still passes"
+
+  # 13. a CMD baked into hub-gke
   printf '%s\n' "${good/USER 1000:1000/USER 1000:1000
 CMD [\"server\", \"start\", \"--token\", \"hunter2\"]}" | expect 1 \
     "a CMD in hub-gke is rejected" "declares a CMD"
@@ -237,6 +313,13 @@ if [ ! -f "$DOCKERFILE" ]; then
   exit 1
 fi
 
+if ! refuse_unparseable "$DOCKERFILE"; then
+  echo
+  echo "$FAILURES check(s) failed. Nothing below was checked: the file was not parsed."
+  exit 1
+fi
+ok "no construct this parser cannot read (no 'escape' directive, no heredoc)"
+
 TABLE="$(parse "$DOCKERFILE")"
 STAGE_COUNT="$(echo "$TABLE" | awk '$1=="STAGE"{n=$2} END{print n+0}')"
 
@@ -244,6 +327,21 @@ if [ "$STAGE_COUNT" -lt 2 ]; then
   fail "expected a multi-stage Dockerfile, found $STAGE_COUNT stage(s) in $DOCKERFILE"
   exit 1
 fi
+
+# Stage names must be unique. A second `AS runtime` later in the file silently
+# repoints every later `FROM runtime` -- including the trailing stage this
+# script exists to protect -- at the newer definition, which may be an entirely
+# different base image. (BuildKit rejects duplicates outright; the classic
+# builder takes the last one. Either way this file is wrong.) Every check below
+# assumes a name resolves to one stage, so this is fatal rather than counted.
+DUPE_NAMES="$(echo "$TABLE" | awk '$1=="STAGE" && $4!="-" {print $4}' | sort | uniq -d | tr '\n' ' ')"
+if [ -n "$DUPE_NAMES" ]; then
+  fail "duplicate stage name(s) in $DOCKERFILE: ${DUPE_NAMES% }. A later 'FROM <name>' resolves to the last stage of that name, so a duplicate silently changes what the default build target is built from. Stage names must be unique."
+  echo
+  echo "$FAILURES check(s) failed."
+  exit 1
+fi
+ok "stage names are unique, so each 'FROM <stage>' resolves to one stage"
 
 stage_name()  { echo "$TABLE" | awk -v n="$1" '$1=="STAGE" && $2==n {print $4}'; }
 stage_base()  { echo "$TABLE" | awk -v n="$1" '$1=="STAGE" && $2==n {print $3}'; }
