@@ -320,22 +320,39 @@ raw_tail() {
 #
 # WHETHER EACH CASE ACTUALLY TESTS ITS RULE IS MEASURED, NOT ASSERTED. Every
 # guard call site -- a line that begins with the `fail` builtin below -- is
-# neutered one at a time, the call rewritten to a `true` carrying a NEUTERED
-# marker, and the whole suite re-run against the mutant. (Guards are counted by
-# an ANCHORED match, because prose like this line mentions them too.)
-# Last full run: 29 guards, 49 negative cases. Every guard reddens at least one
-# case, every case has exactly one claimant, none unclaimed, none unreachable,
-# and every mutant exits non-zero -- that last one is asserted rather than
-# printed, because a guard whose removal the suite mentions but does not report
-# in $? is invisible to CI.
+# defeated one at a time and the whole suite re-run against the mutant. (Guards
+# are counted by an ANCHORED match, because prose like this line mentions them
+# too.) Every guard reddens at least one case, every case is claimed by at least
+# one guard, none unclaimed, none unreachable, and every mutant exits non-zero --
+# that last one is asserted rather than printed, because a guard whose removal
+# the suite mentions but does not report in $? is invisible to CI.
 #
-# READ THE SPLIT, NOT THE TOTAL. Of the 49, only 24 are HOLES -- cases where
-# removing the guard makes a bad Dockerfile PASS. The other 25 are MESSAGE-ONLY:
-# the file is still refused, by the `die` on the next line or by another rule,
-# and the case goes red only because it matches on its own rule's message. That
-# is defence in depth and it is worth having, but "49 cases, one claimant each"
-# would invite the reader to conclude 49 holes are closed, and 24 are. Twelve of
-# the 29 guards open a hole when removed; seventeen do not.
+# THE NUMBERS BELOW ARE OPERATOR-DEPENDENT AND THE OPERATOR IS NAMED, because
+# the first version of them was not a fact about these guards at all.
+#
+#   S, SUPPRESSION: `fail "` -> `true "NEUTERED `. The guard stops COMPLAINING.
+#   R, REMOVAL:     the same, PLUS `die()` returning instead of exiting when
+#                   nothing has been recorded. A fatal branch taken by a guard
+#                   that is no longer there is not a refusal, and declining to
+#                   exit is what "the guard is absent" means.
+#
+# Nine of the 29 guards are a `fail` immediately followed by `die`. Under S they
+# still exit 1 from their OWN die, so the classifier reads "still refused" off
+# every one of them and reported hole=0 for all nine. That was the operator's
+# signature, not a property of the guards: an instrument that returns the same
+# verdict for every member of a structurally-defined subclass is usually
+# incapable of returning the other verdict for it. Found by gd-p7-rev-4.
+#
+# READ THE SPLIT, NOT THE TOTAL. Population: the suite's own 50 NEGATIVE cases
+# (the 67-fixture adversarial corpus is a separate instrument, and the matrix
+# never opens it). Under R -- the operator the claim is derived from -- 30 of the
+# 50 are HOLES, cases where removing the guard makes a bad Dockerfile PASS, and
+# 20 are MESSAGE-ONLY: the file is still refused BY A DIFFERENT RULE and the case
+# goes red only because it matches on its own rule's message. FIFTEEN of the 29
+# guards open a hole when removed; FOURTEEN are defence in depth. Under S the
+# same run says 24/26 and 12 of 29, and three of those rows are wrong -- the
+# refusal was coming from the guard's own die. Where the two columns disagree is
+# the finding; the artifact prints both.
 #
 # Two guards were unreachable the first time this ran, which is what put GO_BIN
 # and the single-stage case in the file. Re-run it after adding or moving a rule;
@@ -361,12 +378,14 @@ raw_tail() {
 #     the tab form. now: rule 13, fed by BuildKit's EscapeToken. Mutation:
 #     neuter rule 13 -> both red.
 #   heredocs (4 cases)               was: the awk's heredoc regex. now: rule 14,
-#     fed by BuildKit's Heredocs. Mutation: neuter rule 14 -> all four go red,
+#     fed by BuildKit's Heredocs. Mutation: REMOVE rule 14 -> all four go red,
 #     but not for the same reason, and the difference is recorded rather than
 #     hidden: the two plain forms are then ACCEPTED, while the two comment-shaped
 #     ones are still REJECTED by a second rule (the readings disagree, and
 #     hub-gke ends up last). Those two go red anyway because a case matches on
-#     its own rule's message, not on "exit 1".
+#     its own rule's message, not on "exit 1". This sentence was in the file
+#     while the matrix printed hole=0 for rule 14 -- the prose and the number
+#     contradicted each other for two rounds and the number was the wrong one.
 #   heredoc false-positive twins (3) was: the awk regex must not over-match.
 #     now: the emitter must not report a heredoc that BuildKit does not see.
 #     Mutation: re-introduce a raw-text `grep '<<'` gate -> all three red.
@@ -436,6 +455,24 @@ USER 1000:1000
 
 FROM runtime"
 
+  # A PASSING RUN'S OUTPUT, KEPT SO EVERY NEEDLE CAN BE CHECKED AGAINST IT.
+  #
+  # A needle is supposed to say "and it was refused for THIS reason". Twelve of
+  # them said nothing of the kind: `heredoc` also occurs in `ok: no construct
+  # this parser cannot read (no 'escape' directive, no heredoc)`, and
+  # `stage-2(runtime)` and `carries arguments` occur in two more ok: lines. Those
+  # cases were satisfied by SUCCESS output -- a needle that a green run contains
+  # cannot discriminate the reason for a red one, and under the removal operator
+  # two of them went green against a Dockerfile the guard no longer refused.
+  # Found by gd-p7-rev-4 (round 5). The fix is not to re-word twelve strings and
+  # trust the next author: it is to ASSERT the property, once, for every case.
+  local goodout="$tmp/good.out"
+  printf '%s\n' "$good" > "$tmp/Dockerfile.known-good"
+  "$SELF" "$tmp/Dockerfile.known-good" > "$goodout" 2>&1 || {
+    echo "self-test FAILED: the known-good fixture does not pass; every needle check below would be meaningless" >&2
+    echo "the known-good fixture passes" >> "$FAILLOG"
+  }
+
   # expect <expected-exit> <label> [substring the failure message must contain]
   # The substring matters: a fixture that fails for a rule other than the one it
   # was written to trip would otherwise look like a pass.
@@ -448,6 +485,15 @@ FROM runtime"
     # silently stops running cases is the same defect as one that cannot report
     # them.
     echo "$label" >> "$RANLOG"
+    # Anti-vacuity, second kind: a needle that a PASSING run's output already
+    # contains cannot say why a failing run failed. Checked here rather than in
+    # a review, because the needle and the message it points at are edited by
+    # different people at different times.
+    if [ -n "$needle" ] && grep -qF -- "$needle" "$goodout"; then
+      echo "self-test FAILED: $label -- the needle '$needle' also appears in the output of a run that PASSES, so it cannot identify the reason for a refusal. Quote enough of the rule's own failure message to be unique to it." >&2
+      echo "$label" >> "$FAILLOG"
+      return
+    fi
     # Anti-vacuity: a fixture identical to the known-good file tests nothing.
     # The one case that is legitimately byte-identical is named explicitly.
     if [ "$label" != "no trailing newline at all is fine" ] &&
@@ -583,7 +629,8 @@ CMD [\"server\", \"start\", \"--token\", \"hunter2\"]}" | expect 1 \
     "a CMD in hub-gke is rejected" "a CMD is declared in 'hub-gke' or a stage it inherits from: stage-3(hub-gke)"
   printf '%s\n' "${good/EXPOSE 8080/EXPOSE 8080
 CMD [\"server\", \"start\", \"--token\", \"hunter2\"]}" | expect 1 \
-    "a CMD in the runtime stage, inherited by hub-gke, is rejected" "stage-2(runtime)"
+    "a CMD in the runtime stage, inherited by hub-gke, is rejected" \
+    "a CMD is declared in 'hub-gke' or a stage it inherits from: stage-2(runtime)"
 
   # ---- ENTRYPOINT (R5, R8, and the rider on loosening R5) ------------------
   # sed, not ${good/.../...}: in a bash substitution ["/usr/local/bin/scion"]
@@ -596,9 +643,9 @@ CMD [\"server\", \"start\", \"--token\", \"hunter2\"]}" | expect 1 \
   echo "$good" | sed 's|^ENTRYPOINT .*$|ENTRYPOINT ["/bin/sh", "-c", "exec scion \\"$@\\""]|' | expect 0 \
     "an ENTRYPOINT that runs scion via a shell wrapper is accepted"
   echo "$good" | sed 's|^ENTRYPOINT .*$|ENTRYPOINT ["/bin/sh", "-c", "scion server start --token hunter2"]|' | expect 1 \
-    "a shell-form ENTRYPOINT carrying arguments is rejected" "carries arguments"
+    "a shell-form ENTRYPOINT carrying arguments is rejected" "carries arguments:"
   echo "$good" | sed 's|^ENTRYPOINT .*$|ENTRYPOINT ["/usr/local/bin/scion", "server", "start"]|' | expect 1 \
-    "an exec-form ENTRYPOINT carrying arguments is rejected" "carries arguments"
+    "an exec-form ENTRYPOINT carrying arguments is rejected" "carries arguments:"
   echo "$good" | sed 's|^COPY --from=builder .*$|COPY x /usr/local/bin/scion|' | expect 1 \
     "a base stage that does not ingest a built binary is rejected" "is not uniquely identifiable"
 
@@ -641,23 +688,23 @@ EXPOSE 8080|' | expect 0 \
 
   # ---- escape directive: refused at the top, ignored elsewhere -------------
   printf '# escape=`\n%s\n' "$good" | expect 1 \
-    "an 'escape' parser directive is refused" "escape"
+    "an 'escape' parser directive is refused" "sets the parser directive"
   printf '#\tescape=`\n%s\n' "$good" | expect 1 \
-    "a TAB-indented 'escape' directive is refused too" "escape"
+    "a TAB-indented 'escape' directive is refused too" "sets the parser directive"
   printf '%s\n# escape=` is banned here, see hack/check-dockerfile-stages.sh\n' "$good" | expect 0 \
     "a comment mentioning escape= below the top of the file is not a directive"
 
   # ---- heredocs: refused, in every form Docker accepts ---------------------
   echo "${good/RUN echo build/RUN <<EOT
 echo build
-EOT}" | expect 1 "a heredoc is refused" "heredoc"
+EOT}" | expect 1 "a heredoc is refused" "uses a heredoc"
   printf '%s' "${good/RUN echo build/RUN	<<EOT
 echo build
-EOT}" | expect 1 "a TAB before a heredoc marker is refused too" "heredoc"
+EOT}" | expect 1 "a TAB before a heredoc marker is refused too" "uses a heredoc"
   printf '%s\nRUN 0<<#EOF\nFROM runtime\n#EOF\n' "${good%$'\n\nFROM runtime'}" | expect 1 \
-    "an fd-prefixed heredoc with a comment-shaped delimiter is refused" "heredoc"
+    "an fd-prefixed heredoc with a comment-shaped delimiter is refused" "uses a heredoc"
   printf '%s\nRUN <<\\#EOF\nFROM runtime\n#EOF\n' "${good%$'\n\nFROM runtime'}" | expect 1 \
-    "a backslash-quoted comment-shaped delimiter is refused" "heredoc"
+    "a backslash-quoted comment-shaped delimiter is refused" "uses a heredoc"
 
   # ...and the twins. A refusal that fires on legal files becomes a nuisance
   # and gets deleted, which is its own silent pass.
@@ -702,12 +749,12 @@ EXPOSE 8080|' | expect 1 \
 D ["server", "start", "--token", "hunter2"]\
 EXPOSE 8080|' | expect 1 \
     "a CMD whose verb is split across a continuation is still a CMD" \
-    "stage-2(runtime)"
+    "a CMD is declared in 'hub-gke' or a stage it inherits from: stage-2(runtime)"
   echo "$good" | sed 's|^EXPOSE 8080$|USE\\\
 R 0\
 EXPOSE 8080|' | expect 1 \
     "a USER whose verb is split across a continuation is still a USER" \
-    "stage-2(runtime)"
+    "outside 'hub-gke': stage-2(runtime)"
 
   # C3. A DOUBLED trailing backslash does not continue the line, so the USER
   # below is a real instruction in the runtime stage rather than part of the RUN.
@@ -715,7 +762,7 @@ EXPOSE 8080|' | expect 1 \
 USER 0\
 EXPOSE 8080|' | expect 1 \
     "a doubled trailing backslash does not swallow the line below it" \
-    "stage-2(runtime)"
+    "outside 'hub-gke': stage-2(runtime)"
 
   # ...and the positive twin for the whole class. An ordinary continuation must
   # still join, or the guard has traded one misreading for another.
@@ -797,6 +844,17 @@ EXPOSE 8080|' | expect 0 \
   printf '%s\n# the default build target. Do not add anything below this line.\n' "$good" | expect 0 \
     "a comment after the final FROM is fine"
   printf '%s\n' "$good" | sed 's/$/\r/' | expect 0 "CRLF line endings are fine"
+  # ...and the negative twin, because the positive one above does not exercise
+  # what it is named for. A trailing \r is absorbed by the [^ \t]+ base-image
+  # token, so raw_tail emits the same LASTFROM with or without the CRLF strip in
+  # raw_tail -- gd-p7-rev-4 deleted the strip and all cases stayed green. The
+  # strip is load-bearing only for the continuation regexes /\\[ \t]*$/, where
+  # "\<CR>" is not a continuation, so PRECONT goes missing and reading 1 stops
+  # seeing the one line that can absorb the final FROM. This case pairs CRLF
+  # with a continuation and pins the needle to PRECONT's own message.
+  printf '%s\nRUN true \\\nFROM runtime\n' "${good%$'\n\nFROM runtime'}" | sed 's/$/\r/' | expect 1 \
+    "a continuation above the final FROM is still seen with CRLF line endings" \
+    "absorb the final FROM"
   echo "${good%FROM runtime}  FROM runtime" | expect 0 "leading whitespace on the final FROM is fine"
   echo "${good%FROM runtime}FROM runtime AS final" | expect 0 "a named trailing stage is fine"
   echo "${good%FROM runtime}FROM RunTime" | expect 0 \
@@ -905,8 +963,8 @@ AS final" | expect 1 \
   # is asserted so that deleting a case, or an early `return` that skips a
   # block of them, is a failure rather than a quieter pass. Adding a case means
   # bumping this number, which is the intended friction.
-  want_cases=73
-  [ -n "${DOCKERFILE_STAGES_META:-}" ] && want_cases=72   # the meta case skips itself
+  want_cases=74
+  [ -n "${DOCKERFILE_STAGES_META:-}" ] && want_cases=73   # the meta case skips itself
   if [ "$ran" -ne "$want_cases" ]; then
     echo "self-test: expected $want_cases cases, $ran ran. A case was added, deleted or skipped; a suite that quietly runs fewer cases still reports no failures." >&2
     echo "$ran cases ran" >> "$FAILLOG"
@@ -992,6 +1050,14 @@ if [ -n "$ESCAPE" ]; then
 fi
 
 # --- 14. no heredocs (fatal: their bodies are data, not instructions) -------
+# BEFORE YOU DELETE OR LOOSEN THIS: it is TODAY THE SOLE DEFENCE against corpus
+# fixture 30-heredoc-plain. Measured, not inferred -- with this rule REMOVED (its
+# message suppressed AND its die declining to exit), that fixture goes from exit
+# 1 to exit 0: ACCEPTED. The self-test's two plain-heredoc cases behave the same
+# way. Only the two COMMENT-SHAPED heredoc forms are caught a second time, by the
+# readings-disagree check. "The self-test still fails" is not evidence that
+# something else refuses the file: a case can be red purely because it matches on
+# this rule's own wording.
 HEREDOCS="$(echo "$TABLE" | "$AWK_BIN" '$1=="HEREDOC" {printf "line %s: %s\n", $2, $3}')"
 if [ -n "$HEREDOCS" ]; then
   fail "$DOCKERFILE uses a heredoc ($(echo "$HEREDOCS" | tr '\n' ';' | sed 's/;$//')). Reading 2 now understands heredocs -- this refusal is NOT because the parser cannot read them. It is because Docker 20.10.24's built-in frontend and docker/dockerfile:1.9 were measured DISAGREEING WITH EACH OTHER about the same heredoc file: under one, a comment-shaped delimiter hides a phantom FROM; under the other, it hides hub-gke at the end of the file. A better parser tells you what buildkit v0.31.2 thinks, not what the frontend building the image thinks, so the construct is refused rather than interpreted. Rewrite without the heredoc."
@@ -1182,6 +1248,13 @@ fi
 # in the chain derives from is ordinary and stays green (corpus 101), and the
 # trailing stage's own base is already required to be a literal in-file name by
 # rule 4 (corpus 54).
+#
+# BEFORE YOU DELETE OR LOOSEN THIS: it is TODAY THE SOLE DEFENCE against corpus
+# fixtures 98-onbuild-in-arg-hidden-ancestor and 99-user-in-arg-hidden-ancestor.
+# Measured, not inferred -- with this rule REMOVED (its message suppressed AND
+# its die declining to exit), both go from exit 1 to exit 0: ACCEPTED. Rules 6,
+# 10 and 11 do not catch them; they are precisely the rules this one stops from
+# passing vacuously, and a vacuous pass looks exactly like a real one.
 if [ -n "$BASE_IDX" ]; then
   IN_CHAIN=" $BASE_IDX "
   VARBASE=""
