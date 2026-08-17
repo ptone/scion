@@ -90,7 +90,7 @@ BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real
 # honest encoding of the hold, and bumping it would be the defeat gd-p0-dev
 # warned about. Lifting the hold is a two-line change: 26 -> 35 here, and
 # 107 -> 116 in run-all.sh, in one diff.
-EXPECTED_TOTAL=49
+EXPECTED_TOTAL=55
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output
@@ -1011,8 +1011,8 @@ fi
 rm -f "$_e11_on" "$_e11_off"
 
 # ---------------------------------------------------------------------------
-# E12. The credential guard reaches the SCHEDULING fields, not just the two
-# pod-spec fields somebody thought of.
+# E12. EVERY credential-guard call site in templates/ has a witness, and the
+# NUMBER of call sites is itself asserted.
 # ---------------------------------------------------------------------------
 #
 # The pass that guarded hub.podAnnotations and hub.podLabels enumerated the
@@ -1023,12 +1023,30 @@ rm -f "$_e11_on" "$_e11_off"
 # the identical string on hub.podAnnotations was refused. Measured before the
 # fix, not reasoned about.
 #
+# 🛑 AND THEN THE SAME MISTAKE WAS MADE ONE LEVEL UP. The three arms added with
+# that fix covered the three NEW call sites and left the five that were already
+# there with no witness at all. Measured by gd-p3-rev: deleting the guard call
+# from service.yaml, serviceaccount.yaml, configmap-env.yaml or either of the two
+# original deployment.yaml lines left tests/run-all.sh at 155/155 GREEN and
+# hack/verify.sh at 273/273 GREEN. With the hub.podAnnotations call deleted, a
+# postgres DSN rendered verbatim into the Deployment and the suite reported
+# success. A GUARD WHOSE DELETION IS INVISIBLE TO THE SUITE IS NOT A GUARD, IT IS
+# A COMMENT. All eight call sites now have an arm, so all eight are load-bearing.
+#
+# The arms below are ordered by call site, not by importance, so that a reader
+# comparing this list against `grep -rn assertNoCredential templates/*.yaml` can
+# see at a glance whether the two agree. The count assertion at the end is what
+# makes that comparison a test rather than a habit.
+#
 # THE ENUMERATION IS THE FRAGILE PART, NOT THE MATCHER. Every one of these
 # assertions passes by the guard being CALLED on a surface; none of them can tell
-# you about a surface with no call. That is not a hole this file can close - a
-# test can only plant into fields it knows about, which is the same blindness
-# that produced the gap. It is stated so the next reader does not mistake five
-# green rows for coverage of the pod spec.
+# you about a surface with no call. The count assertion narrows this but does not
+# close it: it catches a call site DELETED, and it catches a new template adding
+# a sink and no call ONLY IF the author also does not add a call anywhere. A new
+# template that adds two sinks and one call still passes. That residue is R1's
+# subject - walking .Values once against a committed allow-list - and it is not
+# closed here. It is stated so the next reader does not mistake eight green rows
+# and a count for coverage of the chart.
 #
 # PLANTED VIA A VALUES FILE, NEVER --set-string. `--set-string` runs its own
 # escape parser: 'Sc2\Back\Alpha' arrives as 'Sc2BackAlpha', so the chart is
@@ -1054,6 +1072,20 @@ _e12_arm() { # $1 = values yaml, $2 = expected source name in the failure
     && printf '%s' "$_out" | grep -q "$2"
 }
 for _e12_case in \
+  "service.annotations:service:
+  annotations:
+    example.com/a: \"$_e12_dsn\"" \
+  "serviceAccount.annotations:serviceAccount:
+  annotations:
+    example.com/a: \"$_e12_dsn\"" \
+  "hub.podAnnotations:hub:
+  podAnnotations:
+    example.com/a: \"$_e12_dsn\"" \
+  "hub.podLabels:hub:
+  podLabels:
+    example.com/a: \"$_e12_dsn\"" \
+  "hub.maintenanceMessage:hub:
+  maintenanceMessage: \"$_e12_dsn\"" \
   "hub.nodeSelector:hub:
   nodeSelector:
     disk: \"$_e12_dsn\"" \
@@ -1072,9 +1104,9 @@ for _e12_case in \
 do
   _e12_name="${_e12_case%%:*}"
   if _e12_arm "${_e12_case#*:}" "$_e12_name"; then
-    pass "${_e12_name} refuses a credential (the scheduling fields reach the guard)"
+    pass "${_e12_name} refuses a credential, naming the surface (this call site is load-bearing: delete it and this row goes red)"
   else
-    fail "${_e12_name} renders a DSN into the pod spec without a word. The pod spec is readable by anyone with pod read access - a wider audience than the Secret's RBAC - and hub.podAnnotations refuses the identical string, so this is an unguarded surface beside a guarded one rather than a decision to allow it."
+    fail "${_e12_name} renders a DSN into a non-Secret object without a word. Every object this chart emits other than the Secrets is readable by anyone with read access to that kind - a wider audience than the Secret's own RBAC - and the other seven surfaces in this loop refuse the identical string, so this is an unguarded surface beside seven guarded ones rather than a decision to allow it. If the guard call for this surface was deleted on purpose, the deletion is the thing to justify: it was invisible to this suite until these arms existed."
   fi
 done
 # The arm that caught the empty corpus. Without it, every row above is satisfied
@@ -1087,6 +1119,30 @@ else
   fail "a plain nodeSelector/toleration no longer renders. The credential guard has been widened into legitimate operator input, which is worse than the hole it closed: the hole leaked a value the operator chose to put there, this rejects a value they must set, with no override."
 fi
 rm -f "$_e12_vals"
+
+# The count. The eight arms above each fail when their own call site is deleted;
+# none of them can see a call site that was never there. This asserts the NUMBER
+# of guard calls in templates/*.yaml against a committed figure, so that adding a
+# template with a new operator-supplied sink and no guard call is a diff that has
+# to change this number - and changing it is the moment somebody asks why.
+#
+# Counted from the .yaml templates only. _helpers.tpl is excluded deliberately:
+# its calls are the guard's own recursion and its argv/extraEnv/config.extra
+# helpers, which have their own arms elsewhere in the suite, and folding them in
+# here would make this number move for reasons that have nothing to do with the
+# per-object sinks it exists to count.
+#
+# A MISMATCH IN EITHER DIRECTION IS A FAILURE. Fewer means a guard was removed.
+# More means a guard was added without an arm in the loop above - which is the
+# good kind of change, and it still has to come with its witness in the same diff.
+_e12_expected_calls=8
+_e12_actual_calls="$(command grep -c 'include "scion-hub.assertNoCredential' \
+  "$CHART"/templates/*.yaml 2>/dev/null | awk -F: '{s+=$2} END {print s+0}')"
+if [ "$_e12_actual_calls" = "$_e12_expected_calls" ]; then
+  pass "templates/*.yaml holds exactly $_e12_expected_calls credential-guard call sites, each with an arm above"
+else
+  fail "templates/*.yaml holds $_e12_actual_calls credential-guard call sites, not the committed $_e12_expected_calls. If you removed one, the arm above for that surface should also be red and the surface is now unguarded. If you added one, add its arm to the E12 loop and raise this number in the same diff - an unwitnessed guard is the state this whole section exists to prevent, and it was reached once already by adding three calls and three arms while five older calls had none."
+fi
 
 # ---------------------------------------------------------------------------
 # Fail closed.
