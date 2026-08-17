@@ -400,6 +400,18 @@
           "type": "boolean",
           "description": "The oauth mode's client credentials are not rendered by the chart yet. An oauth install starts and passes its probes; every human login fails. Set true to render it anyway."
         },
+        "existingSecret": {
+          "type": "string",
+          "description": "Name of a Secret you manage holding the session secret. Preferred over auth.sessionSecret: the value never enters your values file or Helm's release storage. Exactly one of auth.existingSecret and auth.sessionSecret must be set. Only the named key is bound into the hub's environment."
+        },
+        "existingSecretKey": {
+          "type": "string",
+          "description": "Key inside auth.existingSecret holding the session secret. Defaults to SCION_SERVER_SESSION_SECRET, which is the name the hub reads. Requires auth.existingSecret; set alone it selects nothing and the render fails."
+        },
+        "sessionSecret": {
+          "type": "string",
+          "description": "The session secret itself, rendered by the chart into secret-session.yaml. Backs both the session cookie key and the shared JWT signing key, so all replicas must agree. The chart never generates one: a generated value rotates on every upgrade, invalidating all sessions and the signing key, and cannot be rendered reproducibly. Exactly one of auth.sessionSecret and auth.existingSecret must be set."
+        },
         "requireStableSigningKey": {
           "type": "boolean",
           "description": "When true the hub refuses to start rather than fall back to a per-process signing key. That fallback is fatal across replicas and silent: each pod signs tokens the others reject, which presents as intermittent logouts."

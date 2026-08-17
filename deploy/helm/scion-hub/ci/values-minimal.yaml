@@ -57,3 +57,18 @@ hub:
 image:
   repository: us-docker.pkg.dev/example-project/example-repo/scion-hub-gke
   tag: ci
+
+auth:
+  # REQUIRED - the render fails without this or auth.existingSecret, which is
+  # why the "smallest install the chart supports" now carries one. There is no
+  # default and the chart will not generate one: a generated secret rotates on
+  # every upgrade, invalidating every session and the shared JWT signing key,
+  # and lookup returns empty under helm template so the golden and the installed
+  # output would disagree.
+  #
+  # A LITERAL IN A ci/ FILE IS NOT A LEAK AND IS NOT A PRECEDENT. This value is
+  # public, committed, and exists so the goldens cover the chart-rendered Secret
+  # path. Real installs use auth.existingSecret - see ci/values-session-existing.yaml
+  # for that shape. tests/secret-material.sh asserts this string reaches only
+  # the Secret, never args, a ConfigMap or an annotation.
+  sessionSecret: ci-minimal-session-secret-not-a-real-secret

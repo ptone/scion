@@ -117,10 +117,32 @@ probes:
 # ci/values-existing-secret.yaml, the only shape where true is permitted at all -
 # see the refusal in templates/configmap-env.yaml.
 #
-# NO `auth:` KEY HERE, DELIBERATELY, AND THIS IS MEASURED RATHER THAN STYLE. A
-# bare `auth:` with nothing but comments under it parses as null and overrides
-# the entire default map, and the schema then reports "(root): auth is required".
-# I hit exactly that while making this edit.
+# THE `auth:` KEY IS HERE NOW, AND THE WARNING THAT USED TO STAND IN ITS PLACE
+# STILL APPLIES: a bare `auth:` with nothing but comments under it parses as
+# null, overrides the entire default map, and the schema reports "(root): auth
+# is required". Two real keys are set below, so it is a map and not null. Do not
+# comment both of them out - comment out the `auth:` line as well.
+auth:
+  # REQUIRED. See ci/values-minimal.yaml for why the chart refuses to default or
+  # generate this, and why a literal here is not a leak.
+  sessionSecret: ci-varied-session-secret-not-a-real-secret
+
+  # THE FALSE BRANCH OF THE SCION_REQUIRE_STABLE_SIGNING_KEY TERNARY, AND THIS
+  # FIXTURE IS ITS ONLY HOME AGAIN. The coverage note that lived here described
+  # the opposite arrangement and was correct when written: the Critical-2 fix had
+  # inverted the default to false, so `false` was what every permutation rendered
+  # and the `true` branch needed a home in ci/values-existing-secret.yaml.
+  #
+  # The session-secret phase inverted it back. `true` is the default now - it is
+  # finally satisfiable, because the chart renders the secret the hub needs - so
+  # `true` is what the other permutations render and `false` is once more the
+  # branch with no other home. A ternary with one live branch is a constant, and
+  # a constant is not coverage.
+  #
+  # Legitimate as a VALUE, not merely as coverage: an operator who supplies a
+  # signing key by some route the chart cannot see is entitled to turn the
+  # refusal off, and nothing here can prove they have not.
+  requireStableSigningKey: false
 
 
 database:

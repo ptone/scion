@@ -63,6 +63,7 @@ auth:
   # this chart yet, so this install would not start. The schema requires the
   # acknowledgement rather than letting the mode be selected by accident.
   acknowledgeOAuthUnlanded: true
+  sessionSecret: ci-oauth-session-secret-not-a-real-secret
 
 agents:
   imageRegistry: us-docker.pkg.dev/scion-ci/scion

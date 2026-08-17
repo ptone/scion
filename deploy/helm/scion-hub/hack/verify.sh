@@ -64,6 +64,7 @@ PERMUTATIONS=(
   settings-oauth
   existing-secret
   varied
+  session-existing
 )
 
 # hub.home per permutation, held here rather than read out of the render.
@@ -85,6 +86,7 @@ declare -A HUB_HOME=(
   [settings-oauth]=/home/scion
   [existing-secret]=/home/scion
   [varied]=/srv/hub
+  [session-existing]=/home/scion
 )
 
 # Documents each permutation renders. A committed constant per values file, and
@@ -94,11 +96,12 @@ declare -A HUB_HOME=(
 # this table. A phase that changes the rendered manifest set updates these here,
 # in its own diff, beside the template it added.
 declare -A EXPECTED_DOCS=(
-  [minimal]=7
-  [settings]=7
-  [settings-oauth]=7
+  [minimal]=8
+  [settings]=8
+  [settings-oauth]=8
   [existing-secret]=6
-  [varied]=7
+  [varied]=8
+  [session-existing]=7
 )
 
 # The one permutation where the chart renders no settings.yaml, because the
