@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=71   # 57 + 14 from the oauth credential section (Phase 3).
+EXPECTED_TOTAL=78   # 57 + 14 oauth credential section (Phase 3) + 7 C4 secret-name collision (F1).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -557,6 +557,158 @@ for rel in t other-release t2; do
     echo "FAIL  hub-id under release '${rel}': ${got}"; failed=$((failed + 1))
   fi
 done
+
+echo "== C4: TWO RELEASES, ONE NAMESPACE, ONE SET OF SECRET NAMES. PINNED AS PRESENT. =="
+# 🛑 EVERY ASSERTION IN THIS SECTION IS A FENCE, NOT A GUARANTEE. THREE OF THEM
+# ASSERT THAT A DEFECT IS STILL HERE. When C4 is fixed they go RED, and red is
+# then the correct result: delete them in the same diff that fixes it.
+#
+# THE DEFECT (C4, filed separately from C1, gd-em's ruling): scion-hub.fullname
+# maps release R and release R-scion-hub to ONE fullname, because it appends
+# "-scion-hub" only when the release name does not already contain it. Every
+# object this chart names is named from that helper, so two independent installs
+# of this chart into ONE namespace render the same metadata.name for all of them.
+#
+# WHY IT IS THIS FILE'S BUSINESS AND NOT SOMEBODY ELSE'S. The helper is not this
+# phase's code and this phase is not fixing it. What this phase DID is hang three
+# NEW objects off it - Secret NAME-session, Secret NAME-settings, ConfigMap
+# NAME-env - and two of those carry secret material. A shared ClusterRole name is
+# an authorization defect; a shared SECRET name means two installs resolve one
+# session signing key and one OAuth client secret, and the loser is whichever
+# applied first. That escalation is this delta's doing, so the fence is this
+# delta's to build. Found by gd-p3-rev; the fixture is mine.
+#
+# 🔴 AND IT IS THIS SUITE'S BUSINESS FOR A SECOND REASON, WHICH IS THAT THE SUITE
+# COULD NOT SEE IT. Every other check in this file renders exactly one release
+# name - `t`, hardcoded in render(). A collision between two release names is not
+# expressible in a corpus with one release name in it, at any assertion count, so
+# no number of green assertions above this line was ever evidence about C4. That
+# is the alphabet error: AN EXHAUSTIVE SEARCH IS ONLY EXHAUSTIVE OVER ITS
+# ALPHABET. Worse, `t` is itself half of a colliding pair - release `t` and
+# release `t-scion-hub` both render `t-scion-hub-session` - so the suite's own
+# fixture sits inside the defect it cannot express.
+#
+# 🛑 DO NOT TRY TO CLOSE C4 HERE, AND DO NOT REACH FOR THE TRUNCATION GATE. In
+# this cell the longest name is 30 bytes against a 63-byte bound, so NOTHING
+# TRUNCATES and a truncation-keyed disambiguator never fires. Hashing the
+# untruncated identity fails too, because both releases produce the SAME
+# untruncated identity. The only input that separates these two installs is
+# .Release.Name, which is precisely what scion-hub.fullname discards.
+_F1_NS=f1-one-namespace
+# metadata.name of one template, for one release, in ONE namespace.
+# NO 2>/dev/null ANYWHERE: a render that fails must put its reason on the
+# terminal. An extractor that silently returns empty is the whole hazard here,
+# because TWO EMPTY STRINGS ARE EQUAL and this section's headline assertions are
+# equality assertions - they would go green on a broken instrument reporting
+# nothing, and green is the answer they are looking for.
+_f1_name() {  # <release> <template basename>
+  "$HELM" template "$1" "$CHART" "${BASE[@]}" --namespace "$_F1_NS" \
+    --show-only "templates/$2" | sed -n 's/^  name: //p' | head -1
+}
+_f1_label() {  # <release>
+  "$HELM" template "$1" "$CHART" "${BASE[@]}" --namespace "$_F1_NS" \
+    --show-only templates/secret-session.yaml \
+    | sed -n 's/^    app.kubernetes.io\/instance: //p' | head -1
+}
+
+_f1_a_sess="$(_f1_name prod            secret-session.yaml)"
+_f1_b_sess="$(_f1_name prod-scion-hub  secret-session.yaml)"
+_f1_a_set="$(_f1_name  prod            secret-settings.yaml)"
+_f1_b_set="$(_f1_name  prod-scion-hub  secret-settings.yaml)"
+_f1_a_env="$(_f1_name  prod            configmap-env.yaml)"
+_f1_b_env="$(_f1_name  prod-scion-hub  configmap-env.yaml)"
+_f1_c_sess="$(_f1_name prod-other      secret-session.yaml)"
+
+# 1. CAPABILITY, AND IT RUNS BEFORE ANY COMPARISON. Six non-empty extractions.
+#    This is the arm that makes the three equality assertions below mean
+#    something: without it, a chart that stopped rendering secrets altogether
+#    would satisfy every one of them.
+executed=$((executed + 1))
+_f1_empty=""
+for _f1_v in "$_f1_a_sess" "$_f1_b_sess" "$_f1_a_set" "$_f1_b_set" "$_f1_a_env" "$_f1_b_env" "$_f1_c_sess"; do
+  [ -n "$_f1_v" ] || _f1_empty="${_f1_empty}x"
+done
+if [ -z "$_f1_empty" ]; then
+  echo "ok    C4 capability: all 7 name extractions are non-empty, so the equality arms below compare rendered names and not two absences"
+else
+  echo "FAIL  C4 capability: ${#_f1_empty} of 7 name extractions came back EMPTY, so nothing below this line is a measurement. Two empty strings are equal and the arms that follow assert equality - they would have gone green. Read the helm errors above."
+  failed=$((failed + 1))
+fi
+
+# 2. NEGATIVE CONTROL, AND IT IS PLACED BEFORE THE FENCES DELIBERATELY. An
+#    unrelated release must render a DIFFERENT session Secret name. If this is
+#    red, the extractor cannot say "different" and the fences below are vacuous
+#    whatever they print.
+executed=$((executed + 1))
+if [ -n "$_f1_a_sess" ] && [ -n "$_f1_c_sess" ] && [ "$_f1_a_sess" != "$_f1_c_sess" ]; then
+  echo "ok    C4 negative control: release 'prod-other' renders a DIFFERENT session Secret name (${_f1_c_sess}), so the instrument can distinguish two releases"
+else
+  echo "FAIL  C4 negative control: release 'prod' and release 'prod-other' rendered the SAME session Secret name ('${_f1_a_sess}' vs '${_f1_c_sess}'), or one was empty. Either the collision is far wider than C4 or the extractor is broken. Both fences below are vacuous until this is green."
+  failed=$((failed + 1))
+fi
+
+# 3-5. THE FENCES. Each asserts the collision is STILL PRESENT.
+executed=$((executed + 1))
+if [ -n "$_f1_a_sess" ] && [ "$_f1_a_sess" = "$_f1_b_sess" ]; then
+  echo "ok    C4 PRESENT (fence): releases 'prod' and 'prod-scion-hub' both render session Secret '${_f1_a_sess}' in one namespace - ONE SESSION SIGNING KEY FOR TWO INSTALLS"
+else
+  echo "FAIL  C4 fence: session Secret names now DIFFER ('${_f1_a_sess}' vs '${_f1_b_sess}'), or an extraction was EMPTY - check that first, an empty pair is an instrument fault and not a fix. If C4 was fixed deliberately, THIS IS THE EXPECTED RED - delete this whole section in the same diff. If you did not fix it, scion-hub.fullname changed under you."
+  failed=$((failed + 1))
+fi
+
+executed=$((executed + 1))
+if [ -n "$_f1_a_set" ] && [ "$_f1_a_set" = "$_f1_b_set" ]; then
+  echo "ok    C4 PRESENT (fence): both releases render settings Secret '${_f1_a_set}' - ONE OAUTH CLIENT SECRET FOR TWO INSTALLS"
+else
+  echo "FAIL  C4 fence: settings Secret names now DIFFER ('${_f1_a_set}' vs '${_f1_b_set}'), or an extraction was EMPTY. Expected red if C4 was fixed; delete this section in that diff."
+  failed=$((failed + 1))
+fi
+
+executed=$((executed + 1))
+if [ -n "$_f1_a_env" ] && [ "$_f1_a_env" = "$_f1_b_env" ]; then
+  echo "ok    C4 PRESENT (fence): both releases render env ConfigMap '${_f1_a_env}'"
+else
+  echo "FAIL  C4 fence: env ConfigMap names now DIFFER ('${_f1_a_env}' vs '${_f1_b_env}'), or an extraction was EMPTY. Expected red if C4 was fixed; delete this section in that diff."
+  failed=$((failed + 1))
+fi
+
+# 6. THE INSTANCE LABEL DIFFERS, AND THIS ARM EXISTS TO STOP A CORRECT FACT BEING
+#    READ AS A REMEDY. It is also a correction, banked in code rather than left
+#    in a message: the two renders are NOT byte-identical, as was reported on the
+#    thread. They differ on this label at 11 sites and on two Deployment checksum
+#    annotations downstream of it. What is identical is every metadata.name, and
+#    that is the whole defect, because an apply keys on kind plus namespace plus
+#    NAME. A label that discriminates on an object the apply is already
+#    overwriting protects nothing.
+executed=$((executed + 1))
+_f1_la="$(_f1_label prod)"; _f1_lb="$(_f1_label prod-scion-hub)"
+if [ -n "$_f1_la" ] && [ -n "$_f1_lb" ] && [ "$_f1_la" != "$_f1_lb" ]; then
+  echo "ok    C4: app.kubernetes.io/instance DOES differ across the colliding pair ('${_f1_la}' vs '${_f1_lb}') - the renders are NOT byte-identical, only their names are, and the label is NOT a mitigation"
+else
+  echo "FAIL  C4: the instance label did not differ across the colliding pair ('${_f1_la}' vs '${_f1_lb}'), or one was empty. If it is genuinely identical now, the two installs have become indistinguishable on every field and C4 is worse than filed."
+  failed=$((failed + 1))
+fi
+
+# 7. THE SUITE'S OWN FIXTURE IS INSIDE THE DEFECT, AND THAT IS ASSERTED HERE
+#    RATHER THAN ONLY DESCRIBED AT THE TOP OF THIS SECTION. Every other check in
+#    this file renders release `t`, and release `t` collides with release
+#    `t-scion-hub` by exactly the mechanism above. A fact stated in a comment and
+#    checked by nothing is the decay this suite exists to prevent - the SCRIPTS
+#    annotations in run-all.sh sat stale at 57 and 38 for the same reason.
+#
+#    🛑 THIS ARM IS NOT A REQUEST TO CHANGE THE FIXTURE NAME. Renaming `t` would
+#    make this one arm green and would not move C4 an inch; it would only stop
+#    the suite admitting where it stands. The arm is here so that the admission
+#    is load-bearing.
+executed=$((executed + 1))
+_f1_t="$(_f1_name t secret-session.yaml)"
+_f1_t2="$(_f1_name t-scion-hub secret-session.yaml)"
+if [ -n "$_f1_t" ] && [ "$_f1_t" = "$_f1_t2" ]; then
+  echo "ok    C4 PRESENT (fence): this suite's own fixture release 't' shares session Secret '${_f1_t}' with release 't-scion-hub' - the corpus every check above runs in is itself half a colliding pair"
+else
+  echo "FAIL  C4 fence: release 't' and release 't-scion-hub' no longer share a session Secret name ('${_f1_t}' vs '${_f1_t2}'), or the extraction was empty. Expected red if C4 was fixed; delete this section in that diff."
+  failed=$((failed + 1))
+fi
 
 echo "---"
 echo "executed=${executed} expected=${EXPECTED_TOTAL} failed=${failed}"
