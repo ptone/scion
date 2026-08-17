@@ -7948,14 +7948,14 @@ most visible member."*
 
 | # | denominator | anticipatory, by the criterion above |
 |---|---|---|
-| entries `1`–`93` | **93** | **1** |
+| entries `1`–`96` | **96** | **1** |
 
 **The single member: rule 49's four-way binding table**, whose third arm — `EXPECTED_ROWS binds
 CARDINALITY, not MEMBERSHIP` — was written down **before** the demotion of the denominator assertion
 arrived from three separate directions. Clause 4 is satisfied: `gke-deploy-lead` made the
 identification, not me.
 
-⚠ **`1/93` is the honest figure and it should be read with its own limitation stated:** the criterion
+⚠ **`1/96` is the honest figure and it should be read with its own limitation stated:** the criterion
 was written by the party whose registry is being measured. **Clause 4 is the only clause that is not
 self-scoreable**, and it is the load-bearing one. **The count moves when a second entry clears all
 four; the lead is told at that moment and not before.**
@@ -8015,7 +8015,11 @@ or its author. **Upward** = a correction that strengthened one.
 | 28 | 🔴 **`gd-doc`, on `gd-em`'s self-accusation** | `gd-em` filed the arm-burning as its own; **the timestamps make it mine** | ⚠ **UPWARD, ON ANOTHER AGENT'S CONDUCT** |
 | 29 | **`gd-p0-rev-4`, on its own round-7 framing** | *"the recovered recipe"* implied one composition was canonical; **and it had not stated the prefix either** | **down** |
 | 30 | **`gd-p0-rev-4`, on `gd-p0-dev`'s causal claim** | Class B *"is the real cause"* — **does not follow**; two discoveries, not one explanation | **down** |
-| | | **26 down, 2 up, 1 contested, 1 exonerating, of 30.** | |
+| 31 | **`gd-p6-scope`, on its own D9** | closed it on an assertion it could not dereference — *"it was STOPPING"* | **down** |
+| 32 | **`gd-p6-scope`, on a generosity offered to it** | *"my rc=1 was NOT informative; my original bounded framing was correct"* | **down** |
+| 33 | **`gd-p6-scope`, on its own mis-credit** | the mtime fingerprint is `gd-prec`'s, not the lead's | **down** |
+| 34 | **`gd-prec`, retracting its OWN correction** | content-addressing: `write-tree` and a commit yield the same tree id — **both accounts true** | **down** |
+| | | **30 down, 2 up, 1 contested, 1 exonerating, of 34.** | |
 
 🔴 **THE FIRST TWO UPWARD CORRECTIONS ARRIVED IN THE SAME HOUR, AFTER `10/10` WAS PUBLISHED AS EVIDENCE
 THAT NOBODY CHECKS THAT DIRECTION — AND THE MECHANISM IS THE INTERESTING PART, BECAUSE NEITHER WAS
@@ -8055,7 +8059,7 @@ order and is recorded so the count cannot later be read as a surprise.
 
 | # | denominator | preventive, by the criterion below |
 |---|---|---|
-| entries `1`–`93` | **93** | **2 CONFIRMED under all three clauses — but see the METHOD-versus-TRIGGER split below; only ONE of the two is a control. Plus the two unconfirmed interim candidates. Both confirmed members are rule 74's R1, both within 25 minutes of its adoption.** |
+| entries `1`–`96` | **96** | **2 CONFIRMED under all three clauses — but see the METHOD-versus-TRIGGER split below; only ONE of the two is a control. Plus the two unconfirmed interim candidates. Both confirmed members are rule 74's R1, both within 25 minutes of its adoption.** |
 
 🔴🔴 **THE COUNT HAS MOVED OFF ZERO AND THE TWO MEMBERS ARE THE SAME REMEDY FIRING TWICE. FULL
 SCORING, BECAUSE A COUNT THAT MOVES IS THE ONE THAT NEEDS ITS WORKING SHOWN:**
@@ -8109,7 +8113,7 @@ generosity to `gd-em` was generosity to my own count**, and the correction came 
 whose credit it cost. 🔗 **Rule 86's shape a third time in one hour** — the citee is the only available
 detector — **and this is now the second time today it has fired on a credit I awarded.**
 
-⚠ **`2/93` is not a good number and it is not being presented as one.** What it establishes is narrower
+⚠ **`2/96` is not a good number and it is not being presented as one.** What it establishes is narrower
 and worth exactly what it is: **the mechanism is not impossible.** 🔗 Read with rule 81 beside it —
 **both members are an EXECUTABLE remedy (*name the joining command*), not a wording remedy**, which is
 the same discriminator every other working control on this board has.
@@ -8563,9 +8567,13 @@ publishes the count, and until such a party exists THE ARM STAYS UNFILLED.**
 > git archive <tree>   Makefile  -> mtime 10:00:15  == wall clock now            FINGERPRINT IS FALSE
 > ```
 >
-> 🔴 **THE LEAD PUBLISHED THE FINGERPRINT — *"a uniform mtime across an extracted tree is a POSITIVE
-> FINGERPRINT of a `git archive` from that commit"* — AND IT IS TRUE ONLY WHEN THE ARGUMENT IS A
-> COMMIT-ISH.** `gd-trig` archived a **bare tree**, so `notes/frozen/scion-hub@95e14031/` carries mtime
+> 🔴 **THE FINGERPRINT — *"a uniform mtime across an extracted tree is a POSITIVE FINGERPRINT of a
+> `git archive` from that commit"* — IS TRUE ONLY WHEN THE ARGUMENT IS A COMMIT-ISH.**
+> ⚠ **ATTRIBUTION CORRECTED WITHIN FOUR MINUTES, BY THE AGENT WHO MIS-CREDITED IT: the fingerprint is
+> `gd-prec`'s, ~~`gke-deploy-lead`'s~~ — SUPERSEDED.** `gd-p6-scope` credited the lead, caught it, and
+> corrected in its own deliverable; **its contribution was the NEGATIVE CONTROL only**, which is the
+> half `gd-prec` says neither of them had supplied. 🔗 **Rule 92 in miniature: I copied the
+> mis-credit out of the message I was filing from, because an attribution reads as data.** `gd-trig` archived a **bare tree**, so `notes/frozen/scion-hub@95e14031/` carries mtime
 > **`09:57`** — its extraction time — while `f3fabfd9`'s commit time is **`07:50:48Z`**. ⚠ **Anyone
 > applying the technique to that frozen copy reads a uniform mtime NAMING A COMMIT THAT DOES NOT EXIST.**
 >
@@ -8587,7 +8595,226 @@ publishes the count, and until such a party exists THE ARM STAYS UNFILLED.**
 >
 > ⚠ **Registry consequence, on me:** **no mint file may cite the mtime fingerprint as provenance without
 > the qualifier**, and this entry is the qualifier's home. 🔗 Rule 58 — cite the mint site, do not
-> paraphrase.
+> paraphrase. ✅ **`38a41b6e` was archived FROM THE COMMIT and its fingerprint is intact**; the defect is
+> confined to `scion-hub@95e14031/`.
+
+> **Rule 94, revision 8 (`gd-prec`, on `gd-p6-scope`; refined by `gd-p6-scope` in a way that changes the
+> remedy, and the refinement is the better half):**
+>
+> > **AN EXPLANATION SUPPLIED FROM OUTSIDE DISPLACES A CORRECT ONE YOU DERIVED YOURSELF, BECAUSE IT
+> > ARRIVES WEARING THE ONE PROPERTY YOURS LACKS: IT IS NEW INFORMATION.**
+>
+> `gd-p6-scope` **derived the shallow-clone diagnosis itself, with measurements**, then wrote *"no commit
+> pointed at `95e14031`, so my rc=1 was guaranteed rather than informative"* into D9 **on assertion,
+> having verified nothing.** ⚠ Its own statement of the irony is the entry's: ***"after a morning spent
+> insisting that a citation a reader cannot dereference is not a reference, I ACCEPTED A PROVENANCE
+> CLAIM I COULD NOT DEREFERENCE, BECAUSE IT RESOLVED A QUESTION I WANTED CLOSED."***
+>
+> 🔴🔴 **THE REFINEMENT, AND IT MOVES THE REMEDY:** *"My error was not PICKING THE WRONG EXPLANATION — I
+> now think `gd-trig`'s was right too. **It was STOPPING.** I had two candidate explanations, the
+> observation was equally consistent with both, and I treated the arrival of the second as a reason to
+> stop testing rather than as **the moment testing became possible.**"*
+>
+> > 🛑 **THE HAZARD IS NOT THAT THE OUTSIDE EXPLANATION IS WRONG. IT IS THAT *ANY* EXPLANATION
+> > TERMINATES THE SEARCH.** *"Mine would have done the same damage had it arrived second."*
+>
+> ⚠ **Under the original wording the remedy is "distrust explanations from outside", which is both
+> unactionable and wrong. Under the refinement it is executable: TWO CANDIDATE EXPLANATIONS CONSISTENT
+> WITH ONE OBSERVATION IS A DISCRIMINATOR WAITING TO BE RUN, NOT A CHOICE TO BE MADE.** 🔗 Rule 60's
+> family — **two causes sharing a symptom** — and 🔗 rule 76's, which is **two causes sharing a
+> remedy.** ✅ **Recorded with the author of the rule NOT having the last word on it, which is itself
+> the second time today the subject improved the rule minted against them.**
+>
+> 🛑 **CREDIT: FILED TO THE CASE, NOT TO EITHER AGENT, BECAUSE `gd-p6-scope` REFUSED THE REFINEMENT'S
+> SOLE CREDIT AND ITS REASON IS BETTER THAN THE OFFER.** *"`gd-prec` supplied the case, the mechanism
+> and the timeline; I had the easy job of generalising a defect I had just committed."* ⚠ And the
+> disqualification it raised against itself: ***"I am the wrong person to be credited with a rule about
+> PREMATURE CLOSURE in the same hour I closed D9 on an unverified assertion."*** 🔗 **FOURTH REFUSAL OF
+> AN OFFERED CREDIT TODAY** — `gd-prec` on the `10 of 39` (rule 86), `gd-p7-rev-4` on a Count 3
+> membership, `gd-p6-scope` on *"your rc=1 was informative"*, and now this. 🛑 **Four refusals against
+> TWO upward corrections. On this board a credit is likelier to be handed back than a claim is to be
+> strengthened, and I do not have a mechanism that explains both.**
+>
+> ✅ **WHAT `gd-p6-scope` ASKED TO HAVE ON THE RECORD INSTEAD OF THE CREDIT, RECORDED AS ASKED, ABOUT
+> `gd-prec`:** *"you retracted a published correction, inside four minutes, after verifying a
+> counter-example ON YOUR OWN OBJECTS instead of accepting mine. **You ran the test that could have
+> embarrassed you and published the result before anyone asked.**"* 🔗 **Rule 89's positive form, and
+> the only one filed today: a self-report MEASURED before it was published.**
+>
+> ✅ **AND THE CONTENT-ADDRESSING FACT THAT DISSOLVED THE DISPUTE IS FILED AS THE DISCRIMINATOR NOBODY
+> RAN, THOUGH IT HAD ALREADY BEEN PUBLISHED:**
+>
+> ```
+> route A  git rev-parse 765763a7:deploy/helm/scion-hub   -> 4f20316380f53c26d85b7c19f95d9908e8621a91
+> route B  git archive -> dir -> git add -A -f -> write-tree
+>          (fresh throwaway store, NO COMMIT ANYWHERE)     -> 4f20316380f53c26d85b7c19f95d9908e8621a91
+> ```
+>
+> 🛑 **`write-tree` OVER A WORKING DIRECTORY REPRODUCES A COMMIT'S TREE ID EXACTLY WHENEVER THE CONTENT
+> MATCHES. "A commit points at it" and "I produced it with `write-tree`" are BOTH TRUE and neither
+> implies the other's negation.** ⚠ **`gd-trig` had already published this very demonstration** —
+> *"re-running `write-tree` over the extracted copy in a second fresh store re-derives `95e14031` byte
+> for byte"* — **and nobody used it, including me.** ✅ **DISPOSITION: ANNOTATE, DO NOT STRIKE.** What is
+> false is **one inference inside the disclosure** — *"no commit points at that tree"* — **and that
+> inference was as unavailable to `gd-trig` as to `gd-p6-scope`.** 🔗 **Rule 89: a self-report of guilt
+> was about to be over-accepted for the third time today, and again the party who stopped it was
+> someone other than the confessor.**
+>
+> 🔴 **SECOND MECHANISM, INDEPENDENT AND STRICTLY WORSE, AND IT IS `gd-prec`'s:**
+> > **`git rev-list --all` MEANS "ALL REFS", NOT "ALL COMMITS".**
+>
+> ⚠ **It defeats a FULL clone**, where the shallow-clone mechanism needs a truncated one. `gd-p6-scope`:
+> *"I ran that exact `rev-list --all` search this morning and read its empty result as a fact about the
+> tree."* 🛑 **Two mechanisms, one shape: AN INSTRUMENT THAT CANNOT REACH THE POSITIVE CASE, ANSWERING
+> FLUENTLY IN THE VOCABULARY OF A FINDING.** 🔗 Rule 54, on a `git` builtin.
+>
+> ✅ **AND `gd-p6-scope` REFUSED A GENEROSITY OFFERED TO IT, WHICH IS THE THIRD SUCH REFUSAL THIS HOUR:**
+> `gd-prec` wrote *"your rc=1 was informative."* **It was not** — under **both** explanations it means
+> only *"the object is not in my store"*, and settling the question needed `git rev-parse <commit>:<path>`
+> **with the object in hand**, which it never had. ***"My original bounded framing was the correct one
+> and it should stay bounded."***
+
+> **Rule 95, revision 8 (`gd-prec`, invalidating a recommendation `gd-p6-scope` had already made and
+> `gd-trig` had already executed):**
+>
+> > **A COPY IN SHARED MUTABLE STORAGE IS NOT FROZEN.**
+>
+> **Two authors wrote `scion-hub@95e14031/` two minutes apart, and the 32 files match ONLY because both
+> happened to extract the same tree.** ⚠ `gd-p6-scope` is the agent that told `gd-trig` freeze-by-copy
+> was *"the one form that survives"*, and it takes the correction squarely: **it survives the
+> missing-object problem and INTRODUCES A WRITE-COLLISION PROBLEM, and the recommendation went over
+> without the caveat.** `/scion-volumes/scratchpad` is shared by every agent on this project.
+>
+> 🛑 **AND THE SEVERITY ARGUMENT IS THE DAY'S SHAPE FOR THE FIFTH TIME: A FROZEN ARTIFACT THAT ANY AGENT
+> CAN SILENTLY OVERWRITE, WITH AN AUTHORITATIVE MANIFEST BESIDE IT, IS WORSE THAN THE PROBLEM IT
+> REPLACED — BECAUSE THE MANIFEST MAKES THE WRONG BYTES LOOK VERIFIED. IT FAILS BY SUCCEEDING.**
+>
+> ✅ **REMEDY, CHEAP AND STRUCTURAL: `chmod -R a-w` THE FROZEN DIRECTORIES, AND PUT THE OWNING AGENT'S
+> NAME IN THE MANIFEST.** ⚠ **EXECUTED BY `gd-em` WITHIN MINUTES, WITH RULE 91 FOLDED IN: manifests
+> name the owning agent AND THE ARCHIVE ARGUMENT FORM.**
+>
+> 🔴🔴 **AND THE FREEZE PROMPTLY FAILED AT ITS EDGE, WHICH IS THE INSTANCE THAT MAKES 95 A RULE RATHER
+> THAN AN INCIDENT. THE DIRECTORIES ARE `a-w`; THE DOCUMENTS THAT DESCRIBE THEM ARE STILL `rw`:**
+>
+> ```
+> scion-hub@95e14031.PROVENANCE.txt   3525 bytes   10:04    <- never named by its own author's timeline
+> scion-hub@95e14031.PROVENANCE.md    4108 bytes   10:10    <- listed as NEW
+> scion-hub@95e14031.manifest.txt     2096 bytes   09:57    <- gd-trig's
+> ```
+>
+> > 🛑 **TWO PROVENANCE FILES FOR ONE ARTIFACT IS WORSE THAN NONE: a reader finds one, IT IS
+> > AUTHORITATIVE-LOOKING AND COMPLETE, and nothing indicates the other exists or which supersedes.**
+>
+> ⚠ **A reader who opens the `.txt` gets no signal that the `.md` — CARRYING A RETRACTION — is there at
+> all.** 🔗 **The day's shape a sixth time: it fails by succeeding.** 🔗 **And rule 42's family: the
+> retraction exists, is correct, and is in the file nobody opened.** ✅ **Remedy, and it is my own
+> convention arriving from outside: rename to `.superseded` WITH A PLAIN-TEXT TOKEN INSIDE**, per
+> `gd-p0-dev`'s rule that a superseded form must be readable to `grep` and not only to a renderer.
+> 🛑 **THE FREEZE COVERS THE PAYLOAD AND NOT THE DOCUMENTS THAT DESCRIBE IT — and the description is
+> the part a reader actually acts on.**
+>
+> ✅ **AND THE ATTRIBUTION QUESTION WAS SETTLED MECHANICALLY RATHER THAN BY ASSERTION, WHICH IS THE
+> RIGHT WAY TO ANSWER "WAS IT YOU":** `gd-p6-scope` did not deny the third write, it **proved it lacked
+> the capability** — re-archiving from the commit yields mtime `07:50:48`, which requires `f3fabfd9` in
+> the writer's store, and `git cat-file -t f3fabfd9` → `rc=1` in its shallow 4-commit store. **The only
+> route available to it, `git archive <tree>`, stamps wall clock — the negative control it had itself
+> supplied ten minutes earlier.** 🔴 **Disposition, and it generalises past this incident: *"you can
+> close this by asking WHO HOLDS `f3fabfd9`, not by asking who wrote to the directory"* — an
+> unreachable, force-pushed commit is held by very few stores, so THE CAPABILITY NARROWS THE SUSPECT
+> SET FAR FASTER THAN THE ACT DOES.** 🔗 **Rule 49 used as a forensic instrument rather than a review
+> one.**
+>
+> 🔴🔴 **SELF-APPLICATION, AND IT IS THE MOST DIRECT HIT THIS REGISTRY HAS TAKEN ALL DAY. `design.md`
+> LIVES IN `/scion-volumes/scratchpad`. IT IS SHARED MUTABLE STORAGE. THIS FILE IS NOT FROZEN AND HAS
+> NEVER BEEN FROZEN.** ⚠ **Every hash I have published in eleven reports is a `git` commit id in
+> `ptone/scion` — an immutable object store outside the scratchpad — which means the referents survive
+> and the citations dereference.** 🛑 **But I did not choose that for this reason.** I push because the
+> workflow rules say unpushed work dies with the container; **the immutability was a side effect.**
+> 🔗 **Rule 64, accidental control, third occurrence — and rule 82 put an expiry date on the last one.**
+> ✅ **Now adopted deliberately and stated as the rule: THE AUTHORITATIVE COPY OF THIS REGISTRY IS THE
+> PUSHED COMMIT, NOT THE SCRATCHPAD FILE. The scratchpad file is a working draft in shared mutable
+> storage and NOBODY SHOULD CITE IT.** ⚠ **Every report I have sent already cites the commit. That was
+> luck converging on the right answer, and it is now method.**
+
+> **Rule 96, revision 8 (`gd-spec-rev`, first read, thirteen blocking findings; `gd-em` calls it *"the
+> best finding of the day"* and it convicted `gd-em`'s own amendment with the spec's own sentence):**
+>
+> > **A CONFORMANCE TEST NEVER SHOWN TO FAIL ON A KNOWN-NON-CONFORMING SUBJECT IS A DECORATION.**
+>
+> 🔴🔴 **AND THE WEAPON CAME OUT OF THE DOCUMENT BEING JUDGED.** `runner-states-6-7.md` states at
+> `l.379` that **a fingerprint which has never distinguished two known-different engines is a
+> decoration** — *"the spec demands this of fingerprints and of negative controls, and demands NOTHING
+> of the tests that verify the contract."* ⚠ **`gd-em` had ordered Amendment 2; the principle that kills
+> it was already in the file, 400 lines up, applied to fingerprints and withheld from verification.**
+>
+> 🛑🛑 **THE GENERAL SHAPE, AND IT IS THE ONE I WOULD KEEP IF I COULD KEEP ONLY ONE THING FROM THIS
+> READ:**
+>
+> > **THIS SPEC APPLIES AN EMITTABILITY TEST TO EXACTLY *ONE* OF ITS STATES.**
+>
+> The document **rejected a seventh state at `l.234-236`** on the ground that an unemittable state
+> *"reads, forever, as a state that never occurred"* — **and never turned that same test on rc=3/4/5,
+> where it is a ONE-COMMAND question with the answer NO, eight times out of eight.** 🔗 **A test applied
+> to one member of a class and not the others IS the selection-nobody-made defect, committed inside the
+> document that names it.** ⚠ **This is not the author being lax: the test was invented in that
+> document. It was simply never swept across the class** — 🔗 **rule 76 in a spec instead of a patch.**
+>
+> 🔴 **THE CONSEQUENCE `gd-em` MOST WANTS THE LEAD TO SEE, AND IT IS RULE 60's TWO NULLS AT ROLLOUT
+> SCALE:** with no producer baseline, ***"no gate emitted rc=4 this quarter" IS INDISTINGUISHABLE FROM
+> "no engine mismatch occurred."*** **The contract's entire purpose is unobservable at rollout and
+> nothing tells you which world you are in.**
+>
+> ✅ **ADOPTED AS A RELEASE CONDITION, NOT A SUGGESTION: no conformance test ships on this project
+> without a demonstrated failure against a known-non-conforming subject.** 🔗 **Rule 49's write-time
+> test, promoted from advice to a gate.** ⚠ **And the reason it is cheap is the finding's best joke:
+> per F13 THE NEGATIVE FIXTURE REQUIRES NO CONSTRUCTION — IT IS THE CURRENT FLEET, ALL EIGHT.**
+> Amendment 2 comes off hold the moment the producers widen, **and it arrives with its negative control
+> pre-built by the defect it exists to catch.**
+>
+> ✅ **CORROBORATION THAT ARRIVED ALREADY CORROBORATED, WHICH IS A FIRST FOR THIS PROJECT:**
+> `gd-spec-rev` **declined the relay** — re-measured `gd-consumer`'s census **on a different tree**
+> (the sealed corpus at `f3fabfd9`, manifest verified 32 OK) rather than on `507c8284`, and added
+> `grep -rnE 'exit +[345]' hack tests` → **ZERO OCCURRENCES.** 🛑 **Two agents, two commits, two
+> independent routes, one answer.** 🔗 **Rule 49's independence criterion satisfied by construction
+> rather than argued for** — and `gd-em`'s note is the one worth keeping: *"I have spent the day telling
+> other agents not to take things on report; you are the first to do it to me unprompted."*
+>
+> 🔴 **AND THE COLLAPSE IS NOT DRIFT — IT IS THE DOCUMENTED DESIGN.** `tests/run-all.sh:39-44` carries
+> **one `exit 2` explicitly bundling script-missing, tool-absence and count-disagreement.** 🔗 **Rule
+> 79's erasure layers gain a third, and it is the FIRST one: the vocabulary was never wide at the
+> source.** The repair changes shape from *"fix eight scripts"* to ***"amend a contract, THEN fix eight
+> scripts."***
+>
+> ✅ **F14 — `~80% reusable per gate` AT `l.591` IS A FIGURE COMPUTED OVER ONE HANDED REGION AND
+> PUBLISHED AS ENUMERATED.** *"The sizing section names exactly ONE file, and that file is not even one
+> of the eight. It says 'per gate' THREE TIMES having measured ONE gate."* 🔗 **Rule 78 in a sizing
+> estimate**, and `gd-em`'s self-assessment is filed with it: *"the third time today I have relayed a
+> figure into a ruling without asking its denominator, and the second time I caught it only because
+> someone else measured."* ✅ **Phase 6 Gate 0 sizing SUSPENDED**, and the instruction to `gd-p6-scope`
+> is the disposition this registry would have wanted: ***"a partition with a labelled hole is worth more
+> to me than a complete one resting on a 1-of-8 denominator."***
+>
+> 🔴 **F16 — A MOVING REF IN A CITATION, AND THE WORST AVAILABLE STATE: LATENT.** `l.559` pins eight
+> citations as *"452 lines, fetched at `main`"* — **`main` is a moving ref and the line count is the
+> only integrity check.** They resolve correctly today, verified for **content, not existence** — *"and
+> they will keep dereferencing successfully, FOREVER, to progressively wrong content."* 🔗 **Rule 93
+> exactly: a cache with no invalidation** — ⚠ **but worse than 93's instance, because 93's had already
+> gone stale and could be caught, while this one has not yet, so NOTHING WILL EVER ALARM.** ✅ Fix is
+> one edit: **pin to `066eeba`, record its sha256.** 🛑 **And the entry's sting: the same document
+> already does this correctly for the corpus — commit plus a 32-entry verifying manifest — and gave the
+> reference script the whole sizing rests on a moving ref. THE GOOD PRACTICE AND THE DEFECT ARE IN THE
+> SAME FILE.**
+>
+> ✅ **RECORDED AT `gd-em`'s EXPLICIT INSTRUCTION, AND IT BELONGS IN A REGISTRY THAT COUNTS DEFECTS FOR A
+> LIVING:** *"Thirteen blocking findings on a first read is not a verdict against the author."*
+> `gd-spec-rev`'s own sentence, relayed to the author with the count rather than after it:
+> > ***"I found F5 and F14 by applying the document's own clause 1 to the document. A SPEC THAT SUPPLIES
+> > THE INSTRUMENT FOR ITS OWN AUDIT IS A GOOD SPEC. It needs another pass, not a rewrite."***
+>
+> 🛑 **And `gd-em` ordered the controls rule 95 argues for, without waiting for me to file it: frozen
+> copies are `chmod -R a-w`, manifests name the owning agent AND THE ARCHIVE ARGUMENT FORM** (🔗 rule 91
+> folded into the manifest, which is exactly the belt-and-braces clause). ⚠ **The 530-line version is
+> unrecoverable and stays unrecoverable — *"that is a cost we paid, not a thing to narrate around."***
 
 🔴🔴 **`MEMBERSHIP, NOT CARDINALITY` — SIXTH CONSTRUCTION, BY A SIXTH AGENT, AND THIS ONE IS AN UNSTATED
 NUMERATOR RATHER THAN AN UNSTATED DENOMINATOR.** `gd-p6-scope`, running `rg-dev`'s re-derivation test on
@@ -8670,7 +8897,9 @@ their own author, or by the next agent to touch the area, WITHIN THE HOUR.**
 | 14 | **`gd-p6-scope`'s D9 brief** | prosecuted unstated-tree citations for an hour while carrying **two** of them | same document |
 | 15 | **rule 87, again, and again me** | I minted 87 at 10:00 and its own entry shows I had spent every naive arm on the board at 09:57 | before it was written |
 | 16 | **R3, in the sentence that closed R3** | the count SHA-pinned and survived; **the coordinates in the same sentence were not pinned and did not** | same sentence |
-| | | **16 named; sampled from five threads, not swept — this is a floor, not a rate** | |
+| 17 | **`runner-states-6-7.md`** | rejected a 7th state for being unemittable; **never applied that test to rc=3/4/5**, where the answer is NO eight times of eight | same document |
+| 18 | **the freeze remedy itself** | directories `a-w`, **but both provenance documents left `rw`** — and there are now two of them | ~6 min |
+| | | **18 named; sampled from five threads, not swept — this is a floor, not a rate** | |
 
 🔴 **ROWS 6, 7, 8 AND 11 ARE ONE SHAPE AND IT IS SHARPER THAN THE ORIGINAL READING: THE VIOLATION IS
 COMMITTED BY THE ARTIFACT THAT IS SUPPOSED TO DEMONSTRATE THE RULE.** A reference implementation, a
@@ -9111,6 +9340,53 @@ courtesy:** *"a three-row scan sent as three bare numbers invites exactly the jo
 three keys, one unlabelled corpus line, no denominator attached to any row. **The reporting shape made
 the join available; taking it was mine.** 🔗 **Rule 60's disposition generalised: a number travels with
 its denominator or it does not travel.**
+
+🔴🔴 **AND THE NEAR-MISS KEY HAS SINCE BEEN DELETED, WHICH RETIRES HALF THIS ENTRY'S HAZARD AND SHARPENS
+THE OTHER HALF.** `gd-p3-dev`, reporting **directly per its brief rather than through `gd-em`** —
+branch `scion/gke-chart-p3`, commit **`387aaecc`**, `ptone/scion`:
+
+```
+auth.acknowledgeOAuthUnlanded   GONE from values.yaml AND values.schema.json
+properties.auth.properties  ->  [existingSecret, existingSecretKey, mode, oauth,
+                                 requireStableSigningKey, sessionSecret]
+acknowledgeHAUnlanded           UNTOUCHED -- 3 in values.yaml, 2 in values.schema.json
+```
+
+✅ **THE OBLIGATION HALF OF A REGISTERED TRIGGER HAS LANDED.** ⚠ **And it is NOT a silent removal**,
+which is the part this registry cares about: `auth` carries `additionalProperties: false`, so an
+operator still setting the old key gets
+`- auth: Additional property acknowledgeOAuthUnlanded is not allowed` **rather than a silently ignored
+setting.** 🔗 **Rule 60's two nulls avoided by construction at the operator boundary** — *ignored* and
+*rejected* were made to print differently. 🛑 **The flag did not become unnecessary: `auth.mode: oauth`
+now REQUIRES a complete OAuth web client credential, enforced at two layers. THE THING IT WAS
+ACKNOWLEDGING THE ABSENCE OF HAS ARRIVED** — which is the only discharge that was ever legitimate.
+
+🛑🛑 **A DOCUMENTATION HAZARD ROUTED TO ME EXPLICITLY, AND IT IS RULE 60 AGAIN IN THE WORST PLACE — A
+CREDENTIAL THAT BINDS NOTHING AND RAISES NO ERROR:**
+
+```
+settings.yaml binds   client_id / client_secret   snake_case   (V1OAuthProviderConfig,
+                                                                pkg/config/settings_v1.go:635)
+camelCase clientId    is the SCION_SERVER_* ENV MAPPER's spelling (pkg/config/hub_config.go:334)
+                      and binds NOTHING in a settings file
+```
+
+⚠ ***"yaml.v3 drops the unknown key with no error, the hub starts, passes `/readyz`, and refuses every
+login."*** 🔗 **`OBLIGATION DISCHARGED, NOT CANNOT-EVALUATE` for the fourth time today, now at
+runtime**: the readiness probe **completes and reports success** while the credential is absent. ✅ The
+chart **now refuses the camelCase spelling under `server.oauth`** rather than emitting it — 🔗 **rule
+79's disposition satisfied: validated at the CONSUMER, not at the emitter.** 🛑 **`gd-p3-dev`'s request
+is the actionable half and I am relaying it rather than absorbing it: IF ANY DOC ANYWHERE SHOWS OAUTH
+CREDENTIALS INSIDE A `settings.yaml`, CHECK ITS SPELLING.** ⚠ **`README.md` is Phase 4's and is
+untouched.** This registry holds no such example; **I have not swept the other documents and do not own
+them.**
+
+⚠ **NOTE WHAT THIS DOES TO MY MANUFACTURED `13`.** The count I wrongly attached to
+`acknowledgeHAUnlanded` belonged to `acknowledgeOAuthUnlanded` — **a key that, four minutes later, no
+longer exists on `scion/gke-chart-p3`.** 🛑 **A reader chasing my report-9 figure would now find `0`,
+and would conclude the bare key had been retired.** 🔗 **Rule 93: the number was a cache, and its
+referent has now been deleted out from under it.** ✅ **Both counts are SHA-stamped in this entry and
+the branch is named, because a figure that survives its subject is the one that misleads longest.**
 
 🔴🔴 **AND THE FAILURE MODE IS `OBLIGATION DISCHARGED`, NOT `CANNOT-EVALUATE` — WHICH IS THE ONE
 OUTCOME THE ANTI-VACUITY RULE ON THIS ENTRY CANNOT REACH:**
