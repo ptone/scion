@@ -435,18 +435,18 @@ accept "oauth with no credentials but an external settings Secret" \
 # narrowed to config.extra only. This asserts the emitted spelling directly.
 executed=$((executed + 1))
 _oa="$(render --set auth.mode=oauth "${OAUTH_WEB[@]}")"
-if [ -z "$_oa" ] || ! printf '%s\n' "$_oa" | grep -q '^kind: Secret$'; then
+if [ -z "$_oa" ] || ! printf '%s\n' "$_oa" | grep -qE '^kind: Secret$'; then
   echo "FAIL  rendered oauth credentials: no Secret in the output, so nothing was inspected"
   failed=$((failed + 1))
 elif printf '%s\n' "$_oa" | grep -qE '^ +client(Id|Secret):'; then
   echo "FAIL  rendered oauth credentials: the chart emits camelCase, which binds nothing in settings.yaml"
   failed=$((failed + 1))
-elif printf '%s\n' "$_oa" | grep -q '^ *client_id: rg-web-google-id$' \
-  && printf '%s\n' "$_oa" | grep -q '^ *client_secret: rg-web-google-secret$'; then
+elif printf '%s\n' "$_oa" | grep -qE '^ *client_id: rg-web-google-id$' \
+  && printf '%s\n' "$_oa" | grep -qE '^ *client_secret: rg-web-google-secret$'; then
   echo "ok    the chart emits client_id/client_secret, the spelling settings.yaml binds"
 else
   echo "FAIL  rendered oauth credentials: neither spelling reached the settings document"
-  echo "        got: $(printf '%s' "$_oa" | grep -c .) lines, no client_id/client_secret"
+  echo "        got: $(printf '%s' "$_oa" | grep -cE '.') lines, no client_id/client_secret"
   failed=$((failed + 1))
 fi
 unset _oa

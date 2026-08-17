@@ -169,7 +169,7 @@ _kind_total=0
 for k in $(printf '%s\n' "${!EXPECTED_KINDS[@]}" | sort); do
   want="${EXPECTED_KINDS[$k]}"
   _kind_total=$((_kind_total + want))
-  got="$(printf '%s\n' "$RENDER" | grep -cx "kind: $k")"
+  got="$(printf '%s\n' "$RENDER" | grep -cxF -- "kind: $k")"
   if [ "$got" -eq "$want" ]; then
     pass "render contains ${want}x kind: $k"
   else
@@ -613,8 +613,8 @@ fi
 # the string is the guard's fingerprint and it should exist nowhere now.
 _e2="$("$HELM" template t "$CHART" "${BASE[@]}" \
          --set auth.requireStableSigningKey=true 2>&1)"
-if printf '%s\n' "$_e2" | grep -q 'SCION_REQUIRE_STABLE_SIGNING_KEY: "true"' \
-   && ! printf '%s\n' "$_e2" | grep -q 'auth.requireStableSigningKey is true'; then
+if printf '%s\n' "$_e2" | grep -qF -- 'SCION_REQUIRE_STABLE_SIGNING_KEY: "true"' \
+   && ! printf '%s\n' "$_e2" | grep -qF -- 'auth.requireStableSigningKey is true'; then
   pass "requireStableSigningKey=true renders without config.existingSecret (Phase 1's refusal is gone)"
 else
   fail "requireStableSigningKey=true did NOT render true without config.existingSecret -- Phase 1's guard is back, or the ternary was rewired"
@@ -687,9 +687,9 @@ fi
 # the two values to set. A message that named just one would send everyone who
 # wanted the bring-your-own path down the inline one.
 _e6="$("$HELM" template t "$CHART" "${BASE_NO_SECRET[@]}" 2>&1)"
-if printf '%s\n' "$_e6" | grep -q 'auth.sessionSecret' \
-   && printf '%s\n' "$_e6" | grep -q 'auth.existingSecret' \
-   && ! printf '%s\n' "$_e6" | grep -q 'SCION_REQUIRE_STABLE_SIGNING_KEY'; then
+if printf '%s\n' "$_e6" | grep -qF -- 'auth.sessionSecret' \
+   && printf '%s\n' "$_e6" | grep -qF -- 'auth.existingSecret' \
+   && ! printf '%s\n' "$_e6" | grep -qF -- 'SCION_REQUIRE_STABLE_SIGNING_KEY'; then
   pass "render with no session secret is refused, naming auth.sessionSecret and auth.existingSecret"
 else
   fail "render with no session secret was NOT refused, or the refusal stopped naming both values"
@@ -787,8 +787,8 @@ for _f in "${_e7_files[@]}"; do
   [ -e "$_f" ] || continue
   _e8_seen=$((_e8_seen+1))
   _k="$("$HELM" template t "$CHART" -f "$_f" 2>&1 | _e8_keys)"
-  printf '%s\n' "$_k" | grep -qx 'checksum/env-config' && _e8_control=$((_e8_control+1))
-  _hit="$(printf '%s\n' "$_k" | grep -i 'session' | tr '\n' ' ')"
+  printf '%s\n' "$_k" | grep -qxF -- 'checksum/env-config' && _e8_control=$((_e8_control+1))
+  _hit="$(printf '%s\n' "$_k" | grep -iF -- 'session' | tr '\n' ' ')"
   [ -n "$_hit" ] && _e8_bad="${_e8_bad} [$(basename "$_f"): ${_hit}]"
 done
 if [ "$_e8_seen" -ne "$_e7_ondisk" ]; then

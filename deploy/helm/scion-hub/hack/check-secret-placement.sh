@@ -359,7 +359,7 @@ FIXEOF
   fi
 
   for want in "Deployment/args" "ConfigMap/data" "Deployment/annotation"; do
-    if ! printf '%s\n' "${got_labels[@]}" | grep -qx "$want"; then
+    if ! printf '%s\n' "${got_labels[@]}" | grep -qxF -- "$want"; then
       echo "check-secret-placement self-test: FAIL - the scanner did not flag ${want}." >&2
       printf '  got: %s\n' "${got_labels[*]}" >&2
       exit 2
@@ -419,7 +419,7 @@ if [[ "${#fixtures[@]}" -eq 0 ]]; then
 fi
 
 for known in "${NO_MATERIAL[@]}"; do
-  if ! printf '%s\n' "${fixtures[@]}" | grep -qx "$known"; then
+  if ! printf '%s\n' "${fixtures[@]}" | grep -qxF -- "$known"; then
     echo "check-secret-placement: NO_MATERIAL names '${known}', which is not a fixture on disk. The declared-vacuity list has gone stale -- NOTHING WAS ANALYSED (skipped, not clean)" >&2
     exit 2
   fi
@@ -467,7 +467,7 @@ for name in "${fixtures[@]}"; do
   fi
   # THE RENDER IS ASSERTED NON-TRIVIAL BEFORE IT IS SEARCHED. A negative scan
   # over an empty or truncated document is the cheapest false pass there is.
-  docs="$(grep -c '^kind:' <<<"$render")"
+  docs="$(grep -cE '^kind:' <<<"$render")"
   if [[ "$docs" -lt 5 ]]; then
     echo "  ERROR   ${name}: render produced only ${docs} documents, which is not a manifest this scan can speak about" >&2
     rc=2
@@ -481,7 +481,7 @@ for name in "${fixtures[@]}"; do
   mapfile -t hits < <(sed -n 's/^FINDING=//p' <<<"$out")
 
   expect_vacuous=no
-  printf '%s\n' "${NO_MATERIAL[@]}" | grep -qx "$name" && expect_vacuous=yes
+  printf '%s\n' "${NO_MATERIAL[@]}" | grep -qxF -- "$name" && expect_vacuous=yes
 
   if [[ "$n" -eq 0 && "$expect_vacuous" == "no" ]]; then
     echo "  ERROR   ${name}: no secret material in the render at all, so this fixture proves nothing." >&2
