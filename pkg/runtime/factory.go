@@ -165,6 +165,9 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			util.Debugf("GetRuntime: auto-detected GKE cluster, enabling Autopilot scheduling tolerance")
 		}
 		rt.ListAllNamespaces = rtConfig.ListAllNamespaces
+		if vs != nil && vs.Server != nil {
+			rt.WorkspaceStorage = vs.Server.WorkspaceStorage
+		}
 		return rt
 	case "cloudrun":
 		rt := NewCloudRunRuntime(rtConfig.CloudRun)
