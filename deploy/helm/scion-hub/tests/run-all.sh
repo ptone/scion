@@ -115,7 +115,7 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=4
-EXPECTED_ASSERTIONS=127   # 35 chart-integrity + 57 render-guards + 31 reserved-flags + 4 update-strategy.
+EXPECTED_ASSERTIONS=130   # 38 chart-integrity + 57 render-guards + 31 reserved-flags + 4 update-strategy.
 EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 
 # Enumerated by name, not globbed into a loop. A glob would run whatever is
@@ -124,7 +124,7 @@ SCRIPTS=(
   reserved-flags.sh     # 31 - the reserved-flag lists
   update-strategy.sh    #  4 - the updateStrategy derivation
   render-guards.sh      # 57 - every other render-time refusal, incl. the HA-unlanded gate
-  chart-integrity.sh    # 35 - .helmignore breadth, the packaged file set, base-url, signing key
+  chart-integrity.sh    # 38 - .helmignore breadth, the packaged file set, base-url, signing key
 )
 
 # NAMED EXCEPTIONS. Present in this directory, deliberately NOT run from here and
@@ -297,7 +297,7 @@ done
 # gets its own committed number, failing in both directions like the others.
 # Phase 6 owns CI wiring and may move this; it must not delete it without
 # replacing the coverage.
-EXPECTED_VERIFY_ASSERTIONS=249
+EXPECTED_VERIFY_ASSERTIONS=267
 # hack/ IS OUTSIDE THIS DIRECTORY, SO THE FILE SCAN BELOW CANNOT SEE IT, AND
 # NAMING ITS CONTENTS HERE IS THE ONLY THING THAT MAKES THEM DISCOVERABLE. Two
 # files, both stated: verify.sh, gated below, and run-all-mutations.sh, which is

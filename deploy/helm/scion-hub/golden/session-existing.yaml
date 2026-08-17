@@ -13,6 +13,68 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: scion
 ---
+# Source: scion-hub/templates/secret-settings.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: scion-scion-hub-settings
+  namespace: scion-system
+  labels:
+    helm.sh/chart: scion-hub-0.1.0
+    app.kubernetes.io/name: scion-hub
+    app.kubernetes.io/instance: scion
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: scion
+type: Opaque
+stringData:
+  settings.yaml: |
+    # Rendered by the scion-hub Helm chart. Every runtime write to this file is
+    # pod-local; see ptone/scion#1091 before making it writable.
+    #
+    # Positions deliberately left unrendered, each owned by a later change:
+    #   server.database.url        Cloud SQL. Note the key is url, not dsn.
+    #   server.secrets             the secret backend (gcpsm).
+    #   server.auth.proxy,
+    #   server.auth.transport,
+    #   server.oauth               the subtree selected by server.auth.mode.
+    #   server.workspace_storage   Filestore NFS - a different subsystem from
+    #                              server.storage, which is the hub's GCS blob
+    #                              store and is rendered below.
+    #
+    # The session secret is not here and does not belong here: it arrives as an
+    # environment variable from its own Secret.
+    active_profile: default
+    profiles:
+      default:
+        runtime: kubernetes
+    runtimes:
+      kubernetes:
+        gke: true
+        list_all_namespaces: false
+        namespace: scion-system
+        type: kubernetes
+    schema_version: "1"
+    server:
+      auth:
+        mode: proxy
+      broker:
+        auto_provide: true
+        host: 127.0.0.1
+        port: 9800
+      database:
+        conn_max_idle_time: 5m
+        conn_max_lifetime: 30m
+        driver: sqlite
+        max_idle_conns: 5
+        max_open_conns: 25
+      hub:
+        hub_id: ci-session-existing
+        hub_name: Scion Hub
+      mode: hosted
+      storage:
+        provider: local
+---
 # Source: scion-hub/templates/configmap-env.yaml
 apiVersion: v1
 kind: ConfigMap
@@ -44,7 +106,7 @@ data:
   # http://localhost:<port>: agents cannot reach that, and the session cookie's
   # Secure attribute is derived from the https:// prefix, so the fallback also
   # quietly serves cookies without Secure.
-  SCION_SERVER_BASE_URL: "https://ci-existing.example.com"
+  SCION_SERVER_BASE_URL: "https://ci-session-existing.example.com"
 
   # Compared against the literal string "true", so it is emitted as a string and
   # any other value means false. When true the hub refuses to start rather than
@@ -194,8 +256,9 @@ spec:
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/part-of: scion
       annotations:
-        scion.io/hub-id: "ci-existing"
-        checksum/env-config: 83052af853cc310b9008f4db1146811ca2750b4178e58d7cc534b3ec99cb59dc
+        scion.io/hub-id: "ci-session-existing"
+        checksum/env-config: cb8136cd2fda0c7990810c13e8de5aae4eb71d9158de35c6b671097a3e6582f6
+        checksum/settings: de026ee8f859eb83f4b6ea28c4ba65649229e363f34f64dbbf61a1149ff8c642
     spec:
       serviceAccountName: scion-scion-hub
       securityContext:
@@ -230,7 +293,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: my-own-session-secret
-                  key: SCION_SERVER_SESSION_SECRET
+                  key: session-secret
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -279,7 +342,7 @@ spec:
           emptyDir: {}
         - name: settings
           secret:
-            secretName: my-own-hub-settings
+            secretName: scion-scion-hub-settings
             defaultMode: 0444
             items:
               - key: settings.yaml

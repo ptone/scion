@@ -114,7 +114,12 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=249
+#
+# 249 -> 267 in the session-secret phase: +18, and none of them hand-counted.
+# The sixth permutation (session-existing) carries a fixed per-permutation
+# battery, and the two new values leaves (auth.existingSecret,
+# auth.existingSecretKey) each earn a mutation-probe classification.
+EXPECTED_TOTAL=267
 
 failures=0
 assertions=0
@@ -250,10 +255,21 @@ expect_render_failure() {
 }
 
 # A minimal set of valid values to hang a single bad --set off.
+#
+# auth.sessionSecret IS PART OF THE MINIMUM SINCE THE SESSION-SECRET PHASE, and
+# leaving it out does not weaken these checks so much as invert them. Every
+# expect_render_failure below asserts the REASON a render failed, not merely that
+# it failed; without a session secret every one of them fails on
+# scion-hub.assertSessionSecret instead of on the guard under test, and the
+# harness reports "failed, but not for the expected reason" across the board. The
+# guards would all still be working and the run would say nothing about any of
+# them. That is the same class of defect as a negative assertion against an empty
+# file, and it is why the reason is asserted rather than the outcome.
 BASE=(
   --set image.repository=example.test/scion-hub-gke
   --set hub.hubId=neg
   --set hub.baseUrl=https://neg.example.com
+  --set auth.sessionSecret=verify-not-a-real-secret
 )
 
 # --------------------------------------------------------------------------
@@ -1040,6 +1056,15 @@ PROBE_PY
 # failure or a leaf that moves nothing, both of which are counted and reported
 # below.
 declare -A PROBE_MUTATION=(
+  # BOTH OF THESE MUST CLEAR auth.sessionSecret, and that is the guard talking,
+  # not a quirk of the probe. scion-hub.assertSessionSecret refuses a render with
+  # both an inline secret and an existing one - two sources for one value, with
+  # nothing in the manifest to say which won - and it refuses existingSecretKey
+  # without the existingSecret it selects a key from. The probe's baseline
+  # supplies the inline secret because every other leaf needs a render at all, so
+  # reaching these two means standing that baseline down first.
+  [auth.existingSecret]='--set-string|auth.sessionSecret=|--set-string|auth.existingSecret=probe-session'
+  [auth.existingSecretKey]='--set-string|auth.sessionSecret=|--set-string|auth.existingSecret=probe-session|--set-string|auth.existingSecretKey=PROBE_SESSION_KEY'
   [auth.mode]='--set-string|auth.mode=oauth|--set|auth.acknowledgeOAuthUnlanded=true'
   [database.connMaxIdleTime]='--set-string|database.connMaxIdleTime=9m'
   [database.connMaxLifetime]='--set-string|database.connMaxLifetime=9m'
@@ -2080,6 +2105,10 @@ hub:
         -----BEGIN PRIVATE KEY-----
         MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDexample
         -----END PRIVATE KEY-----
+auth:
+  # Mandatory since the session-secret phase. Without it the render fails on
+  # scion-hub.assertSessionSecret and this check reports a guard it never reached.
+  sessionSecret: verify-not-a-real-secret
 PEMVALUES
 expect_render_failure \
   "hub.extraEnv rejects a multi-line PEM in an environment value" \
@@ -2296,6 +2325,7 @@ expect_render_failure \
   --skip-schema-validation \
   --set image.repository=example.test/scion-hub-gke \
   --set hub.hubId=neg \
+  --set auth.sessionSecret=verify-not-a-real-secret \
   --set hub.baseUrl=http://neg.example.com
 
 expect_render_failure \
@@ -2490,6 +2520,10 @@ hub:
       value: |
         Scheduled maintenance on Sunday.
         Sessions will be interrupted.
+auth:
+  # Mandatory since the session-secret phase. Without it the render fails on
+  # scion-hub.assertSessionSecret and this check reports a guard it never reached.
+  sessionSecret: verify-not-a-real-secret
 MLVALUES
 if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
     --values "$WORK/multiline-env.yaml" >/dev/null 2>&1; then
