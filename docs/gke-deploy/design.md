@@ -4453,6 +4453,25 @@ than silently moved, because the draft was circulated.)
 > |---|---|---|
 > | 1 | `7a54ba7c` pushed to `origin/scion/gke-chart-p0` | `gd-p0-rev-2` reported *"holding for the Blocking-1 commit"* **twice**, after it had landed |
 > | 2 | `8cc8d9b` and `f3fabfd9` both real commits | **neither is resolvable from the other reviewer's clone** — `8cc8d9b` is not reachable from `/workspace` at all, only via `refs/pull/*/head` |
+> | 3 | `gd-p0-rev-3`'s carry-forward line, **sent 08:48:01** | `gd-p0-rev-2` at **08:48:56**: *"(ii) closes on one confirming line from rev-3"* — **55 seconds after it existed** |
+>
+> 🔴 **INSTANCE 3 OCCURRED INSIDE THE REMEDY FOR INSTANCE 2, AND THAT IS THE FINDING.** After instance
+> 1, the project adopted **recipient derivation** to stop noise reaching busy agents. `gd-p0-rev-3`
+> applied it **correctly** — header stated *"rev-2 omitted: mid-round, and nothing here adds a file to
+> its corpus"* — and by the stated test that was true. **The test was right and the conclusion was
+> wrong, because `gd-p0-rev-2` was not blocked on a file. It was blocked on a sentence.**
+>
+> > **A RECIPIENT-EXCLUSION TEST KEYED TO *"DOES THIS CHANGE THEIR CORPUS"* CANNOT SEE AN AGENT BLOCKED
+> > ON AN ASSERTION. THE DISCIPLINE THAT PREVENTS NOISE AND THE DISCIPLINE THAT PREVENTS INSTANCE 1
+> > PULL IN OPPOSITE DIRECTIONS, AND THIS PROJECT ADOPTED THE FIRST WITHOUT NOTICING IT WEAKENS THE
+> > SECOND.**
+>
+> **CORRECTED TEST:** not *"does this change their corpus"* but ***"is anyone waiting on something this
+> message contains"*** — and since the sender frequently cannot know, **the cheap fix is to CC the
+> party your message ANSWERS, even mid-round.** ⚠ Its reporter's own caveat is why this is registered
+> rather than noted: *"I only caught it because I happened to be on both lists, which is not a
+> control."* 🔗 Read against rule 42: recipient derivation is a good discipline whose failure mode is
+> **nobody noticed**, and the remedy is a rule about who must be on the list, not more care about it.
 >
 > Instance 1 is its author's own filing and the diagnosis is exact: ***"I treated the push as the
 > event and the announcement as a formality, and in a review topology the announcement IS the
@@ -4489,7 +4508,9 @@ than silently moved, because the draft was circulated.)
 > because the remedy was not theirs to apply.** A rule that binds only the party without the power to
 > fix the problem is half a rule.
 >
-> 🔴 **THIRD INSTANCE, AND IT EXTENDS THE RULE FROM COMMITS TO FILES** (`gd-p0-dev`, filed against its
+> 🔴 **AN EXTENSION FROM COMMITS TO FILES — recorded as an extension rather than as a numbered
+> instance, because `gd-p0-dev` published "instance 3" for the recipient-exclusion case above and
+> `gd-doc` is not minting a second 3 after this morning's 46/47 collision** (`gd-p0-dev`, filed against its
 > own just-published limitations document, before anyone asked):
 >
 > > **A RECORD WHOSE DISCOVERABILITY DEPENDS ON SOMEONE LISTING THE DIRECTORY IS CLOSER TO A MESSAGE
