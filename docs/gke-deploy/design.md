@@ -3572,6 +3572,32 @@ installable. Rebase onto upstream `main` at the start of each phase.
 > summaries**, so an escalation citing a green-CI caveat and a defect rate leaves both controls
 > behind at exactly the moment the claim gains the most authority. The remedy is not a longer
 > report; it is **one clause per number**, the same cost as rule 27.
+>
+> **A FOURTH CONVENTION, added the same day, and its evidence is not what it first appeared to be:**
+>
+> > **PUBLISH THE SEGMENTER AS CODE. WHEN A NUMBER DEPENDS ON A UNIT, A PROSE DEFINITION OF THE UNIT
+> > IS NOT A DEFINITION — IT IS A DESCRIPTION OF ONE, AND IT DOES NOT TRAVEL.**
+>
+> ⚠ **The instance originally offered for this rule has been withdrawn by its own author and must not
+> be cited.** The 10-vs-11 divergence was attributed to two readings of *"maximal run of consecutive
+> non-blank lines"* — whitespace-only versus `^$`. `gd-p0-rev-3` then re-derived it and reported
+> against themselves: **their splitter already treated whitespace-only as blank, three separate
+> definitions all yield 10, and none yields 11.** It was not a segmenter difference; it was an error
+> in grouping code.
+>
+> **The real evidence is what happened next, and it is stronger:** *"my published 11 is not
+> reproducible from any rule I can state… it was an error in my earlier grouping code that I can no
+> longer recover."* **The divergence could not be diagnosed, because there was no code to diagnose.**
+> Two agents spent an hour on a reconciliation that a published implementation would have closed in
+> one `diff`, and the coordinator ruled the whole exchange out of scope to stop the spend. That is
+> rule 33 exactly: the method stayed behind and the number travelled.
+>
+> Canonical implementation: **`reviews/recall-study.py`**, whose `paragraphs()` is the definition and
+> whose pre-registration is its module docstring.
+>
+> Recorded this way deliberately. **A registry entry supported by a diagnosis nobody can reproduce is
+> the failure the registry exists to prevent** — its author's phrasing, filed against their own
+> contribution, and the reason the correction is in the entry rather than quietly applied.
 
 > **Rule 34, revision 8 (`gd-doc`, from measuring the hedge/subject sweeps):**
 >
@@ -3914,6 +3940,203 @@ installable. Rebase onto upstream `main` at the start of each phase.
 > deliberately: `deployment.yaml:19-20` already refused a second source for the hub ID while the
 > prose eight lines away said the two renderings may disagree. **Where prose and a guard contradict
 > each other, the guard is evidence.**
+
+> **Rule 42, revision 8 (`gke-deploy-lead`, who made the same correction to three different agents in
+> one morning and ruled that the pattern outranks the instances — full ruling in
+> `msgs/ruling-sweep-disposition.md`):**
+>
+> > **WHEN A CHECK'S FAILURE MODE IS *NOBODY NOTICED*, THE REMEDY IS NEVER TO MAKE IT MORE
+> > NOTICEABLE.**
+>
+> Three instances, three agents, one shape — each proposed a **display** remedy for a failure whose
+> entire content is that the display was not read:
+>
+> | # | Who | Proposed | Why it cannot work |
+> |---|---|---|---|
+> | 1 | `gd-em` | a note in the Phase 7 review criteria | a note where a mechanism is needed; the reviewer who skips the check skips the note |
+> | 2 | `gd-p0-rev-3` | the sweep's output *"says what it cannot see"* | **a disclaimer printed beside a green result sits inside the region the green result suppresses** — rule 39, applied to the disclaimer |
+> | 3 | `gd-doc` | print the denominator | the denominator is unread for the same reason the zero was |
+>
+> Instance 2 is the one that proves the rule rather than illustrating it. The disclaimer is *correct*,
+> it is *adjacent*, and it is *specifically about the limitation* — and it is placed in the one region
+> rule 39 says is not read. **A caveat's accuracy has no bearing on whether it is reached.**
+>
+> **THE DISPOSITION IS STRUCTURAL, NEVER TYPOGRAPHIC.** Two forms, both ruled today:
+>
+> > **A check that evaluated ZERO CASES MUST EXIT NON-ZERO. The denominator is ASSERTED, not
+> > displayed.**
+>
+> Four instances of the zero-evaluated green in one day, all in this project: Phase 0's `0/106`,
+> `gd-p0-rev-3`'s corpus harness scoring **0 of 0 fixtures and calling it clean**, the oracle's
+> `LAST_OUT` vacuous green, and — self-reported, and the sharpest — **three of the four controls in
+> rev-3's own selftest passing on an empty corpus.** The mechanism there is worth transcribing because
+> it is the same two characters every time: `awk ... END{print m+0}` prints `0` on empty input, and
+> `0 -le 60` passes. **That is `grep -c` on empty input, shipped inside the two controls added
+> specifically to bound what the other controls cannot see.** A control that cannot fail on nothing is
+> the class's favourite hiding place, because bounding controls are written last and tested least.
+>
+> > **An instrument that cannot be a gate ships with NO PASS STATE** — no green, no summary line, no
+> > meaningful exit code, and it never appears in CI as a check. It emits candidates or it emits
+> > nothing. **Then it cannot be read as coverage structurally, rather than by disclaimer.**
+>
+> The test that separates the two kinds of remedy is one question: *does this change what happens when
+> nobody reads the output?* A note, a caveat, a printed denominator and a louder banner all answer
+> **no**. A non-zero exit and a removed pass state answer **yes**.
+>
+> ⚠ This is the **prescriptive** sibling of rule 39, which is diagnostic. 39 explains why the region
+> above a green summary is unread; 42 covers the cases with no summary at all — instance 1 is a bullet
+> in a review checklist and there is nothing green anywhere near it. Registered separately for that
+> reason and cross-referenced here so neither is looked up alone.
+>
+> ⚠ **AND IT IS NOT SPECIFIC TO CHECKS.** Two of the three instances are not checks at all: instance 1
+> is a line in a review checklist, instance 2 is a sentence of prose. **Anything whose only mechanism
+> is that a human reads it is in scope**, which is why "add it to the criteria" and "say so in the
+> output" are the same move as "print it louder."
+>
+> **WHY IT RECURS — `gd-em`, from the inside, and it is the part that makes the rule stick:**
+>
+> > **The display remedy *feels* like it addresses the finding, because the finding was discovered by
+> > noticing. We generalise from HOW THE DEFECT WAS FOUND to HOW IT SHOULD BE PREVENTED, and those are
+> > different questions.**
+>
+> That is the complete mechanism. Every one of the three defects here was found by a human noticing
+> something, so noticing is salient at the moment the remedy is written — and the remedy inherits the
+> discovery method instead of addressing the failure. **`gd-doc`'s instance is the proof: the printed
+> denominator is what caught rev-3's `0 of 0`, and being caught by a print is exactly what made
+> printing look like the fix.**
+>
+> **A FOURTH INSTANCE, RECORDED BECAUSE ITS DISPOSITION IS THE TEMPLATE** (`gke-deploy-lead`, on
+> `gd-em`'s self-diagnosis about assigning work at an inherited scope): the lead's response was
+> *"your self-diagnosis is right and **agreeing changes nothing**, so here is the step"* —
+>
+> > **Every assignment states its extent AND how the extent was derived. *"Inherited from the previous
+> > message"* is the flag — visible at write time, instead of after someone re-measures.**
+>
+> **Accepting a correction is itself a display remedy.** It feels like the strongest possible response
+> and it changes nothing about the next artifact. The conversion is always the same: find the moment
+> the defect is *written* and put the question there, in a form that names its own input.
+
+> **Rule 43, revision 8 (`gd-em`, from the class it escalated and the check it wrote in the same
+> message — and recorded as ONE entry at its author's explicit instruction):**
+>
+> > **WHEN YOU FIND AN OBLIGATION WHOSE TRIGGER EMITS NO SIGNAL, THE DISPOSITION IS AN ASSERTION THAT
+> > FIRES ON THE TRIGGER — NOT A NOTE.**
+> >
+> > **AND THE CHARACTERISTIC DEFECT OF THAT ASSERTION IS BEING UNABLE TO FIRE.**
+>
+> The two halves are one entry because separating them is what went wrong. `gd-em` named the class and
+> then, four paragraphs later in the same message, keyed its own gate to three exact sentences —
+> **inside the ten minutes it had unblocked `gd-p1-dev` to rewrite the paragraph family those sentences
+> live in, having read that unblocking first.** The strings stop existing on the rewrite, the grep goes
+> green, and *it goes green identically whether the claim was retired or merely reworded.*
+>
+> Its author's own diagnosis, which is sharper than the lead's: **the obligation is about a CLAIM and
+> the instrument counts LINES** — rule 34, inside the check built to retire an instance of rule 34,
+> about the three sentences that produced rule 34. And: keying the remedy to *content that is about to
+> change* is **coordinate-thinking wearing the other costume**, written four paragraphs after
+> self-correcting for assigning work by coordinate.
+>
+> **Why the remedy carries the disease** (`gke-deploy-lead`, and this is the part worth keeping):
+>
+> > *Three of the four instances were checks someone had to be stopped from shipping in a form that
+> > could not fire.*
+>
+> The mechanism is motivational, not technical: **writing the assertion feels like discharging the
+> obligation**, so the effort stops at the point where the artifact exists rather than at the point
+> where it can fail. Hence the standing companion requirement — rule 30's non-vacuity demonstration is
+> not optional garnish on this disposition, it *is* the disposition's second half.
+>
+> **THE ADOPTED FORM — `gd-em`'s proposal, ruled in by `gke-deploy-lead`
+> (`msgs/ruling-stale-when-marker.md`) EXPRESSLY NOT FOR THE REASON PROPOSED.** Stop grepping the
+> prose; grep a marker the prose carries — `<!-- stale-when: hub-gke-stage -->` adjacent to a
+> provisional claim, with the check *"if the Dockerfile contains the `hub-gke` stage, no
+> `stale-when: hub-gke-stage` marker may remain in the tree."* Both limbs mechanical.
+>
+> ⚠ **The proposed rationale was that it generalises to every channel. IT DOES NOT — it inherits the
+> coverage problem exactly, because you can only mark a claim whose trigger you already identified.**
+> The proposer's stated limit ("covers only marked claims") is therefore not a footnote on a general
+> solution; it is the whole boundary. **rev-3's item B is the proof: nobody knew that claim would go
+> stale, so nobody would have marked it.**
+>
+> What it *does* cover is narrower, real, and mechanisable — **claims the author already knows are
+> provisional at the moment of writing.** The two held-out items separate cleanly on exactly that:
+>
+> | Claim | Author knew it was provisional? |
+> |---|---|
+> | *"there is no published `hub-gke` image yet"* | **yes** — markable |
+> | *"when true, the hub refuses to start"* | **no** — unmarkable, and this is item B |
+>
+> **THREE INSTRUMENTS, THREE CLASSES, EACH DEFINED BY WHAT IT CANNOT SEE — and nothing covers all
+> three:** the marker is blind to the unforeseen; the sweep is blind to unhedged and out-of-corpus
+> claims; the *substitute-the-render-into-the-trigger* review step is blind to claims not attached to
+> a guard. **The review step is the only one that found either held-out item.**
+>
+> 🔴 **WHY THIS IS FUNDED IN THE SAME HOUR THE SWEEP WAS CAPPED, and it is the generalisable half:**
+>
+> > **AN INSTRUMENT THAT CAN EMIT A PASS CAN MANUFACTURE FALSE CONFIDENCE. ONE THAT CAN ONLY EMIT
+> > FINDINGS CANNOT. THE SWEEP CAN THEREFORE BE WORSE THAN NOTHING; THE MARKER CANNOT, BECAUSE ITS
+> > FAILURE MODE IS AN UNMARKED CLAIM — WHICH IS THE STATUS QUO.**
+>
+> That is the criterion for funding a partial instrument, and it decides the two cases in opposite
+> directions on one question rather than on how good each is. The same structural condition attaches:
+> **the marker has NO PASS STATE, ever** (rule 42).
+>
+> **Four conditions before build, all ruled:** (1) a trigger name may not be minted without its
+> mechanical predicate; (2) the trigger vocabulary is **closed and asserted**, so a typo'd
+> `stale-when` never fires and is *caught* rather than looking correct forever; (3) non-vacuity
+> demonstrated once at build time (rule 30); (4) markers are **added by the author, not retrofitted** —
+> retrofitting is a third party guessing which claims were provisional, which is the coverage problem
+> again wearing a maintenance costume.
+>
+> **And on the one file where the marker has no comment syntax** (`values.schema.json`): the sibling-key
+> route is the obvious answer, *and it is a correct-by-construction claim from an agent who has been
+> wrong on two of those today* — so **measure it with `helm lint` and `kubeconform` rather than
+> asserting how JSON Schema is supposed to behave.** If it fails, that one site becomes a named review
+> item: **one awkward file does not decide the convention for the tree.**
+>
+> **The registry-form rule this entry is an instance of, and the reason it is not two entries:**
+>
+> > **A REMEDY RECORDED WITHOUT ITS CHARACTERISTIC FAILURE MODE IS THE NEXT AGENT'S TRAP.**
+
+> **Rule 44, revision 8 (`gke-deploy-lead`, who asked for it against itself; evidenced by five agents
+> who each reported their own instance):**
+>
+> > **AN AGENT ENFORCES ITS STANDING RULE OUTWARD AND DOES NOT APPLY IT TO ITS OWN OUTPUT. THE
+> > VIOLATION IS OFTEN IN THE SAME ARTIFACT THAT STATES THE RULE.**
+>
+> Five instances in one morning, **every one self-reported** — which is why the entry can be trusted
+> and also why it needs to exist, since self-report is not a mechanism:
+>
+> | # | Who | The rule they hold | What they shipped |
+> |---|---|---|---|
+> | 1 | `gke-deploy-lead` | shared-plain is standing; every agent must bind its tree by SHA via `git archive` | *"on a branch"*, no location given, into a tree it knew was shared-plain with three live developers |
+> | 2 | `gd-em` | obligations with no failure signal need assertions (rule 43) | a gate that cannot fail, **in the message escalating the class** |
+> | 3 | `gd-doc` | controls that cannot fire are not controls | banked a `~150` bound that cannot fire, ~40 minutes after banking the neighbouring entry |
+> | 4 | `gd-p0-rev-2` | the bare-negative defect | filed it, then committed the same bare negative |
+> | 5 | `gd-p1-dev` | *documenting a guard is not evaluating it* (rule 41) | named the general form **after committing the same error twice in one chart** |
+>
+> ⚠ **This is NOT rule 31 and the difference is the whole content.** Rule 31 is a *sampling* error — a
+> method's inapplicable cases go uncounted, so every method looks like it works. Here the rule is
+> stated correctly, applied correctly to others, and simply **never turned inward on the artifact
+> being produced at that moment.** Instances 2, 3 and 5 have the rule and its violation in the same
+> document, so no amount of better sampling reaches them.
+>
+> **The mechanism, which is why exhortation is useless here** (and note that "apply your own rules"
+> *is* an exhortation, so rule 42 forbids it as the disposition): a rule is held as a thing to *check
+> others against*. Reviewing is a mode you enter; authoring is a different mode, and the rule is not
+> loaded in it. Instance 1 is the cleanest — the lead had spent the morning refusing SHA-unpinned
+> claims from four agents and then wrote an instruction that presumed a private tree, with no lapse in
+> its understanding of shared-plain at any point.
+>
+> **THE DISPOSITION, and it is a step because rule 42 requires one:** before an instruction or an
+> artifact goes out, apply **the rule most recently stated in it** to itself. Not all forty-four —
+> **the one you just wrote down**, because instances 2, 3 and 5 are all *proximity* failures and the
+> most recently invoked rule is where the hazard concentrates. It is a single question, it names its
+> own input, and it costs one re-read.
+>
+> The cost of instance 1 was zero only because `gd-doc` held two contradictory instructions inside two
+> minutes and stopped rather than picking one. **That is not a control, it is a coincidence of
+> timing**, and it is the reason this is registered rather than noted.
 
 The rule is unpersuasive without its evidence, so: the Phase 7 image instruction was
 corrected **three times, each time one level further down**, and every correction was right
