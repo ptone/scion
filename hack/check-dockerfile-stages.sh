@@ -78,7 +78,7 @@
 #  11. no ENTRYPOINT in that same chain carries arguments, which is the other
 #      half of 10: a shell-form ENTRYPOINT bakes exactly what a CMD would
 #
-# plus six structural preconditions, fatal rather than counted because every
+# plus seven structural preconditions, fatal rather than counted because every
 # check above assumes them:
 #
 #  12. stage names are unique. A second `AS runtime` later in the file silently
@@ -96,6 +96,10 @@
 #      runtime` truncates the chain walk that 6, 10 and 11 are about, hiding a
 #      real ancestor -- and `--build-arg` means the value is not in the file.
 #      Checked where the chain is first computed, after 4 establishes it.
+#  18. awk is on PATH. Reading 1 is an awk program and every table query is an
+#      awk one-liner; without it the rules run against empty strings that
+#      compare equal to each other, and the script reports that its two
+#      readings agree about a file neither of them read.
 #
 # and one more raw-text check that is not a rule about the Dockerfile so much as
 # about this script: the last real line ABOVE the final FROM must not open a
@@ -229,6 +233,15 @@ die() { echo; echo "$FAILURES check(s) failed."; exit 1; }
 # rather than testing that the message string is spelled correctly.
 GO_BIN="${DOCKERFILE_STAGES_GO:-go}"
 
+# AWK_BIN exists for the same reason, and for a second one. Reading 1 IS an awk
+# program and every query against reading 2's table is an awk one-liner, so awk
+# missing is not a degraded run -- it is seven `ok:` lines for checks that never
+# executed, including all four of reading 1's and "both readings agree the last
+# stage begins at line " with an empty value on both sides, because "" = "".
+# The two-readings design silently becomes zero readings and reports agreement.
+# The seam is what lets the self-test walk that, rather than describe it.
+AWK_BIN="${DOCKERFILE_STAGES_AWK:-awk}"
+
 parse() {
   local abs
   abs="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
@@ -258,7 +271,7 @@ parse() {
 # that can absorb the final FROM, under any continuation model.
 # ---------------------------------------------------------------------------
 raw_tail() {
-  awk '
+  "$AWK_BIN" '
     { line = $0; sub(/\r$/, "", line); lines[NR] = line }
     line ~ /^[ \t]*[Ff][Rr][Oo][Mm]([ \t]+--[^ \t]+)*[ \t]+[^ \t]+([ \t]+[Aa][Ss][ \t]+[^ \t]+)?[ \t]*$/ { lastfrom = NR }
     END {
@@ -296,8 +309,11 @@ raw_tail() {
 # check is ever weakened, these are the only things that notice.
 #
 # WHETHER EACH CASE ACTUALLY TESTS ITS RULE IS MEASURED, NOT ASSERTED. Every
-# `fail` call site in this file is neutered one at a time (`fail "` -> `true
-# "NEUTERED `) and the whole suite is re-run against the mutant. Last full run:
+# guard call site -- a line that begins with the `fail` builtin below -- is
+# neutered one at a time, the call rewritten to a `true` carrying a NEUTERED
+# marker, and the whole suite re-run against the mutant. (Guards are counted by
+# an ANCHORED match, because prose like this line mentions them too.)
+# Last full run:
 # 28 guards, 48 negative cases; every guard reddens at least one case, every case
 # has EXACTLY ONE claimant, zero cases stay green without their guard, zero guards
 # are unreachable. The harness and its output are archived outside this repo. Two
@@ -356,9 +372,27 @@ raw_tail() {
 #   character, so neither ever replaced anything. One of them was green.
 # ---------------------------------------------------------------------------
 self_test() {
-  local tmp errors=0
+  local tmp errors ran
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' RETURN
+
+  # THE FAILURE COUNTER IS A FILE, AND THAT IS THE WHOLE POINT.
+  #
+  # Every case below is written `... | expect ...`, and the right-hand side of a
+  # pipeline runs in a SUBSHELL. This counter was an integer variable, so every
+  # increment happened in a subshell and died with it: 70 of the 71 cases could
+  # not move the exit code. The suite printed `self-test FAILED: ...` and then
+  # `self-test passed`, and exited 0. `make dockerfile-stages` runs it with
+  # stdout on /dev/null and CI reads only the exit code, so for the life of that
+  # bug the suite guarding eleven rules was a constant.
+  #
+  # A file survives the subshell. `shopt -s lastpipe` would also work and is not
+  # used: it changes the execution model of every pipeline in the file to fix one
+  # of them, and it is silently inert in an interactive shell.
+  #
+  # shellcheck names this SC2031 and shellcheck is not in this repo's CI.
+  FAILLOG="$tmp/failures"; : > "$FAILLOG"
+  RANLOG="$tmp/ran";       : > "$RANLOG"
 
   local good="FROM alpine AS builder
 RUN echo build
@@ -383,12 +417,17 @@ FROM runtime"
     local want="$1" label="$2" needle="${3:-}" f out got
     f="$tmp/Dockerfile.$RANDOM"
     cat > "$f"
+    # Recorded BEFORE the case runs. The suite's verdict asserts a count of
+    # cases actually executed as well as an absence of failures; a suite that
+    # silently stops running cases is the same defect as one that cannot report
+    # them.
+    echo "$label" >> "$RANLOG"
     # Anti-vacuity: a fixture identical to the known-good file tests nothing.
     # The one case that is legitimately byte-identical is named explicitly.
     if [ "$label" != "no trailing newline at all is fine" ] &&
        printf '%s' "$good" | cmp -s - "$f"; then
       echo "self-test FAILED: $label -- the fixture is byte-identical to the known-good file, so it mutated nothing" >&2
-      errors=$((errors + 1))
+      echo "$label" >> "$FAILLOG"
       return
     fi
     out="$("$SELF" "$f" 2>&1)"
@@ -396,13 +435,13 @@ FROM runtime"
     if [ "$got" != "$want" ]; then
       echo "self-test FAILED: $label -- expected exit $want, got $got" >&2
       echo "$out" | sed 's/^/    /' >&2
-      errors=$((errors + 1))
+      echo "$label" >> "$FAILLOG"
       return
     fi
     if [ -n "$needle" ] && ! echo "$out" | grep -q -- "$needle"; then
       echo "self-test FAILED: $label -- exited $got but not for the expected reason ('$needle' not in output)" >&2
       echo "$out" | sed 's/^/    /' >&2
-      errors=$((errors + 1))
+      echo "$label" >> "$FAILLOG"
       return
     fi
     echo "self-test ok: $label (exit $got)"
@@ -688,6 +727,19 @@ EXPOSE 8080|' | expect 0 \
     "is not on PATH"
   unset DOCKERFILE_STAGES_GO
 
+  # The same shape for awk, which is the other thing this script cannot work
+  # without and the more dangerous of the two: a missing Go toolchain empties
+  # the table and rule 15 says so, while a missing awk leaves the rules running
+  # against empty strings that compare equal to each other. Measured before the
+  # guard existed: seven `ok:` lines for checks that never ran, including "both
+  # readings agree" with nothing on either side. Its own needle, because "not on
+  # PATH" alone would also be satisfied by the Go message above.
+  export DOCKERFILE_STAGES_AWK="definitely-not-an-awk"
+  echo "$good" | expect 1 \
+    "no awk on PATH fails the run before it can report agreement with itself" \
+    "are awk programs"
+  unset DOCKERFILE_STAGES_AWK
+
   # ---- a single-stage file -------------------------------------------------
   # The whole script is about the relationship between stages, so one stage is
   # not a mild case of the good file -- it is a file none of the rules mean
@@ -704,11 +756,12 @@ EXPOSE 8080|' | expect 0 \
   # `hack/check-dockerfile-stages.sh Dockerfile`. A false REJECT reachable only
   # outside the test harness is still a false REJECT.
   printf '%s\n' "$good" > "$tmp/Dockerfile.rel"
+  echo "a relative path argument is resolved from the caller's cwd" >> "$RANLOG"
   if ( cd "$tmp" && "$SELF" Dockerfile.rel >/dev/null 2>&1 ); then
     echo "self-test ok: a relative path argument is resolved from the caller's cwd (exit 0)"
   else
     echo "self-test FAILED: a relative path argument is resolved from the caller's cwd" >&2
-    errors=$((errors + 1))
+    echo "a relative path argument is resolved from the caller's cwd" >> "$FAILLOG"
   fi
 
   # ---- legal variations of the tail: the allowlist must not cry wolf -------
@@ -738,12 +791,99 @@ AS final" | expect 1 \
   printf '%s\nARG FOO=bar\n' "$good" | expect 1 \
     "an ARG after the trailing FROM is rejected" "contains 1 instruction"
 
+  # ---- META: does a failing case actually reach the exit code? -------------
+  #
+  # Everything above only prints. None of it is worth anything unless a printed
+  # FAILED changes $?, because the CI invocation is `make dockerfile-stages`,
+  # which runs this with stdout on /dev/null. That link was broken for the whole
+  # life of the suite (see FAILLOG above), and a fix scoped to the reported
+  # instance leaves the mechanism unguarded, so the mechanism is what this
+  # asserts: run the entire suite against a COPY OF ITSELF with one guard
+  # neutered -- the same mutation operator the archived guard-defeat matrix uses
+  # -- and require a non-zero exit, the FAILED line naming the case that belongs
+  # to the neutered guard, and the absence of the word "passed".
+  #
+  # DOCKERFILE_STAGES_META bounds the recursion at exactly one level. The copy
+  # lives beside this script because REPO_ROOT is derived from BASH_SOURCE: a
+  # copy in /tmp would look for the emitter in /tmp and fail every case, which
+  # would produce the same exit 1 for a reason that has nothing to do with the
+  # guard.
+  #
+  # THERE IS DELIBERATELY NO "an unmutated copy exits 0" TWIN. Neutering ANY
+  # guard would redden it, so it would attach itself to all 28 rows of the
+  # defeat matrix and destroy the one-claimant property that makes the matrix
+  # readable. The anti-vacuity work that twin would do is done here instead, by
+  # requiring that the copy differ by exactly one line, that the line be the
+  # named guard, and that the FAILED line name that guard's own case -- an
+  # exit 1 from a copy that failed to build or failed to mutate does not satisfy
+  # any of the three.
+  if [ -z "${DOCKERFILE_STAGES_META:-}" ]; then
+    echo "a neutered guard makes the whole suite exit non-zero" >> "$RANLOG"
+    meta_mutant="$REPO_ROOT/hack/.selftest-meta-mutant.$$.sh"
+    # ANCHORED, and the anchor is load-bearing. The first version of this matched
+    # /fail "USER appears/ unanchored -- and the only line it found was the awk
+    # program on THIS line, which contains that text as a pattern. The suite then
+    # reported the mutation as confirmed (the mutant did contain the string it
+    # grepped for) and the case passed while testing nothing. A guard call site
+    # is `fail "` at the start of a line; a mention of one is not.
+    "$AWK_BIN" '/^[[:space:]]*fail "USER appears in the runtime stage/ && !done { sub(/fail "/, "true \"NEUTERED "); done=1 } { print }' \
+      "$SELF" > "$meta_mutant"
+    chmod +x "$meta_mutant"
+    # Confirm the mutation is the mutation intended, from BOTH sides of the diff:
+    # one line replaced, the line that left was a real guard call site, and the
+    # line that arrived is that same guard neutered. Grepping the mutant for the
+    # string is what was fooled above.
+    meta_gone="$(diff "$SELF" "$meta_mutant" | sed -n 's/^< //p')"
+    meta_new="$(diff "$SELF" "$meta_mutant" | sed -n 's/^> //p')"
+    meta_changed="$(diff "$SELF" "$meta_mutant" | grep -c '^[<>] ')"
+    if [ "$meta_changed" != "2" ] ||
+       ! printf '%s\n' "$meta_gone" | grep -q '^[[:space:]]*fail "USER appears in the runtime stage' ||
+       ! printf '%s\n' "$meta_new" | grep -q '^[[:space:]]*true "NEUTERED USER appears in the runtime stage'; then
+      echo "self-test FAILED: a neutered guard makes the whole suite exit non-zero -- the mutation did not land as intended (diff touched $meta_changed line(s); gone: '${meta_gone# }'). The operator no longer matches the guard it names, so this case would have tested nothing." >&2
+      echo "a neutered guard makes the whole suite exit non-zero" >> "$FAILLOG"
+    else
+      meta_out="$(DOCKERFILE_STAGES_META=1 "$meta_mutant" --self-test 2>&1)"
+      meta_rc=$?
+      if [ "$meta_rc" -eq 0 ]; then
+        echo "self-test FAILED: a neutered guard makes the whole suite exit non-zero -- the mutant exited 0. Failing cases cannot reach the exit code, so CI cannot see a broken guard." >&2
+        echo "$meta_out" | grep '^self-test FAILED' | sed 's/^/    /' >&2
+        echo "a neutered guard makes the whole suite exit non-zero" >> "$FAILLOG"
+      elif ! echo "$meta_out" | grep -q "^self-test FAILED: USER added to the runtime stage is rejected"; then
+        echo "self-test FAILED: a neutered guard makes the whole suite exit non-zero -- the mutant exited $meta_rc, but not because of the case belonging to the neutered guard. An exit 1 for some other reason is not evidence that this link works." >&2
+        echo "a neutered guard makes the whole suite exit non-zero" >> "$FAILLOG"
+      elif echo "$meta_out" | grep -q "self-test passed"; then
+        echo "self-test FAILED: a neutered guard makes the whole suite exit non-zero -- the mutant printed 'self-test passed' alongside its failures." >&2
+        echo "a neutered guard makes the whole suite exit non-zero" >> "$FAILLOG"
+      else
+        echo "self-test ok: a neutered guard makes the whole suite exit non-zero (exit $meta_rc, $(echo "$meta_out" | grep -c '^self-test FAILED') case(s) red)"
+      fi
+    fi
+    rm -f "$meta_mutant"
+  fi
+
   echo
+  errors="$(wc -l < "$FAILLOG" | tr -d ' ')"
+  ran="$(wc -l < "$RANLOG" | tr -d ' ')"
+
+  # THE PASS CONDITION IS PRESENCE OF N SUCCESSES, NOT ABSENCE OF FAILURE.
+  # "no case failed" is also what a suite that ran no cases reports. The count
+  # is asserted so that deleting a case, or an early `return` that skips a
+  # block of them, is a failure rather than a quieter pass. Adding a case means
+  # bumping this number, which is the intended friction.
+  want_cases=73
+  [ -n "${DOCKERFILE_STAGES_META:-}" ] && want_cases=72   # the meta case skips itself
+  if [ "$ran" -ne "$want_cases" ]; then
+    echo "self-test: expected $want_cases cases, $ran ran. A case was added, deleted or skipped; a suite that quietly runs fewer cases still reports no failures." >&2
+    echo "$ran cases ran" >> "$FAILLOG"
+    errors="$(wc -l < "$FAILLOG" | tr -d ' ')"
+  fi
+
   if [ "$errors" -eq 0 ]; then
-    echo "self-test passed: every mutation above was caught, and every legal variation was not."
+    echo "self-test passed: $ran cases -- every mutation above was caught, every legal variation was not, and a neutered guard still moves the exit code."
     return 0
   fi
-  echo "self-test: $errors case(s) behaved unexpectedly." >&2
+  echo "self-test: $errors case(s) behaved unexpectedly:" >&2
+  sed 's/^/  - /' "$FAILLOG" >&2
   return 1
 }
 
@@ -757,6 +897,27 @@ DOCKERFILE="${1:-$REPO_ROOT/Dockerfile}"
 if [ ! -f "$DOCKERFILE" ]; then
   echo "FAIL: no such file: $DOCKERFILE" >&2
   exit 1
+fi
+
+# --- 18. awk is present (fatal: FAIL CLOSED) --------------------------------
+# Reading 1 IS an awk program, and every query against reading 2's table is an
+# awk one-liner. Without awk this script does not degrade, it lies: measured
+# with awk removed, it printed SEVEN `ok:` lines for checks that never ran --
+# all four of reading 1's, and "both readings agree the last stage begins at
+# line " with both sides empty, because "" = "". The two-readings design
+# becomes zero readings and reports agreement. It also produced a false
+# accusation ("no stage named 'hub-gke'" on a file that has one) and an
+# `integer expression expected` error from the stage-count guard.
+#
+# The old exit code was 1 in that state, so this looks like it changes nothing.
+# It changes everything that matters: exit 1 came from rule 1 happening to be
+# fatal on garbage input. Fail-closed by luck is not fail-closed, and the seven
+# false `ok:` lines were being read by humans.
+#
+# Checked before the table is built, so nothing downstream has to wonder.
+if ! command -v "$AWK_BIN" >/dev/null 2>&1; then
+  fail "cannot check $DOCKERFILE: all of reading 1 and every query against reading 2's table are awk programs, and '$AWK_BIN' is not on PATH. This is not skippable -- without awk the readings return empty strings, compare equal to each other, and report agreement about a file nobody parsed."
+  die
 fi
 
 # --- 15. the table was actually produced (fatal: FAIL CLOSED) ---------------
@@ -789,48 +950,48 @@ ok "stage table built by buildkit's own parser ($(echo "$TABLE" | grep -c '^STAG
 TAIL="$(raw_tail "$DOCKERFILE")"
 
 # --- 13. no escape directive (fatal: it changes what every line means) ------
-ESCAPE="$(echo "$TABLE" | awk '$1=="DIRECTIVE" && $2=="escape" {print $3}')"
+ESCAPE="$(echo "$TABLE" | "$AWK_BIN" '$1=="DIRECTIVE" && $2=="escape" {print $3}')"
 if [ -n "$ESCAPE" ]; then
   fail "$DOCKERFILE sets the parser directive 'escape=$ESCAPE', which redefines the line-continuation character. Reading 2 honours it, because it is BuildKit's parser -- but READING 1 does not and cannot: it is raw text, it assumes a backslash continues a line, and it is the check that survives the parser being wrong. A file that needs the escape directive gets one reading instead of two. Remove the directive."
   die
 fi
 
 # --- 14. no heredocs (fatal: their bodies are data, not instructions) -------
-HEREDOCS="$(echo "$TABLE" | awk '$1=="HEREDOC" {printf "line %s: %s\n", $2, $3}')"
+HEREDOCS="$(echo "$TABLE" | "$AWK_BIN" '$1=="HEREDOC" {printf "line %s: %s\n", $2, $3}')"
 if [ -n "$HEREDOCS" ]; then
   fail "$DOCKERFILE uses a heredoc ($(echo "$HEREDOCS" | tr '\n' ';' | sed 's/;$//')). Reading 2 now understands heredocs -- this refusal is NOT because the parser cannot read them. It is because Docker 20.10.24's built-in frontend and docker/dockerfile:1.9 were measured DISAGREEING WITH EACH OTHER about the same heredoc file: under one, a comment-shaped delimiter hides a phantom FROM; under the other, it hides hub-gke at the end of the file. A better parser tells you what buildkit v0.31.2 thinks, not what the frontend building the image thinks, so the construct is refused rather than interpreted. Rewrite without the heredoc."
   die
 fi
 ok "no construct this parser cannot read (no 'escape' directive, no heredoc)"
 
-STAGE_COUNT="$(echo "$TABLE" | awk '$1=="STAGE"{n=$2} END{print n+0}')"
+STAGE_COUNT="$(echo "$TABLE" | "$AWK_BIN" '$1=="STAGE"{n=$2} END{print n+0}')"
 if [ "$STAGE_COUNT" -lt 2 ]; then
   fail "expected a multi-stage Dockerfile, found $STAGE_COUNT stage(s) in $DOCKERFILE"
   die
 fi
 
 # --- 12. stage names are unique (fatal: name resolution underpins the rest) -
-DUPE_NAMES="$(echo "$TABLE" | awk '$1=="STAGE" && $4!="-" {print $4}' | sort | uniq -d | tr '\n' ' ')"
+DUPE_NAMES="$(echo "$TABLE" | "$AWK_BIN" '$1=="STAGE" && $4!="-" {print $4}' | sort | uniq -d | tr '\n' ' ')"
 if [ -n "$DUPE_NAMES" ]; then
   fail "duplicate stage name(s) in $DOCKERFILE: ${DUPE_NAMES% }. A later 'FROM <name>' resolves to the last stage of that name, so a duplicate silently changes what the default build target is built from. Stage names must be unique."
   die
 fi
 ok "stage names are unique, so each 'FROM <stage>' resolves to one stage"
 
-stage_name()  { echo "$TABLE" | awk -v n="$1" '$1=="STAGE" && $2==n {print $4}'; }
-stage_base()  { echo "$TABLE" | awk -v n="$1" '$1=="STAGE" && $2==n {print $3}'; }
-stage_line()  { echo "$TABLE" | awk -v n="$1" '$1=="STAGE" && $2==n {print $5}'; }
-stage_index() { echo "$TABLE" | awk -v s="$1" '$1=="STAGE" && $4==s {print $2}'; }
-stage_instr_count() { echo "$TABLE" | awk -v n="$1" '$1=="INSTR" && $2==n' | wc -l; }
-stage_verbs() { echo "$TABLE" | awk -v n="$1" '$1=="INSTR" && $2==n {print $3}'; }
-stage_lines_of() { echo "$TABLE" | awk -v n="$1" -v v="$2" '$1=="INSTR" && $2==n && $3==v {$1="";$2="";$3="";sub(/^ +/,"");print}'; }
+stage_name()  { echo "$TABLE" | "$AWK_BIN" -v n="$1" '$1=="STAGE" && $2==n {print $4}'; }
+stage_base()  { echo "$TABLE" | "$AWK_BIN" -v n="$1" '$1=="STAGE" && $2==n {print $3}'; }
+stage_line()  { echo "$TABLE" | "$AWK_BIN" -v n="$1" '$1=="STAGE" && $2==n {print $5}'; }
+stage_index() { echo "$TABLE" | "$AWK_BIN" -v s="$1" '$1=="STAGE" && $4==s {print $2}'; }
+stage_instr_count() { echo "$TABLE" | "$AWK_BIN" -v n="$1" '$1=="INSTR" && $2==n' | wc -l; }
+stage_verbs() { echo "$TABLE" | "$AWK_BIN" -v n="$1" '$1=="INSTR" && $2==n {print $3}'; }
+stage_lines_of() { echo "$TABLE" | "$AWK_BIN" -v n="$1" -v v="$2" '$1=="INSTR" && $2==n && $3==v {$1="";$2="";$3="";sub(/^ +/,"");print}'; }
 
 LAST="$STAGE_COUNT"
 
 # ---------------------------------------------------------------------------
 # Reading 1 vs Reading 2, and the tail allowlist.
 # ---------------------------------------------------------------------------
-RAW_LASTFROM="$(echo "$TAIL" | awk '$1=="LASTFROM"{print $2}')"
+RAW_LASTFROM="$(echo "$TAIL" | "$AWK_BIN" '$1=="LASTFROM"{print $2}')"
 PARSED_LASTFROM="$(stage_line "$LAST")"
 if [ "$RAW_LASTFROM" != "$PARSED_LASTFROM" ]; then
   fail "the two readings of $DOCKERFILE disagree about where the last stage begins: scanning raw text says line $RAW_LASTFROM, parsing says line $PARSED_LASTFROM. One of them is misreading the file and this script will not guess which. Write the final FROM as a single plain line."
@@ -838,21 +999,21 @@ else
   ok "both readings agree the last stage begins at line $RAW_LASTFROM"
 fi
 
-TAILJUNK="$(echo "$TAIL" | awk '$1=="TAILJUNK"{$1="";sub(/^ /,"");print}')"
+TAILJUNK="$(echo "$TAIL" | "$AWK_BIN" '$1=="TAILJUNK"{$1="";sub(/^ /,"");print}')"
 if [ -n "$TAILJUNK" ]; then
   fail "there is content after the final FROM line in $DOCKERFILE that is neither blank nor a comment, so the default build target is not an empty stage: $(echo "$TAILJUNK" | tr '\n' '|' | sed 's/|$//'). Nothing may follow the trailing FROM."
 else
   ok "nothing but blank lines and comments follows the final FROM line"
 fi
 
-TAILCONT="$(echo "$TAIL" | awk '$1=="TAILCONT"{$1="";sub(/^ /,"");print}')"
+TAILCONT="$(echo "$TAIL" | "$AWK_BIN" '$1=="TAILCONT"{$1="";sub(/^ /,"");print}')"
 if [ -n "$TAILCONT" ]; then
   fail "a line at or after the final FROM in $DOCKERFILE ends in a continuation backslash: $(echo "$TAILCONT" | tr '\n' '|' | sed 's/|$//'). Whether that joins the next line depends on Docker's parser and on whether the line is a comment; the trailing stage must not depend on either."
 else
   ok "no continuation backslash at or after the final FROM line"
 fi
 
-PRECONT="$(echo "$TAIL" | awk '$1=="PRECONT"{$1="";sub(/^ /,"");print}')"
+PRECONT="$(echo "$TAIL" | "$AWK_BIN" '$1=="PRECONT"{$1="";sub(/^ /,"");print}')"
 if [ -n "$PRECONT" ]; then
   fail "the last real line above the final FROM in $DOCKERFILE opens a continuation: $(echo "$PRECONT" | tr '\n' '|' | sed 's/|$//'). That line, and only that line, can absorb the final FROM into itself -- and if it does, the trailing empty stage does not exist and hub-gke is what an untargeted build ships. Blank lines in between do not save it: BuildKit skips them and holds the continuation open."
 else
@@ -867,7 +1028,7 @@ fi
 # window, and by the two readings disagreeing about where the last stage begins --
 # because it is the single worst input this script has been shown, and because a
 # construct whose meaning is deprecated is a construct whose meaning can change.
-EMPTYCONT="$(echo "$TABLE" | awk '$1=="WARN" && /[Ee]mpty continuation/ {$1="";sub(/^ /,"");print}')"
+EMPTYCONT="$(echo "$TABLE" | "$AWK_BIN" '$1=="WARN" && /[Ee]mpty continuation/ {$1="";sub(/^ /,"");print}')"
 if [ -n "$EMPTYCONT" ]; then
   fail "$DOCKERFILE has an empty continuation line: $(echo "$EMPTYCONT" | tr '\n' ';' | sed 's/;$//'). BuildKit skips the blank line and keeps the continuation open, so the next non-blank line is absorbed into the instruction above -- which is how a blank line silently deletes the trailing stage. Docker deprecates this; remove the blank line or the backslash above it."
   die
@@ -1060,7 +1221,7 @@ if [ -n "$BASE_IDX" ]; then
     # rule weakens with it SILENTLY, because it will still print its ok line.
     # Both scopes were live bypasses (corpus 100, 98/99) at the head where the
     # sentence above was first written.
-    ONBUILD_VERB="$(stage_lines_of "$i" ONBUILD | awk 'NF {print toupper($1)}' | sort -u | tr '\n' ',' | sed 's/,$//')"
+    ONBUILD_VERB="$(stage_lines_of "$i" ONBUILD | "$AWK_BIN" 'NF {print toupper($1)}' | sort -u | tr '\n' ',' | sed 's/,$//')"
     if [ -n "$ONBUILD_VERB" ]; then
       ONBUILD_IN_CHAIN="$ONBUILD_IN_CHAIN stage-$i($(stage_name "$i")):ONBUILD $ONBUILD_VERB"
     fi
@@ -1088,7 +1249,7 @@ else
 fi
 
 # --- 8. no ENV KUBECONFIG anywhere  (negative) ------------------------------
-if echo "$TABLE" | awk '$1=="INSTR" && $3=="ENV"' | grep -q 'KUBECONFIG'; then
+if echo "$TABLE" | "$AWK_BIN" '$1=="INSTR" && $3=="ENV"' | grep -q 'KUBECONFIG'; then
   fail "an ENV KUBECONFIG appears in $DOCKERFILE. pkg/k8s/client.go prefers an explicit kubeconfig over in-cluster credentials, so baking one in silently disables ServiceAccount auth and the hub cannot schedule agent pods -- a failure that looks like an RBAC problem."
 else
   ok "no ENV KUBECONFIG anywhere in the file"
