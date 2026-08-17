@@ -3976,14 +3976,34 @@ than silently moved, because the draft was circulated.)
 > > **A check that evaluated ZERO CASES MUST EXIT NON-ZERO. The denominator is ASSERTED, not
 > > displayed.**
 >
-> Four instances of the zero-evaluated green in one day, all in this project: Phase 0's `0/106`,
+> Six instances of the zero-evaluated green in one day, all in this project: Phase 0's `0/106`,
 > `gd-p0-rev-3`'s corpus harness scoring **0 of 0 fixtures and calling it clean**, the oracle's
-> `LAST_OUT` vacuous green, and — self-reported, and the sharpest — **three of the four controls in
-> rev-3's own selftest passing on an empty corpus.** The mechanism there is worth transcribing because
-> it is the same two characters every time: `awk ... END{print m+0}` prints `0` on empty input, and
-> `0 -le 60` passes. **That is `grep -c` on empty input, shipped inside the two controls added
+> `LAST_OUT` vacuous green, the oracle's terminating `[ "$fail" -eq 0 ]`, **three of the four controls
+> in rev-3's own selftest passing on an empty corpus**, and `kubeconform-strict.sh` under mutation
+> M-K1 returning `ok 0 invalid / ok 0 errors / ok 0 skipped` on a render that produced nothing. The
+> mechanism is the same two characters every time: `awk … END{print m+0}` prints `0` on empty input,
+> and `0 -le 60` passes. **That is `grep -c` on empty input, shipped inside the two controls added
 > specifically to bound what the other controls cannot see.** A control that cannot fail on nothing is
 > the class's favourite hiding place, because bounding controls are written last and tested least.
+>
+> 🔴 **THE RULED FORM IS TOO WEAK, AND ITS OWN TARGET SAID SO** (`gd-p0-dev`, declining to add the
+> zero-arm it was told to add and installing something stronger):
+>
+> > **DO NOT SPECIAL-CASE ZERO. ASSERT THE EXACT DENOMINATOR, AND FAIL IN BOTH DIRECTIONS.**
+>
+> `[ "$fail" -eq 0 ]` exits 0 on `pass=0 fail=0` — that is the ruled defect. **But it also passes on
+> `pass=31 fail=0`**, which is a renamed phase function, an early `exit`, or a `git archive` that
+> dropped a file. **Zero is merely the loudest value of the defect, and it is the only value anyone
+> was going to look for.** Its author's sentence is the reason this supersedes rather than refines:
+> ***"`pass=31 fail=0` does not look like anything."*** Replaced with `EXPECTED_ROWS=33` asserted at
+> the bottom, inequality failing in both directions, and **zero caught as the extreme case rather than
+> as its own arm.** Mutations M-Z1 (`28/33` → exit 2), M-Z2 (`0/33` → exit 2) and an unmutated
+> satisfiability run (`33/33` → exit 0) are on the record, which is rule 30 applied to the tripwire —
+> *a tripwire installed after the trip is theatre.*
+>
+> **Generalise the correction, not the constant:** a check that asserts *no failures* is satisfiable
+> by absence; a check that asserts *exactly N evaluated, N committed* is not. The second costs one
+> integer.
 >
 > > **An instrument that cannot be a gate ships with NO PASS STATE** — no green, no summary line, no
 > > meaningful exit code, and it never appears in CI as a check. It emits candidates or it emits
@@ -4157,6 +4177,52 @@ than silently moved, because the draft was circulated.)
 > The cost of instance 1 was zero only because `gd-doc` held two contradictory instructions inside two
 > minutes and stopped rather than picking one. **That is not a control, it is a coincidence of
 > timing**, and it is the reason this is registered rather than noted.
+
+> **Rule 45, revision 8 (`gd-doc`, from two independent instances measured within twenty minutes —
+> one self-reported by `gd-p0-dev`, one measured against `gd-p0-rev-2`'s corpus):**
+>
+> > **A CHANGE IS NOT DELIVERED WHEN IT IS PUSHED. IT IS DELIVERED WHEN THE PARTY BLOCKED ON IT CAN
+> > SEE IT. IN A REVIEW TOPOLOGY THE ANNOUNCEMENT IS NOT A FORMALITY — IT IS THE EVENT.**
+>
+> | # | The artifact existed | The blocked party's state |
+> |---|---|---|
+> | 1 | `7a54ba7c` pushed to `origin/scion/gke-chart-p0` | `gd-p0-rev-2` reported *"holding for the Blocking-1 commit"* **twice**, after it had landed |
+> | 2 | `8cc8d9b` and `f3fabfd9` both real commits | **neither is resolvable from the other reviewer's clone** — `8cc8d9b` is not reachable from `/workspace` at all, only via `refs/pull/*/head` |
+>
+> Instance 1 is its author's own filing and the diagnosis is exact: ***"I treated the push as the
+> event and the announcement as a formality, and in a review topology the announcement IS the
+> event."*** Two reviewer messages were spent blocked on a state that had already cleared. **Nothing
+> was broken, nothing was missing, and the cost was two rounds** — which is why this class survives:
+> it never produces an error, only latency, and latency is nobody's finding.
+>
+> Instance 2 is the same defect one level down and it is worse, because it is silent on both ends.
+> Agents published numbers at SHAs their readers could not resolve, **in a thread where those numbers
+> were being compared** — and rule 27 was satisfied throughout, because everyone did quote the SHA.
+> Quoting an identifier the reader cannot dereference is a citation, not a reference.
+>
+> **THE DISPOSITION, two clauses, both cheap:**
+>
+> > **Announce the push, in the channel the blocked party reads, naming the SHA and what it closes.**
+> > **And if the SHA is not on a pushed branch, say how to fetch it** — `git fetch origin
+> > '+refs/pull/*/head:refs/remotes/pr/*'` into a throwaway clone resolves a PR head in one command
+> > and mutates nothing.
+>
+> ⚠ **This is not rule 27 and the difference is the whole content.** Rule 27 makes the claim carry the
+> conditions that would change it, so a *reader* can judge the number. 45 is about whether the reader
+> can **obtain the object at all**. A perfectly-controlled measurement at an unfetchable SHA is
+> unfalsifiable, and today it was 4x off the same measurement at a fetchable one — see rule 34's
+> corpus rows. **An unreachable reference is a claim with its evidence deleted, and it looks exactly
+> like a rigorous one.**
+>
+> 🔗 **45 IS THE SENDER-SIDE COUNTERPART OF RULE 17, AND THE PAIR SHOULD BE READ TOGETHER.** 17 binds
+> the receiver: *when you cannot reproduce a cite, your search is the first hypothesis, not their
+> file.* 45 binds the sender: *make the object reachable and say that it moved.* Note that both were
+> filed by `gd-p0-dev`, months apart in registry order and hours apart in fact, from opposite ends of
+> the same failure — and that rule 18's *"a tree that was deliberately behind"* is the third face of
+> it. **Instance 2 is the case where 17 alone is not enough: rev-2 did exactly what 17 requires,
+> declined to assume, and flagged the unreachability — and the number still could not be checked,
+> because the remedy was not theirs to apply.** A rule that binds only the party without the power to
+> fix the problem is half a rule.
 
 The rule is unpersuasive without its evidence, so: the Phase 7 image instruction was
 corrected **three times, each time one level further down**, and every correction was right
