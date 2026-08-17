@@ -185,13 +185,16 @@ die() { echo; echo "$FAILURES check(s) failed."; exit 1; }
 # klog -- and the go directive, and the result does not build without further
 # remediation. The repo already carries ten nested modules under extras/.
 #
-# v0.31.2 rather than the current v0.32.2, and the reason is CI, not the parser:
-# v0.32's go directive is 1.26.3, the root go.mod says 1.26.1, and that is the
-# version `actions/setup-go` installs. Building it would make this guard depend
-# on an automatic toolchain download on every run. v0.31.2 needs 1.25.9 and
-# builds under `GOTOOLCHAIN=local` at 1.26.1 -- verified that way, not assumed.
+# v0.31.2 rather than the current v0.32.2, and the reason is CI, not the parser.
+# v0.32's go directive is 1.26.3; the root go.mod says 1.26.1, which is what
+# `actions/setup-go` installs -- AND that action sets `GOTOOLCHAIN=local`, which
+# was read off the CI job's own env block rather than inferred. So v0.32.2 does
+# not "download a toolchain and carry on" on the runner; it fails outright, and
+# this guard would have been red on arrival. v0.31.2 needs 1.25.9 and builds
+# under `GOTOOLCHAIN=local` at 1.26.1 -- checked by building it that way.
 # The two versions were also run against each other over the whole corpus and
 # every Dockerfile in the tree: identical tables everywhere, identical verdicts.
+# If you bump this, check the go directive against the root go.mod first.
 #
 # WHAT THIS DOES NOT FIX, WHICH IS WHY READING 1 STAYS
 #
@@ -218,6 +221,14 @@ die() { echo; echo "$FAILURES check(s) failed."; exit 1; }
 # that assert this script FAILS CLOSED when the emitter produces nothing, which
 # is not otherwise constructible. Nothing else should set it.
 # ---------------------------------------------------------------------------
+# GO_BIN is a variable rather than a literal `go` for one reason: the
+# "Go is not installed" branch of rule 15 is otherwise unreachable from the
+# self-test, and an unreachable branch is an untested branch -- which is the
+# defect that let two walkable gates sit under nineteen green cases. Pointing
+# it at a name that does not exist exercises the real failure end to end,
+# rather than testing that the message string is spelled correctly.
+GO_BIN="${DOCKERFILE_STAGES_GO:-go}"
+
 parse() {
   local abs
   abs="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
@@ -225,7 +236,7 @@ parse() {
     $DOCKERFILE_STAGES_CMD "$abs"
     return $?
   fi
-  go -C "$REPO_ROOT/hack/dockerfile-stages" run . "$abs"
+  "$GO_BIN" -C "$REPO_ROOT/hack/dockerfile-stages" run . "$abs"
 }
 
 # ---------------------------------------------------------------------------
@@ -647,6 +658,27 @@ EXPOSE 8080|' | expect 0 \
     "an emitter that exits non-zero fails the run rather than passing it" \
     "failed to read"
   unset DOCKERFILE_STAGES_CMD
+  # The third branch of rule 15, and the one a CI runner can actually reach:
+  # no Go at all. Distinguished from "the emitter failed" because the remedies
+  # are different, and a message that tells you to debug the emitter when the
+  # real problem is a missing toolchain is a message that gets the guard
+  # deleted. Reached through GO_BIN, so this exercises the branch and not just
+  # the string; without that seam it was the one unreachable failure path in
+  # the file.
+  export DOCKERFILE_STAGES_GO="definitely-not-a-go-toolchain"
+  echo "$good" | expect 1 \
+    "no Go toolchain on PATH fails the run, with its own message" \
+    "is not on PATH"
+  unset DOCKERFILE_STAGES_GO
+
+  # ---- a single-stage file -------------------------------------------------
+  # The whole script is about the relationship between stages, so one stage is
+  # not a mild case of the good file -- it is a file none of the rules mean
+  # anything about. Left unhandled it reaches rule 1 and reports "no stage
+  # named hub-gke", which is true and misleading.
+  printf 'FROM debian:trixie-slim\nRUN true\n' | expect 1 \
+    "a single-stage file is refused as such, not misreported" \
+    "expected a multi-stage Dockerfile"
 
   # ---- a RELATIVE path argument --------------------------------------------
   # Nothing else in this suite can catch this: `expect` and the review corpus
@@ -724,8 +756,8 @@ PARSE_MSG="$(cat "$PARSE_ERR")"
 rm -f "$PARSE_ERR"
 
 if [ "$PARSE_RC" -ne 0 ]; then
-  if ! command -v go >/dev/null 2>&1; then
-    fail "cannot read $DOCKERFILE: this script gets its stage table from hack/dockerfile-stages, which needs a Go toolchain, and 'go' is not on PATH. It is not skippable: with no table there are no instructions to check and every rule below would pass vacuously. CI runs this after actions/setup-go; locally, install Go or run 'make dockerfile-stages' from a checkout."
+  if ! command -v "$GO_BIN" >/dev/null 2>&1; then
+    fail "cannot read $DOCKERFILE: this script gets its stage table from hack/dockerfile-stages, which needs a Go toolchain, and '$GO_BIN' is not on PATH. It is not skippable: with no table there are no instructions to check and every rule below would pass vacuously. CI runs this after actions/setup-go; locally, install Go or run 'make dockerfile-stages' from a checkout."
   else
     fail "hack/dockerfile-stages failed to read $DOCKERFILE (exit $PARSE_RC): ${PARSE_MSG:-no error output}. A file BuildKit's own parser will not read is not a file this guard can have an opinion about."
   fi
