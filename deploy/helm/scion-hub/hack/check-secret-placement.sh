@@ -53,6 +53,37 @@ CHART_DIR="${CHART_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # SHOULD carry material stops carrying it, it will not quietly join this set.
 NO_MATERIAL=(existing-secret session-existing)
 
+# THE NEEDLE COUNT PER FIXTURE, COMMITTED. Not reported - asserted.
+#
+# WHY THIS EXISTS, AND IT IS A DEFECT THIS FILE SHIPPED WITH. The guards below
+# assert that a fixture's needle set is non-EMPTY unless its vacuity is declared
+# in NO_MATERIAL, and that the corpus total is non-zero. Neither notices a set
+# that merely got SMALLER. Measured, on this chart: inject BRE-style escaping
+# (`secret\|token\|...`) into the scanner's Python `re` key filter - the exact
+# wrong-dialect slip GNU grep's `\|` invites - and settings-oauth drops from 2
+# needles to 1, the corpus total from 5 to 4, the OAuth client_secret stops
+# being tracked at all, and the run reports
+#
+#   PASS (6 fixtures, 4 secret values tracked, 0 in args/ConfigMap/annotation)
+#
+# with exit 0. A scanner that has stopped seeing the newest credential is
+# indistinguishable, in its own output, from a chart that never leaked it. The
+# criterion this file exists to measure would have been reported met by an
+# instrument that had gone partly blind.
+#
+# The remedy is the same one section B of chart-integrity.sh uses for kinds: a
+# committed expectation, asserted in BOTH directions against the fixtures on
+# disk, so a drop is a failure and an addition has to be written down in the
+# diff that causes it. Update these numbers deliberately; do not chase them.
+declare -A EXPECTED_NEEDLES=(
+  [existing-secret]=0    # bring-your-own session Secret; nothing rendered
+  [minimal]=1            # the chart-rendered session secret
+  [session-existing]=0   # bring-your-own session Secret; nothing rendered
+  [settings]=1           # session secret; settings.yaml carries no credential
+  [settings-oauth]=2     # session secret + the OAuth web client_secret
+  [varied]=1             # session secret
+)
+
 # ---------------------------------------------------------------------------
 # The scanner. Reads a rendered multi-document manifest on stdin and prints one
 # line per finding. Zero dependencies beyond python3 - deliberately no PyYAML,
@@ -394,6 +425,33 @@ for known in "${NO_MATERIAL[@]}"; do
   fi
 done
 
+# EXPECTED_NEEDLES IS ASSERTED AGAINST DISK IN BOTH DIRECTIONS, for the reason
+# the fixture list itself is: a table that has stopped covering a fixture is a
+# table that excuses it.
+for name in "${fixtures[@]}"; do
+  if [[ -z "${EXPECTED_NEEDLES[$name]+set}" ]]; then
+    echo "check-secret-placement: fixture '${name}' has no entry in EXPECTED_NEEDLES. Add its count deliberately -- NOTHING WAS ANALYSED (skipped, not clean)" >&2
+    exit 2
+  fi
+done
+for name in "${!EXPECTED_NEEDLES[@]}"; do
+  if ! printf '%s\n' "${fixtures[@]}" | grep -qxF -- "$name"; then
+    echo "check-secret-placement: EXPECTED_NEEDLES names '${name}', which is not a fixture on disk -- NOTHING WAS ANALYSED (skipped, not clean)" >&2
+    exit 2
+  fi
+  # The two declarations must agree. A fixture in NO_MATERIAL with a non-zero
+  # expectation, or a zero expectation without the declaration, means one of
+  # them was updated and the other was not - and whichever is stale is the one
+  # that will be believed.
+  _declared_vacuous=no
+  printf '%s\n' "${NO_MATERIAL[@]}" | grep -qxF -- "$name" && _declared_vacuous=yes
+  if [[ "${EXPECTED_NEEDLES[$name]}" -eq 0 && "$_declared_vacuous" == "no" ]] \
+     || [[ "${EXPECTED_NEEDLES[$name]}" -ne 0 && "$_declared_vacuous" == "yes" ]]; then
+    echo "check-secret-placement: '${name}' is EXPECTED_NEEDLES=${EXPECTED_NEEDLES[$name]} but NO_MATERIAL says vacuous=${_declared_vacuous}. The two declarations disagree -- NOTHING WAS ANALYSED (skipped, not clean)" >&2
+    exit 2
+  fi
+done
+
 echo "check-secret-placement: ${HELM} ${helm_version}, python3 $(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:3])))'), ${#fixtures[@]} fixtures"
 
 rc=0
@@ -432,6 +490,20 @@ for name in "${fixtures[@]}"; do
     rc=2
     continue
   fi
+  # THE COUNT, NOT MERELY ITS NON-EMPTINESS. This is the guard that catches a
+  # scanner which has gone PARTLY blind - the case the two checks around it
+  # cannot see, because a set that shrank is still non-empty and still sums to
+  # a non-zero total. See EXPECTED_NEEDLES for the measurement that made this
+  # necessary.
+  if [[ "$n" -ne "${EXPECTED_NEEDLES[$name]}" ]]; then
+    echo "  ERROR   ${name}: harvested ${n} secret value(s), expected exactly ${EXPECTED_NEEDLES[$name]}." >&2
+    echo "          Fewer means the scanner stopped seeing material that is still there - the" >&2
+    echo "          placement result below it would be a clean bill of health from a blind" >&2
+    echo "          instrument. More means the chart or the fixture now renders material nobody" >&2
+    echo "          wrote down. Update EXPECTED_NEEDLES in the diff that changes the count." >&2
+    rc=2
+    continue
+  fi
   if [[ "$n" -gt 0 && "$expect_vacuous" == "yes" ]]; then
     echo "  ERROR   ${name}: listed in NO_MATERIAL but the render carries ${n} secret value(s)." >&2
     echo "          The declared vacuity is wrong, and the scan for this fixture was being skipped." >&2
@@ -460,6 +532,17 @@ fi
 # scanner or the run says nothing.
 if [[ "$total_needles" -eq 0 ]]; then
   echo "check-secret-placement: no fixture rendered any secret material -- NOTHING WAS ANALYSED (skipped, not clean)" >&2
+  exit 2
+fi
+# And the corpus total against the sum of the committed expectations. Redundant
+# with the per-fixture check on today's corpus, and kept anyway: it is the one
+# line that still holds if a future edit makes the per-fixture loop `continue`
+# past a fixture without failing, which is how the vacuity guard above was
+# reached in the first place.
+_want_total=0
+for name in "${!EXPECTED_NEEDLES[@]}"; do _want_total=$((_want_total + EXPECTED_NEEDLES[$name])); done
+if [[ "$total_needles" -ne "$_want_total" ]]; then
+  echo "check-secret-placement: tracked ${total_needles} secret values across the corpus, expected ${_want_total} -- NOT a clean run" >&2
   exit 2
 fi
 
