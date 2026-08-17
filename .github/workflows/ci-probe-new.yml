@@ -1,0 +1,16 @@
+name: CI Probe New File
+
+on:
+  pull_request:
+    branches: [ scion/ci-probe-base ]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe
+    runs-on: ubuntu-latest
+    steps:
+      - name: Say hello
+        run: echo "brand-new workflow file added only on the head branch"
