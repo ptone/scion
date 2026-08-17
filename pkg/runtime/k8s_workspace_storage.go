@@ -46,10 +46,12 @@ func sharedWorkspaceBackend(name string) bool {
 
 // usesSharedWorkspacePVC reports whether this pod's workspace is served by a
 // shared PVC rather than the node-local EmptyDir. Every shared-workspace
-// branch in the K8s pod path tests exactly this — the advisory lock, the
-// workspace sync skip, the shared-dir PVCs, fsGroup, the workspace volume and
-// the provisioning init container — so a future backend is admitted at all of
-// them at once rather than at seven of eight.
+// branch in the K8s pod path tests exactly this, and this is the full list of
+// them: the advisory lock, the workspace-sync skip and its seeding check, the
+// shared-dir PVC creation no-op, the fsGroup choice, the workspace volume and
+// its subPath mount, the provisioning init container, and the shared-dir
+// subPath mounts. A future backend admitted here is admitted at all of them at
+// once, which is what stops it being admitted at all but one.
 func usesSharedWorkspacePVC(cfg RunConfig) bool {
 	return sharedWorkspaceBackend(cfg.WorkspaceBackendName) && cfg.NFSPVClaimName != ""
 }
@@ -97,6 +99,8 @@ func workspaceListingIsEmpty(lsOutput string) bool {
 
 // sharedWorkspaceNeedsSeeding reports whether the host copy should be extracted
 // onto the shared volume, which is true only while the volume is still empty.
+// It takes the listing as a function value rather than reaching for the exec
+// subresource itself; see workspaceSyncDeps for why.
 //
 // A shared volume is not a fresh EmptyDir. It outlives the pod and, in
 // shared-plain, every agent in the project mounts the same subPath
@@ -113,20 +117,107 @@ func workspaceListingIsEmpty(lsOutput string) bool {
 // If the check itself fails we seed: an unpopulated workspace is the worse
 // outcome, and a broken exec channel surfaces as a sync error rather than as a
 // pod that quietly came up empty.
-func (r *KubernetesRuntime) sharedWorkspaceNeedsSeeding(ctx context.Context, namespace, podName string, cfg RunConfig) bool {
-	out, err := r.execInPod(ctx, namespace, podName, []string{"sh", "-c", "ls -A /workspace 2>/dev/null | head -1"})
+func sharedWorkspaceNeedsSeeding(ctx context.Context, listWorkspace func(context.Context) (string, error), cfg RunConfig) bool {
+	out, err := listWorkspace(ctx)
 	if err != nil {
 		runtimeLog.Warn("Could not inspect shared workspace volume; seeding it from the host copy",
 			"agent", cfg.Name, "backend", cfg.WorkspaceBackendName, "error", err)
 		return true
 	}
-	if workspaceListingIsEmpty(out) {
-		return true
+	return workspaceListingIsEmpty(out)
+}
+
+// workspaceSyncDeps carries the pod-side effects of the workspace stage as
+// function values: listing the pod's workspace, copying the host workspace
+// into it, and fixing ownership afterwards.
+//
+// All three go through the API server's exec subresource, which a fake
+// clientset cannot serve — so with the effects inlined, the decision between
+// them could not be reached from a test at all, only re-implemented in one.
+// That is what let round 1's defect (a shared-volume pod mounting an empty
+// /workspace) live in four lines of Run with a green suite. The seam exists so
+// the decision is driven, not restated.
+type workspaceSyncDeps struct {
+	// listWorkspace returns the pod's /workspace listing (empty when the
+	// directory is empty).
+	listWorkspace func(ctx context.Context) (string, error)
+	// copyWorkspace extracts the host workspace into the pod's /workspace.
+	copyWorkspace func(ctx context.Context) error
+	// chownWorkspace hands /workspace to the container's unix user.
+	chownWorkspace func(ctx context.Context) error
+}
+
+// podWorkspaceSyncDeps binds the real, exec-backed effects to one pod.
+func (r *KubernetesRuntime) podWorkspaceSyncDeps(namespace, podName string, cfg RunConfig) workspaceSyncDeps {
+	if r.workspaceSyncDepsOverride != nil {
+		return r.workspaceSyncDepsOverride(namespace, podName, cfg)
 	}
-	runtimeLog.Info("Shared workspace volume already populated; leaving it as it is",
-		"agent", cfg.Name, "backend", cfg.WorkspaceBackendName,
+	return workspaceSyncDeps{
+		listWorkspace: func(ctx context.Context) (string, error) {
+			return r.execInPod(ctx, namespace, podName,
+				[]string{"sh", "-c", "ls -A /workspace 2>/dev/null | head -1"})
+		},
+		copyWorkspace: func(ctx context.Context) error {
+			return r.syncWithRetry(ctx, func() error {
+				return r.syncToPod(ctx, namespace, podName, cfg.Workspace, "/workspace")
+			})
+		},
+		chownWorkspace: func(ctx context.Context) error {
+			chownCmd := fmt.Sprintf("chown -R %s:%s /workspace", cfg.UnixUsername, cfg.UnixUsername)
+			_, err := r.execInPod(ctx, namespace, podName, []string{"sh", "-c", chownCmd})
+			return err
+		},
+	}
+}
+
+// syncWorkspaceStage decides whether the host workspace is copied into the pod
+// and, when it is, copies it and fixes ownership.
+//
+// The skip for shared-volume pods tracks the mechanism that populates the
+// volume, not the backend name: skip only when the bytes arrive some other way
+// (the provisioning init container, or the container's own git clone). A
+// shared-volume pod with neither would otherwise mount the PVC and find
+// /workspace empty (#1075 round 1).
+//
+// One further condition applies on shared storage, checked against the volume
+// once the pod is up: the host copy seeds it only while it is still empty. See
+// sharedWorkspaceNeedsSeeding.
+//
+// Local-backend pods are untouched by all of this and RETAIN today's
+// behaviour: sync whenever there is a host workspace.
+func (r *KubernetesRuntime) syncWorkspaceStage(ctx context.Context, cfg RunConfig, deps workspaceSyncDeps) error {
+	if !shouldSyncWorkspaceToPod(cfg) {
+		if usesSharedWorkspacePVC(cfg) {
+			logWorkspaceSyncSkip(cfg, "populated-by-container-clone")
+		}
+		return nil
+	}
+	if usesSharedWorkspacePVC(cfg) && !sharedWorkspaceNeedsSeeding(ctx, deps.listWorkspace, cfg) {
+		logWorkspaceSyncSkip(cfg, "volume-already-populated")
+		return nil
+	}
+
+	runtimeLog.Info("Syncing workspace", "agent", cfg.Name, "source", cfg.Workspace, "phase", "workspace-sync")
+	fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", cfg.Workspace)
+	if err := deps.copyWorkspace(ctx); err != nil {
+		return fmt.Errorf("failed to sync workspace: %w", err)
+	}
+	// Fix ownership: tar extraction runs as root via K8s exec, so extracted
+	// files are owned by root. Non-fatal, as it has always been.
+	if err := deps.chownWorkspace(ctx); err != nil {
+		runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
+	}
+	return nil
+}
+
+// logWorkspaceSyncSkip records a skipped workspace sync with a discriminated
+// reason. The two reasons are different claims about the world — "something
+// else will populate this volume" versus "something else already did" — and
+// an operator reading the log needs to know which one fired.
+func logWorkspaceSyncSkip(cfg RunConfig, reason string) {
+	runtimeLog.Info("Skipping workspace sync (bytes come from the shared volume, not from a host copy)",
+		"agent", cfg.Name, "backend", cfg.WorkspaceBackendName, "skip_reason", reason,
 		"pvc", cfg.NFSPVClaimName, "subpath", cfg.NFSSubPath, "phase", "workspace-sync-skip")
-	return false
 }
 
 // workspaceSharingModeFromEnv reads the project's workspace sharing mode from
@@ -165,7 +256,20 @@ func (r *KubernetesRuntime) applyWorkspaceStorage(cfg RunConfig) (RunConfig, err
 	mode := workspaceSharingModeFromEnv(cfg.Env)
 	backend := SelectWorkspaceBackend(r.WorkspaceStorage, mode)
 	if !sharedWorkspaceBackend(backend.Name()) {
-		return cfg, nil
+		// Two very different states reach here. Asking for node-local storage
+		// is the legitimate no-op. Asking for a backend this runtime cannot
+		// realize is not: SelectWorkspaceBackend falls through to local for an
+		// unrecognized name (and its switch is case-sensitive where
+		// ApplyNFSDefaults is not, so "NFS" gets its defaults applied and then
+		// resolves to local), and "cloudrun-volume" resolves to a real backend
+		// that this pod path has no branch for. Both would hand the operator
+		// an EmptyDir with no way to notice — the #1075 signature.
+		configured := strings.TrimSpace(r.WorkspaceStorage.Backend)
+		if configured == "" || strings.EqualFold(configured, "local") || mode == store.SharingModeClonePerAgent {
+			return cfg, nil
+		}
+		return cfg, fmt.Errorf("workspace storage backend %q is not supported by the kubernetes runtime; "+
+			"use \"nfs\" or \"gke-shared-volume\"", configured)
 	}
 
 	sharedDirNames := make([]string, 0, len(cfg.SharedDirs))
@@ -183,10 +287,12 @@ func (r *KubernetesRuntime) applyWorkspaceStorage(cfg RunConfig) (RunConfig, err
 		return cfg, fmt.Errorf("workspace storage backend %q: %w", backend.Name(), err)
 	}
 
-	desc, err := backend.Realize(RealizeInput{
-		Resolved:           resolved,
-		ContainerWorkspace: cfg.ContainerWorkspace,
-	})
+	// ContainerWorkspace is deliberately not passed: it only feeds
+	// desc.Target, and the K8s pod path does not read Target — buildPod
+	// hardcodes MountPath "/workspace" in both arms, and the seeding check
+	// lists that same literal. Threading a value to a field nobody reads is
+	// how wiring comes to look live when it is not (see the NFSGID note below).
+	desc, err := backend.Realize(RealizeInput{Resolved: resolved})
 	if err != nil {
 		return cfg, fmt.Errorf("workspace storage backend %q: %w", backend.Name(), err)
 	}

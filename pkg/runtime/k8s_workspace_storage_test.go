@@ -30,6 +30,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // --- #1075: factory wiring of workspace storage into the K8s runtime ---
@@ -568,12 +571,72 @@ func TestRun_MissingProjectID_FailsInsteadOfEmptyDir(t *testing.T) {
 	}
 }
 
+func TestRun_UnsupportedBackend_FailsInsteadOfEmptyDir(t *testing.T) {
+	// A backend the kubernetes runtime cannot realize must fail the launch.
+	// SelectWorkspaceBackend falls through to local for anything it does not
+	// recognize, so without this guard the operator's configuration is
+	// accepted and silently produces an EmptyDir — the #1075 signature.
+	tests := []struct {
+		name      string
+		storage   *config.V1WorkspaceStorageConfig
+		wantInErr string
+		why       string
+	}{
+		{
+			name: "backend the k8s pod path has no branch for",
+			storage: &config.V1WorkspaceStorageConfig{
+				Backend: "cloudrun-volume",
+				CloudRunVolume: &config.V1CloudRunVolumeConfig{
+					VolumeName: "scion-workspaces",
+				},
+			},
+			wantInErr: "cloudrun-volume",
+			why:       "cloudrun-volume resolves to a real backend, but not one this runtime mounts",
+		},
+		{
+			name: "backend name that does not match SelectWorkspaceBackend's case-sensitive switch",
+			storage: &config.V1WorkspaceStorageConfig{
+				Backend: "NFS",
+				NFS: &config.V1NFSConfig{
+					MountRoot:   "/mnt/nfs",
+					SubPathRoot: "projects",
+					Shares:      []config.V1NFSShare{{ID: "s0", Server: "10.0.0.2", Export: "/ws", PVName: "nfs-pvc"}},
+				},
+			},
+			wantInErr: "NFS",
+			why:       "ApplyNFSDefaults lowercases and SelectWorkspaceBackend does not, so this config half-applies",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newNFSTestK8sRuntime()
+			r.WorkspaceStorage = tc.storage
+
+			err := runExpectingFailure(t, r, baseRunConfig("scion-test-unsupported"), tc.why)
+			if !strings.Contains(err.Error(), tc.wantInErr) {
+				t.Errorf("error should name the configured backend %q, got: %v", tc.wantInErr, err)
+			}
+			if n := len(listPods(t, r)); n != 0 {
+				t.Errorf("expected no pod to be created, got %d", n)
+			}
+		})
+	}
+}
+
 // --- The workspace-sync decision on shared storage ---
 //
-// These pin the decision function rather than the branch in Run: the sync
-// stage runs after waitForPodReady, and a fake clientset can neither make a
-// pod Ready nor serve the exec subresource the sync uses (its RESTClient()
-// panics in rest.NewRequest). See the PR body's known-gap note.
+// The decision has three layers and each is pinned where it lives:
+//
+//   - shouldSyncWorkspaceToPod / workspaceListingIsEmpty — the pure parts,
+//     below.
+//   - syncWorkspaceStage — the decision itself, driven through
+//     workspaceSyncDeps with the pod-side effects stubbed. This is the layer
+//     round 1's defect lived in, and where the "was the host copy actually
+//     extracted?" question gets answered.
+//   - Run -> syncWorkspaceStage — reachability, pinned by
+//     TestRun_ReachesWorkspaceSyncStage against a fake clientset whose pods
+//     report Ready.
 
 func TestShouldSyncWorkspaceToPod(t *testing.T) {
 	sharedCfg := func(name string, env ...string) RunConfig {
@@ -676,18 +739,241 @@ func TestWorkspaceListingIsEmpty(t *testing.T) {
 	}
 }
 
+// --- The workspace stage, driven ---
+
+// workspaceSyncRecorder stands in for the pod-side effects of the workspace
+// stage and records which of them were asked for. The counts are the
+// measurement: "did the host copy get extracted onto this volume?" has an
+// answer here, which it does not have at the level of a decision function.
+type workspaceSyncRecorder struct {
+	listing string
+	listErr error
+	copyErr error
+
+	listCalls  int
+	copyCalls  int
+	chownCalls int
+}
+
+func (rec *workspaceSyncRecorder) deps() workspaceSyncDeps {
+	return workspaceSyncDeps{
+		listWorkspace: func(context.Context) (string, error) {
+			rec.listCalls++
+			return rec.listing, rec.listErr
+		},
+		copyWorkspace: func(context.Context) error {
+			rec.copyCalls++
+			return rec.copyErr
+		},
+		chownWorkspace: func(context.Context) error {
+			rec.chownCalls++
+			return nil
+		},
+	}
+}
+
+// sharedVolumeSyncConfig is a pod already wired to a shared PVC — the state
+// applyWorkspaceStorage leaves a RunConfig in.
+func sharedVolumeSyncConfig(name string, env ...string) RunConfig {
+	return RunConfig{
+		Name:                 name,
+		UnixUsername:         "scion",
+		Workspace:            "/host/projects/demo",
+		WorkspaceBackendName: "gke-shared-volume",
+		NFSPVClaimName:       "scion-workspaces-pvc",
+		NFSSubPath:           "projects/proj-1075/workspace",
+		Env:                  env,
+	}
+}
+
+func TestSyncWorkspaceStage(t *testing.T) {
+	withInitClone := sharedVolumeSyncConfig("init-container")
+	withInitClone.GitCloneForInit = &api.GitCloneConfig{URL: "https://example.com/demo.git"}
+
+	tests := []struct {
+		name      string
+		cfg       RunConfig
+		listing   string
+		listErr   error
+		wantList  int
+		wantCopy  int
+		wantChown int
+		why       string
+	}{
+		{
+			name:      "shared volume, nothing populates it, volume empty: seed it",
+			cfg:       sharedVolumeSyncConfig("non-git"),
+			listing:   "",
+			wantList:  1,
+			wantCopy:  1,
+			wantChown: 1,
+			why:       "skipping here is #1075 round 1: the pod mounts the PVC and finds /workspace empty",
+		},
+		{
+			name:     "shared volume, nothing populates it, volume already has files: leave them",
+			cfg:      sharedVolumeSyncConfig("non-git-second-agent"),
+			listing:  "README.md\n",
+			wantList: 1,
+			wantCopy: 0,
+			why:      "tar -xz of a stale host copy would overwrite what the agents on this volume have written",
+		},
+		{
+			name:     "shared volume, container clones itself: never touch the volume",
+			cfg:      sharedVolumeSyncConfig("git-backed", "SCION_GIT_CLONE_URL=https://example.com/demo.git"),
+			listing:  "",
+			wantList: 0,
+			wantCopy: 0,
+			why:      "sciontool init clones into /workspace; seeding first would make it skip the clone",
+		},
+		{
+			name:     "shared volume, provisioning init container: never touch the volume",
+			cfg:      withInitClone,
+			listing:  "",
+			wantList: 0,
+			wantCopy: 0,
+			why:      "the init container has already populated the volume before the agent container starts",
+		},
+		{
+			name:      "shared volume, listing unavailable: seed it",
+			cfg:       sharedVolumeSyncConfig("exec-broken"),
+			listErr:   fmt.Errorf("exec channel unavailable"),
+			wantList:  1,
+			wantCopy:  1,
+			wantChown: 1,
+			why:       "an unpopulated workspace is the worse outcome, and a failed copy is at least visible",
+		},
+		{
+			name:      "local backend: today's behaviour, unconditionally",
+			cfg:       RunConfig{Name: "local", UnixUsername: "scion", Workspace: "/host/projects/demo"},
+			listing:   "README.md\n",
+			wantList:  0,
+			wantCopy:  1,
+			wantChown: 1,
+			why:       "an EmptyDir has no other source of bytes, and none of the shared-volume reasoning applies",
+		},
+		{
+			name:     "no host workspace: nothing to copy",
+			cfg:      RunConfig{Name: "no-workspace", UnixUsername: "scion"},
+			wantList: 0,
+			wantCopy: 0,
+			why:      "there is no source path",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newNFSTestK8sRuntime()
+			rec := &workspaceSyncRecorder{listing: tc.listing, listErr: tc.listErr}
+
+			if err := r.syncWorkspaceStage(context.Background(), tc.cfg, rec.deps()); err != nil {
+				t.Fatalf("syncWorkspaceStage: %v", err)
+			}
+			if rec.listCalls != tc.wantList {
+				t.Errorf("listWorkspace called %d times, want %d — %s", rec.listCalls, tc.wantList, tc.why)
+			}
+			if rec.copyCalls != tc.wantCopy {
+				t.Errorf("copyWorkspace called %d times, want %d — %s", rec.copyCalls, tc.wantCopy, tc.why)
+			}
+			if rec.chownCalls != tc.wantChown {
+				t.Errorf("chownWorkspace called %d times, want %d", rec.chownCalls, tc.wantChown)
+			}
+		})
+	}
+}
+
+func TestSyncWorkspaceStage_CopyFailureFailsTheLaunch(t *testing.T) {
+	// A workspace that did not make it into the pod is not a warning. The
+	// agent would come up on an empty directory and start working in it.
+	r := newNFSTestK8sRuntime()
+	rec := &workspaceSyncRecorder{copyErr: fmt.Errorf("stream failed")}
+
+	err := r.syncWorkspaceStage(context.Background(), sharedVolumeSyncConfig("copy-fails"), rec.deps())
+	if err == nil {
+		t.Fatal("expected the stage to fail when the workspace copy fails")
+	}
+	if !strings.Contains(err.Error(), "stream failed") {
+		t.Errorf("error should propagate the cause, got: %v", err)
+	}
+}
+
+// TestRun_ReachesWorkspaceSyncStage pins the call, not the decision: Run must
+// still hand the workspace stage the pod it created. The stage's own matrix is
+// covered by TestSyncWorkspaceStage; what cannot be established there is that
+// anything reaches it.
+//
+// This is the one test that drives Run past waitForPodReady, which costs it
+// the 2s poll interval. Everything after the workspace stage still needs a
+// real API server, so Run ends on the startup gate — that error is the proof
+// the stage was passed rather than skipped over.
+func TestRun_ReachesWorkspaceSyncStage(t *testing.T) {
+	r := gkeSharedVolumeRuntime(t)
+	readyPodsOnGet(t, r)
+
+	rec := &workspaceSyncRecorder{}
+	var gotNamespace, gotPod string
+	r.workspaceSyncDepsOverride = func(namespace, podName string, cfg RunConfig) workspaceSyncDeps {
+		gotNamespace, gotPod = namespace, podName
+		return rec.deps()
+	}
+
+	cfg := baseRunConfig("scion-test-run-reaches-sync")
+	cfg.Workspace = t.TempDir() // a non-git project: nothing else populates the volume
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := r.Run(ctx, cfg)
+
+	if err == nil || !strings.Contains(err.Error(), "startup gate") {
+		t.Fatalf("expected Run to get as far as the startup gate, got: %v", err)
+	}
+	if rec.copyCalls != 1 {
+		t.Errorf("Run reached the pod but copied the workspace %d times, want 1 "+
+			"(the workspace stage is not being called, or not with this pod's PVC)", rec.copyCalls)
+	}
+	if gotNamespace != "default" || gotPod != cfg.Name {
+		t.Errorf("workspace stage bound to %s/%s, want default/%s", gotNamespace, gotPod, cfg.Name)
+	}
+}
+
+// readyPodsOnGet makes the fake clientset report every pod as Running with a
+// running agent container, which is what waitForPodReady polls for. Pod
+// creation still goes through the tracker, so listPods keeps working.
+func readyPodsOnGet(t *testing.T, r *KubernetesRuntime) {
+	t.Helper()
+
+	cs, ok := r.Client.Clientset.(*k8sfake.Clientset)
+	if !ok {
+		t.Fatalf("expected a fake clientset, got %T", r.Client.Clientset)
+	}
+	cs.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		get, ok := action.(k8stesting.GetAction)
+		if !ok {
+			return false, nil, nil
+		}
+		return true, &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: get.GetName(), Namespace: get.GetNamespace()},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name:  agentContainerName,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}},
+			},
+		}, nil
+	})
+}
+
 // TestSharedWorkspaceNeedsSeeding_ChecksUnavailable pins the failure policy:
 // when the volume cannot be inspected we seed it. An unpopulated workspace is
 // the worse outcome, and the failure surfaces through the sync rather than as
 // a pod that quietly came up empty.
 func TestSharedWorkspaceNeedsSeeding_ChecksUnavailable(t *testing.T) {
-	r := gkeSharedVolumeRuntime(t) // fake clientset: execInPod cannot run
-	cfg := baseRunConfig("scion-test-seed-check")
-	cfg.Workspace = "/host/projects/demo"
-	cfg.WorkspaceBackendName = "gke-shared-volume"
-	cfg.NFSPVClaimName = "scion-workspaces-pvc"
+	cfg := sharedVolumeSyncConfig("scion-test-seed-check")
+	list := func(context.Context) (string, error) {
+		return "", fmt.Errorf("K8s REST config not available (test environment)")
+	}
 
-	if !r.sharedWorkspaceNeedsSeeding(context.Background(), "default", "some-pod", cfg) {
+	if !sharedWorkspaceNeedsSeeding(context.Background(), list, cfg) {
 		t.Error("an unavailable volume check must fall back to seeding, not to skipping the sync")
 	}
 }

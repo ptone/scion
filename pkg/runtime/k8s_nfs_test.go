@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -309,6 +310,124 @@ func TestBuildPod_LocalBackend_NoInitContainer_EvenWithGitClone(t *testing.T) {
 
 	if len(pod.Spec.InitContainers) != 0 {
 		t.Errorf("local backend: expected no init containers even with GitCloneForInit, got %d", len(pod.Spec.InitContainers))
+	}
+}
+
+// gkeSharedVolumeRunConfig is the gke-shared-volume twin of the NFS configs
+// above: the same shared PVC + subPath shape, reached through the other
+// backend.
+func gkeSharedVolumeRunConfig(name string) RunConfig {
+	return RunConfig{
+		Name:                 name,
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		WorkspaceBackendName: "gke-shared-volume",
+		NFSPVClaimName:       "scion-workspaces-pvc",
+		NFSSubPath:           "projects/proj-123/workspace",
+	}
+}
+
+// TestBuildPod_GKESharedVolume_InitContainer_Present couples the init-container
+// gate to the workspace-sync skip's premise.
+//
+// The skip defers population of a shared volume to "something else": the
+// provisioning init container, or the container's own clone. If the gate here
+// were narrowed back to the nfs backend — which is what it said before this
+// change — a gke-shared-volume pod with GitCloneForInit set would be admitted
+// to the skip and excluded from the thing the skip defers to, and would come
+// up on an empty /workspace. The two conditions are the same expression today;
+// this test is what stops them drifting apart in silence.
+func TestBuildPod_GKESharedVolume_InitContainer_Present(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := gkeSharedVolumeRunConfig("test-gke-init")
+	config.GitCloneForInit = &api.GitCloneConfig{
+		URL:    "https://github.com/example/repo.git",
+		Branch: "main",
+		Depth:  1,
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("gke-shared-volume: expected 1 provisioning init container, got %d — "+
+			"the init container gate no longer admits this backend, but the workspace-sync "+
+			"skip still defers to it", len(pod.Spec.InitContainers))
+	}
+
+	ic := pod.Spec.InitContainers[0]
+	assert.Equal(t, "workspace-provision", ic.Name)
+	assert.Equal(t, "sciontool", ic.Command[0])
+	assert.Equal(t, "provision", ic.Command[1])
+
+	wsMount := findVolumeMount(&ic, "workspace")
+	if wsMount == nil {
+		t.Fatal("init container: workspace volume mount not found")
+	}
+	if wsMount.SubPath != "projects/proj-123/workspace" {
+		t.Errorf("init container workspace subPath = %q, want %q", wsMount.SubPath, "projects/proj-123/workspace")
+	}
+}
+
+func TestBuildPod_GKESharedVolume_NoInitContainer_WhenNoGitClone(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+
+	pod, err := r.buildPod("default", gkeSharedVolumeRunConfig("test-gke-no-git"))
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	if len(pod.Spec.InitContainers) != 0 {
+		t.Errorf("gke-shared-volume without GitCloneForInit: expected no init containers, got %d",
+			len(pod.Spec.InitContainers))
+	}
+}
+
+// TestBuildPod_SharedDirs_GKESharedVolume_UsesSubPaths is the shared-dir twin:
+// the subPath mounts are the eighth shared-workspace branch, and it too must
+// admit the second backend rather than only nfs.
+func TestBuildPod_SharedDirs_GKESharedVolume_UsesSubPaths(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := gkeSharedVolumeRunConfig("test-gke-shared-dirs")
+	config.SharedDirs = []api.SharedDir{
+		{Name: "build-cache"},
+		{Name: "logs", ReadOnly: true},
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	for i, want := range []struct {
+		subPath  string
+		readOnly bool
+	}{
+		{"projects/proj-123/shared-dirs/build-cache", false},
+		{"projects/proj-123/shared-dirs/logs", true},
+	} {
+		name := fmt.Sprintf("shared-dir-%d", i)
+
+		vol := findVolume(pod, name)
+		if vol == nil {
+			t.Fatalf("gke-shared-volume: %s volume not found — shared dirs fell back to per-dir PVCs", name)
+		}
+		if vol.PersistentVolumeClaim == nil || vol.PersistentVolumeClaim.ClaimName != "scion-workspaces-pvc" {
+			t.Errorf("%s should be served from the workspace PVC, got %+v", name, vol.VolumeSource)
+		}
+
+		mount := findVolumeMount(&pod.Spec.Containers[0], name)
+		if mount == nil {
+			t.Fatalf("%s mount not found", name)
+		}
+		if mount.SubPath != want.subPath {
+			t.Errorf("%s subPath = %q, want %q", name, mount.SubPath, want.subPath)
+		}
+		if mount.ReadOnly != want.readOnly {
+			t.Errorf("%s readOnly = %v, want %v", name, mount.ReadOnly, want.readOnly)
+		}
 	}
 }
 
@@ -869,53 +988,62 @@ func TestBuildPod_FSGroup_NFSBackend_CustomGID(t *testing.T) {
 
 // --- N2-3: Skip workspace kubectl cp when backend=nfs ---
 
-// TestSkipWorkspaceSync_NFSBackend_RunConfigGuard validates the guard condition
-// that controls workspace sync skip. The actual Run() method performs real K8s
-// API calls, so we test the conditional logic via the config fields that
-// determine behavior.
+// TestSkipWorkspaceSync_NFSBackend_RunConfigGuard validates the guard that
+// controls the workspace sync skip.
+//
+// It used to re-implement the guard inline ("Replicate the guard condition
+// from Run()"), which meant it went on passing when the real guard changed —
+// and it asserted the pre-#1075 rule that any nfs pod skips the sync, which is
+// no longer true: the skip now tracks whether anything else populates the
+// volume. It calls the real decision now. The full matrix, including the
+// shared-volume cases, is in TestShouldSyncWorkspaceToPod and
+// TestSyncWorkspaceStage.
 func TestSkipWorkspaceSync_NFSBackend_RunConfigGuard(t *testing.T) {
 	tests := []struct {
 		name            string
-		workspace       string
-		backendName     string
+		config          RunConfig
 		wantWorkspaceCP bool
 	}{
 		{
 			name:            "local backend syncs workspace",
-			workspace:       "/some/path",
-			backendName:     "",
+			config:          RunConfig{Workspace: "/some/path"},
 			wantWorkspaceCP: true,
 		},
 		{
 			name:            "local backend explicit syncs workspace",
-			workspace:       "/some/path",
-			backendName:     "local",
+			config:          RunConfig{Workspace: "/some/path", WorkspaceBackendName: "local"},
 			wantWorkspaceCP: true,
 		},
 		{
-			name:            "NFS backend skips workspace sync",
-			workspace:       "/some/path",
-			backendName:     "nfs",
+			name: "NFS backend skips workspace sync when the container clones itself",
+			config: RunConfig{
+				Workspace:            "/some/path",
+				WorkspaceBackendName: "nfs",
+				NFSPVClaimName:       "scion-workspaces",
+				Env:                  []string{"SCION_GIT_CLONE_URL=https://example.com/demo.git"},
+			},
 			wantWorkspaceCP: false,
 		},
 		{
+			name: "NFS backend syncs when nothing else populates the volume",
+			config: RunConfig{
+				Workspace:            "/some/path",
+				WorkspaceBackendName: "nfs",
+				NFSPVClaimName:       "scion-workspaces",
+			},
+			wantWorkspaceCP: true,
+		},
+		{
 			name:            "empty workspace skips sync for any backend",
-			workspace:       "",
-			backendName:     "",
+			config:          RunConfig{},
 			wantWorkspaceCP: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := RunConfig{
-				Workspace:            tt.workspace,
-				WorkspaceBackendName: tt.backendName,
-			}
-			// Replicate the guard condition from Run()
-			shouldSync := config.Workspace != "" && config.WorkspaceBackendName != "nfs"
-			if shouldSync != tt.wantWorkspaceCP {
-				t.Errorf("workspace sync guard: got %v, want %v", shouldSync, tt.wantWorkspaceCP)
+			if got := shouldSyncWorkspaceToPod(tt.config); got != tt.wantWorkspaceCP {
+				t.Errorf("shouldSyncWorkspaceToPod: got %v, want %v", got, tt.wantWorkspaceCP)
 			}
 		})
 	}

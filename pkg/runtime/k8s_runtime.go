@@ -59,6 +59,13 @@ type KubernetesRuntime struct {
 	// from server settings, mirroring CloudRunRuntime. When nil, pods keep the
 	// node-local EmptyDir workspace.
 	WorkspaceStorage *config.V1WorkspaceStorageConfig
+
+	// workspaceSyncDepsOverride replaces the exec-backed effects of the
+	// workspace stage. Nil in production. Tests set it to drive Run's
+	// workspace decision without an API server — the exec subresource is the
+	// one thing a fake clientset cannot serve, and leaving it unsubstitutable
+	// is what made round 1's empty-/workspace defect invisible to the suite.
+	workspaceSyncDepsOverride func(namespace, podName string, cfg RunConfig) workspaceSyncDeps
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -346,7 +353,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 				ctx, store.LockWorkspaceProvision, objID,
 			)
 			if err != nil {
-				return "", fmt.Errorf("NFS provision advisory lock for project %s: %w", config.ProjectID, err)
+				return "", fmt.Errorf("workspace provision advisory lock for project %s: %w", config.ProjectID, err)
 			}
 			nfsProvisionLockRelease = release
 			if !acquired {
@@ -354,15 +361,18 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 				// buildPod will inject a wait-for-sentinel init container instead
 				// of the cloning one.
 				config.nfsProvisionLockLost = true
-				runtimeLog.Info("NFS provision lock held by another node — pod will wait for sentinel",
-					"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
+				runtimeLog.Info("Workspace provision lock held by another node — pod will wait for sentinel",
+					"agent", config.Name, "project_id", config.ProjectID,
+					"backend", config.WorkspaceBackendName, "phase", "nfs-lock")
 			} else {
-				runtimeLog.Info("NFS provision lock acquired — pod will clone workspace",
-					"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
+				runtimeLog.Info("Workspace provision lock acquired — pod will clone workspace",
+					"agent", config.Name, "project_id", config.ProjectID,
+					"backend", config.WorkspaceBackendName, "phase", "nfs-lock")
 			}
 		} else {
-			runtimeLog.Warn("No advisory locker available — NFS provisioning is unguarded (sentinel-only)",
-				"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
+			runtimeLog.Warn("No advisory locker available — workspace provisioning is unguarded (sentinel-only)",
+				"agent", config.Name, "project_id", config.ProjectID,
+				"backend", config.WorkspaceBackendName, "phase", "nfs-lock")
 		}
 	}
 	// Deferred release: held through pod creation + waitForPodReady (init
@@ -370,8 +380,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	defer func() {
 		if nfsProvisionLockRelease != nil {
 			if err := nfsProvisionLockRelease(); err != nil {
-				runtimeLog.Error("Failed to release NFS provision lock", "error", err,
-					"agent", config.Name, "project_id", config.ProjectID)
+				runtimeLog.Error("Failed to release workspace provision lock", "error", err,
+					"agent", config.Name, "project_id", config.ProjectID,
+					"backend", config.WorkspaceBackendName)
 			}
 		}
 	}()
@@ -417,45 +428,16 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
-	// Workspace sync. The skip for shared-volume pods tracks the mechanism that
-	// populates the volume, not the backend name: skip only when the bytes
-	// arrive some other way (the provisioning init container, or the
-	// container's own git clone). A shared-volume pod with neither would
-	// otherwise mount the PVC and find /workspace empty.
+	// Workspace stage: decide whether the host copy goes into the pod, and if
+	// so copy it and fix ownership. The decision and its two shared-volume
+	// conditions live in syncWorkspaceStage; the pod-side effects are passed
+	// in so both are reachable from a test.
 	//
-	// One further condition applies on shared storage, checked against the
-	// volume once the pod is up: a shared volume outlives the pod and is shared
-	// by every agent in the project, so the host copy seeds it only while it is
-	// empty. Re-extracting a stale host tar over a volume another agent is
-	// working in would overwrite live edits — see sharedWorkspaceNeedsSeeding.
-	//
-	// Local-backend pods are untouched by all of this and RETAIN today's
-	// behaviour. Home-dir sync and the startup gate (/tmp/.scion-home-ready)
-	// are RETAINED for both backends — they carry agent dotfiles and secrets,
-	// not workspace code.
-	syncWorkspace := shouldSyncWorkspaceToPod(config)
-	if syncWorkspace && usesSharedWorkspacePVC(config) {
-		syncWorkspace = r.sharedWorkspaceNeedsSeeding(ctx, namespace, createdPod.Name, config)
-	}
-	if syncWorkspace {
-		runtimeLog.Info("Syncing workspace", "agent", config.Name, "source", config.Workspace, "phase", "workspace-sync")
-		fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
-		err = r.syncWithRetry(ctx, func() error {
-			return r.syncToPod(ctx, namespace, createdPod.Name, config.Workspace, "/workspace")
-		})
-		if err != nil {
-			return createdPod.Name, fmt.Errorf("failed to sync workspace: %w", err)
-		}
-		// Fix workspace ownership for the scion user
-		chownCmd := fmt.Sprintf("chown -R %s:%s /workspace", config.UnixUsername, config.UnixUsername)
-		if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
-			runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
-		}
-	} else if usesSharedWorkspacePVC(config) {
-		runtimeLog.Info("Skipping workspace sync (shared workspace volume: bytes come from the volume, not from a host copy)",
-			"backend", config.WorkspaceBackendName, "agent", config.Name,
-			"populated_on_volume", workspacePopulatedOnVolume(config),
-			"phase", "workspace-sync-skip")
+	// Home-dir sync and the startup gate (/tmp/.scion-home-ready) are RETAINED
+	// for every backend — they carry agent dotfiles and secrets, not workspace
+	// code.
+	if err := r.syncWorkspaceStage(ctx, config, r.podWorkspaceSyncDeps(namespace, createdPod.Name, config)); err != nil {
+		return createdPod.Name, err
 	}
 
 	// Signal the startup gate: all files are synced and ownership is fixed,
