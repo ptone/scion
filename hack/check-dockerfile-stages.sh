@@ -836,7 +836,7 @@ AS final" | expect 1 \
   # guard.
   #
   # THERE IS DELIBERATELY NO "an unmutated copy exits 0" TWIN. Neutering ANY
-  # guard would redden it, so it would attach itself to all 28 rows of the
+  # guard would redden it, so it would attach itself to every row of the
   # defeat matrix and destroy the one-claimant property that makes the matrix
   # readable. The anti-vacuity work that twin would do is done here instead, by
   # requiring that the copy differ by exactly one line, that the line be the
@@ -862,10 +862,19 @@ AS final" | expect 1 \
     meta_gone="$(diff "$SELF" "$meta_mutant" | sed -n 's/^< //p')"
     meta_new="$(diff "$SELF" "$meta_mutant" | sed -n 's/^> //p')"
     meta_changed="$(diff "$SELF" "$meta_mutant" | grep -c '^[<>] ')"
+    # The diagnostic is BOUNDED because the failure mode with the widest diff is
+    # also the one that produces the least readable diff: if awk is missing the
+    # mutant is empty, every line of this script counts as "gone", and an
+    # unbounded interpolation buries the sentence that explains what happened
+    # under a copy of the file. First line, first 100 characters, plus a count.
+    meta_gone_brief="$(printf '%s\n' "$meta_gone" | sed -n '1p' | cut -c1-100)"
+    if [ "$meta_changed" -gt 2 ] 2>/dev/null; then
+      meta_gone_brief="$meta_gone_brief [... $meta_changed diff lines in total, truncated]"
+    fi
     if [ "$meta_changed" != "2" ] ||
        ! printf '%s\n' "$meta_gone" | grep -q '^[[:space:]]*fail "USER appears in the runtime stage' ||
        ! printf '%s\n' "$meta_new" | grep -q '^[[:space:]]*true "NEUTERED USER appears in the runtime stage'; then
-      echo "self-test FAILED: a neutered guard makes the whole suite exit non-zero -- the mutation did not land as intended (diff touched $meta_changed line(s); gone: '${meta_gone# }'). The operator no longer matches the guard it names, so this case would have tested nothing." >&2
+      echo "self-test FAILED: a neutered guard makes the whole suite exit non-zero -- the mutation did not land as intended (diff touched $meta_changed line(s); gone: '${meta_gone_brief# }'). The operator no longer matches the guard it names, so this case would have tested nothing." >&2
       echo "a neutered guard makes the whole suite exit non-zero" >> "$FAILLOG"
     else
       meta_out="$(DOCKERFILE_STAGES_META=1 "$meta_mutant" --self-test 2>&1)"
