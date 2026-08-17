@@ -1013,8 +1013,55 @@ AS final" | expect 1 \
   # Comment lines are excluded, so prose may name `grep -q` freely. The tail
   # `['\''"$.]` requires something pattern-shaped after the flags, which is what
   # separates an invocation from a sentence.
-  ungated="$(grep -vE '^[[:space:]]*#' "$SELF" \
-    | grep -oE "(^|[^./A-Za-z_-])grep( +-[A-Za-z-]+)* +['\"\$.]" \
+  #
+  # THE FINDER NEEDS A DENOMINATOR, AND UNTIL NOW IT HAD NONE (gd-p7-rev-4 R7-3).
+  # `ungated` is the numerator of a ratio. If the finder below ever stops
+  # matching -- a refactor, a quoting change, a call site spelled through a
+  # variable -- it emits nothing, `ungated` is 0, `-ne 0` is false, and this
+  # suite reports a clean sweep over an evaluation that examined nothing. That
+  # is the same defect this whole file exists to catch, twenty lines below its
+  # own reference implementation. Reproduced here in a fake repo root whose
+  # UNMUTATED control passes 74/74 with 0 stderr, so the arms mean something:
+  #   A  plant a bare call site           -> fires, exit 1              correct
+  #   B  break the finder pattern         -> exit 0, 74 green, SILENT   the hole
+  #   C  spell a call site through a var  -> exit 0, 74 green, SILENT   in the wild
+  #
+  # WHAT THE FIX BELOW DOES NOT CLOSE, MEASURED AND NOT ASSUMED: ARM C still
+  # exits 0 after it. Adding `G=grep; $G 'pat' f` makes a call site invisible to
+  # the finder WITHOUT changing the census, so it moves neither the floor nor
+  # the pin -- both of them watch the size of the found set, and an unfindable
+  # site was never in it. A and B are closed; C is a structurally different hole
+  # (indirection, not finder failure) and needs a different instrument. Stated
+  # here rather than in a note, because the next reader of this block will
+  # otherwise assume all three arms are covered.
+  #
+  # TWO ASSERTIONS, AND THEY ARE NOT THE SAME KIND OF THING:
+  #   THE FLOOR is DERIVED. Zero call sites in a file that is visibly full of
+  #   them is impossible, independent of any run, so a floor of >0 cannot be a
+  #   wrong number. It is what catches arm B, and it is the part that discharges
+  #   the rule. Do not adjust it; fix the finder.
+  #   THE PIN is OBSERVED. It was read off a run and can only tell you the count
+  #   MOVED -- it can never establish that the census was ever right. It is the
+  #   strengthening, and it is what catches arm C, where the count drops by one
+  #   in silence.
+  # The pin has its own name on purpose: want_guards is a DIFFERENT number that
+  # happens to be near the same size, and sharing the variable would let a
+  # future edit that moves one population and not the other read as agreement.
+  grep_sites="$(grep -vE '^[[:space:]]*#' "$SELF" \
+    | grep -oE "(^|[^./A-Za-z_-])grep( +-[A-Za-z-]+)* +['\"\$.]")"
+  n_grep_sites="$(printf '%s\n' "$grep_sites" | { grep -cE '.' || true; })"
+  want_grep_sites=31
+  if [ "$n_grep_sites" -eq 0 ]; then
+    echo "self-test: the dialect finder matched 0 call sites in $SELF. This file contains dozens, so a finder that matches none has not swept -- and the ungated count it feeds is then a numerator over an empty denominator, which reports 0 and reads exactly like a clean sweep. Repair the finder; do not relax this floor. It is derived, not observed: zero is impossible here." >&2
+    echo "0 dialect call sites found" >> "$FAILLOG"
+    errors="$(wc -l < "$FAILLOG" | tr -d ' ')"
+  elif [ "$n_grep_sites" -ne "$want_grep_sites" ]; then
+    echo "self-test: the dialect finder matched $n_grep_sites call sites in $SELF, expected $want_grep_sites. A call site was added, removed, or written in a form the finder cannot see -- spelling one through a variable makes it invisible here while leaving it just as unlabelled at runtime. Read the change, then bump want_grep_sites. This is NOT want_guards; they are different populations." >&2
+    echo "$n_grep_sites dialect call sites" >> "$FAILLOG"
+    errors="$(wc -l < "$FAILLOG" | tr -d ' ')"
+  fi
+  ungated="$(printf '%s\n' "$grep_sites" \
+    | grep -E '.' \
     | { grep -vcE ' -[A-Za-z]*[EF]' || true; })"
   if [ "$ungated" -ne 0 ]; then
     echo "self-test: $ungated grep call site(s) in $SELF name neither -E nor -F. A bare grep is BRE, so an ERE metacharacter in the pattern matches nothing and reports 0 -- which reads exactly like a clean sweep. Name the dialect at the call site, and read the pattern when you do: \\| \\? \\+ \\( \\) are special under -E and literal under -F, and the reverse under BRE." >&2
