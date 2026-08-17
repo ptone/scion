@@ -80,9 +80,10 @@ lint:
 compat-literals:
 	@./hack/check-project-compat-literals.sh
 
-## wsguard: Fire the shared-workspace git guard (hack/wsguard) and prove the harness can fail
+## wsguard: Fire the shared-workspace git guard and its hook-mechanism probe (both prove they can fail first)
 wsguard:
 	@./hack/wsguard/selftest.sh --prove-it
+	@./hack/wsguard/hook-probe.sh --prove-it
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
 golangci-lint:
