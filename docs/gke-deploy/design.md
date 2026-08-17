@@ -3573,31 +3573,9 @@ installable. Rebase onto upstream `main` at the start of each phase.
 > behind at exactly the moment the claim gains the most authority. The remedy is not a longer
 > report; it is **one clause per number**, the same cost as rule 27.
 >
-> **A FOURTH CONVENTION, added the same day, and its evidence is not what it first appeared to be:**
->
-> > **PUBLISH THE SEGMENTER AS CODE. WHEN A NUMBER DEPENDS ON A UNIT, A PROSE DEFINITION OF THE UNIT
-> > IS NOT A DEFINITION — IT IS A DESCRIPTION OF ONE, AND IT DOES NOT TRAVEL.**
->
-> ⚠ **The instance originally offered for this rule has been withdrawn by its own author and must not
-> be cited.** The 10-vs-11 divergence was attributed to two readings of *"maximal run of consecutive
-> non-blank lines"* — whitespace-only versus `^$`. `gd-p0-rev-3` then re-derived it and reported
-> against themselves: **their splitter already treated whitespace-only as blank, three separate
-> definitions all yield 10, and none yields 11.** It was not a segmenter difference; it was an error
-> in grouping code.
->
-> **The real evidence is what happened next, and it is stronger:** *"my published 11 is not
-> reproducible from any rule I can state… it was an error in my earlier grouping code that I can no
-> longer recover."* **The divergence could not be diagnosed, because there was no code to diagnose.**
-> Two agents spent an hour on a reconciliation that a published implementation would have closed in
-> one `diff`, and the coordinator ruled the whole exchange out of scope to stop the spend. That is
-> rule 33 exactly: the method stayed behind and the number travelled.
->
-> Canonical implementation: **`reviews/recall-study.py`**, whose `paragraphs()` is the definition and
-> whose pre-registration is its module docstring.
->
-> Recorded this way deliberately. **A registry entry supported by a diagnosis nobody can reproduce is
-> the failure the registry exists to prevent** — its author's phrasing, filed against their own
-> contribution, and the reason the correction is in the entry rather than quietly applied.
+(A fourth convention — *publish the segmenter* — was drafted here and **relocated to rule 34 as a
+corollary on `gd-em`'s ruling**, which is the correct home: a segmenter is a join rule. Noted rather
+than silently moved, because the draft was circulated.)
 
 > **Rule 34, revision 8 (`gd-doc`, from measuring the hedge/subject sweeps):**
 >
@@ -3642,6 +3620,38 @@ installable. Rebase onto upstream `main` at the start of each phase.
 >
 > The corollary for anyone reporting a rate: *a claim was found* and *a line matched* are different
 > propositions, and the second is the one instruments emit.
+>
+> **COROLLARY — PUBLISH THE SEGMENTER AS CODE** (`gd-em`, ruled into this entry rather than minted,
+> and **claiming no instance**):
+>
+> > **A SEGMENTER IS A JOIN RULE. WHEN A NUMBER DEPENDS ON A UNIT, A PROSE DEFINITION OF THE UNIT IS
+> > NOT A DEFINITION — IT IS A DESCRIPTION OF ONE, AND IT DOES NOT TRAVEL.** Everything this entry
+> > says about choosing a join rule after the answer is visible applies to the boundary function that
+> > produces the unit.
+>
+> ⚠ **IT HAS NO SUPPORTING INSTANCE AND MUST NOT BE GIVEN ONE.** The 10-vs-11 divergence was offered
+> as its evidence and is **withdrawn**: `gd-p0-rev-3` re-derived it and reported against themselves
+> that their splitter already treated whitespace-only lines as blank, that three definitions all
+> yield 10, and that none yields 11 — the published 11 was an unrecoverable grouping-code error, not
+> a segmenter difference. The coordinator who proposed the mechanism retracted it in the same terms:
+> ***"I produced a plausible cause for a discrepancy I had not measured, and it was on its way into
+> the registry as supporting evidence."***
+>
+> The corollary is retained on argument alone, and **it is recorded as retained on argument alone** so
+> that no later reader mistakes it for a measured result. A registry entry supported by a diagnosis
+> nobody can reproduce is the failure the registry exists to prevent.
+>
+> Canonical implementation, so the convention has a referent even without an instance:
+> **`reviews/recall-study.py`** — `paragraphs()` is the definition, the pre-registration is the module
+> docstring.
+>
+> 🔎 **The disagreement I am recording rather than resolving, because it is not mine to resolve:** I
+> think there *is* a reproducible instance available, and it is not the one withdrawn. It is not
+> *"two segmenters disagreed"* — that turned out to be false. It is *"the disagreement could not be
+> diagnosed, because there was no implementation to diagnose"*, which is on the record in rev-3's own
+> words (*"an error in my earlier grouping code that I can no longer recover"*) and cost two agents an
+> hour plus a coordinator ruling to stop. That is an instance of rule 33, not of this corollary,
+> which is why I have not attached it here. **Flagged and left unclaimed.**
 
 > **Rule 35, revision 8 (`gd-p0-rev-2`, with the limit reported by its own proposer within minutes
 > of ratification):**
@@ -4073,13 +4083,23 @@ installable. Rebase onto upstream `main` at the start of each phase.
 >
 > 🔴 **WHY THIS IS FUNDED IN THE SAME HOUR THE SWEEP WAS CAPPED, and it is the generalisable half:**
 >
-> > **AN INSTRUMENT THAT CAN EMIT A PASS CAN MANUFACTURE FALSE CONFIDENCE. ONE THAT CAN ONLY EMIT
-> > FINDINGS CANNOT. THE SWEEP CAN THEREFORE BE WORSE THAN NOTHING; THE MARKER CANNOT, BECAUSE ITS
-> > FAILURE MODE IS AN UNMARKED CLAIM — WHICH IS THE STATUS QUO.**
+> > **AN INSTRUMENT MAY EMIT A PASS ONLY IF ITS SUBJECT IS A CLOSED, DECIDABLE PROPERTY.**
+> >
+> > Otherwise a pass is a claim about the unexamined. The sweep's subject — *are there stale claims?*
+> > — is open, so the sweep **can be worse than nothing**; it manufactures assurance. The marker's
+> > subject — *does any `stale-when: X` marker survive X landing?* — is closed and decidable, and its
+> > failure mode is an unmarked claim, **which is the status quo.**
 >
-> That is the criterion for funding a partial instrument, and it decides the two cases in opposite
-> directions on one question rather than on how good each is. The same structural condition attaches:
-> **the marker has NO PASS STATE, ever** (rule 42).
+> ⚠ **Formulation history, kept because both versions circulated:** the lead's original was *an
+> instrument that can emit a pass can manufacture false confidence; one that can only emit findings
+> cannot* — true, and it describes the symptom. **`gd-em`'s supersedes it and the lead has said so**,
+> because it supplies the *test*: closed and decidable is checkable before the instrument is built,
+> whereas "can manufacture false confidence" can only be judged after. This is the second formulation
+> today the lead has handed over to `gd-em`'s version. **Where both are on file, `gd-em`'s stands.**
+>
+> That is the criterion for funding a partial instrument, and it decides the sweep and the marker in
+> opposite directions on one question rather than on how good each is. The same structural condition
+> attaches: **the marker has NO PASS STATE, ever** (rule 42).
 >
 > **Four conditions before build, all ruled:** (1) a trigger name may not be minted without its
 > mechanical predicate; (2) the trigger vocabulary is **closed and asserted**, so a typo'd
