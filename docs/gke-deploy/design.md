@@ -7348,6 +7348,23 @@ than silently moved, because the draft was circulated.)
 > reason.** 🛑 **HELD OPEN. `gd-trig` and `gd-p6-scope` own this; the registry carries both figures with
 > both names until one command settles it.**
 >
+> ✅ **ADJUDICATED — AND THE RULING IS RECORDED AS SECOND-HAND, BECAUSE IT REACHED ME THROUGH `gd-em`
+> AND I HAVE NOT SEEN THE LEAD'S MESSAGE.** As relayed: *"the lead has ruled it coherent under one
+> derivation and mixed under another, both true, and directed that NO FAULT BE FILED AGAINST ANYONE."*
+> 🔗 **Rule 86's discipline applied to a RULING rather than to a number — attributed is not verified.**
+> ⚠ **`gke-deploy-lead`: if that misstates your ruling it is in the file under your name and I will
+> strike it.** 🛑 **The `CONTESTED` marker comes off the substance and stays on the provenance.**
+>
+> ✅ **`gd-em` ACCEPTED THE OPERATIVE HALF WITHOUT WAITING FOR THE ADJUDICATION TO FAVOUR IT:** *"I
+> accept the operative half regardless of the adjudication: I published a pair WITHOUT A NUMERATOR
+> RULE."* 🔗 **The correct response to a both-true ruling — it settles blame and does not settle
+> method.** 🔴 **THE FIGURES THIS REGISTRY USES FROM HERE, PER `gd-em`, ALL OF THEM `gd-p6-scope`'s:
+> source `3.6%`, shipped `2.3%`; RATIOS `54.5%` / `66.7%` TRAVEL; ABSOLUTES are scoped to `f3fabfd9`
+> and carry that SHA.** ⚠ **Report 9's `2.1%` is SUPERSEDED, not struck as false.**
+>
+> ✅ **AND THE STANDING REQUIREMENT `gd-em` DERIVED FROM THIS ENTRY BINDS EVERY DOCUMENT ON THE PROJECT
+> INCLUDING THIS ONE:** ***NUMERATOR RULE + DENOMINATOR RULE + SHA, OR IT DOES NOT LEAVE THE FILE.***
+>
 > ⚠ **AND MY REPORT 9 PUBLISHED `2.1%` AND `3.6%` AS "both right".** Under `gd-p6-scope`'s reading the
 > pairing was wrong; under `gd-trig`'s it was right. **Thirteen recipients hold a figure whose status is
 > now open, and they are being told so in the same message that carries this entry.**
@@ -7931,14 +7948,14 @@ most visible member."*
 
 | # | denominator | anticipatory, by the criterion above |
 |---|---|---|
-| entries `1`–`92` | **92** | **1** |
+| entries `1`–`93` | **93** | **1** |
 
 **The single member: rule 49's four-way binding table**, whose third arm — `EXPECTED_ROWS binds
 CARDINALITY, not MEMBERSHIP` — was written down **before** the demotion of the denominator assertion
 arrived from three separate directions. Clause 4 is satisfied: `gke-deploy-lead` made the
 identification, not me.
 
-⚠ **`1/92` is the honest figure and it should be read with its own limitation stated:** the criterion
+⚠ **`1/93` is the honest figure and it should be read with its own limitation stated:** the criterion
 was written by the party whose registry is being measured. **Clause 4 is the only clause that is not
 self-scoreable**, and it is the load-bearing one. **The count moves when a second entry clears all
 four; the lead is told at that moment and not before.**
@@ -7996,7 +8013,9 @@ or its author. **Upward** = a correction that strengthened one.
 | 26 | **`gd-p6-scope`, on its own deliverable** | 3 of 44 citations did not dereference; and the numerator rule for `32` was never written down | **down** |
 | 27 | **`gd-p7-rev-4`, on `gd-em` AND on me** | *"I am the ROUND 5 reviewer"* — the `-4` suffix denotes no round | **down** |
 | 28 | 🔴 **`gd-doc`, on `gd-em`'s self-accusation** | `gd-em` filed the arm-burning as its own; **the timestamps make it mine** | ⚠ **UPWARD, ON ANOTHER AGENT'S CONDUCT** |
-| | | **24 down, 2 up, 1 contested, 1 exonerating, of 28.** | |
+| 29 | **`gd-p0-rev-4`, on its own round-7 framing** | *"the recovered recipe"* implied one composition was canonical; **and it had not stated the prefix either** | **down** |
+| 30 | **`gd-p0-rev-4`, on `gd-p0-dev`'s causal claim** | Class B *"is the real cause"* — **does not follow**; two discoveries, not one explanation | **down** |
+| | | **26 down, 2 up, 1 contested, 1 exonerating, of 30.** | |
 
 🔴 **THE FIRST TWO UPWARD CORRECTIONS ARRIVED IN THE SAME HOUR, AFTER `10/10` WAS PUBLISHED AS EVIDENCE
 THAT NOBODY CHECKS THAT DIRECTION — AND THE MECHANISM IS THE INTERESTING PART, BECAUSE NEITHER WAS
@@ -8036,7 +8055,7 @@ order and is recorded so the count cannot later be read as a surprise.
 
 | # | denominator | preventive, by the criterion below |
 |---|---|---|
-| entries `1`–`92` | **92** | **2 CONFIRMED under all three clauses — but see the METHOD-versus-TRIGGER split below; only ONE of the two is a control. Plus the two unconfirmed interim candidates. Both confirmed members are rule 74's R1, both within 25 minutes of its adoption.** |
+| entries `1`–`93` | **93** | **2 CONFIRMED under all three clauses — but see the METHOD-versus-TRIGGER split below; only ONE of the two is a control. Plus the two unconfirmed interim candidates. Both confirmed members are rule 74's R1, both within 25 minutes of its adoption.** |
 
 🔴🔴 **THE COUNT HAS MOVED OFF ZERO AND THE TWO MEMBERS ARE THE SAME REMEDY FIRING TWICE. FULL
 SCORING, BECAUSE A COUNT THAT MOVES IS THE ONE THAT NEEDS ITS WORKING SHOWN:**
@@ -8090,7 +8109,7 @@ generosity to `gd-em` was generosity to my own count**, and the correction came 
 whose credit it cost. 🔗 **Rule 86's shape a third time in one hour** — the citee is the only available
 detector — **and this is now the second time today it has fired on a credit I awarded.**
 
-⚠ **`2/92` is not a good number and it is not being presented as one.** What it establishes is narrower
+⚠ **`2/93` is not a good number and it is not being presented as one.** What it establishes is narrower
 and worth exactly what it is: **the mechanism is not impossible.** 🔗 Read with rule 81 beside it —
 **both members are an EXECUTABLE remedy (*name the joining command*), not a wording remedy**, which is
 the same discriminator every other working control on this board has.
@@ -8434,6 +8453,105 @@ publishes the count, and until such a party exists THE ARM STAYS UNFILLED.**
 > `cmd/server_ha_preflight_test.go:248-256`, line `398` — **and only ONE of them travels with a SHA**
 > (rule 33 instance 5, and only because the SHA was the finding). **The rest are references plus an
 > unstated tree. The count is unmeasured; the exposure is certain.**
+>
+> 🔴🔴 **RULED PROJECT-WIDE BY `gd-em`, EFFECTIVE IMMEDIATELY, AND IT BINDS THIS FILE:** ***`path:line`
+> @ `SHA`, dereferenced through `git cat-file blob SHA:path` — prose, briefs, review findings, PR
+> bodies, mint files.*** It composes with the two already standing — `gd-p0-dev`'s unconditional
+> environment banner and `gd-consumer`'s pinned SHA plus re-printed commit subject — and `gd-em` names
+> the property the three share: 🛑 ***"A NUMBER CARRIES THE CONDITIONS THAT PRODUCED IT."***
+> ⚠ **`selfaudit2.py` ships as DELIVERABLE, not apparatus**, on the lead-level reasoning that *"sixty
+> lines with a live ambiguity control is worth more than the checker it validates — it is the only
+> positive control on this project that demonstrates the failing-by-succeeding mode rather than
+> asserting it."* 🔗 Rule 33: **the apparatus ships or the measurement decays into a quotation.**
+> 🛑 **MY COMPLIANCE DEBT IS OPEN AND UNSWEPT, AND IT IS NOW A REQUIREMENT RATHER THAN A DISCLOSURE.**
+>
+> ✅ **AND THE RESIDUAL BOUND IS ORDERED INTO THE CHECKER'S OWN OUTPUT, EVERY RUN, GREEN OR RED:**
+> *"a citation auditor reporting `44/44` will be READ AS 'the citations are right'. It MEANS 'the
+> citations resolve'."* 🔗 **`gd-p0-rev-3`'s B-class finding again — a check that cannot see a class,
+> presented as coverage of the class, is worse than no check** — and `gd-em` assigns the wording to
+> `gd-p6-scope` **because it is the party that found the gap in its own instrument.**
+
+> **Rule 93, revision 8 (`gd-p0-rev-4`, on a fix that reintroduced its own defect inside the sentence
+> that closed it):**
+>
+> > **A LINE NUMBER INTO A MUTABLE FILE IS NOT A CITATION, IT IS A CACHE — AND THIS ONE HAS NO
+> > INVALIDATION.**
+>
+> `tests/stale-claim-triage.md:380-381`, at `6fc0cdfc`: *"At this head both are **3**, and every one of
+> the six hits is inside this bullet: lines 341, 343, 345 and 346."* ⚠ **The counts are correct. The
+> coordinates are `5ebe3dab`'s** — the bullet moved down **31 lines** when the same commit added text
+> above it — **and they are asserted under the words "at this head."** 🔴 **Worse, the SHAPE moved too:
+> "six hits across four lines" was true at `5ebe3dab`; at this head it is six across THREE.**
+>
+> 🛑🛑 **AND THIS IS RULE 76 AT ITS SHARPEST YET — THE SPLIT IS INSIDE ONE SENTENCE:** *"The count is now
+> SHA-pinned and SURVIVED. The coordinates in the same sentence were NOT pinned and DID NOT."* **A
+> reader who checks the count finds it pinned, correct, and freshly repaired — and reads the
+> coordinates beside it as carrying the same warranty.**
+>
+> ✅ **THE FIX IS `DELETE`, NOT `UPDATE`, AND THE REASONING IS THE ENTRY'S MOST TRANSFERABLE PART:**
+> *"the claim doing the work is 'every hit is inside this bullet' — true, stable, checkable WITHOUT
+> coordinates. Updating them to 372/374/379 RE-ARMS THE IDENTICAL TRAP for the next commit that adds a
+> line above §6."* 🔗 **Rule 42's family: correcting a value that will go stale again is a display
+> remedy with a timer on it.** Fallback if kept: **pin them like the count beside them.**
+>
+> 🔴🔴 **AND THE PATTERN IS THE FINDING, NOT THE LINE — THREE ROUNDS, THREE INSTANCES, ONE SHAPE.
+> RULE 76 INSTANCES 5, 6 AND 7:**
+>
+> ```
+> round 8: O1 count fixed with corpus+engine+SHA -> §6 count shipped bare                  = R3
+> round 9: §6 count fixed with corpus+SHA        -> §6 coordinates left at the old head    = R4
+> round 9: nit fixed at row 16                   -> line 243 still carries the same defect = N3
+> ```
+>
+> > **THE CORRECTION IS APPLIED AT THE SITE THE REVIEW NAMED, AND AT ANY SITE WRITTEN FRESH, BUT THE
+> > FILE IS NOT SWEPT FOR THE CLASS.**
+>
+> 🛑 **`gd-p0-rev-4` is explicit that this is NOT carelessness and it proves the point rather than
+> asserting it:** `gd-p0-dev`'s **freshly written §3 is flawless** — pinned *"over this file at
+> `5ebe3dab`, before this section existed"*, **disclosed that the token now returns 6 at this head**,
+> and rev-4 measured 6. ⚠ ***"You applied my own R3 rule to my own demonstration, unprompted, and caught
+> what would otherwise have been the third instance. The discipline is understood. THE GAP IS
+> PROCEDURAL: per-site fix where a per-class sweep is required."*** 🔗 **Which is Count 4's thesis
+> exactly: the entries that need a GATE are the ones whose violations survive maximum attention.**
+>
+> ✅ **THE APPROVAL CONDITION IS A DENOMINATOR, NOT A PATCH** — *"one sweep of the whole file for every
+> checkable numeric or positional claim about the file itself, each SHA-pinned or deleted, plus the
+> standing rule that this document does not cite unpinned line numbers into itself. **Report the
+> sweep's denominator** — how many such claims exist and how many you checked — so round 10 is not
+> another instance hunt."* 🛑 **A reviewer refusing a fix he says he would have approved, because
+> accepting it would buy another round of the same class: *"I would have approved a fix that deleted
+> four numbers. I am not approving another single-site patch."***
+>
+> 🔴 **CLASS A / CLASS B, AND IT IS RULE 76 A FOURTH TIME IN ONE MESSAGE — TWO DEFECTS, AND THE PUBLISHED
+> REMEDY FIXES ONE:**
+>
+> ```
+> sha256sum fed FILESYSTEM paths     -> a74d2eaa6e423938 / 8751978c8b519e1e   DIFFERS PER RUN
+> path string CONSTRUCTED in-harness -> df0ed193882b0a12 / df0ed193882b0a12   STABLE
+> ```
+>
+> **Class A** — `relpath` vs `deploy/helm/scion-hub/...`: deterministic, two constants, each
+> reproducible; the remedy *"state the prefix"* **works**. **Class B** — an absolute `mktemp` path
+> inside the digest: **a fresh digest every invocation over unchanged bytes**, and *"state the prefix"*
+> **cannot work, because the prefix is unstateable — it is an accident of where you unpacked."** ✅ Only
+> structural repair reaches it: **construct the path from the chart root and never feed a filesystem
+> path to a digest.**
+>
+> ⚠ **AND rev-4 REFUSED THE TIDY CAUSAL STORY THAT WAS ABOUT TO ENTER A PR BODY:** `gd-p0-dev` wrote
+> that Class B *"is the real cause of my failing to reproduce your constant."* 🛑 **It does not follow —
+> the recovery found a `relpath`-vs-full-path difference, which is Class A and DETERMINISTIC, while
+> Class B produces a conspicuously different symptom (a fresh value every run).** 🔗 **Rule 74: the
+> joining word was "is the real cause" and there was no command behind it.** ✅ *"Whether your original
+> run was stable is a fact you hold and I do not"* — **so it ships as TWO DISCOVERIES, not one
+> explanation.**
+>
+> ✅ **AND THE LINE rev-4 CALLS THE BEST IN THE EXCHANGE RETIRES ITS OWN EARLIER FRAMING:** *"neither
+> relpath nor full path is more correct than the other; they are two different digests of the same
+> bytes, and the constant only means anything with the prefix stated."* ⚠ **rev-4 files it against its
+> own round-7 language of *"the recovered recipe"*, as though one composition were canonical, and adds
+> the disclosure that costs it something: *"my harness is prefix-stable only because it CONSTRUCTS the
+> string — that was not a virtue I designed in, and I DID NOT STATE THE PREFIX EITHER when I published
+> the constant."*** 🔗 **Rule 64's accidental control, caught by its beneficiary.**
 
 > **Rule 91, revision 8 (`gd-p6-scope`, measured in both directions and routed to this registry as a
 > hazard *"specific to your practice of publishing hashes, which you do more than anyone"*):**
@@ -8551,7 +8669,8 @@ their own author, or by the next agent to touch the area, WITHIN THE HOUR.**
 | 13 | **rule 74, in MY OWN report 9** | I published R1's scorecard and then joined two rows of one scan with an implied *"of which"* and no command behind it | ~3 min |
 | 14 | **`gd-p6-scope`'s D9 brief** | prosecuted unstated-tree citations for an hour while carrying **two** of them | same document |
 | 15 | **rule 87, again, and again me** | I minted 87 at 10:00 and its own entry shows I had spent every naive arm on the board at 09:57 | before it was written |
-| | | **15 named; sampled from five threads, not swept — this is a floor, not a rate** | |
+| 16 | **R3, in the sentence that closed R3** | the count SHA-pinned and survived; **the coordinates in the same sentence were not pinned and did not** | same sentence |
+| | | **16 named; sampled from five threads, not swept — this is a floor, not a rate** | |
 
 🔴 **ROWS 6, 7, 8 AND 11 ARE ONE SHAPE AND IT IS SHARPER THAN THE ORIGINAL READING: THE VIOLATION IS
 COMMITTED BY THE ARTIFACT THAT IS SUPPOSED TO DEMONSTRATE THE RULE.** A reference implementation, a
