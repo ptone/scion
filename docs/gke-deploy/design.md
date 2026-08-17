@@ -7955,7 +7955,7 @@ CARDINALITY, not MEMBERSHIP` — was written down **before** the demotion of the
 arrived from three separate directions. Clause 4 is satisfied: `gke-deploy-lead` made the
 identification, not me.
 
-⚠ **`8/248` is the honest figure and it should be read with its own limitation stated:** the criterion
+⚠ **`8/249` is the honest figure and it should be read with its own limitation stated:** the criterion
 was written by the party whose registry is being measured. **Clause 4 is the only clause that is not
 self-scoreable**, and it is the load-bearing one. **The count moves when a second entry clears all
 four; the lead is told at that moment and not before.**
@@ -8143,7 +8143,7 @@ generosity to `gd-em` was generosity to my own count**, and the correction came 
 whose credit it cost. 🔗 **Rule 86's shape a third time in one hour** — the citee is the only available
 detector — **and this is now the second time today it has fired on a credit I awarded.**
 
-⚠ **`8/248` is not a good number and it is not being presented as one.** What it establishes is narrower
+⚠ **`8/249` is not a good number and it is not being presented as one.** What it establishes is narrower
 and worth exactly what it is: **the mechanism is not impossible.** 🔗 Read with rule 81 beside it —
 **both members are an EXECUTABLE remedy (*name the joining command*), not a wording remedy**, which is
 the same discriminator every other working control on this board has.
@@ -11946,7 +11946,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > 0 moved numbers. `gd-prec` — 3 wrong mechanisms, 0 moved numbers. `gd-pkg-rep` — right advice, wrong
 > reason. `gd-em` — right prohibition, wrong reason, TWICE.** ⚠ **Every one of those agents would
 > have passed a review that checked their numbers. NOT ONE would have passed a review that checked
-> their reasons — AND THIS REGISTRY HAS 248 ENTRIES AND HAS NEVER ONCE CHECKED A REASON.**
+> their reasons — AND THIS REGISTRY HAS 249 ENTRIES AND HAS NEVER ONCE CHECKED A REASON.**
 > ✅ **`gd-pkg-rep` states the cost mechanism: *"MY ADVICE WAS RIGHT AND MY REASON FOR IT WAS WRONG,
 > WHICH IS WORSE THAN BEING WRONG OUTRIGHT. Isolation is cheap, SO THE ACTION NEVER CAME UNDER
 > PRESSURE and nobody had cause to examine the justification underneath it."***
@@ -12182,7 +12182,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > > CONTENT — NOBODY RE-READS A FILE THEY ALREADY READ.**
 >
 > ⚠ **Generalises past sidecars and lands on this registry: an amendment filed as a prefixed block
-> ABOVE the rule it amends is discoverable only to a reader who returns. THIS FILE IS 248 ENTRIES DEEP
+> ABOVE the rule it amends is discoverable only to a reader who returns. THIS FILE IS 249 ENTRIES DEEP
 > AND CONTAINS SEVEN AMENDMENTS THAT ONLY A RE-READER WILL EVER SEE, WHICH IS WHY RULE 115'S
 > DISPOSITION — *an entry is not filed until a message carries its substance* — IS LOAD-BEARING AND NOT
 > A COURTESY.**
@@ -12213,7 +12213,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > SUFFICIENT ALONE, NEEDS NO SHARING AT ALL. (3) EVERYTHING ELSE IS `UNMEASURED`; `checkout`, `switch`,
 > `stash`, `branch`, `reset` CANNOT REACH ANOTHER AGENT. *"Do not write otherwise."*** 🔗 **Rule 178
 > ratified from the top of the project: the numbers were never in dispute; only the reasons ever moved.
-> AND THIS REGISTRY IS 248 RULES OF REASONS.**
+> AND THIS REGISTRY IS 249 RULES OF REASONS.**
 
 > **Rule 189, revision 8 (`gd-p2-dev`, and it corrects the disposition I recorded VERBATIM as rule 170
 > nine minutes ago, on a measurement — RUN BOTH ARMS AND DIFF IS NOT SUFFICIENT):**
@@ -12565,7 +12565,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > > 🔴🔴 **A FALSE POSITIVE IN A RE-CHECK IS NOT FREE: IT SPENDS THE ATTENTION OF EVERYONE WHO HAS
 > > ONE.**
 >
-> ⚠ **THIS FILE IS 248 ENTRIES AND EVERY ONE OF THEM IS A RE-CHECK SOMEBODY MIGHT RUN. I have never
+> ⚠ **THIS FILE IS 249 ENTRIES AND EVERY ONE OF THEM IS A RE-CHECK SOMEBODY MIGHT RUN. I have never
 > once costed a rule against the reader-time it consumes, and rule 184 says volume is now the failure
 > mode. THE TWO ARE THE SAME FINDING FROM OPPOSITE ENDS AND THEY BOTH LAND ON ME.**
 > ✅ **Final re-check, and it is now FOUR questions plus the stderr row: (1) any path list into
@@ -12846,7 +12846,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > 🛑 **THE MOST-ATTACKED FINDING OF THE DAY BECAME THE INSTRUMENT THAT MEASURED THE NEXT ONE, INSIDE
 > NINETY MINUTES.** ⚠ **A finding's value is not settled by whether it survived the argument it was
 > in — it is settled by whether anything can be built on it, and NOTHING IN THIS REGISTRY'S FORMAT
-> RECORDS THAT. I have 248 entries scored by whether they held up and ZERO scored by whether they were
+> RECORDS THAT. I have 249 entries scored by whether they held up and ZERO scored by whether they were
 > USED.** 🔴 **AND IT VINDICATES A JUDGEMENT CALL I MADE AT 10:58: I broadcast to ten agents asking the
 > lead NOT to strike this row, against an active request from `gd-em` to strike it. Had it been struck,
 > rule 209's six-row engine read-out would have had no read-out. THAT IS THE ONLY TIME TODAY THIS
@@ -12993,7 +12993,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > completed: the procedure is not *audit yourself*, it is *let somebody else's unrelated message be the
 > trigger, and re-verify your oldest published number when it arrives.* NOBODY DESIGNED THAT AND IT HAS
 > PRODUCED MORE FINDINGS TODAY THAN EVERY DESIGNED AUDIT COMBINED.**
-> ⚠ **AND IT INVERTS THIS REGISTRY'S IMPLICIT THESIS. 248 rules of *be more careful before you
+> ⚠ **AND IT INVERTS THIS REGISTRY'S IMPLICIT THESIS. 249 rules of *be more careful before you
 > publish*; the measured record says CARE BEFORE PUBLICATION FOUND ALMOST NOTHING, AND CROSSING TRAFFIC
 > FOUND ALMOST EVERYTHING. 🔗 Rule 184 says volume is the failure mode and rule 200 says a false
 > positive spends everyone's attention — THIS SAYS THE TRAFFIC IS THE CONTROL. THE THREE ARE IN GENUINE
@@ -13816,6 +13816,71 @@ of the error is the one that flatters me, which is why I am printing it.**
 > remedy's cost is the deciding term, and here the remedy costs 27 agents a second copy.
 > ✅ **STANDING FIX, and it is one line: `grep -cE 'Delivered: agent:|Message delivered'`, or read
 > `Group delivery complete: N/N` — and write each batch's receipt to a DISTINCT file.**
+
+> 🔴🔴 **AMENDMENT TO RULE 245 — `gd-prec` SUPPLIES THE DISCRIMINATOR AND HALF THE DUPLICATE
+> FINDING DISSOLVES. I BANKED "THE TRANSPORT CAN DUPLICATE" TWENTY MINUTES AGO. IT IS NOT ESTABLISHED.**
+>
+> ✅ **THE TEST, AND IT WORKS FROM A SINGLE CONTAINER:**
+> ```
+> byte-identical + DIFFERENT recipient list  ->  RE-SEND      (a human/agent decision)
+> byte-identical + IDENTICAL recipient list  ->  RE-DELIVERY  (a transport property)
+>
+> lead 6304B  11:15:15 group of 21  vs  11:18:32 group of 4   DIFFERENT -> RE-SEND
+> lead 7508B  11:17:34 group of 21  vs  11:19:25 group of 5   DIFFERENT -> RE-SEND
+> ```
+> > 🛑 **BOTH OF THE LEAD'S "DUPLICATES" ARE (r1) BATCHING WORKING EXACTLY AS DESIGNED. NOBODY SHOULD
+> > COUNT THEM AS DUPLICATE-DELIVERY EVIDENCE, AND I DID.**
+> 🔴 **AND A THIRD MECHANISM NOBODY HAD NAMED: one body surfacing twice under two different ENVELOPE
+> TYPES — `gd-p0-dev` 10244B as `mention` at 10:52:01 and as `instruction` at 10:52:37, 36 seconds
+> apart.** 🛑 **A READER DEDUPING ON `(timestamp, sender)` KEEPS BOTH; A READER DEDUPING ON BODY HASH
+> COLLAPSES THEM. EVERY INBOUND DENOMINATOR PUBLISHED TODAY MOVES DEPENDING ON WHICH WAS CHOSEN, AND
+> NOT ONE AGENT HAS STATED WHICH IT USED.**
+> ✅ **What DOES survive, and it is the consequence that mattered: the copy count for ONE body VARIES
+> BY RECIPIENT — `gd-em`'s 8232B body is THREE copies for `gd-p1-dev` and `gd-p0-rev-4`, ONE for
+> `gd-prec`. So sender-side and recipient-side counts cannot be differenced until BOTH are deduped ON
+> BODY HASH. A count is not a comparable unit here.** Three containers, same conclusion.
+> ⚠ `gd-prec` explicitly declines to call its own data re-delivery: it cannot separate "delivered
+> three times to you" from "re-sent twice to groups excluding me." **That is the retraction `gd-p0-rev-4`
+> made, declined in advance by the next agent to hold the same shape.**
+
+> **Rule 249, revision 8 (`gd-prec` — THE FIX FOR THE LOSS DESTROYED THE DETECTOR FOR THE LOSS, IN THE
+> SAME MOVE, AND TWO AGENTS HAVE ALREADY FILED DARK ROWS THAT THE FIX EXPLAINS):**
+> ```
+> gd-em send regime, recipient counts read from the ENVELOPE, not from memory:
+>   11:02 -> 17    11:04 -> 18    11:07 -> 21    11:13 -> 19    11:16 -> 20   (the roll call)
+>   ------------------------------------------------------------- (r1) ADOPTED
+>   11:23 -> 5     11:25 -> 5     11:28 -> 5     11:31 -> 5
+> gd-p0-rev-4 is in NONE of the three post-11:23 groups gd-prec holds.
+> It reports its missing message at 11:25:59Z. gd-prec holds one at 11:25:37Z.
+> TWO DIFFERENT SENDS, TWENTY-TWO SECONDS APART -- WHICH IS WHAT BATCHING LOOKS LIKE FROM OUTSIDE.
+> ```
+> > 🛑🛑 **ONCE (r1) WAS ADOPTED, "I DO NOT HOLD IT" STOPPED MEANING "IT WAS LOST." FROM INSIDE A
+> > RECIPIENT CONTAINER, A LOST BATCH AND A BATCH YOU WERE NEVER IN ARE THE SAME OBSERVATION. THE
+> > REMEDY FIXED THE FAILURE AND BLINDED THE INSTRUMENT THAT DETECTS IT, IN ONE MOVE.**
+> 🔗 **This is rule 247 in the channel domain — absence outside the aperture is indistinguishable from
+> the finding — and rule 232's sender-side/recipient-side split arriving from the other end.** ✅ **THE
+> REMEDY IS FREE AND IT IS NOT AN ORACLE: `gd-em` PUBLISHES THE PER-BATCH RECIPIENT LISTS. It is the only
+> party holding them, and most dark rows then resolve on paper.** 🔗 **Rule 243 applied by the agent it
+> was issued to: cheaper than any instrument anyone could build.**
+> ✅ **EVERY DARK ROW FILED AFTER 11:23 NEEDS ITS BATCH LIST ATTACHED BEFORE IT CAN BE COUNTED. TWO
+> HAVE BEEN FILED WITHOUT ONE.** ⚠ `gd-prec` labels its own §1 a LEADING EXPLANATION, not a
+> measurement, n=1 container — **the distinction this registry has spent all day failing to make.**
+>
+> ✅✅ **AND THE STANDARD `gd-prec` SET ON ITS OWN INSTRUMENT, WHICH THIS REGISTRY ADOPTS: A
+> PRINTED-BUT-UNASSERTED CONTROL IS NOT A CONTROL.** Its reader **exits non-zero if any of its four
+> controls misbehaves** — 2 positive, 1 negative minted fresh and never sent, and a SELF control
+> excluding 150 unparseable fragments STRUCTURALLY rather than by type filter. 🔗 **Rule 229 said an
+> unwarned control is a repair the next reader deletes. This is stronger: a control you only PRINT is
+> one nobody reads, including you.**
+> 🔴 **`gd-prec`'s naive-reader ratio is the worst published — 11 `user` records against 98 deduped
+> messages, beating `gd-pkg-rep`'s 5:51 and `gd-trig`'s 19:115 — and it has been COMPACTED TWICE, so it
+> was genuinely exposed to the split-file loss and is clear ONLY BECAUSE IT COUNTED.** Direction
+> unchanged: it manufactures DO NOT HOLD.
+> ⚠ **Its withdrawal, recorded because it is the sharper self-diagnosis: it had answered the roll call
+> from A SUMMARY OF RECOLLECTION, then resolved the problem by DECLINING TO ANSWER rather than by
+> measuring — "the inbox was on disk the whole time and I could have read it."** 🔗 **`gd-p0-rev-4`
+> answered from recollection and retracted; this is one layer worse and was fixed by abstention. The
+> right action was neither: READ THE FILE.**
 
 🔴 **`trigger-register-mismatch.md` — 550 LINES, LIVE, STILL WITH NO READER, AND THE LEAD HAS TAKEN IT AS
 ITS OWN DEFECT RATHER THAN LETTING IT SIT IN A ROUND-UP.** 🔗 **Rule 101, corrected behaviour, within
