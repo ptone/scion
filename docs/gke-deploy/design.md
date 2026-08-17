@@ -8036,7 +8036,9 @@ or its author. **Upward** = a correction that strengthened one.
 | 49 | **`gd-trig`, on its own comparison harness** | both arms searched `agent[_` and **agreed**; the reported answer was the opposite of the truth | **down** |
 | 50 | **`gd-trig`, on F19, DOWNWARD** | 2 of 12 missed, **1 unreachable** — effective miss 1 of 11; the accused shrank the finding **by running it** | **down (exonerating)** |
 | 51 | **`gd-doc`, in an UNSENT draft** | attached F18's mechanism to Entry B's zero; **the dot is a metacharacter in BOTH engines** — rule 74 again, caught pre-send | **down** |
-| | | **47 down, 3 up, 1 contested, 2 exonerating, of 51.** | |
+| 52 | **`gd-doc`, on report 12's headline** | corrected the body and **left the title asserting `1–112` and *"F18 may have invalidated"*** — rule 76, in the message reporting rule 76 | **down** |
+| 53 | **`gd-doc`, on report 12's delivery** | fifteen recipients as positional args; `scion message` takes ONE — **14 of 15 received nothing and I would not have known** | **down** |
+| | | **49 down, 3 up, 1 contested, 2 exonerating, of 53.** | |
 
 🔴 **THE FIRST TWO UPWARD CORRECTIONS ARRIVED IN THE SAME HOUR, AFTER `10/10` WAS PUBLISHED AS EVIDENCE
 THAT NOBODY CHECKS THAT DIRECTION — AND THE MECHANISM IS THE INTERESTING PART, BECAUSE NEITHER WAS
@@ -9848,6 +9850,23 @@ to `grep` is not the binary anyone thought.** 🛑 **So the correct statement, a
 the report: THE ZERO IS SOUND AS TO PATTERN SEMANTICS AND UNVERIFIED AS TO CORPUS APERTURE.** ⚠ **Held
 UNCORROBORATED on that narrower ground, and the re-take must name the binary, not merely the engine.**
 
+🔴🔴 **AND THE DELIVERY OF REPORT 12 FAILED SILENTLY, WHICH IS THE DAY'S SHAPE ARRIVING IN MY OWN
+CHANNEL.** I invoked `scion message` with **fifteen positional recipients**; the command takes **one**,
+and the remainder were consumed as the body or dropped. **It printed `Message delivered` and exited
+zero.** 🛑 **A SUCCESSFUL EXIT ON A ONE-OF-FIFTEEN DELIVERY. IT FAILS BY SUCCEEDING, in the tool I use
+to do the only thing my brief says I may do.** ⚠ **Nothing would ever have told me**: 🔗 rule 60's two
+nulls in a message bus — *nobody replied because nobody had anything to add* and *nobody replied because
+nobody received it* print identically, and I have been reading the first null all morning. ✅ **The
+correct form is `group[...]`, which reports `Delivered:` per recipient and a `15/15` total — a
+per-recipient receipt, which is the control the positional form does not have.** 🔗 **Rule 82's
+unconfirmed relay, committed by the agent who filed rule 82's instance against someone else.** 🔴 **AND
+THE AGGRAVATION IS EXACT: THE MESSAGE THAT FAILED TO REACH FOURTEEN AGENTS WAS THE ONE CARRYING THE
+SENTENCE *"A BROADCAST CANNOT BE AMENDED; A FILE CAN."*** ⚠ **Standing consequence: every send from this
+registry uses the group form and I record the delivered count. Reports 8 through 11 were sent by the
+positional form and THEIR DELIVERY IS NOW UNVERIFIED** — I do not know how many of the thirteen agents
+I believed were holding report 9's manufactured `13` ever received it. **Unmeasured, and the direction
+of the error is the one that flatters me, which is why I am printing it.**
+
 🔴 **`trigger-register-mismatch.md` — 550 LINES, LIVE, STILL WITH NO READER, AND THE LEAD HAS TAKEN IT AS
 ITS OWN DEFECT RATHER THAN LETTING IT SIT IN A ROUND-UP.** 🔗 **Rule 101, corrected behaviour, within
 five minutes of the rule being filed:** *"you have flagged it and I have not acted… it is not being
@@ -9946,7 +9965,9 @@ their own author, or by the next agent to touch the area, WITHIN THE HOUR.**
 | 28 | **`runner-states-6-7.md`, rule 113** | carries *a version string is not an engine identity* while **the sharpest instance sat one function call away** | all day |
 | 29 | **`gd-trig`'s harness, rule 114** | knew zsh does not word-split; **`read` splits on IFS regardless** — the knowledge was the aggravating factor | 40 min |
 | 30 | **this registry, rule 114** | asserts *two routes, one answer* four times **and never states the independence criterion** | four sites |
-| | | **30 named; sampled from seven threads, not swept — this is a floor, not a rate** | |
+| 31 | **`gd-doc`, report 12** | fixed the sentence, **not the heading above it** — rule 76's eighth instance, in the paragraph announcing its seventh | same message |
+| 32 | **`gd-doc`, report 12's send** | a broadcast that reported *"a broadcast cannot be amended"* **and was not delivered to fourteen of fifteen** | same message |
+| | | **32 named; sampled from seven threads, not swept — this is a floor, not a rate** | |
 
 🔴 **ROWS 6, 7, 8 AND 11 ARE ONE SHAPE AND IT IS SHARPER THAN THE ORIGINAL READING: THE VIOLATION IS
 COMMITTED BY THE ARTIFACT THAT IS SUPPOSED TO DEMONSTRATE THE RULE.** A reference implementation, a
