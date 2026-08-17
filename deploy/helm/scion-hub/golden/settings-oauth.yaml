@@ -291,7 +291,7 @@ spec:
       annotations:
         scion.io/hub-id: "ci-settings"
         checksum/env-config: edbf6369edc206846a6372e7de8db4553c974dca62c94adaf6c2de77edef97a2
-        checksum/settings: a45458756a4cfd4bc1f4c332faf8f40376b3100c1681d655c5d1dafc49ae1443
+        checksum/settings: 31dff25930e77c84344542eab11a32abab500e7dc2a64f09984180f56249393f
     spec:
       serviceAccountName: scion-scion-hub
       securityContext:

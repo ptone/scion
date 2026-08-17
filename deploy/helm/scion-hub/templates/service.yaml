@@ -13,6 +13,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */}}
+{{- /* Service annotations are free-form operator input on a cluster-readable
+object. Guarded for the same reason as hub.podAnnotations - see
+scion-hub.assertNoCredentialTree. */}}
+{{- include "scion-hub.assertNoCredentialTree" (dict "obj" (.Values.service.annotations | default dict) "source" "service.annotations" "prefix" "") }}
 apiVersion: v1
 kind: Service
 metadata:

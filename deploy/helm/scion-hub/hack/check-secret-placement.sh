@@ -71,6 +71,17 @@ NO_MATERIAL=(existing-secret session-existing)
 # criterion this file exists to measure would have been reported met by an
 # instrument that had gone partly blind.
 #
+# HOW FAR THAT ACTUALLY REACHED, WHICH IS LESS FAR THAN THIS COMMENT FIRST
+# CLAIMED. `exit 0` was true of THIS SCRIPT RUN ALONE. Through the suite it was
+# already caught: run-all.sh gates the real scan behind --self-test, the
+# self-test asserts 2 needles and fails exit 2 when blinded, and run-all counts
+# that as a meta-failure and exits non-zero. So the suite failed closed on a
+# blinded scanner before EXPECTED_NEEDLES existed. Found by gd-p3-rev, who
+# reproduced the defect and then measured its blast radius instead of taking
+# the author's word for it - a correction in the author's favour, which is the
+# direction nobody checks. The hole was real and worth closing: anyone running
+# this script directly, which its own --help invites, got the green.
+#
 # The remedy is the same one section B of chart-integrity.sh uses for kinds: a
 # committed expectation, asserted in BOTH directions against the fixtures on
 # disk, so a drop is a failure and an addition has to be written down in the
@@ -84,6 +95,33 @@ declare -A EXPECTED_NEEDLES=(
   [varied]=1             # session secret
 )
 
+# AND THE IDENTITY OF THOSE NEEDLES, AS A DIGEST OVER THE SORTED SET.
+#
+# EXPECTED_NEEDLES pins HOW MANY. It cannot distinguish a harvester that found
+# the right two values from one that found two wrong ones - and a key filter
+# that drifts onto the wrong keys can easily preserve a count. gd-p2-dev hit
+# this shape from an unrelated instrument and named it precisely: a planted
+# positive plants whatever the needle holds and then finds it, so it controls
+# the mechanism and says nothing about WHICH string it fires on.
+#
+# A digest, not the values, so nothing here prints or stores fixture material.
+# These are ci/ fixtures whose values are literally spelled "not-a-real-secret"
+# and are already committed in this repo, so the objection this chart raises
+# elsewhere - that a digest of a low-entropy secret is recoverable offline -
+# does not apply to them. It would apply to a real value, which is exactly why
+# the digest is taken here and not over anything a release renders.
+#
+# Both vacuous fixtures share one digest: it is sha256 of the empty string,
+# because their needle set is empty. That is correct, not a copy-paste.
+declare -A EXPECTED_NEEDLE_SET=(
+  [existing-secret]=e3b0c44298fc  # the empty set: bring-your-own Secret
+  [minimal]=3aeb1b0ad7de  # the chart-rendered session secret
+  [session-existing]=e3b0c44298fc  # the empty set: bring-your-own Secret
+  [settings]=f48ea127825a  # session secret only
+  [settings-oauth]=fc2fc3df35bc  # session secret + the OAuth web client_secret
+  [varied]=534908f3bd07  # session secret
+)
+
 # ---------------------------------------------------------------------------
 # The scanner. Reads a rendered multi-document manifest on stdin and prints one
 # line per finding. Zero dependencies beyond python3 - deliberately no PyYAML,
@@ -95,7 +133,7 @@ declare -A EXPECTED_NEEDLES=(
 # subject is this chart's own output, and the self-test pins the shapes.
 # ---------------------------------------------------------------------------
 read -r -d '' SCANNER <<'PYEOF' || true
-import sys, re
+import sys, re, hashlib
 
 text = sys.stdin.read()
 needles_env = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -237,6 +275,12 @@ for doc in docs:
                     findings.append("%s: %s" % (label, b.strip()))
 
 print("NEEDLES=%d" % len(needles))
+# WHICH strings, not merely how many. A count says the harvester found two
+# things; it does not say it found the RIGHT two. Emitted as a digest over the
+# sorted set so the identity is assertable without the values themselves
+# passing through stdout, a log, or this file.
+print("NEEDLESET=%s" % hashlib.sha256(
+    "\n".join(sorted(needles)).encode()).hexdigest()[:12])
 for f in findings:
     print("FINDING=%s" % f)
 PYEOF
@@ -457,6 +501,10 @@ echo "check-secret-placement: ${HELM} ${helm_version}, python3 $(python3 -c 'imp
 rc=0
 total_needles=0
 analysed=0
+# Counted so the summary can state the MATERIAL denominator rather than the
+# corpus size. A fixture declared vacuous is one the scan cannot say anything
+# about, and "6 fixtures" reads as six fixtures examined.
+vacuous=0
 for name in "${fixtures[@]}"; do
   render="$("$HELM" template t "$CHART_DIR" -f "$CHART_DIR/ci/values-$name.yaml" 2>&1)"
   if [[ $? -ne 0 || -z "$render" ]]; then
@@ -477,6 +525,7 @@ for name in "${fixtures[@]}"; do
 
   out="$(scan <<<"$render")" || { echo "  ERROR   ${name}: scanner failed" >&2; rc=2; continue; }
   n="$(sed -n 's/^NEEDLES=//p' <<<"$out")"
+  nset="$(sed -n 's/^NEEDLESET=//p' <<<"$out")"
   total_needles=$((total_needles + n))
   mapfile -t hits < <(sed -n 's/^FINDING=//p' <<<"$out")
 
@@ -504,6 +553,20 @@ for name in "${fixtures[@]}"; do
     rc=2
     continue
   fi
+  # AND WHICH VALUES, NOT JUST HOW MANY. The count above cannot tell a harvester
+  # that found the right two things from one that found two wrong things. Named
+  # by gd-p2-dev, who hit the same shape from an unrelated instrument: a planted
+  # positive plants whatever the needle holds and then finds it, so it controls
+  # the mechanism and says nothing about WHICH string it fires on.
+  if [[ "$nset" != "${EXPECTED_NEEDLE_SET[$name]}" ]]; then
+    echo "  ERROR   ${name}: needle-set digest ${nset}, expected ${EXPECTED_NEEDLE_SET[$name]}." >&2
+    echo "          The COUNT is right and the VALUES are not, so the harvester is picking up" >&2
+    echo "          different material than it was pinned to. Either a fixture value changed" >&2
+    echo "          (update the digest in that diff) or the key filter drifted onto the wrong" >&2
+    echo "          keys - which is the failure the count guard alone cannot see." >&2
+    rc=2
+    continue
+  fi
   if [[ "$n" -gt 0 && "$expect_vacuous" == "yes" ]]; then
     echo "  ERROR   ${name}: listed in NO_MATERIAL but the render carries ${n} secret value(s)." >&2
     echo "          The declared vacuity is wrong, and the scan for this fixture was being skipped." >&2
@@ -516,6 +579,7 @@ for name in "${fixtures[@]}"; do
     printf '          %s\n' "${hits[@]}"
     [[ "$rc" -ne 2 ]] && rc=1
   elif [[ "$expect_vacuous" == "yes" ]]; then
+    vacuous=$((vacuous + 1))
     echo "  ok      ${name}: renders no secret material (bring-your-own, declared in NO_MATERIAL)"
   else
     echo "  ok      ${name}: ${n} secret value(s), none in args, a ConfigMap, or an annotation"
@@ -546,7 +610,23 @@ if [[ "$total_needles" -ne "$_want_total" ]]; then
   exit 2
 fi
 
+# THE PRINTED DENOMINATOR IS THE MATERIAL ONE. "6 fixtures, 5 secret values"
+# reads as six fixtures examined, and two of them are declared vacuous - the
+# scan reaches four. The per-fixture rows always disclosed it; the summary did
+# not, and the summary is the line that gets quoted. Asserted against the
+# declaration rather than merely counted, so the number in the summary cannot
+# drift away from NO_MATERIAL the way two hand-maintained facts do.
+if [[ "$vacuous" -ne "${#NO_MATERIAL[@]}" ]]; then
+  echo "check-secret-placement: ${vacuous} fixtures rendered no material but ${#NO_MATERIAL[@]} are declared vacuous -- NOT a clean run" >&2
+  exit 2
+fi
+_material=$((analysed - vacuous))
+if [[ "$_material" -le 0 ]]; then
+  echo "check-secret-placement: every fixture is declared vacuous -- NOTHING WAS ANALYSED (skipped, not clean)" >&2
+  exit 2
+fi
+
 if [[ "$rc" -eq 0 ]]; then
-  echo "check-secret-placement: PASS (${analysed} fixtures, ${total_needles} secret values tracked, 0 in args/ConfigMap/annotation)"
+  echo "check-secret-placement: PASS (${_material} of ${analysed} fixtures carry material, ${vacuous} declared vacuous; ${total_needles} secret values tracked, 0 in args/ConfigMap/annotation)"
 fi
 exit "$rc"

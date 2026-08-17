@@ -158,6 +158,52 @@ THE SETTINGS FILE IS READ-ONLY. THIS IS DELIBERATE.
   Configure these through your values file and helm upgrade instead. Note the
   separate hazard that a hub which has already run against Postgres keeps some
   settings in database rows that shadow the file entirely; see VALIDATION.md.
+{{- $oauthConfigured := false }}
+{{- range $provider, $creds := .Values.auth.oauth.web }}
+{{- if or $creds.clientId $creds.clientSecret }}
+{{- $oauthConfigured = true }}
+{{- end }}
+{{- end }}
+{{- if $oauthConfigured }}
+
+ROTATING AN OAUTH CLIENT SECRET REQUIRES A RESTART YOU HAVE TO RUN YOURSELF
+
+  This release sets OAuth client credentials, so this applies to you. It is
+  printed on every install and upgrade that sets them, because forgetting it is
+  silent in both directions and there is nothing else that will tell you.
+
+  A helm upgrade that changes clientId or clientSecret rewrites the Secret,
+  reports success, and leaves every running replica on the OLD credential. The
+  reason is the mount described above: settings.yaml arrives as a subPath mount,
+  which the kubelet resolves once at container start and never refreshes.
+
+  The checksum/settings pod annotation does not rescue you here, and that is
+  deliberate rather than an oversight. The digest is taken over a projection of
+  the settings document with the credentials redacted, so a credential-only
+  change does not move it and does not roll the pods. Before that redaction the
+  pods rolled as a side effect of the client secret being inside the digest -
+  and that same side effect made the annotation an offline verification oracle
+  for the secret, published to everyone with pod read access, which is a wider
+  audience than the Secret's own RBAC. The automatic roll and the oracle were
+  one mechanism. Removing the oracle removed the roll. This paragraph is what
+  replaces it.
+
+  After any upgrade that changes a value under auth.oauth:
+
+    kubectl rollout restart deploy/{{ include "scion-hub.fullname" . }} -n {{ .Release.Namespace }}
+
+  Until you run it, the rotation has not happened. If you are rotating because
+  the old secret leaked, the leaked secret is the one still in use.
+
+  WHAT IT LOOKS LIKE IF YOU FORGET. Nothing. Logins keep working on the old
+  credential, every pod stays Ready, and /readyz cannot see a stale OAuth
+  credential. The failure arrives later and all at once, when the provider
+  revokes the old secret and every login starts failing with "OAuth provider is
+  not configured" while the deployment still reports healthy.
+
+  Non-credential settings changes are unaffected: the annotation still moves for
+  those, and the pods still roll on their own.
+{{- end }}
 
 SCHEMA_VERSION IS LOAD-BEARING
 

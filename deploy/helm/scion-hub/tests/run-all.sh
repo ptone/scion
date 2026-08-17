@@ -115,7 +115,7 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=4
-EXPECTED_ASSERTIONS=145   # 39 chart-integrity + 71 render-guards + 31 reserved-flags + 4 update-strategy.
+EXPECTED_ASSERTIONS=151   # 45 chart-integrity + 71 render-guards + 31 reserved-flags + 4 update-strategy.
 EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 
 # Enumerated by name, not globbed into a loop. A glob would run whatever is

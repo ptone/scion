@@ -1937,6 +1937,7 @@ real deep merge rather than a text append.
 {{- $driver := .Values.database.driver }}
 
 {{- /* server.hub. hub_name, not name: the koanf tag is hub_name. */}}
+{{- include "scion-hub.assertNoCredential" (dict "value" .Values.hub.name "source" "hub.name") }}
 {{- $hub := dict "hub_id" $hubId "hub_name" .Values.hub.name }}
 
 {{- /*
@@ -2061,7 +2062,187 @@ forces a chart fork. Merged before the assertions run, not after. */}}
 {{- $rendered := toYaml $doc }}
 {{- include "scion-hub.assertSettings" (dict "root" . "rendered" $rendered "hubId" $hubId) }}
 {{- include "scion-hub.assertNoExtraCollision" (dict "preMerge" $preMerge "extra" .Values.config.extra) }}
+{{- /* config.extra is an arbitrary subtree the operator controls, so it can put
+a credential at a path no redaction list names - a DSN at server.database.url
+was measured doing exactly that, landing in the Secret AND moving the
+checksum/settings digest. The projection cannot enumerate its way out of an
+open-ended surface; this turns the injection into a render failure instead. */}}
+{{- include "scion-hub.assertNoCredentialTree" (dict "obj" .Values.config.extra "source" "config.extra" "prefix" "") }}
 {{- $rendered }}
+{{- end }}
+
+{{/*
+The checksum/settings digest input: the rendered settings Secret with its
+credential-bearing leaves replaced by a constant, BY PATH.
+
+WHY A PROJECTION AND NOT THE DOCUMENT. A checksum annotation is safe exactly
+when its input is no more privileged than the annotation itself. This one was
+not. Pod annotations are readable by anyone with pod read access - a strictly
+wider audience than the Secret's own RBAC - and once auth.mode is oauth the
+digested document contains the OAuth client secret. That published an offline
+verification oracle. It was measured rather than argued: the digest preimage was
+recovered byte for byte (2679 bytes at the settings-oauth fixture) and then used
+to predict helm's digest for three client secrets that had never been rendered,
+3 of 3 correct, at ~300k guesses/sec on one CPU core.
+
+STATED AT ITS TRUE SIZE, because a fix argued from an inflated reason gets
+reverted by the first person who measures the reason. Against a provider-issued
+secret this is CONFIRMATION, not recovery - that guess rate does not touch the
+entropy of a real GOCSPX- value. What it hands an attacker who ALREADY HOLDS A
+CANDIDATE, from staging, from git history, from a CI log, is free verification
+against production, and against every superseded value still sitting in the
+ReplicaSet revision history. Lower bar than recovery, and the one actually given
+away.
+
+THE CHART PREVIOUSLY ARGUED THE OTHER WAY, IN THIS REPOSITORY, AND THE ARGUMENT
+WAS WRONG. It said an attacker must also guess every other field in the
+document. Census of the 26 leaves at that fixture: 9 chart constants, 5
+published defaults, 5 booleans or small enums, 2 printed in plaintext on the
+same object the annotation is on, 1 public by construction (the client ID), 3
+operator identifiers, 1 secret. "Every other field" is nine constants and a
+display name. The claim was never measured when it was written, and it does not
+survive being measured. It is gone rather than softened.
+
+BY PATH, NOT BY VALUE, AND THE DISTINCTION IS THE GUARD. A value-based redaction
+- find the secret's text in the output and blank it - fails open the moment the
+value arrives by a route the redactor did not anticipate, and it fails SILENTLY,
+because a redaction that matched nothing renders identically to a document that
+had nothing to redact. So the path list does the work and a value check verifies
+it: after projecting, every credential the chart rendered is asserted ABSENT
+from the projection. A path this list forgets therefore breaks the render
+instead of quietly restoring the oracle. Path list to act, value check to prove
+the action landed - neither alone is sufficient and they fail in opposite
+directions.
+
+WHAT IT COSTS, PLAINLY: a helm upgrade changing ONLY an OAuth client secret no
+longer moves the digest, so it no longer rolls the pods - and settings.yaml is a
+subPath mount the kubelet never refreshes, so the new credential does not take
+effect until something restarts them. That behaviour is RELOCATED, NOT DELETED.
+values.yaml documents the restart next to auth.oauth.web.*.clientSecret and
+NOTES.txt prints it whenever OAuth credentials are set. Delete either of those
+and you have deleted the behaviour, not the annotation.
+
+server.database.url is redacted here BEFORE the chart renders that field, and
+only its credential component, so a host or database-name change still rolls the
+pods. Cloud SQL will put a password there. A redaction list extended in the same
+change that adds the field is a list that will eventually be extended one
+release late; listing it early costs nothing. HONESTLY: with the credential
+guard now applied to every config.extra leaf, no supported input can reach that
+branch today, so it is UNEXERCISED BY CONSTRUCTION rather than tested. It is
+here for the phase that makes it reachable, and it is named as untested so
+nobody reads it as a passing check.
+*/}}
+{{- define "scion-hub.settingsChecksum" -}}
+{{- $obj := fromYaml (include (print .Template.BasePath "/secret-settings.yaml") .) }}
+{{- if hasKey $obj "Error" }}
+{{- fail (printf "scion-hub.settingsChecksum could not parse the rendered settings Secret as YAML: %s. This annotation is a digest of a redacted projection of that document, so a parse failure would digest an error string instead - a value that never changes, which is worse than no annotation because it looks like coverage." (get $obj "Error")) }}
+{{- end }}
+{{- $doc := fromYaml (dig "stringData" "settings.yaml" "" $obj) }}
+{{- if not (hasKey $doc "server") }}
+{{- fail "scion-hub.settingsChecksum parsed the settings Secret but the document has no top-level server key. Every settings document the chart renders has one, so this means the projection is operating on an empty or unexpected document - and a digest of an empty document is a constant, which would silently stop rolling pods on every future settings change. Failing instead." }}
+{{- end }}
+{{- $redacted := "[redacted-from-checksum]" }}
+{{- $marks := 0 }}
+{{- $rendered := list }}
+{{- range $provider, $entry := (dig "server" "oauth" "web" (dict) $doc) }}
+{{- if hasKey $entry "client_secret" }}
+{{- $rendered = append $rendered (toString (get $entry "client_secret")) }}
+{{- $_ := set $entry "client_secret" $redacted }}
+{{- $marks = add1 $marks }}
+{{- end }}
+{{- end }}
+{{- $db := dig "server" "database" (dict) $doc }}
+{{- if hasKey $db "url" }}
+{{- $was := toString (get $db "url") }}
+{{- $now := regexReplaceAll "://[^/@[:space:]]*:[^/@[:space:]]+@" $was (printf "://%s@" $redacted) }}
+{{- if ne $now $was }}
+{{- $_ := set $db "url" $now }}
+{{- $marks = add1 $marks }}
+{{- end }}
+{{- end }}
+{{- $projection := toYaml $doc }}
+{{- $found := sub (len (splitList $redacted $projection)) 1 }}
+{{- if ne (int $found) (int $marks) }}
+{{- fail (printf "scion-hub.settingsChecksum performed %d redactions but the projection carries %d redaction markers. The two must agree: this is how the helper proves its own edits reached the document that gets digested, rather than assuming the assignment landed. Either a `set` above did not take effect on the parsed document - in which case a credential is about to be digested - or some rendered settings value contains the literal marker text %q, which the chart cannot distinguish from its own mark. Fix the first; for the second, change the marker." (int $marks) (int $found) $redacted) }}
+{{- end }}
+{{- /* SECOND PROOF, AND IT HAS A FLOOR THAT IS THERE FOR A MEASURED REASON.
+The marker count above proves the edits landed at the paths the helper knows.
+It cannot prove the same credential is not ALSO sitting at some path the list
+does not know about, so each rendered credential is searched for by value in the
+finished projection.
+
+THE FLOOR. That search is a plain substring test, and a short credential
+collides with ordinary prose: measured, a client secret of "def" is found inside
+the word "default" in the rendered settings, and the render was refused with a
+message telling the maintainer to add a path that does not exist. False, loud,
+and with remediation advice that cannot be followed. So the value search applies
+only at 12 characters or more. Google issues 24-character client secrets and
+GitHub 40, so no real credential is below the floor.
+
+WHAT THE FLOOR CANNOT SEE, STATED PLAINLY: a credential shorter than 12
+characters copied to a path outside the redaction list would be digested and
+this check would not say so. The path redaction still applies to every path it
+knows, the marker count still proves those landed, and a secret that short is
+not a secret. This is a narrowed check, not a disabled one, and it is narrowed
+in the direction that removes false refusals rather than the direction that
+removes refusals.
+
+AND THE ONE CASE NEITHER HALF COVERS, BECAUSE A MUTATION FOUND IT RATHER THAN
+REASONING. The marker count proves a marker EXISTS; it does not prove the marker
+is at the right key. Rewriting the `set` above to a misspelled key leaves the
+credential in place AND inserts a marker, so the count still balances - and with
+a sub-floor credential the value check is silent too. Measured: the render
+succeeds and `client_secret: shrt` reaches the digest. Both guards see the same
+mutation the moment the credential is of realistic length, and removing the
+`set` outright is caught at any length, so what is uncovered is the intersection
+of two unlikely things. It is written down rather than closed because a guard
+whose gap is named is a guard someone can widen; an unnamed one is a guard
+people trust past its edge. */ -}}
+{{- range $s := $rendered }}
+{{- if and (ge (len $s) 12) (contains $s $projection) }}
+{{- fail (printf "scion-hub.settingsChecksum redacted the credential paths it knows about and a rendered credential is STILL present in the digest input. The path list above is missing the path this value came from. Do not silence this by widening the value check - add the path, because the annotation is published to a wider audience than the Secret and a digest of a credential is a verification oracle for it. Value begins %q." (trunc 4 $s)) }}
+{{- end }}
+{{- end }}
+{{- if regexMatch "://[^/@[:space:]]*:[^/@[:space:]]+@" $projection }}
+{{- fail "scion-hub.settingsChecksum found a scheme://user:password@host URL in the digest input AFTER redaction. This is a backstop and reaching it means an upstream guard was missed, so fix the upstream one rather than this: either some settings path now carries a credential-bearing URL and is not in the redaction list above (add the path), or a values surface that feeds settings.yaml is not running scion-hub.assertNoCredential (add the call, and prefer that - it names the value the operator actually set, which this message cannot)." }}
+{{- end }}
+{{- $_ := set $obj "stringData" (dict "settings.yaml" $projection) }}
+{{- toYaml $obj | sha256sum }}
+{{- end }}
+
+{{/*
+Refuse a credential anywhere in an arbitrary values subtree, leaf by leaf.
+
+scion-hub.assertNoCredential checks ONE value. The surfaces that needed it -
+config.extra and the four free-form annotation/label maps - are trees of
+operator-supplied values of unbounded shape, so the check has to walk them.
+
+WHY THESE SURFACES. A reach check rendered one hostile DSN through ten surfaces
+in turn, the identical string each time. hub.args and hub.extraEnv refused it by
+name; hub.podAnnotations, hub.podLabels, service.annotations,
+serviceAccount.annotations and every config.extra leaf rendered it without a
+word. Two refusals in the same run are what make those five silences a real
+absence of a guard rather than a broken harness. The chart already owned the
+right idea and applied it to two of seven surfaces.
+
+Recursive through include, like scion-hub.leafPaths. Maps and lists are walked;
+everything else is a leaf and gets checked. Nil leaves stringify to a value no
+credential pattern matches, so they cost a call and nothing else.
+*/}}
+{{- define "scion-hub.assertNoCredentialTree" -}}
+{{- $prefix := .prefix }}
+{{- $source := .source }}
+{{- if kindIs "map" .obj }}
+{{- range $k, $v := .obj }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "obj" $v "source" $source "prefix" (ternary (toString $k) (printf "%s.%s" $prefix (toString $k)) (eq $prefix ""))) }}
+{{- end }}
+{{- else if kindIs "slice" .obj }}
+{{- range $i, $v := .obj }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "obj" $v "source" $source "prefix" (printf "%s[%d]" $prefix $i)) }}
+{{- end }}
+{{- else }}
+{{- include "scion-hub.assertNoCredential" (dict "value" .obj "source" (printf "%s %s" $source $prefix)) }}
+{{- end }}
 {{- end }}
 
 {{/*

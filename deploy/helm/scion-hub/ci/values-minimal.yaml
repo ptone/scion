@@ -69,6 +69,17 @@ auth:
   # A LITERAL IN A ci/ FILE IS NOT A LEAK AND IS NOT A PRECEDENT. This value is
   # public, committed, and exists so the goldens cover the chart-rendered Secret
   # path. Real installs use auth.existingSecret - see ci/values-session-existing.yaml
-  # for that shape. tests/secret-material.sh asserts this string reaches only
-  # the Secret, never args, a ConfigMap or an annotation.
+  # for that shape. hack/check-secret-placement.sh asserts this string reaches
+  # only the Secret, never args, a ConfigMap or an annotation - over every
+  # fixture in this directory, with the number of fixtures actually carrying
+  # material printed beside the result so a scan of nothing cannot read as a
+  # clean scan.
+  #
+  # THE NAME IN THIS COMMENT WAS WRONG UNTIL THE SECRETS PHASE. It cited
+  # tests/secret-material.sh, which has never existed in this repository. A
+  # citation to a guard that does not exist is worse than no citation: it is the
+  # exact evidence a reviewer looks for to conclude the property is covered, and
+  # nothing about reading it reveals that it is fiction. Found by a reach check
+  # that went looking for the named file. If you add a claim of the form "X
+  # asserts this", open X.
   sessionSecret: ci-minimal-session-secret-not-a-real-secret

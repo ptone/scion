@@ -264,7 +264,7 @@ spec:
       annotations:
         scion.io/hub-id: "ci-session-existing"
         checksum/env-config: cb8136cd2fda0c7990810c13e8de5aae4eb71d9158de35c6b671097a3e6582f6
-        checksum/settings: a94247e6e3ecbb790735822c8ed4d8c4657053d93d7e414c0feae24b88f7c3e7
+        checksum/settings: 66815184561e4652de60a8df9b6dd691d4d5d244fa83edf5ae6f52b45e26d67f
     spec:
       serviceAccountName: scion-scion-hub
       securityContext:
