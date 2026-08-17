@@ -90,7 +90,7 @@ BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real
 # honest encoding of the hold, and bumping it would be the defeat gd-p0-dev
 # warned about. Lifting the hold is a two-line change: 26 -> 35 here, and
 # 107 -> 116 in run-all.sh, in one diff.
-EXPECTED_TOTAL=55
+EXPECTED_TOTAL=56
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output
@@ -1142,6 +1142,43 @@ if [ "$_e12_actual_calls" = "$_e12_expected_calls" ]; then
   pass "templates/*.yaml holds exactly $_e12_expected_calls credential-guard call sites, each with an arm above"
 else
   fail "templates/*.yaml holds $_e12_actual_calls credential-guard call sites, not the committed $_e12_expected_calls. If you removed one, the arm above for that surface should also be red and the surface is now unguarded. If you added one, add its arm to the E12 loop and raise this number in the same diff - an unwitnessed guard is the state this whole section exists to prevent, and it was reached once already by adding three calls and three arms while five older calls had none."
+fi
+
+# ---------------------------------------------------------------------------
+# E13. The readiness path is /readyz, by name.
+# ---------------------------------------------------------------------------
+#
+# Changing `path: /readyz` to `/healthz` was already caught - but ONLY by
+# hack/verify.sh golden diffing, which reports it as generic drift and whose
+# remedy text is "run hack/verify.sh --update if the change is intended". That
+# is exactly what somebody who believes they changed the path on purpose will
+# do, and the control is then gone with the golden. The readiness path is a
+# standing project constraint (/readyz - NOT /healthz, NOT /api/v1/readyz), so
+# it gets an assertion that names it and quotes the constraint when it fails.
+#
+# Scoped to httpGet probe paths specifically. The Deployment also renders
+# `path: settings.yaml` as a projected-volume item, which is a different key in
+# a different position and must not be swept up by a loose `path:` match.
+# The liveness probe is deliberately tcpSocket and has no path at all, so this
+# asserts over the startup and readiness probes - which is why the denominator
+# is checked rather than assumed.
+#
+# THE DENOMINATOR IS THE POINT. "No probe path is /healthz" is satisfied by a
+# render with no probes in it, and two of the six ci fixtures render no
+# Deployment at all under this section's BASE. A vacuous pass here would read
+# identically to a real one, so an empty corpus is a META-FAILURE, not a pass.
+_e13_paths="$("$HELM" template t "$CHART" "${BASE[@]}" --show-only templates/deployment.yaml 2>/dev/null \
+  | command grep -E '^[[:space:]]+path: /' | awk '{print $2}')"
+_e13_n="$(printf '%s' "$_e13_paths" | command grep -c . || true)"
+if [ "$_e13_n" -eq 0 ]; then
+  echo "META-FAILURE: E13 found no httpGet probe paths in the rendered Deployment, so it measured nothing. Either the Deployment stopped rendering under BASE or the probes were removed; both are findings, neither is a pass." >&2
+  exit 2
+fi
+_e13_bad="$(printf '%s\n' "$_e13_paths" | command grep -v '^/readyz$' || true)"
+if [ -z "$_e13_bad" ]; then
+  pass "all $_e13_n httpGet probe paths in the Deployment are /readyz (asserted by name, not by golden drift)"
+else
+  fail "a probe in the Deployment uses an httpGet path that is not /readyz (found: $(printf '%s' "$_e13_bad" | paste -sd' ' -)). The readiness path is a standing project constraint: it is /readyz, never /healthz and never /api/v1/readyz. If you believe you changed this on purpose, that belief is the failure mode this assertion exists to interrupt - the golden diff would have let you past with --update."
 fi
 
 # ---------------------------------------------------------------------------

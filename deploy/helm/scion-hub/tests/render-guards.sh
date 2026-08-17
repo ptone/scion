@@ -180,11 +180,24 @@ echo "== credential guard, VALUE axis =="
 # defect in the fixture; lowering the floor to fit it lets tests/ set a security
 # parameter and re-opens the false positive the floor exists to close.
 #
-# These plant through `--set hub.args[0]=` - the ARGV path. That is deliberate
-# and it is why this section exists separately from chart-integrity.sh's E12,
-# which plants through values files onto object surfaces. A values-only corpus
-# cannot reach these rows at all: the gap between those two apertures is where
-# the 12-character fixture above survived unnoticed.
+# These plant through `--set hub.args[0]=` - the ARGV path - which is why this
+# section exists separately from chart-integrity.sh's E12, which plants through
+# values files onto object surfaces.
+#
+# ⚠️ CORRECTION, RECORDED RATHER THAN QUIETLY EDITED. An earlier version of this
+# comment said a values-only corpus "cannot reach these rows at all." THAT IS
+# FALSE and gd-consumer disproved it by doing it: `hub.args` is an ordinary
+# .Values key, so a `-f` overlay reaches this identical code path with no `--set`
+# involved, and their overlay reproduced the 12-character blocker independently.
+#
+# The real distinction is narrower and worth keeping straight, because the wrong
+# version makes the gap sound unavoidable when it is one line of work: the
+# corpora in flight did not ENUMERATE hub.args as a surface. That is the same
+# enumeration blindness this suite keeps finding in the chart, this time in the
+# instruments pointed at it - not a property of the values-file method. The
+# `--set-string` ban is also narrower than it is sometimes quoted: it bans
+# planting CREDENTIAL VALUES through helm's escape parser, which rewrites them,
+# not exercising the argv surface, which is what these rows legitimately do.
 reject "DSN with userinfo"  "embeds credentials in a URL" --set 'hub.args[0]=--upstream=postgres://scion:hunter2@10.0.0.1/scion'
 reject "ghp_ prefix"        "shape of a credential"       --set 'hub.args[0]=--x=ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 reject "sk- prefix"         "shape of a credential"       --set 'hub.args[0]=--x=sk-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'

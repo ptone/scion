@@ -115,17 +115,53 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=4
-EXPECTED_ASSERTIONS=161   # 55 chart-integrity + 71 render-guards + 31 reserved-flags + 4 update-strategy.
+EXPECTED_ASSERTIONS=162   # 56 chart-integrity + 71 render-guards + 31 reserved-flags + 4 update-strategy.
 EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 
 # Enumerated by name, not globbed into a loop. A glob would run whatever is
 # present and could never notice that something is absent.
+#
+# 🔴 THE NUMBERS IN THESE COMMENTS ARE CHECKED, AND THEY ARE HERE BECAUSE THEY
+# WERE NOT. At the time this check was added, `render-guards.sh` was annotated 57
+# against an on-disk EXPECTED_TOTAL of 71, and `chart-integrity.sh` was annotated
+# 38 against 49. Both had been true once. This file's own rule two screens up is
+# "WHERE A CHECK COUNTS ANYTHING, COMMIT THE NUMBER AND FAIL ON INEQUALITY" - and
+# these four were counts nobody had wired to anything, decaying quietly in the
+# file that exists to stop exactly that. A stale 57 is also what one mutation in
+# hack/run-all-mutations.sh was aimed at, so the rot had already produced a
+# no-op sed that reported success.
 SCRIPTS=(
   reserved-flags.sh     # 31 - the reserved-flag lists
   update-strategy.sh    #  4 - the updateStrategy derivation
-  render-guards.sh      # 57 - every other render-time refusal, incl. the HA-unlanded gate
-  chart-integrity.sh    # 38 - .helmignore breadth, the packaged file set, base-url, signing key
+  render-guards.sh      # 71 - every other render-time refusal, incl. the HA-unlanded gate
+  chart-integrity.sh    # 56 - .helmignore breadth, the packaged file set, base-url, signing key
 )
+
+# Each annotation above must equal that script's own committed EXPECTED_TOTAL,
+# and the four must sum to EXPECTED_ASSERTIONS. Checked before anything runs, so
+# a stale annotation is a loud meta-failure rather than a comment that reads as
+# authoritative and is not.
+_ann_sum=0
+while read -r _ann_name _ann_n; do
+  _ann_disk="$(command grep -oE '^EXPECTED_TOTAL=[0-9]+' "$HERE/$_ann_name" 2>/dev/null | head -1 | cut -d= -f2)"
+  if [ -z "$_ann_disk" ]; then
+    echo "META-FAILURE: $_ann_name has no EXPECTED_TOTAL= line, so its annotation in SCRIPTS cannot be checked and this pre-flight measured nothing for it." >&2
+    exit 2
+  fi
+  if [ "$_ann_disk" != "$_ann_n" ]; then
+    echo "META-FAILURE: SCRIPTS annotates $_ann_name as $_ann_n assertions; the script itself commits EXPECTED_TOTAL=$_ann_disk. Update the annotation in the same diff that moves the total - an annotation that is merely decorative is how 57 survived a move to 71." >&2
+    exit 2
+  fi
+  _ann_sum=$(( _ann_sum + _ann_n ))
+done <<< "$(command grep -oE '^  [a-z-]+\.sh +# +[0-9]+' "${BASH_SOURCE[0]}" | awk '{print $1, $3}')"
+if [ "$_ann_sum" != "$EXPECTED_ASSERTIONS" ]; then
+  echo "META-FAILURE: the SCRIPTS annotations sum to $_ann_sum but EXPECTED_ASSERTIONS is $EXPECTED_ASSERTIONS. One of the two is stale; the per-script totals above were each verified against disk, so suspect EXPECTED_ASSERTIONS." >&2
+  exit 2
+fi
+if [ "$_ann_sum" -eq 0 ]; then
+  echo "META-FAILURE: the SCRIPTS annotation pre-flight parsed zero entries, so it verified nothing. The grep that reads this file's own SCRIPTS block has stopped matching it." >&2
+  exit 2
+fi
 
 # NAMED EXCEPTIONS. Present in this directory, deliberately NOT run from here and
 # deliberately NOT part of EXPECTED_ASSERTIONS. Stated as a list rather than left
