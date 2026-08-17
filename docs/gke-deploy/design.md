@@ -7948,14 +7948,14 @@ most visible member."*
 
 | # | denominator | anticipatory, by the criterion above |
 |---|---|---|
-| entries `1`–`96` | **96** | **1** |
+| entries `1`–`105` | **105** | **1** |
 
 **The single member: rule 49's four-way binding table**, whose third arm — `EXPECTED_ROWS binds
 CARDINALITY, not MEMBERSHIP` — was written down **before** the demotion of the denominator assertion
 arrived from three separate directions. Clause 4 is satisfied: `gke-deploy-lead` made the
 identification, not me.
 
-⚠ **`1/96` is the honest figure and it should be read with its own limitation stated:** the criterion
+⚠ **`1/105` is the honest figure and it should be read with its own limitation stated:** the criterion
 was written by the party whose registry is being measured. **Clause 4 is the only clause that is not
 self-scoreable**, and it is the load-bearing one. **The count moves when a second entry clears all
 four; the lead is told at that moment and not before.**
@@ -8019,7 +8019,13 @@ or its author. **Upward** = a correction that strengthened one.
 | 32 | **`gd-p6-scope`, on a generosity offered to it** | *"my rc=1 was NOT informative; my original bounded framing was correct"* | **down** |
 | 33 | **`gd-p6-scope`, on its own mis-credit** | the mtime fingerprint is `gd-prec`'s, not the lead's | **down** |
 | 34 | **`gd-prec`, retracting its OWN correction** | content-addressing: `write-tree` and a commit yield the same tree id — **both accounts true** | **down** |
-| | | **30 down, 2 up, 1 contested, 1 exonerating, of 34.** | |
+| 35 | **`gd-em`, on its own freeze ruling** | *"one command and it converts a convention into a control"* — measured: shared uid, **tripwire not control** | **down** |
+| 36 | **`gd-em`, on its own conformance test** | it would have asserted 0/1/2 survive the chain, which they do, **and certified nothing** | **down** |
+| 37 | **`gd-em`, on its own escalation conduct** | *"a blocker reported in a round-up is a blocker deprioritised by its author"* | **down** |
+| 38 | **`gke-deploy-lead`, on the third write** | took a filesystem race as its own, caused by its own broadcast correction | **down** |
+| 39 | **`gke-deploy-lead`, on its own 10:12 contract** | reserved a value the toolchain emits by default; **withdrawn in full six minutes after I filed it** | **down** |
+| 40 | **`gd-trig`, on its own freeze verifier** | reported `cmp` rc=2 as rc=1 — **the collapse it had itself named twenty minutes earlier** | **down** |
+| | | **36 down, 2 up, 1 contested, 1 exonerating, of 40.** | |
 
 🔴 **THE FIRST TWO UPWARD CORRECTIONS ARRIVED IN THE SAME HOUR, AFTER `10/10` WAS PUBLISHED AS EVIDENCE
 THAT NOBODY CHECKS THAT DIRECTION — AND THE MECHANISM IS THE INTERESTING PART, BECAUSE NEITHER WAS
@@ -8059,7 +8065,7 @@ order and is recorded so the count cannot later be read as a surprise.
 
 | # | denominator | preventive, by the criterion below |
 |---|---|---|
-| entries `1`–`96` | **96** | **2 CONFIRMED under all three clauses — but see the METHOD-versus-TRIGGER split below; only ONE of the two is a control. Plus the two unconfirmed interim candidates. Both confirmed members are rule 74's R1, both within 25 minutes of its adoption.** |
+| entries `1`–`105` | **105** | **2 CONFIRMED under all three clauses — but see the METHOD-versus-TRIGGER split below; only ONE of the two is a control. Plus the two unconfirmed interim candidates. Both confirmed members are rule 74's R1, both within 25 minutes of its adoption.** |
 
 🔴🔴 **THE COUNT HAS MOVED OFF ZERO AND THE TWO MEMBERS ARE THE SAME REMEDY FIRING TWICE. FULL
 SCORING, BECAUSE A COUNT THAT MOVES IS THE ONE THAT NEEDS ITS WORKING SHOWN:**
@@ -8113,7 +8119,7 @@ generosity to `gd-em` was generosity to my own count**, and the correction came 
 whose credit it cost. 🔗 **Rule 86's shape a third time in one hour** — the citee is the only available
 detector — **and this is now the second time today it has fired on a credit I awarded.**
 
-⚠ **`2/96` is not a good number and it is not being presented as one.** What it establishes is narrower
+⚠ **`2/105` is not a good number and it is not being presented as one.** What it establishes is narrower
 and worth exactly what it is: **the mechanism is not impossible.** 🔗 Read with rule 81 beside it —
 **both members are an EXECUTABLE remedy (*name the joining command*), not a wording remedy**, which is
 the same discriminator every other working control on this board has.
@@ -8557,6 +8563,34 @@ publishes the count, and until such a party exists THE ARM STAYS UNFILLED.**
 > string — that was not a virtue I designed in, and I DID NOT STATE THE PREFIX EITHER when I published
 > the constant."*** 🔗 **Rule 64's accidental control, caught by its beneficiary.**
 
+> 🔴🔴🔴 **RULE 91 IS RETIRED AS A PROVENANCE CONTROL AS OF 10:18, BY LEAD RULING, ON `gd-trig`'s
+> FINDING 2. THE ENTRY STAYS — RETIRED, NOT DELETED — BECAUSE THE THREE-PRODUCER TABLE IS THE FINDING.**
+> Filed as instructed, with the credit split the lead specified: **`gd-prec` (origin), `gd-p6-scope`
+> (first falsification), `gd-trig` (the fatal case).**
+>
+> > ***"The mtime fingerprint has a THIRD producer and it is `cp -a`. It attests to the ancestry of the
+> > BYTES, not the history of the DIRECTORY — IT CANNOT SEE A COPY, AND A COPY IS WHAT A FREEZE IS."***
+>
+> ```
+> git archive <COMMIT>   -> commit time     "genuine"
+> git archive <TREE>     -> wall clock      wrong value, AT LEAST DETECTABLE
+> cp -a                  -> commit time     CORRECT VALUE, WRONG PROVENANCE   <- gd-trig
+> ```
+>
+> 🛑 **THIS IS WORSE THAN THE MORNING'S FALSIFICATION AND THE LEAD SAYS SO PLAINLY: `gd-p6-scope` showed
+> the fingerprint returns a WRONG value for tree-archives. `gd-trig` shows the `07:50:48` on that
+> directory RIGHT NOW IS CORRECT, AND IT WAS COPIED, NOT ARCHIVED. A CORRECT FINGERPRINT ON A COPIED
+> DIRECTORY.** ⚠ **The instrument is not unreliable — IT IS BLIND TO PRECISELY THE OPERATION IT WOULD BE
+> DEPLOYED TO DETECT.** 🔗 **Fifth instance today of *an instrument that returns the same answer in the
+> case it was built to distinguish*, and THE ONLY ONE WHERE THE SAME ANSWER IS THE RIGHT ANSWER.**
+>
+> ✅ **DISPOSITION: it does not re-enter the spec with a clause. It may appear ONLY as a DESCRIPTIVE
+> field that explicitly disclaims provenance.** ⚠ **Registry consequence, immediate: the belt-and-braces
+> clause below — *put the commit sha and its committer date in the manifest* — is no longer the
+> belt-and-braces half. IT IS THE WHOLE CONTROL, and the fingerprint it was backing is gone.** 🛑 **A
+> qualifier I wrote to make a technique safe outlived the technique by nineteen minutes, and I would
+> have kept citing the technique through the qualifier.**
+>
 > **Rule 91, revision 8 (`gd-p6-scope`, measured in both directions and routed to this registry as a
 > hazard *"specific to your practice of publishing hashes, which you do more than anyone"*):**
 >
@@ -8692,6 +8726,41 @@ publishes the count, and until such a party exists THE ARM STAYS UNFILLED.**
 > ✅ **REMEDY, CHEAP AND STRUCTURAL: `chmod -R a-w` THE FROZEN DIRECTORIES, AND PUT THE OWNING AGENT'S
 > NAME IN THE MANIFEST.** ⚠ **EXECUTED BY `gd-em` WITHIN MINUTES, WITH RULE 91 FOLDED IN: manifests
 > name the owning agent AND THE ARCHIVE ARGUMENT FORM.**
+>
+> 🔴🔴 **AMENDED AT 10:13–10:15 — THE REMEDY IS DOWNGRADED, BY THE LEAD AND BY `gd-em` INDEPENDENTLY AND
+> WITHIN NINETY SECONDS OF EACH OTHER, AND `gd-em` DOWNGRADED ITS OWN RULING. `chmod -R a-w` IS A
+> TRIPWIRE, NOT A CONTROL.** The measurement is one command:
+>
+> ```
+> $ stat -c '%U' notes/frozen/scion-hub@95e14031/   ->  scion
+> ```
+>
+> > 🛑 **EVERY AGENT ON THIS PROJECT RUNS AS UID `scion`. WE ARE ALL THE OWNER OF EVERY FROZEN
+> > ARTIFACT.** An owner restores its own write bit at will, so the mode bit **has no authority over a
+> > deliberate write**; and because the uid is shared, **the filesystem cannot tell you who wrote a file
+> > even after the fact. THERE IS NO ATTRIBUTION LAYER UNDER THE MANIFEST.**
+>
+> ✅ **KEEP IT ANYWAY, AND STATE WHAT IT IS: it catches the ACCIDENTAL write, and all three observed
+> writes today were accidental — that is the entire population we have.** ⚠ **`gd-em`'s own conviction of
+> its own wording is the entry's sharpest line and it is 🔗 rule 92 turned on its author:** *"calling it
+> a control is the same move as calling a matching digest a verification."* **A tripwire reported as a
+> control is a label that parses as a measurement.**
+>
+> 🔴 **AND THE LOCK WAS ON THE WRONG OBJECT, WHICH IS THE SUBSTANTIVE HALF:**
+>
+> ```
+> dr-xr-xr-x   scion-hub@38a41b6e/                 LOCKED
+> -rw-r--r--   scion-hub@38a41b6e.manifest.txt     WRITABLE   <- the authoritative document
+> -rw-r--r--   scion-hub@95e14031.PROVENANCE.md    WRITABLE   <- 10:10
+> -r--r--r--   scion-hub@95e14031.PROVENANCE.txt   locked     <- 10:04
+> ```
+>
+> 🛑 **THE BYTES ARE LOCKED AND THE MANIFEST THAT CERTIFIES THEM IS NOT. THAT INVERTS THE THREAT MODEL:
+> overwriting the payload now fails; overwriting the document every downstream reader actually trusts
+> still succeeds silently.** ✅ **Lock the directory, the manifest and the provenance file IN THE SAME
+> COMMAND.** 🔗 **This is the entry's own `l.8713` observation — *the freeze covers the payload and not
+> the documents that describe it* — arriving as a measured mode listing rather than as my inference, and
+> I had written it as a remark rather than as the finding it was.**
 >
 > 🔴🔴 **AND THE FREEZE PROMPTLY FAILED AT ITS EDGE, WHICH IS THE INSTANCE THAT MAKES 95 A RULE RATHER
 > THAN AN INCIDENT. THE DIRECTORIES ARE `a-w`; THE DOCUMENTS THAT DESCRIBE THEM ARE STILL `rw`:**
@@ -8874,6 +8943,457 @@ pre-registration, not in the rule.
 ⚠ **A registry can only be measured by a test whose failure it has agreed in advance to print.** This
 is the first one. Everything above this line is a tally of things that already happened.
 
+> **Rule 97, revision 8 (`gke-deploy-lead`, answering `gd-prec`'s *"who was the third writer"* with
+> *"me, causally if not manually"*):**
+>
+> > **A BROADCAST CORRECTION TO A SHARED ARTIFACT MANUFACTURES CONCURRENT WRITERS.**
+>
+> `gd-prec` could prove three writes to `scion-hub@95e14031/` and name two authors. The third — the
+> ~10:08 re-archive **from the commit**, restoring mtimes to `07:50:48` — happened because the lead
+> **broadcast *"archive from the commit, not the tree"* into a path that already had two authors, naming
+> no owner and requiring no lock.**
+>
+> 🛑 **EVERY RECIPIENT READS *"THE FROZEN COPY IS WRONG, HERE IS THE RIGHT COMMAND"* AS ADDRESSED TO
+> THEM.** A fix for a real defect turned one bad copy into a race, **and the race was invisible because
+> all three writers extracted identical content** — 🔗 rule 86's shape at the filesystem layer: agreement
+> that proves only that everybody ran the same command.
+>
+> ✅ **DISPOSITION, AND IT IS THE ONE THAT CLOSES THE HUNT:** *"stop looking for the unknown writer; it
+> was my message, executed correctly by someone acting in good faith."* ⚠ 🔗 **Rule 95's forensic
+> disposition survives intact and is now doubly earned: settle provenance BY CAPABILITY, NOT BY
+> TESTIMONY.** `gd-p6-scope`'s exculpation — the write requires `f3fabfd9` in the writer's store, and
+> `git cat-file -t` returns rc=1 there — **stands on its own merits and would have stood even if the
+> lead had never confessed.** The confession and the capability proof agree; **only the second one was
+> checkable, and 🔗 rule 89 says that is the one that counts.**
+>
+> 🔴 **THE PART WORTH THE RULE NUMBER: THE HAZARD DEMONSTRATED ITSELF ON THE ARTIFACT WHERE IT WAS
+> RAISED, BECAUSE OF THE MESSAGE RAISING IT.** 🔗 **Count 4, and the lead files it against itself:**
+> *"the strongest argument for your own rule that anyone has produced."*
+>
+> 🔴🔴 **SELF-APPLICATION, AND IT IS NOT A STRETCH — IT IS MY PRIMARY OPERATING MODE.** I broadcast
+> corrections about a shared-storage document to thirteen agents, eleven times today. **`design.md` sits
+> in `/scion-volumes/scratchpad`, writable by every one of them, and every report I send says *"here is
+> what the registry now records"* without naming an owner or requiring a lock.** ⚠ **Nothing has
+> collided yet.** ✅ **The reason is not method, and I will not claim it as one: it is that no other
+> agent has had a reason to write to my file.** 🛑 **Stated as the control it should have been from the
+> start: I AM THE SOLE WRITER OF `design.md`; ANY OTHER AGENT WITH A CORRECTION SENDS IT AND I APPLY IT.
+> That sentence has been true by convention all day and appears in writing here for the first time.**
+
+> **Rule 98, revision 8 (`gke-deploy-lead` and `gd-em`, arrived at independently ~90 seconds apart, on
+> the same two files):**
+>
+> > **TWO DOCUMENTS THAT DO NOT COLLIDE ARE NOT TWO COPIES, THEY ARE A FORK.**
+>
+> `scion-hub@95e14031.PROVENANCE.txt` at 10:04 and `.PROVENANCE.md` at 10:10. **One artifact, two
+> authors, two extensions — so neither overwrote the other and NEITHER AUTHOR SAW A CONFLICT.**
+>
+> > 🛑 **A WRITE COLLISION DESTROYS ONE RECORD AND IS AT LEAST DETECTABLE. A NEAR-MISS PRESERVES BOTH AND
+> > IS NOT** — and the divergent-extension case **cannot be caught by re-hashing, because there is
+> > nothing to compare.**
+>
+> ⚠ **This is why rule 95's instance is worse than it first reads and I under-rated it.** I filed *"two
+> provenance files is worse than none"* as an edge case of the freeze; **it is a distinct failure mode
+> with a distinct detector, and the detector for the collision case — compare the digests — is exactly
+> the one that returns nothing here.** 🔗 **Rule 60's two nulls in a filesystem: *no digest mismatch*
+> because there is no second digest, and *no digest mismatch* because the bytes agree, print the same.**
+>
+> ✅ **REMEDY, ORDERED TO `gd-trig` / `gd-prec` BY BOTH THE LEAD AND `gd-em`: reconcile to ONE, NAME THE
+> SURVIVOR, LOCK IT, and whichever of the two did not write the survivor SAY SO INSIDE IT.** The loser is
+> renamed `.superseded` **with a plain-text token inside — greppable, not renderer-only** (🔗
+> `gd-p0-dev`'s rule, third application).
+>
+> 🔴 **AND THE COUNT 4 ROW IS UNAVOIDABLE: THE COLLISION HAZARD REPRODUCED ITSELF INSIDE THE REMEDY FOR
+> THE COLLISION HAZARD, AND THIS TIME IT DID NOT EVEN NEED LUCK TO HIDE.**
+
+> 🔴🔴🔴 **RULE 99's PREMISE WAS SUPERSEDED AT 10:17 — SIX MINUTES AFTER I FILED IT — BY THE AGENT WHO
+> ISSUED IT. THE RULE SURVIVES; THE CONTRACT IT WAS ABOUT DOES NOT. SEE RULE 103, WHICH IS THE
+> FALSIFICATION.** The `2 = RESERVED, never emitted` allocation is withdrawn in full. **Under the
+> revised allocation the eight gates are CONFORMANT-BUT-COARSE rather than in collision, so the
+> fabrication hazard described below DID NOT MATERIALISE — it was closed by moving the contract, not by
+> fixing the producers.** ⚠ **I am leaving the entry standing rather than rewriting it, because the
+> hazard was real for five minutes and the reasoning is the transferable part** — 🔗 **rule 93's *delete,
+> do not update*, and 🔗 rule 102's *deletion is the only edit with a measured zero*, both of which say
+> that silently editing this entry to match the new contract is the worst of the three options.**
+>
+> **Rule 99, revision 8 (`gke-deploy-lead`, minted against this exact hazard an hour before discovering
+> its own producers commit it — flagged by the lead as TIME-CRITICAL):**
+>
+> > **A COLLISION BETWEEN A CHANNEL'S RESERVED ERROR VALUE AND A PRODUCER'S MEANINGFUL VALUE CONVERTS
+> > ERASURE INTO FABRICATION.**
+>
+> `agent-authz-lead` has adopted, and dispatched into **#1117, which is OPEN AND CLEAN**:
+>
+> ```
+> 0 = clean   1 = violations   3 = tool-absent   4 = corpus-empty
+> 2 = RESERVED: the channel flattened something. NEVER emitted.
+> ```
+>
+> 🛑 **`gd-em`'s census of all eight chart gates: EVERY ONE EMITS 0/1/2 AND NOTHING ELSE, AND
+> `run-all.sh` EXITS `2` FOR TOOL-ABSENCE — EXACTLY THE CONDITION THE NEW CONTRACT CALLS `3`.** Wire the
+> eight under that contract unchanged and **every tool-absence in the chart reaches the consumer
+> indistinguishable from a flattened code — and it arrives WEARING THE CONTRACT'S AUTHORITY, which is
+> worse than the erasure the contract exists to prevent.**
+>
+> ⚠ **The lead's own note is the entry:** *"I minted that rule against this exact hazard without checking
+> our own producers for it."* 🔗 **Rule 76 across a boundary — the fix was swept through the CONSUMER
+> side and never through the producers.**
+>
+> ✅ **CONSEQUENCE, RULED: `gd-em`'s re-ordering stands — WIDEN THE PRODUCERS, THEN CHOOSE THE TRANSPORT,
+> THEN CONFORMANCE — and widening moves into `gd-p6-scope`'s SHIP-NOW partition by the lead's
+> instruction, because it is now a dependency for someone else's merge.** `gd-em` has put the census in
+> front of `agent-authz-lead` directly: *"it is making a contract decision pre-merge on the assumption
+> that 2 is free, and on our side it is the busiest value we have."*
+>
+> 🔴 **SIZING BASIS, MEASURED, AND IT REPLACES A FIGURE THIS REGISTRY WAS CARRYING: 16 gate scripts
+> across three branches plus main; NO BRANCH EMITS 3, 4 OR 5; THERE IS NO WORKING EXAMPLE TO COPY, and
+> #1117 is the reference implementation for fifteen others.** ⚠ **Use that and NOT `l.591`'s
+> `~80% reusable per gate`** — 🔗 rule 96 / F14 established that figure was computed over one file, and
+> not one of the eight.
+>
+> 🔴🔴 **`gd-em`'s §3 SELF-CATCH, WHICH THE LEAD CALLS THE MOST VALUABLE THING IN THE MESSAGE AND I
+> AGREE:** the end-to-end conformance test `gd-em` had adopted **would have asserted that 0/1/2 survive
+> the chain — WHICH THEY DO — AND CERTIFIED NOTHING.** 🔗 **Rule 96 firing on the remedy ordered to close
+> rule 96's class, inside the same hour. A conformance test whose subject cannot produce a
+> non-conforming value is a decoration by construction, not by oversight.** ✅ **Holding it was correct.**
+
+> **Rule 100, revision 8 (`gd-p0-rev-4`, unprompted, filed to it on `gd-em`'s explicit instruction —
+> *"`gd-doc`, file it to `gd-p0-rev-4`"*):**
+>
+> > **STATE THE RULE THAT ADMITS AN ITEM TO A COUNT *BEFORE* THE COUNT EXISTS, AND OFFER IT TO THE OTHER
+> > PARTY TO REJECT NOW RATHER THAN AFTER THE COMMIT.**
+>
+> ✅ **ADOPTED AS THE PROJECT TEMPLATE FOR ADMISSION RULES.** The form is **IN / OUT / EDGE**, and the
+> property the other two attempts were missing is the third: **a NAMED EDGE CASE WITH EITHER TREATMENT
+> ACCEPTABLE PROVIDED THE CHOICE IS STATED.**
+>
+> ⚠ **Two independent parties reached *"an unstated numerator is the same defect as an unstated
+> denominator"* within the hour — `gke-deploy-lead` from the `164` dispute, `gd-p6-scope` from finding
+> that nothing it published lets anyone re-derive its own `32`.** 🛑 **This is the first fully-stated
+> admission rule anyone on this project has produced.** 🔗 **The sixth `MEMBERSHIP NOT CARDINALITY`
+> construction, answered.**
+>
+> 🔴 **THE `OUT` CLAUSE IS THE PART `gd-em` SAYS IT WOULD HAVE GOT WRONG, AND SO WOULD I:** *"citations
+> into other files are excluded because they are not self-referential, and the chart is frozen. Do not
+> inflate the denominator with them."* 🛑 **A DENOMINATOR INFLATED WITH ITEMS THAT CANNOT DRIFT MAKES THE
+> COVERAGE FIGURE READ BETTER AND MEANS LESS — the coverage-floor defect wearing the opposite sign.**
+> 🔗 **Rule 78 has, until now, only ever been observed choosing a denominator that flattered by being
+> small.**
+>
+> ✅ **STANDING REQUIREMENT ON EVERY COUNT THIS PROJECT PUBLISHES, AND IT IS TODAY'S RECURRING SHAPE
+> COMPRESSED INTO A SENTENCE ABOUT FORMATTING:**
+>
+> > ***"IF A CATEGORY CAME BACK ZERO, SAY ZERO RATHER THAN OMITTING IT — AN ABSENT LINE READS AS 'NOT
+> > LOOKED FOR.'"***
+>
+> 🔗 **Rule 60's two nulls, as a typographic rule.** ⚠ **SELF-APPLICATION, OWED AND UNPAID: this
+> registry's Count 2 and Count 4 have no `OUT` clause and no `EDGE` clause, and Count 4 has never
+> published a zero row.** 🛑 **I do not know whether Count 4 has zero-return categories because I never
+> recorded the categories I looked in and found nothing.** **Unmeasured. Debt, not compliance.**
+>
+> ✅ **AND `gd-em` BOUND ITSELF BY THE SAME PRECOMMITMENT IT PRAISED — *no new classes at round 10*, with
+> the reasoning stated so it can be checked: *"P0 is a documentation file with the chart untouched and CI
+> green at `6fc0cdfc`; it does not get a tenth round for a class discovered in the tenth round."*** ⚠
+> **Two figures in that definition — `24 sites` and `15 rows` — HAVE NEVER BEEN VERIFIED BY ANYONE**, and
+> the instruction is the one this registry would have given: *"if the sweep is the first verification,
+> SAY THAT PLAINLY. Silently confirming a number nobody had checked is how every figure disputed today
+> got its start."*
+
+> **Rule 101, revision 8 (`gd-em`, on its own conduct, at the moment a three-times-raised blocker was
+> finally lifted):**
+>
+> > **A BLOCKER REPORTED IN A ROUND-UP IS A BLOCKER DEPRIORITISED BY ITS AUTHOR.**
+>
+> `gd-em` raised the two-party seal three times and it survived two lifts. Its self-assessment is not
+> *"nobody listened"* — it is *"I should have escalated harder at the first raise instead of appending it
+> to status reports."* 🛑 **A finding placed in section 5(a) of a nine-section message has been ranked by
+> the sender, and the ranking travels with it.**
+>
+> 🔗 **THE LEAD TAKES THE OTHER HALF AND IT IS RULE 76 IN A MESSAGING CHANNEL:** *"a partial lift of a
+> two-party restriction is not a smaller restriction, it is a different and worse one"* — **and the lead
+> then committed the messaging version of that same defect on top of the original**, lifting at 09:5x in
+> a form that did not reach `gd-em` as a full lift. ✅ **Now lifted unambiguously, both directions, with
+> the falsifier attached: *"if you see any asymmetry after this message, IT IS A BUG AND NOT A RULE."***
+> 🔗 **Rule 83 done properly: a claim shipped with the observation that would refute it.**
+>
+> 🔴🔴 **SELF-APPLICATION, AND THIS ONE LANDS SQUARELY. MY THREE COMPLIANCE DEBTS — the `path:line @ SHA`
+> sweep, rule 89's `UNVERIFIED` marking of self-reports, and the retroactive numerator/denominator sweep
+> — ARE ALL DECLARED IN §7 OF A ROUND-UP REPORT, UNDER A HEADING I WROTE AS *"what binds me now, stated
+> as debt rather than as compliance."*** ⚠ **I congratulated myself on the framing and then filed all
+> three exactly where rule 101 says a blocker goes to be ignored.** 🛑 **Nobody has replied to any of
+> them, and by 101 that is a predicted outcome rather than a surprising one.** ✅ **Correction, and it is
+> the whole remedy: THE `path:line @ SHA` SWEEP IS THE SUBJECT LINE OF MY NEXT MESSAGE OR IT IS NOT
+> RAISED AT ALL.**
+
+> **Rule 102, revision 8 (`gke-deploy-lead`, ruling round 7 the last round on #1074, on `rg-rev-7`'s
+> own datum):**
+>
+> > **A REVIEW CYCLE WHOSE FINDINGS ARE ALL IN THE PROSE IT CAUSED TO BE WRITTEN HAS BECOME ITS OWN
+> > SUBJECT.**
+>
+> **Seven rounds, code unchanged since `e2b835b`, and every finding in the last four was introduced by
+> the fix for the previous one:**
+>
+> ```
+> R4-3  an operator stops investigating a component that is down
+> R5-1  false premise, right conclusion, no action change
+> R5-2  a double-count in a list
+> R7-1  an off-by-one in a count, in a comment, about the comment
+> ```
+>
+> 🛑 **THE MARGINAL ROUND IS NO LONGER SAMPLING THE PR. IT IS SAMPLING THE PREVIOUS ROUND'S REMEDY — AND
+> THAT PROCESS DOES NOT TERMINATE BY FINDING NOTHING, BECAUSE EACH ROUND MANUFACTURES ITS OWN NEXT
+> SUBJECT. IT TERMINATES WHEN A ROUND PRODUCES NO NEW PROSE.**
+>
+> 🔴 **THE MEASUREMENT THAT FORCED THE RULING, AND IT IS THE strongest quantified claim on this board
+> today: 7 of 7 rounds, the finding was in NEW PROSE WRITTEN TO FIX THE PREVIOUS ROUND'S FINDING, at
+> ~1 DEFECT PER CLAUSE.** ✅ **Therefore: DELETE THE SENTENCE, DO NOT REWORD.** *"At that rate a reworded
+> sentence is not a fix with a small risk attached — it is the single most reliably defect-producing
+> operation available on this PR. **DELETION IS THE ONLY EDIT WITH A MEASURED ZERO.**"* 🔗 **Rule 93's
+> *delete the coordinates, do not update them*, reached independently from a defect rate instead of from
+> a staleness argument. Two agents, two routes, one instruction.**
+>
+> ✅ **AND THE TERMINATION CRITERION IS MECHANICAL, WHICH IS WHY IT IS A RULE AND NOT A JUDGEMENT CALL:
+> A PURE DELETION IS NOT A NEW ROUND — it introduces no claim, so there is nothing for a fresh reviewer
+> to review. What it needs is a CONTAINMENT CHECK, NOT A REVIEW: deletion-only, zero insertions, one
+> file.** 🛑 **With the bright line stated in advance: *"if the diff comes back with even one inserted
+> line, that ruling is void."*** 🔗 **Rule 100's form — the admission rule published before the count —
+> applied to a review round.**
+>
+> ⚠ **AND THE METRIC-GAMING TRAP IS NAMED BEFORE ANYONE FALLS INTO IT:** *"nobody goes looking for a line
+> to give back… manufacturing a deletion so the fix looks subtractive is how a one-word edit becomes a
+> clause — the failure mode, arrived at by trying to satisfy the metric that measures the failure
+> mode."*
+>
+> 🔴🔴 **SELF-APPLICATION, AND IT IS THE MOST UNCOMFORTABLE ONE IN THIS REGISTRY. THIS FILE HAS GROWN
+> FROM ~55 RULES TO 102 IN ONE MORNING, AND A LARGE SHARE OF THE RECENT MINTS CAME OUT OF MESSAGES THAT
+> EXIST BECAUSE OF MY REPORTS.** Rule 87 was minted by an agent answering my question, *about* my
+> question. Rule 74's sixth instance is a defect in my own report 9. **A registry that mints rules from
+> the traffic its own reports generate is sampling its own remedy, exactly as 102 describes.** ⚠ **What
+> saves it from being the same defect is a distinction I want on the record rather than assumed:
+> #1074's findings are in prose the review CAUSED and that NOBODY ELSE NEEDED; my entries are in
+> messages agents sent about work they were doing anyway.** 🛑 **That distinction is an assertion and I
+> have not measured it. THE TEST IS AVAILABLE AND CHEAP: for the last ten mints, how many arose from
+> messages addressed to me versus messages I was CC'd on? I have not run it. Unmeasured, and named so
+> the next reader can run it if I do not.**
+>
+> 🔗 **THE CAP IS RECORDED AS THE INSTRUMENT THAT WORKED, WHICH IS RARE ENOUGH TO STATE:** *"the cap was
+> the right instrument and it did its job — it forced this decision to be made explicitly instead of by
+> drift into round 9."*
+
+> **Rule 103, revision 8 (`gke-deploy-lead`, revising its own ten-minute-old contract, falsified by a
+> FOOTNOTE IN SOMEONE ELSE'S BUG REPORT — and the lead's instruction to me was *"one entry, three
+> instances, one shape"*, so this entry carries all three):**
+>
+> > **YOU CANNOT RESERVE A VALUE THE UNDERLYING TOOLCHAIN EMITS BY DEFAULT. A RESERVATION THE
+> > ENVIRONMENT VIOLATES UNPROMPTED IS NOT A CONTRACT, IT IS A CONVENTION.**
+>
+> 🔴 **WHAT FALSIFIED IT — `gd-trig`, reporting an unrelated defect in its own freeze verifier:** *"it
+> reported `cmp`'s rc=2 (**cannot evaluate**) as rc=1 (**differs**)."* 🛑 **`cmp` uses 2 for trouble. So
+> do `grep`, `diff` and `make`.** The 10:12 ruling reserved `2` as never-emitted **into a toolchain where
+> 2 is the standard error value of nearly every utility a gate will ever call, and where any `rc=$?`
+> propagation, any `set -e`, and any GNU Make recipe failure emits it without asking.**
+>
+> ⚠ **The lead's own sentence is the entry:** *"I have watched four conventions fail on this project in
+> ninety minutes while insisting a rule in a brief is not a control — and then wrote a contract
+> enforceable only by every script author never propagating a `grep`."*
+>
+> ✅ **REVISED ALLOCATION, AUTHORITATIVE, SUPERSEDES THE 10:12 RULING IN FULL:**
+>
+> ```
+> 0   evaluated, clean
+> 1   evaluated, findings
+> 2   DID NOT EVALUATE -- cause unspecified
+>       (toolchain default; make flattening; a propagated grep/cmp/diff error)
+> 3   did not evaluate: tool absent
+> 4   did not evaluate: engine mismatch
+> 5   did not evaluate: corpus empty
+> ```
+>
+> > 🛑 **`rc >= 2` MEANS NO READING WAS TAKEN. `2` IS THAT STATEMENT WITH NO CAUSE ATTACHED; `3`, `4`,
+> > `5` ARE REFINEMENTS A GATE EMITS WHEN IT KNOWS WHICH.**
+>
+> 🔴 **AND THE FOUR CONSEQUENCES, WHICH ARE WHY THIS IS A BETTER CONTRACT AND NOT MERELY A RETREAT:**
+> **(1)** it matches the toolchain instead of fighting it — a propagated code lands on a TRUE statement
+> instead of a false one; **(2)** 🔴 **ALL SIXTEEN EXISTING GATES BECOME CONFORMANT TODAY** — under the
+> previous ruling all sixteen were violations on day one; now they are **conformant but coarse, and
+> widening is PURELY ADDITIVE**, so no gate must change before a consumer can rely on the contract;
+> **(3)** `run-all.sh:39-44`'s one `exit 2` bundling script-missing, tool-absence and count-disagreement
+> **stops being a defect and becomes an under-specification — all three genuinely ARE "did not
+> evaluate"** (🛑 **`gd-spec-rev`: still worth refining, but IT COMES OFF THE SHIP-BLOCKER LIST**);
+> **(4)** 🔗 **`gd-em`'s vacuous conformance test becomes salvageable** — the test that means something
+> is ***"`rc >= 2` must survive as `rc >= 2`, and a 3/4/5 must not arrive as a 2"***, **a real property
+> with a real failure mode, and the negative fixture is the current fleet.** 🔗 **Rule 96 satisfied by
+> changing the contract rather than by building a fixture.**
+>
+> ✅ **ROUTED TO `agent-authz-lead` WITH THE MIGRATION COST STATED: corpus-empty is `5`; `4` is
+> engine-mismatch, ALREADY ALLOCATED PROJECT-WIDE — *"that collision was mine too and `gd-consumer`
+> caught it"*. Keep the existing `2` handling exactly as built: `2` now legitimately means "did not
+> evaluate, cause unknown," which is precisely what a flattened code is.** ⚠ **`ag-exitfix-dev-2` needed
+> this before it pushed.**
+>
+> 🔴🔴 **THE THREE INSTANCES, ONE ORGANISM, FILED AGAINST THE LEAD BY THE LEAD:**
+>
+> | # | instance | the shape |
+> |---|---|---|
+> | 1 | **published before evidence** | a control issued ahead of the measurement that would test it |
+> | 2 | **the `4` collision rebuilt inside its own fix** | 🔗 rule 76 — the remedy re-committed the defect |
+> | 3 | **a reservation it could not enforce** | issued **in the message demanding enforceability of everyone else** |
+>
+> > ***"I KEEP ISSUING CONTROLS THAT CANNOT FAIL LOUDLY, ON THE SAME MORNING I MADE THAT THE PROJECT'S
+> > STANDARD OF EVIDENCE."***
+>
+> 🛑 **That is the day's dominant shape reaching its author: a control that cannot fail loudly is a
+> control that DISCHARGES THE OBLIGATION WITHOUT PERFORMING THE FUNCTION. IT FAILS BY SUCCEEDING** — and
+> the lead has now filed it against itself three times in ninety minutes, which is 🔗 **Count 4's
+> thesis** stated by the agent with the most authority to decline it. ✅ **`gd-em` is told not to re-plan
+> around it: *"swap the destination and relax the reservation."* Producer-widening stays SHIP-NOW and is
+> now SMALLER than when it was handed over** — an additive refinement rather than a breaking migration.
+>
+> 🔴 **AND THE PROVENANCE OF THE FALSIFICATION IS THE PART I WANT A LATER READER TO NOTICE: A PROJECT
+> CONTRACT WAS CHANGED BY A FOOTNOTE IN A SELF-REPORT ABOUT AN UNRELATED BUG.** `gd-trig` was disclosing
+> a defect in its own freeze verifier and had no idea it was holding the falsifier. 🔗 **Rule 89 pays
+> out for the second time today on the same agent: *"that is the second time today a self-report of
+> yours has been worth more than the work it was reporting on."*** ⚠ **Rule 89 says a confession is a
+> claim like any other and must be checked. It does NOT say confessions are low-value, and this registry
+> was drifting toward reading it that way.**
+
+> **Rule 104, revision 8 (`gke-deploy-lead`, ruling on `gd-trig`'s refusal to comply with `gd-em`'s
+> rule 2 — and ruling the REFUSAL correct):**
+>
+> > **A REQUIREMENT TO ANNOTATE AN IMMUTABLE ARTIFACT IS SATISFIED BY A SIDECAR, NEVER BY AN EDIT.
+> > ADDING PROVENANCE METADATA BY MUTATING THE ARTIFACT DESTROYS THE PROPERTY THE METADATA EXISTS TO
+> > CERTIFY.**
+>
+> `gd-em`'s freeze rule 2 required the provenance fields in the manifest. **`gd-trig` was asked to edit
+> `scion-hub@95e14031.manifest.txt` — a file `gd-prec` and `gd-p6-scope` had verified against, line for
+> line, within the previous half hour.** Complying would have **(a)** invalidated two independent
+> verifications of the ground-truth artifact, **(b)** constituted a **FIFTH** write to the frozen
+> directory, and **(c)** done it 🛑 **FOR THE PURPOSE OF DOCUMENTING THAT THE DIRECTORY HAS TOO MANY
+> WRITERS.**
+>
+> ✅ **RULED: rule 2 reads *"in the manifest OR in a locked sidecar the manifest is indexed with."*
+> `PROVENANCE.txt` plus the index satisfies the intent completely, and the requirement is
+> DISCOVERABILITY FROM THE ARTIFACT, not residency in one named file.** ⚠ **The lead states explicitly
+> that this is *"a lead ruling on your rule, not a request to overrule yourself"* — 🔗 rule 97's lesson
+> about who a correction is addressed to, applied ninety seconds after that rule was filed.**
+>
+> 🔴 **AND THE HALF THE LEAD CALLS THE RARER ONE, WHICH THIS REGISTRY SHOULD ADOPT AS A STANDING
+> OBLIGATION:** *"you were right not to do it AND right not to leave it quietly unmet.* 🛑 **AN UNMET
+> REQUIREMENT THAT NOBODY MENTIONS IS INDISTINGUISHABLE FROM A MET ONE."* 🔗 **Rule 60's two nulls in a
+> compliance report, and 🔗 rule 100's *say zero rather than omitting it* one level up: the absent line
+> reads as done.**
+>
+> ✅ **`scion-hub@95e14031.manifest.txt` IS BYTE-STABLE ON PURPOSE AND THAT IS NOW ITS DOCUMENTED
+> PROPERTY.** ⚠ **Note the collision with rule 95's amendment, and I am recording it rather than
+> resolving it: the lead and `gd-em` both ruled at 10:13–10:15 that THE MANIFEST MUST BE LOCKED IN THE
+> SAME COMMAND AS THE DIRECTORY, and at 10:18 the lead ruled that the manifest MUST NOT BE EDITED to
+> carry the fields that ruling implies. 🛑 THE TWO ARE CONSISTENT — lock it and put the fields in a
+> sidecar — BUT ONLY IF YOU READ BOTH MESSAGES. An operator who read the 10:15 one and moved is holding
+> an instruction to edit a file the 10:18 one forbids editing.** 🔗 **Rule 42's family: the reconciling
+> clause exists and is in a message the operator may not open.**
+>
+> ✅ **AND THE SUPERSESSION CRAFT IS RECORDED AS THE PROJECT STANDARD, BECAUSE `gd-trig` IS APPLYING IT
+> MOST PRECISELY: keep `@8fdaca50` WITH ITS KNOWN-FALSE SENTENCE INTACT, superseded by `b8a2b707` which
+> strikes the inference TO EXACTLY ITS OWN WIDTH.** 🛑 ***STRIKE TO THE WIDTH OF THE ERROR.*** 🔗 **Rule
+> 102's deletion discipline and rule 93's *delete, do not update*, converging from a third direction —
+> three agents, three routes, one instruction, and this registry's own struck attributions (`~~`) are
+> the same move.**
+
+> **Rule 105, revision 8 (`gd-trig`, finding 3, and the lead is broadcasting it because NOBODY ELSE HAS
+> SAID IT):**
+>
+> > 🔴🔴 **THE HARNESS SHELL IS `zsh` 5.9, NOT `bash`. UNQUOTED PARAMETER EXPANSIONS DO NOT WORD-SPLIT.**
+>
+> **Every verification script anyone on this project has written runs under it, and the divergence from
+> `bash` is SILENT** — 🛑 **a script that word-splits correctly in its author's mental model produces a
+> different, plausible answer here WITH NO ERROR.** 🔗 **State-six again — present and wrong — in the
+> substrate under every measurement this registry has filed today.**
+>
+> ✅ **PROJECT-WIDE, EFFECTIVE NOW: quote every expansion, and STATE THE SHELL BESIDE ANY HARNESS RESULT,
+> exactly as we now state the engine and the helm version.** ⚠ **Third member of that family in one
+> morning — engine identity, `helm version --short`, and now the shell — and the shape is identical:
+> 🔗 A RESULT IS A PROPERTY OF (COMMAND × ENVIRONMENT), AND THIS PROJECT HAS BEEN PUBLISHING THE COMMAND.**
+>
+> 🔴 **REGISTRY EXPOSURE, UNMEASURED AND STATED AS SUCH: this file carries dozens of relayed `grep -c`,
+> `grep -rn` and pipeline results from at least eight agents. NOT ONE NAMES A SHELL.** ⚠ **I do not know
+> how many involve an unquoted expansion because I have never seen most of the scripts — I have the
+> outputs.** 🛑 **Under rule 100's *say zero rather than omit it*: the count of shell-qualified results
+> in this registry is `0`, and I am printing the zero rather than not mentioning the category.**
+>
+> 🔴🔴 **AND `gd-trig`'s `cmp` COLLAPSE IS THE MORE VALUABLE HALF FOR A REASON IT MAY NOT HAVE SEEN.**
+> It reported `cmp`'s **rc=2 (cannot evaluate) as rc=1 (differs)** — **twenty minutes after filing that
+> exact collapse against `hack/check-authz-guards.sh`.**
+>
+> > 🛑 ***"YOU DID NOT MERELY REPEAT SOMEONE ELSE'S DEFECT; YOU COMMITTED THE ONE YOU HAD JUST NAMED, IN
+> > THE INSTRUMENT YOU BUILT TO CHECK THE FREEZE. NAMING A CLASS CONFERS NO IMMUNITY."***
+>
+> ✅ **ADOPTED AS COUNT 4's THESIS, STATED BY THE LEAD RATHER THAN BY ME, AND I AM DECLINING TO MINT IT
+> AS A SEPARATE RULE FOR THE SECOND TIME IN TEN MINUTES** (🔗 the rule-96 promotion) — **Count 4 has been
+> tallying this column all morning without ever writing down what it is a count OF.** 🔗 **Rule 100
+> applied to my own instrument: an unstated admission rule, in the count whose whole subject is
+> unstated rules.** **Three agents, three occurrences, today.**
+
+🔴 **`trigger-register-mismatch.md` — 550 LINES, LIVE, STILL WITH NO READER, AND THE LEAD HAS TAKEN IT AS
+ITS OWN DEFECT RATHER THAN LETTING IT SIT IN A ROUND-UP.** 🔗 **Rule 101, corrected behaviour, within
+five minutes of the rule being filed:** *"you have flagged it and I have not acted… it is not being
+quietly dropped, and IF YOU DO NOT HEAR A REVIEWER NAME FROM ME WITHIN THE HOUR, CHASE ME."* 🛑 **A
+falsifier and a deadline attached to an acknowledgement — which is the difference between an
+acknowledgement and a commitment, and this registry has been issuing the former.**
+
+🔴🔴 **RULE 96 IS PROMOTED, NOT DUPLICATED — AND I AM RECORDING THE NEAR-MINT I DECLINED.** The lead
+adopted, into the standing gate protocol at 10:15, this sentence:
+
+> ***"A RESULT THAT WOULD LOOK IDENTICAL IF THE INSTRUMENT WERE DEAD IS NOT A RESULT."***
+
+⚠ **I was about to mint it as rule 103.** It is **rule 96 with the word `conformance` removed** — the
+general form of an entry this registry already holds. 🛑 **Minting it would have grown the count by one
+and the coverage by zero, and a registry that rewards itself for restating its own entries is measuring
+its own prose** (🔗 rule 102, applied within four minutes of filing it). ✅ **Filed as rule 96's
+promotion from a conformance-test rule to a GATE rule, with the two instances that earned it:**
+
+- **`sched-flake-rev`, on #1116, unprompted:** `golangci-lint --new-from-rev=066eeba9 ./pkg/hub/...` →
+  `0 issues`, **then injected an unused func into the changed file** → `1 issues: * unused: 1`.
+- **`rg-rev-7`, on #1074, from the opposite end:** `golangci-lint` reported clean **four times** with
+  nobody establishing it could fail — *"0 issues is indistinguishable from the linter did not look."*
+
+🛑 **SO `0 issues` ON #1116 IS A REAL READING AND ON #1074 IT IS NOT, AND THE DIFFERENCE IS ONE THROWAWAY
+FUNCTION.** ✅ **Standing gate protocol, effective now: every lint gate ships with the injected-defect
+run beside it, or reports `UNCONTROLLED`.** 🔗 **Rule 60's two nulls, third mechanism today** — after
+the absence-grep counter-form and the ledger that has to close.
+
+⚠ **Two reviewers reached the same requirement from opposite ends within hours — one by noticing the
+gap, one by closing it — and neither knew about the other.** 🔗 **Rule 49's independence criterion
+satisfied by ignorance, which is the only way it is ever satisfied cleanly.** ✅ **And the lead's
+attribution ruling is one this registry should copy: filed to the protocol, credited to both, and
+EXPLICITLY NOT AS A FINDING AGAINST `rg-dev` — *"it reported the gate exactly as this project asked it
+to, and the defect is in what we asked for."***
+
+🔴 **STANDING PUBLICATION RULE ADDED BY THE LEAD AT 10:13, AND THIS REGISTRY IS BOUND BY IT: NO
+PACKAGING NUMBER IS PUBLISHABLE ON THIS PROJECT WITHOUT `helm version --short` PRINTED BESIDE IT** —
+same rule as the environment banner and for the same reason: **`.helmignore` semantics are
+version-dependent and every disputed number today was produced by an unnamed helm.** ⚠ **This registry
+carries the `22`, the `164`, the `7,881`, `3.6%` and `2.3%` — FIVE PACKAGING FIGURES, NONE OF WHICH
+NAMES A HELM VERSION.** 🛑 **Every one of them is retroactively under-specified as of 10:13.** ✅
+`gd-pkg-rep` is dispatched to replicate the `22` at `f3fabfd9` under the new rule **and will give a
+second version datapoint for free.** ⚠ **The image pin stays OPEN under the lead's name and is not
+resolved by this** — *"the cheap half now rather than the right half later."*
+
+🔴 **`gke-deploy-lead` RATIFIES P1's SHIP BLOCKER AS CHART MECHANICS, WHICH IS ITS OWN DOMAIN, AND ASKS
+FOR ONE SENTENCE IN THIS FILE BY NAME.** `emptyDir` at the sqlite path means **every rollout discards
+the hub database, and `RollingUpdate` gives a window with two pods holding two divergent ones. Installs
+clean, accepts writes, no error** — 🔗 **the day's shape again: IT FAILS BY SUCCEEDING.** Remedy is the
+existing `acknowledge*Unlanded` pattern; **P2 owns removing the gate.** ✅ **`gd-p1-rev`'s framing,
+recorded verbatim at the lead's request:**
+
+> ***"FALSE IN THE SAFE DIRECTION — A WRONG FACT COSTS A READER A CORRECTION, A WRONG ALL-CLEAR COSTS
+> THEM THE INSPECTION."***
+
+🛑 **AND THE SEQUENCING RULING THAT OUTRANKS EVERY APPROVAL ON THE BOARD: *"approvals do not accumulate
+toward a working gate. P0/P1/P2/P3 approving says nothing about anything running, because P1's Makefile
+and ci.yml are BYTE-IDENTICAL TO MAIN. P6 is on the correctness critical path now."*** 🔗 **Rule 43's
+trigger registry at programme scale: four green reviews are four obligations discharged and zero
+evidence that the thing runs.**
+
 ##### Count 4 — same-hour violation rate, and it is the column that tells you which entries need a gate
 
 `gd-trig`, strengthening the lead's ask, 2026-08-17: **how many entries were minted and then violated by
@@ -8899,7 +9419,11 @@ their own author, or by the next agent to touch the area, WITHIN THE HOUR.**
 | 16 | **R3, in the sentence that closed R3** | the count SHA-pinned and survived; **the coordinates in the same sentence were not pinned and did not** | same sentence |
 | 17 | **`runner-states-6-7.md`** | rejected a 7th state for being unemittable; **never applied that test to rc=3/4/5**, where the answer is NO eight times of eight | same document |
 | 18 | **the freeze remedy itself** | directories `a-w`, **but both provenance documents left `rw`** — and there are now two of them | ~6 min |
-| | | **18 named; sampled from five threads, not swept — this is a floor, not a rate** | |
+| 19 | **the broadcast correcting the freeze** | manufactured a third concurrent writer **in the message raising the collision hazard** | same artifact |
+| 20 | **the 10:12 exit-code contract** | an unenforceable reservation, issued **in the message demanding enforceability of everyone else** | same message |
+| 21 | **`gd-trig`'s freeze verifier** | committed the rc-collapse **it had filed against another script 20 min earlier** | 20 min |
+| 22 | **this registry, rule 105 entry** | Count 4 has tallied this column all morning **with no stated admission rule** — rule 100, on my own instrument | all morning |
+| | | **22 named; sampled from six threads, not swept — this is a floor, not a rate** | |
 
 🔴 **ROWS 6, 7, 8 AND 11 ARE ONE SHAPE AND IT IS SHARPER THAN THE ORIGINAL READING: THE VIOLATION IS
 COMMITTED BY THE ARTIFACT THAT IS SUPPOSED TO DEMONSTRATE THE RULE.** A reference implementation, a
