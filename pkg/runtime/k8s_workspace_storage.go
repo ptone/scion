@@ -64,6 +64,15 @@ func usesSharedWorkspacePVC(cfg RunConfig) bool {
 // This is the property the workspace-sync skip must track. Tracking the
 // backend *name* instead is what made the skip fire for pods that had no
 // populating mechanism at all, leaving /workspace empty.
+//
+// KNOWN LIMITATION (ptone/scion#1111): the second arm delegates population to
+// each container's own clone, and in shared-plain every agent in the project
+// mounts the same subPath. Two agents started concurrently onto a still-empty
+// volume both see an empty /workspace and both clone into it. The N2-2b
+// advisory lock does not cover this — it is gated on GitCloneForInit, which
+// has no production writer (ptone/scion#1112), and it is released before the
+// container's clone begins. Serializing belongs in gitCloneWorkspace, where
+// the race is, so it holds for every runtime.
 func workspacePopulatedOnVolume(cfg RunConfig) bool {
 	if cfg.GitCloneForInit != nil {
 		return true

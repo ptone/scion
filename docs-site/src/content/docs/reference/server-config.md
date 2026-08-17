@@ -217,6 +217,21 @@ Configures the backend and mount settings for storing and managing agent workspa
 | `gke_shared_volume.pv_claim_name` | string | | The name of the GKE-managed PVC bound to the shared storage backend (e.g. Filestore). |
 | `gke_shared_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the GKE volume. |
 
+#### Shared Workspace Volumes on Kubernetes
+
+With `nfs` or `gke-shared-volume` selected, agent pods mount the project workspace from the shared PVC
+at `<subpath_root>/<project-id>/workspace` instead of a node-local ephemeral directory. Two operator-visible
+consequences:
+
+* **The host copy stops being authoritative.** The workspace directory on the broker host seeds the volume
+  once, while it is still empty, and is never re-extracted over it afterwards — a later agent joining the
+  same project gets what is on the volume, not what is on the host. Use `scion sync` to move bytes
+  deliberately in either direction.
+* **Concurrent first start on a git-backed project.** In `shared-plain` mode every agent in a project mounts
+  the same directory. Starting two agents at once on a project whose volume has not been populated yet can
+  have both containers clone into it simultaneously. Start the first agent for a new project on its own, or
+  pre-populate the volume. Tracked in [ptone/scion#1111](https://github.com/ptone/scion/issues/1111).
+
 #### Ephemeral Storage & 503 Safety Gate
 
 To protect deployments from silent data loss, the Hub implements a strict **503 Safety Gate**:
