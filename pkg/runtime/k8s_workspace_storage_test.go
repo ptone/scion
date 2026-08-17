@@ -49,7 +49,9 @@ func startStubAPIServer(t *testing.T, gitVersion string) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"major":"1","minor":"29","gitVersion":%q,"platform":"linux/amd64"}`, gitVersion)
+		if _, err := fmt.Fprintf(w, `{"major":"1","minor":"29","gitVersion":%q,"platform":"linux/amd64"}`, gitVersion); err != nil {
+			t.Errorf("stub API server: write /version response: %v", err)
+		}
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
