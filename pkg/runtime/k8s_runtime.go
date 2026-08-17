@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
@@ -52,6 +53,19 @@ type KubernetesRuntime struct {
 	GKEMode           bool // Enables GKE-specific features (SecretProviderClass CSI, GCS FUSE)
 	GKEAutoDetected   bool // True when GKE was auto-detected (enables Autopilot tolerance only)
 	ListAllNamespaces bool // When true, List() queries all namespaces for scion pods
+
+	// WorkspaceStorage holds the workspace storage configuration, used to
+	// select the workspace backend for agent pods. Set by the runtime factory
+	// from server settings, mirroring CloudRunRuntime. When nil, pods keep the
+	// node-local EmptyDir workspace.
+	WorkspaceStorage *config.V1WorkspaceStorageConfig
+
+	// workspaceSyncDepsOverride replaces the exec-backed effects of the
+	// workspace stage. Nil in production. Tests set it to drive Run's
+	// workspace decision without an API server — the exec subresource is the
+	// one thing a fake clientset cannot serve, and leaving it unsubstitutable
+	// is what made round 1's empty-/workspace defect invisible to the suite.
+	workspaceSyncDepsOverride func(namespace, podName string, cfg RunConfig) workspaceSyncDeps
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -60,6 +74,14 @@ type KubernetesRuntime struct {
 // do not cause the API server to reject the exec request with an
 // "a container name must be specified" error.
 const agentContainerName = "agent"
+
+// containerUID is the UID and GID every agent pod runs as. It is pinned
+// rather than derived — a hardening invariant asserted by k8s_hardening_test
+// — which is why workspace storage's nfs.uid setting cannot be honoured on
+// this runtime the way it is on docker, podman and cloudrun. Package-level so
+// that applyWorkspaceStorage can warn against the same number buildPod
+// applies, instead of repeating a literal that could drift.
+const containerUID int64 = 1000
 
 var serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
@@ -227,6 +249,15 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
+	// Derive the workspace storage fields from the configured backend before
+	// anything reads them. Every shared-workspace branch below (init
+	// container, sync skip, shared-dir PVCs, fsGroup, workspace volume)
+	// depends on this call — without it they are unreachable (#1075).
+	config, err := r.applyWorkspaceStorage(config)
+	if err != nil {
+		return "", err
+	}
+
 	// Persist workspace path in annotations for later sync
 	if config.Workspace != "" {
 		config.Annotations = ensureAnnotations(config.Annotations)
@@ -310,10 +341,10 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
-	// --- N2-2b: Per-project advisory lock for NFS init-container provisioning ---
+	// --- N2-2b: Per-project advisory lock for shared-workspace init-container provisioning ---
 	//
-	// When backend=nfs with a git clone configured AND an advisory locker is
-	// available, acquire the per-project lock before building the pod spec.
+	// When the workspace is a shared PVC with a git clone configured AND an
+	// advisory locker is available, acquire the per-project lock before building the pod spec.
 	// This prevents concurrent first-clone corruption (risk RN1, design §7):
 	//   - Lock winner: injects the cloning init container (existing N2-2 script)
 	//   - Lock loser:  injects a wait-for-sentinel init container (polls for
@@ -323,14 +354,14 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	// complete), mirroring N1-4's "hold during clone" lifetime. On error
 	// paths the deferred release ensures no lock leak.
 	var nfsProvisionLockRelease func() error
-	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" && config.GitCloneForInit != nil {
+	if usesSharedWorkspacePVC(config) && config.GitCloneForInit != nil {
 		if config.Locker != nil {
 			objID := store.StableProjectHash(config.ProjectID)
 			acquired, release, err := config.Locker.TryAdvisoryLockObject(
 				ctx, store.LockWorkspaceProvision, objID,
 			)
 			if err != nil {
-				return "", fmt.Errorf("NFS provision advisory lock for project %s: %w", config.ProjectID, err)
+				return "", fmt.Errorf("workspace provision advisory lock for project %s: %w", config.ProjectID, err)
 			}
 			nfsProvisionLockRelease = release
 			if !acquired {
@@ -338,15 +369,18 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 				// buildPod will inject a wait-for-sentinel init container instead
 				// of the cloning one.
 				config.nfsProvisionLockLost = true
-				runtimeLog.Info("NFS provision lock held by another node — pod will wait for sentinel",
-					"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
+				runtimeLog.Info("Workspace provision lock held by another node — pod will wait for sentinel",
+					"agent", config.Name, "project_id", config.ProjectID,
+					"backend", config.WorkspaceBackendName, "phase", "nfs-lock")
 			} else {
-				runtimeLog.Info("NFS provision lock acquired — pod will clone workspace",
-					"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
+				runtimeLog.Info("Workspace provision lock acquired — pod will clone workspace",
+					"agent", config.Name, "project_id", config.ProjectID,
+					"backend", config.WorkspaceBackendName, "phase", "nfs-lock")
 			}
 		} else {
-			runtimeLog.Warn("No advisory locker available — NFS provisioning is unguarded (sentinel-only)",
-				"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
+			runtimeLog.Warn("No advisory locker available — workspace provisioning is unguarded (sentinel-only)",
+				"agent", config.Name, "project_id", config.ProjectID,
+				"backend", config.WorkspaceBackendName, "phase", "nfs-lock")
 		}
 	}
 	// Deferred release: held through pod creation + waitForPodReady (init
@@ -354,8 +388,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	defer func() {
 		if nfsProvisionLockRelease != nil {
 			if err := nfsProvisionLockRelease(); err != nil {
-				runtimeLog.Error("Failed to release NFS provision lock", "error", err,
-					"agent", config.Name, "project_id", config.ProjectID)
+				runtimeLog.Error("Failed to release workspace provision lock", "error", err,
+					"agent", config.Name, "project_id", config.ProjectID,
+					"backend", config.WorkspaceBackendName)
 			}
 		}
 	}()
@@ -401,30 +436,18 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
-	// Workspace sync: NFS-backed pods have workspace bytes pre-populated by the
-	// init container (N2-2), so skip the kubectl-cp workspace sync. This avoids
-	// redundantly copying workspace contents that already exist on the shared
-	// NFS volume. Local-backend pods RETAIN the existing workspace sync.
+	// Workspace stage: decide whether the host copy goes into the pod, and if
+	// so copy it and fix ownership. The decision and its two shared-volume
+	// conditions live in syncWorkspaceStage; the pod-side effects are passed
+	// in so both are reachable from a test.
 	//
 	// Home-dir sync and the startup gate (/tmp/.scion-home-ready) are RETAINED
-	// for both backends — they carry agent dotfiles and secrets, not workspace code.
-	if config.Workspace != "" && config.WorkspaceBackendName != "nfs" {
-		runtimeLog.Info("Syncing workspace", "agent", config.Name, "source", config.Workspace, "phase", "workspace-sync")
-		fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
-		err = r.syncWithRetry(ctx, func() error {
-			return r.syncToPod(ctx, namespace, createdPod.Name, config.Workspace, "/workspace")
-		})
-		if err != nil {
-			return createdPod.Name, fmt.Errorf("failed to sync workspace: %w", err)
-		}
-		// Fix workspace ownership for the scion user
-		chownCmd := fmt.Sprintf("chown -R %s:%s /workspace", config.UnixUsername, config.UnixUsername)
-		if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
-			runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
-		}
-	} else if config.WorkspaceBackendName == "nfs" {
-		runtimeLog.Info("Skipping workspace sync (NFS backend: workspace pre-populated by init container)",
-			"agent", config.Name, "phase", "workspace-sync-skip")
+	// for every backend — they carry agent dotfiles and secrets, not workspace
+	// code.
+	// The skip reason is discarded here: it is already logged, and it is
+	// returned only so a test can pin which of the two reasons fired.
+	if _, err := r.syncWorkspaceStage(ctx, config, r.podWorkspaceSyncDeps(namespace, createdPod.Name, config)); err != nil {
+		return createdPod.Name, err
 	}
 
 	// Signal the startup gate: all files are synced and ownership is fixed,
@@ -776,17 +799,18 @@ const defaultSharedDirSize = "10Gi"
 // PVCs are project-scoped and persist across agent restarts. If a PVC already
 // exists (from a previous agent in the same project), it is reused.
 //
-// When backend=nfs, shared dirs are served via NFS subPath from the workspace
-// PVC and do NOT require separate PVCs — this method is a no-op for NFS.
+// When the workspace is a shared PVC, shared dirs are served via subPath from
+// that same PVC and do NOT require separate PVCs — this method is a no-op then.
 func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace string, config RunConfig) error {
 	if len(config.SharedDirs) == 0 {
 		return nil
 	}
 
-	// NFS backend: shared dirs use subPaths on the workspace NFS PVC,
+	// Shared workspace volume: shared dirs use subPaths on the workspace PVC,
 	// no separate PVCs needed (design §5.3).
-	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" {
-		runtimeLog.Info("NFS backend: shared dirs served via NFS subPath, skipping PVC creation",
+	if usesSharedWorkspacePVC(config) {
+		runtimeLog.Info("Shared workspace volume: shared dirs served via subPath, skipping PVC creation",
+			"backend", config.WorkspaceBackendName,
 			"shared_dir_count", len(config.SharedDirs))
 		return nil
 	}
@@ -1171,18 +1195,23 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 
 	// Security context: run agent pods as the image's non-root scion user.
 	// FSGroup is branched by workspace backend (N2-4):
-	//   - NFS backend: stable GID (default 1000) so files are writable across
-	//     pods and nodes without per-start chown (design §9.1).
+	//   - Shared workspace volume: request a stable GID (default 1000) rather
+	//     than a node-specific one, so the value does not vary by broker host
+	//     (design §9.1). Whether the volume's group ownership actually changes
+	//     is up to the volume plugin — a CSI driver applies fsGroup only per
+	//     its fsGroupPolicy, and the default policy skips ReadWriteMany
+	//     volumes. Do not rely on this branch to make a shared volume
+	//     writable; ownership on shared storage is an operator/provisioner
+	//     concern.
 	//   - Local backend: host GID (today's behavior) so synced files remain
 	//     writable by the broker user.
-	const containerUID int64 = 1000
 	fsGroupGID := int64(os.Getgid()) // default: host GID (local backend)
-	if config.WorkspaceBackendName == "nfs" {
-		nfsGID := config.NFSGID
-		if nfsGID == 0 {
-			nfsGID = 1000 // design default
+	if usesSharedWorkspacePVC(config) {
+		sharedGID := config.NFSGID
+		if sharedGID == 0 {
+			sharedGID = 1000 // design default
 		}
-		fsGroupGID = int64(nfsGID)
+		fsGroupGID = int64(sharedGID)
 	}
 	runAsNonRoot := true
 	allowPrivilegeEscalation := false
@@ -1211,12 +1240,13 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
-	// Workspace volume: NFS-backed pods use a PVC+subPath for shared, persistent
-	// storage isolated to the project subtree (design §5.1/§9.4).
+	// Workspace volume: shared-volume pods (NFS export or GKE-managed shared
+	// volume) use a PVC+subPath for shared, persistent storage isolated to the
+	// project subtree (design §5.1/§9.4).
 	// Local-backend pods keep the existing EmptyDir (zero behavior change).
 	var workspaceVolume corev1.Volume
 	var workspaceVolumeMount corev1.VolumeMount
-	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" {
+	if usesSharedWorkspacePVC(config) {
 		workspaceVolume = corev1.Volume{
 			Name: "workspace",
 			VolumeSource: corev1.VolumeSource{
@@ -1276,10 +1306,11 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		},
 	}
 
-	// NFS init container: when backend=nfs and git clone config is set, add an
-	// init container that provisions the workspace before the main container
-	// starts. The init container mounts the same workspace PVC+subPath so
-	// provisioned files are visible to the main container.
+	// Workspace-provision init container: when the workspace is a shared PVC
+	// and git clone config is set, add an init container that provisions the
+	// workspace before the main container starts. The init container mounts
+	// the same workspace PVC+subPath so provisioned files are visible to the
+	// main container.
 	//
 	// Advisory lock integration (N2-2b, design §7, risk RN1): the Go-side
 	// Run() method acquires a per-project advisory lock (via TryAdvisoryLockObject)
@@ -1294,7 +1325,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// nfsProvisionLockLost stays false and the cloning init container is
 	// injected — the sentinel provides idempotent protection but NOT
 	// cross-node mutual exclusion.
-	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" && config.GitCloneForInit != nil {
+	if usesSharedWorkspacePVC(config) && config.GitCloneForInit != nil {
 		var initCommand []string
 		if config.nfsProvisionLockLost {
 			// Lock loser: wait for the sentinel written by the winning node's
@@ -1416,8 +1447,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// Process shared directories — mount shared-dir volumes.
 	// Build a set of shared dir targets so we can skip them in the regular volume loop.
 	//
-	// NFS backend (N2-5): shared dirs are served from the SAME workspace NFS PVC
-	// via subPath (e.g., "projects/<pid>/shared-dirs/<name>"), avoiding per-dir PVCs.
+	// Shared workspace volume (N2-5): shared dirs are served from the SAME
+	// workspace PVC via subPath (e.g., "projects/<pid>/shared-dirs/<name>"),
+	// avoiding per-dir PVCs.
 	// The workspace volume is already defined; we add additional subPath mounts.
 	//
 	// Local backend: each shared dir gets its own PVC (existing behavior, unchanged).
@@ -1426,7 +1458,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		k8sContainerWorkspace = "/workspace"
 	}
 	sharedDirTargets := make(map[string]bool, len(config.SharedDirs))
-	nfsSharedDirs := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
+	nfsSharedDirs := usesSharedWorkspacePVC(config)
 	for i, sd := range config.SharedDirs {
 		target := fmt.Sprintf("/scion-volumes/%s", sd.Name)
 		if sd.InWorkspace {

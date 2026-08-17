@@ -56,9 +56,10 @@ type RunConfig struct {
 	Project              string   // Project name (e.g., "global" or "my-project")
 	ProjectID            string   // Project ID (e.g., "550e8400-e29b-41d4-a716-446655440000")
 
-	// WorkspaceBackendName is "local" or "nfs", set by the workspace backend
-	// selector. Used to branch UID/GID injection and skip per-start chown
-	// when NFS (N1-5).
+	// WorkspaceBackendName is "local", "nfs", "gke-shared-volume" or
+	// "cloudrun-volume", set by the workspace backend selector. Used to branch
+	// UID/GID injection and skip per-start chown on shared storage (N1-5), and
+	// on Kubernetes to branch the whole shared-workspace pod shape.
 	WorkspaceBackendName string
 	// NFSUID and NFSGID are the stable, node-independent UID/GID for NFS-backed
 	// workspaces. Advertised as SCION_HOST_UID/GID when WorkspaceBackendName is "nfs"
@@ -66,9 +67,10 @@ type RunConfig struct {
 	NFSUID int
 	NFSGID int
 
-	// NFSPVClaimName is the K8s PVC name for the NFS-backed workspace volume.
-	// Set when WorkspaceBackendName is "nfs". The PVC references a static RWX PV
-	// bound to the Filestore/NFS export. Empty for local backend.
+	// NFSPVClaimName is the K8s PVC name for a shared workspace volume. Set
+	// when WorkspaceBackendName is "nfs" or "gke-shared-volume" — the name
+	// predates the second backend. The PVC references a static RWX PV bound to
+	// the NFS/Filestore export. Empty for local backend.
 	NFSPVClaimName string
 	// NFSSubPath is the subPath within the NFS PVC that isolates this project's
 	// workspace (e.g. "projects/<pid>/workspace"). Used by K8s buildPod to scope
