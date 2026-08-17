@@ -55,11 +55,17 @@ stringData:
     #   server.database.url        Cloud SQL. Note the key is url, not dsn.
     #   server.secrets             the secret backend (gcpsm).
     #   server.auth.proxy,
-    #   server.auth.transport,
-    #   server.oauth               the subtree selected by server.auth.mode.
+    #   server.auth.transport      the subtree server.auth.mode: proxy selects.
     #   server.workspace_storage   Filestore NFS - a different subsystem from
     #                              server.storage, which is the hub's GCS blob
     #                              store and is rendered below.
+    #
+    # server.oauth IS rendered, and only here. The client secret is secret
+    # material, so it goes in this Secret and never into a ConfigMap, an
+    # annotation or argv. Note the spelling: client_id and client_secret, which
+    # is what this file's schema binds - clientId and clientSecret are the
+    # environment mapper's spelling and bind nothing here, silently. The chart
+    # refuses that spelling rather than emitting it.
     #
     # The session secret is not here and does not belong here: it arrives as an
     # environment variable from its own Secret.
@@ -280,7 +286,7 @@ spec:
       annotations:
         scion.io/hub-id: "ci-varied"
         checksum/env-config: 6a709a3a2fbd57905f1702244388a7530cc5470785e1b624bf7cefbaeea80e58
-        checksum/settings: b706d09048a24348e3f6b2cafb7bf74c422e73b73bde26b043ada8b9be1a5be9
+        checksum/settings: 009b3d17abcbf90290fd71a9027e57791d4d3d9ca6772d0c970f5eee0f1c6110
     spec:
       serviceAccountName: scion-scion-hub
       securityContext:

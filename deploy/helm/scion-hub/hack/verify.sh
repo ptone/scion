@@ -119,7 +119,14 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # The sixth permutation (session-existing) carries a fixed per-permutation
 # battery, and the two new values leaves (auth.existingSecret,
 # auth.existingSecretKey) each earn a mutation-probe classification.
-EXPECTED_TOTAL=267
+#
+# 267 -> 269 with the OAuth web client credentials: +2, both in the paired
+# auth-mode diff, which now excises the server.oauth subtree and asserts what
+# came out of each side rather than masking it. THE FOUR NEW VALUES LEAVES ADD
+# NOTHING HERE, and that is worth knowing rather than assuming: the mutation
+# probe reports fixed-shape totals, not one assertion per leaf, and all four are
+# refused under config.existingSecret so none of them reaches the transfer list.
+EXPECTED_TOTAL=269
 
 failures=0
 assertions=0
@@ -672,8 +679,9 @@ for name in settings settings-oauth; do
   done
 done
 
-# Byte-for-byte, with the authentication mode itself masked. Switching mode must
-# change one line and nothing else; a chart that dropped a preflight key in one
+# Byte-for-byte, with the authentication mode itself masked and the credential
+# subtree that mode selects lifted out. Switching mode must change one line and
+# add server.oauth, and nothing else; a chart that dropped a preflight key in one
 # mode would install and then fail at hub startup, naming the key but not the
 # reason it went missing.
 #
@@ -683,8 +691,32 @@ done
 # auth mode named hosted, and any future subtree with a mode key of its own would
 # be masked silently, which is the direction that hides a difference rather than
 # reporting one.
-settings_block "$WORK/settings.yaml"       | sed 's/^\(    mode: \)\(proxy\|oauth\)$/\1MASKED/' >"$WORK/auth-a"
-settings_block "$WORK/settings-oauth.yaml" | sed 's/^\(    mode: \)\(proxy\|oauth\)$/\1MASKED/' >"$WORK/auth-b"
+#
+# 🔴 THIS CHECK USED TO CLAIM "ONE LINE AND NOTHING ELSE", AND THAT CLAIM DIED
+# WHEN THE OAUTH CREDENTIALS LANDED - because the credentials are not an extra
+# alongside the mode, they are part of what selecting the mode means. oauth mode
+# without them is refused at render time, so no fixture can select the mode and
+# omit them. THE TEMPTING FIX IS TO WIDEN THE MASK AND MOVE ON, and it is the
+# wrong one: a mask that swallows a whole subtree unconditionally would swallow a
+# preflight key that drifted into it, which is the exact failure this check
+# exists to catch. So the subtree is EXCISED INTO A FILE AND THEN ASSERTED - what
+# came out, and that nothing came out of the other side. An excision nobody looks
+# at is a mask with extra steps.
+settings_block "$WORK/settings.yaml"       | sed 's/^\(    mode: \)\(proxy\|oauth\)$/\1MASKED/' >"$WORK/auth-a-full"
+settings_block "$WORK/settings-oauth.yaml" | sed 's/^\(    mode: \)\(proxy\|oauth\)$/\1MASKED/' >"$WORK/auth-b-full"
+# server.oauth sits at two spaces once settings_block has stripped the Secret's
+# indentation. The subtree ends at the next key at that same depth.
+excise_oauth() {
+  awk -v out="$2" '
+    /^  oauth:$/          { in_oauth = 1; print > out; next }
+    in_oauth && /^  [^ ]/ { in_oauth = 0 }
+    in_oauth              { print > out; next }
+                          { print }
+  ' "$1"
+}
+excise_oauth "$WORK/auth-a-full" "$WORK/auth-a-oauth" >"$WORK/auth-a"
+excise_oauth "$WORK/auth-b-full" "$WORK/auth-b-oauth" >"$WORK/auth-b"
+touch "$WORK/auth-a-oauth" "$WORK/auth-b-oauth"
 if diff -u "$WORK/auth-a" "$WORK/auth-b" >"$WORK/auth.diff"; then
   pass "the two auth modes render identical settings.yaml apart from auth.mode"
 else
@@ -705,6 +737,28 @@ if grep -qxF '  mode: hosted' "$WORK/auth-a" && grep -qxF '  mode: hosted' "$WOR
   pass "the auth-mode mask left server.mode alone"
 else
   fail "server.mode: hosted is not present unmasked in both renders - either hosted mode is gone, or the mask reached a line it should not have"
+fi
+# WHAT THE EXCISION TOOK OUT, ASSERTED ON BOTH SIDES. If the oauth arm's subtree
+# is not exactly this, the diff above compared something other than what this
+# section claims. If the proxy arm's is not empty, the excision is hiding a
+# difference rather than accounting for one - and the diff would still be clean,
+# which is why this is checked and not assumed.
+oauth_want='  oauth:
+    web:
+      google:
+        client_id: ci-oauth-web-google-client-id.apps.googleusercontent.invalid
+        client_secret: ci-oauth-web-google-client-secret-not-a-real-secret'
+if [[ "$(cat "$WORK/auth-b-oauth")" == "$oauth_want" ]]; then
+  pass "the excised subtree is exactly server.oauth.web.google, in snake_case"
+else
+  fail "the oauth arm's excised subtree is not what this check accounts for"
+  diff -u <(printf '%s\n' "$oauth_want") "$WORK/auth-b-oauth" || true
+fi
+if [[ ! -s "$WORK/auth-a-oauth" ]]; then
+  pass "the proxy arm renders no server.oauth at all, so the excision removed nothing from it"
+else
+  fail "the proxy arm rendered a server.oauth subtree, which the excision then hid from the diff"
+  cat "$WORK/auth-a-oauth"
 fi
 
 # --------------------------------------------------------------------------
@@ -1065,7 +1119,13 @@ declare -A PROBE_MUTATION=(
   # reaching these two means standing that baseline down first.
   [auth.existingSecret]='--set-string|auth.sessionSecret=|--set-string|auth.existingSecret=probe-session'
   [auth.existingSecretKey]='--set-string|auth.sessionSecret=|--set-string|auth.existingSecret=probe-session|--set-string|auth.existingSecretKey=PROBE_SESSION_KEY'
-  [auth.mode]='--set-string|auth.mode=oauth|--set|auth.acknowledgeOAuthUnlanded=true'
+  # NO COMPANION, and that is the point of PROBE_CREDS below. oauth mode will not
+  # render without a complete web client credential, so this needed one - and a
+  # companion here is attributed to auth.mode, which produced the false transfer
+  # "auth.mode -> server.oauth.web.google.client_id". The credential lives in the
+  # probe's baseline instead, where it cancels. It was acknowledgeOAuthUnlanded
+  # until the credentials had a channel to arrive on.
+  [auth.mode]='--set-string|auth.mode=oauth'
   [database.connMaxIdleTime]='--set-string|database.connMaxIdleTime=9m'
   [database.connMaxLifetime]='--set-string|database.connMaxLifetime=9m'
   [database.driver]='--set-string|database.driver=postgres|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true'
@@ -1089,9 +1149,31 @@ declare -A PROBE_MUTATION=(
   [updateStrategy.type]='--set-string|updateStrategy.type=RollingUpdate'
 )
 
+# A COMPLETE OAUTH WEB CREDENTIAL, IN THE PROBE'S BASELINE AND NOT IN BASE.
+# Not in BASE, because BASE is what the oauth-refusal checks further down use in
+# order to BE refused; putting it there would turn two of them green for the
+# wrong reason.
+#
+# WHY THE BASELINE AND NOT auth.mode's MUTATION. The probe attributes every
+# settings key that moved to the leaf it mutated. auth.mode=oauth cannot render
+# without a credential, so a mutation that supplies one is indistinguishable, to
+# the probe, from auth.mode moving the credential itself - and it duly observed
+# "auth.mode -> server.oauth.web.google.client_id" and demanded that be declared
+# as a transfer. It is not one. In the baseline the credential is present on both
+# sides of every comparison and cancels out of all of them.
+#
+# DELIBERATELY ABSENT FROM THE config.existingSecret REFUSAL RENDER BELOW. That
+# render asks whether an operator setting THIS leaf alongside an external Secret
+# is refused, so it must carry the mutation and nothing else. Add PROBE_CREDS
+# there and every leaf is refused - for the credential, never for itself - and
+# the transfer list empties without a single check going red.
+PROBE_CREDS=(
+  --set-string auth.oauth.web.google.clientId=probe-oauth-base-id
+  --set-string auth.oauth.web.google.clientSecret=probe-oauth-base-secret
+)
 probe_render() {
   "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
-    --skip-schema-validation "${BASE[@]}" "$@" 2>&1
+    --skip-schema-validation "${BASE[@]}" "${PROBE_CREDS[@]}" "$@" 2>&1
 }
 # The settings document only. Everything else in the stream, with the settings
 # checksum removed: that annotation is a hash OF the settings document, so
@@ -2289,9 +2371,13 @@ expect_render_failure \
   --set hub.hubId=neg \
   --set hub.baseUrl=http://neg.example.com
 
+# WAS "the SCHEMA rejects oauth mode without the acknowledgement". The
+# acknowledgement is gone; what the schema now requires in its place is a
+# complete web client credential, which is the thing the acknowledgement was
+# asking the operator to confirm they were going without.
 expect_render_failure \
-  "the SCHEMA rejects oauth mode without the acknowledgement" \
-  "acknowledgeOAuthUnlanded" \
+  "the SCHEMA rejects oauth mode without a web client credential" \
+  "auth.oauth.web: Must validate at least one schema (anyOf)" \
   "${BASE[@]}" \
   --set auth.mode=oauth
 
@@ -2329,8 +2415,8 @@ expect_render_failure \
   --set hub.baseUrl=http://neg.example.com
 
 expect_render_failure \
-  "the TEMPLATE rejects oauth mode without the acknowledgement" \
-  "every human login fails" \
+  "the TEMPLATE rejects oauth mode without a web client credential" \
+  "no complete OAuth web client credential is present" \
   --skip-schema-validation \
   "${BASE[@]}" \
   --set auth.mode=oauth
