@@ -1,0 +1,607 @@
+# wsguard — a guard against destructive git operations on a shared workspace
+
+```sh
+export PATH="$PWD/hack/wsguard/bin:$PATH"   # install
+hack/wsguard/selftest.sh --prove-it         # verify (see "Firing the control")
+```
+
+## What it protects against
+
+Scion runs agents in three workspace modes. In `shared-plain`, every agent in a
+project shares **one** working directory; in `worktree-per-agent`, the working
+trees are private but the underlying clone — history, refs, and the single-slot
+files in `.git` — is not. Both modes make ordinary git commands destructive to
+people who are not running them.
+
+The hazard has two heads, and a guard that covers one is not a guard.
+
+**(a) The destructive command itself.** `checkout`, `switch`, `restore`,
+`reset`, `clean -f`, `stash`, `branch -D`. On 2026-08-17 an agent on this
+project ran `git checkout --` on a shared working tree and destroyed its own
+uncommitted work. It disclosed the mistake itself, and its framing is the design
+principle here:
+
+> *"the rule earns its keep by being reported, not by being unbroken."*
+
+**(b) `FETCH_HEAD` and the other single-slot refs are shared globals.** Two
+agents fetching concurrently into one clone overwrite each other's `FETCH_HEAD`,
+so `git fetch <url> <ref> && git log FETCH_HEAD` can read a ref that a different
+agent fetched. This head is the more dangerous of the two, because it is
+invisible: it does not error, it returns a confident wrong answer.
+
+## Mechanism: a `PATH` shim, and why not the alternatives
+
+| Candidate | Verdict | Why |
+|---|---|---|
+| **`PATH` shim named `git`** | **chosen** | The only mechanism that sees the command *before* it runs, for every form of it, including the pathspec forms that touch no ref. Bypassable on purpose (see below). |
+| `core.hooksPath` hook set | rejected — **and this rejection is measured, not argued: `hack/wsguard/hook-probe.sh`** | **Git has no `pre-checkout` hook.** `post-checkout` fires after the working tree has already been overwritten. `reference-transaction` can abort a ref update, so it sees branch switching and `reset` — but `git checkout -- <path>`, `git restore <path>` and `git clean -fd` touch no ref at all, and `FETCH_HEAD` is not written through the ref backend either. A hook set would have been a control that passes vacuously against `git checkout -- .`, the exact command that caused the casualty. See **Measuring the hook rejection** below — that paragraph was originally reasoning from git's documented hook set, and is now a measurement. |
+| `git config alias` shadow | rejected | Git does not let an alias shadow a built-in subcommand. `alias.checkout` is ignored whenever `git checkout` resolves to the built-in, which is always. The mechanism silently does nothing, which is the worst available failure mode. |
+| A CI check | rejected **as the mechanism**, adopted **as the verification** | CI runs after the push. The work this guard protects is uncommitted, so by the time CI could speak, there is nothing left to protect. But CI is exactly the right place to prove the guard still works: `make wsguard` runs the selftest, so a regression in the guard is caught by the same pipeline as any other regression. |
+| Documentation alone | rejected | This project has ample evidence that prose rules are not obeyed under pressure — including in the incident above, where the rule existed and was written down. Documentation is shipped alongside the shim, not instead of it. |
+| A read-only mount / filesystem ACL | rejected | It would break the legitimate 95% of writes. The problem is not that agents write to the shared tree; it is that a handful of git subcommands write *over other agents*. |
+
+### Measuring the hook rejection
+
+The paragraph above decides the whole design, and in the first version of this
+README it was **argued from git's documentation rather than measured** — it was
+published as the design's weakest claim and the first thing a reviewer should
+attack. `hack/wsguard/hook-probe.sh` now attacks it.
+
+The probe installs a real `core.hooksPath` set in a throwaway repository, with
+each hook logging **its argv and its stdin**, and runs both arms. Measured on
+git 2.54.0, `/usr/local/bin/git`, `files` ref backend:
+
+| Arm | Command | `reference-transaction` | Reading |
+|---|---|---|---|
+| 1 — positive control | `git checkout -q -b probe-branch` | **fires**, payload `refs/heads/probe-branch` | the hook set is really installed, and stdin capture really works |
+| 2 | `git checkout -- tracked.txt` | **silent** (only `post-index-change`, `post-checkout` — both after the fact) | the command that caused the casualty is invisible to it |
+| 3 | `git restore tracked.txt` | **silent** | same |
+| 4 | `git clean -fd` | **no hook fires at all** | not merely unabortable — unobservable |
+| 5 | `git fetch <donor> main` | fires 3×, **payload empty**, nothing names `FETCH_HEAD` | hazard (b)'s write side is invisible to it |
+| 6 — contrast | `git reset -q --hard HEAD~1` | **fires**, payloads name `ORIG_HEAD`, `HEAD`, `refs/heads/main` | a hook set would have covered `reset`, and *only* the ref-moving forms |
+
+#### The aperture is derived from git, not chosen
+
+The first version of this probe installed **nine hook names I picked**. That put
+a membership test I authored underneath the headline result: a hook git invokes
+that is not on my list produces silence, and silence is the shape of the result
+being reported. An aperture chosen for display convenience becomes a membership
+test without saying so.
+
+The hook set is now enumerated from git itself:
+
+1. **an over-inclusive candidate corpus** — every maximal `[a-z-]` run in the
+   git binary, 6–32 characters, not dash-terminated (`tr` for the extraction,
+   bash `case` for the shape, so no regex dialect can drop a name);
+2. **an oracle, which is git** — `git hook run <name>` answers `unknown hook
+   event` for a name git does not know and `cannot find a hook named` for one it
+   does. The oracle is controlled first: it must give *different* answers for
+   `pre-commit` and for an invented name, or it discriminates nothing;
+3. **a denominator control against an independent source** — the `.sample` hooks
+   git ships in its own templates directory. The derived set must be a superset
+   of all 14. Asserting merely that it is non-empty would be asserting against
+   zero.
+
+Result: **5779 candidates → 24 native hook events**, all 14 shipped samples
+present. And the differential, run rather than argued: across all six arms,
+**3** distinct hooks fired and **0** of them were outside the original nine. The
+narrow aperture happened to be adequate — but it had no way of knowing that and
+no way of reporting it, which is the defect, not the count.
+
+`pre-checkout` and `pre-reset` come back `unknown hook event`. The README's
+opening sentence, *"git has no `pre-checkout` hook"*, is that line of output.
+
+Arm 6 is why the rejection matters. A hook set is not useless — it is *partial*,
+and it would have looked whole. The part it misses is the part that took
+`gd-p1-dev`'s work.
+
+**Arm 5 carries a finding of its own, and it is a finding against the probe's
+own first version.** `reference-transaction` *does* fire during the fetch, three
+times, carrying nothing. A hook author — or a probe author — who keyed on *did
+the event fire* rather than *what did it carry* would read that as coverage of
+the `FETCH_HEAD` write. It is not. The first version of this probe logged only
+argv, reported the claim CONTRADICTED, and was wrong. It is quoted here rather
+than quietly fixed, because the differential between the two versions is the
+evidence that the second one is measuring the right thing.
+
+The probe has four controls, and they are not all the same kind — enumeration
+(the oracle discriminates), denominator (24 ⊇ the 14 shipped samples),
+apparatus (arm 1 fires the hook set), plumbing (arm 1's payload names the ref it
+created). Beyond those it has the same two defences as the selftest: a **positive control**
+(arms 2–5 are all "nothing happened", which is exactly what a hook set that was
+never installed produces for free — arm 1 must fire, and its payload must be
+captured, or the probe exits `2` and reports nothing) and a **negative control**
+(`--prove-it` re-runs the probe with arm 2's expectation deliberately falsified
+and requires exit `1`). `make wsguard` runs the `--prove-it` form.
+
+```sh
+hack/wsguard/hook-probe.sh --prove-it   # 0 confirmed · 1 contradicted · 2 nothing measured
+```
+
+The answer may be backend-dependent; the probe prints `rev-parse
+--show-ref-format` in its provenance block so the reading travels with its
+conditions.
+
+### The shim is bypassable, and that is the design
+
+`/usr/local/bin/git` still works, and `SCION_WSGUARD_OVERRIDE` is a documented
+escape hatch. This is not a sandbox and does not pretend to be. What it removes
+is the **accident** — the operator who did not know the tree was shared, or knew
+and forgot, and got no warning until the work was gone. What it adds for the
+deliberate case is a **record**: the override demands a reason of at least 12
+characters and appends it, with the command and the agent name, to
+`<root>/.git/wsguard-audit.log`. An override without a reason is refused like
+any other destructive command, because an override that does not say why is
+worth nothing to whoever reads the log afterwards.
+
+### Scope: an instrument, not a blanket
+
+A guard that refuses everything gets uninstalled within a week, and deserves to
+be. This one fires only when **all** of these hold:
+
+1. the workspace mode says the resource is actually shared — rule (a) arms in
+   `shared-plain` only; rule (b) arms in `shared-plain` **and**
+   `worktree-per-agent`, because the clone is shared in both;
+2. the repository the command would act on is inside the guarded root
+   (`SCION_WSGUARD_ROOT`, default `/workspace`) — the same command in your own
+   clone under `/tmp` is permitted, and the selftest proves it (arm `P7`);
+3. the command matches an enumerated rule.
+
+`git clean -n`, `git stash list`, `git branch --list`, `git status`,
+`git fetch origin main:refs/wsguard/<agent>/main`, and every read of a ref you
+own are all permitted. Anything not enumerated is passed straight through
+without even resolving the repository, so the shim costs nothing on the common
+path.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `77` | **REFUSED.** Understood, matched a rule, and **not run**. |
+| `78` | **CANNOT EVALUATE.** Armed and watching, but the target repository could not be determined, so no reading was taken and the command was **not run**. Fail-closed. |
+| other | git's own exit code, passed through untouched — the shim `exec`s it. |
+
+`77` and `78` are distinct on purpose and neither collides with git's own codes
+(1, 128, 129). A caller reading only the status must be able to tell "I refused
+you" from "I could not tell, so I did not act" from "git ran and said no".
+Collapsing those three is how a gate starts reporting clean for the wrong
+reason — and it is why the refusal path in the shim is a **captured status
+branched on by value**, never `if cmd`: an `if` sees a boolean, so a gate whose
+refusal path is an `if` cannot report cannot-evaluate at all, by construction.
+
+The selftest follows the project's check contract instead: `0` evaluated-clean,
+`1` evaluated-with-findings, `2` **nothing was tested**.
+
+## Firing the control
+
+A control that has never been fired is not a control.
+
+```sh
+hack/wsguard/selftest.sh            # 50 arms, 79 post-conditions
+hack/wsguard/selftest.sh --prove-it # ... after first proving the harness can fail
+hack/wsguard/hook-probe.sh --prove-it # the hook-mechanism rejection, measured
+make wsguard                        # both, from CI
+```
+
+The suite builds four throwaway repositories under `mktemp -d` and runs the
+guard against real destructive commands. Three things keep it from passing
+vacuously:
+
+- **Positive controls on the harness.** "The file was still modified after the
+  guard refused" proves nothing unless `git checkout --` would have removed the
+  modification. Each hazard is first reproduced with the *real* git and asserted
+  to do its damage. If a control does not reproduce, the suite exits `2`.
+- **A negative control on the harness, one per counter.** The suite reports two
+  numbers — arms whose status mismatched, and post-conditions that failed — and
+  a single injection could only ever prove one of them alive. `--prove-it` now
+  runs the suite twice, once per injection site, and each run must show *its*
+  counter go red **and the other stay green**. One number vouching for another
+  is not a control.
+- **Both directions.** Thirty refusal arms, five cannot-evaluate arms,
+  fifteen permit arms — including the same `git checkout --` that is refused in the
+  shared repository being permitted in a private one.
+- **Permitted means silent, not merely unrefused.** Every permit arm used to be
+  scored on `rc=0` alone, and two of them asserted nothing at all. Twelve now
+  also assert that the guard printed **no** `wsguard:` line. A guard that
+  comments on every `git status` is one an agent learns to read past, and the
+  day it prints `REFUSED` nobody sees it — so the refusal arms are only worth
+  what the permit arms cost. Falsified with a shim whose `passthrough` emits one
+  benign note: all twelve go red.
+- **Properties, not instances.** Arms that exist because a specific bug was
+  found can only catch that bug again. Four members of the argv-parsing class
+  survived to round 4 for exactly that reason. The arms that close a class
+  derive their inputs from the guard's own tables and assert an invariant over
+  all of them: every global option classifies the same separated as attached
+  (`N25`); an alias cannot demote any watched builtin (`N31`); every verb
+  `armed_for` can arm is also in `is_watched_verb` (`N32`); every watched verb
+  is named in the `AGENTS.md` paragraph agents actually read (`N33`), and every
+  verb that paragraph promises is still watched by the shim (`N36`, the deletion
+  direction of the same pair); every verb in a hand-written argv table is still
+  watched (`N34`, and see below for why that direction is the one that was
+  missing); repeating an unknown-arity option does not exhaust the candidate
+  union at any depth from one to four (`N35`).
+
+Every arm runs under `timeout`, and a timeout kill is scored as its own status
+rather than folded into "failed". A suite that can hang cannot report.
+
+### A containment cannot detect the set shrinking on both sides
+
+`A ⊆ B` survives A and B being emptied together. `N31`, `N32` and `N33` are all
+containments whose left-hand side is derived from `is_watched_verb`, so deleting
+a verb from `is_watched_verb` **and** from `armed_for` shrinks both sides at
+once and every one of them stays green. gd-wsg-rev-3 found the hole by looking
+for the verb with no hardcoded arm behind it — `switch` — and measured
+`git switch -f main`: `rc=0`, guard silent, uncommitted work destroyed, and a
+suite headline byte-identical to the baseline.
+
+The fix is not another containment. `N34` walks `SHADOW_ARGV`, a hand-written
+twelve-entry table that exists for an unrelated purpose and is **not** derived
+from the guard, and asserts every verb in it is still watched. An independent
+denominator is the only thing that can see a deletion; a generated one moves
+with the thing it is measuring.
+
+**And `SHADOW_ARGV` alone was not enough, because it lives in this file.** Two
+sources in one file are two sites in one edit: deleting `switch` from
+`is_watched_verb`, `armed_for` *and* `SHADOW_ARGV` is still a live silent bypass
+— measured, `rc=0`, work destroyed — while the suite prints `PASS — 50 arms, 78
+post-conditions` and exits `0`. The floors cannot see it either, because `N31`
+sweeps inside a single assertion and `N31`–`N34` each contribute exactly one
+check no matter how large their sets are. **A count is not a denominator.**
+
+So `N33` gained its converse. `N33` catches a verb *added* to the guard and left
+undocumented; `N36` catches a verb *deleted* from the guard while `AGENTS.md`
+still promises it. Together they are set equality, which is blind in neither
+direction, and `AGENTS.md` qualifies as an independent source for a reason
+rather than by coincidence: it is prose maintained for other agents to read, in
+another file, and nothing about deleting a `case` arm from a shell script
+prompts anyone to edit it.
+
+The allowlist for the paragraph's three non-verb tokens (`` `git` ``, `` `.git` ``,
+`` `FETCH_HEAD` ``) is the obvious way back out — move the deleted verb into it
+and set equality holds again — so it is **pinned at exactly three entries**, and
+every entry must actually occur in the paragraph. Both falsifiers exit `2`.
+
+This raises a cost; it does not prove a negative. Deleting the verb from
+`AGENTS.md` as well (three files, four sites) makes both arms agree on a smaller
+set. That limit is written down in the arm itself, along with the condition
+under which it would silently get worse: if the paragraph ever becomes
+*generated* from the shim, `N36` quietly becomes `N31` again.
+
+### The suite's own size is a post-condition
+
+Deleting the `N27`/`N28` block used to print `PASS — 47 arms, 59
+post-conditions`, exit `0`, and `--prove-it` still reported both controls green.
+Nothing in the suite noticed it had gotten smaller. `EXPECT_ARMS`,
+`EXPECT_CHECKS` and `EXPECT_CONTROLS` are now floors, and falling below any of
+them exits `2` — *nothing was tested* — rather than `1`, because a suite that
+shrank has not measured anything to disagree with. They are floors and not
+equalities on purpose: adding an arm must not require editing a constant, and
+removing one must.
+
+`hook-probe.sh` carries the same three floors over its assertion count, its
+abort-capable set and its derived hook set. Ordering matters there: the floor is
+checked **only when there are no contradictions**, because a contradiction is a
+verdict and has to stay `1`. The falsified `--prove-it` run legitimately asserts
+less than the baseline, and a floor applied ahead of the verdict turned the
+required `1` into a `2`.
+
+### An audit log the subject can forge is worse than no audit log
+
+Three of the five tab-separated fields recorded on an override are written by
+the person being audited — the free-text reason, the argv, and the agent name
+from the environment. A newline in the reason appended a second, entirely
+fabricated row with the right column count, attributable to any agent the writer
+chose. `P15` asserts on the row **count**, not on a substring: "the escape is in
+the file" would also pass if the injected row had been written alongside it.
+
+### Both sides of a path comparison must come from the same normaliser
+
+The scoping decision is a string comparison between the guarded root and the
+repository the command would act on. An earlier version normalised the root only
+`if [[ -d "$root" ]]`, which produced two ways for an **armed** guard to fall
+through to passthrough while still printing its arming banner: a root with a
+trailing slash or a symlinked component never matches a normalised toplevel, and
+a root that does not exist matches nothing. Both are now `78`
+(cannot-evaluate) or a refusal, asserted by arms `U2-unresolvable-root` and
+`N11-root-with-trailing-slash`. A guard must not answer *"not shared, go ahead"*
+on the strength of a comparison it could not make.
+
+### Where the guard's parse disagrees with git's parse, git wins
+
+Three bypasses, all found by `gd-wsg-rev`, all the same shape — the guard
+decided what a command *was* by reading argv differently from the way git reads
+it, and the gap between the two readings was a hole:
+
+| form | shipped | now | why |
+|---|---|---|---|
+| `git co -- f` (`alias.co = checkout`) | `0`, work destroyed, silent | `77` | git expands the alias **internally**; the shim never sees `checkout` and never re-enters |
+| `git checkout -- -h` | `0`, work destroyed, silent | `77` | the help scan did not stop at `--`, so a **pathspec** named `-h` read as a help flag |
+| `git rm -f f` | `0`, file gone | `77` | `rm` deletes from the **working tree**, and was simply missing from the watched set |
+
+Aliases are resolved to a **fixed point**, not to depth one, and the first
+version of this got it wrong in the most expensive way available — see below. A
+`!`-prefixed shell alias is deliberately *not* expanded: any git it runs is a new
+process that finds the shim on `PATH` and is judged on its own merits, so
+re-entry already covers it.
+
+`git rm --cached` and `git clean -n` are permitted for the same reason — in both
+cases the discriminating flag was measured, not inferred, by running the real
+git and looking at the disk.
+
+**`-h` is the one worth remembering.** It was filed as cosmetic: `rc=1` instead
+of `77`. In a fixture containing a file literally named `-h` it is `rc=0` and
+the uncommitted content is gone. The reviewer's fixture had no such file, so
+git's own pathspec error stood in for a refusal.
+
+### A bound with a wrong reason attached is worse than an arbitrary bound
+
+The alias fix shipped resolving **one level**, carrying a comment that said so
+deliberately: *"alias chains are NOT followed by git… measured."* **git 2.54.0
+chains aliases to arbitrary depth, and the measurement behind that comment was
+an artifact.** Found by `gd-wsg-rev-2`:
+
+| | shipped | now |
+|---|---|---|
+| `alias.a = co`, `alias.co = checkout` → `git a -- f` | `rc=0`, **work gone**, silent | `77` |
+| a six-deep chain → `git d6 -- f` | `rc=0`, **work gone**, silent | `77` |
+| `alias.r1 = rm`, `alias.r2 = r1` → `git r2 -f f` | `rc=0`, **file gone**, silent | `77` |
+| `alias.g = -c core.quotepath=false checkout` | `rc=0`, **work gone**, silent | `77` |
+
+**How the original measurement lied, which is worth more than the bug.** The
+probe reused a repository whose index had already been rewritten by earlier
+arms, so the *dirty* content was also the *staged* content. `checkout -- f` then
+restored the file to bytes identical to the ones already on disk. The
+post-condition was *"the content did not change"* — and **that cannot
+distinguish "the command never ran" from "the command ran and wrote the same
+bytes."** The arm read a successful checkout as a no-op and concluded git does
+not chain.
+
+The reviewer reproduced the *false negative* before reproducing the bug, which
+is the only reason the artifact was identified rather than merely overruled.
+
+Two changes make it a measurement: a **hard reset before each arm**, and a
+post-condition asserting the content is now the *committed* string rather than
+merely "not the dirty string".
+
+> **This is the same shape as the 60-line marker bound, and the more expensive
+> of the two.** An arbitrary bound invites testing. A bound with a stated reason
+> attached, where the reason is wrong, actively discourages the next reader from
+> testing it.
+
+Resolution now loops until the head word is neither an option nor an alias.
+Termination is git's problem and it solves it — `fatal: alias loop detected` is
+measured — so the 10-iteration cap is a backstop, and hitting it is `78`, not a
+passthrough: the guard cannot tell a cycle from a chain deeper than 10, and
+*"probably the harmless one"* is the reasoning it exists to refuse. Arm `U4`
+tests the cap; arm `P13` requires an alias resolving to `status` to still be
+**permitted**, so the loop is classifying rather than blanket-refusing.
+
+A refusal also now names the resolution — `` `d6` resolves to `checkout` after 7
+expansion(s) `` — because otherwise the diagnostic discusses a word the operator
+never typed.
+
+### The same bound, one level up: the candidate union was capped at two
+
+An option the guard does not know the arity of makes the subcommand ambiguous —
+in `git --attr-source HEAD checkout -- f`, either `HEAD` or `checkout` is the
+verb depending on whether `--attr-source` takes a separate value. The guard
+refuses to guess: it enumerates the readings and refuses if **any** of them is
+watched.
+
+It enumerated exactly two. One reading, plus one resumed scan. The number of
+possible readings grows with the number of unknown-arity options in the prefix,
+so with two of them both candidates landed on option *values* and the real verb
+was never classified at all. gd-wsg-rev-3 measured it on the shipped head — not
+on a mutant:
+
+| | shipped | now |
+|---|---|---|
+| `git --attr-source HEAD --attr-source HEAD checkout -- f` | `rc=0`, **work gone**, silent | `77` |
+| `git --attr-source HEAD --attr-source HEAD reset --hard` | `rc=0`, **work gone**, silent | `77` |
+
+This is the *same mistake as the depth-one alias bound*, in a different
+function, shipped in the round that fixed the first one — and again carrying a
+comment asserting the bound was safe. The scan now resumes to a fixed point, and
+`N35` sweeps depths one through four across `checkout`, `reset` and `rm` rather
+than testing the depth that was reported.
+
+`--attr-source` is deliberately **not** added to `opt_takes_value`. Naming the
+option would close this instance and leave the class open; the live control is
+that an option the guard has never heard of still cannot hide a verb.
+
+### A generated arm is blind to deletions from the source it generates from
+
+The answer to "every arm is one-per-known-bug" is to derive the arm's inputs
+from the guard's own tables. That works, and it has one failure mode that is
+easy to miss: **an arm keyed to the thing under test cannot see the thing under
+test get smaller.** `N31` sweeps every verb in `is_watched_verb` and asserts an
+alias cannot demote it. Delete two verbs from that list and `N31` derives a
+shorter list, sweeps it, and passes — while both deleted verbs are live
+bypasses. Measured, one verb dropped at a time with the mutation verified to
+have actually changed the file: **all ten bypass, and eight destroy the
+uncommitted work at `rc=0` with the guard silent.**
+
+A generated arm therefore generalises over *additions* and needs a second,
+independent source to pin the *denominator*. Here that source already existed:
+`armed_for` holds the same verbs for a different purpose, so `N32` asserts
+`armed_for ⊆ is_watched_verb` — a verb that is armed but not watched is
+precisely the bug `N29` was written for, stated as an invariant instead of an
+example.
+
+**That was still not an independent denominator, and the sentence that used to
+close this section — "deleting from either table now fails" — was false.**
+`armed_for` and `is_watched_verb` are two hand-maintained copies of the same
+list, so the containment holds while *both* shrink; see *A containment cannot
+detect the set shrinking on both sides* above. The lesson survives the
+correction and is sharper for it: a second source is only independent if it
+would not be edited in the same change. `SHADOW_ARGV` qualifies because it
+exists to hold argv, not verbs, and `N34` is the arm that finally sees a
+deletion.
+
+### The assertion has to carry the discrimination, not the exit code
+
+Two arms this round were green for reasons unrelated to what they claimed.
+
+`N25` asserted `status != 0`, reading any nonzero as "the guard stopped it".
+But a nonzero can also be real git rejecting the option. With the union removed,
+`--attr-source` returned `128` **and deleted the tracked file** — a working-tree
+mutation, the exact event the guard exists to prevent — and the arm stayed
+green, because `128` is not `0`. It now requires that the *guard spoke* (`77`
+with a refusal banner, or `78` with a cannot-evaluate banner) and that the
+content survived.
+
+`N33` checks that every watched verb is named in the `AGENTS.md` paragraph.
+Written as a substring test over the paragraph it could not go red: deleting
+`` `rm` `` from the refused list left it passing, first because `git rm --cached`
+appears further down among the *permitted* examples, and then, after narrowing
+to the refused half, because the word **"armed"** contains the substring `rm`.
+It now extracts backticked code spans and matches command words exactly. Both
+fixes were confirmed by regressing the documentation four separate ways and
+requiring the failure to name the right verb each time.
+
+> A check that passes on the permitted list is a check that cannot see the
+> refused list shrink.
+
+### A read-back must be anchored to the command, not to the variable
+
+Twenty-one arms depend on a `git config alias.<x> <y>` fixture having taken
+effect, and none of them checked. A fixture that silently fails turns an arm
+into "the guard did not refuse a command it never saw", which is green.
+
+`set_alias` now writes and reads back, exiting `2` if the value did not land.
+That was still not enough. The first version derived the read-back key from the
+same shell variable as the write, so renaming the alias in both places kept it
+green while the arm's *command line* still used the old name — a control that
+cannot fail is not a control. `require_alias_for` takes the **command line the
+arm will run**, extracts its first word, and requires an alias to exist for
+*that*. Both falsifiers now exit `2`.
+
+### The justification must be true of the operation it guards
+
+`branch -D` was refused on the grounds that it touches *"a ref namespace that
+every agent in this project shares."* `gd-pkg-rep` measured that claim: local
+`refs/heads` held **2 names, none belonging to another agent**, while the shared
+namespace — **one origin URL, 510 branches** under `refs/heads/scion/*` — is
+reached by `push`, which was not guarded at all.
+
+> The guard protected a live namespace against an operation that cannot reach
+> it, while the operation that can was unguarded.
+
+The refusal is **kept** and re-pointed: `branch -D` now cites the narrower
+ground that is actually true of it (an unpushed commit reachable only from that
+name has nothing else pointing at it — rule `a/local-refs`), and the shared-
+namespace reasoning moved to new rule `c/shared-remote` on `push --delete`,
+`push --force` and `push --mirror`. `--force-with-lease` is permitted and is
+what the refusal offers instead, so arm `P12` pushes with it for real rather
+than merely not refusing it.
+
+**Bound, kept in the code and not only here:** at the time of measurement **0 of
+4** sampled agent branches existed on the remote, so this risk is *unrealized*,
+not disproven. **Known gap:** rule (c) is scoped to the guarded root like every
+other rule, so a force-push from a private clone elsewhere on disk is not
+covered.
+
+### A shim must recognise its own kind, not just itself
+
+`find_real_git` originally skipped its own directory — which answers *"is this
+me"* when the question is *"is this one of us"*. With two copies of the shim on
+`PATH`, each skipped itself, found the other, and exec'd it: an unbounded loop
+that never returned and printed **nothing**. For a guard that is the worst
+reachable outcome, worse than refusing wrongly, because there is no diagnostic
+to read.
+
+The shim now identifies its own kind by a **marker string in the file**, so
+every shim copy is skipped regardless of path, and a hop counter bounds the
+chain at 8 and exits `78` naming the loop for any copy too old to carry the
+marker. The counter is unset immediately before exec'ing a real git, so ordinary
+nesting (`git` → hook → `git`) always starts from zero.
+
+The first version of this fix did not work, for a reason worth keeping: the
+marker was declared on line 119 and the reader was bounded to 60 lines, so the
+shim could not recognise itself and the loop survived. **A bound chosen for
+safety is still a chosen aperture.** The marker is now on line 2.
+
+Arm `C1-only-shims-on-path` is the control that makes the other two mean
+something: with *nothing* on `PATH` but two shims and a purpose-built bash-only
+bin, the configuration **is** the loop unless the marker check works, and it
+must exit `78` saying it could not find a real git. `P9` then requires two shims
+plus a real git to resolve through at exit `0`, and `U3` exercises the hop cap
+directly, since no ordinary path reaches it.
+
+Building `C1` exposed a second defect of the same shape: with a minimal `PATH`
+the shim's fail-closed diagnostic emitted `dirname: command not found` and
+`cat: command not found`. **The code that runs when the environment is broken
+must not depend on the environment.** Those paths now use parameter expansion,
+`echo` and a bash read loop instead of `dirname`, `cat` and `sed`.
+
+### Instrument disclosure
+
+Every assertion in the selftest is a bash `[[ "$x" == *literal* ]]` glob
+containment test or an integer comparison. **No `grep`, `rg`, `awk` or `sed`
+decides any verdict**, so no result depends on which binary `grep` resolves to
+or on which regex dialect it defaults to — the failure mode that cost this
+project a day, where an ERE pattern run under GNU grep's default BRE reported
+`0` for a term that was present. The one thing resolved from the environment,
+the real `git`, is resolved explicitly and printed with its path and version in
+the run's provenance block.
+
+### What the shim costs, measured
+
+The hot path used to carry the comment *"the common case must not pay for a
+subprocess."* That was an intent, and by the time anyone checked it the shim had
+grown two subprocesses that **every** git call pays. Measured in the dev
+container, `N=100`, `git rev-parse --git-dir` in a small repo — an *unwatched*
+verb, the common case — each row adding to the one above it:
+
+| | per call |
+|---|---|
+| bare `/usr/local/bin/git` | 2.0 ms |
+| a null bash shim that only `exec`s | 4.5 ms |
+| + argv parsing, `REAL_GIT` pinned, alias lookup stubbed | 6.4 ms |
+| + `resolve_alias`'s `config --get alias.<verb>` | 9.3 ms |
+| + `find_real_git` | **22.4 ms** |
+
+So roughly 20 ms and 11× bare git. `find_real_git` dominates: it forks one
+`$(cd -- "$dir" && pwd -P)` per `PATH` entry until it finds a git that is not
+one of us. `resolve_alias` costs ~3 ms and **cannot be skipped for unwatched
+verbs** — that skip was the C4 bypass, and the fix was to delete the skip list,
+not to shorten it.
+
+Nothing is being optimised on the strength of this. Nothing in the guard's job
+is latency-sensitive and no measurement says 20 ms is a problem; the number is
+published so the next person works from a measurement instead of from a
+comment. A speculative fast path around alias resolution is precisely the change
+C4 already punished.
+
+## Environment
+
+| Variable | Effect |
+|---|---|
+| `SCION_WORKSPACE_MODE` | Arms the guard: `shared-plain` arms both rules, `worktree-per-agent` arms rule (b) only. |
+| `SCION_WSGUARD=off` | Disables the guard entirely, announced on stderr. |
+| `SCION_WSGUARD_FORCE=1` | Arms both rules regardless of workspace mode. |
+| `SCION_WSGUARD_ROOT` | Guarded root. Default `/workspace`. |
+| `SCION_WSGUARD_AUDIT` | Override audit log. Default `<root>/.git/wsguard-audit.log`. |
+| `SCION_WSGUARD_OVERRIDE` | A reason, ≥12 characters. Permits one command and records it. |
+
+## What this does NOT cover
+
+Stated plainly, because a guard whose limits are not written down gets read as
+covering more than it does.
+
+- **`merge`, `rebase`, `cherry-pick`, `revert`, `am`, `apply`** are not
+  enumerated. They rewrite a shared working tree just as thoroughly as `reset`
+  does. They are omitted because they are also the normal way work gets
+  integrated, and a rule that fires on them would be suppressed within a week —
+  the failure mode that matters more than the coverage gap. If the fleet decides
+  those belong in the shared-tree prohibition, adding them is one `case` arm
+  each plus one arm in the selftest.
+- **Anything invoked as `/usr/local/bin/git`,** by absolute path, or by a
+  process that does not inherit the shim's `PATH`. Deliberate; see above.
+- **Non-git destruction** — `rm -rf`, an editor writing over a file another
+  agent is holding, a build that cleans its output directory.
+- **Installation.** This ships the guard and the proof that it works; it does
+  not yet put `hack/wsguard/bin` on `PATH` inside agent containers. That belongs
+  in the container provisioning path (`pkg/config/embeds/`), which is shared
+  infrastructure and needs to be assigned deliberately. Until then the guard
+  protects whoever exports the `PATH`, and `make wsguard` keeps it honest.

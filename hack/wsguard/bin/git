@@ -1,0 +1,1251 @@
+#!/usr/bin/env bash
+# wsguard-shim-marker:8f3a1c
+#
+# The line above is load-bearing, not decoration: it is how one wsguard shim
+# recognises another on PATH, and it must stay inside the first few lines. See
+# WSGUARD_SHIM_MARKER below. (First attempt put the marker at line 119 behind a
+# 60-line bounded read, so the shim could not recognise itself and the fork bomb
+# survived the fix. The bound silently excluded the thing it was looking for.)
+#
+# wsguard — a PATH shim named `git` that refuses the git operations which
+# destroy other agents' work in a SHARED workspace, and which cannot be caught
+# after the fact.
+#
+# WHY THIS EXISTS
+#
+# On 2026-08-17 an agent on this project ran `git checkout --` on a shared
+# working tree and destroyed its own uncommitted work. It disclosed the mistake
+# itself, and its framing is the design principle for this guard:
+#
+#     "the rule earns its keep by being reported, not by being unbroken."
+#
+# So this shim is not a sandbox. It can be bypassed by anyone who types
+# /usr/local/bin/git, and it has a deliberate override. What it removes is the
+# *accident*: the case where the operator did not know the tree was shared, or
+# knew and forgot, and got no warning until the work was already gone.
+#
+# THE HAZARD HAS TWO HEADS, AND A GUARD THAT COVERS ONE IS NOT A GUARD
+#
+#   (a) The destructive command itself — checkout, switch, restore, reset,
+#       clean -f, stash, branch -D. In a shared tree these destroy work
+#       belonging to agents who are not running the command and who get no
+#       warning. This one at least announces itself: the work is visibly gone.
+#
+#   (b) FETCH_HEAD and the other single-slot refs are SHARED GLOBALS. Two
+#       agents fetching concurrently into one clone overwrite each other's
+#       FETCH_HEAD, so `git fetch <url> <ref> && git log FETCH_HEAD` can read a
+#       ref that a different agent fetched. This one is invisible: it does not
+#       error, it returns a confident wrong answer. It is the more dangerous of
+#       the two and it is the reason a hook-based guard was rejected — see
+#       MECHANISM below.
+#
+# MECHANISM: WHY A PATH SHIM AND NOT A HOOK
+#
+# Git has no pre-checkout hook. The hooks that exist are:
+#
+#   post-checkout           fires AFTER the working tree has been overwritten.
+#   reference-transaction   can abort a ref update, so it sees branch switching
+#                           and `reset`, but `git checkout -- <path>`,
+#                           `git restore <path>` and `git clean -fd` touch no
+#                           ref at all and are therefore invisible to it.
+#                           FETCH_HEAD is not written through the ref backend
+#                           either, so hazard (b) is invisible to it too.
+#
+# The single most destructive form — `git checkout -- .` — is precisely the one
+# no hook can see before the damage. A hook set would have been a control that
+# passes vacuously against the case it was built for. The alternatives
+# considered and rejected are recorded in hack/wsguard/README.md.
+#
+# SCOPE — THIS IS AN INSTRUMENT, NOT A BLANKET
+#
+# A guard that refuses everything gets uninstalled in a week, and deserves to
+# be. This one refuses only inside the guarded root (the shared mount, default
+# /workspace), only in the workspace modes where the resource is actually
+# shared, and only for the enumerated operations. The same commands in your own
+# private clone under /tmp are permitted, and the selftest proves it.
+#
+#   rule (a), destructive-to-working-tree: armed only in `shared-plain`, where
+#       the working tree itself is common to every agent.
+#   rule (b), FETCH_HEAD as a shared global: armed in `shared-plain` AND in
+#       `worktree-per-agent`, because in that mode the working tree is private
+#       but the underlying clone — and therefore .git/FETCH_HEAD — is not.
+#
+# EXIT CODES
+#
+#   77  REFUSED. The command was understood, matched a rule, and WAS NOT RUN.
+#   78  CANNOT EVALUATE. The guard is armed and the command is one it watches,
+#       but it could not determine which repository the command would act on,
+#       so it took no reading and WAS NOT RUN.
+#   *   anything else is the real git's own exit code, passed through
+#       untouched, because the shim execs it.
+#
+# 77 and 78 are distinct on purpose, and neither collides with git's own codes
+# (git uses 1, 128, 129 and occasionally 2). A caller reading only the status
+# must be able to tell "I refused you" from "I could not tell, so I did not
+# act" from "git ran and said no". Collapsing those three is how a gate starts
+# reporting clean for the wrong reason.
+#
+# ENVIRONMENT
+#
+#   SCION_WORKSPACE_MODE       arms the guard: shared-plain / worktree-per-agent
+#   SCION_WSGUARD=off          disables the guard entirely (announced on stderr)
+#   SCION_WSGUARD_FORCE=1      arms both rules regardless of workspace mode
+#   SCION_WSGUARD_ROOT=<dir>   guarded root; defaults to /workspace
+#   SCION_WSGUARD_AUDIT=<file> override audit log; defaults to <root>/.git/wsguard-audit.log
+#   SCION_WSGUARD_OVERRIDE=<reason>
+#                              permit a refused command. The reason must be at
+#                              least 12 characters of actual prose: an override
+#                              that does not say why is refused like any other
+#                              destructive command. Every use is announced on
+#                              stderr and appended to the audit log, because the
+#                              rule earns its keep by being reported.
+#
+# INSTALL
+#
+#   export PATH="<repo>/hack/wsguard/bin:$PATH"
+#
+# VERIFY (do this; a control that has never been fired is not a control)
+#
+#   hack/wsguard/selftest.sh
+#
+set -uo pipefail
+
+readonly EX_REFUSED=77
+readonly EX_CANNOT_EVALUATE=78
+
+self_path="${BASH_SOURCE[0]}"
+# Parameter expansion, not `dirname`. Everything on this code path runs BEFORE
+# the real git has been located, which is exactly the situation where PATH may
+# be minimal or wrong — so the guard must not need coreutils to say what went
+# wrong. Measured: with a PATH holding only bash and two shim copies, the
+# `dirname` form emitted "dirname: command not found" and the fail-closed
+# diagnostic below never printed at all.
+self_parent="${self_path%/*}"
+[[ "$self_parent" == "$self_path" ]] && self_parent="."
+self_dir="$(cd -- "$self_parent" && pwd -P)"
+
+# A shim identifies its own kind by CONTENT, not by path. Skipping only
+# "$self_dir" was enough for one installation and became a fork bomb with two:
+# copy A skips A, finds B, execs it; B skips B, finds A, execs it; forever, with
+# no output and no exit. Measured before this fix: `timeout 20` killed it at
+# rc=124 with an empty stderr — the worst diagnostic a guard can produce, which
+# is none. Path identity answers "is this me"; the question is "is this one of
+# us".
+readonly WSGUARD_SHIM_MARKER="wsguard-shim-marker:8f3a1c"
+
+# is_wsguard_shim <path> — true if the file carries the marker in its head.
+# Bounded read: an unbounded read of an arbitrary PATH entry is its own hazard.
+#
+# The bound is why the first version of this fix did not work. The marker was
+# declared HERE, at line ~119, and the reader stopped at 60 — so the shim could
+# not recognise itself, and the fork bomb survived a change made specifically to
+# kill it. A bound chosen for safety is still a chosen aperture, and this one
+# silently excluded the one thing it was looking for. The marker now sits at the
+# top of the file and selftest arm C1-only-shims-on-path is the control: with
+# nothing on PATH but two shims, that arm HANGS unless this function works.
+is_wsguard_shim() {
+  local f="$1" line n=0
+  [[ -r "$f" ]] || return 1
+  while IFS= read -r line; do
+    n=$(( n + 1 ))
+    (( n > 60 )) && break
+    [[ "$line" == *"$WSGUARD_SHIM_MARKER"* ]] && return 0
+  done < "$f"
+  return 1
+}
+
+# Belt and braces for the case where the marker check fails to recognise an
+# older or modified shim: bound the number of shim hops instead of spinning.
+# A wrong answer that arrives is debuggable; a hang is not. The counter is
+# unset immediately before exec'ing a resolved real git, so ordinary nesting
+# (git -> hook -> git) always starts from zero rather than accumulating.
+wsguard_hops="${SCION_WSGUARD_HOPS:-0}"
+case "$wsguard_hops" in
+  ''|*[!0-9]*) wsguard_hops=0 ;;
+esac
+if (( wsguard_hops >= 8 )); then
+  {
+    echo "wsguard: CANNOT EVALUATE — this shim has been entered $wsguard_hops times"
+    echo "wsguard: without ever reaching a real git. NOTHING WAS RUN."
+    echo "wsguard:"
+    echo "wsguard: That means two or more wsguard shims are on PATH and are"
+    echo "wsguard: resolving to each other. Check for a second copy:"
+    echo "wsguard:   type -a git"
+    echo "wsguard:"
+    echo "wsguard: Refusing to loop. A guard that hangs with no output is worse"
+    echo "wsguard: than one that refuses with a reason."
+  } >&2
+  exit "$EX_CANNOT_EVALUATE"
+fi
+export SCION_WSGUARD_HOPS=$(( wsguard_hops + 1 ))
+
+# ---------------------------------------------------------------------------
+# Locate the real git: the first `git` on PATH that is not this shim.
+# ---------------------------------------------------------------------------
+find_real_git() {
+  local dir resolved candidate
+  local IFS=:
+  for dir in $PATH; do
+    [[ -z "$dir" ]] && dir="."
+    resolved="$(cd -- "$dir" 2>/dev/null && pwd -P)" || continue
+    [[ "$resolved" == "$self_dir" ]] && continue
+    candidate="$resolved/git"
+    # Not "is this me" — "is this one of us". See WSGUARD_SHIM_MARKER above.
+    is_wsguard_shim "$candidate" && continue
+    if [[ -f "$candidate" && -x "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+REAL_GIT="$(find_real_git)" || {
+  {
+    echo "wsguard: could not find a real git on PATH behind the shim at $self_dir."
+    echo "wsguard: NOTHING WAS RUN. This is a broken environment, not a policy refusal."
+    echo "wsguard:"
+    echo "wsguard: Every git on PATH is a wsguard shim, or there is none at all."
+    echo "wsguard:   type -a git"
+  } >&2
+  exit "$EX_CANNOT_EVALUATE"
+}
+
+# The resolved git is a real git, so the hop counter has done its job. Unsetting
+# it here keeps ordinary nesting (git -> hook -> git) starting from zero instead
+# of walking toward the cap.
+passthrough() { unset SCION_WSGUARD_HOPS; exec "$REAL_GIT" "$@"; }
+
+# reprint_indented <file> — echo a captured stderr back to the caller, indented.
+# A builtin, for the same reason as above: this runs only on the paths where
+# something has already gone wrong, and `2>/dev/null` on a broken tool is how a
+# "command not found" became a confident false claim on this project today. The
+# whole point of these paths is that the underlying tool's own words survive.
+reprint_indented() {
+  local line
+  while IFS= read -r line; do
+    printf 'wsguard:   %s\n' "$line"
+  done < "$1"
+  [[ -s "$1" ]] || printf 'wsguard:   (it said nothing)\n'
+}
+
+if [[ "${SCION_WSGUARD:-}" == "off" ]]; then
+  echo "wsguard: DISABLED via SCION_WSGUARD=off — the shared-workspace guard is not in effect." >&2
+  passthrough "$@"
+fi
+
+# ---------------------------------------------------------------------------
+# Arming. Rule (a) protects the working tree; rule (b) protects single-slot
+# refs in the .git directory, which are shared in one more mode than the tree.
+# ---------------------------------------------------------------------------
+mode="${SCION_WORKSPACE_MODE:-}"
+forced="${SCION_WSGUARD_FORCE:-}"
+tree_shared=0
+refs_shared=0
+case "$mode" in
+  shared-plain)       tree_shared=1; refs_shared=1 ;;
+  worktree-per-agent) refs_shared=1 ;;
+esac
+if [[ "$forced" == "1" ]]; then
+  tree_shared=1
+  refs_shared=1
+fi
+
+# Rule (c) gets its OWN arming flag, and it is unconditional.
+#
+# It used to ride on `refs_shared`, which made the comment beneath it a lie
+# about its own code: the comment argued that the remote is shared in every
+# workspace mode — privacy of a clone says nothing about the namespace it
+# pushes to — and the rule was then armed on a condition that is FALSE in
+# `clone-per-agent`. gd-wsg-rev-2 measured the consequence, all of it INSIDE
+# the guarded root:
+#
+#     SCION_WORKSPACE_MODE=shared-plain        git push --force   77, refused
+#     SCION_WORKSPACE_MODE=worktree-per-agent  git push --force   77, refused
+#     SCION_WORKSPACE_MODE=clone-per-agent     git push --force    0, NOT REFUSED
+#     SCION_WORKSPACE_MODE unset               git push --force    0, NOT REFUSED
+#
+# So the guard was disarmed for force-push in precisely the mode where an agent
+# is most likely to own a clone and force-push out of it. This is NOT the
+# labelled gap below: the labelled gap is about repositories OUTSIDE the
+# guarded root, and these four readings are all inside it. A label that does
+# not cover the case it is read as covering is worse than no label.
+remote_shared=1
+
+if (( tree_shared == 0 && refs_shared == 0 && remote_shared == 0 )); then
+  passthrough "$@"
+fi
+
+# ---------------------------------------------------------------------------
+# Split argv into git's global options, the subcommand, and the rest.
+# The global options are handed back to the real git verbatim when resolving
+# the target repository, so that -C / --git-dir / --work-tree are honoured by
+# git's own resolution rather than by a reimplementation of it here.
+#
+# THE GUARD DOES NOT KNOW GIT'S OPTION TABLE AND MUST NOT PRETEND TO. Filed as
+# C3 by gd-wsg-rev-2, and it is the answer to the brief's central question of
+# whether the parse class is enumerable. It is not.
+#
+# The old code hardcoded which global options consume a SECOND token. Get that
+# wrong in the "takes no value" direction and the guard reads the option's
+# VALUE as the subcommand, and the real verb becomes invisible. `--attr-source`
+# takes a separate value in git 2.54.0 and was not in the list, so:
+#
+#     git --attr-source=HEAD checkout -- f    77, refused      (attached form)
+#     git --attr-source  HEAD checkout -- f    0, WORK GONE, guard silent
+#     git --attr-source  HEAD rm -f f          0, FILE GONE, guard silent
+#     git --attr-source  HEAD reset --hard     0, WORK GONE, guard silent
+#
+# The attached form being refused while the separated form was not is direct
+# evidence that the mechanism is token accounting and nothing else. Adding
+# `--attr-source` to the list would fix the instance and leave the class: the
+# guard would still be carrying a hand-maintained copy of a table belonging to
+# a program that gains options between releases, and it was ALREADY out of sync
+# with the git in this container.
+#
+# So the class is closed structurally instead. For a `-*` token whose arity the
+# guard does not know, it does not guess — it takes the UNION OF CANDIDATES.
+# EVERY reading is classified, and the command is refused if ANY of them is
+# watched. No knowledge of git's option table is required for that to be safe,
+# and it fails closed on options that do not exist yet.
+#
+# "EVERY reading" is load-bearing and this comment used to say "both". It was
+# written when the resume ran once, which capped the union at two candidates —
+# safe at one unknown option and FAILING OPEN at two, because both candidates
+# landed on option values and the verb was never classified. The comment stated
+# the design goal; the code implemented one instance of it. See the candidate
+# loop below for the measurements. A comment that overstates what the code does
+# is worse than no comment, because it tells the next reader not to check.
+#
+# `--attr-source` IS DELIBERATELY LEFT OUT of the value-taking list below, and
+# it must stay out. It is the live control for the union: a real option, in the
+# real git in this container, that really takes a separate value and that the
+# guard's table really does not know. Add it and arm N23 goes green for the
+# wrong reason — it would be testing the table entry, and the union would have
+# no test that a future unknown option is covered. The table is a PRECISION
+# aid, not the safety mechanism.
+# ---------------------------------------------------------------------------
+
+# Takes its value as a SEPARATE token. Being wrong here in the "no value"
+# direction is a BYPASS, so this list holds only what git's own usage line
+# documents: `-C <path>`, `-c <name>=<value>`, and the four long forms.
+# Measured: `git -cuser.name=zz ...` is rejected by git as an unknown option,
+# so -c never carries an attached value.
+opt_takes_value() {
+  case "$1" in
+    -C|-c|--git-dir|--work-tree|--namespace|--config-env) return 0 ;;
+  esac
+  return 1
+}
+
+# Takes NO separate token. Being wrong here costs a spurious second candidate,
+# which can only ever produce a FALSE REFUSAL — recoverable, visible, and
+# overridable — never a bypass. That is the whole reason the two lists are
+# separate rather than one list with an "everything else" arm.
+#
+# `--exec-path` was in the value-taking list and does not belong there:
+# measured, `git --exec-path status` prints the exec path and exits WITHOUT
+# running status, so it consumes nothing. It was harmless only by accident.
+opt_takes_no_value() {
+  case "$1" in
+    --*=*) return 0 ;;
+    --exec-path|--html-path|--man-path|--info-path) return 0 ;;
+    --no-pager|-p|--paginate|-P|--bare) return 0 ;;
+    --literal-pathspecs|--no-literal-pathspecs) return 0 ;;
+    --glob-pathspecs|--noglob-pathspecs|--icase-pathspecs) return 0 ;;
+    --no-replace-objects|--no-optional-locks|--no-lazy-fetch|--no-advice) return 0 ;;
+    -v|--version|-h|--help) return 0 ;;
+  esac
+  return 1
+}
+
+argv=("$@")
+
+# scan_from <index> — find the subcommand at or after <index>, honouring the
+# arity of every global option on the way. Sets:
+#   scan_subcmd        the token, or "" if there is none
+#   scan_idx           its index in argv, or -1
+#   scan_prev_unknown  1 if the token IMMEDIATELY BEFORE it was an option of
+#                      unknown arity, i.e. if this reading might be that
+#                      option's value rather than the subcommand
+scan_subcmd=""
+scan_idx=-1
+scan_prev_unknown=0
+scan_from() {
+  local i="$1" tok prev_unknown=0
+  scan_subcmd=""
+  scan_idx=-1
+  scan_prev_unknown=0
+  while (( i < ${#argv[@]} )); do
+    tok="${argv[i]}"
+    [[ "$tok" == "--" ]] && return 0
+    case "$tok" in
+      -*)
+        if opt_takes_value "$tok"; then
+          prev_unknown=0
+          i=$(( i + 2 ))
+        elif opt_takes_no_value "$tok"; then
+          prev_unknown=0
+          i=$(( i + 1 ))
+        else
+          prev_unknown=1
+          i=$(( i + 1 ))
+        fi
+        ;;
+      *)
+        scan_subcmd="$tok"
+        scan_idx="$i"
+        scan_prev_unknown="$prev_unknown"
+        return 0
+        ;;
+    esac
+  done
+  return 0
+}
+
+scan_from 0
+subcmd="$scan_subcmd"
+sub_idx="$scan_idx"
+prev_unknown="$scan_prev_unknown"
+
+[[ -z "$subcmd" ]] && passthrough "$@"
+
+# Every token before the subcommand is a global option or an option's value, by
+# construction of the scan — so `pre` is derived rather than accumulated, and
+# cannot drift out of step with the arity decisions above.
+pre=()
+(( sub_idx > 0 )) && pre=("${argv[@]:0:sub_idx}")
+rest=("${argv[@]:sub_idx+1}")
+
+# The remaining candidates, when the first reading might be an unknown option's
+# value. The scan is RESUMED rather than "take the next token", so that
+# `git --attr-source HEAD --literal-pathspecs checkout` is covered too.
+#
+# THIS IS A LOOP, AND IT USED TO BE A SINGLE RESUME. That capped the candidate
+# set at two readings while the number of possible readings grows with the
+# number of unknown-arity options, so with two of them BOTH candidates landed on
+# option values and the real verb was never classified at all. gd-wsg-rev-3
+# measured it on the shipped head, calibrated against bare git and against the
+# n=1 case, and I reproduced every line before changing anything:
+#
+#   git --attr-source HEAD --attr-source HEAD checkout -- f   0, WORK GONE, silent
+#   git --attr-source HEAD --attr-source HEAD reset --hard    0, WORK GONE, silent
+#   git --attr-source HEAD --attr-source HEAD rm -f f         0, FILE GONE, silent
+#   (n=1, the same shapes)                                    77, refused
+#
+# Termination: each pass resumes at `cur_idx + 1` and scan_from returns an index
+# strictly greater than where it started, so cur_idx strictly increases and is
+# bounded by ${#argv[@]}. No cap is needed and none is imposed — a cap here
+# would be a number lifted from a fixture, which is how the depth-one alias
+# limit came to exist.
+alt_subs=()
+alt_idxs=()
+cur_idx="$sub_idx"
+cur_unknown="$prev_unknown"
+while (( cur_unknown == 1 )); do
+  scan_from $(( cur_idx + 1 ))
+  [[ -z "$scan_subcmd" ]] && break
+  alt_subs+=("$scan_subcmd")
+  alt_idxs+=("$scan_idx")
+  cur_idx="$scan_idx"
+  cur_unknown="$scan_prev_unknown"
+done
+
+# ---------------------------------------------------------------------------
+# Does this invocation even mention something we watch? This is a pure-bash
+# scan over argv, so this BLOCK costs nothing.
+#
+# THE SENTENCE THAT USED TO BE HERE WAS FALSE. It read "the common case must
+# not pay for a subprocess", which described an intent, not the shim, and by
+# the time gd-wsg-rev-3 measured it the shim had grown two subprocesses that
+# every unwatched verb pays for. Correcting the claim rather than deleting it,
+# because a stale performance justification is how a guard gets weakened later
+# by someone who trusts the comment: measured in this container, N=100,
+# `git rev-parse --git-dir` in a small repo, an UNWATCHED verb, wall clock per
+# call, each layer added to the one above it:
+#
+#     bare /usr/local/bin/git                              2.0 ms
+#     a null bash shim that only `exec`s                   4.5 ms
+#     + the shim's argv parsing, REAL_GIT pinned,
+#       alias lookup stubbed out                           6.4 ms
+#     + resolve_alias's `config --get alias.<verb>`        9.3 ms
+#     + find_real_git                                     22.4 ms
+#
+# So the common case pays about 20 ms, roughly 11x bare git, and the two costs
+# are BOTH subprocesses:
+#
+#   find_real_git (~13 ms, the dominant term) is a command substitution that
+#   forks one more `$(cd -- "$dir" && pwd -P)` per PATH entry until it finds a
+#   git that is not one of us, and reads up to 60 lines of each candidate.
+#
+#   resolve_alias (~3 ms) runs one real git per classification. It cannot be
+#   skipped for unwatched verbs — that skip WAS the C4 bypass, and the fix was
+#   to delete the skip list, not to shorten it.
+#
+# Neither is being optimised here. Nothing in this guard's job is latency-
+# sensitive, no measurement says 20 ms is a problem, and a speculative fast
+# path around alias resolution is precisely the change C4 already punished.
+# The remedy for a justification that no longer holds is to re-point the
+# justification. If someone later has a real latency budget, they must bring a
+# measurement against it and leave the classification intact.
+# ---------------------------------------------------------------------------
+mentions_fetch_head=0
+for tok in "${argv[@]}"; do
+  case "$tok" in
+    FETCH_HEAD|FETCH_HEAD[~^:@.]*) mentions_fetch_head=1; break ;;
+  esac
+done
+
+# The subcommand the guard classifies must be the subcommand GIT will run, and
+# for an alias those are different strings. `git co -- file` with
+# `alias.co = checkout` expands INSIDE git and never re-enters this shim, so the
+# guard classified "co", found it unwatched, and passed through. Measured by
+# gd-wsg-rev as R2 and reproduced here: rc=0, uncommitted work destroyed, not
+# one line of output. That is the silent-bypass shape this whole guard exists
+# to prevent, arriving through the guard's own front door.
+#
+# RESOLVED TO A FIXED POINT, NOT TO DEPTH ONE. The first version of this block
+# stopped after one expansion and carried a comment explaining why that was
+# correct: "alias chains are NOT followed by git", supposedly measured. THAT
+# MEASUREMENT WAS AN ARTIFACT AND THE CONCLUSION WAS FALSE. git 2.54.0 chains
+# aliases to arbitrary depth:
+#
+#     alias.co=checkout, alias.a=co      git a  -- f   destroyed the file
+#     a chain six deep                   git d6 -- f   destroyed the file
+#     alias.r1=rm, alias.r2=r1           git r2 -f f   deleted the file
+#
+# SIX IS A FIXTURE DEPTH, NOT A LIMIT. gd-wsg-rev-2 flagged this the moment it
+# saw the number quoted back: it built a six-deep chain and six bypassed, and
+# it did not find a depth at which git stops. The finding is UNBOUNDED
+# chaining. The number is recorded here as the size of the fixture that was
+# run, and it must never be read as a property of git — that is exactly how the
+# depth-one limit below came to exist.
+#
+# The false negative came from a contaminated fixture, and the mechanism is
+# worth more than the bug: the earlier probe reused a repository whose index
+# had already been rewritten by previous arms, so the DIRTY content was the
+# staged content. `checkout -- f` then restored the file to bytes identical to
+# the ones already on disk. The post-condition was "the content did not
+# change", and that cannot distinguish "the command never ran" from "the
+# command ran and rewrote the file with the same bytes". A hard reset between
+# arms separates the two readings; without it the arm is not a measurement.
+#
+# gd-wsg-rev-2 found this by reproducing the false negative BEFORE reproducing
+# the bug, which is the only reason the artifact was identified rather than
+# merely overruled.
+#
+# The shape is the same as the 60-line marker bound in the fork-bomb fix, and
+# it is the more expensive of the two: A BOUND CHOSEN FOR A STATED REASON,
+# WHERE THE REASON IS ITSELF WRONG, is worse than an arbitrary bound, because
+# the comment actively discourages the next reader from testing it.
+#
+# Termination is not this loop's problem to solve. git refuses a cyclic alias
+# itself — measured: `fatal: alias loop detected: expansion of 'loop1' does not
+# terminate`. The iteration cap below is therefore a backstop against something
+# unforeseen, not the primary defence, and hitting it is fail-closed (78), not
+# a passthrough.
+#
+# A `!`-prefixed SHELL alias is deliberately NOT expanded. Whatever git it runs
+# is a new process that finds this shim on PATH and is classified on its own
+# merits; re-entry covers it, and the hop counter above bounds that re-entry.
+# THE WATCHED VERBS, IN ONE PLACE, BECAUSE TWO PLACES DRIFTED.
+#
+# This list had a second copy: the fast path that decides which subcommands
+# skip alias resolution. That copy omitted `push` — the only watched verb
+# missing from it — and gd-wsg-rev-2 filed it as C4 with the fixture that
+# matters:
+#
+#     control, no alias.push set          git push --force ...   77, ref INTACT
+#     alias.push = log                    git push --force ...    0, ref CLOBBERED
+#
+# GIT NEVER LETS AN ALIAS SHADOW A BUILTIN. It ignored `alias.push` and ran the
+# real push; the guard honoured the alias, reclassified the push as `log`, and
+# waved it through onto the shared remote. So the skip is not an optimisation,
+# it is a correctness requirement, and expressing it as a hand-copied list of
+# the same verbs guaranteed the two would eventually disagree.
+#
+# The union-of-candidates fix above does NOT close this. gd-wsg-rev-2 was
+# explicit about that and it is worth repeating where someone will read it:
+# the union closes the class of GLOBAL OPTIONS BEFORE THE SUBCOMMAND, and C4 is
+# a different disagreement entirely — about which of two names git dispatches.
+# Both fixes are needed, and this is the second one.
+is_watched_verb() {
+  case "$1" in
+    checkout|switch|restore|reset|clean|stash|branch) return 0 ;;
+    rm|checkout-index|read-tree)                      return 0 ;;
+    fetch|push)                                       return 0 ;;
+  esac
+  return 1
+}
+
+# alias_head <expansion> — the subcommand git will dispatch, i.e. the first
+# word that is not a global option. An expansion may LEAD with one:
+# `alias.g = -c core.quotepath=false checkout` dispatches checkout, and reading
+# only the first word yields `-c`, which matches no rule. Filed as F1b.
+alias_head() {
+  local -a words=()
+  local w head=""
+  read -r -a words <<<"$1"
+  local n=${#words[@]} i=0
+  while (( i < n )); do
+    w="${words[i]}"
+    if opt_takes_value "$w"; then
+      i=$(( i + 2 ))          # option WITH a separate value
+      continue
+    fi
+    case "$w" in
+      -*) i=$(( i + 1 )); continue ;;   # flag, or an option carrying its value
+    esac
+    head="$w"
+    break
+  done
+  # git splits an alias with shell-style quoting, so the dispatched word may be
+  # written quoted. Strip one layer; anything more exotic falls through to the
+  # cap and is refused, not permitted.
+  head="${head#[\'\"]}"
+  head="${head%[\'\"]}"
+  printf '%s' "$head"
+}
+
+# resolve_alias <subcommand> — walk alias expansions to a FIXED POINT.
+# Sets r_classify and r_hops. Exits 78 at the cap rather than passing through.
+r_classify=""
+r_hops=0
+resolve_alias() {
+  local expansion next
+  r_classify="$1"
+  r_hops=0
+  while : ; do
+    is_watched_verb "$r_classify" && return 0
+    expansion="$("$REAL_GIT" ${pre[@]+"${pre[@]}"} config --get "alias.$r_classify" 2>/dev/null)" || expansion=""
+    case "$expansion" in
+      ''|'!'*) return 0 ;;
+    esac
+    next="$(alias_head "$expansion")"
+    [[ -z "$next" || "$next" == "$r_classify" ]] && return 0
+    r_classify="$next"
+    r_hops=$(( r_hops + 1 ))
+    if (( r_hops > 10 )); then
+      {
+        echo "wsguard: CANNOT EVALUATE — the alias \`$1\` did not resolve to a"
+        echo "wsguard: real subcommand within 10 expansions. NOTHING WAS RUN."
+        echo "wsguard:"
+        echo "wsguard: If the alias is cyclic, git would refuse it too, with"
+        echo "wsguard: \"fatal: alias loop detected\" — but this guard cannot tell a cycle"
+        echo "wsguard: from a chain deeper than 10, and passing through on the assumption"
+        echo "wsguard: that it is the harmless one is exactly the reasoning this guard"
+        echo "wsguard: exists to refuse. It will not permit a possibly destructive command"
+        echo "wsguard: on the grounds that it could not work out what the command is."
+        echo "wsguard:"
+        echo "wsguard:   git config --get alias.$1"
+      } >&2
+      exit "$EX_CANNOT_EVALUATE"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Classify each candidate reading of argv, and take the first one that is
+# watched. Refusing if EITHER reading is watched is what makes an unknown
+# global option safe: the guard never has to decide which reading is right,
+# only whether either of them is dangerous.
+# ---------------------------------------------------------------------------
+classify_as=""
+alias_of=""
+alias_hops=0
+watched=0
+via_union=0
+armed_for() {                      # <verb> -> 0 if armed in this workspace mode
+  case "$1" in
+    checkout|switch|restore|reset|clean|stash|branch) (( tree_shared   == 1 )) && return 0 ;;
+    rm|checkout-index|read-tree)                      (( tree_shared   == 1 )) && return 0 ;;
+    fetch)                                            (( refs_shared   == 1 )) && return 0 ;;
+    push)                                             (( remote_shared == 1 )) && return 0 ;;
+  esac
+  return 1
+}
+
+cand_sub=("$subcmd")
+cand_idx=("$sub_idx")
+if (( ${#alt_subs[@]} > 0 )); then
+  cand_sub+=("${alt_subs[@]}")
+  cand_idx+=("${alt_idxs[@]}")
+fi
+
+for (( ci = 0; ci < ${#cand_sub[@]}; ci++ )); do
+  resolve_alias "${cand_sub[ci]}"
+  if armed_for "$r_classify"; then
+    subcmd="${cand_sub[ci]}"
+    sub_idx="${cand_idx[ci]}"
+    classify_as="$r_classify"
+    alias_hops="$r_hops"
+    (( r_hops > 0 )) && alias_of="$subcmd"
+    pre=()
+    (( sub_idx > 0 )) && pre=("${argv[@]:0:sub_idx}")
+    rest=("${argv[@]:sub_idx+1}")
+    watched=1
+    (( ci > 0 )) && via_union=1
+    break
+  fi
+  # Keep the first reading's classification for the diagnostics if nothing is
+  # watched — it is the reading git is most likely to agree with.
+  if (( ci == 0 )); then
+    classify_as="$r_classify"
+    alias_hops="$r_hops"
+    (( r_hops > 0 )) && alias_of="$subcmd"
+  fi
+done
+
+if (( mentions_fetch_head == 1 && refs_shared == 1 )); then
+  watched=1
+fi
+
+(( watched == 0 )) && passthrough "$@"
+
+# `git <anything> -h` and `--help` never touch the tree. Let them through so
+# that the guard never stands between an operator and the documentation for the
+# command it just refused. This runs AFTER classification, because `rest` is
+# only known once the guard has decided which reading of argv it is judging:
+# for `git --attr-source HEAD checkout -h`, the help flag is in the SECOND
+# candidate's rest, and scanning the first candidate's would miss it.
+#
+# The scan MUST stop at `--`. After the terminator every token is a PATHSPEC,
+# and this loop used to keep scanning: `git checkout -- -h` was read by the
+# guard as a help request and by git as "check out the file named -h", so the
+# guard waved through the exact command that overwrites it.
+#
+# gd-wsg-rev filed this as O4, cosmetic — rc=1 instead of 77. It is not
+# cosmetic. Measured in a fixture holding a file literally named `-h`:
+#
+#     git checkout -- -h    rc=0, uncommitted content GONE, guard silent
+#
+# The reviewer's fixture had no such file, so git's own pathspec error stood in
+# for a refusal and the miss looked like a difference of opinion about an exit
+# code. The general rule is the one that matters: WHEREVER THE GUARD'S PARSE
+# DISAGREES WITH GIT'S PARSE, GIT WINS, AND THE GAP IS A BYPASS.
+for tok in ${rest[@]+"${rest[@]}"}; do
+  [[ "$tok" == "--" ]] && break
+  case "$tok" in
+    -h|--help) passthrough "$@" ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Which repository would this command act on? Resolved by the real git with
+# the caller's own global options, so that `git -C /elsewhere checkout` is
+# judged against /elsewhere and not against the current directory.
+#
+# stderr from the probe is captured rather than discarded, and is reprinted
+# whenever it is load-bearing. Sending it to /dev/null is how a `command not
+# found` became a confident false claim about a SHA on this project.
+# ---------------------------------------------------------------------------
+# Both sides of the scoping comparison below must come out of the SAME
+# normaliser, or the comparison is not a comparison. `$toplevel` is always
+# absolute and always run through `cd && pwd -P`; the root must be too.
+#
+# The first version of this block normalised the root only `if [[ -d ... ]]`,
+# which quietly produced two fail-open shapes: a root with a trailing slash or
+# a symlinked component would never string-match a normalised toplevel, and a
+# root that does not exist at all would match nothing — in both cases an ARMED
+# guard falls through to passthrough and permits everything while still
+# printing an arming banner. That is the worst failure mode available: a guard
+# that looks installed and fires on nothing. It is the same class as the
+# `./`-prefix path-comparison hazard the lead published at 10:51 — two path
+# lists produced by different invocations, set-compared without normalising
+# first. Fail-closed on an unresolvable root instead; `78` says no reading was
+# taken, which is the truth.
+guard_root="${SCION_WSGUARD_ROOT:-/workspace}"
+root_err="$(mktemp)"
+root_status=0
+resolved_root="$(cd -- "$guard_root" 2>"$root_err" && pwd -P)" || root_status=$?
+if (( root_status != 0 )) || [[ -z "$resolved_root" ]]; then
+  {
+    echo "wsguard: CANNOT EVALUATE — \`git $subcmd\` is a guarded operation, but the"
+    echo "wsguard: guarded root could not be resolved, so no reading was taken and the"
+    echo "wsguard: command WAS NOT RUN."
+    echo "wsguard:"
+    echo "wsguard: root as configured : $guard_root"
+    if [[ -n "${SCION_WSGUARD_ROOT:-}" ]]; then
+      echo "wsguard: root came from    : SCION_WSGUARD_ROOT"
+    else
+      echo "wsguard: root came from    : the built-in default (SCION_WSGUARD_ROOT is unset)"
+    fi
+    echo "wsguard: cd exited $root_status and said:"
+    reprint_indented "$root_err"
+    echo "wsguard:"
+    echo "wsguard: An unresolvable root cannot be compared against the repository this"
+    echo "wsguard: command would act on, and a guard that cannot make the comparison"
+    echo "wsguard: must not answer 'not shared, go ahead'."
+  } >&2
+  rm -f "$root_err"
+  exit "$EX_CANNOT_EVALUATE"
+fi
+rm -f "$root_err"
+guard_root="$resolved_root"
+
+probe_err="$(mktemp)"
+probe_status=0
+toplevel="$("$REAL_GIT" ${pre[@]+"${pre[@]}"} rev-parse --show-toplevel 2>"$probe_err")" || probe_status=$?
+
+if (( probe_status != 0 )); then
+  {
+    echo "wsguard: CANNOT EVALUATE — \`git $subcmd\` is a guarded operation, but the"
+    echo "wsguard: repository it would act on could not be determined, so no reading"
+    echo "wsguard: was taken and the command WAS NOT RUN."
+    echo "wsguard:"
+    echo "wsguard: git rev-parse --show-toplevel exited $probe_status and said:"
+    reprint_indented "$probe_err"
+    echo "wsguard:"
+    echo "wsguard: This is fail-closed by design. The guard will not permit a"
+    echo "wsguard: destructive operation on the grounds that it could not tell whether"
+    echo "wsguard: the target was the shared workspace at $guard_root."
+  } >&2
+  rm -f "$probe_err"
+  exit "$EX_CANNOT_EVALUATE"
+fi
+rm -f "$probe_err"
+
+toplevel="$(cd -- "$toplevel" && pwd -P)"
+if [[ "$toplevel" != "$guard_root" && "$toplevel" != "$guard_root"/* ]]; then
+  # A private clone. Nothing here is shared; the operator may do as they like.
+  passthrough "$@"
+fi
+
+# ---------------------------------------------------------------------------
+# Classification. Each rule sets `verdict=refuse` and fills in the diagnostic.
+# ---------------------------------------------------------------------------
+verdict="allow"
+rule=""
+why=""
+instead=()
+
+refuse() {
+  verdict="refuse"
+  rule="$1"
+  why="$2"
+  shift 2
+  instead=("$@")
+}
+
+# --- rule (b): reading a single-slot ref that another agent may have moved ---
+if (( mentions_fetch_head == 1 && refs_shared == 1 )); then
+  refuse "b/fetch-head-read" \
+    "FETCH_HEAD is a single slot in the shared .git directory, not a ref you own. Any agent that fetches between your fetch and your read replaces it, and the read then succeeds against the wrong commit — no error, just a wrong answer." \
+    "git fetch <remote> <ref>:refs/wsguard/${SCION_AGENT_SLUG:-$USER}/<slug>" \
+    "git log refs/wsguard/${SCION_AGENT_SLUG:-$USER}/<slug>"
+fi
+
+if [[ "$verdict" == "allow" ]]; then
+  # NOTE: this switches on $classify_as, not $subcmd, so that an alias is judged
+  # as the command git will actually dispatch. See the alias block above.
+  case "$classify_as" in
+
+    # --- rule (a): commands that overwrite the shared working tree ---------
+    checkout|switch)
+      refuse "a/working-tree" \
+        "\`git $classify_as\` replaces files in this working tree and moves HEAD. The tree is shared (SCION_WORKSPACE_MODE=$mode), so this discards UNCOMMITTED WORK — yours for certain, and anyone else's who is holding some here. A working-tree modification that was never committed is not in the object database and has no reflog entry, so there is nothing to recover it from." \
+        "git show <ref>:<path>            # read a file at another ref" \
+        "git archive <sha> <path> | tar -x -C /tmp/inspect   # read a whole tree" \
+        "git clone --no-hardlinks $guard_root /tmp/mine      # then do as you like there"
+      ;;
+
+    restore)
+      refuse "a/working-tree" \
+        "\`git restore\` discards uncommitted changes in the shared working tree. Changes you did not make are indistinguishable from changes you did, and there is no reflog for a working-tree modification that was never staged." \
+        "git diff -- <path>               # see what you would be discarding" \
+        "git stash push -m '<who>: <why>' -- <path>          # in a repo you own" \
+        "ask the agent whose change it is, in the shared tree"
+      ;;
+
+    reset)
+      refuse "a/working-tree" \
+        "\`git reset\` moves HEAD and rewrites the index in a shared tree (SCION_WORKSPACE_MODE=$mode). --hard additionally discards every uncommitted change present in the tree in one step, whoever made them." \
+        "git revert <sha>                 # undo a commit without moving HEAD backwards" \
+        "git clone --no-hardlinks $guard_root /tmp/mine      # then reset there"
+      ;;
+
+    clean)
+      clean_dry=0
+      clean_force=0
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        case "$tok" in
+          --) break ;;
+          --dry-run) clean_dry=1 ;;
+          --force)   clean_force=1 ;;
+          --*) ;;
+          -?*)
+            chars="${tok#-}"
+            for (( k = 0; k < ${#chars}; k++ )); do
+              case "${chars:k:1}" in
+                n) clean_dry=1 ;;
+                f) clean_force=1 ;;
+              esac
+            done
+            ;;
+        esac
+      done
+      if (( clean_force == 1 || clean_dry == 0 )); then
+        refuse "a/working-tree" \
+          "\`git clean\` deletes untracked files outright. In a shared tree those files are other agents' scratch work, notes, and half-written code, and they are not in any object database — a clean is the one destructive git operation with no recovery path at all." \
+          "git clean -n                     # permitted: says what it would delete" \
+          "git status --porcelain           # permitted: shows who is holding what"
+      fi
+      ;;
+
+    stash)
+      # Breaks at `--` like every other verb scan. It was the only one of the
+      # five that did not, and gd-wsg-rev-2 could not build a fixture where it
+      # changed the verdict — the default here is refusal, so a pathspec read
+      # as a verb can only fail towards refusing. It is fixed anyway, because
+      # "the inconsistent one is the safe one" is an argument that stops being
+      # true the moment the default changes, and nobody rereads the loop then.
+      stash_verb=""
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        case "$tok" in
+          --) break ;;
+          -*) ;;
+          *) stash_verb="$tok"; break ;;
+        esac
+      done
+      case "$stash_verb" in
+        list|show) ;;
+        *)
+          refuse "a/working-tree" \
+            "\`git stash\` removes the working-tree changes of every agent in this project, not just yours, and drops them into one shared stack where nobody else knows to look for them." \
+            "git stash list                   # permitted" \
+            "git stash show                   # permitted" \
+            "git diff > /tmp/mine.patch       # keep your own changes without moving anyone else's"
+          ;;
+      esac
+      ;;
+
+    branch)
+      branch_destructive=""
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        case "$tok" in
+          --) break ;;
+          --delete) branch_destructive="--delete" ;;
+          --move)   branch_destructive="--move" ;;
+          --force)  branch_destructive="--force" ;;
+          --*) ;;
+          -?*)
+            chars="${tok#-}"
+            for (( k = 0; k < ${#chars}; k++ )); do
+              case "${chars:k:1}" in
+                d|D) branch_destructive="-${chars:k:1}" ;;
+                m|M) branch_destructive="-${chars:k:1}" ;;
+                f)   branch_destructive="-f" ;;
+              esac
+            done
+            ;;
+        esac
+      done
+      if [[ -n "$branch_destructive" ]]; then
+        # The justification here was WRONG, and wrong in a specific way worth
+        # recording: it read "a ref namespace that every agent in this project
+        # shares". gd-pkg-rep measured it. refs/heads in a container holds ~2
+        # names, all local, none belonging to another agent, while the shared
+        # namespace — one origin URL, 510 branches under refs/heads/scion/* —
+        # is reached by `push`, which this rule does not touch. THE STATED
+        # REASON WAS TRUE OF A DIFFERENT OPERATION THAN THE ONE BEING GUARDED.
+        #
+        # The refusal is kept, because the narrower ground is real and is the
+        # one that bit this project: an unpushed commit reachable only from the
+        # name you are deleting has nothing else pointing at it. The shared-
+        # namespace reasoning moved to rule (c) below, where it bites.
+        refuse "a/local-refs" \
+          "\`git branch $branch_destructive\` deletes, renames or force-moves a branch, and a commit reachable only from that name has nothing else pointing at it. If it was never pushed, the branch name IS the backup. (Narrower than this guard used to claim: refs/heads was measured and holds only local branches, so this is about losing YOUR OWN work, not another agent's. The shared namespace is the remote, and it is guarded separately on push.)" \
+          "git branch                       # permitted: listing" \
+          "git branch <new-name> <sha>      # permitted: creating" \
+          "ask the branch's owner before removing or moving it"
+      fi
+      ;;
+
+    # `git rm` deletes files from the working tree, not merely from the index.
+    # Filed as R3 by gd-wsg-rev and reproduced: `git rm -f tracked.txt` returned
+    # 0 and the file was gone, uncommitted content and all. It belongs with
+    # `clean` — an outright deletion — and it was simply missing from the
+    # watched set.
+    #
+    # --cached is the discriminating flag, measured rather than assumed: with
+    # --cached the file survived in the working tree, so that form is permitted
+    # exactly as `clean -n` is.
+    rm)
+      rm_cached=0
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        case "$tok" in
+          --) break ;;
+          --cached) rm_cached=1 ;;
+        esac
+      done
+      if (( rm_cached == 0 )); then
+        refuse "a/working-tree" \
+          "\`git rm\` DELETES THE FILE FROM THE WORKING TREE, not just from the index, and it does so without asking. Anything uncommitted in that file goes with it and is in no object database. In a shared tree (SCION_WORKSPACE_MODE=$mode) the file may not be yours at all." \
+          "git rm --cached <path>           # permitted: unstages, leaves the file" \
+          "git status --porcelain -- <path> # permitted: see whether it is dirty first"
+      fi
+      ;;
+
+    # Two plumbing commands that overwrite the working tree, filed by
+    # gd-wsg-rev-2 as F3 and explicitly downgraded to FYI on the grounds that
+    # nobody reaches them by accident and this guard is an instrument against
+    # accidents. That reasoning is right about the operator and wrong about the
+    # caller: a shell script, a Makefile or another agent's tooling reaches
+    # plumbing on purpose and destroys a shared tree just as thoroughly, and the
+    # guard cannot tell which one is holding the terminal. They cost four lines
+    # each, so the cheaper thing is to close them than to argue the exposure.
+    #
+    # The discriminating flags are MEASURED, not assumed, exactly as --cached
+    # was for `rm`:
+    #
+    #     git checkout-index -a           rc=1, content DIRTY      -> permitted
+    #     git checkout-index -f -a        rc=0, content COMMITTED  -> refused
+    #     git read-tree HEAD              rc=0, content DIRTY      -> permitted
+    #     git read-tree -u --reset HEAD   rc=0, content COMMITTED  -> refused
+    #
+    # `-u` is the whole of the read-tree test: without it read-tree touches the
+    # index only, and the working tree is what this rule protects.
+    checkout-index)
+      ci_force=0
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        case "$tok" in
+          --) break ;;
+          --force) ci_force=1 ;;
+          --*) ;;
+          -?*)
+            chars="${tok#-}"
+            for (( k = 0; k < ${#chars}; k++ )); do
+              [[ "${chars:k:1}" == "f" ]] && ci_force=1
+            done
+            ;;
+        esac
+      done
+      if (( ci_force == 1 )); then
+        refuse "a/working-tree" \
+          "\`git checkout-index -f\` overwrites files in the shared working tree from the index, with no confirmation and no report of what it replaced. Without -f it refuses to overwrite an existing file — measured — so the force flag is the whole of the hazard." \
+          "git checkout-index -a            # permitted: will not overwrite what is there" \
+          "git checkout-index --prefix=/tmp/mine/ -a -f       # write the tree somewhere you own"
+      fi
+      ;;
+
+    read-tree)
+      rt_worktree=0
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        case "$tok" in
+          --) break ;;
+          --*) ;;
+          -?*)
+            chars="${tok#-}"
+            for (( k = 0; k < ${#chars}; k++ )); do
+              [[ "${chars:k:1}" == "u" ]] && rt_worktree=1
+            done
+            ;;
+        esac
+      done
+      if (( rt_worktree == 1 )); then
+        refuse "a/working-tree" \
+          "\`git read-tree -u\` updates the shared WORKING TREE to match the tree it reads, and with --reset it does so discarding whatever was there. Without -u it rewrites the index only and the tree is untouched — measured — which is why -u is the discriminator." \
+          "git read-tree <tree>             # permitted: index only, tree untouched" \
+          "git archive <tree> | tar -x -C /tmp/inspect        # materialise it somewhere you own"
+      fi
+      ;;
+
+    # --- rule (c): the operations that reach the SHARED remote namespace ----
+    #
+    # This rule exists because of a measurement, not a theory. The shared-
+    # namespace justification was originally attached to `branch -D`, which
+    # cannot reach the remote at all. Measured by gd-pkg-rep: one origin URL,
+    # 510 branches under refs/heads/scion/*, against a local refs/heads holding
+    # 2 private names.
+    #
+    # Bound, kept deliberately in the code and not only in the notes: at the
+    # time of measurement 0 of 4 sampled agent branches existed on the remote,
+    # so this risk is UNREALIZED, not disproven. That is a fact about push
+    # history at 12:04 on 2026-08-17, not a clearance for the future.
+    #
+    # THE REMAINING GAP, STATED WHERE IT IS ACTUALLY TRUE. Rule (c) is scoped to
+    # $guard_root like every other rule, so a force-push issued from a private
+    # clone somewhere ELSE on disk is not covered. Closing that would mean
+    # resolving and comparing remote URLs on every invocation, or refusing in
+    # repositories that have nothing to do with this project, and gd-wsg-rev-2
+    # ruled both worse than a stated gap.
+    #
+    # The label used to be attached one step too wide. It read as though it also
+    # covered the case where the workspace mode is private, and it did not: the
+    # rule was armed on refs_shared, so `clone-per-agent` and an unset mode were
+    # unguarded for force-push INSIDE the guarded root — which the stated reason
+    # does not describe at all. That is fixed at the arming site above, where
+    # rule (c) now has its own unconditional flag. A LABEL THAT DOES NOT COVER
+    # THE CASE IT IS READ AS COVERING IS WORSE THAN NO LABEL, for the same
+    # reason a bound with a wrong reason attached is worse than an arbitrary
+    # one: both tell the next reader the ground has been checked.
+    #
+    # Only the forms that can destroy someone else's ref are refused. A plain
+    # push, and a --force-with-lease, are permitted: the lease is precisely the
+    # mechanism that refuses to overwrite a ref you have not seen, so it is the
+    # alternative offered rather than another thing to block.
+    push)
+      push_destructive=""
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        case "$tok" in
+          --) break ;;
+          --force-with-lease|--force-with-lease=*|--force-if-includes) ;;
+          --delete) push_destructive="--delete" ;;
+          --force)  push_destructive="--force" ;;
+          --mirror) push_destructive="--mirror" ;;
+          --*) ;;
+          -?*)
+            chars="${tok#-}"
+            for (( k = 0; k < ${#chars}; k++ )); do
+              case "${chars:k:1}" in
+                d) push_destructive="-d" ;;
+                f) push_destructive="-f" ;;
+              esac
+            done
+            ;;
+        esac
+      done
+      if [[ -n "$push_destructive" ]]; then
+        refuse "c/shared-remote" \
+          "\`git push $push_destructive\` acts on the ONE namespace that is shared no matter how your workspace is provisioned. A private clone does not make the remote private: measured, this project has a single origin and 510 branches under refs/heads/scion/*. A deleted or force-overwritten remote branch may be the only copy of another agent's work, and unlike a local ref there is no reflog of yours to recover it from." \
+          "git push --force-with-lease      # permitted: refuses to clobber a ref you have not seen" \
+          "git push origin <your-branch>    # permitted: fast-forward to your own name" \
+          "ask the branch's owner before deleting or force-overwriting their name"
+      fi
+      ;;
+
+    # --- rule (b): a fetch whose only record is the shared FETCH_HEAD slot --
+    fetch)
+      fetch_multiple=0
+      positionals=()
+      skip_next=0
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        if (( skip_next == 1 )); then
+          skip_next=0
+          continue
+        fi
+        case "$tok" in
+          --multiple) fetch_multiple=1 ;;
+          --depth|--deepen|--shallow-since|--shallow-exclude|--negotiation-tip|--upload-pack|--refmap|--server-option|--filter|--jobs|-j|-o)
+            skip_next=1 ;;
+          -*) ;;
+          *) positionals+=("$tok") ;;
+        esac
+      done
+      if (( fetch_multiple == 0 && ${#positionals[@]} >= 2 )); then
+        for (( k = 1; k < ${#positionals[@]}; k++ )); do
+          case "${positionals[k]}" in
+            *:*) ;;
+            *)
+              refuse "b/fetch-head-write" \
+                "\`git fetch <remote> ${positionals[k]}\` records its result only in FETCH_HEAD, a single slot in the shared .git directory. A concurrent fetch by another agent overwrites it between your fetch and your read, and the read cannot tell. Name a destination ref and the race disappears." \
+                "git fetch ${positionals[0]} ${positionals[k]}:refs/wsguard/${SCION_AGENT_SLUG:-$USER}/${positionals[k]##*/}" \
+                "git log refs/wsguard/${SCION_AGENT_SLUG:-$USER}/${positionals[k]##*/}"
+              break
+              ;;
+          esac
+        done
+      fi
+      ;;
+  esac
+fi
+
+[[ "$verdict" == "allow" ]] && passthrough "$@"
+
+# ---------------------------------------------------------------------------
+# Refused. Print the diagnostic, then consider the override.
+# ---------------------------------------------------------------------------
+{
+  echo "wsguard: REFUSED [$rule] — this command WAS NOT RUN."
+  echo "wsguard:"
+  echo "wsguard:   \$ git $*"
+  echo "wsguard:"
+  echo "wsguard: repository : $toplevel"
+  echo "wsguard: guarded    : $guard_root (SCION_WORKSPACE_MODE=${mode:-unset}${forced:+, SCION_WSGUARD_FORCE=$forced})"
+  # Without this line a refusal of `git a` talks about `git checkout`, a word
+  # the operator never typed and cannot find in their own command.
+  if [[ -n "$alias_of" ]]; then
+    echo "wsguard: alias      : \`$alias_of\` resolves to \`$classify_as\` after $alias_hops expansion(s)"
+  fi
+  # Say so when the verdict rests on the SECOND reading of argv, so that the
+  # operator can see the guard did not simply misread their command: it could
+  # not tell whether the option before it takes a value, and judged both ways.
+  if (( via_union == 1 )); then
+    echo "wsguard: reading    : \`${argv[sub_idx-1]}\` is not an option this guard knows the shape of,"
+    echo "wsguard:              so both \`${cand_sub[0]}\` and \`$subcmd\` were classified and the"
+    echo "wsguard:              guarded one decided it. If that is wrong, the fix is to teach"
+    echo "wsguard:              opt_takes_value/opt_takes_no_value about it, not to widen the rule."
+  fi
+  echo "wsguard:"
+  printf 'wsguard: %s\n' "$why"
+  echo "wsguard:"
+  echo "wsguard: Instead:"
+  for line in ${instead[@]+"${instead[@]}"}; do
+    echo "wsguard:   $line"
+  done
+} >&2
+
+override="${SCION_WSGUARD_OVERRIDE:-}"
+if [[ -z "$override" ]]; then
+  {
+    echo "wsguard:"
+    echo "wsguard: If you have decided you need this anyway, say why and it will be"
+    echo "wsguard: permitted and recorded:"
+    echo "wsguard:"
+    echo "wsguard:   SCION_WSGUARD_OVERRIDE='<why, in a sentence>' git $*"
+  } >&2
+  exit "$EX_REFUSED"
+fi
+
+if (( ${#override} < 12 )); then
+  {
+    echo "wsguard:"
+    echo "wsguard: SCION_WSGUARD_OVERRIDE was set to '$override', which is not a reason."
+    echo "wsguard: An override that does not say why is worth nothing to whoever reads"
+    echo "wsguard: the audit log afterwards. Give at least 12 characters of prose."
+    echo "wsguard: The command WAS NOT RUN."
+  } >&2
+  exit "$EX_REFUSED"
+fi
+
+audit_log="${SCION_WSGUARD_AUDIT:-$guard_root/.git/wsguard-audit.log}"
+
+# One TSV field. Three of the five fields below are attacker-controlled —
+# $override is free text the caller wrote, `git $*` is the caller's argv, and
+# SCION_AGENT_NAME/USER are environment — and a tab or a newline inside any of
+# them forges a new COLUMN or a whole new ROW. This log's only job is to say
+# who overrode what; an override that can append a plausible line attributing
+# a different command to a different agent makes it worse than no log, because
+# it is a log someone will believe. Flagged by gd-wsg-rev-3.
+#
+# The backslash is escaped FIRST. Doing it last would rewrite the backslashes
+# this function just introduced, and a literal `\t` typed by the caller would
+# become indistinguishable from a tab that was escaped — the mapping has to
+# stay injective or a reader cannot undo it.
+tsv_field() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  printf '%s' "$s"
+}
+
+audit_line="$(date -u '+%Y-%m-%dT%H:%M:%SZ')	$(tsv_field "${SCION_AGENT_NAME:-${USER:-unknown}}")	$rule	$(tsv_field "$override")	$(tsv_field "git $*")"
+audit_status=0
+printf '%s\n' "$audit_line" >>"$audit_log" || audit_status=$?
+
+{
+  echo "wsguard:"
+  echo "wsguard: OVERRIDDEN. Proceeding because SCION_WSGUARD_OVERRIDE says:"
+  echo "wsguard:   $override"
+  if (( audit_status == 0 )); then
+    echo "wsguard: Recorded in $audit_log"
+  else
+    echo "wsguard: COULD NOT RECORD this override in $audit_log (append exited $audit_status)."
+    echo "wsguard: Proceeding anyway, but the only account of this is the line above,"
+    echo "wsguard: in a terminal nobody else can read. Report it yourself."
+  fi
+} >&2
+
+passthrough "$@"
