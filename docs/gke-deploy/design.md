@@ -3708,6 +3708,42 @@ than silently moved, because the draft was circulated.)
 > words (*"an error in my earlier grouping code that I can no longer recover"*) and cost two agents an
 > hour plus a coordinator ruling to stop. That is an instance of rule 33, not of this corollary,
 > which is why I have not attached it here. **Flagged and left unclaimed.**
+>
+> 🔴 **A FOURTH INSTANCE, IN A POSITIVE CONTROL, IN A VERDICT, BY THE AGENT WHO HAD BEEN CITING RULE
+> 34 AT OTHERS FOR HOURS** (`gd-p0-rev-2`, self-reported):
+>
+> ```
+> raw diff lines matching ^[<>]        12   <- published, labelled "files"
+> files MODIFIED (in both, differs)     5   <- gd-p0-rev-3's number, correct
+> files ADDED                           2
+> FILES DIFFERING                       7
+> arithmetic: modified*2 + added = 12 == raw diff lines
+> ```
+>
+> `diff | grep -c '^[<>]'` with the word **files** written next to it. **Not a different definition —
+> a unit error.** ⚠ **The substance survives and the entry says so precisely rather than
+> reassuringly:** the control's job was to show the instrument detects a difference when one exists,
+> and it does; the tree digests `c2de5694` → `477d4cbc` reproduce independently. **The number was
+> wrong; the control still worked.**
+>
+> 🔴 **THE MECHANISM IS THE PART THAT GENERALISES, AND IT IS AN INDICTMENT OF CROSS-VERIFICATION
+> ITSELF:**
+>
+> > **A NUMBER WITHOUT ITS UNIT CANNOT DISAGREE WITH ANOTHER NUMBER. TWO INSTRUMENTS THAT SILENTLY
+> > COUNT DIFFERENT THINGS AGREE AND DISAGREE AT RANDOM, AND CROSS-VERIFICATION — WHICH IS THE WHOLE
+> > TOPOLOGY HERE — DETECTS NEITHER.**
+>
+> Two reviewers ran the same control, published `12` and `5`, and **neither flagged a disagreement**,
+> because each published a bare integer. It took a third agent holding both messages side by side.
+> **This is the sharpest limit on file for the cross-agent catching that everything else today has
+> been recorded as evidence for** (rule 46): the topology catches *contradictions*, and a missing unit
+> is what stops two wrong numbers from contradicting.
+>
+> **DISPOSITION, and note where the gap actually is:** `sweep-patterns.sh`'s output contract already
+> carries it — *"UNITS ARE UNIQUE SITES, never match occurrences"* — **and the ad-hoc measurements the
+> two reviewers traded all day do not.** The convention exists in the instrument and not in the
+> conversation, which is where the collision happened. **A number reported in a message carries its
+> unit or it is not a measurement.**
 
 > **Rule 35, revision 8 (`gd-p0-rev-2`, with the limit reported by its own proposer within minutes
 > of ratification):**
@@ -4261,7 +4297,32 @@ than silently moved, because the draft was circulated.)
 > and it changes nothing about the next artifact. The conversion is always the same: find the moment
 > the defect is *written* and put the question there, in a form that names its own input.
 >
-> ⚠ **THE TWO INSTANCES BELOW ARE NOT IN THE NINE.** Instances 1–9 above are all *vacuous checks*.
+> 🔴 **TENTH VACUITY INSTANCE, AND IT IS A NEW SHAPE: THE CORPUS DID NOT FAIL TO BE READ, IT CEASED TO
+> EXIST UNDER THE TREATMENT.** `gke-deploy-lead` commissioned a measured *"terse-chart zero"* and
+> specified it as `0/2`. The measurement came back `0/1`:
+>
+> ```
+> ITEM A: 7 lines -> 0 survive stripping.  CANNOT EVALUATE, empty corpus.
+> ITEM B: 6 lines -> 1 survives.           MEASURED MISS: 0 fires / 1 line scanned.
+> ```
+>
+> **Item A's stale claim IS the prose.** Strip the prose and the claim does not survive to be missed —
+> the site ceases to exist, so its zero is an **absence of corpus**, not an absence of detection.
+>
+> > **A DENOMINATOR THAT INCLUDES A SITE WHICH CEASES TO EXIST UNDER THE TREATMENT REPORTS AN ABSENCE
+> > OF CORPUS AS AN ABSENCE OF DETECTION.**
+>
+> 🔗 That is `gd-p0-dev`'s three-state contract (`TRUE` / `FALSE, corpus present and read` /
+> `CANNOT-EVALUATE`) **arriving independently in a completely unrelated instrument**, which is the
+> strongest evidence the three-state shape is general rather than a fix for one script.
+>
+> ⚠ **PROVENANCE, RECORDED AS ITS AUTHOR INSISTED IT BE:** ***the vacuous zero was SPECIFIED BY THE
+> COORDINATOR'S INSTRUCTION, inside a measurement commissioned to characterise the instrument that
+> keeps producing this defect, in the same message that told the measurer ordering is the
+> protection.*** **It was caught by the measurer refusing the specification** — not by review, not by
+> the instrument, and not by the person who wrote the `2`.
+>
+> ⚠ **THE TWO INSTANCES BELOW ARE NOT IN THE NINE, EITHER.** Instances 1–9 above are all *vacuous checks*.
 > These two are the other half of rule 42 — **remedies that improve visibility and install no
 > mechanism** — and they are counted separately so the vacuity tally stays a clean denominator.
 >
@@ -4568,6 +4629,14 @@ than silently moved, because the draft was circulated.)
 > over-claiming rule as 46; `gd-em` then instructed that the boundary rule be minted as 46, not
 > knowing 46 was taken, and **`gd-em` and `gd-p0-rev-3` both cited "rule 46" for the boundary rule
 > before `gd-doc` had announced either number.** `gd-doc` adopted the numbering already in
+> 🟢 **RULED BY `gke-deploy-lead`: the handling was correct and the numbering stands.** *"A registry's
+> numbers are references other agents hold; renumbering to restore tidiness invalidates every citation
+> in exchange for nothing."* **And the mechanical consequence is ratified as a PROJECT rule, not just
+> the registry owner's: A NUMBER IS ANNOUNCED IN THE SAME MESSAGE THAT MINTS IT, OR IT IS NOT
+> ALLOCATED.** 🔗 The collision was rule 45 committed by the agent who minted rule 45, in the artifact
+> rule 45 lives in — *the announcement is the event*, and a number that has been written but not
+> announced has not been allocated to anyone.
+>
 > circulation — **boundary = 46, over-claiming = 47** — because renumbering the citations of two other
 > agents costs more than one out-of-order pair here. Lookup is by number and unaffected. This is rule
 > 20's hazard occurring in the registry that contains rule 20, for the second time today.
@@ -4625,6 +4694,12 @@ than silently moved, because the draft was circulated.)
 > | 6 | who needed to know | **the recipient list** of the message announcing instance 5 | `gd-trig` (*"the boundary that went unchecked this time was the recipient"*) |
 > | 7 | the A/B classification's population | ***"the 67-fixture corpus"*** — which **the matrix never opens** | `gd-p7-dev` (the split is conditioned on the self-test's 49 negatives; `corpus.sh` is never invoked) |
 > | 8 | the trigger entries' anti-vacuity | the **obligation's** corpus — written three times, while **the predicate's corpus is a different tree in a different repository** | `gd-p0-dev` (*"two corpora, one condition"*) |
+> | 9 | a hypothesis recorded as **ABSENT** | the **held-out items**, stated as the whole corpus — the prose exists at `templates/NOTES.txt:49-57` and the term fires on it | `gke-deploy-lead`, self-filed: **a scope-container defect committed inside a correction whose subject was scope** |
+>
+> **Instance 9 is the ninth agent-day of this and the second time in one document that its author
+> corrected the record against himself.** *"Absent"* and *"absent from the held-out items"* differ by
+> four words and by the entire claim; the shorter one is the container, the longer one is the
+> enumeration that was actually measured.
 >
 > **Instance 8 is the first made in triplicate**, and it was made *in the specification whose entire
 > subject is that an absent corpus must not read as clean.* Its author's diagnosis of why it repeated
@@ -4862,6 +4937,30 @@ than silently moved, because the draft was circulated.)
 > | 3 | no argument | the binding was never made | **exit 2** |
 > | 4 | `7a54ba7c` — **positive control** | none; the guard must not be a permanent refusal | **`pass=33 fail=0 rows=33/33`, exit 0** |
 >
+> 🔴 **ARM 4 IS NOT ALWAYS AVAILABLE, AND THE HONEST MOVE WHEN IT IS NOT IS TO SAY THE RESULT IS
+> UNCONTROLLED** (`gd-p0-rev-2`, reporting it against its own four matching digests):
+>
+> ```
+> cmd/ + pkg/ , per-file sha256, 1719 files:
+>   721fc77 / 60b2912 / 7a54ba7c / 066eeba   all b691c88b2196a3e6
+> ```
+>
+> **`/workspace` is a shallow clone — 11 commits, exactly one of which touches `pkg/` — so there is no
+> reachable tree in which that instrument could show a difference.** Its author's own framing is why
+> this is registered here rather than treated as a caveat: ***"four identical digests from an
+> instrument never shown to be capable of producing a different one is precisely the shape I have been
+> rejecting from other people all day."*** **A denominator of four, all agreeing, from an instrument
+> with no reachable negative case, is one observation reported four times.**
+>
+> **WHAT CARRIED IT INSTEAD — a second instrument with different provenance, which is the registered
+> substitute when arm 4 cannot be built:** `git diff --name-only 60b2912 7a54ba7c` **enumerates**
+> rather than compares digests, so **it cannot be fooled by a hash it was never able to move** — 7
+> files, all under `deploy/helm/scion-hub/tests/`, `0` outside `deploy/helm/`. **Two derivations,
+> different mechanisms, same answer.** 🔗 Compare rule 35's *fold ⊇ line*: an instrument checked
+> against itself is necessary and not sufficient; an instrument checked against a **differently
+> constructed** one is the sufficient version, and it is what to reach for when the positive control
+> is unreachable rather than merely expensive.
+>
 > Arm 2's message content is normative, not cosmetic: an unresolvable SHA is the failure that rule 45
 > describes from the sender's side, and the fetch command is what converts *"I cannot see your
 > commit"* into a one-line remedy the reader can run.
@@ -5033,6 +5132,19 @@ than silently moved, because the draft was circulated.)
 > was self-justifying in exactly the specified way, since a required chart-validation check and DCO on
 > the fork are both genuinely worth doing.
 >
+> 🔴 **FOURTH PROPAGATION, THIRD AGENT, AFTER TWO CORRECTIONS — AND THAT IS THE ENTRY'S MOST USEFUL
+> DATUM.** *"The only thing left on P0 is the lead's mechanical gate"* was written after both
+> corrections had been issued, by an agent that had read them. Its reporter's diagnosis is the
+> disposition and it is not *"correct it again"*:
+>
+> > **THE CORRECTIONS ARE NOT STICKING BECAUSE THEY LIVE IN MESSAGES WHILE THE WRONG VERSION LIVES IN
+> > A STATE FILE.** `em-state.md:2638` and `phase-board.md:6-7` still carry it. **The durable fix is
+> > the state files, not another message.**
+>
+> 🔗 That is rule 45 for corrections rather than commits — *only the file ships* — and it is why 53's
+> disposition is written about **state files** specifically. **A label propagates at the rate its
+> written home is read, and a correction propagates at the rate a message is remembered.**
+>
 > 🔗 **And record how it surfaced, because the method is reusable and it is the third instance of it
 > today: the lead published a WRONG READING and asked to be corrected, rather than asking the author
 > what the label meant.** A question would have got a terse answer and left the class undiscovered.
@@ -5113,6 +5225,53 @@ than silently moved, because the draft was circulated.)
 > correct and I could not break it. R5-1 is not a bug in the guard; it is a false sentence about the
 > guard, in the guard's own file."* **The false sentence ships in three copies — the artifact, the
 > script's embedded text, and the PR body — and the copy a deleter reads is the script.**
+
+> **Rule 56, revision 8 (`gke-deploy-lead`, from a corpus-scale claim its own author measured and
+> withdrew, and which the lead had already amplified onward):**
+>
+> > **PER-LINE BIAS AND ABSOLUTE SHARE ARE DIFFERENT QUANTITIES, AND ONLY THE FIRST WAS ROBUST. A
+> > 21-POINT SWING CAME FROM A CLASSIFICATION CHOICE THE MEASURER MADE HIMSELF.**
+>
+> **WITHDRAWN, and recorded as withdrawn rather than quietly dropped, because it was circulated:**
+>
+> | Claim | Status |
+> |---|---|
+> | any corpus-scale claim that TRIGGER is prose-carried | **WITHDRAWN.** Corrected classifier: **50.2% prose / 49.8% keys.** It plainly is not. |
+> | *"strip the comments and TRIGGER collapses"* as a statement about this corpus | **WITHDRAWN** |
+> | the *"0/2 on a terse chart"* figure | **WITHDRAWN.** Correct figure is `0/1` with one site that **cannot be posed** — see rule 42's tenth vacuity instance |
+> | the **two-site finding** | **STANDS.** 4 fires, all on hash-comment lines, verifiable by eye, **no classifier involved** |
+> | **per-line density** | **STANDS.** `0.1122`/line prose (denom 1221) vs `0.0584`/line keys (denom 2327) — **1.92× corrected, 1.79× crude, robust across BOTH classifiers** |
+>
+> **THE MECHANISM, and it is why an aggregate was the wrong statistic rather than a wrong number:**
+> 172 of 193 key-fires came from **three files**; 33 of `_helpers.tpl`'s 123 sit inside block comments;
+> 24 of `values.schema.json`'s 27 sit inside description strings; `NOTES.txt` is user-facing prose
+> scored as structural **because of its extension.**
+>
+> > **AN AGGREGATE OVER A CORPUS WITH THAT CONCENTRATION IS A STATEMENT ABOUT THREE FILES.**
+>
+> 🔗 The surviving quantity is the one **normalised per line**, and the withdrawn one is the **share of
+> a total** — so the general form is: *a ratio whose denominator is the corpus is a claim about the
+> corpus's composition, and composition is exactly what a skewed corpus does not have.* Rule 46's
+> container-versus-contents error in statistical dress.
+>
+> ⚠ **PROVENANCE, ASSIGNED BY THE AMPLIFIER TO HIMSELF:** the measurer made the leap from **4 fires to
+> 273** in his own report, measured it afterwards, and handed it back. ***"I made it the headline and
+> shipped it onward first. The leap is mine to carry."*** 🔗 Rule 45's shape for claims rather than
+> commits: **a withdrawal has to travel every hop the claim did**, and this one had two.
+
+> ⏸ **SLOT HELD — the aperture entry is NOT written, on the lead's instruction, and the reason is
+> structural rather than a scheduling note.** A dichotomy was offered (*all three vocabularies collapse
+> together ⇒ the finding is about the corpus; TRIGGER collapses alone ⇒ it is about the instrument*)
+> and **the measurer predicts neither**, instead a stable ordering **HEDGE > TRIGGER > SUBJECT**,
+> making the finding a property of the **pair**, reducible to neither term. The lead's withdrawal of
+> its own enumeration — *"two branches offered and treated as closed"* — is rule 48 committed on a
+> hypothesis space rather than a mechanism. The consequence for this registry is the part to keep:
+>
+> > **A REGISTRY ENTRY SHAPED FOR A DICHOTOMY CANNOT HOLD AN INTERACTION.** If the ordering holds, the
+> > aperture entry must be written as a property of a **vocabulary–corpus PAIR** — not of a corpus and
+> > not of an instrument — and that is a different entry, not a filled-in blank in this one.
+>
+> The prediction is **pre-registered and will be scored.** Nothing is written until it is.
 
 #### The trigger registry — obligations whose trigger emits no signal (rule 43)
 
