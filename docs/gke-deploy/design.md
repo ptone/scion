@@ -4466,12 +4466,46 @@ than silently moved, because the draft was circulated.)
 > > PULL IN OPPOSITE DIRECTIONS, AND THIS PROJECT ADOPTED THE FIRST WITHOUT NOTICING IT WEAKENS THE
 > > SECOND.**
 >
-> **CORRECTED TEST:** not *"does this change their corpus"* but ***"is anyone waiting on something this
-> message contains"*** — and since the sender frequently cannot know, **the cheap fix is to CC the
-> party your message ANSWERS, even mid-round.** ⚠ Its reporter's own caveat is why this is registered
+> **FIRST CORRECTED TEST** (`gd-p0-dev`): not *"does this change their corpus"* but ***"is anyone
+> waiting on something this message contains"*** — and since the sender frequently cannot know, CC the
+> party your message ANSWERS, even mid-round. ⚠ Its reporter's own caveat is why this is registered
 > rather than noted: *"I only caught it because I happened to be on both lists, which is not a
-> control."* 🔗 Read against rule 42: recipient derivation is a good discipline whose failure mode is
-> **nobody noticed**, and the remedy is a rule about who must be on the list, not more care about it.
+> control."*
+>
+> 🔴 **AND THAT TEST IS SUPERSEDED WITHIN FOUR MINUTES BY THE AGENT THAT COMMITTED THE OMISSION, ON
+> THE GROUND THAT THE SENDER CANNOT RUN IT** (`gd-p0-rev-3`, self-filed):
+>
+> > **A TEST THE SENDER CANNOT EVALUATE IS NOT A TEST.** Applied honestly at 08:48 it *still* omits
+> > `gd-p0-rev-2`: the only signal available was the lead's *"gd-p0-rev-2 has APPROVED P0"*, which
+> > reads as **finished**, not **waiting**.
+>
+> **THE DECIDABLE VERSION PRICES THE TWO ERRORS INSTEAD OF GUESSING THE TWO STATES, AND IT IS THE
+> REGISTERED FORM:**
+>
+> > **AN OMISSION CARRIES NO SIGNAL TO THE OMITTED PARTY.** A wrong CC costs one second of reading
+> > **and announces itself.** A wrong omission costs an agent its progress and is **undetectable from
+> > inside** — the blocked party cannot distinguish *"the answer does not exist yet"* from *"the answer
+> > exists and I was not sent it."* **The convention prices these as symmetric and they are not within
+> > an order of magnitude.**
+> >
+> > **Sender-evaluable rule, requiring no knowledge of anyone's state: WHEN THE INCLUDE IS IN DOUBT,
+> > INCLUDE.** Recipient-derivation prunes the **clearly uninvolved**, never the **plausibly waiting.**
+>
+> ⚠ **The convention was calibrated to the cheaper failure and then let loose on the more expensive
+> one.** It was built to fix **noise**, whose cost is seconds of reading; it produced **blocking**,
+> whose cost is an agent held. That is why the disposition is a **default direction** rather than a
+> judgement to make at send time.
+>
+> ⚠ **The stated reason was produced to fit a decision the convention had already made**, and its
+> author says so: *"I did not ask whether rev-2 wanted the message; I asserted it did not need it,
+> about a party whose state I had not measured."* — **rule 48 in the recipient list**, and the header
+> asserting the omission was justified is the evidence against it. Also declined, and recorded because
+> declining it is the honest move: the same author's next message *did* CC `gd-p0-rev-2`, **and that
+> happened because the intervening message made rev-2 obviously relevant, not because anything had
+> been repaired.**
+>
+> 🔗 Read against rule 42: recipient derivation is a good discipline whose failure mode is **nobody
+> noticed**, and the remedy is a rule about who must be on the list, not more care about it.
 >
 > Instance 1 is its author's own filing and the diagnosis is exact: ***"I treated the push as the
 > event and the announcement as a formality, and in a review topology the announcement IS the
@@ -5005,6 +5039,80 @@ than silently moved, because the draft was circulated.)
 > **A wrong reading is falsifiable in one grep; a question is not falsifiable at all.** Same move as
 > *publish the sweep as a file* (rule 33's fourth convention) and as rule 52's *commit before you
 > read*: in all three, **making the claim concrete enough to be wrong is what produced the finding.**
+
+> **Rule 54, revision 8 (`gd-p7-rev-4`, routed by `gd-em` and recorded as the reviewer's, from the
+> Phase 7 guard-classification matrix):**
+>
+> > **WHEN AN INSTRUMENT'S VERDICT IS UNANIMOUS ACROSS A SUBCLASS OF INPUTS THAT SHARE A STRUCTURAL
+> > FEATURE, THE FIRST HYPOTHESIS IS THAT THE INSTRUMENT CANNOT RETURN THE OTHER ANSWER FOR THAT
+> > SUBCLASS — NOT THAT THE SUBCLASS IS UNANIMOUS.**
+>
+> The classifier's mutation operator is `fail "` → `true "NEUTERED `. **Nine of the 29 guards have the
+> shape `fail "…"` followed by `die`.** Neutering the message leaves the `die`, the script still exits
+> 1, and the classifier reads TYPE-B off *"expected exit 1, got 1."*
+>
+> > **ALL NINE FATAL GUARDS CARRY `hole=0`. THAT IS NOT A FINDING ABOUT THOSE GUARDS. IT IS THE
+> > OPERATOR'S SIGNATURE.**
+>
+> **And the two claims are not the same claim.** TYPE-B is supposed to mean *another rule catches
+> this*; for those nine it means *this rule catches it twice* — and **only one of the two justifies a
+> deletion**, which is the sole purpose the artifact serves. Measured counterexamples: guard 6 (rule
+> 14, heredocs) lets `30-heredoc-plain.Dockerfile` through at exit 0; guard 21 (rule 17) lets both
+> `98-` and `99-onbuild/user-in-arg-hidden-ancestor` through. **At least 14 of 29 open a hole; at most
+> 15 are defence in depth** — against a published *twelve*.
+>
+> 🔴 **THE TELL WAS FREE AND NOBODY LOOKED FOR IT, INCLUDING THE ESCALATING AGENT.** A **perfect
+> correlation between a structural property of the input** (the guard is fatal) **and the instrument's
+> verdict** (`hole=0`), nine of nine, **readable off the shipped artifact with no new measurement.**
+>
+> 🔗 **RULE 42'S FAMILY, ONE TURN OUT, AND THE DISTINCTION IS THE ENTRY'S REASON FOR EXISTING:** 42 is
+> about a check **nobody evaluated**. This is a check that **ran 29 times and was incapable of two
+> outcomes on nine of them.** It produced 29 evaluated results and still had a blind subclass — so
+> asserting the denominator (rule 42's own remedy) would have passed here at `29/29`. **A full
+> denominator is not a full instrument.** 🔗 Rule 49's write-time test reaches it from the other side:
+> the operator never committed what a *hole* would look like for a fatal guard, so it could only
+> report PRESENT-versus-ABSENT of a non-zero exit.
+>
+> **DISPOSITION, and it is deliberately indifferent between the two repairs** (`gd-em`, ruling): either
+> extend the operator so fatal guards become classifiable, **or retain the operator and restate the
+> claim in terms the operator can support** — *"of the 20 non-fatal guards, N open a hole"*, with the
+> nine reported **UNCLASSIFIED, not TYPE-B.**
+>
+> > **NO ROW MAY CARRY A VERDICT THE INSTRUMENT COULD NOT HAVE CONTRADICTED.**
+>
+> ⚠ **A subclass bound reported unprompted by the same reviewer, and it is rule 46 applied correctly
+> for once:** *"eleven TYPE-B guards held"* covers **13 of 17, not 17**, because guards 1–4 are
+> unreachable from any Dockerfile fixture. **Do not restate it as 17.**
+
+> **Rule 55, revision 8 (`gd-p7-rev-4`, and `gd-em` judges it the sharper of the two):**
+>
+> > **THE PROSE KNEW; THE TABLE COULD NOT SEE IT; THE SUMMARY TOOK THE TABLE'S ANSWER.**
+>
+> The same document's re-pointing note says of rule 14: ***"neuter rule 14 → the two plain forms are
+> then ACCEPTED."*** **Accepted is a hole.** The contradicting evidence was **already in the file, in
+> prose**, and the derived summary was written from the derived **table** — so **the one fact the
+> table's schema could not represent was dropped silently at summary time.**
+>
+> 🔴 **THIS IS A HAZARD OF THE DOCUMENT SHAPE, NOT OF THE AUTHOR**, which is why it is registered
+> separately from 54: **any artifact carrying both a narrative and a generated table will have facts
+> the schema cannot hold, and the summariser will read the table** — because the table is the part
+> that looks authoritative and the part that is mechanically complete. **The prose is where the
+> uncomfortable exception lives precisely because the schema had no column for it.**
+>
+> **DISPOSITION:** when a document carries a narrative and a generated table, **the summary is derived
+> from the narrative and reconciled against the table, not the reverse** — and any prose fact the
+> schema cannot represent is called out **as a schema gap**, in the document, where the summariser
+> reads. 🔗 Rule 34 is the same failure at the level of the counting unit; this is it at the level of
+> the reporting schema. 🔗 And it is rule 47's shape once more — *the instrument held the disambiguating
+> information and discarded it* — except here the information was not even in the instrument: it was
+> beside it, in the same file, in a form the pipeline could not consume.
+>
+> ⚠ **The concrete harm names itself and belongs in the entry:** rule 14 is today the **sole defence
+> against fixtures the reviewers wrote specifically to break this script**, and the artifact's only
+> job is to guide deletion decisions. The reviewer's summary of the whole finding: *"The code is
+> correct and I could not break it. R5-1 is not a bug in the guard; it is a false sentence about the
+> guard, in the guard's own file."* **The false sentence ships in three copies — the artifact, the
+> script's embedded text, and the PR body — and the copy a deleter reads is the script.**
 
 #### The trigger registry — obligations whose trigger emits no signal (rule 43)
 
