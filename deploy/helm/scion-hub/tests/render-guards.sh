@@ -162,10 +162,33 @@ reject "--upstream-password"      "names credential material" --set hub.args[0]=
 reject "--x-credential"           "names credential material" --set hub.args[0]=--x-credential=abc
 
 echo "== credential guard, VALUE axis =="
+# 🛑 THESE FIXTURES CARRY A LENGTH, AND THE LENGTH IS LOAD-BEARING. The matcher
+# is under revision to add an entropy/length floor after each prefix, because
+# `sk-[A-Za-z0-9]` with no floor refuses ordinary GKE nodepool names like
+# `sk-pool` - measured, 27 of 138 legitimate renders. A floor makes any fixture
+# SHORTER than the floor render, and this section then goes red.
+#
+# Measured on real helm v3.16.3: with `sk-AAAAAAAAAAAA` (12 characters of body)
+# this row went red under BOTH published candidate matchers, because the
+# proposed floor is 16. The bodies below are sized to real credentials - an
+# OpenAI key is ~48 characters, a GitHub PAT ~36, an AWS access key ID exactly
+# 16 after `AKIA` - so they clear any floor anyone has proposed and they clear
+# the current unfloored matcher too. Verified green at both.
+#
+# 🛑 IF A FLOOR LANDS AND THIS SECTION GOES RED, LENGTHEN THE FIXTURE, DO NOT
+# LOWER THE FLOOR. A test fixture that is shorter than a real credential is a
+# defect in the fixture; lowering the floor to fit it lets tests/ set a security
+# parameter and re-opens the false positive the floor exists to close.
+#
+# These plant through `--set hub.args[0]=` - the ARGV path. That is deliberate
+# and it is why this section exists separately from chart-integrity.sh's E12,
+# which plants through values files onto object surfaces. A values-only corpus
+# cannot reach these rows at all: the gap between those two apertures is where
+# the 12-character fixture above survived unnoticed.
 reject "DSN with userinfo"  "embeds credentials in a URL" --set 'hub.args[0]=--upstream=postgres://scion:hunter2@10.0.0.1/scion'
-reject "ghp_ prefix"        "shape of a credential"       --set 'hub.args[0]=--x=ghp_AAAAAAAAAAAAAAAAAAAA'
-reject "sk- prefix"         "shape of a credential"       --set 'hub.args[0]=--x=sk-AAAAAAAAAAAA'
-reject "AKIA prefix"        "shape of a credential"       --set 'hub.args[0]=--x=AKIAABCDEFGH1234'
+reject "ghp_ prefix"        "shape of a credential"       --set 'hub.args[0]=--x=ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+reject "sk- prefix"         "shape of a credential"       --set 'hub.args[0]=--x=sk-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+reject "AKIA prefix"        "shape of a credential"       --set 'hub.args[0]=--x=AKIAABCDEFGH12345678'
 # A PEM header contains spaces, so the whitespace guard reaches it FIRST. Both
 # are rejections; asserting which message fires keeps the ordering honest rather
 # than letting the credential axis take credit for a catch it did not make.
