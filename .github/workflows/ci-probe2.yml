@@ -1,0 +1,10 @@
+name: CI Probe2 No Filter
+
+on: pull_request
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo
+        run: echo "ci-probe2 no-filter workflow ran"
