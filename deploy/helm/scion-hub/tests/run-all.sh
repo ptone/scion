@@ -105,7 +105,7 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=4
-EXPECTED_ASSERTIONS=107   # 106 + chart-integrity.sh's base-url channel tripwire.
+EXPECTED_ASSERTIONS=168   # 115 + 53 in render-guards.sh: 12 name-axis separator rows (F2), 7 multi-line-leaf rows, 14 anchor-class rows, 4 map-KEY rows, 12 URL-userinfo rows (F3: 7 slash-bearing fire arms, 3 authority-terminator accepts, 1 pinned known false positive, 1 slash redaction-superset arm), and 2 /readyz probe-path rows. Up from 48 by 5 in the NFD-keep matcher commit: +2 reclaimed-FP accept rows (SK-Hynix-pool and akia12345678, the OUT side of the (?i) swap), +1 value-position control paired with the map-KEY reject in the same fixture (R2), +2 /readyz rows (R6). The six prose rows flipped accept->reject in that commit and the short-sk- row flipped accept->reject back to main's polarity, but a flip changes no count - only the verb. The 115 includes reserved-flags.sh at 39, up from 31: 4 shorthand-cluster reject rows and 4 accept rows, of which -y is the EXHAUSTIVE negative set for that axis (four reachable shorthands, three reserved) and -C/x records a boundary the chart deliberately does not guard.
 EXPECTED_FILES=6        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 
 # Enumerated by name, not globbed into a loop. A glob would run whatever is
