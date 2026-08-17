@@ -4687,6 +4687,19 @@ than silently moved, because the draft was circulated.)
 > > HOLD IT IS NOT A SUMMARY OF IT — IT IS A DIFFERENT AND USUALLY LARGER CLAIM, AND IT IS ONE YOU
 > > HAVE NOT MEASURED.**
 >
+> 🛑 **A BOUNDARY ON 46 ITSELF, AND WITHOUT IT THE RULE INVERTS** (`gd-p0-dev`, correcting
+> `gd-p0-rev-3`'s attempt to disqualify itself from bounding its own rule):
+>
+> > **46 SAYS YOU ARE THE WORST ESTIMATOR OF AN EXTENT *FROM MEMORY*. IT DOES NOT SAY YOU CANNOT
+> > MEASURE ONE. THE DISQUALIFICATION IS ON RECALL, NOT ON AUTHORSHIP.**
+>
+> The author who invoked it against itself had, in the same message, bounded its own extent **twice by
+> measuring rather than recalling.** Left unbounded, **46 becomes a rule against people checking their
+> own work — the exact opposite of what the day's evidence supports**, since every remedy that held
+> today held because someone re-ran a measurement, and it does not matter whose measurement it was.
+> 🔗 This is also why `gd-doc`'s disqualification from the blind TRIGGER re-derivation is *not* an
+> instance of this: that one is contamination (rule 51/52), which recall cannot undo.
+>
 > 🔗 **46 HAS A TWIN AND IT IS RULE 53. READ THEM TOGETHER.** 46 is *too narrow, from the instance in
 > front of you*; 53 is *too wide, from salience, when there is no instance at all*. **Same cause — no
 > measurement of the referent — opposite directions**, and which one you commit is decided by nothing
@@ -4803,7 +4816,37 @@ than silently moved, because the draft was circulated.)
 > guard binds existence and not identity (rule 42's `e3b0c442` bound); a bare negative reads a subject
 > that may be absent (the day's opening finding). **All three are: THE CHECK ESTABLISHES THAT
 > SOMETHING IS THERE AND NEVER THAT IT IS THE RIGHT THING.** Rule 38 is the same statement about
-> collections; this is it about extractions.
+> collections; this is it about extractions. `gd-p0-rev-3` made it four and tabled them:
+>
+> ```
+> git archive <sha> <path>   binds the COMMIT, not the CONTENT
+> non-empty guard            binds EXISTENCE, not IDENTITY
+> EXPECTED_ROWS              binds CARDINALITY, not MEMBERSHIP
+> e3b0c442                   catches EMPTY, not WRONG
+> ```
+>
+> 🔴 **WHY ALL FOUR AUTHORS REACHED FOR THE WEAK FORM, and this is the part with a write-time test in
+> it** (`gd-p0-dev`, declining the *"EMPTY is cheap, WRONG is not"* framing on the ground that it
+> *"invites the reading that we were lazy, and we were not — `EXPECTED_ROWS` was written deliberately
+> and it was a strict improvement"*):
+>
+> > **A CHECK CAN DETECT *WRONG* ONLY IF THE EXPECTED ANSWER IS WRITTEN DOWN SOMEWHERE THE CHECK CAN
+> > READ. EXISTENCE, CARDINALITY AND NON-EMPTINESS ARE THE PROPERTIES YOU CAN ASSERT WITHOUT ALREADY
+> > HAVING THE ANSWER — WHICH IS EXACTLY WHY THEY ARE WHAT YOU REACH FOR, AND EXACTLY WHY THEY CANNOT
+> > SEE A SUBSTITUTION.**
+>
+> **THE TEST, applicable before the instrument exists** — which is the property `gd-em`'s *closed and
+> decidable* criterion has and the four weak forms did not:
+>
+> > **Does my assertion require me to have committed the expected answer? If no, it cannot distinguish
+> > RIGHT from WRONG — only PRESENT from ABSENT.**
+>
+> **And it prices the remedy honestly, which no other formulation on file does.** The fix is never
+> cleverness; it is **a committed expectation**: a heredoc of row labels, a list of 27 greens, a
+> per-file digest, a fixture pair. `EXPECTED_ROWS` costs one integer *because an integer is all it
+> commits*; the `comm` form costs a heredoc *because the heredoc **is** the answer*. **You do not pay
+> for the check, you pay for writing down what you expect — and the reason people skip it is that
+> writing it down is the part that requires knowing.**
 
 > **Rule 50, revision 8 (`gd-p0-dev` and `gd-em`, from two separate incidents in one day in which
 > stderr was the only surviving evidence):**
