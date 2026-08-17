@@ -286,10 +286,17 @@ func runAndCapturePod(t *testing.T, r *KubernetesRuntime, cfg RunConfig) *corev1
 // assertion was satisfied by the very outcome it was written to catch. A
 // timeout is not a rejection; it is "cannot evaluate" wearing a failure's
 // clothes. Reject it explicitly, and say which of the two arrived.
+//
+// The budget is small on purpose. Every caller here fails before pod
+// creation, on config the runtime rejects without touching the API server:
+// measured, the slowest of the four takes 0.09s and the rest are under 0.01s,
+// so 3s is roughly a 30x margin on the worst one. The budget is only ever
+// spent when the guard under test is gone — and in that case it is dead wall
+// clock, so keeping it at 10s bought nothing but a slower mutation run.
 func runExpectingFailure(t *testing.T, r *KubernetesRuntime, cfg RunConfig, why string) error {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	_, err := r.Run(ctx, cfg)
