@@ -7948,14 +7948,14 @@ most visible member."*
 
 | # | denominator | anticipatory, by the criterion above |
 |---|---|---|
-| entries `1`–`112` | **112** | **1** |
+| entries `1`–`114` | **114** | **1** |
 
 **The single member: rule 49's four-way binding table**, whose third arm — `EXPECTED_ROWS binds
 CARDINALITY, not MEMBERSHIP` — was written down **before** the demotion of the denominator assertion
 arrived from three separate directions. Clause 4 is satisfied: `gke-deploy-lead` made the
 identification, not me.
 
-⚠ **`1/112` is the honest figure and it should be read with its own limitation stated:** the criterion
+⚠ **`1/114` is the honest figure and it should be read with its own limitation stated:** the criterion
 was written by the party whose registry is being measured. **Clause 4 is the only clause that is not
 self-scoreable**, and it is the load-bearing one. **The count moves when a second entry clears all
 four; the lead is told at that moment and not before.**
@@ -8033,7 +8033,10 @@ or its author. **Upward** = a correction that strengthened one.
 | 46 | **`gd-spec-rev`, one step before publishing** | its `sha256sum -c` FAILED on its own cwd — *"an artefact of MY argument vector"* | **down** |
 | 47 | **`gd-spec-rev`, on `421-434`** | re-ran a claim it had marked *could not evaluate* and **promoted it to VERIFIED** | **up** |
 | 48 | **`gke-deploy-lead`, on its own class test** | `rc >= 2` re-collapses the tiering at every call site — **the third control containing its own defeat** | **down** |
-| | | **44 down, 3 up, 1 contested, 1 exonerating, of 48.** | |
+| 49 | **`gd-trig`, on its own comparison harness** | both arms searched `agent[_` and **agreed**; the reported answer was the opposite of the truth | **down** |
+| 50 | **`gd-trig`, on F19, DOWNWARD** | 2 of 12 missed, **1 unreachable** — effective miss 1 of 11; the accused shrank the finding **by running it** | **down (exonerating)** |
+| 51 | **`gd-doc`, in an UNSENT draft** | attached F18's mechanism to Entry B's zero; **the dot is a metacharacter in BOTH engines** — rule 74 again, caught pre-send | **down** |
+| | | **47 down, 3 up, 1 contested, 2 exonerating, of 51.** | |
 
 🔴 **THE FIRST TWO UPWARD CORRECTIONS ARRIVED IN THE SAME HOUR, AFTER `10/10` WAS PUBLISHED AS EVIDENCE
 THAT NOBODY CHECKS THAT DIRECTION — AND THE MECHANISM IS THE INTERESTING PART, BECAUSE NEITHER WAS
@@ -8073,7 +8076,7 @@ order and is recorded so the count cannot later be read as a surprise.
 
 | # | denominator | preventive, by the criterion below |
 |---|---|---|
-| entries `1`–`112` | **112** | **2 CONFIRMED under all three clauses — but see the METHOD-versus-TRIGGER split below; only ONE of the two is a control. Plus the two unconfirmed interim candidates. Both confirmed members are rule 74's R1, both within 25 minutes of its adoption.** |
+| entries `1`–`114` | **114** | **2 CONFIRMED under all three clauses — but see the METHOD-versus-TRIGGER split below; only ONE of the two is a control. Plus the two unconfirmed interim candidates. Both confirmed members are rule 74's R1, both within 25 minutes of its adoption.** |
 
 🔴🔴 **THE COUNT HAS MOVED OFF ZERO AND THE TWO MEMBERS ARE THE SAME REMEDY FIRING TWICE. FULL
 SCORING, BECAUSE A COUNT THAT MOVES IS THE ONE THAT NEEDS ITS WORKING SHOWN:**
@@ -8127,7 +8130,7 @@ generosity to `gd-em` was generosity to my own count**, and the correction came 
 whose credit it cost. 🔗 **Rule 86's shape a third time in one hour** — the citee is the only available
 detector — **and this is now the second time today it has fired on a credit I awarded.**
 
-⚠ **`2/112` is not a good number and it is not being presented as one.** What it establishes is narrower
+⚠ **`2/114` is not a good number and it is not being presented as one.** What it establishes is narrower
 and worth exactly what it is: **the mechanism is not impossible.** 🔗 Read with rule 81 beside it —
 **both members are an EXECUTABLE remedy (*name the joining command*), not a wording remedy**, which is
 the same discriminator every other working control on this board has.
@@ -9712,6 +9715,139 @@ is the first one. Everything above this line is a tally of things that already h
 > the relation.** ⚠ **That sentence is a disclaimer, not a fix** — 🔗 **rule 42's family, and I am
 > labelling it as such rather than claiming I have closed it. THE SWEEP IS OWED AND UNPAID.**
 
+> **Rule 113, revision 8 (`gd-trig`, nine seconds of `awk` on the shell snapshot — and it is the
+> largest finding of the day by reach, because it invalidates the identity of an instrument every agent
+> on this project has used all morning):**
+>
+> > 🔴🔴 **THERE IS NO `ugrep` ON THIS CONTAINER. THE ENGINE EVERY GATE HAS BEEN CALLING "ugrep 7.5.0"
+> > IS `claude.exe` DISPATCHING ON `argv[0]`, AND IT EMITS A COMPLETE, PLAUSIBLE ugrep VERSION BANNER.**
+>
+> ```
+> command -v ugrep      -> nothing. No such binary anywhere on PATH.
+> the wrapper runs      ARGV0=ugrep <CLAUDE_CODE_EXECPATH> -G ...
+> CLAUDE_CODE_EXECPATH  .../@anthropic-ai/claude-code/bin/claude.exe
+> grep --version        "ugrep 7.5.0 x86_64-pc-linux-gnu +sse2; -P:pcre2jit; ..."
+> ```
+>
+> 🛑 **`gd-trig`'s own rule — *a version string is not an engine identity* — HAS BEEN SITTING IN
+> `runner-states-6-7.md` ALL DAY WITH THE SHARPEST AVAILABLE INSTANCE ONE FUNCTION CALL AWAY.** 🔗
+> **Count 4's purest specimen so far: not a defect committed in the document that names the class, but
+> the class's best example lying unexamined beside the document that names it.** ⚠ **The version banner
+> is not merely uninformative — IT IS AFFIRMATIVELY MISLEADING, AND IT IS THE ONLY THING ANYONE CHECKED.**
+>
+> 🔴 **A FIFTH AXIS NOBODY HAD: THE ENGINE DEPENDS ON AN ENVIRONMENT VARIABLE.** The wrapper's fallback
+> when `CLAUDE_CODE_EXECPATH` is unset is `/home/scion/.local/bin/claude`, **which does not exist on this
+> container**, so the function falls straight through to `command grep`:
+>
+> ```
+> grep --version                         -> ugrep 7.5.0
+> CLAUDE_CODE_EXECPATH= grep --version   -> grep (GNU grep) 3.8
+> ```
+>
+> 🛑 **UNSET ONE VARIABLE AND EVERY BARE `grep` IN EVERY GATE SILENTLY BECOMES GNU WITH NONE OF THE TEN
+> INJECTED FLAGS.** ✅ **ENGINE IDENTITY IS A PROPERTY OF (RUNNER × ARGUMENT VECTOR × ENVIRONMENT).**
+> ⚠ **The injected set, READ rather than transcribed, is ten flags** — `-G --ignore-files --hidden -I`
+> plus six separate `--exclude-dir` — 🔗 **rule 110's F19 shape: the shorthand was smaller than the
+> thing.**
+>
+> 🔴🔴 **AND THE MEASURED COST, ON THE REAL CHART, WITH A POSITIVE CONTROL BUILT INTO THE TABLE. NINE
+> TERMS, 32-FILE DENOMINATOR, FILES-WITH-A-HIT:**
+>
+> ```
+> TERM                          python re   GNU -E   GNU -G   bare token
+> workspace[_ -]?storage              8        8        0          0
+> non[_ -]?root                      12       12        0          0
+> signing[_ -]?key                   11       11        0          0
+> hub[_ -]?gke                       10       10        0          0
+> image[_ -]?registry                 8        8        0          0
+> github[_ -]?app                     4        4        0          0
+> agent[_ -]?role                     0        0        0          0
+> gke[_ -]?shared[_ -]?volume         0        0        0          0
+> rate[_ -]?limit                     0        0        0          0
+> ```
+>
+> 🛑 **SIX OF THE NINE ARE PRESENT — 53 FILE-HITS — AND THE BARE TOKEN REPORTS `0` FOR EVERY ONE. THREE
+> ARE GENUINELY ABSENT AND REPORT `0`. ALL NINE ZEROS ARE BYTE-IDENTICAL.** ✅ **And the three true zeros
+> ARE the positive control:** *"the instrument demonstrably CAN emit a correct 0, which is exactly what
+> makes the six false ones unfindable."* 🔗 **The single best sentence written about rule 60 today: a
+> null that is sometimes right is worse than one that is always wrong.**
+>
+> ```
+> silent terms, in-process python re :  9 of 28   <- true
+> silent terms, bare `grep` token    : 15 of 28   <- six FALSE silences
+> silent terms, explicit `grep -E`   :  9 of 28   <- the trailing -E DOES override -G. Tested.
+> ```
+>
+> > 🔴 ***"RULE 60 IS NOT HYPOTHETICAL ANY MORE. ON THIS CORPUS THE VOCABULARY'S OWN SILENCE COUNT IS 9
+> > OR 15 DEPENDING ON WHICH `grep` YOU REACH, AND NEITHER RUN PRINTS ANYTHING TO TELL YOU WHICH YOU
+> > GOT."***
+>
+> ✅ **`gd-trig`'s published `11 of 28` IS UNAFFECTED — it was in-process Python and never touched
+> grep.** ⚠ **It differs from the `9` BY APERTURE, NOT BY ENGINE: the published figure wraps each term
+> in a word-boundary assertion; raw substring frees `chat` and `notification`, which occur inside longer
+> tokens.** 🛑 **11 (bounded) and 9 (raw) ARE BOTH CORRECT AT THEIR OWN APERTURE AND MUST NOT BE QUOTED
+> AGAINST EACH OTHER.**
+>
+> ✅ **FILED AS RULE 108's SECOND INSTANCE RATHER THAN AS A NEW RULE, AND THAT IS THE THIRD NEAR-MINT I
+> HAVE DECLINED IN THIRTY MINUTES.** 108 is *two instruments, two numbers, one label*; this is **one
+> instrument, two apertures, two correct numbers** — 🛑 **the same defect from the other side, and the
+> generalisation is the entry: A COUNT IS A PROPERTY OF (CORPUS × INSTRUMENT × APERTURE), AND THIS
+> PROJECT HAS BEEN PUBLISHING THE CORPUS.** ⚠ **Minting it separately would have grown the registry by
+> one and its coverage by zero** — 🔗 rule 102, applied to me for the third time.
+
+> **Rule 114, revision 8 (`gd-trig`, §6, on its own comparison harness — the fourth instrument it has
+> caught in its own hands today):**
+>
+> > 🛑 **A COMPARISON IN WHICH BOTH ARMS RECEIVE THE SAME GARBAGE RETURNS AGREEMENT, AND AGREEMENT IS
+> > THE ANSWER LEAST LIKELY TO BE QUESTIONED.**
+>
+> The first run of the table above **printed `0` for every cell in both engine columns — which reads as
+> *no difference between engines*, THE CONCLUSION EXACTLY OPPOSITE TO THE TRUTH.** Cause: a `read`
+> splitting each term on the space inside the bracket expression, **so both arms searched for
+> `agent[_`.**
+>
+> 🔴 **AND IT SURVIVED THE `zsh` FACT ITS OWN AUTHOR PUBLISHED FORTY MINUTES EARLIER: `read` SPLITS ON
+> IFS REGARDLESS.** 🔗 **Rule 105 knowing the shell does not word-split, and the defect arriving through
+> the one builtin that does anyway.** 🛑 **Naming a class confers no immunity — and here, naming the
+> class supplied a FALSE REASSURANCE that the class could not fire.** ⚠ **That is worse than not knowing,
+> and it is the first instance today where the knowledge was the aggravating factor.**
+>
+> 🔴🔴 **SELF-APPLICATION, DIRECT AND UNPLEASANT: THIS REGISTRY'S HIGHEST FORM OF EVIDENCE IS
+> "TWO AGENTS, TWO ROUTES, ONE ANSWER" — I HAVE WRITTEN THAT PHRASE FOUR TIMES TODAY** (rule 96's
+> corroboration, rule 102's deletion instruction, rule 104's index, rule 107's two halves). ⚠ **Rule 114
+> says agreement is the cheapest thing to manufacture and the least likely to be audited.** 🛑 **In every
+> one of those four cases the routes were independent by construction — different corpora, different
+> commits, different agents ignorant of each other — but I ASSERTED the independence and never STATED
+> the criterion.** ✅ **Adopted: any *two routes, one answer* claim in this file names what made the
+> routes independent, or it is downgraded to *two reports, one answer*.** **Retroactive sweep owed on
+> four sites. Unpaid.**
+
+🔴 **`gd-trig` F19 REFINED, AND THE ACCUSED MADE THE FINDING SMALLER BY RUNNING IT — WHICH IS THE
+DIRECTION CORRECTIONS ALMOST NEVER GO.** The case list holds **12** patterns, but **`-*-save-config*` is
+DEAD CODE**: `-*-config*` precedes it and subsumes it, verified **by running the case statement rather
+than reading it** (🔗 rule 110's own remedy, *never by asking a resolver*, applied to the resolver).
+**So the enumeration missed 2 of 12, of which 1 can never fire. Effective miss: 1 of 11 REACHABLE
+patterns — `-*-format-open*`, which really does bypass.** ✅ ***"The bound stands; its magnitude is half
+what it looked like, and I would rather have that correct than have it worse."*** 🛑 **A downward
+correction of a finding against oneself, published by the party it exonerates, with the command
+attached** — 🔗 **rule 89 in its rarest direction, and the reason it is credible is that the same agent
+filed three upward ones in the same message.**
+
+🔴🔴 **I NEARLY MANUFACTURED A SECOND FALSE JOIN, AND I CAUGHT IT IN AN UNSENT DRAFT — RECORDED BECAUSE
+THE FIRST ONE WENT OUT.** On reading F18 I wrote, in report 12: *"Entry B's zero is a zero, and the
+dotted form contains a metacharacter, so F18 may have invalidated it."* 🛑 **THAT IS WRONG AND THE
+MECHANISM DOES NOT APPLY. `.` IS A METACHARACTER IN BOTH BRE AND ERE.** An unescaped dot **over-matches
+in both engines**, so a bare-token zero on `auth.acknowledgeOAuthUnlanded` is **STRONGER evidence of
+absence than an escaped one, not weaker** — F18's mechanism is the `-G` demotion of `?`, `|`, `+` and
+`()`, none of which appear in that pattern. ⚠ **I attached a named mechanism to a number because the
+number was a zero and the mechanism was about zeroes** — 🔗 **precisely rule 74's sixth instance again,
+same author, ninety minutes later, and the only difference is that this one was in a file rather than
+in a broadcast.** ✅ **What DOES still reach Entry B is rule 113, not F18: the ten injected flags —
+`--ignore-files`, `--hidden`, `-I`, six `--exclude-dir` — CHANGE THE FILE SET, and the binary answering
+to `grep` is not the binary anyone thought.** 🛑 **So the correct statement, and the one that goes in
+the report: THE ZERO IS SOUND AS TO PATTERN SEMANTICS AND UNVERIFIED AS TO CORPUS APERTURE.** ⚠ **Held
+UNCORROBORATED on that narrower ground, and the re-take must name the binary, not merely the engine.**
+
 🔴 **`trigger-register-mismatch.md` — 550 LINES, LIVE, STILL WITH NO READER, AND THE LEAD HAS TAKEN IT AS
 ITS OWN DEFECT RATHER THAN LETTING IT SIT IN A ROUND-UP.** 🔗 **Rule 101, corrected behaviour, within
 five minutes of the rule being filed:** *"you have flagged it and I have not acted… it is not being
@@ -9807,7 +9943,10 @@ their own author, or by the next agent to touch the area, WITHIN THE HOUR.**
 | 25 | **`runner-states-6-7.md`, F19** | quotes the enumeration bound against itself **twice**, and the enumeration is 10 of 12 | same document |
 | 26 | **the coverage floor, F20** | clause 2 says *publish at freeze or not at all*; **adopted 11 min after freeze, tuned three times** | same document |
 | 27 | **this registry, rule 112** | prosecutes unmeasured kinship words **in a file built out of ~5 unmeasured arrows** | same entry |
-| | | **27 named; sampled from seven threads, not swept — this is a floor, not a rate** | |
+| 28 | **`runner-states-6-7.md`, rule 113** | carries *a version string is not an engine identity* while **the sharpest instance sat one function call away** | all day |
+| 29 | **`gd-trig`'s harness, rule 114** | knew zsh does not word-split; **`read` splits on IFS regardless** — the knowledge was the aggravating factor | 40 min |
+| 30 | **this registry, rule 114** | asserts *two routes, one answer* four times **and never states the independence criterion** | four sites |
+| | | **30 named; sampled from seven threads, not swept — this is a floor, not a rate** | |
 
 🔴 **ROWS 6, 7, 8 AND 11 ARE ONE SHAPE AND IT IS SHARPER THAN THE ORIGINAL READING: THE VIOLATION IS
 COMMITTED BY THE ARTIFACT THAT IS SUPPOSED TO DEMONSTRATE THE RULE.** A reference implementation, a
@@ -10248,6 +10387,33 @@ courtesy:** *"a three-row scan sent as three bare numbers invites exactly the jo
 three keys, one unlabelled corpus line, no denominator attached to any row. **The reporting shape made
 the join available; taking it was mine.** 🔗 **Rule 60's disposition generalised: a number travels with
 its denominator or it does not travel.**
+
+✅ **LANDED SHA ATTACHED AT 10:25, AND THE CONFIRMATION ARRIVED IN THE FORM THIS REGISTRY ASKS FOR:
+COMMIT `3152d4fa`, BRANCH `scion/gke-chart-p3`, HEAD `d9bdfb9a`, PUSHED.** Zero raw occurrences in
+`values.yaml` and `values.schema.json`, **and zero in the rendered output for all six
+`ci/values-*.yaml` fixtures** — 🔗 rule 96's discipline: the check was run against the *rendered* output,
+not only the source. ⚠ **`gd-p3-dev` flagged that it may be re-reporting across a context compaction and
+labelled it as a confirmation rather than as news** — 🔗 **rule 89, and the correct handling of a
+self-report whose own provenance is uncertain.**
+
+✅ **WHAT REPLACED IT, RECORDED BECAUSE THE ENTRY MUST SAY WHAT AN OPERATOR DOES NOW:**
+`auth.oauth.web.{google,github}.{clientId,clientSecret}`, all defaulting to `""`. **Under
+`auth.mode=oauth` the chart REFUSES TO INSTALL unless a complete web credential pair is present, or the
+settings arrive out of band via `config.existingSecret` / `config.extra`.** 🛑 **THE ACKNOWLEDGEMENT KEY
+WAS STANDING IN FOR EXACTLY THAT CHECK, SO THE SUBSTITUTE IS A REFUSAL RATHER THAN A FLAG** — 🔗 **rule
+43's trigger registry answered properly for once: an obligation whose trigger emitted no signal has
+been replaced by one that cannot be reached without emitting one.**
+
+🔴 **AND THE UPGRADE-NOTE LINE, WHICH IS THE OPPOSITE OF THIS ENTRY'S USUAL FINDING: THE OLD KEY DOES
+NOT BECOME INERT, IT BECOMES LOUD.** A values file still setting it fails with
+`auth: Additional property acknowledgeOAuthUnlanded is not allowed` — **`additionalProperties: false`
+doing the work, deliberately.** 🛑 **An operator carrying the key forward from a draft GETS TOLD rather
+than getting a silent no-op.** ✅ **File this as the day's only instance of a removal that fails in the
+SAFE direction** — 🔗 `gd-p1-rev`'s framing, and the first time today a schema has been the control.
+
+⚠ **DO NOT LET THE REMOVAL NOTE READ AS COVERING BOTH KEYS: `auth.acknowledgeHAUnlanded` differs by
+four characters, is not `gd-p3-dev`'s, is NOT removed, and is still required where it was.** 🛑 **The
+two sort adjacent in any registry listing, which is the entire reason this entry exists.**
 
 🔴🔴 **AND THE NEAR-MISS KEY HAS SINCE BEEN DELETED, WHICH RETIRES HALF THIS ENTRY'S HAZARD AND SHARPENS
 THE OTHER HALF.** `gd-p3-dev`, reporting **directly per its brief rather than through `gd-em`** —
