@@ -75,6 +75,14 @@ type KubernetesRuntime struct {
 // "a container name must be specified" error.
 const agentContainerName = "agent"
 
+// containerUID is the UID and GID every agent pod runs as. It is pinned
+// rather than derived — a hardening invariant asserted by k8s_hardening_test
+// — which is why workspace storage's nfs.uid setting cannot be honoured on
+// this runtime the way it is on docker, podman and cloudrun. Package-level so
+// that applyWorkspaceStorage can warn against the same number buildPod
+// applies, instead of repeating a literal that could drift.
+const containerUID int64 = 1000
+
 var serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
 func NewKubernetesRuntime(client *k8s.Client) *KubernetesRuntime {
@@ -436,7 +444,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	// Home-dir sync and the startup gate (/tmp/.scion-home-ready) are RETAINED
 	// for every backend — they carry agent dotfiles and secrets, not workspace
 	// code.
-	if err := r.syncWorkspaceStage(ctx, config, r.podWorkspaceSyncDeps(namespace, createdPod.Name, config)); err != nil {
+	// The skip reason is discarded here: it is already logged, and it is
+	// returned only so a test can pin which of the two reasons fired.
+	if _, err := r.syncWorkspaceStage(ctx, config, r.podWorkspaceSyncDeps(namespace, createdPod.Name, config)); err != nil {
 		return createdPod.Name, err
 	}
 
@@ -1195,7 +1205,6 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	//     concern.
 	//   - Local backend: host GID (today's behavior) so synced files remain
 	//     writable by the broker user.
-	const containerUID int64 = 1000
 	fsGroupGID := int64(os.Getgid()) // default: host GID (local backend)
 	if usesSharedWorkspacePVC(config) {
 		sharedGID := config.NFSGID

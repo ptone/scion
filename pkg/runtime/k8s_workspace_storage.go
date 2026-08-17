@@ -52,6 +52,14 @@ func sharedWorkspaceBackend(name string) bool {
 // its subPath mount, the provisioning init container, and the shared-dir
 // subPath mounts. A future backend admitted here is admitted at all of them at
 // once, which is what stops it being admitted at all but one.
+//
+// Do not delete the claim-name conjunct as dead code. It cannot be false on
+// the Run path — applyWorkspaceStorage is the only non-test writer of both
+// fields there and it fails the launch before assigning when the backend
+// resolves no claim name — but it is load-bearing for callers that reach
+// buildPod with a hand-built RunConfig, which is what
+// TestBuildPod_WorkspaceVolume_NFSWithoutPVCName_FallsBackToEmptyDir pins. It
+// is defensive here, not empirical, and it stays.
 func usesSharedWorkspacePVC(cfg RunConfig) bool {
 	return sharedWorkspaceBackend(cfg.WorkspaceBackendName) && cfg.NFSPVClaimName != ""
 }
@@ -163,8 +171,19 @@ func (r *KubernetesRuntime) podWorkspaceSyncDeps(namespace, podName string, cfg 
 	}
 	return workspaceSyncDeps{
 		listWorkspace: func(ctx context.Context) (string, error) {
+			// This used to be `ls -A /workspace 2>/dev/null | head -1`,
+			// which could not fail: a pipeline exits with its last
+			// command's status and head succeeds whatever ls did, and the
+			// diagnostic was discarded. An ls that failed inside a healthy
+			// pod came back ("", nil) and was read as "the volume is empty"
+			// rather than "the check is unavailable" — the error branch was
+			// named for a case its own probe could not produce. Capturing
+			// first lets ls's status through; keeping stderr lets execInPod
+			// put the reason in the error it returns. Both branches seed, so
+			// no behaviour changes; the log line stops being blank about why.
+			// head -1 still bounds the output.
 			return r.execInPod(ctx, namespace, podName,
-				[]string{"sh", "-c", "ls -A /workspace 2>/dev/null | head -1"})
+				[]string{"sh", "-c", `entries=$(ls -A /workspace) || exit 1; printf '%s' "$entries" | head -1`})
 		},
 		copyWorkspace: func(ctx context.Context) error {
 			return r.syncWithRetry(ctx, func() error {
@@ -194,39 +213,55 @@ func (r *KubernetesRuntime) podWorkspaceSyncDeps(namespace, podName string, cfg 
 //
 // Local-backend pods are untouched by all of this and RETAIN today's
 // behaviour: sync whenever there is a host workspace.
-func (r *KubernetesRuntime) syncWorkspaceStage(ctx context.Context, cfg RunConfig, deps workspaceSyncDeps) error {
+//
+// The returned string is the skip reason that was logged, or "" when the sync
+// ran. Run has no use for it; it is returned so that a test can hold the two
+// reasons to account at the stage itself. Asserting them on a pure helper
+// instead would prove only that the helper can produce two strings, not that
+// the stage picks the right one — which is the shape that let round 1's
+// defect through.
+func (r *KubernetesRuntime) syncWorkspaceStage(ctx context.Context, cfg RunConfig, deps workspaceSyncDeps) (string, error) {
 	if !shouldSyncWorkspaceToPod(cfg) {
 		if usesSharedWorkspacePVC(cfg) {
-			logWorkspaceSyncSkip(cfg, "populated-by-container-clone")
+			return logWorkspaceSyncSkip(cfg, skipReasonContainerClone), nil
 		}
-		return nil
+		return "", nil
 	}
 	if usesSharedWorkspacePVC(cfg) && !sharedWorkspaceNeedsSeeding(ctx, deps.listWorkspace, cfg) {
-		logWorkspaceSyncSkip(cfg, "volume-already-populated")
-		return nil
+		return logWorkspaceSyncSkip(cfg, skipReasonVolumePopulated), nil
 	}
 
 	runtimeLog.Info("Syncing workspace", "agent", cfg.Name, "source", cfg.Workspace, "phase", "workspace-sync")
 	fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", cfg.Workspace)
 	if err := deps.copyWorkspace(ctx); err != nil {
-		return fmt.Errorf("failed to sync workspace: %w", err)
+		return "", fmt.Errorf("failed to sync workspace: %w", err)
 	}
 	// Fix ownership: tar extraction runs as root via K8s exec, so extracted
 	// files are owned by root. Non-fatal, as it has always been.
 	if err := deps.chownWorkspace(ctx); err != nil {
 		runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
 	}
-	return nil
+	return "", nil
 }
 
+// The two reasons a workspace sync is skipped on shared storage. They are
+// different claims about the world — "something else will populate this
+// volume" versus "something else already did" — and an operator reading the
+// log needs to know which one fired.
+const (
+	skipReasonContainerClone  = "populated-by-container-clone"
+	skipReasonVolumePopulated = "volume-already-populated"
+)
+
 // logWorkspaceSyncSkip records a skipped workspace sync with a discriminated
-// reason. The two reasons are different claims about the world — "something
-// else will populate this volume" versus "something else already did" — and
-// an operator reading the log needs to know which one fired.
-func logWorkspaceSyncSkip(cfg RunConfig, reason string) {
+// reason, and returns the reason it logged. Returning it is what makes the
+// discrimination testable: the value the test reads is the value the operator
+// sees, so the two cannot drift apart.
+func logWorkspaceSyncSkip(cfg RunConfig, reason string) string {
 	runtimeLog.Info("Skipping workspace sync (bytes come from the shared volume, not from a host copy)",
 		"agent", cfg.Name, "backend", cfg.WorkspaceBackendName, "skip_reason", reason,
 		"pvc", cfg.NFSPVClaimName, "subpath", cfg.NFSSubPath, "phase", "workspace-sync-skip")
+	return reason
 }
 
 // workspaceSharingModeFromEnv reads the project's workspace sharing mode from
@@ -322,6 +357,17 @@ func (r *KubernetesRuntime) applyWorkspaceStorage(cfg RunConfig) (RunConfig, err
 	// consumes is how wiring comes to look live when it is not.
 	if nfs := r.WorkspaceStorage.NFS; nfs != nil && backend.Name() == "nfs" {
 		cfg.NFSGID = nfs.GID
+		// nfs.uid is honoured on docker, podman, cloudrun and the
+		// provisioner, and cannot be honoured here: agent pods pin runAsUser
+		// to containerUID (1000) as a hardening invariant. Dropping it is the
+		// right call; dropping it silently is not, because the same setting
+		// visibly works on every other runtime. Say so once, at launch, and
+		// only when the operator actually asked for something else.
+		if nfs.UID != 0 && int64(nfs.UID) != containerUID {
+			runtimeLog.Warn("nfs.uid is not applied on Kubernetes; agent pods always run as UID 1000",
+				"agent", cfg.Name, "configured_uid", nfs.UID, "pod_run_as_user", containerUID,
+				"remedy", "make the export writable by UID 1000, or by nfs.gid if your CSI driver applies fsGroup")
+		}
 	}
 
 	runtimeLog.Info("Workspace storage resolved for pod",

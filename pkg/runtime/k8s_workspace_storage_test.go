@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -275,9 +276,16 @@ func runAndCapturePod(t *testing.T, r *KubernetesRuntime, cfg RunConfig) *corev1
 }
 
 // runExpectingFailure drives Run for a configuration that must not reach pod
-// creation, and returns the error. The generous deadline is never consumed
-// when the code is correct — it only bounds the failure case, where Run would
-// otherwise sit in waitForPodReady.
+// creation, and returns the error. The deadline bounds the case where Run
+// creates the pod anyway and settles into waitForPodReady.
+//
+// That deadline must not be allowed to count as the failure. `err != nil` was
+// once the whole check, and it passed under a mutation that deleted the guard
+// it exists to defend: Run created the pod, waited, and returned "timed out
+// waiting for pod to be ready: context deadline exceeded" — non-nil, so the
+// assertion was satisfied by the very outcome it was written to catch. A
+// timeout is not a rejection; it is "cannot evaluate" wearing a failure's
+// clothes. Reject it explicitly, and say which of the two arrived.
 func runExpectingFailure(t *testing.T, r *KubernetesRuntime, cfg RunConfig, why string) error {
 	t.Helper()
 
@@ -287,6 +295,11 @@ func runExpectingFailure(t *testing.T, r *KubernetesRuntime, cfg RunConfig, why 
 	_, err := r.Run(ctx, cfg)
 	if err == nil {
 		t.Fatalf("expected Run to fail: %s", why)
+	}
+	if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		t.Fatalf("Run exhausted the test deadline instead of rejecting the config: %s\n"+
+			"got: %v\nthis is a cannot-evaluate, not a failure — the config was accepted and Run "+
+			"proceeded to wait on a pod that a fake clientset never makes ready", why, err)
 	}
 	return err
 }
@@ -401,13 +414,25 @@ func TestRun_NFS_WorkspaceIsPVCNotEmptyDir(t *testing.T) {
 	if got, want := mount.SubPath, "projects/proj-1075/workspace"; got != want {
 		t.Errorf("workspace mount subPath = %q, want %q", got, want)
 	}
-	// NFS UID/GID travel with the backend config: fsGroup is the configured
-	// GID, not the broker host's.
+	// nfs.gid travels with the backend config: fsGroup is the configured GID,
+	// not the broker host's.
 	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.FSGroup == nil {
 		t.Fatal("pod has no fsGroup")
 	}
 	if got, want := *pod.Spec.SecurityContext.FSGroup, int64(5678); got != want {
 		t.Errorf("fsGroup = %d, want %d (configured nfs.gid)", got, want)
+	}
+	// nfs.uid does NOT travel, and the fixture sets 1234 to say so out loud
+	// rather than setting a value and never mentioning it again. Agent pods
+	// pin runAsUser to 1000 as a hardening invariant, so the UID an operator
+	// configures for the export is not the UID the pod writes as — the
+	// divergence documented in server-config.md and warned about at launch.
+	if pod.Spec.SecurityContext.RunAsUser == nil {
+		t.Fatal("pod has no runAsUser")
+	}
+	if got, want := *pod.Spec.SecurityContext.RunAsUser, int64(1000); got != want {
+		t.Errorf("runAsUser = %d, want %d — nfs.uid was 1234; if this pod now runs as the "+
+			"configured UID the hardening invariant moved and the docs are wrong", got, want)
 	}
 }
 
@@ -790,6 +815,10 @@ func TestSyncWorkspaceStage(t *testing.T) {
 	withInitClone := sharedVolumeSyncConfig("init-container")
 	withInitClone.GitCloneForInit = &api.GitCloneConfig{URL: "https://example.com/demo.git"}
 
+	// wantSkip is the skip reason the stage must report, "" when it syncs.
+	// The two reasons are separate claims — "something else will populate this
+	// volume" vs "something else already did" — and asserting them here is
+	// what stops the next editor collapsing them into one value nothing reads.
 	tests := []struct {
 		name      string
 		cfg       RunConfig
@@ -798,6 +827,7 @@ func TestSyncWorkspaceStage(t *testing.T) {
 		wantList  int
 		wantCopy  int
 		wantChown int
+		wantSkip  string
 		why       string
 	}{
 		{
@@ -815,6 +845,7 @@ func TestSyncWorkspaceStage(t *testing.T) {
 			listing:  "README.md\n",
 			wantList: 1,
 			wantCopy: 0,
+			wantSkip: "volume-already-populated",
 			why:      "tar -xz of a stale host copy would overwrite what the agents on this volume have written",
 		},
 		{
@@ -823,6 +854,7 @@ func TestSyncWorkspaceStage(t *testing.T) {
 			listing:  "",
 			wantList: 0,
 			wantCopy: 0,
+			wantSkip: "populated-by-container-clone",
 			why:      "sciontool init clones into /workspace; seeding first would make it skip the clone",
 		},
 		{
@@ -831,6 +863,7 @@ func TestSyncWorkspaceStage(t *testing.T) {
 			listing:  "",
 			wantList: 0,
 			wantCopy: 0,
+			wantSkip: "populated-by-container-clone",
 			why:      "the init container has already populated the volume before the agent container starts",
 		},
 		{
@@ -865,8 +898,13 @@ func TestSyncWorkspaceStage(t *testing.T) {
 			r := newNFSTestK8sRuntime()
 			rec := &workspaceSyncRecorder{listing: tc.listing, listErr: tc.listErr}
 
-			if err := r.syncWorkspaceStage(context.Background(), tc.cfg, rec.deps()); err != nil {
+			skip, err := r.syncWorkspaceStage(context.Background(), tc.cfg, rec.deps())
+			if err != nil {
 				t.Fatalf("syncWorkspaceStage: %v", err)
+			}
+			if skip != tc.wantSkip {
+				t.Errorf("skip reason %q, want %q — the operator's log says which of the two "+
+					"skips fired, and the two are not interchangeable", skip, tc.wantSkip)
 			}
 			if rec.listCalls != tc.wantList {
 				t.Errorf("listWorkspace called %d times, want %d — %s", rec.listCalls, tc.wantList, tc.why)
@@ -887,7 +925,7 @@ func TestSyncWorkspaceStage_CopyFailureFailsTheLaunch(t *testing.T) {
 	r := newNFSTestK8sRuntime()
 	rec := &workspaceSyncRecorder{copyErr: fmt.Errorf("stream failed")}
 
-	err := r.syncWorkspaceStage(context.Background(), sharedVolumeSyncConfig("copy-fails"), rec.deps())
+	_, err := r.syncWorkspaceStage(context.Background(), sharedVolumeSyncConfig("copy-fails"), rec.deps())
 	if err == nil {
 		t.Fatal("expected the stage to fail when the workspace copy fails")
 	}
@@ -903,16 +941,23 @@ func TestSyncWorkspaceStage_CopyFailureFailsTheLaunch(t *testing.T) {
 //
 // This is the one test that drives Run past waitForPodReady, which costs it
 // the 2s poll interval. Everything after the workspace stage still needs a
-// real API server, so Run ends on the startup gate — that error is the proof
-// the stage was passed rather than skipped over.
+// real API server, so Run ends on the startup gate.
+//
+// The startup-gate error is a PRECONDITION, not the proof: the stage and the
+// gate are consecutive statements, so deleting the stage leaves Run ending on
+// the same error. It says only that Run got as far as where the stage lives.
+// copyCalls is the discriminating assertion — it can be moved by nothing but
+// the closure the stage is handed — and the PVC check below is what makes
+// "with this pod's storage applied" a claim the test actually tests.
 func TestRun_ReachesWorkspaceSyncStage(t *testing.T) {
 	r := gkeSharedVolumeRuntime(t)
 	readyPodsOnGet(t, r)
 
 	rec := &workspaceSyncRecorder{}
-	var gotNamespace, gotPod string
+	var gotNamespace, gotPod, gotPVC, gotSubPath string
 	r.workspaceSyncDepsOverride = func(namespace, podName string, cfg RunConfig) workspaceSyncDeps {
 		gotNamespace, gotPod = namespace, podName
+		gotPVC, gotSubPath = cfg.NFSPVClaimName, cfg.NFSSubPath
 		return rec.deps()
 	}
 
@@ -928,10 +973,19 @@ func TestRun_ReachesWorkspaceSyncStage(t *testing.T) {
 	}
 	if rec.copyCalls != 1 {
 		t.Errorf("Run reached the pod but copied the workspace %d times, want 1 "+
-			"(the workspace stage is not being called, or not with this pod's PVC)", rec.copyCalls)
+			"— the workspace stage is not being called", rec.copyCalls)
 	}
 	if gotNamespace != "default" || gotPod != cfg.Name {
 		t.Errorf("workspace stage bound to %s/%s, want default/%s", gotNamespace, gotPod, cfg.Name)
+	}
+	// The stage must see the config Run derived, not the one Run was handed.
+	// Without this, deleting applyWorkspaceStorage from Run leaves this test
+	// green: the local-backend path syncs unconditionally, so copyCalls is
+	// still 1 and the pod quietly has an EmptyDir.
+	if gotPVC != "scion-workspaces-pvc" || gotSubPath != "projects/proj-1075/workspace" {
+		t.Errorf("workspace stage saw pvc=%q subpath=%q, want pvc=%q subpath=%q — the stage ran, "+
+			"but not on a config with this pod's shared storage applied",
+			gotPVC, gotSubPath, "scion-workspaces-pvc", "projects/proj-1075/workspace")
 	}
 }
 

@@ -231,6 +231,49 @@ consequences:
   the same directory. Starting two agents at once on a project whose volume has not been populated yet can
   have both containers clone into it simultaneously. Start the first agent for a new project on its own, or
   pre-populate the volume. Tracked in [ptone/scion#1111](https://github.com/ptone/scion/issues/1111).
+* **`nfs.uid` has no effect on Kubernetes.** Agent pods always run as UID 1000 (`runAsUser`), which is a
+  hardening invariant of the Kubernetes runtime and is not configurable. Make the export writable by UID
+  1000 — or by `nfs.gid`, which *is* applied, as the pod's `fsGroup`. Note that a CSI driver honours
+  `fsGroup` only according to its `fsGroupPolicy`, and the default policy skips `ReadWriteMany` volumes, so
+  on a shared export ownership is best set on the export itself. `nfs.uid` continues to apply on the
+  Docker, Podman and Cloud Run runtimes. Setting it to anything other than 1000 logs a warning at agent
+  launch.
+
+##### Migrating an existing Kubernetes deployment
+
+Before this change, `server.workspace_storage` was never read by the Kubernetes runtime: a deployment
+configured with `backend: nfs` still gave every agent pod a node-local ephemeral `emptyDir` workspace. The
+setting appeared to be in effect and was not.
+
+After upgrading, those same pods change shape:
+
+| | Before | After |
+| :--- | :--- | :--- |
+| Workspace volume | `emptyDir` (node-local, per pod) | `persistentVolumeClaim` + `subPath` (shared, survives the pod) |
+| Workspace lifetime | Deleted with the pod | Persists on the volume |
+| Source of the bytes | Copied from the broker host on every start | Seeded from the host once, while the volume is empty |
+
+**Existing workspace contents are not migrated.** Anything an agent wrote into the old `emptyDir` was
+already lost when that pod terminated, so there is nothing to carry over. But for a project that is not
+git-backed, the first pod to start after the upgrade seeds the shared volume from the broker host's copy
+of the workspace — and if that host copy is stale, the stale version is what lands on the volume and
+becomes authoritative for every later agent. Run `scion sync` for any project whose host copy is behind
+before starting agents. (For a git-backed project the container clones into the volume instead, and the
+host copy is not used.)
+
+After upgrading, check that:
+
+* The PVC named in `nfs.shares[].pv_name` or `gke_shared_volume.pv_claim_name` exists and is `Bound` in
+  the agents' namespace. If the configured backend resolves **no** claim name at all, the agent launch now
+  fails with an error naming the backend and the setting to fix, rather than silently falling back to
+  `emptyDir`. A claim name that is set but does not exist in the cluster is not caught at launch — the pod
+  is created and stays `Pending` on volume binding.
+* The export is writable by UID 1000 (see the bullet above). A pod that cannot write `/workspace` will
+  come up and then fail during agent init.
+* `kubectl get pod <agent> -o jsonpath='{.spec.volumes[?(@.name=="workspace")]}'` shows the claim, not
+  `emptyDir`.
+
+To stay on the previous behaviour, set `server.workspace_storage.backend: local` (or remove the block).
 
 #### Ephemeral Storage & 503 Safety Gate
 
