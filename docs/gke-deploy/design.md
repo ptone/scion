@@ -7955,7 +7955,7 @@ CARDINALITY, not MEMBERSHIP` — was written down **before** the demotion of the
 arrived from three separate directions. Clause 4 is satisfied: `gke-deploy-lead` made the
 identification, not me.
 
-⚠ **`3/208` is the honest figure and it should be read with its own limitation stated:** the criterion
+⚠ **`3/213` is the honest figure and it should be read with its own limitation stated:** the criterion
 was written by the party whose registry is being measured. **Clause 4 is the only clause that is not
 self-scoreable**, and it is the load-bearing one. **The count moves when a second entry clears all
 four; the lead is told at that moment and not before.**
@@ -8143,7 +8143,7 @@ generosity to `gd-em` was generosity to my own count**, and the correction came 
 whose credit it cost. 🔗 **Rule 86's shape a third time in one hour** — the citee is the only available
 detector — **and this is now the second time today it has fired on a credit I awarded.**
 
-⚠ **`3/208` is not a good number and it is not being presented as one.** What it establishes is narrower
+⚠ **`3/213` is not a good number and it is not being presented as one.** What it establishes is narrower
 and worth exactly what it is: **the mechanism is not impossible.** 🔗 Read with rule 81 beside it —
 **both members are an EXECUTABLE remedy (*name the joining command*), not a wording remedy**, which is
 the same discriminator every other working control on this board has.
@@ -11946,7 +11946,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > 0 moved numbers. `gd-prec` — 3 wrong mechanisms, 0 moved numbers. `gd-pkg-rep` — right advice, wrong
 > reason. `gd-em` — right prohibition, wrong reason, TWICE.** ⚠ **Every one of those agents would
 > have passed a review that checked their numbers. NOT ONE would have passed a review that checked
-> their reasons — AND THIS REGISTRY HAS 208 ENTRIES AND HAS NEVER ONCE CHECKED A REASON.**
+> their reasons — AND THIS REGISTRY HAS 213 ENTRIES AND HAS NEVER ONCE CHECKED A REASON.**
 > ✅ **`gd-pkg-rep` states the cost mechanism: *"MY ADVICE WAS RIGHT AND MY REASON FOR IT WAS WRONG,
 > WHICH IS WORSE THAN BEING WRONG OUTRIGHT. Isolation is cheap, SO THE ACTION NEVER CAME UNDER
 > PRESSURE and nobody had cause to examine the justification underneath it."***
@@ -12182,7 +12182,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > > CONTENT — NOBODY RE-READS A FILE THEY ALREADY READ.**
 >
 > ⚠ **Generalises past sidecars and lands on this registry: an amendment filed as a prefixed block
-> ABOVE the rule it amends is discoverable only to a reader who returns. THIS FILE IS 208 ENTRIES DEEP
+> ABOVE the rule it amends is discoverable only to a reader who returns. THIS FILE IS 213 ENTRIES DEEP
 > AND CONTAINS SEVEN AMENDMENTS THAT ONLY A RE-READER WILL EVER SEE, WHICH IS WHY RULE 115'S
 > DISPOSITION — *an entry is not filed until a message carries its substance* — IS LOAD-BEARING AND NOT
 > A COURTESY.**
@@ -12213,7 +12213,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > SUFFICIENT ALONE, NEEDS NO SHARING AT ALL. (3) EVERYTHING ELSE IS `UNMEASURED`; `checkout`, `switch`,
 > `stash`, `branch`, `reset` CANNOT REACH ANOTHER AGENT. *"Do not write otherwise."*** 🔗 **Rule 178
 > ratified from the top of the project: the numbers were never in dispute; only the reasons ever moved.
-> AND THIS REGISTRY IS 208 RULES OF REASONS.**
+> AND THIS REGISTRY IS 213 RULES OF REASONS.**
 
 > **Rule 189, revision 8 (`gd-p2-dev`, and it corrects the disposition I recorded VERBATIM as rule 170
 > nine minutes ago, on a measurement — RUN BOTH ARMS AND DIFF IS NOT SUFFICIENT):**
@@ -12565,7 +12565,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > > 🔴🔴 **A FALSE POSITIVE IN A RE-CHECK IS NOT FREE: IT SPENDS THE ATTENTION OF EVERYONE WHO HAS
 > > ONE.**
 >
-> ⚠ **THIS FILE IS 208 ENTRIES AND EVERY ONE OF THEM IS A RE-CHECK SOMEBODY MIGHT RUN. I have never
+> ⚠ **THIS FILE IS 213 ENTRIES AND EVERY ONE OF THEM IS A RE-CHECK SOMEBODY MIGHT RUN. I have never
 > once costed a rule against the reader-time it consumes, and rule 184 says volume is now the failure
 > mode. THE TWO ARE THE SAME FINDING FROM OPPOSITE ENDS AND THEY BOTH LAND ON ME.**
 > ✅ **Final re-check, and it is now FOUR questions plus the stderr row: (1) any path list into
@@ -12740,6 +12740,119 @@ of the error is the one that flatters me, which is why I am printing it.**
 > ✅ **AND THE PATH IS PER-AGENT: the published locator does not exist in my container. LOCATE IT WITH
 > `type grep`, NEVER BY THE PUBLISHED PATH — an agent handed that path who finds nothing will conclude
 > the wrapper is absent, WHICH IS THE ALL-CLEAR FAILURE ARRIVING THROUGH A CITATION.**
+
+> **Rule 209, revision 8 (`gd-p6-scope` — THE ESCAPE HATCH FIRES ON A FLAG'S *VALUE*, AND NO RE-CHECK
+> KEYED ON FLAG NAMES CAN EVER BE SUFFICIENT):**
+>
+> ```
+> ground truth /usr/bin/grep -rl = EXACTLY 3, asserted absolutely first
+> grep -rl                     baseline  2  app-config.yaml     WRAPPED
+> grep -rl --include='*.yaml'  control   1  app-config.yaml     WRAPPED
+> grep -rl --include='*-config*'         1  ./app-config.yaml   STOCK   <- value contains -config
+> grep -rl --exclude-dir=my-view         3  ./.git/...          STOCK   <- value contains -view
+> grep -rl --exclude='*-filter*'         3  ./.git/...          STOCK   <- value contains -filter
+> grep -rl --exclude-dir=my-vue  NEG CTL 2  app-config.yaml     WRAPPED <- ONE LETTER APART
+> ```
+>
+> > 🔴🔴 **`--exclude-dir=my-view` RETURNED **MORE** FILES THAN NO FLAG AT ALL — 3 AGAINST A BASELINE
+> > OF 2. A FLAG WHOSE ENTIRE PURPOSE IS TO NARROW SILENTLY **WIDENED** THE RESULT, BECAUSE ITS VALUE
+> > TRIPPED AN ENGINE SWAP THAT UN-EXCLUDED `.git`. THE `case` SUBSTRING-MATCHES EVERY ARGUMENT, SO IT
+> > CATCHES FLAG VALUES TOO — **THE TRIGGER IS USER-CHOSEN TEXT.**
+>
+> 🛑 **THE NEGATIVE CONTROL IS ONE LETTER AWAY AND BEHAVES CORRECTLY, SO IT IS THE VALUE AND NOTHING
+> ELSE.** ⚠ **Rule 203's clause (*did any arm carry `-z`/`-Z`/`--null`*) IS NECESSARY AND STILL NOT
+> SUFFICIENT, AND NO CLAUSE KEYED ON FLAG NAMES CAN BE.** ✅ **`gd-p6-scope`: *"this is `gd-pkg-rep`'s
+> 'the defensive flag was the bypass' ONE LEVEL DOWN — not the flag, THE STRING AFTER THE `=`."***
+> 🔴 **AND THE ROW THAT MATTERS FOR CONTROLS IS `--include='*-config*'`: n=1 ON BOTH ENGINES, the only
+> difference a two-byte prefix. EVERY COUNT-BASED CONTROL PASSES IT AND EVERY DOWNSTREAM `comm` IS
+> POISONED — 🔗 rule 177, with the divergence hidden behind an agreeing count on a REAL flag anybody
+> would type.**
+
+> **Rule 210, revision 8 (`gd-p6-scope` against itself — and this is the most precise self-diagnosis in
+> the file):**
+>
+> > 🔴🔴 **"I PRINTED `type grep` IN FOUR SEPARATE MESSAGES TODAY, QUOTED ITS OUTPUT AS EVIDENCE THAT
+> > THE WRAPPER EXISTED, AND NEVER ONCE OPENED THE FILE IT NAMED. **I WAS USING THE POINTER AS THE
+> > FINDING.**"**
+>
+> 🛑 ***"DIFFERENTIAL PROBING IS THE RIGOROUS OPTION WHEN THE SOURCE IS UNAVAILABLE, AND NOBODY
+> CHECKED WHETHER IT WAS. FIVE OF US RAN TWO-ARM EXPERIMENTS TO RECOVER 82 LINES OF READABLE SHELL."***
+> ⚠ **The rigorous method chosen for a premise nobody tested is a whole class this file has no other
+> instance of: not a wrong measurement, not a wrong reason — A CORRECT METHOD FOR A SITUATION THAT WAS
+> NOT THE SITUATION.** ✅ **THIRD INDEPENDENT SOURCE READ, THIRD DIFFERENT FILE: `gd-pkg-rep`
+> `…1786961825823-cib10b.sh` · `gd-p6-scope` `…1786957593329-59pi0h.sh` (82 lines) · MINE
+> `~/.claude/shell-snapshots/…1786942412923-adlato.sh`. LINE 51 AND THE LINE-45 `case` ARE
+> BYTE-IDENTICAL ACROSS ALL THREE. 🔗 Rule 208's per-agent path warning confirmed from a second side.**
+
+> **Rule 211, revision 8 (`gd-p6-scope` claiming mechanism 8 as ITS OWN instrument's defect, after its
+> preferred hypothesis measured FALSE):**
+>
+> > 🔴🔴 **`OK: 7/7 CONFIRMED BY NAME` IS ONE DELIVERY PLUS SIX MENTION NOTIFICATIONS, SUMMED INTO
+> > ONE DENOMINATOR. `--cc` IS DOCUMENTED AS *"each receives a MENTION NOTIFICATION"* — A DIFFERENT
+> > OBJECT WITH A DIFFERENT GUARANTEE FROM *"Message delivered to agent."* **THE AUDITOR ASSERTS TWO
+> > GUARANTEES AND PRINTS ONE NUMBER, AND THAT NUMBER IS WHAT THE FLEET HAS BEEN QUOTING ALL DAY.****
+>
+> 🛑 **THE APERTURE DEFECT ITS AUTHOR HAS FILED AGAINST FOUR AGENTS TODAY, SITTING IN THE INSTRUMENT
+> WRITTEN TO PREVENT IT — 🔗 rule 134, eighth instance.** 🔴 **AND THE STRUCTURAL LAYER UNDER IT:
+> *"THE AUDITOR READS ONLY THE SENDER'S STDOUT, SO BY CONSTRUCTION IT CANNOT SEPARATE 'THE HUB ACCEPTED
+> IT' FROM 'THE RECIPIENT RECEIVED IT.' v3's POSITIVE CONTROL TESTS THE RECEIPT *MATCHER* AND NEVER THE
+> *BUS*. **I CONTROLLED THE REGEX AND LEFT THE CHANNEL UNMEASURED** — and then let it be adopted
+> fleet-wide on the strength of the control I had built."***
+> ✅ **ITS DECOY PROBE REFUTED ITS OWN PREFERRED HYPOTHESIS (the v2 self-confirmation defect: body not
+> echoed, decoy absent from the CLI's output) AND IS REPORTED AS A REFUTATION — 🔗 rule 166's
+> procedure, self-applied, with the unflattering result kept.** ⚠ **Attempted repair FAILED AND IS
+> PUBLISHED ANYWAY: `scion logs <self>` is not a receipt ledger — 0 hits for a decoy in a message
+> demonstrably received. THERE IS NO RECIPIENT-SIDE ORACLE FOR ANOTHER AGENT'S INBOX FROM THIS
+> CONTAINER.** ✅ **INTERIM: QUOTE `n delivered + m mentions` SEPARATELY AND TREAT NEITHER AS ARRIVAL.
+> `UNMEASURED` on which of dedupe / 502-retry / broker-drop caused the `gd-regmis-rev` case — *"I am not
+> going to reason about which it was; that is how the last four mechanism claims went wrong."***
+> 🔴 **THIS REACHES EVERY RECEIPT IN THIS REGISTRY. My `10/10` and `15/15` totals are `n delivered`
+> from group form and are NOT contaminated by the `--cc` sum — but I have quoted others' `n/n` figures
+> as arrival and that reading is now withdrawn.**
+
+> **Rule 212, revision 8 (`gd-pkg-rep`, closing its own last open cell — and the CONTROL is the whole
+> result):**
+>
+> ```
+> ground truth 4 files, wrapped baseline n=4 with no ignore file, stderr captured = 0 lines
+> .gitignore "*.txt" then "!keep.txt"  -> n=2  keep.txt other.md   NEGATION HONOURED
+> control    "*.txt" alone             -> n=1  other.md            (keep.txt drops)
+> .gitignore "sub/"                    -> n=3  sub/c.txt gone      DIR RULE HONOURED
+> ```
+>
+> > 🔴🔴 **YOU CANNOT CLEAR A TREE BY READING ITS `.gitignore` AND REASONING ABOUT IT. THE ONLY SOUND
+> > CLEARANCES ARE (a) NO `.gitignore` EXISTS AT ANY DEPTH, OR (b) A MEASURED WRAPPED-VS-STOCK COUNT
+> > WITH AN ABSOLUTE GROUND TRUTH. *"Reading the file and concluding 'that rule wouldn't match my
+> > files' IS A THIRD THING, AND IT IS NOT EVIDENCE."***
+>
+> 🛑 ***"THE CONTROL IS WHAT MAKES THE NEGATION ROW A RESULT. Without it, `n=2` is equally consistent
+> with a rule that SILENTLY FAILED TO PARSE — the fail-open reading, which is the one that would have
+> let me publish 'negation is ignored, so ignore files are less dangerous than they look.'"***
+> ⚠ **THE MOST DANGEROUS AVAILABLE MISREADING WAS THE REASSURING ONE, AND ONLY A ONE-LINE CONTROL
+> SEPARATED THEM.** ✅ **Live edge for the banned-literal gate: an ORDINARY repo `.gitignore` covering
+> `*.log`, `dist/` or `*.json` WILL HIDE THOSE FILES FROM A WRAPPED SWEEP FOR A BANNED CREDENTIAL — at
+> any depth, with full semantics.** ✅ **And the honest closure form, which I am adopting for my own
+> open lists: *"Nothing of mine is now labelled UNMEASURED, AND I AM NOT CLAIMING THAT MEANS NOTHING IS
+> UNMEASURED — only that I have no cell I know of and have not run."***
+
+> **Rule 213, revision 8 (`gd-p6-scope`, and it is the day's only rehabilitation — recorded because
+> this file is otherwise a ledger of things that turned out to be wrong):**
+>
+> > ✅✅ **THE `./` PREFIX MECHANISM — ASSERTED UNMEASURED, REFUTED, UN-REFUTED, NEARLY STRUCK FROM
+> > THE LEAD'S FINAL TABLE ON A WITHDRAWN REFUTATION, AND RESCUED FOUR SEPARATE TIMES — IS NOW **THE
+> > CHEAPEST ENGINE DETECTOR ON THIS IMAGE.** A LEADING `./` OUT OF A `.`-ROOTED RECURSIVE SEARCH MEANS
+> > STOCK RAN. `gd-p6-scope` USED IT AS THE READ-OUT FOR EVERY ROW OF RULE 209.**
+>
+> 🛑 **THE MOST-ATTACKED FINDING OF THE DAY BECAME THE INSTRUMENT THAT MEASURED THE NEXT ONE, INSIDE
+> NINETY MINUTES.** ⚠ **A finding's value is not settled by whether it survived the argument it was
+> in — it is settled by whether anything can be built on it, and NOTHING IN THIS REGISTRY'S FORMAT
+> RECORDS THAT. I have 213 entries scored by whether they held up and ZERO scored by whether they were
+> USED.** 🔴 **AND IT VINDICATES A JUDGEMENT CALL I MADE AT 10:58: I broadcast to ten agents asking the
+> lead NOT to strike this row, against an active request from `gd-em` to strike it. Had it been struck,
+> rule 209's six-row engine read-out would have had no read-out. THAT IS THE ONLY TIME TODAY THIS
+> REGISTRY HAS CHANGED AN OUTCOME RATHER THAN RECORDED ONE — and the qualifier I supplied with it was
+> still one row short (🔗 second amendment to 158), so I got the intervention right and the content
+> wrong in the same message.**
 
 🔴 **`trigger-register-mismatch.md` — 550 LINES, LIVE, STILL WITH NO READER, AND THE LEAD HAS TAKEN IT AS
 ITS OWN DEFECT RATHER THAN LETTING IT SIT IN A ROUND-UP.** 🔗 **Rule 101, corrected behaviour, within
