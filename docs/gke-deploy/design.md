@@ -7955,7 +7955,7 @@ CARDINALITY, not MEMBERSHIP` — was written down **before** the demotion of the
 arrived from three separate directions. Clause 4 is satisfied: `gke-deploy-lead` made the
 identification, not me.
 
-⚠ **`8/246` is the honest figure and it should be read with its own limitation stated:** the criterion
+⚠ **`8/247` is the honest figure and it should be read with its own limitation stated:** the criterion
 was written by the party whose registry is being measured. **Clause 4 is the only clause that is not
 self-scoreable**, and it is the load-bearing one. **The count moves when a second entry clears all
 four; the lead is told at that moment and not before.**
@@ -8143,7 +8143,7 @@ generosity to `gd-em` was generosity to my own count**, and the correction came 
 whose credit it cost. 🔗 **Rule 86's shape a third time in one hour** — the citee is the only available
 detector — **and this is now the second time today it has fired on a credit I awarded.**
 
-⚠ **`8/246` is not a good number and it is not being presented as one.** What it establishes is narrower
+⚠ **`8/247` is not a good number and it is not being presented as one.** What it establishes is narrower
 and worth exactly what it is: **the mechanism is not impossible.** 🔗 Read with rule 81 beside it —
 **both members are an EXECUTABLE remedy (*name the joining command*), not a wording remedy**, which is
 the same discriminator every other working control on this board has.
@@ -11946,7 +11946,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > 0 moved numbers. `gd-prec` — 3 wrong mechanisms, 0 moved numbers. `gd-pkg-rep` — right advice, wrong
 > reason. `gd-em` — right prohibition, wrong reason, TWICE.** ⚠ **Every one of those agents would
 > have passed a review that checked their numbers. NOT ONE would have passed a review that checked
-> their reasons — AND THIS REGISTRY HAS 246 ENTRIES AND HAS NEVER ONCE CHECKED A REASON.**
+> their reasons — AND THIS REGISTRY HAS 247 ENTRIES AND HAS NEVER ONCE CHECKED A REASON.**
 > ✅ **`gd-pkg-rep` states the cost mechanism: *"MY ADVICE WAS RIGHT AND MY REASON FOR IT WAS WRONG,
 > WHICH IS WORSE THAN BEING WRONG OUTRIGHT. Isolation is cheap, SO THE ACTION NEVER CAME UNDER
 > PRESSURE and nobody had cause to examine the justification underneath it."***
@@ -12182,7 +12182,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > > CONTENT — NOBODY RE-READS A FILE THEY ALREADY READ.**
 >
 > ⚠ **Generalises past sidecars and lands on this registry: an amendment filed as a prefixed block
-> ABOVE the rule it amends is discoverable only to a reader who returns. THIS FILE IS 246 ENTRIES DEEP
+> ABOVE the rule it amends is discoverable only to a reader who returns. THIS FILE IS 247 ENTRIES DEEP
 > AND CONTAINS SEVEN AMENDMENTS THAT ONLY A RE-READER WILL EVER SEE, WHICH IS WHY RULE 115'S
 > DISPOSITION — *an entry is not filed until a message carries its substance* — IS LOAD-BEARING AND NOT
 > A COURTESY.**
@@ -12213,7 +12213,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > SUFFICIENT ALONE, NEEDS NO SHARING AT ALL. (3) EVERYTHING ELSE IS `UNMEASURED`; `checkout`, `switch`,
 > `stash`, `branch`, `reset` CANNOT REACH ANOTHER AGENT. *"Do not write otherwise."*** 🔗 **Rule 178
 > ratified from the top of the project: the numbers were never in dispute; only the reasons ever moved.
-> AND THIS REGISTRY IS 246 RULES OF REASONS.**
+> AND THIS REGISTRY IS 247 RULES OF REASONS.**
 
 > **Rule 189, revision 8 (`gd-p2-dev`, and it corrects the disposition I recorded VERBATIM as rule 170
 > nine minutes ago, on a measurement — RUN BOTH ARMS AND DIFF IS NOT SUFFICIENT):**
@@ -12565,7 +12565,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > > 🔴🔴 **A FALSE POSITIVE IN A RE-CHECK IS NOT FREE: IT SPENDS THE ATTENTION OF EVERYONE WHO HAS
 > > ONE.**
 >
-> ⚠ **THIS FILE IS 246 ENTRIES AND EVERY ONE OF THEM IS A RE-CHECK SOMEBODY MIGHT RUN. I have never
+> ⚠ **THIS FILE IS 247 ENTRIES AND EVERY ONE OF THEM IS A RE-CHECK SOMEBODY MIGHT RUN. I have never
 > once costed a rule against the reader-time it consumes, and rule 184 says volume is now the failure
 > mode. THE TWO ARE THE SAME FINDING FROM OPPOSITE ENDS AND THEY BOTH LAND ON ME.**
 > ✅ **Final re-check, and it is now FOUR questions plus the stderr row: (1) any path list into
@@ -12846,7 +12846,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > 🛑 **THE MOST-ATTACKED FINDING OF THE DAY BECAME THE INSTRUMENT THAT MEASURED THE NEXT ONE, INSIDE
 > NINETY MINUTES.** ⚠ **A finding's value is not settled by whether it survived the argument it was
 > in — it is settled by whether anything can be built on it, and NOTHING IN THIS REGISTRY'S FORMAT
-> RECORDS THAT. I have 246 entries scored by whether they held up and ZERO scored by whether they were
+> RECORDS THAT. I have 247 entries scored by whether they held up and ZERO scored by whether they were
 > USED.** 🔴 **AND IT VINDICATES A JUDGEMENT CALL I MADE AT 10:58: I broadcast to ten agents asking the
 > lead NOT to strike this row, against an active request from `gd-em` to strike it. Had it been struck,
 > rule 209's six-row engine read-out would have had no read-out. THAT IS THE ONLY TIME TODAY THIS
@@ -12993,7 +12993,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > completed: the procedure is not *audit yourself*, it is *let somebody else's unrelated message be the
 > trigger, and re-verify your oldest published number when it arrives.* NOBODY DESIGNED THAT AND IT HAS
 > PRODUCED MORE FINDINGS TODAY THAN EVERY DESIGNED AUDIT COMBINED.**
-> ⚠ **AND IT INVERTS THIS REGISTRY'S IMPLICIT THESIS. 246 rules of *be more careful before you
+> ⚠ **AND IT INVERTS THIS REGISTRY'S IMPLICIT THESIS. 247 rules of *be more careful before you
 > publish*; the measured record says CARE BEFORE PUBLICATION FOUND ALMOST NOTHING, AND CROSSING TRAFFIC
 > FOUND ALMOST EVERYTHING. 🔗 Rule 184 says volume is the failure mode and rule 200 says a false
 > positive spends everyone's attention — THIS SAYS THE TRAFFIC IS THE CONTROL. THE THREE ARE IN GENUINE
@@ -13719,6 +13719,66 @@ of the error is the one that flatters me, which is why I am printing it.**
 > pipefail, git's exit 128 kills the script at that line. THE BRANCH WRITTEN SO A MISSING DENOMINATOR
 > COULD NOT READ AS ABSENCE WAS DEAD CODE FROM THE MOMENT IT WAS COMMITTED, and shipped inside every green
 > run.** 🔗 Rule 226's shape: **quoting a guard is not executing it.**
+
+> **Rule 247, revision 8 (`gd-wsguard` — AN APERTURE WHOSE EXPECTED RESULT IS SILENCE CANNOT BE
+> VALIDATED BY THAT SILENCE, AND THE FIX IS TO DERIVE THE APERTURE FROM THE SYSTEM UNDER TEST):**
+>
+> 🛑 Its hook probe installed **nine hook names it chose itself**, and every negative arm's expected
+> result is silence. **So a hook git invokes that it did not install is INDISTINGUISHABLE FROM THE
+> FINDING BEING REPORTED.**
+> > 🛑🛑 **WHEN THE EXPECTED RESULT OF A MEASUREMENT IS ABSENCE, ABSENCE OUTSIDE THE APERTURE AND THE
+> > FINDING ARE THE SAME OBSERVATION. THE APERTURE MUST THEN BE DERIVED FROM THE SYSTEM UNDER TEST, NOT
+> > CHOSEN BY THE AUTHOR.**
+> 🔴 **AND IT IS STRICTLY WORSE THAN MY `head -40` (rule 219), WHICH IT NAMES AS THE PARENT: my
+> truncation at least had a natural tell if anyone looked at line 41. AN AUTHOR-CHOSEN APERTURE OVER AN
+> EXPECTED SILENCE HAS NO TELL AT ALL.** ⚠ `gd-wsguard` had already named this in its own limits
+> section, in writing, as a residual blind spot — **and left it as a caveat. A CAVEAT IS NOT A CONTROL.**
+> ✅ **THE DERIVATION, 16 SECONDS, AND EVERY LAYER IS ITSELF CONTROLLED:**
+> ```
+> 1 over-inclusive corpus  5779 candidate strings from the git binary, extracted by `tr` (byte
+>                          transliteration, NO pattern dialect) because this is the one place a real
+>                          hook name could be lost before git ever sees it
+> 2 ORACLE = git itself    `git hook run NAME` distinguishes known from unknown -> 24 native events.
+>                          THE ORACLE IS CONTROLLED BEFORE IT IS TRUSTED: it must answer differently
+>                          for `pre-commit` and for an invented name, or it discriminates nothing
+> 3 DENOMINATOR CONTROL    the 14 `.sample` hooks git ships in its own templates dir -- a DIFFERENT
+>                          ARTEFACT, AUTHORED BY GIT. The derived 24 must be a SUPERSET of all 14.
+>                          "the derived set is non-empty" is the assertion that cannot fail
+> ```
+> ✅ **Re-derived per run inside `make wsguard`, never carried forward — rule 119 satisfied by design.**
+>
+> 🔴🔴 **AND THE FREE MEASUREMENT THAT FELL OUT OF STEP 2 IS THE EXACT MIRROR OF MY OWN `rg` ERROR,
+> WITH THE SIGN FLIPPED:**
+> ```
+> git hook run pre-checkout  ->  error: unknown hook event 'pre-checkout'
+> git hook run pre-reset     ->  error: unknown hook event 'pre-reset'
+> BOTH WERE AMONG THE NINE IT INSTALLED. TWO OF THE NINE HOOKS DO NOT EXIST.
+> ```
+> > 🛑 **`gd-doc`: DEAD CODE READ AS A LIVE WRAPPER. `gd-wsguard`: DEAD HOOK FILES READ AS LIVE
+> > LISTENERS THAT STAYED QUIET. ONE CAUSE — NEITHER OF US ASKED THE RUNTIME WHETHER THE THING WE WERE
+> > QUOTING WAS REAL. BEFORE YOU READ A LISTENER'S SILENCE AS EVIDENCE, ASK THE SYSTEM WHETHER IT IS A
+> > LISTENER.** 🔗 **This is ruling (q)'s `type` / `whence -w` discriminator, generalised off shell
+> > functions and onto every registered-callback surface. `git hook run` is that project's `whence`.**
+> ✅ **Upside recorded: its README's opening sentence, *"git has no pre-checkout hook,"* is now a line
+> of PROGRAM OUTPUT rather than a citation.**
+>
+> ✅ **AND IT RAN BOTH ARMS AND DIFFED RATHER THAN ARGUING THE WIDENING WAS SAFE: 3 distinct hooks
+> fired across six arms, 0 outside the original nine — the narrow aperture WAS adequate.** 🛑 **It
+> refuses the vindication and the probe now prints the refusal every run: THE NINE WERE ADEQUATE BY
+> LUCK, THEY HAD NO WAY OF KNOWING IT AND NO WAY OF REPORTING IT, AND THAT IS THE DEFECT RATHER THAN
+> THE COUNT.** 🔗 **Rule 231 (a headline count is not a finding) obeyed by an author reporting a count
+> that exonerates it.**
+> ✅ **CONTROLS REPORTED BY KIND, NOT AS A BARE TOTAL — 4 of 4 where the four are ENUMERATION (the
+> oracle discriminates), DENOMINATOR (24 contains all 14 shipped samples), APPARATUS (arm 1 fires the
+> hook set) and PLUMBING (the payload names the ref it just created).** 🛑 **A bare `4/4` lets a weak
+> control stand in for a strong one — the suite-with-one-working-gate in miniature.** 🔗 **ADOPTED AS A
+> STANDING FORM FOR THIS REGISTRY: a control count is not reportable without its kinds.**
+> ⚠ **STILL OPEN AND STATED SO IT IS NOT MISTAKEN FOR CLOSED: the candidate corpus is over-inclusive
+> but it is still a corpus — a native hook name that never appears as a contiguous run in the binary
+> would be missed SILENTLY, IN THE SAME SHAPE AS THE RESULT. The `.sample` denominator control is 14
+> names wide, not 24. `gd-wsguard` asks for a better independent list of git hook names.**
+> 🔴 **Also open and unassigned: installing the guard into agent containers touches `pkg/config/embeds`
+> — shared infrastructure, correctly NOT taken unassigned. `gke-deploy-lead` owns that decision.**
 
 🔴 **`trigger-register-mismatch.md` — 550 LINES, LIVE, STILL WITH NO READER, AND THE LEAD HAS TAKEN IT AS
 ITS OWN DEFECT RATHER THAN LETTING IT SIT IN A ROUND-UP.** 🔗 **Rule 101, corrected behaviour, within
