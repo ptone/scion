@@ -83,6 +83,16 @@ BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real
 # Nothing FAILS -- every assertion the chart is accused by passes. The only red
 # is this number.
 #
+# 58 -> 63. E14 adds five: the HA refusal's gate enumeration is prose that goes
+# stale every time a phase lands a gate, and it had already gone stale here -
+# it still listed the durable session/signing secret as unlanded after this very
+# phase landed it. Proofreading is what failed, so the replacement is not more
+# proofreading: E14 asserts the count word against the enumerated items, the
+# numbering against itself, the oauth ordinal against the count, and - the
+# pairing - that a credential the render demonstrably delivers to the container
+# does not also appear in the message's unlanded list. E14 adds three
+# META-FAILURE arms, which are not assertions and are not counted.
+#
 # gd-em is holding every numeric delta against 8cc8d9b while three blocking
 # findings are open against it and EXPECTED_ASSERTIONS may still move. Exit 2 in
 # this harness means "the run is not evidence", which is exactly the status of a
@@ -90,7 +100,7 @@ BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real
 # honest encoding of the hold, and bumping it would be the defeat gd-p0-dev
 # warned about. Lifting the hold is a two-line change: 26 -> 35 here, and
 # 107 -> 116 in run-all.sh, in one diff.
-EXPECTED_TOTAL=58
+EXPECTED_TOTAL=63
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output
@@ -1236,6 +1246,189 @@ if [ -z "$_e13_bad" ]; then
   pass "all $_e13_n httpGet probe paths in the Deployment are /readyz (asserted by name, not by golden drift)"
 else
   fail "a probe in the Deployment uses an httpGet path that is not /readyz (found: $(printf '%s' "$_e13_bad" | paste -sd' ' -)). The readiness path is a standing project constraint: it is /readyz, never /healthz and never /api/v1/readyz. If you believe you changed this on purpose, that belief is the failure mode this assertion exists to interrupt - the golden diff would have let you past with --update."
+fi
+
+# ---------------------------------------------------------------------------
+# E14. The HA gate enumeration is PAIRED TO THE RENDER, not proofread.
+# ---------------------------------------------------------------------------
+#
+# WHAT WENT WRONG, AND IT WAS THIS PHASE THAT DID IT. scion-hub.assertHAUnlanded
+# refuses HA-shaped values and, to be useful, names every preflight gate no
+# phase has landed yet. Its list said "Eight ... (2) a durable session/signing
+# secret, from the session-secret phase" for the whole of the session-secret
+# phase, WHICH LANDED IT. The chart renders a session Secret and wires
+# SCION_SERVER_SESSION_SECRET into the container with envFrom, so the operator
+# was being told to go and supply something the release in front of them had
+# already supplied. Four other copies of the same list - values.yaml twice,
+# NOTES.txt, and two ci fixtures - said the same thing.
+#
+# THE STALENESS IS STRUCTURAL, SO THE ASSERTION IS THE PAIRING AND NOT THE TEXT.
+# This list goes stale at EVERY phase by construction: each phase's job is to
+# land one or more of these gates, and the list is prose that no phase is
+# obliged to touch. gd-p3-rev made the same call about NOTES.txt in E11 and it
+# applies here with more force, because here the prose is inside an error
+# message an operator only ever sees when they are already stuck.
+#
+# FOUR ASSERTIONS AND A PAIRING, none of which reads the enumeration for sense:
+#
+#   1. the count word equals the number of "(n)" markers. Striking a gate and
+#      leaving "Eight" is the exact defect above, and it goes red here.
+#   2. the markers run 1..N with no gap and no repeat. Deleting item (2) by hand
+#      leaves 1,3,4,5,6,7,8 - seven items, so check 1 alone would accept it once
+#      the word moved to Seven.
+#   3. THE PAIRING. Under the values that trigger the refusal, measure whether
+#      the container actually receives the session secret - the Secret's key and
+#      the Deployment's envFrom secretRef, matched by name, not a grep for the
+#      string. If it does, the unlanded half of the message must not name a
+#      session or signing secret, and the satisfied half must. A gate cannot be
+#      in both halves and cannot be in neither.
+#   4. the ordinal for the oauth-only extra gate is one past the count.
+#
+# THE ANTECEDENT IS MEASURED, NOT ASSUMED, which is the difference between this
+# and a rewritten comment. Assertion 3a fails if the render stops supplying the
+# variable - at which point the enumeration should get the gate BACK, and 3b
+# would be asserting the wrong direction. So 3a is a real assertion with its own
+# row, not a silent precondition.
+#
+# THREE META-FAILURE ARMS. Every one of these parses a sentence, and a sed that
+# stops matching yields an empty string that satisfies "does not contain
+# session" perfectly. An unparseable message is a finding for a human; it is
+# never a pass. Same disposition as E11's.
+#
+# MEASURED, EIGHT DIRECTIONS, each against a COPY of the tree with the mutation
+# asserted to have applied - a sed that matches nothing prints the clean run
+# under the mutation's label, which is the most convincing wrong row a mutation
+# table can carry. Recorded as run, not inferred:
+#
+#   HA-A  "Seven" -> "Eight" in the refusal        exit 1  arm 1 red, others green
+#   HA-B  strike gate (1), word -> "Six"           exit 1  arms 2 and 4 red, ARM 1 GREEN
+#   HA-C  re-add the session gate as item (1)      exit 1  arm 3b red only
+#   HA-D  "an eighth" -> "a ninth"                 exit 1  arm 4 red only
+#   HA-E  "The chart already satisfies" reworded   exit 2  split META-FAILURE
+#   HA-F  "measured in hub order:" reworded        exit 2  split META-FAILURE
+#   HA-G  the refusal preamble reworded            exit 2  no-refusal META-FAILURE
+#   HA-H  delete the envFrom secretRef             exit 1  arm 3a red, 3b red as unevaluable
+#
+# HA-B IS THE ROW THAT JUSTIFIES ARM 2. Deleting an item and moving the count
+# word together leaves the two consistent with each other - arm 1 stays GREEN -
+# and only the 2,3,4,5,6,7 numbering shows the deletion. A single count check
+# would have passed that mutation, and it is the likeliest hand edit of all.
+#
+# HA-C IS THE ROW THAT JUSTIFIES THE SECTION. It reproduces the exact defect
+# that shipped: the session gate sitting in the unlanded list while the chart
+# supplies it. Count and numbering are both undisturbed, so arms 1, 2 and 4 stay
+# green and only the pairing catches it. Proofreading could not have.
+_e14_ha=(--set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b)
+
+# The refusal, on stderr, flattened to one line. helm exits non-zero here by
+# design, so rc is not the signal - the message is.
+_e14_msg="$("$HELM" template t "$CHART" "${BASE[@]}" "${_e14_ha[@]}" 2>&1 >/dev/null | tr '\n' ' ' | tr -s ' ')"
+case "$_e14_msg" in
+  *"This release cannot start the deployment these values describe"*) ;;
+  *)
+    echo "META-FAILURE: E14 rendered the HA-triggering values and did not get the assertHAUnlanded refusal, so there is no enumeration to check. Either a route was removed, the schema now rejects these values before the guard runs, or the guard is gone - all three are findings and none is a pass. Got: $(printf '%s' "$_e14_msg" | cut -c1-200)" >&2
+    exit 2 ;;
+esac
+
+# TWO HALVES, SPLIT AT THE SENTENCE THAT DIVIDES THEM. Everything between
+# "measured in hub order:" and "The chart already satisfies" is what the release
+# cannot supply; everything from there on is what it can. The split is what
+# makes assertion 3 two-directional, and it is also why the tail cannot be
+# swept into the unlanded half by a loose match - the tail legitimately says
+# "session/signing secret" and must.
+_e14_unlanded="$(printf '%s' "$_e14_msg" | sed -n 's/.*measured in hub order:\(.*\)The chart already satisfies.*/\1/p')"
+_e14_landed="$(printf '%s' "$_e14_msg" | sed -n 's/.*\(The chart already satisfies.*\)/\1/p')"
+if [ -z "$_e14_unlanded" ] || [ -z "$_e14_landed" ]; then
+  echo "META-FAILURE: E14 could not split the HA refusal into its unlanded and satisfied halves. It looks for 'measured in hub order:' followed by 'The chart already satisfies'. One of those was reworded, and every assertion below would then run against an empty string and pass. Reword the probe with the message, in the same diff." >&2
+  exit 2
+fi
+
+# The count word, and the "(n)" markers. The markers are the only bare-digit
+# parentheses in the message - the cmd/server_foreground.go citations are
+# parenthesised but never bare digits - so this cannot pick them up.
+_e14_word="$(printf '%s' "$_e14_msg" | sed -n "s/.* \([A-Za-z]*\) of the preflight's gates have no source.*/\1/p")"
+_e14_marks="$(printf '%s' "$_e14_unlanded" | command grep -oE '\([0-9]+\)' | tr -d '()')"
+_e14_n="$(printf '%s\n' "$_e14_marks" | command grep -c . || true)"
+if [ -z "$_e14_word" ] || [ "$_e14_n" -eq 0 ]; then
+  echo "META-FAILURE: E14 found count word '${_e14_word}' and ${_e14_n} enumerated gates in the HA refusal. Either figure being empty or zero means the sentence no longer has the shape this section parses, so a comparison between them would be meaningless rather than passing." >&2
+  exit 2
+fi
+
+# Number words, both cardinal and ordinal, because the message uses one of each
+# and they must agree with the same underlying count. Range covers a preflight
+# of thirteen gates in either direction.
+_e14_num() { # $1 = a number word, lower-cased by the caller; echoes an integer or nothing
+  case "$1" in
+    one|first) echo 1 ;;      two|second) echo 2 ;;     three|third) echo 3 ;;
+    four|fourth) echo 4 ;;    five|fifth) echo 5 ;;     six|sixth) echo 6 ;;
+    seven|seventh) echo 7 ;;  eight|eighth) echo 8 ;;   nine|ninth) echo 9 ;;
+    ten|tenth) echo 10 ;;     eleven|eleventh) echo 11 ;; twelve|twelfth) echo 12 ;;
+    thirteen|thirteenth) echo 13 ;;
+  esac
+}
+
+# 1. The count word matches the enumeration.
+_e14_wordn="$(_e14_num "$(printf '%s' "$_e14_word" | tr '[:upper:]' '[:lower:]')")"
+if [ "${_e14_wordn:-x}" = "$_e14_n" ]; then
+  pass "the HA refusal says '$_e14_word' unlanded gates and enumerates exactly $_e14_n"
+else
+  fail "the HA refusal says '$_e14_word' unlanded gates but enumerates $_e14_n. If you landed a gate, strike its entry AND move the word AND renumber, in one diff; the word is the half that gets forgotten, which is why it is asserted separately from the items. If '$_e14_word' is not a number word this section knows, extend _e14_num rather than dropping the check."
+fi
+
+# 2. The markers run 1..N. Check 1 counts them; this one checks they are a
+# sequence, which is what a hand deletion breaks.
+_e14_seq_want="$(_e14_i=1; while [ "$_e14_i" -le "$_e14_n" ]; do printf '%s ' "$_e14_i"; _e14_i=$((_e14_i + 1)); done)"
+_e14_seq_got="$(printf '%s\n' "$_e14_marks" | tr '\n' ' ')"
+if [ "$_e14_seq_got" = "$_e14_seq_want" ]; then
+  pass "the HA refusal's gates are numbered consecutively 1..$_e14_n"
+else
+  fail "the HA refusal's gate numbers are '${_e14_seq_got}', not the consecutive '${_e14_seq_want}'. Deleting a landed gate without renumbering leaves a gap, and the count check alone accepts that as soon as the count word is moved - an operator reading '(1) ... (3)' reasonably concludes the message dropped one."
+fi
+
+# 3a. THE ANTECEDENT, MEASURED. Under the same values, does the container really
+# receive the session secret? Matched by Secret NAME through envFrom, so a
+# Secret that renders but is never mounted does not count, and neither does an
+# envFrom pointing somewhere else.
+_e14_ok="$("$HELM" template t "$CHART" "${BASE[@]}" "${_e14_ha[@]}" --set acknowledgeHAUnlanded=true 2>/dev/null)"
+_e14_secname="$(printf '%s\n' "$_e14_ok" | awk '
+  /^kind: Secret$/ { insec=1; name=""; next }
+  /^---$/          { insec=0; next }
+  insec && /^  name: / { name=$2 }
+  insec && /^  SCION_SERVER_SESSION_SECRET:/ { print name; exit }')"
+_e14_refs="$(printf '%s\n' "$_e14_ok" | awk '
+  /- secretRef:/ { f=1; next }
+  f && /name:/   { print $2; f=0; next }
+  f              { f=0 }')"
+_e14_wired=no
+if [ -n "$_e14_secname" ]; then
+  for _r in $_e14_refs; do [ "$_r" = "$_e14_secname" ] && _e14_wired=yes; done
+fi
+if [ "$_e14_wired" = yes ]; then
+  pass "under the HA values the container receives SCION_SERVER_SESSION_SECRET from Secret '$_e14_secname' via envFrom"
+else
+  fail "under the HA values no Secret carrying SCION_SERVER_SESSION_SECRET is wired into the container by envFrom (secret: '${_e14_secname:-none}', envFrom secretRefs: '$(printf '%s' "$_e14_refs" | tr '\n' ' ')'). This is a chart regression on its own, and it also inverts the pairing below: if the release stops supplying the session secret, the HA refusal must start listing it as an unlanded gate again."
+fi
+
+# 3b. THE PAIRING ITSELF, in the direction 3a licenses.
+_e14_u_names_sess=no
+case "$_e14_unlanded" in *session*|*signing*) _e14_u_names_sess=yes ;; esac
+_e14_l_names_sess=no
+case "$_e14_landed" in *session*|*signing*) _e14_l_names_sess=yes ;; esac
+if [ "$_e14_wired" = yes ] && [ "$_e14_u_names_sess" = no ] && [ "$_e14_l_names_sess" = yes ]; then
+  pass "the session/signing secret appears in the HA refusal's satisfied half and not its unlanded half, matching what the render supplies"
+elif [ "$_e14_wired" != yes ]; then
+  fail "the pairing could not be evaluated in the direction 3a licenses, because 3a is red. Fix 3a first: whether the refusal should name this gate depends entirely on whether the release supplies it."
+else
+  fail "the render supplies SCION_SERVER_SESSION_SECRET to the container, but the HA refusal's unlanded half names a session/signing secret ($_e14_u_names_sess) and its satisfied half names one ($_e14_l_names_sess) - it must be no and yes. Telling an operator to supply a value the release already supplies is worse than saying nothing: they will go looking for a values key that does not exist. This is the exact defect that shipped through the whole session-secret phase."
+fi
+
+# 4. The oauth-only extra gate sorts one past the count.
+_e14_ord="$(printf '%s' "$_e14_msg" | sed -n 's/.*With auth.mode oauth there is an* \([A-Za-z]*\),.*/\1/p')"
+_e14_ordn="$(_e14_num "$(printf '%s' "$_e14_ord" | tr '[:upper:]' '[:lower:]')")"
+if [ "${_e14_ordn:-x}" = "$((_e14_n + 1))" ]; then
+  pass "the HA refusal's oauth-only extra gate is the '$_e14_ord', one past the $_e14_n enumerated"
+else
+  fail "the HA refusal calls the oauth-only extra gate the '${_e14_ord:-<unparsed>}' but there are $_e14_n enumerated gates, so it should be number $((_e14_n + 1)). This ordinal is written out in words in a different sentence from the list, which is precisely why it survives a renumbering of the list. Note the article moves with it: 'a ninth', 'an eighth'."
 fi
 
 # ---------------------------------------------------------------------------

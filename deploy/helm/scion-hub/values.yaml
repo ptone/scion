@@ -26,10 +26,11 @@ fullnameOverride: ""
 #
 # database.driver: postgres, or storage.provider gcs with auth.mode proxy, or
 # hub.extraEnv setting K_SERVICE, each make the hub's isHADeployment test true
-# (cmd/server_foreground.go:927). Its hosted HA preflight then runs, and eight of
+# (cmd/server_foreground.go:927). Its hosted HA preflight then runs, and seven of
 # that preflight's thirteen gates have no source in this chart, so the hub aborts
 # before serving. The chart refuses those value combinations unless you set this,
-# and the refusal names all eight and the phase that lands each.
+# and the refusal names all seven and the phase that lands each. It was eight
+# until the session-secret phase landed the durable session/signing secret.
 #
 # Set it to true when you are rendering to inspect the output, or when you are
 # supplying the missing configuration yourself through config.existingSecret.
@@ -402,12 +403,13 @@ database:
   #
   # postgres is what the hosted deployment runs, and selecting it turns on the
   # hub's HA preflight (cmd/server_foreground.go:931). That preflight has
-  # THIRTEEN gates, and this release cannot satisfy eight of them - the database
-  # URL, a durable session secret, and six keys in the proxy and transport
-  # subtrees - so selecting postgres today means the hub aborts before serving
-  # unless you set acknowledgeHAUnlanded. Measured by walking the preflight gate
-  # by gate on the settings.yaml this chart renders; the eight are enumerated in
-  # the refusal itself.
+  # THIRTEEN gates, and this release cannot satisfy seven of them - the database
+  # URL and six keys in the proxy and transport subtrees - so selecting postgres
+  # today means the hub aborts before serving unless you set
+  # acknowledgeHAUnlanded. Measured by walking the preflight gate by gate on the
+  # settings.yaml this chart renders; the seven are enumerated in the refusal
+  # itself. A durable session secret was the eighth until the session-secret
+  # phase landed it.
   #
   # An earlier version of this comment listed four requirements - hub ID,
   # database URL, GCS storage with a bucket, session secret. Those are four of

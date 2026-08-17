@@ -959,24 +959,36 @@ else
 fi
 
 # --------------------------------------------------------------------------
-step "the eight-gate list is the same eight everywhere it is written"
+step "the gate list is the same list everywhere it is written"
 # --------------------------------------------------------------------------
 # A PARITY GUARD, NOT A DERIVATION, and that is a deliberate choice gd-em ruled
 # on. The three copies are written for three audiences - a numbered table for
 # whoever maintains the guard, a single-sentence refusal for whoever tripped it,
 # and an operator's table in NOTES - and collapsing them into one shared string
 # would make all three read like whichever audience won. What must not differ is
-# WHICH EIGHT, so that is what is checked, in both directions:
+# WHICH GATES, so that is what is checked, in both directions:
 #
 #   forward   every canonical gate appears in every copy
-#   backward  no copy names a preflight key that is not one of the eight, except
-#             the four this chart already satisfies and the ninth oauth-only gate
+#   backward  no copy names a preflight key that is not one of the seven, except
+#             the ones this chart already satisfies and the eighth oauth-only gate
 #
-# The backward half is the one that matters. Without it, adding a ninth gate to
-# one copy is invisible: the forward half stays green because all eight are
+# The backward half is the one that matters. Without it, adding an eighth gate to
+# one copy is invisible: the forward half stays green because all seven are
 # still there. An unknown token is a FAILURE and not a warning - the author
 # either added a gate and must add it everywhere, or named a key that is not a
 # gate and must say so in ALLOWED_NON_GATES below.
+#
+# SEVEN, AND IT WAS EIGHT: THE SESSION GATE MOVED, AND SO DID ITS ASSERTION.
+# "a durable session/signing secret" was gate 2 in all three copies. The
+# session-secret phase landed it - the chart renders a session Secret and wires
+# SCION_SERVER_SESSION_SECRET into the container - and all three copies went on
+# listing it for the length of that phase, because parity between three stale
+# copies is still parity. THIS CHECK WAS GREEN THROUGHOUT. That is not a defect
+# in the check, which was only ever asked whether the copies AGREE, but it is
+# the reason SESSION_MARKER below is now asserted ABSENT rather than present:
+# agreement is checked here, and correspondence to what the chart actually
+# renders is checked in tests/chart-integrity.sh section E14, which measures the
+# envFrom wiring before it will accept the gate's absence from the list.
 #
 # The NOTES copy is read out of the RENDER, not out of the template, so a copy
 # that is present in the file but conditioned away for this release counts as
@@ -1008,10 +1020,14 @@ CANON_GATES=(
   server.auth.transport.oidc_audience
   server.auth.transport.platform_auth_sa
 )
-# Gate 2 has no key name in any copy - it is prose - so it is carried as a
-# marker rather than pretended into a dotted token.
+# THE LANDED GATE, CARRIED AS A TRIPWIRE. It never had a key name in any copy -
+# it was prose - so it cannot be expressed as a dotted token, and it is now
+# asserted ABSENT from the unlanded lists rather than present in them. Kept
+# rather than deleted because re-adding it is the specific regression: the next
+# person to walk the preflight will hit a session-secret gate in the hub source
+# and may put it back without checking whether this chart supplies it.
 SESSION_MARKER='durable session'
-# Preflight keys that legitimately appear beside the eight. Each is here for a
+# Preflight keys that legitimately appear beside the seven. Each is here for a
 # stated reason, because an exclusion list with no reasons becomes a place to
 # put anything that turns a check green.
 ALLOWED_NON_GATES=(
@@ -1019,7 +1035,7 @@ ALLOWED_NON_GATES=(
   server.database.driver # ditto
   server.storage.provider # ditto
   server.database        # the assertExtraEnv refusal points the operator at this subtree
-  server.auth.mode       # the NINTH gate, oauth-only, and not one of the eight by construction
+  server.auth.mode       # the EIGHTH gate, oauth-only, and not one of the seven by construction
   server.mode            # hosted-mode prose
 )
 
@@ -1028,13 +1044,29 @@ gate_tokens() { grep -oE 'server\.[a-z_]+(\.[a-z_]+)*' "$1" | sort -u; }
 # EXTRACTED BY CONTENT, NEVER BY LINE NUMBER. Each extraction asserts its own
 # size, because an extraction that silently returns nothing makes both halves of
 # the parity check pass.
-grep -E '^  [1-8]  ' "$CHART_DIR/templates/_helpers.tpl" >"$WORK/gates-doc.txt" || true
+grep -E '^  [1-7]  ' "$CHART_DIR/templates/_helpers.tpl" >"$WORK/gates-doc.txt" || true
+# THE REFUSAL IS ONE LINE CARRYING BOTH HALVES, so it is TRUNCATED at the
+# sentence that divides them. The doc and NOTES copies are tables and their
+# unlanded half is the table; the refusal is a paragraph whose tail deliberately
+# names what the chart DOES satisfy - including the session/signing secret. Fed
+# in whole, it trips the absent-marker assertion on text that is correct, which
+# is a false red pointing at the one sentence that should stay. Cut it at "The
+# chart already satisfies" and the marker test means what it means elsewhere.
 grep -F 'This release cannot start the deployment these values describe' \
-  "$CHART_DIR/templates/_helpers.tpl" >"$WORK/gates-fail.txt" || true
-grep -E '^    (server\.|a durable)' "$WORK/notes-ack.txt" >"$WORK/gates-notes.txt" || true
-[[ "$(wc -l <"$WORK/gates-doc.txt")" -eq 8 ]] || meta_failure "the numbered gate table in _helpers.tpl matched $(wc -l <"$WORK/gates-doc.txt") lines, not 8. The parity check below has nothing to compare."
+  "$CHART_DIR/templates/_helpers.tpl" \
+  | sed 's/The chart already satisfies.*//' >"$WORK/gates-fail.txt" || true
+# The cut must have HAPPENED. A sed that stops matching leaves the tail in and
+# the assertion silently goes back to being the false red described above; a cut
+# that swallowed the whole line leaves nothing and both parity halves pass on an
+# empty file. Both are meta-failures, and they are opposite mistakes.
+grep -qF 'The chart already satisfies' "$WORK/gates-fail.txt" \
+  && meta_failure "the refusal's satisfied half was not cut off before the parity check, so a gate this chart LANDS would be read as one it lacks."
+grep -qF 'server.database.url' "$WORK/gates-fail.txt" \
+  || meta_failure "cutting the refusal at 'The chart already satisfies' left no gate names behind, so the parity check below would compare against an empty file and pass."
+grep -E '^    server\.' "$WORK/notes-ack.txt" >"$WORK/gates-notes.txt" || true
+[[ "$(wc -l <"$WORK/gates-doc.txt")" -eq 7 ]] || meta_failure "the numbered gate table in _helpers.tpl matched $(wc -l <"$WORK/gates-doc.txt") lines, not 7. The parity check below has nothing to compare."
 [[ "$(wc -l <"$WORK/gates-fail.txt")" -eq 1 ]] || meta_failure "the assertHAUnlanded refusal string matched $(wc -l <"$WORK/gates-fail.txt") lines, not 1. The parity check below has nothing to compare."
-[[ "$(wc -l <"$WORK/gates-notes.txt")" -eq 8 ]] || meta_failure "the gate table in the rendered NOTES matched $(wc -l <"$WORK/gates-notes.txt") lines, not 8. The parity check below has nothing to compare."
+[[ "$(wc -l <"$WORK/gates-notes.txt")" -eq 7 ]] || meta_failure "the gate table in the rendered NOTES matched $(wc -l <"$WORK/gates-notes.txt") lines, not 7. The parity check below has nothing to compare."
 
 printf '%s\n' "${CANON_GATES[@]}" | sort -u >"$WORK/gates-canon.txt"
 printf '%s\n' "${CANON_GATES[@]}" "${ALLOWED_NON_GATES[@]}" | sort -u >"$WORK/gates-permitted.txt"
@@ -1044,17 +1076,17 @@ for _src in doc fail notes; do
   gate_tokens "$_f" >"$WORK/gates-$_src.tok"
   _missing="$(comm -23 "$WORK/gates-canon.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ')"
   _missing="${_missing% }"
-  if [[ -z "$_missing" ]] && grep -qF "$SESSION_MARKER" "$_f"; then
-    pass "the $_src copy names all eight gates"
+  if [[ -z "$_missing" ]] && ! grep -qF "$SESSION_MARKER" "$_f"; then
+    pass "the $_src copy names all seven unlanded gates and does not name the landed session-secret gate"
   else
-    fail "the $_src copy does not name all eight gates: missing [${_missing:-none}]$(grep -qF "$SESSION_MARKER" "$_f" || printf ' and the session-secret gate')"
+    fail "the $_src copy does not name the seven unlanded gates correctly: missing [${_missing:-none}]$(grep -qF "$SESSION_MARKER" "$_f" && printf ' and it still lists the session-secret gate, which THIS RELEASE LANDS')"
   fi
   _extra="$(comm -13 "$WORK/gates-permitted.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ')"
   _extra="${_extra% }"
   if [[ -z "$_extra" ]]; then
-    pass "the $_src copy names no preflight key that is not one of the eight"
+    pass "the $_src copy names no preflight key that is not one of the seven"
   else
-    fail "the $_src copy names [$_extra], which is neither one of the eight gates nor a listed non-gate. If a gate was added, add it to all three copies and to CANON_GATES; if it is not a gate, say why in ALLOWED_NON_GATES."
+    fail "the $_src copy names [$_extra], which is neither one of the seven gates nor a listed non-gate. If a gate was added, add it to all three copies and to CANON_GATES; if it is not a gate, say why in ALLOWED_NON_GATES."
   fi
 done
 

@@ -343,17 +343,30 @@ accept "sqlite + local storage + oauth"   --set auth.mode=oauth "${OAUTH_WEB[@]}
 accept "the chart defaults, no route"
 
 # THE GATE LIST IS PART OF THE CONTRACT, SO IT IS ASSERTED RATHER THAN TRUSTED.
-# gke-deploy-lead's Critical 1 requires the refusal to name all eight unlandable
-# gates in hub order. The number was reported as five for most of a day because
+# gke-deploy-lead's Critical 1 requires the refusal to name every unlandable
+# gate in hub order. The number was reported as five for most of a day because
 # a prober stopped at the first gate it could not construct and its extent was
 # read as the preflight's extent; the count below is the guard against that
 # happening again silently. THE DENOMINATOR IS ASSERTED, not the presence of at
-# least one - a message that named three of the eight would satisfy any
+# least one - a message that named three of the seven would satisfy any
 # per-substring check written as a loop with no total.
+#
+# SEVEN, AND IT WAS EIGHT. "durable session/signing secret" was the second entry
+# of this corpus until the session-secret phase landed it: the chart now renders
+# a session Secret and wires SCION_SERVER_SESSION_SECRET into the container, so
+# the refusal correctly stopped naming it and this row correctly went red.
+#
+# LOWERING A DESIGN-COUPLED COUNT IS ALMOST ALWAYS THE WRONG REPAIR, and it is
+# the right one here for exactly one reason: the gate was SATISFIED, not the
+# assertion weakened. The distinction is not rhetorical and it is not left to
+# this comment either - chart-integrity.sh section E14 measures that the render
+# really does supply that variable to the container before it will accept its
+# absence from this list. If a future phase lands a gate, strike it here and
+# extend E14's pairing in the same diff; if a row goes red and you cannot show
+# the render supplying the thing, the refusal is what regressed, not this list.
 executed=$((executed + 1))
 _ha_out="$(render --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b 2>&1)"
 _ha_want='server.database.url
-durable session/signing secret
 server.auth.proxy.provider=iap
 server.auth.proxy.iap.audience
 server.auth.transport
@@ -367,18 +380,18 @@ done <<EOF
 $_ha_want
 EOF
 _ha_total="$(printf '%s\n' "$_ha_want" | grep -c .)"
-if [ "$_ha_total" -ne 8 ]; then
+if [ "$_ha_total" -ne 7 ]; then
   # THE PROBE'S OWN CORPUS, ASSERTED. A truncated heredoc would make _ha_seen
   # equal _ha_total on zero gates and print ok. This is the defect the section
   # above exists to describe, reproduced one level up, so it gets a meta-failure.
-  echo "HARNESS ERROR: the gate-name list holds ${_ha_total} entries, not 8. NOTHING WAS MEASURED."
+  echo "HARNESS ERROR: the gate-name list holds ${_ha_total} entries, not 7. NOTHING WAS MEASURED."
   echo "ASSERTIONS_EXECUTED=${executed}"
   exit 2
 fi
-if [ "$_ha_seen" -eq 8 ]; then
-  echo "ok    the HA refusal names all 8 unlandable gates"
+if [ "$_ha_seen" -eq 7 ]; then
+  echo "ok    the HA refusal names all 7 unlandable gates"
 else
-  echo "FAIL  the HA refusal names ${_ha_seen}/8 unlandable gates"
+  echo "FAIL  the HA refusal names ${_ha_seen}/7 unlandable gates"
   echo "        got: $(printf '%s' "$_ha_out" | tr '\n' ' ' | cut -c1-300)"
   failed=$((failed + 1))
 fi
