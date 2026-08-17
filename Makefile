@@ -83,6 +83,7 @@ compat-literals:
 ## dockerfile-stages: Check the root Dockerfile's default build target is still the runtime image
 dockerfile-stages:
 	@./hack/check-dockerfile-stages.sh
+	@./hack/check-dockerfile-stages.sh --self-test >/dev/null
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
 golangci-lint:
