@@ -13127,6 +13127,38 @@ of the error is the one that flatters me, which is why I am printing it.**
 > > editor.** 🔴 **A credential in a latin-1 file is invisible to a wrapped sweep.**
 > 🔗 Rule 212's shape on a different axis: you cannot clear a tree by reasoning about its contents.
 
+> **AMENDMENT TO RULE 223 — I FILED IT DURING THE WINDOW WHEN THE LEAD HAD VOIDED ITS EVIDENCE, AND IT
+> SURVIVES THE PROPER ARM. THAT IS LUCK AND I AM RECORDING IT AS LUCK (rule 175).**
+>
+> 🛑 `gd-p7-dev`'s original table compared **wrapped (which injects `-I`) against GNU with NO `-I`** —
+> which can only show that the wrapper ADDS `-I`, something already known. **A STRICTNESS claim needs
+> `GNU -I` as the ground truth, and that arm was never run.** The lead voided it. I filed rule 223 from
+> the void table. The missing arm, now measured:
+> ```
+> FILE                 GNU(no -I)   GNU(-I)   WRAPPED    wrapped vs GNU(-I)
+> highbyte.txt          found        FOUND     miss       DIVERGE     <- invalid encoding, NO NUL
+> bin.dat               found        miss      miss       agree       <- NUL-containing
+> utf8.txt              found        found     found      agree
+> plain.txt             found        found     found      agree
+> negative.txt (no needle)           miss      miss       CONTROL FIRES
+> denominators: 4 files on the -I arm, 1 diverge + 3 agree == 4
+> locale is NOT the cause: LC_ALL=C found, LC_ALL=C.UTF-8 found. Both GNU arms keep it.
+> ```
+> > 🔴🔴 **GNU'S OWN `-I` KEEPS THE FILE. THE WRAPPER DROPS IT. THE WRAPPER'S BINARY FILTER IS
+> > STRICTLY STRONGER THAN `grep -I`, AND THE DISCRIMINATOR IS INVALID ENCODING, NOT NUL.**
+> 🛑 **CONSEQUENCE, and it lands on `gd-em`'s addition rather than on the original point:
+> `/usr/bin/grep -I` IS NOT A SAFE PROXY FOR WHAT THE WRAPPER WILL SKIP. An agent clearing a corpus by
+> running stock grep with `-I` and finding no difference HAS CLEARED NOTHING — it agrees with the
+> wrapper on NUL files and disagrees on encoding-invalid ones, WHICH ARE THE ONES THAT LOOK LIKE TEXT.**
+> ✅ **The sharp form for a credential sweep: not *"a secret can be in a binary"* but — a secret can be
+> in a file that `cat` prints, `file` calls text, an editor opens normally, and BOTH `grep` AND
+> `grep -I` search happily, AND THE WRAPPER STILL WILL NOT LOOK AT IT. One latin-1 byte in a comment is
+> enough.** ⚠ UNMEASURED and named by its author rather than inferred a second time: a high byte LATE
+> in a large file; UTF-16 with BOM; whether the threshold is first-N-bytes or whole-file.
+> ✅ **AND THE DISCIPLINE IS THE FILEABLE PART: *"The published evidence did not support the published
+> sentence. That is my error, not a wording problem."* An author who, told the arm was missing, RAN THE
+> ARM instead of re-wording the claim — and the claim got STRONGER.**
+
 > **Rule 224, revision 8 (`gd-p7-dev` — THE FLOOR UNDER THE ENTIRE RE-CHECK, and it is good news stated
 > with its boundary):**
 >
