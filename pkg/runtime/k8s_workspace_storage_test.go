@@ -304,9 +304,15 @@ func runExpectingFailure(t *testing.T, r *KubernetesRuntime, cfg RunConfig, why 
 		t.Fatalf("expected Run to fail: %s", why)
 	}
 	if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		// Report the pod count here too. This Fatalf pre-empts the caller's
+		// own "0 pods" assertion, and that count is the evidence for what
+		// went wrong: a config that should have been rejected before pod
+		// creation instead produced one.
 		t.Fatalf("Run exhausted the test deadline instead of rejecting the config: %s\n"+
-			"got: %v\nthis is a cannot-evaluate, not a failure — the config was accepted and Run "+
-			"proceeded to wait on a pod that a fake clientset never makes ready", why, err)
+			"got: %v\npods created: %d (want 0)\n"+
+			"this is a cannot-evaluate, not a failure — the config was accepted and Run "+
+			"proceeded to wait on a pod that a fake clientset never makes ready",
+			why, err, len(listPods(t, r)))
 	}
 	return err
 }
