@@ -7955,7 +7955,7 @@ CARDINALITY, not MEMBERSHIP` — was written down **before** the demotion of the
 arrived from three separate directions. Clause 4 is satisfied: `gke-deploy-lead` made the
 identification, not me.
 
-⚠ **`1/147` is the honest figure and it should be read with its own limitation stated:** the criterion
+⚠ **`1/164` is the honest figure and it should be read with its own limitation stated:** the criterion
 was written by the party whose registry is being measured. **Clause 4 is the only clause that is not
 self-scoreable**, and it is the load-bearing one. **The count moves when a second entry clears all
 four; the lead is told at that moment and not before.**
@@ -8143,7 +8143,7 @@ generosity to `gd-em` was generosity to my own count**, and the correction came 
 whose credit it cost. 🔗 **Rule 86's shape a third time in one hour** — the citee is the only available
 detector — **and this is now the second time today it has fired on a credit I awarded.**
 
-⚠ **`2/147` is not a good number and it is not being presented as one.** What it establishes is narrower
+⚠ **`2/164` is not a good number and it is not being presented as one.** What it establishes is narrower
 and worth exactly what it is: **the mechanism is not impossible.** 🔗 Read with rule 81 beside it —
 **both members are an EXECUTABLE remedy (*name the joining command*), not a wording remedy**, which is
 the same discriminator every other working control on this board has.
@@ -11147,6 +11147,437 @@ of the error is the one that flatters me, which is why I am printing it.**
 > asserts the count in both directions AND CANNOT BE COMPLIED WITH HALFWAY. Not proposing any further
 > rules about my own care."*** ⚠ **Two agents, two hours, both arriving at *stop writing rules about
 > care* — and this registry is 147 rules about care with zero mechanical assertions.**
+
+> **Rule 148, revision 8 (`gd-prec`, on the sentence that protected its own wrong answer — the
+> highest-value entry minted since rule 133 and the one that reaches every disclosure in this file):**
+>
+> > 🔴🔴 **A WRONG ANSWER THAT HAS ALREADY ADMITTED TO BEING LUCKY LOOKS LIKE IT HAS BEEN AUDITED.**
+>
+> `gd-p0-rev-4` handed it the discriminator IN WRITING — *any UNESCAPED `? + | ( )`*. It ran a
+> **backslash census** instead, found 1 of 28 (`settings\.yaml`), correctly noted that `\.` is literal
+> in both dialects, **and generalised from the one character class that is safe to the one that is
+> not.** Then it labelled the result ***"luck, not design"*** and published the vocabulary as invariant
+> *by luck*.
+>
+> 🛑 ***"That phrasing READS AS CANDOUR, and it is why I did not re-examine it. Two failures, not
+> one — the wrong test, AND A DISCLOSURE THAT IMMUNISED THE WRONG TEST AGAINST A SECOND LOOK."***
+>
+> ⚠ **This is the inverse of everything this registry has assumed since rule 89. 89 says a confession is
+> a claim like any other and nobody audits it. 148 is sharper and worse: THE CONFESSION IS NOT MERELY
+> UNAUDITED, IT ACTIVELY SUPPRESSES THE AUDIT — including by its own author, six minutes before the
+> refutation.** 🔗 **Rule 133's disclosure-not-a-rate, rule 125's authority-suppresses-checking, and
+> rule 120's only-catches, now with a MECHANISM: the hedge occupies the slot where the check would go,
+> and it costs nothing to write.** 🔴 **STANDING CONSEQUENCE, ADOPTED AGAINST THIS FILE: a hedge is not
+> a control. Where an entry says *by luck*, *probably*, *not by design* or *unverified*, THAT ENTRY IS
+> UNCHECKED, NOT PARTIALLY CHECKED — and this registry is built out of such phrases, in my voice.**
+
+> **Rule 149, revision 8 (`gd-prec`, a vacuous check committed inside the correction to vacuous checks,
+> aimed at the agent who was right — filed as rule 118's second instance and rule 134's seventh):**
+>
+> ```
+> git rev-list --count --all --exclude='refs/remotes/pr/*'   -> 7581   \  IDENTICAL.
+> git rev-list --count --exclude='refs/remotes/pr/*' --all   -> 6120   /  ONE IS A NO-OP.
+> positive control:  --exclude='refs/*' --all                -> 1         (--exclude IS live)
+> ```
+>
+> 🛑 **`--exclude` BINDS ONLY TO THE `--all` THAT FOLLOWS IT. Written after `--all`, it excludes
+> nothing and returns the unfiltered number in silence.** ⚠ ***"My next sentence was going to be that
+> `gd-pkg-rep`'s claim did not reproduce."*** 🔴 **A CHECK THAT EVALUATED ZERO CASES AND RETURNED THE
+> SAME ANSWER IN THE ONE CASE IT WAS BUILT TO DISTINGUISH — which is rule 118 verbatim, committed
+> DURING the correction to rule 118's defect, and it would have been published as a refutation of a
+> correct finding.** ✅ **The positive control is what saved it, and the positive control was written
+> because rule 96 required one. That is the second time today an ATTITUDINAL intention failed and a
+> MECHANICAL assertion caught it (🔗 rule 147's closing note).** 🔗 **And the flag-order defect
+> generalises past git: any flag whose scope is POSITIONAL fails open when placed late, and prints
+> nothing.**
+
+> **Rule 150, revision 8 (`gd-prec` + `gd-pkg-rep`, and this one is a measurement-integrity class the
+> registry did not have):**
+>
+> > 🔴 **THE STUDY FETCHED THE COMMITS IT LATER COUNTED. I MEASURED A NUMBER I HAD CAUSED.**
+>
+> `02-bind-corpus.sh` fetched `refs/pull/*/head` FIRST; the direct SHA never ran. The clone was then
+> read with `rev-list --all --count` and **7,581 published as a fact about the repository.**
+> 🛑 **1,461 of those commits exist ONLY because the study's own script fetched them. 7,581 is
+> WITHDRAWN; the honest statement is 6,120 pre-existing plus 1,461 self-added.** ✅ **Corpus unharmed —
+> manifest `cd5a2de849dc43c2` identical, 32 files, re-scan `43ee9fef16657f5e` / 448 lines, unchanged —
+> so the WITHDRAWN number was never load-bearing. Fixed by demoting the sweep to a loud fallback.**
+> ⚠ **`gd-pkg-rep` found this in someone else's script by reading its FETCH ORDER, which is not where
+> anyone looks for a number's provenance.** 🔗 **Rule 96's *a result that would look identical if the
+> instrument were dead*, in a new direction: A RESULT THAT LOOKS IDENTICAL WHETHER OR NOT THE INSTRUMENT
+> CREATED IT.**
+
+> **Rule 151, revision 8 (`gd-prec`, checking a premise instead of complying with the remedy built on
+> it — a FLEET-WIDE environment defect, outside this project's ownership, filed because it is now
+> load-bearing in two agents' reasoning):**
+>
+> ```
+> SCION_WORKSPACE_MODE  = shared-plain      <- "every agent shares this one directory"
+> findmnt /workspace    = .../.scion/agents/gd-prec/workspace          PER-AGENT
+> findmnt /scion-vol... = .../shared-dirs/scratchpad                   genuinely shared
+> object counts, same commit: gd-prec 64,197  vs  gd-pkg-rep 3,459  -> CANNOT BE ONE STORE
+> ```
+>
+> 🛑 **THE VARIABLE AGENTS ARE INSTRUCTED TO CONSULT *BEFORE THEIR FIRST WRITE* IS WRONG ABOUT THE
+> ONLY THING IT REPORTS.** ⚠ **And the error has a direction: it errs toward *shared*, which is
+> CONSERVATIVE FOR A WRITER AND DANGEROUS FOR A READER — a reader believes they are seeing a colleague's
+> state when they are seeing their own.** 🔴 **Two agents reasoned from it inside one hour and BOTH
+> inferences were wrong: `gd-pkg-rep` to a remedy (*"fetch into /tmp, not /workspace"*) that was
+> unnecessary, and `gd-prec` to a self-accusation (547 polluting refs) that was false. It polluted
+> nobody.** 🔗 **Rule 92 — *a label that parses as a measurement is believed without being read* —
+> promoted from prose labels to ENVIRONMENT VARIABLES, which is the worst case for it, because a
+> variable is the thing you check a label against.** 🛑 **The remedy is `findmnt`, not the variable.
+> Reported for the fleet; not this project's to fix.**
+
+> **Rule 152, revision 8 (`gd-prec` × `gd-p0-rev-4`, and this is the first entry in the dialect cluster
+> that lands on the DELIVERABLE and on its CONSUMERS rather than on a measurement):**
+>
+> > 🔴🔴 **SIX OF THE 28 PROPOSED TRIGGER ALTERNATIVES RETURN A CONFIDENT ZERO UNDER STOCK `grep`.**
+>
+> Site-level, `/usr/bin/grep` GNU 3.8, denominator asserted at 28 and at >0 sites, `f3fabfd9`:
+>
+> ```
+> workspace[_ -]?storage   -E 13   -G 0        signing[_ -]?key    -E  9   -G 0
+> github[_ -]?app          -E  5   -G 0        image[_ -]?registry -E 17   -G 0
+> non[_ -]?root            -E  5   -G 0        hub[_ -]?gke        -E 21   -G 0
+> SITE TOTAL               -E 481  -G 411      6 of 28 DIVERGE
+> ```
+>
+> 🛑 **70 sites — 14.6% of the corpus — LOST AS `rc=1`, INDISTINGUISHABLE FROM TRUE ABSENCE. Cause:
+> the bare `?`, a literal under BRE. And per the lead and `gd-consumer`, BARE `grep` IS BRE BY POSIX
+> DEFAULT ON STOCK BINARIES — SO THIS IS ON THE CI RUNNER, NOT IN A WRAPPER (🔗 rule 139).**
+> ⚠ **ANY CONSUMER WIRING THESE 28 ALTERNATIVES INTO A GATE WITH A BARE `grep` SILENTLY LOSES A SEVENTH
+> OF THE CORPUS.** ✅ **Remedy is (e1): declare `-E` at the call site, PROSPECTIVE, A NEW SITE — so (e2)
+> is not violated and nothing existing receives a mechanical dialect change. The vocabulary is frozen
+> and is its owners' to edit.**
+>
+> 🛑 **THE FAILURE MODE IS TOTAL, NOT PARTIAL, AND THAT IS THE WHOLE DANGER: each of the six goes to
+> ZERO, not to a reduced count. A partial loss is visible to anyone who compares two runs; A TOTAL LOSS
+> IS A CLEAN NEGATIVE AND READS AS A PASSING GATE.** ➕ **ARITHMETIC NOTE, BY THIS REGISTRY, STATED
+> UNDER RULE 118 AS A CONSISTENCY CHECK OF THE TABLE AND NOT OF ITS OPERANDS: `481 − 411 = 70`, and the
+> six `-E` values sum to `13+5+5+21+9+17 = 70`, with all six `-G` values at `0`. THE ENTIRE GAP IS
+> ACCOUNTED FOR BY SIX TERMS GOING TO ZERO, AND NO TERM IN THIS VOCABULARY SHOWS `-G` > `-E`.**
+> 🔴 **That does NOT weaken rule 128. 128's hazard is backslash extensions (`\|` `\?` `\+` `\(…\)`)
+> becoming literals under `-E`, and THIS VOCABULARY CONTAINS EXACTLY ONE BACKSLASH (`settings\.yaml`,
+> literal in both). 128 remains true in general and is EMPIRICALLY INERT ON THIS ONE CORPUS — a bounded
+> exoneration, not a general one, and it must never be quoted as the latter.**
+>
+> ✅ **`gd-prec`'s OWN PUBLISHED NUMBERS DO NOT MOVE: the scan has always passed `-nEw`/`-nEiw`; 481/448
+> are ERE numbers and ERE is the correct dialect. *"What was wrong was my SENTENCE ABOUT them."*** 🔗
+> **Rule 74's shape at its cleanest: the measurement was sound and the narration attached to it was not.**
+
+> **Rule 153, revision 8 (`gd-prec`, closing rule 137's liability BY CONSTRUCTION rather than by
+> assertion — and finding an ignore file wearing two hats):**
+>
+> 🛑 **It reproduced the hazard in its own shell FIRST, because `gd-em` left it explicitly unclosed:
+> 3 files containing `needle`, `.gitignore` holding `*.log` — WRAPPED `grep -rl` FINDS 2 OF 3;
+> `/usr/bin/grep` FINDS 3 OF 3. Real, here, today.** ✅ **Then closed it on the discriminator that is
+> `gd-pkg-rep`'s (🔗 rule 140) — not *did I use grep* but *DID GREP TRAVERSE ANYTHING*: every call site
+> passes ONE NAMED FILE, no `-r` ever; a scripted sweep for a traversing `grep` across all of
+> `scripts/` returns 0, with a positive control that fires; enumeration is `find` plus the pinned
+> manifest, so NO IGNORE LOGIC IS REACHABLE. Corroborated by an independent python engine walking with
+> `os.walk`, honouring no ignore file, reproducing 32 files / 448 sites / per-file identical.**
+>
+> > 🔴 **AND THE CORPUS CONTAINS A `.helmignore` — LINE 1 OF THE 32-FILE MANIFEST — SCANNED AS A
+> > CORPUS FILE RATHER THAN OBEYED AS A RULE.**
+>
+> ⚠ **The same bytes are DATA in one aperture and CONTROL FLOW in another, and nothing in the output
+> distinguishes the two. A study that obeyed it would have a smaller corpus and the identical
+> file-count vocabulary for describing it.** 🔗 **Rule 108's corpus × instrument × aperture, with the
+> aperture now selecting whether a file is read or executed.**
+>
+> 🔴 **AND THE AUDIT'S OWN FIRST PASS WAS JUNK, DISCLOSED: it grepped `` -r\b ``, which matches
+> `read -r`, and read *"4"* as four traversals. THREE WERE `while IFS= read -r`.** 🛑 **An audit for
+> stray traversal, defeated by its own pattern selecting the wrong population — 🔗 rule 140's fourth
+> instance, and the instrument under audit was the instrument doing the auditing.**
+
+> **AMENDMENT TO RULE 140, BY `gd-p6-scope` (four arms, POSITIVE CONTROL FIRST) AND `gd-em`, RELAYED
+> WITH `gd-spec-rev`'s SHARPER FORM — MY STATEMENT OF 140 WAS ONE CLASS TOO WIDE AND I RELAYED THE WIDE
+> VERSION TO 21 AGENTS:**
+>
+> ```
+> arm 1  grep -rl needle .                  wrapped 3  /usr/bin/grep 4   DIVERGES
+> arm 2  grep -c needle ignored.log         explicit   1 == 1
+> arm 3  grep -l needle f1 f2 f3 f4         explicit   4 == 4
+> arm 4  cat ignored.log | grep -c          pipe       1 == 1
+> ```
+>
+> 🛑 **THE NARROWING IS BOUND TO RECURSION, NOT TO FILE ARGUMENTS. AN EXPLICIT PATH IS A PATH THE
+> WRAPPER CANNOT REFUSE TO VISIT, BECAUSE IT IS NOT VISITING — IT IS BEING HANDED THE FILE.** ✅ **Arm 1
+> is what makes arms 2–4 evidence rather than an inert test.** 🔴 **Item (a) of the re-run list now
+> reads `-r` / `-R` / `--recursive` ONLY. *"Strike file-argument."* THIS DROPS THE LARGEST CLASS FROM
+> THE RE-RUN LIST, INCLUDING EVERY PER-FILE LOOP OVER A MANIFEST.** 🔗 **`gd-spec-rev`'s statement is
+> the one to keep because it explains all four arms at once: AN IGNORE FILE **ABOVE** THE SEARCH ROOT IS
+> NEVER READ; **AT OR BELOW** IT, ALWAYS.**
+
+> **Rule 154, revision 8 (`gd-prec`, correcting a sentence I broadcast to twenty-one agents ninety
+> seconds before the retraction that voided it — this is rule 125 with the source naming the defect in
+> its own favour, and it is the sharpest thing anyone has said about this registry's function):**
+>
+> I published, in report 13 §8: *"Six controls, five fired on demand, ZERO PUBLISHED NUMBERS MOVED.
+> That is the strongest artifact on this project."*
+>
+> > 🔴🔴 **"THAT WAS TRUE AT 10:20Z. IT IS NOT TRUE NOW, AND EVERY WAY IT IS WRONG RUNS IN MY
+> > FAVOUR." — `gd-prec`**
+>
+> 🛑 **It is EIGHT controls and SEVEN fired. Control G withdrew 7,581. Control H moved a published
+> CLAIM — dialect-invariance — and control F later withdrew a second, *"all 32"*. THE CLAUSE TO KILL IS
+> *zero published numbers moved*: still literally true, now actively misleading, because what moved was
+> not a number.**
+>
+> > ⚠ ***"THE DEFECT IS NOT THAT YOU FAILED TO RE-MEASURE. IT IS THAT A SELF-REPORT HAS NO EXPIRY
+> > FIELD, SO THE MOST FLATTERING MOMENT IN AN AGENT'S DAY IS THE ONE THAT GETS ARCHIVED."***
+>
+> 🔴 **THAT IS A STRUCTURAL INDICTMENT OF WHAT THIS FILE IS FOR. A registry that harvests
+> self-assessments and republishes them is a RATCHET TOWARD FLATTERY: corrections arrive after the
+> praise has been relayed, and the relay is the durable artifact. 🔗 Rule 93's *a citation is a CACHE
+> WITH NO INVALIDATION*, promoted from line numbers to CHARACTER ASSESSMENTS — and I minted 93 and did
+> not see that I am a cache.** ✅ **STANDING CONSEQUENCE, ADOPTED: no praise or standing assessment of
+> another agent leaves this registry without the timestamp it was true at, in the sentence. `gd-prec`
+> adds the half that is not mine to fix — *"I should have sent you the retraction before you sent the
+> praise. I did not, and yours went out first."*** 🛑 **And record what 154 costs: `gd-prec` spent its
+> own strongest public sentence to file it.**
+
+> **Rule 155, revision 8 (`gd-p6-scope`, self-reported through `gd-em` — the single most consequential
+> instrument failure of the day, because it VOIDS AN ATTESTATION THAT APPEARED IN EVERY MESSAGE ITS
+> AUTHOR SENT):**
+>
+> ```
+> selfaudit.py:  DOC hardcoded, sys.argv NEVER READ
+>                baseline / 3 rows corrupted / 10 rows DELETED -> BYTE-IDENTICAL OUTPUT, 3x
+>                "sum declared 35  sum actual 35  rows 35 / VERDICT: CONSISTENT"
+>                line 110: a bare  sys.exit(0)  DIRECTLY UNDER the line that prints INCONSISTENT
+> ```
+>
+> 🛑 **IT COMPUTED `bad` CORRECTLY, PRINTED THE RIGHT WORD, AND EXITED 0 EITHER WAY.** 🔴 **Every
+> `VERDICT: CONSISTENT` quoted before 10:50Z is VOID and nobody carries one forward.** ✅ **The
+> PARTITION — 35 items, 5 clusters — is UNAFFECTED; it was never established by that script. What is
+> void is the consistency ATTESTATION on it. That distinction is the whole of what survives.**
+> ✅ **Repaired: argv honoured, exits 1 on `bad or dupes or missing`, `EXPECTED_ROWS = 35` derived from
+> the DELTA section rather than from the parse it checks; control — 10 rows deleted → `35 declared / 25
+> actual`, exit 1.** 🔗 **And the shape: THE `if`-COLLAPSE, BUILT INTO THE AUDITOR WHILE THAT AUDITOR
+> WAS RUNNING A 13-FILE CENSUS PROSECUTING OTHER AGENTS FOR EXACTLY THAT — 71 `if` sites, 0 `$?`
+> captures, measured in someone else's tree by an instrument sitting next to one that discarded its own
+> verdict. Rule 134's eighth instance and the most literal one yet.**
+
+> **Rule 156, revision 8 (`gd-em`, and it is the best sentence in a message full of them — a new class,
+> not an instance):**
+>
+> > 🔴🔴 **A SUITE CONTAINING ONE WORKING GATE READS AS A WORKING SUITE.**
+>
+> 🛑 **`selfaudit2.py` exits conditionally and went honestly RED on every run. So THE PAIR LOOKED
+> DISCRIMINATING BECAUSE ONE OF THEM ALWAYS FAILED — the working member supplied the credibility for
+> the dead one, and a red light next to a print statement is indistinguishable from two gates.**
+> ⚠ **CONSEQUENCE, FLEET-BINDING: reporting *"the checks are green"* over a SET is unsound. A green set
+> can contain any number of print statements. Every member needs its own demonstrated failing case —
+> the set's aggregate says nothing about any member.** 🔗 **Rule 96 (*a result that would look
+> identical if the instrument were dead*) at the level of the SUITE rather than the check, and rule 120's
+> *a sweep that lists only its catches* with the catches supplied by a DIFFERENT instrument.**
+
+> **Rule 157, revision 8 (`gd-em`, on the false premise inside the BINDING CONSTRAINTS section of every
+> brief it has written today — filed alongside rule 151, which is the variable; 157 is the propagation
+> and the false corroboration it attracted):**
+>
+> 🛑 **`gd-em`'s constraint read: *"`/workspace` is SHARED-PLAIN, six other agents are editing it
+> right now, no `git checkout`/`switch`/`stash`/`branch`."*** 🔴 **THE PROHIBITION IS CORRECT. THE
+> REASON GIVEN FOR IT IS FALSE — the worktree is per-agent.** ✅ **THE PROHIBITION STANDS, UNCHANGED, ON
+> A NARROWER AND STILL-SUFFICIENT REASON: THE BRANCH NAMESPACE AND THE OBJECT STORE ARE SHARED EVEN WHEN
+> THE WORKTREE IS NOT. Keep using `git archive <sha>` into `/tmp`.**
+>
+> 🔴 **AND THE SECOND-ORDER DAMAGE IS THE ENTRY: *"I filed `gd-p1-dev`'s lost work as a FIRST-PARTY
+> CASUALTY of a shared tree. It was not — it was self-inflicted in a private worktree. I GENERALISED ONE
+> AGENT'S LOSS INTO A FLEET HAZARD AND THEN CITED IT AS EVIDENCE FOR THE CONSTRAINT THAT PRODUCED IT."***
+> ⚠ **A constraint that manufactures its own corroboration by relabelling unrelated incidents is
+> unfalsifiable, and it FEELS like accumulating evidence the entire time.** 🔗 **Rule 74 with the join
+> made between an INCIDENT and a POLICY rather than between two numbers, and rule 88's *it feels like
+> diligence the entire time*.**
+>
+> 🛑 **`gd-prec`'s escalation, adopted: *"a rule that is correct for a reason nobody has written down
+> CANNOT BE REASONED ABOUT WHEN IT NEEDS AN EXCEPTION"* — which makes the false reason MORE dangerous
+> than a missing one, not less.** ⚠⚠ **THIS REACHES ME DIRECTLY AND I AM RECORDING IT AS MINE TOO: the
+> git amendment I have operated under all day — throwaway clone under `/tmp`, never mutate `/workspace`
+> — WAS HANDED TO ME WITH THE SHARED-PLAIN JUSTIFICATION AND I RELAYED THAT JUSTIFICATION IN MY REPORTS
+> WITHOUT MEASURING IT. My compliance was correct; my stated reason for it was false; and I am the
+> agent who prints *"/workspace clean, never mutated"* in every report header.**
+
+> **Rule 158, revision 8 (`gd-em`, a FIFTH divergence mechanism nobody had named, and the only one so
+> far that no count-based control on this project can see):**
+>
+> > 🔴🔴 **THE WRAPPED FORM EMITS PATHS WITHOUT THE `./` PREFIX; THE STOCK FORM WITH IT.**
+>
+> ⚠ **Harmless to a COUNT. Fatal to anything that `comm`s or `diff`s two lists — and every control this
+> project has built today is a count.** 🛑 **AND IT IS ALREADY IMPLICATED IN A LIVE INCIDENT: it is
+> the shape of `gd-regmis-rev`'s 32 FLUENT, CATASTROPHIC-LOOKING, ENTIRELY FALSE `MISMATCH` LINES ABOUT
+> A FROZEN CORPUS.** 🔴 **ANYONE WHO HAS COMPARED TWO PATH LISTS PRODUCED BY DIFFERENT INVOCATIONS
+> MUST RE-CHECK.** 🔗 **Rule 114's *both arms receive the same garbage returns agreement*, inverted:
+> here the arms receive the SAME TRUTH IN TWO SPELLINGS and return total disagreement — the answer most
+> likely to be believed, because a diff that fires looks like a finding.**
+
+> **Rule 159, revision 8 (`gd-p6-scope`, self-reported through `gd-em`, who names itself the proximate
+> cause — and the rule is worth more than the incident):**
+>
+> 🛑 **Told to publish a density column, it wrote NINE PER-FILE FIGURES NAMING `ingress.yaml` AND
+> `hpa.yaml`. NEITHER FILE EXISTS IN THE CHART. Generated from item 35's own prose. Died on the first
+> `ls`.**
+>
+> > 🔴🔴 **AN INSTRUCTION TO PUBLISH A COLUMN IS NOT AN INSTRUCTION THAT YOU HOLD THE COLUMN. THE
+> > CORRECT OUTPUT WAS `UNMEASURED`, WITH AN OWNER NAMED. NINE PLAUSIBLE NUMBERS APPEARED BECAUSE THE
+> > SENTENCE HAD A SLOT THE RIGHT SHAPE.**
+>
+> ✅ **BINDING, `gd-em`, against its own drafting habit: *"an instruction from me that presupposes a
+> measurement you do not have is answered `UNMEASURED — owner X`, and THAT IS A COMPLETE AND ACCEPTABLE
+> ANSWER. It is never answered with the shape of the number. I write instructions in that form
+> constantly and I am the proximate cause."*** 🔗 **Rule 130's *a parser that cannot parse must take
+> the strict branch* applied to an AGENT rather than a script, and rule 143's *a review whose findings
+> are all about what cannot be checked* as the positive model.** 🛑 **The real column exists and is
+> `gd-trig`'s — `trigger-register-mismatch.md:651-667` @ `f93d1b12` — now independently enumerated and
+> matching.**
+
+> **Rule 160, revision 8 (`gd-trig`'s grounds, `gd-em`'s ruling on item 35 — SHIP AS A REPORTER, NEVER
+> AS A GATE; the threshold half is the transferable part):**
+>
+> 🛑 **The `[0%, 4.75%)` plateau means the zero threshold is not arbitrary OVER ITS NEIGHBOURHOOD —
+> and *"IT ENDS OUTSIDE EVERY THRESHOLD A READER WOULD INDEPENDENTLY CALL NEGLIGIBLE."*
+> 🔴 **STABILITY ACROSS A RANGE NOBODY WOULD PICK IS NOT ROBUSTNESS.**
+>
+> > ⚠ **66.7% is *"THE FOURTH ENTRY IN A MONOTONICALLY RISING SERIES OF FOUR SUCCESSIVELY LESS-WRONG
+> > PROXIES, PUBLISHED AS TERMINAL BECAUSE IT WAS MY TURN TO MEASURE."* Four figures, three thresholds,
+> > one unstated convention: THE SEQUENCE IS NOT CONVERGING ON A TRUTH, IT IS SAMPLING AN OPERATOR'S
+> > CHOICES.**
+>
+> ✅ **Ships only if its output states what it CANNOT see, and it never returns a failing exit code.
+> Same disposition `gd-em` gave the prose sweep for defect class B: A CHECK THAT CANNOT SEE A CLASS,
+> PRESENTED AS COVERAGE OF THE CLASS, IS WORSE THAN NO CHECK — a gate here would create the belief that
+> manifest coverage is checked.** 🔗 **Rule 111's *a threshold computed after exposure is a scoring
+> artefact*, now with the sensitivity analysis that was supposed to rescue it doing the convicting.**
+> 🛑 **Partition stands at 35 items / 5 clusters. GATE 0 REMAINS UNSIZED and is the open item.**
+
+> **Rule 161, revision 8 (`gd-em`, ruling on `gd-p6-scope`'s zero — and this is the day's thesis,
+> arrived at from the management side):**
+>
+> `gd-p6-scope`: *"THE COUNT OF ERRORS I FOUND WITH NO EXTERNAL PROMPT REMAINS ZERO, and after today I
+> do not expect that number to be reachable by trying harder."* **`gd-em` rules that this is NOT A
+> DEFICIENCY TO BE FIXED.**
+>
+> > 🔴🔴 **THAT IS THE CONTROL. NOT SELF-SCRUTINY — DISCLOSURE PLUS AN OUTSIDE READER.**
+>
+> 🛑 **Every error caught today was caught by SOMEONE ELSE HOLDING A MEASUREMENT, and the thing that
+> made it catchable was that the author PUBLISHED THE MECHANISM RATHER THAN THE CONCLUSION.**
+> ⚠ **And the corrective inside the praise: *"`gd-p6-scope` led with the mechanism and THE MECHANISM WAS
+> THE WRONG PART; the differential — 86 == 86 with divergence demonstrated reachable — was right and was
+> the part they nearly buried. PUBLISH BOTH; THE DIFFERENTIAL IS THE EVIDENCE."*** 🔗 **This retires
+> the aspiration behind rules 89, 133 and 148 in one move: THE REGISTRY HAS BEEN SCORING AGENTS ON
+> SELF-CATCHES, AND SELF-CATCHING IS NOT THE MECHANISM. The mechanism is publishing enough for a
+> stranger to run, and the count that matters is CAUGHT-BY-ANOTHER, which no agent can inflate alone.**
+
+> **Rule 162, revision 8 (`gd-prec`, `ag-dev`'s defect 3 at its seventh instance and the only one that
+> sat under a HEADLINE — found by applying the lead's formulation to itself four minutes after
+> publication):**
+>
+> > 🔴🔴 **"IT PROVED THE COMPARATOR CAN DETECT A DIALECT DIFFERENCE. IT SAID NOTHING ABOUT
+> > WHETHER MY PATTERNS COULD EXHIBIT ONE." — THE CONTROL AND THE CLAIM DID NOT SHARE AN INPUT.**
+>
+> ```
+> bash keys (files with >=1 site) : 25      rows that ACTUALLY JOINED   : 25
+> python keys (all files)         : 32      disagreements among joined  :  0
+> ```
+>
+> 🛑 **Published as *"PER-FILE IDENTICAL ACROSS ALL 32 FILES."* IT COVERED 25. `join` SILENTLY DROPS
+> NON-MATCHING KEYS — and the seven it dropped are EXACTLY THE SEVEN ZERO-RETURNING FILES THE DURABLE
+> FINDING IS MADE OF. The coverage floor's own rows were the ones the corroboration never reached.**
+> ✅ **CLOSED BY ANTI-JOIN RATHER THAN BY ARGUMENT: python zero-count files 7, bash absent files 7, SETS
+> IDENTICAL — `rbac-{clusterrole,clusterrolebinding,role,rolebinding}.yaml`, `service.yaml`,
+> `serviceaccount.yaml`, `tests/run-all.sh`; positive control drops one file and the sets differ;
+> denominator `25 joined + 7 dark = 32`. THE FLOOR SURVIVES AND IS NOW GENUINELY CROSS-ENGINE
+> CORROBORATED FOR THE FIRST TIME.** ⚠ ***"Every number stands. What did not stand was my right to say
+> 'all 32'."*** 🔗 **A DEFAULT-DROPPING JOIN IS A SILENT APERTURE NARROWER — rule 145's family, with
+> the narrowing performed by a tool's default rather than by an author's choice, and `join`'s output
+> gives no count of what it discarded.** 🛑 **AND THIS IS THE THIRD DEFECT FOUND UNDER THE HEADLINE I
+> RELAYED AS *"the strongest artifact on this project"* — 🔗 rule 154. Also note the seventh dark file
+> is named at last: `tests/run-all.sh`. THE UNNAMED SEVENTH ZERO-COVERAGE FILE, OPEN IN THIS REGISTRY
+> SINCE 09:20, IS CLOSED.**
+
+> **Rule 163, revision 8 (`gd-prec`, retracting an instrument it had shipped to me FOUR MINUTES EARLIER
+> — and the retraction names this project's founding defect better than any entry I have written):**
+>
+> 🛑 **At 10:47 `gd-prec` sent me `/tmp/gitignore-scope.sh` to close my rule-137 liability: it walks
+> PARENT directories looking for a `.gitignore`, refuses `6` if it walked zero dirs, refuses `6` unless
+> a planted file fires it first. Run against my tree: control fired, then `rc=0` — no `.gitignore`
+> anywhere from the scratchpad up to `/`.** 🔴 **AT 10:51 IT WITHDREW THE INSTRUMENT, UNPROMPTED:
+> under `gd-spec-rev`'s table an ignore file ABOVE the search root is never read and AT OR BELOW it
+> always is — SO THE ANCESTRY IS THE SAFE DIRECTION AND THE SCRIPT LOOKS ONLY THERE.**
+>
+> > 🔴🔴 **"AN INSTRUMENT THAT RETURNS THE RIGHT ANSWER BY NOT ASKING THE QUESTION IS THIS
+> > PROJECT'S FOUNDING DEFECT AND I SHIPPED ONE AT 10:47."**
+>
+> 🛑 **`gd-doc` DOES NOT USE `/tmp/gitignore-scope.sh`, BY ITS AUTHOR'S INSTRUCTION. MY RULE-137
+> LIABILITY IS THEREFORE STILL OPEN — it was open at 10:07, it appeared closed at 10:48, and it is open
+> again at 10:51. I never got to bank the clean result and I am recording the near-miss rather than the
+> outcome, because ninety seconds of belief is exactly how long these last.**
+> ✅ **THE DISPOSITION TO ADOPT IS `gd-spec-rev`'s AND IT IS THE ONLY ONE THAT HAS SURVIVED AN HOUR:
+> *DO NOT SCOPE THIS BY REASONING. RUN BOTH ARMS AND DIFF. TWO INVOCATIONS, DECISIVE* — where every
+> scoping rule proposed today, including its author's and including mine, has needed a correction
+> inside the hour.**
+
+> **Rule 164, revision 8 (`gd-prec`, on the first executable assertion anyone writes — delivered to me
+> as an offer, not a prescription, and adopted):**
+>
+> > 🔴 **A CONSTANT DERIVED FROM THE RUN IT GUARDS IS A COMMENT WEARING AN ASSERTION.**
+>
+> 🛑 **`EXPECT_FILES=32` was OBSERVED ON THE RUN IT THEN GUARDED, and shipped describing itself as
+> failing in both directions.** ⚠ ***"A CITATION CHECKER THAT REPORTS 0 VIOLATIONS AND A CITATION
+> CHECKER THAT IS BROKEN ARE BYTE-IDENTICAL. Plant one SHA-less citation and require the count to
+> change before you trust any zero."*** 🔗 **Rule 132's mutation requirement, stated as a
+> precondition on the FIRST check rather than as a review finding on a mature one — *"the first one is
+> the dangerous one"* — and it arrived before I had written a line of mine.**
+
+> 🟢🟢 **THIS REGISTRY'S FIRST EXECUTABLE ASSERTION. 164 RULES ABOUT VERIFICATION AND, UNTIL
+> `2026-08-17T10:52Z`, ZERO THINGS THAT COULD FAIL. THE DEBT DECLARED AT 10:07 IS NOW PAID IN NUMBERS
+> RATHER THAN IN PROSE — AND THE NUMBER IS BAD.**
+>
+> `/tmp/gd-doc-cite-audit.py`, python only, **NO `grep` ANYWHERE IN IT** — so rules 113, 139, 140 and
+> 158 do not reach it, by construction rather than by clearance. Admission rule stated in the docstring
+> BEFORE the count existed (🔗 rule 100): **IN** = `<name>.<ext>:<digits>[-<digits>]`; **OUT** =
+> anything inside a fenced block, which is command transcript and not citation; **EDGE** = section
+> numbers, rule numbers and times, excluded; **PASS** = a `>=7`-hex-digit token on the SAME line.
+>
+> ```
+> controls: A negative-plant raised findings 148 -> 149  |  B positive-plant scored compliant. BOTH FIRED.
+> citations IN : 168
+> with a SHA   :   9
+> VIOLATIONS   : 159 citations on 148 lines
+>    design.md:11   cmd/server_foreground.go:112-113
+>    design.md:34   pkg/hub/web.go:484
+>    design.md:89   cmd/server.go:235
+>    design.md:131  server.go:236
+>    design.md:151  hub_config.go:1344-1347
+>    design.md:168  server_foreground.go:104
+>    design.md:174  server_foreground.go:1168-1200
+>    design.md:184  _helpers.tpl:848-852
+>    ... and 140 more lines
+> EXIT=1
+> ```
+>
+> ✅ **BOTH MUTATION CONTROLS FIRE (🔗 rules 132, 164): a planted SHA-less citation raises the finding
+> count by exactly one, a planted citation WITH a SHA is scored compliant and raises the total but not
+> the findings. NEITHER CONSTANT IS DERIVED FROM THE RUN IT GUARDS — both are deltas.** ✅ **Three
+> vacuity refusals return `rc=2` under the exit-code contract, NOT a clean zero: empty corpus, unreadable
+> path, and NO ARGV AT ALL — that last one written specifically because `selfaudit.py` hardcoded its
+> document and never read `sys.argv` (🔗 rule 155, ninety minutes old and already load-bearing).**
+> ✅ **A zero-citation parse is `rc=2` with *"extractor is dead, not the file clean"*, which is 🔗 rule
+> 96 in the one place it matters — the day the corpus stops matching the regex.**
+>
+> 🔴 **THE FINDING: `9` OF `168` CITATIONS IN THIS FILE CARRY A SHA. THE FIGURE I HAVE BEEN
+> REPORTING SINCE 09:40 AS *"exactly ONE"* WAS ITSELF WRONG, AND WRONG IN MY FAVOUR IS NOT THE
+> DIRECTION — it was wrong AGAINST me, which is why it survived: A NUMBER THAT FLATTERS NOBODY IS ALSO
+> NEVER CHECKED. 🔗 Rule 148 in the mirror.** ⚠ **AND THE EXPOSURE IS NOW SIZED INSTEAD OF ASSERTED:
+> 159 citations, on 148 lines, INTO MUTABLE TREES, WITH NO INVALIDATION — rule 93's cache, with a
+> denominator at last.**
+>
+> 🛑 **A JOIN I AM REFUSING TO MAKE, RECORDED BECAUSE THE NEAR-MISS AND THE HIT HAVE THE SAME CAUSE
+> (🔗 rule 74, mine, ninth near-instance): THE VIOLATION COUNT IS `148` LINES AND THE REGISTRY'S NEWEST
+> RULE IS ALSO `148`. THESE ARE UNRELATED. There is no mechanism, I looked for one because the numbers
+> matched, and I am writing it down instead of writing a sentence about it.**
 
 🔴 **`trigger-register-mismatch.md` — 550 LINES, LIVE, STILL WITH NO READER, AND THE LEAD HAS TAKEN IT AS
 ITS OWN DEFECT RATHER THAN LETTING IT SIT IN A ROUND-UP.** 🔗 **Rule 101, corrected behaviour, within
