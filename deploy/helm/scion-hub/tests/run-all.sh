@@ -105,7 +105,7 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=4
-EXPECTED_ASSERTIONS=143   # 107 + 36 in render-guards.sh: 12 name-axis separator rows (F2), 7 multi-line-leaf rows, 14 anchor-class rows, and 3 map-KEY rows (catch, no-leak, name-axis boundary).
+EXPECTED_ASSERTIONS=155   # 107 + 48 in render-guards.sh: 12 name-axis separator rows (F2), 7 multi-line-leaf rows, 14 anchor-class rows, 3 map-KEY rows, and 12 URL-userinfo rows (F3: 7 slash-bearing fire arms, 3 authority-terminator accepts, 1 pinned known false positive, 1 slash redaction-superset arm).
 EXPECTED_FILES=6        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 
 # Enumerated by name, not globbed into a loop. A glob would run whatever is
