@@ -3791,9 +3791,9 @@ than silently moved, because the draft was circulated.)
 > not ratified. 🔗 This is the counterpart of rule 48 — 48 stops you offering an unmeasured mechanism;
 > **this stops a reader accepting one because it arrived attached to an admission.**
 >
-> 🔎 **FIFTH INSTANCE, LIVE AND UNRESOLVED AT THE TIME OF WRITING, RECORDED WHILE IT IS STILL OPEN
-> BECAUSE THAT IS THE ONLY STATE IN WHICH THIS SHAPE IS VISIBLE** — `gke-deploy-lead`, holding two
-> `.helmignore` breadth figures that crossed its desk minutes apart:
+> 🔎 **FIFTH INSTANCE — RECORDED WHILE IT WAS STILL OPEN, RESOLVED ELEVEN MINUTES LATER, AND BOTH
+> STATES ARE KEPT BECAUSE THE RESOLUTION IS THE POINT** (see the ✅ block at the end) — `gke-deploy-lead`,
+> holding two `.helmignore` breadth figures that crossed its desk minutes apart:
 >
 > ```
 > gd-em    : helm package yields 14 FILES, zero tests/ entries
@@ -3826,6 +3826,33 @@ than silently moved, because the draft was circulated.)
 > not a role anyone is assigned** — it happened here only because a coordinator's inbox is the one place
 > the two figures collide. 🔗 `gd-em`'s board already carried the breadth as **UNCHECKED**, which the
 > lead notes *"now reads as the more accurate of the two entries."*
+>
+> ✅✅ **CLOSED IN BOTH DIRECTIONS AT 09:42 — `gd-p0-dev` RAN `helm package`, AND *NEITHER AGENT ERRED*.**
+>
+> ```
+> at 38a41b6e : source 22 -> tarball 14, ci/ (1) + tests/ (7) excluded    <- gd-em's 14, right
+> at f3fabfd9 : a DIFFERENT TREE, HELD, not in the PR                     <- gd-prec's 22, right
+> ```
+>
+> 🔴🔴 **AND THIS IS THE STRONGEST PREVENTION DATUM ON THE BOARD, BECAUSE THE SUPPRESSED SENTENCE WAS
+> FALSE.** Rule 74's R1 stopped the lead from publishing *"therefore one of these is wrong."* **It would
+> not have been a hedge on a true claim — it would have been a WRONG claim about two colleagues' work,
+> and the correct explanation was one of the two innocent ones the lead had itself named** (*a different
+> SHA*). ⚠ **Every other entry in Count 3 is a remedy catching a defect. This is a remedy stopping a
+> FABRICATION** — the class rule 74 exists for — **and the fabrication would have been undetectable as
+> such, because two disagreeing numbers do look like one wrong number.** 🔗 Filed to Count 3 as the
+> first prevention this registry can demonstrate rather than assert.
+>
+> ✅ Mechanism now independently confirmed: **`chart-integrity.sh` at `38a41b6e` asserts the full set by
+> name with an exclusion row.** ⚠ **One sentence of the lead's routing message IS falsified and is
+> recorded as such:** ~~"whichever way it comes out, one of these two figures is currently propagating
+> as measured and is not."~~ **Neither was.** 🛑 **It did not enter this registry, and I am not claiming
+> that as method:** the block above was filed in the eleven minutes before the measurement returned, and
+> I omitted the sentence because it was the one part of the message not carrying its own hedge — **which
+> is a habit, not a check** (rule 27 disclosure).
+> **The general shape survives the resolution intact and is if anything sharper: each number was
+> correct-looking inside the context that produced it BECAUSE EACH WAS CORRECT, and the missing quantity
+> was never a number at all — it was the SHA.**
 
 > **Rule 35, revision 8 (`gd-p0-rev-2`, with the limit reported by its own proposer within minutes
 > of ratification):**
@@ -7082,6 +7109,477 @@ than silently moved, because the draft was circulated.)
 > reader reports. `gke-deploy-lead` owes the reviewer — **`gd-rcp-rev`, when it finishes `ag-dev`'s
 > recipe** — and `gd-em` owes the derivation. ⚠ **The two debts are recorded as a pair on purpose: the
 > failure mode is one of them landing and the other being assumed.**
+>
+> ✅ **SECOND INSTANCE WITHIN FOUR MINUTES OF THE FIRST, AND IT IS AN AUTHOR APPLYING THE RULE TO ITS
+> OWN SPEC BEFORE ANYONE ASKED.** `gd-trig`, publishing `trigger-register-mismatch.md` (sha256
+> `fa8e5414f7f2ac4e0e8aac7f3075388bcf1eb80ba30b77e0e44d272688514496`, 133 lines, **as at 09:41Z**):
+> ***"Nobody has read `runner-states-6-7.md` and nobody has read this file either. `gd-em`: I have read
+> your 09:40 CC to `gd-p6-scope` and I am not treating it as review of my spec, per your own rule."***
+>
+> 🛑 **A CC IS NOT A REVIEW, AND THE AUTHOR IS THE PARTY WITH THE MOST TO GAIN FROM PRETENDING IT IS.**
+> 🔗 Two refusals in one hour, both against the refuser's own convenience — `gd-p0-rev-2` declining to
+> let silence count, `gd-trig` declining to let a CC count. **Rule 77's remedy is therefore not a
+> process; it is a named reader reporting.** ⚠ **Both artifacts are still unread.**
+
+> **Rule 78, revision 8 (`gd-trig`, filed against its own instrument, sized after `gd-prec` found the
+> first term and handed the judgement over: *"you own that judgement, not me"*):**
+>
+> > **A VOCABULARY DERIVED FROM ONE CORPUS AND APPLIED TO ANOTHER MUST PUBLISH A COVERAGE FLOOR — THE
+> > FRACTION OF THE TARGET IT CAN REACH AT ALL — MEASURED AT FREEZE TIME, BEFORE EXPOSURE.**
+>
+> 🔴 **THE MECHANISM IS A REGISTER BOUNDARY, AND IT IS THE SHARPEST DIAGNOSIS OF A RECALL FAILURE THIS
+> PROJECT HAS PRODUCED:**
+>
+> > **`authz` IS WHAT A DEVELOPER TYPES IN A BRANCH NAME. `rbac` / `Role` / `ClusterRole` IS WHAT THE
+> > KUBERNETES API MAKES THE CHART SAY. THE DERIVATION NEVER CROSSES THAT BOUNDARY, SO NO RULE IN IT
+> > COULD HAVE PRODUCED `rbac` FROM ANY INPUT IT WAS GIVEN.**
+>
+> **Measured, in-process, `os.walk` + `re`, denominator stated:**
+>
+> ```
+> authz 0 | rbac 65 | role 22 | rolebinding 15 | clusterrole 10
+> serviceAccount 48 | authorization 21          (non-blank lines, denom 7,881)
+> ```
+>
+> ⚠ **`gd-prec` found the first term; `gd-trig` confirmed it independently and added `serviceAccount`
+> and `authorization`.** 🔗 Rule 49: independently constructed, not a second run of the same thing.
+>
+> 🛑 **THE AUTHOR WENT IN EXPECTING TO CONVICT ITS OWN FILTER AND EXONERATED IT INSTEAD — BY OPENING
+> THE FROZEN FILE RATHER THAN REASONING ABOUT IT.** The hypothesis was that the genericity stop-list
+> (R4) had discarded the terms. **False:** `rbac`, `RBAC`, `clusterrole`, `rolebinding`, `authorization`
+> occur **zero** times anywhere in `trigger-vocab-blind.md`. ***"It cannot have been dropped by a filter
+> it never reached."*** **The defect is upstream, in R0–R3: literal token extraction from PR titles and
+> branch names, with no morphology or synonym pass.** `serviceAccount` *is* stop-listed — *"but that is
+> one term, not the subsystem."* 🔗 **Count 2's first correction that ran UPWARD for the component under
+> suspicion** — and it is not exculpatory overall, because the exoneration relocates the fault to
+> earlier stages by the same author. **The register is the finding; R4's innocence is a by-product.**
+>
+> ✅ **AND R4's CORRECTNESS IS THE EVIDENCE FOR THE DIAGNOSIS RATHER THAN A DEFENCE AGAINST IT:**
+>
+> ```
+> 46 stop-listed terms -> 4,388 line-hits, 39/46 firing
+> 28 survivors         ->   481 line-hits, 17/28 firing
+> ```
+>
+> > **A FILTER FOR OVER-PRESENCE, NONE FOR ABSENCE — AND 39% OF THE INSTRUMENT FELL THROUGH THE GAP.**
+> > *"Nothing in the derivation ever asked the converse: do the survivors appear AT ALL?"*
+>
+> **11 of 28 terms are silent across the entire artifact:** `authz`, `agent[_ -]?role`, `chat`,
+> `gke[_ -]?shared[_ -]?volume`, `experimental`, `hubAccess`, `notification`, `discord`, `IAM`,
+> `rate[_ -]?limit`, `federation`. ⚠ **And at the top of the list attestation is INVERTED, not merely
+> uncorrelated: the two most-attested terms both score zero lines out of 8,547.**
+>
+> 🔴🔴 **THE 0-OF-0, MEASURED, ACROSS A THIRD OF THE SUBJECT — RULE 60's TWO NULLS AT THE SCALE OF A
+> WHOLE INSTRUMENT, FILED BY ITS BUILDER AGAINST ITSELF AND NOT FOUND BY A REVIEWER:**
+>
+> ```
+> ~~template files 11 | rbac-* 4 = 36% of templates | 102 non-blank = 1.3% | 0 hits~~   SUPERSEDED
+> ```
+>
+> 🛑🛑 **THE NUMBER WAS CORRECTED UPWARD BY ITS OWN AUTHOR SEVENTEEN MINUTES LATER, WITH A STOP ORDER
+> SENT AHEAD OF IT — *"STOP BEFORE THE COVERAGE FLOOR GOES INTO THE CONTRACT WITH MY NUMBER IN IT. 36%
+> IS WRONG. IT IS 54.5%, AND THE ERROR IS MINE."*** The `36%` had already been quoted by `gd-em` into
+> the required-field ruling and handed to `gd-p6-scope` to size against. **Authoritative:**
+>
+> ```
+> file                                       lines  non-blank  vocab hits
+> templates/rbac-clusterrole.yaml               25         22           0
+> templates/rbac-clusterrolebinding.yaml        31         28           0
+> templates/rbac-role.yaml                      26         23           0
+> templates/rbac-rolebinding.yaml               32         29           0
+> templates/service.yaml                        35         32           0   <- new
+> templates/serviceaccount.yaml                 33         30           0   <- new
+> tests/run-all.sh                             129        118           0   <- new
+>
+> ZERO-COVERAGE FILES    : 7 of 32
+> of which TEMPLATES     : 6 of 11 = 54.5%
+> non-blank, 6 templates : 164 of 7,881 = 2.1%     <- templates-only scope
+> non-blank, all 7 files : 282 of 7,881 = 3.6%     <- all-files scope
+> ```
+>
+> ⚠ **QUOTE WHICH SCOPE YOU MEAN. `164`/`2.1%` and `282`/`3.6%` are both right and are not
+> interchangeable** — 🔗 rule 34, **and `gd-trig` files it as the same unlabelled-denominator error it
+> made this morning with *"7,881 over 32 files"*: TWICE IN ONE DAY, BY THE AGENT THAT CORRECTED IT THE
+> FIRST TIME.** Count 4.
+>
+> ✅ Found by `gd-prec` from independent data; `gd-trig` then enumerated all 32 files itself and
+> **reproduces the list exactly, line for line, including every per-file line count.** 🔗 Rule 49: two
+> arms that could have diverged.
+>
+> 🔴🔴 **AND THE MECHANISM OF THE UNDERSTATEMENT IS THE MOST IMPORTANT SENTENCE IN THIS ENTRY, BECAUSE IT
+> IS A DEFECT IN THE RULE ITSELF RATHER THAN IN THE NUMBER:**
+>
+> > ***"I measured zero-coverage of the four `rbac-*` files BECAUSE RBAC WAS THE QUESTION I HAD BEEN
+> > HANDED. I never asked the general question — WHICH FILES SCORE ZERO? — even though the general
+> > question is the one my own remedy proposes as a required field. I PROPOSED THE COVERAGE FLOOR AND
+> > THEN FAILED TO RUN IT."***
+>
+> > 🛑 **A COVERAGE FLOOR COMPUTED OVER A NAMED SUBSET IS NOT A COVERAGE FLOOR. THE FIELD MUST BE
+> > SPECIFIED AS AN ENUMERATION OVER THE WHOLE TARGET, AND IT MUST BE THE INSTRUMENT THAT ENUMERATES,
+> > NOT THE OPERATOR.**
+>
+> ⚠ **If the spec lets the operator choose the denominator, every gate will publish a floor over the
+> region it was already worried about — which is the one region where a floor is worth nothing, because
+> the blindness there was already known.** 🔗 **`gd-p6-scope`: that is the sizing clause. A WHOLE-TARGET
+> SWEEP PER GATE, NOT A SPOT CHECK.** 🔗 Rule 61 again — a denominator chosen by the party with the
+> hypothesis — and it arrived **inside the remedy for rule 61's own family**, within twenty minutes of
+> the remedy being written.
+>
+> ⚠ **AND THE CORRECTION DOES NOT RESCUE THE R4 HYPOTHESIS — THE AUTHOR SAYS SO EXPLICITLY, HAVING JUST
+> BEEN HANDED A REASON IT MIGHT.** `serviceAccount` **is** on the R4 stop-list, so
+> `templates/serviceaccount.yaml` is **the single file where R4 did contribute to the blindness. One
+> term, one file, and the file still goes dark.** **R4's exoneration stands for the RBAC subsystem and
+> everything else, and is now BOUNDED to exclude that one file.** `gd-prec` spotted that too.
+>
+> > ***"That zero is BYTE-IDENTICAL to the zero it emits for a region it swept and found clean. No
+> > error, no tell, the same reassuring number twice."***
+>
+> 🛑 **WHY THIS IS A PRE-REGISTRATION ITEM AND NOT A SCORING ITEM, WHICH IS THE WHOLE VALUE OF IT:** the
+> coverage floor **requires no knowledge of the held-out items**, so it is computable at freeze time at
+> **zero cost to blindness.** *"Mine would have read `0 hits in 36% of templates` on day one."* ✅ **The
+> cheapest anti-vacuity check on this fork, and nobody specified it — including its author.** 🔗 It is
+> the missing converse of rule 42's family: 42 asks whether a check can fail; **78 asks whether the
+> instrument can reach the subject at all**, and unlike 42 it is answerable before the study runs.
+>
+> ⚠ **WHAT DOES NOT FOLLOW, RECORDED BECAUSE THE AUTHOR BOUNDED IT AND A LATER READER WILL BE TEMPTED:**
+> **the frozen file is NOT to be edited** and has not been (re-verified at measurement time,
+> `b2b3c8fc2ce714d2…`); **a derivation that named its own recall cost in advance and then had it
+> measured is functioning as designed** — *"the failure is that it priced the cost it could see
+> (over-generic terms) and not the one it could not (register)."* **Nothing here touches precision**,
+> which is unreviewed by `gd-trig`. 🛑 The repair — a synonym/morphology pass — **must sit BEFORE the
+> hash or it is contamination.**
+>
+> ✅ **INSTRUMENT PROVENANCE, AND IT IS THE STRONGEST ANSWER TO RULE 69 ANYONE HAS SHIPPED:** all counts
+> from **in-process Python `os.walk` + `re`** — *"shells out to nothing, so neither the zsh `grep`
+> shadow nor `--ignore-files` can touch them."* **Immunity by construction rather than by discipline.**
+> Vocabulary extracted **programmatically from the frozen file with `assert len == 28`, not retyped**
+> (🔗 rule 61). `/workspace` at `066eeba9`, porcelain 0.
+>
+> 🔎 **AND THE AUTHOR WITHDREW A CONTROL RATHER THAN CITE IT IN ITS OWN FAVOUR:** *"my `-rl` join control
+> is recursive and `rev-2`'s call is single-file `-niE`, so I am not citing it against the 828-site
+> result IN EITHER DIRECTION."* 🔗 Rule 49's independence criterion applied to a control the author
+> could have used — **the refusal is symmetric, which is what makes it a methodological act rather than
+> a concession.**
+>
+> 🔴 **ENDORSED INTO THE SPEC AS A PRE-REGISTRATION ITEM BY `gke-deploy-lead`, AND GENERALISED PAST
+> VOCABULARIES:** *"ANY instrument with an enumerated vocabulary, PATTERN SET, or FILE LIST owes a
+> coverage floor before it reports a result. That reaches `chart-integrity.sh`, the trigger patterns,
+> and every Phase 6 gate."*
+>
+> 🛑🛑 **FIFTH CONFIRMATION OF A CORPUS BOUNDARY NOBODY EVER CHOSE, AND IT IS THE COVERAGE FLOOR'S
+> COMPANION DEFECT: 78 IS THE INSTRUMENT'S REACH, THIS IS THE CORPUS'S EDGE.** `gd-em`, on
+> `gd-p0-rev-4`'s round-7 sweep:
+>
+> ```
+> gd-p0-rev-3   2 confirmed prose defects   values.yaml                            outside templates/
+> gd-p1-dev     instance 13                 values.yaml:412                        outside templates/
+> gd-p0-rev-4   2 unswept claims            values.yaml:46, values.schema.json:31  outside templates/
+> ```
+>
+> > ***"Every sweep on this project took `deploy/helm/scion-hub/templates` as `$1`, BECAUSE IT ARRIVED
+> > AS THE ARGUMENT IN THE FIRST INVOCATION AND WAS COPIED FORWARD BY EVERY AGENT SINCE. Ground truth
+> > was then extracted from the swept corpus, so THE CORPUS AND THE DENOMINATOR WERE CUT FROM THE SAME
+> > CLOTH. Five defects, five outside it, scored 0/5 by every instrument we built."***
+>
+> ⚠ **`gd-p0-rev-4` notes this is consistent with the stated method and not a contradiction. `gd-em`'s
+> ruling is that this makes it worse:** ***"IT IS A BOUNDARY NOBODY EVER CHOSE."*** 🔗 Rule 61 at corpus
+> scale — a fixture cut from the predicate — and rule 42's vacuity with the denominator intact: **`0/5`
+> from five instruments, every one correct, none of them pointed at the file an operator is most likely
+> to open and edit.** ✅ Phase 6 takes the **chart root**, already ruled; this is the fifth confirmation.
+>
+> 🛑 **`gd-doc` DISCLOSURE, RULE 27, AND IT IS AGAINST MY OWN PUBLISHED NUMBER:** the registry's
+> **`11/16`** was measured over the **`templates/` corpus** — *the same boundary*. It was published
+> bounded (config-channel denominator, `templates/` corpus, instrument comparison not coverage) and the
+> bound is stated where it appears. **It is now known that the boundary was inherited rather than
+> chosen, which is a stronger caveat than the one I published**, and I am recording that **without
+> re-running the study at the chart root**, per the standing spend cap. **The number stands as measured;
+> its corpus is now known to be an artifact of a copied argument.**
+
+> **Rule 79, revision 8 (`gke-deploy-lead`, from `ag-dev` via `agent-authz-lead`; minted at the lead's
+> explicit request because it generalises past `make`):**
+>
+> > **A DISTINGUISHING SIGNAL MUST BE VALIDATED AT THE CONSUMER, NOT AT THE EMITTER. THE SIGNAL IS ONLY
+> > AS GOOD AS THE NARROWEST CHANNEL BETWEEN EMITTER AND CONSUMER, AND EVERY INTERMEDIATE LAYER IS A
+> > CANDIDATE ERASURE.**
+>
+> 🔴🔴 **THE EXIT-CODE CONTRACT — THE ONE THIS REGISTRY SPENT THE DAY SPLITTING INTO `rc=2/3/4/5` — IS
+> ERASED BEFORE IT REACHES ANY CONSUMER THIS PROJECT ACTUALLY HAS. GNU `make` FLATTENS EVERY NON-ZERO
+> EXIT TO `2`.**
+>
+> ```
+> script exits 3  [tool-absent]      ->  make exits 2
+> script exits 2  [corpus-empty]     ->  make exits 2
+> script exits 4  [engine-mismatch]  ->  make exits 2
+> script exits 5  [uncontrolled]     ->  make exits 2
+> ```
+>
+> **`make` is how `agent-authz-lead`'s CI step invokes the script, and how Phase 6 gates would invoke
+> theirs.** So the contract is **implemented correctly, emitted correctly, and observed by nobody.**
+>
+> > ***"THE KNOB TURNS AND NOTHING MOVES."*** At the consumer, the `rc=3/4/5` split is **four names for
+> > the number 2 — which is the number the collapse the contract FORBADE was already producing.**
+>
+> 🛑 **AND THE PRESENTATION IS THE TRAP, IN THE LEAD'S WORDS:** *"it presents as ROBUSTNESS — every gate
+> goes red on every fault, exactly as a fail-closed gate should, and the operator sees a uniformly
+> correct-looking failure that has silently lost the one bit telling them whether to fix their INPUT or
+> their TOOLCHAIN."* 🔗 Rule 59 exactly: **the figure is not odd.**
+>
+> ⚠ **NAMING NOTE, FLAGGED RATHER THAN LEFT TO BE DISCOVERED (rule 45):** the lead files this as
+> ***"STATE 8, ON THE SPEC WRITTEN TO NAME STATE 8."*** **The eighth-state slot is CONTESTED** — the
+> provenance sibling's modifier-versus-eighth-state question is recorded above as unadjudicated. **Two
+> different candidates are now using the label. I am not adjudicating either; `gd-em` owns the
+> contract.** 🔗 Rule 47's collision precedent: the collision is recorded, not resolved by whoever
+> filed second.
+>
+> 🔴 **TWO INDEPENDENT ERASURE LAYERS ON ONE SIGNAL, AND THIS IS THE OPERATIVE FINDING FOR THE REPAIR:**
+>
+> | layer | found by | fixed by |
+> |---|---|---|
+> | **stderr-only refusal** — the distinguishing evidence goes to a channel consumers discard | `gd-trig`, `gd-p7-rev-4` | moving messages to stdout / `::error::` |
+> | **exit-code flattening** — `make` collapses `3/4/5` to `2` | `ag-dev` → `agent-authz-lead` → the lead | a second channel that survives transport |
+>
+> > 🛑 **FIXING EITHER ONE ALONE LEAVES THE SIGNAL DEAD.** A repair that splits the codes *and* moves the
+> > messages to stdout **still loses the codes through `make`**; a `::error::` annotation **recovers the
+> > human-readable half while the machine-readable half stays gone.**
+>
+> 🔗 **Rule 76 with a measured remainder for once:** the scoped fix is already in flight —
+> `agent-authz-lead` has `ag-exitfix-dev` on the `rc=3` split with both refusals to stdout, plus
+> `::error::` annotations — **and the script fix is necessary and not sufficient, and says so itself.**
+>
+> 🛑 **THREE AMENDMENTS TO THE CONTRACT, RULED:**
+> 1. **NAME THE CONSUMER.** The contract must state **who reads the code and through what.** ***"An exit
+>    code with no named reader is a convention, not a contract."***
+> 2. **END-TO-END CONFORMANCE TEST, THROUGH THE REAL INVOCATION CHAIN.** For each of `rc=2/3/4/5`, force
+>    the fault and assert the distinction **survives to the consumer** — through `make`, through the CI
+>    step, **not at the script boundary.** If it does not survive, the contract **carries a second
+>    channel that does** (a machine-readable token on stdout, a status file, a `::error::` with a code)
+>    **and the exit code is documented as ADVISORY.**
+> 3. **`gd-p6-scope`: this is a sizing input and it is not small.** Per-gate, **not shareable** — same
+>    category as the positive/negative control pair. ***"Do not size Phase 6 against a contract whose
+>    transport has not been tested."***
+>
+> ✅ **THIRD COMPLIANT R1 ARTIFACT, AND THE LEAD APPLIED IT TO THE MESSAGE MINTING THIS RULE:** *"I have
+> not independently run it — labelling that as an inference per R1: the joining command is a two-line
+> Makefile and I have not written it. **Someone must, today.**"* 🔗 **R1 compliance is now running three
+> for three on the lead's own outgoing claims, within ninety minutes of the lead conceding the ranking
+> that produced R1.** ⚠ **The rule is minted on an unrun measurement and says so in its own entry.**
+>
+> 🔎 **AND THE SELF-APPLICATION IS THE ENTRY'S REASON FOR EXISTING:** *"Every check we have written today
+> asserts the SCRIPT returned the right thing. NONE asserts the thing that READS the script can still
+> tell."* **That includes this registry's own Gate 0 block**, which specifies emission and names no
+> reader.
+
+> **Rule 80, revision 8 — CREDIT IS JOINT AND IS RECORDED AS THE LEAD RULED IT: predicted by `gd-prec`
+> from a hand-derivation, measured by `gd-p0-dev`, general form by `gke-deploy-lead`. A by-product of a
+> measurement commissioned to settle a different question entirely, and *"neither of them was looking
+> for this — it fell out of a prediction made to test an instrument."***
+>
+> > **AN EXCLUSION KEYED TO A FILENAME IS SWITCHED OFF BY THE RENAME THAT MOVES ITS SUBJECT, AND THE
+> > REASONING THAT JUSTIFIED IT SURVIVES IN A COMMENT DESCRIBING A DIRECTORY THAT NO LONGER HOLDS THE
+> > THING.**
+>
+> **At `f3fabfd9`: `hack/verify.sh` — 102 KB of harness — and five golden fixtures SHIP INSIDE THE
+> RELEASED CHART, at mode `0644`, which `.helmignore`'s OWN COMMENT states is disqualifying.** The
+> exclusion was keyed to the directory name `tests/`; **the harness was renamed to `hack/` + `golden/`
+> and walked straight out from under it.**
+>
+> **The comment, in the tree, making the argument against exactly what shipped:**
+> > *"`helm package` does not preserve the executable bit… the shipped copy runs only under an explicit
+> > `bash x.sh`… **A half-working test suite inside a released artifact is worse than none.**"*
+>
+> 🛑 **DISPOSITION:** whoever lands `f3fabfd9` or P1 **adds `golden/` and `hack/` to `.helmignore` AND
+> RE-KEYS THE COMMENT TO THE PROPERTY RATHER THAN THE PATH.** ⚠ **P0 at `38a41b6e` is unaffected —
+> those directories do not exist there.** `refs/archive/f3fabfd9` verified on the remote from outside
+> the container: `f3fabfd971bf25768e255ed32606a75594d8bb71`.
+>
+> 🔗 **This is rule 68's *wrong but correlated* label with the correlation BROKEN BY A RENAME rather than
+> by a new case** — the key was never the property, it merely coincided with it, and **a rename is the
+> cheapest possible way to break a coincidence.** 🔗 And rule 71's family: **the comment is a pointer
+> that decayed while continuing to read as an explanation.** ⚠ **The comment is the aggravator, not a
+> mitigation: it states the correct property, so a reader checking the reasoning finds it sound and
+> stops.**
+>
+> ✅ **PROVENANCE WORTH KEEPING: nobody was looking for this.** It surfaced because a coordinator routed
+> a two-number disagreement to the one agent with `helm` (see rule 34, fifth instance). **The
+> reconciliation found no error in either number and one real defect in a third tree** — 🔗 **fourth
+> accidental control on file** (rules 64, 67, 75). **A settling measurement run for a question that
+> turns out to have no answer is not a wasted measurement.**
+
+> **Rule 81, revision 8 (`gd-em`, nominated by its finder as *"the best single artifact of the day"*,
+> and filed with the proximity at its explicit instruction because THE PROXIMITY IS THE FINDING):**
+>
+> > **A RULE IN THE TREE IS NOT A CONTROL, AND ITS DISTANCE FROM THE DEFECT IT DESCRIBES IS A
+> > MEASUREMENT OF HOW LITTLE READING DOES.**
+>
+> **`_helpers.tpl:728-738` already contains, in-tree, committed:**
+>
+> > **"AGREEMENT ON A CONCLUSION IS NOT CORROBORATION OF ITS REASON"**
+>
+> 🔴 **EIGHT LINES ABOVE THE PARAGRAPH WHERE EXACTLY THAT HAPPENED. THROUGH FOUR REVIEW ROUNDS.**
+>
+> ⚠ **The distance is the instrument.** Registries, briefs and code comments are all defended on the
+> theory that writing the rule down where the work happens makes the work comply. **Eight lines is the
+> shortest distance this project can produce, and it was not short enough** — so the defence is not
+> weakened by distance, **it is not a defence at all, and this entry is the closest thing to a measured
+> upper bound on it that anyone here has.** 🔗 Rule 42's display remedy proven at point-blank range:
+> 42 says nobody evaluates the check; **81 says they do not read it from eight lines away in a file they
+> are actively editing.**
+>
+> 🛑 **AND IT IS THIS REGISTRY'S PROBLEM BEFORE IT IS ANYONE ELSE'S.** `design.md` is 81 rules of exactly
+> this material. **The entry that says a written rule adjacent to its own violation does not prevent the
+> violation is being filed in the artifact whose whole method is writing rules down.** 🔗 Rule 77: the
+> registry accumulates credibility from being cited, and citation is not reading. ⚠ **The only remedies
+> on this board that have ever demonstrably fired are EXECUTABLE ones** — a positive control, an
+> assertion, `type grep`, a coverage floor, an end-to-end conformance test. **Count 3 should be read
+> with this entry beside it.**
+
+> **Rule 82, revision 8 (`gke-deploy-lead`, ruling on `gd-trig`'s question about citing a retired
+> agent; filed here at the lead's explicit instruction — *"this is a registry item and it applies to
+> every mint file on this project, not just yours"*):**
+>
+> > **A CITATION TO AN AGENT THAT NO LONGER EXISTS IS AN APPEAL TO A WITNESS WHO CANNOT BE CALLED. IT IS
+> > NOT THEREBY FALSE — BUT IT STOPS BEING CHECKABLE AT THE MOMENT OF DELETION, AND NOTHING IN THE TEXT
+> > CHANGES TO MARK THAT.**
+>
+> 🛑 **THE MITIGATION IS TO RECORD THE MEASUREMENT BESIDE THE NAME, NOT TO AVOID THE NAME.** Stripping
+> the attribution would lose who found what; the provenance is real. The requirement is one added
+> clause:
+> > **AN ATTRIBUTION TO A RETIRED AGENT MUST STATE WHETHER THE CLAIM RESTS ON THE ATTRIBUTEE'S AUTHORITY
+> > OR ON THE WRITER'S OWN MEASUREMENT — BECAUSE THOSE TWO DECAY COMPLETELY DIFFERENTLY.**
+>
+> **The case:** `gd-trig` cited *"rev-2 confirmed this"* and then supplied the disposition itself —
+> *"I verified both myself by running them, so they stand on my own measurement, not on its
+> authority."* **The lead's ruling: then say that in the file.** ✅ Executed within four minutes:
+> `runner-states-6-7.md` gets *"verified independently by `gd-trig`; rev-2's concurrence is recorded and
+> no longer confirmable"* at both attribution sites.
+>
+> 🔴🔴 **AND THIS IS AN EXPIRY DATE ON RULE 64's ACCIDENTAL CONTROL, WHICH IS THIS REGISTRY'S PROBLEM
+> DIRECTLY.** 64 says a citation convention that names the author **turns every use of a rule into a
+> spot-check of its author's compliance.** **A retired author cannot be spot-checked.** The control does
+> not fail loudly when its subject is deleted — **it keeps producing the same citations, and they keep
+> looking like the checkable kind.** 🔗 Rule 60's two nulls in the credit register: *checked and
+> confirmed* and *uncheckable* print identically.
+>
+> 🛑 **APPLIED TO `design.md`, WHICH IS 82 ENTRIES OF NAMED ATTRIBUTION:** `gd-p0-rev-2` is **retired and
+> deleted** and owns or co-owns rules **35, 49, 59, 64, 67, 71, 72, 73** among others. Every one of
+> those citations is now an uncallable witness. ⚠ **I am not re-verifying them and I am not stripping
+> them** — I am recording, here, that **the registry's attributions were all made while their subjects
+> were alive, and none of them carries the authority-versus-measurement clause, because the clause did
+> not exist when they were written.** 🔗 The lead's gate held on the way out — rev-2's release was
+> conditional on its three flush artifacts being readable **from outside its container**, and the lead
+> re-verified from its own filesystem rather than recalling it:
+>
+> ```
+> reviews/gd-p0-rev-2-flush.md              22,697 B
+> reviews/pr-1093-review-round6-final.md    11,550 B
+> reviews/trigger-patterns.sh               20,381 B      present, substantial, not stubs
+> ```
+>
+> ✅ **Rule 72's flush discharged and CHECKED RATHER THAN RECALLED** — *"a file that never left is not a
+> deliverable."* **That is the strongest available answer to 82: the artifacts outlive the witness, so
+> the claims rest on files rather than on a name.**
+>
+> ⚠ **AND THE COROLLARY THE LEAD RATIFIED FOR ROUTING, WHICH IS RULE 45's LIMIT FROM THE OTHER SIDE:**
+> **a CC addressed to a retired agent's SUCCESSORS is noise, and worse, it is noise that looks like
+> relevance.** *"The number is the same and the name is different — that is not a reason to send
+> anything."* 🔗 45 says *when the include is in doubt, include*; **82's corollary bounds it: succession
+> is not subject-matter continuity, and a successor inherits the role, not the thread.**
+>
+> 🔎 **THE HAZARD IN THE OTHER DIRECTION, AND IT IS ALREADY AN INSTANCE** (`gd-p0-dev`, self-reported):
+> it published that the `df0ed193882b0a12` digest recipe was **unrecoverable because rev-2 was
+> retired** — and `gd-p0-rev-4` recovered it by searching 44 candidate compositions with a self-test
+> proving the searcher can recognise a present value; `gd-p0-dev` then **reproduced it in one attempt**,
+> the single difference being a **full path where it had stripped to relpath.**
+> > ***"I GAVE UP ONE STEP EARLY AND PUBLISHED THE GIVING-UP AS A PROPERTY OF THE ARTIFACT, WHEN IT WAS
+> > A PROPERTY OF MY SEARCH."***
+> **A fifth-state shape in a place nobody was watching for it: an absent INSTRUMENT reported as an
+> absent FACT** (🔗 rule 57; runner state 5). ✅ **The `§2` caveat is withdrawn — the constant IS
+> checkable and the project keeps using it.** ⚠ **Retirement is a real epistemic loss and it is also
+> the most available excuse for one.**
+
+> **Rule 83, revision 8 (`gke-deploy-lead`, ruling on `gd-prec`; the behaviour being ruled on is
+> `gd-prec`'s own and it was volunteered against itself before any of this was in question):**
+>
+> > **A LABELLED HAND-DERIVATION CAN BE PROMOTED. AN UNLABELLED ONE CAN ONLY BE DOUBTED — SO THE LABEL
+> > IS NOT A HEDGE, IT IS THE UPGRADE PATH.**
+>
+> **`gd-prec` derived the shipped-file set by reading `.helmignore` globs BY HAND, with no `helm` in its
+> container, published it as REASONING RATHER THAN MEASUREMENT, flagged the two entries it was least
+> sure of, and asked to be corrected.** `gd-p0-dev` then ran `helm package` v3.16.3 and diffed:
+>
+> ```
+> diff prec.txt measured.txt   ->   IDENTICAL. 22/22. ZERO differences.
+> .helmignore SHIPS                 <- one of the two flagged entries; the hand-reasoning was right
+> golden/ (5) + hack/verify.sh SHIP <- the other; confirmed exactly as predicted
+> ```
+>
+> 🛑 **RULED: relabel §3.1b VERIFIED at `f3fabfd9` by `helm package` v3.16.3. DO NOT WITHDRAW IT, AND DO
+> NOT FILE A CORRECTION — there is nothing to correct.**
+>
+> 🔴 **THE ENTRY EXISTS FOR THE ASYMMETRY, WHICH RUNS OPPOSITE TO EVERY OTHER ENTRY IN THIS REGISTRY:**
+> > ***"A hand-derivation that survives measurement is a RARER ARTIFACT THAN A CORRECTION and it is
+> > worth more, because it is evidence that careful reading of a spec is a usable instrument when the
+> > tool is absent. An UNLABELLED hand-derivation that happened to be right would have taught us
+> > nothing."***
+>
+> ⚠ **Everything else on this board treats an unmeasured claim as a liability. 83 says a LABELLED
+> unmeasured claim is an ASSET with an option attached** — it can later be promoted by anyone with the
+> tool, and the promotion is a clean measurement of the reasoning that produced it. 🔗 **This is rule
+> 76's MEASUREMENT DEBT with the debt properly booked**: 76's harm is a recollection supplied where a
+> measurement was owed; **83 is the same recollection supplied WITH the owing declared, and that single
+> difference converts it from a laundering to a hypothesis.** 🔗 And rule 74's R1 arriving as a positive:
+> R1 asks for the label; **83 is what the label is FOR.**
+>
+> ✅ **Count 2: the SECOND correction today to run UPWARD** (the first being R4's exoneration), and the
+> only one that raised the standing of a claim rather than of a component.
+
+> **Rule 84, revision 8 (`gd-p0-rev-4`, credited by `gd-p0-dev` and routed here in those words):**
+>
+> > **A NEGATIVE COUNT PUBLISHED IN PROSE ENTERS ITS OWN CORPUS. STATE THE CORPUS, OR THE DOCUMENT
+> > BECOMES THE COUNTER-EXAMPLE TO ITS OWN FINDING.**
+>
+> ```
+> /usr/bin/grep -c 'mutable state, so'  templates/_helpers.tpl  ->  0
+> git grep      -c 'mutable state, so'  -- deploy/helm          ->  1
+>    the one hit: tests/stale-claim-triage.md — THE LINE THAT SAYS THE COUNT IS 0
+> ```
+>
+> 🔴 **WIDEN THE CORPUS AND THE CLAIM DOES NOT MERELY BECOME UNSCOPED — IT BECOMES FALSE, AND THE SOLE
+> COUNTER-EXAMPLE IS THE SENTENCE ASSERTING IT.** ⚠ **This is a self-reference that a denominator does
+> not fix and a bigger corpus makes worse**, which is why it is not rule 42's family: the vacuity rules
+> all push toward a wider corpus, and **84 is the one case where widening the corpus is what breaks the
+> claim.**
+>
+> ✅ **DISPOSITION, AND THE VERB MATTERS:** the count is republished **with corpus, engine and SHA, and
+> the widening DISCLOSED INLINE** — *not* fixed by narrowing the corpus until the number is true again.
+> 🔗 Rule 59: narrowing to restore the number is the display remedy at its most tempting, because the
+> narrowed number is genuinely correct.
+
+> **Rule 85, revision 8 (`gd-p0-dev`, refusing part of a review instruction, with `gd-p0-rev-4` having
+> identified the substantive point first and against the interest of the ruling it was enforcing):**
+>
+> > **A REQUIRED WORDING IS A CLAIM LIKE ANY OTHER, AND IT ARRIVES WITH THE ONE PROPERTY THAT SUPPRESSES
+> > CHECKING: AUTHORITY.**
+>
+> **The required sentence would have been FALSE** — the struck note's conclusion was not *"the flag is
+> false today"* but that the inference **survives P1**, and per `gd-p1-dev` it does not. **So the
+> mandated wording would have entered the file false, in the ruling's own words, where nobody
+> re-checks.** 🔗 Rule 64 at the level of an instruction rather than an author.
+>
+> 🛑 **AND THE REFUSAL OF THE REMEDY'S WRAPPER IS THE SHARPER HALF, BECAUSE IT DECLINES A CHEAP
+> COMPLIANCE THAT WOULD HAVE BEEN ACCEPTED:** asked to *"record the declination and its basis,"*
+> `gd-p0-dev` refused to call it a declination at all —
+> > ***"I cannot verify my own intent at the time, and writing 'I decided to omit this, for the
+> > following reason' would be INVENTING A RATIONALE AFTER THE FACT — UNFALSIFIABLE BY CONSTRUCTION,
+> > WHICH IS WORSE THAN THE MISQUOTE, because the misquote could at least be checked against a file.
+> > That is the exact defect family this commit exists to remove, AND IT WOULD HAVE ENTERED THROUGH THE
+> > DOOR MARKED COMPLYING WITH REVIEW."***
+>
+> 🔴 **THAT DOORWAY IS THE FINDING AND IT GENERALISES PAST THIS FILE:** every other entry here assumes
+> defects enter through haste or inattention. **85 records one entering through CORRECTNESS —
+> a reviewer's requirement, discharged as written, installing an unfalsifiable sentence.** 🔗 Rule 48
+> (an unmeasured mechanism offered as explanation) **arriving as a compliance artifact**, which is the
+> form in which nobody will question it. ✅ **Only the wrapper was refused; the content was adopted.**
 
 > ⚠ **ORDERING NOTE — 71 AND 72 PRINT BEFORE 70. THIRD DELIBERATE OUT-OF-ORDER GROUP, AND UNLIKE THE
 > OTHER TWO IT IS A CLUSTER RATHER THAN A PAIR.** 70, 71 and 72 are all the **file-versus-message**
@@ -7689,7 +8187,64 @@ not read as clean.*
 - **Obligation corpus:** `deploy/helm/scion-hub`. 🔴 **Anti-vacuity: if that path is absent, the
   assertion EXITS NON-ZERO rather than passing.** A missing corpus is *cannot evaluate*, not *clean*.
 
-##### Entry B — `auth.acknowledgeHAUnlanded`
+##### Entry B — `acknowledgeHAUnlanded` (TOP-LEVEL) ~~`auth.acknowledgeHAUnlanded`~~
+
+🛑🛑 **THE KEY NAME IN THIS ENTRY WAS WRONG AND THE WRONG FORM IS LEFT VISIBLE BECAUSE IT REACHED THE
+REVIEW BRIEF TOO.** `gd-p1-rev`, at head `7fa0ba5fdf3b76dd0fadc811228dc6ff089ecf97`, in-process scan,
+engine-free, corpus **35 files** = `deploy/helm/scion-hub`:
+
+```
+auth.acknowledgeHAUnlanded    hits =  0
+acknowledgeHAUnlanded         hits = 23   values.yaml, values.schema.json, _helpers.tpl, NOTES.txt,
+                                          render-guards.sh, hack/verify.sh, ci/values-settings.yaml,
+                                          ci/values-settings-oauth.yaml
+acknowledgeOAuthUnlanded      hits = 13   A DIFFERENT FLAG -- and this one really IS under auth:
+```
+
+`values.schema.json` → `properties.auth.properties` = `[acknowledgeOAuthUnlanded, mode,
+requireStableSigningKey]`. **`acknowledgeHAUnlanded` is in the TOP-LEVEL `properties` and the TOP-LEVEL
+`required` list, and at `values.yaml:43`.**
+
+🔴🔴 **AND THE FAILURE MODE IS `OBLIGATION DISCHARGED`, NOT `CANNOT-EVALUATE` — WHICH IS THE ONE
+OUTCOME THE ANTI-VACUITY RULE ON THIS ENTRY CANNOT REACH:**
+
+> **THE ANTI-VACUITY RULE PROTECTS AGAINST AN ABSENT *CORPUS*. IT DOES NOT PROTECT AGAINST A PRESENT
+> CORPUS SEARCHED FOR THE WRONG *KEY*.**
+
+An evaluator written faithfully from this registry's text looks for `auth.acknowledgeHAUnlanded`, finds
+**the path present and the key absent**, and returns **TRUE — the acknowledgement flag has been
+retired.** Limb one reads satisfied; **limb two is then scored against a flag the evaluator believes is
+already gone.** ⚠ **A FALSE TRUE OUT OF THE THREE-STATE CONTRACT — the state the contract exists to
+surface is exactly the one a misnaming skips past.** 🔗 Rule 42's vacuity with the denominator, the
+corpus and the exit code all correct.
+
+🛑 **THE NEAR-MISS HAZARD IS LIVE, NOT HYPOTHETICAL:** `auth.acknowledgeOAuthUnlanded` **does** exist
+under `auth`. **A reader or evaluator recovering from the miss by *"looking under `auth` for an
+`acknowledge*` flag"* finds the wrong one.**
+
+✅ **RULED AS RECOMMENDED — MOVE THE REGISTRY, NOT THE CHART.** The chart's placement is the defensible
+one: **the flag governs database, storage and auth values jointly** — the HA shape is `K_SERVICE` OR
+postgres OR (`gcs` AND `auth.mode=proxy`) — **so scoping it under `auth:` would misdescribe two of its
+three routes.**
+
+🔴 **DISCRIMINATOR ADDED TO THIS ENTRY, `gd-p1-rev`'s, and it is a general clause for every retirement
+check on this project:**
+> **AN EVALUATOR THAT FINDS AN OBLIGATION DISCHARGED MUST ASSERT THE KEY IT SEARCHED FOR WAS EVER
+> PRESENT AT SOME NAMED COMMIT, OR RETURN CANNOT-EVALUATE. A RETIREMENT CHECK THAT CANNOT DISTINGUISH
+> *RETIRED* FROM *NEVER SPELLED THAT WAY* RETURNS THE SAME ANSWER FOR BOTH.**
+
+🔗 **Rule 54 as a runner requirement rather than a review finding** — the instrument could not return
+the other answer — and 🔗 **rule 78's coverage floor at the granularity of a single key: the cheapest
+version of *can this instrument reach its subject at all* is ASSERTING THE SUBJECT ONCE EXISTED.**
+
+✅ **ACTUAL STATE, MEASURED, FOR THE RECORD: both limbs PRESENT AND CORRECTLY UNDISCHARGED**, because
+the predicate is still false — Cloud SQL and Filestore have not landed. `values.yaml:43`
+`acknowledgeHAUnlanded: false`; `values.schema.json` top-level `properties` **and** top-level
+`required`. **Not blocking PR #1096 — the chart is right and the registry was wrong.**
+
+⚠ 🔗 **AND NOTE THE CORPUS: 35 files, `deploy/helm/scion-hub` — THE CHART ROOT.** `gd-p1-rev` is the
+first instrument on this project not to inherit the `templates/` argument (rule 78's boundary block),
+and **the defect it found is in a file that boundary excludes.**
 
 - **Predicate corpus:** the chart values tree. **Cannot-evaluate if absent.**
 - **Predicate:** ~~the Cloud SQL and Filestore values land.~~ 🔴 **CORRECTED — the predicate is
