@@ -67,8 +67,25 @@ row() { # row <label> <mutation function name>
   local label="$1" fn="$2"
   local d; d="$(mktemp -d)"
   cp -a "$SRC/." "$d/"
-  local strip_helm=0
-  "$fn" "$d"    # a mutation may set strip_helm=1
+  local strip_helm=0 mm_notree=0
+  "$fn" "$d"    # a mutation may set strip_helm=1 and/or mm_notree=1
+  # THE APPLIED-ASSERTION, AND IT IS THE SAME DECAY THIS FILE EXISTS TO STOP.
+  # A mutation function whose sed matches nothing is SILENT, and the row it then
+  # prints is the CLEAN run wearing the mutation's label -- the most convincing
+  # wrong row this driver can emit, because every other column reads exactly as
+  # a reader expects. Ten printed rows is what a no-op driver produces too.
+  #
+  # NOT HYPOTHETICAL, IT HAD ALREADY HAPPENED HERE: mm3 hardcoded 127 and mm5
+  # hardcoded 57; the totals moved to 164 and 71; both seds stopped matching and
+  # both arms silently became MM0, still printing under their own labels.
+  #
+  # Two arms are legitimately non-tree -- MM0 is the clean control by design and
+  # MM7 mutates PATH -- and each must DECLARE it by name. The default is that a
+  # mutation which did not change the tree measured nothing.
+  if [ "$mm_notree" != "1" ] && diff -rq "$SRC" "$d" >/dev/null 2>&1; then
+    echo "HARNESS ERROR: the $label mutation left the tree byte-identical to $SRC, so this row would be the clean run under ${label}'s label. NOTHING WAS MEASURED."
+    rm -rf "$d"; exit 2
+  fi
   local out rc
   if [ "$strip_helm" = "1" ]; then
     local farm="$d/.pathfarm"
@@ -96,6 +113,13 @@ row() { # row <label> <mutation function name>
   s="$(printf '%s' "$summary" | sed -n 's/^\([0-9]*\/[0-9]*\).*/\1/p')"
   a="$(printf '%s' "$summary" | sed -n 's/.*assertions: \([0-9]*\/[0-9]*\).*/\1/p')"
   m="$(printf '%s' "$summary" | sed -n 's/.*meta-failures: \([0-9]*\).*/\1/p')"
+  # A MISSING SUMMARY LINE HAS TWO CAUSES AND THEY ARE NOT THE SAME NEWS. The
+  # suite may have ABORTED IN PRE-FLIGHT -- correct behaviour, and earlier than
+  # counting -- or this driver may have failed to parse a summary that was
+  # printed. A bare "?" reads as the second and is usually the first, so say so.
+  if [ -z "$summary" ] && printf '%s\n' "$out" | command grep -q 'META-FAILURE'; then
+    s="--"; a="preflight"; m="abort"
+  fi
   printf '#   %-6s %-38s exit %s  %-5s %-9s meta %s\n' \
     "$label" "$MM_DESC" "$rc" "${s:-?}" "${a:-?}" "${m:-?}"
   rows=$((rows + 1))
@@ -103,20 +127,46 @@ row() { # row <label> <mutation function name>
 }
 
 MM_DESC=""
-mm0() { :; }
+# MM0 and MM7 are the only arms that do not touch the tree, and they say so.
+# Everything else is held to the applied-assertion in row().
+mm0() { mm_notree=1; }
 mm1() { printf '#!/usr/bin/env bash\nexit 0\n' >"$1/tests/zz-unenumerated.sh"; }
 mm2() { sed -i 's/^EXPECTED_SCRIPTS=4$/EXPECTED_SCRIPTS=5/' "$1/tests/run-all.sh"; }
-mm3() { sed -i 's/^EXPECTED_ASSERTIONS=127/EXPECTED_ASSERTIONS=128/' "$1/tests/run-all.sh"; }
+# MM3 AND MM5 DERIVE THE NUMBER THEY PERTURB. They used to hardcode 127 and 57.
+# Both totals moved -- to 164 and 71 -- both seds stopped matching, and both arms
+# silently became MM0 while still printing under their own labels. A mutation
+# driver that hardcodes the value it perturbs has EXACTLY THE DECAY IT EXISTS TO
+# PREVENT, which is the joke the table above tells about itself one level down.
+#
+# Reading the current value also means neither arm can be perturbed in the wrong
+# direction by a future edit: off-by-one from whatever is on disk is always the
+# mutation intended, and if the grep finds nothing the tree is untouched and
+# row() refuses to print a row at all.
+mm3() {
+  local cur
+  cur="$(command grep -oE '^EXPECTED_ASSERTIONS=[0-9]+' "$1/tests/run-all.sh" | head -1 | cut -d= -f2)"
+  [ -n "$cur" ] || return 0
+  sed -i "s/^EXPECTED_ASSERTIONS=${cur}/EXPECTED_ASSERTIONS=$((cur + 1))/" "$1/tests/run-all.sh"
+}
 mm4() { rm -f "$1/tests/update-strategy.sh"; }
 # MM5: drop assertions AND lower that script's own total, which is green
 # everywhere except against run-all.sh's duplicate of the number.
+#
+# The reject line is checked BEFORE anything is written. If it is ever renamed,
+# the deletion would no-op while the total still dropped -- a HALF-APPLIED
+# mutation, which the tree-diff cannot catch because the tree did change. Half
+# an arm under a whole arm's label is the same defect as a silent one.
 mm5() {
+  local cur
+  command grep -q '^reject "--gh-pat"' "$1/tests/render-guards.sh" || return 0
+  cur="$(command grep -oE '^EXPECTED_TOTAL=[0-9]+' "$1/tests/render-guards.sh" | head -1 | cut -d= -f2)"
+  [ -n "$cur" ] || return 0
   sed -i '/^reject "--gh-pat"/d' "$1/tests/render-guards.sh"
-  sed -i 's/^EXPECTED_TOTAL=57$/EXPECTED_TOTAL=56/' "$1/tests/render-guards.sh"
+  sed -i "s/^EXPECTED_TOTAL=${cur}/EXPECTED_TOTAL=$((cur - 1))/" "$1/tests/render-guards.sh"
 }
 # MM6: a real chart failure, induced in the chart rather than in the harness.
 mm6() { sed -i 's/runAsUser may not be 0/runAsUser must not be 0/' "$1/templates/_helpers.tpl"; }
-mm7() { strip_helm=1; }
+mm7() { strip_helm=1; mm_notree=1; }   # mutates PATH, not the tree
 mm8() { sed -i '/^echo "ASSERTIONS_EXECUTED=\${executed}"$/d' "$1/tests/update-strategy.sh"; }
 mm9() { rm -f "$1/tests/verify-failopen.sh"; }
 
@@ -125,7 +175,7 @@ echo "# helm $("$(command -v helm)" version --short 2>/dev/null || echo unknown)
 MM_DESC="clean";                                 row MM0 mm0
 MM_DESC="unenumerated script on disk";           row MM1 mm1
 MM_DESC="EXPECTED_SCRIPTS=5";                    row MM2 mm2
-MM_DESC="EXPECTED_ASSERTIONS=128";               row MM3 mm3
+MM_DESC="EXPECTED_ASSERTIONS off by one";        row MM3 mm3
 MM_DESC="enumerated script missing";             row MM4 mm4
 MM_DESC="assertion dropped + own total lowered"; row MM5 mm5
 MM_DESC="a real assertion failure";              row MM6 mm6

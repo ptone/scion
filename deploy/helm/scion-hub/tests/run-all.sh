@@ -60,24 +60,42 @@
 # field of a multi-field output has tested one field; the rest is decoration you
 # have trained yourself to skim.
 #
-# RE-DERIVE, DO NOT EDIT: bash hack/run-all-mutations.sh. The rows below were
-# printed by that script and pasted; it asserts it produced exactly ten of them.
-# The numbers here were 107 for a while after the total moved to 127, because
-# the original driver lived in a scratch directory and was thrown away - a
-# measurement whose apparatus is not shipped decays into a quotation, and this
+# RE-DERIVE, DO NOT EDIT: bash hack/run-all-mutations.sh. The rows below are
+# that script's output, PASTED UNEDITED; it asserts it produced exactly ten of
+# them. The numbers here were 107 for a while after the total moved to 127,
+# because the original driver lived in a scratch directory and was thrown away -
+# a measurement whose apparatus is not shipped decays into a quotation, and this
 # table is where that was demonstrated rather than argued.
 #
-#   MEASURED 2026-08-17T08:53:04Z, helm v3.16.3+gcfd0749
-#   MM0    clean                                  exit 0  4/4   127/127   meta 0
-#   MM1    unenumerated script on disk            exit 2  4/4   127/127   meta 2
-#   MM2    EXPECTED_SCRIPTS=5                     exit 2  4/5   127/127   meta 2
-#   MM3    EXPECTED_ASSERTIONS=128                exit 2  4/4   127/128   meta 1
-#   MM4    enumerated script missing              exit 2  3/4   123/127   meta 4
-#   MM5    assertion dropped + own total lowered  exit 2  4/4   126/127   meta 1
-#   MM6    a real assertion failure               exit 1  4/4   127/127   meta 0
-#   MM7    helm absent from PATH                  exit 2  0/4   0/127     meta 1
-#   MM8    a script emits no count line           exit 2  4/4   123/127   meta 2
-#   MM9    named exception missing from disk      exit 2  4/4   127/127   meta 2
+# AND IT DECAYED A SECOND TIME, INSIDE THE APPARATUS ITSELF, WHICH IS THE MORE
+# INSTRUCTIVE HALF. Shipping the driver stopped the TABLE going stale and did
+# nothing for the driver: mm3 hardcoded 127 and mm5 hardcoded 57, the totals
+# moved to 164 and 71, and BOTH SEDS SILENTLY STOPPED MATCHING. Each arm then
+# ran the CLEAN tree and printed the clean numbers under its own label - two
+# rows of a ten-row table asserting nothing, with no character of output to say
+# so. The repair is not a new number; it is that row() now DIFFS THE MUTATED
+# TREE AGAINST THE SOURCE and refuses to print a row for a mutation that changed
+# nothing, and that mm3/mm5 DERIVE the value they perturb instead of naming it.
+#
+#   MEASURED 2026-08-17T13:50:05Z, helm v3.16.3+gcfd0749
+#   MM0    clean                                  exit 0  4/4   164/164   meta 0
+#   MM1    unenumerated script on disk            exit 2  4/4   164/164   meta 2
+#   MM2    EXPECTED_SCRIPTS=5                     exit 2  4/5   164/164   meta 2
+#   MM3    EXPECTED_ASSERTIONS off by one         exit 2  --    preflight meta abort
+#   MM4    enumerated script missing              exit 2  --    preflight meta abort
+#   MM5    assertion dropped + own total lowered  exit 2  --    preflight meta abort
+#   MM6    a real assertion failure               exit 1  4/4   164/164   meta 0
+#   MM7    helm absent from PATH                  exit 2  0/4   0/164     meta 1
+#   MM8    a script emits no count line           exit 2  4/4   160/164   meta 2
+#   MM9    named exception missing from disk      exit 2  4/4   164/164   meta 2
+#
+# "preflight abort" IS NOT A MISSING MEASUREMENT. Three arms now exit in the
+# SCRIPTS annotation pre-flight, before any script runs, so there is no summary
+# line to report - which is the pre-flight working: it refuses to print counts
+# it has just proved it cannot trust. exit 2 is the load-bearing column in those
+# rows and it is unchanged. THE DETECTION MOVED EARLIER, NOT AWAY. The driver
+# distinguishes this from a parse failure of its own, because a bare "?" reads
+# as the second and was in fact the first.
 #
 # MM5 is why EXPECTED_ASSERTIONS duplicates each script's own total: the mutated
 # script alone reports PASS 3/3 and exits 0. MM6 and MM7 are the pair that keeps
@@ -88,13 +106,15 @@
 # MM9 covers the named exceptions: an exception that stops existing must not
 # quietly become an exception to nothing.
 #
-# MM4 is meta 4, not meta 2, and the extra two are worth reading rather than
-# rounding off: removing one script trips the missing-file check, the
-# unenumerated-set check, EXPECTED_FILES and the assertion total. FOUR
-# INDEPENDENT COUNTS FIRING ON ONE MUTATION IS THE INTENDED BEHAVIOUR, not
-# double-reporting - each is answering a different question about the same
-# breach, and a fix that silenced three of them would leave the fourth as the
-# only witness.
+# MM4 USED TO BE meta 4 - four independent counts firing on one mutation, which
+# the previous version of this comment celebrated as the intended behaviour. It
+# is now a single pre-flight abort, and THAT IS A REAL LOSS OF DIAGNOSTIC BREADTH
+# THAT THE PRE-FLIGHT CAUSED AND THIS TABLE IS WHAT REVEALED IT. The four checks
+# still exist and still fire when reached; the pre-flight simply reaches its own
+# first. What was repaired is the WORDING, not the ordering: a deleted script
+# used to be reported as "has no EXPECTED_TOTAL= line", which is the symptom of
+# an absent file described as if it were a malformed one, and sends the reader
+# looking for a missing variable in a file that is not there.
 #
 # The mutation driver is not in this directory: it copies the tree and edits the
 # copies, so it is not an assertion script and enumerating it here would be a
@@ -143,9 +163,18 @@ SCRIPTS=(
 # authoritative and is not.
 _ann_sum=0
 while read -r _ann_name _ann_n; do
+  # ABSENT AND UNPARSEABLE ARE DIFFERENT DIAGNOSES AND THIS SAYS WHICH. Both used
+  # to print "has no EXPECTED_TOTAL= line", which is the SYMPTOM of a deleted
+  # script and the CAUSE of a malformed one. hack/run-all-mutations.sh MM4
+  # deletes an enumerated script, and the row it produced told the reader to go
+  # looking for a missing variable in a file that was not there.
+  if [ ! -f "$HERE/$_ann_name" ]; then
+    echo "META-FAILURE: $_ann_name is enumerated in SCRIPTS but is not on disk. The suite cannot run the set it commits to, so nothing below this line would be a measurement of that set." >&2
+    exit 2
+  fi
   _ann_disk="$(command grep -oE '^EXPECTED_TOTAL=[0-9]+' "$HERE/$_ann_name" 2>/dev/null | head -1 | cut -d= -f2)"
   if [ -z "$_ann_disk" ]; then
-    echo "META-FAILURE: $_ann_name has no EXPECTED_TOTAL= line, so its annotation in SCRIPTS cannot be checked and this pre-flight measured nothing for it." >&2
+    echo "META-FAILURE: $_ann_name is on disk but has no EXPECTED_TOTAL= line, so its annotation in SCRIPTS cannot be checked and this pre-flight measured nothing for it." >&2
     exit 2
   fi
   if [ "$_ann_disk" != "$_ann_n" ]; then
