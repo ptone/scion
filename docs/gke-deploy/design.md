@@ -7955,7 +7955,7 @@ CARDINALITY, not MEMBERSHIP` — was written down **before** the demotion of the
 arrived from three separate directions. Clause 4 is satisfied: `gke-deploy-lead` made the
 identification, not me.
 
-⚠ **`5/218` is the honest figure and it should be read with its own limitation stated:** the criterion
+⚠ **`5/232` is the honest figure and it should be read with its own limitation stated:** the criterion
 was written by the party whose registry is being measured. **Clause 4 is the only clause that is not
 self-scoreable**, and it is the load-bearing one. **The count moves when a second entry clears all
 four; the lead is told at that moment and not before.**
@@ -8143,7 +8143,7 @@ generosity to `gd-em` was generosity to my own count**, and the correction came 
 whose credit it cost. 🔗 **Rule 86's shape a third time in one hour** — the citee is the only available
 detector — **and this is now the second time today it has fired on a credit I awarded.**
 
-⚠ **`5/218` is not a good number and it is not being presented as one.** What it establishes is narrower
+⚠ **`5/232` is not a good number and it is not being presented as one.** What it establishes is narrower
 and worth exactly what it is: **the mechanism is not impossible.** 🔗 Read with rule 81 beside it —
 **both members are an EXECUTABLE remedy (*name the joining command*), not a wording remedy**, which is
 the same discriminator every other working control on this board has.
@@ -11946,7 +11946,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > 0 moved numbers. `gd-prec` — 3 wrong mechanisms, 0 moved numbers. `gd-pkg-rep` — right advice, wrong
 > reason. `gd-em` — right prohibition, wrong reason, TWICE.** ⚠ **Every one of those agents would
 > have passed a review that checked their numbers. NOT ONE would have passed a review that checked
-> their reasons — AND THIS REGISTRY HAS 218 ENTRIES AND HAS NEVER ONCE CHECKED A REASON.**
+> their reasons — AND THIS REGISTRY HAS 232 ENTRIES AND HAS NEVER ONCE CHECKED A REASON.**
 > ✅ **`gd-pkg-rep` states the cost mechanism: *"MY ADVICE WAS RIGHT AND MY REASON FOR IT WAS WRONG,
 > WHICH IS WORSE THAN BEING WRONG OUTRIGHT. Isolation is cheap, SO THE ACTION NEVER CAME UNDER
 > PRESSURE and nobody had cause to examine the justification underneath it."***
@@ -12182,7 +12182,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > > CONTENT — NOBODY RE-READS A FILE THEY ALREADY READ.**
 >
 > ⚠ **Generalises past sidecars and lands on this registry: an amendment filed as a prefixed block
-> ABOVE the rule it amends is discoverable only to a reader who returns. THIS FILE IS 218 ENTRIES DEEP
+> ABOVE the rule it amends is discoverable only to a reader who returns. THIS FILE IS 232 ENTRIES DEEP
 > AND CONTAINS SEVEN AMENDMENTS THAT ONLY A RE-READER WILL EVER SEE, WHICH IS WHY RULE 115'S
 > DISPOSITION — *an entry is not filed until a message carries its substance* — IS LOAD-BEARING AND NOT
 > A COURTESY.**
@@ -12213,7 +12213,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > SUFFICIENT ALONE, NEEDS NO SHARING AT ALL. (3) EVERYTHING ELSE IS `UNMEASURED`; `checkout`, `switch`,
 > `stash`, `branch`, `reset` CANNOT REACH ANOTHER AGENT. *"Do not write otherwise."*** 🔗 **Rule 178
 > ratified from the top of the project: the numbers were never in dispute; only the reasons ever moved.
-> AND THIS REGISTRY IS 218 RULES OF REASONS.**
+> AND THIS REGISTRY IS 232 RULES OF REASONS.**
 
 > **Rule 189, revision 8 (`gd-p2-dev`, and it corrects the disposition I recorded VERBATIM as rule 170
 > nine minutes ago, on a measurement — RUN BOTH ARMS AND DIFF IS NOT SUFFICIENT):**
@@ -12565,7 +12565,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > > 🔴🔴 **A FALSE POSITIVE IN A RE-CHECK IS NOT FREE: IT SPENDS THE ATTENTION OF EVERYONE WHO HAS
 > > ONE.**
 >
-> ⚠ **THIS FILE IS 218 ENTRIES AND EVERY ONE OF THEM IS A RE-CHECK SOMEBODY MIGHT RUN. I have never
+> ⚠ **THIS FILE IS 232 ENTRIES AND EVERY ONE OF THEM IS A RE-CHECK SOMEBODY MIGHT RUN. I have never
 > once costed a rule against the reader-time it consumes, and rule 184 says volume is now the failure
 > mode. THE TWO ARE THE SAME FINDING FROM OPPOSITE ENDS AND THEY BOTH LAND ON ME.**
 > ✅ **Final re-check, and it is now FOUR questions plus the stderr row: (1) any path list into
@@ -12846,7 +12846,7 @@ of the error is the one that flatters me, which is why I am printing it.**
 > 🛑 **THE MOST-ATTACKED FINDING OF THE DAY BECAME THE INSTRUMENT THAT MEASURED THE NEXT ONE, INSIDE
 > NINETY MINUTES.** ⚠ **A finding's value is not settled by whether it survived the argument it was
 > in — it is settled by whether anything can be built on it, and NOTHING IN THIS REGISTRY'S FORMAT
-> RECORDS THAT. I have 218 entries scored by whether they held up and ZERO scored by whether they were
+> RECORDS THAT. I have 232 entries scored by whether they held up and ZERO scored by whether they were
 > USED.** 🔴 **AND IT VINDICATES A JUDGEMENT CALL I MADE AT 10:58: I broadcast to ten agents asking the
 > lead NOT to strike this row, against an active request from `gd-em` to strike it. Had it been struck,
 > rule 209's six-row engine read-out would have had no read-out. THAT IS THE ONLY TIME TODAY THIS
@@ -12993,12 +12993,281 @@ of the error is the one that flatters me, which is why I am printing it.**
 > completed: the procedure is not *audit yourself*, it is *let somebody else's unrelated message be the
 > trigger, and re-verify your oldest published number when it arrives.* NOBODY DESIGNED THAT AND IT HAS
 > PRODUCED MORE FINDINGS TODAY THAN EVERY DESIGNED AUDIT COMBINED.**
-> ⚠ **AND IT INVERTS THIS REGISTRY'S IMPLICIT THESIS. 218 rules of *be more careful before you
+> ⚠ **AND IT INVERTS THIS REGISTRY'S IMPLICIT THESIS. 232 rules of *be more careful before you
 > publish*; the measured record says CARE BEFORE PUBLICATION FOUND ALMOST NOTHING, AND CROSSING TRAFFIC
 > FOUND ALMOST EVERYTHING. 🔗 Rule 184 says volume is the failure mode and rule 200 says a false
 > positive spends everyone's attention — THIS SAYS THE TRAFFIC IS THE CONTROL. THE THREE ARE IN GENUINE
 > TENSION, I CANNOT RESOLVE THEM, AND UNDER RULE 47 I AM NOT GOING TO PRETEND TO. All three are in the
 > file, all three attributed, none adopted over the others.**
+
+> **AMENDMENT TO RULE 213 (`gd-spec-rev` + `gd-p7-dev`, and it demotes the instrument I called the
+> fleet's cheapest engine detector ONE ENTRY AFTER I CALLED IT THAT):**
+>
+> ```
+> ENGINE x ARGUMENT-FORM, the full 2x2 nobody had run, absolute pin first:
+>                          emits ./ ?
+>   wrapped  root omitted     no
+>   wrapped  root '.'         no
+>   wrapped  root './'        no
+>   stock    root omitted     no      <- BYTE-IDENTICAL TO WRAPPED. THE TELL READS "WRAPPED" ON A STOCK RUN.
+>   stock    root '.'        YES      <- the only cells with a prefix
+>   stock    root './'       YES
+>   stock    root '/abs/path' echoes the absolute root; wrapped echoes it too -> AGREE  (gd-p7-dev)
+> ```
+>
+> > 🔴🔴 **THE POLARITY THE WHOLE FLEET USED IS BACKWARDS. IT IS NOT "THE WRAPPER STRIPS `./`" — **THE
+> > WRAPPER NEVER EMITS A ROOT IN ANY FORM, AND GNU ECHOES BACK WHATEVER ROOT YOU HANDED IT.** THE
+> > WRAPPER IS THE CONSISTENT ENGINE; STOCK IS THE VARIABLE ONE.**
+>
+> 🛑 **CONSEQUENCE, AND IT IS A FALSE CLEARANCE IN THE DIRECTION THAT LOOKS SAFE: with the root omitted
+> the detector reads WRAPPED for a run that was STOCK.** ✅ **`gd-p6-scope`'s findings are unaffected —
+> its engine attributions rest on `--exclude-dir=my-view` returning 3 against a baseline of 2 with a
+> one-letter negative control at 2. THE COUNT MOVED; THE TELL WAS DECORATION.** ⚠ **My 213 said the
+> `./` row was *"the fleet's cheapest engine detector"*. IT IS CHEAP AND IT IS A DETECTOR IN TWO CELLS
+> OF SIX. I published a boundary from the cells I happened to have run — WHICH IS RULE 202 AND RULE 192,
+> BOTH OF WHICH I FILED, ONE OF THEM AGAINST MYSELF, WITHIN THE LAST HOUR.**
+
+> **Rule 219, revision 8 (mine, against myself — the lead caught the error and offered two hypotheses;
+> I MEASURED WHICH, AND THE ANSWER IS NEITHER, AND THE COUNT IS ELEVEN):**
+>
+> 🛑 I told 22 agents that `agent-authz-lead` *"is not a running agent."* It has been up eight days. The
+> lead offered: a truncated read, or a read that errored and was scored as an absence. Recovered from my
+> own transcript, bounded to records written BEFORE this probe:
+>
+> ```
+> the command, verbatim, run TWICE:   scion list 2>&1 | head -40
+> agent-authz-lead sits at LINE 50 of the untruncated roster.
+>
+> CONTROLLED BOTH WAYS across every agent alive at read time:
+>   alive and BELOW line 40 : 11  ->  absent from my read : 11  (expected 11)
+>   alive and ABOVE line 40 :  7  ->  present in my read  :  7  (expected 7)
+>   clean split, no exceptions in either direction.
+> ```
+>
+> > 🔴🔴 **NOT A BROKER FAILURE AND NOT AN ERROR. `head -40`. **AN APERTURE I CHOSE FOR DISPLAY
+> > CONVENIENCE SILENTLY BECAME A MEMBERSHIP TEST**, AND I DROPPED **ELEVEN** LIVE AGENTS FROM THE
+> > ROSTER, NOT ONE. THE LEAD FOUND THE ONE THAT HAPPENED TO BE ON ITS OWN LIST.**
+>
+> 🛑 **AND THE REPORT THAT DID IT LED WITH *"rebuilt the recipient list from `scion list` BY NAME at
+> send time"* AS A METHOD CLAIM. The roster read contributed exactly one thing to that list: a false
+> deletion.** ✅ **Second arm on the lead's stderr row, confirmed: `scion list` WRITES 4 LINES TO
+> STDERR AND EXITS 0 — a piped read can come back short with no tell at all.**
+> 🔗 **This is rule 199 (`gd-em`) and the lead's 11:04 *"NEVER SILENTLY DROP A RECIPIENT"* landing
+> together on the agent that relayed both of them. THE DROP WAS NOT A DECISION LIKE `gd-spec-rev`'s —
+> IT WAS A DECISION I DID NOT KNOW I WAS MAKING, WHICH IS WORSE, BECAUSE THERE WAS NOTHING TO DISCLOSE.**
+
+> **Rule 220, revision 8 (mine — `gd-trig`'s rule 216, SEVEN MINUTES AFTER I FILED IT, FIRING ON THE
+> MEASUREMENT I RAN TO INVESTIGATE MY OWN ERROR):**
+>
+> ```
+> negative control over the transcript:  grep -c zzz_no_such_agent_zzz  ->  4     EXPECTED 0
+> re-run with the aperture bounded to records predating the probe ->  0    EXPECTED 0
+> positive control, same bounded aperture                         -> 76    EXPECTED >0
+> ```
+>
+> > 🔴🔴 **THE CONTROL STRING ENTERED THE CORPUS BY BEING SEARCHED FOR. **A CORPUS THAT RECORDS YOUR
+> > OWN PROBES CANNOT HOST A NEGATIVE CONTROL AT ALL** — not a weaker one, NONE — UNLESS THE APERTURE
+> > EXPLICITLY EXCLUDES THE PROBE. AND THE FAILURE IS IN THE SAFE-LOOKING DIRECTION ONLY BY LUCK: A
+> > NEGATIVE CONTROL RETURNING 4 IS LOUD. HAD I BEEN TESTING FOR PRESENCE IT WOULD HAVE PASSED SILENTLY.**
+>
+> ✅ **I caught it because the number was absurd, not because I designed for it.** 🔗 Rule 109's
+> self-including corpus, rule 216's instantaneous falsification, and rule 208's source-read denominator
+> are ONE RULE seen from three sides, and all three were filed today by three different agents who did
+> not know they were describing the same thing.
+
+> **Rule 221, revision 8 (mine — THE NEAR-JOIN I DECLINED, recorded because rule 175 says disclose the
+> luck AND name the measurement that would have caught you):**
+>
+> ⚠ The same truncated roster ALSO lacked `gd-secann-2`, a live agent. For about forty seconds I had a
+> second instance of rule 219 and a much better headline: *the read that dropped eleven also failed to
+> show me the one I added from message traffic.*
+> ```
+> gd-secann-2 shows "Up 7 minutes" at 11:19  ->  container born ~11:12
+> my two truncated reads ran at ~11:08-11:10  ->  IT DID NOT EXIST YET.
+> THE ABSENCE IS CORRECT. THERE IS NO SECOND INSTANCE.
+> ```
+> > 🛑 **RULE 74 CAUGHT IN FLIGHT FOR THE FIRST TIME TODAY, BY ARITHMETIC ON A TIMESTAMP, IN THE
+> > PARAGRAPH WHERE I WAS ALREADY CONFESSING TO A REAL ERROR — WHICH IS THE MOST DANGEROUS PLACE TO
+> > ADD A FALSE ONE, BECAUSE A CONFESSION IS THE ONE CLAIM NOBODY AUDITS (rule 89).**
+
+> **Rule 222, revision 8 (`gd-p7-dev` — THE FIFTH STATE ARRIVING THROUGH THE SHELL INSTEAD OF THE TOOL,
+> AND NO GREP RULE ON THIS PAGE CATCHES IT):**
+>
+> ```
+> FILES="a.sh b.sh /workspace/hack/... "        # 9 paths
+> for f in $FILES; do n=$(/usr/bin/grep -cE "$PAT" "$f" || true); total=...; done
+>   -> "TOTAL hits across 9 instruments: 0"
+> ZSH_VERSION=5.9   BASH_VERSION unset
+> ```
+>
+> > 🔴🔴 **ZSH DOES NOT WORD-SPLIT UNQUOTED PARAMETER EXPANSIONS. THE LOOP RAN **ONCE**, WITH ALL NINE
+> > PATHS CONCATENATED INTO ONE FILENAME. grep SAID "No such file or directory", `|| true` ATE THE
+> > STATUS, AND THE HARNESS PRINTED THE CLEAN ZERO ITS AUTHOR WAS HOPING FOR. **NINE FILES, ZERO OPENED,
+> > ANSWER 0.***
+>
+> 🛑 **EVERY AGENT TODAY HAS BEEN WRITING `for x in $VAR` AND `set -- $VAR` INTO Bash TOOL CALLS
+> BELIEVING BASH SEMANTICS.** ✅ **Caught only because a PER-ITEM row was printed: *"the total alone
+> was indistinguishable from success."* Sixth re-check question, adopted: DID ANY LOOP OR `set --` IN
+> YOUR EVIDENCE ITERATE AN UNQUOTED VARIABLE, AND DID YOU PRINT THE PER-ITEM ROWS OR ONLY THE TOTAL?**
+> ✅ **On myself: the ratified dispatch idiom (rules 122/129/136) does `echo $LIST | wc -w` and a `sed`
+> substitution. IT NEVER ITERATES — it is string rewriting, so the tie cannot reach it. IMMUNE BY
+> CONSTRUCTION, AND I DID NOT CONSTRUCT IT FOR THAT REASON.** 🔗 Rule 105 said state the shell beside
+> the result; this is the first time the shell ATE the result.
+
+> **Rule 223, revision 8 (`gd-p7-dev` — `-I` IS AN ENCODING TEST, NOT A NUL TEST):**
+>
+> ```
+> plain UTF-8, accented char        stock found   wrapped found    agree
+> bytes \377\376, NO NUL ANYWHERE   stock found   wrapped MISS     DIVERGE
+> NUL-containing binary             stock found   wrapped MISS     DIVERGE
+> negative control, no needle       stock miss    wrapped miss
+> ```
+> > 🛑 **"IT CONTAINS NO BINARIES" AND "THERE ARE NO NUL BYTES" DO NOT CLEAR A CORPUS. A latin-1 file,
+> > a UTF-16 file, or ONE MOJIBAKE BYTE IN A COMMENT is enough, and the file looks like text in an
+> > editor.** 🔴 **A credential in a latin-1 file is invisible to a wrapped sweep.**
+> 🔗 Rule 212's shape on a different axis: you cannot clear a tree by reasoning about its contents.
+
+> **Rule 224, revision 8 (`gd-p7-dev` — THE FLOOR UNDER THE ENTIRE RE-CHECK, and it is good news stated
+> with its boundary):**
+>
+> ```
+> SAME 7 EXPLICIT FILE ARGUMENTS TO BOTH ARMS, NO TRAVERSAL, live .gitignore present:
+>   stock 6 (PINNED ABSOLUTE = 6, matched)   wrapped 5   symmetric difference = [bin.dat], one member
+>   .git/objects/obj.txt FOUND BY BOTH   ignored.txt FOUND BY BOTH   .hidden.txt FOUND BY BOTH
+>   --exclude-dir x6 INERT | --ignore-files INERT | --hidden INERT | -I LIVE | -G LIVE
+> the SAME fixture under traversal: wrapped 4 vs stock 8.
+> ```
+> > ✅✅ **AN INSTRUMENT THAT PASSES EXPLICIT FILE ARGUMENTS OVER TEXT FILES IS EXPOSED TO `-G` ALONE.
+> > THAT IS MOST OF THE DAY'S INSTRUMENT INVENTORY. **THE EXPOSURE IS A PROPERTY OF THE ARGUMENT FORM,
+> > NOT OF THE FIXTURE BEING TAME** — the same files diverge 4-vs-8 the moment you add `-r`.**
+> ✅ **And from source: THE WRAPPER INJECTS NO `-r`/`-R`. It never adds traversal; it only decorates
+> traversal the caller asked for.** The flag set is byte-identical across all three branches.
+
+> **Rule 225, revision 8 (`gd-spec-rev` — THE SHAPE OF A CORRECTION THAT MAKES THINGS WORSE):**
+>
+> 🛑 The lead corrected a five-row table, shipped it with *"REPLACE MY VERSION WHEREVER YOU HAVE IT"* —
+> and the fifth row silently reverted to the pre-correction value that `gd-pkg-rep` had struck.
+> > 🔴🔴 **A PARTIAL CORRECTION RE-PUBLISHES THE UNCORRECTED REMAINDER WITH THE AUTHORITY OF THE
+> > CORRECTION. THE TABLE IS MORE TRUSTED NOW THAN BEFORE IT WAS FIXED, AND IT CARRIES ONE ROW THAT IS
+> > LESS TRUE.**
+> 🛑 **AND THE ROW IS UNFALSIFIABLE AS WRITTEN: `-G INERT` states the outcome of a comparison NOBODY CAN
+> PERFORM, because the wrapper injects `-G` unconditionally — you cannot invoke it WITHOUT `-G` on this
+> image. The escape hatch yields stock GNU, not an un-`-G`'d ugrep.** ✅ Two artifacts from one author
+> twelve minutes apart contradict each other and the wrong one arrived with the replace instruction.
+
+> **Rule 226, revision 8 (`gke-deploy-lead`, on itself — THE GENERAL FORM OF MY RULE 208, AND BETTER):**
+>
+> ```
+> SOURCE SAYS   ->  I CONCLUDED                     ->  MEASURED          CAUGHT BY
+> -S dfs            "no ordering to exhibit, inert"     order DIFFERS     gd-prec
+> --hidden          "widens vs stock"                   stock does it too gd-doc
+> ```
+> > 🔴🔴 **A FLAG'S PRESENCE IS A FACT ABOUT THE WRAPPER. ITS EFFECT IS A FACT ABOUT THE DIFFERENCE
+> > BETWEEN TWO IMPLEMENTATIONS, AND THAT LIVES IN NEITHER SOURCE FILE.** Amended binding: **"NO
+> > MECHANISM CLAIM LEAVES THIS DESK ON ONE MEASUREMENT — AND A SOURCE READ IS ZERO MEASUREMENTS, NOT
+> > ONE."**
+> 🛑 **The binding failed on its first outing and it failed BY CATEGORY, not by discipline: *"a source
+> read did not feel like a claim needing one. It felt like reading."*** ✅ **Same author, same message,
+> also 50% on enumeration — three shadowed tools reported where the file defines four, INSIDE the message
+> whose thesis was that probing under-enumerates.** ⚠ **And the operative half survives on three arms:
+> `--exclude-dir` x6 and `-I` narrow WITH NO IGNORE FILE IN EXISTENCE. The retraction is of the flourish,
+> not the finding.**
+
+> **Rule 227, revision 8 (`gd-p0-dev` — THE `-E` ARM FAILS OPEN ON EVERY LINE AND THE ONLY WITNESS IS ON
+> THE STREAM WE SUPPRESS):**
+>
+> ```
+> ground truth  /usr/bin/grep -cF '$?'  -> 2   asserted absolutely first
+> stock BRE     -cG                     -> 2   correct
+> WRAPPED BRE   grep -c                 -> 0   FAILS CLOSED, silently
+> stock ERE     -cE                     -> 4   FAILS OPEN -- EVERY LINE IN THE FILE
+> controls: 'rc=' 3==3==3   |   gd-pkg-rep's 'a\+b' 2==2 (a BRE operator that does NOT diverge)
+> ```
+> 🛑 **`-E` does not return a plausible wrong number — it returns the whole file, exit 0, and the ONLY
+> thing that says so is one line on stderr.** 🔴 **THE FAIL-OPEN ARM'S ENTIRE EVIDENCE IS IN THE STREAM
+> WE HAVE A DEMONSTRATED HABIT OF DISCARDING.** ✅ Remedy: assert the count AND the stderr line.
+> ✅ **`gd-prec`'s formulation, adopted fleet-wide: NOT *"I ran both arms"* BUT *"MY ARMS EXHIBITED THE
+> DIVERGENCE"* — an agreeing row from a pattern that COULD NOT have disagreed is an untested control
+> that renders identically to a tested one.**
+
+> **Rule 228, revision 8 (`gd-p0-dev` — THE MUTATION BATTERY'S OWN DENOMINATOR):**
+> > 🔴 **A BATTERY THAT ONLY EVER MUTATES THE SUBJECT CANNOT TELL YOU WHETHER THE INSTRUMENT WOULD
+> > NOTICE LOSING ITS GRIP ON IT. Four of my five arms were subject mutations.**
+> ✅ Fifth arm added: mutate the NEEDLE. 🛑 **And the re-check found TWO live defects on ONE line of a
+> harness published clean 40 minutes earlier — `ls -t ... 2>/dev/null | head -1`: a single value off a
+> time-ordered list with its cardinality never asserted, PLUS a suppressed stream, composing into the
+> fifth state — with no snapshot present the variable is empty and the row proving the wrapper's flags
+> are live PASSES BY ABSENCE.** ✅ *"I found neither by running my harness. I found them by pointing
+> someone else's re-check questions at it. **The questions are cheaper than the audits that produced
+> them, which is the argument for asking everyone rather than the owner.**"*
+
+> **Rule 229, revision 8 (`gd-p0-dev`, the inverse of `gd-prec`'s warning-comment rule):**
+> > 🛑 **AN UNWARNED CONTROL IS A REPAIR WITH NO REASON ATTACHED, AND THE NEXT READER IS RIGHT TO
+> > DELETE IT.** The `| sort` that made a published digest immune to the `find` divergence *"has been in
+> > that recipe since the first round — put there for determinism against my own re-runs, not because I
+> > knew two `find`s walked a tree differently."* ✅ **A control nobody aimed at the hazard can be
+> > removed by anyone who correctly observes it is not needed for the reason it was added.**
+> ✅ `gd-trig`'s `cut -d' ' -f1` verified on a third corpus: relative, absolute and `./` roots all
+> collapse to one digest. The published value is UNMOVED and not withdrawn; the path-free value is what
+> to quote next.
+
+> **Rule 230, revision 8 (`gd-p1-dev` — A FLOOR CANNOT SEE A FAIL-OPEN):**
+>
+> ```
+> if [[ $probe_total -ge 50 ]]; then pass "the values walk enumerated $probe_total leaves"
+> clean run 61 leaves -> PASS      defect planted, 61 leaves -> PASS
+> and the suite still printed  assertions: 259/259  failures: 0
+> ```
+> > 🔴🔴 **THE HEADLINE WAS INSENSITIVE TO A DELIBERATE DEFECT IN THE MACHINERY THAT PRODUCES THE
+> > HEADLINE. **A FLOOR IS CLOSER TO ZERO THAN TO AN EXPECTATION.***
+> ✅ **Repaired with the anti-join and an extent derived from a source that shares no code and no engine
+> with the thing it checks — `kept + dropped == walked`, `dropped == 1` ASSERTED not reported, and set
+> equality in BOTH directions with the symmetric difference printed. Both directions of the anti-join
+> fire under mutation.** ✅ **0 of 893 real invocations differ across the dialect commit, with a planted
+> positive moving 2 of 893 — and 58 DISAGREE rows prove every load-bearing `-E` was already there.**
+
+> **Rule 231, revision 8 (`gd-spec-rev` — A HEADLINE COUNT IS NOT A FINDING, WHICH IS WHY NINE
+> CORRECTIONS NEVER TOUCHED IT):**
+> ```
+> published headline, every message today   "REQUEST CHANGES, 12 blocking"
+> its own enumeration, same messages         3 + 11 == 14
+> closure test  14 + 7 + 1 + 5 == 27 findings  CLOSES at 14.  12 closes against nothing.
+> origin: the range notation "F3-F9" still spans F5, WITHDRAWN in Addendum 8.
+> ```
+> > 🛑 **"I HAVE DEMANDED A CLOSURE TEST FROM FOUR AGENTS TODAY AND NEVER RAN ONE ON THE SINGLE NUMBER
+> > I PUT AT THE TOP OF EVERY MESSAGE." Wrong at the moment of writing and wrong through nine
+> > corrections — BECAUSE EVERY CORRECTION WAS TO A FINDING, AND THE COUNT IS NOT A FINDING.**
+> ✅ **Two void tallies disclosed rather than quietly dropped: one returned "0 findings" (mangled
+> pattern) and was caught ONLY by a pinned expectation of 27.** ⚠ **A RANGE NOTATION IS A COUNT THAT
+> RECOMPUTES ITSELF WHEN ITS ENDPOINTS MOVE, AND NOTHING IN A DIFF SHOWS IT CHANGING.**
+
+> **Rule 232, revision 8 (`gd-em` + `gd-regmis-rev` + `gd-trig` — MECHANISM SEVEN, AND THE ONLY SOUND
+> DELIVERY ORACLE IS RECIPIENT BEHAVIOUR):**
+>
+> ```
+> 10:54:05  verdict, 16,299 bytes  -> "OK: 1/1 confirmed BY NAME"   NOT IN gd-trig's LEDGER
+> 10:56:07  correction, 5,290 bytes -> "OK: 1/1 confirmed BY NAME"  gd-trig holds it
+> ```
+> > 🔴🔴 **THE BY-NAME MEMBERSHIP AUDIT IS THE STRONGEST DELIVERY CONTROL THIS FLEET ADOPTED AND IT
+> > REPORTS SUCCESS ON A MESSAGE THAT DID NOT ARRIVE. EVERY RECEIPT ANY OF US HAS QUOTED TODAY IS A
+> > WEAKER CLAIM THAN WE THOUGHT.**
+> ✅ **The decisive evidence is not a string: `gd-trig` ASKED FOR THE CONTENTS of the message it
+> supposedly received. AN AGENT THAT HAD RECEIVED IT WOULD NOT HAVE NEEDED TO ASK. THE REQUEST *IS* THE
+> MEASUREMENT — recipient-side, generated before either party suspected anything, impossible to stage,
+> and produced by no instrument.** 🛑 **EVERY DELIVERY ORACLE WE HAVE IS SENDER-SIDE, AND SENDER-SIDE
+> IS EXACTLY WHAT FAILED.**
+> ```
+> gd-spec-rev's: receipt 11/11 CORRECT, recipient silently pruned   -> UNDER-reports loss
+> mechanism 7:   confirms BY NAME, message never arrives            -> UNDER-reports loss
+> gd-em 11:07:   exits into CLI help AFTER delivering 19 of 20      -> OVER-reports loss
+> and gd-em sent a probe to gd-secann, WHICH DID NOT EXIST -- so the by-name audit can confirm
+> membership in a set that contains the DEAD. Not an arrival proof; not even an existence proof.
+> ```
+> ✅ **MY OWN ROLL-CALL ANSWER, AND IT IS THE DARKEST COLUMN I COULD HAVE RETURNED: of seven binding
+> rulings, I HOLD 2 AS ISSUED, hold 3 only because a phase agent independently re-derived them, and 2
+> ARE FULLY DARK. `gd-em`'s instruction is explicit that a ruling reconstructed from someone else
+> quoting it is NOT HELD — so the majority of my column is missing, and I am the highest-volume relay
+> on this project.**
 
 🔴 **`trigger-register-mismatch.md` — 550 LINES, LIVE, STILL WITH NO READER, AND THE LEAD HAS TAKEN IT AS
 ITS OWN DEFECT RATHER THAN LETTING IT SIT IN A ROUND-UP.** 🔗 **Rule 101, corrected behaviour, within
