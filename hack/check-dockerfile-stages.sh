@@ -1035,6 +1035,28 @@ AS final" | expect 1 \
   # here rather than in a note, because the next reader of this block will
   # otherwise assume all three arms are covered.
   #
+  # C IS NOT THE ONLY MEMBER OF ITS CLASS, AND THE OTHER TWO ARE EASIER TO WRITE
+  # BY ACCIDENT. The finder is a NAME-BASED search, which is sound exactly while
+  # the name is how the tool gets called:
+  #   D  `/usr/bin/grep -q 'p' f`   the prefix class excludes `/`, so a call
+  #      through an absolute path is uncounted AND unchecked. MEASURED: exit 0,
+  #      74 green. This is the hardening idiom the whole project adopted today,
+  #      so it is the likeliest of the three to arrive in a future edit.
+  #   E  `grep -q pat f`            an unquoted pattern fails the trailing
+  #      `['"$.]` shape test. MEASURED on a planted line: superset +1, finder +0.
+  # As of this writing NONE of C, D or E is reached. Measured at ca51e9ac over
+  # the 742 non-comment lines, with each detector fired on a planted line first:
+  #   variable-assigned tool name (`X=grep`, `X=/usr/bin/grep`, `X="$(...)"`) 0
+  #   path-form invocation (`/usr/bin/grep`, `| /bin/grep`)                   0
+  #   every bare-name occurrence of the word, superset of the finder          35
+  #   the finder                                                              31
+  #   the 4 uncounted: 3 are prose inside echo strings; the 4th is the copy of
+  #   the word inside the finder's OWN pattern, on the finder's own line --
+  #   the needle in its own haystack, correctly declined by the shape test.
+  # So 31 is a COMPLETE census of the call sites that exist, not merely of the
+  # ones this pattern happens to see. If you add a call site in form D or E, the
+  # census will not move and nothing here will tell you.
+  #
   # TWO ASSERTIONS, AND THEY ARE NOT THE SAME KIND OF THING:
   #   THE FLOOR is DERIVED. Zero call sites in a file that is visibly full of
   #   them is impossible, independent of any run, so a floor of >0 cannot be a
