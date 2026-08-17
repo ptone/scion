@@ -510,7 +510,7 @@ FROM runtime"
       echo "$label" >> "$FAILLOG"
       return
     fi
-    if [ -n "$needle" ] && ! echo "$out" | grep -q -- "$needle"; then
+    if [ -n "$needle" ] && ! echo "$out" | grep -qF -- "$needle"; then
       echo "self-test FAILED: $label -- exited $got but not for the expected reason ('$needle' not in output)" >&2
       echo "$out" | sed 's/^/    /' >&2
       echo "$label" >> "$FAILLOG"
@@ -919,7 +919,7 @@ AS final" | expect 1 \
     # string is what was fooled above.
     meta_gone="$(diff "$SELF" "$meta_mutant" | sed -n 's/^< //p')"
     meta_new="$(diff "$SELF" "$meta_mutant" | sed -n 's/^> //p')"
-    meta_changed="$(diff "$SELF" "$meta_mutant" | grep -c '^[<>] ')"
+    meta_changed="$(diff "$SELF" "$meta_mutant" | grep -cE '^[<>] ')"
     # The diagnostic is BOUNDED because the failure mode with the widest diff is
     # also the one that produces the least readable diff: if awk is missing the
     # mutant is empty, every line of this script counts as "gone", and an
@@ -930,8 +930,8 @@ AS final" | expect 1 \
       meta_gone_brief="$meta_gone_brief [... $meta_changed diff lines in total, truncated]"
     fi
     if [ "$meta_changed" != "2" ] ||
-       ! printf '%s\n' "$meta_gone" | grep -q '^[[:space:]]*fail "USER appears in the runtime stage' ||
-       ! printf '%s\n' "$meta_new" | grep -q '^[[:space:]]*true "NEUTERED USER appears in the runtime stage'; then
+       ! printf '%s\n' "$meta_gone" | grep -qE '^[[:space:]]*fail "USER appears in the runtime stage' ||
+       ! printf '%s\n' "$meta_new" | grep -qE '^[[:space:]]*true "NEUTERED USER appears in the runtime stage'; then
       echo "self-test FAILED: a neutered guard makes the whole suite exit non-zero -- the mutation did not land as intended (diff touched $meta_changed line(s); gone: '${meta_gone_brief# }'). The operator no longer matches the guard it names, so this case would have tested nothing." >&2
       echo "a neutered guard makes the whole suite exit non-zero" >> "$FAILLOG"
     else
@@ -939,16 +939,16 @@ AS final" | expect 1 \
       meta_rc=$?
       if [ "$meta_rc" -eq 0 ]; then
         echo "self-test FAILED: a neutered guard makes the whole suite exit non-zero -- the mutant exited 0. Failing cases cannot reach the exit code, so CI cannot see a broken guard." >&2
-        echo "$meta_out" | grep '^self-test FAILED' | sed 's/^/    /' >&2
+        echo "$meta_out" | grep -E '^self-test FAILED' | sed 's/^/    /' >&2
         echo "a neutered guard makes the whole suite exit non-zero" >> "$FAILLOG"
-      elif ! echo "$meta_out" | grep -q "^self-test FAILED: USER added to the runtime stage is rejected"; then
+      elif ! echo "$meta_out" | grep -qE "^self-test FAILED: USER added to the runtime stage is rejected"; then
         echo "self-test FAILED: a neutered guard makes the whole suite exit non-zero -- the mutant exited $meta_rc, but not because of the case belonging to the neutered guard. An exit 1 for some other reason is not evidence that this link works." >&2
         echo "a neutered guard makes the whole suite exit non-zero" >> "$FAILLOG"
-      elif echo "$meta_out" | grep -q "self-test passed"; then
+      elif echo "$meta_out" | grep -qF "self-test passed"; then
         echo "self-test FAILED: a neutered guard makes the whole suite exit non-zero -- the mutant printed 'self-test passed' alongside its failures." >&2
         echo "a neutered guard makes the whole suite exit non-zero" >> "$FAILLOG"
       else
-        echo "self-test ok: a neutered guard makes the whole suite exit non-zero (exit $meta_rc, $(echo "$meta_out" | grep -c '^self-test FAILED') case(s) red)"
+        echo "self-test ok: a neutered guard makes the whole suite exit non-zero (exit $meta_rc, $(echo "$meta_out" | grep -cE '^self-test FAILED') case(s) red)"
       fi
     fi
     rm -f "$meta_mutant"
@@ -989,6 +989,36 @@ AS final" | expect 1 \
   if [ "$got_guards" -ne "$want_guards" ]; then
     echo "self-test: expected $want_guards guard call sites in $SELF, found $got_guards. A rule was added or removed. If it was added, it has no case here until you write one, and 'all $ran cases pass' does not cover it: re-run verification/p7-guard-defeat-matrix.sh, confirm the new guard reddens a case of its own, and bump want_guards and want_cases together." >&2
     echo "$got_guards guard call sites" >> "$FAILLOG"
+    errors="$(wc -l < "$FAILLOG" | tr -d ' ')"
+  fi
+
+  # EVERY grep CALL SITE IN THIS GATE NAMES ITS DIALECT (-E or -F).
+  # A bare `grep` is an unlabelled instrument: GNU grep defaults to BRE, so an
+  # ERE metacharacter in the pattern -- `|` `+` `?` `(` `)` `{` `}` -- is a
+  # literal, the match count is 0, and 0 is byte-identical to "checked, clean".
+  # This is NOT the sandbox's shell-function wrapper: the wrapper injects -G,
+  # which is a no-op because BRE is already the default. Measured:
+  #   /usr/bin/grep -c    'alpha|bravo' -> 0     (rc 1)
+  #   /usr/bin/grep -G -c 'alpha|bravo' -> 0     (rc 1)
+  #   /usr/bin/grep -c -E 'alpha|bravo' -> 2     (rc 0)
+  # so the hazard is a property of the call and it ships with this file.
+  #
+  # -E IS NOT THE SAFE END OF THE AXIS (gd-trig). GNU BRE gives `\|` `\?` `\+`
+  # `\(` `\)` their special meaning, and -E makes those LITERAL -- the same
+  # silent 0, arriving from the fix. Converting a pattern requires reading it,
+  # not adding a flag. All 19 sites converted here were confirmed first to
+  # contain no `\|`-family escape and no bare ERE metacharacter, so both
+  # readings agree; the six literal patterns took -F instead.
+  #
+  # Comment lines are excluded, so prose may name `grep -q` freely. The tail
+  # `['\''"$.]` requires something pattern-shaped after the flags, which is what
+  # separates an invocation from a sentence.
+  ungated="$(grep -vE '^[[:space:]]*#' "$SELF" \
+    | grep -oE "(^|[^./A-Za-z_-])grep( +-[A-Za-z-]+)* +['\"\$.]" \
+    | { grep -vcE ' -[A-Za-z]*[EF]' || true; })"
+  if [ "$ungated" -ne 0 ]; then
+    echo "self-test: $ungated grep call site(s) in $SELF name neither -E nor -F. A bare grep is BRE, so an ERE metacharacter in the pattern matches nothing and reports 0 -- which reads exactly like a clean sweep. Name the dialect at the call site, and read the pattern when you do: \\| \\? \\+ \\( \\) are special under -E and literal under -F, and the reverse under BRE." >&2
+    echo "$ungated ungated grep call site(s)" >> "$FAILLOG"
     errors="$(wc -l < "$FAILLOG" | tr -d ' ')"
   fi
 
@@ -1055,11 +1085,11 @@ if [ "$PARSE_RC" -ne 0 ]; then
   fi
   die
 fi
-if ! echo "$TABLE" | grep -q '^STAGE '; then
+if ! echo "$TABLE" | grep -qE '^STAGE '; then
   fail "the stage table for $DOCKERFILE is empty -- no STAGE rows. Either the file declares no stages, or the emitter produced nothing. Every rule below reads that table, so continuing would report success for a file nobody looked at."
   die
 fi
-ok "stage table built by buildkit's own parser ($(echo "$TABLE" | grep -c '^STAGE ') stages)"
+ok "stage table built by buildkit's own parser ($(echo "$TABLE" | grep -cE '^STAGE ') stages)"
 
 TAIL="$(raw_tail "$DOCKERFILE")"
 
@@ -1225,7 +1255,7 @@ fi
 if [ -n "$BASE_IDX" ]; then
   stage_matches_contract() { # <stage index>
     local s="$1" from f
-    stage_lines_of "$s" ENTRYPOINT | grep -q . || return 1
+    stage_lines_of "$s" ENTRYPOINT | grep -qE . || return 1
     for from in $(stage_lines_of "$s" COPY | tr ' \t' '\n\n' | sed -n 's/^--from=//p'); do
       f="$(echo "$from" | tr 'A-Z' 'a-z')"
       # An in-file stage, by name or by build-stage index. --from=<image> does
@@ -1319,7 +1349,7 @@ if [ -n "$BASE_IDX" ]; then
   USER_OUTSIDE=""
   ONBUILD_IN_CHAIN=""
   for i in $IN_CHAIN; do
-    if [ "$i" != "$GKE_IDX" ] && stage_verbs "$i" | grep -qx "USER"; then
+    if [ "$i" != "$GKE_IDX" ] && stage_verbs "$i" | grep -qxF "USER"; then
       USER_OUTSIDE="$USER_OUTSIDE stage-$i($(stage_name "$i"))"
     fi
     # ONBUILD, ANY VERB, ANYWHERE IN THE RUNTIME CHAIN.
@@ -1378,7 +1408,7 @@ else
 fi
 
 # --- 8. no ENV KUBECONFIG anywhere  (negative) ------------------------------
-if echo "$TABLE" | "$AWK_BIN" '$1=="INSTR" && $3=="ENV"' | grep -q 'KUBECONFIG'; then
+if echo "$TABLE" | "$AWK_BIN" '$1=="INSTR" && $3=="ENV"' | grep -qF 'KUBECONFIG'; then
   fail "an ENV KUBECONFIG appears in $DOCKERFILE. pkg/k8s/client.go prefers an explicit kubeconfig over in-cluster credentials, so baking one in silently disables ServiceAccount auth and the hub cannot schedule agent pods -- a failure that looks like an RBAC problem."
 else
   ok "no ENV KUBECONFIG anywhere in the file"
@@ -1406,7 +1436,7 @@ while :; do
 done
 CMD_IN=""
 for s in $CMD_CHAIN; do
-  if stage_verbs "$s" | grep -qx "CMD"; then CMD_IN="$CMD_IN stage-$s($(stage_name "$s"))"; fi
+  if stage_verbs "$s" | grep -qxF "CMD"; then CMD_IN="$CMD_IN stage-$s($(stage_name "$s"))"; fi
 done
 if [ -n "$CMD_IN" ]; then
   fail "a CMD is declared in '$GKE_STAGE' or a stage it inherits from:$CMD_IN. '$GKE_STAGE' inherits CMD from its base chain, so the published image would carry those arguments. The chart supplies the hub's arguments; baking them into the image risks baking a secret into a published artifact."
@@ -1427,13 +1457,13 @@ entrypoint_carries_args() { # <the text after the ENTRYPOINT verb>
   local rest="$1" elems n first second script extra
   if [ "${rest#[}" != "$rest" ]; then
     elems="$(printf '%s' "$rest" | sed 's/^\[//; s/\][[:space:]]*$//' | tr ',' '\n' |
-             sed 's/^[[:space:]]*"\{0,1\}//; s/"\{0,1\}[[:space:]]*$//' | grep -c .)"
+             sed 's/^[[:space:]]*"\{0,1\}//; s/"\{0,1\}[[:space:]]*$//' | grep -cE .)"
     n="$elems"
     elems="$(printf '%s' "$rest" | sed 's/^\[//; s/\][[:space:]]*$//' | tr ',' '\n' |
              sed 's/^[[:space:]]*"\{0,1\}//; s/"\{0,1\}[[:space:]]*$//')"
   else
-    elems="$(printf '%s' "$rest" | tr -s ' \t' '\n\n' | grep -v '^$')"
-    n="$(printf '%s\n' "$elems" | grep -c .)"
+    elems="$(printf '%s' "$rest" | tr -s ' \t' '\n\n' | grep -vE '^$')"
+    n="$(printf '%s\n' "$elems" | grep -cE .)"
   fi
   [ "$n" -le 1 ] && return 1
   first="$(printf '%s\n' "$elems" | sed -n 1p)"
@@ -1441,8 +1471,8 @@ entrypoint_carries_args() { # <the text after the ENTRYPOINT verb>
   if printf '%s' "$first" | grep -Eq '(^|/)(sh|bash|ash|dash)$' && [ "$second" = "-c" ]; then
     script="$(printf '%s\n' "$elems" | sed -n '3,$p')"
     # Everything in the script that is not `exec` and not an argv passthrough.
-    extra="$(printf '%s' "$script" | tr -s ' \t' '\n\n' | grep -v '^$' |
-             grep -Ev '^(exec|\\?"?[$]\{?@\}?\\?"?)$' | grep -c .)"
+    extra="$(printf '%s' "$script" | tr -s ' \t' '\n\n' | grep -vE '^$' |
+             grep -Ev '^(exec|\\?"?[$]\{?@\}?\\?"?)$' | grep -cE .)"
     [ "$extra" -le 1 ] && return 1
   fi
   return 0
