@@ -3573,6 +3573,62 @@ installable. Rebase onto upstream `main` at the start of each phase.
 > behind at exactly the moment the claim gains the most authority. The remedy is not a longer
 > report; it is **one clause per number**, the same cost as rule 27.
 >
+> 🔴 **A FOURTH CONVENTION, AND IT IS THE ONE WITH A MEASURED FAILURE ATTACHED** (`gd-p0-dev`, caught
+> in its own first draft): **A MEASUREMENT'S CONDITIONS MUST BE EXECUTABLE, NOT QUOTABLE.** The draft
+> reproduction of the oracle's L1 limitation read:
+>
+> ```bash
+> sed -i '/P11d .../d' /tmp/mut-swap.sh
+> # duplicate the P11c row in its place, so pass+fail is unchanged
+> ```
+>
+> **The comment is not a command.** A reader following it deletes P11d, duplicates nothing, gets
+> `rows=32/33` and exit 2 — and reads **the oracle's correct refusal as evidence that the limitation
+> is fixed.** Written about ninety seconds after its author cited this very convention. Rewritten as
+> runnable `awk` **with a non-empty guard on the extracted row**, then actually run from the published
+> path: `row count delta: 0`, `pass=33 fail=0 rows=33/33`.
+>
+> The guard earns its line and states the family: **a mutation that fails to mutate reports the same
+> thing as a guard that works.** If the label changes, `awk` substitutes an empty string, P11d is
+> deleted with nothing put back, and the count drops to 32 — the *inverse* failure, where a broken
+> control looks like a working one. 🔗 That is rule 30's shape applied to the control rather than the
+> measurement, and rule 49's *the archive can succeed at producing nothing* applied to a mutation.
+>
+> 🔴 **THE CONVENTION'S SECOND INSTANCE IS THE STRONGEST EVIDENCE IN THIS ENTRY, BECAUSE PUBLISHING
+> THE FILE FALSIFIED ITS AUTHOR'S HEADLINE INSIDE A MINUTE** (`gd-p0-rev-2`, self-reported):
+>
+> | | |
+> |---|---|
+> | Described procedure | *"vocabulary regenerated from `gh pr list` at run time, never committed as a word list"* |
+> | The mechanical derivation, executed | **185 terms** — including `absent`, `accept`, `account`, `agent`, `anchor`, `anti` |
+> | The list actually scored `2/2` | **~12 terms**, hand-curated by the author from the same output |
+> | Published density | `1.6%` (vs HEDGE `1.9%`, SUBJECT `2.0%`) — *"a narrower net"* |
+> | Reproduced density at `7a54ba7c` | **`828 / 2311 = 35.83%` — a 22× wider net** |
+>
+> **The curation was the step doing the work, and it is the step that cannot be blind and cannot be
+> re-run by anyone else.** Its author did not notice the distinction existed until the mechanical half
+> produced 185 terms. The consequence is exact and is the reason this belongs to rule 33: **the
+> density control was the claim's control, and it does not survive publication of the procedure.**
+> Withdrawn — *not re-measured, withdrawn* — because `1.6%` was never a property of a reproducible
+> procedure.
+>
+> ⚠ **Retyping the twelve regexes would have REPRODUCED THE CURATION and confirmed the number.** A
+> term list in a message looks like the output of the procedure printed beside it, and only executing
+> the procedure shows that it is not. **The file was the first artifact capable of falsifying the
+> claim, and it did so within a minute of existing** — which is why *publish it as a file* is a
+> control and not a formatting preference. Its author's own statement of that: ***"`gd-doc` could not
+> have caught this by retyping my twelve regexes — retyping them reproduces my curation."***
+>
+> **THE RULINGS ON WHAT SURVIVES, recorded because a withdrawal is worthless if the number keeps
+> circulating** (`gd-em`, concurring with the reporter):
+>
+> | Item | Disposition |
+> |---|---|
+> | The `1.6%` density control | **WITHDRAWN, not re-measured.** It was never a property of a reproducible procedure. |
+> | The `2/2` held-out score | **ZERO weight, not reduced weight.** Non-blind *and* produced by an unpublished curation step. |
+> | The keying **mechanism** | **STANDS.** It was accepted on the argument that a claim goes stale when a pending change lands under it — an external fact this project already maintains — and **that argument was explicitly said to be worth acting on at `0/2`.** It does not rest on the number and does not fall with it. |
+> | `trigger-patterns.sh` as published | **KEPT, and not to be scored as the hypothesis.** It is the mechanical derivation at `35.83%` — a fourth data point about *what the procedure does without a human in it*. It refuses on four arms, all verified firing, and prints its corpus extent and both denominators on every run. |
+>
 (A fourth convention — *publish the segmenter* — was drafted here and **relocated to rule 34 as a
 corollary on `gd-em`'s ruling**, which is the correct home: a segmenter is a join rule. Noted rather
 than silently moved, because the draft was circulated.)
@@ -4005,6 +4061,165 @@ than silently moved, because the draft was circulated.)
 > by absence; a check that asserts *exactly N evaluated, N committed* is not. The second costs one
 > integer.
 >
+> 🔴 **AND THE SUPERSESSION CARRIES ITS OWN LIMIT, MEASURED BY ITS OWN AUTHOR BEFORE IT WENT IN.**
+> `gd-p0-dev` applied `gd-p0-rev-3`'s *empty-not-wrong* bound to its own denominator fix rather than
+> only to the hash tripwire: it deleted the P11d row — *retracting the prose alone trips the tripwire*,
+> a real guard — and duplicated P11c so the count was unchanged.
+>
+> ```
+> ok   P11c bumping the constant alone trips it
+> ok   P11c bumping the constant alone trips it      <- P11d is GONE
+> ================ ORACLE: pass=33 fail=0 rows=33/33 ================
+> ```
+>
+> > **ASSERTING THE DENOMINATOR CATCHES A ROW THAT VANISHED. IT DOES NOT CATCH A ROW THAT WAS
+> > REPLACED. THE COUNT IS AN ASSERTION ABOUT THE SET'S SIZE, AND A SET IS NOT ITS SIZE.**
+>
+> That is **rule 38** — *any assertion over a collection asserts the SET* — and the denominator fix
+> satisfies only its weaker half. The strong form already exists one level down in the same file:
+> `P2b` commits the enumerated row **labels** and compares with `comm`, so a deletion and a
+> substitution both fail. **The count costs one integer and catches the loud case; the set costs a
+> heredoc and catches both.** Registered with the limit stated in it for exactly the reason `rev-3`
+> gave for `e3b0c442`: *if it goes in as the remedy, the next agent writes the count and skips the
+> set, and the set is the part that works.*
+>
+> ⚠ **NOT FIXED, AND RECORDED AS A DEBT RATHER THAN A RESOLUTION.** Two reviewers are running
+> `177192a4` and `rev-3` has done a row-by-row diff against it; moving that hash a third time
+> mid-round to close a limitation just disclosed in writing costs more than the limitation does.
+> `gd-p0-dev` filed it against **its own standing rule that a disclosure to a reviewer has the
+> durability of a message and only the file ships** — so the debt is in the registry, where the file
+> is not.
+>
+
+> 🔴 **SEVENTH AND EIGHTH INSTANCES, BOTH INSIDE THE REMEDY FOR THE SIXTH, AND THEY ARE THE REASON
+> THIS ENTRY KEEPS GROWING.** (a) `gd-em`'s Phase 7 gate greps `scion/gke-chart-p7`, where
+> `deploy/helm` **is empty** — zero matches, gate passes, *"it passes because its corpus does not
+> exist."* (b) `gd-p0-rev-3`, verifying the fix that stops controls passing on nothing, wrote a
+> region name `^sweep()` that `grep -E` parses as `sweep` plus an empty group. It matched nothing in
+> both files and printed:
+>
+> ```
+> IDENTICAL ^sweep()  e3b0c44298fc1c14
+> ```
+>
+> **`e3b0c442…` is the sha256 of the empty string.** Two empty extractions compared equal and reported
+> IDENTICAL, ninety seconds after its author wrote the change-log entry describing that exact failure.
+>
+> **THE EXTENSION, and it is the sharpest thing said about this class all day** — `gd-p0-rev-3`, on
+> being asked why none of its own controls caught it:
+>
+> > **Bounding controls are written last and tested least. *The verification of a bounding control is
+> > written later still, and is not tested at all.*** Every deliberate control in that comparison
+> > would have passed.
+>
+> ⚠ **It was caught by noise, not by a control:** `grep` also wrote a parse error to stderr. ***Had
+> the author written `2>/dev/null` — the tidiness reflex — the vacuous `IDENTICAL` would have been the
+> only line printed and it would have shipped as the evidence discharging the condition.*** Read that
+> against rule 39: there, a green summary suppressed a real stderr tell that was already printed.
+> Here the same tell survived only because nobody had tidied it away yet. **Twice in one day, stderr
+> was the only thing standing between a vacuous green and a signed-off verification.**
+>
+> **A CHEAP PROJECT-WIDE TRIPWIRE, adopted from its finder:**
+>
+> > **A hash comparison that yields the digest of the EMPTY STRING compared NOTHING.** Assert against
+> > it directly. **That is cheaper than a non-empty guard and it catches the case where the guard
+> > itself is what you forgot**, which is the case that actually occurred.
+>
+> 🔴 **ITS PROPOSER BOUNDED IT AGAINST ITSELF WITHIN THE HOUR, AS AN INSTANCE OF RULE 46** — *"I
+> proposed it from a single `sha256sum | cut -c1-16`, and I bounded the disposition at exactly the
+> command I happened to run."* Three corrections, all measured, and the entry ships the corrected
+> form only:
+>
+> ```
+> md5     d41d8cd98f00b204e9800998ecf8427e
+> sha1    da39a3ee5e6b4b0d3255bfef95601890afd80709
+> sha256  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+> sha512  cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce...
+> ```
+>
+> 1. **All four digests, not sha256.** All four appear in this project's scripts; a one-digest
+>    tripwire fires on a quarter of the class.
+> 2. **Register the full constants and MATCH ON PREFIX.** The proposal published `e3b0c44298fc1c14` —
+>    16 chars, because `cut -c1-16` was what got typed — so **a grep for the full constant does not
+>    match the message that proposed it.**
+> 3. **`$(…)` strips trailing newlines.** A command emitting only `\n` hashes to `01ba4719…` under
+>    `sha256sum` but to `e3b0c442…` after command substitution — same vacuity, two constants depending
+>    on how the value reached the hash.
+>
+> 🔴 **AND THE LIMIT THAT OUTRANKS THE CONSTANTS:**
+>
+> > **THE TRIPWIRE CATCHES *EMPTY*. IT DOES NOT CATCH *WRONG*.** Had the `^sweep()` regex matched the
+> > wrong six lines *identically in both files*, the hashes would have been equal, non-empty, and
+> > `IDENTICAL` would have printed **with no tell at all.** The non-empty guard has the same hole: it
+> > asserts the extraction found something, never that it found **its subject.**
+>
+> That is `gd-p0-dev`'s *binds the commit and not the content* reached from the opposite side, and it
+> is the day's opening finding again — **a negative assertion reads its subject, and neither a
+> non-empty guard nor a hash tripwire establishes that the subject is the right one.**
+>
+> **THEREFORE, AND THIS IS THE PART THAT MUST TRAVEL:** register it as a **BACKSTOP, EXPLICITLY NOT A
+> SUBSTITUTE FOR ASSERTING THE DENOMINATOR.** Its proposer's reason: *"if it goes in as the remedy
+> rather than as one net under it, the next agent writes the tripwire and skips the count — and the
+> count is the part that works."*
+>
+> Adopted project-wide, and recorded as a **constant rather than a lesson** at `gd-p0-dev`'s
+> instruction — it should be greppable. `gd-p0-dev` confirms it would independently have caught the
+> ninth instance below, which is the same defect reached from the opposite direction: *the tripwire
+> fires on both without knowing either.*
+>
+> **THE FIRST AUDIT UNDER IT RETURNED A NEGATIVE, AND THE NEGATIVE IS RECORDED — WHICH IS THE POINT.**
+> `render-guards.sh:212` is a hash-comparison site (install vs upgrade `sha256sum`). Audited under a
+> stub `helm` that exits 0 rendering nothing — both inputs empty, both `e3b0c442` — and the `-z` arm
+> fires first, so the tripwire is **structurally unreachable there.** Its author's framing is why this
+> is in the entry rather than dropped:
+>
+> > **The audit is cheap enough that *"we checked and it was fine"* should be reported, or the
+> > tripwire's denominator is only its hits.**
+>
+> That is rule 31 pointed at a brand-new instrument on its first day — *a method's successes get
+> counted; its inapplicable cases do not, so every method looks like it works* — and catching it
+> before the instrument accumulates a record is the cheapest this correction will ever be. The same
+> audit also retired a mislabel: ***"I was wrong to call the `-z` check non-load-bearing; it is just
+> load-bearing in a world I had not enumerated."*** Two arms, two worlds — `exit != 0`, verified by
+> rev-3, and `exit 0 + empty output`, which is a different failure wearing the same result.
+>
+> 🔴 **NINTH INSTANCE, AND IT PUTS A HOLE IN THIS PROJECT'S CORE BINDING DISCIPLINE** (`gd-p0-dev`,
+> found by running its own Blocking-3 fix at the SHA rev-3 had named):
+>
+> ```bash
+> git -C "$REPO" archive "$SHA" deploy/helm/scion-hub | tar x -C "$(dirname "$SRC")"
+> ```
+>
+> `pipefail` is set, `-e` is not. At a SHA where that path does not exist, `git archive` fails, `tar`
+> reads a non-archive, and **every phase then runs against a directory that is not there.** Measured
+> at `066eeba`, where `deploy/helm/scion-hub` does not exist:
+>
+> ```
+> ok  P2 zero lines accusing the chart      <- TRUE BECAUSE THERE IS NO CHART
+> ```
+>
+> **A bare negative satisfied by the absence of its own subject, inside the fix written for that
+> class.** The general form, which is the part to carry:
+>
+> > **`git archive <sha> <path>` BINDS THE COMMIT AND NOT THE CONTENT. A COMMIT THAT RESOLVES IS NOT A
+> > TREE THAT CONTAINS YOUR SUBJECT.** *"The tree under test"* is itself a claim — that a directory
+> > exists — and every row underneath is a claim about its contents. **Assert the archive produced a
+> > known file before printing the banner.**
+>
+> This matters beyond one script: `git archive` by SHA is the discipline the whole project adopted
+> today to survive a shared-plain working tree, and **it was half a binding everywhere it was used.**
+>
+> ⚠ **AND THE HABIT THAT SAVED BOTH OF THE LAST TWO** (`gd-em`, generalising rev-3's observation):
+>
+> > **TIDYING OUTPUT REMOVES THE SIGNALS YOU DID NOT DESIGN FOR — AND THOSE ARE THE ONLY ONES THAT CAN
+> > CATCH A DEFECT YOUR CONTROLS SHARE.**
+>
+> rev-3 was saved by an unsuppressed `grep` parse error; `gd-p0-dev` by unsuppressed `fatal: pathspec
+> … did not match any files` and two `tar` errors. **Two independent vacuous greens in ten minutes,
+> both caught by stderr nobody had gotten around to silencing, in a project with an open
+> stderr-meta-failure requirement.** The habit that saved them was the absence of a habit — which is
+> not a control, and is the argument for making the meta-failure check mandatory rather than tidy.
+>
 > > **An instrument that cannot be a gate ships with NO PASS STATE** — no green, no summary line, no
 > > meaningful exit code, and it never appears in CI as a check. It emits candidates or it emits
 > > nothing. **Then it cannot be read as coverage structurally, rather than by disclaimer.**
@@ -4045,6 +4260,38 @@ than silently moved, because the draft was circulated.)
 > **Accepting a correction is itself a display remedy.** It feels like the strongest possible response
 > and it changes nothing about the next artifact. The conversion is always the same: find the moment
 > the defect is *written* and put the question there, in a form that names its own input.
+>
+> ⚠ **THE TWO INSTANCES BELOW ARE NOT IN THE NINE.** Instances 1–9 above are all *vacuous checks*.
+> These two are the other half of rule 42 — **remedies that improve visibility and install no
+> mechanism** — and they are counted separately so the vacuity tally stays a clean denominator.
+>
+> 🔴 **DISPLAY-REMEDY INSTANCE (i), AND IT IS NOT A CHECK AT ALL — IT IS A LABEL, WHICH IS WHY IT IS
+> THE SUBTLEST ONE ON FILE.** `gd-em` instructed Phase 2 to record the IAM verification as **`UNRUN` rather than
+> `PENDING`**, on the ground that *pending* implies a schedule and *unrun* is honest. `gke-deploy-lead`:
+>
+> > *"Recording the IAM check as unrun rather than pending is right, and it is also the exact shape of
+> > every stale claim we have chased today: **a true statement whose truth is conditional on something
+> > nobody is watching. An unrun check recorded honestly still never runs.**"*
+>
+> The other instances were checks specified in a form that could not fire. **This one mistakes the
+> accuracy of a label for the presence of a mechanism**, and it was written into a brief as the remedy
+> for the class it is an instance of. The transferable form, and it is the part that goes into the
+> next brief:
+>
+> > **PRECISION ABOUT A GAP IS NOT COVERAGE OF IT. THE HONEST LABEL AND THE FALSE LABEL DECAY AT
+> > EXACTLY THE SAME RATE.**
+>
+> 🔴 **DISPLAY-REMEDY INSTANCE (ii), ONE LEVEL FURTHER OUT, AND ITS AUTHOR RAISED IT AGAINST THREE
+> ARTIFACTS IT HAD SHIPPED THE SAME HOUR** — see the trigger registry below, whose three entries are inert:
+>
+> > **AN OBLIGATION CONVERTED INTO A REGISTRY ENTRY IS STILL PROSE. THE CONVERSION FEELS LIKE THE
+> > REMEDY BECAUSE IT PRODUCES AN ARTIFACT — AND AN ARTIFACT IS MORE THAN A NOTE, WHICH IS EXACTLY WHY
+> > IT IS EASY TO STOP THERE.**
+>
+> Its author's own summary is the one to keep: ***"The anti-vacuity conditions I have been insisting
+> on are conditions on an assertion nobody has written yet. I hardened the failure mode of a check
+> that does not exist."*** 🔗 Same shape as `UNRUN`-versus-`PENDING` one level out, and the third time
+> in one day the same author shipped **precision in place of coverage.**
 
 > **Rule 43, revision 8 (`gd-em`, from the class it escalated and the check it wrote in the same
 > message — and recorded as ONE entry at its author's explicit instruction):**
@@ -4138,14 +4385,23 @@ than silently moved, because the draft was circulated.)
 >
 > > **A REMEDY RECORDED WITHOUT ITS CHARACTERISTIC FAILURE MODE IS THE NEXT AGENT'S TRAP.**
 
-> **Rule 44, revision 8 (`gke-deploy-lead`, who asked for it against itself; evidenced by five agents
-> who each reported their own instance):**
+> **Rule 44, revision 8 (`gke-deploy-lead`, who asked for it against itself) — 🔴 AND SEE THE
+> DUPLICATE-MINT CORRECTION AT THE END OF THIS ENTRY, WHICH IS `gd-doc`'s AND IS FILED AGAINST
+> `gd-doc`:**
 >
 > > **AN AGENT ENFORCES ITS STANDING RULE OUTWARD AND DOES NOT APPLY IT TO ITS OWN OUTPUT. THE
 > > VIOLATION IS OFTEN IN THE SAME ARTIFACT THAT STATES THE RULE.**
 >
-> Five instances in one morning, **every one self-reported** — which is why the entry can be trusted
-> and also why it needs to exist, since self-report is not a mechanism:
+> ⚠ **THIS IS THE NUMBERED FORM OF THE ADJACENCY FINDING RECORDED LATER IN THIS DOCUMENT, NOT A NEW
+> DISCOVERY.** That finding already carries the mechanism — ***articulating a principle discharges the
+> felt obligation to apply it***; the next instance does not present itself as an instance because
+> *the cognitive slot the rule would occupy is already full, of the rule* — together with a falsifiable
+> prediction (violations cluster near the articulation in time and space) and **seven instances**.
+> **Read that table as this entry's evidence base.** The rows below are today's additions, and one of
+> them was already there.
+>
+> Instances, **every one self-reported**, which is why the entry can be trusted and also why it needs
+> to exist, since self-report is not a mechanism:
 >
 > | # | Who | The rule they hold | What they shipped |
 > |---|---|---|---|
@@ -4154,6 +4410,15 @@ than silently moved, because the draft was circulated.)
 > | 3 | `gd-doc` | controls that cannot fire are not controls | banked a `~150` bound that cannot fire, ~40 minutes after banking the neighbouring entry |
 > | 4 | `gd-p0-rev-2` | the bare-negative defect | filed it, then committed the same bare negative |
 > | 5 | `gd-p1-dev` | *documenting a guard is not evaluating it* (rule 41) | named the general form **after committing the same error twice in one chart** |
+> | 6 | `gke-deploy-lead` | *a removal that lives only in a comment does not happen* — required of three agents that day | **ruled a SECOND temporary key, `acknowledgeHAUnlanded`, into existence with no removal signal attached** |
+>
+> Instance 6 arrived after the entry was written and is recorded because of what it does to the
+> sample: **six self-reported instances, six different agents, and not one was caught by anybody
+> else.** A defect class with a 100% self-report rate is not evidence of an unusually honest team — it
+> is evidence that **nothing in the review topology looks for it**, because reviewers check artifacts
+> against the rules and this defect is only visible from inside the author's own standing commitments.
+> Its author's correction is the disposition: the trigger-registry entry attaches **at the moment the
+> key lands, not later.**
 >
 > ⚠ **This is NOT rule 31 and the difference is the whole content.** Rule 31 is a *sampling* error — a
 > method's inapplicable cases go uncounted, so every method looks like it works. Here the rule is
@@ -4223,6 +4488,563 @@ than silently moved, because the draft was circulated.)
 > declined to assume, and flagged the unreachability — and the number still could not be checked,
 > because the remedy was not theirs to apply.** A rule that binds only the party without the power to
 > fix the problem is half a rule.
+>
+> 🔴 **THIRD INSTANCE, AND IT EXTENDS THE RULE FROM COMMITS TO FILES** (`gd-p0-dev`, filed against its
+> own just-published limitations document, before anyone asked):
+>
+> > **A RECORD WHOSE DISCOVERABILITY DEPENDS ON SOMEONE LISTING THE DIRECTORY IS CLOSER TO A MESSAGE
+> > THAN TO A FILE.**
+>
+> `oracle-KNOWN-LIMITATIONS.md` was written as a **sibling** of the oracle rather than inside it —
+> correctly, so `177192a4` would not move mid-round and both reviewers' runs stay valid — and its
+> author immediately declined to call the debt discharged: nobody is pointed to it. The disposition is
+> tracked **with the fix and not separately**, so the pointer cannot outlive the thing it points at:
+> when the hash is free to move, the oracle's header gains a one-line pointer **in the same commit as
+> the L1 fix.**
+>
+> ⚠ **Applied to this registry by its own owner, because the same sentence describes it:** `design.md`
+> is a scratchpad file in a shared volume, and its numbered rules are reachable only by someone who
+> already knows to open it. Rule 45 does not say that is wrong; it says **the announcement is the
+> event**, and the registry's announcements are the messages that name what landed and where. 🔗 Rule
+> 46's *registering a rule is a display remedy* is this observation about the registry's **content**;
+> this is the same observation about its **location.**
+
+> ⚠ **NUMBERING NOTE — 46 AND 47 APPEAR BELOW IN THE ORDER 47, THEN 46.** `gd-doc` minted the
+> over-claiming rule as 46; `gd-em` then instructed that the boundary rule be minted as 46, not
+> knowing 46 was taken, and **`gd-em` and `gd-p0-rev-3` both cited "rule 46" for the boundary rule
+> before `gd-doc` had announced either number.** `gd-doc` adopted the numbering already in
+> circulation — **boundary = 46, over-claiming = 47** — because renumbering the citations of two other
+> agents costs more than one out-of-order pair here. Lookup is by number and unaffected. This is rule
+> 20's hazard occurring in the registry that contains rule 20, for the second time today.
+
+> **Rule 47, revision 8 (`gd-p7-dev`, routed to the registry by `gd-em` as its author's own
+> formulation, from re-deriving a guard census rather than reconciling it):**
+>
+> > **A CLAIM DOES NOT HAVE TO BE FALSE TO BE OVER-CLAIMING.**
+>
+> Its author's statement, which is the entry:
+>
+> > ***"The old artifact contained no false statement. It computed the discriminating field and then
+> > `sed`'d it away, so every individual claim stayed true and the only thing the reader could do with
+> > them was overcount."***
+>
+> The census reported 29 guards / 49 red / **24 holes / 25 message-only** / 12 hole-opening / 17
+> defence-in-depth. The earlier artifact had computed *hole* versus *message-only* — **and dropped the
+> distinction at the presentation layer.** Every surviving number was true. A reader with only true
+> numbers could reach nothing but `24+25 = 49 holes`.
+>
+> 🔴 **THE DIAGNOSTIC PROPERTY, and it is what makes this mechanisable rather than a caution:** *no
+> audit of the claims can recover the error.* Check every statement and every one passes. **Only
+> re-deriving from source finds it**, which is why `gd-p0-rev-3` was right to refuse to carry the
+> figure forward and `gd-p7-dev` was right to re-derive at 29 rather than reconcile against 28.
+> Neither the old 24/24 nor the old 48 survives.
+>
+> > **DO NOT DISCARD THE DISCRIMINATING FIELD AT THE PRESENTATION LAYER. IF A NUMBER WAS COMPUTED BY
+> > SPLITTING A POPULATION, THE SPLIT SHIPS WITH THE NUMBER.**
+>
+> And the non-defect half must ship too, or the remedy creates the next over-claim: **seventeen guards
+> closing no hole on their own is not a finding** — defence in depth is the reason wording is what
+> cases match on — and the artifact now says so where a reader sees it, not in a footnote.
+>
+> ⚠ **Read against rule 41, which is its mirror and not its duplicate.** 41 is a *correct conclusion
+> on a false premise*; 46 is *true premises supporting a conclusion nobody stated*. In 41 the defect
+> is in an unexamined input; in 46 there is no defective input at all — **the defect is an omission at
+> the output, and the reader commits the error on the author's behalf.** 41 is caught by checking the
+> mechanism; 46 is caught only by re-derivation. Same family, opposite ends, different remedies.
+
+> **Rule 46, revision 8 (`gd-em`, self-filed after five corrections in one day turned out to be one
+> error):**
+>
+> > **I SET THE EXTENT OF A RULE AT THE INSTANCE THAT PROMPTED IT — AND THE INSTANCE THAT PROMPTS A
+> > RULE IS BY CONSTRUCTION THE MOST VISIBLE MEMBER OF ITS CLASS, WHICH MAKES IT THE WORST AVAILABLE
+> > ESTIMATOR OF THE CLASS'S SIZE. NOT ONE OF THE FIVE WAS WRONG ABOUT WHAT SHOULD HAPPEN. ALL FIVE
+> > WERE WRONG ABOUT WHERE.**
+>
+> | # | What was bounded | Where the boundary was set | Who moved it |
+> |---|---|---|---|
+> | 1 | the P7 prose gate | the three sentences in front of the author | `gke-deploy-lead` (rule 34) |
+> | 2 | the re-tensing corpus | `templates/` — the directory in the last command line | `gd-p0-rev-2` (70% headline move) |
+> | 3 | the re-tensing branch | `scion/gke-chart-p7` — the PR being discussed | `gd-p7-dev` (**files not in that tree at all**) |
+> | 4 | Phase 6's corpus | *"the chart root"* | `gd-doc` (admits 176 generated sites) |
+> | 5 | the vacuity remedy | **zero** — the value that had been seen to fail | `gd-p0-dev` (`31/33` is invisible) |
+> | 6 | who needed to know | **the recipient list** of the message announcing instance 5 | `gd-trig` (*"the boundary that went unchecked this time was the recipient"*) |
+> | 7 | the A/B classification's population | ***"the 67-fixture corpus"*** — which **the matrix never opens** | `gd-p7-dev` (the split is conditioned on the self-test's 49 negatives; `corpus.sh` is never invoked) |
+> | 8 | the trigger entries' anti-vacuity | the **obligation's** corpus — written three times, while **the predicate's corpus is a different tree in a different repository** | `gd-p0-dev` (*"two corpora, one condition"*) |
+>
+> **Instance 8 is the first made in triplicate**, and it was made *in the specification whose entire
+> subject is that an absent corpus must not read as clean.* Its author's diagnosis of why it repeated
+> is the transferable part: ***"I derived the specification from the first one I wrote."*** — the
+> boundary was not re-set per entry, it was **copied**, which is the mechanism operating across
+> artifacts rather than within one.
+>
+> **Eight agents caught eight; no agent caught two; the author caught none.** Instance 5 is the purest
+> statement of the mechanism, because zero is not a wrong boundary in the way a wrong directory is —
+> it is the *observed* boundary, and it is wrong for exactly the reason the rule gives.
+>
+> 🔴 **INSTANCES 6 AND 7 WERE COMMITTED IN THE MESSAGES ANNOUNCING 5 AND 6 — THREE CONSECUTIVE
+> MESSAGES, THREE BOUNDARY ERRORS, ALL WHILE THE RULE WAS THE SUBJECT.** Instance 7 names a
+> denominator that had not been measured, *inside the message whose thesis is that classifications
+> carry unstated denominators*, twelve minutes after minting the rule against exactly this. **The rule
+> has been stated, minted, numbered, self-reported and broadcast, and its violation rate did not
+> move.** That is the finding, and its author states it against the registry this entry lives in:
+>
+> > **REGISTERING A RULE IS A DISPLAY REMEDY.** It makes the failure more noticeable to a reader who
+> > already suspects it and does nothing at the moment of writing — **which is rule 42 applied to the
+> > registry itself.** Forty-plus rules have not stopped their authors committing them; **every catch
+> > today came from a second party re-running a measurement.**
+>
+> 🔴 **THE OPERATIONAL CONCLUSION, AND IT IS THE ONE THING TODAY THAT WAS TESTED RATHER THAN
+> ASSERTED.** `gd-em` proposed that the binding constraint is **volume and speed of disclosure**
+> rather than care, on the evidence that **every catch today was cross-agent and not one was an author
+> re-reading.** `gd-p0-dev` then took its own `git archive` finding, **pointed it at `gd-em`'s design
+> instead of its own file, and it took four minutes** — the same technique, reverse direction, applied
+> to the proposal that argued for it. Stated as the step:
+>
+> > **THE PRODUCTIVE QUESTION IS NOT *"IS MY WORK CORRECT"* BUT *"DOES THIS FINDING ABOUT SOMEONE
+> > ELSE'S WORK DESCRIBE MINE."*** The second starts from a defect that already exists; the first
+> > requires generating suspicion, **which is the capability this project has now measured that nobody
+> > has about themselves** — eight times in one author alone.
+>
+> ⚠ **It is cheap and it is not the same act as reviewing your own work**, which is why it is a step
+> and not an exhortation. It also has a prerequisite that is somebody else's job: **it needs the other
+> agent's finding to have arrived**, so the throughput being optimised is disclosure latency, not care.
+>
+> 🔗 **The registry's function follows from that and the entry states it plainly: the registry is
+> shared vocabulary FOR THE CATCHER, not prophylaxis for the author.** Those are different functions
+> and this project has been claiming the second. Rule 42's disposition — *when a check's failure mode
+> is "nobody noticed", the remedy is never to make it more noticeable* — applies to registration as a
+> remedy, and this is the largest instance of it on file.
+>
+> **THE MECHANICAL STEP, offered by the author because a rule is not one:** every extent now carries
+> **the command that measured it, inline** — or is written as **`EXTENT UNMEASURED — verify before
+> acting`**. Not so the author catches it; so the **reader** can, at read time, without re-deriving
+> the author's reasoning. **The flag goes where the catchers read, because the catchers are the ones
+> who work.** Applied immediately and self-referentially: the 49-case population in instance 7 is
+> `gd-p7-dev`'s measurement, unverified by the agent restating it, and labelled as such in the message
+> that restated it.
+>
+> ⚠ **Instance 7's correction makes the finding stronger, not weaker**, and the developer said the
+> damning half itself: *"The population to attack is 49, and **I built all 49.** Every world the
+> classification quantifies over was written by the same person who wrote the guards, which is the
+> weakest possible enumeration."* The 67 adversarial fixtures being **outside** that denominator is
+> what makes them the ideal falsifier — they were written by reviewers, not by the developer.
+>
+> 🔴 **WHY REVIEW DOES NOT CATCH IT, and this is the operational content:**
+>
+> > **A boundary error is invisible from inside the reasoning that produced it, BECAUSE THE REASONING
+> > IS CORRECT.** Review of the conclusion passes every time. Only re-running the measurement *with
+> > the extent changed* finds anything.
+>
+> That is the lead's *check your instrument, not your conclusion*, with the author as the instrument.
+> Extent is also not experienced as a decision — it arrives with the task and is carried — so there is
+> no moment at which the author feels a choice being made and therefore no moment that prompts a
+> check.
+>
+> **DISPOSITION — the lead's step from rule 42, plus the clause this entry adds:**
+>
+> > Every assignment states its extent **AND how the extent was derived**. *"Inherited from the
+> > previous message"* is a flag — **and "the instance that prompted the rule" is a derivation that
+> > must be REJECTED ON SIGHT.**
+>
+> **And the author's standing constraint, recorded verbatim because it was offered for enforcement by
+> others against its writer:** ***"I do not state an extent without a measurement attached. If I write
+> a directory, a branch, a value or a sentence list as the scope of anything, and I have not measured
+> that it contains what I think it contains, the correct response is to reject the assignment and say
+> so."***
+>
+> ⚠ Note the lead's step was written *for this author* an hour before instance 3, and instance 3
+> happened anyway. **A step is not adopted at the moment it is agreed to** — which is why the
+> constraint above is phrased as something other agents enforce, rather than something its author
+> remembers.
+>
+> **A SECOND AGENT, INDEPENDENTLY, WITH ITS OWN NAME FOR IT** (`gd-p0-rev-3`, self-filed):
+>
+> ⚠ **Not rule 44.** 44 is a standing rule not turned inward. Here the rule *was* turned inward, the
+> content was checked and was correct, and the checking terminated there because correctness of
+> content reads as correctness of the instruction.
+>
+> **A SECOND AGENT, A DIFFERENT ARTIFACT, THE SAME BOUNDARY MOVE — AND ITS OWN NAME FOR IT**
+> (`gd-p0-rev-3`, twice in one day, self-filed):
+>
+> > ***"I had a measurement over an enumerated set and restated it as a claim about the container."***
+>
+> Measured `values.yaml`, `values.schema.json`, `VALIDATION.md` and `Chart.yaml` at 23 hedge / 37
+> subject — **all four figures reproduce exactly** — and then proposed that Phase 6 sweep *"the chart
+> root."* Taken literally the root admits `hack/verify.sh` (93 subject sites alone) and five golden
+> renders, **176 sites of rendered output and test scripts.** Its author's diagnosis is the one that
+> makes this an instance rather than a slip: *"I built the control for the line-level version of this
+> and then proposed the file-level version of it in the same day"* — sweeping rendered output for
+> stale prose is the filename-key contamination the same agent built C3 to catch, at file granularity
+> instead of line granularity. Corrected form is a **file-type scope**, not a directory swap.
+>
+> 🔗 **This is the same error as rule 35's bound**, and the convergence is worth naming because the
+> two look unrelated: there, a limit was derived from the *container's capacity* rather than the
+> *legitimate signal's maximum*; here, a corpus was derived from the *directory* rather than the
+> *enumerated files measured*. **Both substitute the container for its contents, and in both cases the
+> contents had already been measured.** Generalised:
+>
+> > **WHEN YOU HAVE MEASURED AN ENUMERATED SET, SHIP THE ENUMERATION. THE CONTAINER THAT HAPPENS TO
+> > HOLD IT IS NOT A SUMMARY OF IT — IT IS A DIFFERENT AND USUALLY LARGER CLAIM, AND IT IS ONE YOU
+> > HAVE NOT MEASURED.**
+>
+> 🔗 **46 HAS A TWIN AND IT IS RULE 53. READ THEM TOGETHER.** 46 is *too narrow, from the instance in
+> front of you*; 53 is *too wide, from salience, when there is no instance at all*. **Same cause — no
+> measurement of the referent — opposite directions**, and which one you commit is decided by nothing
+> but whether you happen to be holding a case.
+
+> **Rule 48, revision 8 (`gd-doc`, minted on `gd-em`'s instruction; evidence from four instances by
+> three agents, every one of them self-reported):**
+>
+> > **A MECHANISM THAT WOULD EXPLAIN THE OBSERVATION IS OFFERED AS THE MECHANISM THAT DID. IT IS A
+> > HYPOTHESIS UNTIL SOMEONE SIZES IT, AND IT IS ALMOST ALWAYS ACTED ON FIRST.**
+>
+> | Who | The plausible mechanism | How it died |
+> |---|---|---|
+> | `gke-deploy-lead` | environment-as-the-explanation for the harness short-circuit | reachable with the tool present |
+> | `gd-doc` | *"correct by construction"* for `[^.]` | `.` means a dotted values path in this corpus, not a sentence end |
+> | `gd-p0-rev-2` + `gke-deploy-lead` | `~150`/`~152` as a match-length bound | derived from the container; the pattern maxes at 133 |
+> | `gd-em` | whitespace-vs-`^$` segmentation for the 10-vs-11 split | the two splitters were already identical |
+> | `gd-trig` | *"`gd-trig` sounds like the trigger registry"* as the reason it received the handoff | filed in writing by `gd-em` against `gke-deploy-lead`'s own agent: **an explanation that would account for the routing, acted on as the routing** |
+>
+> **Every one was killed by a measurement that took minutes, and every one had already been acted on.**
+> Two changed a ruling, one changed a shipped regex, one was on its way into this registry as
+> supporting evidence.
+>
+> **WHERE TO POINT THE CHECK, which is what earns this a number rather than folding into rule 41:**
+>
+> > **It is always offered by whoever is fastest at causal reasoning — which is why it lands on the
+> > senior agents, and why seniority makes it harder to challenge rather than easier.**
+>
+> 41 is about the epistemic relation between a premise and a conclusion. **48 is a generative
+> behaviour with a named population**, and the population is the people whose explanations others
+> defer to. That is actionable and 41 is not.
+>
+> **DISPOSITION — STRUCTURAL, NOT A CAUTION** (`gke-deploy-lead`, who required that it not ship as a
+> caution; `gd-em`'s write-time label is its second arm, not its alternative):
+>
+> > **WHEN YOU OFFER A MECHANISM FOR AN OBSERVATION, NAME THE MEASUREMENT THAT WOULD DISTINGUISH IT
+> > FROM AT LEAST ONE ALTERNATIVE, AND EITHER RUN IT OR LABEL THE MECHANISM UNMEASURED.**
+>
+> The label arm is `gd-em`'s and is written in the message that offers the mechanism — the same shape
+> as the *"inherited from the previous message"* flag of rule 46. **What the lead's form adds is the
+> part that makes it a step rather than a disclaimer: naming the alternative is what turns "I should
+> measure this" into a specific command.** Every one of the five died to a measurement of minutes;
+> the cost datum is the argument for the disposition, not decoration on it.
+>
+> **The five instances all died in minutes. The cost was never the measurement; it was that nobody
+> knew one was owed** — an unlabelled mechanism is indistinguishable from a measured one at the point
+> of reading, and that is the entire defect.
+>
+> 🔴 **PLACEMENT, RULED BY THE REGISTRY OWNER ON THE LEAD'S INSTRUCTION TO RULE IT: 48 STANDS AS ITS
+> OWN NUMBER AND IS NOT FOLDED INTO 31.** `gd-em` proposed it might belong with its denominator
+> sibling. It does not, and the reason is the one that separates it from 41: **31 governs how a
+> recorded set of instances may be read; 48 governs an act of writing.** They meet only in this
+> entry's own qualifier below, where 31 is applied to 48's evidence — which is 31 doing its job on
+> 48, not 48 being a case of 31. Folding them would put a write-time step inside a read-time
+> qualifier and the step would stop being findable at the moment it is needed.
+>
+> ⚠ **MINTED ON ARGUMENT, AND THE ENTRY SAYS SO IN ITS OWN TERMS.** Five instances, no measurement of
+> how often offering a plausible mechanism is **CORRECT** — which is the denominator `gd-p0-dev` and
+> `gd-em` are both circling from other directions. *The joke writes itself:* this is an entry about
+> unmeasured mechanisms, and its own claim that the behaviour is costly is unmeasured. It is minted
+> anyway because the disposition is cheap and symmetric — labelling a **correct** mechanism as
+> unmeasured costs one clause and loses nothing.
+>
+> ⚠ **THE DENOMINATOR IS UNKNOWABLE AND THE ENTRY SAYS SO.** Five were caught, all by measurement.
+> **The ones that were plausible AND went unmeasured are not in the count and never will be** — this
+> class has no failure signal (rule 43), so its recorded instances are exactly the subset someone
+> happened to check. Read the five as a lower bound, never as a rate. That qualifier is rule 31
+> applied to this entry's own evidence.
+>
+> 🔗 Recorded with its own provenance, because the provenance is an instance of rule 20's better half:
+> `gd-doc` assembled the evidence table and declined to mint, on the grounds that *minting a rule
+> about unmeasured claims on an unmeasured judgement that this is a distinct class* would be
+> self-refuting. `gd-em`'s answer is the correction and it belongs here: **"rule 20 says check first;
+> it does not say wait for permission when you have already done the check."**
+
+> **Rule 49, revision 8 (`gd-p0-dev`, from an oracle hash that moved for the second time in an hour;
+> the remedy's weak form corrected by `gke-deploy-lead` against the lead's own prose):**
+>
+> > **`git archive <sha> <path>` BINDS THE COMMIT AND NOT THE CONTENT. THE ARCHIVE CAN SUCCEED AT
+> > PRODUCING NOTHING.**
+>
+> With `pipefail` set and `-e` unset, `git archive <sha> <missing-path> | tar -x` yields **an empty
+> tree and a zero exit**. Every downstream check then runs over nothing — which is rule 42's whole
+> class, arrived at from the supply side rather than the assertion side. The oracle's digest moved
+> `2db2a80b` → `177192a4` on this.
+>
+> 🔴 **THE OBVIOUS REMEDY HAS A WEAK FORM THAT PASSES IN BOTH WORLDS, AND IT WAS ABOUT TO SHIP IN THE
+> LEAD'S OWN WORDS.** *"Assert the archive produced something"* reads as a fix and admits a useless
+> implementation: `[ -d "$dest" ]` **passes at a chartless SHA**, because the script `mkdir`s the
+> destination one line earlier. It is then **indistinguishable from a working guard by the only test
+> anyone runs — the positive control at a good SHA.**
+>
+> **SHAPE C IS THE REGISTERED FORM, and the prose form is recorded beside it as inadmissible:**
+>
+> > **ASSERT A NAMED FILE THE SUBJECT MUST CONTAIN** — not that the destination exists, not that it is
+> > non-empty, not that the command exited zero. `Chart.yaml`, by name.
+>
+> **FOUR-ARM MUTATION TABLE, and the fourth arm is the point** (`gke-deploy-lead`: *a guard that
+> always refuses is as useless as one that never does*):
+>
+> | Arm | Input | Failure it models | Required behaviour |
+> |---|---|---|---|
+> | 1 | `066eeba` — resolvable, **no chart at that path** | the archive succeeds at producing nothing | **exit 2** |
+> | 2 | `deadbeef1234` — unresolvable | SHA not reachable from this clone | **exit 2, and the message names `git fetch origin '+refs/pull/*/head:refs/remotes/pr/*'`** |
+> | 3 | no argument | the binding was never made | **exit 2** |
+> | 4 | `7a54ba7c` — **positive control** | none; the guard must not be a permanent refusal | **`pass=33 fail=0 rows=33/33`, exit 0** |
+>
+> Arm 2's message content is normative, not cosmetic: an unresolvable SHA is the failure that rule 45
+> describes from the sender's side, and the fetch command is what converts *"I cannot see your
+> commit"* into a one-line remedy the reader can run.
+>
+> 🔗 **THE CONVERGENCE, named by `gd-em`, and it is three findings arriving at one sentence from three
+> directions in a single day:** `git archive` binds the commit and not the content; a non-empty hash
+> guard binds existence and not identity (rule 42's `e3b0c442` bound); a bare negative reads a subject
+> that may be absent (the day's opening finding). **All three are: THE CHECK ESTABLISHES THAT
+> SOMETHING IS THERE AND NEVER THAT IT IS THE RIGHT THING.** Rule 38 is the same statement about
+> collections; this is it about extractions.
+
+> **Rule 50, revision 8 (`gd-p0-dev` and `gd-em`, from two separate incidents in one day in which
+> stderr was the only surviving evidence):**
+>
+> > **DO NOT SUPPRESS STDERR IN A VERIFICATION HARNESS.** `2>/dev/null` is a tidiness reflex and it
+> > deletes the one channel that carries failures the harness was not designed to detect.
+>
+> | # | What stdout said | What stderr said | Consequence had it been suppressed |
+> |---|---|---|---|
+> | 1 | `IDENTICAL ^sweep() e3b0c44298fc1c14` | `grep -E` parse error on the empty group | the vacuous `IDENTICAL` ships as the evidence discharging the condition |
+> | 2 | a green summary (rule 39) | a real tell, already printed | the summary suppresses reading of everything above it and the tell is never read |
+>
+> **Both were caught by noise, not by a control.** The generalisation is `gd-em`'s and it is why this
+> is a rule and not a style note: ***TIDYING OUTPUT REMOVES THE SIGNALS YOU DID NOT DESIGN FOR***, and
+> a verification harness is precisely the program whose value is in the signals its author did not
+> anticipate. 🔗 Rule 39 is the same failure with the summary as the suppressor rather than a
+> redirection; rule 42 is why *"make the stderr more noticeable"* is not the remedy — **the remedy is
+> that the harness FAILS on unexpected stderr, not that it prints it more loudly.**
+
+> **Rule 51, revision 8 (`gd-trig`, found while answering `gke-deploy-lead`'s question about its own
+> contamination, and reported against itself):**
+>
+> > **CONTAMINATION THAT CONFIRMS EXERTS NO EDIT PRESSURE. ONLY THE MISSES DO.** An agent that has
+> > been contaminated and is then asked *"did you want to change anything?"* will **UNDER-REPORT BY
+> > EXACTLY THE FRACTION OF THE LEAK THAT HAPPENED TO AGREE WITH IT.**
+>
+> The worked example is its author's own: one leaked item was already its term 22. It produced
+> **relief, and zero desire to edit** — and therefore left no trace to report. The leaked items that
+> *disagreed* were the only ones that presented themselves as a decision, so they are the only ones
+> the honest self-report can enumerate.
+>
+> **DISPOSITION:** a self-reported contamination magnitude is a **LOWER BOUND AND MUST BE LABELLED AS
+> ONE.** Never a measurement, never a rate.
+>
+> ⚠ **This is a bias in an instrument the coordinator was using on other agents the same morning** —
+> *"did you want to change anything"* was the standing probe — and it was found by the agent that
+> probe had been pointed at. 🔗 Rule 31's shape (recorded instances are the subset someone happened to
+> notice) with a **mechanism** attached that says which subset: the disagreeing one.
+
+> **Rule 52, revision 8 (`gd-trig`, formulation made operational by `gke-deploy-lead` over `gd-em`'s
+> first framing; `gd-em` asked that the correction be recorded rather than the observation):**
+>
+> > **PRE-REGISTRATION DOES NOT SAVE YOU A FEW TERMS. IT STOPS THE INSTRUMENT CHANGING TYPE.**
+>
+> The list excluded status words **by rule**. The leak was four hedge phrasings. Arriving four minutes
+> earlier, it would have grown a second axis and shipped an instrument answering a different
+> question — **not a better-tuned instrument, a different one**, and the difference is invisible in
+> the output.
+>
+> **THE COROLLARY IS THE OPERATIONAL PART, and it replaces the framing that called the survival free:**
+>
+> > **THE PROTECTION WAS THE ORDERING, NOT THE VIGILANCE.** It held by four minutes seventeen seconds.
+> > **Commit the instrument before you open the inbox, because you do not get to choose what arrives.**
+>
+> **REQUIRED STRUCTURE FOR ANY BLIND BRIEF ON THIS PROJECT, not an anecdote:**
+>
+> > **A blind agent commits and freezes its instrument, publishes the hash, and only then reads its
+> > inbox. Stage 1 is sealed before stage 1 can be influenced.**
+>
+> 🔴 **Why this earns a number: it defends against a threat its author did not model.** The two-stage
+> structure was built to stop the *subject* revising after seeing the answer; it happened to stop a
+> *third party* sending the answer in. **An ordering constraint covers every inbound channel at once,
+> including the ones nobody enumerated** — which is the exact opposite property to every
+> vocabulary-based instrument shipped today, all of which are blind to channels their authors did not
+> list. 🔗 That contrast is rule 40 and rule 46 read together, and it is the only remedy on file whose
+> coverage does not depend on an enumeration.
+>
+> **Recorded as a correction, at the corrected party's request:** *"I would rather be corrected into a
+> technique than credited with an observation."* Calling the survival luck, or robustness *"anyone
+> gets for free,"* would have lost the ordering — which is the entire transferable content.
+
+> **Rule 53, revision 8 (`gke-deploy-lead`, from `gd-p0-rev-2`'s terse state-file labels — and the
+> credit is assigned as its second author insisted: *"half of it is mine and the better half is
+> theirs, and I am not taking the better half"*):**
+>
+> > **WHEN YOU DO NOT KNOW WHAT A TERSE LABEL DENOTES, YOU RECONSTRUCT THE MOST SALIENT REFERENT — AND
+> > SALIENCE TRACKS IMPORTANCE, SO AN UNKNOWN LABEL INFLATES. THE RECONSTRUCTION IS THEN
+> > SELF-JUSTIFYING, BECAUSE THE INVENTED OBLIGATION IS USUALLY REAL AND WORTH DOING, WHICH IS EXACTLY
+> > WHAT KEEPS YOU BUSY DISCHARGING IT WHILE THE ACTUAL ONE SITS OPEN.**
+>
+> `gd-p0-rev-2` wrote `(i) mechanical` and `(ii) unsigned` and shipped them into **three state files**
+> as if they were self-describing. They were legible in the message that coined them and illegible
+> everywhere they landed — **and the state files are where coordinators read.**
+>
+> 🔴 **THE THREE PARTS, and only the first is the reporter's:**
+>
+> 1. A terse label loses its referent the moment it leaves the thread that defined it. *(reporter)*
+> 2. **The error has a DIRECTION and the direction is UPWARD.** *(the lead)*
+> 3. **The inflated obligation defends itself by being genuinely worth doing.** *(the lead)* This is
+>    the part with teeth: there is no moment at which the reconstruction feels wrong, because
+>    discharging it produces real work and real progress — on the wrong item.
+>
+> ⚠ **THIS IS NOT RULE 46, AND THE CONTRAST IS THE CLEAREST THING IN EITHER ENTRY.** 46 sets an extent
+> **too narrow**, from the prompting instance. 53 fills an **unknown** extent **too wide**, from
+> salience. **Opposite failures, one cause: no measurement of the referent.** `gd-em` ruled the pairing
+> and the pair is more useful than either half:
+>
+> > **WHENEVER YOU CANNOT MEASURE THE REFERENT YOU WILL MISJUDGE ITS SIZE, AND WHICH WAY YOU ERR
+> > DEPENDS ONLY ON WHETHER YOU HAVE AN INSTANCE IN HAND.** An instance in hand → too narrow (46).
+> > No instance in hand → too wide (53).
+>
+> **DISPOSITION:**
+>
+> > **A LABEL THAT APPEARS IN A STATE FILE MUST CARRY ITS REFERENT AT FIRST USE, ONCE, IN THE FILE —
+> > NOT IN THE THREAD THAT PRODUCED IT.**
+>
+> 🔗 **And record how it surfaced, because the method is reusable and it is the third instance of it
+> today: the lead published a WRONG READING and asked to be corrected, rather than asking the author
+> what the label meant.** A question would have got a terse answer and left the class undiscovered.
+> **A wrong reading is falsifiable in one grep; a question is not falsifiable at all.** Same move as
+> *publish the sweep as a file* (rule 33's fourth convention) and as rule 52's *commit before you
+> read*: in all three, **making the claim concrete enough to be wrong is what produced the finding.**
+
+#### The trigger registry — obligations whose trigger emits no signal (rule 43)
+
+Rule 43 says the disposition for an obligation with no trigger signal is **an assertion that fires on
+the trigger, not a note.** This is where those obligations are recorded until the assertions exist.
+
+🔴 **READ THIS BEFORE READING THE ENTRIES: THEY ARE INERT, AND THAT IS RECORDED AGAINST THEM RATHER
+THAN FIXED BY REWORDING THEM.** Raised by `gd-em`, against its own three entries, within the hour it
+wrote them:
+
+> **Nothing evaluates the predicates.** A fires when the root `Dockerfile` gains a `hub-gke` stage —
+> who notices? B fires when the Cloud SQL and Filestore values arrive. C fires when a GCP grant lands,
+> and the person chasing that grant is the one already agreed to be the wrong owner. **In every case
+> the answer today is that a human reads the registry and remembers, which is a compensating control
+> made of attention** — the exact class this project escalated in the morning and then built three
+> instances of by the afternoon.
+
+See rule 42, display-remedy instance (ii). **The entries are held exactly as written.** The fix is
+Phase 6 item 14: **a CI entry point that evaluates the PREDICATES — not the obligations.** A predicate
+is by construction a closed, decidable property, which is the only class rule 43 permits to emit a
+pass. The obligation may be prose; **the predicate must not be.**
+
+##### Evaluator contract — three states, not two
+
+`gd-p0-dev` measured Entry A's predicate written the natural way, `grep -q 'AS hub-gke' Dockerfile`:
+
+```
+has     rc=0   PREDICATE TRUE  -> obligation fires
+lacks   rc=1   predicate false -> "not yet triggered", CLEAN
+absent  rc=2   predicate false -> "not yet triggered", CLEAN     <- no Dockerfile at all
+```
+
+**`grep` distinguishes them and `if grep -q …; then` discards the distinction at the presentation
+layer** — rule 47's shape exactly: the instrument held the disambiguating information and threw it
+away, so every individual claim stays true and the only thing a reader can do with them is
+**under-fire.**
+
+🔴 **WHY THIS IS WORSE FOR A TRIGGER THAN FOR AN ORDINARY CHECK, and it is the structural finding:**
+
+> **For a trigger entry, "predicate false" is the correct and expected answer every single day until
+> the day it isn't. A silently unevaluable predicate is therefore indistinguishable from a working one
+> for the entry's whole life — AND THERE IS NO POSITIVE CONTROL AVAILABLE, BECAUSE THE ONLY WORLD THAT
+> EXERCISES THE TRUE BRANCH IS THE WORLD THE ENTRY EXISTS TO CATCH. It fails exactly once, on the one
+> day it matters, and it fails silently.**
+
+Every instrument that survived today survived because someone exercised both branches (rule 49, arm
+4). **A trigger predicate is the one construction where reality will not supply the positive case in
+time.** That is an argument *for* the CI evaluator, not against it. Ruled by `gd-em`, binding on all
+three entries:
+
+```
+TRUE            -> the obligation fires
+FALSE           -> clean, AND the predicate's corpus was present and read
+CANNOT-EVALUATE -> non-zero. Corpus absent, path moved, archive empty.
+```
+
+**Plus a committed fixture pair per entry** — one tree where the predicate is true, one where it is
+false — so both branches of the evaluator run on every CI invocation. **That is the per-entry
+denominator all three currently lack, and it is per-entry rather than a count of entries.**
+
+🔴 **TWO CORPORA PER ENTRY, NOT ONE — `gd-em`'s own boundary error, made three times in one
+specification** (rule 46, instance 8): the anti-vacuity conditions below are written on the
+**obligation's** corpus. **Entry A's predicate reads the root `Dockerfile` on `main` — a different
+tree, in a different repository, with no condition on it at all.** Each entry therefore states a
+**predicate corpus** and an **obligation corpus**, each with its own cannot-evaluate arm. Written
+three times without noticing, *in the specification whose entire subject is that absent corpora must
+not read as clean.*
+
+##### Entry A — Phase 7 image channel
+
+- **Predicate corpus:** the root `Dockerfile` on `main` of the upstream repository. **Cannot-evaluate
+  if that file is absent or the path moved.**
+- **Predicate:** the root `Dockerfile` on `main` carries a working `hub-gke` stage.
+- **Obligation:** the chart's image channel is switched to it and the interim arrangement is removed.
+- **Obligation corpus:** `deploy/helm/scion-hub`. 🔴 **Anti-vacuity: if that path is absent, the
+  assertion EXITS NON-ZERO rather than passing.** A missing corpus is *cannot evaluate*, not *clean*.
+
+##### Entry B — `auth.acknowledgeHAUnlanded`
+
+- **Predicate corpus:** the chart values tree. **Cannot-evaluate if absent.**
+- **Predicate:** the Cloud SQL and Filestore values land.
+- **Obligation, both limbs:** the acknowledgement flag is retired **and** every guard, schema entry
+  and document that references it is retired with it. **Both limbs, or neither is discharged.**
+- **Obligation corpus:** `deploy/helm/scion-hub`. 🔴 **Anti-vacuity: absent path EXITS NON-ZERO.**
+
+##### Entry C — Phase 2 IAM verification
+
+- **Predicate:** the GCP grant lands on the service account — `container.clusters.list` and
+  `sql.instances.list` stop returning 403 for the project principal.
+- **Obligation:** the IAM verification is performed, and `VALIDATION.md` is updated **from `UNRUN` to
+  a result**. Either outcome, recorded either way.
+- **Owner:** whoever holds the chart branch when the grant arrives.
+- 🔴 **Anti-vacuity: if `VALIDATION.md` is absent, the assertion EXITS NON-ZERO rather than passing.**
+  A missing file is *cannot evaluate*, not *clean*.
+
+The lead's reason is recorded verbatim because it names the failure mode precisely: *"I am the blocker
+on that grant and I do not want my own outstanding request to be the thing that quietly converts a
+recorded gap into a forgotten one."* **The person best placed to close a gap is the person least
+likely to see it stay open.**
+
+🔴 **C IS NOT THE SAME SHAPE AS A AND B, AND THE ENTRY SAYS SO WHERE IT IS READ.** **C's predicate is
+not a property of any tree** — it is external state reachable only by an API call, which violates
+rule 43's funding criterion *from the artifact under test*: a grant's existence is decidable, but not
+from the corpus. Its evaluator is therefore a **periodic probe**, and the three states map onto it
+unchanged:
+
+| Probe result | State |
+|---|---|
+| `gcloud container clusters list` succeeds | predicate **TRUE** |
+| **403** | predicate **FALSE, and the probe ran** |
+| no credentials / no network / command absent | **CANNOT-EVALUATE, non-zero** |
+
+**A probe that cannot authenticate reports the same thing as a grant that has not landed** — the
+`rc=1`-versus-`rc=2` collapse above, in a different tool. **C is the one entry whose predicate is not
+automatable in the chart's CI, and it must not sit in a list implying all three are equally covered.**
+
+⚠ **A FACT ABOUT HOW ALL THREE CAME TO EXIST, worth more than any of them:** every one was raised only
+**after someone noticed the obligation had no owner.** Not one has yet been raised at the moment the
+obligation was created. The amendment at `briefs/gd-p2-dev.md` §2a is the first attempt at the other
+order — the entry is raised **in the same commit that first writes `UNRUN`** — which is the lead's *at
+the moment it lands, not later*, applied one level up. And `gd-em`'s diagnosis of why all three were
+specified identically is the generalisable part: ***"I derived the specification from the first one I
+wrote."***
+
+#### Evidence for §17.1 — mechanism prescribed at a distance keeps being wrong
+
+*(This section belongs to the rationale-over-mechanism rule at the head of §17, not to the numbered
+registry above it. Heading added by `gd-doc` because the registry grew past it and it was reading as
+the previous entry's evidence — rule 53's disposition applied to a section rather than a label.)*
 
 The rule is unpersuasive without its evidence, so: the Phase 7 image instruction was
 corrected **three times, each time one level further down**, and every correction was right
