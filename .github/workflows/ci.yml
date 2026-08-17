@@ -82,6 +82,14 @@ jobs:
       - name: Check Compatibility Literals
         run: make compat-literals
 
+      # Guards the root Dockerfile's default build target: `docker build` with no
+      # --target must keep producing the plain runtime image, not the non-root
+      # hub-gke image added for GKE. --self-test proves the check can still fail.
+      - name: Check Dockerfile Stages
+        run: |
+          make dockerfile-stages
+          ./hack/check-dockerfile-stages.sh --self-test
+
       - name: Run Tests
         run: make test-fast
 
