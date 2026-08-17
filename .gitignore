@@ -10,6 +10,7 @@
 /scion
 scion-agent
 extras/scion-chat-app/scion-chat-app
+hack/dockerfile-stages/dockerfile-stages
 
 # secrets
 TEST_GEMINI_KEY

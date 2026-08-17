@@ -18,9 +18,16 @@
 #
 # HOW IT CHECKS: TWO READINGS, DELIBERATELY UNEQUAL
 #
-# A review of an earlier version got six wrong Dockerfiles past it, and every
-# one of them worked by confusing the PARSER rather than by violating a rule.
-# So the most important property no longer depends on the parser:
+# Two reviews of earlier versions got NINE wrong Dockerfiles past this script,
+# and every one of them worked by confusing the PARSER rather than by violating
+# a rule. Two things follow, and the script is built out of both:
+#
+#   The line model is not ours any more. Reading 2 is BuildKit's own parser
+#   (hack/dockerfile-stages), so "our parser disagrees with Docker" is not a
+#   category that exists here. See the decision record above parse().
+#
+#   That is not sufficient, so the most important property still does not
+#   depend on any parser:
 #
 #   Reading 1 (no parser): the file's TAIL is matched as raw text. Find the last
 #   line that is a whole-line `FROM ...` and require that everything after it is
@@ -56,9 +63,11 @@
 #      base. Uniqueness, not resemblance -- see the rule for why matching a
 #      contract does not work here
 #   6. no `USER` in the runtime stage, in a stage it derives from, or in a
-#      stage derived from it, except `hub-gke`; and no `ONBUILD USER` anywhere
-#      in that chain, since its trigger fires in the trailing stage (a `USER`
-#      in an unrelated build stage is normal and is not this script's business)
+#      stage derived from it, except `hub-gke` (a `USER` in an unrelated build
+#      stage is normal and is not this script's business); and NO `ONBUILD` AT
+#      ALL in that chain, whatever the verb, since its trigger fires in the
+#      empty trailing stage and so adds an instruction to the default build
+#      target's image that appears in no stage the script can read
 #   7. `hub-gke` sets USER to a numeric uid 1000          (positive twin of 6;
 #      `runAsNonRoot: true` cannot resolve a username)
 #   8. no `ENV KUBECONFIG` anywhere                       (negative: an explicit
@@ -69,13 +78,28 @@
 #  11. no ENTRYPOINT in that same chain carries arguments, which is the other
 #      half of 10: a shell-form ENTRYPOINT bakes exactly what a CMD would
 #
-# plus three structural preconditions, fatal rather than counted because every
+# plus six structural preconditions, fatal rather than counted because every
 # check above assumes them:
 #
-#  11. stage names are unique. A second `AS runtime` later in the file silently
+#  12. stage names are unique. A second `AS runtime` later in the file silently
 #      repoints the trailing stage at a different image.
-#  12. no `escape` parser directive (it redefines the continuation character).
-#  13. no heredocs (their bodies are data, not instructions).
+#  13. no `escape` parser directive. Reading 2 honours it; reading 1 is raw text
+#      and cannot, and a file that needs it gets one reading instead of two.
+#  14. no heredocs. NOT because the parser cannot read them -- it can. Because
+#      Docker 20.10.24's built-in frontend and docker/dockerfile:1.9 were
+#      measured DISAGREEING WITH EACH OTHER about the same heredoc file.
+#  15. the stage table was actually produced and is non-empty. Reading 2 is now
+#      an external program; with no table, every rule above passes vacuously.
+#  16. no empty continuation line. BuildKit skips the blank line and holds the
+#      continuation open, which is how a blank line deletes the trailing stage.
+#  17. every base in the runtime chain is written literally. `FROM ${B} AS
+#      runtime` truncates the chain walk that 6, 10 and 11 are about, hiding a
+#      real ancestor -- and `--build-arg` means the value is not in the file.
+#      Checked where the chain is first computed, after 4 establishes it.
+#
+# and one more raw-text check that is not a rule about the Dockerfile so much as
+# about this script: the last real line ABOVE the final FROM must not open a
+# continuation, because that line is the only one that can absorb the FROM.
 #
 # WHAT IT CANNOT CHECK, AND MUST NOT BE READ AS SAYING
 #
@@ -94,19 +118,20 @@
 #   - It assumes the current Docker semantics that an untargeted build resolves
 #     to the last stage. If that ever changes, this script is measuring the
 #     wrong thing and will not notice.
-#   - It sees `ONBUILD USER` only in the runtime chain (rule 6). An ONBUILD in
-#     an unrelated stage affects images built FROM that stage, which is not this
+#   - It refuses `ONBUILD` only in the runtime chain (rule 6). An ONBUILD in an
+#     unrelated stage affects images built FROM that stage, which is not this
 #     script's business.
-#   - Its parser models a subset of Dockerfile syntax. Constructs that would be
-#     MISREAD rather than merely missed are refused (12, 13) instead of guessed
-#     at, and the tail allowlist means a misread cannot silently satisfy the
-#     main property -- but the subset is still a subset.
+#   - Reading 2 is BuildKit v0.31.2's parser, which is not necessarily the
+#     frontend that builds the image. Constructs measured to be read DIFFERENTLY
+#     BY DIFFERENT FRONTENDS are refused (13, 14) rather than interpreted, and
+#     reading 1 does not parse at all -- but a frontend that disagrees with
+#     v0.31.2 about something nobody has measured is not covered by either.
 #
-# EVERY GATE LIVES INSIDE parse()'s awk, ON PURPOSE. An earlier version put two
+# A GATE THE SELF-TEST CANNOT REACH IS NOT TESTED. An earlier version put two
 # gates in `grep -E`, where `[ \t]` is the set {space, backslash, t} and not a
-# tab, so both were walkable by pressing Tab -- and the self-test never noticed,
-# because it only ever reached the awk. A gate the self-test cannot reach is not
-# tested. If you add a gate, add it where the fixtures already go.
+# tab, so both were walkable by pressing Tab -- and 19 green self-test cases
+# never noticed, because none of them reached those two lines. Add gates where
+# the fixtures already go, and give each one a fixture that fails without it.
 #
 # Run `hack/check-dockerfile-stages.sh --self-test` to see the script fail on
 # each mutation it is meant to catch, and pass the legitimate variations that
@@ -115,7 +140,9 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SELF="${BASH_SOURCE[0]}"
+# Absolute, because the self-test runs the script from another directory and a
+# relative $0 would not resolve there.
+SELF="$REPO_ROOT/hack/$(basename "${BASH_SOURCE[0]}")"
 GKE_STAGE="hub-gke"
 
 FAILURES=0
@@ -128,90 +155,77 @@ ok() { echo "ok: $*"; }
 die() { echo; echo "$FAILURES check(s) failed."; exit 1; }
 
 # ---------------------------------------------------------------------------
-# Reading 2: parse the Dockerfile into a stage table.
+# Reading 2: the stage table -- produced by BUILDKIT'S OWN PARSER.
+#
+# THE DECISION, AND WHY IT WAS MADE (2026-08-17)
+#
+# This used to be ~60 lines of awk that modelled BuildKit's line model:
+# continuations, comments, the escape directive, heredocs. Over two review
+# rounds, two different authors found SEVEN bugs in it -- a comment ending in a
+# backslash swallowing the next line, a tab-separated parser directive, four
+# flavours of heredoc, an empty continuation line, a continuation join that
+# inserted a space Docker does not insert, and a doubled trailing backslash.
+#
+# Every one of them shipped a GREEN guard. The rules were right and were being
+# handed a file that was not the one Docker builds; a rule cannot defend against
+# being given the wrong input. The seventh was found by attacking a part nobody
+# had attacked yet, which is the signature of a class that does not converge.
+#
+# So the line model is no longer ours. `hack/dockerfile-stages` is a ~120-line
+# Go program, in its own module, that calls
+# `github.com/moby/buildkit/frontend/dockerfile/parser` -- the code Docker
+# itself uses -- and prints the AST as the flat table below. It contains no
+# rules. The eleven rules stayed exactly where they were, in this file, with
+# their messages and their self-test cases unchanged.
+#
+# Pinned at buildkit v0.31.2 (see hack/dockerfile-stages/go.mod, which is the
+# citation: "modelled on parser.go" with no revision is a claim nobody can
+# re-check). It is a SEPARATE module on purpose: adding buildkit to the root
+# go.mod bumps eleven unrelated dependencies -- otel, protobuf, grpc-gateway,
+# klog -- and the go directive, and the result does not build without further
+# remediation. The repo already carries ten nested modules under extras/.
+#
+# v0.31.2 rather than the current v0.32.2, and the reason is CI, not the parser:
+# v0.32's go directive is 1.26.3, the root go.mod says 1.26.1, and that is the
+# version `actions/setup-go` installs. Building it would make this guard depend
+# on an automatic toolchain download on every run. v0.31.2 needs 1.25.9 and
+# builds under `GOTOOLCHAIN=local` at 1.26.1 -- verified that way, not assumed.
+# The two versions were also run against each other over the whole corpus and
+# every Dockerfile in the tree: identical tables everywhere, identical verdicts.
+#
+# WHAT THIS DOES NOT FIX, WHICH IS WHY READING 1 STAYS
+#
+# BuildKit's parser tells you what buildkit v0.31.2 thinks the file means. It
+# does not tell you what the frontend that actually builds the image thinks:
+# Docker 20.10.24's built-in frontend and `docker/dockerfile:1.9` were MEASURED
+# disagreeing with each other about the same file (see rule 14). The dependency
+# can also be wrong, unpinned, or drift. Reading 1 does not parse, so it
+# survives all of that, and it is the reason rules 13 and 14 are still refusals
+# rather than interpretations.
 #
 # Emits, in file order:
-#   DIRECTIVE <name> <value>      parser directive at the top of the file
-#   HEREDOC <line> <word>         a heredoc redirection, as Docker detects one
+#   DIRECTIVE escape <token>      when the escape token is not a backslash
+#   WARN <text>                   a BuildKit parser warning
+#   HEREDOC <line> <<word>        a heredoc redirection, as BuildKit detects one
 #   STAGE <n> <base> <name-or--> <line>
-#   INSTR <n> <VERB> <rest of line>
+#   INSTR <n> <VERB> <rest>
 #
-# Stage names are case-insensitive to Docker, so names and the base refs that
-# point at them are lowercased. Image refs are lowercase anyway.
+# Stage names and base refs are lowercased: Docker matches them
+# case-insensitively. Instructions before the first FROM are reported as stage 0,
+# which no rule reads.
+#
+# DOCKERFILE_STAGES_CMD overrides the emitter. It exists for the self-test cases
+# that assert this script FAILS CLOSED when the emitter produces nothing, which
+# is not otherwise constructible. Nothing else should set it.
 # ---------------------------------------------------------------------------
 parse() {
-  awk '
-    function emit(logical, lno,   l, n, tok, verb, base, name, rest, i) {
-      if (logical ~ /^[ \t]*$/) return
-      l = logical
-      sub(/^[ \t]+/, "", l)
-      n = split(l, tok, /[ \t]+/)
-      verb = toupper(tok[1])
-
-      # Heredoc detection, done the way Docker does it: only on the
-      # instructions that support heredocs, by word-splitting the line and
-      # matching each word against BuildKits form  ^([0-9]*)<<(-?)...
-      # Doing it this way (rather than grepping the raw text) is what keeps a
-      # comment that MENTIONS <<EOF, or a LABEL containing a left-shift, from
-      # being refused -- neither is a heredoc to Docker either.
-      if (verb == "RUN" || verb == "COPY" || verb == "ADD" || verb == "ONBUILD") {
-        for (i = 2; i <= n; i++) {
-          if (tok[i] ~ /^[0-9]*<<-?[^<]/) printf "HEREDOC %d %s\n", lno, tok[i]
-        }
-      }
-
-      if (verb == "FROM") {
-        stage++
-        i = 2
-        while (i <= n && tok[i] ~ /^--/) i++      # FROM --platform=... AS x
-        base = tolower(tok[i])
-        name = "-"
-        if (i + 2 <= n && toupper(tok[i+1]) == "AS") name = tolower(tok[i+2])
-        printf "STAGE %d %s %s %d\n", stage, base, name, lno
-      } else if (verb == "ARG" && stage == 0) {
-        return                                    # pre-FROM ARG: not in a stage
-      } else {
-        rest = l
-        sub(/^[^ \t]+[ \t]*/, "", rest)
-        printf "INSTR %d %s %s\n", stage, verb, rest
-      }
-    }
-
-    BEGIN { in_directives = 1 }
-    {
-      line = $0
-      sub(/\r$/, "", line)
-
-      # Parser directives are only honoured in the run of directive-comments at
-      # the very top of the file; the first line that is not one ends the block.
-      # Modelling that is what stops a comment merely DISCUSSING `escape=` from
-      # being treated as one.
-      if (in_directives) {
-        if (line ~ /^#[ \t]*[a-zA-Z][a-zA-Z0-9]*[ \t]*=/) {
-          d = line
-          sub(/^#[ \t]*/, "", d)
-          split(d, dd, /[ \t]*=[ \t]*/)
-          printf "DIRECTIVE %s %s\n", tolower(dd[1]), dd[2]
-          next
-        }
-        in_directives = 0
-      }
-
-      # A comment is dropped BEFORE continuation handling, and leaves any open
-      # continuation untouched -- which is what Docker does (BuildKit runs
-      # trimComments before trimContinuationCharacter). Doing it the other way
-      # round lets `# note \` swallow the line after it.
-      if (line ~ /^[ \t]*#/) next
-
-      if (cont != "") { line = cont " " line; cont = "" }
-      if (line ~ /\\[ \t]*$/) { sub(/\\[ \t]*$/, "", line); cont = line; next }
-      emit(line, FNR)
-    }
-    # A continuation left open at EOF is still an instruction to Docker.
-    # Dropping it would let `USER 1000 \` as the final line of the file -- one
-    # stray backslash, no exotic syntax -- pass as an empty last stage.
-    END { if (cont != "") emit(cont, FNR) }
-  ' "$1"
+  local abs
+  abs="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+  if [ -n "${DOCKERFILE_STAGES_CMD:-}" ]; then
+    $DOCKERFILE_STAGES_CMD "$abs"
+    return $?
+  fi
+  go -C "$REPO_ROOT/hack/dockerfile-stages" run . "$abs"
 }
 
 # ---------------------------------------------------------------------------
@@ -221,6 +235,16 @@ parse() {
 #   LASTFROM <line>            the last whole-line FROM in the file
 #   TAILJUNK <line> <text>     a line after it that is neither blank nor comment
 #   TAILCONT <line> <text>     a line from it onwards that opens a continuation
+#   PRECONT <line> <text>      the first real line ABOVE it opens a continuation
+#
+# PRECONT is not decoration. The window used to start at LASTFROM, and an empty
+# continuation line two lines ABOVE the final FROM defeated both readings at
+# once: BuildKit skips the blank, keeps the continuation open, and swallows the
+# final FROM into the instruction above it, so there is no trailing stage and
+# hub-gke is what an untargeted build ships. Reading 1 was present and did not
+# save reading 2 because it was not looking up. Walking up past blanks and
+# comments to the first real line is the whole fix: that line is the only one
+# that can absorb the final FROM, under any continuation model.
 # ---------------------------------------------------------------------------
 raw_tail() {
   awk '
@@ -235,6 +259,12 @@ raw_tail() {
       }
       for (i = (lastfrom > 0 ? lastfrom : 1); i <= NR; i++) {
         if (lines[i] ~ /\\[ \t]*$/) printf "TAILCONT %d %s\n", i, lines[i]
+      }
+      for (i = lastfrom - 1; i >= 1; i--) {
+        if (lines[i] ~ /^[ \t]*$/) continue
+        if (lines[i] ~ /\\[ \t]*$/) { printf "PRECONT %d %s\n", i, lines[i]; break }
+        if (lines[i] ~ /^[ \t]*#/) continue
+        break
       }
     }
   ' "$1"
@@ -253,6 +283,29 @@ raw_tail() {
 # Cases are only ever added here. A case that a later, broader check catches
 # first is re-pointed at the new failure message, not deleted: if the broader
 # check is ever weakened, these are the only things that notice.
+#
+# RE-POINTED WHEN THE AWK LINE MODEL WAS REPLACED BY BUILDKIT'S PARSER, with the
+# mutation that makes each fail, because a case whose subject no longer exists
+# is a deleted test wearing the name of a live one. All five were checked by
+# actually making the mutation and watching the case go red:
+#
+#   comment-backslash before a USER  was: the awk dropped comments before
+#     joining continuations. now: reading 1's TAILJUNK. Mutation: neuter
+#     TAILJUNK -> red. Sole claimant.
+#   comment-backslash hiding an ENV  was: the same, away from the tail.
+#     now: rule 8, and it still fails if comments ever start swallowing the
+#     line below. Mutation: neuter rule 8 -> red.
+#   escape directive (2 cases)       was: the awk's directive scanner, incl.
+#     the tab form. now: rule 13, fed by BuildKit's EscapeToken. Mutation:
+#     neuter rule 13 -> both red.
+#   heredocs (4 cases)               was: the awk's heredoc regex. now: rule 14,
+#     fed by BuildKit's Heredocs. Mutation: neuter rule 14 -> the two plain
+#     forms go red; the two comment-shaped ones stay red for a SECOND reason
+#     (the readings disagree, and hub-gke ends up last), which is recorded here
+#     rather than hidden.
+#   heredoc false-positive twins (3) was: the awk regex must not over-match.
+#     now: the emitter must not report a heredoc that BuildKit does not see.
+#     Mutation: re-introduce a raw-text `grep '<<'` gate -> all three red.
 #
 # TWO RULES FOR ADDING A CASE, both learned the hard way:
 #
@@ -372,12 +425,44 @@ USER 1000:1000|' | expect 1 \
     "USER added to the runtime stage is rejected" "USER appears in the runtime stage"
   echo "${good/RUN echo build/USER node}" | expect 0 \
     "USER in a build stage is allowed (running npm as node is normal)"
-  # ONBUILD USER: not a USER in the runtime stage, a USER in everything built
-  # FROM it -- which includes the trailing stage. No USER appears at the top
-  # level of any stage, so rule 6's plain-USER half cannot claim this one.
-  echo "$good" | sed 's|^EXPOSE 8080$|EXPOSE 8080\
-ONBUILD USER 1000:1000|' | expect 1 \
-    "ONBUILD USER in the runtime stage is rejected" "ONBUILD USER appears in the runtime chain"
+  # ONBUILD: not an instruction in the runtime stage, an instruction in
+  # everything built FROM it -- which includes the trailing stage. Nothing
+  # appears at the top level of any stage, so the rule each of these defeats
+  # cannot claim the fixture; only the ONBUILD rule can. One case per verb,
+  # because this was found as a class after `ONBUILD USER` was filed as a
+  # singleton and three more turned up the moment anyone looked.
+  for ob in "USER 1000:1000" \
+            "ENV KUBECONFIG=/tmp/kc" \
+            "CMD [\"server\", \"start\", \"--token\", \"hunter2\"]" \
+            "ENTRYPOINT [\"/bin/sh\", \"-c\", \"scion server start --token hunter2\"]"; do
+    echo "$good" | sed "s|^EXPOSE 8080\$|EXPOSE 8080\\
+ONBUILD $ob|" | expect 1 \
+      "ONBUILD ${ob%% *} in the runtime stage is rejected" \
+      "stage-2(runtime):ONBUILD ${ob%% *}"
+  done
+  # The twin. An ONBUILD in a stage the runtime chain has nothing to do with
+  # affects images built FROM that stage, which is not this script's business,
+  # and refusing it would be the cry-wolf failure.
+  echo "${good/RUN echo build/ONBUILD COPY . \/src}" | expect 0 \
+    "ONBUILD in an unrelated build stage is allowed"
+  # ---- the chain itself (rule 17) ------------------------------------------
+  # The two above read a CHAIN, and a build-arg base truncates it. The hidden
+  # ancestor here really is built by Docker and really does export its USER to
+  # the published image; before rule 17 both of these scored a clean pass with
+  # rules 6/10/11 all green, which is the vacuity the needle is guarding.
+  printf 'ARG B=shady\nFROM alpine AS shady\nUSER 1000:1000\n\n%s\n' \
+    "${good/FROM debian:trixie-slim AS runtime/FROM \$\{B\} AS runtime}" | expect 1 \
+    "a USER hidden in a build-arg-named ancestor of runtime is rejected" \
+    "names its base with a build-arg expansion"
+  printf 'ARG B=shady\nFROM alpine AS shady\nONBUILD USER 1000:1000\n\n%s\n' \
+    "${good/FROM debian:trixie-slim AS runtime/FROM \$\{B\} AS runtime}" | expect 1 \
+    "an ONBUILD hidden in a build-arg-named ancestor of runtime is rejected" \
+    "names its base with a build-arg expansion"
+  # The twin, and it is the whole reason rule 17 is scoped upward rather than
+  # applied to every FROM: `FROM ${NODE} AS frontend` is how this repo's real
+  # Dockerfile would pin a base, and no chain member derives from it.
+  printf 'ARG NODE=node:22-alpine\nFROM ${NODE} AS frontend\nRUN npm run build\n\n%s\n' "$good" | expect 0 \
+    "a build-arg base on a stage outside the runtime chain is allowed"
   echo "${good/USER 1000:1000/USER scion}" | expect 1 \
     "a non-numeric USER in hub-gke is rejected" "must be the numeric uid 1000"
   echo "${good/USER 1000:1000/RUN true}" | expect 1 \
@@ -491,6 +576,92 @@ EOT}" | expect 1 "a TAB before a heredoc marker is refused too" "heredoc"
 EXPOSE 8080}" | expect 0 \
     "a LABEL containing << is not a heredoc (LABEL takes no heredoc)"
 
+  # ---- the C-class: the line model is BuildKit's now -----------------------
+  # These four are the cases that BROKE the awk. They are kept as fixtures
+  # rather than deleted with it, because the file that defeated the guard is
+  # still a file someone can write, and because the next person to touch the
+  # emitter needs to fail if they get it wrong. All four were settled on Cloud
+  # Build by gd-p7-rev-2 on both frontends, not read off parser.go.
+
+  # C1. An empty continuation line, two lines ABOVE the final FROM. BuildKit
+  # skips the blank and HOLDS THE CONTINUATION OPEN, so the final FROM is
+  # absorbed into the RUN above it and hub-gke becomes the last stage: the
+  # untargeted build ships uid 1000. One backslash and one empty line.
+  printf '%s\nRUN true \\\n\nFROM runtime\n' "${good%$'\n\nFROM runtime'}" | expect 1 \
+    "an empty continuation line above the final FROM is refused" "empty continuation line"
+  # ...the same shape without the blank line. Different mechanism: nothing is
+  # deprecated here, the continuation simply eats the FROM. This is reading 1's
+  # PRECONT window, which is why the needle is PRECONT's message -- rule 16
+  # cannot claim this one and the readings-disagree check must not be what the
+  # case rests on.
+  printf '%s\nRUN true \\\nFROM runtime\n' "${good%$'\n\nFROM runtime'}" | expect 1 \
+    "a continuation on the line above the final FROM is refused" "absorb the final FROM"
+
+  # C2. Continuations are joined with NO separator, so an identifier can be
+  # split across one. Three cases because three different rules are defeated by
+  # the same trick, and each must be caught by its own rule.
+  echo "$good" | sed 's|^EXPOSE 8080$|ENV KUBECONF\\\
+IG=/home/scion/.kube/config\
+EXPOSE 8080|' | expect 1 \
+    "an ENV KUBECONFIG split across a continuation is still an ENV KUBECONFIG" \
+    "ENV KUBECONFIG appears"
+  echo "$good" | sed 's|^EXPOSE 8080$|CM\\\
+D ["server", "start", "--token", "hunter2"]\
+EXPOSE 8080|' | expect 1 \
+    "a CMD whose verb is split across a continuation is still a CMD" \
+    "stage-2(runtime)"
+  echo "$good" | sed 's|^EXPOSE 8080$|USE\\\
+R 0\
+EXPOSE 8080|' | expect 1 \
+    "a USER whose verb is split across a continuation is still a USER" \
+    "stage-2(runtime)"
+
+  # C3. A DOUBLED trailing backslash does not continue the line, so the USER
+  # below is a real instruction in the runtime stage rather than part of the RUN.
+  echo "$good" | sed 's|^EXPOSE 8080$|RUN echo a\\\\\
+USER 0\
+EXPOSE 8080|' | expect 1 \
+    "a doubled trailing backslash does not swallow the line below it" \
+    "stage-2(runtime)"
+
+  # ...and the positive twin for the whole class. An ordinary continuation must
+  # still join, or the guard has traded one misreading for another.
+  echo "$good" | sed 's|^EXPOSE 8080$|RUN echo one \\\
+ \&\& echo two\
+EXPOSE 8080|' | expect 0 \
+    "an ordinary continuation still joins into one instruction"
+
+  # ---- FAIL CLOSED: no table is a failure, not an empty file ---------------
+  # Reading 2 now needs a Go toolchain, a nested module and a module download.
+  # If any of them is missing, `parse` prints nothing -- and eleven rules over
+  # an empty table is seventeen oks and exit 0. That is not a hypothetical
+  # worth a comment; it is the same shape as every other vacuous-pass bug found
+  # on this project, so it is constructed and asserted. DOCKERFILE_STAGES_CMD
+  # exists for these two cases and nothing else.
+  export DOCKERFILE_STAGES_CMD=true
+  echo "$good" | expect 1 \
+    "an emitter that prints nothing fails the run rather than passing it" \
+    "stage table for"
+  export DOCKERFILE_STAGES_CMD=false
+  echo "$good" | expect 1 \
+    "an emitter that exits non-zero fails the run rather than passing it" \
+    "failed to read"
+  unset DOCKERFILE_STAGES_CMD
+
+  # ---- a RELATIVE path argument --------------------------------------------
+  # Nothing else in this suite can catch this: `expect` and the review corpus
+  # both pass absolute paths, so a shim that resolved paths against the module
+  # directory would be green here and broken for every human who typed
+  # `hack/check-dockerfile-stages.sh Dockerfile`. A false REJECT reachable only
+  # outside the test harness is still a false REJECT.
+  printf '%s\n' "$good" > "$tmp/Dockerfile.rel"
+  if ( cd "$tmp" && "$SELF" Dockerfile.rel >/dev/null 2>&1 ); then
+    echo "self-test ok: a relative path argument is resolved from the caller's cwd (exit 0)"
+  else
+    echo "self-test FAILED: a relative path argument is resolved from the caller's cwd" >&2
+    errors=$((errors + 1))
+  fi
+
   # ---- legal variations of the tail: the allowlist must not cry wolf -------
   printf '%s\n' "$good" | expect 0 "a trailing newline after the final FROM is fine"
   printf '%s' "$good" | expect 0 "no trailing newline at all is fine"
@@ -539,20 +710,46 @@ if [ ! -f "$DOCKERFILE" ]; then
   exit 1
 fi
 
-TABLE="$(parse "$DOCKERFILE")"
+# --- 15. the table was actually produced (fatal: FAIL CLOSED) ---------------
+# Reading 2 now depends on a Go toolchain, a nested module and a module
+# download. If any of those is missing, `parse` prints nothing -- and eleven
+# rules over an empty table is seventeen `ok`s and exit 0. That failure shape
+# (the pass condition being absence of failure rather than presence of N
+# successes) is exactly what this whole script exists to prevent elsewhere, so
+# it is asserted here rather than assumed away in a comment.
+PARSE_ERR="$(mktemp)"
+TABLE="$(parse "$DOCKERFILE" 2>"$PARSE_ERR")"
+PARSE_RC=$?
+PARSE_MSG="$(cat "$PARSE_ERR")"
+rm -f "$PARSE_ERR"
+
+if [ "$PARSE_RC" -ne 0 ]; then
+  if ! command -v go >/dev/null 2>&1; then
+    fail "cannot read $DOCKERFILE: this script gets its stage table from hack/dockerfile-stages, which needs a Go toolchain, and 'go' is not on PATH. It is not skippable: with no table there are no instructions to check and every rule below would pass vacuously. CI runs this after actions/setup-go; locally, install Go or run 'make dockerfile-stages' from a checkout."
+  else
+    fail "hack/dockerfile-stages failed to read $DOCKERFILE (exit $PARSE_RC): ${PARSE_MSG:-no error output}. A file BuildKit's own parser will not read is not a file this guard can have an opinion about."
+  fi
+  die
+fi
+if ! echo "$TABLE" | grep -q '^STAGE '; then
+  fail "the stage table for $DOCKERFILE is empty -- no STAGE rows. Either the file declares no stages, or the emitter produced nothing. Every rule below reads that table, so continuing would report success for a file nobody looked at."
+  die
+fi
+ok "stage table built by buildkit's own parser ($(echo "$TABLE" | grep -c '^STAGE ') stages)"
+
 TAIL="$(raw_tail "$DOCKERFILE")"
 
-# --- 12. no escape directive (fatal: it changes what every line means) ------
+# --- 13. no escape directive (fatal: it changes what every line means) ------
 ESCAPE="$(echo "$TABLE" | awk '$1=="DIRECTIVE" && $2=="escape" {print $3}')"
 if [ -n "$ESCAPE" ]; then
-  fail "$DOCKERFILE sets the parser directive 'escape=$ESCAPE', which redefines the line-continuation character. This script joins continuations itself and would misread the file rather than fail on it. Remove the directive, or teach parse() to honour it before re-enabling this check."
+  fail "$DOCKERFILE sets the parser directive 'escape=$ESCAPE', which redefines the line-continuation character. Reading 2 honours it, because it is BuildKit's parser -- but READING 1 does not and cannot: it is raw text, it assumes a backslash continues a line, and it is the check that survives the parser being wrong. A file that needs the escape directive gets one reading instead of two. Remove the directive."
   die
 fi
 
-# --- 13. no heredocs (fatal: their bodies are data, not instructions) -------
+# --- 14. no heredocs (fatal: their bodies are data, not instructions) -------
 HEREDOCS="$(echo "$TABLE" | awk '$1=="HEREDOC" {printf "line %s: %s\n", $2, $3}')"
 if [ -n "$HEREDOCS" ]; then
-  fail "$DOCKERFILE uses a heredoc ($(echo "$HEREDOCS" | tr '\n' ';' | sed 's/;$//')). This script treats every line as an instruction, so heredoc bodies are misread -- a body line starting with FROM invents a stage, and with a comment-shaped delimiter that invented stage impersonates the empty trailing stage this script exists to require. Rewrite without the heredoc, or teach parse() to skip heredoc bodies before re-enabling this check."
+  fail "$DOCKERFILE uses a heredoc ($(echo "$HEREDOCS" | tr '\n' ';' | sed 's/;$//')). Reading 2 now understands heredocs -- this refusal is NOT because the parser cannot read them. It is because Docker 20.10.24's built-in frontend and docker/dockerfile:1.9 were measured DISAGREEING WITH EACH OTHER about the same heredoc file: under one, a comment-shaped delimiter hides a phantom FROM; under the other, it hides hub-gke at the end of the file. A better parser tells you what buildkit v0.31.2 thinks, not what the frontend building the image thinks, so the construct is refused rather than interpreted. Rewrite without the heredoc."
   die
 fi
 ok "no construct this parser cannot read (no 'escape' directive, no heredoc)"
@@ -563,7 +760,7 @@ if [ "$STAGE_COUNT" -lt 2 ]; then
   die
 fi
 
-# --- 11. stage names are unique (fatal: name resolution underpins the rest) -
+# --- 12. stage names are unique (fatal: name resolution underpins the rest) -
 DUPE_NAMES="$(echo "$TABLE" | awk '$1=="STAGE" && $4!="-" {print $4}' | sort | uniq -d | tr '\n' ' ')"
 if [ -n "$DUPE_NAMES" ]; then
   fail "duplicate stage name(s) in $DOCKERFILE: ${DUPE_NAMES% }. A later 'FROM <name>' resolves to the last stage of that name, so a duplicate silently changes what the default build target is built from. Stage names must be unique."
@@ -604,6 +801,27 @@ if [ -n "$TAILCONT" ]; then
   fail "a line at or after the final FROM in $DOCKERFILE ends in a continuation backslash: $(echo "$TAILCONT" | tr '\n' '|' | sed 's/|$//'). Whether that joins the next line depends on Docker's parser and on whether the line is a comment; the trailing stage must not depend on either."
 else
   ok "no continuation backslash at or after the final FROM line"
+fi
+
+PRECONT="$(echo "$TAIL" | awk '$1=="PRECONT"{$1="";sub(/^ /,"");print}')"
+if [ -n "$PRECONT" ]; then
+  fail "the last real line above the final FROM in $DOCKERFILE opens a continuation: $(echo "$PRECONT" | tr '\n' '|' | sed 's/|$//'). That line, and only that line, can absorb the final FROM into itself -- and if it does, the trailing empty stage does not exist and hub-gke is what an untargeted build ships. Blank lines in between do not save it: BuildKit skips them and holds the continuation open."
+else
+  ok "the last real line above the final FROM does not open a continuation"
+fi
+
+# --- 16. no empty continuation line (fatal: deprecated AND load-bearing) ----
+# BuildKit skips a blank line inside a continuation and KEEPS THE CONTINUATION
+# OPEN, emitting a deprecation warning. That is how one backslash and one empty
+# line, two lines above the final FROM, make the untargeted build ship the
+# uid-1000 image. It is caught three ways now -- here, by reading 1's PRECONT
+# window, and by the two readings disagreeing about where the last stage begins --
+# because it is the single worst input this script has been shown, and because a
+# construct whose meaning is deprecated is a construct whose meaning can change.
+EMPTYCONT="$(echo "$TABLE" | awk '$1=="WARN" && /[Ee]mpty continuation/ {$1="";sub(/^ /,"");print}')"
+if [ -n "$EMPTYCONT" ]; then
+  fail "$DOCKERFILE has an empty continuation line: $(echo "$EMPTYCONT" | tr '\n' ';' | sed 's/;$//'). BuildKit skips the blank line and keeps the continuation open, so the next non-blank line is absorbed into the instruction above -- which is how a blank line silently deletes the trailing stage. Docker deprecates this; remove the blank line or the backslash above it."
+  die
 fi
 
 # --- 1. the hub-gke stage exists --------------------------------------------
@@ -702,43 +920,87 @@ if [ -n "$BASE_IDX" ]; then
   fi
 fi
 
-# --- 6. no USER in the runtime stage or its descendants, except hub-gke -----
-# Scoped to that chain on purpose: `USER node` in a build stage is normal, and
-# rule 6's rationale -- a uid change is a behaviour change for consumers of the
-# published image -- only applies to stages that become one.
+# --- 17. every base in the runtime chain is written literally (fatal) -------
+# Rules 6, 10 and 11 do not read a stage, they read a CHAIN, and the chain is
+# computed by following `FROM <base>` upwards. `FROM ${B} AS runtime` truncates
+# that walk: the ancestor is real, Docker builds it, and this script cannot see
+# it -- so a `USER 1000:1000` or an `ONBUILD` parked in that hidden ancestor is
+# inherited by the runtime stage, by the trailing stage, and by the published
+# image, while rules 6/10/11 report ok on the two stages they can still see.
+# That is a vacuous pass, not a missed rule, which is why it is fatal.
+#
+# Refused rather than resolved, and the reason is not effort. `docker build
+# --build-arg B=other` changes the answer at build time, so which stage the
+# chain contains is NOT A PROPERTY OF THIS FILE. There is no value to compute.
+#
+# Scoped to the upward chain only. `FROM ${NODE} AS frontend` on a stage nobody
+# in the chain derives from is ordinary and stays green (corpus 101), and the
+# trailing stage's own base is already required to be a literal in-file name by
+# rule 4 (corpus 54).
 if [ -n "$BASE_IDX" ]; then
-  # Upward: a USER in a stage the runtime stage derives from is inherited by it.
-  # Downward: a USER in a stage derived from the runtime stage is in the image
-  # only if that stage is a build target -- and the default target is one.
-  # Sideways is not included: `USER node` in an unrelated build stage is normal
-  # and refusing it is how a guard earns its deletion.
   IN_CHAIN=" $BASE_IDX "
+  VARBASE=""
   b="$BASE_IDX"
   while :; do
-    p="$(stage_index "$(stage_base "$b")")"
+    bb="$(stage_base "$b")"
+    case "$bb" in
+      *'$'*) VARBASE="$VARBASE stage-$b($(stage_name "$b")):FROM $bb" ;;
+    esac
+    p="$(stage_index "$bb")"
     [ -n "$p" ] || break
     IN_CHAIN="$IN_CHAIN$p "
     b="$p"
   done
+  # Downward: stages built FROM a chain member. Not var-checked -- a variable
+  # base there cannot silently ADD an ancestor to the published image.
   i=1
   while [ "$i" -le "$STAGE_COUNT" ]; do
     pb="$(stage_index "$(stage_base "$i")")"
     if [ -n "$pb" ] && [ "${IN_CHAIN#* $pb }" != "$IN_CHAIN" ]; then IN_CHAIN="$IN_CHAIN$i "; fi
     i=$((i + 1))
   done
+  if [ -n "$VARBASE" ]; then
+    fail "a stage in the runtime chain names its base with a build-arg expansion:$VARBASE. The chain is what rules 6, 10 and 11 are actually about, and this truncates it: the real ancestor is built by Docker and is invisible here, so a USER or an ONBUILD parked in it reaches the published image while those rules report ok on the stages they can still see. It is refused rather than resolved because 'docker build --build-arg' can change the value at build time -- which stage the chain contains is not a property of this file. Write the base literally. A variable base on a stage outside the runtime chain is fine."
+    die
+  fi
+  ok "every base in the runtime chain is written literally, so the chain can be computed from the file"
+fi
+
+# --- 6. no USER in the runtime stage or its descendants, except hub-gke -----
+# Scoped to that chain on purpose: `USER node` in a build stage is normal, and
+# rule 6's rationale -- a uid change is a behaviour change for consumers of the
+# published image -- only applies to stages that become one.
+#
+# Upward: a USER in a stage the runtime stage derives from is inherited by it.
+# Downward: a USER in a stage derived from the runtime stage is in the image
+# only if that stage is a build target -- and the default target is one.
+# Sideways is not included: `USER node` in an unrelated build stage is normal
+# and refusing it is how a guard earns its deletion.
+if [ -n "$BASE_IDX" ]; then
   USER_OUTSIDE=""
   ONBUILD_USER=""
   for i in $IN_CHAIN; do
     if [ "$i" != "$GKE_IDX" ] && stage_verbs "$i" | grep -qx "USER"; then
       USER_OUTSIDE="$USER_OUTSIDE stage-$i($(stage_name "$i"))"
     fi
-    # ONBUILD USER is not a USER in this stage -- it is a USER in every stage
-    # built FROM it, which here includes the empty trailing stage. It is
-    # therefore a way to set the default target's uid without the word USER ever
-    # appearing at the top level of any stage. It is caught for the whole chain,
-    # hub-gke included, because unlike a plain USER it never belongs here.
-    if stage_lines_of "$i" ONBUILD | grep -Eqi '^USER([[:space:]]|$)'; then
-      ONBUILD_USER="$ONBUILD_USER stage-$i($(stage_name "$i"))"
+    # ONBUILD, ANY VERB, ANYWHERE IN THE RUNTIME CHAIN.
+    #
+    # An ONBUILD instruction is not an instruction in this stage -- it is an
+    # instruction in every stage built FROM it, which here includes the empty
+    # trailing stage that is the default build target. So it is a way to add
+    # something to the published images with that something never appearing as
+    # an instruction in either of them, and every rule below reads instructions.
+    #
+    # This refuses the CONSTRUCT rather than enumerating the dangerous verbs,
+    # which is deliberate. `ONBUILD USER` was filed as a curiosity and turned out
+    # to be a live bypass; probing the rest of the class immediately found three
+    # more (`ONBUILD ENV KUBECONFIG`, `ONBUILD CMD`, `ONBUILD ENTRYPOINT` with
+    # arguments), each defeating a different rule. Enumerating verbs would leave
+    # the next one open, and the whole class is unnecessary here: nothing in a
+    # leaf application image needs an ONBUILD trigger.
+    ONBUILD_VERB="$(stage_lines_of "$i" ONBUILD | awk 'NF {print toupper($1)}' | sort -u | tr '\n' ',' | sed 's/,$//')"
+    if [ -n "$ONBUILD_VERB" ]; then
+      ONBUILD_USER="$ONBUILD_USER stage-$i($(stage_name "$i")):ONBUILD $ONBUILD_VERB"
     fi
   done
   if [ -n "$USER_OUTSIDE" ]; then
@@ -747,9 +1009,9 @@ if [ -n "$BASE_IDX" ]; then
     ok "no USER instruction in the runtime chain outside '$GKE_STAGE'"
   fi
   if [ -n "$ONBUILD_USER" ]; then
-    fail "ONBUILD USER appears in the runtime chain:$ONBUILD_USER. An ONBUILD trigger fires in every stage built FROM that stage -- which includes the empty trailing stage that is the default build target -- so this sets the uid of the default target's image without a USER instruction appearing anywhere in it."
+    fail "an ONBUILD trigger appears in the runtime chain:$ONBUILD_USER. An ONBUILD fires in every stage built FROM that stage -- which includes the empty trailing stage that is the default build target -- so it adds an instruction to the published image that appears nowhere in the stage the image is built from. Every rule in this script reads instructions, so every one of them can be walked past this way: ONBUILD USER sets the default target's uid, ONBUILD ENV bakes a KUBECONFIG, ONBUILD CMD and ONBUILD ENTRYPOINT bake arguments. The construct is refused outright rather than filtered by verb, because a leaf application image has no use for it and enumerating the dangerous verbs leaves the next one open."
   else
-    ok "no ONBUILD USER trigger in the runtime chain"
+    ok "no ONBUILD trigger in the runtime chain"
   fi
 fi
 
