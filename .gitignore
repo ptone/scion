@@ -10,6 +10,11 @@
 /scion
 scion-agent
 extras/scion-chat-app/scion-chat-app
+hack/dockerfile-stages/dockerfile-stages
+# transient copies of check-dockerfile-stages.sh written by its own meta case
+# and by the guard-defeat matrix; both remove them, this is the seatbelt
+hack/.selftest-meta-mutant.*.sh
+hack/.matrix-mutant.*.sh
 
 # secrets
 TEST_GEMINI_KEY

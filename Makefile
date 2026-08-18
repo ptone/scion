@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals golangci-lint web web-typecheck web-test fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals dockerfile-stages golangci-lint web web-typecheck web-test fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -79,6 +79,41 @@ lint:
 ## compat-literals: Check legacy grove literals stay in compatibility surfaces
 compat-literals:
 	@./hack/check-project-compat-literals.sh
+
+## dockerfile-stages: Check the root Dockerfile's default build target is still the runtime image
+# The self-test belongs to the target, not to the CI step, so that `make ci`
+# locally and the CI job run the same two commands. It was briefly in both and
+# ran twice; one place is enough, and the guard's own test should travel with
+# the guard rather than with one caller.
+#
+# The self-test's marker line is printed rather than discarded, and both
+# directions are pinned. A dropped `--self-test` argument used to be silent: the
+# script with no argument runs the ordinary check a second time and exits 0, so
+# with stdout discarded the log was byte-indistinguishable from a correct run.
+# Command substitution is used instead of a pipe because /bin/sh here is dash,
+# which has no `pipefail` -- in a pipeline the script's exit status is discarded
+# and a self-test that fails outright would still pass the target.
+#
+# The second recipe line asserts the marker is PRESENT after `--self-test`. That
+# assertion is only meaningful while the marker is ABSENT from the ordinary run,
+# which nothing else enforces, so the first line asserts the negative twin: a
+# presence-only guard can be made vacuous by an edit to a path it never looks at.
+dockerfile-stages:
+	@bare=$$(./hack/check-dockerfile-stages.sh) || { printf '%s\n' "$$bare" >&2; exit 1; }; \
+	 printf '%s\n' "$$bare"; \
+	 if printf '%s\n' "$$bare" | grep -q 'self-test passed:'; then \
+	   echo "dockerfile-stages: NEGATIVE TWIN FAILED -- the ordinary run printed the self-test marker, so the check below can no longer tell a real self-test from a dropped flag." >&2; \
+	   exit 1; \
+	 fi
+	@selftest=$$(./hack/check-dockerfile-stages.sh --self-test) || { \
+	   printf '%s\n' "$$selftest" >&2; \
+	   echo "dockerfile-stages: self-test FAILED (exit status)" >&2; exit 1; }; \
+	 if ! printf '%s\n' "$$selftest" | grep -q 'self-test passed: [0-9][0-9]* cases'; then \
+	   printf '%s\n' "$$selftest" >&2; \
+	   echo "dockerfile-stages: self-test MARKER ABSENT -- the run exited 0 without reporting cases, which is what a dropped --self-test argument looks like." >&2; \
+	   exit 1; \
+	 fi; \
+	 printf '%s\n' "$$selftest" | grep 'self-test passed:'
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
 golangci-lint:
@@ -152,12 +187,12 @@ fmt-check:
 	@echo "Go formatting OK."
 
 ## ci: Run fast CI checks (format check, vet, compatibility guardrails, tests, build)
-ci: fmt-check lint compat-literals test-fast build
+ci: fmt-check lint compat-literals dockerfile-stages test-fast build
 	@echo ""
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-typecheck web-test lint compat-literals golangci-lint test-fast build
+ci-full: fmt-check web web-typecheck web-test lint compat-literals dockerfile-stages golangci-lint test-fast build
 	@echo ""
 	@echo "CI (full) passed."
 
