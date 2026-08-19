@@ -215,7 +215,7 @@ func TestResolveMessageBody_Stdin(t *testing.T) {
 
 	_, err = w.WriteString("hello from stdin\n")
 	require.NoError(t, err)
-	w.Close()
+	_ = w.Close()
 
 	os.Stdin = r
 
@@ -233,7 +233,7 @@ func TestResolveMessageBody_StdinNoTrailingNewline(t *testing.T) {
 
 	_, err = w.WriteString("no trailing newline")
 	require.NoError(t, err)
-	w.Close()
+	_ = w.Close()
 
 	os.Stdin = r
 
