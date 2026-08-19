@@ -140,7 +140,7 @@ Examples:
 		if msgBodyFile != "" && len(args) > 1 && !msgBroadcast && !msgAll {
 			return fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
 		}
-		if msgBodyFile != "" && msgBroadcast && len(args) > 0 {
+		if msgBodyFile != "" && (msgBroadcast || msgAll) && len(args) > 0 {
 			return fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
 		}
 
