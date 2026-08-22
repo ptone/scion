@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals check-authz-guards golangci-lint web web-typecheck web-test fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals check-authz-guards check-custom golangci-lint web web-typecheck web-test fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -89,6 +89,10 @@ compat-literals:
 check-authz-guards:
 	@./hack/check-authz-guards.sh
 
+## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
+check-custom: compat-literals check-authz-guards
+	@echo "All custom checks passed."
+
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
 golangci-lint:
 	@if [ ! -x "$(GOLANGCI_LINT)" ]; then \
@@ -160,13 +164,13 @@ fmt-check:
 	fi
 	@echo "Go formatting OK."
 
-## ci: Run fast CI checks (format check, vet, compatibility guardrails, authz guards, tests, build)
-ci: fmt-check lint compat-literals check-authz-guards test-fast build
+## ci: Run fast CI checks (format check, vet, custom lint checks, tests, build)
+ci: fmt-check lint check-custom test-fast build
 	@echo ""
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-typecheck web-test lint compat-literals check-authz-guards golangci-lint test-fast build
+ci-full: fmt-check web web-typecheck web-test lint check-custom golangci-lint test-fast build
 	@echo ""
 	@echo "CI (full) passed."
 
