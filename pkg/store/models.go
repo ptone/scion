@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 )
 
 // Agent represents an agent record in the Hub database.
@@ -1483,51 +1484,30 @@ func (t *UserAccessToken) UnmarshalJSON(data []byte) error {
 // UATPrefix is the token prefix that distinguishes UATs from other token types.
 const UATPrefix = "scion_pat_"
 
-// UAT scope constants define the allowed capability scopes.
+// UAT scope constants define the allowed capability scopes. Stale legacy
+// constants are retained for old stored-token metadata, but UATValidScopes below
+// is registry-derived and controls newly-created tokens.
 const (
-	UATScopeProjectRead     = "project:read"
-	UATScopeProjectUpdate   = "project:update"
-	UATScopeAgentCreate     = "agent:create"
-	UATScopeAgentRead       = "agent:read"
-	UATScopeAgentList       = "agent:list"
-	UATScopeAgentStart      = "agent:start"
-	UATScopeAgentStop       = "agent:stop"
-	UATScopeAgentDelete     = "agent:delete"
-	UATScopeAgentMessage    = "agent:message"
-	UATScopeAgentAttach     = "agent:attach"
-	UATScopeAgentPortAccess = "agent:port_access"
-	UATScopeAgentDispatch   = "agent:dispatch"
-	UATScopeAgentManage     = "agent:manage" // Convenience alias
+	UATScopeProjectRead     = permissions.ResourceProject + ":" + permissions.ActionRead
+	UATScopeProjectUpdate   = permissions.ResourceProject + ":" + permissions.ActionUpdate
+	UATScopeAgentCreate     = permissions.ResourceAgent + ":" + permissions.ActionCreate
+	UATScopeAgentRead       = permissions.ResourceAgent + ":" + permissions.ActionRead
+	UATScopeAgentList       = permissions.ResourceAgent + ":" + permissions.ActionList
+	UATScopeAgentStart      = "agent:start"    // legacy stale scope; not valid for new tokens
+	UATScopeAgentStop       = "agent:stop"     // legacy stale scope; not valid for new tokens
+	UATScopeAgentMessage    = "agent:message"  // legacy stale scope; not valid for new tokens
+	UATScopeAgentDispatch   = "agent:dispatch" // legacy stale scope; not valid for new tokens
+	UATScopeAgentDelete     = permissions.ResourceAgent + ":" + permissions.ActionDelete
+	UATScopeAgentAttach     = permissions.ResourceAgent + ":" + permissions.ActionAttach
+	UATScopeAgentPortAccess = permissions.ResourceAgent + ":" + permissions.ActionPortAccess
+	UATScopeAgentManage     = permissions.UATScopeAgentManage // Convenience alias
 )
 
 // UATValidScopes is the set of all valid UAT scope strings.
-var UATValidScopes = map[string]bool{
-	UATScopeProjectRead:     true,
-	UATScopeProjectUpdate:   true,
-	UATScopeAgentCreate:     true,
-	UATScopeAgentRead:       true,
-	UATScopeAgentList:       true,
-	UATScopeAgentStart:      true,
-	UATScopeAgentStop:       true,
-	UATScopeAgentDelete:     true,
-	UATScopeAgentMessage:    true,
-	UATScopeAgentAttach:     true,
-	UATScopeAgentPortAccess: true,
-	UATScopeAgentDispatch:   true,
-	UATScopeAgentManage:     true,
-}
+var UATValidScopes = permissions.UATValidScopes()
 
 // UATManageScopes are the scopes expanded from the agent:manage alias.
-var UATManageScopes = []string{
-	UATScopeAgentCreate,
-	UATScopeAgentRead,
-	UATScopeAgentList,
-	UATScopeAgentStart,
-	UATScopeAgentStop,
-	UATScopeAgentDelete,
-	UATScopeAgentPortAccess,
-	UATScopeAgentDispatch,
-}
+var UATManageScopes = permissions.UATManageScopes()
 
 // UATScopeToAction maps a UAT scope to its resource type and action.
 func UATScopeToAction(scope string) (resourceType string, action string) {
