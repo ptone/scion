@@ -4,10 +4,11 @@
 **Authors:** review-arch (final editor), codex-auth-review
 **Date:** 2026-08-22
 **Process:** Two independent reviews, then 4 rounds of debate.
-Convergence at round 2. Signoff at round 4, with no dissent. One
-editorial correctness pass after signoff.
+Convergence at round 2. Signoff at round 4, with no dissent. Two
+editorial passes after signoff: one for correctness, one to interpret
+the sponsor decision. Both reviewers signed off on the final text.
 **Status:** Open question 1 resolved by the sponsor on 2026-08-22.
-Questions 2 and 3 are open.
+Questions 2 and 3 are open. The document is otherwise final.
 **Language:** ASD-STE100 Simplified Technical English.
 
 ---
@@ -689,6 +690,17 @@ Two were substantive, and both were review-arch's:
 codex-auth-review also corrected the D6 attribution **against their own
 interest**: review-arch found D6, and codex-auth-review verified it
 afterwards. The earlier text said both found it independently.
+
+**Interpretation of the sponsor decision.** After the sponsor answered
+question 1, codex-auth-review made three further edits, all accepted:
+the D1 retitle; the generalisation of the admission gate from a
+role-only check to `CanDelegate` over five authority-creating paths;
+and the separation of super-admin from the recovery credential. The
+second corrected a genuine overstatement by review-arch, which would
+have left raw policy writes outside the only remaining constraint.
+
+**Final state.** codex-auth-review confirmed on 2026-08-22 that there
+are no outstanding edits and no dissent.
 
 ---
 
