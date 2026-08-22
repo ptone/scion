@@ -305,7 +305,7 @@ func TestValidateToken(t *testing.T) {
 	svc, _, _ := newTestUATService()
 	ctx := context.Background()
 
-	key, _, err := svc.CreateToken(ctx, tid("user-1"), "test-token", tid("project-1"),
+	key, token, err := svc.CreateToken(ctx, tid("user-1"), "test-token", tid("project-1"),
 		[]string{"agent:attach", "agent:read"}, nil)
 	if err != nil {
 		t.Fatalf("failed to create token: %v", err)
@@ -321,6 +321,9 @@ func TestValidateToken(t *testing.T) {
 		}
 		if identity.ScopedProjectID() != tid("project-1") {
 			t.Errorf("expected project 'project-1', got %q", identity.ScopedProjectID())
+		}
+		if identity.CredentialID() != token.ID {
+			t.Errorf("expected credential ID %q, got %q", token.ID, identity.CredentialID())
 		}
 		if !identity.HasScope("agent:attach") {
 			t.Error("expected identity to have scope agent:attach")

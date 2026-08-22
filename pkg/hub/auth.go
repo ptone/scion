@@ -150,7 +150,9 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if cfg.AgentTokenSvc != nil {
 					if claims, err := cfg.AgentTokenSvc.ValidateAgentToken(token); err == nil {
 						ctx = context.WithValue(ctx, agentContextKey{}, claims)
-						ctx = contextWithIdentity(ctx, &agentIdentityWrapper{claims})
+						identity := &agentIdentityWrapper{claims}
+						ctx = contextWithIdentity(ctx, identity)
+						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
 						ctx = contextWithAuthType(ctx, AuthTypeAgent)
 						if cfg.Debug {
 							log.Debug("Agent authenticated", "subject", claims.Subject)
@@ -189,6 +191,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					return
 				}
 				ctx = contextWithIdentity(ctx, identity)
+				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
 				ctx = contextWithAuthType(ctx, AuthTypeFederation)
 				if cfg.Debug {
 					log.Debug("Federated identity authenticated",
@@ -263,6 +266,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						}
 						ctx = context.WithValue(ctx, userContextKey{}, identity)
 						ctx = contextWithIdentity(ctx, identity)
+						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
 						ctx = contextWithAuthType(ctx, AuthTypeProxy)
 						if cfg.Debug {
 							log.Debug("Proxy user authenticated", "provider", cfg.ProxyAuthenticator.Name(), "email", proxyUser.Email)
@@ -278,6 +282,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					if user := extractProxyUser(r); user != nil {
 						ctx = context.WithValue(ctx, userContextKey{}, user)
 						ctx = contextWithIdentity(ctx, user)
+						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(user))
 						ctx = contextWithAuthType(ctx, AuthTypeProxy)
 						if cfg.Debug {
 							log.Debug("Proxy user authenticated (legacy)", "email", user.Email())
@@ -307,6 +312,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				ctx = context.WithValue(ctx, userContextKey{}, devUser)
 				ctx = contextWithIdentity(ctx, devUser)
+				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(devUser))
 				ctx = contextWithAuthType(ctx, AuthTypeDevToken)
 				if cfg.Debug {
 					log.Debug("Dev user authenticated")
@@ -326,6 +332,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				ctx = context.WithValue(ctx, userContextKey{}, scopedUser)
 				ctx = contextWithIdentity(ctx, scopedUser)
+				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(scopedUser))
 				ctx = contextWithAuthType(ctx, AuthTypeUAT)
 				if cfg.Debug {
 					log.Debug("UAT authenticated", "email", scopedUser.Email(), "project_id", scopedUser.ScopedProjectID())
@@ -337,6 +344,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					if cfg.DevAuthEnabled && apiclient.ValidateDevToken(token, cfg.DevAuthToken) {
 						ctx = context.WithValue(ctx, userContextKey{}, devUser)
 						ctx = contextWithIdentity(ctx, devUser)
+						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(devUser))
 						ctx = contextWithAuthType(ctx, AuthTypeDevToken)
 						if cfg.Debug {
 							log.Debug("Dev user authenticated (fallback)")
@@ -363,6 +371,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				)
 				ctx = context.WithValue(ctx, userContextKey{}, user)
 				ctx = contextWithIdentity(ctx, user)
+				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(user))
 				ctx = contextWithAuthType(ctx, AuthTypeJWT)
 				if cfg.Debug {
 					log.Debug("User authenticated", "email", user.Email())

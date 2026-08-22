@@ -172,8 +172,12 @@ func TestUnifiedAuthMiddleware_AgentToken(t *testing.T) {
 
 	t.Run("agent token via X-Scion-Agent-Token header", func(t *testing.T) {
 		var gotIdentity Identity
+		var gotCredential CredentialContext
+		var gotRequest AuthzRequest
 		handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gotIdentity = GetIdentityFromContext(r.Context())
+			gotCredential = GetCredentialContextFromContext(r.Context())
+			gotRequest = AuthzRequestFromContext(r.Context(), Resource{Type: "agent", ID: "agent-456"}, ActionRead)
 			w.WriteHeader(http.StatusOK)
 		}))
 
@@ -197,6 +201,15 @@ func TestUnifiedAuthMiddleware_AgentToken(t *testing.T) {
 
 		if gotIdentity.Type() != "agent" {
 			t.Errorf("expected identity type 'agent', got %q", gotIdentity.Type())
+		}
+		if gotCredential.Kind != CredentialKindAgentJWT {
+			t.Errorf("expected agent JWT credential, got %q", gotCredential.Kind)
+		}
+		if gotCredential.ID == "" {
+			t.Error("expected agent JWT credential ID")
+		}
+		if gotRequest.Principal.ID != "agent-456" || gotRequest.Credential.ID != gotCredential.ID {
+			t.Errorf("request context lost principal or credential: %+v", gotRequest)
 		}
 	})
 }

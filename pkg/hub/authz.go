@@ -64,13 +64,89 @@ type Resource struct {
 	Ancestry   []string          // Ordered ancestor chain [root, ..., parent] for transitive access
 }
 
+// PrincipalKind describes the authenticated actor evaluated by an authorization request.
+type PrincipalKind string
+
+const (
+	PrincipalKindUser             PrincipalKind = "user"
+	PrincipalKindAgent            PrincipalKind = "agent"
+	PrincipalKindFederatedUser    PrincipalKind = "federated_user"
+	PrincipalKindFederatedAgent   PrincipalKind = "federated_agent"
+	PrincipalKindFederatedService PrincipalKind = "federated_service"
+	PrincipalKindBroker           PrincipalKind = "broker"
+	PrincipalKindDev              PrincipalKind = "dev"
+)
+
+// CredentialKind describes the authentication material that established a principal.
+// Credential constraints are caveats: they may narrow authority but never grant it.
+type CredentialKind string
+
+const (
+	CredentialKindInteractive CredentialKind = "interactive"
+	CredentialKindUAT         CredentialKind = "uat"
+	CredentialKindAgentJWT    CredentialKind = "agent_jwt"
+	CredentialKindFederation  CredentialKind = "federation"
+	CredentialKindBroker      CredentialKind = "broker"
+	CredentialKindDev         CredentialKind = "dev"
+)
+
+// PrincipalContext identifies the authenticated actor for an authorization request.
+// Identity remains available during the migration so existing policy evaluation can
+// use the established identity interfaces.
+type PrincipalContext struct {
+	Kind     PrincipalKind
+	ID       string
+	Identity Identity
+}
+
+// CredentialContext records the credential used for an authorization request.
+// ProjectID and Scopes are caveats for scoped bearer credentials.
+type CredentialContext struct {
+	Kind      CredentialKind
+	ID        string
+	Type      string
+	ProjectID string
+	Scopes    []string
+}
+
+// AuthzRequest carries both the acting principal and the credential caveats.
+type AuthzRequest struct {
+	Principal  PrincipalContext
+	Credential CredentialContext
+	Resource   Resource
+	Action     Action
+}
+
+// AuthzRequestFromContext builds a request from authentication middleware
+// context. Legacy callers that supplied only an identity receive a derived
+// credential context, keeping the compatibility adapter safe during migration.
+func AuthzRequestFromContext(ctx context.Context, resource Resource, action Action) AuthzRequest {
+	identity := GetIdentityFromContext(ctx)
+	credential := GetCredentialContextFromContext(ctx)
+	if credential.Kind == "" {
+		credential = credentialContextForIdentity(identity)
+	}
+	return AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credential,
+		Resource:   resource,
+		Action:     action,
+	}
+}
+
 // Decision represents the result of an authorization check.
 type Decision struct {
-	Allowed    bool   // Whether access is allowed
-	Reason     string // Human-readable explanation
-	PolicyID   string // ID of the matched policy (if any)
-	PolicyName string // Name of the matched policy (if any)
-	Scope      string // Scope level that decided (hub, project, resource)
+	Allowed        bool   // Whether access is allowed
+	Reason         string // Human-readable explanation
+	PolicyID       string // ID of the matched policy (if any)
+	PolicyName     string // Name of the matched policy (if any)
+	Scope          string // Scope level that decided (hub, project, resource)
+	MatchedGrant   string // Audit-ready matched grant identifier
+	MatchedPolicy  string // Audit-ready matched policy identifier
+	PrincipalKind  PrincipalKind
+	CredentialID   string
+	CredentialType string
+	CredentialKind string
 }
 
 // EvaluationDetail provides detailed info for the evaluate endpoint.
@@ -98,20 +174,133 @@ func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
 // CheckAccess evaluates whether the given identity is allowed to perform
 // the specified action on the resource.
 func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resource Resource, action Action) Decision {
-	switch identity.Type() {
-	case "user", "dev":
-		if user, ok := identity.(UserIdentity); ok {
-			return a.checkAccessForUser(ctx, user, resource, action)
-		}
-		return Decision{Allowed: false, Reason: "invalid user identity"}
-	case "agent":
-		if agent, ok := identity.(AgentIdentity); ok {
-			return a.checkAccessForAgent(ctx, agent, resource, action)
-		}
-		return Decision{Allowed: false, Reason: "invalid agent identity"}
-	default:
-		return Decision{Allowed: false, Reason: "unknown identity type"}
+	return a.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   resource,
+		Action:     action,
+	})
+}
+
+// Decide evaluates an authorization request. Credential caveats are applied
+// before legacy principal baselines, so a scoped credential can never inherit
+// an admin or super-admin bypass from its principal.
+func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
+	principal := request.Principal
+	if principal.Identity == nil {
+		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, principal, request.Credential)
 	}
+	derivedPrincipal := principalContextForIdentity(principal.Identity)
+	if principal.Kind != "" && principal.Kind != derivedPrincipal.Kind {
+		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, derivedPrincipal, request.Credential)
+	}
+	principal.Kind = derivedPrincipal.Kind
+	if principal.ID == "" {
+		principal.ID = derivedPrincipal.ID
+	}
+
+	credential := request.Credential
+	if credential.Kind == "" {
+		credential = credentialContextForIdentity(principal.Identity)
+	}
+
+	var decision Decision
+	switch principal.Kind {
+	case PrincipalKindUser, PrincipalKindDev, PrincipalKindFederatedUser:
+		user, ok := principal.Identity.(UserIdentity)
+		if !ok {
+			decision = Decision{Allowed: false, Reason: "invalid user identity"}
+			break
+		}
+		if credential.Kind == CredentialKindUAT {
+			user = NewScopedUserIdentity(user, credential.ProjectID, credential.Scopes)
+		}
+		decision = a.checkAccessForUser(ctx, user, request.Resource, request.Action)
+	case PrincipalKindAgent, PrincipalKindFederatedAgent:
+		agent, ok := principal.Identity.(AgentIdentity)
+		if !ok {
+			decision = Decision{Allowed: false, Reason: "invalid agent identity"}
+			break
+		}
+		decision = a.checkAccessForAgent(ctx, agent, request.Resource, request.Action)
+	case PrincipalKindFederatedService:
+		decision = Decision{Allowed: false, Reason: "federated service identities are not supported"}
+	case PrincipalKindBroker:
+		decision = Decision{Allowed: false, Reason: "broker identities are not supported by policy authorization"}
+	default:
+		decision = Decision{Allowed: false, Reason: "unknown identity type"}
+	}
+
+	return decorateDecision(decision, principal, credential)
+}
+
+// DecideFromContext evaluates a request using the authenticated principal and
+// credential metadata established by middleware.
+func (a *AuthzService) DecideFromContext(ctx context.Context, resource Resource, action Action) Decision {
+	return a.Decide(ctx, AuthzRequestFromContext(ctx, resource, action))
+}
+
+func principalContextForIdentity(identity Identity) PrincipalContext {
+	if identity == nil {
+		return PrincipalContext{}
+	}
+	principal := PrincipalContext{ID: identity.ID(), Identity: identity}
+	switch identity.Type() {
+	case "user":
+		principal.Kind = PrincipalKindUser
+	case "agent":
+		principal.Kind = PrincipalKindAgent
+	case "federated_user":
+		principal.Kind = PrincipalKindFederatedUser
+	case "federated_agent":
+		principal.Kind = PrincipalKindFederatedAgent
+	case "federated_service":
+		principal.Kind = PrincipalKindFederatedService
+	case "broker":
+		principal.Kind = PrincipalKindBroker
+	case "dev":
+		principal.Kind = PrincipalKindDev
+	}
+	return principal
+}
+
+func credentialContextForIdentity(identity Identity) CredentialContext {
+	if identity == nil {
+		return CredentialContext{}
+	}
+	if scoped, ok := identity.(*ScopedUserIdentity); ok {
+		return CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes()}
+	}
+	switch identity.Type() {
+	case "agent":
+		credential := CredentialContext{Kind: CredentialKindAgentJWT}
+		if agent, ok := identity.(*agentIdentityWrapper); ok && agent.AgentTokenClaims != nil {
+			credential.ID = agent.AgentTokenClaims.Claims.ID
+		}
+		return credential
+	case "federated_user", "federated_agent", "federated_service":
+		return CredentialContext{Kind: CredentialKindFederation, Type: identity.Type()}
+	case "broker":
+		return CredentialContext{Kind: CredentialKindBroker}
+	case "dev":
+		return CredentialContext{Kind: CredentialKindDev}
+	default:
+		return CredentialContext{Kind: CredentialKindInteractive, Type: identity.Type()}
+	}
+}
+
+func decorateDecision(decision Decision, principal PrincipalContext, credential CredentialContext) Decision {
+	decision.PrincipalKind = principal.Kind
+	decision.CredentialID = credential.ID
+	decision.CredentialType = credential.Type
+	decision.CredentialKind = string(credential.Kind)
+	if decision.MatchedPolicy == "" {
+		decision.MatchedPolicy = decision.PolicyID
+	}
+	if decision.MatchedGrant == "" {
+		decision.MatchedGrant = decision.PolicyName
+	}
+	return decision
 }
 
 // checkAccessForUser evaluates access for a user principal.

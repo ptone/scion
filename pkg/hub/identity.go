@@ -87,16 +87,24 @@ func (u *AuthenticatedUser) ClientType() string { return u.clientType }
 // It is produced when authenticating with a User Access Token (UAT).
 type ScopedUserIdentity struct {
 	UserIdentity
-	projectID string
-	scopes    []string
+	projectID    string
+	scopes       []string
+	credentialID string
 }
 
 // NewScopedUserIdentity creates a ScopedUserIdentity.
 func NewScopedUserIdentity(user UserIdentity, projectID string, scopes []string) *ScopedUserIdentity {
+	return NewScopedUserIdentityWithCredentialID(user, projectID, scopes, "")
+}
+
+// NewScopedUserIdentityWithCredentialID creates a UAT-backed identity with
+// its persisted credential ID available for authorization audit context.
+func NewScopedUserIdentityWithCredentialID(user UserIdentity, projectID string, scopes []string, credentialID string) *ScopedUserIdentity {
 	return &ScopedUserIdentity{
 		UserIdentity: user,
 		projectID:    projectID,
 		scopes:       scopes,
+		credentialID: credentialID,
 	}
 }
 
@@ -105,6 +113,16 @@ func (s *ScopedUserIdentity) ScopedProjectID() string { return s.projectID }
 
 // ScopedScopes returns the action scopes this identity is limited to.
 func (s *ScopedUserIdentity) ScopedScopes() []string { return s.scopes }
+
+// CredentialID returns the persisted ID of the UAT that authenticated this identity.
+func (s *ScopedUserIdentity) CredentialID() string { return s.credentialID }
+
+// IsScopedUserIdentity reports whether an identity is backed by a scoped UAT.
+// Scoped credentials must not use role-only administrative bypasses.
+func IsScopedUserIdentity(identity Identity) bool {
+	_, ok := identity.(*ScopedUserIdentity)
+	return ok
+}
 
 // HasScope returns true if this identity has the given scope.
 func (s *ScopedUserIdentity) HasScope(scope string) bool {
@@ -146,6 +164,9 @@ func (a *agentIdentityWrapper) OriginUserID() string {
 
 // identityContextKey is the key for storing identity in the request context.
 type identityContextKey struct{}
+
+// credentialContextKey is the key for request credential metadata.
+type credentialContextKey struct{}
 
 // GetIdentityFromContext returns the authenticated identity (user or agent).
 func GetIdentityFromContext(ctx context.Context) Identity {
@@ -190,6 +211,19 @@ func GetAgentIdentityFromContext(ctx context.Context) AgentIdentity {
 // contextWithIdentity returns a new context with the identity set.
 func contextWithIdentity(ctx context.Context, identity Identity) context.Context {
 	return context.WithValue(ctx, identityContextKey{}, identity)
+}
+
+// GetCredentialContextFromContext returns the credential metadata recorded by
+// authentication middleware. It intentionally returns a zero value when a
+// legacy test or internal caller set only an identity.
+func GetCredentialContextFromContext(ctx context.Context) CredentialContext {
+	credential, _ := ctx.Value(credentialContextKey{}).(CredentialContext)
+	return credential
+}
+
+// contextWithCredentialContext records credential caveats for request-based authorization.
+func contextWithCredentialContext(ctx context.Context, credential CredentialContext) context.Context {
+	return context.WithValue(ctx, credentialContextKey{}, credential)
 }
 
 // AuthType constants for request logging.
