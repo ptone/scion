@@ -53,3 +53,14 @@
   defense in depth.
 - Added regressions for a federated admin decision, maintenance, global
   stop-all, broker rotation, and invalid federation configuration.
+
+## Round 2 Audit Remediation
+
+- Updated `requireAdmin` to use `IsUnscopedLocalPlatformAdmin` after its
+  user-identity assertion, preserving the existing scoped-token and ordinary
+  non-admin audit reasons while denying federated admin identities.
+- Added `requireAdmin` coverage for federated-admin denial alongside existing
+  scoped-admin denial and local-admin allow coverage.
+- Added branch-level regressions proving a policy-authorized federated admin
+  cannot escalate a group member and a non-member federated admin cannot use
+  project-scoped stop-all.

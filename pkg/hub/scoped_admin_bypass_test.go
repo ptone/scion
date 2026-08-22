@@ -41,6 +41,24 @@ func federatedAdminIdentity() *FederatedUserIdentity {
 	return NewFederatedUserIdentity("https://issuer.example", "admin", "admin@example.com", "Admin", "admin", nil)
 }
 
+// bindableFederatedAdmin is a federated identity whose ID is a local UUID so a
+// test can grant an ordinary policy and reach a direct bypass branch. Production
+// federation IDs intentionally include the issuer and are not bindable locally.
+type bindableFederatedAdmin struct {
+	UserIdentity
+	issuerURL string
+}
+
+func (f *bindableFederatedAdmin) Type() string      { return "federated_user" }
+func (f *bindableFederatedAdmin) IssuerURL() string { return f.issuerURL }
+
+func newBindableFederatedAdmin(id string) *bindableFederatedAdmin {
+	return &bindableFederatedAdmin{
+		UserIdentity: NewAuthenticatedUser(id, "admin@example.com", "Admin", "admin", "api"),
+		issuerURL:    "https://issuer.example",
+	}
+}
+
 func TestAdminModeMiddlewareRejectsScopedAdmin(t *testing.T) {
 	middleware := adminModeMiddleware(NewMaintenanceState(true, ""))(passthrough)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
@@ -139,4 +157,46 @@ func TestFederatedAdminCannotUseDirectAdminShortcuts(t *testing.T) {
 
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
+}
+
+func TestFederatedAdminCannotUseGroupHierarchyBypass(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	caller := newBindableFederatedAdmin(tid("federated-group-admin"))
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: caller.ID(), Email: caller.Email(), DisplayName: caller.DisplayName(), Role: "member", Status: "active"}))
+	owner := &store.User{ID: tid("federated-group-owner"), Email: "owner@example.com", DisplayName: "Owner", Role: "member", Status: "active"}
+	target := &store.User{ID: tid("federated-group-target"), Email: "target@example.com", DisplayName: "Target", Role: "member", Status: "active"}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	require.NoError(t, s.CreateUser(ctx, target))
+	group := &store.Group{ID: tid("federated-group"), Name: "Group", Slug: "federated-group", GroupType: store.GroupTypeExplicit, OwnerID: owner.ID}
+	require.NoError(t, s.CreateGroup(ctx, group))
+	policy := &store.Policy{ID: tid("federated-group-add-member"), Name: "federated group add member", ScopeType: "hub", ResourceType: "group", Actions: []string{"addMember"}, Effect: "allow"}
+	require.NoError(t, s.CreatePolicy(ctx, policy))
+	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{PolicyID: policy.ID, PrincipalType: "user", PrincipalID: caller.ID()}))
+	body, err := json.Marshal(AddGroupMemberRequest{MemberType: store.GroupMemberTypeUser, MemberID: target.ID, Role: store.GroupMemberRoleAdmin})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/groups/"+group.ID+"/members", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), caller))
+	rec := httptest.NewRecorder()
+
+	srv.addGroupMember(rec, req, group)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestFederatedAdminCannotUseProjectStopAllBypass(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project := &store.Project{ID: tid("federated-stop-project"), Name: "Project", Slug: "federated-stop-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	caller := newBindableFederatedAdmin(tid("federated-stop-admin"))
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: caller.ID(), Email: caller.Email(), DisplayName: caller.DisplayName(), Role: "member", Status: "active"}))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), caller))
+	rec := httptest.NewRecorder()
+
+	srv.handleStopAllAgents(rec, req, project.ID)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
