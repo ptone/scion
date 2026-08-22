@@ -90,3 +90,18 @@ func TestCheckAccessUsesInteractiveCredentialCompatibilityAdapter(t *testing.T) 
 	assert.True(t, decision.Allowed)
 	assert.Equal(t, string(CredentialKindInteractive), decision.CredentialKind)
 }
+
+func TestAuthzDecideFederatedAdminCannotUseLocalAdminBypass(t *testing.T) {
+	authz, _ := authzTestSetup(t)
+	federatedAdmin := NewFederatedUserIdentity("https://issuer.example", "user-1", "user@example.com", "User", "admin", nil)
+
+	decision := authz.Decide(context.Background(), AuthzRequest{
+		Principal:  PrincipalContext{Identity: federatedAdmin},
+		Credential: CredentialContext{Kind: CredentialKindFederation},
+		Resource:   Resource{Type: "agent", ID: "agent-1"},
+		Action:     ActionRead,
+	})
+
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, "default deny", decision.Reason)
+}

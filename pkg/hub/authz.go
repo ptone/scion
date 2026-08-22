@@ -306,9 +306,7 @@ func decorateDecision(decision Decision, principal PrincipalContext, credential 
 // checkAccessForUser evaluates access for a user principal.
 func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity, resource Resource, action Action) Decision {
 	// 0. If the identity is scoped (UAT), enforce project + scope constraints first.
-	scoped := false
 	if scopedIdentity, ok := user.(*ScopedUserIdentity); ok {
-		scoped = true
 		if denied := a.enforceUATConstraints(scopedIdentity, resource, action); denied != nil {
 			return *denied
 		}
@@ -317,7 +315,7 @@ func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity
 	// 1. Admin bypass. Scoped UAT credentials must not inherit hub-admin
 	// semantics from the underlying user after their project/scope constraints
 	// pass; they continue through owner, project membership, and policy grants.
-	if !scoped && user.Role() == "admin" {
+	if IsUnscopedLocalPlatformAdmin(user) {
 		return Decision{
 			Allowed: true,
 			Reason:  "admin bypass",

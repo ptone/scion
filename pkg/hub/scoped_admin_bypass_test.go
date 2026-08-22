@@ -37,6 +37,10 @@ func scopedAdminIdentity() *ScopedUserIdentity {
 	)
 }
 
+func federatedAdminIdentity() *FederatedUserIdentity {
+	return NewFederatedUserIdentity("https://issuer.example", "admin", "admin@example.com", "Admin", "admin", nil)
+}
+
 func TestAdminModeMiddlewareRejectsScopedAdmin(t *testing.T) {
 	middleware := adminModeMiddleware(NewMaintenanceState(true, ""))(passthrough)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
@@ -97,4 +101,42 @@ func TestAddGroupMemberRejectsScopedAdminBypass(t *testing.T) {
 	srv.addGroupMember(rec, req, group)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestFederatedAdminCannotUseDirectAdminShortcuts(t *testing.T) {
+	t.Run("maintenance admission", func(t *testing.T) {
+		middleware := adminModeMiddleware(NewMaintenanceState(true, ""))(passthrough)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), federatedAdminIdentity()))
+		rec := httptest.NewRecorder()
+
+		middleware.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
+
+	t.Run("global stop all", func(t *testing.T) {
+		srv, _ := testServer(t)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/stop-all", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), federatedAdminIdentity()))
+		rec := httptest.NewRecorder()
+
+		srv.handleStopAllAgents(rec, req, "")
+
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("broker secret rotation", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+		broker := &store.RuntimeBroker{ID: tid("fed-broker-1"), Name: "Broker", Slug: "fed-broker-1", CreatedBy: tid("different-owner")}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), federatedAdminIdentity()))
+		rec := httptest.NewRecorder()
+
+		srv.handleBrokerRotateSecret(rec, req, broker.ID)
+
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
 }

@@ -540,7 +540,7 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		}
 	} else {
 		isResourceOwner := group.OwnerID != "" && group.OwnerID == userIdent.ID()
-		isPlatformAdmin := userIdent.Role() == "admin" && !IsScopedUserIdentity(userIdent)
+		isPlatformAdmin := IsUnscopedLocalPlatformAdmin(userIdent)
 		if !isResourceOwner && !isPlatformAdmin {
 			callerMembership, err := s.store.GetGroupMembership(ctx, groupID, store.GroupMemberTypeUser, userIdent.ID())
 			switch req.Role {

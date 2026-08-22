@@ -40,3 +40,16 @@
 - Federated service identities are deliberately denied until a supported hub
   surface and policy model are specified. No Phase 1C/1D ordering or route
   guard work was introduced.
+
+## Round 1 Security Audit Remediation
+
+- Added `IsUnscopedLocalPlatformAdmin`, the single predicate for local
+  platform-admin bypasses. It rejects both UAT-scoped and federated users.
+- Applied the predicate to policy authorization plus the Phase 1B direct
+  shortcuts: maintenance admission, broker rotation, group hierarchy, and
+  global/project stop-all.
+- Federation config now rejects `issuer_type: user` with `default_role: admin`.
+  Identity construction also normalizes that invalid role to `viewer` as a
+  defense in depth.
+- Added regressions for a federated admin decision, maintenance, global
+  stop-all, broker rotation, and invalid federation configuration.

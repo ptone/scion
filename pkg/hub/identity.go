@@ -124,6 +124,17 @@ func IsScopedUserIdentity(identity Identity) bool {
 	return ok
 }
 
+// IsUnscopedLocalPlatformAdmin reports whether a local, non-bearer-scoped user
+// may use platform-admin bypasses. Federated identities are never local
+// platform administrators, regardless of an issuer-provided role claim.
+func IsUnscopedLocalPlatformAdmin(user UserIdentity) bool {
+	if user == nil || user.Role() != "admin" || IsScopedUserIdentity(user) {
+		return false
+	}
+	_, federated := user.(FederatedIdentity)
+	return !federated
+}
+
 // HasScope returns true if this identity has the given scope.
 func (s *ScopedUserIdentity) HasScope(scope string) bool {
 	for _, sc := range s.scopes {

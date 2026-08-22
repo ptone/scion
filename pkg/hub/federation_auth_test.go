@@ -1253,6 +1253,31 @@ func TestFederationAuth_User_ConfiguredRole(t *testing.T) {
 	}
 }
 
+func TestFederationAuth_UserAdminDefaultRoleRejected(t *testing.T) {
+	_, jwksSrv, _ := setupFederationTestServer(t)
+	issuer := "https://securetoken.google.com/my-firebase-project"
+	audience := "my-firebase-project"
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{{
+			IssuerURL:        issuer,
+			JWKSURL:          jwksSrv.URL,
+			ExpectedAudience: audience,
+			IssuerType:       "user",
+			DefaultRole:      "admin",
+		}},
+	}
+
+	_, err := NewFederationAuthenticator(cfg, audience, &http.Client{Timeout: 5 * time.Second}, "dev", slog.Default())
+	if err == nil {
+		t.Fatal("expected federated user default_role admin to be rejected")
+	}
+	if !strings.Contains(err.Error(), "default_role \"admin\" is not allowed") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 // User Test 9: User token with email not in allowed_emails -> reject
 func TestFederationAuth_User_EmailNotAllowed(t *testing.T) {
 	privKey, jwksSrv, kid := setupFederationTestServer(t)

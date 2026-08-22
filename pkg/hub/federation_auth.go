@@ -330,7 +330,7 @@ func extractUserClaims(claims *federationClaims,
 		return nil, fmt.Errorf("federation: user token missing sub claim")
 	}
 	role := issuerCfg.DefaultRole
-	if role == "" {
+	if role == "" || role == "admin" {
 		role = "viewer"
 	}
 	return NewFederatedUserIdentity(

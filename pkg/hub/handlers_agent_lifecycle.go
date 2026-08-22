@@ -361,14 +361,14 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 
 	if projectID == "" {
 		// Global stop-all: platform admin only
-		if userIdent.Role() != "admin" || IsScopedUserIdentity(userIdent) {
+		if !IsUnscopedLocalPlatformAdmin(userIdent) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"Only admins can stop all agents", nil)
 			return
 		}
 	} else {
 		// Project-scoped stop-all: any project member allowed
-		isAdmin := userIdent.Role() == "admin" && !IsScopedUserIdentity(userIdent)
+		isAdmin := IsUnscopedLocalPlatformAdmin(userIdent)
 		if !isAdmin {
 			projectRole := s.resolveUserProjectRole(ctx, projectID, userIdent.ID())
 			if projectRole == "" {
