@@ -19,12 +19,21 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func expectedAgentResourceActions() []string {
+	actions := make([]string, len(ResourceActions["agent"]))
+	for i, action := range ResourceActions["agent"] {
+		actions[i] = string(action)
+	}
+	return actions
+}
 
 func TestComputeCapabilities_AdminGetsAllActions(t *testing.T) {
 	srv, _ := testServer(t)
@@ -34,7 +43,7 @@ func TestComputeCapabilities_AdminGetsAllActions(t *testing.T) {
 	resource := Resource{Type: "agent", ID: "some-agent"}
 
 	caps := srv.authzService.ComputeCapabilities(ctx, admin, resource)
-	assert.Equal(t, []string{"read", "update", "delete", "start", "stop", "message", "attach"}, caps.Actions)
+	assert.Equal(t, expectedAgentResourceActions(), caps.Actions)
 }
 
 func TestComputeCapabilities_OwnerGetsAllActions(t *testing.T) {
@@ -49,7 +58,7 @@ func TestComputeCapabilities_OwnerGetsAllActions(t *testing.T) {
 	resource := Resource{Type: "agent", ID: tid("agent-1"), OwnerID: tid("user-owner-cap")}
 
 	caps := srv.authzService.ComputeCapabilities(ctx, user, resource)
-	assert.Equal(t, []string{"read", "update", "delete", "start", "stop", "message", "attach"}, caps.Actions)
+	assert.Equal(t, expectedAgentResourceActions(), caps.Actions)
 }
 
 func TestComputeCapabilities_PolicySubset(t *testing.T) {
@@ -105,7 +114,7 @@ func TestComputeCapabilitiesBatch_AdminGetsAll(t *testing.T) {
 	caps := srv.authzService.ComputeCapabilitiesBatch(ctx, admin, resources, "agent")
 	require.Len(t, caps, 3)
 	for _, cap := range caps {
-		assert.Equal(t, []string{"read", "update", "delete", "start", "stop", "message", "attach"}, cap.Actions)
+		assert.Equal(t, expectedAgentResourceActions(), cap.Actions)
 	}
 }
 
@@ -137,7 +146,7 @@ func TestComputeCapabilitiesBatch_MixedOwnership(t *testing.T) {
 	require.Len(t, caps, 2)
 
 	// Owned resource gets all actions
-	assert.Equal(t, []string{"read", "update", "delete", "start", "stop", "message", "attach"}, caps[0].Actions)
+	assert.Equal(t, expectedAgentResourceActions(), caps[0].Actions)
 
 	// Non-owned resource gets only read from policy
 	assert.Equal(t, []string{"read"}, caps[1].Actions)
@@ -160,7 +169,7 @@ func TestComputeCapabilities_AncestorGetsAllActions(t *testing.T) {
 	}
 
 	caps := srv.authzService.ComputeCapabilities(ctx, user, resource)
-	assert.Equal(t, []string{"read", "update", "delete", "start", "stop", "message", "attach"}, caps.Actions)
+	assert.Equal(t, expectedAgentResourceActions(), caps.Actions)
 }
 
 func TestComputeCapabilitiesBatch_AncestryAccess(t *testing.T) {
@@ -181,7 +190,7 @@ func TestComputeCapabilitiesBatch_AncestryAccess(t *testing.T) {
 	require.Len(t, caps, 2)
 
 	// Descendant gets all actions via ancestry
-	assert.Equal(t, []string{"read", "update", "delete", "start", "stop", "message", "attach"}, caps[0].Actions)
+	assert.Equal(t, expectedAgentResourceActions(), caps[0].Actions)
 
 	// Unrelated agent gets empty (no policy, not owner, not ancestor)
 	assert.Equal(t, []string{}, caps[1].Actions)
@@ -298,6 +307,15 @@ func TestResourceActions_GCPServiceAccountDeclaresAssign(t *testing.T) {
 	assert.Contains(t, ResourceActions["gcp_service_account"], ActionAssign)
 	assert.NotContains(t, ScopeActions["gcp_service_account"], ActionAssign,
 		"assign is an item-level action; it must not appear in ScopeActions")
+}
+
+func TestResourceActions_AgentLifecycleUsesAttachPermission(t *testing.T) {
+	assert.Contains(t, ResourceActions["agent"], ActionAttach)
+	assert.Contains(t, ResourceActions["agent"], ActionPortAccess)
+	for _, action := range []Action{ActionStart, ActionStop, ActionMessage} {
+		assert.False(t, slices.Contains(ResourceActions["agent"], action),
+			"%s is enforced through ActionAttach today and must not be exposed as an independent capability", action)
+	}
 }
 
 func TestComputeCapabilities_GCPServiceAccount_AdminSeesAssign(t *testing.T) {

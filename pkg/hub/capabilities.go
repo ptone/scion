@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -27,30 +28,20 @@ type Capabilities struct {
 }
 
 // ResourceActions maps resource types to the actions applicable to individual resources.
-var ResourceActions = map[string][]Action{
-	"agent":               {ActionRead, ActionUpdate, ActionDelete, ActionStart, ActionStop, ActionMessage, ActionAttach},
-	"project":             {ActionRead, ActionUpdate, ActionDelete, ActionManage, ActionRegister},
-	"skill":               {ActionRead, ActionUpdate, ActionDelete},
-	"template":            {ActionRead, ActionUpdate, ActionDelete},
-	"harness_config":      {ActionRead, ActionUpdate, ActionDelete},
-	"group":               {ActionRead, ActionUpdate, ActionDelete, ActionAddMember, ActionRemoveMember},
-	"user":                {ActionRead, ActionUpdate},
-	"policy":              {ActionRead, ActionUpdate, ActionDelete},
-	"broker":              {ActionRead, ActionUpdate, ActionDelete, ActionDispatch},
-	"gcp_service_account": {ActionRead, ActionDelete, ActionVerify, ActionAssign},
-}
+var ResourceActions = actionMapFromRegistry(permissions.ResourceActions())
 
 // ScopeActions maps resource types to scope-level actions (e.g., create, list).
-var ScopeActions = map[string][]Action{
-	"agent":               {ActionCreate, ActionList, ActionStopAll},
-	"project":             {ActionCreate, ActionList},
-	"skill":               {ActionCreate, ActionList},
-	"template":            {ActionCreate, ActionList},
-	"harness_config":      {ActionCreate, ActionList},
-	"group":               {ActionCreate, ActionList},
-	"policy":              {ActionCreate, ActionList},
-	"broker":              {ActionCreate, ActionList},
-	"gcp_service_account": {ActionCreate, ActionList, ActionMint},
+var ScopeActions = actionMapFromRegistry(permissions.ScopeActions())
+
+func actionMapFromRegistry(in map[string][]string) map[string][]Action {
+	out := make(map[string][]Action, len(in))
+	for resource, actions := range in {
+		out[resource] = make([]Action, len(actions))
+		for i, action := range actions {
+			out[resource][i] = Action(action)
+		}
+	}
+	return out
 }
 
 // agentResource constructs a Resource from a store.Agent for capability computation.

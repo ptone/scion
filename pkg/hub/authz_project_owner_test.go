@@ -113,6 +113,67 @@ func TestAuthz_ProjectOwnerBypass_RegularMemberCannotUpdateProject(t *testing.T)
 	assert.False(t, decision.Allowed, "regular member should NOT be allowed to update project; reason=%q", decision.Reason)
 }
 
+func TestAuthz_ScopedAdminUATProjectUpdateRequiresIndependentGrant(t *testing.T) {
+	t.Run("admin role alone denied", func(t *testing.T) {
+		srv, _, _, _, project := setupDemoPolicyTest(t)
+		ctx := context.Background()
+
+		admin := NewAuthenticatedUser(tid("scoped-admin-no-grant"), "scoped-admin-no-grant@test.com", "Scoped Admin", store.UserRoleAdmin, "api")
+		scoped := NewScopedUserIdentity(admin, project.ID, []string{store.UATScopeProjectUpdate})
+
+		decision := srv.authzService.CheckAccess(ctx, scoped, projectResource(project), ActionUpdate)
+		assert.False(t, decision.Allowed, "scoped admin UAT must not inherit the role-only admin bypass; reason=%q", decision.Reason)
+		assert.NotEqual(t, "admin bypass", decision.Reason)
+	})
+
+	t.Run("explicit project policy grant allowed", func(t *testing.T) {
+		srv, s, _, _, project := setupDemoPolicyTest(t)
+		ctx := context.Background()
+
+		admin := &store.User{
+			ID:          tid("scoped-admin-policy-grant"),
+			Email:       "scoped-admin-policy-grant@test.com",
+			DisplayName: "Scoped Admin Policy Grant",
+			Role:        store.UserRoleAdmin,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, admin))
+		grantUserActionOnResource(t, s, admin.ID, "project", project.ID, ActionUpdate)
+
+		identity := NewAuthenticatedUser(admin.ID, admin.Email, admin.DisplayName, admin.Role, "api")
+		scoped := NewScopedUserIdentity(identity, project.ID, []string{store.UATScopeProjectUpdate})
+
+		decision := srv.authzService.CheckAccess(ctx, scoped, projectResource(project), ActionUpdate)
+		assert.True(t, decision.Allowed, "scoped admin UAT should use explicit policy grants after scope checks; reason=%q", decision.Reason)
+		assert.NotEqual(t, "admin bypass", decision.Reason)
+	})
+
+	t.Run("project admin membership allowed", func(t *testing.T) {
+		srv, s, _, _, project := setupDemoPolicyTest(t)
+		ctx := context.Background()
+
+		admin := &store.User{
+			ID:          tid("scoped-admin-project-admin"),
+			Email:       "scoped-admin-project-admin@test.com",
+			DisplayName: "Scoped Admin Project Admin",
+			Role:        store.UserRoleAdmin,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, admin))
+		ensureHubMembership(ctx, s, admin.ID)
+		addProjectMemberWithRole(t, s, project, admin.ID, store.GroupMemberRoleAdmin)
+
+		identity := NewAuthenticatedUser(admin.ID, admin.Email, admin.DisplayName, admin.Role, "api")
+		scoped := NewScopedUserIdentity(identity, project.ID, []string{store.UATScopeProjectUpdate})
+
+		decision := srv.authzService.CheckAccess(ctx, scoped, projectResource(project), ActionUpdate)
+		assert.True(t, decision.Allowed, "scoped admin UAT should use project admin membership after scope checks; reason=%q", decision.Reason)
+		assert.Equal(t, "project owner/admin", decision.Reason)
+	})
+}
+
 func TestAuthz_ProjectOwnerBypass_RegularMemberCannotDeleteOthersAgent(t *testing.T) {
 	srv, s, alice, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
