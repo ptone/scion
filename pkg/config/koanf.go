@@ -352,6 +352,7 @@ func unmarshalWithUnusedKeyCheck(k *koanf.Koanf, target interface{}, label strin
 		DecoderConfig: &mapstructure.DecoderConfig{
 			DecodeHook: mapstructure.ComposeDecodeHookFunc(
 				mapstructure.StringToTimeDurationHookFunc(),
+				mapstructure.TextUnmarshallerHookFunc(),
 			),
 			Metadata:         &md,
 			WeaklyTypedInput: true,
