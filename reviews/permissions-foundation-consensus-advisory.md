@@ -60,7 +60,7 @@ between a human and an agent is missing. That is the real problem.
 
 | ID | Defect | Severity | Live today |
 |----|--------|----------|-----------|
-| D1 | The engine cannot express a non-overridable rule | Structural | Yes |
+| D1 | Policy conflict resolution is nondeterministic and underspecified | Structural | Yes |
 | D2 | Enforcement is opt-in per handler. Omission grants access | Structural | Yes |
 | D3 | Three or more permission vocabularies disagree | Structural | Yes |
 | D4 | Admin is a code bypass, not a grant | Structural | Yes |
@@ -233,7 +233,12 @@ relation removes this defect as well.
 
 ## 5. The Five Structural Defects
 
-### 5.1 D1: The engine cannot express a non-overridable rule
+### 5.1 D1: Policy conflict resolution is nondeterministic and underspecified
+
+*(This defect was originally titled "the engine cannot express a
+non-overridable rule". After the sponsor decision of 2026-08-22, that
+inability is an accepted capability limit, not a defect. See section
+5.1.1. What remains is the nondeterminism described below.)*
 
 `evaluatePolicies` at `authz.go:455-503` uses last-match-wins:
 
@@ -264,10 +269,13 @@ several different things:
 The engine cannot tell them apart.
 
 **Sponsor decision, 2026-08-22.** Item 4 is **not wanted**. A project may
-override a hub rule. Only the super-admin role holds an absolute
-capability, and it holds it by bypass. See section 5.1.1. The remaining
-conflation of items 1 to 3 is still a defect, because the engine cannot
-resolve a tie between them deterministically.
+override a hub rule. Only the hub-admin role, which the sponsor plans to
+rename **super-admin**, holds an absolute capability, and it holds it by
+bypass. See section 5.1.1.
+
+So item 4 leaves the defect list. The conflation of items 1 to 3 stays,
+because the engine cannot resolve a tie between them deterministically.
+That is what D1 now means.
 
 **Two supporting problems.**
 
@@ -304,16 +312,41 @@ The sponsor's answer moves constraint from **evaluation time** to
 one. The consequence must be explicit.
 
 The hub can no longer say "no project may allow X" through a policy.
-Instead the hub must prevent the grant from being created at all. Two
-mechanisms carry this load:
+Instead the hub must prevent the grant from being created at all.
 
-- The grantable-role check (F1.5). A subject cannot grant a role wider
-  than the role that they hold.
-- The project maximum role, which already exists for agents.
+**One gate, on every authority-creating path.** An earlier draft named
+only the grantable-role check, and also named the project maximum role.
+That was too narrow. The project maximum constrains agent roles only; it
+is not general admission control. A single gate — call it
+`CanDelegate` or `GrantAuthorizer` — must cover **every** path that
+creates authority:
 
-**This makes F1.5 load-bearing.** It was important before. It is now the
-only thing that stops a project from granting more than the hub intends.
-It must be tested accordingly.
+1. A direct role binding.
+2. A group binding, and a nested group binding.
+3. Agent delegation.
+4. A custom role definition, and any update to one. Defining a wide role
+   is equivalent to granting it.
+5. Raw policy create, update and bind, **if** a scoped admin can reach
+   those APIs.
+
+Item 5 matters most. A subject who can author a raw allow policy
+bypasses the grantable-role check completely. Whatever the gate refuses,
+a policy can grant.
+
+**Current state, verified.** Today the policy write APIs are gated by
+`requireAdmin`, at the dispatcher (`handlers_policies.go:104`, covering
+create, and `:309`, `:332`, `:400`, `:418`, `:499`). So policy authoring
+is reachable only through the admin role bypass. A scoped admin cannot
+author a raw policy today, because scoped admins do not yet exist.
+
+**The design constraint.** Policy authoring must stay restricted to
+super-admin, **or** it must pass through the same admission gate as
+every other authority-creating path. It must not become an ordinary
+permission that a scoped admin can hold, unless the gate covers it.
+
+**This makes the gate load-bearing.** It was important before. It is now
+the only thing that stops a project, or a scoped admin, from granting
+more than the hub intends. It must be tested on every path above.
 
 **One capability is now absent by design.** There is no way to express a
 non-overridable organizational prohibition, for example "no agent in any
@@ -544,8 +577,13 @@ those are deferred, the interim rule of F0.1 must ship in their place.
 - F1.4 Declarative route guards, from the route table (D2). Add
   authorized SQL filtering for the list endpoints, so that a list does
   not leak rows that a read would refuse.
-- F1.5 `RoleDefinition`, `RoleBinding` and the grantable-role check
-  (D4). Migrate `User.Role` and the project bypasses.
+- F1.5 `RoleDefinition`, `RoleBinding`, and one `CanDelegate` admission
+  gate on every authority-creating path (D4, and section 5.1.1). The
+  paths are: direct binding, group binding, nested-group binding, agent
+  delegation, custom role definition and update, and raw policy write.
+  Migrate `User.Role` and the project bypasses. **This item is
+  load-bearing** — after the sponsor decision it is the only mechanism
+  constraining a project.
 - F1.6 Principal and credential separation (section 6.5).
 - F1.7 Connect the delegation ceiling (section 6.1). Bound every edge.
 - F1.8 Agent token revocation (section 6.4). Add a `jti` and a check at
@@ -665,10 +703,19 @@ are listed in the order that they block work.
    **super-admin**, has an absolute capability, and it has it by bypass.
    Consequences are in section 5.1.1. `PolicyBoundary` is cancelled.
    F1.5 becomes load-bearing.
-2. **Break-glass access.** Partly resolved by the answer to question 1:
-   the renamed super-admin role is the break-glass principal. What
-   remains: who holds it, how it is audited, and confirmation that it is
-   non-delegable and never honoured from a scoped credential.
+2. **Break-glass access.** Partly resolved by the answer to question 1,
+   but **not** fully. Super-admin is the absolute *operational* role.
+   That does not automatically make it the *break-glass credential*.
+   The two should stay separable:
+
+   - Everyday super-admin identities, used by named operators.
+   - A protected recovery credential, which may hold super-admin, with
+     stronger storage and use controls.
+
+   What remains to decide: who holds each; how each is audited; whether
+   super-admin is delegable by a binding (we recommend no); and whether
+   either is ever honoured from a scoped credential (we recommend no,
+   for both).
 3. **Revocation propagation.** *(Reframed. The earlier form — immediate
    delegator versus origin user — was a false choice. Our agreed rule
    binds every edge to the delegator's current entitlements, so the
@@ -739,10 +786,14 @@ A reviewer or QA tester must verify the following.
       by any route.
 - [ ] A list endpoint returns no row that a read on that row would
       refuse.
-- [ ] A scoped admin cannot grant a role wider than their own. This is
-      now the only mechanism that constrains a project, so test it
-      exhaustively: direct grant, grant through a group, grant through a
-      nested group, and grant through an agent.
+- [ ] A scoped admin cannot create authority wider than their own, by
+      **any** path. This is the only mechanism constraining a project,
+      so test every path: direct binding; group binding; nested-group
+      binding; agent delegation; defining a custom role; updating a
+      custom role; and raw policy write.
+- [ ] Raw policy authoring is either restricted to super-admin, or it
+      passes the same admission gate. A scoped admin cannot use a policy
+      to grant what the gate refuses.
 - [ ] A credential can only narrow the permissions of its principal.
       A test proves that no credential widens.
 - [ ] The audit record names the credential, by identifier and type.
@@ -781,6 +832,7 @@ All line numbers are from branch `scion/review-arch`, commit `89ed0fe`.
 | `pkg/hub/handlers_projects_core.go` | 487-517, 564-572, 596-612, 2531-2537 | D8 |
 | `pkg/hub/handlers_agents_core.go` | 626-647 | Section 6.1 |
 | `pkg/store/models.go` | 1752-1764 | D6 (no principal kind on the event) |
+| `pkg/hub/handlers_policies.go` | 104, 309, 332, 400, 418, 499 | Section 5.1.1 (policy writes are admin-gated) |
 | `pkg/store/entadapter/policy_store.go` | 459-466, 177-179, 202-204 | D1 |
 
 **Verification status.**
