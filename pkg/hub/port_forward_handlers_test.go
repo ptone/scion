@@ -68,6 +68,39 @@ func TestAgentPortRegistrationLifecycle(t *testing.T) {
 	assert.Empty(t, got.ExposedPorts)
 }
 
+func TestAuthorizePortRegistrationRejectsScopedHubAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	admin := NewAuthenticatedUser(tid("scoped-port-admin"), "admin@example.com", "Scoped Port Admin", store.UserRoleAdmin, "api")
+	project := &store.Project{
+		ID:      tid("scoped-port-project"),
+		Name:    "Scoped Port Project",
+		Slug:    "scoped-port-project",
+		OwnerID: admin.ID(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID:        tid("scoped-port-agent"),
+		Slug:      "scoped-port-agent",
+		Name:      "Scoped Port Agent",
+		ProjectID: project.ID,
+		OwnerID:   admin.ID(),
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	scoped := NewScopedUserIdentity(admin, project.ID, []string{store.UATScopeAgentPortAccess})
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
+	r = r.WithContext(contextWithIdentity(r.Context(), scoped))
+	w := httptest.NewRecorder()
+
+	_, ok := srv.authorizePortRegistration(w, r, agent.ID)
+
+	assert.False(t, ok, "scoped hub-admin UAT must not use the raw admin port-management shortcut")
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "Scoped access tokens cannot manage exposed ports")
+}
+
 func TestAgentPortRegistrationRejectsNonLoopbackHost(t *testing.T) {
 	srv, s := testServer(t)
 	agent, token := createPortForwardAgent(t, srv, s)

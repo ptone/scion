@@ -56,3 +56,14 @@ Round 1 fix verification:
 - `make ci`: passed.
 
 `npm run lint` was attempted after installing web dependencies and failed on existing repo-wide lint debt unrelated to the Phase 1A scope edit, including test files outside the frontend tsconfig and pre-existing strict eslint violations.
+
+## Round 2 Audit Disposition
+
+- Medium audit finding fixed: `authorizePortRegistration` now rejects `ScopedUserIdentity` before the raw hub-admin shortcut can grant exposed-port registration, deletion, clearing, or tunnel management. Unscoped hub admins retain the existing behavior, and agent identities still require `agent:port:forward`.
+- Regression coverage added: `TestAuthorizePortRegistrationRejectsScopedHubAdmin` gives a scoped hub-admin UAT `agent:port_access` plus independent project/agent ownership, verifies the access check passes far enough to reach registration authorization, and asserts the scoped credential is forbidden.
+- The `js-yaml` npm advisory remains separate web/dependency triage as previously recorded; no Phase 1A registry or auth-surface expansion was made.
+
+Round 2 verification:
+
+- `go test ./pkg/hub -run 'TestAuthorizePortRegistrationRejectsScopedHubAdmin|TestAgentPortRegistrationLifecycle|TestPermissionRegistryEntriesDeclareCurrentUse|TestAuthz_ScopedAdminUATProjectUpdateRequiresIndependentGrant' -count=1`: passed.
+- `go test ./pkg/hub -timeout=600s -count=1`: passed.
