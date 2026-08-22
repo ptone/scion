@@ -3,7 +3,11 @@
 **Project:** permissions-foundation
 **Authors:** review-arch (final editor), codex-auth-review
 **Date:** 2026-08-22
-**Process:** Two independent reviews, then 4 rounds of debate. Convergence at round 2.
+**Process:** Two independent reviews, then 4 rounds of debate.
+Convergence at round 2. Signoff at round 4, with no dissent. One
+editorial correctness pass after signoff.
+**Status:** Open question 1 resolved by the sponsor on 2026-08-22.
+Questions 2 and 3 are open.
 **Language:** ASD-STE100 Simplified Technical English.
 
 ---
@@ -44,10 +48,10 @@ an acceptance test.
 
 **Do not build the new features on the current foundation yet.**
 
-The engine has eight defects. Two of them are live escalations. You must
-repair those two first. The other six are structural. You must repair
-them before the new features, because the new features make each defect
-worse.
+The engine has eight defects. Three of them are live escalations. You
+must repair those three first. The other five are structural. You must
+repair them before the new features, because the new features make each
+defect worse.
 
 The human and agent distinction is correct. Keep it. The **relationship**
 between a human and an agent is missing. That is the real problem.
@@ -97,14 +101,40 @@ today. Each has a small patch.
 so no ancestry check can constrain it. The parent role ceiling does not
 apply. The project maximum does not apply.
 
-Both reviewers found this independently in the source.
+review-arch found this. codex-auth-review verified it independently in
+the source after round 1.
 
-**The patch.** An absent role must resolve to the lowest role, not the
-highest. Change the default in `agentRoleAndScopes`, in
-`ScopesForRole` (`agentrole.go:66-67`) and in `roleOrdinal`
-(`agentrole.go:85-86`). Make the scheduler copy the ancestry and the
-role of the creating agent. Migrate the existing rows that hold an
-empty role, so that the change does not remove access from live agents.
+**The patch, part 1 — the unsafe default.** An absent role must resolve
+to the lowest role, not the highest. Change the default in
+`agentRoleAndScopes`, in `ScopesForRole` (`agentrole.go:66-67`) and in
+`roleOrdinal` (`agentrole.go:85-86`). Migrate the existing rows that
+hold an empty role, so that the change does not remove access from live
+agents.
+
+**The patch, part 2 — the scheduled path.** An earlier draft of this
+advisory said "make the scheduler copy the ancestry and the role of the
+creating agent". That is **not implementable as stated**.
+`ScheduledEvent` (`store/models.go:1752-1764`) stores `CreatedBy` and
+nothing else about the principal. It records no principal kind, no
+ancestry and no role. So the scheduler cannot tell whether the creator
+was a human or an agent, and a human creator has no agent role at all.
+Authority can also change between the schedule time and the fire time.
+
+For P0, do this instead:
+
+- Authorize `dispatch_agent` as `agent:create`, both when the schedule
+  is created and again when it fires.
+- Until the creator kind and the delegation context are persisted,
+  either refuse an agent-authored dispatch schedule, or give the
+  resulting agent the lowest role explicitly.
+
+The durable model stores the creator principal kind and the delegation
+context on the event. At fire time it derives a role that is at most the
+current entitlements of the delegator, subject to the project maximum
+and the template boundary.
+
+**Note:** this means Phase 0 is not free of data-model change. See
+section 7.
 
 ### 4.2 D7: A scoped UAT passes the hub admin check
 
@@ -120,9 +150,24 @@ Exactly one place in the codebase rejects a `ScopedUserIdentity`:
 states the escalation. So the hazard is known but is not fixed
 generally.
 
-**The patch.** `requireAdmin` must reject a `ScopedUserIdentity` unless
-the token holds an explicit hub-admin scope. Use the existing
-`requireHubAdmin` logic at all 14 sites.
+**The patch.** An earlier draft was self-contradictory here. It said
+"reject unless the token holds an explicit hub-admin scope" and then
+said "use `requireHubAdmin`", which rejects every scoped identity. The
+agreed rule is the strict one:
+
+**Reject every UAT at a role-only admin gate.** Apply the existing
+`requireHubAdmin` logic at all 14 sites. Do not add a hub-admin token
+scope as part of this patch.
+
+A hub-scoped credential may exist later. If it does, it must arrive
+through the canonical permission pipeline (F1.1, F1.2), as an ordinary
+permission subject to intersection with the principal. It must never
+arrive as a role bypass.
+
+This rule became more important after the sponsor's decision of
+2026-08-22. The super-admin bypass is now the only absolute authority in
+the system, so it is the highest-value target. A bearer token must never
+carry it.
 
 ### 4.3 D8: Project admin escalation by slug squatting
 
@@ -208,17 +253,21 @@ defective by itself. The tests and the design chose local override on
 purpose, to give projects autonomy. codex-auth-review is right on this
 point, and review-arch withdrew the earlier wording.
 
-**The real defect is representational.** One `Policy` row represents four
-different things:
+**The real defect is representational.** One `Policy` row represents
+several different things:
 
 1. A default.
 2. A delegated grant.
 3. An ordinary deny.
 4. A non-overridable organizational boundary.
 
-The engine cannot tell them apart. So it cannot honour the fourth. An
-administrator cannot write a rule that a project cannot override. Every
-planned feature needs that rule.
+The engine cannot tell them apart.
+
+**Sponsor decision, 2026-08-22.** Item 4 is **not wanted**. A project may
+override a hub rule. Only the super-admin role holds an absolute
+capability, and it holds it by bypass. See section 5.1.1. The remaining
+conflation of items 1 to 3 is still a defect, because the engine cannot
+resolve a tie between them deterministically.
 
 **Two supporting problems.**
 
@@ -236,10 +285,42 @@ planned feature needs that rule.
 Also: `Priority` is stored and sorted on, but the engine never reads it
 to decide. `SourceIPs` is stored and never evaluated.
 
-**The repair.** Introduce explicit `PolicyBoundary` semantics. Rank
-ordinary grants below a boundary. Give the evaluation a total order and
-a documented conflict rule. Reject `SourceIPs` and any other condition
-that is not enforced, until it is enforced.
+**The repair.** Do **not** build `PolicyBoundary`. The sponsor declined
+it. Keep local override. Do the rest:
+
+- Give the evaluation a total order. Add a third sort key, such as the
+  policy ID, so that a tie resolves the same way every time.
+- Make the engine read `Priority`, or remove the field. Today it is
+  stored and sorted on, but never read to decide.
+- Reject `SourceIPs` and any other condition that is not enforced, until
+  it is enforced.
+- Distinguish a default from an explicit deny, so that a tie between
+  them has a documented outcome.
+
+### 5.1.1 Where organizational constraint now lives
+
+The sponsor's answer moves constraint from **evaluation time** to
+**admission time**. This is a coherent choice, and arguably a cleaner
+one. The consequence must be explicit.
+
+The hub can no longer say "no project may allow X" through a policy.
+Instead the hub must prevent the grant from being created at all. Two
+mechanisms carry this load:
+
+- The grantable-role check (F1.5). A subject cannot grant a role wider
+  than the role that they hold.
+- The project maximum role, which already exists for agents.
+
+**This makes F1.5 load-bearing.** It was important before. It is now the
+only thing that stops a project from granting more than the hub intends.
+It must be tested accordingly.
+
+**One capability is now absent by design.** There is no way to express a
+non-overridable organizational prohibition, for example "no agent in any
+project may reach the public internet". The super-admin bypass does not
+supply this. A bypass grants; it does not forbid. If such a rule is
+needed later, the place to add it is the admission-time check, not
+policy precedence. We record this as a known limit, not as a defect.
 
 ### 5.2 D2: Enforcement is opt-in per handler
 
@@ -432,16 +513,22 @@ the credential type in the audit context.
 
 ### Phase 0 — Patch the live escalations
 
-- F0.1 Fix D6. An absent role resolves to the lowest role. The scheduler
-  copies the ancestry and the role.
-- F0.2 Fix D7. `requireAdmin` rejects a scoped identity at all 14 sites.
+- F0.1 Fix D6. An absent role resolves to the lowest role. Authorize
+  `dispatch_agent` as `agent:create` at schedule time and at fire time.
+  Refuse an agent-authored dispatch schedule, or force the lowest role,
+  until the creator kind is persisted. See section 4.1.
+- F0.2 Fix D7. Reject every UAT at all 14 role-only admin gates.
 - F0.3 Fix D8. Guard `createGroup`. Reserve the `project:` slug
-  namespace. Narrow `isProjectOwnerOrAdmin` to the members group.
+  namespace. Refuse to adopt a colliding group. Narrow
+  `isProjectOwnerOrAdmin` to the canonical relation.
 - F0.4 Add a route classification test. The test lists every route and
   its required permission. It fails on an undeclared route. Run it
   against the current tree and record the gaps.
 
-Phase 0 changes no data model. It can ship immediately.
+Phase 0 is mostly behavioural, but it is **not** free of data-model
+change. F0.1 needs a migration for the agent rows that hold an empty
+role. The durable half of F0.1 needs new fields on `ScheduledEvent`; if
+those are deferred, the interim rule of F0.1 must ship in their place.
 
 ### Phase 1 — The foundation
 
@@ -450,8 +537,10 @@ Phase 0 changes no data model. It can ship immediately.
 - F1.2 One `AuthzRequest` and `Decision` pipeline for every principal
   kind (D2, and section 6.2). Keep the agent-specific rules — same
   project, self, no escalation — as mandatory boundaries inside it.
-- F1.3 Boundary and precedence semantics (D1). Add `PolicyBoundary`.
-  Give the evaluation a total order.
+- F1.3 Precedence and determinism (D1). Give the evaluation a total
+  order. Make the engine read `Priority` or remove it. Reject
+  unenforced conditions. **Do not build `PolicyBoundary`** — the sponsor
+  declined it on 2026-08-22. See sections 5.1 and 5.1.1.
 - F1.4 Declarative route guards, from the route table (D2). Add
   authorized SQL filtering for the list endpoints, so that a list does
   not leak rows that a read would refuse.
@@ -528,7 +617,7 @@ Three positions changed during the debate. We record them for honesty.
    claim. The advisory now states the defect as a representational one.
 2. **PostgreSQL tie order.** review-arch first speculated about the
    PostgreSQL behaviour, and could not test it — no PostgreSQL was
-   available in the container. codex-auth-require corrected the framing
+   available in the container. codex-auth-review corrected the framing
    to "SQL gives no guaranteed tie order". The observed flip is marked
    SQLite-only. A speculative claim about UPDATE was removed.
 3. **D5 wording.** review-arch wrote "structurally impossible".
@@ -547,6 +636,22 @@ that the durable D8 repair not depend on a slug. Section 4.3 now
 specifies a system-managed relation keyed by the immutable project ID.
 review-arch accepted this without change.
 
+**Editorial review after signoff.** codex-auth-review reviewed the
+finished document and found six errors. review-arch accepted all six.
+Two were substantive, and both were review-arch's:
+
+- The D7 patch contradicted itself. It said "reject unless the token
+  holds a hub-admin scope", then prescribed `requireHubAdmin`, which
+  rejects every scoped identity. The strict rule now stands.
+- The D6 patch was not implementable. It said the scheduler should copy
+  the creator's ancestry and role, but `ScheduledEvent` records no
+  principal kind. review-arch verified this in the source and rewrote
+  the patch. The claim that Phase 0 changes no data model was withdrawn.
+
+codex-auth-review also corrected the D6 attribution **against their own
+interest**: review-arch found D6, and codex-auth-review verified it
+afterwards. The earlier text said both found it independently.
+
 ---
 
 ## 10. Open Questions
@@ -554,15 +659,24 @@ review-arch accepted this without change.
 These need a product decision. They are not reviewer disagreements. They
 are listed in the order that they block work.
 
-1. **Boundary semantics.** May a hub-level rule be non-overridable by a
-   project? This determines the `PolicyBoundary` data model. It blocks
-   F1.3. *(Raised with the sponsor.)*
-2. **Break-glass access.** We recommend one protected recovery
-   principal, narrowly configured, strongly audited, and never accepted
-   from a scoped credential. Who holds it? How is it audited?
-3. **Delegation ceiling.** Does the ceiling follow the immediate
-   delegator or the origin user? Both reviewers prefer the immediate
-   delegator. It blocks F1.7.
+1. ~~**Boundary semantics.** May a hub-level rule be non-overridable by
+   a project?~~ **RESOLVED, 2026-08-22.** No. A project may override a
+   hub rule. Only the hub-admin role, which the sponsor plans to rename
+   **super-admin**, has an absolute capability, and it has it by bypass.
+   Consequences are in section 5.1.1. `PolicyBoundary` is cancelled.
+   F1.5 becomes load-bearing.
+2. **Break-glass access.** Partly resolved by the answer to question 1:
+   the renamed super-admin role is the break-glass principal. What
+   remains: who holds it, how it is audited, and confirmation that it is
+   non-delegable and never honoured from a scoped credential.
+3. **Revocation propagation.** *(Reframed. The earlier form — immediate
+   delegator versus origin user — was a false choice. Our agreed rule
+   binds every edge to the delegator's current entitlements, so the
+   origin is already bounded transitively.)* The real question: when a
+   user loses a permission, must every agent below them lose it at the
+   next decision, through every ancestor? Or do existing agents keep a
+   snapshot of their grant until it expires? Both reviewers recommend
+   live propagation through every edge. It blocks F1.7.
 4. **Migration of existing agents.** Agents with an empty role currently
    run as full. Fixing D6 will remove their access. Do we migrate them
    to `full` explicitly, or do we force a re-grant?
@@ -580,12 +694,16 @@ A reviewer or QA tester must verify the following.
 
 - [ ] An agent with the `readonly` role cannot create an agent with a
       wider role, by any route, including `dispatch_agent`.
-- [ ] An agent created by the scheduler has the ancestry and the role of
-      its creator.
+- [ ] `dispatch_agent` is authorized as `agent:create` when the schedule
+      is created, and again when it fires.
+- [ ] An agent-authored dispatch schedule is either refused, or produces
+      an agent with the lowest role.
 - [ ] An agent row with an empty role resolves to the lowest role, not
       full.
-- [ ] A project-scoped, read-only UAT of an admin is refused at all 14
-      `requireAdmin` sites.
+- [ ] The migration for empty-role agent rows runs, and no live agent
+      loses intended access.
+- [ ] **Every** UAT is refused at all 14 role-only admin gates,
+      including a UAT of a super-admin.
 - [ ] `POST /api/v1/groups` refuses an unauthorized caller.
 - [ ] A user cannot create a group whose slug starts with `project:`.
 - [ ] A pre-existing group with the slug `project:NAME:members` does not
@@ -610,12 +728,21 @@ A reviewer or QA tester must verify the following.
       project, self, no escalation — are mandatory inside it.
 - [ ] Policy evaluation has a total order. The same input gives the same
       output over 100 runs, with rows inserted in a different order.
-- [ ] A hub boundary rule cannot be overridden by a project policy.
 - [ ] A stored condition that is not enforced, such as `SourceIPs`, is
       rejected at write time.
+- [ ] `Priority` changes the outcome of a decision, or the field is
+      removed.
+- [ ] A project policy **can** override a hub policy. This is intended
+      behaviour, per the sponsor decision of 2026-08-22. A test pins it,
+      so that a later change does not alter it silently.
+- [ ] The super-admin bypass is never honoured from a scoped credential,
+      by any route.
 - [ ] A list endpoint returns no row that a read on that row would
       refuse.
-- [ ] A scoped admin cannot grant a role wider than their own.
+- [ ] A scoped admin cannot grant a role wider than their own. This is
+      now the only mechanism that constrains a project, so test it
+      exhaustively: direct grant, grant through a group, grant through a
+      nested group, and grant through an agent.
 - [ ] A credential can only narrow the permissions of its principal.
       A test proves that no credential widens.
 - [ ] The audit record names the credential, by identifier and type.
@@ -653,13 +780,15 @@ All line numbers are from branch `scion/review-arch`, commit `89ed0fe`.
 | `pkg/hub/handlers_groups.go` | 40-49, 148, 162-171, 178-181, 217-227, 326, 383, 487, 722 | D8 |
 | `pkg/hub/handlers_projects_core.go` | 487-517, 564-572, 596-612, 2531-2537 | D8 |
 | `pkg/hub/handlers_agents_core.go` | 626-647 | Section 6.1 |
+| `pkg/store/models.go` | 1752-1764 | D6 (no principal kind on the event) |
 | `pkg/store/entadapter/policy_store.go` | 459-466, 177-179, 202-204 | D1 |
 
 **Verification status.**
 
 - D1 case (a) and case (b): verified by execution, on SQLite.
 - D1 ordering: verified by source reading. Confirmed by both reviewers.
-- D6: verified in source by both reviewers, independently.
+- D6: found by review-arch, then verified in source by
+  codex-auth-review.
 - D8: verified in source by review-arch, during round 3.
 - Federated identity handlers: **not swept**. See open question 5.
 - PostgreSQL tie behaviour: **not tested**. No PostgreSQL was available.
