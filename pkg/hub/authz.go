@@ -117,14 +117,18 @@ func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resou
 // checkAccessForUser evaluates access for a user principal.
 func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity, resource Resource, action Action) Decision {
 	// 0. If the identity is scoped (UAT), enforce project + scope constraints first.
-	if scoped, ok := user.(*ScopedUserIdentity); ok {
-		if denied := a.enforceUATConstraints(scoped, resource, action); denied != nil {
+	scoped := false
+	if scopedIdentity, ok := user.(*ScopedUserIdentity); ok {
+		scoped = true
+		if denied := a.enforceUATConstraints(scopedIdentity, resource, action); denied != nil {
 			return *denied
 		}
 	}
 
-	// 1. Admin bypass
-	if user.Role() == "admin" {
+	// 1. Admin bypass. Scoped UAT credentials must not inherit hub-admin
+	// semantics from the underlying user after their project/scope constraints
+	// pass; they continue through owner, project membership, and policy grants.
+	if !scoped && user.Role() == "admin" {
 		return Decision{
 			Allowed: true,
 			Reason:  "admin bypass",

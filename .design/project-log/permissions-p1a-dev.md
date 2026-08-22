@@ -16,7 +16,19 @@ Branch: scion/permissions-p1a
 
 - Phase 1A does not introduce PolicyBoundary or centralize route enforcement. Registry `Enforcement` and `NonRouteUse` metadata document current use sites so drift tests can fail when exposed vocabulary has no matching use.
 - Current agent lifecycle capability exposure uses `agent:attach`; `agent:start`, `agent:stop`, and `agent:message` remain as legacy action constants but are not exposed as independent capabilities or valid new UAT scopes.
-- The web scope list remains static in this phase. It is guarded by a Hub drift test that scans the component for stale and required scope strings.
+- The web scope list remains static in this phase. It is guarded by a Hub drift test that parses `AVAILABLE_SCOPES` and compares it exactly to registry UAT scopes, including aliases.
+
+## Round 1 Audit And QA Disposition
+
+- Medium audit finding fixed: `AuthzService.CheckAccess` now prevents `ScopedUserIdentity` credentials from using the role-only hub admin bypass after UAT project/scope constraints pass. Scoped UATs continue through owner, project owner/admin membership, hub-member baselines, and policy grants.
+- Regression coverage added: scoped admin UAT with `project:update` is denied when the underlying admin role is the only authority, and allowed when the underlying user has an explicit policy grant or project admin membership.
+- Low audit finding strengthened in scope: registry `Enforcement` entries now must point at an existing source file, and `file.go:symbol` entries must contain the referenced symbol.
+- Required code review finding fixed: `agent:port:forward` is mapped only to `agent.port_forward` and no longer appears on user-facing `agent.port_access`.
+- Agent token drift coverage strengthened: known agent token scopes now assert exact registry permission ID mappings, including the intentional `project:agent:lifecycle` mapping to `agent.attach` and `agent.delete`.
+- Medium QA follow-up strengthened in scope: the web token scope list drift test now performs exact registry equality rather than only stale/required substring checks.
+- Low QA follow-up fixed in scope: `cmd` now has a focused `TestHubTokenCreateHelpUsesRegistryScopes` test for direct command help coverage.
+- `npm audit` high `js-yaml` advisory is outside Phase 1A permission-registry scope. Recommended owner: web/dependency maintenance. Risk: `web/src/components/pages/skill-create.ts` imports `js-yaml`; reachability and upgrade impact should be triaged in a separate dependency security task.
+- `npm run lint` remains a non-blocking repo-wide/pre-existing web lint debt item; the Phase 1A edit did not introduce a new lint category.
 
 ## Verification
 
@@ -29,6 +41,18 @@ Branch: scion/permissions-p1a
 - `npm run typecheck` in `web/`: passed.
 - `npx prettier --check src/components/shared/token-list.ts` in `web/`: passed.
 - `npm run build` in `web/`: passed.
+- `make ci`: passed.
+
+Round 1 fix verification:
+
+- `go test ./pkg/hub -run 'TestPermissionRegistryEntriesDeclareCurrentUse|TestTokenScopeSurfacesDoNotExposeStaleUATScopes|TestAuthz_ScopedAdminUATProjectUpdateRequiresIndependentGrant|TestAuthz_AdminBypass|TestAuthz_ProjectOwnerBypass' -count=1`: passed.
+- `go test ./cmd -run '^TestHubTokenCreateHelpUsesRegistryScopes$' -count=1`: passed.
+- `go test ./pkg/hub -run 'TestAgentTokenScopesMapToRegistry|TestPermissionRegistryEntriesDeclareCurrentUse|TestTokenScopeSurfacesDoNotExposeStaleUATScopes' -count=1`: passed.
+- `go test ./pkg/hub -run 'TestPermissionRegistryEntriesDeclareCurrentUse|TestCapabilityActionMapsAreRegistryDerived|TestUATScopesAreRegistryDerived|TestAgentTokenScopesMapToRegistry|TestTokenScopeSurfacesDoNotExposeStaleUATScopes|TestAuthz_ScopedAdminUATProjectUpdateRequiresIndependentGrant|TestAuthz_AdminBypass|TestAuthz_ProjectOwnerBypass|TestCreateToken|TestValidateToken|TestExpandScopes|TestScopedUserIdentity|TestResourceActions_AgentLifecycleUsesAttachPermission' -timeout=120s -count=1`: passed.
+- `go test ./cmd -run '^TestHubTokenCreateHelpUsesRegistryScopes$' -timeout=120s -count=1`: passed.
+- `go test ./pkg/hub -timeout=600s -count=1`: passed.
+- `npm run typecheck` in `web/`: passed.
+- `npx prettier --check src/components/shared/token-list.ts` in `web/`: passed.
 - `make ci`: passed.
 
 `npm run lint` was attempted after installing web dependencies and failed on existing repo-wide lint debt unrelated to the Phase 1A scope edit, including test files outside the frontend tsconfig and pre-existing strict eslint violations.

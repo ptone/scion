@@ -16,6 +16,8 @@ package hub
 
 import (
 	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -43,6 +45,9 @@ func TestPermissionRegistryEntriesDeclareCurrentUse(t *testing.T) {
 		}
 		if len(permission.Enforcement) == 0 && len(permission.NonRouteUse) == 0 {
 			t.Fatalf("%s must declare route enforcement or explicit non-route use", permission.ID)
+		}
+		for _, enforcement := range permission.Enforcement {
+			assertEnforcementReferenceExists(t, permission.ID, enforcement)
 		}
 	}
 }
@@ -96,20 +101,22 @@ func TestUATScopesAreRegistryDerived(t *testing.T) {
 }
 
 func TestAgentTokenScopesMapToRegistry(t *testing.T) {
-	for _, scope := range []AgentTokenScope{
-		ScopeAgentStatusUpdate,
-		ScopeAgentLogAppend,
-		ScopeProjectSecretRead,
-		ScopeAgentCreate,
-		ScopeAgentLifecycle,
-		ScopeAgentNotify,
-		ScopeAgentTokenRefresh,
-		ScopeAgentPortForward,
-		ScopeIdentityToken,
-		ScopeProjectRead,
-	} {
-		if !registryHasAgentScope(string(scope)) {
-			t.Fatalf("agent token scope %q is not declared by permission registry", scope)
+	want := map[AgentTokenScope][]string{
+		ScopeAgentStatusUpdate: {"agent.status_update"},
+		ScopeAgentLogAppend:    {"agent.log_append"},
+		ScopeProjectSecretRead: {"project.secret_read"},
+		ScopeAgentCreate:       {"agent.create"},
+		ScopeAgentLifecycle:    {"agent.attach", "agent.delete"},
+		ScopeAgentNotify:       {"agent.notify"},
+		ScopeAgentTokenRefresh: {"agent.token_refresh"},
+		ScopeAgentPortForward:  {"agent.port_forward"},
+		ScopeIdentityToken:     {"agent.identity_token"},
+		ScopeProjectRead:       {"project.read"},
+	}
+	for scope, wantIDs := range want {
+		gotIDs := registryPermissionIDsForAgentScope(string(scope))
+		if strings.Join(gotIDs, "\n") != strings.Join(wantIDs, "\n") {
+			t.Fatalf("agent token scope %q maps to wrong registry permissions\ngot:  %v\nwant: %v", scope, gotIDs, wantIDs)
 		}
 	}
 }
@@ -132,15 +139,10 @@ func TestTokenScopeSurfacesDoNotExposeStaleUATScopes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		for _, stale := range []string{"agent:start", "agent:stop", "agent:message", "agent:dispatch"} {
-			if strings.Contains(string(content), stale) {
-				t.Fatalf("%s still exposes stale UAT scope %q", path, stale)
-			}
-		}
-		for _, required := range []string{"project:update", "agent:port_access"} {
-			if !strings.Contains(string(content), required) {
-				t.Fatalf("%s does not expose valid UAT scope %q", path, required)
-			}
+		got := extractWebTokenScopes(t, path, string(content))
+		want := registryUATScopes(true)
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("%s AVAILABLE_SCOPES drifted from registry\ngot:  %v\nwant: %v", path, got, want)
 		}
 	}
 }
@@ -189,11 +191,71 @@ func stringSliceMapEqual(a, b map[string][]string) bool {
 	return true
 }
 
-func registryHasAgentScope(scope string) bool {
+func registryPermissionIDsForAgentScope(scope string) []string {
+	var ids []string
 	for _, permission := range permissions.Registry {
 		if slices.Contains(permission.AgentScopes, scope) {
-			return true
+			ids = append(ids, permission.ID)
 		}
 	}
-	return false
+	sort.Strings(ids)
+	return ids
+}
+
+func assertEnforcementReferenceExists(t *testing.T, permissionID, enforcement string) {
+	t.Helper()
+
+	fileRef, symbolRef, _ := strings.Cut(enforcement, ":")
+	if fileRef == "" {
+		t.Fatalf("%s has empty enforcement file reference %q", permissionID, enforcement)
+	}
+	path := filepath.Clean(filepath.Join("..", "..", fileRef))
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("%s enforcement reference %q points to missing file: %v", permissionID, enforcement, err)
+	}
+	if symbolRef != "" && !strings.Contains(string(content), symbolRef) {
+		t.Fatalf("%s enforcement reference %q points to missing symbol %q", permissionID, enforcement, symbolRef)
+	}
+}
+
+func extractWebTokenScopes(t *testing.T, path, content string) []string {
+	t.Helper()
+
+	start := strings.Index(content, "const AVAILABLE_SCOPES = [")
+	if start < 0 {
+		t.Fatalf("%s missing AVAILABLE_SCOPES declaration", path)
+	}
+	end := strings.Index(content[start:], "] as const;")
+	if end < 0 {
+		t.Fatalf("%s missing AVAILABLE_SCOPES terminator", path)
+	}
+	block := content[start : start+end]
+
+	matches := regexp.MustCompile(`value:\s*'([^']+)'`).FindAllStringSubmatch(block, -1)
+	if len(matches) == 0 {
+		t.Fatalf("%s AVAILABLE_SCOPES has no scope values", path)
+	}
+	scopes := make([]string, 0, len(matches))
+	seen := map[string]bool{}
+	for _, match := range matches {
+		scope := match[1]
+		if seen[scope] {
+			t.Fatalf("%s AVAILABLE_SCOPES contains duplicate scope %q", path, scope)
+		}
+		seen[scope] = true
+		scopes = append(scopes, scope)
+	}
+	sort.Strings(scopes)
+	return scopes
+}
+
+func registryUATScopes(includeAliases bool) []string {
+	options := permissions.UATScopeOptions(includeAliases)
+	scopes := make([]string, 0, len(options))
+	for _, option := range options {
+		scopes = append(scopes, option.UATScope)
+	}
+	sort.Strings(scopes)
+	return scopes
 }
