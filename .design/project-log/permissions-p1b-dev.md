@@ -64,3 +64,14 @@
 - Added branch-level regressions proving a policy-authorized federated admin
   cannot escalate a group member and a non-member federated admin cannot use
   project-scoped stop-all.
+
+## Round 3 Security Audit Remediation
+
+- Updated hub pre-start-hook mutation and script-visibility checks to use
+  `IsUnscopedLocalPlatformAdmin`, denying both scoped and federated admin
+  identities while preserving unscoped local-admin access.
+- Redacted hub hook scripts from both list and detail responses for readers
+  that are not unscoped local platform admins.
+- Added a federated-admin regression covering create, update, activate,
+  delete, list, and detail; unscoped local-admin create/list/detail coverage
+  remains in the handler suite.
