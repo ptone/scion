@@ -75,3 +75,12 @@
 - Added a federated-admin regression covering create, update, activate,
   delete, list, and detail; unscoped local-admin create/list/detail coverage
   remains in the handler suite.
+
+## Round 4 Code Review Remediation
+
+- Updated `authorizePortRegistration` to use
+  `IsUnscopedLocalPlatformAdmin` for its direct port-management bypass while
+  retaining the existing scoped-token denial response.
+- Added a regression where a federated admin has an ordinary policy grant for
+  `agent:port_access` but is still forbidden from port registration/tunneling.
+  The same suite explicitly retains unscoped local-admin access.

@@ -532,7 +532,7 @@ func (s *Server) authorizePortRegistration(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Scoped access tokens cannot manage exposed ports", nil)
 			return nil, false
 		}
-		if userIdent.Role() == store.UserRoleAdmin {
+		if IsUnscopedLocalPlatformAdmin(userIdent) {
 			return agent, true
 		}
 	}
