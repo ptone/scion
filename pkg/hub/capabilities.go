@@ -192,8 +192,11 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 	}
 
 	// Admin short-circuit: return all actions
-	if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
+	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
 		return allActions(actions)
+	}
+	if IsScopedUserIdentity(identity) {
+		return a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 	}
 
 	// Project owner/admin short-circuit: full access on project and project-scoped
@@ -228,7 +231,7 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 	}
 
 	// Admin short-circuit
-	if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
+	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
 		return allActions(actions)
 	}
 
@@ -236,6 +239,9 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 		Type:       resourceType,
 		ParentType: scopeType,
 		ParentID:   scopeID,
+	}
+	if IsScopedUserIdentity(identity) {
+		return a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 	}
 
 	// Project owner/admin short-circuit at scope level (e.g. agent:create
@@ -272,11 +278,18 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 	}
 
 	// Admin short-circuit: return all actions for all resources
-	if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
+	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
 		allCap := allActions(actions)
 		caps := make([]*Capabilities, len(resources))
 		for i := range caps {
 			caps[i] = allCap
+		}
+		return caps
+	}
+	if IsScopedUserIdentity(identity) {
+		caps := make([]*Capabilities, len(resources))
+		for i, resource := range resources {
+			caps[i] = a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 		}
 		return caps
 	}
@@ -334,6 +347,22 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		caps[i] = &Capabilities{Actions: allowed}
 	}
 	return caps
+}
+
+// computeCapabilitiesWithContext evaluates every action through the canonical
+// request path so credential caveats (notably UAT project and scope limits)
+// cannot be bypassed by capability projections.
+func (a *AuthzService) computeCapabilitiesWithContext(ctx context.Context, identity Identity, resource Resource, actions []Action) *Capabilities {
+	if GetIdentityFromContext(ctx) != identity {
+		ctx = contextWithIdentity(ctx, identity)
+	}
+	allowed := make([]string, 0, len(actions))
+	for _, action := range actions {
+		if a.DecideFromContext(ctx, resource, action).Allowed {
+			allowed = append(allowed, string(action))
+		}
+	}
+	return &Capabilities{Actions: allowed}
 }
 
 // precomputeForIdentity fetches group memberships and policies once for an identity.

@@ -19,6 +19,8 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"testing"
 
@@ -115,6 +117,62 @@ func TestComputeCapabilitiesBatch_AdminGetsAll(t *testing.T) {
 	require.Len(t, caps, 3)
 	for _, cap := range caps {
 		assert.Equal(t, expectedAgentResourceActions(), cap.Actions)
+	}
+}
+
+func TestComputeCapabilitiesBatch_ScopedAdminCannotReadCrossProjectResources(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	admin := NewAuthenticatedUser(tid("scoped-cap-admin"), "admin@example.com", "Admin", store.UserRoleAdmin, "api")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: admin.ID(), Email: admin.Email(), DisplayName: admin.DisplayName(), Role: store.UserRoleAdmin, Status: "active"}))
+	projectA := tid("scoped-cap-project-a")
+	projectB := tid("scoped-cap-project-b")
+	policy := &store.Policy{ID: tid("scoped-cap-read"), Name: "Scoped project read", ScopeType: "project", ScopeID: projectA, ResourceType: "agent", Actions: []string{"read"}, Effect: "allow"}
+	require.NoError(t, s.CreatePolicy(ctx, policy))
+	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{PolicyID: policy.ID, PrincipalType: "user", PrincipalID: admin.ID()}))
+	scoped := NewScopedUserIdentity(admin, projectA, []string{"agent:read"})
+	ctx = contextWithIdentity(ctx, scoped)
+
+	caps := srv.authzService.ComputeCapabilitiesBatch(ctx, scoped, []Resource{
+		{Type: "agent", ID: tid("scoped-cap-agent-a"), ParentType: "project", ParentID: projectA},
+		{Type: "agent", ID: tid("scoped-cap-agent-b"), ParentType: "project", ParentID: projectB},
+	}, "agent")
+
+	require.Len(t, caps, 2)
+	assert.Contains(t, caps[0].Actions, "read")
+	assert.NotContains(t, caps[1].Actions, "read")
+}
+
+func TestScopedAdminListsExcludeCrossProjectCapabilities(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	admin := NewAuthenticatedUser(tid("scoped-list-admin"), "admin@example.com", "Admin", store.UserRoleAdmin, "api")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: admin.ID(), Email: admin.Email(), DisplayName: admin.DisplayName(), Role: store.UserRoleAdmin, Status: "active"}))
+	projectA := &store.Project{ID: tid("scoped-list-project-a"), Name: "Project A", Slug: "scoped-list-project-a"}
+	projectB := &store.Project{ID: tid("scoped-list-project-b"), Name: "Project B", Slug: "scoped-list-project-b"}
+	require.NoError(t, s.CreateProject(ctx, projectA))
+	require.NoError(t, s.CreateProject(ctx, projectB))
+	agentA := &store.Agent{ID: tid("scoped-list-agent-a"), Name: "Agent A", Slug: "scoped-list-agent-a", ProjectID: projectA.ID, Phase: "running"}
+	agentB := &store.Agent{ID: tid("scoped-list-agent-b"), Name: "Agent B", Slug: "scoped-list-agent-b", ProjectID: projectB.ID, Phase: "running"}
+	require.NoError(t, s.CreateAgent(ctx, agentA))
+	require.NoError(t, s.CreateAgent(ctx, agentB))
+	for _, policy := range []*store.Policy{
+		{ID: tid("scoped-list-agent-read"), Name: "Agent read", ScopeType: "project", ScopeID: projectA.ID, ResourceType: "agent", Actions: []string{"read"}, Effect: "allow"},
+		{ID: tid("scoped-list-project-read"), Name: "Project read", ScopeType: "project", ScopeID: projectA.ID, ResourceType: "project", Actions: []string{"read"}, Effect: "allow"},
+	} {
+		require.NoError(t, s.CreatePolicy(ctx, policy))
+		require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{PolicyID: policy.ID, PrincipalType: "user", PrincipalID: admin.ID()}))
+	}
+	scoped := NewScopedUserIdentity(admin, projectA.ID, []string{"agent:read", "project:read"})
+
+	for _, handler := range []func(http.ResponseWriter, *http.Request){srv.listAgents, srv.listProjects} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil).WithContext(contextWithIdentity(ctx, scoped))
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), projectA.ID)
+		assert.NotContains(t, rec.Body.String(), projectB.ID)
+		assert.NotContains(t, rec.Body.String(), agentB.ID)
 	}
 }
 
