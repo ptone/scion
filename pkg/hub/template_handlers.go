@@ -229,7 +229,19 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	}
 	totalCount := result.TotalCount
 	if user, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(user) {
-		totalCount = len(templates)
+		all, err := s.store.ListTemplates(ctx, filter, store.ListOptions{Limit: result.TotalCount})
+		if err == nil {
+			resources := make([]Resource, len(all.Items))
+			for i := range all.Items {
+				resources[i] = templateResource(&all.Items[i])
+			}
+			totalCount = 0
+			for _, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "template") {
+				if capabilityAllows(cap, ActionRead) {
+					totalCount++
+				}
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, ListTemplatesResponse{

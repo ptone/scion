@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -173,6 +174,54 @@ func TestScopedAdminListsExcludeCrossProjectCapabilities(t *testing.T) {
 		assert.Contains(t, rec.Body.String(), projectA.ID)
 		assert.NotContains(t, rec.Body.String(), projectB.ID)
 		assert.NotContains(t, rec.Body.String(), agentB.ID)
+	}
+}
+
+func TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	admin := NewAuthenticatedUser(tid("scoped-list-endpoint-admin"), "admin@example.com", "Admin", store.UserRoleAdmin, "api")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: admin.ID(), Email: admin.Email(), DisplayName: admin.DisplayName(), Role: store.UserRoleAdmin, Status: "active"}))
+	projectA := &store.Project{ID: tid("scoped-list-endpoint-a"), Name: "Project A", Slug: "scoped-list-endpoint-a"}
+	projectB := &store.Project{ID: tid("scoped-list-endpoint-b"), Name: "Project B", Slug: "scoped-list-endpoint-b"}
+	require.NoError(t, s.CreateProject(ctx, projectA))
+	require.NoError(t, s.CreateProject(ctx, projectB))
+	now := time.Now()
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: tid("scoped-list-template-a"), Name: "Template A", Slug: "scoped-list-template-a", Scope: store.TemplateScopeProject, ScopeID: projectA.ID, Harness: "claude", Status: store.TemplateStatusActive, Created: now, Updated: now}))
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: tid("scoped-list-template-b"), Name: "Template B", Slug: "scoped-list-template-b", Scope: store.TemplateScopeProject, ScopeID: projectB.ID, Harness: "claude", Status: store.TemplateStatusActive, Created: now, Updated: now}))
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: tid("scoped-list-config-a"), Name: "Config A", Slug: "scoped-list-config-a", Scope: store.HarnessConfigScopeProject, ScopeID: projectA.ID, Harness: "claude", Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: tid("scoped-list-config-b"), Name: "Config B", Slug: "scoped-list-config-b", Scope: store.HarnessConfigScopeProject, ScopeID: projectB.ID, Harness: "claude", Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: tid("scoped-list-group-a"), Name: "Group A", Slug: "scoped-list-group-a", GroupType: store.GroupTypeExplicit, ProjectID: projectA.ID, OwnerID: admin.ID()}))
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: tid("scoped-list-group-b"), Name: "Group B", Slug: "scoped-list-group-b", GroupType: store.GroupTypeExplicit, ProjectID: projectB.ID, OwnerID: admin.ID()}))
+	for _, policy := range []*store.Policy{
+		{ID: tid("scoped-list-template-read"), Name: "Template read", ScopeType: "project", ScopeID: projectA.ID, ResourceType: "template", Actions: []string{"read"}, Effect: "allow"},
+		{ID: tid("scoped-list-config-read"), Name: "Config read", ScopeType: "project", ScopeID: projectA.ID, ResourceType: "harness_config", Actions: []string{"read"}, Effect: "allow"},
+		{ID: tid("scoped-list-group-read"), Name: "Group read", ScopeType: "project", ScopeID: projectA.ID, ResourceType: "group", Actions: []string{"read"}, Effect: "allow"},
+	} {
+		require.NoError(t, s.CreatePolicy(ctx, policy))
+		require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{PolicyID: policy.ID, PrincipalType: "user", PrincipalID: admin.ID()}))
+	}
+	scoped := NewScopedUserIdentity(admin, projectA.ID, []string{"template:read", "harness_config:read", "group:read"})
+	for _, tc := range []struct {
+		path, allowedID, deniedID string
+		handler                   func(http.ResponseWriter, *http.Request)
+	}{
+		{"/api/v1/templates", tid("scoped-list-template-a"), tid("scoped-list-template-b"), srv.listTemplatesV2},
+		{"/api/v1/harness-configs", tid("scoped-list-config-a"), tid("scoped-list-config-b"), srv.listHarnessConfigs},
+		{"/api/v1/groups", tid("scoped-list-group-a"), tid("scoped-list-group-b"), srv.listGroups},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			for _, path := range []string{tc.path, tc.path + "?projectId=" + projectB.ID} {
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(contextWithIdentity(ctx, scoped))
+				tc.handler(rec, req)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.NotContains(t, rec.Body.String(), tc.deniedID)
+				if path == tc.path {
+					assert.Contains(t, rec.Body.String(), tc.allowedID)
+				}
+			}
+		})
 	}
 }
 

@@ -140,7 +140,19 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	}
 	totalCount := result.TotalCount
 	if user, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(user) {
-		totalCount = len(groups)
+		all, err := s.store.ListGroups(ctx, filter, store.ListOptions{Limit: result.TotalCount})
+		if err == nil {
+			resources := make([]Resource, len(all.Items))
+			for i := range all.Items {
+				resources[i] = groupResource(&all.Items[i])
+			}
+			totalCount = 0
+			for _, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "group") {
+				if capabilityAllows(cap, ActionRead) {
+					totalCount++
+				}
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, ListGroupsResponse{

@@ -213,7 +213,19 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 	}
 	totalCount := result.TotalCount
 	if user, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(user) {
-		totalCount = len(items)
+		all, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: result.TotalCount})
+		if err == nil {
+			resources := make([]Resource, len(all.Items))
+			for i := range all.Items {
+				resources[i] = harnessConfigResource(&all.Items[i])
+			}
+			totalCount = 0
+			for _, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "harness_config") {
+				if capabilityAllows(cap, ActionRead) {
+					totalCount++
+				}
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, ListHarnessConfigsResponse{
