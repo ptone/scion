@@ -274,6 +274,54 @@ func TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches
 	}
 }
 
+func TestListEndpointsRejectMalformedAndCrossBoundCursors(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	admin := NewAuthenticatedUser(tid("cursor-admin"), "cursor-admin@example.com", "Admin", store.UserRoleAdmin, "api")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: admin.ID(), Email: admin.Email(), DisplayName: admin.DisplayName(), Role: store.UserRoleAdmin, Status: "active"}))
+	projectA := &store.Project{ID: tid("cursor-project-a"), Name: "Cursor A", Slug: "cursor-a"}
+	projectB := &store.Project{ID: tid("cursor-project-b"), Name: "Cursor B", Slug: "cursor-b"}
+	require.NoError(t, s.CreateProject(ctx, projectA))
+	require.NoError(t, s.CreateProject(ctx, projectB))
+	for i := 0; i < 2; i++ {
+		id := fmt.Sprintf("%d", i)
+		require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: tid("cursor-template-" + id), Name: "template-" + id, Slug: "template-" + id, Harness: "codex", Scope: store.TemplateScopeProject, ScopeID: projectA.ID, Status: store.TemplateStatusActive}))
+		require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: tid("cursor-config-" + id), Name: "config-" + id, Slug: "config-" + id, Harness: "codex", Scope: store.HarnessConfigScopeProject, ScopeID: projectA.ID, Status: store.HarnessConfigStatusActive}))
+		require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: tid("cursor-group-" + id), Name: "group-" + id, Slug: "group-" + id, ProjectID: projectA.ID}))
+	}
+	for _, tc := range []struct {
+		path    string
+		handler func(http.ResponseWriter, *http.Request)
+		other   func(http.ResponseWriter, *http.Request)
+	}{
+		{"/api/v1/templates", srv.listTemplatesV2, srv.listHarnessConfigs},
+		{"/api/v1/harness-configs", srv.listHarnessConfigs, srv.listGroups},
+		{"/api/v1/groups", srv.listGroups, srv.listTemplatesV2},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			request := func(path string) *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(contextWithIdentity(ctx, admin))
+				tc.handler(rec, req)
+				return rec
+			}
+			first := request(tc.path + "?limit=1&projectId=" + projectA.ID)
+			require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+			var page struct {
+				NextCursor string `json:"nextCursor"`
+			}
+			require.NoError(t, json.Unmarshal(first.Body.Bytes(), &page))
+			require.NotEmpty(t, page.NextCursor)
+			assert.Equal(t, http.StatusBadRequest, request(tc.path+"?cursor=malformed").Code)
+			assert.Equal(t, http.StatusBadRequest, request(tc.path+"?cursor="+page.NextCursor+"&projectId="+projectB.ID).Code)
+			crossEndpoint := httptest.NewRecorder()
+			crossRequest := httptest.NewRequest(http.MethodGet, "/api/v1/other?cursor="+page.NextCursor, nil).WithContext(contextWithIdentity(ctx, admin))
+			tc.other(crossEndpoint, crossRequest)
+			assert.Equal(t, http.StatusBadRequest, crossEndpoint.Code)
+		})
+	}
+}
+
 func TestComputeCapabilitiesBatch_MixedOwnership(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

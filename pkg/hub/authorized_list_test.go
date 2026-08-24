@@ -54,3 +54,63 @@ func TestAuthorizedListReturnsCanceledContext(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.False(t, called)
 }
+
+func TestAuthorizedListFailsClosedOnLaterFetchOrAuthorizationError(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fetch func(context.Context, string, int) (authorizedCandidatePage[authorizedListTestItem], error)
+		read  func(context.Context, Identity, []Resource) ([]bool, error)
+	}{
+		{
+			name: "later fetch error",
+			fetch: func(_ context.Context, cursor string, _ int) (authorizedCandidatePage[authorizedListTestItem], error) {
+				if cursor != "" {
+					return authorizedCandidatePage[authorizedListTestItem]{}, errors.New("store unavailable")
+				}
+				return authorizedCandidatePage[authorizedListTestItem]{Items: []authorizedListTestItem{{id: "one"}}, NextCursor: "next"}, nil
+			},
+			read: func(_ context.Context, _ Identity, resources []Resource) ([]bool, error) {
+				return makeAllowed(len(resources)), nil
+			},
+		},
+		{
+			name: "authorization error",
+			fetch: func(_ context.Context, _ string, _ int) (authorizedCandidatePage[authorizedListTestItem], error) {
+				return authorizedCandidatePage[authorizedListTestItem]{Items: []authorizedListTestItem{{id: "one"}}}, nil
+			},
+			read: func(context.Context, Identity, []Resource) ([]bool, error) {
+				return nil, errors.New("authorization unavailable")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := authorizedList(context.Background(), nil, "", 1, tc.fetch,
+				func(*authorizedListTestItem) Resource { return Resource{} }, func(item *authorizedListTestItem) string { return item.id }, tc.read)
+			require.Error(t, err)
+			assert.Empty(t, result.Items)
+			assert.Zero(t, result.TotalCount)
+		})
+	}
+}
+
+func TestAuthorizedListStopsAfterInFlightCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	fetches := 0
+	reads := 0
+	_, err := authorizedList(ctx, nil, "", 1,
+		func(_ context.Context, cursor string, _ int) (authorizedCandidatePage[authorizedListTestItem], error) {
+			fetches++
+			if cursor == "" {
+				return authorizedCandidatePage[authorizedListTestItem]{Items: []authorizedListTestItem{{id: "one"}}, NextCursor: "next"}, nil
+			}
+			return authorizedCandidatePage[authorizedListTestItem]{}, nil
+		}, func(*authorizedListTestItem) Resource { return Resource{} }, func(item *authorizedListTestItem) string { return item.id },
+		func(_ context.Context, _ Identity, resources []Resource) ([]bool, error) {
+			reads++
+			cancel()
+			return makeAllowed(len(resources)), nil
+		})
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 1, fetches)
+	assert.Equal(t, 1, reads)
+}

@@ -314,9 +314,13 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, filter store.Template
 		))
 	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	totalCount := 0
+	if !opts.SkipTotalCount {
+		var err error
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	limit := opts.Limit
@@ -324,11 +328,11 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, filter store.Template
 		limit = 50
 	}
 	if opts.Cursor != "" {
-		_, cursorID, err := decodeCursor(opts.Cursor)
+		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
 		if err != nil {
 			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
-		query.Where(templateBeforeCursor(cursorID))
+		query.Where(templateBeforeCursor(cursorCreated, cursorID))
 	}
 
 	rows, err := query.
@@ -348,7 +352,7 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, filter store.Template
 	if len(items) > limit {
 		result.Items = items[:limit]
 		last := result.Items[len(result.Items)-1]
-		result.NextCursor = encodeCursor(last.Created, last.ID)
+		result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
 	} else {
 		result.Items = items
 	}
@@ -610,9 +614,13 @@ func (s *TemplateStore) ListHarnessConfigs(ctx context.Context, filter store.Har
 		))
 	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	totalCount := 0
+	if !opts.SkipTotalCount {
+		var err error
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	limit := opts.Limit
@@ -620,11 +628,11 @@ func (s *TemplateStore) ListHarnessConfigs(ctx context.Context, filter store.Har
 		limit = 50
 	}
 	if opts.Cursor != "" {
-		_, cursorID, err := decodeCursor(opts.Cursor)
+		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
 		if err != nil {
 			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
-		query.Where(harnessConfigBeforeCursor(cursorID))
+		query.Where(harnessConfigBeforeCursor(cursorCreated, cursorID))
 	}
 
 	rows, err := query.
@@ -644,30 +652,29 @@ func (s *TemplateStore) ListHarnessConfigs(ctx context.Context, filter store.Har
 	if len(items) > limit {
 		result.Items = items[:limit]
 		last := result.Items[len(result.Items)-1]
-		result.NextCursor = encodeCursor(last.Created, last.ID)
+		result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
 	} else {
 		result.Items = items
 	}
 	return result, nil
 }
 
-func templateBeforeCursor(cursorID uuid.UUID) predicate.Template {
-	return keysetBeforeCursor(enttemplate.Table, enttemplate.FieldCreated, enttemplate.FieldID, cursorID)
+func templateBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.Template {
+	return keysetBeforeCursor(enttemplate.FieldCreated, enttemplate.FieldID, cursorCreated, cursorID)
 }
 
-func harnessConfigBeforeCursor(cursorID uuid.UUID) predicate.HarnessConfig {
-	return keysetBeforeCursor(entharnessconfig.Table, entharnessconfig.FieldCreated, entharnessconfig.FieldID, cursorID)
+func harnessConfigBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.HarnessConfig {
+	return keysetBeforeCursor(entharnessconfig.FieldCreated, entharnessconfig.FieldID, cursorCreated, cursorID)
 }
 
-func keysetBeforeCursor(table, createdField, idField string, cursorID uuid.UUID) func(*entsql.Selector) {
+func keysetBeforeCursor(createdField, idField string, cursorCreated time.Time, cursorID uuid.UUID) func(*entsql.Selector) {
 	return func(s *entsql.Selector) {
 		created := s.C(createdField)
 		s.Where(entsql.P(func(b *entsql.Builder) {
-			b.WriteString("(").WriteString(created).WriteString(" < (SELECT ").Ident(createdField).
-				WriteString(" FROM ").Ident(table).WriteString(" WHERE ").Ident(idField).WriteString(" = ").Arg(cursorID).
-				WriteString(") OR (").WriteString(created).WriteString(" = (SELECT ").Ident(createdField).
-				WriteString(" FROM ").Ident(table).WriteString(" WHERE ").Ident(idField).WriteString(" = ").Arg(cursorID).
-				WriteString(") AND ").WriteString(s.C(idField)).WriteString(" < ").Arg(cursorID).WriteString("))")
+			b.WriteString("((").WriteString(created).WriteString(" < ").Arg(cursorCreated).
+				WriteString(" AND ").WriteString(s.C(idField)).WriteString(" != ").Arg(cursorID).WriteString(")").
+				WriteString(" OR (").WriteString(created).WriteString(" = ").Arg(cursorCreated).
+				WriteString(" AND ").WriteString(s.C(idField)).WriteString(" < ").Arg(cursorID).WriteString("))")
 		}))
 	}
 }

@@ -177,24 +177,31 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cursor := query.Get("cursor")
+	cursorBinding := authorizedListCursorBinding("harness-configs", filter)
+	if cursor != "" {
+		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
+			BadRequest(w, err.Error())
+			return
+		}
+	}
 	var configs []store.HarnessConfig
 	var nextCursor string
 	var totalCount int
 	if user, ok := identity.(UserIdentity); identity != nil && (!ok || !IsUnscopedLocalPlatformAdmin(user)) {
 		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.HarnessConfig], error) {
-			page, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor})
+			page, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
 			if err != nil {
 				return authorizedCandidatePage[store.HarnessConfig]{}, err
 			}
 			return authorizedCandidatePage[store.HarnessConfig]{Items: page.Items, NextCursor: page.NextCursor}, nil
-		}, harnessConfigResource, func(h *store.HarnessConfig) string { return authorizedListCursor(h.Created, h.ID) }, s.authzService.AuthorizeReadBatch)
+		}, harnessConfigResource, func(h *store.HarnessConfig) string { return authorizedListCursor(h.Created, h.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
 		if err != nil {
 			writeAuthorizedListError(w, err)
 			return
 		}
 		configs, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
 	} else {
-		result, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor})
+		result, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return

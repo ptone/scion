@@ -1075,11 +1075,17 @@ func (n *Notification) UnmarshalJSON(data []byte) error {
 
 // ListOptions provides pagination and filtering for list operations.
 type ListOptions struct {
-	Limit   int               // Maximum results
-	Cursor  string            // Pagination cursor (opaque string)
-	Labels  map[string]string // Label selectors
-	SortBy  string            // Sort field (interpretation is store-specific)
-	SortDir string            // Sort direction: "asc" or "desc" (default depends on field)
+	Limit  int    // Maximum results
+	Cursor string // Pagination cursor (opaque string)
+	// SkipTotalCount avoids a full matching COUNT query when the caller only
+	// needs a bounded page scan.
+	SkipTotalCount bool
+	// CursorBinding binds cursors to a caller-defined endpoint and filter.
+	// Stores reject a cursor whose binding does not match.
+	CursorBinding string
+	Labels        map[string]string // Label selectors
+	SortBy        string            // Sort field (interpretation is store-specific)
+	SortDir       string            // Sort direction: "asc" or "desc" (default depends on field)
 }
 
 // ListResult is a generic result container for list operations.

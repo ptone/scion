@@ -2,12 +2,17 @@ package hub
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -64,12 +69,6 @@ func authorizedList[T any](
 	if err := ctx.Err(); err != nil {
 		return authorizedListResult[T]{}, err
 	}
-	if requestCursor != "" {
-		if _, err := fetch(ctx, requestCursor, 1); err != nil {
-			return authorizedListResult[T]{}, err
-		}
-	}
-
 	total := 0
 	candidateCount := 0
 	for cursor := ""; ; {
@@ -150,6 +149,30 @@ func authorizeCandidatePage[T any](ctx context.Context, identity Identity, items
 	return allowed, nil
 }
 
-func authorizedListCursor(created time.Time, id string) string {
-	return base64.URLEncoding.EncodeToString([]byte(created.Format(time.RFC3339Nano) + "," + id))
+func authorizedListCursor(created time.Time, id, binding string) string {
+	return base64.URLEncoding.EncodeToString([]byte(created.Format(time.RFC3339Nano) + "," + id + "," + binding))
+}
+
+func authorizedListCursorBinding(endpoint string, filter any) string {
+	encoded, _ := json.Marshal(filter)
+	digest := sha256.Sum256(append([]byte(endpoint+":"), encoded...))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
+func validateAuthorizedListCursor(cursor, binding string) error {
+	raw, err := base64.URLEncoding.DecodeString(cursor)
+	if err != nil {
+		return fmt.Errorf("invalid cursor: %w", err)
+	}
+	parts := strings.SplitN(string(raw), ",", 3)
+	if len(parts) != 3 || parts[2] != binding {
+		return errors.New("invalid cursor")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, parts[0]); err != nil {
+		return fmt.Errorf("invalid cursor: %w", err)
+	}
+	if _, err := uuid.Parse(parts[1]); err != nil {
+		return fmt.Errorf("invalid cursor: %w", err)
+	}
+	return nil
 }

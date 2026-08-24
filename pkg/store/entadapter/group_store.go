@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -324,10 +325,14 @@ func (s *GroupStore) ListGroups(ctx context.Context, filter store.GroupFilter, o
 		query.Where(group.ProjectIDEQ(projectUID))
 	}
 
-	// Get total count before pagination
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	// Get total count before pagination unless this is a bounded scan.
+	totalCount := 0
+	if !opts.SkipTotalCount {
+		var err error
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	limit := opts.Limit
@@ -335,11 +340,11 @@ func (s *GroupStore) ListGroups(ctx context.Context, filter store.GroupFilter, o
 		limit = 50
 	}
 	if opts.Cursor != "" {
-		_, cursorID, err := decodeCursor(opts.Cursor)
+		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
 		if err != nil {
 			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
-		query.Where(groupAfterCursor(cursorID))
+		query.Where(groupAfterCursor(cursorCreated, cursorID))
 	}
 
 	groups, err := query.
@@ -359,22 +364,21 @@ func (s *GroupStore) ListGroups(ctx context.Context, filter store.GroupFilter, o
 	if len(items) > limit {
 		result.Items = items[:limit]
 		last := result.Items[len(result.Items)-1]
-		result.NextCursor = encodeCursor(last.Created, last.ID)
+		result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
 	} else {
 		result.Items = items
 	}
 	return result, nil
 }
 
-func groupAfterCursor(cursorID uuid.UUID) predicate.Group {
+func groupAfterCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.Group {
 	return func(s *entsql.Selector) {
 		created := s.C(group.FieldCreated)
 		s.Where(entsql.P(func(b *entsql.Builder) {
-			b.WriteString("(").WriteString(created).WriteString(" > (SELECT ").Ident(group.FieldCreated).
-				WriteString(" FROM ").Ident(group.Table).WriteString(" WHERE ").Ident(group.FieldID).WriteString(" = ").Arg(cursorID).
-				WriteString(") OR (").WriteString(created).WriteString(" = (SELECT ").Ident(group.FieldCreated).
-				WriteString(" FROM ").Ident(group.Table).WriteString(" WHERE ").Ident(group.FieldID).WriteString(" = ").Arg(cursorID).
-				WriteString(") AND ").WriteString(s.C(group.FieldID)).WriteString(" > ").Arg(cursorID).WriteString("))")
+			b.WriteString("((").WriteString(created).WriteString(" > ").Arg(cursorCreated).
+				WriteString(" AND ").WriteString(s.C(group.FieldID)).WriteString(" != ").Arg(cursorID).WriteString(")").
+				WriteString(" OR (").WriteString(created).WriteString(" = ").Arg(cursorCreated).
+				WriteString(" AND ").WriteString(s.C(group.FieldID)).WriteString(" > ").Arg(cursorID).WriteString("))")
 		}))
 	}
 }

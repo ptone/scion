@@ -101,6 +101,10 @@ func TestTemplateAndHarnessConfigListKeysetPagination(t *testing.T) {
 	require.Len(t, moreTemplates.Items, 1)
 	assert.NotEqual(t, templates.Items[0].ID, moreTemplates.Items[0].ID)
 	assert.NotEqual(t, templates.Items[1].ID, moreTemplates.Items[0].ID)
+	require.NoError(t, ts.DeleteTemplate(ctx, templates.Items[1].ID))
+	afterDeletedTemplate, err := ts.ListTemplates(ctx, store.TemplateFilter{}, store.ListOptions{Limit: 2, Cursor: templates.NextCursor})
+	require.NoError(t, err)
+	assert.Equal(t, moreTemplates.Items[0].ID, afterDeletedTemplate.Items[0].ID, "cursor must survive deletion of its source row")
 
 	configs, err := ts.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 2})
 	require.NoError(t, err)
@@ -111,6 +115,15 @@ func TestTemplateAndHarnessConfigListKeysetPagination(t *testing.T) {
 	require.Len(t, moreConfigs.Items, 1)
 	assert.NotEqual(t, configs.Items[0].ID, moreConfigs.Items[0].ID)
 	assert.NotEqual(t, configs.Items[1].ID, moreConfigs.Items[0].ID)
+	require.NoError(t, ts.DeleteHarnessConfig(ctx, configs.Items[1].ID))
+	afterDeletedConfig, err := ts.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 2, Cursor: configs.NextCursor})
+	require.NoError(t, err)
+	assert.Equal(t, moreConfigs.Items[0].ID, afterDeletedConfig.Items[0].ID, "cursor must survive deletion of its source row")
+
+	bound, err := ts.ListTemplates(ctx, store.TemplateFilter{}, store.ListOptions{Limit: 1, CursorBinding: "templates-filter-a"})
+	require.NoError(t, err)
+	_, err = ts.ListTemplates(ctx, store.TemplateFilter{}, store.ListOptions{Limit: 1, Cursor: bound.NextCursor, CursorBinding: "templates-filter-b"})
+	assert.Error(t, err, "a cursor must not be reusable with a different filter binding")
 
 	_, err = ts.ListTemplates(ctx, store.TemplateFilter{}, store.ListOptions{Limit: 1, Cursor: "not-a-cursor"})
 	assert.Error(t, err)

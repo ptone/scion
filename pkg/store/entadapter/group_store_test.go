@@ -19,6 +19,7 @@ package entadapter
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -103,8 +104,25 @@ func TestListGroupsKeysetPagination(t *testing.T) {
 	require.Len(t, second.Items, 1)
 	assert.NotEqual(t, first.Items[0].ID, second.Items[0].ID)
 	assert.NotEqual(t, first.Items[1].ID, second.Items[0].ID)
+	require.NoError(t, gs.DeleteGroup(ctx, first.Items[1].ID))
+	afterDeletedCursor, err := gs.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{Limit: 2, Cursor: first.NextCursor})
+	require.NoError(t, err)
+	assert.Equal(t, second.Items[0].ID, afterDeletedCursor.Items[0].ID, "cursor must survive deletion of its source row")
 
 	_, err = gs.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{Limit: 1, Cursor: "not-a-cursor"})
+	assert.Error(t, err)
+}
+
+func TestListGroupsCursorBindingAndSkipTotalCount(t *testing.T) {
+	gs := newTestGroupStore(t)
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		require.NoError(t, gs.CreateGroup(ctx, &store.Group{ID: uuid.NewString(), Name: uuid.NewString(), Slug: uuid.NewString(), Created: time.Now()}))
+	}
+	page, err := gs.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{Limit: 1, SkipTotalCount: true, CursorBinding: "groups-filter-a"})
+	require.NoError(t, err)
+	assert.Zero(t, page.TotalCount)
+	_, err = gs.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{Limit: 1, Cursor: page.NextCursor, CursorBinding: "groups-filter-b"})
 	assert.Error(t, err)
 }
 

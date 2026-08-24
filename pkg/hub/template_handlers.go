@@ -179,24 +179,31 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	identity, cursor := GetIdentityFromContext(ctx), query.Get("cursor")
+	cursorBinding := authorizedListCursorBinding("templates", filter)
+	if cursor != "" {
+		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
+			BadRequest(w, err.Error())
+			return
+		}
+	}
 	var items []store.Template
 	var nextCursor string
 	var totalCount int
 	if user, ok := identity.(UserIdentity); identity != nil && (!ok || !IsUnscopedLocalPlatformAdmin(user)) {
 		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Template], error) {
-			page, err := s.store.ListTemplates(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor})
+			page, err := s.store.ListTemplates(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
 			if err != nil {
 				return authorizedCandidatePage[store.Template]{}, err
 			}
 			return authorizedCandidatePage[store.Template]{Items: page.Items, NextCursor: page.NextCursor}, nil
-		}, templateResource, func(t *store.Template) string { return authorizedListCursor(t.Created, t.ID) }, s.authzService.AuthorizeReadBatch)
+		}, templateResource, func(t *store.Template) string { return authorizedListCursor(t.Created, t.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
 		if err != nil {
 			writeAuthorizedListError(w, err)
 			return
 		}
 		items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
 	} else {
-		result, err := s.store.ListTemplates(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor})
+		result, err := s.store.ListTemplates(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
