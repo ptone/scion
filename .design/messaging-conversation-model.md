@@ -245,6 +245,62 @@ The recipient is still explicit. It is declared once, when the conversation is e
 instead of being retyped on every message. That is the ergonomic win, and it is why
 omitting an addressee is now safe where omitting `--thread-id` is currently catastrophic.
 
+#### 2.4.1 Global direct conversations: resolution and failure modes
+
+Direct conversations are **global** — one per pair of principals, `ProjectID` nil (Q2,
+resolved). This keeps the familiar "one DM per person" model, but it means a DM has no
+ambient project, and anything project-scoped inside it must resolve without one. Today that
+resolution is a guess that returns `""` and silently disables mention resolution
+(`findings.md` §9). The rule below replaces the guess.
+
+**Candidate scope.** A project-scoped reference inside a direct conversation resolves against
+the **intersection of the projects the two participants both belong to**. Not the sender's
+projects; the shared set. An agent belongs to exactly one project, so any DM with an agent has
+a candidate set of size ≤ 1 and is trivially unambiguous.
+
+**Resolution outcomes**, exhaustively:
+
+| Shared projects | Slug matches | Outcome |
+|---|---|---|
+| exactly 1 | 1 | Resolve. |
+| N > 1 | exactly 1 across all N | Resolve. Multiple projects do not imply ambiguity. |
+| N > 1 | > 1 | **Fail: `ambiguous`.** Error lists every qualified candidate. |
+| N ≥ 1 | 0 | **Fail: `not-found`.** |
+| 0 | — | **Fail: `no-shared-project`.** |
+
+**Never resolve to a first match.** Ambiguity resolves to nothing. This is the same rule as
+conversation references (§2.6): no fallback destination, ever.
+
+**Disambiguation escape hatch.** A qualified mention `@<project>/<agent>` resolves directly,
+mirroring the `#<space>/<thread>` form in the reference grammar. Every `ambiguous` error
+prints the exact qualified forms that would have worked, so the error is a fix, not a
+dead end.
+
+**Information disclosure.** `not-found` must not distinguish "no such agent" from "an agent
+with that slug exists in a project you do not share." Both produce the same message: *not
+found in any project you share with `<peer>`*. Otherwise the error becomes a probe for the
+existence of private projects.
+
+**Does a failed mention fail the send?** No — and this is safe specifically because
+`Kind == direct` always resolves the peer as an addressee (§2.4 case 1). A mention in a DM is
+always *additive*, so an unresolved one can never mean nobody receives the message. The rule:
+
+- The message is delivered to the peer.
+- The response carries an `unresolved[]` array: `{ text, reason, candidates[] }` where
+  `reason ∈ { ambiguous, not-found, no-shared-project, not-a-participant }`.
+- The CLI prints each unresolved mention to stderr and **exits non-zero** (distinct code for
+  *delivered with unresolved references*, separate from *send failed*). An agent that checks
+  its exit status learns the fan-out did not happen. This is the difference from today, where
+  the same situation exits 0 and reports nothing.
+
+**Conversation references inside a DM.** The bare `#<thread>` form means "in the current
+project's space" and therefore has no meaning in a direct conversation. It fails with a
+message naming the cause and the fix (`use #<space>/<thread>`), rather than resolving against
+an arbitrary project.
+
+**`--to` inside a DM** may only name one of the two participants. Naming anyone else fails as
+`not-a-participant`; a DM is not a back door to addressing a third party.
+
 ### 2.5 The type taxonomy
 
 Today one enum of eight values mixes intent, lifecycle signal, provenance, and delivery
@@ -542,7 +598,16 @@ this does. But it is a change to the storage model that decision implied, so it 
 explicit yes rather than my assumption. **If the answer is no, the design still works;**
 mentions revert to N message rows and we lose the deduplicated conversation view.
 
-### Q2 — Are direct conversations global or project-scoped?
+### Q2 — Are direct conversations global or project-scoped? — **RESOLVED 2026-08-24**
+
+> **Resolution (ptone@google.com):** keep direct conversations **global**, with explicitly
+> specified failure modes wherever ambiguity cannot be resolved. `Conversation.ProjectID`
+> stays nullable. Full resolution rules, the exhaustive outcome table, the
+> `@<project>/<agent>` disambiguation form, the information-disclosure rule, and the
+> exit-code behaviour are specified in **§2.4.1**. Verified by AC-21–AC-25.
+>
+> The governing principle: a DM's missing project is now an **explicit** condition with named
+> outcomes, not a derived `""` that silently disables features.
 
 Today native DMs are explicitly global and not project-scoped, which forces
 `resolveProjectFromDMKey` to look up an agent to find a project, and returns `""` for
@@ -651,6 +716,25 @@ Commit-sized, ordered, each independently reviewable.
 - **AC-20** The five `findings.md` §12 bugs that are out of scope are verified still-present
   or still-fixed as applicable, and none is newly broken.
 
+### Direct conversations and ambiguity (Q2, §2.4.1)
+
+- **AC-21** Each row of the §2.4.1 outcome table has a test. Specifically: two shared
+  projects with a slug present in only one **resolves**; the same slug present in both
+  **fails as `ambiguous`** and the error text contains both `@<project>/<agent>` forms.
+- **AC-22** A user↔user DM resolves `@agent` mentions correctly. This is the direct
+  regression for `resolveProjectFromDMKey` returning `""` — the current silent no-op must be
+  unreachable, asserted by a test that fails if resolution ever returns empty without an
+  accompanying `unresolved[]` entry.
+- **AC-23** No mention ever resolves to a "first match" under ambiguity. Property test: for
+  any candidate set of size > 1, the outcome is a failure, never a delivery.
+- **AC-24** An unresolved mention in a DM still delivers to the peer, returns a populated
+  `unresolved[]` with the correct `reason`, and exits non-zero with a code distinct from
+  send-failure. A test asserts the exit codes differ.
+- **AC-25** `not-found` is indistinguishable between "no such agent" and "agent exists in an
+  unshared project" — asserted by comparing both error strings for equality. Bare `#<thread>`
+  inside a DM fails naming the `#<space>/<thread>` fix. `--to` naming a third party in a DM
+  fails as `not-a-participant`.
+
 ---
 
 ## Appendix A — Proposed `scion message` usage
@@ -691,6 +775,13 @@ ADDRESSING WITHIN A CONVERSATION
 
   The third case is normal. It is how you say something in a room without
   handing anyone a task.
+
+IN A DIRECT CONVERSATION
+  A DM is global — one per pair, belonging to no project. So a bare @agent in
+  the body resolves against the projects you and the other participant both
+  belong to. If that is ambiguous, the send reports it and exits non-zero
+  rather than picking one; write @<project>/<agent> to be exact. A bare
+  #<thread> has no meaning here — use #<space>/<thread>.
 
 FLAGS
   --to <principal>       Address a participant directly (repeatable).
