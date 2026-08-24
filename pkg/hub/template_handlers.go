@@ -205,7 +205,7 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 
 	// Compute per-item and scope capabilities
 	identity := GetIdentityFromContext(ctx)
-	templates := make([]TemplateWithCapabilities, len(result.Items))
+	templates := make([]TemplateWithCapabilities, 0, len(result.Items))
 	if identity != nil {
 		resources := make([]Resource, len(result.Items))
 		for i := range result.Items {
@@ -213,11 +213,13 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 		}
 		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "template")
 		for i := range result.Items {
-			templates[i] = TemplateWithCapabilities{Template: result.Items[i], Cap: caps[i]}
+			if capabilityAllows(caps[i], ActionRead) {
+				templates = append(templates, TemplateWithCapabilities{Template: result.Items[i], Cap: caps[i]})
+			}
 		}
 	} else {
 		for i := range result.Items {
-			templates[i] = TemplateWithCapabilities{Template: result.Items[i]}
+			templates = append(templates, TemplateWithCapabilities{Template: result.Items[i]})
 		}
 	}
 
@@ -229,7 +231,7 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ListTemplatesResponse{
 		Templates:    templates,
 		NextCursor:   result.NextCursor,
-		TotalCount:   result.TotalCount,
+		TotalCount:   len(templates),
 		Capabilities: scopeCap,
 	})
 }

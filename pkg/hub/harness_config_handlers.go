@@ -189,7 +189,7 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 
 	// Compute per-item and scope capabilities (mirrors listTemplatesV2).
 	identity := GetIdentityFromContext(ctx)
-	items := make([]HarnessConfigWithCapabilities, len(result.Items))
+	items := make([]HarnessConfigWithCapabilities, 0, len(result.Items))
 	if identity != nil {
 		resources := make([]Resource, len(result.Items))
 		for i := range result.Items {
@@ -197,11 +197,13 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 		}
 		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "harness_config")
 		for i := range result.Items {
-			items[i] = HarnessConfigWithCapabilities{HarnessConfig: result.Items[i], Cap: caps[i]}
+			if capabilityAllows(caps[i], ActionRead) {
+				items = append(items, HarnessConfigWithCapabilities{HarnessConfig: result.Items[i], Cap: caps[i]})
+			}
 		}
 	} else {
 		for i := range result.Items {
-			items[i] = HarnessConfigWithCapabilities{HarnessConfig: result.Items[i]}
+			items = append(items, HarnessConfigWithCapabilities{HarnessConfig: result.Items[i]})
 		}
 	}
 
@@ -213,7 +215,7 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ListHarnessConfigsResponse{
 		HarnessConfigs: items,
 		NextCursor:     result.NextCursor,
-		TotalCount:     result.TotalCount,
+		TotalCount:     len(items),
 		Capabilities:   scopeCap,
 	})
 }

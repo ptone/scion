@@ -116,7 +116,7 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 
 	// Compute per-item and scope capabilities
 	identity := GetIdentityFromContext(ctx)
-	groups := make([]GroupWithCapabilities, len(result.Items))
+	groups := make([]GroupWithCapabilities, 0, len(result.Items))
 	if identity != nil {
 		resources := make([]Resource, len(result.Items))
 		for i := range result.Items {
@@ -124,11 +124,13 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		}
 		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "group")
 		for i := range result.Items {
-			groups[i] = GroupWithCapabilities{Group: result.Items[i], Cap: caps[i]}
+			if capabilityAllows(caps[i], ActionRead) {
+				groups = append(groups, GroupWithCapabilities{Group: result.Items[i], Cap: caps[i]})
+			}
 		}
 	} else {
 		for i := range result.Items {
-			groups[i] = GroupWithCapabilities{Group: result.Items[i]}
+			groups = append(groups, GroupWithCapabilities{Group: result.Items[i]})
 		}
 	}
 
@@ -140,7 +142,7 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ListGroupsResponse{
 		Groups:       groups,
 		NextCursor:   result.NextCursor,
-		TotalCount:   result.TotalCount,
+		TotalCount:   len(groups),
 		Capabilities: scopeCap,
 	})
 }
