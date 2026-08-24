@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"strings"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -332,10 +334,17 @@ func (s *GroupStore) ListGroups(ctx context.Context, filter store.GroupFilter, o
 	if limit <= 0 {
 		limit = 50
 	}
+	if opts.Cursor != "" {
+		_, cursorID, err := decodeCursor(opts.Cursor)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", err)
+		}
+		query.Where(groupAfterCursor(cursorID))
+	}
 
 	groups, err := query.
-		Order(group.ByCreated()).
-		Limit(limit).
+		Order(group.ByCreated(), group.ByID()).
+		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
 		return nil, err
@@ -346,10 +355,28 @@ func (s *GroupStore) ListGroups(ctx context.Context, filter store.GroupFilter, o
 		items = append(items, *entGroupToStore(g))
 	}
 
-	return &store.ListResult[store.Group]{
-		Items:      items,
-		TotalCount: totalCount,
-	}, nil
+	result := &store.ListResult[store.Group]{TotalCount: totalCount}
+	if len(items) > limit {
+		result.Items = items[:limit]
+		last := result.Items[len(result.Items)-1]
+		result.NextCursor = encodeCursor(last.Created, last.ID)
+	} else {
+		result.Items = items
+	}
+	return result, nil
+}
+
+func groupAfterCursor(cursorID uuid.UUID) predicate.Group {
+	return func(s *entsql.Selector) {
+		created := s.C(group.FieldCreated)
+		s.Where(entsql.P(func(b *entsql.Builder) {
+			b.WriteString("(").WriteString(created).WriteString(" > (SELECT ").Ident(group.FieldCreated).
+				WriteString(" FROM ").Ident(group.Table).WriteString(" WHERE ").Ident(group.FieldID).WriteString(" = ").Arg(cursorID).
+				WriteString(") OR (").WriteString(created).WriteString(" = (SELECT ").Ident(group.FieldCreated).
+				WriteString(" FROM ").Ident(group.Table).WriteString(" WHERE ").Ident(group.FieldID).WriteString(" = ").Arg(cursorID).
+				WriteString(") AND ").WriteString(s.C(group.FieldID)).WriteString(" > ").Arg(cursorID).WriteString("))")
+		}))
+	}
 }
 
 // AddGroupMember adds a user, agent, or group as a member of a group.

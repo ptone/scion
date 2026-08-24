@@ -17,13 +17,16 @@ package entadapter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	entharnessconfig "github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	enttemplate "github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // TemplateStore implements store.TemplateStore and store.HarnessConfigStore
@@ -320,10 +323,17 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, filter store.Template
 	if limit <= 0 {
 		limit = 50
 	}
+	if opts.Cursor != "" {
+		_, cursorID, err := decodeCursor(opts.Cursor)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", err)
+		}
+		query.Where(templateBeforeCursor(cursorID))
+	}
 
 	rows, err := query.
-		Order(enttemplate.ByCreated(entsql.OrderDesc())).
-		Limit(limit).
+		Order(enttemplate.ByCreated(entsql.OrderDesc()), enttemplate.ByID(entsql.OrderDesc())).
+		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
 		return nil, err
@@ -334,10 +344,15 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, filter store.Template
 		items = append(items, *entTemplateRowToStore(e))
 	}
 
-	return &store.ListResult[store.Template]{
-		Items:      items,
-		TotalCount: totalCount,
-	}, nil
+	result := &store.ListResult[store.Template]{TotalCount: totalCount}
+	if len(items) > limit {
+		result.Items = items[:limit]
+		last := result.Items[len(result.Items)-1]
+		result.NextCursor = encodeCursor(last.Created, last.ID)
+	} else {
+		result.Items = items
+	}
+	return result, nil
 }
 
 // =============================================================================
@@ -604,10 +619,17 @@ func (s *TemplateStore) ListHarnessConfigs(ctx context.Context, filter store.Har
 	if limit <= 0 {
 		limit = 50
 	}
+	if opts.Cursor != "" {
+		_, cursorID, err := decodeCursor(opts.Cursor)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", err)
+		}
+		query.Where(harnessConfigBeforeCursor(cursorID))
+	}
 
 	rows, err := query.
-		Order(entharnessconfig.ByCreated(entsql.OrderDesc())).
-		Limit(limit).
+		Order(entharnessconfig.ByCreated(entsql.OrderDesc()), entharnessconfig.ByID(entsql.OrderDesc())).
+		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
 		return nil, err
@@ -618,8 +640,34 @@ func (s *TemplateStore) ListHarnessConfigs(ctx context.Context, filter store.Har
 		items = append(items, *entHarnessConfigToStore(e))
 	}
 
-	return &store.ListResult[store.HarnessConfig]{
-		Items:      items,
-		TotalCount: totalCount,
-	}, nil
+	result := &store.ListResult[store.HarnessConfig]{TotalCount: totalCount}
+	if len(items) > limit {
+		result.Items = items[:limit]
+		last := result.Items[len(result.Items)-1]
+		result.NextCursor = encodeCursor(last.Created, last.ID)
+	} else {
+		result.Items = items
+	}
+	return result, nil
+}
+
+func templateBeforeCursor(cursorID uuid.UUID) predicate.Template {
+	return keysetBeforeCursor(enttemplate.Table, enttemplate.FieldCreated, enttemplate.FieldID, cursorID)
+}
+
+func harnessConfigBeforeCursor(cursorID uuid.UUID) predicate.HarnessConfig {
+	return keysetBeforeCursor(entharnessconfig.Table, entharnessconfig.FieldCreated, entharnessconfig.FieldID, cursorID)
+}
+
+func keysetBeforeCursor(table, createdField, idField string, cursorID uuid.UUID) func(*entsql.Selector) {
+	return func(s *entsql.Selector) {
+		created := s.C(createdField)
+		s.Where(entsql.P(func(b *entsql.Builder) {
+			b.WriteString("(").WriteString(created).WriteString(" < (SELECT ").Ident(createdField).
+				WriteString(" FROM ").Ident(table).WriteString(" WHERE ").Ident(idField).WriteString(" = ").Arg(cursorID).
+				WriteString(") OR (").WriteString(created).WriteString(" = (SELECT ").Ident(createdField).
+				WriteString(" FROM ").Ident(table).WriteString(" WHERE ").Ident(idField).WriteString(" = ").Arg(cursorID).
+				WriteString(") AND ").WriteString(s.C(idField)).WriteString(" < ").Arg(cursorID).WriteString("))")
+		}))
+	}
 }

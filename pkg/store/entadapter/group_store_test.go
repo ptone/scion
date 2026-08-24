@@ -83,6 +83,31 @@ func TestCreateGroup(t *testing.T) {
 	assert.Equal(t, store.GroupTypeExplicit, g.GroupType)
 }
 
+func TestListGroupsKeysetPagination(t *testing.T) {
+	gs := newTestGroupStore(t)
+	ctx := context.Background()
+	for _, id := range []string{
+		uuid.MustParse("00000000-0000-0000-0000-000000000011").String(),
+		uuid.MustParse("00000000-0000-0000-0000-000000000012").String(),
+		uuid.MustParse("00000000-0000-0000-0000-000000000013").String(),
+	} {
+		require.NoError(t, gs.CreateGroup(ctx, &store.Group{ID: id, Name: "group-" + id, Slug: "group-" + id}))
+	}
+
+	first, err := gs.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{Limit: 2})
+	require.NoError(t, err)
+	require.Len(t, first.Items, 2)
+	require.NotEmpty(t, first.NextCursor)
+	second, err := gs.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{Limit: 2, Cursor: first.NextCursor})
+	require.NoError(t, err)
+	require.Len(t, second.Items, 1)
+	assert.NotEqual(t, first.Items[0].ID, second.Items[0].ID)
+	assert.NotEqual(t, first.Items[1].ID, second.Items[0].ID)
+
+	_, err = gs.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{Limit: 1, Cursor: "not-a-cursor"})
+	assert.Error(t, err)
+}
+
 func TestCreateGroupDuplicate(t *testing.T) {
 	gs := newTestGroupStore(t)
 	ctx := context.Background()
