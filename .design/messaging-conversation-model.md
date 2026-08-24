@@ -381,6 +381,64 @@ Two consequences worth naming:
   bound agents. The design does not attempt to mirror platform membership, and the API
   documents this explicitly so nobody builds a presence feature on a partial list.
 
+#### 2.7.1 What creates a conversation row (Q3, resolved)
+
+Surface containers are created **eagerly at link time** (Q3). That decision applies to
+containers that an explicit act brings into existence — it is *not* a general policy of
+pre-materialising every conversation that could exist.
+
+**The governing invariant: a conversation row is never created by enumeration.** Every row
+traces to a specific act — a person linked a channel, a person opened or posted to a
+conversation, or a platform delivered an event. Nothing is created by walking the cross
+product of principals.
+
+| Conversation | Created by | Cardinality bounded by |
+|---|---|---|
+| Surface channel (`#dev` on Discord) | the link operation | explicit link acts |
+| Surface thread under a linked parent | first inbound platform event (§2.7) | actual platform activity |
+| Native topic | a person creating it | explicit acts |
+| Direct (DM) | first send, or a person explicitly opening the DM | explicit acts |
+| *(any principal pair, speculatively)* | **never** | — |
+
+**Why DMs are not eager.** Three reasons, in increasing order of force:
+
+1. Cardinality is combinatorial — `users × agents + C(users,2) + C(agents,2)` — where linked
+   channels are merely numerous.
+2. There is no external artifact to mirror. A linked Discord channel is a real object that
+   already exists; an unused (alice, bob) pair is not a thing, it is a *capability*.
+3. **Agents in Scion are ephemeral.** They are spawned and destroyed continuously. Enumerating
+   DM rows per agent would write to the conversation table on every spawn and leave a dead row
+   for every agent that ever existed. The table would stop describing conversations and start
+   describing history of the roster.
+
+**This does not make un-materialised DMs unaddressable.** The `@` reference grammar (§2.6) is
+**resolve-or-create**: `scion message @builder "..."` creates the conversation on first send,
+atomically, idempotent on the normalised participant pair. Addressability comes from the
+grammar; the table only records conversations that have actually been engaged.
+
+**Roster and conversation list are different queries with different sources.**
+
+| Question | Source | Command |
+|---|---|---|
+| Who can I talk to? | agent registry / project membership | `scion agents list`, project members |
+| What am I talking in? | `conversations` | `scion conversations list` |
+
+Conflating them is exactly what would reintroduce the O(N²) problem. In native chat this is
+the familiar split: the "new message" picker reads the roster, the sidebar reads conversations,
+and picking someone from the picker materialises a conversation on send. No new command is
+needed for the roster; it already exists.
+
+**No crawling.** Linking a Discord channel does not enumerate its existing threads. Threads
+materialise when the platform delivers an event for them. Backfilling history is out of scope
+(§1 Non-Goals) and would violate the no-enumeration invariant.
+
+**Relation to §2.3.1.** That section argues the schema *must permit* conversations with zero
+messages — needed for a linked-but-silent channel and for an opened-but-unused DM pane. It does
+not argue that empty conversations should be manufactured. Permitting an empty conversation and
+enumerating all possible ones are independent; this design does the first and refuses the
+second. An empty DM the user opened and abandoned is dismissible via `ArchivedAt` without
+deleting anything, since there is nothing to delete.
+
 ### 2.8 Delivery options move off the message
 
 `Plain`, `Raw`, `ObserverOnly`, `Urgent` are transport mechanics, not properties of a
@@ -621,7 +679,17 @@ changes user-visible behaviour and means the same two people have N DM threads.
 I lean global-with-an-explicit-project-field-on-the-message, which fixes the mention hole
 without splitting conversations. Wanted your call before I commit to it.
 
-### Q3 — Should surface-level conversations be auto-created?
+### Q3 — Should surface-level conversations be auto-created? — **RESOLVED 2026-08-24**
+
+> **Resolution (ptone@google.com):** **eager** for surface containers, created at link time
+> and immediately present in `scion conversations list`.
+>
+> Scoped in follow-up: eager applies to containers brought into existence by an explicit act.
+> It does **not** imply materialising a DM per principal pair. The governing invariant —
+> *no conversation row is ever created by enumeration* — the per-kind creation table, the
+> resolve-or-create `@` grammar that keeps un-materialised DMs addressable, and the
+> roster-vs-conversation-list separation are specified in **§2.7.1**. Verified by
+> AC-26–AC-29.
 
 When a Discord channel is linked with no threads in use, is a conversation created eagerly
 at link time, or lazily on first message? Eager is more predictable and makes the channel
@@ -734,6 +802,21 @@ Commit-sized, ordered, each independently reviewable.
   unshared project" — asserted by comparing both error strings for equality. Bare `#<thread>`
   inside a DM fails naming the `#<space>/<thread>` fix. `--to` naming a third party in a DM
   fails as `not-a-participant`.
+
+### Conversation creation (Q3, §2.7.1)
+
+- **AC-26** Linking a surface channel creates exactly one conversation, immediately listable
+  and addressable as `conv:<id>` before any message exists. Linking does not enumerate
+  existing platform threads.
+- **AC-27** **No-enumeration invariant.** Spawning N agents into a project with M users
+  creates zero conversation rows. Asserted directly: row count before and after is unchanged.
+  This is the regression guard for the O(N²) failure mode.
+- **AC-28** `scion message @<agent>` to a never-used pair succeeds, creating the DM on send.
+  Two concurrent first-sends to the same pair produce exactly one conversation — enforced by
+  the unique index on the normalised participant pair, and tested under concurrency.
+- **AC-29** `scion conversations list` and the roster are separate queries. A project member
+  with no conversations lists none while remaining fully addressable via `@`. Deleting an
+  agent does not orphan or delete a conversation that has messages.
 
 ---
 
