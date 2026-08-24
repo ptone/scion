@@ -211,11 +211,15 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "harness_config")
 	}
+	totalCount := result.TotalCount
+	if user, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(user) {
+		totalCount = len(items)
+	}
 
 	writeJSON(w, http.StatusOK, ListHarnessConfigsResponse{
 		HarnessConfigs: items,
 		NextCursor:     result.NextCursor,
-		TotalCount:     len(items),
+		TotalCount:     totalCount,
 		Capabilities:   scopeCap,
 	})
 }

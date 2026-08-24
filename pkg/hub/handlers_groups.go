@@ -138,11 +138,15 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "group")
 	}
+	totalCount := result.TotalCount
+	if user, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(user) {
+		totalCount = len(groups)
+	}
 
 	writeJSON(w, http.StatusOK, ListGroupsResponse{
 		Groups:       groups,
 		NextCursor:   result.NextCursor,
-		TotalCount:   len(groups),
+		TotalCount:   totalCount,
 		Capabilities: scopeCap,
 	})
 }

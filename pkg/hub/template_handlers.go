@@ -227,11 +227,15 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "template")
 	}
+	totalCount := result.TotalCount
+	if user, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(user) {
+		totalCount = len(templates)
+	}
 
 	writeJSON(w, http.StatusOK, ListTemplatesResponse{
 		Templates:    templates,
 		NextCursor:   result.NextCursor,
-		TotalCount:   len(templates),
+		TotalCount:   totalCount,
 		Capabilities: scopeCap,
 	})
 }
