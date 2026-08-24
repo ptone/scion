@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,52 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type authorizedListHandlerFailingStore struct {
+	store.Store
+	listCalls      int
+	wrongListOpts  bool
+	failList       func() error
+	failPolicyRead error
+}
+
+func (s *authorizedListHandlerFailingStore) checkListOptions(opts store.ListOptions) {
+	s.listCalls++
+	if !opts.SkipTotalCount || opts.Limit != authorizedListBatchSize {
+		s.wrongListOpts = true
+	}
+}
+
+func (s *authorizedListHandlerFailingStore) GetPoliciesForPrincipals(ctx context.Context, principals []store.PrincipalRef) ([]store.Policy, error) {
+	if s.failPolicyRead != nil {
+		return nil, s.failPolicyRead
+	}
+	return s.Store.GetPoliciesForPrincipals(ctx, principals)
+}
+
+func (s *authorizedListHandlerFailingStore) ListTemplates(ctx context.Context, filter store.TemplateFilter, opts store.ListOptions) (*store.ListResult[store.Template], error) {
+	s.checkListOptions(opts)
+	if s.failList != nil && s.listCalls > 1 {
+		return nil, s.failList()
+	}
+	return s.Store.ListTemplates(ctx, filter, opts)
+}
+
+func (s *authorizedListHandlerFailingStore) ListHarnessConfigs(ctx context.Context, filter store.HarnessConfigFilter, opts store.ListOptions) (*store.ListResult[store.HarnessConfig], error) {
+	s.checkListOptions(opts)
+	if s.failList != nil && s.listCalls > 1 {
+		return nil, s.failList()
+	}
+	return s.Store.ListHarnessConfigs(ctx, filter, opts)
+}
+
+func (s *authorizedListHandlerFailingStore) ListGroups(ctx context.Context, filter store.GroupFilter, opts store.ListOptions) (*store.ListResult[store.Group], error) {
+	s.checkListOptions(opts)
+	if s.failList != nil && s.listCalls > 1 {
+		return nil, s.failList()
+	}
+	return s.Store.ListGroups(ctx, filter, opts)
+}
 
 func expectedAgentResourceActions() []string {
 	actions := make([]string, len(ResourceActions["agent"]))
@@ -271,6 +318,81 @@ func TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches
 			assert.Contains(t, body, tc.deniedID)
 			assert.Equal(t, 1, totalCount)
 		})
+	}
+}
+
+func TestListEndpointsFailClosedOnStoreOrAuthorizationError(t *testing.T) {
+	for _, tc := range []struct {
+		path     string
+		itemsKey string
+		handler  func(*Server) func(http.ResponseWriter, *http.Request)
+		seed     func(testing.TB, store.Store, time.Time)
+	}{
+		{
+			path:     "/api/v1/templates",
+			itemsKey: "templates",
+			handler:  func(s *Server) func(http.ResponseWriter, *http.Request) { return s.listTemplatesV2 },
+			seed: func(t testing.TB, s store.Store, now time.Time) {
+				for i := range authorizedListBatchSize + 1 {
+					require.NoError(t, s.CreateTemplate(context.Background(), &store.Template{ID: tid(fmt.Sprintf("failed-list-template-%d", i)), Name: fmt.Sprintf("Template %d", i), Slug: fmt.Sprintf("failed-list-template-%d", i), Scope: store.TemplateScopeGlobal, Harness: "codex", Status: store.TemplateStatusActive, Created: now, Updated: now}))
+				}
+			},
+		},
+		{
+			path:     "/api/v1/harness-configs",
+			itemsKey: "harnessConfigs",
+			handler:  func(s *Server) func(http.ResponseWriter, *http.Request) { return s.listHarnessConfigs },
+			seed: func(t testing.TB, s store.Store, now time.Time) {
+				for i := range authorizedListBatchSize + 1 {
+					require.NoError(t, s.CreateHarnessConfig(context.Background(), &store.HarnessConfig{ID: tid(fmt.Sprintf("failed-list-config-%d", i)), Name: fmt.Sprintf("Config %d", i), Slug: fmt.Sprintf("failed-list-config-%d", i), Scope: store.HarnessConfigScopeGlobal, Harness: "codex", Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
+				}
+			},
+		},
+		{
+			path:     "/api/v1/groups",
+			itemsKey: "groups",
+			handler:  func(s *Server) func(http.ResponseWriter, *http.Request) { return s.listGroups },
+			seed: func(t testing.TB, s store.Store, now time.Time) {
+				for i := range authorizedListBatchSize + 1 {
+					require.NoError(t, s.CreateGroup(context.Background(), &store.Group{ID: tid(fmt.Sprintf("failed-list-group-%d", i)), Name: fmt.Sprintf("Group %d", i), Slug: fmt.Sprintf("failed-list-group-%d", i), GroupType: store.GroupTypeExplicit, Created: now, Updated: now}))
+				}
+			},
+		},
+	} {
+		for _, failure := range []struct {
+			name      string
+			configure func(*authorizedListHandlerFailingStore)
+		}{
+			{name: "later page store error", configure: func(s *authorizedListHandlerFailingStore) {
+				s.failList = func() error { return errors.New("store unavailable") }
+			}},
+			{name: "authorization read error", configure: func(s *authorizedListHandlerFailingStore) { s.failPolicyRead = errors.New("authorization unavailable") }},
+		} {
+			t.Run(tc.path+"/"+failure.name, func(t *testing.T) {
+				srv, baseStore := testServer(t)
+				tc.seed(t, baseStore, time.Now())
+				failingStore := &authorizedListHandlerFailingStore{Store: baseStore}
+				failure.configure(failingStore)
+				srv.store = failingStore
+				srv.authzService = NewAuthzService(failingStore, srv.authzService.logger)
+
+				identity := NewScopedUserIdentity(NewAuthenticatedUser(tid("failed-list-user"), "failed-list@example.com", "Failed List", store.UserRoleAdmin, "api"), "", []string{"template:read", "harness_config:read", "group:read"})
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodGet, tc.path, nil).WithContext(contextWithIdentity(context.Background(), identity))
+				tc.handler(srv)(rec, req)
+
+				require.NotEqual(t, http.StatusOK, rec.Code, rec.Body.String())
+				var response map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Contains(t, response, "error")
+				assert.NotContains(t, response, tc.itemsKey)
+				assert.NotContains(t, response, "totalCount")
+				if failure.name == "later page store error" {
+					assert.GreaterOrEqual(t, failingStore.listCalls, 2)
+				}
+				assert.False(t, failingStore.wrongListOpts, "restricted list fetch must use bounded skip-count options")
+			})
+		}
 	}
 }
 
