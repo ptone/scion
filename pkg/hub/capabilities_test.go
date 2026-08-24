@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -193,6 +194,12 @@ func TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches
 	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: tid("scoped-list-config-b"), Name: "Config B", Slug: "scoped-list-config-b", Scope: store.HarnessConfigScopeProject, ScopeID: projectB.ID, Harness: "claude", Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: tid("scoped-list-group-a"), Name: "Group A", Slug: "scoped-list-group-a", GroupType: store.GroupTypeExplicit, ProjectID: projectA.ID, OwnerID: admin.ID()}))
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: tid("scoped-list-group-b"), Name: "Group B", Slug: "scoped-list-group-b", GroupType: store.GroupTypeExplicit, ProjectID: projectB.ID, OwnerID: admin.ID()}))
+	for i := 0; i < 50; i++ {
+		suffix := fmt.Sprintf("%02d", i)
+		require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: tid("scoped-list-template-extra-" + suffix), Name: "Template Extra " + suffix, Slug: "scoped-list-template-extra-" + suffix, Scope: store.TemplateScopeProject, ScopeID: projectA.ID, Harness: "claude", Status: store.TemplateStatusActive, Created: now, Updated: now}))
+		require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: tid("scoped-list-config-extra-" + suffix), Name: "Config Extra " + suffix, Slug: "scoped-list-config-extra-" + suffix, Scope: store.HarnessConfigScopeProject, ScopeID: projectA.ID, Harness: "claude", Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
+		require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: tid("scoped-list-group-extra-" + suffix), Name: "Group Extra " + suffix, Slug: "scoped-list-group-extra-" + suffix, GroupType: store.GroupTypeExplicit, ProjectID: projectA.ID, OwnerID: admin.ID()}))
+	}
 	for _, policy := range []*store.Policy{
 		{ID: tid("scoped-list-template-read"), Name: "Template read", ScopeType: "project", ScopeID: projectA.ID, ResourceType: "template", Actions: []string{"read"}, Effect: "allow"},
 		{ID: tid("scoped-list-config-read"), Name: "Config read", ScopeType: "project", ScopeID: projectA.ID, ResourceType: "harness_config", Actions: []string{"read"}, Effect: "allow"},
@@ -205,22 +212,64 @@ func TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches
 	for _, tc := range []struct {
 		path, allowedID, deniedID string
 		handler                   func(http.ResponseWriter, *http.Request)
+		itemsKey                  string
+		unscopedTotal             int
 	}{
-		{"/api/v1/templates", tid("scoped-list-template-a"), tid("scoped-list-template-b"), srv.listTemplatesV2},
-		{"/api/v1/harness-configs", tid("scoped-list-config-a"), tid("scoped-list-config-b"), srv.listHarnessConfigs},
-		{"/api/v1/groups", tid("scoped-list-group-a"), tid("scoped-list-group-b"), srv.listGroups},
+		{"/api/v1/templates", tid("scoped-list-template-a"), tid("scoped-list-template-b"), srv.listTemplatesV2, "templates", 52},
+		{"/api/v1/harness-configs", tid("scoped-list-config-a"), tid("scoped-list-config-b"), srv.listHarnessConfigs, "harnessConfigs", 52},
+		{"/api/v1/groups", tid("scoped-list-group-a"), tid("scoped-list-group-b"), srv.listGroups, "groups", 53}, // Includes the seeded hub-members group.
 	} {
 		t.Run(tc.path, func(t *testing.T) {
-			for _, path := range []string{tc.path, tc.path + "?projectId=" + projectB.ID} {
+			request := func(identity Identity, path string) (string, int) {
 				rec := httptest.NewRecorder()
-				req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(contextWithIdentity(ctx, scoped))
+				req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(contextWithIdentity(ctx, identity))
 				tc.handler(rec, req)
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-				assert.NotContains(t, rec.Body.String(), tc.deniedID)
-				if path == tc.path {
-					assert.Contains(t, rec.Body.String(), tc.allowedID)
+				body := rec.Body.String()
+				var response struct {
+					TotalCount int `json:"totalCount"`
+				}
+				require.NoError(t, json.Unmarshal([]byte(body), &response))
+				return body, response.TotalCount
+			}
+
+			body, totalCount := request(scoped, tc.path+"?limit=1")
+			assert.NotContains(t, body, tc.deniedID)
+			assert.Equal(t, 51, totalCount, "authorized total must not collapse to the current page length")
+
+			body, totalCount = request(scoped, tc.path+"?projectId="+projectB.ID)
+			assert.NotContains(t, body, tc.deniedID)
+			assert.Equal(t, 0, totalCount)
+
+			body, totalCount = request(scoped, tc.path+"?projectId="+projectA.ID+"&limit=100")
+			assert.Contains(t, body, tc.allowedID)
+			assert.Equal(t, 51, totalCount)
+			var response map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal([]byte(body), &response))
+			var items []struct {
+				ID  string        `json:"id"`
+				Cap *Capabilities `json:"_capabilities"`
+			}
+			require.NoError(t, json.Unmarshal(response[tc.itemsKey], &items))
+			for _, item := range items {
+				if item.ID == tc.allowedID {
+					require.NotNil(t, item.Cap)
+					assert.Contains(t, item.Cap.Actions, string(ActionRead))
+					break
 				}
 			}
+
+			_, totalCount = request(admin, tc.path+"?limit=1")
+			assert.Equal(t, tc.unscopedTotal, totalCount, "unscoped admin total must not collapse to the current page length")
+
+			body, totalCount = request(admin, tc.path+"?limit=100")
+			assert.Contains(t, body, tc.allowedID)
+			assert.Contains(t, body, tc.deniedID)
+			assert.Equal(t, tc.unscopedTotal, totalCount)
+
+			body, totalCount = request(admin, tc.path+"?projectId="+projectB.ID)
+			assert.Contains(t, body, tc.deniedID)
+			assert.Equal(t, 1, totalCount)
 		})
 	}
 }
