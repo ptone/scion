@@ -240,6 +240,74 @@ func (a *AuthzService) DecideFromContext(ctx context.Context, resource Resource,
 	return a.Decide(ctx, AuthzRequestFromContext(ctx, resource, action))
 }
 
+// AuthorizeReadBatch evaluates read enforcement decisions without converting
+// authorization-store failures into denials. Capability projections retain
+// their best-effort behavior; list enforcement must fail closed instead.
+func (a *AuthzService) AuthorizeReadBatch(ctx context.Context, identity Identity, resources []Resource) ([]bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
+		return makeAllowed(len(resources)), nil
+	}
+
+	principals, err := a.authorizationPrincipals(ctx, identity)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := a.store.GetPoliciesForPrincipals(ctx, principals); err != nil {
+		return nil, err
+	}
+	if GetIdentityFromContext(ctx) != identity {
+		ctx = contextWithIdentity(ctx, identity)
+	}
+	allowed := make([]bool, len(resources))
+	for i := range resources {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		decision := a.DecideFromContext(ctx, resources[i], ActionRead)
+		if decision.Reason == "policy lookup error" {
+			return nil, errors.New("authorization policy lookup failed")
+		}
+		allowed[i] = decision.Allowed
+	}
+	return allowed, nil
+}
+
+func (a *AuthzService) authorizationPrincipals(ctx context.Context, identity Identity) ([]store.PrincipalRef, error) {
+	principals := []store.PrincipalRef{{Type: identity.Type(), ID: identity.ID()}}
+	var (
+		groups []string
+		err    error
+	)
+	switch identity.Type() {
+	case "user", "dev", "federated_user":
+		principals[0].Type = "user"
+		groups, err = a.store.GetEffectiveGroups(ctx, identity.ID())
+	case "agent", "federated_agent":
+		principals[0].Type = "agent"
+		groups, err = a.store.GetEffectiveGroupsForAgent(ctx, identity.ID())
+	default:
+		return principals, nil
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	for _, groupID := range groups {
+		principals = append(principals, store.PrincipalRef{Type: "group", ID: groupID})
+	}
+	return principals, nil
+}
+
+func makeAllowed(n int) []bool {
+	allowed := make([]bool, n)
+	for i := range allowed {
+		allowed[i] = true
+	}
+	return allowed
+}
+
 func principalContextForIdentity(identity Identity) PrincipalContext {
 	if identity == nil {
 		return PrincipalContext{}

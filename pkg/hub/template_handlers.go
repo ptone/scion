@@ -15,11 +15,11 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -168,88 +168,60 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	if !checkAgentReadScope(w, r) {
 		return
 	}
-
-	ctx := r.Context()
-	query := r.URL.Query()
-
-	filter := store.TemplateFilter{
-		Name:      query.Get("name"),
-		Scope:     query.Get("scope"),
-		ScopeID:   query.Get("scopeId"),
-		ProjectID: query.Get("projectId"), // Backwards compat
-		Harness:   query.Get("harness"),
-		Status:    query.Get("status"),
-		Search:    query.Get("search"),
-	}
-
-	// Default to active templates only
+	ctx, query := r.Context(), r.URL.Query()
+	filter := store.TemplateFilter{Name: query.Get("name"), Scope: query.Get("scope"), ScopeID: query.Get("scopeId"), ProjectID: query.Get("projectId"), Harness: query.Get("harness"), Status: query.Get("status"), Search: query.Get("search")}
 	if filter.Status == "" {
 		filter.Status = store.TemplateStatusActive
 	}
-
-	limit := 50
-	if l := query.Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-
-	result, err := s.store.ListTemplates(ctx, filter, store.ListOptions{
-		Limit:  limit,
-		Cursor: query.Get("cursor"),
-	})
+	limit, err := parseAuthorizedListLimit(query.Get("limit"))
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		BadRequest(w, err.Error())
 		return
 	}
-
-	// Compute per-item and scope capabilities
-	identity := GetIdentityFromContext(ctx)
-	templates := make([]TemplateWithCapabilities, 0, len(result.Items))
-	if identity != nil {
-		resources := make([]Resource, len(result.Items))
-		for i := range result.Items {
-			resources[i] = templateResource(&result.Items[i])
-		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "template")
-		for i := range result.Items {
-			if capabilityAllows(caps[i], ActionRead) {
-				templates = append(templates, TemplateWithCapabilities{Template: result.Items[i], Cap: caps[i]})
+	identity, cursor := GetIdentityFromContext(ctx), query.Get("cursor")
+	var items []store.Template
+	var nextCursor string
+	var totalCount int
+	if user, ok := identity.(UserIdentity); identity != nil && (!ok || !IsUnscopedLocalPlatformAdmin(user)) {
+		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Template], error) {
+			page, err := s.store.ListTemplates(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor})
+			if err != nil {
+				return authorizedCandidatePage[store.Template]{}, err
 			}
+			return authorizedCandidatePage[store.Template]{Items: page.Items, NextCursor: page.NextCursor}, nil
+		}, templateResource, func(t *store.Template) string { return authorizedListCursor(t.Created, t.ID) }, s.authzService.AuthorizeReadBatch)
+		if err != nil {
+			writeAuthorizedListError(w, err)
+			return
+		}
+		items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+	} else {
+		result, err := s.store.ListTemplates(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+	}
+	templates := make([]TemplateWithCapabilities, 0, len(items))
+	if identity == nil {
+		for i := range items {
+			templates = append(templates, TemplateWithCapabilities{Template: items[i]})
 		}
 	} else {
-		for i := range result.Items {
-			templates = append(templates, TemplateWithCapabilities{Template: result.Items[i]})
+		resources := make([]Resource, len(items))
+		for i := range items {
+			resources[i] = templateResource(&items[i])
+		}
+		for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "template") {
+			templates = append(templates, TemplateWithCapabilities{Template: items[i], Cap: cap})
 		}
 	}
-
 	var scopeCap *Capabilities
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "template")
 	}
-	totalCount := result.TotalCount
-	if user, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(user) {
-		all, err := s.store.ListTemplates(ctx, filter, store.ListOptions{Limit: result.TotalCount})
-		if err == nil {
-			resources := make([]Resource, len(all.Items))
-			for i := range all.Items {
-				resources[i] = templateResource(&all.Items[i])
-			}
-			totalCount = 0
-			for _, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "template") {
-				if capabilityAllows(cap, ActionRead) {
-					totalCount++
-				}
-			}
-		}
-	}
-
-	writeJSON(w, http.StatusOK, ListTemplatesResponse{
-		Templates:    templates,
-		NextCursor:   result.NextCursor,
-		TotalCount:   totalCount,
-		Capabilities: scopeCap,
-	})
+	writeJSON(w, http.StatusOK, ListTemplatesResponse{Templates: templates, NextCursor: nextCursor, TotalCount: totalCount, Capabilities: scopeCap})
 }
 
 // createTemplateV2 creates a template with optional file upload URLs.

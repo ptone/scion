@@ -17,7 +17,6 @@ package hub
 import (
 	"context"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -98,39 +97,49 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		ProjectID: query.Get("projectId"),
 	}
 
-	limit := 50
-	if l := query.Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-
-	result, err := s.store.ListGroups(ctx, filter, store.ListOptions{
-		Limit:  limit,
-		Cursor: query.Get("cursor"),
-	})
+	identity := GetIdentityFromContext(ctx)
+	limit, err := parseAuthorizedListLimit(query.Get("limit"))
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		BadRequest(w, err.Error())
 		return
 	}
-
-	// Compute per-item and scope capabilities
-	identity := GetIdentityFromContext(ctx)
-	groups := make([]GroupWithCapabilities, 0, len(result.Items))
-	if identity != nil {
-		resources := make([]Resource, len(result.Items))
-		for i := range result.Items {
-			resources[i] = groupResource(&result.Items[i])
-		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "group")
-		for i := range result.Items {
-			if capabilityAllows(caps[i], ActionRead) {
-				groups = append(groups, GroupWithCapabilities{Group: result.Items[i], Cap: caps[i]})
+	cursor := query.Get("cursor")
+	var groupItems []store.Group
+	var nextCursor string
+	var totalCount int
+	if user, ok := identity.(UserIdentity); identity != nil && (!ok || !IsUnscopedLocalPlatformAdmin(user)) {
+		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Group], error) {
+			page, err := s.store.ListGroups(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor})
+			if err != nil {
+				return authorizedCandidatePage[store.Group]{}, err
 			}
+			return authorizedCandidatePage[store.Group]{Items: page.Items, NextCursor: page.NextCursor}, nil
+		}, groupResource, func(g *store.Group) string { return authorizedListCursor(g.Created, g.ID) }, s.authzService.AuthorizeReadBatch)
+		if err != nil {
+			writeAuthorizedListError(w, err)
+			return
+		}
+		groupItems, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+	} else {
+		result, err := s.store.ListGroups(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		groupItems, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+	}
+	groups := make([]GroupWithCapabilities, 0, len(groupItems))
+	if identity == nil {
+		for i := range groupItems {
+			groups = append(groups, GroupWithCapabilities{Group: groupItems[i]})
 		}
 	} else {
-		for i := range result.Items {
-			groups = append(groups, GroupWithCapabilities{Group: result.Items[i]})
+		resources := make([]Resource, len(groupItems))
+		for i := range groupItems {
+			resources[i] = groupResource(&groupItems[i])
+		}
+		for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "group") {
+			groups = append(groups, GroupWithCapabilities{Group: groupItems[i], Cap: cap})
 		}
 	}
 
@@ -138,26 +147,9 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "group")
 	}
-	totalCount := result.TotalCount
-	if user, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(user) {
-		all, err := s.store.ListGroups(ctx, filter, store.ListOptions{Limit: result.TotalCount})
-		if err == nil {
-			resources := make([]Resource, len(all.Items))
-			for i := range all.Items {
-				resources[i] = groupResource(&all.Items[i])
-			}
-			totalCount = 0
-			for _, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "group") {
-				if capabilityAllows(cap, ActionRead) {
-					totalCount++
-				}
-			}
-		}
-	}
-
 	writeJSON(w, http.StatusOK, ListGroupsResponse{
 		Groups:       groups,
-		NextCursor:   result.NextCursor,
+		NextCursor:   nextCursor,
 		TotalCount:   totalCount,
 		Capabilities: scopeCap,
 	})
