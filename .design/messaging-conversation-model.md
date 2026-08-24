@@ -163,6 +163,54 @@ type Addressee struct {
 disappear from the envelope. `Plain`, `Raw`, `ObserverOnly` move out of the message and
 into delivery options (§2.8).
 
+#### 2.3.1 Why `ReplyToID` does not subsume `ConversationID`
+
+A message ID is more specific than a conversation ID, so it is reasonable to ask whether
+`reply_to` alone could address a message. It cannot. The two fields answer different
+questions:
+
+| Field | Question | Required |
+|---|---|---|
+| `ConversationID` | Where does this go? | Always |
+| `ReplyToID` | Which message am I responding to? | Never |
+
+Four reasons the container ID has to exist independently:
+
+1. **Cold start.** The first message in a conversation has no parent. More importantly, a
+   conversation can exist with zero messages — a native DM pane is opened, or a Discord
+   thread is created and nobody has spoken. Native chat must be able to render and address
+   an empty conversation, and `POST /conversations/:id/messages` must have an `:id`.
+2. **Mutable container state has nowhere else to live.** Participant set, default agent,
+   read state, `ArchivedAt`, `DriftState`, and the `(Surface, ExternalRef)` mapping to the
+   real platform thread all change over the life of a conversation. Messages are immutable
+   records. Attaching mutable state to an immutable row is a category error, and it is
+   unclear which message would own it.
+3. **Derivation cost and fragility.** Recovering the container means walking `reply_to` to
+   a root: every routing decision becomes a graph traversal instead of a column lookup, and
+   the chain breaks when a middle message is deleted or redacted.
+4. **Most messages are not replies.** In an active thread the common case is "the next thing
+   said in the room." If `reply_to` were the address, senders would have to nominate an
+   arbitrary parent — and on Discord and Slack `reply_to` maps to the native quoted-reply
+   affordance, so a synthetic parent renders as a false quote to every human present.
+
+**Invariant: `reply_to` is never a routing input.** On the wire, `conversation` is always
+populated and always authoritative. `reply_to` must reference a message whose
+`conversation_id` equals this message's — which is an O(1) column comparison precisely
+because the container ID is stored on both rows. Remove it and the constraint becomes both
+a chain walk and unvalidatable, since there is nothing to compare against.
+
+**Ergonomic consequence (adopted).** Because a message belongs to exactly one conversation,
+`reply_to → conversation` is a total function. The CLI therefore accepts:
+
+```
+scion message --reply-to <msg-id> "..."      # conversation positional omitted
+```
+
+resolving the conversation in one lookup and placing the *resolved* conversation on the
+wire. This does not reintroduce the two-address failure mode: the CLI requires exactly one
+of (conversation positional, `--reply-to`), there is still no implicit fallback, and
+supplying both with a mismatch is an error rather than a silent preference.
+
 ### 2.4 Addressee resolution — how "no recipient named" works
 
 This is the mechanism that delivers the requested "send with no recipient explicitly named".
@@ -383,6 +431,35 @@ leaving recipient as the address.
 were themselves added as optional qualifiers alongside a primary recipient. Adding a third
 optional qualifier to the same envelope reproduces the failure mode at a larger scale.
 
+### 3.5 No Conversation entity: the root message ID *is* the conversation ID
+
+The email model. Every message carries `in_reply_to`; conversation identity is the ID of the
+root message, and a thread is the transitive closure of the reply graph (RFC 5322
+`References`). This is a real, long-lived design, and it is the strongest form of "if we have
+message IDs, why do we need conversation IDs?"
+
+It would genuinely remove an entity, and reply chains would be exactly faithful to how Discord
+and Slack render quoted replies.
+
+**Rejected**, for the reasons in §2.3.1 — chiefly:
+
+- **Conversations must be able to exist before they contain messages.** Native chat opens a DM
+  pane, and a broker registers a Discord thread, before anyone speaks. Under this model those
+  states are unrepresentable, which is fatal for the native surface we are trying to
+  differentiate.
+- **Deleting the root destroys the identity of the whole thread.** Email tolerates this because
+  identity is client-side and best-effort; we have foreign keys, read state, and participant
+  rows hanging off it.
+- **Container state has no owner.** Participants, default agent, and the `(Surface, ExternalRef)`
+  mapping are mutable and thread-wide; the root message is immutable and has no claim to them.
+
+Email also demonstrates the cost directly: threading is famously unreliable across clients
+precisely because it is *derived* rather than *stored*, and every client re-derives it slightly
+differently. That is the failure mode this proposal exists to eliminate.
+
+The useful part of the idea is kept: `--reply-to` may be given *instead of* naming a
+conversation, and the CLI resolves the container from it (§2.3.1).
+
 ---
 
 ## 4. Migration / Rollout
@@ -440,7 +517,12 @@ Two backfill hazards, both already present in the data:
 
 ## 5. Open Questions
 
-### Q1 — Mention fan-out: refinement of a settled decision, needs sign-off
+### Q1 — Mention fan-out: refinement of a settled decision — **RESOLVED 2026-08-24**
+
+> **Resolution (ptone@google.com):** approved. One message row, N addressee rows. The
+> `mention` type is removed from the taxonomy; `metadata.mention_source` is removed. Any
+> "your mentions" view queries `message_addressees WHERE via = 'body-mention'` rather than
+> counting message rows. Recorded in AC-9.
 
 `findings.md` §11.2 records that body mentions produce **separate messages**, that brokers
 send **separate inbound POSTs per mention**, and that bundling and hub-side parsing were
@@ -529,11 +611,21 @@ Commit-sized, ordered, each independently reviewable.
   reach the parent container.
 - **AC-8** `Validate()` is invoked on all three inbound paths. Specific regression: the
   Teams `channel:"" + thread_id:set` combination is rejected at the boundary.
+- **AC-8a** `reply_to` never affects routing. A message whose `reply_to` names a message in a
+  *different* conversation is rejected. Constructing an envelope where `conversation` is
+  absent but `reply_to` is present is rejected at the API boundary — resolution happens in
+  the CLI, and the wire format always carries the resolved conversation.
+- **AC-8b** `scion message --reply-to <id> "text"` with no positional conversation resolves
+  and delivers to the containing conversation. Supplying both a positional conversation and a
+  `--reply-to` that belongs elsewhere is a CLI error naming both.
 
 ### Agent surface (G3)
 
 - **AC-9** An agent can determine "is this addressed to me" from a single structured field
-  without parsing prose or inspecting metadata.
+  without parsing prose or inspecting metadata. A body mention produces **one** message row
+  with an additional addressee row (`via = 'body-mention'`), not a second message; the
+  mentioned agent and the primary addressee receive the same `message.id` and the same `to`
+  list. (Q1, resolved.)
 - **AC-10** `status` on lifecycle events is a structured field. No agent needs to regex the
   body to learn an agent completed.
 - **AC-11** Replying to any inbound message requires echoing one field from the envelope. No
@@ -568,10 +660,15 @@ Post a message to a conversation.
 
 Usage:
   scion message <conversation> <text> [flags]
+  scion message --reply-to <msg-id> <text> [flags]
 
 A conversation is the place a message goes: a native thread, a DM, a Discord
 thread, a Slack thread. Every message goes to exactly one. Inbound messages
 tell you which conversation they came from — reply by naming the same one.
+
+Give exactly one destination: a conversation, or a message to reply to. A
+message belongs to exactly one conversation, so --reply-to identifies the
+destination on its own.
 
 CONVERSATION REFERENCES
   conv:<id>              A conversation by ID. This is what inbound messages
@@ -598,7 +695,10 @@ ADDRESSING WITHIN A CONVERSATION
 FLAGS
   --to <principal>       Address a participant directly (repeatable).
                          Must already be a participant.
-  --reply-to <msg-id>    Reply to a specific message in the conversation.
+  --reply-to <msg-id>    Reply to a specific message. Renders as a quoted reply
+                         on surfaces that support it. May be used instead of
+                         naming a conversation. If you name both, the message
+                         must belong to that conversation.
   --attach <path>        Attach a file (repeatable). Paths under /workspace
                          or /scion-volumes.
   --visibility <level>   normal (default) | verbose | full
@@ -617,6 +717,9 @@ EXAMPLES
 
   # Say something in a room without tasking anyone.
   scion message #general "Heads up: staging is down for ~10 minutes."
+
+  # Answer one specific message. The conversation is implied by the message.
+  scion message --reply-to msg:4c81de07 "Yes — that path is already covered."
 
 SEE ALSO
   scion broadcast              Send to all agents. Not a conversation.
@@ -693,8 +796,16 @@ scion message conv:7f3a91c2 "..."
 You never construct a thread or channel ID. If you echo back the conversation
 you were addressed in, your reply lands where the sender is looking.
 
-To reply somewhere else, name that conversation instead — but be deliberate,
-because it will not be where the sender is watching.
+To answer one specific message in a busy conversation, name the message
+instead — the conversation is implied, and on surfaces that support quoted
+replies it will render as a reply to that message:
+
+```bash
+scion message --reply-to msg:4c81de07 "..."
+```
+
+To reply somewhere else entirely, name that other conversation — but be
+deliberate, because it will not be where the sender is watching.
 
 ### Example — a request
 
