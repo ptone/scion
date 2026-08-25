@@ -239,6 +239,53 @@ attacker. A project with more than 10 explicit groups may not return the
 members group at all. Then a legitimate owner is refused. The canonical
 relation removes this defect as well.
 
+**Repair status, verified 2026-08-25.** The members path is correct. The
+agents path is not, and the difference looks accidental.
+
+*Correct.* `createGroup` now calls `s.authorize` with `ActionCreate`,
+which closes (a). It rejects any slug carrying the `project:` prefix,
+which closes (b), and it refuses the `project_agents` group type
+outright. `createProjectMembersGroupAndPolicy` closes (c): on a slug
+conflict it calls `isSystemProjectMembersGroup`, which requires **both**
+that the group already carries the project's immutable ID **and** that
+it holds the `scion.io/project-members-group` annotation. Otherwise it
+refuses to adopt, and logs. `BackfillProjectMembersGroupMarkers` marks
+the legitimate pre-upgrade groups so that reuse still works. This is the
+durable shape.
+
+*Incomplete.* `createProjectGroup`, which creates the project **agents**
+group, kept the original adoption logic:
+
+```go
+if existing.ProjectID != project.ID {
+    existing.ProjectID = project.ID
+    UpdateGroup(...)
+}
+```
+
+There is no annotation check, no system-group check and no group-type
+check. It adopts any group whose slug is `project:<slug>:agents`. There
+is no agents equivalent of the marker backfill, so nothing marks the
+legitimate ones either.
+
+*Severity.* Not reachable on a fresh hub, because the prefix reservation
+stops anyone creating that slug. Reachable on an **upgraded** hub in one
+case: a group named `project:<future-slug>:agents`, created before the
+prefix reservation landed, is adopted when a project with that slug is
+created later. Its creator stays the owner and can add members, and the
+agents group is the implicit binding target for project agent policies.
+So the exposure needs a hub upgrading across this fix, and someone who
+guessed a project slug in advance. **Not P0. An incomplete repair.** The
+point of the members-side work was that a slug is not a safe key, and
+the agents side still treats it as one.
+
+*Repair.* Make the two paths symmetric: the same system annotation, the
+same both-conditions predicate on adoption, refuse and log otherwise,
+and a marker backfill covering agents groups. Do this even at low
+severity, because two adjacent functions now handle one class of
+resource with different rigour, and that asymmetry is what invites the
+regression. The members-side code is already the template.
+
 ---
 
 ## 5. The Five Structural Defects
@@ -1252,6 +1299,12 @@ A reviewer or QA tester must verify the following.
 - [ ] Project membership is keyed by the immutable project ID, not by a
       slug. The relation is created in the same transaction as the
       project.
+- [ ] The project **agents** group is adopted on the same terms as the
+      members group. A pre-existing group with a colliding slug is
+      refused unless it already carries the project's immutable ID and
+      the system annotation. Test the upgraded-hub case: a group created
+      under that slug before the prefix reservation is **not** adopted.
+      (Section 4.3, repair status.)
 
 ### Phase 2
 
