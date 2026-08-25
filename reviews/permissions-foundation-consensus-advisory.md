@@ -1999,6 +1999,70 @@ administrator.
 
 ---
 
+### 11.9 Final fixes at `182a76b7` — D8 closed, one gap in the guard
+
+#### D8 — approved
+
+The durable annotation is right. Handling the already-marked group was
+not requested and closes a real hole: interrupted backfills and later
+ownership changes now get the review annotation too.
+
+#### The effect guard — built to specification
+
+The pre-scan runs before any mutation, counts **matching existing
+users** rather than config strings, refuses on zero with an Error, and
+is not row-order dependent. The rotation case works because bob exists;
+whitespace and empty both refuse. `adminSet` trims independently of
+config sanitization, which is the right redundancy.
+
+`SanitizeEmailList` is applied at four entry points. The fifth — the web
+server's list — is covered as well: `splitCommaList` trims and drops
+empties, and `determineUserRole` lowercases at comparison.
+
+#### Finding — the guard covers the batch path, not the interactive one
+
+`determineUserRole` is unchanged. It still demotes on nothing more than
+`currentRole == "admin" && len(adminEmails) > 0`. It carries no effect
+guard, and it cannot carry one, because it sees a single user rather
+than the user set.
+
+Consider any future state where `AdminEmails` is non-empty and matches
+no existing user — an operator using an alias, a provider changing its
+email claim format, a migration that rewrites stored emails. The
+reconciler refuses to demote and logs Error, as designed. Every
+administrator who then logs in is demoted anyway, one at a time, and the
+binding is deleted with them, because D11-fix2 correctly ties deletion
+to demotion. The hub loses every administrator gradually instead of at
+once, while the guard reports that it prevented exactly that.
+
+That is worse than having no guard, because the Error tells the operator
+they are protected while the loss proceeds by another route.
+
+This is the third instance of one pattern: the login-deletion path, then
+whitespace, now this. Each time the protection was attached to a single
+route instead of to the outcome.
+
+**Fix.** The reconciler already computes the decision — publish it.
+Record "demotion is unsafe" as a process-level atomic or a hub setting,
+and have `determineUserRole`'s callers refuse to demote while it is set.
+Start-up completes before serving, so the value is always available
+before a login can occur. No new logic; an existing decision made
+visible to the path that needs it.
+
+#### Minor
+
+The pre-scan adds a second full paginated pass over the user table at
+start-up. The count is only compared against zero, so it can break on
+the first match.
+
+#### Disposition
+
+The PR may open. The guard-publication fix belongs on the PR before it
+merges; it does not need another pre-PR review round. Everything else
+across 1G, D10, D11 and D8 is settled.
+
+---
+
 ## 12. Acceptance Criteria
 
 A reviewer or QA tester must verify the following.
