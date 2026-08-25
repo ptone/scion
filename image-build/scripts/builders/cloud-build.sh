@@ -49,6 +49,7 @@ cloud_build_config_for_target() {
     scion-base) file="cloudbuild-scion-base.yaml" ;;
     harnesses)  file="cloudbuild-harnesses.yaml" ;;
     hub)        file="cloudbuild-hub.yaml" ;;
+    omni)       file="cloudbuild-omni.yaml" ;;
     thick-prep) file="cloudbuild-thick.yaml" ;;
     thick)      file="cloudbuild-thick.yaml" ;;
     *)
