@@ -473,14 +473,14 @@ func TestMountsFor_BasicPaths(t *testing.T) {
 	}
 
 	mounts := mountsFor(paths, nil)
-	if len(mounts) != 3 {
-		t.Fatalf("mountsFor() returned %d mounts, want 3", len(mounts))
+	// No tmux mount: AF_UNIX can't cross gVisor boundary (§4.4a).
+	if len(mounts) != 2 {
+		t.Fatalf("mountsFor() returned %d mounts, want 2", len(mounts))
 	}
 
 	wantMounts := []string{
 		"type=bind,source=/scion/agents/test-agent/home,destination=/scion/agents/test-agent/home",
 		"type=bind,source=/scion/agents/test-agent/workspace,destination=/scion/agents/test-agent/workspace",
-		"type=bind,source=/scion/agents/test-agent/tmux,destination=/scion/agents/test-agent/tmux",
 	}
 	for i, want := range wantMounts {
 		if mounts[i] != want {
@@ -502,16 +502,17 @@ func TestMountsFor_WithSharedDirs(t *testing.T) {
 	}
 
 	mounts := mountsFor(paths, sharedDirs)
-	if len(mounts) != 5 {
-		t.Fatalf("mountsFor() returned %d mounts, want 5 (3 agent + 2 shared)", len(mounts))
+	// 2 agent mounts (home, workspace) + 2 shared dirs = 4. No tmux mount (§4.4a).
+	if len(mounts) != 4 {
+		t.Fatalf("mountsFor() returned %d mounts, want 4 (2 agent + 2 shared)", len(mounts))
 	}
 
-	// Shared dirs should be at indices 3 and 4.
-	if !strings.Contains(mounts[3], "build-cache") {
-		t.Errorf("mounts[3] = %q, want shared dir build-cache", mounts[3])
+	// Shared dirs should be at indices 2 and 3.
+	if !strings.Contains(mounts[2], "build-cache") {
+		t.Errorf("mounts[2] = %q, want shared dir build-cache", mounts[2])
 	}
-	if !strings.Contains(mounts[4], "artifacts") {
-		t.Errorf("mounts[4] = %q, want shared dir artifacts", mounts[4])
+	if !strings.Contains(mounts[3], "artifacts") {
+		t.Errorf("mounts[3] = %q, want shared dir artifacts", mounts[3])
 	}
 }
 
@@ -539,9 +540,9 @@ func TestEnvFor_BasicEnv(t *testing.T) {
 		t.Errorf("KEY2 = %q, want %q", env["KEY2"], "VAL2")
 	}
 
-	// Check TMUX_TMPDIR.
-	if env["TMUX_TMPDIR"] != "/scion/agents/test/tmux" {
-		t.Errorf("TMUX_TMPDIR = %q, want %q", env["TMUX_TMPDIR"], "/scion/agents/test/tmux")
+	// TMUX_TMPDIR should NOT be set (§4.4a: AF_UNIX can't cross gVisor).
+	if _, ok := env["TMUX_TMPDIR"]; ok {
+		t.Errorf("TMUX_TMPDIR should not be set (§4.4a), got %q", env["TMUX_TMPDIR"])
 	}
 
 	// Check project identity.
@@ -1026,10 +1027,10 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 		"--write",
 		"--allow-egress",
 		"--mount",
-		// Per-agent mounts (FIX 1): individual agent paths, not /scion root.
+		// Per-agent mounts: individual agent paths, not /scion root.
+		// No tmux mount (§4.4a: AF_UNIX can't cross gVisor boundary).
 		"type=bind,source=" + rootDir + "/agents/test-agent/home,destination=" + rootDir + "/agents/test-agent/home",
 		"type=bind,source=" + rootDir + "/agents/test-agent/workspace,destination=" + rootDir + "/agents/test-agent/workspace",
-		"type=bind,source=" + rootDir + "/agents/test-agent/tmux,destination=" + rootDir + "/agents/test-agent/tmux",
 		// Env vars via --env flags (FIX 2), not /usr/bin/env.
 		"--env",
 		// Symlink setup in entrypoint (FIX 5).

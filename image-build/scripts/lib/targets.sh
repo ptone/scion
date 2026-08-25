@@ -97,7 +97,7 @@ resolve_targets() {
       echo scion-hub
       ;;
     omni)
-      echo scion-omni
+      printf '%s\n' scion-claude scion-codex scion-opencode scion-antigravity scion-grok-build scion-omni
       ;;
     common)
       printf '%s\n' scion-base
@@ -171,6 +171,30 @@ step_context_dir() {
   esac
 }
 
+# Omni chain order. When OMNI_BUILD is true, harnesses chain to each other
+# instead of all branching from scion-base:
+#   scion-base -> claude -> codex -> opencode -> antigravity -> grok-build -> omni
+_OMNI_CHAIN=(scion-claude scion-codex scion-opencode scion-antigravity scion-grok-build scion-omni)
+
+# _omni_chain_parent <step_id>
+#
+# Returns the parent step for the given step in the omni chain, or empty if
+# the step is not in the chain. The first element chains from scion-base;
+# each subsequent element chains from the previous one.
+_omni_chain_parent() {
+  local step="$1"
+  local prev="scion-base"
+  local s
+  for s in "${_OMNI_CHAIN[@]}"; do
+    if [[ "${s}" == "${step}" ]]; then
+      echo "${prev}"
+      return 0
+    fi
+    prev="${s}"
+  done
+  return 1
+}
+
 # step_build_args <step_id>
 #
 # Emits one KEY=VALUE line per build-arg on stdout. Reads orchestrator
@@ -205,11 +229,23 @@ step_build_args() {
       echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
       ;;
     scion-omni)
-      echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
+      if [[ "${OMNI_BUILD:-}" == "true" ]]; then
+        local parent
+        parent="$(_omni_chain_parent "scion-omni")"
+        echo "BASE_IMAGE=${prefix}${parent}:${BASE_TAG}"
+      else
+        echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
+      fi
       ;;
     *)
       if is_harness_step "$1"; then
-        echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
+        if [[ "${OMNI_BUILD:-}" == "true" ]] && _omni_chain_parent "$1" >/dev/null 2>&1; then
+          local parent
+          parent="$(_omni_chain_parent "$1")"
+          echo "BASE_IMAGE=${prefix}${parent}:${BASE_TAG}"
+        else
+          echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
+        fi
       else
         return 1
       fi
@@ -234,10 +270,20 @@ step_parent() {
       fi
       ;;
     scion-hub)     echo "scion-base" ;;
-    scion-omni)    echo "scion-base" ;;
+    scion-omni)
+      if [[ "${OMNI_BUILD:-}" == "true" ]]; then
+        _omni_chain_parent "scion-omni"
+      else
+        echo "scion-base"
+      fi
+      ;;
     *)
       if is_harness_step "$1"; then
-        echo "scion-base"
+        if [[ "${OMNI_BUILD:-}" == "true" ]] && _omni_chain_parent "$1" >/dev/null 2>&1; then
+          _omni_chain_parent "$1"
+        else
+          echo "scion-base"
+        fi
       else
         return 1
       fi

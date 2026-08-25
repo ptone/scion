@@ -253,7 +253,7 @@ type scionPaths struct {
 	root      string // e.g. /scion
 	agentHome string // /scion/agents/<slug>/home
 	workspace string // /scion/agents/<slug>/workspace
-	tmuxDir   string // /scion/agents/<slug>/tmux
+	tmuxDir   string // /scion/agents/<slug>/tmux (not mounted — §4.4a, AF_UNIX can't cross gVisor)
 }
 
 // prepareScionLayout creates the /scion directory structure for a sandbox
@@ -389,13 +389,16 @@ func copyDirContents(src, dst string) error {
 // -----------------------------------------------------------------------
 
 // mountsFor returns the per-agent mount descriptors. Each sandbox gets
-// only its own home, workspace, tmux dir, and entitled shared dirs --
+// only its own home, workspace, and entitled shared dirs --
 // NOT the entire /scion root (which would expose every agent's paths).
+//
+// No tmux mount: gVisor runs without --host-uds, so AF_UNIX cannot cross
+// the sandbox boundary (§4.4a). The tmux socket is deliberately
+// sandbox-internal; tmux uses its default path inside the sandbox.
 func mountsFor(paths scionPaths, sharedDirs []api.SharedDir) []string {
 	mounts := []string{
 		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.agentHome, paths.agentHome),
 		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.workspace, paths.workspace),
-		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.tmuxDir, paths.tmuxDir),
 	}
 	for _, sd := range sharedDirs {
 		sdPath := filepath.Join(filepath.Dir(paths.agentHome), "..", "..", "shared", sd.Name)
@@ -428,9 +431,10 @@ func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 		}
 	}
 
-	// TMUX socket directory — must be under the /scion mount so the tmux
-	// socket file is visible to the host (P4 attach).
-	env["TMUX_TMPDIR"] = paths.tmuxDir
+	// No TMUX_TMPDIR: gVisor runs without --host-uds, so AF_UNIX cannot
+	// cross the sandbox boundary (§4.4a). tmux uses its default socket
+	// path inside the sandbox. Every other runtime uses the default too
+	// (common.go:480, k8s_runtime.go:934).
 
 	// Project identity.
 	if cfg.Project != "" {
