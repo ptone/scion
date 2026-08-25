@@ -653,6 +653,10 @@ those are deferred, the interim rule of F0.1 must ship in their place.
   constraining a project.
 - F1.6 Principal and credential separation (section 6.5).
 - F1.7 Connect the delegation ceiling (section 6.1). Bound every edge.
+  The sponsor confirmed live downgrade on 2026-08-25, so the ceiling is
+  re-read at each decision. Copy the `handleAuthRefresh` pattern
+  (`handlers_auth.go:427`), which already does this for humans. The
+  scope of grandfathering is still open — see question 6.
 - F1.8 Agent token revocation (section 6.4). Add a `jti` and a check at
   authentication.
 - F1.9 Decision and mutation audit, with an "explain" API. An
@@ -794,14 +798,16 @@ are listed in the order that they block work.
    super-admin is delegable by a binding (we recommend no); and whether
    either is ever honoured from a scoped credential (we recommend no,
    for both).
-3. **Revocation propagation.** *(Reframed. The earlier form — immediate
-   delegator versus origin user — was a false choice. Our agreed rule
-   binds every edge to the delegator's current entitlements, so the
-   origin is already bounded transitively.)* The real question: when a
-   user loses a permission, must every agent below them lose it at the
-   next decision, through every ancestor? Or do existing agents keep a
-   snapshot of their grant until it expires? Both reviewers recommend
-   live propagation through every edge. It blocks F1.7.
+3. ~~**Revocation propagation.**~~ **RESOLVED by the sponsor,
+   2026-08-25T13:14:34Z.** Live downgrade. When a user loses a
+   permission, every agent below them loses it at the next decision,
+   through every ancestor. Existing agents do **not** keep a snapshot
+   until expiry. This unblocks F1.7.
+
+   *(The question was reframed before it was answered. The earlier form
+   — immediate delegator versus origin user — was a false choice. Our
+   agreed rule binds every edge to the delegator's current
+   entitlements, so the origin is already bounded transitively.)*
 
    **Existing precedent, found 2026-08-25.** The system already does
    live re-evaluation, for humans. `handleAuthRefresh`
@@ -816,12 +822,58 @@ are listed in the order that they block work.
    the human side. The agent path does not do it. This is the strongest
    argument for answering in favour of live propagation, and
    `handleAuthRefresh` is the pattern for F1.7 to copy.
-4. **Migration of existing agents.** Agents with an empty role currently
-   run as full. Fixing D6 will remove their access. Do we migrate them
-   to `full` explicitly, or do we force a re-grant?
+4. ~~**Migration of existing agents.**~~ **RESOLVED by the sponsor,
+   2026-08-25T13:10:18Z.** Grandfather all existing agents. This shipped
+   before the decision was recorded: `BackfillEmptyAgentRoles`
+   (`pkg/store/entadapter/composite.go:254-294`) sets
+   `cfg.AgentRole = "full"` for every agent with an empty role. A marker
+   row in hub settings records that the migration ran.
+
+   **A consequence to note.** The backfill does not tag the rows that it
+   changes. Before the migration, an empty role identified an agent as
+   legacy, of unknown provenance. After the migration, those agents look
+   the same as agents that an operator deliberately granted `full`. The
+   marker row shows that the migration ran. It does not show which
+   agents it changed. On a hub where the migration has already run, that
+   population can no longer be identified. See question 6.
 5. **Federated identities.** `FederatedAgentIdentity`,
    `FederatedUserIdentity` and `BrokerIdentity` were not swept. Do they
    reach the same handlers? This is an unverified gap, not a finding.
+6. **The scope of grandfathering.** *(Raised 2026-08-25, after questions
+   3 and 4 were answered. Escalated to the sponsor by
+   `auth-refactor-lead`; not yet resolved.)* The word "grandfather"
+   answers question 4 correctly, but it can also be read onto question
+   3, where it means something very different. The two readings must not
+   be confused:
+
+   - **Starting point.** Existing agents keep their current role as the
+     value they start from. Live propagation then applies to them from
+     that point on. This is consistent with the answer to question 3.
+     Both reviewers expect that this is the intended meaning.
+   - **Permanent exemption.** Existing agents are excluded from the
+     F1.7 delegation ceiling for as long as they live. This is not
+     consistent with the answer to question 3.
+
+   Permanent exemption would put the exemption on the worst population.
+   After the backfill, all of those agents hold `full`. Many hold no
+   ancestry at all, because the D6 scheduler path created them without
+   any. The agents with the widest authority and the least provenance
+   would become permanently exempt from the mechanism whose purpose is
+   to bound authority. The Phase 1 acceptance criterion — an agent loses
+   a permission at the next decision, when its delegator loses it —
+   would then be false for that population, and nothing would show it.
+
+   If the sponsor does want an exemption, we recommend two conditions on
+   it. Bound it to a deadline or to token expiry, instead of forever.
+   Report the count of agents that operate under it, so that the
+   exemption stays visible.
+
+   **One part of this is time-sensitive.** On any hub where
+   `BackfillEmptyAgentRoles` has not yet run, the backfill can still
+   record a marker on each agent that it changes. This costs one field
+   now. It cannot be recovered later. Every hub that runs the migration
+   in its current form loses the ability to identify that population
+   permanently.
 
 ---
 
@@ -890,7 +942,13 @@ A reviewer or QA tester must verify the following.
       A test proves that no credential widens.
 - [ ] The audit record names the credential, by identifier and type.
 - [ ] An agent loses a permission at the next decision, when its
-      delegator loses it.
+      delegator loses it. Per the sponsor decision of 2026-08-25, this
+      applies to **existing** agents too, and not only to agents created
+      after F1.7. Test an agent that the role backfill touched.
+- [ ] If any agent is exempt from the delegation ceiling, the exempt
+      population is bounded and enumerable. A report or metric gives the
+      count. An exemption that is permanent and invisible fails this
+      criterion. See open question 6.
 - [ ] A revoked agent token is refused at authentication, before its
       10-hour expiry.
 - [ ] A revoked but unexpired token cannot obtain a fresh, unrevoked
