@@ -1496,7 +1496,8 @@ particular is exactly right: a typed parameter, a nil check, an
 interface test rather than one concrete type, and an unknown type fails
 closed.
 
-Four new findings. One blocks merge.
+Five new findings. One blocks merge. R2-5 was raised by the code
+reviewer as optional; we reclassify it.
 
 | ID | Severity | Fault |
 |---|---|---|
@@ -1504,6 +1505,7 @@ Four new findings. One blocks merge.
 | R2-2 | Major | `isMintingOperation` is now a proxy for "harmless", and defaults to fail-open for any future action. |
 | R2-3 | Major | An unmapped permission **grants** access in `handleOrphanedDelegation`. |
 | R2-4 | Minor | `backfillCompleted` fails open on a store fault, and its caching comment is false. |
+| R2-5 | Major | The ceiling ignores the request's scope, so authority in one scope can authorise an action in another. |
 
 #### R2-1: the unique index breaks revocation
 
@@ -1570,6 +1572,57 @@ versus store-fault distinction that 1G-6 fixed elsewhere, not applied
 here. Its comment also claims a cache that does not exist; the call is a
 store read on every no-edge decision. Add the cache or delete the
 sentence, because a false claim of caching invites a hot-path caller.
+
+#### R2-5: the ceiling ignores the request's scope
+
+Raised by the Phase 1G code reviewer as finding O1, and classified by
+them as optional. **We disagree.** The reviewer found one half of it.
+The other half fails open.
+
+The half they found is fail-closed: `activeCount` counts every active
+edge for the delegate across all scopes, while the unique constraint is
+per scope, so a legitimately multi-scoped agent trips the invariant
+check and is denied minting. That is an availability fault, and it is
+safe.
+
+The half they missed is that **the evaluation loop does not filter by
+scope either.** It takes the first active edge in creation order and
+then calls `checkUserHoldsPermission` with `edge.ScopeType` and
+`edge.ScopeID` — the *edge's* scope, not the *request's*. So for a
+request against project P2, the ceiling can be satisfied by the
+delegator's permissions in project P1. Authority in one scope
+authorises an action in another.
+
+The clearest case: an agent holds an edge in P1 and **no** edge in P2,
+and acts in P2. The correct answer is denial — no authority was
+delegated in that scope. The present code finds P1's edge, evaluates it,
+and can allow.
+
+**On the reviewer's justification.** "Agents are single-project in
+practice" is the third safety argument in this review to rest on current
+practice rather than an enforced invariant. The earlier two were "agents
+have at most one active edge" (disproved by the interrupted backfill in
+R1) and "the pre-migration window is empty" (1G-2). Both were reachable.
+This one probably is not reachable today, because both creation sites
+are project-scoped from the agent's own project. The point is that the
+argument has failed twice, and here it guards a security boundary rather
+than a latent bug.
+
+**The load-bearing reason to fix it now** is that the invariant *check*
+does not test the same tuple as the *invariant*. The constraint is per
+scope; the check is across scopes. A detector that does not match what
+it detects is worse than no detector: it raises false alarms, which
+trains everyone to ignore the error line, and it still misses the real
+violation.
+
+**Fix.** Filter the edge set by the request's scope before counting and
+before evaluating. `Resource` carries `ParentType` and `ParentID`, so
+the project scope is available. Filter in `walkDelegationChain` rather
+than in the store — the set is tiny, and a store-level filter would need
+the scope added to the cache key. Apply the same request scope at every
+depth of the chain walk. This makes `activeCount` match the constraint,
+confines evaluation to the correct scope, and routes the
+authority-in-another-scope case to the no-edge denial where it belongs.
 
 #### An operational gap, not a defect
 
@@ -1757,6 +1810,12 @@ From round two (section 11.3):
       authority-affecting action.
 - [ ] Agents skipped by the backfill are enumerable after the migration,
       not only visible as a start-up log line.
+- [ ] An agent holding an edge in project P1 and **no** edge in project
+      P2 is **denied** for an action in P2, even when its P1 delegator
+      still holds the permission. This is the R2-5 regression test.
+- [ ] The duplicate-edge invariant check counts only edges in the
+      request's scope, so an agent legitimately scoped to two projects
+      does not trip it.
 
 From finding R1 (section 11.2):
 
