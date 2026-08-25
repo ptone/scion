@@ -150,6 +150,11 @@ func waitForTmuxSession(ctx context.Context, runtimeCmd, containerID, namespace,
 	execUser = sanitizeExecUser(execUser)
 
 	isK8s := runtimeCmd == "kubernetes" || runtimeCmd == "k8s"
+	isCloudRunSandbox := runtimeCmd == "cloudrun-sandbox"
+
+	if isCloudRunSandbox {
+		return fmt.Errorf("cloudrun-sandbox: tmux session wait not yet implemented")
+	}
 
 	for {
 		select {
@@ -352,6 +357,11 @@ func newLocalPTYSession(ctx context.Context, agentID, containerID, runtimeCmd, e
 // Run starts the PTY session.
 func (s *LocalPTYSession) Run() error {
 	isK8s := (s.runtimeCmd == "kubernetes" || s.runtimeCmd == "k8s") && s.k8sConfig != nil && s.k8sClientset != nil
+	isCloudRunSandbox := s.runtimeCmd == "cloudrun-sandbox"
+
+	if isCloudRunSandbox {
+		return fmt.Errorf("cloudrun-sandbox: PTY attach not yet implemented")
+	}
 
 	if isK8s {
 		return s.runK8sExec()
@@ -696,6 +706,11 @@ func (h *StreamPTYHandler) Run() error {
 		runtimeCmd = "docker"
 	}
 	isK8s := (runtimeCmd == "kubernetes" || runtimeCmd == "k8s") && h.k8sConfig != nil && h.k8sClientset != nil
+	isCloudRunSandbox := runtimeCmd == "cloudrun-sandbox"
+
+	if isCloudRunSandbox {
+		return fmt.Errorf("cloudrun-sandbox: PTY attach not yet implemented")
+	}
 
 	if isK8s {
 		return h.runK8sExec()
