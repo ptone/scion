@@ -1489,6 +1489,99 @@ present single-path rule explicit and enforced.
 
 ---
 
+### 11.3 Phase 1G at commit `6fd0c33` — round two
+
+All eight items from 11.1 and 11.2 are genuinely fixed. 1G-5 in
+particular is exactly right: a typed parameter, a nil check, an
+interface test rather than one concrete type, and an unknown type fails
+closed.
+
+Four new findings. One blocks merge.
+
+| ID | Severity | Fault |
+|---|---|---|
+| R2-1 | **Blocker** | The new unique index also caps **revocation** at one per delegate and scope. |
+| R2-2 | Major | `isMintingOperation` is now a proxy for "harmless", and defaults to fail-open for any future action. |
+| R2-3 | Major | An unmapped permission **grants** access in `handleOrphanedDelegation`. |
+| R2-4 | Minor | `backfillCompleted` fails open on a store fault, and its caching comment is false. |
+
+#### R2-1: the unique index breaks revocation
+
+The index is on `(delegate_type, delegate_id, scope_type, scope_id,
+active)` and is a plain unique index, not a partial one. Including
+`active` as a **column** yields two guarantees rather than one: at most
+one active row per delegate and scope, which is intended, and at most
+one **inactive** row, which is not.
+
+`delegation_edge_store.go:136` sets `Active(false)`, so revocation is
+real. Create, revoke, create, revoke then violates the constraint on the
+second revocation.
+
+Revocation is a security operation. It must not begin failing on its
+second use. The fix is a **partial** unique index — unique on the four
+identity columns `WHERE active = true`. In Ent that is the
+`entsql.IndexWhere` annotation, available on SQLite and Postgres. MySQL
+has no partial indexes; there, use a nullable column that is `NULL` when
+the edge is inactive, because `NULL`s do not collide.
+
+A second half to this finding: applying a unique index to a table that
+already holds duplicates **fails the migration**. Any hub interrupted
+mid-backfill under `3597507` holds exactly the duplicates that R1
+described, and will not start. Production risk is low because Phase 1G
+is unreleased; developer and staging hubs are the exposure. Add a dedup
+pass before the index is created, or document the recovery.
+
+#### R2-2: the fail-open default is now load-bearing
+
+`isMintingOperation` decides three separate fail-open branches: store
+faults, duplicate edges, and orphaned-delegation reads. The comments
+call the non-minting set "reads". It is not. That set contains
+`ActionDelete`, `ActionUpdate`, `ActionStop`, `ActionStopAll`,
+`ActionRemoveMember`, `ActionAttach`, `ActionPortAccess` and
+`ActionDispatch`.
+
+So an agent whose delegator provably does not exist may still delete,
+update, stop, attach and port-access at its frozen ceiling, and a
+transient store fault permits the same.
+
+The structural fault is larger than the present list. **The switch
+returns false by default, so every action added in future is
+automatically fail-open.** Whoever adds the next action will not know.
+
+**Invert the default.** Allowlist the genuinely safe operations — read,
+list, status, verify — and fail closed for everything else. Rename the
+predicate; "minting" no longer describes what it decides.
+
+#### R2-3: an unmapped permission grants access
+
+`permissionToAgentScope` returns `""` when a permission is absent from
+the registry or carries no agent scopes. `handleOrphanedDelegation`
+reads `""` as "allow at baseline". For a delegation whose delegator
+provably does not exist, an unmapped permission must **deny**, and log
+the unmapped permission ID, so that a registry gap appears as a denial
+rather than as a silent grant. This is "absence is not permission"
+again, in code written after the rule was adopted.
+
+#### R2-4: the completion guard fails open
+
+`backfillCompleted` returns `err == nil`. A store fault therefore reads
+as "not yet complete", which allows. This is the same `ErrNotFound`
+versus store-fault distinction that 1G-6 fixed elsewhere, not applied
+here. Its comment also claims a cache that does not exist; the call is a
+store read on every no-edge decision. Add the cache or delete the
+sentence, because a false claim of caching invites a hot-path caller.
+
+#### An operational gap, not a defect
+
+An agent skipped by the parse-failure branch receives no edge, is denied
+permanently once the marker is written, and leaves one error line at
+start-up as its only trace. Record skipped agents in an enumerable list.
+The same applies to the fail-the-whole-migration behaviour in 1G-7: that
+is what we asked for, but a hub that will not start needs a documented
+recovery, or it becomes a support call with no stated fix.
+
+---
+
 ## 12. Acceptance Criteria
 
 A reviewer or QA tester must verify the following.
@@ -1644,6 +1737,26 @@ From D10 and D11 (section 5.6):
 - [ ] The Phase 1G ceiling tests do not pass by way of the super-admin
       short-circuit. The test subject must not hold a super-admin
       binding.
+
+From round two (section 11.3):
+
+- [ ] An agent is revoked, re-delegated, and revoked **again**, in the
+      same scope. The second revocation succeeds. This is the R2-1
+      regression test.
+- [ ] A hub that already holds duplicate active edges upgrades
+      successfully. The migration deduplicates before it applies the
+      unique index.
+- [ ] An orphaned delegation cannot `delete`, `update`, `stop`,
+      `attach`, or `port_access`. Only genuinely safe reads pass.
+- [ ] An action that the classifier does not recognise fails **closed**.
+      Add a deliberately unclassified action to the test to prove the
+      default.
+- [ ] A permission with no agent-scope mapping is **denied** for an
+      orphaned delegation, and the unmapped permission ID is logged.
+- [ ] A store fault while reading the backfill marker does not allow an
+      authority-affecting action.
+- [ ] Agents skipped by the backfill are enumerable after the migration,
+      not only visible as a start-up log line.
 
 From finding R1 (section 11.2):
 
