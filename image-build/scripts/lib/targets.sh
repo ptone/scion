@@ -60,6 +60,7 @@ while IFS= read -r harness_step; do
 done < <(emit_harness_steps)
 ALL_STEP_IDS+=(
   scion-hub
+  scion-omni
 )
 
 # All known target names. Used by the orchestrator's --help and --target
@@ -71,6 +72,7 @@ ALL_TARGETS=(
   scion-base
   harnesses
   hub
+  omni
   common
   all
   thick
@@ -93,6 +95,9 @@ resolve_targets() {
       ;;
     hub)
       echo scion-hub
+      ;;
+    omni)
+      echo scion-omni
       ;;
     common)
       printf '%s\n' scion-base
@@ -133,6 +138,7 @@ step_dockerfile() {
     thick-prep)    echo "${IMAGE_BUILD_DIR}/thick-prep/Dockerfile" ;;
     scion-base)    echo "${IMAGE_BUILD_DIR}/scion-base/Dockerfile" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub/Dockerfile" ;;
+    scion-omni)    echo "${IMAGE_BUILD_DIR}/omni/Dockerfile" ;;
     *)
       if is_harness_step "$1"; then
         echo "${REPO_ROOT}/harnesses/${1#scion-}/Dockerfile"
@@ -154,6 +160,7 @@ step_context_dir() {
     thick-prep)    echo "${IMAGE_BUILD_DIR}/thick-prep" ;;
     scion-base)    echo "${REPO_ROOT}" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub" ;;
+    scion-omni)    echo "${REPO_ROOT}" ;;
     *)
       if is_harness_step "$1"; then
         echo "${REPO_ROOT}/harnesses/${1#scion-}"
@@ -197,6 +204,9 @@ step_build_args() {
     scion-hub)
       echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
       ;;
+    scion-omni)
+      echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
+      ;;
     *)
       if is_harness_step "$1"; then
         echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
@@ -224,6 +234,7 @@ step_parent() {
       fi
       ;;
     scion-hub)     echo "scion-base" ;;
+    scion-omni)    echo "scion-base" ;;
     *)
       if is_harness_step "$1"; then
         echo "scion-base"
