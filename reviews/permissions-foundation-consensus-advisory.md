@@ -599,13 +599,40 @@ Under the model the sponsor confirmed, `AdminEmails` is the sole control
 for super-admin. That control is at present **write-only**. An operator
 can add. An operator cannot remove.
 
-**Repair.** Make reconciliation converge in both directions: demote
-`User.Role` and delete the system super-admin binding for any user not
-in `AdminEmails`, logging each change. **Guard it: refuse to converge
-downward when `AdminEmails` is empty.** An empty list is nearly always a
-failed config load, not an instruction to remove every administrator.
-Without that guard the repair is a hub-wide lockout waiting for a bad
-config push.
+**Repair. Decided by the sponsor, 2026-08-25T14:59:07Z: "remove on
+restart."** Reconciliation converges in both directions. For any user
+not in `AdminEmails`, demote `User.Role` and delete the system-scoped
+super-admin binding. Log each change.
+
+Three qualifications on that decision. The first is the sponsor's. The
+other two are ours, and are labelled as such.
+
+1. **Sponsor-decided.** Removal happens, and it happens at start-up.
+   Reporting only is rejected.
+2. **Architect decision, not sponsor-approved.** Refuse to converge
+   downward when `AdminEmails` is **empty**. The sponsor's reply did not
+   mention the guard, and we are not reading approval into a silence. We
+   are applying it anyway, because it is a fail-safe rather than a
+   policy relaxation, and the asymmetry is severe: an empty list is
+   nearly always a failed config load, and removing every administrator
+   produces a hub that nobody can administer, including to undo the
+   removal. The sponsor has been told we are treating it as accepted
+   unless they object.
+3. **Scope limit — the trap in this decision.** Reconciliation must
+   touch **only** `User.Role` and the system-scoped **super-admin**
+   binding. It must **not** remove the ordinary admin-right grants that
+   make a user functionally admin-like. Those grants are the path the
+   sponsor endorsed in open question 2. An implementation that reads
+   "remove admin authority from users not in `AdminEmails`" broadly
+   would delete exactly the population the sponsor just blessed, on the
+   next restart.
+
+**A known property of this decision.** Because reconciliation runs at
+start-up, the revocation latency for super-admin is the time until the
+next restart. The sponsor chose "on restart" with that in view. If that
+window later proves too wide, the remedy is an explicit endpoint that
+forces reconciliation, not a change to this rule. Recorded as a
+follow-up, not a blocker.
 
 #### A documentation defect alongside them
 
@@ -1000,9 +1027,11 @@ are listed in the order that they block work.
    and therefore back into D10. D4 is now load-bearing for the sponsor's
    model, not merely tidiness.
 
-   One point remains for confirmation: whether reconciliation should
-   **remove** super-admin from users no longer in `AdminEmails`, rather
-   than only report them. See D11.
+   The one point left open here — whether reconciliation should
+   **remove** super-admin from users no longer in `AdminEmails` — was
+   answered by the sponsor at 2026-08-25T14:59:07Z: **"remove on
+   restart."** The consequences, and the two qualifications we attach to
+   it, are in D11.
 3. ~~**Revocation propagation.**~~ **RESOLVED by the sponsor,
    2026-08-25T13:14:34Z.** Live downgrade. When a user loses a
    permission, every agent below them loses it at the next decision,
@@ -1607,6 +1636,11 @@ From D10 and D11 (section 5.6):
       `IsSystemAdmin` then returns false.
 - [ ] Starting with an **empty** `AdminEmails` list does **not** demote
       anybody. The hub logs the refusal to converge downward.
+- [ ] A user who is functionally admin-like through ordinary grants, and
+      who is **not** in `AdminEmails`, keeps **every** one of those
+      grants across a restart. Reconciliation removes only `User.Role`
+      and the system-scoped super-admin binding. This is the regression
+      test for the scope limit in D11.
 - [ ] The Phase 1G ceiling tests do not pass by way of the super-admin
       short-circuit. The test subject must not hold a super-admin
       binding.
