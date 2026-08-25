@@ -995,10 +995,44 @@ checks that `rootUser` equals `ancestry[0]`. The local wrapper derives
 `allowed_root_users`, the other by nothing, and the codebase uses them
 interchangeably.
 
-**Repair.** Reject a federated token whose `ancestry[0]` does not equal
-its `root_user`. Apply `allowed_root_users` to the whole ancestry, not
-to `root_user` alone. Treat token-supplied ancestry as attested only
-when the hub signed the token.
+**Repair.** Three changes. **They are not equally protective**, and it
+is possible to make all three and still leave the hole open. They are
+given in increasing order of value.
+
+1. *Reject a federated token whose `ancestry[0]` does not equal its
+   `root_user`.* This makes the two fields agree, so they can no longer
+   be used interchangeably with different bounds. It does not stop a
+   remote issuer choosing both values.
+2. *Apply `allowed_root_users` to every ancestry element, not to
+   `root_user` alone.* This is real but **conditional**. The check at
+   `federation_auth.go:271` runs only when
+   `len(entry.config.AllowedRootUsers) > 0`, and that field is optional.
+   On a hub where the operator never set it, this change does nothing.
+   That is the default configuration.
+3. *Treat ancestry as authority only when the hub signed the token that
+   carries it.* **This is the load-bearing change**, because it is the
+   only one that does not depend on optional configuration.
+
+Changes 1 and 2 together still let a trusted issuer assert any ancestry
+whenever `allowed_root_users` is unset.
+
+**The narrow form of change 3.** In `checkDelegation`
+(`authz.go:755-766`), use the ancestry fallback only for a hub-signed
+identity. For a federated agent, skip the fallback. Local behaviour does
+not change, and the remote case fails closed.
+
+Put the test behind one named predicate, for example
+`AncestryIsHubAttested(identity)`, beside
+`IsUnscopedLocalPlatformAdmin`. Do not spread a `Type()` comparison
+across call sites. There will be more consumers of ancestry after F1.7,
+and each must answer this question the same way.
+
+**For later, not for F1.7.** If cross-hub delegation is wanted, the
+correct model is that the local hub records the trust relationship, as a
+binding that names the remote issuer and states what it may delegate. It
+is not that the remote hub names local principal IDs and the local hub
+believes it. Skipping the fallback now does not prevent that design. It
+declines to grant it by accident.
 
 **This belongs inside F1.7**, which is building the delegation ceiling
 on ancestry. A ceiling that walks a chain a remote issuer can write
@@ -1162,6 +1196,14 @@ A reviewer or QA tester must verify the following.
       outside that list. (D9.)
 - [ ] A federated agent cannot satisfy a `DelegatedFrom` condition by
       naming a principal in a token that the hub did not sign. (D9.)
+- [ ] A local agent with the same ancestry is still allowed. This proves
+      that the D9 repair did not break normal delegation, which is the
+      real regression risk.
+- [ ] The D9 denial holds on a hub where `allowed_root_users` is
+      **unset**. This pins that the default configuration is covered by
+      the hub-attested check, and not by the allowlist. It is the test
+      that fails if someone later removes the hub-attested check in the
+      belief that the allowlist covers it.
 - [ ] A trusted issuer configured with `default_role: "admin"` is
       refused at config load. `DefaultRole` is validated against the
       canonical role registry. (Section 10.2.)
