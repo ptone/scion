@@ -286,6 +286,42 @@ severity, because two adjacent functions now handle one class of
 resource with different rigour, and that asymmetry is what invites the
 regression. The members-side code is already the template.
 
+**Two cautions on the backfill.**
+
+*It needs its own marker section.* Do not add the agents logic inside
+`BackfillProjectMembersGroupMarkers`. That function returns immediately
+when `projectMembersGroupMarkerBackfillSection` is present, so every hub
+that already ran the members pass would skip the new agents logic in
+silence. Use a separate section, with separate idempotency.
+
+*A backfill blesses an existing squat. It does not remove one.* This is
+the more important caution, and it applies to the members backfill that
+already shipped. Consider the D8 attack. A user creates
+`project:foo:agents` before the prefix reservation. A project with slug
+`foo` is created later, and the old code adopts the group and sets its
+`ProjectID`. The group now has a real project ID and a matching slug —
+exactly the two conditions a backfill tests. The backfill marks it as
+system-managed, and the adoption predicate then accepts it permanently.
+
+So the upgrade prevents **new** squatting. It does not undo an adoption
+that already occurred, and afterwards the squat is indistinguishable
+from a legitimate group. The hazard is that an operator reads the
+upgrade as remediation.
+
+Three consequences:
+
+1. Log every group that the backfill marks, with group ID, slug, project
+   ID and owner. A count is not enough. This is the only artifact an
+   operator can audit against, and it costs one log line for each row.
+2. State in the release note that the upgrade stops new squatting and
+   does not reverse a completed adoption. A hub that may have been
+   exploited needs a manual review of project agents and members groups
+   whose owner is not the project owner.
+3. Optionally, have the backfill flag rather than mark any group whose
+   `OwnerID` differs from the owner of the project it claims. That is
+   the signature of an adopted squat, and it is the one discriminator
+   that survives.
+
 ---
 
 ## 5. The Five Structural Defects
