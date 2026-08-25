@@ -132,7 +132,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		if os.Getenv("CLOUD_RUN_INSTANCE") != "" {
 			if SandboxLauncherAvailable() {
 				util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher (docker override), using cloudrun-sandbox runtime")
-				return NewCloudRunSandboxRuntime()
+				return NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
 			}
 			util.Debugf("GetRuntime: Cloud Run Instance detected without sandbox launcher (docker override), using cloudrun-instances runtime")
 			rt := NewCloudRunRuntimeFromInstances(rtConfig.CloudRunInstances)
@@ -205,7 +205,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		}
 		return rt
 	case "cloudrun-sandbox":
-		rt := NewCloudRunSandboxRuntime()
+		rt := NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
 		return rt
 	}
 
