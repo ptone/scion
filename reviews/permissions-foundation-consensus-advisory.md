@@ -545,9 +545,9 @@ removing them, and `AgentCredential` has no cascade edge. So a deleted
 agent's credential cannot masquerade as a pre-table token, and the
 compatibility window is not reachable that way.
 
-**One open refinement: fail-open on a mint is not fail-open on a read.**
-The patched function copies the middleware's fail-open on a store error.
-The two sites are not equivalent.
+**Refinement, now also closed: fail-open on a mint is not fail-open on a
+read.** The first patch copied the middleware's fail-open on a store
+error. The two sites are not equivalent.
 
 In the middleware, fail-open is defensible. Exposure is bounded by the
 remaining lifetime of a token that already exists, and failing closed
@@ -562,9 +562,21 @@ it, because the revoke-by-agent call has already run.
 The availability argument does not transfer. `ValidateAgentToken` has
 already confirmed the source token is unexpired, so refusing a refresh
 does not break the caller — it only stops the session being extended
-during a fault. **Recommendation: refresh should fail closed.** This
-also confines any `FailClosedOnStoreError` option to the middleware,
-which is where the real availability tension lives.
+during a fault.
+
+**Closed at `066c7792`.** The store-error branch now returns an error
+and mints nothing. Verified: the `ErrNotFound` compatibility window is
+preserved, so pre-table tokens still refresh, and
+`TestAgentTokenService_RefreshStoreErrorFailsClosed` pins the behaviour.
+
+**The general rule, for future work.** Fail-open and fail-closed must be
+decided per operation, not per subsystem. A read may fail open, because
+the exposure is bounded by state that already exists. An operation that
+**mints or extends** authority should fail closed, because it creates
+durable state that outlives the fault. Copying a fail-open policy from a
+read path to a minting path is the specific error to avoid. Any
+`FailClosedOnStoreError` option therefore belongs to the middleware
+only.
 
 *Fail-open on store error.* The middleware accepts a token when the
 credential store returns an error that is not "not found"
