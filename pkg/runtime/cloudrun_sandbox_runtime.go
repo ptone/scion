@@ -39,10 +39,10 @@ import (
 const defaultSandboxBin = "/usr/local/gcp/bin/sandbox"
 
 // defaultScionRoot is the parent directory for all writable sandbox paths.
-// A single bind mount of this directory satisfies the write-visibility
+// Per-agent bind mounts under this directory satisfy the write-visibility
 // requirement for agent home, workspace, tmux sockets, and shared dirs.
 // With --rootfs /, writes to unmounted paths go to a private rootfs overlay
-// that the launcher never sees (§3.2a). This mount makes them visible.
+// that the launcher never sees (§3.2a). These mounts make them visible.
 const defaultScionRoot = "/scion"
 
 // defaultStatePath is the default location for the sandbox state store.
@@ -151,12 +151,20 @@ func (s *sandboxStateStore) save() {
 		runtimeLog.Warn("sandbox state store: failed to marshal", "error", err)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		runtimeLog.Warn("sandbox state store: failed to create dir", "error", err)
 		return
 	}
-	if err := os.WriteFile(s.path, data, 0644); err != nil {
-		runtimeLog.Warn("sandbox state store: failed to write", "path", s.path, "error", err)
+	// Atomic write: write to temp file then rename. Prevents corruption
+	// from crashes during write (audit M2). 0600 permissions (audit M1).
+	tmpPath := s.path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
+		runtimeLog.Warn("sandbox state store: failed to write temp", "path", tmpPath, "error", err)
+		return
+	}
+	if err := os.Rename(tmpPath, s.path); err != nil {
+		runtimeLog.Warn("sandbox state store: failed to rename", "from", tmpPath, "to", s.path, "error", err)
 	}
 }
 
@@ -226,12 +234,12 @@ var sandboxNameRe = regexp.MustCompile(`[^a-z0-9-]`)
 func sanitizeSandboxName(name string) string {
 	s := strings.ToLower(name)
 	s = sandboxNameRe.ReplaceAllString(s, "-")
+	if len(s) > 63 {
+		s = s[:63]
+	}
 	s = strings.Trim(s, "-")
 	if s == "" {
 		s = "sandbox"
-	}
-	if len(s) > 63 {
-		s = s[:63]
 	}
 	return s
 }
@@ -253,7 +261,7 @@ type scionPaths struct {
 //
 // Motivation (§3.2a): --rootfs / is READ-ONLY. Writes go to a private
 // overlay the launcher never sees. --write only makes MOUNTED filesystems
-// writable. A single bind mount of /scion makes all writable paths
+// writable. Per-agent bind mounts under /scion make writable paths
 // visible to the host.
 func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error) {
 	p := scionPaths{
@@ -380,17 +388,30 @@ func copyDirContents(src, dst string) error {
 // Mount and environment construction
 // -----------------------------------------------------------------------
 
-// mountArg returns the single --mount argument for the /scion bind mount.
-func mountArg(rootDir string) string {
-	return fmt.Sprintf("type=bind,source=%s,destination=%s", rootDir, rootDir)
+// mountsFor returns the per-agent mount descriptors. Each sandbox gets
+// only its own home, workspace, tmux dir, and entitled shared dirs --
+// NOT the entire /scion root (which would expose every agent's paths).
+func mountsFor(paths scionPaths, sharedDirs []api.SharedDir) []string {
+	mounts := []string{
+		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.agentHome, paths.agentHome),
+		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.workspace, paths.workspace),
+		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.tmuxDir, paths.tmuxDir),
+	}
+	for _, sd := range sharedDirs {
+		sdPath := filepath.Join(filepath.Dir(paths.agentHome), "..", "..", "shared", sd.Name)
+		mounts = append(mounts, fmt.Sprintf("type=bind,source=%s,destination=%s", sdPath, sdPath))
+	}
+	return mounts
 }
 
 // envFor builds the environment variable map for a sandbox agent.
-// These are passed via /usr/bin/env (not --env flags) because the sandbox
-// CLI declares --env as 'string' not 'stringArray', so repeating the flag
-// may overwrite rather than accumulate.
+// Env vars are passed via repeatable --env flags (confirmed by AC-0 retest).
 func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 	env := make(map[string]string)
+
+	// PATH is empty inside the sandbox (AC-0 retest finding). Set a
+	// reasonable default so the harness and its children can find binaries.
+	env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 	// Parse broker-provided env vars.
 	for _, e := range cfg.Env {
@@ -435,7 +456,7 @@ func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 }
 
 // envArgs converts an env map to a sorted list of KEY=VALUE strings
-// suitable for /usr/bin/env.
+// suitable for --env flag values.
 func envArgs(env map[string]string) []string {
 	keys := make([]string, 0, len(env))
 	for k := range env {
@@ -465,7 +486,7 @@ func envArgs(env map[string]string) []string {
 //	    new-window -t scion -n shell \;
 //	    select-window -t scion:agent \;
 //	    attach-session -t scion
-func buildEntrypoint(cfg RunConfig) ([]string, error) {
+func buildEntrypoint(cfg RunConfig, agentHome string) ([]string, error) {
 	// Build the harness command line.
 	var cmdLine string
 	if cfg.NoAuth {
@@ -491,7 +512,11 @@ func buildEntrypoint(cfg RunConfig) ([]string, error) {
 		agentWindowCmd,
 	)
 
-	return []string{"sciontool", "init", "--", "sh", "-c", tmuxCmd}, nil
+	// R1 fix: Create symlink /home/scion -> bind-mounted agent home so that
+	// sciontool init's HOME=/home/scion resolves to the visible mount path.
+	// Without this, agent writes go to the rootfs overlay (invisible to broker).
+	symlinkCmd := fmt.Sprintf("rm -rf /home/scion && ln -sfn %s /home/scion", agentHome)
+	return []string{"sh", "-c", symlinkCmd + " && exec sciontool init -- sh -c " + shellQuote(tmuxCmd)}, nil
 }
 
 // -----------------------------------------------------------------------
@@ -503,8 +528,8 @@ func buildEntrypoint(cfg RunConfig) ([]string, error) {
 // a Cloud Run Instance via the `sandbox` CLI binary.
 //
 // Architecture:
-//   - All writable paths live under /scion (single bind mount).
-//   - Environment is injected via /usr/bin/env (not --env flags).
+//   - Each sandbox gets per-agent bind mounts (home, workspace, tmux, shared dirs).
+//   - Environment is injected via repeatable --env flags.
 //   - State is tracked locally in a JSON file (no `sandbox list` command).
 //   - A watcher goroutine runs `sandbox wait` to detect exits.
 type CloudRunSandboxRuntime struct {
@@ -562,7 +587,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	env := envFor(cfg, paths)
 
 	// Build entrypoint command.
-	entrypoint, err := buildEntrypoint(cfg)
+	entrypoint, err := buildEntrypoint(cfg, paths.agentHome)
 	if err != nil {
 		return "", err
 	}
@@ -576,11 +601,19 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		"--rootfs", "/",
 		"--write",
 		"--allow-egress",
-		"--mount", mountArg(r.rootDir),
-		"--",
-		"/usr/bin/env",
 	}
-	args = append(args, envArgs(env)...)
+
+	// Per-agent mounts -- each sandbox gets only its own paths (not /scion root).
+	for _, m := range mountsFor(paths, cfg.SharedDirs) {
+		args = append(args, "--mount", m)
+	}
+
+	// Environment variables via --env flags (repeatable, confirmed by AC-0 retest).
+	for _, e := range envArgs(env) {
+		args = append(args, "--env", e)
+	}
+
+	args = append(args, "--")
 	args = append(args, entrypoint...)
 
 	WriteRuntimeDebugFile(cfg, r.bin, args)
@@ -614,31 +647,24 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	return slug, nil
 }
 
-// Stop performs a graceful delete (no --force). The sandbox CLI has no
-// stop/pause verb; Stop==Delete when the platform has no pause verb
-// (K8s precedent). Kept as a separate method so Delete can escalate
-// with --force if the graceful attempt fails.
 func (r *CloudRunSandboxRuntime) Stop(ctx context.Context, id string) error {
-	_, err := runSimpleCommand(ctx, r.bin, "delete", id)
+	// sandbox delete requires --force for running sandboxes (AC-0 retest finding).
+	// There is no stop/pause verb; Stop == Delete.
+	_, err := runSimpleCommand(ctx, r.bin, "delete", "--force", id)
 	if err != nil {
-		return fmt.Errorf("cloudrun-sandbox: stop (graceful delete) failed: %w", err)
+		return fmt.Errorf("cloudrun-sandbox: stop failed: %w", err)
 	}
 	r.state.remove(id)
 	return nil
 }
 
-// Delete removes a sandbox, escalating with --force if needed.
 func (r *CloudRunSandboxRuntime) Delete(ctx context.Context, id string) error {
-	// Attempt graceful delete first.
-	_, err := runSimpleCommand(ctx, r.bin, "delete", id)
+	// Always use --force: sandbox delete without it silently fails for
+	// running sandboxes (AC-0 retest finding). Deleting a running sandbox
+	// is the normal case during Instance teardown.
+	_, err := runSimpleCommand(ctx, r.bin, "delete", "--force", id)
 	if err != nil {
-		// Escalate with --force (§4.3 grace period).
-		runtimeLog.Info("cloudrun-sandbox: graceful delete failed, escalating with --force",
-			"sandbox", id, "error", err)
-		_, err = runSimpleCommand(ctx, r.bin, "delete", "--force", id)
-		if err != nil {
-			return fmt.Errorf("cloudrun-sandbox: forced delete failed: %w", err)
-		}
+		return fmt.Errorf("cloudrun-sandbox: delete failed: %w", err)
 	}
 	r.state.remove(id)
 	return nil
