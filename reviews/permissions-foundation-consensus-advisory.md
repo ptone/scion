@@ -533,11 +533,38 @@ then mints a **new** `jti` and records it as a fresh, unrevoked
 credential. Because revocation is keyed on the `jti` hash, any path that
 mints a new `jti` escapes an earlier revocation.
 
-This is **not exploitable today**. `RefreshAgentToken` has no non-test
-caller, and `/api/v1/auth/refresh` is the user token path, not the agent
-path. It is recorded as a trap, not a defect. Close it before any agent
-refresh endpoint exists: either make the function consult the credential
-store and refuse a revoked source token, or delete the function.
+This was **not exploitable** when found. `RefreshAgentToken` had no
+non-test caller, and `/api/v1/auth/refresh` is the user token path, not
+the agent path. It was recorded as a trap, not a defect.
+
+**Closed at `6adbf0eb`** on `scion/auth-refactor`. `RefreshAgentToken`
+now consults the credential store through a `CredentialChecker` and
+refuses a revoked source token. Verified: agent deletion and suspension
+call `RevokeAgentCredentialsByAgent`, which marks rows rather than
+removing them, and `AgentCredential` has no cascade edge. So a deleted
+agent's credential cannot masquerade as a pre-table token, and the
+compatibility window is not reachable that way.
+
+**One open refinement: fail-open on a mint is not fail-open on a read.**
+The patched function copies the middleware's fail-open on a store error.
+The two sites are not equivalent.
+
+In the middleware, fail-open is defensible. Exposure is bounded by the
+remaining lifetime of a token that already exists, and failing closed
+would reject every agent request during a database fault.
+
+In refresh, fail-open **mints**. A revoked but unexpired token that
+refreshes during a store outage receives a new token, recorded as a
+fresh credential with no `RevokedAt`. The revocation is escaped
+permanently, not for the length of the outage, and nothing later catches
+it, because the revoke-by-agent call has already run.
+
+The availability argument does not transfer. `ValidateAgentToken` has
+already confirmed the source token is unexpired, so refusing a refresh
+does not break the caller — it only stops the session being extended
+during a fault. **Recommendation: refresh should fail closed.** This
+also confines any `FailClosedOnStoreError` option to the middleware,
+which is where the real availability tension lives.
 
 *Fail-open on store error.* The middleware accepts a token when the
 credential store returns an error that is not "not found"
