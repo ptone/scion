@@ -7,8 +7,10 @@
 Convergence at round 2. Signoff at round 4, with no dissent. Two
 editorial passes after signoff: one for correctness, one to interpret
 the sponsor decision. Both reviewers signed off on the final text.
-**Status:** Open question 1 resolved by the sponsor on 2026-08-22.
-Questions 2 and 3 are open. The document is otherwise final.
+**Status:** Questions 1, 3 and 4 are resolved by the sponsor. Question 5
+is swept and closed by review-arch. Question 2 is open. Question 6 was
+raised on 2026-08-25 and is with the sponsor. The document is otherwise
+final, and is updated in place as answers arrive.
 **Language:** ASD-STE100 Simplified Technical English.
 
 ---
@@ -54,6 +56,12 @@ must repair those three first. The other five are structural. You must
 repair them before the new features, because the new features make each
 defect worse.
 
+*(A ninth defect, D9, was added on 2026-08-25 by the federated identity
+sweep in section 10.2. It is not part of the eight that the two
+reviewers debated and signed off. Its severity is structural, and it is
+conditional on federation being configured. It is listed separately in
+the table below for that reason.)*
+
 The human and agent distinction is correct. Keep it. The **relationship**
 between a human and an agent is missing. That is the real problem.
 
@@ -69,6 +77,7 @@ between a human and an agent is missing. That is the real problem.
 | D6 | A readonly agent can create a full-role agent | **P0** | **Yes** |
 | D7 | A scoped UAT passes the hub admin check | **P0** | **Yes** |
 | D8 | Project admin escalation by slug squatting | **P0** | **Yes** |
+| D9 | Federated agent ancestry is unconstrained, and is read as authority | Structural | Only with federation configured |
 
 ### 3.2 The repair order
 
@@ -836,9 +845,10 @@ are listed in the order that they block work.
    marker row shows that the migration ran. It does not show which
    agents it changed. On a hub where the migration has already run, that
    population can no longer be identified. See question 6.
-5. **Federated identities.** `FederatedAgentIdentity`,
-   `FederatedUserIdentity` and `BrokerIdentity` were not swept. Do they
-   reach the same handlers? This is an unverified gap, not a finding.
+5. ~~**Federated identities.**~~ **SWEPT AND CLOSED, 2026-08-25.** The
+   sweep was done against `origin/scion/auth-refactor`. It produced one
+   structural finding, one configuration hazard, one design note and one
+   trust edge. It is written up in section 10.2.
 6. **The scope of grandfathering.** *(Raised 2026-08-25, after questions
    3 and 4 were answered. Escalated to the sponsor by
    `auth-refactor-lead`; not yet resolved.)* The word "grandfather"
@@ -934,6 +944,138 @@ nothing. The marker survives a parse-and-marshal round trip of
 path that rebuilds the config from a struct literal, instead of changing
 the parsed one, drops the field without a sign.
 
+### 10.2 The federated identity sweep
+
+This closes open question 5. It was done against
+`origin/scion/auth-refactor`, so line references are to that branch.
+
+**The three types are not equivalent, and that is the source of the
+findings.**
+
+| Type | `UserIdentity`? | `AgentIdentity`? |
+|---|---|---|
+| `FederatedAgentIdentity` | No | **Yes** |
+| `FederatedUserIdentity` | **Yes**, has `Role()` | No |
+| `BrokerIdentity` | No | No |
+
+#### D9: Federated agent ancestry is unconstrained, and is read as authority
+
+`checkDelegation` (`authz.go:755-766`) falls back to the ancestry chain
+when store-level delegation does not match:
+
+```go
+if !allowed && policy.Conditions.DelegatedFrom != nil {
+    for _, ancestorID := range agent.Ancestry() {
+        if policy.Conditions.DelegatedFrom.PrincipalID == ancestorID {
+            allowed = true
+            break
+        }
+    }
+}
+```
+
+For a local agent this is sound. The ancestry is in a token that the hub
+signed, so the hub attests it. For a `FederatedAgentIdentity` it is not.
+The ancestry comes from `claims.Ancestry` on a **remote** issuer's JWT,
+and `extractHubClaims` (`federation_auth.go:301-310`) passes it through
+unchanged.
+
+**Nothing bounds it.** At `federation_auth.go:264-274` a hub-type issuer
+is checked against `allowed_projects`, using `claims.ProjectID`, and
+against `allowed_root_users`, using `claims.RootUser`. Ancestry is
+checked against nothing. An operator who restricts `allowed_root_users`
+still accepts any ancestry from that issuer. The control appears to
+bound what a trusted peer may assert. It does not bound this.
+
+**The related defect, which is the cheaper thing to fix.** Nothing
+checks that `rootUser` equals `ancestry[0]`. The local wrapper derives
+`OriginUserID` from the ancestry (`identity.go:178`).
+`FederatedAgentIdentity` returns a separately stored `rootUser`
+(`federation_identity.go:72`). The two can disagree. One is bounded by
+`allowed_root_users`, the other by nothing, and the codebase uses them
+interchangeably.
+
+**Repair.** Reject a federated token whose `ancestry[0]` does not equal
+its `root_user`. Apply `allowed_root_users` to the whole ancestry, not
+to `root_user` alone. Treat token-supplied ancestry as attested only
+when the hub signed the token.
+
+**This belongs inside F1.7**, which is building the delegation ceiling
+on ancestry. A ceiling that walks a chain a remote issuer can write
+freely is only as strong as the least careful trusted issuer. It is the
+concrete instance of section 6.3.
+
+**Severity: structural, not P0.** It needs federation enabled with a
+configured hub-type issuer, an existing policy carrying a
+`DelegatedFrom` condition, and the ability to make that issuer mint a
+chosen ancestry. It is unreachable on a hub with no federation.
+
+#### A configuration hazard: an unvalidated `default_role`
+
+`FederatedUserIdentity.Role()` returns a value from issuer
+configuration, never from a remote claim. `extractUserClaims` uses
+`issuerCfg.DefaultRole` and falls back to `viewer`. `federationClaims`
+carries no role field, so a remote role cannot be honoured even if it is
+sent. **That design is correct** and should be preserved.
+
+The gap is validation. Config validation checks `issuer_type` against an
+allowed list. It does not validate `DefaultRole` against any role enum.
+An issuer configured with `default_role: "admin"` gives
+`Role() == "admin"` to every user that it signs.
+`IsUnscopedLocalPlatformAdmin` contains this at the admin gates today,
+so it is not now an escalation. It is one typo away from becoming one at
+any future consumer of `Role()` that does not use the predicate.
+
+**Repair, with F1.1.** Validate `DefaultRole` against the canonical role
+registry at config load. Refuse `admin` outright.
+
+#### A design note: the empty `ProjectID` is accidental safety
+
+`handlers_env_secrets.go` uses `OriginUserID()` directly as the scope ID
+for user-scoped secrets, at four sites. **This is not exploitable.**
+`validateAgentSecretAccess` refuses any agent whose `ProjectID()` is
+empty, and `FederatedAgentIdentity.ProjectID()` returns empty by design,
+so a federated agent gets a 403 before reaching the scope logic.
+
+It is recorded because the safety is accidental, not designed. It holds
+because an empty string fails an emptiness check. A handler written as
+`if agent.ProjectID() != "" && agent.ProjectID() != target { deny }`
+fails **open** on the same input. Step 3 of `checkAccessForAgent`
+already documents this hazard in its `pid != ""` guard, so it is
+understood in one place. **F1.2 must make the federated case explicit in
+the unified pipeline**, instead of relying on empty-string semantics
+holding at every site.
+
+#### A trust edge to write down
+
+Under `X-Scion-On-Behalf-Of`, `applyOnBehalfOf` puts a full
+`*AuthenticatedUser`, carrying the stored role, into the generic
+identity slot. A broker acting for an admin therefore satisfies
+`IsUnscopedLocalPlatformAdmin`. The broker is HMAC-verified
+infrastructure, so this reads as intended. It is recorded because it is
+the one remaining route by which a non-interactive caller reaches the
+platform-admin bypass. It should be a stated trust assumption, not an
+implicit one.
+
+#### What the sweep found already closed
+
+Two items are verified fixed, and pinned by tests.
+
+- **D7.** `requireAdmin` calls `IsUnscopedLocalPlatformAdmin`, which
+  refuses a scoped UAT and a federated identity, with a distinct denial
+  reason for each. `TestHubAdminRoutesRejectScopedAdminUAT` and
+  `TestAuthzDecideFederatedAdminCannotUseLocalAdminBypass` pin both
+  halves.
+- **F1.4.** All 150 `mux.HandleFunc` registrations go through
+  `guarded()`. An unknown pattern returns 500 instead of passing
+  through, and so does an unknown classification.
+  `TestRegisteredRoutesHaveRouteMetadata` pins the coverage invariant,
+  which is the part that keeps it true as routes are added.
+
+One caveat on F1.4. The `RoutePolicy` classification passes through to
+the handler by design, so those routes get no declarative gate. This is
+disclosed in the code, not hidden, but D2 survives for that set.
+
 ---
 
 ## 11. Acceptance Criteria
@@ -1013,6 +1155,19 @@ A reviewer or QA tester must verify the following.
 - [ ] A revoked but unexpired token cannot obtain a fresh, unrevoked
       credential by any refresh path. Revocation survives the minting of
       a new `jti`. See section 6.4.
+- [ ] A federated token whose `ancestry[0]` does not equal its
+      `root_user` is refused at authentication. (D9, section 10.2.)
+- [ ] `allowed_root_users` constrains every element of the ancestry, and
+      not `root_user` alone. A federated agent cannot name an ancestor
+      outside that list. (D9.)
+- [ ] A federated agent cannot satisfy a `DelegatedFrom` condition by
+      naming a principal in a token that the hub did not sign. (D9.)
+- [ ] A trusted issuer configured with `default_role: "admin"` is
+      refused at config load. `DefaultRole` is validated against the
+      canonical role registry. (Section 10.2.)
+- [ ] The unified pipeline decides the federated agent case explicitly.
+      No path depends on `ProjectID()` being empty to deny. (Section
+      10.2.)
 - [ ] The explain API returns the rule that decided a request.
 - [ ] Project membership is keyed by the immutable project ID, not by a
       slug. The relation is created in the same transaction as the
