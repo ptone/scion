@@ -1014,6 +1014,27 @@ are listed in the order that they block work.
    sponsor answer is therefore not a gate on it. It was routed to the
    Phase 1G engineering manager on 2026-08-25. The specification is in
    section 10.1.
+7. **What do several delegation paths mean?** Raised by finding R1
+   (section 11.2), which exposed that the question has never been
+   answered. Today an agent is expected to have one active delegation
+   edge, and the Phase 1G fix makes that an enforced invariant. If the
+   model later allows several delegators for one agent, someone must
+   choose the rule:
+
+   - **Most permissive.** The agent keeps a permission while **any**
+     delegator still holds it. This is what the code comment asserts.
+     Its cost is that revocation is not complete until the operator
+     finds and revokes every path.
+   - **Most restrictive.** The agent keeps a permission only while
+     **every** delegator holds it. Revocation through one path is
+     enough, but one unrelated delegator can strip authority that
+     another legitimately granted.
+
+   We do not recommend an answer here, because there is no product
+   requirement yet for several delegators. **This question is not
+   blocking.** It is recorded so that the first feature that needs
+   multiple delegation paths does not settle it by accident, inside an
+   implementation commit, the way the present comment did.
 
 ### 10.1 Specification: the role-provenance marker
 
@@ -1301,6 +1322,59 @@ stays inside the `AllowedRootUsers` block as agreed, and is therefore
 defence in depth only. The explain steps, which made this review much
 faster and should be kept as a standard for later phases.
 
+### 11.2 Finding R1: the first active edge decides, and the row order is not fixed
+
+Raised by the Phase 1G code reviewer, not by this review. Assessed here
+because it interacts with 1G-1. **It must land in the same commit as the
+1G-1 fix.**
+
+`walkDelegationChain` returns on the first active edge. The comment
+above it says that the ceiling passes if **any** edge's delegator still
+holds the permission. The code and the comment describe different rules.
+
+The reviewer judged this safe, because an agent has at most one active
+edge. **That is a convention, not an invariant, and it is already
+reachable.**
+
+- `pkg/ent/schema/delegationedge.go` declares four indexes. All four are
+  non-unique. Nothing limits an agent to one active edge.
+- The backfill calls `Create` without checking for an existing edge.
+- The backfill writes its completion marker **after** the paging loop.
+  An interruption during the migration leaves the marker absent, so the
+  next start runs the loop again from offset 0 and gives a second edge
+  to every agent already processed. An interruption during a migration
+  that pages over every agent is a normal event.
+
+`GetDelegationEdgesForDelegate` has no `Order()` clause, so row order is
+whatever the database returns. Duplicate edges plus first-edge-decides
+means the same request can allow or deny depending on row order. **This
+is D1 — nondeterministic resolution — reproduced inside the new
+ceiling**, which is one of the defects this engagement exists to remove.
+
+The fault is masked today: every backfilled edge is grandfathered, so
+the 1G-1 bypass returns allow before the order can matter. **Removing
+the bypass unmasks it.** The dependency therefore runs opposite to the
+reviewer's assumption, and R1 cannot be deferred past the 1G-1 fix.
+
+**Do not implement the rule in the comment.** "Any edge passes" is the
+most permissive reading, and it makes revocation require the operator to
+revoke every path. That is a sponsor decision, not a bug fix. It would
+also make the duplicate state work silently, hiding the migration fault.
+
+Scope for the fix: add a unique constraint on one active edge for each
+`(delegate_type, delegate_id, scope_type, scope_id)`; make the backfill
+idempotent; add `Order()` so that determinism does not depend on the
+constraint; correct the comment to state that the single active edge for
+the scope decides; and if more than one active edge is found, log an
+error and fail closed for authority-affecting actions. The last item
+should never fire once the first two land. Keep it as the detector that
+reports a broken invariant.
+
+The open question that this exposes — what several delegation paths
+**mean** — is recorded in section 10 and is not resolved here. The scope
+above is correct under either future answer, because it makes the
+present single-path rule explicit and enforced.
+
 ---
 
 ## 12. Acceptance Criteria
@@ -1435,6 +1509,17 @@ tests that must pass before that phase merges. (Section 11.1.)
       full-role edge.
 - [ ] `AncestryIsHubAttested` gives false for **each** federated
       identity type.
+
+From finding R1 (section 11.2):
+
+- [ ] A second **active** edge for the same delegate and scope is
+      refused by the store.
+- [ ] Running the backfill twice produces the same edge count as running
+      it once. Test the interrupted case: stop the migration part way,
+      restart it, and confirm that no agent has two edges.
+- [ ] Where more than one active edge is somehow present, an
+      authority-affecting action fails closed and an error is logged.
+      The result does not depend on row order.
 
 ### Phase 2
 
