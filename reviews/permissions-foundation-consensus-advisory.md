@@ -78,6 +78,8 @@ between a human and an agent is missing. That is the real problem.
 | D7 | A scoped UAT passes the hub admin check | **P0** | **Yes** |
 | D8 | Project admin escalation by slug squatting | **P0** | **Yes** |
 | D9 | Federated agent ancestry is unconstrained, and is read as authority | Structural | Only with federation configured |
+| D10 | Super-admin is grantable through an F1.5 role binding, against the sponsor decision | **P0** | **Yes** |
+| D11 | Super-admin cannot be revoked. `AdminEmails` is a write-only control | **P0** | **Yes** |
 
 ### 3.2 The repair order
 
@@ -550,6 +552,69 @@ UsageReservation   # atomic reserve and release
 Define a deterministic merge rule per limit, for a subject that matches
 several bindings. Add the index needed for the counting query.
 
+### 5.6 D10 and D11: the super-admin control does not match the decision
+
+Found on 2026-08-25, when the sponsor's answer to open question 2 was
+checked against `origin/scion/auth-refactor`. The decision is that
+super-admin is expanded **out-of-band only**. Neither half of that
+statement is true in the code today.
+
+#### D10: super-admin is grantable through F1.5
+
+There are two super-admin gates, and they disagree.
+
+| Gate | Reads | Obeys the decision? |
+|---|---|---|
+| `IsUnscopedLocalPlatformAdmin` (`identity.go:137`) | `User.Role == "admin"` | Yes. Out-of-band only. |
+| `AuthzService.IsSystemAdmin` (`authz.go`) | Role bindings **only**. Never reads `User.Role`. | **No.** |
+
+`IsSystemAdmin` returns true for any user holding a system-scoped
+binding to the super-admin role definition. That definition is an
+ordinary role definition and is bindable by the normal F1.5 machinery.
+So whoever can create a system-scoped role binding can confer
+super-admin.
+
+This is not a minor path. `checkUserHoldsPermission` short-circuits on
+it, so a super-admin binding also bypasses the entire delegation ceiling
+that Phase 1G is building.
+
+**Repair, at the store and not in a handler.** Refuse to create a role
+binding whose role definition is super-admin unless the caller is the
+system reconciler. A handler-level check will be missed by the next
+handler that is written. The store is the choke point.
+
+#### D11: super-admin cannot be revoked
+
+Removal from `AdminEmails` is a no-op, for two independent reasons.
+
+1. `determineUserRole` (`handlers_auth.go`) never demotes. If the email
+   is absent from the list it returns `currentRole`. A user promoted
+   once keeps `admin` after the operator removes their email.
+2. Even after a manual demotion, `ReconcileSuperAdminBindings` only
+   **warns** about the orphaned binding. It does not remove it, so
+   `IsSystemAdmin` still returns true and super-admin survives in the
+   authz path.
+
+Under the model the sponsor confirmed, `AdminEmails` is the sole control
+for super-admin. That control is at present **write-only**. An operator
+can add. An operator cannot remove.
+
+**Repair.** Make reconciliation converge in both directions: demote
+`User.Role` and delete the system super-admin binding for any user not
+in `AdminEmails`, logging each change. **Guard it: refuse to converge
+downward when `AdminEmails` is empty.** An empty list is nearly always a
+failed config load, not an instruction to remove every administrator.
+Without that guard the repair is a hub-wide lockout waiting for a bad
+config push.
+
+#### A documentation defect alongside them
+
+`identity.go:137` states that reconciliation keeps the role and the
+binding in step "and vice versa". It does not; the reverse direction
+only warns. The comment asserts a stronger invariant than the code
+provides, which is how this area reads as safe on inspection. Correct it
+in the same commit.
+
 ---
 
 ## 6. The Human and Agent Question
@@ -907,19 +972,34 @@ are listed in the order that they block work.
    **super-admin**, has an absolute capability, and it has it by bypass.
    Consequences are in section 5.1.1. `PolicyBoundary` is cancelled.
    F1.5 becomes load-bearing.
-2. **Break-glass access.** Partly resolved by the answer to question 1,
-   but **not** fully. Super-admin is the absolute *operational* role.
-   That does not automatically make it the *break-glass credential*.
-   The two should stay separable:
+2. ~~**Break-glass access.**~~ **RESOLVED by the sponsor, 2026-08-25.**
+   Super-admin is a **bootstrapping role, expanded out-of-band only** —
+   at present through the `AdminEmails` configuration. It is **not**
+   grantable through the F1.5 role-binding machinery. This matches our
+   recommendation.
 
-   - Everyday super-admin identities, used by named operators.
-   - A protected recovery credential, which may hold super-admin, with
-     stronger storage and use controls.
+   The everyday operational path is different: grant a user all
+   *grantable* admin rights through the normal policy and role-binding
+   machinery. The result is a user who is functionally admin-like but
+   who still passes every policy and auth check, one grant at a time,
+   with no super-admin short-circuit. The separation we asked for is
+   therefore achieved by construction, rather than by two credential
+   classes.
 
-   What remains to decide: who holds each; how each is audited; whether
-   super-admin is delegable by a binding (we recommend no); and whether
-   either is ever honoured from a scoped credential (we recommend no,
-   for both).
+   **The code does not yet implement this decision.** Verifying the
+   answer against the branch produced defects D10 and D11, in section
+   5.6. Both must be repaired before the decision is true in practice.
+
+   **This decision also raises the priority of D4.** The functional path
+   works only if the admin capability set is fully expressible as
+   grants. Every remaining hard-coded admin bypass is a capability that
+   cannot be granted, which pushes operators back to true super-admin,
+   and therefore back into D10. D4 is now load-bearing for the sponsor's
+   model, not merely tidiness.
+
+   One point remains for confirmation: whether reconciliation should
+   **remove** super-admin from users no longer in `AdminEmails`, rather
+   than only report them. See D11.
 3. ~~**Revocation propagation.**~~ **RESOLVED by the sponsor,
    2026-08-25T13:14:34Z.** Live downgrade. When a user loses a
    permission, every agent below them loses it at the next decision,
@@ -1509,6 +1589,24 @@ tests that must pass before that phase merges. (Section 11.1.)
       full-role edge.
 - [ ] `AncestryIsHubAttested` gives false for **each** federated
       identity type.
+
+From D10 and D11 (section 5.6):
+
+- [ ] An attempt to create a system-scoped role binding to the
+      super-admin role definition is **refused by the store**, for every
+      caller except the system reconciler. Test it through the F1.5 API,
+      not only through the store.
+- [ ] A user made functionally admin-like by grants passes each policy
+      check individually, and `IsSystemAdmin` returns **false** for
+      them.
+- [ ] Removing a user from `AdminEmails` and restarting demotes
+      `User.Role` **and** deletes their system super-admin binding.
+      `IsSystemAdmin` then returns false.
+- [ ] Starting with an **empty** `AdminEmails` list does **not** demote
+      anybody. The hub logs the refusal to converge downward.
+- [ ] The Phase 1G ceiling tests do not pass by way of the super-admin
+      short-circuit. The test subject must not hold a super-admin
+      binding.
 
 From finding R1 (section 11.2):
 
