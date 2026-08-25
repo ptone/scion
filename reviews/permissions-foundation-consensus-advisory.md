@@ -1635,6 +1635,78 @@ recovery, or it becomes a support call with no stated fix.
 
 ---
 
+### 11.4 Phase 1G at commit `1bd2203` — round three
+
+R2-1, R2-2 and R2-3 are correct. R2-1's dedup pass is properly placed
+before `entc.AutoMigrate`, is idempotent, and keeps the oldest row.
+R2-2's inversion is exactly the requested shape. Two findings remain,
+one blocking.
+
+#### R3-1 (blocker): the scope derivation denies most agent requests
+
+`requestScopeFromResource` maps anything not project-**parented** to
+`(system, "")`. No system-scoped edges exist, so the filter returns an
+empty set, the no-edge path runs, the marker is present, and the agent
+is **denied**.
+
+Counted across `pkg/hub`, excluding tests: **76 `Resource` literals, 17
+set `ParentType`, 59 do not.** The ceiling therefore denies agents on
+roughly three quarters of the authz call sites.
+
+Two faults sit inside that:
+
+1. A resource that **is** a project has no parent. The common literal is
+   `Resource{Type: "project", ID: project.ID, ...}`, which maps to
+   system scope and denies. It should map to `(project, r.ID)`.
+   Agent-reachable paths hit this today in `handlers_env_secrets.go`,
+   `handlers_shared_dirs.go` and `project_settings_handlers.go`.
+2. Everything else omitting `ParentType` silently becomes system scope,
+   and therefore denies.
+
+**Why the tests passed.** All twelve fixtures in
+`delegation_ceiling_test.go` build
+`Resource{Type: "agent", ParentType: "project", ParentID: projectID}`.
+The suite validates a shape that production mostly does not produce. At
+least one test must use a `Resource` built by a real handler path rather
+than synthesised in the test.
+
+**The design problem, not just the bug.** Scope is inferred from an
+optional field that each call site must remember to populate, and the
+failure mode is a silent deny. That is D2's shape again: correctness
+depending on every handler doing the right thing.
+
+**Fix — derive scope from the principal, use the resource as a
+cross-check.** The agent's own project is always known through
+`AgentIdentity.ProjectID()` (`identity.go:41, 190`), and it is exactly
+the scope the edges were created with: the backfill uses `a.ProjectID`
+and both creation sites use the agent's project ID. So default the
+ceiling scope to the agent's own project, and when the resource resolves
+to a *different* project — through `ParentID`, or through `r.ID` when
+`r.Type == "project"` — treat it as a cross-project request, require an
+edge in that project, and deny when there is none. This keeps the
+cross-scope leak closed, which is what R2-5 was for, while removing the
+dependence on 76 call sites populating a field correctly.
+
+#### R3-2 (major): the completion latch can cache "pre-backfill" forever
+
+`backfillOnce.Do` caches whichever answer arrives first, in **both**
+directions. If the first call lands before the marker exists,
+`backfillDone` stays false for the process lifetime and every edge-less
+agent is allowed until restart.
+
+Today the backfill runs during store initialisation before serving, so
+the first call should see the marker. That is start-up ordering, not an
+invariant — and "safe because of current ordering" is now the fourth
+such argument in this phase. The previous three were all reachable.
+
+**Fix: cache only the monotonic, safe direction.** "Completed" is
+permanent, so latch true and stop querying. "Not completed" is
+transient, so do not cache it. An atomic bool that only ever moves from
+false to true is sufficient, and it costs one read per no-edge decision
+during the pre-backfill window alone.
+
+---
+
 ## 12. Acceptance Criteria
 
 A reviewer or QA tester must verify the following.
@@ -1816,6 +1888,18 @@ From round two (section 11.3):
 - [ ] The duplicate-edge invariant check counts only edges in the
       request's scope, so an agent legitimately scoped to two projects
       does not trip it.
+
+From round three (section 11.4):
+
+- [ ] An agent acting on a resource whose literal is
+      `Resource{Type: "project", ID: <its own project>}` — with no
+      `ParentType` — is **allowed**, subject to the ordinary ceiling.
+      This is the R3-1 regression test.
+- [ ] At least one ceiling test drives a `Resource` produced by a real
+      handler path, not one synthesised inside the test.
+- [ ] The backfill completion check, called once **before** the marker
+      exists and again after, returns false then true within a single
+      process. A "not yet complete" answer is never cached.
 
 From finding R1 (section 11.2):
 
