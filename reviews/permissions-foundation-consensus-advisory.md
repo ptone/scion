@@ -972,7 +972,10 @@ are listed in the order that they block work.
    **super-admin**, has an absolute capability, and it has it by bypass.
    Consequences are in section 5.1.1. `PolicyBoundary` is cancelled.
    F1.5 becomes load-bearing.
-2. ~~**Break-glass access.**~~ **RESOLVED by the sponsor, 2026-08-25.**
+2. ~~**Break-glass access.**~~ **RESOLVED by the sponsor,
+   2026-08-25T14:55:19Z**, in Discord thread 1536947436512088174. First
+   relayed by `auth-refactor-lead` at 14:46:22Z, then stated directly by
+   the sponsor. The two agree.
    Super-admin is a **bootstrapping role, expanded out-of-band only** —
    at present through the `AdminEmails` configuration. It is **not**
    grantable through the F1.5 role-binding machinery. This matches our
