@@ -1871,6 +1871,85 @@ finding 3. Each fix needs a test.
 
 ---
 
+### 11.7 D11-fix2 at `f5c7cf2c` and D8 at `2cf6c7ea` — shape check
+
+Both are structurally right. Each has one finding to fix before the PR.
+
+#### D11-fix2 — the three fixes are correct
+
+Single-pass reconciliation grants and revokes in one branch per user, so
+the grant-then-revoke window from finding 11.6/1 is gone. The required
+parameter removes the silent-degradation trap, nil and empty collapse to
+one branch, and the empty-list case disables **both** directions.
+Login-time deletion is gated on the demotion having actually happened.
+
+#### D11-fix2 finding — unnormalized email matching, now destructive
+
+Stored emails are normalized with `normalizeEmail` = `TrimSpace` +
+`ToLower`. Both matchers — `determineUserRole` and the reconciler — use
+plain `strings.ToLower`, with **no** `TrimSpace`.
+
+`AdminEmails` is sanitized in one narrow case only: `hub_config.go:835`
+and `:1204` apply `parseCommaSeparatedList` when the list has exactly
+one element containing a comma, which is an env-var fixup. A native YAML
+or JSON list is never trimmed, and empty entries are never dropped.
+
+So `adminEmails: ["  admin@example.com"]` — a leading space, which YAML
+makes easy — produces no match. The legitimate administrator is
+**demoted** and their super-admin binding **deleted** at start-up, and
+cannot be re-promoted at login while the typo persists. If every entry
+carries stray whitespace, every administrator is removed. The empty-list
+guard does not fire, because the list is not empty.
+
+Under the old additive-only semantics the same typo was harmless: it
+failed to promote, and the stored role was preserved. D11 converts it
+into silent, hub-wide loss of administrators.
+
+**Fix.** Normalize both sides with the store's `normalizeEmail`
+semantics, and drop empty entries. Better, sanitize `AdminEmails` once
+at config load for all list shapes.
+
+**The architectural point.** The empty-list guard protects against one
+*input shape* that causes mass demotion. The invariant that matters is
+about the *effect*: never remove every administrator in a single pass.
+Guarding the input admits any other route to the same outcome —
+whitespace here, and the login-deletion path before it. A guard on the
+effect subsumes the empty-list guard and closes routes nobody has
+thought of yet.
+
+Not a finding: an empty entry making `adminSet[""]` true cannot promote
+anyone, because the user schema declares email `NotEmpty()`.
+
+#### D8 — the gate is correct
+
+It mirrors the members side properly: project ID, annotation and
+`GroupType` are all required before adoption. Refusing to adopt leaves
+the project with no agents group, which is the right trade. Annotations
+are copied rather than clobbered, and the completion marker is written
+only after a clean run.
+
+#### D8 finding — the backfill destroys the evidence it records
+
+On owner mismatch the backfill logs a warning and then **marks the group
+anyway**. The group is then annotation-identical to a legitimate one, so
+no later query can separate them. The backfill is once-only, so the
+warning is never regenerated. The single signal that distinguishes a
+squat is emitted once, to a log, and is then made permanently
+unrecoverable by the marking that follows it.
+
+The commit message is honest that adoption is not undone. This is worse
+than stated: it is not only un-undone, it is un-investigable once the
+log rotates.
+
+**Fix.** Record the mismatch durably as a second annotation —
+`scion.io/adoption-review-required: "true"` — so operators can query for
+suspect groups instead of grepping start-up logs. This is better than
+refusing the mark, because a project ownership transfer changes the
+project owner without changing the group owner and would produce false
+positives.
+
+---
+
 ## 12. Acceptance Criteria
 
 A reviewer or QA tester must verify the following.
