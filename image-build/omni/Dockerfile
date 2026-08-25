@@ -77,9 +77,7 @@ RUN chmod +x /usr/local/bin/init-firewall.sh && \
 COPY --chown=scion:scion harnesses/grok-build/home/.grok/config.toml /home/scion/.grok/config.toml
 
 # ---- Claude: dev-environment setup ----
-# Persist bash history across container restarts.
-RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
-    && chown -R scion /commandhistory
+# Claude: bash history persistence is handled via zsh-in-docker -a parameter below.
 
 ENV DEVCONTAINER=true
 
@@ -140,9 +138,8 @@ RUN curl -fsSL https://x.ai/cli/install.sh | bash \
 # scion-base already created this; ensure it survives any flattening.
 RUN mkdir -p /home/scion/.scion && chown -R scion:scion /home/scion/.scion
 
-USER scion
-
 # Drop all per-harness CMDs. PID 1 is sciontool init (ENTRYPOINT from scion-base);
 # the harness command comes from config.yaml's command: field at runtime.
+# Do NOT switch to USER scion — sciontool init handles the user switch.
 # Default CMD runs the hub server for Cloud Run Instances deployment.
 CMD ["scion", "server", "start", "--foreground", "--host", "0.0.0.0", "--enable-hub"]
