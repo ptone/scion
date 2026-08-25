@@ -2063,6 +2063,42 @@ across 1G, D10, D11 and D8 is settled.
 
 ---
 
+### 11.10 Guard publication at `bd814751` — confirmed, PR #1255 cleared
+
+Three checks, plus one more.
+
+**Polarity — correct.** `demotionSafe atomic.Bool`, zero value false,
+meaning do not demote. The web server holds a **pointer** to the same
+atomic rather than a copy, so it cannot go stale, and `isDemotionSafe()`
+treats nil as false. If the `SetDemotionSafe` wiring at
+`server_foreground.go:2271` were dropped by a future entry point, that
+path fails closed on its own.
+
+**Set on exactly one path — correct.** `Store` is called only in the
+`else` arm, so a reconciler error leaves the zero value untouched and
+demotion stays disabled. The returned value is `canDemote`, true only
+when `AdminEmails` is non-empty **and** the intended admin set matched
+at least one existing user. Every early return yields false.
+
+**Callers honour it — correct.** All seven sites pass the real flag:
+`handlers_auth.go:1505` through `s.demotionSafe.Load()`, and six in
+`web.go` through `ws.isDemotionSafe()`. None hardcodes true. That was
+the last way the fix could have been hollow.
+
+The batch path and the interactive path now refuse demotion on the same
+condition. Guarding the outcome rather than the route closed the three
+doors that kept appearing: the login-deletion path, the whitespace typo,
+and reconciler-never-ran.
+
+#### Not covered by any approval given here
+
+- The other ~34 files in the feature diff, outside the delegation
+  ceiling, D10/D11 and D8.
+- The federated identity handler sweep — open question 5, never closed.
+  Whether it blocks the PR or lands after needs an explicit decision.
+
+---
+
 ## 12. Acceptance Criteria
 
 A reviewer or QA tester must verify the following.
