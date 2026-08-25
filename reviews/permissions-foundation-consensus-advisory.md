@@ -522,6 +522,33 @@ Refresh is unbounded.
 true by a user interface change. It needs a check at authentication
 time.
 
+**Implementation note, 2026-08-25.** F1.8 shipped in Phase 1H. It stores
+a hash of the `jti` and checks it in the auth middleware. Two follow-ups
+came out of a review of that work.
+
+*A latent bypass. Not live.* `RefreshAgentToken`
+(`agenttoken.go:225`) calls `ValidateAgentToken`, which checks the
+signature and the expiry only. It never reads the credential store. It
+then mints a **new** `jti` and records it as a fresh, unrevoked
+credential. Because revocation is keyed on the `jti` hash, any path that
+mints a new `jti` escapes an earlier revocation.
+
+This is **not exploitable today**. `RefreshAgentToken` has no non-test
+caller, and `/api/v1/auth/refresh` is the user token path, not the agent
+path. It is recorded as a trap, not a defect. Close it before any agent
+refresh endpoint exists: either make the function consult the credential
+store and refuse a revoked source token, or delete the function.
+
+*Fail-open on store error.* The middleware accepts a token when the
+credential store returns an error that is not "not found"
+(`auth.go:179-183`). This is a defensible default: failing closed would
+lock out every agent during a database fault, which is the worse
+failure. Two qualifications. The exposure is one full token lifetime,
+currently 10 hours, not the length of the outage. And if a
+`FailClosedOnStoreError` option is added, it should apply only to
+credentials revoked for a security reason, not to routine lifecycle
+churn.
+
 ### 6.5 Separate the principal from the credential
 
 This is an addition from codex-auth-review, and review-arch accepts it.
@@ -736,6 +763,20 @@ are listed in the order that they block work.
    next decision, through every ancestor? Or do existing agents keep a
    snapshot of their grant until it expires? Both reviewers recommend
    live propagation through every edge. It blocks F1.7.
+
+   **Existing precedent, found 2026-08-25.** The system already does
+   live re-evaluation, for humans. `handleAuthRefresh`
+   (`handlers_auth.go:427`) re-reads the stored role instead of trusting
+   the role claim in the token. It refuses when the user no longer
+   exists, and refuses when the user is suspended. A comment in that
+   function states the reason: trusting the token's own role claim would
+   let a stale admin claim renew itself indefinitely through the
+   rotating refresh chain.
+
+   That is the exact hazard this question asks about, already solved on
+   the human side. The agent path does not do it. This is the strongest
+   argument for answering in favour of live propagation, and
+   `handleAuthRefresh` is the pattern for F1.7 to copy.
 4. **Migration of existing agents.** Agents with an empty role currently
    run as full. Fixing D6 will remove their access. Do we migrate them
    to `full` explicitly, or do we force a re-grant?
@@ -813,6 +854,9 @@ A reviewer or QA tester must verify the following.
       delegator loses it.
 - [ ] A revoked agent token is refused at authentication, before its
       10-hour expiry.
+- [ ] A revoked but unexpired token cannot obtain a fresh, unrevoked
+      credential by any refresh path. Revocation survives the minting of
+      a new `jti`. See section 6.4.
 - [ ] The explain API returns the rule that decided a request.
 - [ ] Project membership is keyed by the immutable project ID, not by a
       slug. The relation is created in the same transaction as the
@@ -845,6 +889,13 @@ All line numbers are from branch `scion/review-arch`, commit `89ed0fe`.
 | `pkg/hub/handlers_agents_core.go` | 626-647 | Section 6.1 |
 | `pkg/store/models.go` | 1752-1764 | D6 (no principal kind on the event) |
 | `pkg/hub/handlers_policies.go` | 104, 309, 332, 400, 418, 499 | Section 5.1.1 (policy writes are admin-gated) |
+| `pkg/hub/agenttoken.go` | 225 | Section 6.4 (refresh does not check revocation) |
+| `pkg/hub/auth.go` | 179-183 | Section 6.4 (fail-open on store error) |
+| `pkg/hub/handlers_auth.go` | 427 | Open question 3 (live re-evaluation precedent) |
+
+The last three rows are from branch `scion/auth-refactor`, reviewed on
+2026-08-25, after Phase 1H. All other rows are from `scion/review-arch`
+at `89ed0fe`.
 | `pkg/store/entadapter/policy_store.go` | 459-466, 177-179, 202-204 | D1 |
 
 **Verification status.**
