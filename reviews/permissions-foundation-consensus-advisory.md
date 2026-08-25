@@ -1234,7 +1234,76 @@ disclosed in the code, not hidden, but D2 survives for that set.
 
 ---
 
-## 11. Acceptance Criteria
+## 11. Implementation Review Log
+
+### 11.1 Phase 1G at commit `3597507` — changes requested
+
+Reviewed on request from `pf-1g-em` before merge. Verdict: **do not
+merge**. Three blockers and three major items. The EM self-reported the
+first blocker, which is good practice and shortened the review.
+
+The central finding is that **the ceiling does not limit the population
+it was built to limit.** Two independent paths give unlimited authority
+to every agent that exists before this release, one before the backfill
+runs and one after it.
+
+| ID | Severity | File | Fault |
+|---|---|---|---|
+| 1G-1 | Blocker | `authz_delegation_ceiling.go:166-174` | Each edge with `Grandfathered = true` bypasses the ceiling. The backfill sets that flag on every existing agent, so every existing agent is permanently exempt. This is Option B, which the sponsor rejected. |
+| 1G-2 | Blocker | `authz_delegation_ceiling.go:138-149` | At depth 0 a hub-attested identity with no edge is allowed. "Absence is not permission" was applied to federated agents only. |
+| 1G-3 | Blocker | `authz_delegation_ceiling.go`, `isMintingOperation` | The set omits `ActionMint` and `ActionAssign`. A store error during a token mint or a role assignment fails **open**. Affects `authz.go:284` too. |
+| 1G-4 | Major | `composite.go:345-355` | The backfill defaults `role` to `"full"`. An empty `AppliedConfig` gives a full-role edge with no log record. |
+| 1G-5 | Major | `identity.go:145-156` | `AncestryIsHubAttested(identity interface{})` returns true for any unexpected type, and tests one concrete type where its sibling ten lines above tests the `FederatedIdentity` interface. |
+| 1G-6 | Major | `checkUserHoldsPermission` | `ErrNotFound` for a delegator is handled as a store error. A principal that can never exist is retried as a temporary fault forever. |
+
+#### Why the bypass was written
+
+`determineDelegator` never returns empty. When provenance is unclear it
+returns the synthetic principal `system/migration`. A live check against
+that principal cannot succeed, so those agents would stop working. The
+problem is real; the scope of the fix is wrong. Only the synthetic
+subset has the problem. Most grandfathered edges have a real delegator
+and need no special handling. This is the same conflation error that
+this review has flagged repeatedly: **grandfathered is not the same as
+ambiguous.**
+
+#### The corrected rule
+
+Branch on the **resolvability of the delegator**. Never branch on the
+`Grandfathered` flag.
+
+- Delegator resolves to a real principal — do the live check, always.
+- Delegator is synthetic, or the lookup gives `ErrNotFound` — set the
+  ceiling to the agent's own recorded role and freeze it. The agent
+  keeps what it has. It cannot escalate and it cannot mint above its
+  role. Emit an enumerable "orphaned delegation" signal so that an
+  operator can re-parent the edge.
+- A genuine store fault — fail closed for authority-affecting actions,
+  fail open for the others.
+
+`Grandfathered` stays, as provenance only. It may appear in explain
+traces and audit reports. It must never appear in a branch that returns
+allow. This is the rule already stated in 10.1 for
+`AgentRoleGrandfathered`, which the developer applied correctly there.
+
+For 1G-2, gate the guard on "the backfill marker is absent" rather than
+on "the identity is hub-attested". The backfill runs at start-up in the
+same release, so the pre-migration window is nearly empty. A marker-
+gated guard disables itself when the migration completes. The present
+guard never expires.
+
+#### What is correct
+
+The intersect semantics at `authz.go:277` — the ceiling narrows an
+allow and never widens a deny. The recursive chain walk and its depth
+limit. The federated no-edge denial. `federation_auth.go:275-282`, which
+stays inside the `AllowedRootUsers` block as agreed, and is therefore
+defence in depth only. The explain steps, which made this review much
+faster and should be kept as a standard for later phases.
+
+---
+
+## 12. Acceptance Criteria
 
 A reviewer or QA tester must verify the following.
 
@@ -1352,6 +1421,21 @@ A reviewer or QA tester must verify the following.
       under that slug before the prefix reservation is **not** adopted.
       (Section 4.3, repair status.)
 
+The following six items come from the Phase 1G review. They are the
+tests that must pass before that phase merges. (Section 11.1.)
+
+- [ ] An agent with a grandfathered edge **loses** a permission when its
+      delegator loses that permission.
+- [ ] An agent whose edge was created by the backfill is subject to the
+      ceiling. There is no bypass.
+- [ ] An agent whose delegator is `system/migration` keeps its reads at
+      its recorded role, cannot mint, and cannot escalate.
+- [ ] `ActionMint` and `ActionAssign` fail **closed** on a store error.
+- [ ] An empty `AppliedConfig` during the backfill does not produce a
+      full-role edge.
+- [ ] `AncestryIsHubAttested` gives false for **each** federated
+      identity type.
+
 ### Phase 2
 
 - [ ] A limit is enforced under concurrency. 100 parallel creations
@@ -1361,9 +1445,11 @@ A reviewer or QA tester must verify the following.
 
 ---
 
-## 12. Sources
+## 13. Sources
 
-All line numbers are from branch `scion/review-arch`, commit `89ed0fe`.
+All line numbers are from branch `scion/review-arch`, commit `89ed0fe`,
+except in sections 10.2 and 11.1. Those are from
+`origin/scion/auth-refactor`, and section 11.1 is at commit `3597507`.
 
 | File | Lines | Used for |
 |------|-------|----------|
