@@ -7,10 +7,10 @@
 Convergence at round 2. Signoff at round 4, with no dissent. Two
 editorial passes after signoff: one for correctness, one to interpret
 the sponsor decision. Both reviewers signed off on the final text.
-**Status:** Questions 1, 3 and 4 are resolved by the sponsor. Question 5
-is swept and closed by review-arch. Question 2 is open. Question 6 was
-raised on 2026-08-25 and is with the sponsor. The document is otherwise
-final, and is updated in place as answers arrive.
+**Status:** Questions 1, 3, 4 and 6 are resolved by the sponsor.
+Question 5 is swept and closed by review-arch. **Question 2 is the only
+one still open.** The document is otherwise final, and is updated in
+place as answers arrive.
 **Language:** ASD-STE100 Simplified Technical English.
 
 ---
@@ -962,12 +962,21 @@ are listed in the order that they block work.
    sweep was done against `origin/scion/auth-refactor`. It produced one
    structural finding, one configuration hazard, one design note and one
    trust edge. It is written up in section 10.2.
-6. **The scope of grandfathering.** *(Raised 2026-08-25, after questions
-   3 and 4 were answered. Escalated to the sponsor by
-   `auth-refactor-lead`; not yet resolved.)* The word "grandfather"
-   answers question 4 correctly, but it can also be read onto question
-   3, where it means something very different. The two readings must not
-   be confused:
+6. ~~**The scope of grandfathering.**~~ **RESOLVED by the sponsor,
+   2026-08-25.** Option A, the starting-point reading. Existing agents
+   keep their current role as the value they start from, and the live
+   ceiling applies to them from that point on. **There is no permanent
+   exemption.** Reported through `auth-refactor-lead` and routed to
+   Phase 1G.
+
+   The question and its reasoning are kept below, because the two
+   readings are easy to merge again and the record should show why they
+   were separated.
+
+   *(Raised 2026-08-25, after questions 3 and 4 were answered.)* The
+   word "grandfather" answers question 4 correctly, but it can also be
+   read onto question 3, where it means something very different. The
+   two readings must not be confused:
 
    - **Starting point.** Existing agents keep their current role as the
      value they start from. Live propagation then applies to them from
@@ -1293,10 +1302,11 @@ A reviewer or QA tester must verify the following.
       delegator loses it. Per the sponsor decision of 2026-08-25, this
       applies to **existing** agents too, and not only to agents created
       after F1.7. Test an agent that the role backfill touched.
-- [ ] If any agent is exempt from the delegation ceiling, the exempt
-      population is bounded and enumerable. A report or metric gives the
-      count. An exemption that is permanent and invisible fails this
-      criterion. See open question 6.
+- [ ] **No** agent is exempt from the delegation ceiling. The sponsor
+      chose the starting-point reading on 2026-08-25, so an existing
+      agent keeps its current role as a starting value only. Test an
+      agent that the role backfill touched: its authority must fall when
+      its delegator's authority falls. See open question 6.
 - [ ] A revoked agent token is refused at authentication, before its
       10-hour expiry.
 - [ ] A revoked but unexpired token cannot obtain a fresh, unrevoked
