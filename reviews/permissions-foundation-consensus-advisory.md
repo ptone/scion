@@ -1773,6 +1773,104 @@ the ceiling that Phase 1G builds.
 
 ---
 
+### 11.6 D10 and D11 at commit `d45d1a8f` — shape check
+
+D10 is sound. D11 has one ordering defect to fix before the PR, plus
+two smaller items.
+
+#### D10 — correct, and correctly placed
+
+The guard sits at the store level, which is the right layer. Three
+checks confirm it is complete:
+
+- `CreateRoleBinding` is the **only** binding-creation path. No
+  `UpdateRoleBinding` exists, so there is no create-benign-then-mutate
+  route to super-admin.
+- The guard matches the role-definition **name at any scope**.
+  `IsSystemAdmin` requires system scope **and** that name, so the guard
+  is strictly broader than the check it protects.
+- A separate all-permissions definition under a different name does not
+  trip `IsSystemAdmin`, so it runs through normal policy evaluation.
+  That is the "functionally super-admin-like, but still passed through
+  every check per grant" model from open question 2, not a hole.
+
+#### D11 finding 1 — the forward pass can grant what the reverse revokes
+
+The forward loop keys on `u.Role == "admin"` and never consults
+`adminSet`. For a removed admin whose stored role is still `admin` and
+who holds no binding, start-up runs:
+
+    forward pass  -> CREATES a super-admin binding
+    reverse pass  -> demotes the role, DELETES the binding
+
+The net result is right, but the order is backwards and the passes are
+not atomic. If the reverse pass takes its `ListUsers` error path it
+returns early, and `server.go` only warns, so the hub still starts. A
+reconciliation whose purpose is revocation has then issued a fresh
+super-admin binding to the user it was meant to revoke.
+
+The precondition is reachable: `Role == "admin"` with no binding is
+exactly the state the forward pass exists to repair, so it is the
+expected state on the upgrade that introduces D11.
+
+**Fix.** Gate the forward creation on `inAdminList` whenever the list is
+usable. Better, fold both directions into one pass per user, so no user
+is granted and revoked in the same run.
+
+#### D11 finding 2 — the variadic parameter repeats the D2 shape
+
+`ReconcileSuperAdminBindings(ctx, s, adminEmails ...[]string)` degrades
+**silently** to warn-only when a caller omits the argument. This is the
+`ParentType` problem again: correctness depends on every call site
+remembering an optional field, and the failure mode is quiet. It was
+done for test compatibility, and there is exactly one production call
+site. Make the parameter required.
+
+Related: `emails == nil` takes the warn-only branch and
+`len(emails) == 0` takes the guard branch — two guards for one
+condition, resting on a nil-versus-empty distinction that Go code
+routinely conflates. Both paths are safe, so this is not a bug, but they
+should be collapsed.
+
+#### D11 finding 3 — login demotion and binding deletion diverge
+
+`determineUserRole` demotes `User.Role` at login. Nothing deletes the
+super-admin binding until restart. In that window
+`IsUnscopedLocalPlatformAdmin` returns false while `IsSystemAdmin`
+returns **true**: the user looks demoted and still bypasses the ceiling.
+
+The residual privilege sits inside the restart latency the sponsor
+accepted, so this is not a security regression. The defect is that
+`identity.go:137` now claims the reconciliation "ensures bidirectional
+consistency", and in that window it does not. An operator who sees the
+demotion land would reasonably conclude revocation had happened. Either
+delete the binding at login too — preferred, because it makes the fast
+path and the authoritative path agree — or narrow the comment.
+
+#### Minor
+
+Reconciliation failure at start-up is `slog.Warn` and non-fatal. That
+predates this commit, but the function now carries revocation semantics,
+so the failure matters more than it did.
+
+#### Verified clean — checked and not reported
+
+- The demotion is a read-modify-write through `UpdateUser`, which clears
+  `AvatarURL`, `InvitedBy`, `InviteNote` and `Preferences` when empty.
+  `entUserToStore` hydrates all four in `ListUsers`, so no user data is
+  wiped.
+- `CreatedBy` sentinel collision: the non-system call site passes a user
+  ID, which is a UUID, and `system-reconcile` is not a valid UUID.
+
+#### Test gaps
+
+The 11 tests cover the stated acceptance criteria, including the
+functional-admin regression trap. Nothing exercises finding 1's
+create-then-delete ordering, and nothing asserts the window in
+finding 3. Each fix needs a test.
+
+---
+
 ## 12. Acceptance Criteria
 
 A reviewer or QA tester must verify the following.
