@@ -72,7 +72,6 @@ type sandboxStateEntry struct {
 	Template      string            `json:"template"`
 	HarnessConfig string            `json:"harness_config"`
 	CreatedAt     time.Time         `json:"created_at"`
-	TmuxSocket    string            `json:"tmux_socket"`
 	AgentHome     string            `json:"agent_home"`
 	Workspace     string            `json:"workspace"`
 	Image         string            `json:"image"`
@@ -253,7 +252,6 @@ type scionPaths struct {
 	root      string // e.g. /scion
 	agentHome string // /scion/agents/<slug>/home
 	workspace string // /scion/agents/<slug>/workspace
-	tmuxDir   string // /scion/agents/<slug>/tmux (not mounted — §4.4a, AF_UNIX can't cross gVisor)
 }
 
 // prepareScionLayout creates the /scion directory structure for a sandbox
@@ -268,11 +266,10 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 		root:      rootDir,
 		agentHome: filepath.Join(rootDir, "agents", slug, "home"),
 		workspace: filepath.Join(rootDir, "agents", slug, "workspace"),
-		tmuxDir:   filepath.Join(rootDir, "agents", slug, "tmux"),
 	}
 
 	// Create all directories.
-	for _, d := range []string{p.agentHome, p.workspace, p.tmuxDir} {
+	for _, d := range []string{p.agentHome, p.workspace} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			return p, fmt.Errorf("mkdir %s: %w", d, err)
 		}
@@ -637,7 +634,6 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		Template:      cfg.Template,
 		HarnessConfig: labelValue(cfg.Labels, "scion.harness_config"),
 		CreatedAt:     time.Now(),
-		TmuxSocket:    paths.tmuxDir,
 		AgentHome:     paths.agentHome,
 		Workspace:     paths.workspace,
 		Image:         cfg.Image,

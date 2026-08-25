@@ -469,7 +469,6 @@ func TestMountsFor_BasicPaths(t *testing.T) {
 		root:      "/scion",
 		agentHome: "/scion/agents/test-agent/home",
 		workspace: "/scion/agents/test-agent/workspace",
-		tmuxDir:   "/scion/agents/test-agent/tmux",
 	}
 
 	mounts := mountsFor(paths, nil)
@@ -494,7 +493,6 @@ func TestMountsFor_WithSharedDirs(t *testing.T) {
 		root:      "/scion",
 		agentHome: "/scion/agents/test-agent/home",
 		workspace: "/scion/agents/test-agent/workspace",
-		tmuxDir:   "/scion/agents/test-agent/tmux",
 	}
 	sharedDirs := []api.SharedDir{
 		{Name: "build-cache"},
@@ -526,9 +524,7 @@ func TestEnvFor_BasicEnv(t *testing.T) {
 		Project:   "my-project",
 		ProjectID: "proj-123",
 	}
-	paths := scionPaths{
-		tmuxDir: "/scion/agents/test/tmux",
-	}
+	paths := scionPaths{}
 
 	env := envFor(cfg, paths)
 
@@ -570,7 +566,7 @@ func TestEnvFor_BasicEnv(t *testing.T) {
 
 func TestEnvFor_PATH(t *testing.T) {
 	cfg := RunConfig{}
-	paths := scionPaths{tmuxDir: "/scion/agents/test/tmux"}
+	paths := scionPaths{}
 
 	env := envFor(cfg, paths)
 	if env["PATH"] == "" {
@@ -587,7 +583,7 @@ func TestEnvFor_PATH_OverridableByHarness(t *testing.T) {
 			env: map[string]string{"PATH": "/custom/bin"},
 		},
 	}
-	paths := scionPaths{tmuxDir: "/scion/agents/test/tmux"}
+	paths := scionPaths{}
 
 	env := envFor(cfg, paths)
 	if env["PATH"] != "/custom/bin" {
@@ -599,7 +595,7 @@ func TestEnvFor_WorkspaceBackend(t *testing.T) {
 	cfg := RunConfig{
 		WorkspaceBackendName: "nfs",
 	}
-	paths := scionPaths{tmuxDir: "/scion/agents/test/tmux"}
+	paths := scionPaths{}
 
 	env := envFor(cfg, paths)
 	if env["SCION_WORKSPACE_BACKEND"] != "nfs" {
@@ -742,7 +738,7 @@ func TestPrepareScionLayout_CreatesDirectories(t *testing.T) {
 	}
 
 	// Verify paths exist.
-	for _, dir := range []string{paths.agentHome, paths.workspace, paths.tmuxDir} {
+	for _, dir := range []string{paths.agentHome, paths.workspace} {
 		if _, err := os.Stat(dir); os.IsNotExist(err) {
 			t.Errorf("directory not created: %s", dir)
 		}
@@ -766,16 +762,12 @@ func TestPrepareScionLayout_PathStructure(t *testing.T) {
 
 	wantHome := filepath.Join(rootDir, "agents", "my-agent", "home")
 	wantWs := filepath.Join(rootDir, "agents", "my-agent", "workspace")
-	wantTmux := filepath.Join(rootDir, "agents", "my-agent", "tmux")
 
 	if paths.agentHome != wantHome {
 		t.Errorf("agentHome = %q, want %q", paths.agentHome, wantHome)
 	}
 	if paths.workspace != wantWs {
 		t.Errorf("workspace = %q, want %q", paths.workspace, wantWs)
-	}
-	if paths.tmuxDir != wantTmux {
-		t.Errorf("tmuxDir = %q, want %q", paths.tmuxDir, wantTmux)
 	}
 }
 
