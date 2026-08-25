@@ -49,7 +49,11 @@ cloud_build_config_for_target() {
     scion-base) file="cloudbuild-scion-base.yaml" ;;
     harnesses)  file="cloudbuild-harnesses.yaml" ;;
     hub)        file="cloudbuild-hub.yaml" ;;
-    omni)       file="cloudbuild-omni.yaml" ;;
+    omni)
+      echo "cloud-build: omni target chains harness images and must be built locally." >&2
+      echo "Use: --builder local-docker --target omni" >&2
+      return 1
+      ;;
     thick-prep) file="cloudbuild-thick.yaml" ;;
     thick)      file="cloudbuild-thick.yaml" ;;
     *)
