@@ -1950,6 +1950,55 @@ positives.
 
 ---
 
+### 11.8 Specification of the demotion effect guard
+
+The guard recommended in 11.7 must be stated carefully. The obvious
+phrasing — "refuse to demote when it would remove all current admins" —
+is wrong, and it breaks the most common administrative operation.
+
+Take the ordinary rotation: the hub has one admin, `alice`, replaced by
+`bob`. Config goes from `[alice]` to `[bob]`. Current admins are
+`{alice}`, so demoting alice removes all of them and the guard refuses.
+Alice keeps super-admin permanently, through the mechanism built to
+revoke it. A guard that blocks routine rotation gets disabled by the
+first operator who meets it, and then it protects nothing.
+
+The predicate must describe the **resulting** state, not the demotion
+set:
+
+> Refuse all demotions when the pass would leave **zero**
+> administrators.
+
+Concretely: build the intended final admin set — existing users whose
+normalized email appears in `AdminEmails`. When that set is empty,
+refuse every demotion and log at Error. When it has at least one
+member, proceed.
+
+| Case | Intended set | Behaviour |
+|---|---|---|
+| `alice` replaced by `bob` | `{bob}` | Demotion proceeds. No false positive. |
+| Whitespace on every entry | empty | All demotions refused. |
+| `AdminEmails` empty | empty | All demotions refused. |
+
+The third row makes the separate empty-list guard redundant, which was
+the objective.
+
+**Structural consequence.** This cannot be evaluated inside the
+single-pass loop from `f5c7cf2c`, because the decision depends on the
+whole user set while the pass acts user by user. The intended admin set
+must be computed **before** any mutation — a classifying pre-pass, then
+an applying pass. A running counter inside the existing loop is not a
+substitute: it cannot see users not yet visited, so the guard would fire
+or not fire according to cursor order. That is the row-order dependence
+already corrected once in finding R1.
+
+The intended set must also count **matching existing users**, not
+configured email strings. A config naming only people who have never
+logged in would otherwise pass the guard and demote every real
+administrator.
+
+---
+
 ## 12. Acceptance Criteria
 
 A reviewer or QA tester must verify the following.
