@@ -875,6 +875,65 @@ are listed in the order that they block work.
    in its current form loses the ability to identify that population
    permanently.
 
+   **The marker is decoupled from this question**, because it is correct
+   under either reading. Under the starting-point reading it serves
+   audit. Under the exemption reading it becomes required, because the
+   acceptance criterion asks for the exempt set to be enumerable. The
+   sponsor answer is therefore not a gate on it. It was routed to the
+   Phase 1G engineering manager on 2026-08-25. The specification is in
+   section 10.1.
+
+### 10.1 Specification: the role-provenance marker
+
+Add a field to `AgentAppliedConfig` (`pkg/store/models.go:141`), beside
+`AgentRole`:
+
+```go
+// AgentRoleGrandfathered records that AgentRole was assigned by the
+// pre-role backfill, not by an explicit grant. It is provenance only.
+AgentRoleGrandfathered bool `json:"agentRoleGrandfathered,omitempty"`
+```
+
+`BackfillEmptyAgentRoles` sets it in the same mutation that sets the
+role. `BackfillProjectMembersGroupMarkers`, in the same file, is the
+precedent: it marks groups with `systemProjectMembersGroupAnnotation`.
+
+**Why a sibling field.** The backfill already parses, changes and
+re-marshals this struct. A sibling field is written in the same
+`UpdateOneID` call. There is no second write, no new failure mode, and
+no way for the marker to drift apart from the role that it describes.
+With `omitempty`, existing rows and existing JSON do not change.
+
+**The constraint that matters.** This field is provenance. It is never
+authority. No decision path may read it to grant, to widen or to exempt.
+A boolean named "grandfathered" is the kind of field that becomes a
+bypass quietly. If question 6 resolves in favour of an exemption, that
+logic reads this field at one named and tested gate, and not as an
+ambient check inside evaluation.
+
+**Four limits on the change.**
+
+1. The idempotency guard does not change. `if cfg.AgentRole != ""
+   { continue }` stays as it is.
+2. Do not mark agents that already hold `full`. Such a pass cannot tell
+   a deliberately-granted agent from a legacy one. The marker is only
+   truthful for the rows that the backfill itself changes.
+3. Do not try to recover hubs where the migration already ran. The
+   hub-settings check stops the function, so those hubs get no marker,
+   and that is correct. A retroactive marker would record a guess as a
+   fact. **Those hubs are unrecoverable.** State this, rather than
+   letting someone "repair" it later by marking every `full` agent.
+4. Do not build a hot-path query on this. `AppliedConfig` is JSON in a
+   text column, so a filter is a scan and a parse. That is sufficient
+   for a count-on-demand report, which is all that is needed.
+
+**Tests.** An empty-role agent gets `full` and the marker. An agent with
+an explicit role is untouched and gets no marker. A second run does
+nothing. The marker survives a parse-and-marshal round trip of
+`AgentAppliedConfig` — this is the real regression risk, because any
+path that rebuilds the config from a struct literal, instead of changing
+the parsed one, drops the field without a sign.
+
 ---
 
 ## 11. Acceptance Criteria
