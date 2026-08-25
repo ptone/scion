@@ -434,46 +434,84 @@ func TestSanitizeSandboxName(t *testing.T) {
 		{"---leading---", "leading"},
 		{"", "sandbox"},
 		{strings.Repeat("a", 100), strings.Repeat("a", 63)},
-		{"hello world!", "hello-world-"},
+		{"hello world!", "hello-world"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			got := sanitizeSandboxName(tt.input)
-			// Trim trailing hyphens for the "hello world!" case.
 			if got != tt.want {
-				// For the trailing hyphen case, sanitize doesn't trim trailing hyphens
-				// unless the result of Trim would change it. Let's just check the sanitized result.
-				if tt.input == "hello world!" {
-					// Accept "hello-world-" since Trim only strips leading/trailing.
-					if !strings.HasPrefix(got, "hello-world") {
-						t.Errorf("sanitizeSandboxName(%q) = %q, want prefix %q", tt.input, got, "hello-world")
-					}
-					return
-				}
 				t.Errorf("sanitizeSandboxName(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}
 }
 
-// -----------------------------------------------------------------------
-// mountArg tests
-// -----------------------------------------------------------------------
-
-func TestMountArg(t *testing.T) {
-	got := mountArg("/scion")
-	want := "type=bind,source=/scion,destination=/scion"
+func TestSanitizeSandboxName_TrailingHyphenAfterTruncation(t *testing.T) {
+	// 63rd character is a hyphen after sanitization — trim must happen AFTER truncation.
+	input := strings.Repeat("a", 62) + "!" // '!' -> '-', producing 63 chars ending in '-'
+	got := sanitizeSandboxName(input)
+	if strings.HasSuffix(got, "-") {
+		t.Errorf("sanitizeSandboxName(%q) = %q, ends with trailing hyphen", input, got)
+	}
+	want := strings.Repeat("a", 62)
 	if got != want {
-		t.Errorf("mountArg(/scion) = %q, want %q", got, want)
+		t.Errorf("sanitizeSandboxName(%q) = %q, want %q", input, got, want)
 	}
 }
 
-func TestMountArg_CustomRoot(t *testing.T) {
-	got := mountArg("/tmp/test-scion")
-	want := "type=bind,source=/tmp/test-scion,destination=/tmp/test-scion"
-	if got != want {
-		t.Errorf("mountArg = %q, want %q", got, want)
+// -----------------------------------------------------------------------
+// mountsFor tests
+// -----------------------------------------------------------------------
+
+func TestMountsFor_BasicPaths(t *testing.T) {
+	paths := scionPaths{
+		root:      "/scion",
+		agentHome: "/scion/agents/test-agent/home",
+		workspace: "/scion/agents/test-agent/workspace",
+		tmuxDir:   "/scion/agents/test-agent/tmux",
+	}
+
+	mounts := mountsFor(paths, nil)
+	if len(mounts) != 3 {
+		t.Fatalf("mountsFor() returned %d mounts, want 3", len(mounts))
+	}
+
+	wantMounts := []string{
+		"type=bind,source=/scion/agents/test-agent/home,destination=/scion/agents/test-agent/home",
+		"type=bind,source=/scion/agents/test-agent/workspace,destination=/scion/agents/test-agent/workspace",
+		"type=bind,source=/scion/agents/test-agent/tmux,destination=/scion/agents/test-agent/tmux",
+	}
+	for i, want := range wantMounts {
+		if mounts[i] != want {
+			t.Errorf("mounts[%d] = %q, want %q", i, mounts[i], want)
+		}
+	}
+}
+
+func TestMountsFor_WithSharedDirs(t *testing.T) {
+	paths := scionPaths{
+		root:      "/scion",
+		agentHome: "/scion/agents/test-agent/home",
+		workspace: "/scion/agents/test-agent/workspace",
+		tmuxDir:   "/scion/agents/test-agent/tmux",
+	}
+	sharedDirs := []api.SharedDir{
+		{Name: "build-cache"},
+		{Name: "artifacts"},
+	}
+
+	mounts := mountsFor(paths, sharedDirs)
+	if len(mounts) != 5 {
+		t.Fatalf("mountsFor() returned %d mounts, want 5 (3 agent + 2 shared)", len(mounts))
+	}
+
+	// Shared dirs should be at indices 3 and 4.
+	if !strings.Contains(mounts[3], "build-cache") {
+		t.Errorf("mounts[3] = %q, want shared dir build-cache", mounts[3])
+	}
+	if !strings.Contains(mounts[4], "artifacts") {
+		t.Errorf("mounts[4] = %q, want shared dir artifacts", mounts[4])
 	}
 }
 
@@ -526,6 +564,33 @@ func TestEnvFor_BasicEnv(t *testing.T) {
 	}
 	if env["SCION_HOST_GID"] == "" {
 		t.Error("SCION_HOST_GID not set")
+	}
+}
+
+func TestEnvFor_PATH(t *testing.T) {
+	cfg := RunConfig{}
+	paths := scionPaths{tmuxDir: "/scion/agents/test/tmux"}
+
+	env := envFor(cfg, paths)
+	if env["PATH"] == "" {
+		t.Error("PATH not set; sandbox has no PATH by default (AC-0 retest finding)")
+	}
+	if !strings.Contains(env["PATH"], "/usr/bin") {
+		t.Errorf("PATH = %q, expected to contain /usr/bin", env["PATH"])
+	}
+}
+
+func TestEnvFor_PATH_OverridableByHarness(t *testing.T) {
+	cfg := RunConfig{
+		Harness: &mockHarness{
+			env: map[string]string{"PATH": "/custom/bin"},
+		},
+	}
+	paths := scionPaths{tmuxDir: "/scion/agents/test/tmux"}
+
+	env := envFor(cfg, paths)
+	if env["PATH"] != "/custom/bin" {
+		t.Errorf("PATH = %q, want harness override %q", env["PATH"], "/custom/bin")
 	}
 }
 
@@ -594,28 +659,27 @@ func TestBuildEntrypoint_WithHarness(t *testing.T) {
 			command: []string{"claude", "--agent"},
 		},
 	}
+	agentHome := "/scion/agents/test-agent/home"
 
-	entrypoint, err := buildEntrypoint(cfg)
+	entrypoint, err := buildEntrypoint(cfg, agentHome)
 	if err != nil {
 		t.Fatalf("buildEntrypoint() error = %v", err)
 	}
 
-	// Should start with sciontool init --.
+	// Should start with sh -c (R1: symlink setup wraps sciontool init).
 	if len(entrypoint) < 3 {
 		t.Fatalf("entrypoint too short: %v", entrypoint)
 	}
-	if entrypoint[0] != "sciontool" || entrypoint[1] != "init" || entrypoint[2] != "--" {
-		t.Errorf("entrypoint prefix = %v, want [sciontool init --]", entrypoint[:3])
+	if entrypoint[0] != "sh" || entrypoint[1] != "-c" {
+		t.Errorf("entrypoint[0:2] = %v, want [sh -c]", entrypoint[:2])
 	}
 
-	// Should end with sh -c <tmux-cmd>.
-	if entrypoint[3] != "sh" || entrypoint[4] != "-c" {
-		t.Errorf("entrypoint[3:5] = %v, want [sh -c]", entrypoint[3:5])
-	}
-
-	// The tmux command should contain key patterns.
-	tmuxCmd := entrypoint[5]
+	// The command should contain the symlink setup and sciontool init.
+	cmd := entrypoint[2]
 	for _, pattern := range []string{
+		"rm -rf /home/scion",
+		"ln -sfn " + agentHome + " /home/scion",
+		"sciontool init",
 		"tmux new-session -d -s scion -n agent",
 		"new-window -t scion -n shell",
 		"select-window -t scion:agent",
@@ -623,15 +687,15 @@ func TestBuildEntrypoint_WithHarness(t *testing.T) {
 		"claude",
 		"echo $? >",
 	} {
-		if !strings.Contains(tmuxCmd, pattern) {
-			t.Errorf("tmux command missing pattern %q", pattern)
+		if !strings.Contains(cmd, pattern) {
+			t.Errorf("entrypoint command missing pattern %q\nfull: %s", pattern, cmd)
 		}
 	}
 }
 
 func TestBuildEntrypoint_NoHarness(t *testing.T) {
 	cfg := RunConfig{}
-	_, err := buildEntrypoint(cfg)
+	_, err := buildEntrypoint(cfg, "/scion/agents/test/home")
 	if err == nil {
 		t.Error("buildEntrypoint() with no harness should return error")
 	}
@@ -639,18 +703,22 @@ func TestBuildEntrypoint_NoHarness(t *testing.T) {
 
 func TestBuildEntrypoint_NoAuth(t *testing.T) {
 	cfg := RunConfig{
-		NoAuth:    true,
+		NoAuth:        true,
 		NoAuthMessage: "Please configure auth",
 	}
+	agentHome := "/scion/agents/test-agent/home"
 
-	entrypoint, err := buildEntrypoint(cfg)
+	entrypoint, err := buildEntrypoint(cfg, agentHome)
 	if err != nil {
 		t.Fatalf("buildEntrypoint() error = %v", err)
 	}
 
-	tmuxCmd := entrypoint[5]
-	if !strings.Contains(tmuxCmd, "Please configure auth") {
-		t.Error("tmux command should contain no-auth message")
+	cmd := entrypoint[2]
+	if !strings.Contains(cmd, "Please configure auth") {
+		t.Error("entrypoint command should contain no-auth message")
+	}
+	if !strings.Contains(cmd, "ln -sfn "+agentHome+" /home/scion") {
+		t.Error("entrypoint command should contain symlink setup")
 	}
 }
 
@@ -958,14 +1026,25 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 		"--write",
 		"--allow-egress",
 		"--mount",
-		"type=bind,source=" + rootDir + ",destination=" + rootDir,
-		"/usr/bin/env",
+		// Per-agent mounts (FIX 1): individual agent paths, not /scion root.
+		"type=bind,source=" + rootDir + "/agents/test-agent/home,destination=" + rootDir + "/agents/test-agent/home",
+		"type=bind,source=" + rootDir + "/agents/test-agent/workspace,destination=" + rootDir + "/agents/test-agent/workspace",
+		"type=bind,source=" + rootDir + "/agents/test-agent/tmux,destination=" + rootDir + "/agents/test-agent/tmux",
+		// Env vars via --env flags (FIX 2), not /usr/bin/env.
+		"--env",
+		// Symlink setup in entrypoint (FIX 5).
+		"ln -sfn",
 		"sciontool",
 		"init",
 	} {
 		if !strings.Contains(args, pattern) {
 			t.Errorf("sandbox command missing pattern %q\nfull args:\n%s", pattern, args)
 		}
+	}
+
+	// /usr/bin/env should NOT be in args (FIX 2).
+	if strings.Contains(args, "/usr/bin/env") {
+		t.Errorf("sandbox command should not contain /usr/bin/env\nfull args:\n%s", args)
 	}
 
 	// Verify state store has the entry.
@@ -987,10 +1066,12 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 
 func TestCloudRunSandboxRuntime_Delete(t *testing.T) {
 	tmpDir := t.TempDir()
+	argsFile := filepath.Join(tmpDir, "delete-args")
 
-	// Mock binary that always succeeds.
+	// Mock binary that records its args and succeeds.
 	mockBin := filepath.Join(tmpDir, "sandbox")
-	if err := os.WriteFile(mockBin, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\nexit 0\n"
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1011,13 +1092,25 @@ func TestCloudRunSandboxRuntime_Delete(t *testing.T) {
 	if entry := rt.state.get("sb-del"); entry != nil {
 		t.Error("state entry still present after Delete()")
 	}
+
+	// Verify --force is used (FIX 4).
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("failed to read mock args: %v", err)
+	}
+	if !strings.Contains(string(argsData), "--force") {
+		t.Errorf("Delete() should use --force; args: %s", argsData)
+	}
 }
 
 func TestCloudRunSandboxRuntime_Stop(t *testing.T) {
 	tmpDir := t.TempDir()
+	argsFile := filepath.Join(tmpDir, "stop-args")
 
+	// Mock binary that records its args and succeeds.
 	mockBin := filepath.Join(tmpDir, "sandbox")
-	if err := os.WriteFile(mockBin, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\nexit 0\n"
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1037,6 +1130,15 @@ func TestCloudRunSandboxRuntime_Stop(t *testing.T) {
 
 	if entry := rt.state.get("sb-stop"); entry != nil {
 		t.Error("state entry still present after Stop()")
+	}
+
+	// Verify --force is used (FIX 4).
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("failed to read mock args: %v", err)
+	}
+	if !strings.Contains(string(argsData), "--force") {
+		t.Errorf("Stop() should use --force; args: %s", argsData)
 	}
 }
 
