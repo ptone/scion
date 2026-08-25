@@ -1707,6 +1707,72 @@ during the pre-backfill window alone.
 
 ---
 
+### 11.5 Phase 1G at commit `145444f` — round four, approved
+
+R3-1 and R3-2 are both correctly fixed. The delegation ceiling is
+approved for the integration push.
+
+**R3-1.** The scope now comes from `AgentIdentity.ProjectID()`, with
+`resourceProjectScope` as a cross-check. That helper handles the
+`Type == "project"` case, which was the main breakage, so the 59 call
+sites that omit `ParentType` now resolve to the agent's own project
+instead of denying. When the resource is in a different project, the
+scope moves to that project: an agent that holds a genuine edge there is
+allowed, and one that does not is denied.
+
+**R3-2.** The `atomic.Bool` latch only caches the false-to-true
+direction. `ErrNotFound` returns false without caching, and a store
+fault returns true — fail closed — without latching, so a transient
+fault cannot become permanent.
+
+**Tests.** The shape problem from 11.4 was fixed, not papered over. The
+suite now uses production-shape literals with no `ParentType`, covers
+the `project_settings` variant, asserts a cross-project denial, and unit
+tests both `resourceProjectScope` and the monotonic latch.
+
+#### A correction to a finding this review nearly raised
+
+The chain walk passes the **child's** scope when it looks up the
+**parent's** edges. This first read as a defect, because it contradicts
+the "derive scope from the principal" principle that the R3-1 fix
+adopted: at depth > 0 the principal is the parent, so its own project
+looked like the right scope.
+
+That reading is wrong. The parent-to-child edge is scoped to the
+child's project, so the parent must hold authority **in that project**
+for the grant to have been valid. Filtering the parent's edges by the
+child's scope is therefore the correct semantic, and the resulting
+denial of cross-project chains is a security property rather than a bug:
+an agent cannot confer authority in a project where it holds none.
+
+The behaviour is currently emergent and undocumented, which makes it
+fragile — a later reader could "fix" it. It needs a deliberate test: a
+parent in project Q creates a child in project P, and the child's chain
+check denies because the parent holds no edge in P.
+
+#### Two minor notes, neither blocking
+
+1. `scopeType` is hard-coded to `store.RoleScopeProject`, so a
+   system-scoped edge could never match. No such edges exist, and the
+   effect is protective. It needs a comment saying it is deliberate,
+   because it reads as an oversight.
+2. An identity that is not an `AgentIdentity`, or one with an empty
+   `ProjectID()`, leaves the scope empty, matches no edge, and is denied
+   silently. Fail closed is correct, but it needs a log line so that a
+   token missing its project ID is diagnosable.
+
+#### Scope of the approval
+
+This covers the delegation ceiling and its migration, across four
+rounds. The other ~34 files in `b5c694d..145444f` were **not** reviewed.
+
+D10 and D11 remain outstanding and are not part of 1G. They land as
+standalone fixes on `scion/auth-refactor` before the consolidated PR
+opens. D10 must not trail the PR, because `IsSystemAdmin` short-circuits
+the ceiling that Phase 1G builds.
+
+---
+
 ## 12. Acceptance Criteria
 
 A reviewer or QA tester must verify the following.
