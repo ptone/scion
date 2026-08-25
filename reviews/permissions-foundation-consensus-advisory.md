@@ -587,6 +587,36 @@ read path to a minting path is the specific error to avoid. Any
 `FailClosedOnStoreError` option therefore belongs to the middleware
 only.
 
+**A second general rule: absence is not permission.** This advisory has
+now recorded the same defect three times, in three different places.
+
+| Where | The absent thing | What it resolved to |
+|---|---|---|
+| D6, `httpdispatcher.go:207` | An agent role | `AgentRoleFull` |
+| F1.7, `agentrole.go:120` | A user ceiling | `AgentRoleFull` |
+| F1.7, the new ceiling walk | A delegation edge | Unbounded, if written naively |
+
+Three instances make it a pattern, not three bugs. The shared cause is
+that authority is computed as a **maximum that starts at the top and is
+lowered**. Any lookup that returns nothing then leaves the maximum where
+it began, and an absent record grants everything.
+
+**The rule.** Compute authority from the floor upward. Start at the
+lowest role, or at no permission, and raise it once for each grant that
+a lookup **positively returns**. Never start at the top and lower it.
+
+This makes an empty result safe by construction, which matters because
+empty results are normal rather than exceptional. A federated agent is
+not a local agent record, so a delegation-edge lookup and a
+`GetEffectiveGroupsForAgent` call both return an empty set for it. Under
+the rule, an empty set of groups contributes no grants. Under the
+current shape it reads as no constraint.
+
+An implementation must therefore distinguish three outcomes, and never
+merge the last two: a lookup that returns grants; a lookup that returns
+nothing, which means no authority; and a lookup that fails, which is the
+fail-closed case above.
+
 *Fail-open on store error.* The middleware accepts a token when the
 credential store returns an error that is not "not found"
 (`auth.go:179-183`). This is a defensible default: failing closed would
@@ -1199,6 +1229,14 @@ A reviewer or QA tester must verify the following.
 - [ ] A local agent with the same ancestry is still allowed. This proves
       that the D9 repair did not break normal delegation, which is the
       real regression risk.
+- [ ] A federated agent with no store-recorded delegation edge resolves
+      to the **lowest** role. Assert the resolved role explicitly, not
+      only the denial. A denial can pass for the wrong reason, and the
+      role value is what proves the ceiling started at the floor.
+- [ ] No authority computation starts at the highest role and is
+      lowered. Each starts at the floor and is raised only by a grant
+      that a lookup positively returned. See "absence is not permission"
+      in section 6.4.
 - [ ] The D9 denial holds on a hub where `allowed_root_users` is
       **unset**. This pins that the default configuration is covered by
       the hub-attested check, and not by the allowlist. It is the test
