@@ -709,11 +709,16 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 		// Non-zero ExitCode is hardcoded to PhaseError at handlers_runtime_brokers.go:719,
 		// and Instance teardown (our normal shutdown) SIGKILLs every sandbox simultaneously.
 		// Reporting the real code would put the entire fleet into PhaseError on every
-		// normal teardown. Once ExitReason can modulate the phase decision (Phase 2 of
-		// #1257), we should start reporting the real exit code here.
+		// normal teardown. This stopgap can be removed once BOTH conditions hold:
+		//
+		//   1. state.ExitReason gains a platform_eviction-style value so that
+		//      routine Instance teardown can be distinguished from a real crash.
+		//   2. The phase-promotion logic in handlers_runtime_brokers.go consults
+		//      ExitReason before promoting PhaseStopped → PhaseError (condition 2
+		//      is load-bearing — adding the enum value alone changes nothing).
 		//
 		// The state store tracks the real exit code internally (in sandboxStateEntry)
-		// so it's available when #1260 merges and ExitReason is wired.
+		// so it is available when the above conditions are met.
 		agents = append(agents, api.AgentInfo{
 			ContainerID:     entry.SandboxName,
 			Name:            entry.AgentID,
