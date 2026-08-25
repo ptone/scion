@@ -271,10 +271,22 @@ a candidate set of size ≤ 1 and is trivially unambiguous.
 **Never resolve to a first match.** Ambiguity resolves to nothing. This is the same rule as
 conversation references (§2.6): no fallback destination, ever.
 
-**Disambiguation escape hatch.** A qualified mention `@<project>/<agent>` resolves directly,
-mirroring the `#<space>/<thread>` form in the reference grammar. Every `ambiguous` error
-prints the exact qualified forms that would have worked, so the error is a fix, not a
-dead end.
+**Disambiguation escape hatch.** A qualified mention `@<project>/<agent>` resolves directly.
+Every `ambiguous` error prints the exact qualified forms that would have worked, so the error
+is a fix, not a dead end.
+
+This form *names* a project but does not address across one: both candidate projects are
+already shared by both participants, and the DM itself belongs to no project. It is
+disambiguation within the shared set, not a cross-project reference. (It no longer mirrors a
+`#<space>/<thread>` reference form — that form is removed, §2.6.1.)
+
+**A single message may not address agents in more than one project.** Without this, mentions
+would be a way to build a cross-project venue by the back door: Alice mentions `@builder`
+(project X) and `@deployer` (project Y) in one DM message, and two agents from isolated
+projects are now addressees of a shared conversation, able to see each other's replies. The
+shared-project intersection permits this and must be constrained explicitly. If the resolved
+addressee set would span projects, the send **fails** and names the conflicting projects. Human
+participants are unaffected; the rule applies to agent addressees.
 
 **Information disclosure.** `not-found` must not distinguish "no such agent" from "an agent
 with that slug exists in a project you do not share." Both produce the same message: *not
@@ -294,9 +306,11 @@ always *additive*, so an unresolved one can never mean nobody receives the messa
   the same situation exits 0 and reports nothing.
 
 **Conversation references inside a DM.** The bare `#<thread>` form means "in the current
-project's space" and therefore has no meaning in a direct conversation. It fails with a
-message naming the cause and the fix (`use #<space>/<thread>`), rather than resolving against
-an arbitrary project.
+project's space" and therefore has no meaning in a direct conversation, which has no ambient
+project. It fails naming the cause and the fix — select a project first
+(`scion --project <slug> message #thread …`) — rather than resolving against an arbitrary one.
+There is no qualified `#<space>/<thread>` form to fall back on; addressing a conversation in
+another project is not something the system does (§2.6.1).
 
 **`--to` inside a DM** may only name one of the two participants. Naming anyone else fails as
 `not-a-participant`; a DM is not a back door to addressing a third party.
@@ -346,7 +360,6 @@ Agents and humans need a writable form, not raw UUIDs. The grammar is closed and
 | `@<agent-slug>` | the direct conversation with that agent in the current project |
 | `@<email>` | the direct conversation with that user |
 | `#<thread-name>` | a group conversation in the current project's space |
-| `#<space>/<thread-name>` | a group conversation in another space |
 
 Unresolvable references are an error at send time with the candidate list, never a
 fallback. There is no "if I cannot resolve this, broadcast" path anywhere in the design.
@@ -354,6 +367,59 @@ fallback. There is no "if I cannot resolve this, broadcast" path anywhere in the
 The critical ergonomic property: **the inbound envelope carries `conversation.id`, and
 replying means echoing it back.** The agent never constructs a thread ID, so it cannot omit
 one. This is the direct fix for the reported problem.
+
+#### 2.6.1 Project isolation — references never cross a project boundary
+
+**Messages cannot be sent between projects.** This is an existing, settled property of Scion,
+and the addressing grammar must not be able to express a violation of it.
+
+An earlier draft of this section included a `#<space>/<thread>` form for addressing a
+conversation in another space. **That form is removed.** It described a capability the system
+does not have and must not acquire.
+
+The rule, applied to every form in the grammar:
+
+| Form | Cross-project behaviour |
+|---|---|
+| `conv:<id>` | **Rejected** if the conversation's `ProjectID` is not the sender's current project. |
+| `@<agent-slug>` | Resolves only within the current project. An agent in another project is not addressable. |
+| `@<email>` | Permitted — direct conversations are global and belong to no project (§2.4.1). |
+| `#<thread-name>` | Resolves only within the current project's space. |
+
+`conv:<id>` deserves emphasis: it is a bare UUID, so unlike the `@` and `#` forms it carries no
+visible project context and cannot be rejected on syntax alone. **Project scope must therefore
+be enforced as an authorisation check at send time, not as a resolution failure.** A
+conversation ID that leaks between projects — pasted from a log, echoed from a stale envelope,
+recorded in a scratchpad — must be rejected on the strength of the *sender's* project, not
+merely fail to be found. This is the single most important isolation check in the design,
+because `conv:<id>` is the form agents use most.
+
+The error must say *why*: a conversation that exists but belongs to another project reports a
+boundary violation, not `not-found`. These are different conditions and conflating them makes
+the failure impossible to diagnose. Subject to the disclosure rule below.
+
+**Working in another project is a context switch, not an address.** The CLI already has a
+global `--project` flag. Operating in another project means selecting it, not addressing across
+a boundary:
+
+```bash
+scion --project other-project message #general "..."
+```
+
+This is not cross-project messaging: the sender's ambient project changes, and the message is
+sent from within that project to a conversation inside it. The distinction matters because it
+keeps the isolation invariant intact while still making every conversation reachable by someone
+with the rights to it.
+
+**Disclosure.** As in §2.4.1, a conversation in a project the sender does not belong to must
+report the same error as one that does not exist. The boundary-violation error is only for
+projects the sender *can* see; otherwise the error discloses the existence of private projects.
+
+**Broadcast is unaffected and is not a counter-example.** `scion broadcast --all` fans out
+across projects today. That remains true and is not a contradiction: a broadcast is not a
+conversation and is deliberately outside this model (§2.9). It is a one-way fan-out to agents,
+not a message sent *to a venue in another project*, and it cannot be replied to across the
+boundary — a reply is an ordinary message and obeys the rule above.
 
 ### 2.7 Broker edge resolution
 
@@ -800,8 +866,8 @@ Commit-sized, ordered, each independently reviewable.
   send-failure. A test asserts the exit codes differ.
 - **AC-25** `not-found` is indistinguishable between "no such agent" and "agent exists in an
   unshared project" — asserted by comparing both error strings for equality. Bare `#<thread>`
-  inside a DM fails naming the `#<space>/<thread>` fix. `--to` naming a third party in a DM
-  fails as `not-a-participant`.
+  inside a DM fails naming the `--project` fix. `--to` naming a third party in a DM fails as
+  `not-a-participant`.
 
 ### Conversation creation (Q3, §2.7.1)
 
@@ -817,6 +883,23 @@ Commit-sized, ordered, each independently reviewable.
 - **AC-29** `scion conversations list` and the roster are separate queries. A project member
   with no conversations lists none while remaining fully addressable via `@`. Deleting an
   agent does not orphan or delete a conversation that has messages.
+
+### Project isolation (§2.6.1)
+
+- **AC-30** **`conv:<id>` is authorisation-checked, not merely resolved.** Sending to a valid
+  conversation ID belonging to another project is rejected on the strength of the sender's
+  project. Tested with a real ID from project B used by a sender in project A — the failure
+  must not depend on the ID being unknown.
+- **AC-31** The grammar cannot express a cross-project address. `#<space>/<thread>` is not
+  accepted by the parser. `@<agent>` resolves only within the current project.
+- **AC-32** A conversation that exists in a project the sender belongs to but is not currently
+  scoped into reports a **boundary violation**; one in a project the sender cannot see reports
+  **not-found**. Asserted by string comparison in both directions.
+- **AC-33** No single message has agent addressees in more than one project. Property test over
+  mention resolution in global DMs: a resolved set spanning projects is a failure, never a
+  partial delivery.
+- **AC-34** `scion --project <slug> message #thread` succeeds — context switching is the
+  supported path and remains available.
 
 ---
 
@@ -843,10 +926,16 @@ CONVERSATION REFERENCES
   @<agent>               Your direct conversation with that agent.
   @<email>               Your direct conversation with that user.
   #<thread>              A thread in the current project's space.
-  #<space>/<thread>      A thread in another space.
 
   If a reference does not resolve, the send fails and lists candidates.
   Nothing is ever sent to a fallback destination.
+
+  References never cross a project. To work in another project, select it —
+  this is a context switch, not an address:
+
+    scion --project other-project message #general "..."
+
+  A conv:<id> from another project is rejected, not silently ignored.
 
 ADDRESSING WITHIN A CONVERSATION
   Use --to when you need specific participants to act. Omit it and Scion
@@ -864,7 +953,8 @@ IN A DIRECT CONVERSATION
   the body resolves against the projects you and the other participant both
   belong to. If that is ambiguous, the send reports it and exits non-zero
   rather than picking one; write @<project>/<agent> to be exact. A bare
-  #<thread> has no meaning here — use #<space>/<thread>.
+  #<thread> has no meaning here, since a DM has no project — select one
+  with --project. A single message cannot address agents in two projects.
 
 FLAGS
   --to <principal>       Address a participant directly (repeatable).

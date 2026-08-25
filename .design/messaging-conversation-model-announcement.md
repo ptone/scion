@@ -100,11 +100,23 @@ Conversations are named with a short grammar:
 | `@<agent>` | your direct conversation with that agent |
 | `@<email>` | your direct conversation with that user |
 | `#<thread>` | a thread in the current project's space |
-| `#<space>/<thread>` | a thread in another space |
 
 A reference that does not resolve **fails the send** and lists the candidates. There is no
 fallback destination anywhere in the design — in particular, nothing broadcasts because it
 could not resolve a target.
+
+**References never cross a project boundary.** Messages cannot be sent between projects today,
+and the new grammar cannot express an address that would. Working in another project means
+selecting it — a context switch, not an address:
+
+```bash
+scion --project other-project message #general "..."
+```
+
+A conversation ID belonging to another project is rejected rather than resolved. Because a
+`conv:<id>` is an opaque UUID with no visible project context, this is enforced as a permission
+check at send time, so an ID that leaks between projects — pasted from a log, echoed from an
+old message — fails on the sender's project rather than by chance.
 
 ### Sending without naming a recipient
 
@@ -229,6 +241,9 @@ Deliberately out of scope:
 - **Mention rendering.** Platform-specific `@`-syntax and identity mapping stay inside each
   integration. No shared server-side mention renderer is being introduced.
 - **Federation.** Conversations remain local to one Hub deployment. No hub-to-hub addressing.
+- **Project isolation.** Messages cannot be sent between projects today and will not be able to
+  after this change. The new addressing grammar deliberately cannot express a cross-project
+  address, and conversation IDs are checked against the sender's project rather than trusted.
 - **Transport.** The event bus, the integration plugin interface, and the runtime hop are
   untouched.
 - **History import.** Linking a channel does not crawl or backfill its existing threads.
