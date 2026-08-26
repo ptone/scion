@@ -399,6 +399,36 @@ func TestCloudrunSandboxHubEndpoint_NeverRunApp(t *testing.T) {
 	}
 }
 
+func TestCloudrunSandboxHubEndpoint_ExplicitBindAddress(t *testing.T) {
+	// When SCION_METADATA_BIND_ADDRESS is set to an explicit IP, the function
+	// must use it directly instead of calling DiscoverLinkLocalAddress. This
+	// is required on Cloud Run Instances with multiple link-local addresses.
+	t.Setenv("SCION_METADATA_BIND_ADDRESS", "169.254.8.1")
+
+	ep, err := cloudrunSandboxHubEndpoint(8080)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ep != "http://169.254.8.1:8080" {
+		t.Fatalf("expected http://169.254.8.1:8080, got %q", ep)
+	}
+}
+
+func TestCloudrunSandboxHubEndpoint_LinkLocalFallback(t *testing.T) {
+	// "link-local" means auto-discover, same as empty. The function should
+	// fall back to DiscoverLinkLocalAddress (which may fail in CI).
+	t.Setenv("SCION_METADATA_BIND_ADDRESS", "link-local")
+
+	ep, err := cloudrunSandboxHubEndpoint(8080)
+	if err != nil {
+		// Expected in CI — no link-local address.
+		return
+	}
+	if !strings.HasPrefix(ep, "http://169.254.") {
+		t.Fatalf("expected http://169.254.x.x:8080, got %q", ep)
+	}
+}
+
 func TestRedactEnvValueForLog(t *testing.T) {
 	if got := redactEnvValueForLog("SCION_AUTH_TOKEN", "secret-token"); got != redactedEnvValue {
 		t.Fatalf("SCION_AUTH_TOKEN should be redacted, got %q", got)
