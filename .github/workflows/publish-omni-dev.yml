@@ -36,59 +36,63 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push thick-prep
+      - name: Build all images locally (no push)
+        env:
+          REGISTRY: ghcr.io/${{ github.repository_owner }}
+          TAG: dev-${{ github.sha }}
         run: |
+          # Build the full chain locally. Nothing is pushed yet —
+          # intermediates stay in the local daemon only. This avoids
+          # GHCR cross-repo blob mount failures (read_package denied)
+          # that killed the previous attempt on scion-base.
           image-build/scripts/build-images.sh \
-            --registry "ghcr.io/${{ github.repository_owner }}" \
-            --target thick-prep \
-            --tag "dev-${{ github.sha }}" \
-            --platform linux/amd64 \
-            --push
+            --registry "${REGISTRY}" --target thick-prep \
+            --tag "${TAG}" --platform linux/amd64
 
-      - name: Build and push scion-base
-        run: |
           THICK_BUILD=true image-build/scripts/build-images.sh \
-            --registry "ghcr.io/${{ github.repository_owner }}" \
-            --target scion-base \
-            --tag "dev-${{ github.sha }}" \
-            --platform linux/amd64 \
-            --push
+            --registry "${REGISTRY}" --target scion-base \
+            --tag "${TAG}" --platform linux/amd64
 
-      - name: Build and push omni chain
-        run: |
           image-build/scripts/build-images.sh \
-            --registry "ghcr.io/${{ github.repository_owner }}" \
-            --target omni \
-            --tag "dev-${{ github.sha }}" \
-            --platform linux/amd64 \
-            --push
+            --registry "${REGISTRY}" --target omni \
+            --tag "${TAG}" --platform linux/amd64
 
-      - name: Report published images
-        run: |
-          REGISTRY="ghcr.io/${{ github.repository_owner }}"
-          TAG="dev-${{ github.sha }}"
-          echo "=== Published images ==="
-          echo "Pull reference for deploy:"
-          echo "  ${REGISTRY}/scion-omni:${TAG}"
           echo ""
-          echo "All published images:"
-          for image in thick-prep scion-base scion-claude scion-codex scion-opencode scion-antigravity scion-grok-build scion-omni; do
-            echo "  ${REGISTRY}/${image}:${TAG}"
-          done
-          echo ""
-          echo "=== Image sizes ==="
+          echo "=== All local images ==="
           docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"
 
-      - name: Test anonymous pull (logged-out)
+      - name: Push only scion-omni
+        env:
+          REGISTRY: ghcr.io/${{ github.repository_owner }}
+          TAG: dev-${{ github.sha }}
         run: |
-          REGISTRY="ghcr.io/${{ github.repository_owner }}"
-          TAG="dev-${{ github.sha }}"
+          echo "Pushing scion-omni:${TAG} to GHCR..."
+          docker push "${REGISTRY}/scion-omni:${TAG}"
+          echo ""
+          echo "=== PUSH RESULT ==="
+          echo "Pull reference: ${REGISTRY}/scion-omni:${TAG}"
+
+      - name: Test anonymous pull (logged-out)
+        if: always()
+        env:
+          REGISTRY: ghcr.io/${{ github.repository_owner }}
+          TAG: dev-${{ github.sha }}
+        run: |
+          # Remove the local image so the pull is real
+          docker rmi "${REGISTRY}/scion-omni:${TAG}" 2>/dev/null || true
           # Log out of GHCR to test anonymous access
-          docker logout ghcr.io
-          echo "Attempting anonymous manifest fetch..."
-          if docker manifest inspect "${REGISTRY}/scion-omni:${TAG}" > /dev/null 2>&1; then
-            echo "SUCCESS: scion-omni:${TAG} is publicly accessible"
+          docker logout ghcr.io 2>/dev/null || true
+          echo "Attempting anonymous pull of ${REGISTRY}/scion-omni:${TAG}..."
+          if docker pull "${REGISTRY}/scion-omni:${TAG}" 2>&1; then
+            echo ""
+            echo "=== ANONYMOUS PULL: PASS ==="
+            echo "scion-omni:${TAG} is publicly accessible without auth"
           else
-            echo "FAIL: scion-omni:${TAG} is NOT publicly accessible without auth"
-            echo "The GHCR package needs to be set to public for Cloud Run to pull it."
+            echo ""
+            echo "=== ANONYMOUS PULL: FAIL ==="
+            echo "scion-omni:${TAG} is NOT publicly accessible."
+            echo "GHCR packages default to private. The package must be"
+            echo "set to public for Cloud Run to pull without a secret."
+            echo "This is expected for a first-time publish — the package"
+            echo "visibility must be changed manually in GitHub settings."
           fi
