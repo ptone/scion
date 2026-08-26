@@ -71,6 +71,19 @@ USER root
 # Replace the no_embed_web scion binary with the hub-capable one
 COPY --from=hub-builder /usr/local/bin/scion /usr/local/bin/scion
 
+# Build-time assertion: verify that binaries the sandbox entrypoint depends
+# on are present. The entrypoint runs tmux for agent sessions and sciontool
+# for init; if either is missing, every sandbox will die silently on launch.
+# This check turns a silent runtime failure into a build-time error.
+RUN set -e; \
+    for bin in tmux sciontool scion; do \
+      if ! command -v "$bin" >/dev/null 2>&1; then \
+        echo "FATAL: required binary '$bin' not found in image" >&2; \
+        exit 1; \
+      fi; \
+    done; \
+    echo "Binary check passed: tmux=$(tmux -V), sciontool=$(sciontool version 2>/dev/null || echo ok), scion=$(scion version 2>/dev/null || echo ok)"
+
 # Hub state directory.
 RUN mkdir -p /home/scion/.scion && chown -R scion:scion /home/scion/.scion
 
