@@ -79,7 +79,7 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		}
 	}
 
-	return &HealthResponse{
+	resp := &HealthResponse{
 		Status:       status,
 		Version:      "0.1.0", // TODO: Get from build info
 		ScionVersion: version.Short(),
@@ -89,6 +89,21 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		Checks:       checks,
 		Stats:        stats,
 	}
+
+	if isCloudRunInstance() {
+		resp.DeploymentWarnings = append(resp.DeploymentWarnings,
+			"Ephemeral deployment: workspaces, agent homes, databases, and project "+
+				"trees are lost on redeploy. Push to git remotes for durability.")
+	}
+
+	return resp
+}
+
+// isCloudRunInstance reports whether the hub is running on a Cloud Run Instance.
+// CLOUD_RUN_INSTANCE is set by the platform on Instances but NOT on Cloud Run
+// Services (which use K_SERVICE instead).
+func isCloudRunInstance() bool {
+	return os.Getenv("CLOUD_RUN_INSTANCE") != ""
 }
 
 // HealthStatus returns the status string from the health response.
