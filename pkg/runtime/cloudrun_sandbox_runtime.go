@@ -48,7 +48,6 @@ const defaultScionRoot = "/scion"
 // defaultStatePath is the default location for the sandbox state store.
 const defaultStatePath = "/tmp/scion-sandbox-state.json"
 
-
 // SandboxLauncherAvailable reports whether the Cloud Run Sandbox launcher
 // binary is present on the filesystem.
 func SandboxLauncherAvailable() bool {
@@ -705,7 +704,6 @@ func (r *CloudRunSandboxRuntime) deletePlain(ctx context.Context, id string) err
 	r.state.remove(id)
 	return nil
 }
-
 
 // List returns agent info for all tracked sandboxes, applying an optional
 // label filter.
