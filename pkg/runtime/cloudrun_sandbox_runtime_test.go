@@ -485,7 +485,7 @@ func TestMountsFor_BasicPaths(t *testing.T) {
 	}
 
 	wantMounts := []string{
-		"type=bind,source=/scion/agents/test-agent/home,destination=/scion/agents/test-agent/home",
+		"type=bind,source=/scion/agents/test-agent/home,destination=/home/scion",
 		"type=bind,source=/scion/agents/test-agent/workspace,destination=/scion/agents/test-agent/workspace",
 	}
 	for i, want := range wantMounts {
@@ -689,21 +689,34 @@ func TestBuildEntrypoint_WithHarness(t *testing.T) {
 		t.Errorf("entrypoint argv[0] must be an absolute path, got %q", entrypoint[0])
 	}
 
-	// The command should contain the symlink setup and sciontool init.
+	// The command should contain sciontool init and the tmux poll loop.
+	// No symlink chain: agent home is mounted at /home/scion by mountsFor().
 	cmd := entrypoint[2]
 	for _, pattern := range []string{
-		"rm -rf /home/scion",
-		"ln -sfn " + agentHome + " /home/scion",
 		"sciontool init",
 		"tmux new-session -d -s scion -n agent",
 		"new-window -t scion -n shell",
 		"select-window -t scion:agent",
-		"attach-session -t scion",
+		"while tmux has-session -t scion",
 		"claude",
 		"echo $? >",
+		// #22 entrypoint output capture preserved.
+		entrypointLogFile,
+		entrypointRCFile,
 	} {
 		if !strings.Contains(cmd, pattern) {
 			t.Errorf("entrypoint command missing pattern %q\nfull: %s", pattern, cmd)
+		}
+	}
+	// Must NOT contain the old symlink chain (rootfs is read-only) or
+	// attach-session (no TTY in sandbox).
+	for _, absent := range []string{
+		"rm -rf /home/scion",
+		"ln -sfn",
+		"attach-session -t scion",
+	} {
+		if strings.Contains(cmd, absent) {
+			t.Errorf("entrypoint command should NOT contain %q\nfull: %s", absent, cmd)
 		}
 	}
 }
@@ -737,8 +750,9 @@ func TestBuildEntrypoint_NoAuth(t *testing.T) {
 	if !strings.Contains(cmd, "Please configure auth") {
 		t.Error("entrypoint command should contain no-auth message")
 	}
-	if !strings.Contains(cmd, "ln -sfn "+agentHome+" /home/scion") {
-		t.Error("entrypoint command should contain symlink setup")
+	// No symlink chain: agent home is mounted at /home/scion by mountsFor().
+	if strings.Contains(cmd, "ln -sfn") {
+		t.Error("entrypoint command should NOT contain symlink setup (rootfs is read-only)")
 	}
 }
 
@@ -1049,14 +1063,13 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 		"--write",
 		"--allow-egress",
 		"--mount",
-		// Per-agent mounts: individual agent paths, not /scion root.
-		// No tmux mount (§4.4a: AF_UNIX can't cross gVisor boundary).
-		"type=bind,source=" + rootDir + "/agents/test-agent/home,destination=" + rootDir + "/agents/test-agent/home",
+		// Per-agent mounts: agent home mounted at /home/scion destination,
+		// workspace at its own path. No tmux mount (§4.4a: AF_UNIX can't
+		// cross gVisor boundary).
+		"type=bind,source=" + rootDir + "/agents/test-agent/home,destination=/home/scion",
 		"type=bind,source=" + rootDir + "/agents/test-agent/workspace,destination=" + rootDir + "/agents/test-agent/workspace",
 		// Env vars via --env flags (FIX 2), not /usr/bin/env.
 		"--env",
-		// Symlink setup in entrypoint (FIX 5).
-		"ln -sfn",
 		"sciontool",
 		"init",
 	} {

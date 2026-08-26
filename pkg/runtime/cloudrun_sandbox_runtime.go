@@ -41,8 +41,9 @@ const defaultSandboxBin = "/usr/local/gcp/bin/sandbox"
 // defaultScionRoot is the parent directory for all writable sandbox paths.
 // Per-agent bind mounts under this directory satisfy the write-visibility
 // requirement for agent home, workspace, tmux sockets, and shared dirs.
-// With --rootfs /, writes to unmounted paths go to a private rootfs overlay
-// that the launcher never sees (§3.2a). These mounts make them visible.
+// With --rootfs /, the rootfs is READ-ONLY: writes to unmounted paths fail
+// with EROFS (confirmed by diag-sbx6). Per-agent bind mounts under this
+// directory provide the writable paths agents need.
 const defaultScionRoot = "/scion"
 
 // defaultStatePath is the default location for the sandbox state store.
@@ -271,10 +272,9 @@ type scionPaths struct {
 // prepareScionLayout creates the /scion directory structure for a sandbox
 // agent and relocates broker-provisioned content into it.
 //
-// Motivation (§3.2a): --rootfs / is READ-ONLY. Writes go to a private
-// overlay the launcher never sees. --write only makes MOUNTED filesystems
-// writable. Per-agent bind mounts under /scion make writable paths
-// visible to the host.
+// Motivation (§3.2a): --rootfs / is READ-ONLY (EROFS; no writable overlay,
+// confirmed by diag-sbx6). --write only makes MOUNTED filesystems writable.
+// Per-agent bind mounts under /scion make writable paths visible to the host.
 func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error) {
 	p := scionPaths{
 		root:      rootDir,
@@ -407,8 +407,14 @@ func copyDirContents(src, dst string) error {
 // the sandbox boundary (§4.4a). The tmux socket is deliberately
 // sandbox-internal; tmux uses its default path inside the sandbox.
 func mountsFor(paths scionPaths, sharedDirs []api.SharedDir) []string {
+	// Mount the agent home at /home/scion so that sciontool init's
+	// hardcoded HOME=/home/scion (supervisor.go:115) resolves to the
+	// bind-mounted writable path. The rootfs is read-only (EROFS,
+	// confirmed by diag-sbx6), so the previous rm -rf / ln -sfn approach
+	// fails. Mounting with a different destination avoids rootfs mutation
+	// entirely and was confirmed working by diag-sbx6.
 	mounts := []string{
-		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.agentHome, paths.agentHome),
+		fmt.Sprintf("type=bind,source=%s,destination=/home/scion", paths.agentHome),
 		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.workspace, paths.workspace),
 	}
 	for _, sd := range sharedDirs {
@@ -494,13 +500,14 @@ func envArgs(env map[string]string) []string {
 //
 //	sciontool init -- sh -c '<tmux-command>'
 //
-// The tmux command follows the pattern from common.go:469-482:
+// The tmux command follows the pattern from common.go:469-482, adapted for
+// sandboxes which have no TTY (sandbox run --detach does not allocate one):
 //
 //	tmux new-session -d -s scion -n agent <agent-window-cmd> \;
 //	    set-option -g window-size latest \;
 //	    new-window -t scion -n shell \;
-//	    select-window -t scion:agent \;
-//	    attach-session -t scion
+//	    select-window -t scion:agent;
+//	    while tmux has-session -t scion 2>/dev/null; do sleep 2; done
 func buildEntrypoint(cfg RunConfig, agentHome string) ([]string, error) {
 	// Build the harness command line.
 	var cmdLine string
@@ -523,32 +530,47 @@ func buildEntrypoint(cfg RunConfig, agentHome string) ([]string, error) {
 	// absolute paths are used throughout buildEntrypoint for consistency.
 	agentWindowCmd := "/bin/sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
 
-	// Build tmux command (common.go:479-482 pattern).
+	// Build tmux command (common.go:479-482 pattern, adapted for sandbox).
+	//
+	// Finding #12: `sandbox run --detach` provides no TTY. Docker allocates
+	// one with `docker run -t` (docker.go:76), but sandboxes do not.
+	// `tmux attach-session` fails immediately with "open terminal failed:
+	// not a terminal" (rc=1), killing PID 1 and destroying the sandbox.
+	//
+	// Fix: replace `attach-session` with a poll loop that tracks the tmux
+	// session's lifetime without needing a terminal. PID 1 exits when the
+	// session ends (all windows closed), providing the same lifecycle
+	// semantics as attach-session did in the Docker case.
+	//
+	// Note the boundary between tmux subcommands and the poll loop:
+	// `\;` is a tmux command separator (parsed by tmux), while the bare
+	// `;` after select-window ends the tmux invocation and starts the
+	// shell's while loop.
 	tmuxCmd := fmt.Sprintf(
-		"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent \\; attach-session -t scion",
+		"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent; while tmux has-session -t scion 2>/dev/null; do sleep 2; done",
 		agentWindowCmd,
 	)
 
-	// R1 fix: Create symlink /home/scion -> bind-mounted agent home so that
-	// sciontool init's HOME=/home/scion resolves to the visible mount path.
-	// Without this, agent writes go to the rootfs overlay (invisible to broker).
-	symlinkCmd := fmt.Sprintf("rm -rf /home/scion && ln -sfn %s /home/scion", agentHome)
 	// CRITICAL: argv[0] must be an absolute path. The sandbox launcher resolves
 	// argv[0] BEFORE the PATH env var (set by envFor) is in effect, so bare "sh"
-	// silently fails. See envFor comment at line 412 — the PATH fix landed one
-	// layer too high. The inner "sh -c" after "exec sciontool init --" runs
-	// inside the outer shell where PATH is available, but we use absolute paths
-	// throughout for safety.
-	// Wrap the entire entrypoint in a group whose stdout/stderr are
-	// redirected to a log file under agentHome. On the happy path `exec`
-	// replaces the shell with sciontool (which inherits the redirected fds —
-	// acceptable because tmux manages its own pty). On failure the shell
-	// continues past the group, writes the exit code to an RC file, and both
-	// files are available for the DOA probe to read from the host filesystem.
+	// silently fails (Finding #10).
+	//
+	// No symlink chain: agent home is bind-mounted directly at /home/scion
+	// by mountsFor(), so sciontool init's hardcoded HOME=/home/scion
+	// (supervisor.go:115) resolves to the writable mount without rootfs
+	// mutation. The rootfs is read-only (EROFS, confirmed by diag-sbx6).
+	//
+	// Entrypoint output capture (#22): wrap the command in a group whose
+	// stdout/stderr are redirected to a log file under agentHome. On the
+	// happy path `exec` replaces the shell with sciontool (which inherits
+	// the redirected fds — acceptable because tmux manages its own pty).
+	// On failure the shell continues past the group, writes the exit code
+	// to an RC file, and both files are available for the DOA probe to
+	// read from the host filesystem (bind-mounted at /home/scion).
 	logPath := filepath.Join(agentHome, entrypointLogFile)
 	rcPath := filepath.Join(agentHome, entrypointRCFile)
-	wrappedCmd := fmt.Sprintf("{ %s && exec sciontool init -- /bin/sh -c %s; } > %s 2>&1; echo $? > %s",
-		symlinkCmd, shellQuote(tmuxCmd), logPath, rcPath)
+	wrappedCmd := fmt.Sprintf("{ exec sciontool init -- /bin/sh -c %s; } > %s 2>&1; echo $? > %s",
+		shellQuote(tmuxCmd), logPath, rcPath)
 	return []string{"/bin/sh", "-c", wrappedCmd}, nil
 }
 
