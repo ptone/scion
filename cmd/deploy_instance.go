@@ -18,10 +18,13 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -129,6 +132,11 @@ func runDeployInstance(cmd *cobra.Command, args []string) error {
 	instanceURL := fmt.Sprintf("https://%s-%s.%s.run.app",
 		diName, projectNumber, diRegion)
 
+	// Validate the computed URL before using it in gates and deploy.
+	if err := diValidateInstanceURL(instanceURL); err != nil {
+		return fmt.Errorf("computed instance URL is invalid (project number may be contaminated): %w", err)
+	}
+
 	// Step 3a: Create/update the Instance via gcloud (v1 surface).
 	// gcloud speaks v1, which is the only surface that has sandboxLauncher.
 	// REST v2 neither sets nor returns sandboxLauncher — it returns 400 on
@@ -234,6 +242,9 @@ func diResolveProjectNumber(project string) (string, error) {
 	number := strings.TrimSpace(out)
 	if number == "" {
 		return "", fmt.Errorf("gcloud returned empty project number for %q", project)
+	}
+	if err := diValidateProjectNumber(number); err != nil {
+		return "", err
 	}
 	return number, nil
 }
@@ -653,19 +664,30 @@ func diNoAuthClient() *http.Client {
 	}
 }
 
-// diRunGcloud executes a gcloud command and returns its combined output.
-// Used for gcloud operations (identity, project number, instance deploy, IAP policy).
+// diRunGcloud executes a gcloud command and returns its stdout.
+// Stderr is discarded on success and included in the error on failure.
+//
+// Why stdout-only: gcloud writes diagnostic messages (notably the
+// "WARNING: This command is using service account impersonation..."
+// banner) to stderr. CombinedOutput mixes those into data values like
+// project numbers and URLs, corrupting downstream consumers (#33).
 func diRunGcloud(args ...string) (string, error) {
 	cmd := exec.Command("gcloud", args...)
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output() // stdout only; stderr via ExitError
 	if err != nil {
 		// Limit how much of args we show to avoid leaking tokens
 		showArgs := args
 		if len(showArgs) > 4 {
 			showArgs = showArgs[:4]
 		}
-		return "", fmt.Errorf("gcloud %s: %w\n%s",
-			strings.Join(showArgs, " "), err, string(out))
+		// Extract stderr from ExitError for diagnostic context.
+		var exitErr *exec.ExitError
+		stderrMsg := ""
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			stderrMsg = "\n" + string(exitErr.Stderr)
+		}
+		return "", fmt.Errorf("gcloud %s: %w%s",
+			strings.Join(showArgs, " "), err, stderrMsg)
 	}
 	return string(out), nil
 }
@@ -692,6 +714,41 @@ func diShortenError(err error) string {
 		return msg[:80] + "..."
 	}
 	return msg
+}
+
+// projectNumberRe validates that a string is a pure numeric GCP project number.
+var projectNumberRe = regexp.MustCompile(`^[0-9]+$`)
+
+// diValidateProjectNumber rejects anything that is not a pure numeric string.
+// gcloud under service-account impersonation prepends a WARNING to stderr; if
+// stderr leaks into the captured value, the project number becomes
+// "WARNING: This command is using...721899303052" and every consumer silently
+// embeds garbage (#33).
+func diValidateProjectNumber(s string) error {
+	if !projectNumberRe.MatchString(s) {
+		return fmt.Errorf("project number %q is not purely numeric — "+
+			"gcloud output may be contaminated (stderr mixed into stdout?)", s)
+	}
+	return nil
+}
+
+// diValidateInstanceURL rejects anything that does not parse as an https URL
+// with a plausible Cloud Run host.
+func diValidateInstanceURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("could not parse instance URL %q: %w", rawURL, err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("instance URL %q has scheme %q, expected https", rawURL, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("instance URL %q has no host", rawURL)
+	}
+	if !strings.HasSuffix(u.Host, ".run.app") {
+		return fmt.Errorf("instance URL host %q does not end with .run.app", u.Host)
+	}
+	return nil
 }
 
 // BuildInstanceURL computes the legacy-format Cloud Run Instance URL.

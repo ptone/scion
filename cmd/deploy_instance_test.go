@@ -398,6 +398,96 @@ func TestPrintProjectIAPBindings_WithIAPBinding(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Validation tests: reject contaminated gcloud output (#33)
+// ---------------------------------------------------------------------------
+
+// TestValidateProjectNumber_Clean verifies acceptance of valid project numbers.
+func TestValidateProjectNumber_Clean(t *testing.T) {
+	for _, num := range []string{"123456789", "0", "721899303052"} {
+		assert.NoError(t, diValidateProjectNumber(num),
+			"valid project number %q must be accepted", num)
+	}
+}
+
+// TestValidateProjectNumber_Contaminated verifies rejection of gcloud output
+// that has been contaminated by service-account impersonation warnings on
+// stderr. This is the measured failure mode from #33.
+func TestValidateProjectNumber_Contaminated(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "impersonation warning prefix",
+			input: "WARNING: This command is using service account impersonation. All API calls will be executed as [sa@proj.iam.gserviceaccount.com].\n721899303052",
+		},
+		{
+			name:  "warning inline",
+			input: "WARNING: 721899303052",
+		},
+		{
+			name:  "letters mixed in",
+			input: "72abc1899",
+		},
+		{
+			name:  "empty string",
+			input: "",
+		},
+		{
+			name:  "whitespace",
+			input: " 721899303052 ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := diValidateProjectNumber(tt.input)
+			assert.Error(t, err,
+				"contaminated project number %q must be rejected", tt.input)
+		})
+	}
+}
+
+// TestValidateInstanceURL_Valid verifies acceptance of well-formed Cloud Run URLs.
+func TestValidateInstanceURL_Valid(t *testing.T) {
+	err := diValidateInstanceURL("https://my-instance-123456789.us-east4.run.app")
+	assert.NoError(t, err)
+}
+
+// TestValidateInstanceURL_Contaminated verifies rejection of URLs built from
+// contaminated gcloud output. When the project number is prefixed with the
+// impersonation warning, the URL host becomes garbage (#33).
+func TestValidateInstanceURL_Contaminated(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "warning in host",
+			input: "https://ssh-probe-WARNING: This command is using service account imperson....run.app",
+		},
+		{
+			name:  "not https",
+			input: "http://my-instance-123.us-east4.run.app",
+		},
+		{
+			name:  "wrong domain",
+			input: "https://my-instance-123.us-east4.example.com",
+		},
+		{
+			name:  "empty string",
+			input: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := diValidateInstanceURL(tt.input)
+			assert.Error(t, err,
+				"invalid instance URL %q must be rejected", tt.input)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // diSanitizeResponse tests
 // ---------------------------------------------------------------------------
 

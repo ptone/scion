@@ -415,9 +415,11 @@ func copyDirContents(src, dst string) error {
 // the sandbox boundary (§4.4a). The tmux socket is deliberately
 // sandbox-internal; tmux uses its default path inside the sandbox.
 func mountsFor(paths scionPaths, sharedDirs []api.SharedDir) []string {
-	// Mount the agent home at sandboxAgentHome so that sciontool init's
-	// hardcoded HOME=/home/scion (supervisor.go:115) resolves to the
-	// bind-mounted writable path. The rootfs is read-only (EROFS,
+	// Mount the agent home at sandboxAgentHome (/home/scion). Note:
+	// supervisor.go:113 only sets HOME when UID > 0 || Rootless, so when
+	// the sandbox runs as root (UID 0, non-rootless) HOME is inherited
+	// from the container environment. envFor() now sets HOME explicitly
+	// to ensure it resolves here. The rootfs is read-only (EROFS,
 	// confirmed by diag-sbx6), so the previous rm -rf / ln -sfn approach
 	// fails. Mounting with a different destination avoids rootfs mutation
 	// entirely and was confirmed working by diag-sbx6.
@@ -486,6 +488,17 @@ func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 	uid, gid := os.Getuid(), os.Getgid()
 	env["SCION_HOST_UID"] = strconv.Itoa(uid)
 	env["SCION_HOST_GID"] = strconv.Itoa(gid)
+
+	// Set HOME, USER and LOGNAME explicitly for the sandbox.
+	// supervisor.go:113 only sets HOME when (UID > 0 || Rootless). On
+	// Cloud Run the launcher runs as root (UID 0, non-rootless), so
+	// HOME is inherited as /root. tmux reads ~/.tmux.conf relative to
+	// HOME, so the pane-exited hook in the template home is never found.
+	// Setting HOME here ensures the sandbox-mounted agent home at
+	// sandboxAgentHome is used regardless of supervisor behaviour.
+	env["HOME"] = sandboxAgentHome
+	env["USER"] = "scion"
+	env["LOGNAME"] = "scion"
 
 	return env
 }
@@ -570,9 +583,10 @@ func buildEntrypoint(cfg RunConfig) ([]string, error) {
 	// silently fails (Finding #10).
 	//
 	// No symlink chain: agent home is bind-mounted directly at /home/scion
-	// by mountsFor(), so sciontool init's hardcoded HOME=/home/scion
-	// (supervisor.go:115) resolves to the writable mount without rootfs
-	// mutation. The rootfs is read-only (EROFS, confirmed by diag-sbx6).
+	// by mountsFor(). HOME is set by envFor() to sandboxAgentHome
+	// (/home/scion) so it resolves to the writable mount regardless of
+	// whether supervisor.go sets it. The rootfs is read-only (EROFS,
+	// confirmed by diag-sbx6).
 	//
 	// Entrypoint output capture (#22): wrap the command in a group whose
 	// stdout/stderr are redirected to a log file. On the happy path `exec`
