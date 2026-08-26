@@ -170,6 +170,12 @@ func inferHarnessFromName(name string) string {
 		return "opencode"
 	case strings.Contains(lower, "codex"):
 		return "codex"
+	case strings.Contains(lower, "antigravity"):
+		return "antigravity"
+	case strings.Contains(lower, "copilot"):
+		return "copilot"
+	case strings.Contains(lower, "hermes"):
+		return "hermes"
 	default:
 		return ""
 	}

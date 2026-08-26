@@ -736,9 +736,13 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	allowed := map[string]bool{"claude": true, "gemini": true, "codex": true, "opencode": true}
+	allBuildNames := harness.AllHarnessNames()
+	buildAllowed := make(map[string]bool, len(allBuildNames))
+	for _, n := range allBuildNames {
+		buildAllowed[n] = true
+	}
 	for _, h := range req.Harnesses {
-		if !allowed[h] {
+		if !buildAllowed[h] {
 			ValidationError(w, fmt.Sprintf("unknown harness %q", h), nil)
 			return
 		}
