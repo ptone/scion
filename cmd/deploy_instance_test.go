@@ -603,6 +603,7 @@ func TestDeployEnvVarsRoundTrip(t *testing.T) {
 
 	// Set env vars exactly as diGcloudDeploy formats them (auth vars via
 	// SCION_SERVER_*, admin email via SCION_SEED_SERVER_*).
+	t.Setenv("SCION_SERVER_MODE", "hosted")
 	t.Setenv("SCION_SERVER_AUTH_MODE", "proxy")
 	t.Setenv("SCION_SERVER_AUTH_PROXY_PROVIDER", "iap")
 	t.Setenv("SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE",
@@ -613,6 +614,9 @@ func TestDeployEnvVarsRoundTrip(t *testing.T) {
 	gc, err := config.LoadGlobalConfig("")
 	require.NoError(t, err, "LoadGlobalConfig must succeed with deploy env vars")
 
+	assert.Equal(t, "hosted", gc.Mode,
+		"Mode must be 'hosted' — without this the server runs in workstation "+
+			"mode, auto-enables dev auth, and crashes on a non-loopback host")
 	assert.Equal(t, "proxy", gc.Auth.Mode,
 		"Auth.Mode must be 'proxy'")
 	require.NotNil(t, gc.Auth.Proxy,
@@ -638,6 +642,34 @@ func TestDeployEnvVarsRoundTrip(t *testing.T) {
 	emails := bk.Strings("server.hub.admin_emails")
 	assert.Contains(t, emails, "admin@example.com",
 		"admin email must appear in bootstrap koanf server.hub.admin_emails")
+}
+
+// ---------------------------------------------------------------------------
+// Hosted-mode env var pinning test
+// ---------------------------------------------------------------------------
+
+// TestDeployHostedModeEnvRequired is a pinning test.
+// When SCION_SERVER_MODE is absent, the server defaults to workstation mode.
+// Workstation mode calls applyWorkstationDefaults (server_config.go:35) which
+// sets enableDevAuth=true. On Cloud Run the host is 0.0.0.0, so the
+// non-loopback dev-auth guard (server_foreground.go:2190) fires and the
+// server exits immediately. SCION_SERVER_MODE=hosted is the fix: it sets
+// cfg.Mode="hosted", which makes hostedMode=true, skipping workstation
+// defaults entirely.
+func TestDeployHostedModeEnvRequired(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".scion"), 0755))
+
+	// Simulate the env var diGcloudDeploy sets.
+	t.Setenv("SCION_SERVER_MODE", "hosted")
+
+	gc, err := config.LoadGlobalConfig("")
+	require.NoError(t, err)
+
+	assert.Equal(t, "hosted", gc.Mode,
+		"SCION_SERVER_MODE=hosted must map to cfg.Mode='hosted' — "+
+			"without this, workstation defaults enable dev auth and crash the server")
 }
 
 // ---------------------------------------------------------------------------
