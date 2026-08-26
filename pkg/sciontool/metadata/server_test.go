@@ -1029,14 +1029,14 @@ func TestSelectLinkLocalAddress_SingleAddress(t *testing.T) {
 
 func TestSelectLinkLocalAddress_MultipleAddresses(t *testing.T) {
 	// Cloud Run Instances always have three link-local addresses.
-	// The function should sort and return the lowest.
+	// The function should sort by numeric IP value and return the lowest.
 	addrs := []string{"169.254.169.1", "169.254.9.1", "169.254.8.1"}
 	addr, err := selectLinkLocalAddress(addrs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if addr != "169.254.169.1" {
-		t.Fatalf("expected 169.254.169.1 (lexicographically lowest), got %q", addr)
+	if addr != "169.254.8.1" {
+		t.Fatalf("expected 169.254.8.1 (numerically lowest), got %q", addr)
 	}
 }
 
@@ -1052,8 +1052,8 @@ func TestSelectLinkLocalAddress_MultipleAddresses_Deterministic(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error for %v: %v", addrs, err)
 		}
-		if addr != "169.254.169.1" {
-			t.Fatalf("expected 169.254.169.1 for input %v, got %q", addrs, addr)
+		if addr != "169.254.8.1" {
+			t.Fatalf("expected 169.254.8.1 for input %v, got %q", addrs, addr)
 		}
 	}
 }

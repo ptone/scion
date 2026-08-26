@@ -300,7 +300,7 @@ func DiscoverLinkLocalAddress() (string, error) {
 
 // selectLinkLocalAddress picks one address from the candidate list.
 // It returns an error when the list is empty. When multiple addresses are
-// present, it sorts them lexicographically and returns the lowest.
+// present, it sorts them by numeric IP value and returns the lowest.
 func selectLinkLocalAddress(found []string) (string, error) {
 	switch len(found) {
 	case 0:
@@ -311,10 +311,12 @@ func selectLinkLocalAddress(found []string) (string, error) {
 		// Multiple link-local addresses found. On Cloud Run Instances, all of
 		// them reach the launcher from inside a sandbox (measured: every
 		// 169.254.x.x on the launcher returns HTTP 200 against 0.0.0.0).
-		// Any deterministic choice is safe; we sort and pick the lowest to
-		// keep the selection stable across restarts. This is arbitrary-but-stable,
-		// not principled selection.
-		sort.Strings(found)
+		// Any deterministic choice is safe; we sort by numeric IP value and
+		// pick the lowest to keep the selection stable across restarts. This
+		// is arbitrary-but-stable, not principled selection.
+		sort.Slice(found, func(i, j int) bool {
+			return bytes.Compare(net.ParseIP(found[i]).To4(), net.ParseIP(found[j]).To4()) < 0
+		})
 		log.Info("Multiple link-local addresses found %v; selecting %s", found, found[0])
 		return found[0], nil
 	}
