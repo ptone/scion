@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -261,10 +262,10 @@ func resolveBindAddress(raw string) (string, error) {
 }
 
 // DiscoverLinkLocalAddress enumerates the host's network interfaces and
-// returns the single IPv4 link-local address (169.254.0.0/16). It returns
-// an error when zero or more than one link-local address is found, because
-// both cases are ambiguous and must be resolved by the operator rather than
-// guessed by the emulator.
+// returns an IPv4 link-local address (169.254.0.0/16). When exactly one is
+// found it is returned directly. When multiple are found, they are sorted
+// lexicographically and the lowest is returned for deterministic selection.
+// It returns an error only when no link-local address is found.
 func DiscoverLinkLocalAddress() (string, error) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
@@ -294,14 +295,28 @@ func DiscoverLinkLocalAddress() (string, error) {
 		}
 	}
 
+	return selectLinkLocalAddress(found)
+}
+
+// selectLinkLocalAddress picks one address from the candidate list.
+// It returns an error when the list is empty. When multiple addresses are
+// present, it sorts them lexicographically and returns the lowest.
+func selectLinkLocalAddress(found []string) (string, error) {
 	switch len(found) {
 	case 0:
 		return "", fmt.Errorf("no IPv4 link-local address (169.254.0.0/16) found on any interface")
 	case 1:
 		return found[0], nil
 	default:
-		return "", fmt.Errorf("multiple IPv4 link-local addresses found (%v) — "+
-			"cannot auto-select; set SCION_METADATA_BIND_ADDRESS to the correct one", found)
+		// Multiple link-local addresses found. On Cloud Run Instances, all of
+		// them reach the launcher from inside a sandbox (measured: every
+		// 169.254.x.x on the launcher returns HTTP 200 against 0.0.0.0).
+		// Any deterministic choice is safe; we sort and pick the lowest to
+		// keep the selection stable across restarts. This is arbitrary-but-stable,
+		// not principled selection.
+		sort.Strings(found)
+		log.Info("Multiple link-local addresses found %v; selecting %s", found, found[0])
+		return found[0], nil
 	}
 }
 

@@ -1014,6 +1014,61 @@ func TestMetadataServer_StartReclaimsPortViaShutdownEndpoint(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// Link-local address selection tests
+// -----------------------------------------------------------------------
+
+func TestSelectLinkLocalAddress_SingleAddress(t *testing.T) {
+	addr, err := selectLinkLocalAddress([]string{"169.254.8.1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if addr != "169.254.8.1" {
+		t.Fatalf("expected 169.254.8.1, got %q", addr)
+	}
+}
+
+func TestSelectLinkLocalAddress_MultipleAddresses(t *testing.T) {
+	// Cloud Run Instances always have three link-local addresses.
+	// The function should sort and return the lowest.
+	addrs := []string{"169.254.169.1", "169.254.9.1", "169.254.8.1"}
+	addr, err := selectLinkLocalAddress(addrs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if addr != "169.254.169.1" {
+		t.Fatalf("expected 169.254.169.1 (lexicographically lowest), got %q", addr)
+	}
+}
+
+func TestSelectLinkLocalAddress_MultipleAddresses_Deterministic(t *testing.T) {
+	// Regardless of input order, the same address must be selected.
+	orders := [][]string{
+		{"169.254.9.1", "169.254.169.1", "169.254.8.1"},
+		{"169.254.8.1", "169.254.9.1", "169.254.169.1"},
+		{"169.254.169.1", "169.254.8.1", "169.254.9.1"},
+	}
+	for _, addrs := range orders {
+		addr, err := selectLinkLocalAddress(addrs)
+		if err != nil {
+			t.Fatalf("unexpected error for %v: %v", addrs, err)
+		}
+		if addr != "169.254.169.1" {
+			t.Fatalf("expected 169.254.169.1 for input %v, got %q", addrs, addr)
+		}
+	}
+}
+
+func TestSelectLinkLocalAddress_NoAddresses(t *testing.T) {
+	_, err := selectLinkLocalAddress(nil)
+	if err == nil {
+		t.Fatal("expected error for empty address list")
+	}
+	if !strings.Contains(err.Error(), "no IPv4 link-local") {
+		t.Fatalf("expected 'no IPv4 link-local' in error, got: %v", err)
+	}
+}
+
+// -----------------------------------------------------------------------
 // Bind address tests — §4.11 S5 security guard
 // -----------------------------------------------------------------------
 
