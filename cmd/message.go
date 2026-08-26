@@ -49,6 +49,7 @@ var msgWake bool
 var msgChannel string
 var msgThreadID string
 var msgCC []string
+var msgBodyFile string
 
 // messageCmd represents the message command
 var messageCmd = &cobra.Command{
@@ -65,11 +66,40 @@ Recipients:
 
 If --broadcast is used, the recipient can be omitted and the message will be sent to all running agents.
 
+Message body can be provided as:
+  - Positional arguments: scion message agent "hello world"
+  - File: scion message agent --body-file msg.txt
+  - Stdin: echo "hello" | scion message agent -
+
 Examples:
   scion message my-agent "Please review the PR"
   scion message user:alice "I need clarification on the auth module"
-  scion message "group[agent:reviewer,user:alice,deploy-bot]" "Release v2 is ready"`,
-	Args:              cobra.MinimumNArgs(1),
+  scion message "group[agent:reviewer,user:alice,deploy-bot]" "Release v2 is ready"
+  scion message my-agent --body-file /path/to/message.txt
+  echo "message with backticks" | scion message my-agent -`,
+	Args: func(cmd *cobra.Command, args []string) error {
+		// --body-file provides the message, so we only need recipient (or none for broadcast)
+		bodyFile, _ := cmd.Flags().GetString("body-file")
+		if bodyFile != "" {
+			if msgBroadcast || msgAll {
+				return nil // no args needed
+			}
+			if len(args) < 1 {
+				return fmt.Errorf("recipient is required unless --broadcast is used")
+			}
+			return nil
+		}
+		if msgBroadcast || msgAll {
+			if len(args) < 1 {
+				return fmt.Errorf("message is required")
+			}
+			return nil
+		}
+		if len(args) < 2 {
+			return fmt.Errorf("recipient and message are required unless --broadcast or --body-file is used")
+		}
+		return nil
+	},
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var agentName string
@@ -83,11 +113,13 @@ Examples:
 			}
 			message = strings.Join(args, " ")
 		} else {
-			if len(args) < 2 {
-				return fmt.Errorf("recipient and message are required unless --broadcast is used")
+			if len(args) < 1 {
+				return fmt.Errorf("recipient is required unless --broadcast is used")
 			}
 			recipient := args[0]
-			message = strings.Join(args[1:], " ")
+			if len(args) > 1 {
+				message = strings.Join(args[1:], " ")
+			}
 
 			if messages.IsGroupRecipient(recipient) {
 				parsed, err := messages.ParseGroupRecipient(recipient)
@@ -103,6 +135,26 @@ Examples:
 				// Strip optional "agent:" prefix for backwards compatibility
 				agentName = api.Slugify(strings.TrimPrefix(recipient, "agent:"))
 			}
+		}
+
+		// Validate --body-file conflicts
+		if msgBodyFile != "" && len(args) > 1 && !msgBroadcast && !msgAll {
+			return fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+		}
+		if msgBodyFile != "" && (msgBroadcast || msgAll) && len(args) > 0 {
+			return fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+		}
+
+		// Resolve body from --body-file or stdin
+		var err error
+		message, err = resolveMessageBody(msgBodyFile, message)
+		if err != nil {
+			return err
+		}
+
+		// Ensure we have a message body
+		if message == "" && !msgRaw {
+			return fmt.Errorf("message body is empty; provide a message via positional args, --body-file, or pipe to stdin with '-'")
 		}
 
 		// Validate scheduling flags
@@ -231,7 +283,6 @@ Examples:
 
 		// Check if Hub should be used
 		var hubCtx *HubContext
-		var err error
 		if len(groupRecipients) > 0 {
 			// Group recipients: skip sync (multiple recipients, no single agent)
 			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
@@ -1006,6 +1057,29 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 	wg.Wait()
 }
 
+// resolveMessageBody determines the message body from flags or positional args.
+// Priority: --body-file > positional args. If body is "-", read from stdin.
+func resolveMessageBody(bodyFile string, positionalBody string) (string, error) {
+	if bodyFile != "" {
+		if positionalBody != "" {
+			return "", fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+		}
+		data, err := os.ReadFile(bodyFile)
+		if err != nil {
+			return "", fmt.Errorf("failed to read body file: %w", err)
+		}
+		return string(data), nil
+	}
+	if positionalBody == "-" {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return "", fmt.Errorf("failed to read message from stdin: %w", err)
+		}
+		return strings.TrimRight(string(data), "\n"), nil
+	}
+	return positionalBody, nil
+}
+
 func init() {
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgBroadcast, "broadcast", "b", false, "Send the message to all running agents in the current project")
@@ -1019,6 +1093,7 @@ func init() {
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringVar(&msgChannel, "channel", "", "Target a specific message channel (e.g. telegram, gchat, web)")
 	messageCmd.Flags().StringVar(&msgThreadID, "thread-id", "", "Target a specific thread within the channel")
+	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args")
 	messageCmd.Flags().StringArrayVar(&msgCC, "cc", nil, "CC an additional agent (repeatable; also accepts a comma-separated list); each receives a mention notification")
 	messageCmd.AddCommand(messageChannelsCmd)
 	rootCmd.AddCommand(messageCmd)
