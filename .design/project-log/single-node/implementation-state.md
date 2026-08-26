@@ -3887,3 +3887,67 @@ This is a step my 18:42 merge sequence omitted entirely. Anyone following that s
 8. Land the tutorial and scripts (task #50).
 
 Told ptone at 19:35. Both corrections sent as corrections, with the evidence, not as new opinion.
+
+---
+
+## 2026-08-26 20:50 — orthogonal triage; three issues filed; footprint plan
+
+New direction from ptone at 20:29: identify defects orthogonal to running on an Instance, file
+them on `ptone/scion` for other parts of the team, then rebase our work on the fixes and reduce our
+footprint. Full triage: `orthogonal-triage.md` in this directory.
+
+### Filed
+
+- **[1273]** D-37 / D-48 — hosted hub drops template and harness-config identity on agent create;
+  broker falls back to a disk search that is empty in hosted mode. Four-link root cause with
+  file:line, plus the discriminating experiment and the "silent WARN" evidence.
+- **[1274]** D-49 — `GitCloneConfig.Depth`: `pkg/api/types.go:770` documents `0 = full`,
+  `pkg/provision/provision.go:308-311` rewrites `0` to `1`. Only a **negative** depth gives a full
+  clone, which is undocumented and is what the tests use (`provision_test.go:620`, `Depth: -1`).
+  Same defaulting independently in `pkg/runtime/k8s_runtime.go:2474` and
+  `cmd/sciontool/commands/init.go:1592` — general, not runtime-specific.
+- **[1275]** D-42 — `noAuth:true` makes agent create fail. Reproduced, not root-caused; filed as
+  such rather than dressed up.
+
+### Not filed, and why
+
+D-35, D-41, D-46, D-39, D-15 all lack a mechanism. D-46 and D-39 each split into a general half and
+a tier half and should be divided before filing. Filing them now would hand the owners a symptom.
+
+### Correction to an earlier classification
+
+**D-32 is not orthogonal.** `relocateToScion` is in our own
+`pkg/runtime/cloudrun_sandbox_runtime.go` (confirmed: absent from `main`, present in the branch).
+It stays ours. I had it on the orthogonal list; that was wrong.
+
+### Footprint: 63 files → ~32, with no behaviour change
+
+1. **23 of the 63 files are `.design/project-log/*.md`**, 1679 changed lines. Not review surface.
+   Move to a separate docs commit. **63 → 40. Free.**
+2. **PR 1266 contains the P0-S1 dev-auth fix a second time**, duplicating PR 1265: `IsLoopbackHost`
+   and the `log.Fatalf` guard in `pkg/hub/web.go` (22), the `cmd/server_foreground.go` guard (~9),
+   and tests in `pkg/hub/web_test.go` (80), `cmd/server_foreground_test.go` (96),
+   `cmd/server_bridge_test.go` (89) — ~296 lines in 5 files. Land 1265 first, rebase, and the
+   duplicate disappears. **40 → 35.** This is a second, independent reason for the task #51
+   ordering.
+3. **Two drive-bys travel separately**: `web/embed.go` (2-line comment fix, unrelated) and the
+   general `deploymentWarnings[]` health field + `diagnostics.ts` (71 lines, 2 files) — the
+   mechanism is a hub feature, only the Cloud Run string is ours. **35 → 32.**
+
+### The distinction worth keeping
+
+Fixing 1273/1274/1275 upstream removes **almost no lines** from PR 1266. Those issues cut
+**complexity and risk** — the stopgap goes away, §1 step 6 works properly, the tutorial loses a
+workaround. The **size** reduction comes entirely from items 1-3 above. Two different levers; both
+were asked for; they should not be conflated in reporting.
+
+### Open question
+
+`metadata.DiscoverLinkLocalAddress` (148 lines, includes the guard refusing to bind `0.0.0.0`) is
+arguably general. Left in our set because nothing else uses it today. If a second runtime wants it,
+it should move.
+
+### The criterion that matters
+
+After the rebase the tier must still pass §1 end to end. A smaller diff that no longer deploys is
+not progress.
