@@ -203,8 +203,10 @@ func (s *sandboxStateStore) reconcile(bin string) {
 		}
 		// Probe liveness: try to exec 'true' in the sandbox.
 		// If it fails, the sandbox is dead.
+		// R1: absolute path required — the sandbox launcher resolves argv[0]
+		// before the sandbox environment (including PATH) is in effect.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := runSimpleCommand(ctx, bin, "exec", name, "--", "true")
+		_, err := runSimpleCommand(ctx, bin, "exec", name, "--", "/bin/true")
 		cancel()
 		if err != nil {
 			runtimeLog.Info("sandbox state reconcile: sandbox not alive, removing",
