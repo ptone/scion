@@ -243,16 +243,16 @@ var (
 //   - explicit IP: use as-is (but reject "0.0.0.0" — see §4.11 S5).
 //   - empty: default to "127.0.0.1".
 func resolveBindAddress(raw string) (string, error) {
-	switch {
-	case raw == "":
+	switch raw {
+	case "":
 		return "127.0.0.1", nil
-	case raw == "link-local":
+	case "link-local":
 		addr, err := DiscoverLinkLocalAddress()
 		if err != nil {
 			return "", fmt.Errorf("metadata bind: %w", err)
 		}
 		return addr, nil
-	case raw == "0.0.0.0":
+	case "0.0.0.0":
 		return "", fmt.Errorf("metadata bind: refusing to bind 0.0.0.0 — " +
 			"the emulator does not authenticate callers (§4.11 S5)")
 	default:
