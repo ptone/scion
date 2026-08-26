@@ -973,9 +973,14 @@ func reapOrphanedRunsc(sandboxName string) {
 			continue
 		}
 		args := string(bytes.ReplaceAll(cmdline, []byte{0}, []byte(" ")))
+		// Match the sandbox name as a path segment to avoid false positives:
+		// deleting sandbox "app" must not match processes for "my-app".
+		// The expected cmdline pattern is:
+		//   runsc --root /run/sandbox/<name>/runc delete --force <name>
+		sandboxPathSegment := "/run/sandbox/" + sandboxName + "/"
 		if strings.Contains(args, "runsc") &&
 			strings.Contains(args, "delete") &&
-			strings.Contains(args, sandboxName) {
+			strings.Contains(args, sandboxPathSegment) {
 			slog.Info("reaping orphaned runsc process",
 				"sandbox", sandboxName, "pid", pid,
 				"cmdline", strings.TrimSpace(args))
