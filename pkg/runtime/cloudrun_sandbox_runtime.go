@@ -504,8 +504,10 @@ func buildEntrypoint(cfg RunConfig, agentHome string) ([]string, error) {
 	}
 
 	// Wrap the harness in a shell that records its real exit code (see
-	// common.go:469-475 for the pattern).
-	agentWindowCmd := "sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
+	// common.go:469-475 for the pattern). Use absolute path for sh —
+	// this runs as a tmux window command where PATH is available, but
+	// absolute paths are used throughout buildEntrypoint for consistency.
+	agentWindowCmd := "/bin/sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
 
 	// Build tmux command (common.go:479-482 pattern).
 	tmuxCmd := fmt.Sprintf(
@@ -517,7 +519,13 @@ func buildEntrypoint(cfg RunConfig, agentHome string) ([]string, error) {
 	// sciontool init's HOME=/home/scion resolves to the visible mount path.
 	// Without this, agent writes go to the rootfs overlay (invisible to broker).
 	symlinkCmd := fmt.Sprintf("rm -rf /home/scion && ln -sfn %s /home/scion", agentHome)
-	return []string{"sh", "-c", symlinkCmd + " && exec sciontool init -- sh -c " + shellQuote(tmuxCmd)}, nil
+	// CRITICAL: argv[0] must be an absolute path. The sandbox launcher resolves
+	// argv[0] BEFORE the PATH env var (set by envFor) is in effect, so bare "sh"
+	// silently fails. See envFor comment at line 412 — the PATH fix landed one
+	// layer too high. The inner "sh -c" after "exec sciontool init --" runs
+	// inside the outer shell where PATH is available, but we use absolute paths
+	// throughout for safety.
+	return []string{"/bin/sh", "-c", symlinkCmd + " && exec sciontool init -- /bin/sh -c " + shellQuote(tmuxCmd)}, nil
 }
 
 // -----------------------------------------------------------------------

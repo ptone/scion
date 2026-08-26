@@ -676,12 +676,17 @@ func TestBuildEntrypoint_WithHarness(t *testing.T) {
 		t.Fatalf("buildEntrypoint() error = %v", err)
 	}
 
-	// Should start with sh -c (R1: symlink setup wraps sciontool init).
+	// Should start with /bin/sh -c (R1: symlink setup wraps sciontool init).
+	// argv[0] MUST be an absolute path — the sandbox launcher resolves it
+	// before PATH is set (see envFor), so bare "sh" silently fails.
 	if len(entrypoint) < 3 {
 		t.Fatalf("entrypoint too short: %v", entrypoint)
 	}
-	if entrypoint[0] != "sh" || entrypoint[1] != "-c" {
-		t.Errorf("entrypoint[0:2] = %v, want [sh -c]", entrypoint[:2])
+	if entrypoint[0] != "/bin/sh" || entrypoint[1] != "-c" {
+		t.Errorf("entrypoint[0:2] = %v, want [/bin/sh -c]", entrypoint[:2])
+	}
+	if !strings.HasPrefix(entrypoint[0], "/") {
+		t.Errorf("entrypoint argv[0] must be an absolute path, got %q", entrypoint[0])
 	}
 
 	// The command should contain the symlink setup and sciontool init.
@@ -721,6 +726,11 @@ func TestBuildEntrypoint_NoAuth(t *testing.T) {
 	entrypoint, err := buildEntrypoint(cfg, agentHome)
 	if err != nil {
 		t.Fatalf("buildEntrypoint() error = %v", err)
+	}
+
+	// argv[0] must be an absolute path (sandbox PATH resolution).
+	if !strings.HasPrefix(entrypoint[0], "/") {
+		t.Errorf("entrypoint argv[0] must be an absolute path, got %q", entrypoint[0])
 	}
 
 	cmd := entrypoint[2]
