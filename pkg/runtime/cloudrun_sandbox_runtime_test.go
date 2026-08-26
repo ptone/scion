@@ -669,15 +669,13 @@ func TestBuildEntrypoint_WithHarness(t *testing.T) {
 			command: []string{"claude", "--agent"},
 		},
 	}
-	agentHome := "/scion/agents/test-agent/home"
-
-	entrypoint, err := buildEntrypoint(cfg, agentHome)
+	entrypoint, err := buildEntrypoint(cfg)
 	if err != nil {
 		t.Fatalf("buildEntrypoint() error = %v", err)
 	}
 
-	// Should start with /bin/sh -c (R1: symlink setup wraps sciontool init).
-	// argv[0] MUST be an absolute path — the sandbox launcher resolves it
+	// Should start with /bin/sh -c. argv[0] MUST be an absolute path —
+	// the sandbox launcher resolves it
 	// before PATH is set (see envFor), so bare "sh" silently fails.
 	if len(entrypoint) < 3 {
 		t.Fatalf("entrypoint too short: %v", entrypoint)
@@ -700,9 +698,8 @@ func TestBuildEntrypoint_WithHarness(t *testing.T) {
 		"while tmux has-session -t scion",
 		"claude",
 		"echo $? >",
-		// #22 entrypoint output capture preserved.
+		// #22 entrypoint output capture preserved (log only; no .rc file).
 		entrypointLogFile,
-		entrypointRCFile,
 	} {
 		if !strings.Contains(cmd, pattern) {
 			t.Errorf("entrypoint command missing pattern %q\nfull: %s", pattern, cmd)
@@ -723,7 +720,7 @@ func TestBuildEntrypoint_WithHarness(t *testing.T) {
 
 func TestBuildEntrypoint_NoHarness(t *testing.T) {
 	cfg := RunConfig{}
-	_, err := buildEntrypoint(cfg, "/scion/agents/test/home")
+	_, err := buildEntrypoint(cfg)
 	if err == nil {
 		t.Error("buildEntrypoint() with no harness should return error")
 	}
@@ -734,9 +731,7 @@ func TestBuildEntrypoint_NoAuth(t *testing.T) {
 		NoAuth:        true,
 		NoAuthMessage: "Please configure auth",
 	}
-	agentHome := "/scion/agents/test-agent/home"
-
-	entrypoint, err := buildEntrypoint(cfg, agentHome)
+	entrypoint, err := buildEntrypoint(cfg)
 	if err != nil {
 		t.Fatalf("buildEntrypoint() error = %v", err)
 	}
@@ -1174,7 +1169,7 @@ func TestCloudRunSandboxRuntime_BuildEntrypoint_AbsolutePaths(t *testing.T) {
 			env:     map[string]string{},
 		},
 	}
-	entrypoint, err := buildEntrypoint(cfg, "/scion/agents/test/home")
+	entrypoint, err := buildEntrypoint(cfg)
 	if err != nil {
 		t.Fatalf("buildEntrypoint() error = %v", err)
 	}
