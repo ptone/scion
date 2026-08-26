@@ -74,6 +74,7 @@ var (
 	diServiceAccount string
 	diMemory         string
 	diCPU            string
+	diImageRegistry  string
 )
 
 func init() {
@@ -87,6 +88,7 @@ func init() {
 	deployInstanceCmd.Flags().StringVar(&diServiceAccount, "service-account", "", "GCP service account for the instance")
 	deployInstanceCmd.Flags().StringVar(&diMemory, "memory", "8Gi", "Memory limit")
 	deployInstanceCmd.Flags().StringVar(&diCPU, "cpu", "4", "CPU limit")
+	deployInstanceCmd.Flags().StringVar(&diImageRegistry, "image-registry", "", "Override image registry (default: derived from --image)")
 
 	_ = deployInstanceCmd.MarkFlagRequired("name")
 	_ = deployInstanceCmd.MarkFlagRequired("image")
@@ -137,13 +139,26 @@ func runDeployInstance(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("computed instance URL is invalid (project number may be contaminated): %w", err)
 	}
 
+	// Resolve the image registry: --image-registry override, or derived from --image.
+	// The broker requires SCION_IMAGE_REGISTRY to pull agent images
+	// (requireImageRegistryForBroker in server_foreground.go).
+	imageRegistry := diImageRegistry
+	if imageRegistry == "" {
+		imageRegistry, err = diDeriveRegistry(diImage)
+		if err != nil {
+			return fmt.Errorf("failed to derive image registry from --image %q: %w\n"+
+				"Use --image-registry to set it explicitly", diImage, err)
+		}
+	}
+	fmt.Printf("    Image registry: %s\n", imageRegistry)
+
 	// Step 3a: Create/update the Instance via gcloud (v1 surface).
 	// gcloud speaks v1, which is the only surface that has sandboxLauncher.
 	// REST v2 neither sets nor returns sandboxLauncher — it returns 400 on
 	// create and silently omits it on read.
 	fmt.Println("==> Step 3a: Creating/updating Cloud Run Instance (gcloud, v1 surface)...")
 	if err := diGcloudDeploy(diName, diImage, diProject, diRegion,
-		diServiceAccount, diMemory, diCPU, iapAudience, adminEmail); err != nil {
+		diServiceAccount, diMemory, diCPU, iapAudience, adminEmail, imageRegistry); err != nil {
 		return fmt.Errorf("failed to deploy instance via gcloud: %w", err)
 	}
 	fmt.Println("    Instance deployed successfully.")
@@ -263,7 +278,7 @@ func diResolveProjectNumber(project string) (string, error) {
 // no --iap flag. They are set in a separate REST v2 PATCH (diEnableIAP).
 // The Instance is born with invoker check ON (default) — it is closed from
 // birth, and the IAP PATCH follows immediately.
-func diGcloudDeploy(name, image, project, region, serviceAccount, memory, cpu, iapAudience, adminEmail string) error {
+func diGcloudDeploy(name, image, project, region, serviceAccount, memory, cpu, iapAudience, adminEmail, imageRegistry string) error {
 	args := []string{
 		"beta", "run", "instances", "deploy", name,
 		"--image", image,
@@ -271,8 +286,8 @@ func diGcloudDeploy(name, image, project, region, serviceAccount, memory, cpu, i
 		"--region", region,
 		"--project", project,
 		"--set-env-vars",
-		fmt.Sprintf("SCION_SERVER_AUTH_MODE=proxy,SCION_SERVER_AUTH_PROXY_PROVIDER=iap,SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE=%s,SCION_SEED_SERVER_HUB_ADMINEMAILS=%s",
-			iapAudience, adminEmail),
+		fmt.Sprintf("SCION_SERVER_AUTH_MODE=proxy,SCION_SERVER_AUTH_PROXY_PROVIDER=iap,SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE=%s,SCION_SEED_SERVER_HUB_ADMINEMAILS=%s,SCION_IMAGE_REGISTRY=%s",
+			iapAudience, adminEmail, imageRegistry),
 	}
 
 	if serviceAccount != "" {
@@ -749,6 +764,49 @@ func diValidateInstanceURL(rawURL string) error {
 		return fmt.Errorf("instance URL host %q does not end with .run.app", u.Host)
 	}
 	return nil
+}
+
+// diDeriveRegistry extracts the registry prefix from a container image
+// reference. For example:
+//
+//	ghcr.io/ptone/scion-omni:latest  → ghcr.io/ptone
+//	ghcr.io/ptone/scion-omni@sha256:abc  → ghcr.io/ptone
+//	ghcr.io/ptone/scion-omni  → ghcr.io/ptone
+//
+// The registry is everything before the last path component (the image
+// name), after stripping any tag or digest suffix. Returns an error when
+// the image has no registry host (e.g. bare "nginx:latest").
+func diDeriveRegistry(image string) (string, error) {
+	// Strip tag (:...) or digest (@sha256:...).
+	ref := image
+	if idx := strings.Index(ref, "@"); idx != -1 {
+		ref = ref[:idx]
+	}
+	if idx := strings.LastIndex(ref, ":"); idx != -1 {
+		// Only strip if the colon is after the last slash (it's a tag,
+		// not a port in the registry host like localhost:5000/img).
+		if slashIdx := strings.LastIndex(ref, "/"); idx > slashIdx {
+			ref = ref[:idx]
+		}
+	}
+
+	// Split into path components. The last component is the image name;
+	// everything before it is the registry.
+	slashIdx := strings.LastIndex(ref, "/")
+	if slashIdx <= 0 {
+		return "", fmt.Errorf("cannot derive registry from image %q — "+
+			"expected host/org/name format (e.g. ghcr.io/ptone/scion-omni)", image)
+	}
+
+	registry := ref[:slashIdx]
+
+	// Sanity check: registry must contain a dot (hostname) or colon (port).
+	if !strings.Contains(registry, ".") && !strings.Contains(registry, ":") {
+		return "", fmt.Errorf("derived registry %q from image %q does not look like a "+
+			"hostname — use --image-registry to override", registry, image)
+	}
+
+	return registry, nil
 }
 
 // BuildInstanceURL computes the legacy-format Cloud Run Instance URL.

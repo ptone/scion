@@ -488,6 +488,90 @@ func TestValidateInstanceURL_Contaminated(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// diDeriveRegistry tests (#38)
+// ---------------------------------------------------------------------------
+
+// TestDeriveRegistry_Valid verifies registry derivation from well-formed images.
+func TestDeriveRegistry_Valid(t *testing.T) {
+	tests := []struct {
+		name  string
+		image string
+		want  string
+	}{
+		{
+			name:  "ghcr with tag",
+			image: "ghcr.io/ptone/scion-omni:latest",
+			want:  "ghcr.io/ptone",
+		},
+		{
+			name:  "ghcr with version tag",
+			image: "ghcr.io/ptone/scion-omni:v1.2.3",
+			want:  "ghcr.io/ptone",
+		},
+		{
+			name:  "ghcr with digest",
+			image: "ghcr.io/ptone/scion-omni@sha256:abcdef1234567890",
+			want:  "ghcr.io/ptone",
+		},
+		{
+			name:  "ghcr no tag",
+			image: "ghcr.io/ptone/scion-omni",
+			want:  "ghcr.io/ptone",
+		},
+		{
+			name:  "gcr with nested path",
+			image: "us-docker.pkg.dev/my-project/my-repo/scion-omni:latest",
+			want:  "us-docker.pkg.dev/my-project/my-repo",
+		},
+		{
+			name:  "localhost with port",
+			image: "localhost:5000/myimage:latest",
+			want:  "localhost:5000",
+		},
+		{
+			name:  "tag with digest combined",
+			image: "ghcr.io/ptone/scion-omni:v1@sha256:abcdef",
+			want:  "ghcr.io/ptone",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := diDeriveRegistry(tt.image)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestDeriveRegistry_Invalid verifies rejection of images where registry
+// cannot be derived (no host, bare image name).
+func TestDeriveRegistry_Invalid(t *testing.T) {
+	tests := []struct {
+		name  string
+		image string
+	}{
+		{
+			name:  "bare image with tag",
+			image: "nginx:latest",
+		},
+		{
+			name:  "bare image no tag",
+			image: "nginx",
+		},
+		{
+			name:  "docker library path",
+			image: "library/nginx:latest",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := diDeriveRegistry(tt.image)
+			assert.Error(t, err, "should reject image %q with no derivable registry", tt.image)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // diSanitizeResponse tests
 // ---------------------------------------------------------------------------
 
