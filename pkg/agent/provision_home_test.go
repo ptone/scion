@@ -157,7 +157,7 @@ func TestProvisionAgentEmptyChainAppliesEmbeddedHome(t *testing.T) {
 	// triggers sandbox shutdown. Its absence means the sandbox runs forever.
 	tmuxConf := filepath.Join(agentHome, ".tmux.conf")
 	if _, err := os.Stat(tmuxConf); os.IsNotExist(err) {
-		t.Errorf(".tmux.conf must exist in agent home even with an empty template chain — "+
+		t.Errorf(".tmux.conf must exist in agent home even with an empty template chain — " +
 			"the embedded default template home should have been applied as a floor")
 	}
 }
