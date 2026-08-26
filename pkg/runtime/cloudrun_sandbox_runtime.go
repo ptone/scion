@@ -985,9 +985,13 @@ func (r *CloudRunSandboxRuntime) Exec(ctx context.Context, id string, cmd []stri
 	return runSimpleCommand(ctx, r.bin, args...)
 }
 
-// GetWorkspacePath returns the launcher-side workspace path from the
-// state store. Since bind mounts use the same paths inside and outside
-// the sandbox (both are under /scion), this is the /scion workspace path.
+// GetWorkspacePath returns the launcher-side (host) workspace path from
+// the state store. The workspace mount uses an identity mapping
+// (source=destination, both under /scion), so this path is valid both
+// inside and outside the sandbox. Note: agent HOME uses a DIFFERENT
+// mapping (source=agentHome, destination=sandboxAgentHome), so home
+// paths are NOT interchangeable — use sandboxAgentHome for sandbox-internal
+// home references.
 func (r *CloudRunSandboxRuntime) GetWorkspacePath(ctx context.Context, id string) (string, error) {
 	entry := r.state.get(id)
 	if entry == nil {
