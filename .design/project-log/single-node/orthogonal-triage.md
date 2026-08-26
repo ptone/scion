@@ -39,11 +39,65 @@ are now resolved. One remains open, and it is open for a reason that no amount o
 
 | Defect | What is missing |
 |---|---|
-| D-35 | The hub rejects sandbox session metrics with HTTP 400. We do not have the response body. **Checked 21:10: the evidence window has closed.** Cloud Logging on `sn-step6` and `sn-walk` returns nothing for `metrics`/`400` at 12h, and nothing across all Instances at 3d. The instances are alive and logging (verified — `sn-step6` is emitting scheduler lines as of 20:59), so the query is sound; the original 400 has simply aged out. **A live reproduction is now the only route**: start an agent on `sn-step6`, let it exit naturally, and capture the hub's 400 body. Until then this cannot be filed honestly. |
+| D-35 | The hub rejects sandbox session metrics with HTTP 400. **Narrowed by reading at 21:55 — see §3.1. Six possible causes, one hypothesis eliminated, and the exact log string to grep is now known.** Still not filable: we need the body. **Checked 21:10: the evidence window has closed.** Cloud Logging on `sn-step6` and `sn-walk` returns nothing for `metrics`/`400` at 12h, and nothing across all Instances at 3d. The instances are alive and logging (verified — `sn-step6` is emitting scheduler lines as of 20:59), so the query is sound; the original 400 has simply aged out. **A live reproduction is now the only route**: start an agent on `sn-step6`, let it exit naturally, and capture the hub's 400 body. Until then this cannot be filed honestly. |
 | D-41 | **RESOLVED 21:40 — filed as [1276](https://github.com/ptone/scion/issues/1276).** The preflight call site is `extractRequiredEnvKeys`, `pkg/runtimebroker/handlers.go:2041`, called from `:527`. The defect is one line at `:2178`. Verified by reading, not by report: `handlers.go:2177-2179`, `pkg/harness/auth.go:413`, `pkg/hub/handlers_agents_core.go:1300-1307`, `start_context.go:388-392`. Five harness configs set the flag. A second, smaller defect travels with it — the doc comment on `projectHasVerifiedGCPSA` (`pkg/hub/handlers_agent_create_helpers.go:1344-1346`) claims a verified SA record means the metadata server can provide ADC. It does not. |
 | D-46 | **RESOLVED 21:05 — do not file. See §4.** |
 | D-39 | **RESOLVED 21:05 — do not file. See §4.** |
 | D-15 | The daemonize mechanism is still unknown. Nothing to file. |
+
+## 3.1 D-35 — what reading the code established
+
+The ingest path is `POST /api/v1/agents/{id}/metrics` (client builds the URL at
+`pkg/sciontool/hub/metrics.go:75`) into `handleAgentMetrics`
+(`pkg/hub/handlers_agent_metrics.go:63`). Do not confuse it with
+`/api/v1/metrics/session/{id}`, which is the **read** path and is a GET.
+
+`handleAgentMetrics` can return 400 in exactly six places, and no others:
+
+| Line | Cause |
+|---|---|
+| :81 | `Invalid request body: ...` — the JSON did not decode |
+| :87 | `session.id is required` |
+| :91 | `session.started_at is required` |
+| :98 | `session.started_at must be RFC3339` |
+| :105 | `session.ended_at must be RFC3339` |
+| :109 | `session.ended_at cannot be before session.started_at` |
+
+`BadRequest` and `ValidationError` both write 400 (`pkg/hub/errors.go:183`, `:188`).
+
+**One hypothesis raised and eliminated.** `SummaryToMetricsPayload`
+(`pkg/sciontool/hub/metrics.go:156`) formats `EndedAt` **unconditionally**. A zero `time.Time`
+formats to `"0001-01-01T00:00:00Z"`, which is non-empty — so `omitempty` does not drop it — and
+parses as valid RFC3339, so it would reach the `:109` comparison and fail as "before started_at".
+Measured directly: zero time formats to that string, parses clean, and `Before(now)` is true.
+**But this cannot happen.** The only constructor of `SessionSummary`
+(`pkg/sciontool/telemetry/aggregator.go:171-176`) always sets `EndedAt: time.Now()`. There is no
+second constructor. Eliminated by reading, not by guessing.
+
+By the same argument `started_at` cannot be empty or malformed either — it is always formatted from
+a `time.Time`. So `:91` and `:98` are also out, and `:105` with it.
+
+**That leaves two live candidates: `:81` and `:87`.** `:87` is the stronger one. `session.id` comes
+from `a.sessionID`, and nothing guards it before the send — the `OnSessionEnd` closure at
+`cmd/sciontool/commands/init.go:436-440` passes the summary straight through. If the sandbox agent
+never registered a session start, `sessionID` is `""` and the hub answers
+`session.id is required`. That is consistent with what we already know about this tier: agent
+lifecycle detection in the sandbox was broken for two independent reasons (task #31).
+
+**The body is not lost.** `ReportMetrics` puts the response body into the error —
+`fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))` at
+`pkg/sciontool/hub/metrics.go:124` — and `init.go:440` logs it as
+`Failed to report session metrics to hub: ...`. So this is **not** a diagnosability defect, and
+filing it as one would have been wrong. The answer was in the log all along; we simply did not
+keep it.
+
+**Sharpened reproduction recipe.** Start an agent on `sn-step6`, let it exit **naturally**, and
+grep the sandbox log for the literal string `Failed to report session metrics to hub`. The 400
+body is on that line and will name one of the two remaining causes.
+
+**Residual risk on the repro:** that log line is written by `sciontool init` inside the sandbox, so
+it goes to sandbox stderr. Our tier is known to lose sandbox stderr (task #46). If the repro comes
+back empty, that is not a dead end — it is confirmation of D-46 and should be recorded as such.
 
 # 4. What stays ours
 

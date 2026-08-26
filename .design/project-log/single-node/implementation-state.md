@@ -4032,3 +4032,75 @@ Nothing in this entry is approval for anything. Four decisions remain unanswered
 stopgap vs full fix for D-37/D-48, the credentialed push test, and dispatching a developer for the
 tutorial. Footprint reduction (#53) item 2 depends on PR 1265 landing, which is ptone's gate, and
 the tutorial (#50) is gated on decision B.4. Neither starts without a steer.
+
+---
+
+## 2026-08-26 21:55 — D-35 narrowed by reading; two candidates left, one hypothesis killed
+
+### Why I did this instead of stopping
+
+D-35 was the last open triage item and the only one **not** gated on ptone. Before spending a live
+agent on a reproduction, I read the handler. That was the right order: the read eliminated four of
+the six possible causes and corrected a wrong assumption about where the evidence lives.
+
+### The ingest path is not the path I first looked at
+
+`/api/v1/metrics/session/{id}` (`pkg/hub/server.go:3557`) is a **GET read** endpoint. The ingest
+path is `POST /api/v1/agents/{id}/metrics` → `handleAgentMetrics`
+(`pkg/hub/handlers_agent_metrics.go:63`). Anyone chasing this next should not lose time there.
+
+### The 400 set is exhaustive: six sites
+
+`:81` invalid body, `:87` `session.id is required`, `:91` `started_at is required`, `:98`
+`started_at must be RFC3339`, `:105` `ended_at must be RFC3339`, `:109` `ended_at cannot be before
+started_at`. Both `BadRequest` and `ValidationError` write 400 (`errors.go:183`, `:188`).
+
+### A hypothesis I raised and then killed
+
+`SummaryToMetricsPayload` (`metrics.go:156`) formats `EndedAt` **unconditionally**. A zero
+`time.Time` formats to `0001-01-01T00:00:00Z` — non-empty, so `omitempty` does not drop it, and
+valid RFC3339, so it parses — and would then fail the `:109` "before started_at" check. I measured
+this directly rather than assuming it.
+
+It is still wrong. The **only** constructor of `SessionSummary`
+(`pkg/sciontool/telemetry/aggregator.go:171-176`) always sets `EndedAt: time.Now()`, and `grep`
+confirms there is no second one. The same reasoning eliminates `:91`, `:98` and `:105`, because
+`started_at` is likewise always formatted from a `time.Time`.
+
+**Recording the dead hypothesis on purpose.** It is a good hypothesis — the unconditional format
+really is a latent trap, and it would fire the moment anyone constructs a `SessionSummary` by hand.
+The next person will think of it too, and should not have to re-derive that it is currently
+unreachable.
+
+### What is left
+
+`:81` and `:87`. **`:87` is the stronger candidate**: `session.id` comes from `a.sessionID` with no
+guard before the send (`init.go:436-440` passes the summary straight through), so an agent that
+never registered a session start sends `""` and gets `session.id is required`. That fits what task
+#31 established about this tier — sandbox agent lifecycle detection was broken for two independent
+reasons.
+
+### The correction that matters most
+
+**This is not a diagnosability defect, and I was about to treat it as one.** `ReportMetrics`
+embeds the response body in the error (`metrics.go:124`) and `init.go:440` logs it. The 400 body
+was always being written. We lost it by not keeping it, not because the code discards it. Had I
+filed a "the 400 is opaque" issue upstream it would have been the third bad report of the day,
+after D-46 and D-39.
+
+### Reproduction, sharpened
+
+Start an agent on `sn-step6`, let it exit **naturally**, grep the sandbox log for
+`Failed to report session metrics to hub`. The body is on that line.
+
+**If it comes back empty, that is a result, not a failure** — the line is written by `sciontool
+init` inside the sandbox to stderr, which this tier is known to lose (D-46). An empty grep confirms
+D-46 and should be recorded as such.
+
+### Not done
+
+I did not run the reproduction. It costs a live agent and the last thing I told ptone was that
+D-35 needs one; nothing here changes that conclusion, only the recipe. I also did not send a second
+message about it. He asked for less volume, and "I refined a recipe for a thing I already told you
+about" is not worth interrupting him for. It goes in the record and surfaces when he asks or when
+there is an answer.
