@@ -4593,3 +4593,63 @@ closing them leaves a reviewer unable to tell which is live.
 
 May I open the fork PR for `scion/sn-tier` now? I recommended yes: opening is not landing, and it
 moves review and CI into the 1265 wait rather than after it.
+
+---
+
+## 2026-08-26 23:42Z — ptone said "yes". Fork PR **ptone/scion#1282** is open.
+
+`scion/sn-tier` @ `facb22fb` — **40 files, +6837 −51, 6 commits**.
+Title: *Single-node hosted tier: Cloud Run Instance + sandboxes*.
+
+### What went into the PR body, and why
+
+I wrote it for a reviewer who has never seen this tier and who has probably just looked at #1302.
+Four things it has to do:
+
+1. **Lead with the DO NOT MERGE BEFORE #1265 warning, and say why.** The branch deliberately has no
+   dev-auth guard while shipping a publicly reachable `deploy-instance`. Left unstated, that reads
+   as an omission rather than a deliberate hand-off.
+2. **Kill the duplicate-of-#1302 reading before it forms.** Side-by-side table: #1302 is one Cloud
+   Run *service* per agent (`cloudrun_runtime.go`, registered `cloudrun`); this is all agents as
+   *sandboxes in one Instance* (`cloudrun_sandbox_runtime.go`, registered `cloudrun-sandbox`).
+   Named the single live conflict — `pkg/runtime/factory.go` — and **claimed the reconciliation**
+   rather than leaving it to be discovered. We land second, so it is ours.
+3. **Show the scope discipline as a table**, 68 → 40, so the repack is visible instead of implied.
+   Named the two drive-by branches explicitly, including the argument that the
+   `deploymentWarnings[]` mechanism *deserves review on its own merits* — I did not want it read as
+   Cloud Run plumbing that got waved through.
+4. **List the 5 issues as `Ref:` only**, with an explicit sentence that the PR neither fixes nor
+   code-works-around any of them.
+
+Also stated the venue trap in the body itself, not just in the sequencing file: **#1265 merging on
+the fork does not clear us.** The tier lands upstream; the guard must be upstream.
+
+### Protocol followed
+
+Fork PR only. **I did not open upstream and will not.** The compare URL for Discord thread
+1532864101909528737 is held until the guard is genuinely in upstream `main`. `Ref: ptone/scion#N`
+throughout — no bare `Fixes`. Branch keeps the `scion/<name>` convention.
+
+### CI at 23:41
+
+`shellcheck` **pass** (21s). `Build & Test`, `golangci-lint`, `Build and Push Omni Image` pending.
+`mergeable=MERGEABLE`, `mergeStateStatus=UNSTABLE` (unstable = checks still running, not a
+conflict). Branch is **behind `main` by 1** — harmless now, and it gets rebased when 1265 lands
+anyway.
+
+Worth noting: *Build and Push Omni Image* running at all is task #3 paying off. The omni image had
+no CI build path when this started.
+
+### Housekeeping closed out
+
+Coordinator: 1266, 1268 and 1269 were already closed by repo-maintenance. **I verified all three
+myself** rather than taking it — all `CLOSED`. So the "four PRs for one tier" problem lasted about
+two minutes and never reached a reviewer.
+
+Coordinator also said to **hold both drive-by branches** until the tier lands. Agreed — they are
+parked and pushed, and nothing decays while they sit.
+
+### Where this now stands
+
+The tier is out of my hands and into review. The remaining path is entirely other people's gates:
+#1265 upstream, then #1302, then the rebase, then the compare URL. Task #56 carries the sequence.
