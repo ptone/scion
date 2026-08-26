@@ -3951,3 +3951,84 @@ it should move.
 
 After the rebase the tier must still pass §1 end to end. A smaller diff that no longer deploys is
 not progress.
+
+---
+
+## 2026-08-26 21:40 — D-41 filed as issue 1276; the triage set is closed
+
+### What happened
+
+The Explore run into the auth preflight returned. D-41 is general, the mechanism is one line, and
+it is now filed as [ptone/scion#1276](https://github.com/ptone/scion/issues/1276).
+
+**I verified every line reference myself before filing.** The findings came from a subagent, and a
+subagent's file:line claims are exactly the kind of thing that should not go into an upstream bug
+report unread. All four checked out: `handlers.go:2177-2179`, `harness/auth.go:413`,
+`handlers_agents_core.go:1300-1307`, `start_context.go:388-392`. One number in the report was
+wrong in our favour — the flag is set by **five** harness configs, not four. `grep` found
+`grok-build/config.yaml:105` as well as gemini-cli, antigravity, claude and hermes.
+
+### The mechanism, in one paragraph
+
+`pkg/runtimebroker/handlers.go:2178` computes `gcpSAAssigned` from `MetadataMode == "assign"` and
+nothing else. `MetadataMode` has three values, and `passthrough` — the one that means "the agent
+reaches the real GCE metadata server", which is precisely the ambient-ADC deployment — is not
+counted. So `pkg/harness/auth.go:413` never skips `gcloud-adc`, the broker refuses at
+`handlers.go:577-622`, and the hub returns 422 `missing_env_vars`. The preflight has no other route
+to an ambient credential: its only ADC hook is `os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")` at
+`:2299`, which is a **file path** and is empty on a host whose credentials come from the metadata
+server.
+
+### Why this was worth filing rather than working around
+
+The preflight runs **before** `resolveRuntimeForAgent` (`:2522`) and contains no runtime branches.
+GCE and GKE workload identity hit this too. It is not our tier's problem; we were just the first to
+stand on it. That is the whole test ptone set at 20:29, and D-41 passes it cleanly.
+
+### A second defect travelled with it
+
+`projectHasVerifiedGCPSA` (`pkg/hub/handlers_agent_create_helpers.go:1344-1346`) is documented as
+meaning "the GCE metadata server can provide application default credentials at runtime". It does
+not mean that. It requires a **Scion-managed** SA record with `sa.Verified`. A host with attached
+ambient identity has working ADC and no such record. Lower severity — it feeds only the
+drop-to-shell decision (call site `:281`) — but the equivalence is false and will mislead the next
+reader. Reported in the same issue.
+
+### What I did not do
+
+I did **not** assert that counting `passthrough` is safe. I proposed it, gave the reasoning
+(`passthrough` is only ever set deliberately, and its entire meaning is "this host has a real
+metadata server"), offered the stricter `metadata.OnGCE()` variant, and asked the owner to confirm.
+They own the trust model. We do not.
+
+### Triage set now closed
+
+| Defect | Outcome |
+|---|---|
+| D-37 / D-48 | filed — 1273 |
+| D-49 | filed — 1274 |
+| D-42 | filed — 1275 |
+| D-41 | filed — 1276 |
+| D-46 | do not file — ours |
+| D-39 | do not file — Cloud Run platform feedback |
+| D-32, D-44, D-47 | ours |
+| D-35 | needs a live reproduction; evidence has aged out of Cloud Logging |
+| D-15 | no mechanism |
+
+Four filed, five ours, two unfilable. **Two of the five that looked orthogonal were not** — D-46 and
+D-39 were on the file list until they were diagnosed. Reading before filing cost about an hour and
+prevented two bad upstream reports. That ratio justifies the rule.
+
+### What is not done
+
+D-35 is the only open diagnosis, and no amount of reading closes it. The 400 response body is gone
+from Cloud Logging at 3d across all Instances, and the query shape is sound (`sn-step6` verified
+emitting at 20:59), so the record has simply aged out. A live reproduction on `sn-step6` — start an
+agent, let it exit **naturally**, capture the body — is the only route. Task #52 carries the recipe.
+
+### Still waiting on ptone
+
+Nothing in this entry is approval for anything. Four decisions remain unanswered: the merge gate,
+stopgap vs full fix for D-37/D-48, the credentialed push test, and dispatching a developer for the
+tutorial. Footprint reduction (#53) item 2 depends on PR 1265 landing, which is ptone's gate, and
+the tutorial (#50) is gated on decision B.4. Neither starts without a steer.

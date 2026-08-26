@@ -14,9 +14,12 @@ then rebase our work on the fixes and reduce our footprint.
 
 # 1. Summary
 
-- Three issues are filed: **1273**, **1274**, **1275**.
-- Five more defects need diagnosis before they can be filed honestly.
-- Three defects are ours and stay ours.
+- Four issues are filed: **1273**, **1274**, **1275**, **1276**.
+- The triage set is now closed. Of the five that needed diagnosis: **D-41 is filed** (1276),
+  **two are resolved to "do not file"** (D-46, D-39 — see §4), D-35 needs a live reproduction,
+  and D-15 has no mechanism.
+- **Five defects are ours and stay ours** — D-32, D-44, D-47, and now D-46 and D-39.
+- Two would have been bad upstream reports. Diagnosing before filing was worth the hour.
 - The largest footprint win is **not** the issues. It is 23 log files and one duplicated
   security fix. Together they remove 28 of the 63 files.
 
@@ -27,17 +30,19 @@ then rebase our work on the fixes and reduce our footprint.
 | [1273](https://github.com/ptone/scion/issues/1273) | D-37 / D-48 | hub + broker | The hub drops template and harness-config identity on agent create, and the broker falls back to a disk search that is empty in hosted mode. Affects any hosted hub, not any one runtime. |
 | [1274](https://github.com/ptone/scion/issues/1274) | D-49 | provisioning | `GitCloneConfig.Depth` is documented as `0 = full clone` and implemented as depth 1. The same defaulting appears in three independent paths: `pkg/provision/provision.go:308`, `pkg/runtime/k8s_runtime.go:2474`, `cmd/sciontool/commands/init.go:1592`. |
 | [1275](https://github.com/ptone/scion/issues/1275) | D-42 | agent create | `noAuth:true` makes a request fail that succeeds without it. Pure hub API behaviour. Reproduced, not root-caused; filed as such. |
+| [1276](https://github.com/ptone/scion/issues/1276) | D-41 | broker auth preflight | `pkg/runtimebroker/handlers.go:2178` counts only `metadata_mode: assign` as an assigned GCP identity. `passthrough` — the real metadata server, that is, ambient ADC — is not counted, so `skipped_when_gcp_service_account_assigned` never fires and `gcloud-adc` stays required. The preflight runs before runtime resolution and has no runtime branches, so this hits GCE, GKE and Cloud Run alike. |
 
-# 3. What needs diagnosis before it can be filed
+# 3. What needed diagnosis — now closed
 
-Do not file these yet. A bug report without a mechanism wastes the owner's time and ours.
+Do not file a defect without a mechanism. It wastes the owner's time and ours. Four of the five
+are now resolved. One remains open, and it is open for a reason that no amount of reading fixes.
 
 | Defect | What is missing |
 |---|---|
-| D-35 | The hub rejects sandbox session metrics with HTTP 400. We do not have the response body, so we cannot say whether the payload is wrong or the validation is. Get the 400 body first. |
-| D-41 | The ambient GCP identity is invisible to the auth preflight. Probably general to every GCP-hosted deployment, including GCE and GKE. We have not identified the preflight call site. |
-| D-46 | A git clone failure kills the sandbox with no message. The clone half is general; the "dies silently" half is ours. Split before filing. |
-| D-39 | Image-pull failure is undiagnosable. The error-message half is general; the cache-mirror naming is Cloud Run. Split before filing. |
+| D-35 | The hub rejects sandbox session metrics with HTTP 400. We do not have the response body. **Checked 21:10: the evidence window has closed.** Cloud Logging on `sn-step6` and `sn-walk` returns nothing for `metrics`/`400` at 12h, and nothing across all Instances at 3d. The instances are alive and logging (verified — `sn-step6` is emitting scheduler lines as of 20:59), so the query is sound; the original 400 has simply aged out. **A live reproduction is now the only route**: start an agent on `sn-step6`, let it exit naturally, and capture the hub's 400 body. Until then this cannot be filed honestly. |
+| D-41 | **RESOLVED 21:40 — filed as [1276](https://github.com/ptone/scion/issues/1276).** The preflight call site is `extractRequiredEnvKeys`, `pkg/runtimebroker/handlers.go:2041`, called from `:527`. The defect is one line at `:2178`. Verified by reading, not by report: `handlers.go:2177-2179`, `pkg/harness/auth.go:413`, `pkg/hub/handlers_agents_core.go:1300-1307`, `start_context.go:388-392`. Five harness configs set the flag. A second, smaller defect travels with it — the doc comment on `projectHasVerifiedGCPSA` (`pkg/hub/handlers_agent_create_helpers.go:1344-1346`) claims a verified SA record means the metadata server can provide ADC. It does not. |
+| D-46 | **RESOLVED 21:05 — do not file. See §4.** |
+| D-39 | **RESOLVED 21:05 — do not file. See §4.** |
 | D-15 | The daemonize mechanism is still unknown. Nothing to file. |
 
 # 4. What stays ours
@@ -47,6 +52,8 @@ Do not file these yet. A bug report without a mechanism wastes the owner's time 
 | D-32 | `relocateToScion` lives in `pkg/runtime/cloudrun_sandbox_runtime.go`. It is our code. We fix it. **This corrects an earlier classification.** |
 | D-44 | Downstream of D-45, which is fixed upstream (PR 1300). Not a new defect. It needs a re-test, not an issue. |
 | D-47 | Rewriting our own PR description. Process, not a defect. |
+| D-46 | **Reclassified 21:05.** The general path is already well instrumented. `cmd/sciontool/commands/init.go:286-300` logs the clone failure, writes `PhaseError` and the message into `agent-info.json`, and reports the error to the hub directly via `hubClient.ReportState`, with the broker heartbeat as a fallback. `init.go:1889-1894` classifies the failure and gives guidance, with tokens sanitised out. So the machinery exists and works. If the operator sees nothing on our tier, our sandbox path is losing it — the sandbox dies before the report completes, or the hub client is not configured, or stderr is not captured. **Ours. Filing this upstream would have been a bad report.** |
+| D-39 | **Reclassified 21:05.** Not a Scion defect at all. Our own `cloudrun_sandbox_runtime.go` contains no image-pull error handling (only sandbox-not-found at :931 and :988). The general k8s path already produces a reasonable message (`pkg/runtime/k8s_runtime.go:1627`). The ambiguous "not found", the cache-mirror name and the misleading tag advice all come from the Cloud Run **sandbox launcher binary**. Route as platform feedback to the Cloud Run Sandboxes team, not as an issue on `ptone/scion`. |
 
 # 5. Footprint reduction
 
