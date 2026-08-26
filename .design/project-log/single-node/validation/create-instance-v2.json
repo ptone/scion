@@ -1,0 +1,29 @@
+{
+  "launchStage": "ALPHA",
+  "containers": [
+    {
+      "image": "docker.io/library/python:3.11",
+      "command": [
+        "python3",
+        "-u",
+        "-c",
+        "import threading,http.server,urllib.request,json,sys,os\nclass H(http.server.BaseHTTPRequestHandler):\n    def do_GET(self):\n        self.send_response(200)\n        self.end_headers()\n        self.wfile.write(b\"ok\")\n    def log_message(self,*a):\n        pass\ns=http.server.HTTPServer((\"\",8080),H)\nthreading.Thread(target=s.serve_forever,daemon=True).start()\nprint(\"Health check on :8080\",flush=True)\ntry:\n    r=urllib.request.Request(\"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token\",headers={\"Metadata-Flavor\":\"Google\"})\n    t=json.loads(urllib.request.urlopen(r,timeout=10).read())[\"access_token\"]\n    r2=urllib.request.Request(\"https://storage.googleapis.com/ptone-experiments-instance-gym/validation/delete_timeout_validation_v2.py\",headers={\"Authorization\":\"Bearer \"+t})\n    code=urllib.request.urlopen(r2,timeout=30).read()\n    print(f\"Downloaded {len(code)} bytes\",flush=True)\n    exec(compile(code,\"validate.py\",\"exec\"))\nexcept Exception as e:\n    print(f\"Bootstrap error: {e}\",flush=True)\n    import traceback\n    traceback.print_exc()\n    print(\"Keeping alive for diagnostics...\",flush=True)\n    import time\n    while True:\n        time.sleep(3600)\n"
+      ],
+      "sandboxLauncher": true,
+      "resources": {
+        "limits": {
+          "cpu": "2000m",
+          "memory": "2048Mi"
+        }
+      },
+      "ports": [
+        {
+          "name": "http1",
+          "containerPort": 8080
+        }
+      ]
+    }
+  ],
+  "invokerIamDisabled": true,
+  "ingress": "INGRESS_TRAFFIC_ALL"
+}
