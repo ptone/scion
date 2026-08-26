@@ -486,12 +486,50 @@ func TestMountsFor_BasicPaths(t *testing.T) {
 
 	wantMounts := []string{
 		"type=bind,source=/scion/agents/test-agent/home,destination=/home/scion",
-		"type=bind,source=/scion/agents/test-agent/workspace,destination=/scion/agents/test-agent/workspace",
+		"type=bind,source=/scion/agents/test-agent/workspace,destination=/workspace",
 	}
 	for i, want := range wantMounts {
 		if mounts[i] != want {
 			t.Errorf("mounts[%d] = %q, want %q", i, mounts[i], want)
 		}
+	}
+}
+
+// TestMountsFor_WorkspaceMountedAtStandardPath verifies the workspace is
+// mounted at /workspace inside the sandbox (not at the host-side
+// /scion/agents/<slug>/workspace path). This is the fix for #43: without
+// this remapping, sciontool init tried to git-clone into /workspace on the
+// read-only rootfs, killing every git-linked agent on arrival.
+func TestMountsFor_WorkspaceMountedAtStandardPath(t *testing.T) {
+	paths := scionPaths{
+		root:      "/scion",
+		agentHome: "/scion/agents/slug/home",
+		workspace: "/scion/agents/slug/workspace",
+	}
+	mounts := mountsFor(paths, nil)
+
+	// Find the workspace mount.
+	var wsMount string
+	for _, m := range mounts {
+		if strings.Contains(m, "workspace") {
+			wsMount = m
+			break
+		}
+	}
+	if wsMount == "" {
+		t.Fatal("no workspace mount found")
+	}
+
+	// Destination must be /workspace, NOT the host-side path.
+	wantDest := "destination=/workspace"
+	if !strings.Contains(wsMount, wantDest) {
+		t.Errorf("workspace mount destination wrong:\n  got:  %s\n  want: ...%s", wsMount, wantDest)
+	}
+
+	// Source must be the host-side path.
+	wantSrc := "source=/scion/agents/slug/workspace"
+	if !strings.Contains(wsMount, wantSrc) {
+		t.Errorf("workspace mount source wrong:\n  got:  %s\n  want: ...%s", wsMount, wantSrc)
 	}
 }
 
@@ -595,6 +633,20 @@ func TestEnvFor_PATH_OverridableByHarness(t *testing.T) {
 	env := envFor(cfg, paths)
 	if env["PATH"] != "/custom/bin" {
 		t.Errorf("PATH = %q, want harness override %q", env["PATH"], "/custom/bin")
+	}
+}
+
+func TestEnvFor_WorkspacePath(t *testing.T) {
+	cfg := RunConfig{}
+	paths := scionPaths{}
+
+	env := envFor(cfg, paths)
+
+	// SCION_WORKSPACE_PATH must be set to /workspace so sciontool init
+	// resolves the writable bind mount (not the read-only rootfs). This
+	// is the sandbox equivalent of Docker's --workdir /workspace (#43).
+	if env["SCION_WORKSPACE_PATH"] != sandboxWorkspace {
+		t.Errorf("SCION_WORKSPACE_PATH = %q, want %q", env["SCION_WORKSPACE_PATH"], sandboxWorkspace)
 	}
 }
 
@@ -1058,11 +1110,13 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 		"--write",
 		"--allow-egress",
 		"--mount",
-		// Per-agent mounts: agent home mounted at /home/scion destination,
-		// workspace at its own path. No tmux mount (§4.4a: AF_UNIX can't
-		// cross gVisor boundary).
+		// Per-agent mounts: agent home mounted at /home/scion, workspace
+		// at /workspace. No tmux mount (§4.4a: AF_UNIX can't cross gVisor
+		// boundary). Workspace destination must be /workspace (not the
+		// host-side path) so sciontool init's git clone writes to the
+		// writable bind mount instead of the read-only rootfs (#43).
 		"type=bind,source=" + rootDir + "/agents/test-agent/home,destination=/home/scion",
-		"type=bind,source=" + rootDir + "/agents/test-agent/workspace,destination=" + rootDir + "/agents/test-agent/workspace",
+		"type=bind,source=" + rootDir + "/agents/test-agent/workspace,destination=/workspace",
 		// Env vars via --env flags (FIX 2), not /usr/bin/env.
 		"--env",
 		"sciontool",

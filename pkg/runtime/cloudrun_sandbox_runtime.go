@@ -63,6 +63,17 @@ const defaultStatePath = "/tmp/scion-sandbox-state.json"
 // When writing paths for code that runs on the HOST, use scionPaths.agentHome.
 const sandboxAgentHome = "/home/scion"
 
+// sandboxWorkspace is the path where the agent workspace is mounted INSIDE
+// the sandbox. Like sandboxAgentHome, this differs from the host-side path
+// (scionPaths.workspace, e.g. /scion/agents/<slug>/workspace). mountsFor
+// maps the host path to this destination so that sciontool init — which
+// defaults to /workspace when SCION_WORKSPACE_PATH is unset — writes to
+// the writable bind mount rather than the read-only rootfs.
+//
+// This matches the Docker/Podman convention (common.go:210) where the
+// workspace is always mounted at /workspace regardless of the host-side path.
+const sandboxWorkspace = "/workspace"
+
 // entrypointLogFile is the filename (relative to agentHome) where the
 // entrypoint's stdout/stderr is captured on failure. When `exec sciontool
 // init` succeeds the shell is replaced and the file contains normal init
@@ -421,9 +432,16 @@ func mountsFor(paths scionPaths, sharedDirs []api.SharedDir) []string {
 	// confirmed by diag-sbx6), so the previous rm -rf / ln -sfn approach
 	// fails. Mounting with a different destination avoids rootfs mutation
 	// entirely and was confirmed working by diag-sbx6.
+	//
+	// Mount the workspace at sandboxWorkspace (/workspace) so that
+	// sciontool init's git clone (which defaults to /workspace via
+	// SCION_WORKSPACE_PATH) writes to the writable bind mount. Without
+	// this remapping the workspace was mounted at the host-side path
+	// (/scion/agents/<slug>/workspace) while /workspace remained on the
+	// read-only rootfs, causing every git-linked agent to fail at init.
 	mounts := []string{
 		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.agentHome, sandboxAgentHome),
-		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.workspace, paths.workspace),
+		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.workspace, sandboxWorkspace),
 	}
 	for _, sd := range sharedDirs {
 		sdPath := filepath.Join(filepath.Dir(paths.agentHome), "..", "..", "shared", sd.Name)
@@ -476,6 +494,14 @@ func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 		env["SCION_PROJECT_ID"] = cfg.ProjectID
 		env["SCION_GROVE_ID"] = cfg.ProjectID
 	}
+
+	// Workspace path: tell sciontool init where the writable workspace is
+	// mounted inside the sandbox. mountsFor maps the host-side workspace
+	// (e.g. /scion/agents/<slug>/workspace) to sandboxWorkspace (/workspace).
+	// Without this, sciontool init defaults to /workspace which is correct,
+	// but setting it explicitly documents the contract and insulates against
+	// any future change to the default.
+	env["SCION_WORKSPACE_PATH"] = sandboxWorkspace
 
 	// Workspace backend.
 	if cfg.WorkspaceBackendName != "" {
