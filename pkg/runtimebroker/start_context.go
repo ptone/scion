@@ -381,9 +381,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			env["SCION_METADATA_SA_EMAIL"] = in.Config.GCPIdentity.SAEmail
 			env["SCION_METADATA_PROJECT_ID"] = in.Config.GCPIdentity.ProjectID
 		}
+		// The metadata emulator runs inside the sandbox (started by
+		// sciontool init), so localhost is correct — the emulator and the
+		// harness share the same network namespace.
 		env["GCE_METADATA_HOST"] = "localhost:18380"
 		// gcloud CLI uses GCE_METADATA_ROOT (not GCE_METADATA_HOST) to locate
 		// the metadata server during its initial configuration detection.
+		// Both must point at the same address.
 		env["GCE_METADATA_ROOT"] = "localhost:18380"
 	case store.GCPMetadataModePassthrough:
 		// Deliberately no redirect: passthrough means the agent is meant to

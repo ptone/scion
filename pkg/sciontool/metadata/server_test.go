@@ -1012,3 +1012,89 @@ func TestMetadataServer_StartReclaimsPortViaShutdownEndpoint(t *testing.T) {
 		t.Fatalf("expected new-project from replacement server, got %q", body)
 	}
 }
+
+// -----------------------------------------------------------------------
+// Bind address tests — §4.11 S5 security guard
+// -----------------------------------------------------------------------
+
+// TestBindAddress_Never0000 is the durable guard test required by S5 (§4.11):
+// the metadata emulator must never bind to 0.0.0.0, because it does not
+// authenticate callers and would become a credential-minting endpoint
+// reachable by anything that can route to it.
+func TestBindAddress_Never0000(t *testing.T) {
+	_, err := resolveBindAddress("0.0.0.0")
+	if err == nil {
+		t.Fatal("resolveBindAddress(\"0.0.0.0\") must return an error — " +
+			"binding 0.0.0.0 exposes the unauthenticated credential endpoint (§4.11 S5)")
+	}
+	if !strings.Contains(err.Error(), "0.0.0.0") {
+		t.Fatalf("error should mention 0.0.0.0, got: %v", err)
+	}
+}
+
+// TestBindAddress_DefaultIsLoopback verifies that an empty BindAddress
+// defaults to 127.0.0.1, not 0.0.0.0.
+func TestBindAddress_DefaultIsLoopback(t *testing.T) {
+	addr, err := resolveBindAddress("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if addr != "127.0.0.1" {
+		t.Fatalf("expected 127.0.0.1, got %q", addr)
+	}
+}
+
+// TestBindAddress_ExplicitIP passes through a valid explicit address.
+func TestBindAddress_ExplicitIP(t *testing.T) {
+	addr, err := resolveBindAddress("169.254.8.1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if addr != "169.254.8.1" {
+		t.Fatalf("expected 169.254.8.1, got %q", addr)
+	}
+}
+
+// TestBindAddress_StartRejects0000 verifies that Start() itself refuses to
+// proceed when BindAddress is "0.0.0.0", exercising the full code path.
+func TestBindAddress_StartRejects0000(t *testing.T) {
+	srv := New(Config{
+		Mode:        modeBlock,
+		Port:        freePort(t),
+		BindAddress: "0.0.0.0",
+	})
+	err := srv.Start(context.Background())
+	if err == nil {
+		srv.Stop()
+		t.Fatal("Start() must fail when BindAddress is 0.0.0.0")
+	}
+	if !strings.Contains(err.Error(), "0.0.0.0") {
+		t.Fatalf("error should mention 0.0.0.0, got: %v", err)
+	}
+}
+
+// TestBindAddress_CustomBindWorks verifies the server binds to a specific
+// address when configured.
+func TestBindAddress_CustomBindWorks(t *testing.T) {
+	port := freePort(t)
+	srv := New(Config{
+		Mode:        modeBlock,
+		Port:        port,
+		BindAddress: "127.0.0.1", // explicit loopback
+	})
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer srv.Stop()
+
+	// Verify reachability.
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		t.Fatalf("could not reach server: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
