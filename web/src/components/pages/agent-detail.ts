@@ -1737,6 +1737,27 @@ export class ScionPageAgentDetail extends LitElement {
                 </div>
               `
             : ''}
+          ${agent.appliedConfig?.agentRole
+            ? html`
+                <div class="info-item">
+                  <span class="info-label">Authorization Role</span>
+                  <span class="info-value">
+                    <sl-badge
+                      variant=${agent.appliedConfig.agentRole === 'full'
+                        ? 'success'
+                        : agent.appliedConfig.agentRole === 'baseline'
+                          ? 'primary'
+                          : agent.appliedConfig.agentRole === 'readonly'
+                            ? 'neutral'
+                            : agent.appliedConfig.agentRole === 'none'
+                              ? 'warning'
+                              : 'neutral'}
+                      >${agent.appliedConfig.agentRole}</sl-badge
+                    >
+                  </span>
+                </div>
+              `
+            : ''}
           ${agent.visibility
             ? html`
                 <div class="info-item">
