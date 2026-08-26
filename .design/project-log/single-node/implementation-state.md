@@ -4382,3 +4382,64 @@ repro on `sn-step6` (still up) remains the only way to close it.
 Filing plan: report part 1 (confirmed by reading) as the defect; state part 2 as unconfirmed rather
 than dressing a hypothesis as a finding. Two bad upstream reports (D-46, D-39) already came from
 reasoning off a signal instead of exercising the path.
+
+---
+
+## 2026-08-26 22:47Z — scion/sn-tier delivered at 40 files. Verified against the remote, not taken on report.
+
+`sn-repack-dev` reported COMPLETED at 22:45. **I verified every claim through the GitHub compare
+API before accepting any of it.** The heartbeat's warning that agents have reported work not on
+disk is why; in this case the report held up.
+
+| Check | Result |
+|---|---|
+| Three branches exist on remote | `scion/sn-tier` `facb22fb`, `sn-driveby-embed-comment` `c4619074`, `sn-driveby-deployment-warnings` `97727c66` |
+| File count | **40**, `+6837 -51`, 6 commits |
+| `.design/project-log/` | **0 files** |
+| `pkg/hub/web.go`, `web_test.go`, `scripts/cloudrun/deploy.sh` | all **absent** — security fix removed |
+| Dev-auth guard in `cmd/server_foreground.go` | patch is 2351 bytes, **0** `loopback` references → gone |
+| `cmd/server_bridge_test.go` | **kept** (100% tier work) |
+| Drive-bys in tier | `web/embed.go`, `handlers_health.go`, `diagnostics.ts` all **absent** |
+| Drive-by branch contents | exactly 1 file and exactly 2 files, as specified |
+| Design doc | **byte-identical** to my `77dfada`, 435 lines |
+| `DO NOT MERGE BEFORE PR #1265` | present in the commit message |
+
+**A quoting trap nearly gave me a false pass.** My first design-doc comparison printed `IDENTICAL`
+— because zsh glob-expanded the `?` in `contents/...md?ref=...`, both `gh api` calls failed, and I
+diffed two empty files. This is the third time this session that an unquoted shell metacharacter
+has produced a confident wrong answer (`--include=*.go` was the earlier one). Quote every URL
+containing `?`. A verification step that can silently succeed on no data is worse than no
+verification, because it launders a guess into a fact.
+
+### Final footprint: 40 files, from 68
+
+```
+68  full tier (1266+1268+1269)
+45  − 23 .design/project-log/*.md
+46  + 1 design doc
+43  − 3 pure security-fix files (web.go, web_test.go, deploy.sh)
+40  − 3 drive-by files
+```
+
+40 against my predicted 39. The `+1` is `cmd/server_bridge_test.go`, which I had wrongly listed
+for deletion. The developer caught it. My three published estimates went 33 → 39 → 40; the honest
+reading is that only the last one was derived from evidence rather than from a previous estimate.
+
+### One gap the developer did not flag, found in verification (task #55)
+
+The two `DeploymentWarnings` tests were removed from `pkg/hub/workspace_storage_test.go` on
+`scion/sn-tier` — **correctly**, since they cover the split-out mechanism. But they were **not
+carried onto `scion/sn-driveby-deployment-warnings`**, which holds exactly two files, neither a
+`_test.go`. Confirmed both directions: the tier patch has 0 `DeploymentWarnings` references, and
+the drive-by branch has 0 test files.
+
+**The tests now exist on neither branch.** Not a tier blocker, and the removal from the tier was
+right. But the entire argument for splitting the mechanism out was that it deserves to be proposed
+on its own merits — and proposing it with its coverage silently deleted defeats that. Recover them
+from `scion/sn-ws-mount` before that branch goes up.
+
+### Critical path
+
+`scion/sn-tier` is ready and blocked on exactly one thing: **ptone merging PR 1265**, still OPEN.
+The tier deliberately carries no dev-auth guard, so it must not land first. Nothing else is
+waiting.
