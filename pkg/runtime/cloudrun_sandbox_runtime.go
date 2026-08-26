@@ -1019,9 +1019,12 @@ func (r *CloudRunSandboxRuntime) Exec(ctx context.Context, id string, cmd []stri
 	return runSimpleCommand(ctx, r.bin, args...)
 }
 
-// GetWorkspacePath returns the launcher-side workspace path from the
-// state store. Since bind mounts use the same paths inside and outside
-// the sandbox (both are under /scion), this is the /scion workspace path.
+// GetWorkspacePath returns the HOST-side workspace path from the state
+// store (e.g. /scion/agents/<slug>/workspace). This is the path on the
+// launcher filesystem, not the path inside the sandbox — mountsFor
+// remaps the workspace to /workspace inside the sandbox, so the two
+// differ. The interface contract (interface.go:121) defines the return
+// value as the host path.
 func (r *CloudRunSandboxRuntime) GetWorkspacePath(ctx context.Context, id string) (string, error) {
 	entry := r.state.get(id)
 	if entry == nil {
