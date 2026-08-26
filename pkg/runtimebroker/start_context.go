@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"go.opentelemetry.io/otel/attribute"
@@ -381,10 +382,29 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			env["SCION_METADATA_SA_EMAIL"] = in.Config.GCPIdentity.SAEmail
 			env["SCION_METADATA_PROJECT_ID"] = in.Config.GCPIdentity.ProjectID
 		}
-		env["GCE_METADATA_HOST"] = "localhost:18380"
+		// On the cloudrun-sandbox runtime, sandboxes cannot reach localhost
+		// on the launcher — they can only reach the launcher's link-local
+		// address (169.254.0.0/16). The metadata emulator runs on the
+		// launcher, so GCE_METADATA_HOST must point at that address.
+		// On other runtimes the emulator runs inside the same container,
+		// so localhost is correct.
+		metadataHost := "localhost:18380"
+		if runtimeName == "cloudrun-sandbox" {
+			if linkLocal, err := metadata.DiscoverLinkLocalAddress(); err == nil {
+				metadataHost = fmt.Sprintf("%s:18380", linkLocal)
+				// Tell the launcher's emulator to bind link-local too.
+				env["SCION_METADATA_BIND_ADDRESS"] = linkLocal
+			} else {
+				slog.Warn("cloudrun-sandbox: could not discover link-local address for metadata host; "+
+					"sandboxes will not be able to reach the metadata emulator",
+					"error", err)
+			}
+		}
+		env["GCE_METADATA_HOST"] = metadataHost
 		// gcloud CLI uses GCE_METADATA_ROOT (not GCE_METADATA_HOST) to locate
 		// the metadata server during its initial configuration detection.
-		env["GCE_METADATA_ROOT"] = "localhost:18380"
+		// Both must point at the same address.
+		env["GCE_METADATA_ROOT"] = metadataHost
 	case store.GCPMetadataModePassthrough:
 		// Deliberately no redirect: passthrough means the agent is meant to
 		// reach the real GCE metadata server. Listed explicitly so it is a

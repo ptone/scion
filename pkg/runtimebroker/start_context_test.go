@@ -873,6 +873,136 @@ func TestBuildStartContext_GCPMetadataPassthroughFromResolvedEnv(t *testing.T) {
 	}
 }
 
+// newTestServerWithRuntime creates a test server like newTestServerForStartContext
+// but with a custom runtime name.
+func newTestServerWithRuntime(t *testing.T, cfg ServerConfig, runtimeName string) *Server {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpDir := t.TempDir()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(origWd)
+	})
+
+	dotScion := filepath.Join(tmpDir, ".scion")
+	if err := os.Mkdir(dotScion, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsYAML := `schema_version: "1"
+active_profile: local
+profiles:
+    local:
+        runtime: mock
+runtimes:
+    mock:
+        type: mock
+`
+	if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	templatesDir := filepath.Join(dotScion, "templates")
+	if err := os.MkdirAll(templatesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(templatesDir, "default"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(templatesDir, "claude"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.ForceRuntime = "mock"
+	mgr := &envCapturingManager{}
+	rt := &runtime.MockRuntime{
+		NameFunc: func() string { return runtimeName },
+	}
+	return New(cfg, mgr, rt)
+}
+
+// TestBuildStartContext_GCPMetadataCloudrunSandbox verifies that on the
+// cloudrun-sandbox runtime, GCE_METADATA_HOST and GCE_METADATA_ROOT are set
+// together (the grok-build harness reads GCE_METADATA_ROOT via gcloud), and
+// that the SCION_METADATA_BIND_ADDRESS is set when a link-local address is
+// available.
+func TestBuildStartContext_GCPMetadataCloudrunSandbox(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerWithRuntime(t, cfg, "cloudrun-sandbox")
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-sandbox",
+		HTTPRequest: r,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	host := sc.Opts.Env["GCE_METADATA_HOST"]
+	root := sc.Opts.Env["GCE_METADATA_ROOT"]
+
+	// Both must be set — gcloud reads ROOT, other SDKs read HOST.
+	if host == "" {
+		t.Fatal("GCE_METADATA_HOST must be set for cloudrun-sandbox")
+	}
+	if root == "" {
+		t.Fatal("GCE_METADATA_ROOT must be set for cloudrun-sandbox")
+	}
+	// Both must point at the same address.
+	if host != root {
+		t.Errorf("GCE_METADATA_HOST (%q) and GCE_METADATA_ROOT (%q) must match", host, root)
+	}
+
+	// If a link-local was discovered, the host should contain the link-local
+	// address (not localhost) and SCION_METADATA_BIND_ADDRESS should be set.
+	// If no link-local exists (most CI environments), both fall back to
+	// localhost:18380 — still correct but the sandbox cannot reach it.
+	if strings.HasPrefix(host, "169.254.") {
+		if sc.Opts.Env["SCION_METADATA_BIND_ADDRESS"] == "" {
+			t.Error("SCION_METADATA_BIND_ADDRESS must be set when link-local is discovered")
+		}
+	}
+}
+
+// TestBuildStartContext_GCPMetadataBothVarsAlwaysMatch guards the invariant
+// that GCE_METADATA_HOST and GCE_METADATA_ROOT are always set to the same
+// value. A mismatch means gcloud (ROOT) and language SDKs (HOST) would talk
+// to different servers.
+func TestBuildStartContext_GCPMetadataBothVarsAlwaysMatch(t *testing.T) {
+	for _, rt := range []string{"mock", "cloudrun-sandbox"} {
+		t.Run(rt, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerWithRuntime(t, cfg, rt)
+
+			r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:        "agent-both-vars",
+				HTTPRequest: r,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			host := sc.Opts.Env["GCE_METADATA_HOST"]
+			root := sc.Opts.Env["GCE_METADATA_ROOT"]
+			if host != root {
+				t.Errorf("GCE_METADATA_HOST=%q GCE_METADATA_ROOT=%q — must match", host, root)
+			}
+		})
+	}
+}
+
 // --- resolveWorktreeProvision tests ---
 
 func TestResolveWorktreeProvision_Eligible(t *testing.T) {
