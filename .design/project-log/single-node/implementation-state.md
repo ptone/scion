@@ -3954,7 +3954,7 @@ not progress.
 
 ---
 
-## 2026-08-26 21:40 — D-41 filed as issue 1276; the triage set is closed
+## 2026-08-26 21:05 — D-41 filed as issue 1276; the triage set is closed
 
 ### What happened
 
@@ -4035,7 +4035,7 @@ the tutorial (#50) is gated on decision B.4. Neither starts without a steer.
 
 ---
 
-## 2026-08-26 21:55 — D-35 narrowed by reading; two candidates left, one hypothesis killed
+## 2026-08-26 21:28 — D-35 narrowed by reading; two candidates left, one hypothesis killed
 
 ### Why I did this instead of stopping
 
