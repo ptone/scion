@@ -1029,14 +1029,15 @@ func TestSelectLinkLocalAddress_SingleAddress(t *testing.T) {
 
 func TestSelectLinkLocalAddress_MultipleAddresses(t *testing.T) {
 	// Cloud Run Instances always have three link-local addresses.
-	// The function should sort by numeric IP value and return the lowest.
+	// 169.254.169.1 is in the metadata /24 and should be deprioritised;
+	// 169.254.8.1 is the numerically lowest non-metadata candidate.
 	addrs := []string{"169.254.169.1", "169.254.9.1", "169.254.8.1"}
 	addr, err := selectLinkLocalAddress(addrs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if addr != "169.254.8.1" {
-		t.Fatalf("expected 169.254.8.1 (numerically lowest), got %q", addr)
+		t.Fatalf("expected 169.254.8.1 (lowest non-metadata-adjacent), got %q", addr)
 	}
 }
 
@@ -1055,6 +1056,32 @@ func TestSelectLinkLocalAddress_MultipleAddresses_Deterministic(t *testing.T) {
 		if addr != "169.254.8.1" {
 			t.Fatalf("expected 169.254.8.1 for input %v, got %q", addrs, addr)
 		}
+	}
+}
+
+func TestSelectLinkLocalAddress_PrefersNonMetadataAdjacent(t *testing.T) {
+	// When a future platform hands out 169.254.169.1 and 169.254.200.1,
+	// the non-metadata-adjacent address should be preferred even though
+	// 169.254.169.1 is numerically lower.
+	addrs := []string{"169.254.169.1", "169.254.200.1"}
+	addr, err := selectLinkLocalAddress(addrs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if addr != "169.254.200.1" {
+		t.Fatalf("expected 169.254.200.1 (non-metadata-adjacent), got %q", addr)
+	}
+}
+
+func TestSelectLinkLocalAddress_FallsBackToMetadata(t *testing.T) {
+	// When all candidates are in the metadata /24, still return the lowest.
+	addrs := []string{"169.254.169.10", "169.254.169.1"}
+	addr, err := selectLinkLocalAddress(addrs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if addr != "169.254.169.1" {
+		t.Fatalf("expected 169.254.169.1 (lowest in metadata /24 fallback), got %q", addr)
 	}
 }
 

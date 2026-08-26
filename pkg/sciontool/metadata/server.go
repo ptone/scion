@@ -298,9 +298,20 @@ func DiscoverLinkLocalAddress() (string, error) {
 	return selectLinkLocalAddress(found)
 }
 
+// metadataNet is 169.254.169.0/24 — the subnet containing the GCP metadata
+// server (169.254.169.254). No collision has been observed, but placing hub
+// traffic on an address in this /24 invites untested interactions with
+// GCE_METADATA_HOST, the metadata emulator, and platform iptables rules.
+// This is precautionary, not measured.
+var metadataNet = func() *net.IPNet {
+	_, n, _ := net.ParseCIDR("169.254.169.0/24")
+	return n
+}()
+
 // selectLinkLocalAddress picks one address from the candidate list.
 // It returns an error when the list is empty. When multiple addresses are
-// present, it sorts them by numeric IP value and returns the lowest.
+// present, it prefers candidates outside the GCP metadata /24 and sorts
+// by numeric IP value within that preference.
 func selectLinkLocalAddress(found []string) (string, error) {
 	switch len(found) {
 	case 0:
@@ -311,11 +322,19 @@ func selectLinkLocalAddress(found []string) (string, error) {
 		// Multiple link-local addresses found. On Cloud Run Instances, all of
 		// them reach the launcher from inside a sandbox (measured: every
 		// 169.254.x.x on the launcher returns HTTP 200 against 0.0.0.0).
-		// Any deterministic choice is safe; we sort by numeric IP value and
-		// pick the lowest to keep the selection stable across restarts. This
-		// is arbitrary-but-stable, not principled selection.
+		// Any deterministic choice is safe. We prefer addresses outside
+		// 169.254.169.0/24 (precautionary — no collision observed, but that
+		// /24 contains the GCP metadata server and we avoid untested
+		// interactions), then sort by numeric IP value for stability.
 		sort.Slice(found, func(i, j int) bool {
-			return bytes.Compare(net.ParseIP(found[i]).To4(), net.ParseIP(found[j]).To4()) < 0
+			iIP := net.ParseIP(found[i]).To4()
+			jIP := net.ParseIP(found[j]).To4()
+			iMeta := metadataNet.Contains(iIP)
+			jMeta := metadataNet.Contains(jIP)
+			if iMeta != jMeta {
+				return !iMeta // prefer non-metadata-adjacent
+			}
+			return bytes.Compare(iIP, jIP) < 0
 		})
 		log.Info("Multiple link-local addresses found %v; selecting %s", found, found[0])
 		return found[0], nil
