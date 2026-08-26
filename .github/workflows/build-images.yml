@@ -31,6 +31,8 @@ on:
           - harnesses
           - hub
           - omni
+          - thick
+          - thick-prep
         default: 'common'
       tag:
         description: 'Image tag'
@@ -51,7 +53,7 @@ on:
         required: true
         type: string
       target:
-        description: 'Build target (common, all, core-base, scion-base, harnesses, hub, omni)'
+        description: 'Build target (common, all, core-base, scion-base, harnesses, hub, omni, thick, thick-prep)'
         type: string
         default: 'common'
       tag:
