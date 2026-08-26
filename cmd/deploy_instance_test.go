@@ -164,7 +164,7 @@ func TestEnableIAPPatchBody(t *testing.T) {
 		require.NoError(t, err)
 		capturedBody = body
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer server.Close()
 
@@ -209,7 +209,7 @@ func TestEnableIAPUpdateMask(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedURL = r.URL.String()
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer server.Close()
 
@@ -270,7 +270,7 @@ func TestAssertPerimeter_AppAnswers(t *testing.T) {
 	// Simulate no IAP: app answers directly with 200
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Hello world"))
+		_, _ = w.Write([]byte("Hello world"))
 	}))
 	defer server.Close()
 
@@ -316,7 +316,7 @@ func TestAssertPerimeter_CloudRunErrorPage(t *testing.T) {
 		t.Run(fmt.Sprintf("status_%d", code), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(code)
-				w.Write([]byte("Cloud Run error page"))
+				_, _ = w.Write([]byte("Cloud Run error page"))
 			}))
 			defer server.Close()
 

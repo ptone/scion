@@ -367,7 +367,7 @@ func diRESTCall(method, url, token string, body []byte) (int, string, error) {
 	if err != nil {
 		return 0, "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -405,7 +405,7 @@ func diWaitForIAP(instanceURL string) error {
 			time.Sleep(pollInterval)
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode == http.StatusFound {
 			location := resp.Header.Get("Location")
@@ -596,7 +596,7 @@ func diAssertPerimeter(instanceURL string) error {
 	if err != nil {
 		return fmt.Errorf("could not reach instance URL %s: %w", instanceURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Require a 302 to accounts.google.com
 	if resp.StatusCode != http.StatusFound {
