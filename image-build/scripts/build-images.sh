@@ -68,6 +68,9 @@ Options:
                           common      - scion-base + harnesses + hub (skip core-base)
                           all         - full rebuild including core-base
                           thick-prep  - just the thick base prep layer (amd64 only)
+                          omni        - omni image chain for Cloud Run Instances
+                                        single-node deployment (amd64 only,
+                                        needs scion-base pre-built or in registry)
                           thick       - full thick rebuild: thick-prep + scion-base +
                                         harnesses + hub (amd64 only, uses Cloud
                                         Workstations base instead of core-base)

@@ -18,6 +18,10 @@
 # The harness chain (claude -> codex -> opencode -> antigravity -> grok-build)
 # already installed all harness binaries and config via their own Dockerfiles.
 # This final layer adds only the hub server wiring and pins USER/CMD.
+#
+# Registry convention (used by deploy --image):
+#   ghcr.io/<owner>/scion-omni:<tag>
+# where <tag> is a release version (e.g. v0.1.0) or "latest".
 
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
