@@ -15,10 +15,12 @@
 package runtimebroker
 
 import (
+	"fmt"
 	"net"
 	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 )
 
 const redactedEnvValue = "<redacted>"
@@ -160,6 +162,42 @@ func colocatedExtraHosts(hubEndpoint string, isColocated bool, runtimeName strin
 		return nil
 	}
 	return []string{host + ":host-gateway"}
+}
+
+// cloudrunSandboxHubEndpoint computes the hub endpoint for a sandbox on the
+// cloudrun-sandbox runtime. Sandboxes cannot reach the hub's public IAP-fronted
+// URL (no IAP credential), but the hub is on the same Instance, listening on
+// 0.0.0.0, and reachable from the sandbox via the launcher's link-local address.
+//
+// Same function (DiscoverLinkLocalAddress), same value — but now as a
+// destination (where the sandbox should connect), not a bind address.
+//
+// The port is read from brokerHubEndpoint, which is the broker's own hub URL
+// (typically http://localhost:<port> in co-located mode). This avoids
+// hardcoding a port that could change with configuration.
+//
+// Returns an error if link-local discovery fails or the port cannot be
+// determined — the agent start must fail rather than fall back to a URL that
+// will 302 from the IAP edge.
+func cloudrunSandboxHubEndpoint(brokerHubEndpoint string) (string, error) {
+	linkLocal, err := metadata.DiscoverLinkLocalAddress()
+	if err != nil {
+		return "", fmt.Errorf("cloudrun-sandbox hub endpoint: %w", err)
+	}
+
+	// Extract the port from the broker's own hub URL so we never hardcode it.
+	port := ""
+	if brokerHubEndpoint != "" {
+		if u, err := url.Parse(brokerHubEndpoint); err == nil {
+			port = u.Port()
+		}
+	}
+	if port == "" {
+		return "", fmt.Errorf("cloudrun-sandbox hub endpoint: cannot determine hub port " +
+			"from broker hub endpoint %q — refusing to guess", brokerHubEndpoint)
+	}
+
+	return fmt.Sprintf("http://%s", net.JoinHostPort(linkLocal, port)), nil
 }
 
 func redactEnvValueForLog(key, value string) string {

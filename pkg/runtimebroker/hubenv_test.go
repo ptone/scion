@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -364,6 +365,43 @@ func TestColocatedExtraHosts(t *testing.T) {
 				t.Errorf("colocatedExtraHosts()[0] = %q, want %q", got[0], tt.wantFirst)
 			}
 		})
+	}
+}
+
+func TestCloudrunSandboxHubEndpoint_PortExtraction(t *testing.T) {
+	// cloudrunSandboxHubEndpoint calls DiscoverLinkLocalAddress() which
+	// depends on real interfaces. We test the port extraction and error
+	// paths that are independent of network state.
+
+	// No port → error (refuses to guess).
+	_, err := cloudrunSandboxHubEndpoint("https://hub.example.com")
+	if err == nil {
+		t.Fatal("expected error when broker hub endpoint has no explicit port")
+	}
+
+	// Empty broker endpoint → error.
+	_, err = cloudrunSandboxHubEndpoint("")
+	if err == nil {
+		t.Fatal("expected error when broker hub endpoint is empty")
+	}
+}
+
+func TestCloudrunSandboxHubEndpoint_NeverRunApp(t *testing.T) {
+	// Even if DiscoverLinkLocalAddress fails (no link-local in CI), the
+	// function must never return a public *.run.app URL.
+	ep, err := cloudrunSandboxHubEndpoint("http://localhost:8080")
+	if err != nil {
+		// Expected in CI — no link-local address.
+		return
+	}
+	if strings.Contains(ep, "run.app") {
+		t.Fatalf("cloudrunSandboxHubEndpoint must never return a run.app URL, got %q", ep)
+	}
+	if !strings.HasPrefix(ep, "http://169.254.") {
+		t.Fatalf("expected http://169.254.x.x:<port>, got %q", ep)
+	}
+	if !strings.HasSuffix(ep, ":8080") {
+		t.Fatalf("expected port 8080 from broker endpoint, got %q", ep)
 	}
 }
 

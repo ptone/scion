@@ -927,14 +927,18 @@ runtimes:
 	return New(cfg, mgr, rt)
 }
 
-// TestBuildStartContext_GCPMetadataCloudrunSandbox verifies that on the
-// cloudrun-sandbox runtime, GCE_METADATA_HOST and GCE_METADATA_ROOT are both
-// set to localhost:18380. The metadata emulator runs inside the sandbox (via
-// sciontool init), so it shares the sandbox's network namespace — localhost is
-// correct. The grok-build harness reads GCE_METADATA_ROOT via gcloud.
-func TestBuildStartContext_GCPMetadataCloudrunSandbox(t *testing.T) {
+// TestBuildStartContext_CloudrunSandboxHubEndpoint verifies hub endpoint
+// behaviour for the cloudrun-sandbox runtime. In CI (no link-local interface),
+// the start must fail rather than fall back to the public IAP URL — a 302
+// from the IAP edge is exactly the failure that this fix prevents.
+//
+// When a link-local address IS available (real Cloud Run Instance), the
+// endpoint must be http://<link-local>:<port> with the port read from the
+// broker's own hub endpoint config.
+func TestBuildStartContext_CloudrunSandboxHubEndpoint(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
+	cfg.HubEndpoint = "http://localhost:8080"
 	srv := newTestServerWithRuntime(t, cfg, "cloudrun-sandbox")
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
@@ -943,53 +947,99 @@ func TestBuildStartContext_GCPMetadataCloudrunSandbox(t *testing.T) {
 		Name:        "agent-sandbox",
 		HTTPRequest: r,
 	})
+
 	if err != nil {
-		t.Fatal(err)
+		// Expected in CI: no link-local address → start fails.
+		// Verify it is the right error and not some other failure.
+		if !strings.Contains(err.Error(), "hub endpoint") && !strings.Contains(err.Error(), "link-local") {
+			t.Fatalf("expected hub-endpoint/link-local error for cloudrun-sandbox, got: %v", err)
+		}
+		return
 	}
 
+	// If we get here, a link-local address was found (real Instance).
+	ep := sc.Opts.Env["SCION_HUB_ENDPOINT"]
+
+	// Guard: SCION_HUB_ENDPOINT must never contain a run.app URL for
+	// cloudrun-sandbox — that would route through IAP, which the sandbox
+	// cannot authenticate against.
+	if strings.Contains(ep, "run.app") {
+		t.Fatalf("SCION_HUB_ENDPOINT must never be a run.app URL for cloudrun-sandbox, got %q", ep)
+	}
+
+	// Must be http (not https) on the link-local address.
+	if !strings.HasPrefix(ep, "http://169.254.") {
+		t.Fatalf("expected http://169.254.x.x:<port>, got %q", ep)
+	}
+
+	// Port must come from the broker config, not hardcoded.
+	if !strings.HasSuffix(ep, ":8080") {
+		t.Fatalf("expected port 8080 from broker hub endpoint, got %q", ep)
+	}
+
+	// Metadata vars must still be localhost — emulator runs inside sandbox.
 	host := sc.Opts.Env["GCE_METADATA_HOST"]
 	root := sc.Opts.Env["GCE_METADATA_ROOT"]
-
-	// Both must be set to localhost — the emulator runs inside the sandbox.
 	if host != "localhost:18380" {
 		t.Errorf("expected GCE_METADATA_HOST='localhost:18380', got %q", host)
 	}
 	if root != "localhost:18380" {
 		t.Errorf("expected GCE_METADATA_ROOT='localhost:18380', got %q", root)
 	}
-	// Both must match — gcloud reads ROOT, language SDKs read HOST.
-	if host != root {
-		t.Errorf("GCE_METADATA_HOST (%q) and GCE_METADATA_ROOT (%q) must match", host, root)
+}
+
+// TestBuildStartContext_CloudrunSandboxHubNeverRunApp is a durable guard:
+// assert the negative so the test survives refactoring and catches the
+// shipped defect pattern. If buildStartContext succeeds for cloudrun-sandbox,
+// the hub endpoint must NEVER be a public IAP-fronted URL.
+func TestBuildStartContext_CloudrunSandboxHubNeverRunApp(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	cfg.HubEndpoint = "http://localhost:8080"
+	srv := newTestServerWithRuntime(t, cfg, "cloudrun-sandbox")
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	// Simulate a hub-dispatched agent whose resolvedEnv carries the public URL.
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-sandbox-iap",
+		ResolvedEnv: map[string]string{"SCION_HUB_ENDPOINT": "https://my-instance-xyz.run.app"},
+		HTTPRequest: r,
+	})
+	if err != nil {
+		// In CI this fails (no link-local) — that is correct.
+		return
+	}
+	ep := sc.Opts.Env["SCION_HUB_ENDPOINT"]
+	if strings.Contains(ep, "run.app") {
+		t.Fatalf("cloudrun-sandbox SCION_HUB_ENDPOINT must never contain run.app, got %q", ep)
 	}
 }
 
 // TestBuildStartContext_GCPMetadataBothVarsAlwaysMatch guards the invariant
 // that GCE_METADATA_HOST and GCE_METADATA_ROOT are always set to the same
 // value. A mismatch means gcloud (ROOT) and language SDKs (HOST) would talk
-// to different servers.
+// to different servers. Only tests non-cloudrun-sandbox runtimes since
+// cloudrun-sandbox may fail in CI (no link-local).
 func TestBuildStartContext_GCPMetadataBothVarsAlwaysMatch(t *testing.T) {
-	for _, rt := range []string{"mock", "cloudrun-sandbox"} {
-		t.Run(rt, func(t *testing.T) {
-			cfg := DefaultServerConfig()
-			cfg.StateDir = t.TempDir()
-			srv := newTestServerWithRuntime(t, cfg, rt)
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerWithRuntime(t, cfg, "mock")
 
-			r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 
-			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
-				Name:        "agent-both-vars",
-				HTTPRequest: r,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-both-vars",
+		HTTPRequest: r,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
-			host := sc.Opts.Env["GCE_METADATA_HOST"]
-			root := sc.Opts.Env["GCE_METADATA_ROOT"]
-			if host != root {
-				t.Errorf("GCE_METADATA_HOST=%q GCE_METADATA_ROOT=%q — must match", host, root)
-			}
-		})
+	host := sc.Opts.Env["GCE_METADATA_HOST"]
+	root := sc.Opts.Env["GCE_METADATA_ROOT"]
+	if host != root {
+		t.Errorf("GCE_METADATA_HOST=%q GCE_METADATA_ROOT=%q — must match", host, root)
 	}
 }
 
