@@ -4187,3 +4187,81 @@ My earlier §5.1 said "move the logs to a separate documentation commit or a sep
 
 Revised: 63 files → drop 23 logs → 40 → add 1 design doc → **41** → drop 5 duplicated
 security-fix files once 1265 lands → **36** → send the two drive-bys separately → **33**.
+
+---
+
+## 2026-08-26 22:26Z — Developer dispatched for the repack; footprint numbers corrected twice over
+
+ptone, 22:21: *"you can dispatch to a developer agent - we can create net new integration branches
+if needed."*
+
+**Dispatched `sn-repack-dev`** (template `developer`, harness `claude`).
+Brief: `/scion-volumes/scratchpad/projects/single-node/briefs/sn-repack-dev.md`.
+
+### Why a net-new branch is the better read of the approved order
+
+Step 3 of the order ptone approved at 22:19 was "rebase `dev-rebase-1294` on main". His 22:21
+authorisation lets us do something cleaner: cut **`scion/sn-tier`** fresh from `main` instead. Two
+things improve at once. The standing constraint *"do not rebase or force-push the integration
+branch"* stops being something we have to reason around — it just holds. And PRs 1266/1268/1269
+stay intact as a review record rather than being rewritten underneath their own review threads.
+
+**The single most useful fact I handed the developer:** `scion/sn-ws-mount` is `ahead=6, behind=0`
+against `scion/sn-dev-ready`, so it is a strict superset. The complete tier — 1266 + 1268 + 1269 —
+lives on **one** branch tip. The developer takes content from one branch, not three.
+
+### Two numbers I gave ptone were wrong. Both corrected to him at 22:26.
+
+I told him the tier was 63 files and would shrink to about 32. Neither figure survived contact
+with the remote.
+
+**Error 1 — scope.** 63 is PR 1266 alone. The full tier including 1268 and 1269 is **68 files**
+(`git diff --stat main...scion/sn-ws-mount`). I had been quoting a sub-PR's size as the whole
+tier's size.
+
+**Error 2 — the dedupe arithmetic.** I assumed 5 whole files disappear when the duplicated
+security fix comes out. Only **4** do. Per-file stats show `cmd/server_foreground.go` at `+34 -4`
+— roughly 9 of those lines are the dev-auth guard and the remaining ~25 are genuine tier work. It
+shrinks; it does not vanish. `scripts/cloudrun/deploy.sh` (`+5 -0`) has the same mixed shape.
+
+**Corrected path:**
+
+| Stage | Files |
+|---|---|
+| Full tier today (1266+1268+1269) | 68 |
+| − 23 `.design/project-log/*.md` | 45 |
+| + 1 `.design/hosted/cloud-run-single-node.md` | 46 |
+| − 4 pure security-fix files | 42 |
+| − 3 drive-by files | 39 |
+
+About **39 files** and roughly **2,000 fewer lines** (1,679 logs + 287 dedupe + ~63 drive-bys).
+The §5.1 table two entries above (63→40→41→36→33) is superseded by this one.
+
+**Both errors came from trusting my own earlier count instead of re-deriving it.** This is the
+same failure mode as the 1265/1266 overlap, which I had at five files until I re-checked and found
+six. Re-derive; do not cache.
+
+### One claim I passed on as unverified, and said so
+
+The four "pure security-fix" files — `pkg/hub/web.go`, `pkg/hub/web_test.go`,
+`cmd/server_foreground_test.go`, `cmd/server_bridge_test.go` — I classified from diff **stats** and
+the shape of the change, not by reading every hunk. The brief tells the developer to verify before
+deleting and to report back if any of them turns out to carry tier work. Deleting a file on the
+strength of a line count would be exactly the kind of unexercised inference the heartbeat warns
+about.
+
+### The ordering dependency, restated because it is a real exposure
+
+`scion/sn-tier` will not contain the dev-auth guard: we removed our copy, and 1265 has not landed.
+That is intended, and it means **the tier must not merge before 1265**. This tier ships a
+`deploy-instance` command that stands up a publicly reachable hub. Landing it without the guard is
+not a tidiness problem.
+
+Developer instructed: mark the branch `DO NOT MERGE BEFORE 1265`, and rebase on `main` once 1265
+lands. Rebasing *that* branch is fine — it is ours and backs no open PR.
+
+### Out of scope for this developer
+
+No merges, no PRs (the fork-vs-upstream venue is ptone's call and easy to get wrong), no work on
+the four upstream issues, no tutorial. Branch surgery happens in the developer's own `/tmp` clone,
+not in shared-plain `/workspace`.
