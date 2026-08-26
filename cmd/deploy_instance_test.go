@@ -226,6 +226,26 @@ func TestEnableIAPUpdateMask(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// diIAMMemberPrefix tests
+// ---------------------------------------------------------------------------
+
+func TestIAMMemberPrefix_UserEmail(t *testing.T) {
+	email := "admin@example.com"
+	prefix := diIAMMemberPrefix(email)
+	assert.Equal(t, "user:", prefix)
+	assert.Equal(t, "user:admin@example.com", prefix+email,
+		"normal email must produce user:<email> IAM member")
+}
+
+func TestIAMMemberPrefix_ServiceAccount(t *testing.T) {
+	email := "deploy@my-project.iam.gserviceaccount.com"
+	prefix := diIAMMemberPrefix(email)
+	assert.Equal(t, "serviceAccount:", prefix)
+	assert.Equal(t, "serviceAccount:deploy@my-project.iam.gserviceaccount.com", prefix+email,
+		"service account email must produce serviceAccount:<email> IAM member")
+}
+
+// ---------------------------------------------------------------------------
 // Gate 2 (perimeter assertion) tests
 // ---------------------------------------------------------------------------
 
@@ -281,6 +301,29 @@ func TestAssertPerimeter_IAPNoHeader(t *testing.T) {
 
 	err := diAssertPerimeter(server.URL)
 	assert.NoError(t, err, "should pass even without IAP header if redirect is correct")
+}
+
+func TestAssertPerimeter_CloudRunErrorPage(t *testing.T) {
+	// When the Instance is dead (wrong port, crash loop, missing binary),
+	// Cloud Run returns its own error page (502 or 503) instead of the
+	// IAP 302. The error message must mention Instance health so the
+	// operator knows the problem is the container, not IAP.
+	for _, code := range []int{http.StatusBadGateway, http.StatusServiceUnavailable} {
+		t.Run(fmt.Sprintf("status_%d", code), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(code)
+				w.Write([]byte("Cloud Run error page"))
+			}))
+			defer server.Close()
+
+			err := diAssertPerimeter(server.URL)
+			require.Error(t, err, "must fail when Cloud Run returns %d", code)
+			assert.Contains(t, err.Error(), "not be serving",
+				"error message must mention the instance may not be serving")
+			assert.Contains(t, err.Error(), "CMD",
+				"error message must suggest checking the Dockerfile CMD")
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

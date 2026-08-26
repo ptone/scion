@@ -184,6 +184,7 @@ func runDeployInstance(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("SECURITY FAILURE: IAP perimeter is NOT enforcing — %w", err)
 	}
 	fmt.Println("    IAP perimeter verified: unauthenticated requests are blocked.")
+	fmt.Println("    Instance is serving and IAP-protected.")
 
 	// Step 8: Print the URL
 	fmt.Println()
@@ -385,10 +386,16 @@ func diWaitForIAP(instanceURL string) error {
 	pollInterval := 5 * time.Second
 	deadline := time.Now().Add(maxWait)
 
+	// Track last-seen response for diagnostic on timeout.
+	var lastStatus int
+	var lastErr string
+
 	for time.Now().Before(deadline) {
 		resp, err := client.Get(instanceURL)
 		if err != nil {
-			fmt.Printf("    Polling... (not ready yet: %v)\n", diShortenError(err))
+			lastStatus = 0
+			lastErr = diShortenError(err)
+			fmt.Printf("    Polling... (not ready yet: %v)\n", lastErr)
 			time.Sleep(pollInterval)
 			continue
 		}
@@ -401,16 +408,39 @@ func diWaitForIAP(instanceURL string) error {
 			}
 		}
 
+		lastStatus = resp.StatusCode
+		lastErr = ""
 		fmt.Printf("    Polling... (status %d, waiting for IAP 302)\n", resp.StatusCode)
 		time.Sleep(pollInterval)
 	}
 
-	return fmt.Errorf("timed out after %v waiting for IAP to enforce on %s", maxWait, instanceURL)
+	// Build a diagnostic message that helps distinguish "IAP is slow" from
+	// "the Instance is dead" (wrong port, crash loop, missing binary).
+	diag := fmt.Sprintf("timed out after %v waiting for IAP to enforce on %s", maxWait, instanceURL)
+	if lastErr != "" {
+		diag += fmt.Sprintf(" — last probe: %s (instance may not be serving on port 8080)", lastErr)
+	} else if lastStatus == http.StatusBadGateway || lastStatus == http.StatusServiceUnavailable {
+		diag += fmt.Sprintf(" — last seen: %d (instance may not be serving — check CMD, port, and container health)", lastStatus)
+	} else if lastStatus != 0 {
+		diag += fmt.Sprintf(" — last seen: HTTP %d", lastStatus)
+	}
+	return fmt.Errorf("%s", diag)
 }
 
 // ---------------------------------------------------------------------------
 // Step 5: Bind IAP access policy
 // ---------------------------------------------------------------------------
+
+// diIAMMemberPrefix returns the correct IAM member prefix for the given email.
+// Service accounts (ending in .gserviceaccount.com) use "serviceAccount:";
+// all other emails use "user:". The --admin-email flag is documented for CI
+// service account deploys, so this must handle both forms.
+func diIAMMemberPrefix(email string) string {
+	if strings.HasSuffix(email, ".gserviceaccount.com") {
+		return "serviceAccount:"
+	}
+	return "user:"
+}
 
 // diBindIAPPolicy binds roles/iap.httpsResourceAccessor for the given email
 // at the REGION level. Per §11.2, there is no per-Instance IAP path — a
@@ -420,7 +450,7 @@ func diBindIAPPolicy(project, region, email string) error {
 		"--project="+project,
 		"--region="+region,
 		"--resource-type=cloud-run",
-		"--member=user:"+email,
+		"--member="+diIAMMemberPrefix(email)+email,
 		"--role=roles/iap.httpsResourceAccessor",
 	)
 	return err
@@ -548,6 +578,11 @@ func diPrintProjectIAPBindings(policyOutput, indent string) {
 // FAILS the deploy loudly if the app answers — this is the guard for the
 // single point of failure (§11.1). With invoker IAM disabled, iapEnabled=false
 // leaves the Instance open to the internet with nothing but hub session auth.
+//
+// This gate doubles as the post-deploy smoke check: if the Instance is dead
+// (wrong port, crash loop, missing binary, bad CMD), Cloud Run returns its
+// own error (502/503), NOT the IAP 302. So a passing gate 2 proves both
+// that IAP is enforcing AND that the Instance is serving behind it.
 func diAssertPerimeter(instanceURL string) error {
 	client := diNoAuthClient()
 
@@ -559,6 +594,15 @@ func diAssertPerimeter(instanceURL string) error {
 
 	// Require a 302 to accounts.google.com
 	if resp.StatusCode != http.StatusFound {
+		// Distinguish "IAP not enforcing" (200 = app answered) from
+		// "Instance is dead" (502/503 = Cloud Run error page).
+		if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable {
+			return fmt.Errorf(
+				"expected 302 redirect but got %d — the instance may not be serving "+
+					"(check Dockerfile CMD, port configuration, and container logs). "+
+					"Cloud Run returns %d when the container is unhealthy or not listening on port 8080",
+				resp.StatusCode, resp.StatusCode)
+		}
 		return fmt.Errorf(
 			"expected 302 redirect but got %d — IAP may not be enforcing! "+
 				"An unauthenticated request reached the app, which means "+
