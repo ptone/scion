@@ -1,13 +1,13 @@
-# Publish the omni image to GHCR when image-build/ files change.
+# Publish the omni image to GHCR when source or image-build files change.
 #
-# Triggered on pull_request when any file under image-build/ is modified.
-# This ensures Dockerfile changes (e.g., CMD fixes) result in a republished
-# image without manual intervention.
+# Triggered on pull_request when any Go source, web source, or image-build
+# file is modified. The image contains the compiled Go binary and embedded
+# web assets, so changes to any of these require a rebuild — otherwise the
+# published image silently contains a stale binary.
 #
-# The image is pushed with three tags:
+# The image is pushed with two tags:
 #   - dev-<head-sha>: the PR head commit SHA (predictable, matches git log)
 #   - dev-<merge-sha>: the PR merge commit SHA (github.sha, for backward compat)
-#   - dev-latest: moving tag for the most recent build
 #
 # Only scion-omni is pushed; intermediate images (thick-prep, scion-base,
 # harness chain) are built locally and not published.
@@ -18,6 +18,10 @@ on:
   pull_request:
     paths:
       - 'image-build/**'
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'web/**'
 
 permissions:
   contents: read
@@ -83,19 +87,15 @@ jobs:
 
           # Tag with the head commit SHA (predictable from git log)
           docker tag "${IMAGE}:${MERGE_TAG}" "${IMAGE}:${HEAD_TAG}"
-          # Tag with dev-latest (moving tag for convenience)
-          docker tag "${IMAGE}:${MERGE_TAG}" "${IMAGE}:dev-latest"
 
-          echo "Pushing scion-omni with three tags..."
+          echo "Pushing scion-omni with two tags..."
           docker push "${IMAGE}:${MERGE_TAG}"
           docker push "${IMAGE}:${HEAD_TAG}"
-          docker push "${IMAGE}:dev-latest"
 
           echo ""
           echo "=== PUSH RESULT ==="
           echo "Merge-commit tag: ${IMAGE}:${MERGE_TAG}"
           echo "Head-commit tag:  ${IMAGE}:${HEAD_TAG}"
-          echo "Latest tag:       ${IMAGE}:dev-latest"
           echo ""
           echo "Use the head-commit tag for predictable references:"
           echo "  ${IMAGE}:${HEAD_TAG}"
