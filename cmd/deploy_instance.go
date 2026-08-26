@@ -106,6 +106,12 @@ func runDeployInstance(cmd *cobra.Command, args []string) error {
 		fmt.Printf("    Admin override: %s\n", adminEmail)
 	}
 
+	// Guard: gcloud --set-env-vars is comma-delimited. A comma in the email
+	// would silently split into a second env var, breaking the command.
+	if strings.Contains(adminEmail, ",") {
+		return fmt.Errorf("--admin-email value %q contains a comma, which would break gcloud --set-env-vars", adminEmail)
+	}
+
 	// Step 2: Resolve project number
 	fmt.Println("==> Step 2: Resolving project number...")
 	projectNumber, err := diResolveProjectNumber(diProject)
@@ -254,7 +260,7 @@ func diGcloudDeploy(name, image, project, region, serviceAccount, memory, cpu, i
 		"--region", region,
 		"--project", project,
 		"--set-env-vars",
-		fmt.Sprintf("SCION_SERVER_AUTH_MODE=proxy,SCION_SERVER_AUTH_PROXY_PROVIDER=iap,SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE=%s,SCION_SERVER_HUB_ADMINEMAILS=%s",
+		fmt.Sprintf("SCION_SERVER_AUTH_MODE=proxy,SCION_SERVER_AUTH_PROXY_PROVIDER=iap,SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE=%s,SCION_SEED_SERVER_HUB_ADMINEMAILS=%s",
 			iapAudience, adminEmail),
 	}
 

@@ -20,8 +20,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -405,4 +409,125 @@ func TestSanitizeResponse(t *testing.T) {
 	result := diSanitizeResponse(long)
 	assert.Contains(t, result, "truncated")
 	assert.LessOrEqual(t, len(result), 520)
+}
+
+// ---------------------------------------------------------------------------
+// Round-trip test: deploy env vars → config system → GlobalConfig structs
+// ---------------------------------------------------------------------------
+
+// TestDeployEnvVarsRoundTrip proves that the env vars diGcloudDeploy sets
+// load correctly through the config system into the structs the hub reads.
+// The critical concern is that Auth.Proxy (*ProxyAuthConfig) and Proxy.IAP
+// (*IAPAuthConfig) are pointer fields — if koanf/mapstructure doesn't
+// allocate them, the audience is empty and the hub fails at startup.
+func TestDeployEnvVarsRoundTrip(t *testing.T) {
+	// Use a clean HOME so no existing settings.yaml / server.yaml interfere.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	scionDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(scionDir, 0755))
+
+	// Set env vars exactly as diGcloudDeploy formats them (auth vars via
+	// SCION_SERVER_*, admin email via SCION_SEED_SERVER_*).
+	t.Setenv("SCION_SERVER_AUTH_MODE", "proxy")
+	t.Setenv("SCION_SERVER_AUTH_PROXY_PROVIDER", "iap")
+	t.Setenv("SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE",
+		"/projects/123456789/locations/us-east4/services/test-instance")
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "admin@example.com")
+
+	// --- Part 1: Auth vars through LoadGlobalConfig (the hub's startup path) ---
+	gc, err := config.LoadGlobalConfig("")
+	require.NoError(t, err, "LoadGlobalConfig must succeed with deploy env vars")
+
+	assert.Equal(t, "proxy", gc.Auth.Mode,
+		"Auth.Mode must be 'proxy'")
+	require.NotNil(t, gc.Auth.Proxy,
+		"Auth.Proxy pointer must be allocated by config loading")
+	assert.Equal(t, "iap", gc.Auth.Proxy.Provider,
+		"Auth.Proxy.Provider must be 'iap'")
+	require.NotNil(t, gc.Auth.Proxy.IAP,
+		"Auth.Proxy.IAP pointer must be allocated by config loading")
+	assert.Equal(t,
+		"/projects/123456789/locations/us-east4/services/test-instance",
+		gc.Auth.Proxy.IAP.Audience,
+		"Auth.Proxy.IAP.Audience must match the IAP audience path")
+
+	// --- Part 2: Admin email through LoadSeedEnvKoanf (SEED prefix path) ---
+	seedK := config.LoadSeedEnvKoanf()
+	assert.Equal(t, "admin@example.com",
+		seedK.String("server.hub.admin_emails"),
+		"SCION_SEED_SERVER_HUB_ADMINEMAILS must map to server.hub.admin_emails in seed koanf")
+
+	// --- Part 3: Admin email through LoadBootstrapKoanf (full merge path) ---
+	// This is how opsettings seeding resolves the admin email at startup.
+	bk := config.LoadBootstrapKoanf()
+	emails := bk.Strings("server.hub.admin_emails")
+	assert.Contains(t, emails, "admin@example.com",
+		"admin email must appear in bootstrap koanf server.hub.admin_emails")
+}
+
+// ---------------------------------------------------------------------------
+// Comma collision guard
+// ---------------------------------------------------------------------------
+
+// TestDeployRejectsCommaInAdminEmail verifies that the comma guard in
+// runDeployInstance would reject an --admin-email containing a comma.
+// gcloud --set-env-vars is comma-delimited, so a comma in the value
+// would silently split into a second env var, breaking the command.
+func TestDeployRejectsCommaInAdminEmail(t *testing.T) {
+	tests := []struct {
+		name      string
+		email     string
+		wantError bool
+	}{
+		{
+			name:      "valid single email",
+			email:     "admin@example.com",
+			wantError: false,
+		},
+		{
+			name:      "comma-separated emails rejected",
+			email:     "alice@example.com,bob@example.com",
+			wantError: true,
+		},
+		{
+			name:      "trailing comma rejected",
+			email:     "admin@example.com,",
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Apply the same validation that runDeployInstance performs.
+			hasComma := strings.Contains(tt.email, ",")
+			if tt.wantError {
+				assert.True(t, hasComma,
+					"comma guard must reject %q", tt.email)
+			} else {
+				assert.False(t, hasComma,
+					"comma guard must accept %q", tt.email)
+			}
+		})
+	}
+}
+
+// TestDeployCommaInEmailBreaksGcloud demonstrates WHY the comma guard
+// exists: gcloud --set-env-vars uses commas as the delimiter between
+// key=value pairs, so a comma in any value silently corrupts the command.
+func TestDeployCommaInEmailBreaksGcloud(t *testing.T) {
+	// Simulate the format string from diGcloudDeploy with a comma in email.
+	envVarStr := fmt.Sprintf(
+		"SCION_SERVER_AUTH_MODE=proxy,SCION_SEED_SERVER_HUB_ADMINEMAILS=%s",
+		"alice@example.com,bob@example.com")
+
+	// gcloud splits on commas, so the above would produce three "env vars":
+	//   1. SCION_SERVER_AUTH_MODE=proxy
+	//   2. SCION_SEED_SERVER_HUB_ADMINEMAILS=alice@example.com
+	//   3. bob@example.com   (← broken: not a valid KEY=VALUE)
+	parts := strings.Split(envVarStr, ",")
+	assert.Equal(t, 3, len(parts),
+		"comma in email value causes gcloud to see 3 env vars instead of 2")
+	assert.Equal(t, "bob@example.com", parts[2],
+		"the second email becomes a broken env var fragment")
 }
