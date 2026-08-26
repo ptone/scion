@@ -295,7 +295,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// link-local address. Override the endpoint so the sandbox's sciontool
 	// init (and the metadata emulator's FetchGCPToken) can reach the hub.
 	if runtimeName == "cloudrun-sandbox" {
-		sandboxEndpoint, err := cloudrunSandboxHubEndpoint(s.config.HubEndpoint)
+		sandboxEndpoint, err := cloudrunSandboxHubEndpoint(s.config.HubListenPort)
 		if err != nil {
 			return nil, &startContextError{
 				Status:  http.StatusInternalServerError,
