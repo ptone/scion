@@ -4265,3 +4265,120 @@ lands. Rebasing *that* branch is fine — it is ours and backs no open PR.
 No merges, no PRs (the fork-vs-upstream venue is ptone's call and easy to get wrong), no work on
 the four upstream issues, no tutorial. Branch surgery happens in the developer's own `/tmp` clone,
 not in shared-plain `/workspace`.
+
+---
+
+## 2026-08-26 22:33Z — PR 1302 is not ours; my §4.4 file classification was wrong; D-35 mechanism found
+
+### 1. Upstream PR 1302 is a sibling project, not this tier
+
+The coordinator reported at 22:30: *"Your Cloud Run Instances runtime PR is up as upstream
+PR#1302"*, with 5 Gemini findings to fix. **That attribution is wrong and I corrected it.**
+
+PR 1302 (ptone, `GoogleCloudPlatform/scion`, branch `cloudrun-instances-runtime`, 24 files,
+`+2591 -272`, opened 22:23) implements a **different runtime**: each agent becomes its own Cloud
+Run *service*, via `pkg/runtime/cloudrun_runtime.go`, `pkg/runtime/cloudrun/iap_exec.go`,
+`pkg/runtime/cloudrun/logs.go`.
+
+Our tier runs agents as **sandboxes inside one Instance**, via
+`pkg/runtime/cloudrun_sandbox_runtime.go`, registered as `cloudrun-sandbox`. Design decision 4.4
+chose that distinct name precisely because a `cloudrun` runtime already existed. This is that
+other runtime, now arriving. The naming decision earned its keep.
+
+Verified by set-intersecting the file lists. 1302 touches neither
+`cloudrun_sandbox_runtime.go` nor anything in `pkg/runtimebroker/`. We touch neither
+`cloudrun_runtime.go` nor `iap_exec.go`.
+
+**None of the 5 Gemini findings reach us.** I checked the one with cross-cutting potential:
+`syscall.Statfs` appears nowhere in `main`, so it is entirely 1302's new code.
+
+**What does reach us is a merge conflict.** Exactly three shared files:
+
+| File | Note |
+|---|---|
+| `pkg/runtime/factory.go` | The live one. Both PRs register a runtime. 1302 is `+8 -9`. |
+| `cmd/server_foreground.go` | |
+| `pkg/config/settings_v1.go` | |
+
+1302 is ahead of us, so reconciliation lands on us. Developer warned.
+
+Also flagged to the coordinator: 1302 carries **`tmp_design.md`, 318 lines, at the repo root**,
+alongside a deliberate `.design/cloud-run-instances-runtime.md`. That looks accidental.
+
+### 2. sn-repack-dev caught two errors in my §4.4. The brief told it to check; checking worked.
+
+I classified four files as "purely the duplicated security fix" **from diff stats and the shape of
+the change, not by reading the hunks** — and said so in the brief, with an instruction to verify
+before deleting. Two of the four were wrong.
+
+I then confirmed the developer's finding against PR 1265's own file list, which is the authority:
+
+```
+.design/project-log/p0-security-fixes.md   +75
+cmd/server_foreground.go                   +10
+cmd/server_foreground_test.go              +67
+pkg/hub/web.go                             +22
+pkg/hub/web_test.go                        +80
+scripts/cloudrun/deploy.sh                  +5
+```
+
+- `cmd/server_bridge_test.go` — **absent from 1265 entirely.** 100% tier work
+  (`TestResolveHubListenPort_HostedTier`, `TestResolveHubEndpointForBroker_ExplicitPort`). Deleting
+  it would have destroyed real tests. My error.
+- `cmd/server_foreground_test.go` — **mixed**, not pure. `+67` in 1265 against `+96` in the tier,
+  so ~29 lines are the tier's IAP audience test. Edit, do not delete. My error.
+- `pkg/hub/web.go` (+22) and `pkg/hub/web_test.go` (+80) — identical in both. Pure. Correct.
+
+**A fifth file I had wrong in the other direction:** `scripts/cloudrun/deploy.sh` is `+5 -0` in the
+tier *and* `+5 -0` in 1265. I told the developer it was mixed. If the five lines are the same five,
+it reverts in full. Asked them to diff it.
+
+Revised target: **~40 files** if `deploy.sh` is pure, ~41 if mixed. Told the developer not to chase
+a number.
+
+**The lesson is the same one as the footprint miscount, twice in one hour:** I inferred from
+aggregate statistics where the hunks were available. Diff stats tell you a file changed, never
+which change it was.
+
+### 3. D-35 — mechanism found by reading; trigger still unconfirmed
+
+Traced `session.id` from the hub's 400 back to its single source. All reads against `main`.
+
+```
+claude SessionStart hook
+  -> dialects/claude.go:58    SessionID: getString(data, "session_id")   [uniform for all events]
+  -> handlers/telemetry.go:684  aggregator.StartSession(event.Data.SessionID)
+  -> telemetry/aggregator.go:92  a.sessionID = sessionID                 [THE ONLY WRITER]
+  -> aggregator.go:172           SessionSummary{SessionID: a.sessionID}
+  -> hub/metrics.go:152          Session.ID = s.SessionID
+  -> hub/handlers_agent_metrics.go:87   400 "session.id is required"
+```
+
+**The filable defect, independent of root cause** (`handlers/telemetry.go:700-709`): the session-end
+branch calls `aggregator.Finalize(...)` and passes tokens and error — **but not
+`event.Data.SessionID`**, which is sitting right there on the event and is parsed for every event
+by the same code path. The summary uses only the value latched at session-start. So a missed
+session-start produces a permanently invalid payload, and `init.go:436-440` POSTs it with no guard.
+The information needed to make the request valid was in hand and was discarded.
+
+The same miss also leaves `a.startedAt` zero, since `StartSession` is its only writer too — but
+`:87` fires before `:91`, so empty ID is what the operator sees.
+
+**This also resurrects, in a sound form, a hypothesis I killed earlier.** I had rejected
+"zero timestamp" because `Finalize` always sets `EndedAt: time.Now()`. Correct for *ended*_at —
+but `StartedAt` comes from `a.startedAt`, which is *not* unconditionally set. The right shape of
+the idea survived the wrong version of it.
+
+**Two things narrow the field further.** The 400 itself proves hooks reach the handler at all —
+otherwise there would be no POST. So this is not a blanket "hooks are dead" problem, and it is not
+D-31's `HOME=/root` (fixed). And `sciontool init` is the long-lived supervisor holding the
+aggregator for the whole agent lifetime, so this is not per-hook process amnesia either.
+
+**Still unconfirmed: why session-start is missed.** Reading cannot settle it, and I have not
+established that the observed 400 was `:87` rather than `:81`. The hub does not log which
+validator fired, so the existing occurrence cannot be read back out of Cloud Logging. A live
+repro on `sn-step6` (still up) remains the only way to close it.
+
+Filing plan: report part 1 (confirmed by reading) as the defect; state part 2 as unconfirmed rather
+than dressing a hypothesis as a finding. Two bad upstream reports (D-46, D-39) already came from
+reasoning off a signal instead of exercising the path.
