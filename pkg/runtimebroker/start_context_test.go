@@ -938,7 +938,7 @@ runtimes:
 func TestBuildStartContext_CloudrunSandboxHubEndpoint(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
-	cfg.HubListenPort = 8080
+	cfg.HubEndpoint = "http://localhost:8080"
 	srv := newTestServerWithRuntime(t, cfg, "cloudrun-sandbox")
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
@@ -995,7 +995,7 @@ func TestBuildStartContext_CloudrunSandboxHubEndpoint(t *testing.T) {
 func TestBuildStartContext_CloudrunSandboxHubNeverRunApp(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
-	cfg.HubListenPort = 8080
+	cfg.HubEndpoint = "http://localhost:8080"
 	srv := newTestServerWithRuntime(t, cfg, "cloudrun-sandbox")
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)

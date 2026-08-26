@@ -2450,17 +2450,6 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	}
 
 	// Create Runtime Broker server configuration
-	// Compute the hub's actual listen port for the broker config. In
-	// co-located mode the broker can use this to construct internal
-	// addresses (e.g. link-local for cloudrun-sandbox) without parsing
-	// the external URL, which may have an implicit port (443 via HTTPS).
-	hubListenPort := 0
-	if enableHub {
-		hubListenPort = cfg.Hub.Port
-		if enableWeb {
-			hubListenPort = webPort
-		}
-	}
 	rhCfg := runtimebroker.ServerConfig{
 		Port:                          cfg.RuntimeBroker.Port,
 		Host:                          cfg.RuntimeBroker.Host,
@@ -2468,7 +2457,6 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		WriteTimeout:                  cfg.RuntimeBroker.WriteTimeout,
 		HubEndpoint:                   hubEndpointForRH,
 		ContainerHubEndpoint:          containerHubEndpoint,
-		HubListenPort:                 hubListenPort,
 		BrokerID:                      brokerID,
 		BrokerName:                    brokerName,
 		CORSEnabled:                   cfg.RuntimeBroker.CORSEnabled,
