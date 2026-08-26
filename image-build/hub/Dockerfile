@@ -32,4 +32,9 @@ RUN mkdir -p /home/scion/.scion && \
 # The scion-base ENTRYPOINT runs sciontool init -- <cmd>. Override the
 # default CMD so the container, when started without arguments, runs the
 # hub server in the foreground.
-CMD ["scion", "server", "start", "--foreground", "--host", "0.0.0.0", "--enable-hub"]
+#
+# WORKAROUND (B23): exec-form CMD daemonizes — the --foreground flag is not
+# parsed by cobra when scion is invoked directly via the container runtime.
+# Wrapping in sh -c exec forces shell word-splitting, which makes the flag
+# parse correctly.  Root cause is unresolved.
+CMD ["/bin/sh", "-c", "exec scion server start --foreground --host 0.0.0.0 --enable-hub"]

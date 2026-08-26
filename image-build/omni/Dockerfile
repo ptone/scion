@@ -81,4 +81,10 @@ WORKDIR /workspace
 # Cloud Run Instances deployment.  --enable-web puts the hub API on the web
 # server's port 8080 (where Cloud Run routes traffic); --enable-runtime-broker
 # starts the broker for agent lifecycle and PTY support.
-CMD ["scion", "server", "start", "--foreground", "--host", "0.0.0.0", "--enable-hub", "--enable-web", "--enable-runtime-broker"]
+#
+# WORKAROUND (B23): exec-form CMD (["scion", "server", "start", "--foreground",
+# ...]) daemonizes — the --foreground flag is not parsed by cobra when scion is
+# invoked directly via the container runtime.  Wrapping in sh -c exec forces
+# shell word-splitting, which makes the flag parse correctly.  Root cause is
+# unresolved; see .design/project-log/ for investigation notes.
+CMD ["/bin/sh", "-c", "exec scion server start --foreground --host 0.0.0.0 --enable-hub --enable-web --enable-runtime-broker"]
