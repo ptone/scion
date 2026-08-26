@@ -26,14 +26,15 @@ import (
 )
 
 type HealthResponse struct {
-	Status       string            `json:"status"`
-	Version      string            `json:"version"`
-	ScionVersion string            `json:"scionVersion"`
-	HubID        string            `json:"hub_id,omitempty"`
-	HubName      string            `json:"hub_name,omitempty"`
-	Uptime       string            `json:"uptime"`
-	Checks       map[string]string `json:"checks,omitempty"`
-	Stats        *HealthStats      `json:"stats,omitempty"`
+	Status             string            `json:"status"`
+	Version            string            `json:"version"`
+	ScionVersion       string            `json:"scionVersion"`
+	HubID              string            `json:"hub_id,omitempty"`
+	HubName            string            `json:"hub_name,omitempty"`
+	Uptime             string            `json:"uptime"`
+	Checks             map[string]string `json:"checks,omitempty"`
+	Stats              *HealthStats      `json:"stats,omitempty"`
+	DeploymentWarnings []string          `json:"deploymentWarnings,omitempty"`
 }
 
 type HealthStats struct {
