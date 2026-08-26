@@ -928,10 +928,10 @@ runtimes:
 }
 
 // TestBuildStartContext_GCPMetadataCloudrunSandbox verifies that on the
-// cloudrun-sandbox runtime, GCE_METADATA_HOST and GCE_METADATA_ROOT are set
-// together (the grok-build harness reads GCE_METADATA_ROOT via gcloud), and
-// that the SCION_METADATA_BIND_ADDRESS is set when a link-local address is
-// available.
+// cloudrun-sandbox runtime, GCE_METADATA_HOST and GCE_METADATA_ROOT are both
+// set to localhost:18380. The metadata emulator runs inside the sandbox (via
+// sciontool init), so it shares the sandbox's network namespace — localhost is
+// correct. The grok-build harness reads GCE_METADATA_ROOT via gcloud.
 func TestBuildStartContext_GCPMetadataCloudrunSandbox(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
@@ -950,26 +950,16 @@ func TestBuildStartContext_GCPMetadataCloudrunSandbox(t *testing.T) {
 	host := sc.Opts.Env["GCE_METADATA_HOST"]
 	root := sc.Opts.Env["GCE_METADATA_ROOT"]
 
-	// Both must be set — gcloud reads ROOT, other SDKs read HOST.
-	if host == "" {
-		t.Fatal("GCE_METADATA_HOST must be set for cloudrun-sandbox")
+	// Both must be set to localhost — the emulator runs inside the sandbox.
+	if host != "localhost:18380" {
+		t.Errorf("expected GCE_METADATA_HOST='localhost:18380', got %q", host)
 	}
-	if root == "" {
-		t.Fatal("GCE_METADATA_ROOT must be set for cloudrun-sandbox")
+	if root != "localhost:18380" {
+		t.Errorf("expected GCE_METADATA_ROOT='localhost:18380', got %q", root)
 	}
-	// Both must point at the same address.
+	// Both must match — gcloud reads ROOT, language SDKs read HOST.
 	if host != root {
 		t.Errorf("GCE_METADATA_HOST (%q) and GCE_METADATA_ROOT (%q) must match", host, root)
-	}
-
-	// If a link-local was discovered, the host should contain the link-local
-	// address (not localhost) and SCION_METADATA_BIND_ADDRESS should be set.
-	// If no link-local exists (most CI environments), both fall back to
-	// localhost:18380 — still correct but the sandbox cannot reach it.
-	if strings.HasPrefix(host, "169.254.") {
-		if sc.Opts.Env["SCION_METADATA_BIND_ADDRESS"] == "" {
-			t.Error("SCION_METADATA_BIND_ADDRESS must be set when link-local is discovered")
-		}
 	}
 }
 
