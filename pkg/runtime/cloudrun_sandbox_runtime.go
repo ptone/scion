@@ -69,12 +69,6 @@ const sandboxAgentHome = "/home/scion"
 // output; when it fails the file holds the error output that explains why.
 const entrypointLogFile = ".scion-entrypoint.log"
 
-// entrypointRCFile was previously used to capture the exit code on the
-// failure path, but `exec` replaces the shell on success (echo never runs)
-// and `sandbox wait` already provides the exit code. Kept only for
-// backward compatibility if an existing sandbox wrote this file.
-const entrypointRCFile = ".scion-entrypoint.rc"
-
 // SandboxLauncherAvailable reports whether the Cloud Run Sandbox launcher
 // binary is present on the filesystem.
 func SandboxLauncherAvailable() bool {
