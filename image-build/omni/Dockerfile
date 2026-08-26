@@ -36,5 +36,8 @@ RUN mkdir -p /home/scion/.scion && chown -R scion:scion /home/scion/.scion
 WORKDIR /workspace
 
 # PID 1 is sciontool init (ENTRYPOINT from scion-base).
-# Default CMD runs the hub server for Cloud Run Instances deployment.
-CMD ["scion", "server", "start", "--foreground", "--host", "0.0.0.0", "--enable-hub"]
+# Default CMD runs the combined server (hub + web + runtime-broker) for
+# Cloud Run Instances deployment.  --enable-web puts the hub API on the web
+# server's port 8080 (where Cloud Run routes traffic); --enable-runtime-broker
+# starts the broker for agent lifecycle and PTY support.
+CMD ["scion", "server", "start", "--foreground", "--host", "0.0.0.0", "--enable-hub", "--enable-web", "--enable-runtime-broker"]
