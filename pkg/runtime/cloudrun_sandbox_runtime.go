@@ -569,15 +569,23 @@ func (r *CloudRunSandboxRuntime) ExecUser() string { return "scion" }
 func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
 	slug := sanitizeSandboxName(cfg.Name)
 
-	// C7 (§4.3c): Vertex AI and gcloud-adc auth modes are structurally
-	// unavailable on this runtime. --allow-egress grants network access
-	// but NOT GCP service access. Log a warning but do not reject — let
-	// the operator decide.
+	// OQ-14 (§11.12) proved that Vertex AI and gcloud-adc auth modes work
+	// on this runtime via the metadata emulator: GCE_METADATA_HOST is set
+	// to the launcher's link-local address, and the emulator brokers
+	// credentials from the hub. This path works for all callers that
+	// honour the GCE_METADATA_HOST environment variable — which includes
+	// all five shipped harnesses and the standard Google auth SDKs
+	// (google-auth-library for Node, google-auth for Python,
+	// cloud.google.com/go/compute/metadata for Go).
+	//
+	// Callers that hardcode 169.254.169.254 and ignore GCE_METADATA_HOST
+	// will fail outright: iptables -t nat does not exist in gVisor, so
+	// there is no transparent interception fallback (§4.10).
 	if cfg.ResolvedAuth != nil {
 		method := cfg.ResolvedAuth.Method
 		if method == "vertex-ai" || strings.Contains(strings.ToLower(method), "gcloud") {
-			runtimeLog.Warn("cloudrun-sandbox: auth mode may not work in sandbox — "+
-				"--allow-egress does not grant GCP service access (§4.3c)",
+			runtimeLog.Info("cloudrun-sandbox: GCP auth mode in sandbox — "+
+				"credentials provided via GCE_METADATA_HOST pointed at the launcher's metadata emulator",
 				"method", method, "agent", cfg.Name)
 		}
 	}
