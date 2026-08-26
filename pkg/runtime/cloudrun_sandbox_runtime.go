@@ -49,16 +49,30 @@ const defaultScionRoot = "/scion"
 // defaultStatePath is the default location for the sandbox state store.
 const defaultStatePath = "/tmp/scion-sandbox-state.json"
 
+// sandboxAgentHome is the path where the agent home is mounted INSIDE the
+// sandbox. This differs from the host-side path (scionPaths.agentHome, e.g.
+// /scion/agents/<slug>/home) because mountsFor maps source→destination with
+// different paths. The rootfs is read-only (EROFS), so only mounted paths
+// are writable.
+//
+// This path must match:
+//   - supervisor.go:115 which hardcodes HOME="/home/<username>"
+//   - The provisioner command in harness configs (e.g. /home/scion/.scion/...)
+//
+// When writing paths for code that runs INSIDE the sandbox, use this constant.
+// When writing paths for code that runs on the HOST, use scionPaths.agentHome.
+const sandboxAgentHome = "/home/scion"
+
 // entrypointLogFile is the filename (relative to agentHome) where the
 // entrypoint's stdout/stderr is captured on failure. When `exec sciontool
 // init` succeeds the shell is replaced and the file contains normal init
 // output; when it fails the file holds the error output that explains why.
 const entrypointLogFile = ".scion-entrypoint.log"
 
-// entrypointRCFile is the filename (relative to agentHome) where the
-// entrypoint's exit code is recorded. This file is only written on the
-// failure path — when `exec` succeeds the shell is replaced and the
-// echo never runs.
+// entrypointRCFile was previously used to capture the exit code on the
+// failure path, but `exec` replaces the shell on success (echo never runs)
+// and `sandbox wait` already provides the exit code. Kept only for
+// backward compatibility if an existing sandbox wrote this file.
 const entrypointRCFile = ".scion-entrypoint.rc"
 
 // SandboxLauncherAvailable reports whether the Cloud Run Sandbox launcher
@@ -407,14 +421,14 @@ func copyDirContents(src, dst string) error {
 // the sandbox boundary (§4.4a). The tmux socket is deliberately
 // sandbox-internal; tmux uses its default path inside the sandbox.
 func mountsFor(paths scionPaths, sharedDirs []api.SharedDir) []string {
-	// Mount the agent home at /home/scion so that sciontool init's
+	// Mount the agent home at sandboxAgentHome so that sciontool init's
 	// hardcoded HOME=/home/scion (supervisor.go:115) resolves to the
 	// bind-mounted writable path. The rootfs is read-only (EROFS,
 	// confirmed by diag-sbx6), so the previous rm -rf / ln -sfn approach
 	// fails. Mounting with a different destination avoids rootfs mutation
 	// entirely and was confirmed working by diag-sbx6.
 	mounts := []string{
-		fmt.Sprintf("type=bind,source=%s,destination=/home/scion", paths.agentHome),
+		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.agentHome, sandboxAgentHome),
 		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.workspace, paths.workspace),
 	}
 	for _, sd := range sharedDirs {
@@ -441,9 +455,15 @@ func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 		}
 	}
 
-	// Harness-specific env vars.
+	// Harness-specific env vars. Pass sandboxAgentHome (the path visible
+	// INSIDE the sandbox) rather than paths.agentHome (the host-side mount
+	// source). Any {{ .AgentHome }} expansion in env_template must resolve
+	// to a path the agent can actually reach. No current harness uses
+	// {{ .AgentHome }} in env_template (the authoring guide warns against
+	// it), but if one did, it would silently get a nonexistent path without
+	// this.
 	if cfg.Harness != nil {
-		for k, v := range cfg.Harness.GetEnv(cfg.Name, paths.agentHome, cfg.UnixUsername) {
+		for k, v := range cfg.Harness.GetEnv(cfg.Name, sandboxAgentHome, cfg.UnixUsername) {
 			env[k] = v
 		}
 	}
@@ -508,7 +528,7 @@ func envArgs(env map[string]string) []string {
 //	    new-window -t scion -n shell \;
 //	    select-window -t scion:agent;
 //	    while tmux has-session -t scion 2>/dev/null; do sleep 2; done
-func buildEntrypoint(cfg RunConfig, agentHome string) ([]string, error) {
+func buildEntrypoint(cfg RunConfig) ([]string, error) {
 	// Build the harness command line.
 	var cmdLine string
 	if cfg.NoAuth {
@@ -561,16 +581,23 @@ func buildEntrypoint(cfg RunConfig, agentHome string) ([]string, error) {
 	// mutation. The rootfs is read-only (EROFS, confirmed by diag-sbx6).
 	//
 	// Entrypoint output capture (#22): wrap the command in a group whose
-	// stdout/stderr are redirected to a log file under agentHome. On the
-	// happy path `exec` replaces the shell with sciontool (which inherits
-	// the redirected fds — acceptable because tmux manages its own pty).
-	// On failure the shell continues past the group, writes the exit code
-	// to an RC file, and both files are available for the DOA probe to
-	// read from the host filesystem (bind-mounted at /home/scion).
-	logPath := filepath.Join(agentHome, entrypointLogFile)
-	rcPath := filepath.Join(agentHome, entrypointRCFile)
-	wrappedCmd := fmt.Sprintf("{ exec sciontool init -- /bin/sh -c %s; } > %s 2>&1; echo $? > %s",
-		shellQuote(tmuxCmd), logPath, rcPath)
+	// stdout/stderr are redirected to a log file. On the happy path `exec`
+	// replaces the shell with sciontool (which inherits the redirected fds
+	// — acceptable because tmux manages its own pty). On failure the log
+	// captures the error output.
+	//
+	// IMPORTANT: paths here are INSIDE the sandbox. Use sandboxAgentHome
+	// (/home/scion, the mount destination), NOT agentHome (the host-side
+	// mount source). Writing to agentHome inside the sandbox hits the
+	// read-only rootfs (EROFS). The DOA probe in Run() reads from
+	// agentHome on the HOST, where the bind mount makes the same files
+	// visible at the source path.
+	//
+	// No .rc file: `exec` replaces the shell on success (echo never runs),
+	// and `sandbox wait` already provides the exit code on the host side.
+	logPath := filepath.Join(sandboxAgentHome, entrypointLogFile)
+	wrappedCmd := fmt.Sprintf("{ exec sciontool init -- /bin/sh -c %s; } > %s 2>&1",
+		shellQuote(tmuxCmd), logPath)
 	return []string{"/bin/sh", "-c", wrappedCmd}, nil
 }
 
@@ -656,7 +683,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	env := envFor(cfg, paths)
 
 	// Build entrypoint command.
-	entrypoint, err := buildEntrypoint(cfg, paths.agentHome)
+	entrypoint, err := buildEntrypoint(cfg)
 	if err != nil {
 		return "", err
 	}
@@ -723,13 +750,13 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 			"name", slug, "attempt", i+1, "delay", delay, "error", probeErr)
 	}
 	if probeErr != nil {
-		// Read entrypoint diagnostics from the host filesystem. The agent
-		// home is bind-mounted so the log/RC files written inside the
-		// sandbox are visible at the same path on the host. We cannot use
-		// `sandbox exec` here — the probe just proved the sandbox is dead.
+		// Read entrypoint diagnostics from the host filesystem.
+		// paths.agentHome is the HOST-SIDE mount source; the sandbox writes
+		// to sandboxAgentHome (/home/scion, the mount destination). The bind
+		// mount makes them the same file. We cannot use `sandbox exec` here
+		// — the probe just proved the sandbox is dead.
 		var diagInfo string
 		logPath := filepath.Join(paths.agentHome, entrypointLogFile)
-		rcPath := filepath.Join(paths.agentHome, entrypointRCFile)
 		if logData, readErr := os.ReadFile(logPath); readErr == nil {
 			logStr := string(logData)
 			// Truncate to the last 2000 bytes to keep error messages readable.
@@ -737,9 +764,6 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 				logStr = "...(truncated)\n" + logStr[len(logStr)-2000:]
 			}
 			diagInfo += fmt.Sprintf("\nentrypoint log (%s):\n%s", logPath, logStr)
-		}
-		if rcData, readErr := os.ReadFile(rcPath); readErr == nil {
-			diagInfo += fmt.Sprintf("\nentrypoint exit code: %s", strings.TrimSpace(string(rcData)))
 		}
 
 		runtimeLog.Error("sandbox dead on arrival: all liveness probes failed",
