@@ -4104,3 +4104,86 @@ D-35 needs one; nothing here changes that conclusion, only the recipe. I also di
 message about it. He asked for less volume, and "I refined a recipe for a thing I already told you
 about" is not worth interrupting him for. It goes in the record and surfaces when he asks or when
 there is an answer.
+
+---
+
+## 2026-08-26 22:19 — DECISION APPROVED: the merge order. And the refined design doc is written.
+
+### The merge order is approved by ptone
+
+He asked for a reminder at 22:14, I gave it at ~22:16, and he answered **"yes - this looks good"**
+at 22:19. **This is the first of the four open decisions to be answered.** Recording it here
+because an approval that lives only in a Discord thread is an approval that gets lost.
+
+**Approved sequence:**
+
+1. Merge **1265** (`scion/security-fix-p0-s1` → main).
+2. Land **1268** and **1269** into `scion/dev-rebase-1294`. **Not** into main.
+3. Rebase `scion/dev-rebase-1294` on main. The duplicated security fix disappears by itself.
+4. Land **1266** — which, per the two-venue workflow, means opening an **upstream** PR on
+   `GoogleCloudPlatform/scion` and then closing the fork PR unmerged.
+
+**Everything in the reminder was re-verified against the remote before I sent it**, not recalled:
+
+- 1265 head `scion/security-fix-p0-s1`, base `main`. Independent.
+- 1266 head `scion/dev-rebase-1294`, base `main`.
+- 1268 head `scion/sn-dev-ready`, base `scion/dev-rebase-1294`. **Stacked on 1266.**
+- 1269 head `scion/sn-ws-mount`, base `scion/dev-rebase-1294`. **Stacked on 1266.**
+- `cmd/deploy_instance.go` on `dev-rebase-1294`, line 263: no `SCION_SERVER_MODE=hosted`, no
+  `SCION_IMAGE_REGISTRY`. Both present at line 289 on `sn-dev-ready` and `sn-ws-mount`.
+- Six files overlap between 1265 and 1266: `pkg/hub/web.go`, `pkg/hub/web_test.go`,
+  `cmd/server_foreground.go`, `cmd/server_foreground_test.go`, `scripts/cloudrun/deploy.sh`, and
+  `.design/project-log/p0-security-fixes.md`.
+
+**`scripts/cloudrun/deploy.sh` is new information.** I had the overlap at five files from an
+earlier read; it is six, and the sixth is a deploy script, which is a more interesting conflict
+than a test file. Found only because I re-derived the list from the API instead of trusting my
+own earlier count.
+
+### I cannot execute steps 2 and 3 myself
+
+Two standing constraints bite:
+
+- *"do not merge #1265/#1266 — that is ptone's gate."* Step 1 and step 4 are his.
+- *"Do not rebase or force-push the integration branch."* `scion/dev-rebase-1294` **is** the
+  integration branch, so step 3 is explicitly not mine.
+
+So the approval unblocks the plan but not my own hands. Steps 2 and 3 need a developer with the
+mandate to touch the integration branch. Raised with ptone.
+
+### The refined design doc is written
+
+ptone, 22:14: *"we should be landing one refined design doc in the .design folder in our first PR -
+all other project logs do not need to be durably recorded in the repo, and can move to the
+scratchpad working project folder."*
+
+Written and pushed: **`.design/hosted/cloud-run-single-node.md`, 416 lines**, distilled from the
+5454-line, 353 KB working log.
+
+**Path corrected from what I told him.** I said `.design/cloud-run-single-node.md` before checking
+the convention. `.design/hosted/` is where deployment and distributed architecture lives —
+`hosted-architecture.md`, `multi-broker.md`, `runtime-broker-api.md`. Told him.
+
+**What I stripped, and why it matters.** The working log had become an archaeology of its own
+reasoning: a revision log at §0, a Dockerfile sketch marked `⚠️ SUPERSEDED` inline at :555, a
+section titled `⚠️ STATUS REVERSED TWICE — READ §4.4-rev FIRST`, another titled `⚠️ TITLE
+FALSIFIED`, a `~~DEAD~~` heading, and dated addenda running to §11.23. All of that is valuable
+*process* record and worthless as a *design* record. A reader who needs to implement or review
+this tier should not have to reconstruct which of three contradictory rulings survived.
+
+The refined doc states the architecture as it now **is**, verified end to end on 2026-08-25, and
+keeps only the decisions that are costly to reverse, each with its rationale: the omni image built
+by chaining rather than transcribing harnesses; tmux staying inside the sandbox with `sandbox exec`
+as the transport; selection probing the launcher binary because `K_SERVICE` is not set on
+Instances; the `cloudrun-sandbox` name; and the rule that every address handed into a sandbox needs
+an explicit decision. It carries the four alternatives with reasons for rejection, the ephemeral
+durability trade stated as a trade, the IAP perimeter and its single point of failure, and the four
+upstream issues (1273–1276) this tier depends on.
+
+### Footprint plan corrected
+
+My earlier §5.1 said "move the logs to a separate documentation commit or a separate PR". That is
+**not** what ptone asked for and it is now superseded. The logs do not land in the repo at all.
+
+Revised: 63 files → drop 23 logs → 40 → add 1 design doc → **41** → drop 5 duplicated
+security-fix files once 1265 lands → **36** → send the two drive-bys separately → **33**.

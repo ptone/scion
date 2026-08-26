@@ -118,8 +118,25 @@ PR 1266 today: **63 files, +7575 / -59.**
 23 of the 63 files are internal engineering logs under `.design/project-log/`, totalling 1679
 changed lines. They are not review surface. A reviewer must scroll past them to find the code.
 
-**Action:** move them to a separate documentation commit or a separate PR.
-**Effect: 63 files → 40 files. No risk. No code change.**
+**Superseded by ptone, 22:14.** My earlier action here was "move them to a separate documentation
+commit or a separate PR". That is not what he wants. His instruction:
+
+> we should be landing one refined design doc in the .design folder in our first PR - all other
+> project logs do not need to be durably recorded in the repo, and can move to the scratchpad
+> working project folder.
+
+**Corrected action:**
+
+1. **Drop all 23 `.design/project-log/*.md` files from the PR.** They do not land anywhere in the
+   repo. They stay in the scratchpad. Verified count: 23 of 63.
+2. **Add one refined design doc.** Written and pushed on `scion/sn-impl-arch` at
+   `.design/hosted/cloud-run-single-node.md`, 416 lines, distilled from the 5454-line working log.
+
+**Effect: 63 → 40, then +1 for the design doc = 41 files. No risk. No code change.**
+
+Note on the path: I told ptone `.design/cloud-run-single-node.md` before checking the convention.
+`.design/hosted/` is correct — that is where deployment and distributed architecture lives
+(`hosted-architecture.md`, `multi-broker.md`, `runtime-broker-api.md`). Flagged to him.
 
 ## 5.2 The duplicated security fix — free, but ordering-dependent
 
@@ -156,11 +173,15 @@ This is a second, independent reason to keep the ordering in task #51.
 | Stage | Files |
 |---|---|
 | Today | 63 |
-| Move the logs out (5.1) | 40 |
-| Land 1265 first and rebase (5.2) | 35 |
-| Send the drive-bys separately (5.3) | 32 |
+| Drop the 23 logs entirely (5.1) | 40 |
+| Add the one refined design doc (5.1) | 41 |
+| Land 1265 first and rebase (5.2) | 36 |
+| Send the drive-bys separately (5.3) | 33 |
 
 **Roughly half, with no change to what the tier does.**
+
+Revised 22:20 after ptone's 22:14 instruction. The logs are dropped, not relocated inside the
+repo, and one refined design doc is added back.
 
 ## 5.5 Honest note on what the issues do and do not buy
 
