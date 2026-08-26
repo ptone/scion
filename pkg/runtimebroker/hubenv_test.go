@@ -368,28 +368,22 @@ func TestColocatedExtraHosts(t *testing.T) {
 	}
 }
 
-func TestCloudrunSandboxHubEndpoint_PortExtraction(t *testing.T) {
-	// cloudrunSandboxHubEndpoint calls DiscoverLinkLocalAddress() which
-	// depends on real interfaces. We test the port extraction and error
-	// paths that are independent of network state.
-
-	// No port → error (refuses to guess).
-	_, err := cloudrunSandboxHubEndpoint("https://hub.example.com")
+func TestCloudrunSandboxHubEndpoint_ZeroPort(t *testing.T) {
+	// Zero listen port means the hub's listen port is not known
+	// (non-colocated broker). Must error, not guess.
+	_, err := cloudrunSandboxHubEndpoint(0)
 	if err == nil {
-		t.Fatal("expected error when broker hub endpoint has no explicit port")
+		t.Fatal("expected error when hub listen port is zero")
 	}
-
-	// Empty broker endpoint → error.
-	_, err = cloudrunSandboxHubEndpoint("")
-	if err == nil {
-		t.Fatal("expected error when broker hub endpoint is empty")
+	if !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("expected 'not configured' error, got: %v", err)
 	}
 }
 
 func TestCloudrunSandboxHubEndpoint_NeverRunApp(t *testing.T) {
 	// Even if DiscoverLinkLocalAddress fails (no link-local in CI), the
 	// function must never return a public *.run.app URL.
-	ep, err := cloudrunSandboxHubEndpoint("http://localhost:8080")
+	ep, err := cloudrunSandboxHubEndpoint(8080)
 	if err != nil {
 		// Expected in CI — no link-local address.
 		return
@@ -401,7 +395,7 @@ func TestCloudrunSandboxHubEndpoint_NeverRunApp(t *testing.T) {
 		t.Fatalf("expected http://169.254.x.x:<port>, got %q", ep)
 	}
 	if !strings.HasSuffix(ep, ":8080") {
-		t.Fatalf("expected port 8080 from broker endpoint, got %q", ep)
+		t.Fatalf("expected port 8080, got %q", ep)
 	}
 }
 

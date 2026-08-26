@@ -172,32 +172,26 @@ func colocatedExtraHosts(hubEndpoint string, isColocated bool, runtimeName strin
 // Same function (DiscoverLinkLocalAddress), same value — but now as a
 // destination (where the sandbox should connect), not a bind address.
 //
-// The port is read from brokerHubEndpoint, which is the broker's own hub URL
-// (typically http://localhost:<port> in co-located mode). This avoids
-// hardcoding a port that could change with configuration.
+// hubListenPort is the port the co-located hub HTTP server is listening on,
+// plumbed from the server's configuration (--web-port or --port). This is the
+// actual listen port, not parsed from an external URL which may have an
+// implicit port (443 via HTTPS).
 //
-// Returns an error if link-local discovery fails or the port cannot be
-// determined — the agent start must fail rather than fall back to a URL that
-// will 302 from the IAP edge.
-func cloudrunSandboxHubEndpoint(brokerHubEndpoint string) (string, error) {
+// Returns an error if link-local discovery fails or hubListenPort is zero
+// (non-colocated broker) — the agent start must fail rather than fall back
+// to a URL that will 302 from the IAP edge.
+func cloudrunSandboxHubEndpoint(hubListenPort int) (string, error) {
+	if hubListenPort == 0 {
+		return "", fmt.Errorf("cloudrun-sandbox hub endpoint: hub listen port is not " +
+			"configured (non-colocated broker cannot serve sandboxes)")
+	}
+
 	linkLocal, err := metadata.DiscoverLinkLocalAddress()
 	if err != nil {
 		return "", fmt.Errorf("cloudrun-sandbox hub endpoint: %w", err)
 	}
 
-	// Extract the port from the broker's own hub URL so we never hardcode it.
-	port := ""
-	if brokerHubEndpoint != "" {
-		if u, err := url.Parse(brokerHubEndpoint); err == nil {
-			port = u.Port()
-		}
-	}
-	if port == "" {
-		return "", fmt.Errorf("cloudrun-sandbox hub endpoint: cannot determine hub port " +
-			"from broker hub endpoint %q — refusing to guess", brokerHubEndpoint)
-	}
-
-	return fmt.Sprintf("http://%s", net.JoinHostPort(linkLocal, port)), nil
+	return fmt.Sprintf("http://%s", net.JoinHostPort(linkLocal, fmt.Sprintf("%d", hubListenPort))), nil
 }
 
 func redactEnvValueForLog(key, value string) string {
