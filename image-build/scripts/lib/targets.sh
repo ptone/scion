@@ -236,6 +236,9 @@ step_build_args() {
       else
         echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
       fi
+      if [[ -n "${COMMIT_SHA:-}" ]]; then
+        echo "GIT_COMMIT=${COMMIT_SHA}"
+      fi
       ;;
     *)
       if is_harness_step "$1"; then
