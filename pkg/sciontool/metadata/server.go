@@ -263,9 +263,10 @@ func resolveBindAddress(raw string) (string, error) {
 
 // DiscoverLinkLocalAddress enumerates the host's network interfaces and
 // returns an IPv4 link-local address (169.254.0.0/16). When exactly one is
-// found it is returned directly. When multiple are found, they are sorted
-// lexicographically and the lowest is returned for deterministic selection.
-// It returns an error only when no link-local address is found.
+// found it is returned directly. When multiple are found, candidates outside
+// 169.254.169.0/24 (the GCP metadata subnet) are preferred, then the
+// numerically lowest IP is selected. It returns an error only when no
+// link-local address is found.
 func DiscoverLinkLocalAddress() (string, error) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
