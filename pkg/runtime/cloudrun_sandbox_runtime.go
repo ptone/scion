@@ -639,6 +639,47 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		return "", fmt.Errorf("cloudrun-sandbox: run failed: %w (output: %s)", err, out)
 	}
 
+	// Post-run liveness probe: `sandbox run --detach` returns rc=0 even for
+	// sandboxes that die immediately (e.g. because the entrypoint binary
+	// cannot be resolved — see R1 absolute-path fix above). The exit code
+	// carries no information about whether the sandbox is actually alive.
+	// Probe with `sandbox exec` to confirm liveness before reporting success.
+	// Retry with backoff to give the sandbox time to initialize its control
+	// server.
+	//
+	// Finding from §1 E2E walk (2026-08-26): 4 of 6 test sandboxes returned
+	// rc=0 from `run --detach` but were dead within 5 seconds. Without this
+	// probe, dead-on-arrival sandboxes are permanently reported as running.
+	//
+	// The retry delays are a best-guess bounded by observation: sandboxes
+	// that die do so in under 5 seconds (diag-sbx3 matrix). There is no
+	// precise measurement of sandbox startup latency. If this probe proves
+	// flaky in practice, lengthen the ladder rather than removing the probe.
+	probeDelays := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
+	var probeErr error
+	for i, delay := range probeDelays {
+		time.Sleep(delay)
+		probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
+		_, probeErr = runSimpleCommand(probeCtx, r.bin, "exec", slug, "--", "/bin/true")
+		probeCancel()
+		if probeErr == nil {
+			runtimeLog.Info("sandbox liveness probe passed", "name", slug, "attempt", i+1)
+			break
+		}
+		runtimeLog.Debug("sandbox liveness probe failed, retrying",
+			"name", slug, "attempt", i+1, "delay", delay, "error", probeErr)
+	}
+	if probeErr != nil {
+		runtimeLog.Error("sandbox dead on arrival: all liveness probes failed",
+			"name", slug, "agentID", cfg.Name, "error", probeErr)
+		// Attempt cleanup — sandbox may be in a broken state.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _ = runSimpleCommand(cleanupCtx, r.bin, "delete", "--force", slug)
+		cleanupCancel()
+		return "", fmt.Errorf("cloudrun-sandbox: sandbox dead on arrival after run returned rc=0 — "+
+			"all liveness probes failed: %w", probeErr)
+	}
+
 	// Record in state store.
 	entry := &sandboxStateEntry{
 		SandboxName:   slug,

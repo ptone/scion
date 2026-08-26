@@ -987,8 +987,10 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 	argsFile := filepath.Join(tmpDir, "sandbox-args")
 
 	// Create a mock sandbox binary that records its args.
+	// Only record args for the "run" subcommand (not for subsequent
+	// liveness probe "exec" calls). All calls succeed (rc=0).
 	mockBin := filepath.Join(tmpDir, "sandbox")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\necho sandbox-ok\n"
+	script := "#!/bin/sh\nif [ \"$1\" = \"run\" ]; then\n  printf '%s\\n' \"$@\" > " + argsFile + "\nfi\necho sandbox-ok\n"
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1078,6 +1080,100 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 	}
 	if entry.Project != "my-project" {
 		t.Errorf("state entry Project = %q, want %q", entry.Project, "my-project")
+	}
+}
+
+// TestCloudRunSandboxRuntime_Run_DeadOnArrival tests that Run() returns an
+// error when the sandbox dies immediately after `sandbox run --detach`
+// returns rc=0. This catches the "dead on arrival" scenario where the
+// sandbox binary cannot resolve PATH (Finding #10) or fails for any other
+// reason invisible to the run command's exit code.
+func TestCloudRunSandboxRuntime_Run_DeadOnArrival(t *testing.T) {
+	tmpDir := t.TempDir()
+	rootDir := filepath.Join(tmpDir, "scion")
+
+	// Mock binary: "run" succeeds, "exec" always fails (sandbox is dead),
+	// "delete" succeeds (cleanup).
+	mockBin := filepath.Join(tmpDir, "sandbox")
+	script := `#!/bin/sh
+case "$1" in
+  run)    echo sandbox-ok; exit 0 ;;
+  exec)   echo "sandbox not running"; exit 1 ;;
+  delete) exit 0 ;;
+  *)      exit 1 ;;
+esac
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	homeDir := filepath.Join(tmpDir, "agent-home")
+	if err := os.MkdirAll(homeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	stateFile := filepath.Join(tmpDir, "state.json")
+	rt := &CloudRunSandboxRuntime{
+		bin:          mockBin,
+		state:        newSandboxStateStore(stateFile),
+		rootDir:      rootDir,
+		watchCancels: make(map[string]context.CancelFunc),
+	}
+
+	cfg := RunConfig{
+		Name:      "dead-agent",
+		HomeDir:   homeDir,
+		Workspace: filepath.Join(tmpDir, "workspace"),
+		Image:     "omni-image",
+		Project:   "my-project",
+		ProjectID: "proj-123",
+		Harness: &mockHarness{
+			command: []string{"claude", "--agent"},
+			env:     map[string]string{},
+		},
+		Labels: map[string]string{"scion.name": "dead-agent"},
+	}
+
+	_ = os.MkdirAll(cfg.Workspace, 0755)
+
+	_, err := rt.Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run() should return error for dead-on-arrival sandbox")
+	}
+
+	if !strings.Contains(err.Error(), "dead on arrival") {
+		t.Errorf("Run() error should mention 'dead on arrival', got: %v", err)
+	}
+
+	// State store should NOT have an entry (sandbox was DOA).
+	entry := rt.state.get("dead-agent")
+	if entry != nil {
+		t.Error("state store should not have entry for dead-on-arrival sandbox")
+	}
+}
+
+// TestCloudRunSandboxRuntime_BuildEntrypoint_AbsolutePaths verifies that
+// buildEntrypoint uses absolute paths for shell binaries (Finding #10).
+func TestCloudRunSandboxRuntime_BuildEntrypoint_AbsolutePaths(t *testing.T) {
+	cfg := RunConfig{
+		Harness: &mockHarness{
+			command: []string{"claude", "--agent"},
+			env:     map[string]string{},
+		},
+	}
+	entrypoint, err := buildEntrypoint(cfg, "/scion/agents/test/home")
+	if err != nil {
+		t.Fatalf("buildEntrypoint() error = %v", err)
+	}
+	// The first element must be an absolute path.
+	if !strings.HasPrefix(entrypoint[0], "/") {
+		t.Errorf("buildEntrypoint()[0] = %q, want absolute path (must start with /)", entrypoint[0])
+	}
+	// The entrypoint must not use bare 'sh' anywhere in the command.
+	cmd := strings.Join(entrypoint, " ")
+	// Check for bare 'sh' that is not preceded by '/' (would match 'sh -c' but not '/bin/sh -c')
+	if strings.Contains(cmd, " sh -c ") && !strings.Contains(cmd, "/sh -c") {
+		t.Errorf("buildEntrypoint() uses bare 'sh' instead of an absolute path:\n%s", cmd)
 	}
 }
 
