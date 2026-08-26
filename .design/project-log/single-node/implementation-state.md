@@ -4483,3 +4483,51 @@ dev-auth guard while shipping a publicly reachable deploy command.
 
 Known follow-up, not a blocker: `pkg/runtime/factory.go` will conflict with upstream 1302. We land
 second, so it is ours to reconcile, and it should be a clean re-registration.
+
+---
+
+## 2026-08-26 23:33Z — D-35 filed as ptone/scion#1281. Triage set now fully closed.
+
+Filed while blocked on the merge gate. Nothing on the critical path moved: 1265 still `OPEN`, all
+three branch heads unchanged (`facb22fb`, `c4619074`, `6624f534`), no new upstream PR.
+
+### What was filed
+
+The half that is provable by reading, with the half that is not explicitly labelled as such.
+
+**Confirmed.** Line numbers verified against *both* `GoogleCloudPlatform/scion` main and
+`ptone/scion` main — identical on both:
+
+- `telemetry.go:700-701` — the session-end branch calls `Finalize(...)` with tokens and error but
+  **not** `event.Data.SessionID`.
+- `dialects/claude.go:41-60` — `session_id` is parsed uniformly for *every* event, so the ID is
+  sitting on the session-end event that triggers the send.
+- `aggregator.go:88/92/93` — `StartSession` is the **sole** writer of both `a.sessionID` and
+  `a.startedAt`.
+- `init.go:436-440` — POSTs unconditionally, no guard on an empty ID.
+- `handlers_agent_metrics.go:87` — `400 session.id is required`.
+
+One missed session-start therefore turns a recoverable gap into permanent loss of the session's
+metrics, `exit_code` included, while the field needed to make the request valid goes unused.
+
+**Not established, and stated as such in the issue:** that a missed session-start caused any
+*specific* observed 400, and why session-start would be missed at all. Two hypotheses recorded as
+eliminated — it is not "hooks are dead" (the 400 proves session-end arrived) and not per-hook
+process amnesia (`sciontool init` is a long-lived supervisor holding the aggregator).
+
+This is the discipline that D-46 and D-39 lacked: those two were filed off a plausible mechanism
+rather than an exercised path, and both were wrong. Splitting the report into "provable" and
+"suspected" costs nothing and stops the next reader inheriting my guess as a fact.
+
+Also suggested a follow-up worth more than the fix itself: the hub has six distinct 400 sites and
+logs none of them. Had it logged the rejection reason, this would have been diagnosable from the
+failure we already had, with no live reproduction needed.
+
+### A venue error I made and corrected
+
+I tried to file on `GoogleCloudPlatform/scion` and the token refused `createIssue`. Checking where
+1273 and 1276 actually live showed they are on **`ptone/scion`**, the fork — not upstream, as I had
+been assuming and had written in earlier notes. **All five triage issues are on the fork.** The
+fork-vs-upstream split applies to *pull requests*; I had over-generalised it to issues.
+
+Triage set closed: **1273, 1274, 1275, 1276, 1281.**
