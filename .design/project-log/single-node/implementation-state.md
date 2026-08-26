@@ -4531,3 +4531,65 @@ been assuming and had written in earlier notes. **All five triage issues are on 
 fork-vs-upstream split applies to *pull requests*; I had over-generalised it to issues.
 
 Triage set closed: **1273, 1274, 1275, 1276, 1281.**
+
+---
+
+## 2026-08-26 23:37Z — Upstream PR protocol confirmed. Answered ptone: no, we do not wait for the four issues.
+
+### ptone's question: must we wait for 1273–1276 before opening our first PR?
+
+**Answered: no.** They are not code dependencies.
+
+Verified rather than asserted: I grepped the **entire 276 KB patch** for `scion/sn-tier`. It
+contains **no code keyed to 1273, 1274, 1275 or 1276**. The only code workarounds present are for
+two *Cloud Run platform* defects (B23 exec-form daemonize, and the sandbox delete hang) — both
+documented, and the delete one self-disables via `deleteWorkaroundFixDetected` when the platform
+stops exhibiting the bug.
+
+The stopgaps for 1273 and 1276 are **deploy-time operator settings**, recorded in §9.2 of the
+design doc, not code entanglement. The branch builds and tests clean against `main`, and §1 was
+walked end to end on 2026-08-25 with all four issues open.
+
+So the only genuine gate remains **1265**, and it gates for a different reason: exposure, not
+correctness.
+
+**Cost of waiting, which I put to him:** the branch ages against `main`, and 1302 lands first while
+we already share `factory.go` with it. Waiting makes the conflict bigger, not smaller.
+
+### Protocol, confirmed by the coordinator. Three points I would have got wrong.
+
+1. **Fork PR first** — the review venue, where CI is genuinely green. I can open this myself.
+2. **I do not open the upstream PR, and neither does the coordinator.** I generate a
+   `compare/main...ptone:scion:<branch>?quick_pull=1&title=…&body=…` URL and post it as a markdown
+   link to **Discord thread 1532864101909528737** (that thread carries nothing else). ptone clicks
+   it; the PR is created under his account. **Agents have fork write access only, by design** —
+   which is the real reason my token was refused, not a misconfiguration.
+3. `repo-maintenance` handles fork-PR closure and branch cleanup after the upstream PR merges.
+4. **Issues are fork-only.** My earlier correction was right.
+5. **`scion/<name>` is the convention.** 1302 skipping it was ptone's own direct commit, *not* a
+   precedent — I had started to read it as one.
+6. **PR body uses `Ref: ptone/scion#N`, never a bare `Fixes #N`.** Fork and upstream number issues
+   independently, so a bare reference silently resolves against the wrong repo.
+
+### Sequencing row added, with the venue trap called out
+
+Added to `/scion-volumes/scratchpad/merge-sequencing-deps.md` as the coordinator asked.
+
+**I wrote the constraint against *upstream* `main`, not the fork.** This is the part most likely to
+be missed in a batch sweep: 1265 will read as "merged" on the fork long before the guard exists
+upstream, and the tier goes upstream. The file's own header already warns about exactly this —
+mark resolved only "once the dependency has actually merged upstream, not just once its fork PR is
+ready" — so the trap is a known one, and I flagged my row for the coordinator to sanity-check.
+
+### Raised, not acted on: three stale fork PRs
+
+`#1266` (`scion/dev-rebase-1294`), `#1268` (`scion/sn-dev-ready`), `#1269` (`scion/sn-ws-mount`) are
+all still OPEN and all superseded by `scion/sn-tier`. Opening a fourth PR for the same tier without
+closing them leaves a reviewer unable to tell which is live.
+
+`repo-maintenance` owns fork-PR cleanup, so I asked rather than closing them myself.
+
+### Outstanding decision with ptone
+
+May I open the fork PR for `scion/sn-tier` now? I recommended yes: opening is not landing, and it
+moves review and CI into the 1265 wait rather than after it.
