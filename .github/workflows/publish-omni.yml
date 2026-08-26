@@ -4,9 +4,13 @@
 # This ensures Dockerfile changes (e.g., CMD fixes) result in a republished
 # image without manual intervention.
 #
-# The image tag is dev-<commit-sha> of the PR head. Only scion-omni is pushed;
-# intermediate images (thick-prep, scion-base, harness chain) are built locally
-# and not published.
+# The image is pushed with three tags:
+#   - dev-<head-sha>: the PR head commit SHA (predictable, matches git log)
+#   - dev-<merge-sha>: the PR merge commit SHA (github.sha, for backward compat)
+#   - dev-latest: moving tag for the most recent build
+#
+# Only scion-omni is pushed; intermediate images (thick-prep, scion-base,
+# harness chain) are built locally and not published.
 
 name: Publish Omni Image
 
@@ -46,6 +50,7 @@ jobs:
       - name: Build all images locally (no push)
         env:
           REGISTRY: ghcr.io/${{ github.repository_owner }}
+          # Build with the merge-commit tag (backward compat).
           TAG: dev-${{ github.sha }}
         run: |
           # Build the full chain locally. Nothing is pushed yet —
@@ -71,19 +76,35 @@ jobs:
       - name: Push only scion-omni
         env:
           REGISTRY: ghcr.io/${{ github.repository_owner }}
-          TAG: dev-${{ github.sha }}
+          MERGE_TAG: dev-${{ github.sha }}
+          HEAD_TAG: dev-${{ github.event.pull_request.head.sha }}
         run: |
-          echo "Pushing scion-omni:${TAG} to GHCR..."
-          docker push "${REGISTRY}/scion-omni:${TAG}"
+          IMAGE="${REGISTRY}/scion-omni"
+
+          # Tag with the head commit SHA (predictable from git log)
+          docker tag "${IMAGE}:${MERGE_TAG}" "${IMAGE}:${HEAD_TAG}"
+          # Tag with dev-latest (moving tag for convenience)
+          docker tag "${IMAGE}:${MERGE_TAG}" "${IMAGE}:dev-latest"
+
+          echo "Pushing scion-omni with three tags..."
+          docker push "${IMAGE}:${MERGE_TAG}"
+          docker push "${IMAGE}:${HEAD_TAG}"
+          docker push "${IMAGE}:dev-latest"
+
           echo ""
           echo "=== PUSH RESULT ==="
-          echo "Pull reference: ${REGISTRY}/scion-omni:${TAG}"
+          echo "Merge-commit tag: ${IMAGE}:${MERGE_TAG}"
+          echo "Head-commit tag:  ${IMAGE}:${HEAD_TAG}"
+          echo "Latest tag:       ${IMAGE}:dev-latest"
+          echo ""
+          echo "Use the head-commit tag for predictable references:"
+          echo "  ${IMAGE}:${HEAD_TAG}"
 
       - name: Test anonymous pull (logged-out)
         if: always()
         env:
           REGISTRY: ghcr.io/${{ github.repository_owner }}
-          TAG: dev-${{ github.sha }}
+          TAG: dev-${{ github.event.pull_request.head.sha }}
         run: |
           # Remove the local image so the pull is real
           docker rmi "${REGISTRY}/scion-omni:${TAG}" 2>/dev/null || true
