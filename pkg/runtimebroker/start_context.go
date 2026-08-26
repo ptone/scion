@@ -289,6 +289,21 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			runtimeName,
 		)
 	}
+	// On the cloudrun-sandbox runtime, sandboxes cannot reach the hub's
+	// public IAP-fronted URL (they hold no IAP credential). The hub is on the
+	// same Instance, listening on 0.0.0.0, and reachable via the launcher's
+	// link-local address. Override the endpoint so the sandbox's sciontool
+	// init (and the metadata emulator's FetchGCPToken) can reach the hub.
+	if runtimeName == "cloudrun-sandbox" {
+		sandboxEndpoint, err := cloudrunSandboxHubEndpoint(s.config.HubEndpoint)
+		if err != nil {
+			return nil, &startContextError{
+				Status:  http.StatusInternalServerError,
+				Message: fmt.Sprintf("cannot resolve hub endpoint for sandbox: %v", err),
+			}
+		}
+		hubEndpoint = sandboxEndpoint
+	}
 	if hubEndpoint != "" {
 		env["SCION_HUB_ENDPOINT"] = hubEndpoint
 		env["SCION_HUB_URL"] = hubEndpoint // legacy compat
