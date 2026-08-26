@@ -1,11 +1,37 @@
 # Omni image chain for Cloud Run Instances single-node deployment.
 # Architecture: amd64 only.
 #
-# Chain: thick-prep → scion-base → claude → codex → opencode →
-#        antigravity → grok-build → omni
+# Chain: thick-prep -> scion-base -> claude -> codex -> opencode ->
+#        antigravity -> grok-build -> omni
 #
-# Each step pushes to the registry so the next step can pull it as
-# BASE_IMAGE. Only scion-omni is the final deliverable.
+# Each step builds in the local daemon so the next step can use it as
+# BASE_IMAGE. Only scion-omni is pushed (via the images: section).
+#
+# INVOCATION (exact working command):
+#
+#   CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=<sa-email> \
+#   CLOUDSDK_BILLING_QUOTA_PROJECT=ptone-experiments \
+#     gcloud builds submit \
+#       --project=ptone-experiments \
+#       --config=image-build/cloudbuild-omni.yaml \
+#       --substitutions="_TAG=dev-$(git rev-parse --short HEAD),_REGISTRY=us-central1-docker.pkg.dev/ptone-experiments/scion" \
+#       --ignore-file=image-build/gcloudignore-omni \
+#       --gcs-source-staging-dir=gs://ptone-experiments_cloudbuild/source \
+#       --async .
+#
+# WHY CLOUDSDK_BILLING_QUOTA_PROJECT: When impersonating a SA from a
+#   different project, gcloud checks API enablement on the caller's
+#   project (quota project). If Cloud Build API is not enabled there,
+#   the call fails with SERVICE_DISABLED even though the target project
+#   has it enabled. Setting the quota project to the target works around
+#   this.
+#
+# WHY --ignore-file: The default .gcloudignore excludes web source
+#   files (web/*.json, web/src/, etc.) because existing configs compile
+#   Go with -tags no_embed_web. The omni Dockerfile rebuilds scion
+#   WITHOUT that tag, running npm install && npm run build. Without
+#   the custom ignore file, step 8 (build-scion-omni) fails with
+#   ENOENT on web/package.json.
 steps:
   # Stage 1: Build thick-prep
   - name: 'gcr.io/cloud-builders/docker'
