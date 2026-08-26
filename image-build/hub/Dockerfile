@@ -33,8 +33,8 @@ RUN mkdir -p /home/scion/.scion && \
 # default CMD so the container, when started without arguments, runs the
 # hub server in the foreground.
 #
-# WORKAROUND (B23): exec-form CMD daemonizes — the --foreground flag is not
-# parsed by cobra when scion is invoked directly via the container runtime.
-# Wrapping in sh -c exec forces shell word-splitting, which makes the flag
-# parse correctly.  Root cause is unresolved.
+# WORKAROUND (B23): Observed behaviour — exec-form CMD daemonizes
+# (container exits 0); wrapping in /bin/sh -c exec runs foreground
+# correctly.  Same binary, same flags.  Root cause unresolved; see
+# .design/project-log/task15-b23-daemonize-investigation.md.
 CMD ["/bin/sh", "-c", "exec scion server start --foreground --host 0.0.0.0 --enable-hub"]

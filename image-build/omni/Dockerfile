@@ -95,9 +95,9 @@ WORKDIR /workspace
 # server's port 8080 (where Cloud Run routes traffic); --enable-runtime-broker
 # starts the broker for agent lifecycle and PTY support.
 #
-# WORKAROUND (B23): exec-form CMD (["scion", "server", "start", "--foreground",
-# ...]) daemonizes — the --foreground flag is not parsed by cobra when scion is
-# invoked directly via the container runtime.  Wrapping in sh -c exec forces
-# shell word-splitting, which makes the flag parse correctly.  Root cause is
-# unresolved; see .design/project-log/ for investigation notes.
+# WORKAROUND (B23): Observed behaviour — exec-form CMD and Cloud Run
+# --command/--args both daemonize (container exits 0); wrapping in
+# /bin/sh -c exec runs foreground correctly.  Same binary, same flags,
+# same argv[0] after exec.  Root cause unresolved; see
+# .design/project-log/task15-b23-daemonize-investigation.md.
 CMD ["/bin/sh", "-c", "exec scion server start --foreground --host 0.0.0.0 --enable-hub --enable-web --enable-runtime-broker"]
