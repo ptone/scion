@@ -4653,3 +4653,31 @@ parked and pushed, and nothing decays while they sit.
 
 The tier is out of my hands and into review. The remaining path is entirely other people's gates:
 #1265 upstream, then #1302, then the rebase, then the compare URL. Task #56 carries the sequence.
+
+### 23:51Z — CI green on #1282, all four checks
+
+| Check | Result | Time |
+|---|---|---|
+| Build & Test | **pass** | 3m55s |
+| golangci-lint | **pass** | 2m18s |
+| shellcheck | **pass** | 21s |
+| Build and Push Omni Image | **pass** | 9m59s |
+
+`mergeStateStatus` moved `UNSTABLE` → **`CLEAN`**. No conflicts. No reviews and no review comments
+yet; Gemini has not posted.
+
+Two of these are worth calling out rather than ticking off:
+
+- **golangci-lint passing** matters because the repack cut across 40 files by hand — removing a
+  duplicated security fix from a *mixed* file (`cmd/server_foreground.go`) and splitting drive-bys
+  out. That is exactly the kind of surgery that leaves an unused import or a dead variable behind.
+  It did not.
+- **Build and Push Omni Image passing** is task #3 closing the loop. That image had **no CI build
+  path at all** when this project started; it was built by hand. The tier's own PR now builds it.
+
+`go test` in CI also confirms what the developer reported locally — the `internal/fixturegen`
+failure is pre-existing on `main` and not something we introduced, since CI is green here.
+
+**I am now genuinely blocked, and correctly so.** Every remaining step belongs to someone else:
+#1265 upstream → #1302 → my rebase → the compare URL. There is no work I can pull forward without
+manufacturing it. Task #56 holds the sequence so nothing is carried in my head.
