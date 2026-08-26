@@ -48,6 +48,18 @@ const defaultScionRoot = "/scion"
 // defaultStatePath is the default location for the sandbox state store.
 const defaultStatePath = "/tmp/scion-sandbox-state.json"
 
+// entrypointLogFile is the filename (relative to agentHome) where the
+// entrypoint's stdout/stderr is captured on failure. When `exec sciontool
+// init` succeeds the shell is replaced and the file contains normal init
+// output; when it fails the file holds the error output that explains why.
+const entrypointLogFile = ".scion-entrypoint.log"
+
+// entrypointRCFile is the filename (relative to agentHome) where the
+// entrypoint's exit code is recorded. This file is only written on the
+// failure path — when `exec` succeeds the shell is replaced and the
+// echo never runs.
+const entrypointRCFile = ".scion-entrypoint.rc"
+
 // SandboxLauncherAvailable reports whether the Cloud Run Sandbox launcher
 // binary is present on the filesystem.
 func SandboxLauncherAvailable() bool {
@@ -527,7 +539,17 @@ func buildEntrypoint(cfg RunConfig, agentHome string) ([]string, error) {
 	// layer too high. The inner "sh -c" after "exec sciontool init --" runs
 	// inside the outer shell where PATH is available, but we use absolute paths
 	// throughout for safety.
-	return []string{"/bin/sh", "-c", symlinkCmd + " && exec sciontool init -- /bin/sh -c " + shellQuote(tmuxCmd)}, nil
+	// Wrap the entire entrypoint in a group whose stdout/stderr are
+	// redirected to a log file under agentHome. On the happy path `exec`
+	// replaces the shell with sciontool (which inherits the redirected fds —
+	// acceptable because tmux manages its own pty). On failure the shell
+	// continues past the group, writes the exit code to an RC file, and both
+	// files are available for the DOA probe to read from the host filesystem.
+	logPath := filepath.Join(agentHome, entrypointLogFile)
+	rcPath := filepath.Join(agentHome, entrypointRCFile)
+	wrappedCmd := fmt.Sprintf("{ %s && exec sciontool init -- /bin/sh -c %s; } > %s 2>&1; echo $? > %s",
+		symlinkCmd, shellQuote(tmuxCmd), logPath, rcPath)
+	return []string{"/bin/sh", "-c", wrappedCmd}, nil
 }
 
 // -----------------------------------------------------------------------
@@ -678,14 +700,38 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 			"name", slug, "attempt", i+1, "delay", delay, "error", probeErr)
 	}
 	if probeErr != nil {
+		// Read entrypoint diagnostics from the host filesystem. The agent
+		// home is bind-mounted so the log/RC files written inside the
+		// sandbox are visible at the same path on the host. We cannot use
+		// `sandbox exec` here — the probe just proved the sandbox is dead.
+		var diagInfo string
+		logPath := filepath.Join(paths.agentHome, entrypointLogFile)
+		rcPath := filepath.Join(paths.agentHome, entrypointRCFile)
+		if logData, readErr := os.ReadFile(logPath); readErr == nil {
+			logStr := string(logData)
+			// Truncate to the last 2000 bytes to keep error messages readable.
+			if len(logStr) > 2000 {
+				logStr = "...(truncated)\n" + logStr[len(logStr)-2000:]
+			}
+			diagInfo += fmt.Sprintf("\nentrypoint log (%s):\n%s", logPath, logStr)
+		}
+		if rcData, readErr := os.ReadFile(rcPath); readErr == nil {
+			diagInfo += fmt.Sprintf("\nentrypoint exit code: %s", strings.TrimSpace(string(rcData)))
+		}
+
 		runtimeLog.Error("sandbox dead on arrival: all liveness probes failed",
-			"name", slug, "agentID", cfg.Name, "error", probeErr)
+			"name", slug, "agentID", cfg.Name, "error", probeErr, "diagnostics", diagInfo)
 		// Attempt cleanup — sandbox may be in a broken state.
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_, _ = runSimpleCommand(cleanupCtx, r.bin, "delete", "--force", slug)
 		cleanupCancel()
-		return "", fmt.Errorf("cloudrun-sandbox: sandbox dead on arrival after run returned rc=0 — "+
-			"all liveness probes failed: %w", probeErr)
+
+		errMsg := fmt.Sprintf("cloudrun-sandbox: sandbox dead on arrival after run returned rc=0 — "+
+			"all liveness probes failed: %v", probeErr)
+		if diagInfo != "" {
+			errMsg += diagInfo
+		}
+		return "", errors.New(errMsg)
 	}
 
 	// Record in state store.
