@@ -4443,3 +4443,43 @@ from `scion/sn-ws-mount` before that branch goes up.
 `scion/sn-tier` is ready and blocked on exactly one thing: **ptone merging PR 1265**, still OPEN.
 The tier deliberately carries no dev-auth guard, so it must not land first. Nothing else is
 waiting.
+
+---
+
+## 2026-08-26 23:03Z — DeploymentWarnings test gap closed. All three branches final and verified.
+
+Task #55 fixed by `sn-repack-dev` and verified against the remote:
+
+| Branch | Head | Files |
+|---|---|---|
+| `scion/sn-tier` | `facb22fb` | 40 — **unchanged**, byte-for-byte the head verified at 22:47 |
+| `scion/sn-driveby-embed-comment` | `c4619074` | 1 |
+| `scion/sn-driveby-deployment-warnings` | `6624f534` | 3 (was 2) |
+
+`pkg/hub/workspace_storage_test.go` is back on the drive-by branch, and both tests appear as added
+functions in the patch: `TestHealthCheck_DeploymentWarnings_CloudRunInstance` and
+`TestHealthCheck_DeploymentWarnings_NotOnCloudRunInstance`.
+
+The mechanism can now be proposed on its own merits with its coverage intact — which was the entire
+justification for splitting it out of the tier. Had this shipped as it stood, we would have argued
+"this deserves independent review" while handing a reviewer a feature whose tests had been quietly
+deleted.
+
+**This gap was created by my own instruction.** §4.5 of the brief said to split the mechanism out
+and named the two implementation files; it did not say to take the tests with it. The developer
+followed the brief exactly. Verification caught it because I checked the drive-by branch's contents
+rather than only the tier's — worth remembering that splitting a change means checking *both*
+sides, not just the one you care about.
+
+### State of the merge order (task #51)
+
+- Step 1, merge PR 1265 — **not done.** `state=OPEN, merged=null` at 23:00. ptone's gate.
+- Step 2, assemble the tier on a new branch — **done and verified.**
+- Step 3, drop the duplicated security fix — **done**, folded into step 2.
+- Step 4, upstream PR then close the fork PRs — **not done.** ptone's call on venue and timing.
+
+Nothing is waiting on me. The tier cannot land before 1265 because it deliberately carries no
+dev-auth guard while shipping a publicly reachable deploy command.
+
+Known follow-up, not a blocker: `pkg/runtime/factory.go` will conflict with upstream 1302. We land
+second, so it is ours to reconcile, and it should be a clean re-registration.
