@@ -3829,3 +3829,61 @@ Seven Instances present in `ptone-experiments` / `us-east4` at 18:40: `e2e-omni`
 
 Decision 1 of 4 put to ptone at 18:42 (the merge gate). Three decisions queued behind it:
 the #37/#48 stopgap-or-fix, the credentialed push test for §1 step 6, and who writes the tutorial.
+
+---
+
+## 2026-08-26 19:35 — the real upstream is GoogleCloudPlatform/scion, not the fork; #45 is fixed
+
+Two corrections to the 19:00 entry, found by re-checking rather than by reasoning.
+
+### 1. #45 is fixed and merged. #44 is not yet testable.
+
+PR 1272 in the fork is **CLOSED, not merged** (19:08). Issue 1270 is **CLOSED** (18:57). The fix
+landed **upstream** as `GoogleCloudPlatform/scion` PR **1300**, merged 18:57, and is on
+`origin/main` as commit `1d1e4d76`. `AccessSettingsProvider` is present on main in
+`cmd/server_foreground.go`, `pkg/hub/server.go`, `pkg/hub/web.go`, `pkg/hub/web_test.go`.
+
+**#45 is closed.** The open product-defect count drops from eleven to ten.
+
+**#44 is still open and still untestable.** It is downstream of #45, but the tier and the #45 fix
+do not exist together in any one image: the fix is on `main`, and the tier is not. The #44 re-test
+must wait until the tier merges. Do not close #44 on the strength of PR 1300.
+
+### 2. `ptone/scion` is a fork. The upstream is `GoogleCloudPlatform/scion`.
+
+Confirmed: `gh repo view ptone/scion --json parent` → `isFork=true`, parent
+`GoogleCloudPlatform/scion`.
+
+The workflow is two-venue. A fork PR is the review venue. The work lands through a **separate
+upstream PR** against `GoogleCloudPlatform/scion`, under a **different number**, and the fork PR is
+then closed unmerged. Verified on five branches — this is a pattern, not one case:
+
+| branch | fork PR | upstream PR |
+|---|---|---|
+| `scion/wc-dev` | 1272 CLOSED | **1300 MERGED** |
+| `scion/antigravity-apikey` | 1271 CLOSED | **1297 MERGED** |
+| `scion/agent-status` | 1260 CLOSED | **1294 MERGED** |
+| `scion/auth-capture-journey` | 1262 CLOSED | **1295 MERGED** |
+| `scion/harness-auth-settings` | 1256 CLOSED | **1293 MERGED** |
+
+**Our tier has no upstream pull request.** `scion/security-fix-p0-s1` (fork PR 1265) and
+`scion/dev-rebase-1294` (fork PR 1266) exist only as fork PRs, targeting the fork's `main`.
+Merging them there does **not** land the tier upstream. Of our set only
+`scion/broker-auth-gap` has an upstream PR (1296, open); it is not part of the tier.
+
+This is a step my 18:42 merge sequence omitted entirely. Anyone following that sequence would merge
+#1266 into the fork's main and believe the tier had shipped.
+
+### Corrected merge sequence
+
+1. Fork PR 1265 → land upstream (small, standalone, green).
+2. Remove the DO NOT MERGE markers. Merge fork PRs 1268 and 1269 into `scion/dev-rebase-1294`.
+3. Add the #37/#48 stopgap to `scion/dev-rebase-1294`.
+4. Rewrite the 1266 description (#47) with a 63-file review map.
+5. Merge fork PR 1266 into the fork's `main` — **review only, this does not ship**.
+   **5a. Open an upstream PR against `GoogleCloudPlatform/scion` and land it there.** ← was missing
+6. Re-test #44 on a fresh instance built from the merged result.
+7. File the remaining defects as issues. Fold `.design/project-log/single-node/` into the tier PR.
+8. Land the tutorial and scripts (task #50).
+
+Told ptone at 19:35. Both corrections sent as corrections, with the evidence, not as new opinion.
