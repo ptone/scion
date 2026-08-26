@@ -53,37 +53,44 @@ func TestCloudRunSandboxRuntime_ExecUser(t *testing.T) {
 // Stubs that remain not-yet-implemented (P4 scope)
 // -----------------------------------------------------------------------
 
-func TestCloudRunSandboxRuntime_P4Stubs(t *testing.T) {
+func TestCloudRunSandboxRuntime_P4Methods(t *testing.T) {
 	rt := NewCloudRunSandboxRuntime(nil)
 	ctx := context.Background()
 
-	methods := []struct {
-		name string
-		fn   func() error
-	}{
-		{"Attach", func() error { return rt.Attach(ctx, "x") }},
-	}
+	// P4 methods are implemented but require the sandbox binary to run.
+	// In unit tests without the sandbox binary, they return an exec error
+	// (not "not yet implemented"). Verify they attempt to exec the right
+	// command rather than returning a stub error.
 
-	for _, m := range methods {
-		t.Run(m.name, func(t *testing.T) {
-			err := m.fn()
-			if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-				t.Errorf("%s() error = %v, want 'not yet implemented'", m.name, err)
-			}
-		})
-	}
-
-	t.Run("GetLogs", func(t *testing.T) {
-		_, err := rt.GetLogs(ctx, "x")
-		if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-			t.Errorf("GetLogs() error = %v, want 'not yet implemented'", err)
+	t.Run("Attach_NotFoundInState", func(t *testing.T) {
+		err := rt.Attach(ctx, "nonexistent-sandbox")
+		if err == nil {
+			t.Errorf("Attach() expected error for nonexistent sandbox, got nil")
+		}
+		if !strings.Contains(err.Error(), "not found") {
+			t.Errorf("Attach() error = %v, want 'not found' error", err)
 		}
 	})
 
-	t.Run("Exec", func(t *testing.T) {
-		_, err := rt.Exec(ctx, "x", []string{"ls"})
-		if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-			t.Errorf("Exec() error = %v, want 'not yet implemented'", err)
+	t.Run("GetLogs_NoSandboxBinary", func(t *testing.T) {
+		_, err := rt.GetLogs(ctx, "x")
+		// Without the sandbox binary, this fails with an exec error.
+		if err == nil {
+			t.Errorf("GetLogs() expected error without sandbox binary, got nil")
+		}
+		// Should NOT contain "not yet implemented" — the stub is gone.
+		if strings.Contains(err.Error(), "not yet implemented") {
+			t.Errorf("GetLogs() still returns stub error: %v", err)
+		}
+	})
+
+	t.Run("Exec_NoSandboxBinary", func(t *testing.T) {
+		_, err := rt.Exec(ctx, "x", []string{"/bin/ls"})
+		if err == nil {
+			t.Errorf("Exec() expected error without sandbox binary, got nil")
+		}
+		if strings.Contains(err.Error(), "not yet implemented") {
+			t.Errorf("Exec() still returns stub error: %v", err)
 		}
 	})
 }
