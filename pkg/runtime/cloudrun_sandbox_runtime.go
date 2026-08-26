@@ -738,14 +738,27 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 }
 
 func (r *CloudRunSandboxRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	return "", fmt.Errorf("cloudrun-sandbox: GetLogs not yet implemented")
+	// Use tmux capture-pane to get the scrollback buffer.
+	// Absolute paths required -- PATH is empty inside a sandbox.
+	return runSimpleCommand(ctx, r.bin, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
 }
 
 func (r *CloudRunSandboxRuntime) Attach(ctx context.Context, id string) error {
-	// C4: Attach remains a stub (P4 scope). The sandbox CLI has no --user
-	// flag, so exec/attach would give a root shell. P4 will implement
-	// attach via the tmux socket.
-	return fmt.Errorf("cloudrun-sandbox: Attach not yet implemented")
+	// Look up the sandbox to verify it exists and is running.
+	entry := r.state.get(id)
+	if entry == nil {
+		return fmt.Errorf("cloudrun-sandbox: sandbox %q not found", id)
+	}
+	// Set tmux window-size to latest for proper resize behavior.
+	_, _ = runSimpleCommand(ctx, r.bin, "exec", id, "--",
+		"/usr/bin/tmux", "set-option", "-g", "window-size", "latest")
+	// Interactive attach via sandbox exec.
+	// TERM=xterm-256color is load-bearing: without it tmux sees TERM=dumb
+	// and exits with "terminal does not support clear" -- which looks like
+	// a PTY failure but is not one (design doc section 4.4a-rev).
+	return runInteractiveCommand(r.bin, "exec", id,
+		"--env", "TERM=xterm-256color", "--",
+		"/usr/bin/tmux", "attach-session", "-t", "scion")
 }
 
 // ImageExists returns true — the omni-image is always present.
@@ -776,11 +789,13 @@ func (r *CloudRunSandboxRuntime) Sync(ctx context.Context, id string, direction 
 	return nil
 }
 
-// Exec remains a stub (P4 scope).
-// C4: The sandbox CLI has no --user flag, so exec would give a root
-// shell. P4 will implement exec with proper privilege handling.
 func (r *CloudRunSandboxRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
-	return "", fmt.Errorf("cloudrun-sandbox: Exec not yet implemented")
+	// sandbox exec has no --user flag; the process runs as the sandbox's
+	// configured user (which is the scion user via the omni-image entrypoint).
+	// Absolute paths: PATH is empty inside a sandbox, so callers must provide
+	// absolute paths or the command must be on a bind-mounted path.
+	args := append([]string{"exec", id, "--"}, cmd...)
+	return runSimpleCommand(ctx, r.bin, args...)
 }
 
 // GetWorkspacePath returns the launcher-side workspace path from the
