@@ -87,7 +87,12 @@ agent_defaults.default_harness_config: claude
 ## A.5 Filing status
 
 Only D-45 is filed upstream, as issue 1270. Ten defects exist only in our
-scratchpad. The scratchpad is not a git repository. This is a risk.
+scratchpad.
+
+The scratchpad is not a git repository. On 2026-08-26 we removed that risk. The
+full working record is now on branch `scion/sn-impl-arch` in `ptone/scion`,
+under `.design/project-log/single-node/`. It is documentation only. It contains
+no code. Commit `8959cbc`.
 
 ---
 
@@ -279,7 +284,9 @@ The work in Part C is done when all of these are true.
 4. PR 1266 is merged into `main`.
 5. PR 1272 is merged into `main`, and D-44 is re-tested on a fresh instance.
 6. Each of the ten unfiled defects has a GitHub issue.
-7. The design document is in `.design/`, not only in the scratchpad.
+7. DONE. The design document is in `.design/project-log/single-node/` on
+   branch `scion/sn-impl-arch`. Merge that branch, or fold the directory into
+   PR 1266, before the scratchpad volume goes away.
 8. `scripts/single-node/` holds the five files in C.4.4.
 9. `verify.sh` exits zero against a fresh instance.
 10. A person who did not build this system deploys the tier in a clean GCP

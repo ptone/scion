@@ -3744,3 +3744,88 @@ all. Given `req.Template` was empty, `agent.Template` should have persisted as `
 found what supplies the display value and I am not going to guess — it is cosmetic relative to the
 above, but a record that names a template it never resolved is its own small lie. Flagged, not
 claimed.
+
+---
+
+## 2026-08-26 19:00 — upstream state re-verified; a merge-order hazard; the documentation gap
+
+Written after ptone's 18:35 instruction to use ASD-STE100 Simplified Technical English. The
+answer to his three-part request is in `status-for-ptone.md` in this directory.
+
+### Correction to my own earlier reading
+
+My previous PR checks queried `GoogleCloudPlatform/scion`. That is the wrong repository. Our work
+lives in **`ptone/scion`**. Querying the wrong repo made #1265 and #1266 look merged and unrelated
+(they resolve there to a grok-build harness and a GEMINI.md rename). They are not. Re-checked in
+`ptone/scion` on 2026-08-26:
+
+| PR | Branch | Target | Size | Checks |
+|---|---|---|---|---|
+| 1265 | `scion/security-fix-p0-s1` | `main` | +259 / 6 files | green |
+| 1266 | `scion/dev-rebase-1294` | `main` | +7575 / 63 files | green |
+| 1268 | `scion/sn-dev-ready` | `scion/dev-rebase-1294` | +465 / 6 files | green, DO NOT MERGE |
+| 1269 | `scion/sn-ws-mount` | `scion/dev-rebase-1294` | +806 / 9 files | green, DO NOT MERGE |
+| 1272 | `scion/wc-dev` | `main` | +221 / 5 files | green — fixes #45, issue 1270 |
+| 1264 | `scion/broker-auth-gap` | `main` | +390 / 2 files | green |
+
+**The merge gate is intact.** #1265 and #1266 are open and still wait on ptone. Nothing reversed.
+
+### The hazard: #1266 must not merge alone
+
+`cmd/deploy_instance.go:289`, read on all three branches:
+
+- `scion/dev-rebase-1294` sets `SCION_SERVER_AUTH_MODE`, `SCION_SERVER_AUTH_PROXY_PROVIDER`,
+  `SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE`, `SCION_SEED_SERVER_HUB_ADMINEMAILS`. **That is all.**
+- `scion/sn-dev-ready` and `scion/sn-ws-mount` additionally set `SCION_SERVER_MODE=hosted` and
+  `SCION_IMAGE_REGISTRY`.
+
+So #38 and #40 are marked fixed in this file, and they are — but **only on the two child
+branches**, both of which target #1266's branch and both of which carry DO NOT MERGE markers.
+Merging #1266 to `main` on its own ships a `deploy-instance` whose hub refuses to boot (#40) and
+whose broker cannot pull agent images (#38). §1 step 0 would fail for every new operator.
+
+This supersedes §3 of `upstream-merge-assessment.md`, which had the fixes re-cut against `main`
+*after* the tier landed. See §8 of that document for the corrected sequence. The coordinator
+re-verified the line-289 claim independently at 18:45.
+
+Guard rail posted as a comment on the PR itself, so it sits at the point of action rather than in
+one person's inbox: `ptone/scion#1266` comment `5429626747`. I did not edit the PR description —
+that rewrite is #47 and needs a 63-file review map, not a warning bolted on top.
+
+### #45 has a fix in flight
+
+PR 1272 implements fix shape A from the #45 entry: an `AccessSettingsProvider` interface, with
+`Server` holding the single source of truth behind an `RLock` and returning defensive copies, and
+`WebServer` reading through it per request. It also fixes direct `s.config` reads in
+`isUserAuthorized`, `getUserRole` and `handleInviteRedeem`. **#44 is downstream of #45 and must be
+re-tested on a fresh instance once 1272 lands** — do not close #44 on the strength of 1272 alone.
+
+### The documentation gap — new, and not previously priced
+
+**#1266 adds no user documentation.** 63 changed files; the only Markdown is internal
+`.design/project-log/*` engineering logs plus `image-build/README.md`. No page under `docs-site/`.
+No reusable script for a third party. A person outside this project cannot deploy this tier today.
+
+The doc site already has the right home for it: `docs-site/src/content/docs/hosted/single-node/`
+(holds `overview`, `hub-server`, `hub-setup-gce`, `auth`, `managed-agents`, `metrics`,
+`observability`, `skill-registry`). Specification for the missing page and the five scripts under
+`scripts/single-node/` is in `status-for-ptone.md` Part C.4. Filed as task #50. Blocked on ptone's
+decision B.4; the architect does not implement it.
+
+### Scratchpad risk closed
+
+This directory was version-controlled nowhere. It is now pushed to branch `scion/sn-impl-arch` in
+`ptone/scion` under `.design/project-log/single-node/` — 61 files, 1.4 MB, documentation only, no
+code, commit `8959cbc`. **Fold that directory into #1266 or merge the branch before this volume is
+reclaimed.** The push does not make the scratchpad copy authoritative; this file still is, and the
+archive is a point-in-time snapshot.
+
+### Estate
+
+Seven Instances present in `ptone-experiments` / `us-east4` at 18:40: `e2e-omni`, `e2e-walk-r2`,
+`iap-demo`, `q2-control`, `sn-ready`, `sn-step6`, `sn-walk`. Unchanged.
+
+### Blocked on
+
+Decision 1 of 4 put to ptone at 18:42 (the merge gate). Three decisions queued behind it:
+the #37/#48 stopgap-or-fix, the credentialed push test for §1 step 6, and who writes the tutorial.
