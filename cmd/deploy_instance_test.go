@@ -398,6 +398,180 @@ func TestPrintProjectIAPBindings_WithIAPBinding(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Validation tests: reject contaminated gcloud output (#33)
+// ---------------------------------------------------------------------------
+
+// TestValidateProjectNumber_Clean verifies acceptance of valid project numbers.
+func TestValidateProjectNumber_Clean(t *testing.T) {
+	for _, num := range []string{"123456789", "0", "721899303052"} {
+		assert.NoError(t, diValidateProjectNumber(num),
+			"valid project number %q must be accepted", num)
+	}
+}
+
+// TestValidateProjectNumber_Contaminated verifies rejection of gcloud output
+// that has been contaminated by service-account impersonation warnings on
+// stderr. This is the measured failure mode from #33.
+func TestValidateProjectNumber_Contaminated(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "impersonation warning prefix",
+			input: "WARNING: This command is using service account impersonation. All API calls will be executed as [sa@proj.iam.gserviceaccount.com].\n721899303052",
+		},
+		{
+			name:  "warning inline",
+			input: "WARNING: 721899303052",
+		},
+		{
+			name:  "letters mixed in",
+			input: "72abc1899",
+		},
+		{
+			name:  "empty string",
+			input: "",
+		},
+		{
+			name:  "whitespace",
+			input: " 721899303052 ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := diValidateProjectNumber(tt.input)
+			assert.Error(t, err,
+				"contaminated project number %q must be rejected", tt.input)
+		})
+	}
+}
+
+// TestValidateInstanceURL_Valid verifies acceptance of well-formed Cloud Run URLs.
+func TestValidateInstanceURL_Valid(t *testing.T) {
+	err := diValidateInstanceURL("https://my-instance-123456789.us-east4.run.app")
+	assert.NoError(t, err)
+}
+
+// TestValidateInstanceURL_Contaminated verifies rejection of URLs built from
+// contaminated gcloud output. When the project number is prefixed with the
+// impersonation warning, the URL host becomes garbage (#33).
+func TestValidateInstanceURL_Contaminated(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "warning in host",
+			input: "https://ssh-probe-WARNING: This command is using service account imperson....run.app",
+		},
+		{
+			name:  "not https",
+			input: "http://my-instance-123.us-east4.run.app",
+		},
+		{
+			name:  "wrong domain",
+			input: "https://my-instance-123.us-east4.example.com",
+		},
+		{
+			name:  "empty string",
+			input: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := diValidateInstanceURL(tt.input)
+			assert.Error(t, err,
+				"invalid instance URL %q must be rejected", tt.input)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// diDeriveRegistry tests (#38)
+// ---------------------------------------------------------------------------
+
+// TestDeriveRegistry_Valid verifies registry derivation from well-formed images.
+func TestDeriveRegistry_Valid(t *testing.T) {
+	tests := []struct {
+		name  string
+		image string
+		want  string
+	}{
+		{
+			name:  "ghcr with tag",
+			image: "ghcr.io/ptone/scion-omni:latest",
+			want:  "ghcr.io/ptone",
+		},
+		{
+			name:  "ghcr with version tag",
+			image: "ghcr.io/ptone/scion-omni:v1.2.3",
+			want:  "ghcr.io/ptone",
+		},
+		{
+			name:  "ghcr with digest",
+			image: "ghcr.io/ptone/scion-omni@sha256:abcdef1234567890",
+			want:  "ghcr.io/ptone",
+		},
+		{
+			name:  "ghcr no tag",
+			image: "ghcr.io/ptone/scion-omni",
+			want:  "ghcr.io/ptone",
+		},
+		{
+			name:  "gcr with nested path",
+			image: "us-docker.pkg.dev/my-project/my-repo/scion-omni:latest",
+			want:  "us-docker.pkg.dev/my-project/my-repo",
+		},
+		{
+			name:  "localhost with port",
+			image: "localhost:5000/myimage:latest",
+			want:  "localhost:5000",
+		},
+		{
+			name:  "tag with digest combined",
+			image: "ghcr.io/ptone/scion-omni:v1@sha256:abcdef",
+			want:  "ghcr.io/ptone",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := diDeriveRegistry(tt.image)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestDeriveRegistry_Invalid verifies rejection of images where registry
+// cannot be derived (no host, bare image name).
+func TestDeriveRegistry_Invalid(t *testing.T) {
+	tests := []struct {
+		name  string
+		image string
+	}{
+		{
+			name:  "bare image with tag",
+			image: "nginx:latest",
+		},
+		{
+			name:  "bare image no tag",
+			image: "nginx",
+		},
+		{
+			name:  "docker library path",
+			image: "library/nginx:latest",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := diDeriveRegistry(tt.image)
+			assert.Error(t, err, "should reject image %q with no derivable registry", tt.image)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // diSanitizeResponse tests
 // ---------------------------------------------------------------------------
 
@@ -429,6 +603,7 @@ func TestDeployEnvVarsRoundTrip(t *testing.T) {
 
 	// Set env vars exactly as diGcloudDeploy formats them (auth vars via
 	// SCION_SERVER_*, admin email via SCION_SEED_SERVER_*).
+	t.Setenv("SCION_SERVER_MODE", "hosted")
 	t.Setenv("SCION_SERVER_AUTH_MODE", "proxy")
 	t.Setenv("SCION_SERVER_AUTH_PROXY_PROVIDER", "iap")
 	t.Setenv("SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE",
@@ -439,6 +614,9 @@ func TestDeployEnvVarsRoundTrip(t *testing.T) {
 	gc, err := config.LoadGlobalConfig("")
 	require.NoError(t, err, "LoadGlobalConfig must succeed with deploy env vars")
 
+	assert.Equal(t, "hosted", gc.Mode,
+		"Mode must be 'hosted' — without this the server runs in workstation "+
+			"mode, auto-enables dev auth, and crashes on a non-loopback host")
 	assert.Equal(t, "proxy", gc.Auth.Mode,
 		"Auth.Mode must be 'proxy'")
 	require.NotNil(t, gc.Auth.Proxy,
@@ -464,6 +642,34 @@ func TestDeployEnvVarsRoundTrip(t *testing.T) {
 	emails := bk.Strings("server.hub.admin_emails")
 	assert.Contains(t, emails, "admin@example.com",
 		"admin email must appear in bootstrap koanf server.hub.admin_emails")
+}
+
+// ---------------------------------------------------------------------------
+// Hosted-mode env var pinning test
+// ---------------------------------------------------------------------------
+
+// TestDeployHostedModeEnvRequired is a pinning test.
+// When SCION_SERVER_MODE is absent, the server defaults to workstation mode.
+// Workstation mode calls applyWorkstationDefaults (server_config.go:35) which
+// sets enableDevAuth=true. On Cloud Run the host is 0.0.0.0, so the
+// non-loopback dev-auth guard (server_foreground.go:2190) fires and the
+// server exits immediately. SCION_SERVER_MODE=hosted is the fix: it sets
+// cfg.Mode="hosted", which makes hostedMode=true, skipping workstation
+// defaults entirely.
+func TestDeployHostedModeEnvRequired(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".scion"), 0755))
+
+	// Simulate the env var diGcloudDeploy sets.
+	t.Setenv("SCION_SERVER_MODE", "hosted")
+
+	gc, err := config.LoadGlobalConfig("")
+	require.NoError(t, err)
+
+	assert.Equal(t, "hosted", gc.Mode,
+		"SCION_SERVER_MODE=hosted must map to cfg.Mode='hosted' — "+
+			"without this, workstation defaults enable dev auth and crash the server")
 }
 
 // ---------------------------------------------------------------------------
