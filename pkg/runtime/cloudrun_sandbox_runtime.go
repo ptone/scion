@@ -15,13 +15,11 @@
 package runtime
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,7 +28,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -51,11 +48,6 @@ const defaultScionRoot = "/scion"
 // defaultStatePath is the default location for the sandbox state store.
 const defaultStatePath = "/tmp/scion-sandbox-state.json"
 
-// DefaultDeleteTimeout is the timeout for sandbox delete --force.
-// This value is picked blind -- we have no data on the completion-time
-// distribution because the command never completes (platform defect, see
-// defect-sandbox-delete-hang.md). 10 seconds is a conservative guess.
-const DefaultDeleteTimeout = 10 * time.Second
 
 // SandboxLauncherAvailable reports whether the Cloud Run Sandbox launcher
 // binary is present on the filesystem.
@@ -656,7 +648,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 
 	// Start a watcher goroutine that blocks on `sandbox wait` and records
 	// the exit in the state store when the sandbox terminates.
-	// The context is cancelled by deleteWithTimeout to unblock the watcher
+	// The context is cancelled by deleteOrWorkaround to unblock the watcher
 	// when the sandbox is force-deleted.
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 	r.watchMu.Lock()
@@ -670,7 +662,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 func (r *CloudRunSandboxRuntime) Stop(ctx context.Context, id string) error {
 	// sandbox delete requires --force for running sandboxes.
 	// There is no stop/pause verb; Stop == Delete.
-	return r.deleteWithTimeout(ctx, id)
+	return r.deleteOrWorkaround(ctx, id)
 }
 
 func (r *CloudRunSandboxRuntime) Delete(ctx context.Context, id string) error {
@@ -680,27 +672,14 @@ func (r *CloudRunSandboxRuntime) Delete(ctx context.Context, id string) error {
 	// runsc-gofer/runsc-sandbox processes behind a CLI that reports "not
 	// running". This is the more dangerous defect. See
 	// defect-sandbox-delete-hang.md.
-	return r.deleteWithTimeout(ctx, id)
+	return r.deleteOrWorkaround(ctx, id)
 }
 
-// deleteWithTimeout issues `sandbox delete --force` and bounds the wait
-// with a configurable timeout.
-//
-// Platform defect: `sandbox delete --force` never returns (see
-// defect-sandbox-delete-hang.md). The deletion IS effective -- the sandbox
-// really is gone -- but the CLI process hangs indefinitely.
-//
-// TODO(OQ-16): Every observation of the hang is from serial deletes.
-// Fan-out is the actual pattern (fleet teardown). If the hang is
-// contention-related, concurrent teardown could be qualitatively worse.
-// Explicitly accepted: the timeout bounds the worst case per-sandbox,
-// but aggregate behavior under concurrency is unverified.
-func (r *CloudRunSandboxRuntime) deleteWithTimeout(ctx context.Context, id string) error {
-	timeout := r.deleteTimeout
-	if timeout == 0 {
-		timeout = DefaultDeleteTimeout
-	}
-
+// deleteOrWorkaround dispatches to the workaround or the plain path based
+// on the SCION_CLOUDRUN_DELETE_WORKAROUND kill switch. The watcher cancel
+// is performed here so neither downstream path needs it -- and removing
+// the workaround file does not lose the watcher cancel logic.
+func (r *CloudRunSandboxRuntime) deleteOrWorkaround(ctx context.Context, id string) error {
 	// Cancel the watcher goroutine so `sandbox wait` doesn't hang after
 	// the sandbox is deleted.
 	r.watchMu.Lock()
@@ -710,47 +689,23 @@ func (r *CloudRunSandboxRuntime) deleteWithTimeout(ctx context.Context, id strin
 	}
 	r.watchMu.Unlock()
 
+	if deleteWorkaroundEnabled {
+		return r.deleteWithTimeout(ctx, id)
+	}
+	return r.deletePlain(ctx, id)
+}
+
+// deletePlain is the non-workaround path: plain `sandbox delete --force`.
+// Used when SCION_CLOUDRUN_DELETE_WORKAROUND=off.
+func (r *CloudRunSandboxRuntime) deletePlain(ctx context.Context, id string) error {
 	cmd := exec.CommandContext(ctx, r.bin, "delete", "--force", id)
-	// Use a process group so we can kill the entire tree (the sandbox CLI
-	// spawns runsc subprocesses that inherit pipe fds).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("cloudrun-sandbox: failed to start delete --force: %w", err)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cloudrun-sandbox: delete --force failed: %w", err)
 	}
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			slog.Warn("sandbox delete --force returned with error",
-				"sandbox", id, "error", err)
-		} else {
-			slog.Info("sandbox delete --force completed normally",
-				"sandbox", id)
-		}
-	case <-time.After(timeout):
-		slog.Warn("sandbox delete --force timed out, treating as success",
-			"sandbox", id, "timeout", timeout,
-			"note", "Known platform defect (defect-sandbox-delete-hang.md). "+
-				"The sandbox is deleted despite the hang.")
-		killProcessGroup(cmd)
-		<-done // reap the zombie
-	case <-ctx.Done():
-		killProcessGroup(cmd)
-		<-done
-		return ctx.Err()
-	}
-
-	// Defensively reap any orphaned runsc processes for this sandbox.
-	reapOrphanedRunsc(id)
-
-	// Remove from state store.
 	r.state.remove(id)
 	return nil
 }
+
 
 // List returns agent info for all tracked sandboxes, applying an optional
 // label filter.
@@ -896,7 +851,7 @@ func (r *CloudRunSandboxRuntime) GetWorkspacePath(ctx context.Context, id string
 // -----------------------------------------------------------------------
 
 // watchSandbox blocks on `sandbox wait <name>` and updates the state
-// store when the sandbox exits. The context allows deleteWithTimeout to
+// store when the sandbox exits. The context allows deleteOrWorkaround to
 // cancel the watcher when the sandbox is force-deleted.
 func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string) {
 	// sandbox wait blocks until the sandbox exits.
@@ -904,7 +859,7 @@ func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string) 
 	out, err := cmd.CombinedOutput()
 
 	// If the context was cancelled (sandbox was force-deleted), don't
-	// update the state store — deleteWithTimeout handles cleanup.
+	// update the state store — deleteOrWorkaround handles cleanup.
 	if ctx.Err() != nil {
 		runtimeLog.Debug("watcher cancelled for deleted sandbox", "name", name)
 		return
@@ -939,65 +894,6 @@ func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string) 
 	r.watchMu.Lock()
 	delete(r.watchCancels, name)
 	r.watchMu.Unlock()
-}
-
-// -----------------------------------------------------------------------
-// Process cleanup helpers
-// -----------------------------------------------------------------------
-
-// killProcessGroup sends SIGKILL to the entire process group of cmd.
-func killProcessGroup(cmd *exec.Cmd) {
-	if cmd.Process == nil {
-		return
-	}
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-}
-
-// reapOrphanedRunsc kills any lingering runsc processes for a deleted sandbox.
-// Pattern: runsc --root /run/sandbox/<name>/runc delete --force <name>
-func reapOrphanedRunsc(sandboxName string) {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue
-		}
-		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
-		if err != nil {
-			continue
-		}
-		args := string(bytes.ReplaceAll(cmdline, []byte{0}, []byte(" ")))
-		// Match the sandbox name as a path segment to avoid false positives:
-		// deleting sandbox "app" must not match processes for "my-app".
-		// The expected cmdline pattern is:
-		//   runsc --root /run/sandbox/<name>/runc delete --force <name>
-		sandboxPathSegment := "/run/sandbox/" + sandboxName + "/"
-		if strings.Contains(args, "runsc") &&
-			strings.Contains(args, "delete") &&
-			strings.Contains(args, sandboxPathSegment) {
-			slog.Info("reaping orphaned runsc process",
-				"sandbox", sandboxName, "pid", pid,
-				"cmdline", strings.TrimSpace(args))
-			if proc, err := os.FindProcess(pid); err == nil {
-				_ = proc.Kill()
-				waitDone := make(chan struct{})
-				go func() {
-					_, _ = proc.Wait()
-					close(waitDone)
-				}()
-				select {
-				case <-waitDone:
-				case <-time.After(2 * time.Second):
-				}
-			}
-		}
-	}
 }
 
 // -----------------------------------------------------------------------
