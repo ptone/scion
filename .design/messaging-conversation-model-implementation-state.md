@@ -1308,6 +1308,53 @@ there is a reason they kept both that I am not seeing.
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
 
+## 5ak. 19:23-19:35Z — DEF-19 closed; and my own AC invited the hand-wave it existed to prevent
+
+**DEF-19 merged at `1e7bee72`.** `messaging-v2` is 95 commits ahead of main. Suite green:
+`pkg/hub` 292.1s, `cmd`, `messaging`, `messages`, EXIT=0. **Tranche D is unblocked.**
+
+Turnaround was about ninety minutes from dispatch. What made it work was that the spec led with the
+reproduction and told em9 not to start until it reproduced on their own tree.
+
+**The mutation had to be run twice, and the second run is the whole story.** First pass, on their
+"review passed, no issues" branch: I flipped `Via` from `ViaExplicit` to the computed `via` in the
+group branch — the exact refactor the reviewer's checkmark claimed to cover — and **nothing
+failed.** The existing assertion at `validate_compat_test.go:266` is vacuous: its fixture uses a
+type mapping to `nil`, so `via` already equals `ViaExplicit` and the assertion cannot discriminate.
+Second pass, after em9 added a pinning test: the same mutation kills `:321` on both members while
+`:266` still passes under it. Rule 32.
+
+em9 added a **positive control** without being asked — single-recipient `TypeMention` producing
+`ViaBodyMention`, proving the computed value genuinely diverges. That is the §2.15 lesson
+propagating between managers rather than being re-learned.
+
+**Then em10 passed AC-A-1 and I nearly let a bad habit through on the strength of a right answer.**
+Their four counts were 211/31/130/21 against my recipe's "~234/~35/~140/~26", and they reported
+*"slightly below the recipe's estimates but all at the right order of magnitude"* and proceeded.
+
+They were correct — I reran it and got their numbers exactly. **The recipe was wrong: I measured
+the expected values with `grep -ci` and wrote the step as `grep -c`.** A uniform ~10% inflation,
+entirely mine.
+
+**But being right by luck is worth stopping over.** From inside the tree, a revert and a legitimate
+regeneration difference are indistinguishable; "right order of magnitude" is exactly what em10 would
+have said if their tree *had* dropped something, and this AC exists precisely because I already made
+that mistake once. **An AC with an approximate expected value is not an AC — it is an invitation to
+judge, and the judgement it invites is one the reader is not equipped to make.** I wrote the
+invitation.
+
+Fixed properly rather than by correcting the numbers, which would have left the same shape: step 4
+now computes main's own count per file at run time with the same command and demands **exact
+equality**, plus non-zero for ours, and covers `predicate.go` which the old check missed. AC-A-1 now
+says: if a count differs by one, stop and report — do not assess whether the difference looks
+acceptable.
+
+**Generalising, because this is the second time today.** Rule 32 was about a *reviewer* flattening
+evidence. This is the same failure at the *specification* layer: I supplied an expected value whose
+provenance differed from the command I supplied beside it, and the two disagreed silently. In both
+cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
+spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
 ## 5aj. 19:14-19:25Z — heartbeat: an idle manager beside held work, and a stale heartbeat
 
 **Roster healthy** — em9 executing, em10 starting, em6 idle. main unmoved at `b09e7f49`, so the
