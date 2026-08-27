@@ -34,10 +34,11 @@ import (
 // UpsertConversationByExternalRef).
 type DivergenceEntry struct {
 	MessageID  string `json:"message_id"`
-	OldRouting string `json:"old_routing"` // e.g. "thread:dm:abc123" or "sender:X->recipient:Y"
-	NewRouting string `json:"new_routing"` // e.g. "conv:uuid-of-conversation"
-	Match      bool   `json:"match"`       // true when old and new agree
-	Reason     string `json:"reason"`      // human-readable explanation
+	OldRouting string `json:"old_routing"`          // e.g. "thread:dm:abc123" or "sender:X->recipient:Y"
+	NewRouting string `json:"new_routing"`          // e.g. "conv:uuid-of-conversation"
+	Match      bool   `json:"match"`                // true when old and new agree
+	Reason     string `json:"reason"`               // human-readable explanation
+	Fallback   bool   `json:"fallback,omitempty"`   // true when this is a fallback (e.g. conv-lookup-failed)
 }
 
 // DivergenceCounter tracks the total number of divergence entries logged,
@@ -79,10 +80,15 @@ func (c *DivergenceCounter) Fallbacks() int64 { return c.fallbacks.Load() }
 var DivergenceMetrics = &DivergenceCounter{}
 
 // LogDivergence logs a DivergenceEntry to the provided logger and increments
-// the global divergence counter. Matching entries are logged at INFO;
-// mismatches are logged at WARN for easy grep.
+// the global divergence counter. Fallback entries increment only the fallback
+// counter; all others increment matches or mismatches. Matching entries are
+// logged at INFO; mismatches and fallbacks are logged at WARN for easy grep.
 func LogDivergence(log *slog.Logger, entry DivergenceEntry) {
-	DivergenceMetrics.Inc(entry.Match)
+	if entry.Fallback {
+		DivergenceMetrics.IncFallback()
+	} else {
+		DivergenceMetrics.Inc(entry.Match)
+	}
 
 	attrs := []any{
 		"message_id", entry.MessageID,
@@ -95,7 +101,9 @@ func LogDivergence(log *slog.Logger, entry DivergenceEntry) {
 		attrs = append(attrs, "reason", entry.Reason)
 	}
 
-	if entry.Match {
+	if entry.Fallback {
+		log.Warn("conversation routing check: fallback", attrs...)
+	} else if entry.Match {
 		log.Info("conversation routing check: match", attrs...)
 	} else {
 		log.Warn("conversation routing check: DIVERGENCE", attrs...)

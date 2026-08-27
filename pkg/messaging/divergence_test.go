@@ -425,6 +425,44 @@ func TestCheckConversationConsistency_NoPriorMessages(t *testing.T) {
 // Fallback counter tests
 // ---------------------------------------------------------------------------
 
+func TestLogDivergence_Fallback(t *testing.T) {
+	DivergenceMetrics = &DivergenceCounter{}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	entry := DivergenceEntry{
+		MessageID:  "msg-fallback",
+		OldRouting: "sender-recipient:a:b",
+		NewRouting: "conv:some-id",
+		Match:      false,
+		Reason:     "conv-lookup-failed",
+		Fallback:   true,
+	}
+	LogDivergence(logger, entry)
+
+	if DivergenceMetrics.Fallbacks() != 1 {
+		t.Errorf("expected 1 fallback, got %d", DivergenceMetrics.Fallbacks())
+	}
+	if DivergenceMetrics.Matches() != 0 {
+		t.Errorf("expected 0 matches (Fallback entries must not increment matches), got %d", DivergenceMetrics.Matches())
+	}
+	if DivergenceMetrics.Mismatches() != 0 {
+		t.Errorf("expected 0 mismatches (Fallback entries must not increment mismatches), got %d", DivergenceMetrics.Mismatches())
+	}
+
+	output := buf.String()
+	if !contains(output, "fallback") {
+		t.Errorf("expected 'fallback' in log output for fallback entry, got: %s", output)
+	}
+	if contains(output, "DIVERGENCE") {
+		t.Errorf("fallback entry must NOT log as 'DIVERGENCE', got: %s", output)
+	}
+	if !contains(output, "conv-lookup-failed") {
+		t.Errorf("expected 'conv-lookup-failed' reason in log output, got: %s", output)
+	}
+}
+
 func TestDivergenceCounter_Fallbacks(t *testing.T) {
 	DivergenceMetrics = &DivergenceCounter{}
 

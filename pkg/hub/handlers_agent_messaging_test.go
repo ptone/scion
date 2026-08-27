@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
@@ -254,5 +255,280 @@ func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T
 	if rr := postOutbound(t, srv, project.ID, agent.ID, "task complete"); rr.Code != http.StatusOK {
 		t.Fatalf("the agent's own message must not be starved by its transcript mirror: got %d: %s",
 			rr.Code, rr.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEF-11 regression tests
+// ---------------------------------------------------------------------------
+
+// def11Setup creates a project, agent, and user for the DEF-11 tests.
+// It returns the server, store, and the IDs needed to construct messages.
+func def11Setup(t *testing.T) (srv *Server, s store.Store, projectID, agentSlug, agentID, userID string) {
+	t.Helper()
+	srv, s = testServer(t)
+	ctx := context.Background()
+
+	projectID = tid("def11-project")
+	agentID = tid("def11-agent")
+	userID = tid("def11-user")
+	agentSlug = "def11-agent"
+
+	if err := s.CreateProject(ctx, &store.Project{
+		ID:         projectID,
+		Name:       "def11-project",
+		Slug:       "def11-project",
+		Visibility: store.VisibilityPrivate,
+	}); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	brokerID := tid("def11-broker")
+	if err := s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:     brokerID,
+		Name:   "def11-broker",
+		Slug:   "def11-broker",
+		Status: store.BrokerStatusOnline,
+	}); err != nil {
+		t.Fatalf("CreateRuntimeBroker: %v", err)
+	}
+	if err := s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  projectID,
+		BrokerID:   brokerID,
+		BrokerName: "def11-broker",
+		Status:     store.BrokerStatusOnline,
+	}); err != nil {
+		t.Fatalf("AddProjectProvider: %v", err)
+	}
+	if err := s.CreateAgent(ctx, &store.Agent{
+		ID:              agentID,
+		Name:            "def11-agent",
+		Slug:            agentSlug,
+		ProjectID:       projectID,
+		RuntimeBrokerID: brokerID,
+		Phase:           "running",
+		Visibility:      store.VisibilityPrivate,
+	}); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if err := s.CreateUser(ctx, &store.User{
+		ID:          userID,
+		Email:       "def11@example.com",
+		DisplayName: "DEF11 User",
+	}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	// Set a dispatcher so the handler doesn't fail with 503.
+	srv.SetDispatcher(&recordingDispatcher{})
+
+	return srv, s, projectID, agentSlug, agentID, userID
+}
+
+// TestDEF11_PreResolvedConversation_PopulatesExternalRef verifies that when
+// the CLI pre-resolves a ConversationID, the handler populates ExternalRef
+// from the store — not leaving it as "".
+func TestDEF11_PreResolvedConversation_PopulatesExternalRef(t *testing.T) {
+	srv, s, projectID, agentSlug, agentID, userID := def11Setup(t)
+	ctx := context.Background()
+
+	// Create a conversation with a known ExternalRef.
+	extRef := messaging.DirectMessageExternalRef(userID, agentID)
+	conv := &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: extRef,
+		DriftState:  "active",
+	}
+	created, err := s.UpsertConversationByExternalRef(ctx, conv)
+	if err != nil {
+		t.Fatalf("UpsertConversationByExternalRef: %v", err)
+	}
+
+	// Snapshot divergence metrics; a successful DM match can only happen
+	// when ExternalRef starts with "dm:", proving it was loaded from the store.
+	beforeMatches := messaging.DivergenceMetrics.Matches()
+	beforeMismatches := messaging.DivergenceMetrics.Mismatches()
+
+	// Post a message with a pre-resolved ConversationID.
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/agents/"+agentSlug+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:        messages.Version,
+				Timestamp:      time.Now().UTC().Format(time.RFC3339),
+				Sender:         "user:def11",
+				SenderID:       userID,
+				Recipient:      "agent:" + agentSlug,
+				Msg:            "DEF11 AC-1 test",
+				Type:           messages.TypeInstruction,
+				ConversationID: created.ID,
+			},
+		})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The divergence check should record a dm-routing-agreement match,
+	// which is only possible when ExternalRef is correctly populated from the store.
+	afterMatches := messaging.DivergenceMetrics.Matches()
+	afterMismatches := messaging.DivergenceMetrics.Mismatches()
+	if afterMatches-beforeMatches < 1 {
+		t.Errorf("expected at least 1 new match (dm-routing-agreement), got delta=%d", afterMatches-beforeMatches)
+	}
+	if afterMismatches-beforeMismatches != 0 {
+		t.Errorf("expected 0 new mismatches, got delta=%d", afterMismatches-beforeMismatches)
+	}
+
+	// Verify the conversation in the store still has the correct ExternalRef.
+	readBack, err := s.GetConversation(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+	if readBack.ExternalRef != extRef {
+		t.Errorf("ExternalRef changed: got %q, want %q", readBack.ExternalRef, extRef)
+	}
+}
+
+// TestDEF11_PreResolvedConversation_DivergenceMatch verifies that a
+// pre-resolved send with a matching DM conversation produces a divergence
+// match (not a mismatch).
+func TestDEF11_PreResolvedConversation_DivergenceMatch(t *testing.T) {
+	srv, s, projectID, agentSlug, agentID, userID := def11Setup(t)
+	ctx := context.Background()
+
+	// Create a conversation matching the sender/agent DM pair.
+	extRef := messaging.DirectMessageExternalRef(userID, agentID)
+	conv := &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: extRef,
+		DriftState:  "active",
+	}
+	created, err := s.UpsertConversationByExternalRef(ctx, conv)
+	if err != nil {
+		t.Fatalf("UpsertConversationByExternalRef: %v", err)
+	}
+
+	beforeMatches := messaging.DivergenceMetrics.Matches()
+	beforeMismatches := messaging.DivergenceMetrics.Mismatches()
+
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/agents/"+agentSlug+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:        messages.Version,
+				Timestamp:      time.Now().UTC().Format(time.RFC3339),
+				Sender:         "user:def11",
+				SenderID:       userID,
+				Recipient:      "agent:" + agentSlug,
+				Msg:            "DEF11 AC-2 test",
+				Type:           messages.TypeInstruction,
+				ConversationID: created.ID,
+			},
+		})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	afterMatches := messaging.DivergenceMetrics.Matches()
+	afterMismatches := messaging.DivergenceMetrics.Mismatches()
+
+	if afterMatches-beforeMatches < 1 {
+		t.Errorf("expected Matches delta >= 1, got %d", afterMatches-beforeMatches)
+	}
+	if afterMismatches-beforeMismatches != 0 {
+		t.Errorf("expected Mismatches delta == 0, got %d", afterMismatches-beforeMismatches)
+	}
+}
+
+// TestDEF11_PreResolvedConversation_LookupFailure verifies that when a
+// pre-resolved ConversationID does not exist in the store, the handler records
+// a fallback with reason "conv-lookup-failed" — not a plain
+// "routing-type-mismatch". The Fallback flag on DivergenceEntry routes the
+// event to the fallback counter only, leaving mismatches at zero.
+func TestDEF11_PreResolvedConversation_LookupFailure(t *testing.T) {
+	srv, _, projectID, agentSlug, _, userID := def11Setup(t)
+
+	beforeFallbacks := messaging.DivergenceMetrics.Fallbacks()
+	beforeMismatches := messaging.DivergenceMetrics.Mismatches()
+
+	// Use a non-existent conversation ID.
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/agents/"+agentSlug+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:        messages.Version,
+				Timestamp:      time.Now().UTC().Format(time.RFC3339),
+				Sender:         "user:def11",
+				SenderID:       userID,
+				Recipient:      "agent:" + agentSlug,
+				Msg:            "DEF11 AC-3 test",
+				Type:           messages.TypeInstruction,
+				ConversationID: "nonexistent-conv-id",
+			},
+		})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 (message delivery is non-fatal), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	afterFallbacks := messaging.DivergenceMetrics.Fallbacks()
+	afterMismatches := messaging.DivergenceMetrics.Mismatches()
+
+	if afterFallbacks-beforeFallbacks < 1 {
+		t.Errorf("expected Fallbacks delta >= 1 (conv-lookup-failed recorded), got %d",
+			afterFallbacks-beforeFallbacks)
+	}
+	if afterMismatches-beforeMismatches != 0 {
+		t.Errorf("expected Mismatches delta == 0 (fallback must not register as mismatch), got %d",
+			afterMismatches-beforeMismatches)
+	}
+}
+
+// TestDEF11_PreResolvedConversation_GenuineDisagreement verifies that the
+// divergence comparison is active and can detect a real mismatch when the
+// stored ExternalRef does not agree with the old-model routing.
+func TestDEF11_PreResolvedConversation_GenuineDisagreement(t *testing.T) {
+	srv, s, projectID, agentSlug, _, userID := def11Setup(t)
+	ctx := context.Background()
+
+	// Create a conversation with an ExternalRef that does NOT match the
+	// sender/agent pair used in the message (different principals).
+	wrongRef := messaging.DirectMessageExternalRef("wrong-id-x", "wrong-id-y")
+	conv := &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: wrongRef,
+		DriftState:  "active",
+	}
+	created, err := s.UpsertConversationByExternalRef(ctx, conv)
+	if err != nil {
+		t.Fatalf("UpsertConversationByExternalRef: %v", err)
+	}
+
+	beforeMismatches := messaging.DivergenceMetrics.Mismatches()
+
+	// Post a message referencing the wrong conversation.
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/agents/"+agentSlug+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:        messages.Version,
+				Timestamp:      time.Now().UTC().Format(time.RFC3339),
+				Sender:         "user:def11",
+				SenderID:       userID,
+				Recipient:      "agent:" + agentSlug,
+				Msg:            "DEF11 AC-4 test",
+				Type:           messages.TypeInstruction,
+				ConversationID: created.ID,
+			},
+		})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	afterMismatches := messaging.DivergenceMetrics.Mismatches()
+	if afterMismatches-beforeMismatches < 1 {
+		t.Errorf("expected Mismatches delta >= 1 (genuine disagreement), got %d",
+			afterMismatches-beforeMismatches)
 	}
 }

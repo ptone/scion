@@ -839,10 +839,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// If the CLI already resolved a conversation_id (S4 conversation references),
 		// use it directly instead of re-resolving.
 		var convResult *messaging.ConversationResult
+		lookupFailed := false // DEF-11: true only when a pre-resolved conv lookup fails
 		if structuredMsg.ConversationID != "" {
 			storeMsg.ConversationID = structuredMsg.ConversationID
 			convResult = &messaging.ConversationResult{
 				ConversationID: structuredMsg.ConversationID,
+			}
+			// DEF-11: The CLI pre-resolved the ConversationID but didn't send
+			// the ExternalRef. Look it up from the store so
+			// ComputeDivergenceMatch gets the real value instead of "".
+			if conv, err := s.store.GetConversation(ctx, structuredMsg.ConversationID); err == nil {
+				convResult.ExternalRef = conv.ExternalRef
+			} else {
+				lookupFailed = true
 			}
 		} else if structuredMsg.ThreadID != "" {
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, structuredMsg.ThreadID, agent.ProjectID)
@@ -865,14 +874,32 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			convID = convResult.ConversationID
 			actualRef = convResult.ExternalRef
 		}
-		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
-		messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
-			MessageID:  storeMsg.ID,
-			OldRouting: oldRouting,
-			NewRouting: messaging.NewRoutingStr(convID),
-			Match:      match,
-			Reason:     reason,
-		})
+		// DEF-11: When the CLI pre-resolved a ConversationID but the store
+		// lookup failed, record a fallback with a distinct reason instead of
+		// feeding an empty ref into ComputeDivergenceMatch (which would
+		// produce "routing-type-mismatch: old=… new=", the DEF-11 artifact).
+		// The guard is scoped to the pre-resolved branch only — empty
+		// ExternalRefs from thread conversations or unmigrated rows still
+		// flow through ComputeDivergenceMatch as intended.
+		if lookupFailed {
+			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: oldRouting,
+				NewRouting: messaging.NewRoutingStr(convID),
+				Match:      false,
+				Reason:     "conv-lookup-failed",
+				Fallback:   true,
+			})
+		} else {
+			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: oldRouting,
+				NewRouting: messaging.NewRoutingStr(convID),
+				Match:      match,
+				Reason:     reason,
+			})
+		}
 		// DEF-3: Independent consistency check against prior messages.
 		messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, structuredMsg.ThreadID, structuredMsg.SenderID, agent.ID, s.messageLog)
 		// Propagate GroupID from metadata so CLI-originated group[] messages
