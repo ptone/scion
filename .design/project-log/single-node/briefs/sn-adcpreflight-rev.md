@@ -2,7 +2,7 @@
 
 Author: sn-impl-arch (architect). Date: 2026-08-27, 21:42. Task #85 (internal number).
 
-**Branch to review: `<FILL IN — supplied when sn-adcpreflight-dev reports>` on `ptone/scion`.**
+**Branch to review: `fix/adc-preflight` on `ptone/scion`, based on `c13d910b`. 3 files, +322/-6.**
 The implementing brief the developer worked from is `briefs/sn-adcpreflight-dev.md` in this same
 directory. **Read it first.** Your job is to check the result against it, and against reality.
 
@@ -94,6 +94,53 @@ this project before. The prefix (`ya29.`) and the length are fine to print; the 
   I produced three false negatives in one hour today by grepping coloured output; each time the false
   negative was indistinguishable from a real negative. When a negative result is load-bearing, print
   the region and look at it.
+
+### P5. The two new env-var seams — `_DI_API_BASE` and `_DI_TOKENINFO_URL`
+
+**I added this section after reading the developer's report, and it is the finding I most want a
+second pair of eyes on.**
+
+To make the preflight testable, the developer introduced two environment-variable overrides that
+redirect where the script sends its HTTP requests: `_DI_API_BASE` (the Cloud Run API) and
+`_DI_TOKENINFO_URL` (the Google tokeninfo endpoint). The tests set them to a local stub server.
+
+**`_DI_TOKENINFO_URL` is a request that carries the access token.** So an environment variable can
+redirect a live credential to an arbitrary host. Work out honestly whether that matters here:
+
+- Who can set it? This script is run by an operator in their own shell, on their own machine, with
+  their own credentials. An attacker who can set your environment variables has already won by
+  simpler routes. **That argument may well be sufficient** — I am not asserting it is a vulnerability.
+- But the script is **documented as `curl`-able**, and a copy-pasted command line with an inherited or
+  prepended variable is a more plausible accident than a targeted attack.
+
+**What I want is a judgement, not a reflex.** Report which of these you think is true:
+
+- **Fine as-is** — say why, in one sentence I can put in the design doc.
+- **Fine but should be commented** — the seam should say in the source that it is test-only.
+- **Should be narrowed** — e.g. accept the override only when another test-mode signal is set, or
+  restrict `_DI_TOKENINFO_URL` to `googleapis.com` hosts.
+
+Note the precedent: **test-mode blindness was itself a defect on this file** (internal `#84`). A seam
+that exists only for tests, and that changes where a credential is sent, is worth one careful look
+before it ships.
+
+Also check: does the token survive into any child process environment? The report says the token is
+returned to the caller via **bash dynamic scoping** in `_di_adc_token`. Confirm it is `local` to a
+frame that ends, that it is not `export`ed, and that `set -u` cannot trip on it.
+
+### P6. Is the ORDER actually tested? Read this before you accept the test list
+
+The developer added four tests, all of which exercise `di_preflight_rest_credential` **as a function,
+in isolation**. That is good coverage of what the function does.
+
+**It is not coverage of P1.** P1 is a property of `di_main` — that the preflight is *called before
+step 3a*. A unit test of the function passes identically whether the call site is before step 3a,
+after it, or absent entirely. **The defect we are fixing is an ordering defect, so a test suite that
+cannot detect a reordering has not tested the fix.**
+
+Determine whether any test pins the order. If none does, that is a **finding**, and the remedy is
+cheap: assert on the sequence of the script's own step output, or on the order of calls to the gcloud
+mock. Report it; do not implement it.
 
 ## 4. Tests and CI
 
