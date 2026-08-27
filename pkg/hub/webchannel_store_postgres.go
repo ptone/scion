@@ -321,6 +321,10 @@ UPDATE webchat_thread
 // CreateTopic inserts a new topic and, when ConversationID is set, atomically
 // creates a linked conversations row inside the same transaction.
 func (s *pgWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic) error {
+	if topic.ConversationID != "" && topic.ProjectID == "" {
+		return fmt.Errorf("webchat store: project_id is required for topic conversations")
+	}
+
 	var defaultAgent interface{}
 	if topic.DefaultAgent != "" {
 		defaultAgent = topic.DefaultAgent

@@ -158,43 +158,24 @@ func TestUnify_AC_U4_GroupConversationRequiresProjectID(t *testing.T) {
 	ctx := context.Background()
 	topic := WebChatTopic{
 		ID:             "topic-no-project",
-		ProjectID:      "", // empty = NULL project_id
+		ProjectID:      "", // empty = no project
 		Name:           "orphan-topic",
 		ConversationID: "conv-no-project",
 		CreatedBy:      "user-1",
 		CreatedAt:      time.Now().UTC(),
 	}
 
-	// For native group topics, we enforce project_id NOT NULL at the write path.
-	// The webchat_topic table has project_id TEXT NOT NULL, so empty string
-	// would be stored as empty, not NULL. But the conversations table allows
-	// NULL project_id. The enforcement is that CreateTopic sets project_id
-	// from topic.ProjectID, so the webchat_topic DDL constraint catches it.
-	// Since webchat_topic.project_id is NOT NULL, SQLite will store '' not NULL.
-	// The spec says we enforce NOT NULL at the write path for group, so we
-	// should validate at the application level.
-
-	// The constraint: empty project_id should fail for group topics.
-	// Since the current DDL allows empty string (TEXT NOT NULL), this test
-	// validates that the conversation row has the correct project_id binding.
+	// A group topic conversation without a project_id is unaddressable and
+	// unauthorizable. CreateTopic must reject it at the application level.
 	err := store.CreateTopic(ctx, topic)
+	require.Error(t, err, "CreateTopic must reject empty project_id for topic conversations")
+	require.Contains(t, err.Error(), "project_id is required",
+		"error message must mention project_id requirement")
 
-	// With the current DDL (NOT NULL but accepts ''), the topic creation
-	// will succeed at DB level. The check is that conversations.project_id
-	// matches what was provided.
-	if err != nil {
-		// If DDL or validation caught it, that's the desired outcome.
-		return
-	}
-
-	// Verify the conversation row has the right project_id value.
-	var projID *string
-	err = db.QueryRowContext(ctx,
-		`SELECT project_id FROM conversations WHERE id = ?`,
-		"conv-no-project").Scan(&projID)
+	// Verify no topic row was written.
+	got, err := store.GetTopic(ctx, "topic-no-project")
 	require.NoError(t, err)
-	// Empty string project_id is stored; the caller (handler) is responsible
-	// for not calling CreateTopic with empty projectID for group topics.
+	require.Nil(t, got, "topic must not exist after validation rejection")
 }
 
 // ---------------------------------------------------------------------------

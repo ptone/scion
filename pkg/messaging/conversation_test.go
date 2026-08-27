@@ -501,13 +501,14 @@ func TestAC_U3_NoMintForNativeTopicWithoutRow(t *testing.T) {
 		"topic-uuid-nonexistent", "proj-1",
 		WithTopicLookup(lookup))
 
-	// The function falls through to the existing upsert path when the topic
-	// lookup returns an error (topic not found). This is correct for non-native
-	// surfaces. Without the lookup, the old behavior mints a new conversation.
-	// For the test to demonstrate AC-U-3 properly, we need a scenario where
-	// a native topic exists but has no conversation_id.
-	// That scenario is tested below.
-	_ = got
+	// When topic lookup returns store.ErrNotFound for a non-dm threadID,
+	// the function must return nil — no conversation should be minted.
+	if got != nil {
+		t.Errorf("expected nil for non-existent native topic, got %+v", got)
+	}
+	if mock.lastConv != nil {
+		t.Error("upsert MUST NOT be called — no conversation row should be minted for missing native topic")
+	}
 }
 
 func TestAC_U3_NoMintForTopicWithoutConversationID(t *testing.T) {

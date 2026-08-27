@@ -681,6 +681,10 @@ UPDATE webchat_thread
 // conversations table exists, atomically creates a linked conversations row
 // inside the same transaction.
 func (s *sqliteWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic) error {
+	if topic.ConversationID != "" && topic.ProjectID == "" {
+		return fmt.Errorf("webchat store: project_id is required for topic conversations")
+	}
+
 	isGeneral := 0
 	if topic.IsGeneral {
 		isGeneral = 1
