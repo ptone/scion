@@ -6649,3 +6649,42 @@ pinned in two places — remains an inspection result only.
 Worth stating plainly because it is the theme of the entire night: a repaired code path that has
 never been executed is not a working code path, and I would have carried M1 as "fixed" on the
 strength of a `grep` if the coordinator had not run a real build.
+
+### 05:01 — heartbeat. Closed the verification gap I admitted to at 04:22.
+
+Nothing has changed in thirty minutes, but "nothing changed" is a claim like any other, so I checked
+rather than asserted it.
+
+**Verified all 13 tracking issues exist.** At 04:22 I recorded that I had taken the developer's word
+that twelve issues were filed and never checked that any of them existed — the coordinator spot-checked
+three and I let that stand. That was the same "a reported number is an allegation" failure I had
+applied to others twice this week. Closed it now:
+
+```
+#1287 .. #1299   all 13 open, all titles accurate
+```
+
+`#1297`'s title reads *"Design doc uses bare issue numbers…"* with no section reference, which
+confirms the widening correction landed — I did not have to take that on trust either.
+
+**Verified upstream main is intact.** `#1301` happened once, so a second regression is a real
+hypothesis rather than paranoia.
+
+| check | value |
+|---|---|
+| main head | `f99a81892195` — still my merge, nothing landed since |
+| `.design/hosted/cloud-run-single-node.md` | present, 24817 bytes |
+| `pkg/runtime/cloudrun_sandbox_runtime.go` | present, 42597 bytes |
+| `image-build/cloudbuild-omni.yaml` | present, 6144 bytes |
+| CI | `Build & Test`, `golangci-lint`, `shellcheck` all success |
+
+Three check-runs is the correct count for a **push** to main. The 10-vs-6 rule from last night is a
+**pull_request** context rule and does not transfer — noting that explicitly so a later reader does
+not see 3 and raise a false alarm against a number that was never meant to apply here.
+
+**Agents:** only `sn-impl-arch` (me) and `sn-impl-em3` remain. Nothing of mine is running or stalled.
+
+**Three questions:** agents fine; nothing blocks the critical path; design doc still in sync.
+Unchanged from 04:31, and now checked rather than assumed.
+
+Still holding for ptone on task #50 and the defect register. Asked once at 04:21. Not asking again.
