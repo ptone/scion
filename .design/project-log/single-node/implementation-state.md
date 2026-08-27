@@ -6091,3 +6091,65 @@ code binding dev auth to `0.0.0.0`.
 > #1307's source and test hunks must be restored together.
 
 Adds `pkg/hub/web_test.go` and `cmd/server_foreground_test.go` to the repair surface.
+
+### 03:56 — incident over, and it took CI with it on the way out
+
+ptone force-pushed upstream main back to `f876e27b`, pre-#1301. Fork main synced. Verified, not taken
+on report:
+
+| check | value |
+|---|---|
+| upstream main | `f876e27b` |
+| fork main | `f876e27b` (matches) |
+| #1310 `mergeable` | **true** |
+| `IsLoopbackHost` / `non-loopback` in `pkg/hub/web.go` | 6 |
+| `NewCloudRunRuntimeFromInstances` | `(*CloudRunRuntime, error)` — the working two-value form |
+| `"not yet implemented"` | 13 → **2** |
+| `cloud.google.com/go/run|resourcemanager` in go.mod | 0 → **2** |
+| files / ahead / behind | 37 / 14 / **1** |
+
+The `factory.go` conflict resolved itself when the base moved. Holding rather than resolving it was
+the right call: had I resolved against reverted main, the revert would now be baked into our branch
+and invisible.
+
+> **`mergeable` comes back `null` on first query.** GitHub computes it on demand — the first call
+> triggers, the second reads. Do not read `null` as `CONFLICTING`.
+
+#### The regression stripped CI, and this is the part that nearly slipped past
+
+`#1310`'s head `38ba412e` **has never been built.**
+
+| commit | pushed | workflows |
+|---|---|---|
+| `728d17cd` | 03:08:46 | CI (`pull_request`), GitHub Actions Scan, Google Admin scan |
+| `38ba412e` | 03:35:25 | **GitHub Actions Scan only** |
+
+A/B on adjacent commits of one PR. `728d17cd` landed before #1301 merged at 03:15:33; `38ba412e`
+landed after. **While a PR is CONFLICTING, GitHub cannot compute a merge commit, so every
+`pull_request` workflow is skipped.** `GitHub Actions Scan` survived only because it is
+`pull_request_target`, which runs against the base and needs no merge commit.
+
+So `sn-review-dev`'s R1/R2/R4/R5 work — context threading, the resize helper,
+`waitForSandboxLiveness` and its 5 new tests — carries **zero** CI signal. The check list looked
+clean because it was nearly empty.
+
+> **An upstream regression silently strips CI from every PR that pushes while conflicted.** The
+> checks do not fail. They do not appear. An all-green check list can mean nothing ran — always
+> check the *count* of checks, not just their conclusions.
+
+This is the exact inverse of the 03:2x lesson. Then, a green CI concealed a revert. Now, absent CI
+impersonates a green CI. Both times the check list was reassuring and carried no information.
+
+Fallout is wider than us: **any** PR that pushed between 03:15 and the force-push has an unbuilt
+head. Flagged to the coordinator to sweep.
+
+#### Recommendation to ptone (sent 03:56, awaiting reply)
+
+**Merge main into `scion/sn-tier`. Do not rebase.**
+
+- A rebase detaches the 6 inline bot comments on #1310.
+- The merge is a squash, so branch history is discarded anyway — a rebase buys nothing.
+- A plain merge commit clears `behind=1` **and** fires CI against the restored main.
+
+`mergeable=true` is a text-merge fact, not a compile fact. Our own long-standing lesson.
+Still held; nothing dispatched.
