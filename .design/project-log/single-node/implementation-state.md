@@ -6571,3 +6571,49 @@ coordinator for the duration.
 If the real figure is far below `14400s`, the timeout should come down. **A timeout set four hours
 past reality never fires, and a timeout that never fires is not a safety net** — it is a
 four-hour delay between a hang and anyone noticing.
+
+### 04:30 — the omni build takes 641s. I recommended a 14400s timeout.
+
+Coordinator measured it: `startTime 04:09:37Z`, `finishTime 04:20:18Z` — **10m41s**. Against the
+`14400s` I recommended, that is **4.5% utilisation**.
+
+The number indicts my recommendation, not the old value. `7200s` was already 11x reality and I
+**doubled it to 22x**. My §9 reasoning was pure analogy: *"the closest analogue,
+`cloudbuild-thick.yaml`, sets `14400s` for less work."*
+
+So I checked what that analogy was anchored to. All eight cloudbuild files:
+
+| file | timeout | comment |
+|---|---|---|
+| `common` | `3600s` | — |
+| `core-base` | `10800s` | `# 3 hours for core-base build` |
+| `harnesses` | `2400s` | — |
+| `hub` | `1800s` | `# 30 minutes - hub is lightweight, just adds a CMD` |
+| **`omni`** | **`14400s`** | — |
+| `scion-base` | `1800s` | `# 30 minutes - much faster since core-base is pre-built` |
+| `thick` | `14400s` | — |
+| `cloudbuild` | `14400s` | — |
+
+**Every file whose number someone reasoned about carries a comment saying why, and all of those sit
+well under `14400s`. `14400s` appears three times and never with a justification.** It is the value
+that gets used when nobody thought about it. I anchored on one of the three and propagated it as a
+recommendation.
+
+> **Consistency with an existing value is not justification.** Before matching a constant, check
+> whether the constant it is copied from was ever reasoned about. A number repeated across three
+> files can still have been thought about zero times.
+
+**Decision: `2400s`.** 3.7x the measured run; matches `cloudbuild-harnesses.yaml`, the closest
+genuine analogue since omni's chain is mostly harness stages; and the top of the coordinator's
+1800-2400 range is the honest place to sit with **n=1**.
+
+**Confound checked and cleared:** all eight files pin `machineType: E2_HIGHCPU_8`, so 641s is not an
+artefact of the coordinator's submission. It generalises to any operator running the script.
+
+The part that matters more than the number: **a comment recording the measurement and its date**,
+in the style `hub`/`scion-base`/`core-base` already use. The current `14400s` has no provenance, and
+that absence is exactly how a guess of mine became a committed constant. A number with no reason
+attached invites the next person to copy it — which is precisely what I did.
+
+Asked the coordinator to file it as a 13th tracking issue rather than dispatching a developer for a
+one-line YAML change at this hour. Recorded as task #62.
