@@ -11753,3 +11753,49 @@ the perishable part.
 successful deliveries all looked like silent failures and I re-sent each time. Harmless here; it is
 the fourth instance today of a pattern too narrow for text I had not read. **Match on the actual
 output, or print it.**
+
+### Heartbeat 22:30 — the stall was a 9-minute test run, not a wedge
+
+**1. Agents.** `sn-adcpreflight-dev2` fired a STALLED signal while "Executing: Bash". **Checked before
+believing it.** It is not wedged: it is 8m47s into a `go test` with a 10-minute timeout. R1, R2a, R2b,
+R3 and R4 are done; R5 (rebase) and the mutation tests remain.
+
+**Two problems visible in the pane that the stall signal did not carry**, and both are worth more than
+the signal itself:
+
+- **It is running the whole repository suite** — `fixturegen`, `github_installations`, group tables —
+  for a change that touches one shell script and two test files. Nine minutes per iteration, none of
+  it relevant.
+- **It is at 8% until auto-compact.** Burning context on unrelated test output is how work gets lost
+  right before it is pushed.
+
+Sent a short redirect: use `go test ./cmd/ -run TestScript`; **push what you have now, do not wait for
+done**; and mutation tests take priority over the rebase, because a rebase is recoverable and an
+unproven pin is not.
+
+**Generalise the stall signal:** "STALLED (was executing)" and "wedged" are different states that look
+identical from outside. Last time it was a genuinely dead harness; this time it is a slow command.
+`scion look` distinguishes them in one call. **Never act on the state-change notification alone** —
+the previous developer was correctly stopped, and stopping this one would have destroyed 25 minutes of
+finished work.
+
+**2. Critical path.** `#85` round 2, and nothing else.
+
+**3. Design doc sync — clean, but the SCRIPT is not.**
+
+I grepped the merged doc for any `--iap` claim: **there is none**, so the reviewer's correction (b)
+does not touch it. But `deploy.sh:499-500` carries the comment:
+
+```
+# iapEnabled and invokerIamDisabled are v2-only fields. gcloud has no
+# --iap flag, so we flip both booleans with a single REST PATCH.
+```
+
+**"gcloud has no `--iap` flag" is false as written.** It exists on the Services surface; it is simply
+not registered on the `instances` noun. The comment is load-bearing in the worst way — it is the
+justification a future maintainer reads before deciding whether the REST PATCH can be deleted, and it
+is checkable in ten seconds and **fails the check**. A reader who greps, finds `--iap`, and concludes
+the comment is stale may well delete the PATCH — which silently removes the tier's only perimeter.
+
+Added as a one-line item to round 2. **A wrong comment next to correct code is a trap primed for
+whoever touches it next**; this one sits directly above the line that must not be removed.
