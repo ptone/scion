@@ -61,11 +61,37 @@ Migration, per topic, **all-or-nothing per row**:
 ```
   raw := topic.default_agent
   if raw == "" -> default_agent_id = NULL          (not a failure; nothing to promote)
-  a, ok := GetAgentBySlug(topic.project_id, raw)   -- step 1, runtime order
-  if !ok { a, ok = GetAgent(raw) }                 -- step 2, by ID
+  a, ok := GetAgentBySlug(topic.project_id, raw)   -- step 1: project-scoped, hides deleted
+  if !ok { a, ok = GetAgentScoped(topic.project_id, raw) }   -- step 2: SEE 3.2.1
   if ok   -> default_agent_id = a.ID
   if !ok  -> default_agent_id = NULL  AND  record {topic_id, raw} in the operator report
 ```
+
+### 3.2.1 Step 2 must NOT be a literal copy of the runtime lookup (revised 23:05Z, DEF-31)
+
+My first draft said "migration resolution **is** the runtime's two-step lookup" and made that
+AC-U-13. **That is now wrong and must not be implemented as written.** The runtime's step 2
+(`handlers_chat_v2.go:938`) is `GetAgent(ctx, raw)` — `agent_store.go:294`, a bare primary-key fetch
+with **no project filter and no `DeletedAtIsNil()`**, while step 1 one line above has both. See
+DEF-31: that asymmetry is itself a live defect.
+
+Copying it here would be worse than leaving it alone. The runtime bug is a *routing* decision made
+per-send against a mutable surface column; the migration would **promote its output into
+`conversations.default_agent_id`**, a stable identity column that later phases treat as
+authoritative. **An ingress defect laundered into the identity layer stops looking like a defect** —
+it acquires the authority of the column it lands in, and every later reader inherits it. This is
+rule 56 in the other direction: not a surface concern leaking down, but a surface *defect* being
+promoted up.
+
+So the migration's step 2 is **project-scoped and deleted-filtered**, matching step 1:
+
+- Resolve by UUID **only within `topic.project_id`**, and only for a non-deleted agent.
+- Where the scoped lookup and the runtime lookup **disagree** — i.e. the runtime would have routed
+  and the migration will not — that is a **report line, not a replication**. Those rows are exactly
+  the DEF-31 exposures and the operator needs their list. **AC-U-15.**
+- The migration must not be blocked on DEF-31 being fixed first. Scoping here is correct
+  independently: a `conversations.default_agent_id` naming an agent outside the conversation's
+  project is not a defensible row under any resolution of DEF-31.
 
 `ClearTopicDefaultAgent` moves to operate on `Conversation.default_agent_id`. Its native-chat
 signature stays; only the storage target changes.
@@ -73,9 +99,16 @@ signature stays; only the storage target changes.
 ### 3.3 Why NULL and not "refuse to migrate"
 
 Under-granting is recoverable, over-granting is not — but note this is **not** an authorization
-decision, so that rule is not what drives it (rule 52's caution). It is driven by the fact that the
-unresolvable set is **already inert**. Refusing to migrate would block cut-over on a set that does
-nothing today. NULL records reality.
+decision, so that rule is not what drives it (rule 52's caution). Refusing to migrate would block
+cut-over on rows that need an operator, not a blocked deploy. NULL records reality.
+
+> **Correction 23:05Z.** My original justification here was "the unresolvable set is **already
+> inert** — it does nothing today." **That was false, and DEF-31 is why.** A `default_agent` holding
+> a foreign-project or soft-deleted agent UUID is *not* inert: the runtime's unscoped step 2 resolves
+> it and routes live traffic to it. The rows I called dead are the exposed ones. The conclusion
+> (NULL, plus a report) survives — but on the opposite reasoning, and that matters: it is now
+> **remediation**, so **AC-U-14's report is the deliverable, not a courtesy**. An operator must see
+> every row whose routing the migration just severed, because some of those routings were working.
 
 ---
 
@@ -305,9 +338,17 @@ step 1 with.** If that happens, the answer is to require a UUID for DMs, not to 
 
 ## 11. Acceptance criteria
 
-- **AC-U-13** Migration resolution is the runtime's two-step lookup. Test a **slug**-valued
-  `default_agent`, a **UUID**-valued one, and a genuinely unresolvable one. Paired positives — a test
-  that only asserts the NULL case cannot see over-NULLing, which is the regression that matters.
+- **AC-U-13** *(REVISED 23:05Z — the original wording "resolution is the runtime's two-step lookup"
+  is withdrawn, see §3.2.1)* Migration resolution is slug-then-UUID, **both steps project-scoped and
+  both hiding soft-deleted agents**. Test a **slug**-valued `default_agent`, a **UUID**-valued one,
+  and a genuinely unresolvable one. Paired positives — a test that only asserts the NULL case cannot
+  see over-NULLing, which is the regression that matters.
+- **AC-U-15** *(new, §3.2.1)* A topic whose `default_agent` is the UUID of an agent in **another
+  project**, and one whose `default_agent` is the UUID of a **soft-deleted** agent, both migrate to
+  `default_agent_id = NULL` and both appear in the AC-U-14 report **flagged distinctly** from
+  never-resolvable garbage. These two are the rows where the migration deliberately **diverges from
+  runtime behaviour**; the report is what makes that divergence visible instead of silent. A test
+  that lumps them in with unparseable strings satisfies the letter and destroys the point.
 - **AC-U-14** The migration emits an operator report listing every topic whose `default_agent` did
   not resolve, with the raw value. Cheap, and the only way anyone learns these existed.
 - **AC-57-1** A **soft-deleted** topic renders `[deleted]`, not its stored name, through every

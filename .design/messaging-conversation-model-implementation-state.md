@@ -1265,6 +1265,7 @@ is a queue, not a blocker.
 | **Four A-ACs deferred into B's merge** | 23f7c820's 5 handler call-site fixes; AC-DEF15-1 (source confinement); AC-DEF15-4 (invalid `dm:` → zero rows); AC-DEF16-1 (validation before creation). **These are tranche A's ACs, not B's** — not covered by AC-B-1..9, must be reported by name. AC-DEF15-1 + `b7651af9`'s unexport are one control in two files: **both or neither**. | **em10** | added to B's spec 21:28Z |
 | DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
 | **DEF-30 — stored DM keys in a format our derivation can no longer produce** | **CLOSED 22:33Z — no migration, no exposure.** Found by `integration2-operator` 22:30Z: staging holds `dm:<uuid>:<uuid>`; `dm_key.go:40` emits `dm:<kind>:<uuid>:<kind>:<uuid>`. Risk was that the upsert keys on `(surface, external_ref)`, so a new-format derivation mints a duplicate rather than matching. **Closed by two checked negatives:** (1) beta has no `conversations`/`conversation_participants`/`message_addressees` tables at all — zero rows to migrate, the staging keys are dev detritus from our own branch; (2) `ParseDMKey` on the legacy form splits the body expecting 4 segments, gets 2, and **errors** — no best-effort parse, no fallback, so a legacy key fails closed and never reaches the ACL. Tranche order unchanged. **Staging rows deliberately NOT deleted** — see log 5bh. | — | closed 22:33Z |
+| **DEF-31 — a topic's `default_agent` routes across project boundaries** | **OPEN, security-relevant, PRE-EXISTS on `main` — not ours, but phase 5 would have cemented it.** Found by `ca-msg-em6`'s sweep as P2-F1 (unvalidated ingress); **mechanism established by me 23:03Z**. Three links, all verified: (1) `handlers_chat_v2.go:451` stores `body.DefaultAgent` with **zero validation** while `name` beside it gets four checks; (2) the send-path resolver at `:935-938` is two-step — step 1 `GetAgentBySlug(projectID, raw)` is project-scoped and filters deleted, step 2 `GetAgent(raw)` (`agent_store.go:294`) is a **bare primary-key fetch: no project filter, no `DeletedAtIsNil()`**; (3) `sendAgentRouted` never compares `agent.ProjectID` to `projectID` and dispatches the object as given. **Effect:** a member of project A can bind their topic to an agent UUID in project B and have message content delivered to it; the row persists with `ProjectID`=A and `AgentID`=B's agent. **Sharper no-guessing variant:** step 2's missing `DeletedAtIsNil()` lets a *soft-deleted agent in your own project* be re-bound by UUID — which **defeats `ClearTopicDefaultAgent`** (`handlers_agents_core.go:2337`), the control that exists precisely to scrub those bindings on agent deletion. **Impact on us:** my AC-U-13 originally said the migration copies the runtime lookup — that would promote this into `conversations.default_agent_id`, laundering an ingress defect into the identity layer. Spec revised, §3.2.1 + AC-U-15. | ca-msg-em6 | open, escalated to user 23:0xZ |
 | **DEF-29 — `CreateConversation` accepts a keyless `direct` conversation (no ACL)** | **Fix landed `1aadc3cf`, ONE follow-up open.** Guard is correctly narrow (`kind=="direct" && external_ref==""`), group carve-out intact, reasoning in the error string. I verified independently there are **no production callers** of `CreateConversation` — only interface decls — so the guard breaks no runtime path. **OPEN:** em10 repurposed `TestAddParticipant_DM_EmptyExternalRefRejection` up to the create layer, leaving `AddParticipant`'s own `ParseDMKey` guard live but **untested** — defended only by a guard in another function (rule 52's non-local-safety hazard), and DEF-29's own root cause is that create paths multiply. Restore a direct AddParticipant test that bypasses `CreateConversation`. | **em10** | follow-up dispatched 22:46Z |
 | **DEF-28 — `UpsertConversationByExternalRef` silently erases `parent_ref`** | **CLOSED 22:46Z at `f57e07b6`.** Guarded like its four siblings. Ships with a **reflect-based field-classification test** (14 fields, 5 buckets) that fails when a new field is added without classification — converts "reviewer must notice an omission" into "CI notices," which is the durable answer to the rule-54 shape. Mutation names the erased value. `Kind` confirmed bucket B (immutable) — a direct conversation must not become a group, per D-1. | — | closed 22:46Z |
 | **DEF-27 — soft-deleted native topic gets a shadow conversation** | **CLOSED 22:46Z at `25fad0a2`.** Fix = split the lookup (`GetTopicConversationIDIncludingDeleted` for the mint guard, filtered accessor stays user-facing), both backends. First round REJECTED 22:19Z: 10 store-level tests, none drove the sink, and my mutation survived. Second round accepted after I re-ran the mutation myself — now **killed**, asserting on conversation COUNT (`expected 1, actual 2`, message names the mint), 8 sink-level tests 4 per backend, and the mock given a real `deleted` concept + `calledMethod` recorder so it can no longer rubber-stamp. §8 decision: tombstoned topic with empty `conversation_id` → unresolved, message stored unlinked. | — | closed 22:46Z |
@@ -4562,3 +4563,62 @@ a prose residual is rediscovered by exactly the person it warns about. It is now
 mutation that pins the *mechanism* — set `deleted_at`, drive the upsert, watch it mint a duplicate —
 so a future disagreer must confront the bug before reversing the policy. Two agents concurring on a
 ruling is cheap; the yield here was them refusing to let the concurrence be the deliverable.
+
+## 5bj. 23:01-23:06Z — em6's sweep lands; P2-F1 is bigger than reported, and it hits my own spec
+
+`ca-msg-em6` returned the asymmetry sweep. Denominators: **pattern 1** 51 pairs, 0 divergences (1a),
+**1 shared caller bug (1b)**; **pattern 2** 4 multi-writer tables, 1 defect; **pattern 3** 6 update
+paths, 1 defect. Both hot-spots I flagged (`seedFromWave1`, `migrateThreadIDs`) came back clean from
+**both** sub-agents independently — that is the corroboration the dual-framing was for.
+
+**The dual framing paid, and the evidence is specific.** P1-F1 (duplicate `SetMessageReplyTo` in both
+send paths) was visible **only** from SQL-up — tracing the store method outward found 4 call sites
+for 2 paths. P2-F1 was visible **only** from caller-down. Neither agent would have found the other's.
+That retires any doubt about rule 55's last corollary: same-shape auditors share a blind spot, and the
+cost of differing their framings was zero.
+
+**Rule 55's 1b half also paid, exactly once, and that is the point.** 51 pairs agreed at store level —
+if I had shipped the original diff-the-pair brief, the report would have read "51 pairs clean" and
+been filed as reassurance. The single 1b finding is the entire yield of the expensive half.
+
+### The escalation: P2-F1 is a cross-project routing path (DEF-31)
+
+em6 reported "no validation on `default_agent`" with impact "silent routing failures, **potential**
+information leak." The hedge was right — they had the ingress but not the mechanism. I chased it
+because "potential leak" is either nothing or a release blocker and the two must not be filed the
+same way. Three verified links, in the ledger. The chain works, and there is **no downstream
+re-check**: `sendAgentRouted` dispatches the agent object as given.
+
+**The variant em6 did not have is the stronger one.** Step 1 filters `DeletedAtIsNil()`; step 2 does
+not. So a *soft-deleted agent in your own project* is re-bindable by UUID — needing no cross-project
+knowledge at all — and that **defeats `ClearTopicDefaultAgent`**, which exists solely to scrub those
+bindings when an agent is deleted. A control with a documented purpose, bypassable by the ingress
+that feeds it. That found itself: the same function's two steps disagree about `deleted_at`, which is
+a **rule 55 1b finding inside a single function** rather than across a backend pair. I had only ever
+pointed 1b at sibling implementations. It generalises to any two code paths answering one question.
+
+### What this cost me in my own spec, which is the part worth remembering
+
+AC-U-13 said *"migration resolution **is** the runtime's two-step lookup."* I wrote that as a
+**fidelity** requirement — match production behaviour, don't invent new semantics — and fidelity is
+usually the right instinct for a migration. Here it would have taken a per-send routing bug against a
+mutable surface column and **promoted its output into `conversations.default_agent_id`**, a stable
+identity column later phases treat as authoritative. **An ingress defect laundered into the identity
+layer stops looking like a defect** — it inherits the authority of the column it lands in.
+
+> **Fidelity to a defective source is not fidelity, it is propagation.** A migration copies *data*,
+> never the *resolution logic* that produced it — that logic gets re-derived correctly, and every row
+> where the correct derivation disagrees with production is a **report line, not a silent fix**.
+
+Revised: §3.2.1 (both steps project-scoped and deleted-filtered), AC-U-13 withdrawn and reworded,
+**AC-U-15** added requiring the foreign-project and soft-deleted cases to appear in the report
+*flagged distinctly* from unparseable garbage — they are where the migration deliberately diverges
+from runtime, and lumping them together satisfies the letter while destroying the point.
+
+**And it falsified my §3.3 reasoning.** I had justified NULL-on-unresolvable with "the unresolvable
+set is already inert — it does nothing today." False. Those rows resolve at runtime and carry live
+traffic. The conclusion survives; the reasoning inverted, so the operator report is now
+**remediation** rather than courtesy — it lists routings the migration deliberately severed, some of
+which were working. Keeping a right answer while its justification collapses is worth flagging in
+place, not quietly correcting: the next person to touch §3.3 needs to know which of the two arguments
+is load-bearing.
