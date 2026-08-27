@@ -1203,6 +1203,33 @@ em10 and every agent I dispatch hereafter.
       positive.
 
 
+
+62. **Getting the SEVERITY wrong is worse than getting the finding wrong, because severity selects the
+    fix.** Issued 2026-08-27 23:51Z. em6 correctly found that the CI guard is blind to `AddParticipant`
+    and correctly concluded it should be added — then justified it as *"skipping the authorization
+    checks in checkPostResolutionAuth,"* i.e. an authorization bypass. **The finding is right and the
+    reason is wrong.**
+
+    - `resolve.go:225-246`: for `direct`, auth is derived from the kind-encoded DM key via `ParseDMKey`
+      on `external_ref` — the comment says explicitly *"rather than the participants table."* For
+      `group`, auth is project membership. **The participant table is a derived LISTING INDEX, never
+      the access authority.** An unguarded `AddParticipant` corrupts **visibility**, not access.
+    - **Why the wrong reason is actively dangerous:** filed as "authorization bypass," the obvious fix
+      is to make the participant table authoritative or add participant checks to the resolve path.
+      **That violates the standing invariant and is a real regression** — key-derived auth checks BOTH
+      kind AND ID, so it rejects a user UUID that coincidentally matches an agent position. A table
+      scan is strictly looser. We would trade a tight ACL for a loose one and log it as a hardening.
+    - **The precise severity, stated rather than smoothed:** the `default` branch for an UNKNOWN kind
+      falls back to `requireParticipant`, where the participant table IS the authority. No such kind
+      exists today and the fallback is correctly fail-closed. So: *not an ACL today; an ACL for any
+      future conversation kind someone forgets to case.*
+    - **General form:** when accepting a finding whose justification is wrong, correct the
+      justification in the same breath as the approval. The finding travels into a PR description, the
+      PR description travels into the next reader's head, and **a correct fix shipped with a wrong
+      rationale is a trap primed for whoever touches it next** (rule 53: name the trap the obvious fix
+      falls into).
+
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -4917,3 +4944,43 @@ reads as deliberate. Assessment only; coordinate with em9 before touching their 
 
 **And see rule 61** — my own first verification grep was silently a no-op, and I would have accepted
 its empty output as proof had the real answer not happened to be visibly wrong.
+
+## 5bn. 23:50-23:52Z — CI guard lift APPROVED, gap proven by probe, severity corrected
+
+em6 assessed lifting em9's CI guard (`29cf09be`, `1aefd1e0`, `0361d80d`) out of tranche C. **Verdict:
+PROCEED.** Three files, none conflicting: `hack/check-conversation-upsert-guard.sh` (new),
+`Makefile`, `.github/workflows/ci.yml`.
+
+**Verified the load-bearing fact myself:** the guard runs clean (exit 0) against `upstream/main` @
+`c600df51`. It protects a property that already holds and depends on no tranche C code — which is what
+makes it liftable.
+
+**Then applied rule 61 to it, having written that rule an hour earlier.** A passing guard is not
+evidence until it is shown able to fail. Planted probes in `pkg/hub`:
+
+| Probe | Result |
+|---|---|
+| `s.UpsertConversationByExternalRef(...)` | exit 1 — **caught** |
+| `s.CreateConversation(...)` | exit 1 — **caught** |
+| `s.AddParticipant(...)` | **exit 0, "no violations" — GAP PROVEN** |
+
+The gap I had reasoned about is now demonstrated. Told em6 to make that probe the PR's test —
+**the acceptance criterion is the mutation** (rule 53).
+
+**Severity correction — see rule 62, the real yield of this exchange.** em6 justified the
+`AddParticipant` extension as an authorization bypass. It is not: auth for `direct` is key-derived and
+for `group` is project membership; the participant table is a listing index. Filed as "authz bypass,"
+the next reader's obvious fix is to make participants authoritative — **strictly looser than
+key-derived auth, and a genuine regression dressed as hardening.** Corrected in the same message as
+the approval, before it reached a PR description.
+
+**Second finding, mine:** the raw-SQL check exempts `pkg/hub/webchannel_store*.go` for "dual-write
+paths" — **paths that do not exist on main and arrive with tranche C.** Landing the guard standalone
+would grant a standing exemption to absent code, and nobody revisits an allow-list entry. Directed:
+drop the exemption; tranche C adds it alongside the dual-write it exists for. **An exemption should
+arrive with its beneficiary.**
+
+**Logistics:** em6 cuts the PR, credits em9 as author, and coordinates with em9 DIRECTLY on the three
+mechanical questions — routing those through me makes me a bottleneck for nothing. Only a downstream
+dependency in tranche C's commit sequence would change the plan. Branch pushed and green comes back to
+me; **I produce the compare URL, em6 does not open the PR.**
