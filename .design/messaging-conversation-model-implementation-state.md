@@ -145,7 +145,11 @@ Idempotent, resumable, dry-run. Then dual-write: send paths resolve-or-create an
 point on all three inbound paths; new agent-facing delivery JSON per Appendix B. Old
 envelope still accepted and mapped.
 
-**S4 Surfaces.** Read switch to `conversation_id` (gated on divergence being clean);
+**S4 Surfaces.** Read switch to `conversation_id` — **behind a default-off runtime flag
+per D3, not gated on a production soak (there isn't one).** Must also close DEF-1
+(participant-level auth) and DEF-3 (a divergence comparison with an independent source of
+truth), and expose the divergence counters somewhere readable live during the beta
+exercise. Then:
 `scion broadcast` and `scion keys` split out, `scion message` reduced to six flags with
 deprecation mapping; per-plugin `ResolveConversation` at the broker edge, one commit per
 plugin.
@@ -224,6 +228,11 @@ would bury the events that matter.
   instance of the exact defect this refactor removes, and a sharper one than the original
   bug report: the missing direction was invisible to me because the user kept replying to
   their own prompts, which read as evidence the channel worked.
+- `2026-08-27 03:43Z` **User settles the beta plan:** beta hub is the validation event, run
+  as a scheduled exercise with the user present and a DB snapshot for rollback; until then,
+  implementation and tests only. Recorded as D3 (read switch behind a default-off runtime
+  flag; divergence counters readable live) and D4 (backfill evidence is synthetic, and
+  explicitly weaker than the design asked for). §6 open items closed accordingly.
 
 ## 5d. S2 rejection history — CLOSED 2026-08-27 03:35Z (accepted on round 3)
 
@@ -289,6 +298,8 @@ sections.
 | # | Decision | Rationale | Issued |
 |---|---|---|---|
 | D1 | `ConversationStore` accepts **UUID only** for `DefaultAgentID`, and validates it. A slug is rejected, not stored. | The slug-or-UUID union is the class of defect this refactor removes. A store that accepts both propagates the ambiguity instead of resolving it, and every downstream reader must re-ask which form it holds. A narrow store contract forces the ambiguity to be settled at a known place. | 2026-08-27 |
+| D3 | **The S4 read switch lands behind a runtime flag, default OFF, flippable without redeploy.** Divergence counters must be exposed somewhere readable live (not log lines only). | User decision 2026-08-27: the beta hub is the validation event, run as a scheduled exercise with the user present and a DB snapshot for rollback. There is therefore **no production soak before the switch**, so the design's phase-8 gate cannot be met in its original form. A flag makes the exercise "snapshot, flag on, watch, flag off" — recovery is a config change rather than a snapshot restore. And since the exercise is the *only* window where the two models meet real traffic, the operator has to be able to read a verdict in the moment; log lines are the wrong shape for that. | 2026-08-27 |
+| D4 | **Backfill evidence is synthetic.** Require a seeded corpus exercising both named hazards plus messages that must come out flagged `inferred`. | Real dry-run counts are unobtainable pre-beta (em2 reported this twice). Recorded as **weaker than the design's requirement**, not as the requirement being met. Do not let a later section cite "backfill validated" without this caveat. | 2026-08-27 |
 | D2 | Normalization (slug → UUID) lives in **one shared exported helper**, written in phase 3, with the phase 4 backfill job as an intended second caller. Not two implementations. | Duplicated identity-resolution logic is already a named defect (findings §7). Two callers exist by design; two implementations would recreate the defect inside the fix. **em2 must be pointed at this helper.** | 2026-08-27 |
 
 ## 5b. Branch contract — issued to every manager
@@ -316,9 +327,10 @@ git checkout -B scion/ca-msg-em<N> origin/scion/messaging-v2
   spawned agent's provisioning — it reported `shared-plain` for em1, which was false. If
   isolation matters again, test it (sentinel file + HEAD comparison), do not read the
   variable. Sequencing is retained by choice, not necessity.
-- **Beta hub target.** The user wants this testable on a beta hub. Deployment mechanics
-  for pointing a beta hub at `scion/messaging-v2` are not yet established — resolve
-  before S4 completes.
-- **Phase 8 soak gate.** The design requires divergence logging to run against real
-  traffic before the read switch. On a beta hub this becomes beta soak; the gate must not
-  be silently skipped just because it is inconvenient on a branch.
+- ~~**Beta hub target.**~~ **Closed 2026-08-27.** The user owns scheduling the beta
+  exercise and will direct deployment mechanics then. Dropped from my open list; pick it
+  back up if asked.
+- ~~**Phase 8 soak gate.**~~ **Superseded by D3.** There is no production before beta, so
+  the pre-switch soak cannot happen. Replaced by: read switch behind a default-off runtime
+  flag, divergence counters readable live during the exercise. **The gate was not skipped —
+  it was moved and weakened, deliberately, and this is the record of that.**
