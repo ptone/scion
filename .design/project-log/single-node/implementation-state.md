@@ -8870,3 +8870,43 @@ same pass. Register update dispatched: fourteen → fifteen.
 
 This is also the second confirmation today of the structural point in §19: **every issue we file is a
 future collision.** We created #1314 ourselves, and it collided within hours.
+
+### §23.5 — `e032f55a`: clone step added, collision register at 15
+
+`build-docs` SUCCESS, `Build & Test` SUCCESS, all green except the pre-existing `cla/google`.
+
+Neither `git` **nor `go`** was stated as a prerequisite — the tools table listed only `gcloud` and
+`scion`. Both added. `ptone/scion#1297` now has 15 rows with the count lines and the growth narrative
+(`9 → 11 → 12 → 14 → 15`) all reconciled; the developer caught that leaving the narrative alone would
+have created **a second contradictory total inside the same section**, which is precisely the defect
+the register exists to avoid.
+
+### §23.6 — The seam my own brief created
+
+The developer reported their fix as **"a patch over the seam, not a fix"** and they were right.
+`go build -o ./scion` puts the binary in the clone directory, but the tools table and §1 both invoke
+**bare `scion`**. A bare-machine reader hits `command not found` on the next copy-paste. **Step 0
+still fails.**
+
+**This gap exists because my brief scoped them to "Task 1 only".** They flagged it rather than
+silently widening the diff, which is the behaviour I want — but the narrow scope was mine, and this
+is the second time today a tight brief has produced a locally-correct, globally-incomplete result.
+Recording it as a brief-writing lesson: **scoping by file or by task is not the same as scoping by
+"the reader can complete the path".** For tutorial work the acceptance test is the path, not the diff.
+
+Dispatched with the design constraint that decides the shape: **do not rewrite call sites to
+`./scion`.** Build-from-source is temporary (`ptone/scion#1314`); once a release ships, readers
+install a binary that *is* on `PATH`, and every `./scion` would become wrong. Put the binary on
+`PATH` instead — one instruction, correct in both worlds, no second staleness fuse.
+
+### §23.7 — Two further items
+
+**`ptone/scion#1297` heading counts two different things under one number** (pre-existing). "13 are
+fork issue numbers" counts *bare-ref occurrences in the design file*; the table beneath is the
+*collision register*, now 15 rows, most of which never appear in that file, and two of the five refs
+named in the sentence have no row at all. Dispatched to separate the historical audit from the live
+register. **A number that cannot be checked is worse than no number** — same principle as §19.
+
+**`docs-site/src/content/docs/hosted/user/a2a-bridge.md:81` has the identical missing-clone defect.**
+Outside this tier. Dispatched as an issue filing only, explicitly **not** to be fixed here and
+explicitly **not** to carry the tier label — this PR should not sprawl into unrelated docs.
