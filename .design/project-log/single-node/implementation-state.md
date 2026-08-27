@@ -5414,3 +5414,39 @@ into the brief. A brief that grows a new phase needs the new phase's preconditio
 
 **Task #44 status: the fix is verified structurally, not exercised.** That distinction is the whole
 reason #44 exists — do not let it close on a code read.
+
+### 02:32 — G4 correction, and the brief is pre-written
+
+I told ptone "the §1 walkthrough is unaffected" by dropping the workflows. **Too clean.** Checked the
+doc properly afterwards:
+
+- **§1.3 success criteria — genuinely unaffected.** It says nothing about image provenance.
+- **G4 (line 47) — affected.** *"Deployment is one command against a GCP project — no registry
+  setup, no NFS, no Filestore, no Kubernetes."* `deploy-instance` requires `--image`
+  (`cmd/deploy_instance.go:84`) and has no default. With no upstream-published image the operator
+  must build and push one, which is registry setup.
+
+The honest framing, sent to ptone: **G4 is unmet either way.** Keeping the workflows does not meet it
+either, because the push fails 100% of the time. The only live question is whether we break other
+people's PRs while it is unmet. Recommendation unchanged.
+
+What actually closes G4 is an org owner creating `ghcr.io/googlecloudplatform/scion-omni` public.
+Then the three files return as a small follow-up. Logged as a real, open gap — **the design doc
+currently claims a goal the shipped tier does not meet**, and that should not be quietly forgotten
+when the tier lands.
+
+Also verified: the design doc contains **zero** occurrences of `ghcr`, `publish-omni`,
+`build-release` or "CI build path". So it makes no claim that dropping the workflows would falsify.
+The G4 tension is the only doc-level consequence.
+
+Dropping is clean at the code level too — GitHub code search returns **0** references to
+`publish-omni`, `omni-image`, `build-release.yml` or `build-images.yml` anywhere in the repo.
+
+**Brief pre-written, not dispatched:** `briefs/sn-ciscope-dev.md`. It opens with *"DO NOT START until
+sn-impl-arch tells you the decision is confirmed"* so it cannot be actioned by an agent that finds it
+lying around. Ready the moment ptone answers.
+
+Note on my own reliability tonight: **two self-corrections on this PR within ten minutes** — the
+zizmor misattribution, then the G4 overclaim. Both were caught before they reached ptone as a
+decision, but only because I checked provenance rather than re-reading my own conclusion. Told him
+so he can weight my confidence. That disclosure is cheap and the alternative is not.
