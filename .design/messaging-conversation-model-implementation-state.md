@@ -1248,6 +1248,53 @@ there is a reason they kept both that I am not seeing.
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
 
+## 5ah. 18:45Z — strategy cut over to incremental; DEF-19 found within minutes and dispatched
+
+**User directive 18:30Z: "let's start getting this landed in a safe and incremental way", then
+"proceed" at 18:34Z.** The integration branch is abandoned as a merge unit. Landing plan is §1b.
+
+**The plan was made tractable by something I had not noticed until I looked:** the branch's
+first-parent history is already phase-ordered (phases 1-11), so tranches follow the build order
+instead of cutting across it. I had been describing the branch as an 81-commit lump for two days.
+
+**Two non-obvious consequences of going incremental, both found by checking rather than assuming:**
+
+1. **Tranches must be cut as final state, not replayed commits.** S6/S7/S8 and §2.15 all repaired
+   defects in phase-1-5 files. Replaying the original phase commits would land code we already
+   know is broken, then fix it three PRs later.
+2. **CI gates are per-tranche, not once.** The 15 gofmt violations span phases 3, 5, 6 and 9, and
+   `golangci-lint` runs `--new-from-merge-base=origin/main`. Fixing formatting once on
+   `messaging-v2` would leave every tranche PR red. I had told the user "that is the first commit";
+   it is not, it is a step in each of seven.
+
+**DEF-19 — the incremental decision paid for itself inside six minutes.** Chasing an aside in
+em6's §2.15 report, I probed `ValidateLegacyMessage` directly and found it rejects `group[]`
+recipients, a shipped documented CLI feature. Root cause: `buildAddressees`
+(`envelope_compat.go:229-250`) treats `Recipient` as exactly one principal and splits on `:`,
+yielding principal kind `group[agent`. Validation at `:630` precedes group dispatch at `:669`, so
+every `group[]` message 400s. Absent from `origin/main`, so it is ours. Specced (`def19-spec.md`)
+and dispatched to **`ca-msg-em9`**, which is independent of §2.15's files.
+
+**§2.15 verified independently and NOT merged.** My own run at `457149b9`: 8 packages green,
+`pkg/hub` 274.7s, EXIT=0; both new tests execute, no skips; base re-verified.
+**Then mutation found the defect that green hid.** M1 (`!validDMKey(req.ThreadID)` -> `false` at
+`:121`) killed **only the status assertion** at line 856 (400 -> 503). Both persistence
+assertions — message-count and conversation-count unchanged — **survived**, because with the guard
+disabled the request dies at `503 broker_unavailable` and nothing persists anyway.
+
+So the test proves `validDMKey` returns 400. It does **not** prove `validDMKey` is what prevents
+the message row, which is exactly the claim em6's report makes. **The row-count assertions cannot
+distinguish "the guard blocked it" from "the broker blocked it"; they pass either way.** Rule 14,
+sitting inside the test written to settle the question. What is missing is a **positive control**:
+without a case showing a well-formed key *does* persist in this environment, the negative
+assertion is decoration. Sent back to em6 — the fix is small, and I explicitly did not ask them to
+change the conclusion, only to stop the test claiming more than it demonstrates.
+
+**Note on my own mutation practice:** I nearly recorded "M1 KILLED, test is specific" and moved on.
+The kill was real; the *specificity* was not what it appeared. **Asking which assertions died,
+rather than whether the test died, is the whole difference** — and it is the discipline I have been
+demanding of managers all day while checking only the exit code myself.
+
 ## 5ag. 18:30Z — the blocker I owed myself; unification spec drafted
 
 Heartbeat step 7 ("replies owed") caught what my own status message got wrong. I had told the
