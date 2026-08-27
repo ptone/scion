@@ -46,7 +46,8 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 ## 3. Current position
 
 **Active section:** S1 — Foundation
-**Active manager:** `ca-msg-em1` — NOT YET SPAWNED
+**Active manager:** `ca-msg-em1` — spawned 2026-08-27 00:42Z, template `eng-manager`
+**Awaiting from em1:** workspace mode confirmation + design feasibility read
 **Blocked on:** nothing
 **Last verified landing on integration branch:** none (branch is at `origin/main`)
 
@@ -99,6 +100,12 @@ Append-only. Newest last. One line per event.
 
 - `2026-08-27` Integration branch `scion/messaging-v2` created from `origin/main` @ `fc523ecd`, pushed. Working tree untouched.
 - `2026-08-27` State doc created.
+- `2026-08-27` Heartbeat `ca-msg-impl-heartbeat` created, `13,43 * * * *`, id `1a899567`.
+- `2026-08-27` Tasks #4–#8 created, one per section S1–S5.
+- `2026-08-27` `ca-msg-em1` spawned for S1. Hub-mode start clones the repo per agent
+  ("Hub mode uses HTTPS clone with GITHUB_TOKEN"), so managers get their own working
+  copy — the `shared-plain` concern in §6 appears to apply to the coordinator's
+  `/workspace` only. Awaiting em1's confirmation before treating that as settled.
 
 ## 6. Open items / risks
 
