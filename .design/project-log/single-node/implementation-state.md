@@ -9503,3 +9503,54 @@ would have said everything was fine, twice.
 ### §33.3 — Fleet
 
 `sn-flagdoc-dev` reclaimed after verification. **Zero developer agents of mine running.**
+
+## §34 — ALL FOUR PRs MERGED. The published page equals `main`.
+
+ptone asked whether the live URL is current. Answered by measurement, four ways:
+
+1. Last `docs.yml` deploy on `main`: **16:11:51 for `c43d7e79`, SUCCESS.**
+2. Last commit touching the page: **`c43d7e79`** — the `--image-registry` fix, merged as
+   `GoogleCloudPlatform/scion#1321`.
+3. `main` has since moved to `98a9d9c2`, **but that commit touches no file under `docs-site/`**
+   (`git diff --stat` empty), so **no rebuild is owed.** *A newer `main` does not imply a stale
+   site; the question is whether the newer commits touch the published tree.*
+4. Fetched the live HTML and checked content, not just status:
+
+| marker | live page |
+|---|---|
+| `image-registry` | 2 |
+| `go env GOPATH` (PATH prepend) | 2 |
+| `Always specify` (harnessConfig caution) | 1 |
+| `antigravity` (troubleshooting) | 4 |
+| `deploy-cloudrun-sandbox` (dead command) | **0** |
+| `persistent network volume` (false durability claim) | **0** |
+
+**The published page equals `main`.**
+
+### §34.1 — Final state of the upstream work
+
+| PR | merged |
+|---|---|
+| `GoogleCloudPlatform/scion#1316` build fix | 15:03 |
+| `GoogleCloudPlatform/scion#1315` tutorial | 15:51 |
+| `GoogleCloudPlatform/scion#1321` ninth flag | 16:11 |
+| `GoogleCloudPlatform/scion#1317` design doc | 16:17 |
+
+**All four merged. Nothing of the tier's is outstanding upstream.**
+
+### §34.2 — The bare-reference count on `main` is zero
+
+This morning `.design/hosted/cloud-run-single-node.md` on `main` carried **18 bare `#NNNN`
+references**. Counted again on `main` just now: **0.**
+
+Worth stating plainly because of how the day went. At 14:30 I told a developer that fix had
+"landed" when `#1317` was merely open — the precise conflation I had spent the day warning others
+about (§25.3). **It is landed now, and the difference between those two claims is the whole lesson:
+the first was a branch, this is a count taken on `main`.**
+
+The register (`ptone/scion#1297`) remains the standing mitigation, and the 100% collision rate
+(§25.2) means the durable answer is still a lint rule, not vigilance. Offered; ptone's call.
+
+### §34.3 — Fleet and status
+
+Zero developer agents running. Nothing is blocked on me or on any agent.
