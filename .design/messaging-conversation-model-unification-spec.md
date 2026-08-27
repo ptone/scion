@@ -377,9 +377,40 @@ every native read through Ent, replacing working shipped code for no user-visibl
 
 ## 7. Open questions — raised serially, not batched
 
-**Q1 (user, product-visible).** §4.3: a native topic whose `default_agent` slug no longer resolves
-loses its default agent at migration. Accept the fail-closed NULL + report, or hold cut-over until
-the unresolvable set is empty?
+**Q1 — CLOSED 2026-08-27 19:48Z by me, WITHOUT going to the user, because the premise was wrong.**
+
+I held this for over an hour as "a product decision for the user." Writing it up properly meant
+reading the consumer, and the question dissolved.
+
+I had framed it as: *a topic whose `default_agent` no longer resolves **loses** its default agent at
+migration* — implying a working thing gets broken, hence a product call. **It does not work today.**
+
+- `default_agent` is **never validated at set time**. `handlers_chat_v2.go:579-580` assigns
+  `body.DefaultAgent` straight through with no existence check.
+- The single routing consumer is `:936-947`. It tries `GetAgentBySlug`, falls back to `GetAgent` by
+  ID, and if both fail **falls through to `sendHumanToHuman`** — the message posts to the topic and
+  **no agent is woken, silently, with no error.**
+
+So an unresolvable `default_agent` is *already* functionally NULL. Migrating it to NULL loses
+nothing; it records a truth the system is currently hiding, and stops the UI (`:366`, `:3340`)
+displaying a stale agent name that does nothing. "Hold cut-over until the unresolvable set is empty"
+would mean blocking on a set that is already inert.
+
+**But the investigation replaced the question with a real constraint, which is the part that
+matters.** The migration must resolve `default_agent` using **the same two-step lookup as the
+runtime** — `GetAgentBySlug(projectID, v)` first, then `GetAgent(v)` by ID — because the column
+holds either a slug or a UUID (`:937-938` says so explicitly). A migration that resolves only slugs
+would NULL every UUID-valued default agent, and those are the ones that **do** work today. That
+would be a real regression, introduced by the migration, in the name of cleaning up.
+
+New AC (replaces the Q1 gate on phase 5):
+
+- **AC-U-13** Migration resolution is the runtime's two-step lookup. Test both: a slug-valued
+  `default_agent` and a UUID-valued one both migrate to the correct `default_agent_id`, and a
+  genuinely unresolvable one migrates to NULL. Paired positives (rule 29) — a test that only
+  asserts the NULL case cannot see over-NULLing.
+- **AC-U-14** The migration emits an operator report listing every topic whose `default_agent` did
+  not resolve, with the raw value. Cheap, and the only way anyone learns these existed.
 
 **Q2 — ANSWERED 18:26Z, yes on both engines.** See §3.4. Alternative (A) stays closed. Their
 conclusion verified; their stated mechanism corrected (pool starvation at `MaxOpenConns=1`, not
@@ -404,12 +435,12 @@ Sequenced so nothing user-visible moves until the link exists and is proven.
    only** — never read-state, prefs or `webchat_dm`. AC-U-6, AC-U-9.
 4. **Close the mint path** (§3.3) — `ResolveOrCreateThreadConversation` reads instead of creating.
    AC-U-3. *This is the phase that actually stops the divergence; 1–3 only make it possible.*
-5. **`default_agent` promotion** + `ClearTopicDefaultAgent` move. AC-U-7, AC-U-8. **Gated on Q1.**
+5. **`default_agent` promotion** + `ClearTopicDefaultAgent` move. AC-U-7, AC-U-8, **AC-U-13, AC-U-14**. ~~Gated on Q1~~ — **ungated 19:48Z, Q1 closed.**
 6. **`#<thread>` resolution** reads `webchat_topic.name` (DEF-7 / DEF-5 unblock).
 7. **Make `conversation_id` NOT NULL** once backfill is proven. Cleanup.
 
-Phases 1–4 are independent of Q1 and can proceed while it is open. **Phase 4 is the one that pays
-the debt** — if scheduling pressure forces a cut, cut from the back, not the front.
+**Phase 4 is the one that pays the debt** — if scheduling pressure forces a cut, cut from the back,
+not the front. With Q1 closed, phases 1–5 are all unblocked.
 
 **Phases 1–4 are unblocked as of 18:30Z**: Q2 answered yes, Q3 agreed, §3.6 rescoped. Q1 gates
 phase 5 only. **Not yet dispatched** — §2.15 is mid-flight in `pkg/messaging/conversation.go`,

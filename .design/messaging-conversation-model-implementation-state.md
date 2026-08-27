@@ -371,6 +371,28 @@
     which is the point: **the defect is not in any one test, it is in accepting a green suite as
     evidence about code paths it never distinguishes.**
 
+33. **Holding a question is not free: it defers the examination that might dissolve it.** Issued
+    2026-08-27 19:48Z. I sat on §2.6.4's Q1 for over an hour as "a product decision for the user,
+    waiting for a natural opening." When a heartbeat finally made me write it out properly, I had to
+    read the consumer to state the consequence — and **the premise collapsed.** I had framed it as
+    *a topic whose `default_agent` no longer resolves loses it at migration*, implying a working
+    feature gets broken. It does not work today: `default_agent` is never validated at set time
+    (`handlers_chat_v2.go:579`), and the only routing consumer (`:936-947`) silently falls through
+    to human-to-human when it cannot resolve. The value is *already* inert.
+
+    Two things follow. **The queue was the problem, not the question.** Rule 28 says a blocker owned
+    by me is a queue; this is the sharper version — a *question* I am holding is also a queue, and
+    the holding is what prevents the five minutes of reading that would have closed it.
+    **And escalation has a cost I had been treating as zero:** had I sent Q1 when I first wanted to,
+    the user would have spent attention deciding a question with a false premise, and I would have
+    recorded a decision on a false basis and built on it.
+
+    The examination also produced the thing the question was gesturing at but could not see:
+    the column holds *either* a slug or a UUID, so a migration resolving only slugs would NULL every
+    UUID-valued default agent — precisely the ones that do work. A product question became an
+    implementation constraint with two ACs. **Questions that dissolve usually leave a real
+    constraint behind; the dissolving is not the end of the work.**
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -1307,6 +1329,44 @@ there is a reason they kept both that I am not seeing.
    paths; the agent outbound path does not validate `ThreadID`. A committed test bakes in a malformed
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
+
+## 5al. 19:43-19:50Z — heartbeat: two expired holds, one dissolved question, one silent CLI failure
+
+**Roster:** em6 active on DEF-12, em10 blocked on its own sub-agents (normal), em9 idle after
+closing DEF-19. main unmoved at `b09e7f49`. `messaging-v2` at `1e7bee72`, 95 commits.
+
+**Both heartbeats fired — my v4 deletion silently failed.** `scion schedule delete d4dac308` with
+the short ID printed the command's help text and exited. I *did* re-list and see v4 still there,
+and then went to em10's message and never came back. Deleted properly with the full UUID.
+**A CLI that prints usage on a bad argument looks like it ran**, and the only reason I caught it at
+all was a habit of verifying; the reason it survived another cycle is that I verified and then did
+not act on what I saw. Noticing is not fixing.
+
+**Expired hold #1 — dispatched §2.6.4 phases 1-4 to em9.** My own spec said "not yet dispatched"
+because §2.15 was mid-flight in `pkg/messaging/conversation.go`, which phase 4 rewrites. §2.15
+merged at 19:00Z. **The note recorded a reason but not a re-check, so nothing revisited it** — em9
+sat idle for 43 minutes on work that was runnable. Same shape as DEF-12's stale "do not dispatch"
+one cycle earlier: a correct decision, written down, outliving its premise. Rule 28 keeps arriving
+in new costumes because ledgers store conclusions, not the conditions that produced them.
+
+**Expired hold #2 — Q1 closed without asking the user, because the premise was wrong.** Full
+detail in rule 33 and unification-spec §7. Writing the question out properly forced me to read the
+consumer, and an unresolvable `default_agent` turns out to be **already inert**: never validated at
+set time, and the routing path silently falls through to human-to-human. Migrating it to NULL loses
+nothing and stops the UI showing a dead name.
+
+**And the examination left a real constraint where the question had been.** The column holds either
+a slug or a UUID — `:937-938` says so — so a migration resolving only slugs would NULL every
+UUID-valued default agent, which are exactly the ones that *do* work. A cleanup that introduces a
+regression. Now AC-U-13 (both forms, paired positives) and AC-U-14 (operator report). Phase 5 is
+ungated.
+
+**What I want to keep from this cycle.** Three separate holds — DEF-12's ledger row, the unification
+dispatch note, and Q1 — all expired quietly while I believed I was correctly blocked, and all three
+surfaced only because a heartbeat made me re-read my own documents. **I have been treating "blocked"
+as a state I can verify by recalling why I entered it.** It is not; it is a claim about the present,
+and the only way to check it is to re-derive it. That is what step 5 of the heartbeat is for and I
+had been running it as a formality.
 
 ## 5ak. 19:23-19:35Z — DEF-19 closed; and my own AC invited the hand-wave it existed to prevent
 
