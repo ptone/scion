@@ -11960,3 +11960,50 @@ The sharp questions:
 
 I also told it, as I tell all of them: **tell me what in the brief is wrong.** The round-1 reviewer
 sent four corrections and all four landed; the developer has corrected me twice since.
+
+## §35.44 — Heartbeat 23:01. Checked, not assumed.
+
+**1. Are dispatched agents progressing?** Yes, and I looked rather than reading the phase column.
+`sn-adcpreflight-rev2` is `executing`, 9 seconds stale, working in its own clone at `/tmp/adcrev2` —
+not in shared `/workspace`, which is what I asked for. `sn-adcpreflight-dev2` is idle and completed.
+No stalls.
+
+**The look was worth more than the liveness check.** The reviewer is already past reading and into
+mutation, and it has produced the discriminating result I hoped for:
+
+```
+result: ALL GREEN (pin escaped)
+pre-R7 m9: ALL GREEN (pre-existing gap, not an R7 regression)
+```
+
+**It found an escaped mutation and then checked whether R7 caused it.** It did not — the gap predates
+this branch. That second step is the whole difference between a finding and an accusation, and it did
+it unprompted. I will wait for the report rather than react to a terminal fragment; a partial read of
+someone else's screen is exactly the "reasoning off a signal" the heartbeat warns about.
+
+**2. What blocks the critical path?** #85, in review, nothing else. §1 has been walked end to end
+already; #85 is the defect that stops a *fresh operator* completing step one, which is where ptone
+actually hit it. When the verdict lands: rebase (mechanical, no overlap — §35.43), then the compare
+URL to thread `1532864101909528737`, URL alone.
+
+**3. Is the design doc in sync with what has been measured?** **One omission found, filed as #86.**
+
+§4.3 explains why the Instance must be created on v1 — `sandboxLauncher` lives nowhere else — and
+draws two tooling consequences. **It stops one step short of the fact this whole task is about:**
+`iapEnabled` and `invokerIamDisabled` are **v2-only**, so the deploy cannot be done through one API.
+It creates on v1 and PATCHes on v2. And the PATCH needs a standard OAuth2 token — **a different
+credential store from the one `gcloud` uses for the create.** Two stores, usually the same principal,
+not required to be. That is the entire mechanism of ptone's 401, and the doc does not say it.
+
+Also to record there, in the corrected form: **`--iap` exists in gcloud 582 on the *Services* surface
+and is not registered on the `instances` noun.** My earlier absolute — "no gcloud flag enables IAP" —
+reached the right conclusion by wrong reasoning and the reviewer corrected it. The doc must carry the
+corrected version, because the wrong reasoning is the kind that gets re-derived and then falsified by
+someone with a newer SDK.
+
+**Deferred until #85 merges**, on the #81/#79 rule: write the line that describes what shipped, not
+what is still under review. Grep confirms the doc makes no `--iap` claim today, so this is an omission
+and not an error — nothing in it is currently misleading.
+
+**ptone:** last contact 21:39, nothing outstanding that only he can unblock. Not interrupting. The
+next thing he gets is the compare URL.
