@@ -5450,3 +5450,62 @@ Note on my own reliability tonight: **two self-corrections on this PR within ten
 zizmor misattribution, then the G4 overclaim. Both were caught before they reached ptone as a
 decision, but only because I checked provenance rather than re-reading my own conclusion. Told him
 so he can weight my confidence. That disclosure is cheap and the alternative is not.
+
+---
+
+## 2026-08-27 02:47 — ptone: DROP the workflow files. And he answered G4 without being asked.
+
+Verbatim:
+
+> we can drop the github workflow image builds - our current practice is to manually run our
+> cloud-build targets from the image-build dir - we also have a homebrew repo that builds homebrew
+> images - we want to be able to build our omni image in a semi-private GCP container registry -
+> but as long as we have a sound cloudbuild file for that which follows the existing conventions
+> that should be find. For our beta testers we can share a pre-built image.
+
+Dispatched `sn-ciscope-dev` against the pre-written brief, with the confirmation gate explicitly
+released. #1310: 40 files → 37.
+
+### The condition is conditional, and I nearly missed that
+
+He did not say "drop them". He said **drop them *as long as* we have a sound cloudbuild file that
+follows the existing conventions**. That is an acceptance criterion, not an aside.
+
+Checked before assuming, and the news is good: **the branch already contains
+`image-build/cloudbuild-omni.yaml` (+166)**, named exactly like its six upstream siblings —
+`cloudbuild.yaml`, `-common`, `-core-base`, `-scion-base`, `-hub`, `-thick`, `-harnesses`. The omni
+target is registered in `scripts/lib/targets.sh` (+62 −2) and `scripts/builders/cloud-build.sh`
+(+6), with `image-build/omni/Dockerfile` (+103).
+
+So the manual `image-build` workflow he describes as current practice **is already the path this
+branch uses**. Dropping the GitHub Actions wrappers removes a duplicate, not a capability. Told
+`sn-ciscope-dev` this explicitly so it does not read the deletion as removing image building and
+"helpfully" compensate.
+
+**But "already exists" is not "sound and conventional".** That is his stated condition and it is
+mine to verify, not assume. Dispatched an audit of `cloudbuild-omni.yaml` against all six siblings:
+structural conformance, how the registry destination is parameterised (it must be overridable for a
+*semi-private* registry, which is the specific thing he asked for), target wiring symmetry in
+`targets.sh`, and soundness red flags — hardcoded project/region, `waitFor` ordering across a
+3-stage chained build, timeout adequacy, `images:` entries no step produces.
+
+One inconsistency already visible without the audit: the branch adds
+**`image-build/gcloudignore-omni` (+83)** and there is **no other `gcloudignore-*` file in the
+repo**. New pattern. It needs a justification or it needs to go. Flagged to ptone.
+
+### G4 is resolved, and not by me
+
+I had logged G4 (*"no registry setup"*) as an open gap the tier ships unmet. ptone answered it
+unprompted: **a pre-built image shared with beta testers, out of a semi-private GCP registry.**
+
+That reframes it. G4 was never going to be met by a public GHCR package — that was my assumption
+about how the image would reach operators, not the project's actual distribution model. The real
+model is a curated image handed to a known audience. Under that model "no registry setup" means the
+*operator* does no registry setup, which is satisfied.
+
+**Lesson: I treated an unstated distribution model as a defect in the design.** The gap was in my
+knowledge, not in the tier. Worth remembering the next time I find the doc "claiming something
+untrue" — check whether the claim is false or whether I am missing the owner's context.
+
+Doc edit deferred until `sn-ciscope-dev` has pushed. Two agents committing to `scion/sn-tier` at
+once is how you manufacture a conflict on a branch under active upstream review.
