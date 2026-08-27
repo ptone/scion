@@ -564,6 +564,226 @@ func TestUnify_Migration_Idempotent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// AC-U-6: Backfill is all-or-nothing per row and idempotent
+// ---------------------------------------------------------------------------
+
+func TestUnify_AC_U6_BackfillIdempotent(t *testing.T) {
+	store, db := newUnifyTestStore(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+
+	// Init() already ran the backfill (no topics existed at that point).
+	// Clear the migration marker so we can test the backfill with real data.
+	_, err := db.ExecContext(ctx, `DELETE FROM webchat_migrations WHERE name = 'topic_conversation_backfill'`)
+	require.NoError(t, err)
+
+	// Pre-seed topics WITHOUT conversation_id (legacy rows).
+	for _, name := range []string{"backfill-1", "backfill-2", "backfill-3"} {
+		_, err := db.ExecContext(ctx,
+			`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+			 VALUES (?, 'proj-bf', ?, 0, 'user-1', ?)`,
+			name, name, time.Now().UTC().Format(time.RFC3339Nano))
+		require.NoError(t, err)
+	}
+
+	// Verify topics have no conversation_id.
+	var nullCount int
+	err = db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM webchat_topic WHERE conversation_id IS NULL AND project_id = 'proj-bf'`).Scan(&nullCount)
+	require.NoError(t, err)
+	require.Equal(t, 3, nullCount, "precondition: 3 topics without conversation_id")
+
+	// Run backfill.
+	require.NoError(t, store.backfillTopicConversations())
+
+	// Count conversations after first run.
+	var convCount1 int
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversations`).Scan(&convCount1)
+	require.NoError(t, err)
+	require.Equal(t, 3, convCount1, "first backfill must create 3 conversations")
+
+	// All topics should now have a conversation_id.
+	var linkedCount int
+	err = db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM webchat_topic WHERE conversation_id IS NOT NULL AND project_id = 'proj-bf'`).Scan(&linkedCount)
+	require.NoError(t, err)
+	require.Equal(t, 3, linkedCount, "all topics must be linked after backfill")
+
+	// Mark migration as NOT completed to force a second run.
+	_, err = db.ExecContext(ctx, `DELETE FROM webchat_migrations WHERE name = 'topic_conversation_backfill'`)
+	require.NoError(t, err)
+
+	// Run backfill again — must be idempotent (no new conversations).
+	require.NoError(t, store.backfillTopicConversations())
+
+	var convCount2 int
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversations`).Scan(&convCount2)
+	require.NoError(t, err)
+	require.Equal(t, convCount1, convCount2, "second backfill must not create duplicates")
+}
+
+// ---------------------------------------------------------------------------
+// AC-U-9: Backfill does NOT touch webchat_read_state, webchat_user_prefs,
+// or webchat_dm tables
+// ---------------------------------------------------------------------------
+
+func TestUnify_AC_U9_BackfillTouchesOnlyTopics(t *testing.T) {
+	store, db := newUnifyTestStore(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+
+	// Clear the migration marker so we can test backfill with real data.
+	_, err := db.ExecContext(ctx, `DELETE FROM webchat_migrations WHERE name = 'topic_conversation_backfill'`)
+	require.NoError(t, err)
+
+	// Seed data into the three tables we must NOT touch.
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO webchat_read_state (user_id, conversation_key, last_read_message_id, last_read_at)
+		 VALUES ('user-1', 'conv-key-1', 'msg-1', ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO webchat_user_prefs (user_id, space_sort_mode, thread_sort_mode)
+		 VALUES ('user-1', 'activity', 'activity')`)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO webchat_dm (conversation_key, participant_id, peer_id, peer_kind)
+		 VALUES ('dm-key-1', 'user-1', 'agent-1', 'agent')`)
+	require.NoError(t, err)
+
+	// Record counts before backfill.
+	countBefore := func(table string) int {
+		var c int
+		err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&c)
+		require.NoError(t, err)
+		return c
+	}
+	rsCountBefore := countBefore("webchat_read_state")
+	upCountBefore := countBefore("webchat_user_prefs")
+	dmCountBefore := countBefore("webchat_dm")
+
+	require.Greater(t, rsCountBefore, 0, "precondition: read_state must have rows")
+	require.Greater(t, upCountBefore, 0, "precondition: user_prefs must have rows")
+	require.Greater(t, dmCountBefore, 0, "precondition: dm must have rows")
+
+	// Pre-seed a topic without conversation_id (legacy row to backfill).
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+		 VALUES ('topic-u9', 'proj-u9', 'u9-topic', 0, 'user-1', ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	// Run backfill.
+	require.NoError(t, store.backfillTopicConversations())
+
+	// Verify the other tables are unchanged.
+	require.Equal(t, rsCountBefore, countBefore("webchat_read_state"),
+		"webchat_read_state must be unchanged by backfill")
+	require.Equal(t, upCountBefore, countBefore("webchat_user_prefs"),
+		"webchat_user_prefs must be unchanged by backfill")
+	require.Equal(t, dmCountBefore, countBefore("webchat_dm"),
+		"webchat_dm must be unchanged by backfill")
+}
+
+// ---------------------------------------------------------------------------
+// Backfill: topic already has conversation_id is skipped
+// ---------------------------------------------------------------------------
+
+func TestUnify_Backfill_SkipsAlreadyLinked(t *testing.T) {
+	store, db := newUnifyTestStore(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+
+	// Clear the migration marker so we can test backfill with real data.
+	_, err := db.ExecContext(ctx, `DELETE FROM webchat_migrations WHERE name = 'topic_conversation_backfill'`)
+	require.NoError(t, err)
+
+	// Create a topic with conversation_id (already linked).
+	topic := WebChatTopic{
+		ID:             "topic-already-linked",
+		ProjectID:      "proj-bf",
+		Name:           "already-linked",
+		ConversationID: "conv-already",
+		CreatedBy:      "user-1",
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, store.CreateTopic(ctx, topic))
+
+	// Create a topic WITHOUT conversation_id.
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+		 VALUES ('topic-needs-backfill', 'proj-bf', 'needs-backfill', 0, 'user-1', ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	// Run backfill.
+	require.NoError(t, store.backfillTopicConversations())
+
+	// Verify: the already-linked topic still has its original conversation_id.
+	got, err := store.GetTopic(ctx, "topic-already-linked")
+	require.NoError(t, err)
+	require.Equal(t, "conv-already", got.ConversationID)
+
+	// Verify: the unlinked topic now has a conversation_id.
+	got2, err := store.GetTopic(ctx, "topic-needs-backfill")
+	require.NoError(t, err)
+	require.NotEmpty(t, got2.ConversationID, "backfilled topic must have conversation_id")
+
+	// Verify: exactly 2 conversations exist (one from CreateTopic, one from backfill).
+	var convCount int
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversations`).Scan(&convCount)
+	require.NoError(t, err)
+	require.Equal(t, 2, convCount)
+}
+
+// ---------------------------------------------------------------------------
+// GetTopicConversationID tests
+// ---------------------------------------------------------------------------
+
+func TestUnify_GetTopicConversationID(t *testing.T) {
+	store, db := newUnifyTestStore(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+
+	// Create a topic with conversation_id.
+	topic := WebChatTopic{
+		ID:             "topic-lookup",
+		ProjectID:      "proj-1",
+		Name:           "lookup-test",
+		ConversationID: "conv-lookup",
+		CreatedBy:      "user-1",
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, store.CreateTopic(ctx, topic))
+
+	// Lookup should return the conversation_id.
+	convID, err := store.GetTopicConversationID(ctx, "topic-lookup")
+	require.NoError(t, err)
+	require.Equal(t, "conv-lookup", convID)
+
+	// Lookup for a non-existent topic should return an error.
+	_, err = store.GetTopicConversationID(ctx, "nonexistent")
+	require.Error(t, err)
+
+	// Lookup for a topic without conversation_id should return empty string.
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+		 VALUES ('topic-no-conv', 'proj-1', 'no-conv', 0, 'user-1', ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	convID, err = store.GetTopicConversationID(ctx, "topic-no-conv")
+	require.NoError(t, err)
+	require.Empty(t, convID)
+}
+
+// ---------------------------------------------------------------------------
 // Legacy path: CreateTopic without ConversationID still works
 // ---------------------------------------------------------------------------
 

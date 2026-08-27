@@ -17,6 +17,7 @@ package messaging
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -27,6 +28,15 @@ import (
 // ConversationStore).
 type ConversationUpserter interface {
 	UpsertConversationByExternalRef(ctx context.Context, conv *store.Conversation) (*store.Conversation, error)
+}
+
+// TopicConversationLookup is the minimal interface for looking up a topic's
+// linked conversation_id. The webchat store implements this. When injected
+// into ResolveOrCreateThreadConversation, it enables the function to resolve
+// native topic threads via the existing dual-write link instead of minting
+// a shadow conversation row.
+type TopicConversationLookup interface {
+	GetTopicConversationID(ctx context.Context, topicID string) (string, error)
 }
 
 // ConversationReader is the minimal interface for read-only conversation
@@ -140,6 +150,13 @@ func ResolveDMConversationForRead(
 // conversation and validated for canonicality by DeriveConversationKey. A
 // non-canonical dm: key is refused — never silently resolved.
 //
+// When a TopicConversationLookup is provided and the threadID resolves to a
+// webchat topic with a linked conversation_id, that conversation_id is returned
+// directly — no shadow row is minted. If the topic has no conversation_id (not
+// yet backfilled) or does not exist, the function returns nil for native topics
+// (non-fatal contract). Non-native surfaces (where the threadID is not a topic
+// UUID) fall through to the existing upsert path.
+//
 // On any error the function returns nil and logs the failure.
 // Callers MUST NOT treat a nil return as fatal (Phase 5 non-fatal contract).
 func ResolveOrCreateThreadConversation(
@@ -147,10 +164,41 @@ func ResolveOrCreateThreadConversation(
 	cs ConversationUpserter,
 	log *slog.Logger,
 	threadID, projectID string,
+	opts ...ThreadConversationOption,
 ) *ConversationResult {
 	if threadID == "" {
 		log.Warn("skipping thread conversation resolution: empty threadID")
 		return nil
+	}
+
+	// Apply options.
+	var cfg threadConversationConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+
+	// Phase 4 (close mint): if a topic lookup is available, try to resolve
+	// the threadID as a webchat topic first. If found, return the linked
+	// conversation_id directly instead of minting a new conversation row.
+	if cfg.topicLookup != nil {
+		convID, err := cfg.topicLookup.GetTopicConversationID(ctx, threadID)
+		if err == nil && convID != "" {
+			log.Debug("thread resolved via topic lookup",
+				"thread_id", threadID, "conversation_id", convID)
+			return &ConversationResult{
+				ConversationID: convID,
+			}
+		}
+		// Topic exists but has no conversation_id yet, or topic does not exist.
+		// For native topics (non-dm threadIDs), return nil — do NOT mint.
+		// For dm:-prefixed threadIDs, fall through to the existing path.
+		if err == nil && convID == "" && !strings.HasPrefix(threadID, "dm:") {
+			log.Debug("topic has no conversation_id, returning unresolved (non-fatal)",
+				"thread_id", threadID)
+			return nil
+		}
+		// err != nil means topic not found — fall through to existing path
+		// (could be a non-native surface thread).
 	}
 
 	extRef, kind, projID, err := DeriveConversationKey(KeyInputs{
@@ -169,6 +217,23 @@ func ResolveOrCreateThreadConversation(
 	}
 
 	return ResolveOrCreateConversationByKey(ctx, cs, log, extRef, kind, projID)
+}
+
+// threadConversationConfig holds optional parameters for ResolveOrCreateThreadConversation.
+type threadConversationConfig struct {
+	topicLookup TopicConversationLookup
+}
+
+// ThreadConversationOption is a functional option for ResolveOrCreateThreadConversation.
+type ThreadConversationOption func(*threadConversationConfig)
+
+// WithTopicLookup injects a TopicConversationLookup into the resolution path.
+// When set, native topic threads are resolved via the dual-write link instead
+// of minting a new conversations row.
+func WithTopicLookup(tl TopicConversationLookup) ThreadConversationOption {
+	return func(c *threadConversationConfig) {
+		c.topicLookup = tl
+	}
 }
 
 // ResolveThreadConversationForRead looks up a thread conversation without

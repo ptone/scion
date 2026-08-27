@@ -961,6 +961,23 @@ SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
 // Wave-2 Migrations (Postgres)
 // ---------------------------------------------------------------------------
 
+// GetTopicConversationID returns the conversation_id for a webchat topic.
+// Returns ("", error) if the topic does not exist or is soft-deleted.
+// Returns ("", nil) if the topic exists but has no conversation_id yet.
+// This method implements the messaging.TopicConversationLookup interface.
+func (s *pgWebChatStore) GetTopicConversationID(ctx context.Context, topicID string) (string, error) {
+	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = $1 AND deleted_at IS NULL`
+	var convID string
+	err := s.db.QueryRowContext(ctx, query, topicID).Scan(&convID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("topic not found: %s", topicID)
+		}
+		return "", fmt.Errorf("webchat store: get topic conversation_id: %w", err)
+	}
+	return convID, nil
+}
+
 // runMigrations executes idempotent data migrations.
 func (s *pgWebChatStore) runMigrations() error {
 	if err := s.migrateThreadIDs(DefaultMigrationBatchSize); err != nil {
@@ -974,6 +991,9 @@ func (s *pgWebChatStore) runMigrations() error {
 	}
 	if err := s.addTopicConversationID(); err != nil {
 		return fmt.Errorf("topic conversation_id: %w", err)
+	}
+	if err := s.backfillTopicConversations(); err != nil {
+		return fmt.Errorf("topic conversation backfill: %w", err)
 	}
 	return nil
 }
@@ -1001,6 +1021,88 @@ func (s *pgWebChatStore) addTopicConversationID() error {
 	}
 
 	return s.markMigrationCompleted("topic_conversation_id")
+}
+
+// backfillTopicConversations creates conversation rows for existing webchat_topic
+// rows that don't yet have a conversation_id. Each topic is backfilled
+// atomically (INSERT conversation + UPDATE topic in one transaction).
+// The migration is idempotent: re-running creates no duplicate conversations.
+func (s *pgWebChatStore) backfillTopicConversations() error {
+	done, err := s.migrationCompleted("topic_conversation_backfill")
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	// Find all non-deleted topics without a conversation_id.
+	rows, err := s.db.Query(
+		`SELECT id, project_id, name FROM webchat_topic WHERE conversation_id IS NULL AND deleted_at IS NULL`)
+	if err != nil {
+		return fmt.Errorf("select unlinked topics: %w", err)
+	}
+
+	type topicRow struct {
+		id, projectID, name string
+	}
+	var topics []topicRow
+	for rows.Next() {
+		var t topicRow
+		if err := rows.Scan(&t.id, &t.projectID, &t.name); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan unlinked topic: %w", err)
+		}
+		topics = append(topics, t)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate unlinked topics: %w", err)
+	}
+	rows.Close()
+
+	// Backfill each topic atomically.
+	for _, t := range topics {
+		convID := uuid.New().String()
+
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin backfill tx for topic %s: %w", t.id, err)
+		}
+
+		// INSERT the conversation row.
+		_, err = tx.Exec(
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
+			 VALUES ($1, $2, 'group', 'native', '', '', $3, 'active', NOW(), NOW())`,
+			convID, t.projectID, t.name)
+		if err != nil {
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("insert conversation for topic %s: %w", t.id, err)
+		}
+
+		// UPDATE the topic — WHERE conversation_id IS NULL makes this safe
+		// under concurrent runs.
+		res, err := tx.Exec(
+			`UPDATE webchat_topic SET conversation_id = $1 WHERE id = $2 AND conversation_id IS NULL`,
+			convID, t.id)
+		if err != nil {
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("update topic %s conversation_id: %w", t.id, err)
+		}
+
+		// If another process already backfilled this topic, the UPDATE affected
+		// 0 rows. Roll back to avoid orphan conversation rows.
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			tx.Rollback() //nolint:errcheck
+			continue
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit backfill tx for topic %s: %w", t.id, err)
+		}
+	}
+
+	return s.markMigrationCompleted("topic_conversation_backfill")
 }
 
 // migrationCompleted checks whether a named migration has already run.
