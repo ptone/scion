@@ -1165,6 +1165,13 @@ Proposed: §2 gains an explicit non-goal for observability, or §9.1 gains a gap
 whether we intend to fix it. **That choice is a real decision and it is ptone's, not mine** — a
 named non-goal says "we accept this"; a known gap says "we intend to close this."
 
+> **RESOLVED 2026-08-27 12:27 — ptone chose B: known gap.** The entry goes in **§9.1**, not §2.
+> We intend to close it. It comes in **two stages**, and ptone asked for one issue per stage:
+> (1) near-term **per-agent Cloud Logging support**; (2) **additional observability for CR-sandbox
+> agents**. He also asked for a **label that can be applied retroactively** to issues specific to
+> this tier's deploy config. All three dispatched to `sn-obs-dev` at 12:30
+> (brief: `briefs/sn-obs-dev.md`). D5 needs nothing further from ptone except the label name.
+
 ### D6 — §10 AC 11 has execution evidence
 
 Recorded for completeness: the omni image is now produced by the chained build and verified by

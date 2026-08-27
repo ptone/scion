@@ -8199,3 +8199,78 @@ future readers will read it with no author left to question.
 
 **A finding that outlives its author needs its uncertainty written into it, not held by whoever
 happened to be in the conversation.**
+
+## 12:35 — ptone is back. The serial review started, and item 1 closed with real work attached
+
+ptone returned at 12:23 with *"ok - lets review them here one at a time"*. Ten items are queued.
+I stated the total up front and sent **item 1, D5** — is observability a non-goal or a known gap?
+
+**He answered B: known gap.** Verbatim:
+
+> "B - it can come in stages - we should divide that for now into shorter term cloud logging support
+> per agent, then \"additional observability for CR-sandbox agents\" - open two issues on
+> ptone-scion - we also will want to come up with some label we can retroatively apply to issues
+> we've opened that are specific to this tier deploy config"
+
+So the design-doc entry goes in **§9.1 as a gap we intend to close**, not §2 as an accepted
+non-goal. That distinction is the whole of D5 and it is now settled.
+
+### What "in stages" bought that I had not seen
+
+I put A and B to him as a binary. He took B and immediately split it, and the split is better than
+the question I asked. My framing treated observability as one thing. It is two:
+
+- **Logging is a plumbing problem.** Cloud Logging already works on this platform. It is the one
+  instrument that survived everything — it outlived Instance deletion twice, and it is how both
+  stress ceilings were finally verified by sandbox name after two agents miscounted their own
+  ladders. What it lacks is organisation: verifying liveness meant ad-hoc `grep` over raw JSON for
+  names like `retest--w-1`. That is a forensic technique, not an operator feature. Near-term.
+- **CPU and memory is an instrument problem.** Nothing exists at any layer. Longer-term.
+
+Filed as one issue would have produced a ticket whose tractable half never got done, because the
+intractable half would have set its pace. **A gap that splits along a difficulty line should be
+filed along that line.** I had the evidence for the split — five dead instruments, one working one —
+and still put it as a single question.
+
+### Dispatched, not done myself
+
+`sn-obs-dev` started 12:30. Brief: `briefs/sn-obs-dev.md`. Two issues plus the label.
+
+### The label is where the judgement is, and it is a trap I have already stepped past once
+
+ptone asked for a label to apply retroactively to issues *specific to this tier's deploy config*.
+The obvious execution — label everything this project filed — would be wrong, and wrong in a way
+that is hard to reverse because nobody re-reads a labelled backlog.
+
+`ptone/scion#1304` (`getStats` zeros) is in `runtimebroker`. It returns zeros for **every runtime on
+every tier**. `#1308`, `#1281`, `#1274` are likely the same shape: platform defects that this tier
+merely surfaced first, because this tier is the one being stress-tested. A tier label on those buries
+a product-wide defect inside one tier's backlog.
+
+I caught exactly this when `#1304` was filed — the first brief says "do not file it as a
+single-node tier gap." The labelling task recreates the same opportunity at the other end of the
+issue's life. So the brief says: label only clear cases, leave the doubtful ones unlabelled, report
+them to me. **An unlabelled issue is untidy. A misfiled one stops being anyone's.**
+
+Told ptone the caution up front rather than after the fact.
+
+### Item 2 sent — D1, the structural one
+
+All thirteen issues are on the fork; every fix lands upstream; agents cannot open upstream PRs. In
+the queue I wrote that I leaned toward batching the three one-line fixes into a single PR. I sent him
+a different split, and flagged in the message that it is new information rather than a change of
+mind — because he has told me my communications reverse themselves, and an unexplained revision reads
+exactly like that:
+
+- **PR 1** — one file, `.design/hosted/cloud-run-single-node.md`: `ptone/scion#1297`'s 18 bare refs
+  plus D4–D8, including the §9.1 observability gap he just approved. Six changes, one file.
+- **PR 2** — `ptone/scion#1298` and `#1299`, both build plumbing.
+
+Two compare URLs instead of six. D5's outcome is what made PR 1 worth separating; when I wrote D1,
+that file had one pending change, not six.
+
+### State
+
+`scion/sn-impl-arch` at `b2e4f547` before this commit. Task #66 moved to in_progress with the
+decision recorded. Nine Instances intact. One agent dispatched, fleet well under cap.
+Waiting on ptone for item 2 and on `sn-obs-dev` for the issues and the label name.
