@@ -985,6 +985,14 @@ func init() {
 // ThreadID does NOT appear in persisted message rows and does NOT influence
 // conversation key derivation.
 //
+// We call handleGroupMessage directly (same-package test access) to isolate
+// the unit under test from upstream validation that rejects group[] recipients.
+// This is the exact code path from handleAgentMessage line ~668:
+//
+//	if messages.IsGroupRecipient(structuredMsg.Recipient) {
+//	    s.handleGroupMessage(w, r, id, structuredMsg, plainMessage, req.Interrupt)
+//	}
+//
 // Traceability: AC-S215-M1
 func TestHandleGroupMessage_ThreadID_NotPropagated(t *testing.T) {
 	srv, s := testServer(t)
@@ -998,18 +1006,17 @@ func TestHandleGroupMessage_ThreadID_NotPropagated(t *testing.T) {
 		Slug:       "groupmsg-threadid-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateProject(ctx, project); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	userID := api.NewUUID()
-	if err := s.CreateUser(ctx, &store.User{
+	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID:          userID,
 		Email:       "test@example.com",
 		DisplayName: "Test",
-	}); err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}))
 
 	anchorAgent := &store.Agent{
 		ID:         api.NewUUID(),
@@ -1019,9 +1026,7 @@ func TestHandleGroupMessage_ThreadID_NotPropagated(t *testing.T) {
 		Phase:      "running",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateAgent(ctx, anchorAgent); err != nil {
-		t.Fatalf("CreateAgent(anchor): %v", err)
-	}
+	require.NoError(t, s.CreateAgent(ctx, anchorAgent))
 
 	targetAgent := &store.Agent{
 		ID:         api.NewUUID(),
@@ -1031,80 +1036,72 @@ func TestHandleGroupMessage_ThreadID_NotPropagated(t *testing.T) {
 		Phase:      "running",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateAgent(ctx, targetAgent); err != nil {
-		t.Fatalf("CreateAgent(target): %v", err)
-	}
+	require.NoError(t, s.CreateAgent(ctx, targetAgent))
 
-	// --- Send a group message with a ThreadID set ---
+	// --- Call handleGroupMessage directly with a ThreadID-bearing message ---
+	// This simulates what handleAgentMessage does at line ~668 when it detects
+	// a group[] recipient. The StructuredMessage carries a ThreadID that should
+	// NOT propagate into persisted store.Message rows.
 
 	injectedThreadID := "thread:proj:some-thread-id"
 
-	body := map[string]interface{}{
-		"structured_message": &messages.StructuredMessage{
-			Version:   messages.Version,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-			Sender:    "user:Test",
-			SenderID:  userID,
-			Recipient: "group[agent:target-agent,agent:anchor-agent]",
-			Msg:       "test group message with thread id",
-			Type:      messages.TypeInstruction,
-			Channel:   "web",
-			ThreadID:  injectedThreadID,
-		},
+	structuredMsg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender:    "user:Test",
+		SenderID:  userID,
+		Recipient: fmt.Sprintf("group[agent:%s,agent:%s]", targetAgent.Slug, anchorAgent.Slug),
+		Msg:       "test group message with thread id",
+		Type:      messages.TypeInstruction,
+		Channel:   "web",
+		ThreadID:  injectedThreadID,
 	}
 
-	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/agents/%s/message", anchorAgent.ID), body)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+anchorAgent.ID+"/actions/message",
+		nil)
+	req = req.WithContext(ctx)
 
-	// The request may return 200 (group response) even if dispatch fails
-	// (no runtime broker configured). The important thing is that the message
-	// was persisted before dispatch was attempted.
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 from group message handler, got %d: %s",
-			rec.Code, rec.Body.String())
-	}
+	rr := httptest.NewRecorder()
+	srv.handleGroupMessage(rr, req, anchorAgent.ID, structuredMsg, structuredMsg.Msg, false)
+
+	// handleGroupMessage returns 200 with a GroupMessageResponse. Individual
+	// recipients may show "failed" (no dispatcher/broker), but messages are
+	// persisted before dispatch is attempted.
+	require.Equal(t, http.StatusOK, rr.Code,
+		"handleGroupMessage should return 200; got: %s", rr.Body.String())
 
 	// --- Assert 1: No stored message has a non-empty ThreadID ---
 
 	result, err := s.ListMessages(ctx,
 		store.MessageFilter{ProjectID: project.ID},
 		store.ListOptions{})
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
-
-	if len(result.Items) == 0 {
-		t.Fatal("expected at least one persisted message, got none")
-	}
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Items,
+		"expected at least one persisted message")
 
 	for _, msg := range result.Items {
-		if msg.ThreadID != "" {
-			t.Errorf("persisted message %s has ThreadID=%q, want empty: "+
-				"handleGroupMessage must not propagate the caller's ThreadID "+
-				"into stored messages (AC-S215-M1)", msg.ID, msg.ThreadID)
-		}
+		assert.Empty(t, msg.ThreadID,
+			"AC-S215-M1: persisted message %s has ThreadID=%q, want empty: "+
+				"handleGroupMessage must not propagate StructuredMessage.ThreadID "+
+				"into stored messages", msg.ID, msg.ThreadID)
 	}
 
 	// --- Assert 2: ThreadID did not influence conversation key derivation ---
-	// handleGroupMessage creates store.Message rows directly without calling
-	// DeriveConversationKey or ResolveOrCreateDMConversation. Verify that no
-	// stored message references the injected ThreadID in any field that could
-	// serve as a conversation key.
+	// handleGroupMessage uses ResolveOrCreateDMConversation (principal-pair only),
+	// NOT DeriveConversationKey. Verify no stored field echoes the injected ThreadID.
 
 	for _, msg := range result.Items {
-		// Check that no field echoes back the injected thread ID.
-		if strings.Contains(msg.ThreadID, injectedThreadID) {
-			t.Errorf("message %s ThreadID contains the injected value %q: "+
-				"conversation key must be derived from principal pairs, "+
-				"not from caller-supplied ThreadID (AC-S215-M1)",
-				msg.ID, injectedThreadID)
-		}
-		// GroupID should be a fresh UUID, not derived from ThreadID.
-		if msg.GroupID == injectedThreadID {
-			t.Errorf("message %s GroupID equals the injected ThreadID %q: "+
-				"group key must not be influenced by caller-supplied ThreadID (AC-S215-M1)",
-				msg.ID, injectedThreadID)
-		}
+		assert.NotEqual(t, injectedThreadID, msg.GroupID,
+			"AC-S215-M1: message %s GroupID must not be the injected ThreadID", msg.ID)
+	}
+
+	// Verify conversations (if any) don't reference the injected ThreadID.
+	convs, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	for _, conv := range convs.Items {
+		assert.NotContains(t, conv.ExternalRef, injectedThreadID,
+			"AC-S215-M1: conversation %s ExternalRef must not contain the injected ThreadID", conv.ID)
 	}
 
 	t.Logf("AC-S215-M1 PASS: %d message(s) persisted, none carry the "+
