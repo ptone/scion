@@ -7316,3 +7316,62 @@ task #66: a gap you can close in one function is much harder to justify as a non
 
 Keeping (a) and (b) apart on purpose. (b) is the tempting quick win and it is the one with a
 security cost; (a) is unglamorous and is the correct answer.
+
+## 2026-08-27 07:15 — my pre-registered prediction was FALSIFIED in under two minutes
+
+### The result
+
+```
+BEFORE 07:13:35-07:13:51   10 ALIVE (idle-2..idle-11), 1 DEAD (idle-1)
+CREATE 07:13:51            idle-12, HTTP 201, elapsed 1946ms
+AFTER  07:13:54-07:14:17   11 ALIVE (idle-2..idle-12), 1 DEAD (idle-1)
+```
+
+**My prediction:** "creating idle-12 will either be REFUSED, or will SUCCEED AND KILL idle-2."
+**Actual:** created cleanly, idle-2 alive, 11 concurrent sandboxes on 4 CPU / 8 GiB.
+
+Wrong. No cap of 10. `sn-stress-def` ran the protocol exactly as specified and falsified me with it.
+
+**This is the system working.** I made the agents pre-register so their numbers could be wrong; the
+requirement would have been worthless if I had exempted myself, and it cost me nothing to be wrong
+in public and a great deal less than shipping the claim would have. It is also the second time today
+that a pre-registration caught something — the first was making `sn-stress-def` retract its fitted
+10-11.
+
+### What died with the prediction, and what did not
+
+- **Cap of 10: dead.** Unambiguous.
+- **Creates as a general trigger: now weak.** Two subsequent creates (idle-11, idle-12) killed
+  nothing. One coincidence out of three creates is a coincidence. **I over-read a single timestamp**
+  — I found a striking alignment and built a mechanism on it, which is the same error as naming the
+  token type in the IAP confound: a plausible first candidate, promoted too fast.
+
+I would still rather have made the prediction. It cost two minutes of the agent's time and converted
+an appealing story into a closed question.
+
+### The part that must not be lost
+
+**"idle-1 was a one-off" is a label, not an explanation.** But it is not worth chasing — it does not
+reproduce, and chasing it would consume the run.
+
+What *is* worth keeping is not the death. It is that **the hub reported a dead agent as `running`
+and kept updating `lastSeen`.** For an operator that is worse than the loss itself: an agent silently
+stops working and every dashboard says it is fine. That is task #17 recurring after being closed,
+and it deserves its own section in the report regardless of what killed idle-1.
+
+### Course correction on priorities
+
+We have spent most of the morning on instruments and hypotheses — **two of the hypotheses mine, both
+wrong.** Phase A is not the deliverable. **Phase B is the number we would publish**, because nobody
+runs eleven idle agents.
+
+Directed: finish Phase A at pace, characterise the failure at the break per §3.3, stop, then move to
+Phase B. **If time forces a choice, Phase B wins** — a rough working-agent number beats a precise
+idle-agent number.
+
+### Filed
+
+The gcloud impersonation bug is fully reproduced and handed to the coordinator. The tell is that the
+error names the **core account** rather than the impersonated one, which is what makes it a
+wrong-diagnosis generator: it reports a permission failure against an identity the operator did not
+choose and implies a missing role they do not need.
