@@ -78,10 +78,10 @@ func emitDeprecationWarnings(cmd *cobra.Command) {
 		emitDeprecationWarning("notify", "use 'scion notifications subscribe' instead")
 	}
 	if cmd.Flags().Changed("in") {
-		emitDeprecationWarning("in", "use 'scion schedule message' instead")
+		emitDeprecationWarning("in", "use 'scion schedule create --in' instead")
 	}
 	if cmd.Flags().Changed("at") {
-		emitDeprecationWarning("at", "use 'scion schedule message' instead")
+		emitDeprecationWarning("at", "use 'scion schedule create --at' instead")
 	}
 	if cmd.Flags().Changed("channel") {
 		emitDeprecationWarning("channel", "use @<agent-name> to message an agent directly")
@@ -90,7 +90,7 @@ func emitDeprecationWarnings(cmd *cobra.Command) {
 		emitDeprecationWarning("thread-id", "use @<agent-name> to message an agent directly")
 	}
 	if cmd.Flags().Changed("cc") {
-		emitDeprecationWarning("cc", "use --to instead")
+		emitDeprecationWarning("cc", "--cc is deprecated and will be removed")
 	}
 }
 
@@ -1196,14 +1196,14 @@ func init() {
 	// the new subcommands, but they continue to work identically.
 	messageCmd.Flags().BoolVarP(&msgBroadcast, "broadcast", "b", false, "Deprecated: use 'scion broadcast' instead")
 	messageCmd.Flags().BoolVarP(&msgAll, "all", "a", false, "Deprecated: use 'scion broadcast --all' instead")
-	messageCmd.Flags().StringVar(&msgIn, "in", "", "Deprecated: use 'scion schedule message' instead")
-	messageCmd.Flags().StringVar(&msgAt, "at", "", "Deprecated: use 'scion schedule message' instead")
+	messageCmd.Flags().StringVar(&msgIn, "in", "", "Deprecated: use 'scion schedule create --in' instead")
+	messageCmd.Flags().StringVar(&msgAt, "at", "", "Deprecated: use 'scion schedule create --at' instead")
 	messageCmd.Flags().BoolVar(&msgPlain, "plain", false, "Deprecated: --plain is deprecated and will be removed")
 	messageCmd.Flags().BoolVar(&msgRaw, "raw", false, "Deprecated: use 'scion keys' instead")
 	messageCmd.Flags().BoolVar(&msgNotify, "notify", false, "Deprecated: use 'scion notifications subscribe' instead")
 	messageCmd.Flags().StringVar(&msgChannel, "channel", "", "Deprecated: use conversation references instead")
 	messageCmd.Flags().StringVar(&msgThreadID, "thread-id", "", "Deprecated: use conversation references instead")
-	messageCmd.Flags().StringArrayVar(&msgCC, "cc", nil, "Deprecated: use --to instead")
+	messageCmd.Flags().StringArrayVar(&msgCC, "cc", nil, "Deprecated: --cc is deprecated and will be removed")
 
 	// Hide deprecated flags from help
 	_ = messageCmd.Flags().MarkHidden("broadcast")

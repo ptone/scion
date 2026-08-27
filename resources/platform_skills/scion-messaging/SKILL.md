@@ -90,10 +90,10 @@ The following flags still work but emit deprecation warnings. Prefer the replace
 | `--raw` | Use `scion keys <agent-name> <keystrokes>` instead. |
 | `--broadcast`, `--all` | Use `scion broadcast <message>` instead. |
 | `--notify` | Use `scion notifications subscribe` instead. |
-| `--in <delay>`, `--at <time>` | Use `scion schedule message` instead (the flags still work). |
+| `--in <delay>`, `--at <time>` | Use `scion schedule create --in` / `--at` instead (the flags still work). |
 | `--plain` | No replacement needed — default behavior. |
 | `--channel`, `--thread-id` | Use `@<agent-name>` conversation references instead. |
-| `--cc` | Deprecated; replacement pending. |
+| `--cc` | Deprecated, will be removed. |
 
 ## New Subcommands
 
@@ -124,7 +124,7 @@ Useful for unblocking interactive prompts (confirmation dialogs, stuck CLI tools
 
 - **Coordinator Relay**: Workers generally communicate through the coordinator rather than directly with each other. This guidance may be set by the coordinator.
 - **Avoid being a relay.** If an agent needs to communicate something to a user, have them message the user directly rather than relaying through you. Relay adds latency, risks reframing the message in transit, and wastes context.
-- **Self-Callback Heartbeat**: For very long external tasks, use `scion schedule message` (or `scion message --in`) to send yourself a reminder to check on the process or provide a status update. (during long blocked periods)
+- **Self-Callback Heartbeat**: For very long external tasks, use `scion schedule create` (or `scion message --in`) to send yourself a reminder to check on the process or provide a status update. (during long blocked periods)
 
 ## Multi-User Communication
 

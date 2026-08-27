@@ -319,7 +319,7 @@ func TestDeprecatedFlag_In(t *testing.T) {
 		emitDeprecationWarnings(messageCmd)
 	})
 	assert.Contains(t, stderr, "Warning: --in is deprecated")
-	assert.Contains(t, stderr, "scion schedule message")
+	assert.Contains(t, stderr, "scion schedule create")
 
 	// Verify the command still works (schedule via Hub)
 	err = scheduleMessageViaHub(hubCtx, "test-agent", "scheduled msg", false, false)
@@ -355,7 +355,7 @@ func TestDeprecatedFlag_At(t *testing.T) {
 		emitDeprecationWarnings(messageCmd)
 	})
 	assert.Contains(t, stderr, "Warning: --at is deprecated")
-	assert.Contains(t, stderr, "scion schedule message")
+	assert.Contains(t, stderr, "scion schedule create")
 
 	// Verify the command still works
 	err = scheduleMessageViaHub(hubCtx, "test-agent", "scheduled msg", false, false)
@@ -413,7 +413,7 @@ func TestDeprecatedFlag_CC(t *testing.T) {
 		emitDeprecationWarnings(messageCmd)
 	})
 	assert.Contains(t, stderr, "Warning: --cc is deprecated")
-	assert.Contains(t, stderr, "use --to instead")
+	assert.Contains(t, stderr, "deprecated and will be removed")
 }
 
 // TestDeprecatedFlag_BroadcastStillSucceeds verifies that using the
@@ -656,4 +656,78 @@ func TestBroadcastCmd_IsRegistered(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "broadcast command should be registered on rootCmd")
+}
+
+// TestDeprecationWarnings_ReplacementsExist validates AC-15a: every
+// deprecation warning must name a replacement that exists in the binary.
+// It triggers all deprecated flags, captures the warnings, extracts any
+// 'scion <subcommand>' references, and verifies each resolves via
+// rootCmd.Find().
+func TestDeprecationWarnings_ReplacementsExist(t *testing.T) {
+	restore := resetMessageFlags()
+	defer restore()
+
+	deprecatedFlags := []string{"broadcast", "all", "raw", "plain", "notify", "in", "at", "channel", "thread-id", "cc"}
+	for _, name := range deprecatedFlags {
+		f := messageCmd.Flags().Lookup(name)
+		require.NotNil(t, f, "deprecated flag --%s must be registered", name)
+		f.Changed = true
+	}
+	defer func() {
+		for _, name := range deprecatedFlags {
+			f := messageCmd.Flags().Lookup(name)
+			if f != nil {
+				f.Changed = false
+			}
+		}
+	}()
+
+	stderr := captureStderr(t, func() {
+		emitDeprecationWarnings(messageCmd)
+	})
+
+	// Extract replacement commands: look for 'scion <something>'
+	for _, line := range strings.Split(stderr, "\n") {
+		// Find patterns like "use 'scion broadcast' instead"
+		idx := strings.Index(line, "'scion ")
+		if idx < 0 {
+			continue
+		}
+		rest := line[idx+1:] // skip opening quote
+		end := strings.Index(rest, "'")
+		if end < 0 {
+			continue
+		}
+		cmdStr := rest[:end] // e.g. "scion broadcast"
+		args := strings.Fields(cmdStr)
+		if len(args) < 2 {
+			continue
+		}
+		scionArgs := args[1:] // strip "scion"
+		// Strip flag args (--in, --at, --all) — they are flag examples, not subcommands
+		var subArgs []string
+		for _, a := range scionArgs {
+			if strings.HasPrefix(a, "--") {
+				break
+			}
+			subArgs = append(subArgs, a)
+		}
+		if len(subArgs) == 0 {
+			continue
+		}
+		cmd, _, err := rootCmd.Find(subArgs)
+		assert.NoError(t, err, "replacement command not found: %s (from warning: %s)", cmdStr, strings.TrimSpace(line))
+		// Verify the command was fully consumed (no unknown subcommand left as arg)
+		assert.Equal(t, subArgs[len(subArgs)-1], cmd.Name(),
+			"replacement resolves to wrong command: wanted %s, got %s (from: %s)",
+			subArgs[len(subArgs)-1], cmd.Name(), cmdStr)
+	}
+
+	// Rule 10 mutation subtest: verify the check is load-bearing by
+	// confirming a nonexistent command fails rootCmd.Find().
+	t.Run("catches_nonexistent_replacement", func(t *testing.T) {
+		args := []string{"nonexistent-subcommand"}
+		_, _, err := rootCmd.Find(args)
+		assert.Error(t, err, "expected nonexistent command to fail Find")
+	})
 }
