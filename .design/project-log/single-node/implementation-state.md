@@ -5286,3 +5286,42 @@ how a thing ends up wrong in one place and right in another.
 
 Dispatched to `sn-adminfix-dev`, which is already on this branch for the admin-emails fix — one
 agent per branch, rather than two racing.
+
+## 2026-08-27 02:03Z — both fixes on the branch, verified structurally, NOT yet exercised
+
+`scion/sn-tier` @ **`a9131f1f`**, ahead=11, behind=0, still 40 files. Verified myself:
+
+| Check | Result |
+|---|---|
+| `deploy_instance.go:289` | sets `SCION_SERVER_HUB_ADMINEMAILS`, only that one |
+| `SCION_SEED_SERVER_HUB_ADMINEMAILS` | **zero occurrences across all 40 files**, not just `cmd/` |
+| `repository_owner` | **zero occurrences in any of the six workflow files** |
+| `publish-omni.yml` | single `Set registry` step at `:54`, `${GITHUB_REPOSITORY_OWNER,,}` |
+
+The developer replaced the test's *assertion* rather than renaming the variable inside it —
+`TestDeployEnvVarsRoundTrip` now asserts `gc.Hub.AdminEmails` contains the address, which is the
+field `parseAdminEmails` actually reads. It also dropped the two sub-tests that exercised
+`LoadSeedEnvKoanf` / `LoadBootstrapKoanf`, since those are the postgres-only paths. That is the part
+that mattered; renaming alone would have preserved a test that is green about nothing.
+
+### Why I dispatched a live retest instead of calling this done
+
+Everything above is **read, not exercised** — the exact standard of evidence that produced this
+defect three hours ago. But the reason to doubt here is specific rather than ritual:
+
+**The A/B that proved `SCION_SERVER_HUB_ADMINEMAILS` yields `admin` was run on a pre-#1300 build.**
+#1300 stopped `WebServer` reading its own config and removed `adminEmailList` from `initWebServer`
+entirely (nine args to eight — the same change that produced `sn-rebase-dev`'s silent bad
+auto-merge). **The road that variable travelled in that old measurement no longer exists.** I have
+traced the new one — `cfg.Hub.AdminEmails` → `parseAdminEmails` → `hub.ServerConfig` →
+`Server.AdminEmails()` → provider → `ws.adminEmails()` — and it reads correctly. So did the last
+one.
+
+So: one image from `a9131f1f`, one fresh deploy through the tier's own command with no hand-set
+variables, one `/auth/me`. If it says `admin`, §1 step 2 is exercised rather than argued.
+
+### CI
+
+Re-running at `a9131f1f`. `cla/google` fails as always. The one that matters is
+**Build and Push Omni Image** — green would confirm the lowercase-registry fix in the only venue
+where the bug exists.
