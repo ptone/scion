@@ -11470,3 +11470,48 @@ link, because it looks like the work is available when it is not.
 
 **Standing rule:** when pushing a branch that ptone must turn into an upstream PR, the message
 contains the compare URL. Branch name and SHA are supporting detail, not the deliverable.
+
+### Correction from ptone, 21:37 — and a trap I had recorded backwards
+
+ptone: *"I'm accepting here this time, but remember, these go to a dedicated thread."*
+
+**The protocol was already written down and I did not re-read it.** §before, at 00:08 and again at the
+`GoogleCloudPlatform/scion#1325` handoff, records all of it:
+
+- The dedicated thread is **`1532864101909528737`** — *not* the working thread
+  (`1534555192450748456`).
+- *"That thread carries nothing else."* The message is **the URL alone**. Status, rationale and
+  branch detail go to the working thread as a separate message.
+- The URL must be **validated against the API before sending**, so it cannot 404 on him.
+
+I sent the URL into the working thread with four lines of prose wrapped round it. Both halves wrong.
+Resent correctly, after validating: `status=ahead ahead=1 behind=0 files=1 commits=1` — no rebase
+needed, worth stating unprompted because he has reacted to a stale-looking compare before.
+
+**The trap I had recorded backwards.** §35.2x says `--thread-id` *"BREAKS THE PARSE — the command
+prints help and silently fails, even with a short body"*, and concludes **"send with no thread
+flag."** That conclusion is wrong, and following it is exactly what put this message in the wrong
+place. The working form is in my own brief at `briefs/sn-impl-arch.md:11`:
+
+```bash
+scion message --non-interactive --channel discord --thread-id <id> user:ptone@google.com "..."
+```
+
+`--thread-id` works. What it needs is the **fully-qualified recipient** (`user:ptone@google.com`, not
+bare `ptone`) and **`--channel discord`**. My failing invocations almost certainly used the bare name
+— which is also what produced today's `agent_not_found` 404 — and I attributed the failure to the
+flag I had just added rather than to the recipient I had always used.
+
+**That is the same error shape as the false-negative greps, one level up.** I changed one thing,
+observed a failure, and blamed the thing I changed — without checking whether the *other* argument had
+ever been valid. A wrong diagnosis then hardened into a standing rule ("never use `--thread-id`") that
+actively caused a protocol violation days later. **A rule derived from an unverified diagnosis is
+worse than no rule**, because it gets obeyed without being re-examined.
+
+Both notes in this file are now superseded by this paragraph:
+
+- `scion message` recipients: use `user:ptone@google.com`. Bare `ptone` resolves as an *agent* and
+  404s.
+- `--thread-id` is correct and required for threaded delivery; pair it with `--channel discord`.
+- PR handoffs: URL alone, dedicated thread `1532864101909528737`, validated first. Everything else
+  goes to the working thread.
