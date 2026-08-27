@@ -50,6 +50,49 @@ var msgWake bool
 var msgChannel string
 var msgThreadID string
 var msgCC []string
+var msgVisibility string
+
+// emitDeprecationWarning prints a deprecation notice to stderr.
+func emitDeprecationWarning(flag, replacement string) {
+	fmt.Fprintf(os.Stderr, "Warning: --%s is deprecated: %s\n", flag, replacement)
+}
+
+// emitDeprecationWarnings checks all deprecated flags and emits warnings
+// for any that were explicitly set. Returns an error if a deprecated flag
+// cannot be mapped to its replacement (e.g., scheduling flags that now
+// belong to a different command).
+func emitDeprecationWarnings(cmd *cobra.Command) {
+	if cmd.Flags().Changed("broadcast") {
+		emitDeprecationWarning("broadcast", "use 'scion broadcast' instead")
+	}
+	if cmd.Flags().Changed("all") {
+		emitDeprecationWarning("all", "use 'scion broadcast --all' instead")
+	}
+	if cmd.Flags().Changed("raw") {
+		emitDeprecationWarning("raw", "use 'scion keys' instead")
+	}
+	if cmd.Flags().Changed("plain") {
+		emitDeprecationWarning("plain", "--plain is deprecated and will be removed")
+	}
+	if cmd.Flags().Changed("notify") {
+		emitDeprecationWarning("notify", "use 'scion notifications subscribe' instead")
+	}
+	if cmd.Flags().Changed("in") {
+		emitDeprecationWarning("in", "use 'scion schedule message' instead")
+	}
+	if cmd.Flags().Changed("at") {
+		emitDeprecationWarning("at", "use 'scion schedule message' instead")
+	}
+	if cmd.Flags().Changed("channel") {
+		emitDeprecationWarning("channel", "use conversation references instead: conv:<id>, @<agent>, #<thread>")
+	}
+	if cmd.Flags().Changed("thread-id") {
+		emitDeprecationWarning("thread-id", "use conversation references instead: conv:<id>, @<agent>, #<thread>")
+	}
+	if cmd.Flags().Changed("cc") {
+		emitDeprecationWarning("cc", "use --to instead")
+	}
+}
 
 // messageCmd represents the message command
 var messageCmd = &cobra.Command{
@@ -73,6 +116,10 @@ Examples:
 	Args:              cobra.MinimumNArgs(1),
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Emit deprecation warnings for any deprecated flags in use.
+		// Deprecated flags still work — they warn AND succeed.
+		emitDeprecationWarnings(cmd)
+
 		var agentName string
 		var userRecipient string
 		var groupRecipients []messages.GroupRecipient
@@ -436,6 +483,9 @@ func buildStructuredMessage(sender, recipient, message string) *messages.Structu
 	}
 	msg.Channel = msgChannel
 	msg.ThreadID = msgThreadID
+	if msgVisibility != "" {
+		msg.Visibility = msgVisibility
+	}
 	return msg
 }
 
@@ -1016,19 +1066,38 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 }
 
 func init() {
+	// Retained flags (core message functionality)
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
-	messageCmd.Flags().BoolVarP(&msgBroadcast, "broadcast", "b", false, "Send the message to all running agents in the current project")
-	messageCmd.Flags().BoolVarP(&msgAll, "all", "a", false, "Send the message to all running agents across all projects")
-	messageCmd.Flags().StringVar(&msgIn, "in", "", "Schedule message delivery after a duration (e.g. 30m, 1h)")
-	messageCmd.Flags().StringVar(&msgAt, "at", "", "Schedule message delivery at an absolute time (ISO 8601, e.g. 2026-02-28T14:00:00Z)")
-	messageCmd.Flags().BoolVar(&msgPlain, "plain", false, "Mark for plain-text delivery (message still flows as structured JSON internally)")
-	messageCmd.Flags().BoolVar(&msgRaw, "raw", false, "Send literal bytes via tmux send-keys with no trailing Enter (supports control keys like arrows and Escape)")
-	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
-	messageCmd.Flags().BoolVar(&msgNotify, "notify", false, "Subscribe to notifications for the target agent (completed, waiting for input, etc.)")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
-	messageCmd.Flags().StringVar(&msgChannel, "channel", "", "Target a specific message channel (e.g. telegram, gchat, web)")
-	messageCmd.Flags().StringVar(&msgThreadID, "thread-id", "", "Target a specific thread within the channel")
-	messageCmd.Flags().StringArrayVar(&msgCC, "cc", nil, "CC an additional agent (repeatable; also accepts a comma-separated list); each receives a mention notification")
+	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
+	messageCmd.Flags().StringVar(&msgVisibility, "visibility", "", "Message visibility: normal, verbose, or full")
+
+	// Deprecated flags — still functional, emit warnings when used.
+	// These flags are hidden from help output to guide users toward
+	// the new subcommands, but they continue to work identically.
+	messageCmd.Flags().BoolVarP(&msgBroadcast, "broadcast", "b", false, "Deprecated: use 'scion broadcast' instead")
+	messageCmd.Flags().BoolVarP(&msgAll, "all", "a", false, "Deprecated: use 'scion broadcast --all' instead")
+	messageCmd.Flags().StringVar(&msgIn, "in", "", "Deprecated: use 'scion schedule message' instead")
+	messageCmd.Flags().StringVar(&msgAt, "at", "", "Deprecated: use 'scion schedule message' instead")
+	messageCmd.Flags().BoolVar(&msgPlain, "plain", false, "Deprecated: --plain is deprecated and will be removed")
+	messageCmd.Flags().BoolVar(&msgRaw, "raw", false, "Deprecated: use 'scion keys' instead")
+	messageCmd.Flags().BoolVar(&msgNotify, "notify", false, "Deprecated: use 'scion notifications subscribe' instead")
+	messageCmd.Flags().StringVar(&msgChannel, "channel", "", "Deprecated: use conversation references instead")
+	messageCmd.Flags().StringVar(&msgThreadID, "thread-id", "", "Deprecated: use conversation references instead")
+	messageCmd.Flags().StringArrayVar(&msgCC, "cc", nil, "Deprecated: use --to instead")
+
+	// Hide deprecated flags from help
+	_ = messageCmd.Flags().MarkHidden("broadcast")
+	_ = messageCmd.Flags().MarkHidden("all")
+	_ = messageCmd.Flags().MarkHidden("in")
+	_ = messageCmd.Flags().MarkHidden("at")
+	_ = messageCmd.Flags().MarkHidden("plain")
+	_ = messageCmd.Flags().MarkHidden("raw")
+	_ = messageCmd.Flags().MarkHidden("notify")
+	_ = messageCmd.Flags().MarkHidden("channel")
+	_ = messageCmd.Flags().MarkHidden("thread-id")
+	_ = messageCmd.Flags().MarkHidden("cc")
+
 	messageCmd.AddCommand(messageChannelsCmd)
 	rootCmd.AddCommand(messageCmd)
 }
