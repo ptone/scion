@@ -10868,3 +10868,50 @@ rather than `deploy` and has no `--sandbox-launcher`, so an operator who follows
 whose server crashes on startup.
 
 The design doc is upstream, so this needs ptone to open a PR. It is one file, +19 lines, no code.
+
+---
+
+## §35.28 — Both new agents "stalled" on a trust prompt, and I guessed the cause twice before measuring
+
+**2026-08-27, 19:39 and 19:45.** `sn-issuereconcile` and `sn-hubid-inv` were both reported
+`STALLED (was working): Agent started` within minutes of dispatch. Neither was stalled in any
+interesting sense. **Both were sitting at Claude Code's workspace trust prompt:**
+
+```
+Quick safety check: Is this a project you created or one you trust?
+❯ 1. Yes, I trust this folder
+  2. No, exit
+```
+
+They had not read their briefs. They had not started. They were waiting on a keystroke.
+
+`scion message <agent> "1"` clears it. Within 20 seconds `sn-hubid-inv` was running Q1 and searching
+for `hub_id` readers; `sn-issuereconcile` had a five-item task list and a working `gh api` call.
+
+### I guessed twice and was wrong twice
+
+On the first report I wrote that the plausible cause was **`gh` auth**, on the reasoning that the task
+is pure GitHub admin so an auth wall would produce exactly that shape. Wrong. `gh api` works fine.
+
+Worse, I wrote that only one of two agents stalling **"argues against a systemic problem with the
+dispatch."** That inference was reasonable and false: the second agent hit the identical wall six
+minutes later. I had drawn a conclusion from a sample of one at a moment when the second data point
+had simply not arrived yet. **Absence of a second failure is not evidence against a systemic cause
+when the second agent has not been running long enough to fail.**
+
+What settled it was **`scion look`**, which prints the agent's actual terminal. One command, no
+inference. I had not used it before today and did not know it existed until I read `scion --help`
+while chasing this.
+
+### The other thing I got wrong, and it was the tell
+
+I dismissed the `LAST ACTIVITY` column as unreliable because `sn-hubid-inv` reported activity "3
+minutes ago" on a container up 2 minutes, and treated the stall report as likely an artefact of the
+same skew. **The skew is real but it was not the story.** I used a genuine measurement problem as a
+reason to discount a genuine signal. The stall report was correct; only my explanation of it was not.
+
+### Operational note worth keeping
+
+Newly created agents block at the trust prompt and report as stalled-at-start. **`scion look <agent>`
+is the first diagnostic, not `scion list`** — `list` tells you a container is up, which is true and
+useless. A container can be up, phase `running`, and parked on a modal prompt indefinitely.
