@@ -37,11 +37,13 @@ func (s *Server) handleAdminMessagingDivergence(w http.ResponseWriter, r *http.R
 
 	matches := messaging.DivergenceMetrics.Matches()
 	mismatches := messaging.DivergenceMetrics.Mismatches()
+	fallbacks := messaging.DivergenceMetrics.Fallbacks()
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"matches":              matches,
 		"mismatches":           mismatches,
 		"total":                matches + mismatches,
+		"fallbacks":            fallbacks,
 		"read_switch_enabled":  readSwitchEnabled,
 	})
 }

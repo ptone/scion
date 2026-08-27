@@ -67,6 +67,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		convResult := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, agentID, user.ID())
 		if convResult != nil {
 			filter.ConversationID = convResult.ConversationID
+		} else {
+			messaging.DivergenceMetrics.IncFallback()
 		}
 	}
 
@@ -254,12 +256,16 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 			convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, threadID, agent.ProjectID)
 			if convResult != nil {
 				filter.ConversationID = convResult.ConversationID
+			} else {
+				messaging.DivergenceMetrics.IncFallback()
 			}
 		} else if channel == "web" || channel == "" {
 			// Default: DM conversation between agent and current user.
 			convResult := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, agentID, user.ID())
 			if convResult != nil {
 				filter.ConversationID = convResult.ConversationID
+			} else {
+				messaging.DivergenceMetrics.IncFallback()
 			}
 		}
 	}

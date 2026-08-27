@@ -45,6 +45,7 @@ type DivergenceEntry struct {
 type DivergenceCounter struct {
 	matches    atomic.Int64
 	mismatches atomic.Int64
+	fallbacks  atomic.Int64
 }
 
 // Inc increments the appropriate counter.
@@ -64,6 +65,14 @@ func (c *DivergenceCounter) Mismatches() int64 { return c.mismatches.Load() }
 
 // Total returns the total number of divergence entries logged.
 func (c *DivergenceCounter) Total() int64 { return c.matches.Load() + c.mismatches.Load() }
+
+// IncFallback increments the fallback counter.
+// A fallback occurs when the read-switch flag is ON but conversation
+// resolution returns nil, causing the code to fall back to the old read path.
+func (c *DivergenceCounter) IncFallback() { c.fallbacks.Add(1) }
+
+// Fallbacks returns the total number of read-path fallbacks recorded.
+func (c *DivergenceCounter) Fallbacks() int64 { return c.fallbacks.Load() }
 
 // DivergenceMetrics is the package-level counter for divergence events.
 // Exported so that metrics collectors can read it.

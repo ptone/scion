@@ -822,13 +822,20 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			CreatedAt:     time.Now(),
 		}
 		// Phase 5 dual-write: resolve-or-create conversation for user/agent → agent messages.
+		// If the CLI already resolved a conversation_id (S4 conversation references),
+		// use it directly instead of re-resolving.
 		var convResult *messaging.ConversationResult
-		if structuredMsg.ThreadID != "" {
+		if structuredMsg.ConversationID != "" {
+			storeMsg.ConversationID = structuredMsg.ConversationID
+			convResult = &messaging.ConversationResult{
+				ConversationID: structuredMsg.ConversationID,
+			}
+		} else if structuredMsg.ThreadID != "" {
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, structuredMsg.ThreadID, agent.ProjectID)
 		} else if structuredMsg.SenderID != "" && agent.ID != "" {
 			convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, structuredMsg.SenderID, agent.ID)
 		}
-		if convResult != nil {
+		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.

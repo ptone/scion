@@ -3688,6 +3688,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/messages/", s.handleMessageRoutes)
 	s.mux.HandleFunc("/api/v1/message-channels", s.handleMessageChannels)
 
+	// Conversation resolution endpoint (S4 messaging model)
+	s.mux.HandleFunc("/api/v1/conversations/resolve", s.handleConversationsResolve)
+
 	// Native chat endpoints. Registration is gated on server.native_chat.enabled,
 	// so disabling the feature makes every /api/v1/chat/* path 404 rather than
 	// leaving a live API behind a hidden UI. This is a startup-time gate:

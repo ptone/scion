@@ -421,6 +421,45 @@ func TestCheckConversationConsistency_NoPriorMessages(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Fallback counter tests
+// ---------------------------------------------------------------------------
+
+func TestDivergenceCounter_Fallbacks(t *testing.T) {
+	DivergenceMetrics = &DivergenceCounter{}
+
+	if DivergenceMetrics.Fallbacks() != 0 {
+		t.Fatalf("expected 0 fallbacks initially, got %d", DivergenceMetrics.Fallbacks())
+	}
+
+	DivergenceMetrics.IncFallback()
+	DivergenceMetrics.IncFallback()
+	DivergenceMetrics.IncFallback()
+
+	if DivergenceMetrics.Fallbacks() != 3 {
+		t.Errorf("expected 3 fallbacks, got %d", DivergenceMetrics.Fallbacks())
+	}
+}
+
+func TestDivergenceCounter_FallbacksConcurrent(t *testing.T) {
+	DivergenceMetrics = &DivergenceCounter{}
+
+	done := make(chan struct{})
+	for i := 0; i < 100; i++ {
+		go func() {
+			DivergenceMetrics.IncFallback()
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < 100; i++ {
+		<-done
+	}
+
+	if DivergenceMetrics.Fallbacks() != 100 {
+		t.Errorf("expected 100 fallbacks, got %d", DivergenceMetrics.Fallbacks())
+	}
+}
+
 // TestCheckConversationConsistency_DMByPrincipalPair verifies the DM path
 // (no threadID, matches by sender/recipient pair).
 func TestCheckConversationConsistency_DMByPrincipalPair(t *testing.T) {

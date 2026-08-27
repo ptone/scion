@@ -1641,6 +1641,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		} else {
 			// Conversation not found — fall back to old path so we don't
 			// return an empty result for data written before dual-write.
+			messaging.DivergenceMetrics.IncFallback()
 			filter = store.MessageFilter{
 				Channel:  "web",
 				ThreadID: key,
