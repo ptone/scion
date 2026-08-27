@@ -562,6 +562,49 @@
     it evidence for flipping the read switch.** A comparison that cannot fail is not a check, it is
     a constant — hence AC-B-8: assert that `ComputeDivergenceMatch` can return a mismatch.
 
+39. **Detect wide, decide narrow — and a file arrives carrying every commit that ever touched it.**
+    Issued 2026-08-27 21:10Z, from em10's seam re-scan.
+
+    Rule 38 says classify *per commit across all files*. em10 applied that to the **disposition**
+    and inherited a whole commit's class for a hunk that needed its own: `b7651af9` is class (b),
+    so its `divergence.go` unexport hunk was ruled out along with its `groupForMessage` rewrite —
+    even though the hunk's subject was being deleted by class-(a) content the tranche *was*
+    carrying. **Per-commit is the lens for finding seams; per-hunk is the lens for deciding what
+    crosses.** Widening the detection rule into a disposition rule re-creates the very coupling it
+    exists to expose.
+
+    **The disposition I overturned, and why it was not benign.** An **exported**
+    `DirectMessageExternalRef` producing `dm:{A}:{B}` — where canonical is
+    `dm:<kind>:<uuid>:<kind>:<uuid>` — is DEF-8's root cause (two key derivations agreeing by
+    convention) with the caller removed. **Callers are cheap to add; a wrong ACL is not cheap to
+    undo.** And the project had already decided this: staging renamed the tests to
+    `TestLegacyDirectMessageExternalRef_*`, `handlers_agent_messaging_test.go` keeps a local copy
+    labelled "replicates the legacy (pre-DEF-8) external ref", and AC-DEF15-1 asserts it stays
+    unexported. **Landing it re-exported silently reverses a quarantine.** If B lands before
+    DEF-16's tranche, `main` holds two exported DM key derivations that disagree for days.
+    Unexporting *is* the control — the compiler then forbids out-of-package callers, which beats
+    any assertion, so no guard test travels with it.
+
+    **The "dead code" claim was right by accident.** em10 attributed the missing caller to
+    `60670c0e`. At `cd4ee7ed` the function has two production callers and neither is
+    `ComputeDivergenceMatch`: `backfill.go:201` and — worse — `conversation.go:59`, inside
+    `ResolveOrCreateDMConversation` itself. They are gone because **tranche A carries later
+    revisions of both files**, not because of anything `60670c0e` did. **"Dead code" is a claim
+    about the whole program and is never derivable from one commit's diff.** Grep the tree.
+
+    **The generalisation, which is the part that matters for tranche A.** Tranche A was assembled
+    by taking files at their *staging-current* revision. **A file arrives carrying every commit
+    that ever touched it, including commits nobody classified.** So A's contents are not "phases
+    1-4"; they are "phases 1-4, plus whatever else happened to those files since." Confirmed
+    instance: `b7651af9`'s `groupForMessage` half is already inside tranche A, so "DEF-16 is a
+    later tranche" was false before anyone said it. **These extras are invisible to every check we
+    run, precisely because they are present and coherent — they were simply never chosen.**
+
+    **Harmless-but-unchosen still gets written down.** The standard is that `main` should contain
+    nothing we cannot account for, not that everything in it is dangerous. **One category is never
+    harmless:** anything touching DM key derivation, principal-kind determination, or
+    authorization — an unchosen commit there is raised immediately and separately.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -738,7 +781,7 @@ is a queue, not a blocker.
 |---|---|---|---|
 | **Tranche A landing** | who opens the upstream `GoogleCloudPlatform/scion` PR | **user** | yes, 19:55Z, **still unanswered — now blocking TWO tranches** (A and the verified-and-held B) |
 | **Tranche B re-cut** | classification **done + accepted** 21:04Z. Now: delete `9333f943` (do not amend), re-cut carrying `60670c0e` + `cd4ee7ed` + `69ac6a12` + `23f7c820`, seam re-scan of the (b) column, full AC re-run plus **AC-B-8** (ComputeDivergenceMatch must be able to return a mismatch) and **AC-B-9** (undetermined principal kind is rejected, not defaulted) | **em10** | directed 21:05Z |
-| **Tranche A cut-point audit** | same rule-37 test applied to A's file set; fold in or justify by reachability | **em6** | dispatched 20:59Z. **Wanted before the user answers the landing question, not after.** |
+| **Tranche A cut-point audit** | rule-37/38/39 test on A's file set. Now scoped as an **inventory**: for each file, every commit touching it between the phase-4 boundary and the revision A carries, marking those not part of phases 1-4. Confirmed lead: `b7651af9`'s `groupForMessage` half is already in A. Harmless-but-unchosen still gets recorded; anything on DM key derivation / principal-kind / authz is raised immediately and separately. | **em6** | dispatched 20:59Z, scope extended 21:06Z and 21:10Z. **Wanted before the user answers the landing question.** |
 | DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
 | AC-12-6 (populated-DB exercise) | beta-hub exercise scheduling | **user** — deliberately deferred; pre-beta gate item | told em6 + integration2-operator 20:0xZ |
 | **§2.6.4 phases 1-4** | **DEF-20/21/22/23 rework** | **em9** | verdict sent 20:53Z |
@@ -1696,6 +1739,53 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5at. 21:08-21:12Z — right answer, wrong mechanism, and a quarantine nearly reversed
+
+em10's seam re-scan: `ae33715e` and DEF-8 clean and correctly reasoned — I checked both and
+accepted them. `b7651af9` they marked **benign**, on the grounds that `60670c0e` removes the only
+caller of `DirectMessageExternalRef`, leaving exported dead code.
+
+**The conclusion is right and the stated mechanism is false.** At `cd4ee7ed` the function has two
+production callers and neither is `ComputeDivergenceMatch`:
+
+```
+pkg/messaging/backfill.go:201     key = DirectMessageExternalRef(senderID, recipientID)
+pkg/messaging/conversation.go:59  extRef := DirectMessageExternalRef(senderID, recipientID)   ← inside ResolveOrCreateDMConversation
+```
+
+They vanish because **tranche A carries later revisions of both files**. `60670c0e` had nothing to
+do with it. **A right answer from a wrong mechanism is worth correcting precisely because the
+mechanism is the reusable part** — and this one would next be applied to a case where it does not
+happen to coincide.
+
+**I overturned "benign."** An exported DM key derivation producing `dm:{A}:{B}` when canonical is
+`dm:<kind>:<uuid>:<kind>:<uuid>` is DEF-8's root cause with the caller removed, and callers are
+cheap to add. The decisive evidence was in staging itself: tests renamed to
+`TestLegacyDirectMessageExternalRef_*`, a local copy in the hub tests labelled "replicates the
+legacy (pre-DEF-8) external ref", AC-DEF15-1 asserting it stays unexported. **The project
+quarantined this function on purpose, and shipping it re-exported would have silently reversed
+that** — a decision nobody would have made deliberately, arrived at by classifying a hunk under
+its commit's label. Directed: carry the unexport hunk only. Unexporting *is* the control; the
+compiler beats an assertion, so no guard test travels with it.
+
+**Rule 39** out of the method error: rule 38's per-commit view is for **detecting** seams; the
+disposition stays per hunk. Detect wide, decide narrow.
+
+**And the finding that outgrew the question.** Chasing why the callers were absent produced the
+thing I should have understood before tranche A was ever cut: **a file taken at its current
+revision arrives carrying every commit that ever touched it.** Tranche A's contents are not
+"phases 1-4" — they are "phases 1-4, plus whatever else happened to those files since." Confirmed:
+`b7651af9`'s `groupForMessage` half is *already inside tranche A*, so "DEF-16 is a later tranche"
+was false before anyone asserted it, and DEF-16 will now land in three pieces across three
+tranches.
+
+**These extras are invisible to every check we run, because they are present and coherent — they
+were simply never chosen.** That is the third distinct way this evening that our verification has
+been fooled by something being *self-consistent*, and the through-line is now unmistakable: we
+check agreement, and agreement is cheap. em6's audit is re-scoped from "find the stale bits" to
+"inventory everything in A that nobody chose," with harmless-but-unchosen still written down —
+the bar is that `main` contains nothing we cannot account for.
 
 ## 5as. 21:00-21:10Z — the seam, and the security defect the bridge across it reintroduced
 
