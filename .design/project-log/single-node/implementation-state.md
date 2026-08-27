@@ -8522,3 +8522,53 @@ doc) held back for the next group, as he asked.
 
 `sn-s5-dev` running on commit C. Both PR branches ready. Docs branch clean against main. Blocked on
 ptone for the three questions.
+
+## 13:01 — PR A complete. The brief's trap section is what made it a fact change and not a word change
+
+`sn-s5-dev` reported at 12:58, verified, reclaimed at 13:01. Commit `70aceeb` on
+`scion/sn-docpr-upstream`.
+
+Verified by me on the pushed ref, not from the report: fast-forward from `4a35a3a3` (both earlier
+commits intact, no force-push), one file, +7/-1, and the single diff hunk is at line 286 — **§5 and
+nothing else.** 22 refs in the file, 22 qualified, zero bare.
+
+§5 now reads:
+
+```
+Workspaces and the SQLite control plane live on the Instance's ephemeral filesystem.
+Two events destroy that state:
+
+- **Redeploy** — chosen by the operator, who can save work first.
+- **Exceeding the agent ceiling** (ptone/scion#1303) — not chosen and, on this tier,
+  not currently anticipatable. There is no per-agent memory or CPU instrument (§9.1),
+  so nothing warns before the Instance is destroyed and self-recovers empty. See §9.1
+  for measured agent counts at each Instance size.
+```
+
+"Disposable" survives. The G5 trade survives. The numbers are cited from §9.1 rather than copied —
+one authoritative copy, so the two cannot drift.
+
+### The developer's own read is the part worth keeping
+
+> *"without §3 I would absolutely have reached for softening 'disposable' instead of adding the
+> overload fact."*
+
+That is the second time today a brief's explicit trap section changed the outcome rather than
+decorating it — the first being `sn-uppr-dev` asking for the two issue numbers instead of guessing
+them. **Both traps were of the same kind: the obvious execution is locally reasonable and globally
+wrong.** Softening an adjective looks like doing the task. Prefixing every ref looks like doing the
+task. Neither is.
+
+What made the difference was not warning the agent to be careful. It was naming the specific wrong
+action it was about to take, and saying why it would look right.
+
+### One thing I decided not to do
+
+"Not currently anticipatable" is clumsy English. I am leaving it. It is accurate, it is one word, and
+sending an agent back for it would be exactly the manufactured diligence I caught myself at this
+morning. **A blemish I can name and choose to keep is cheaper than a round-trip I can justify.**
+
+### State
+
+**Three PRs now wait on ptone and nothing waits on me**: the two housekeeping branches and the
+tutorial. All verified to apply to current main. No agents running. Blocked on his three answers.
