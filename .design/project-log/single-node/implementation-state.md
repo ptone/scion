@@ -5926,3 +5926,69 @@ at 03:25. It is ptone's call.
 Merge-readiness for #1310 is therefore **withdrawn** until main is sorted. Everything else on the
 branch is green: `Build & Test`, `golangci-lint`, `shellcheck`, `scan-pr`, `check-changes` all
 SUCCESS; all zizmor SKIPPED; only `cla/google` red, which is the known non-blocker.
+
+### 03:35 — I sized the repair, because "how bad is it" was the wrong question
+
+The useful question for ptone is not *how bad* but *how expensive to fix*. I measured it in the
+throwaway clone `/tmp/mergetest`. **This is a measurement, not a proposed patch — it is never
+pushed.** I do not implement.
+
+**Result: the repair is small, bounded, and mostly mechanical. 16 files. `go build ./...` exits 0.**
+
+Method: classify each affected file as a **pure revert** (HEAD byte-identical to the pre-#1302
+state, so #1301 contributed nothing and a wholesale restore is lossless) or **mixed** (#1301 has
+real work there, so a wholesale restore would destroy it).
+
+| File | Classification | Repair |
+|---|---|---|
+| `pkg/runtime/cloudrun/` (exec, iap_exec, logs, logs_test) | pure | restore from `f876e27b` |
+| `pkg/runtime/cloudrun_runtime.go` + `_test.go` | pure | restore |
+| `pkg/runtime/cloudrun_doctor.go`, `cloudrun_nfs_{linux,other}.go` | pure | restore |
+| `pkg/runtime/factory.go` + `factory_test.go` | pure | restore |
+| `pkg/config/settings_v1.go` | pure | restore (this is where `config.CloudRunConfig` lived) |
+| `go.mod` / `go.sum` | — | restore; #1301 also dropped the Cloud Run + resourcemanager SDK deps |
+| `cmd/server_foreground.go` | **mixed** | one-line field rename, see below |
+| `pkg/hub/web.go` | **mixed** | `git apply -3` of #1307's hunk — **applies cleanly** |
+| `pkg/config/schemas/settings-v1.schema.json` | **mixed** | 8 removed lines, NOT yet restored |
+
+Two findings worth keeping:
+
+**The revert reached into `go.mod`.** The first repair attempt failed on `missing go.sum entry for
+cloud.google.com/go/run/apiv2`. `cloud.google.com/go/run|resourcemanager` in `go.mod`: 2 at
+`f876e27b`, **0** at HEAD. A revert that also strips the dependency manifest is easy to miss when
+reading only the source diff.
+
+**`#1301` wrote new code against the reverted shape.** `resolveCloudRunProjectAndRegion` in
+`cmd/server_foreground.go` is new #1301 code reading `rtConfig.CloudRun.Project` / `.Region` — the
+*stub's* field names. The real `config.CloudRunConfig` uses `ProjectID` / `Location`. So the repair
+is not a pure restore anywhere new code has already adapted to the regression. That is the general
+hazard of leaving a revert in place: **new work accretes on top of it and raises the cost of undoing
+it.** This one is a one-line rename today. It will not stay one line.
+
+**The security half is the cheap half.** #1307's guard re-applies onto #1301's `pkg/hub/web.go`
+with `git apply -3`, cleanly, zero conflict markers, and `IsLoopbackHost` is restored at `:435`.
+
+**Not verified:** the schema's 8 lines, and `go test` (running). Build only.
+
+### 03:35 — heartbeat check, answered by measurement
+
+1. **Are dispatched agents progressing or stalled?** Checked, not assumed. `sn-review-dev` last
+   activity "just now", container up 20 min — progressing. `scion/sn-tier` head is still
+   `728d17cd`, which is consistent with it working and not yet pushing. `sn-adminfix-dev` had been
+   idle 41 min with task #44 closed and verified, so I retired it. Its two evidence Instances
+   (`sn-adminseed-t`, `sn-adminfix-t`) are GCP resources, unaffected by retiring the agent, and
+   stay up until #1310 merges.
+
+2. **What blocks the critical path?** The #1301 upstream revert, and only that. #1310 is otherwise
+   green — `Build & Test`, `golangci-lint`, `shellcheck`, `scan-pr`, `check-changes` all SUCCESS,
+   all zizmor SKIPPED, `cla/google` red and known-non-blocking. The one conflicted file is a
+   symptom of the revert, not of our work. Waiting on ptone's ruling.
+
+3. **Is the design doc in sync?** Yes for §1 — the walkthrough was exercised live on 2026-08-25 and
+   nothing since has touched it. **G4 remains unmet and is still recorded as unmet**
+   (`--image` is required with no default; dropping the CI workflows did not change that, because
+   the ghcr push was already failing). No new drift.
+
+**Judged against §1, not against activity:** nothing in tonight's work moved the §1 walkthrough,
+because §1 already passes. Tonight was about making the branch mergeable and honest. The revert is
+now the only thing between the tier and a squash merge.
