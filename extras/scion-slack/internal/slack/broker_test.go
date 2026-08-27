@@ -2,6 +2,9 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -324,5 +327,120 @@ func TestResolveOutboundMentions(t *testing.T) {
 	t.Run("nil store returns text unchanged", func(t *testing.T) {
 		got := resolveOutboundMentions(ctx, nil, "ptone@google.com")
 		assert.Equal(t, "ptone@google.com", got)
+	})
+}
+
+// TestDeliverInbound_ConversationFields verifies that the Slack plugin
+// populates conversation resolution fields (Phase 11) in the inbound payload.
+func TestDeliverInbound_ConversationFields(t *testing.T) {
+	t.Run("slack threaded message includes conversation fields", func(t *testing.T) {
+		var receivedPayload inboundPayload
+		hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&receivedPayload))
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"delivered": true,
+				"agentId":   "agent-123",
+			})
+		}))
+		defer hub.Close()
+
+		b := NewBroker(nil)
+		b.hubURL = hub.URL
+
+		msg := &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			ThreadID:  "1234567890.123456",
+			Sender:    "user:alice@example.com",
+			Recipient: "agent:coder",
+			Msg:       "hello from slack thread",
+			Type:      messages.TypeInstruction,
+			Metadata: map[string]string{
+				"slack_channel_id": "C0123ABC",
+				"slack_thread_ts":  "1234567890.123456",
+				"project_id":      "proj-1",
+			},
+		}
+
+		he := b.deliverInbound("scion.project.p1.agent.coder.messages", msg)
+		assert.Nil(t, he)
+
+		assert.Equal(t, "slack", receivedPayload.Surface)
+		assert.Equal(t, "C0123ABC:1234567890.123456", receivedPayload.ExternalRef)
+		assert.Equal(t, "C0123ABC", receivedPayload.ParentRef)
+	})
+
+	t.Run("slack top-level message uses bare channel as external_ref", func(t *testing.T) {
+		var receivedPayload inboundPayload
+		hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&receivedPayload))
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"delivered": true,
+				"agentId":   "agent-123",
+			})
+		}))
+		defer hub.Close()
+
+		b := NewBroker(nil)
+		b.hubURL = hub.URL
+
+		msg := &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			ThreadID:  "C0123ABC",
+			Sender:    "user:alice@example.com",
+			Recipient: "agent:coder",
+			Msg:       "hello from slack channel",
+			Type:      messages.TypeInstruction,
+			Metadata: map[string]string{
+				"slack_channel_id": "C0123ABC",
+				"project_id":      "proj-1",
+			},
+		}
+
+		he := b.deliverInbound("scion.project.p1.agent.coder.messages", msg)
+		assert.Nil(t, he)
+
+		assert.Equal(t, "slack", receivedPayload.Surface)
+		assert.Equal(t, "C0123ABC", receivedPayload.ExternalRef)
+		assert.Equal(t, "C0123ABC", receivedPayload.ParentRef)
+	})
+
+	t.Run("AC-8 regression: non-slack channel skips conversation fields", func(t *testing.T) {
+		var receivedPayload inboundPayload
+		hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&receivedPayload))
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"delivered": true,
+				"agentId":   "agent-123",
+			})
+		}))
+		defer hub.Close()
+
+		b := NewBroker(nil)
+		b.hubURL = hub.URL
+
+		msg := &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "",
+			ThreadID:  "",
+			Sender:    "user:alice@example.com",
+			Recipient: "agent:coder",
+			Msg:       "hello",
+			Type:      messages.TypeInstruction,
+		}
+
+		he := b.deliverInbound("scion.project.p1.agent.coder.messages", msg)
+		assert.Nil(t, he)
+
+		assert.Empty(t, receivedPayload.Surface)
+		assert.Empty(t, receivedPayload.ExternalRef)
+		assert.Empty(t, receivedPayload.ParentRef)
 	})
 }

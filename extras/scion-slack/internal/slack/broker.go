@@ -47,6 +47,11 @@ type SlackConfig struct {
 type inboundPayload struct {
 	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
+
+	// Conversation resolution fields (Phase 11).
+	Surface     string `json:"surface,omitempty"`
+	ExternalRef string `json:"external_ref,omitempty"`
+	ParentRef   string `json:"parent_ref,omitempty"`
 }
 
 // hubError represents a structured error returned by the hub API.
@@ -673,9 +678,36 @@ func (b *SlackBroker) deliverInbound(topic string, msg *messages.StructuredMessa
 		return nil
 	}
 
+	// Phase 11: Derive conversation resolution fields from the message.
+	// Slack uses "channelID:threadTS" as ExternalRef (or bare channelID
+	// for top-level messages) and the channel ID as ParentRef.
+	surface := ""
+	externalRef := ""
+	parentRef := ""
+	if msg.Channel == "slack" {
+		surface = "slack"
+		channelID := ""
+		threadTS := ""
+		if msg.Metadata != nil {
+			channelID = msg.Metadata["slack_channel_id"]
+			threadTS = msg.Metadata["slack_thread_ts"]
+		}
+		if channelID != "" {
+			parentRef = channelID
+			if threadTS != "" {
+				externalRef = channelID + ":" + threadTS
+			} else {
+				externalRef = channelID
+			}
+		}
+	}
+
 	payload := inboundPayload{
-		Topic:   topic,
-		Message: msg,
+		Topic:       topic,
+		Message:     msg,
+		Surface:     surface,
+		ExternalRef: externalRef,
+		ParentRef:   parentRef,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
