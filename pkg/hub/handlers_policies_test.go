@@ -25,11 +25,10 @@ import (
 
 func newPolicyTestServer(t *testing.T) *Server {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
 	srv := &Server{store: s}
 	return srv
 }

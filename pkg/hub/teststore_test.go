@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sync/atomic"
+	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -36,7 +37,12 @@ var testStoreSeq atomic.Int64
 // isolated in-memory database or a file path for a persistent one. The returned
 // store is already migrated; callers may still invoke Migrate (it is
 // idempotent).
-func newTestStore(url string) (store.Store, error) {
+//
+// The store is automatically closed via t.Cleanup, so callers do not need to
+// close it themselves. This prevents leaked in-memory SQLite databases from
+// accumulating during a full package test run.
+func newTestStore(t *testing.T, url string) (store.Store, error) {
+	t.Helper()
 	var dsn string
 	if url == ":memory:" {
 		dsn = fmt.Sprintf("file:hubtest%d?mode=memory&cache=shared", testStoreSeq.Add(1))
@@ -57,5 +63,6 @@ func newTestStore(url string) (store.Store, error) {
 		_ = s.Close()
 		return nil, err
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s, nil
 }

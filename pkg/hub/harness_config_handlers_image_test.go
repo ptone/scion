@@ -82,11 +82,10 @@ func fakeBrokerServer(statusCode int, body *BrokerImageStatusResponse) *httptest
 
 func setupImageStatusTest(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	db, err := newTestStore(":memory:")
+	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
 
 	srv := &Server{
 		store:        db,

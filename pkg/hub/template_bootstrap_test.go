@@ -38,7 +38,7 @@ import (
 // SQLite store and a mock storage, suitable for template bootstrap tests.
 func testTemplateBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping: sqlite driver not registered")
@@ -245,7 +245,7 @@ func TestBootstrapTemplatesFromDir_SkipsUnchangedTemplate(t *testing.T) {
 
 func TestBootstrapTemplatesFromDir_NoopWhenNoStorage(t *testing.T) {
 	// Create server without storage
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping: sqlite driver not registered")
