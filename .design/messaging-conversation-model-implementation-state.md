@@ -1183,6 +1183,26 @@ em10 and every agent I dispatch hereafter.
       **Anything that can silently fall behind must have its freshness checked, not its existence.**
 
 
+
+61. **A filter that silently eats everything and a genuine empty result are the same output. Any grep
+    whose value comes from being EMPTY needs a positive control.** Issued 2026-08-27 23:48Z, against
+    myself, while verifying em6's warrant. My exclusion was `grep -v "^./pkg/messaging/"` but `grep -r`
+    emitted paths **without** the `./` prefix, so the filter matched nothing and I was reading an
+    unfiltered result believing it filtered. I caught it only because the output visibly contained
+    what it should have excluded — **had the result been empty I would have accepted it.**
+
+    - **The control:** apply the identical filter to a pattern you KNOW has hits outside the excluded
+      set. If that also comes back empty, the filter is broken, not the codebase clean. Cheap, one
+      extra line, and it converts "no output" from ambiguous into evidence.
+    - **This is the same defect class as everything else tonight**, turned on the instrument rather
+      than the code: a predicate that answers a different question than the one being asked, and
+      answers it plausibly. DEF-27 was a hide-deleted filter answering "is this ours." This was a
+      no-op filter answering "is this reachable."
+    - **Generalises past grep.** Any negative result — an empty test list, a clean sweep, a passing
+      guard, zero rows returned — is only evidence if the instrument was shown capable of producing a
+      positive.
+
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -4858,3 +4878,42 @@ making `blocked` the trusted signal (rules 57/58), I had made **"waiting on purp
 unsent deliverable" look identical again** — the exact ambiguity I had just removed, reintroduced one
 level up. Chased both, and added to the standing instruction: **send the report BEFORE you block.**
 A signal is only as good as the thing it is not allowed to hide.
+
+## 5bm. 23:47-23:49Z — phase-2 warrant PASSES, but its expiry check has a hole
+
+em6 reported the phase-2 warrant exercise as PASS against `upstream/main` @ `c600df51` (they had
+already adopted rule 60's correction unprompted). **Verified independently and the conclusion holds:
+tranche A is production-unreachable on main.**
+
+**But the evidence proves a narrower claim than the one written**, and the gap is in the part meant to
+outlive the check. Two independent facts:
+
+1. `pkg/messaging` is imported nowhere outside itself — **em6's grep tests this**.
+2. **No production code calls the Conversation store methods** — em6 did not check this, and it is not
+   implied by (1). `ConversationStore` is embedded in the composite (`composite.go:75,118`) and
+   `CreateConversation` / `UpsertConversationByExternalRef` / `ListConversations` sit on the `Store`
+   **interface** (`store.go:1610,1625,1635`). **They are reachable in principle from every file in
+   `pkg/hub` holding a `store.Store`.** I confirmed there are no such callers today.
+
+So the stated expiry check — *"re-run the grep after each merge"* — **is incomplete.** Someone adding
+`s.store.UpsertConversationByExternalRef(...)` directly in `pkg/hub`, with no `pkg/messaging` import,
+falsifies the warrant while the grep still returns clean. **The DEF-20 shape for the fifth time
+tonight: a guard with an entrance it does not know about.** Expiry now requires both greps.
+
+### The structural finding: the enforcing guard is queued behind the thing it protects
+
+em9's commit **`29cf09be` — "ci: add guard forbidding UpsertConversationByExternalRef outside
+pkg/messaging and pkg/store"** — is the machine version of this warrant. It is on `em9-unify`,
+scheduled for **tranche C**. Tranches B and C both land first, and those are precisely the merges most
+likely to introduce the caller that breaks the warrant.
+
+Asked em6 to assess lifting it out of tranche C as a standalone early PR — it touches CI config, not
+product code, so it should be orderable independently. **Also to extend it to `CreateConversation` and
+`AddParticipant`, not just the upsert** — rule 54, a guard applied to one sibling and not the rest
+reads as deliberate. Assessment only; coordinate with em9 before touching their work.
+
+> **A control that depends on someone remembering to run it is not yet a control.** Converting the
+> warrant from a re-grepped claim into a build failure is worth reordering a tranche for.
+
+**And see rule 61** — my own first verification grep was silently a no-op, and I would have accepted
+its empty output as proof had the real answer not happened to be visibly wrong.
