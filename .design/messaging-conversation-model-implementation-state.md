@@ -341,6 +341,13 @@ by asking what happens to a user who obeys the warning text.
 | F-1 | **The `--channel` / `--thread-id` deprecation warnings direct users into the exact defect this project exists to remove.** They say "use conversation references instead: `conv:<id>`, `@<agent>`, `#<thread>`". `scion message` cannot parse any of the three; `ParseReference` and `Resolve` have **no production caller**. Traced at `cmd/message.go:137`: `conv:<id>` and `#<thread>` are slugified and looked up as **agent names**; `@builder` contains `@` so becomes **`user:@builder`**, a plausible-looking email recipient. The `@` case **does not error** — it succeeds and delivers nowhere. That is findings §1.2a, newly caused by our own migration guidance. Violates AC-15 in substance and AC-15a in letter. | read `cmd/message.go:118–175`; `grep` for production callers of `ParseReference` / `Resolve` — none | Option (a), chosen: wire `scion message <conversation> <text>` through `ParseReference` and `Resolve`. Option (b) was to strip the syntax from the warnings and hard-error on `conv:`/`#` prefixes rather than slugifying them. | em4 took (a) |
 | F-2 | **DEF-1 is implemented correctly but unreachable.** `checkPostResolutionAuth` matches D5 exactly — one call in `Resolve()` after grammar dispatch, direct requires participant, group authorised by project membership, unknown kind fails closed. But `Resolve()` has no production caller, so D5's cross-grammar guarantee holds **only in unit tests**. My ledger rationale for deferring DEF-1 to S4 — "it becomes reachable the moment S4 switches reads" — was wrong: the read switch resolves from server-side inputs (authenticated user + agent, or thread key + project) and never from a user-supplied reference. | `grep` for callers of `messaging.Resolve` — none outside tests; read `handlers_messages.go:63–72, 247–265` | Option (a) makes it reachable. Otherwise DEF-1 stays open and moves to whichever section wires conversation-reference sending. **Not to be recorded as discharged on unit tests alone.** | resolves with (a) |
 
+**Test evidence at `0c94a685` was clean and I confirmed it myself:** full `pkg/hub` suite
+green (0 failures), plus `pkg/messaging`, `cmd`, `pkg/store` and `entadapter` all green. The
+DEF-4 baseline held through all four workstreams, which is the per-workstream constraint doing
+its job. Worth stating plainly: **the rejection is not a test failure.** F-1 is invisible to
+any test that does not ask what happens to a user who obeys the warning text — which is a
+question about the product, not the code. AC-15a exists to turn that question into a test.
+
 **Non-blocking, raised for the beta exercise.** The read switch **fails open**: when
 `ResolveDMConversationForRead` returns nil, `filter.ConversationID` stays unset and the read
 silently uses the old path while the flag reads ON. With audit L1 (the consistency check also
@@ -355,7 +362,23 @@ omitting the positional conversation argument that §2 and the announcement both
 built to the row. This is AC-8's "three inbound paths" again: **a terse phase summary read as
 the whole requirement.** The design body is authoritative, but managers work from the phase
 table, so the phase table has to carry the load-bearing parts. I have amended the row and
-added AC-15a. Before S5 opens I should audit the remaining phase rows for the same defect.
+added AC-15a. **Audit of the remaining phase rows done the same hour** — four more amended:
+- **Row 7** said "invoked on CLI, hub handlers, and broker-inbound". That is AC-8's original
+  wording living on in the phase table, and S3 built to it. Now reads "**every** inbound path
+  ... the list is illustrative, **not exhaustive**", naming native chat.
+- **Row 8** still carried the pre-beta soak gate. Marked superseded by D3, with the fallback
+  counter named as part of the replacement gate.
+- **Row 12 (S5, next up)** now requires documentation to describe **the build as it ships,
+  not the design's end state** — anything behind a default-off flag is documented as off, and
+  unparseable syntax is not presented as available. Without this S5 would document a
+  conversation model that is switched off in every deployment, which is AC-15a's defect in
+  prose form.
+- **Row 13** now states its preconditions: beta passed, and every replacement named in a
+  deprecation warning has shipped and been exercised. Removing a field whose replacement was
+  never reachable strands exactly the callers the warning redirected.
+
+Row 7's wording is the proof this audit was worth doing: the defect that cost S3 a round was
+still sitting in the table, uncorrected, after I had already fixed the AC it came from.
 
 ## 5d. S2 rejection history — CLOSED 2026-08-27 03:35Z (accepted on round 3)
 

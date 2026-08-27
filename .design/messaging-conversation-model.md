@@ -776,13 +776,13 @@ Commit-sized, ordered, each independently reviewable.
 | 4 | Backfill | Migration job implementing §4.1, including the two hazards. Idempotent, resumable, dry-run mode. |
 | 5 | Dual-write | Send paths resolve-or-create and stamp `conversation_id`. Reads unchanged. Divergence logging. |
 | 6 | Envelope | New `Message` type, `Addressee`, the split taxonomy, addressee resolution (§2.4). Old envelope still accepted and mapped. |
-| 7 | Validation choke point | Single `Validate()` invoked on CLI, hub handlers, and broker-inbound. Fixes the Teams violation. |
-| 8 | Read switch | Reads move to `conversation_id`. Old fields derived. **Gate: soak with divergence logging before proceeding.** |
+| 7 | Validation choke point | Single `Validate()` invoked on **every** inbound path — the CLI, the Hub HTTP handlers **including native chat**, and broker-inbound. The list is illustrative, **not exhaustive**; see AC-8 and AC-8c. Fixes the Teams violation. |
+| 8 | Read switch | Reads move to `conversation_id`. Old fields derived. Lands behind a **default-off runtime flag, flippable without redeploy** (D3). ~~Gate: soak with divergence logging before proceeding.~~ **Superseded:** there is no production soak before the beta exercise, so the gate is the exercise itself, with divergence counters — including a **fallback counter** distinguishing "no disagreement" from "the new path never ran" — readable live on `GET /api/v1/admin/messaging/divergence`. |
 | 9 | Delivery formatter | New agent-facing JSON (Appendix B). `status` and `visibility` delivered. Metadata allowlist removed — the fields it was smuggling are now first-class. |
 | 10 | CLI split | **`scion message <conversation> <text>` — the conversation becomes a required positional argument, parsed by `ParseReference` and resolved by `Resolve` (§2.5).** Plus `scion broadcast`, `scion keys`; `scion message` reduced to six flags; deprecation mapping. **A deprecation warning may not name a replacement syntax the command cannot yet parse** — see AC-15a. |
 | 11 | Broker edge | Per-plugin `ResolveConversation` at inbound; spoke selection by `conversation.surface`. One commit per plugin. |
-| 12 | Docs | Skill (Appendix B), `docs-site` messaging page, GLOSSARY entries for Conversation / Surface / Addressee / Participant. Fixes the three doc-drift items in `findings.md` §10. |
-| 13 | Removal | Drop `channel`, `thread_id`, `recipient*`, old type enum. **Not reversible.** |
+| 12 | Docs | Skill (Appendix B), `docs-site` messaging page, GLOSSARY entries for Conversation / Surface / Addressee / Participant. Fixes the three doc-drift items in `findings.md` §10. **Documentation describes the build as it ships, not the design's end state** — anything behind a default-off flag is documented as off, and any syntax not yet parseable is not presented as available. See AC-15a; the same rule that governs a deprecation warning governs a docs page. |
+| 13 | Removal | Drop `channel`, `thread_id`, `recipient*`, old type enum. **Not reversible.** **Preconditions:** the beta exercise has passed, and every replacement named in a deprecation warning has shipped and been exercised (AC-15a). Removing a field whose replacement was never reachable strands the callers the warning redirected. |
 
 ---
 
