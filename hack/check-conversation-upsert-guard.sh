@@ -19,7 +19,12 @@
 #
 #   Raw SQL INSERT INTO conversations (must only appear in pkg/store/ or in the
 #   webchat store's atomic dual-write paths):
-#     4. INSERT INTO conversations      — used by CreateTopic, EnsureGeneralTopic,
+#     4. INSERT [OR IGNORE|OR REPLACE] INTO ["]conversations["]
+#                                       — case-insensitive match for the full
+#                                         INSERT family. SQLite uses OR IGNORE
+#                                         for idempotent inserts; Postgres uses
+#                                         ON CONFLICT ... DO NOTHING (same line).
+#                                         Used by CreateTopic, EnsureGeneralTopic,
 #                                         backfillTopicConversations, PromoteDM
 #                                         in pkg/hub/webchannel_store*.go. These
 #                                         are the §2.6.4 dual-write mechanism and
@@ -89,11 +94,14 @@ if [[ -s "$tmp" ]]; then
 fi
 
 # --- Check 3: Raw SQL INSERT INTO conversations ---
+# Matches the full INSERT family: INSERT INTO, INSERT OR IGNORE INTO,
+# INSERT OR REPLACE INTO, with optional quoting on the table name, and
+# case-insensitive to catch any casing variant.
 # Allowed in pkg/store/ and in pkg/hub/webchannel_store*.go (the §2.6.4
 # atomic dual-write paths: CreateTopic, EnsureGeneralTopic,
 # backfillTopicConversations, PromoteDM).
 : >"$tmp"
-grep -rn 'INSERT INTO conversations\|INSERT INTO "conversations"' \
+grep -rni 'INSERT[[:space:]]\+\(OR[[:space:]]\+[A-Z]\+[[:space:]]\+\)\?INTO[[:space:]]\+[\"]\?conversations[\"]\?' \
   --include='*.go' \
   --exclude='*_test.go' \
   . \
