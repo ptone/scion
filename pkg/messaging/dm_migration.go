@@ -120,10 +120,11 @@ func (s *DMMigrationService) Run(ctx context.Context, cfg DMMigrationConfig) (*D
 type convClass int
 
 const (
-	convClassUnknown     convClass = iota
-	convClassKindEncoded           // ParseDMKey succeeds
-	convClassEmptyRef              // external_ref == ""
-	convClassOldFormat             // starts with "dm:" but ParseDMKey fails
+	convClassUnknown       convClass = iota
+	convClassKindEncoded             // ParseDMKey succeeds
+	convClassEmptyRef                // external_ref == ""
+	convClassOldFormat               // starts with "dm:" but ParseDMKey fails
+	convClassDEF15Artifact           // thread:<projectID>:dm:<rest> — DEF-15 artifact
 )
 
 // classifyConversation determines which migration step applies.
@@ -507,4 +508,246 @@ func (s *DMMigrationService) mergeConversation(
 // isValidDMKind returns true if the kind is a valid DM principal kind.
 func isValidDMKind(kind string) bool {
 	return kind == "user" || kind == "agent"
+}
+
+// ---------------------------------------------------------------------------
+// DEF-15 artifact repair
+// ---------------------------------------------------------------------------
+
+// DEF15RepairResult summarises what RepairDEF15Artifacts did.
+type DEF15RepairResult struct {
+	Found       int              // rows matching thread:%:dm:%
+	Repaired    int              // rows updated or merged
+	Unrepairable int             // rows left byte-identical
+	Details     []DEF15RowDetail // per-row detail
+}
+
+// DEF15RowDetail records what happened to a single DEF-15 artifact row.
+type DEF15RowDetail struct {
+	ConversationID string
+	ExternalRef    string
+	Action         string // "repaired", "merged", "skipped"
+	Reason         string // empty for repaired; explanation for skipped
+}
+
+// RepairDEF15Artifacts finds and repairs conversation rows whose external_ref
+// matches thread:%:dm:% — artifacts of DEF-15 where a dm:-prefixed ThreadID
+// was incorrectly wrapped in a thread: key.
+func (s *DMMigrationService) RepairDEF15Artifacts(ctx context.Context) (*DEF15RepairResult, error) {
+	result := &DEF15RepairResult{}
+
+	convs, err := s.collectDEF15Artifacts(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("collecting DEF-15 artifacts: %w", err)
+	}
+
+	result.Found = len(convs)
+
+	for i := range convs {
+		conv := &convs[i]
+		s.repairDEF15Row(ctx, conv, result)
+	}
+
+	return result, nil
+}
+
+// collectDEF15Artifacts scans all conversations and returns those whose
+// external_ref matches the pattern thread:<projectID>:dm:<rest>.
+func (s *DMMigrationService) collectDEF15Artifacts(ctx context.Context) ([]store.Conversation, error) {
+	var artifacts []store.Conversation
+	cursor := ""
+
+	for {
+		// DEF-15 artifacts have kind="group" but we scan without kind filter
+		// to be thorough — the external_ref pattern is the definitive marker.
+		page, err := s.store.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{
+			Limit:  defaultBatchSize,
+			Cursor: cursor,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		for _, conv := range page.Items {
+			if isDEF15Artifact(conv.ExternalRef) {
+				artifacts = append(artifacts, conv)
+			}
+		}
+
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+
+	return artifacts, nil
+}
+
+// isDEF15Artifact returns true if the external_ref matches the pattern
+// thread:<something>:dm:<rest> — the signature of a DEF-15 artifact.
+func isDEF15Artifact(ref string) bool {
+	if !strings.HasPrefix(ref, "thread:") {
+		return false
+	}
+	// Split into at most 3 parts: "thread", projectID, rest
+	parts := strings.SplitN(ref, ":", 3)
+	if len(parts) < 3 {
+		return false
+	}
+	// projectID must be non-empty.
+	if parts[1] == "" {
+		return false
+	}
+	return strings.HasPrefix(parts[2], "dm:")
+}
+
+// extractDMKeyFromDEF15 extracts the dm: key suffix from a DEF-15 artifact
+// external_ref. The format is thread:<projectID>:<dmKey>.
+// Returns the dmKey portion (everything after thread:<projectID>:).
+func extractDMKeyFromDEF15(ref string) (dmKey string, ok bool) {
+	// Split into exactly 3 parts: "thread", projectID, rest (the dm: key).
+	parts := strings.SplitN(ref, ":", 3)
+	if len(parts) != 3 {
+		return "", false
+	}
+	if parts[0] != "thread" || parts[1] == "" || !strings.HasPrefix(parts[2], "dm:") {
+		return "", false
+	}
+	return parts[2], true
+}
+
+// repairDEF15Row attempts to repair a single DEF-15 artifact row.
+func (s *DMMigrationService) repairDEF15Row(
+	ctx context.Context,
+	conv *store.Conversation,
+	result *DEF15RepairResult,
+) {
+	// Step 1: Extract the dm: key suffix.
+	dmKey, ok := extractDMKeyFromDEF15(conv.ExternalRef)
+	if !ok {
+		result.Unrepairable++
+		result.Details = append(result.Details, DEF15RowDetail{
+			ConversationID: conv.ID,
+			ExternalRef:    conv.ExternalRef,
+			Action:         "skipped",
+			Reason:         "could not extract dm: key from external_ref",
+		})
+		return
+	}
+
+	// Step 2: Validate the suffix with ParseDMKey.
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(dmKey)
+	if err != nil {
+		result.Unrepairable++
+		result.Details = append(result.Details, DEF15RowDetail{
+			ConversationID: conv.ID,
+			ExternalRef:    conv.ExternalRef,
+			Action:         "skipped",
+			Reason:         fmt.Sprintf("ParseDMKey failed on %q: %v", dmKey, err),
+		})
+		return
+	}
+
+	// Step 3: Check canonicality — re-derive and compare.
+	canonical, err := messages.DMConversationKey(kindA, idA, kindB, idB)
+	if err != nil {
+		result.Unrepairable++
+		result.Details = append(result.Details, DEF15RowDetail{
+			ConversationID: conv.ID,
+			ExternalRef:    conv.ExternalRef,
+			Action:         "skipped",
+			Reason:         fmt.Sprintf("DMConversationKey failed: %v", err),
+		})
+		return
+	}
+	if canonical != dmKey {
+		result.Unrepairable++
+		result.Details = append(result.Details, DEF15RowDetail{
+			ConversationID: conv.ID,
+			ExternalRef:    conv.ExternalRef,
+			Action:         "skipped",
+			Reason:         fmt.Sprintf("non-canonical: extracted %q, canonical %q", dmKey, canonical),
+		})
+		return
+	}
+
+	// Step 4: Check if a correct row already exists with external_ref = dmKey.
+	existing, err := s.store.GetConversationByExternalRef(ctx, conv.Surface, dmKey)
+	if err == nil && existing != nil && existing.ID != conv.ID {
+		// Merge case: correct row already exists. Merge into it.
+		// Get participants from the DEF-15 row for the merge.
+		oldParts, _ := s.store.ListParticipants(ctx, conv.ID)
+		mergeResult := &DMMigrationResult{} // temporary for merge helper
+		if mergeErr := s.mergeConversation(ctx, conv.ID, existing.ID, oldParts, mergeResult); mergeErr != nil {
+			result.Unrepairable++
+			result.Details = append(result.Details, DEF15RowDetail{
+				ConversationID: conv.ID,
+				ExternalRef:    conv.ExternalRef,
+				Action:         "skipped",
+				Reason:         fmt.Sprintf("merge failed: %v", mergeErr),
+			})
+			return
+		}
+		result.Repaired++
+		result.Details = append(result.Details, DEF15RowDetail{
+			ConversationID: conv.ID,
+			ExternalRef:    conv.ExternalRef,
+			Action:         "merged",
+			Reason:         fmt.Sprintf("merged into existing correct row %s", existing.ID),
+		})
+		return
+	}
+
+	// No existing correct row — update in place.
+	conv.ExternalRef = dmKey
+	conv.Kind = "direct"
+	conv.ProjectID = nil
+	if err := s.store.UpdateConversation(ctx, conv); err != nil {
+		result.Unrepairable++
+		result.Details = append(result.Details, DEF15RowDetail{
+			ConversationID: conv.ID,
+			ExternalRef:    conv.ExternalRef,
+			Action:         "skipped",
+			Reason:         fmt.Sprintf("update failed: %v", err),
+		})
+		return
+	}
+
+	// Rebuild participants from the key (the key wins).
+	s.rebuildParticipantsFromKey(ctx, conv.ID, kindA, idA, kindB, idB, result)
+
+	result.Repaired++
+	result.Details = append(result.Details, DEF15RowDetail{
+		ConversationID: conv.ID,
+		ExternalRef:    dmKey,
+		Action:         "repaired",
+	})
+}
+
+// rebuildParticipantsFromKey ensures the conversation has exactly the two
+// participants specified by the dm: key. Existing participants that disagree
+// with the key are left in place (participants are append-only), but the
+// key's principals are guaranteed present.
+func (s *DMMigrationService) rebuildParticipantsFromKey(
+	ctx context.Context,
+	conversationID string,
+	kindA, idA, kindB, idB string,
+	result *DEF15RepairResult,
+) {
+	for _, p := range []struct{ kind, id string }{{kindA, idA}, {kindB, idB}} {
+		err := s.store.AddParticipant(ctx, &store.ConversationParticipant{
+			ID:             uuid.NewString(),
+			ConversationID: conversationID,
+			PrincipalKind:  p.kind,
+			PrincipalID:    p.id,
+			Role:           "member",
+		})
+		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			result.Details = append(result.Details, DEF15RowDetail{
+				ConversationID: conversationID,
+				Action:         "skipped",
+				Reason:         fmt.Sprintf("add participant %s:%s failed: %v", p.kind, p.id, err),
+			})
+		}
+	}
 }
