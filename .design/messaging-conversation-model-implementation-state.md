@@ -620,7 +620,7 @@ is a queue, not a blocker.
 |---|---|---|---|
 | **Tranche A landing** | who opens the upstream `GoogleCloudPlatform/scion` PR | **user** | yes, 19:55Z, unanswered |
 | Tranche B | cut + rule-31 check | **em10** | dispatched 20:17Z |
-| DEF-12 (F1 ✅, F2 fix ✅ / **guards vacuous = F3**, F4) | F1 verified fixed by mutation; F2 fix verified correct incl. 4 bad-input classes; **F3: both F2 regression tests pass on pre-fix code, proven with a tripwire — they guard nothing**; F4 cursor has no project scope | **em6** | F1/F2 dispatched 20:05Z; F3/F4 dispatched 20:30Z |
+| DEF-12 — **F1 ✅ F2 ✅ F3 ✅ F4 ✅ accepted; ONE GATE OUTSTANDING** | All four verified by me at `92f4c7a0`. F3's guard confirmed discriminating via a store-layer mutation (drop the id tiebreaker, cursor format left valid) — it fails with the right diagnostic. F4 accepted as *documented*, deliberately: a project guard needs a `GetMessage` lookup that would undo the cursor's stated resilience to message deletion and over-reject valid resumes (rule 29). **Outstanding: `gofmt -l` flags `pkg/messaging/backfill.go`** (struct alignment). Then rebase `--onto` after tranche A lands. | **em6** | gofmt flagged 20:45Z |
 | AC-12-6 (populated-DB exercise) | beta-hub exercise scheduling | **user** — deliberately deferred; pre-beta gate item | told em6 + integration2-operator 20:0xZ |
 | §2.6.4 phases 1-4 | implementation | **em9** | dispatched 19:45Z |
 | §2.6.4 phases 5-7 | phases 1-4 landing | **me** — queue | n/a |
@@ -1576,6 +1576,53 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5ap. 20:35-20:45Z — F3 fixed; my own suspicion was the thing that needed testing
+
+em6 fixed F3 at `92f4c7a0` and, notably, **verified it themselves rather than relaying a
+sub-agent's report** — the bar from 20:30Z took immediately.
+
+**I doubted their fix, and I was wrong, and how I found that out is the entry.** Their cmd-level
+test now fails on `fda9977f` with `resolving checkpoint message <base64>: not found`. That is the
+buggy code choking on the new input **format**, not on the same-timestamp **defect** — so on the
+face of it the test would stay green if someone reverted only the comparison semantics and kept
+the cursor format. A guard that dies for the wrong reason is the exact failure I had just finished
+lecturing them about, so I was primed to find it.
+
+**Priming is not evidence.** I built the discriminating mutation instead: on the *fixed* code, drop
+the id tiebreaker in the store (`message_store.go` -> `message.CreatedLT(cursorCreated)` alone),
+which reintroduces F2 precisely while leaving the cursor format entirely valid. Their test failed
+with `expected: 2, actual: 0 — cursor-based resume must process same-timestamp messages after
+cursor position`. **It catches the real defect.** My suspicion was unfounded and cost ten minutes,
+which is the correct price for not having asserted it.
+
+**Note the symmetry with §5ao.** There I doubted a *pass* and was right; here I doubted a *failure
+message* and was wrong. In both cases the resolution was the same move — construct the mutation
+that separates the two explanations — and in neither case could the artifact (a green run, an error
+string) have settled it by being read more carefully. **Reading a test result tells you what
+happened; only a mutation tells you what the test discriminates.**
+
+**A real finding fell out of the disproof.** Under that store-layer mutation `pkg/messaging`
+stayed **ok** — the service-level test did *not* die, because it runs against a fake store and can
+only see the `filter.After` form of the bug. So the two tests guard **different mutation sites and
+neither is redundant** — a fact invisible from either test's source. Flagged to em6 to comment
+both, because the next person tidying the suite will delete one believing the other covers it.
+**Non-redundancy that is only visible through mutation will be destroyed by ordinary maintenance.**
+
+**F4 accepted as documented — and checking the cost reversed my position.** I was ready to demand a
+real project-scope guard. Validating a cursor's project requires a `GetMessage` lookup, and
+`message_store.go:400` states the cursor is deliberately self-contained *and "resilient to message
+deletion."* A guard would reintroduce the round-trip **and over-reject any legitimate resume whose
+checkpoint message has since been deleted** — rule 29, where the cost of a wrong rejection is a
+stalled operator with no visible cause. Documentation is correct. I told them not to build it.
+
+**Outstanding: one gate.** `gofmt -l` flags `pkg/messaging/backfill.go` — inserting the
+`LastCheckpoint` comment split the struct's alignment group. Trivial to fix, but it is a real CI
+gate and each tranche is gated separately. `go vet` clean. Base OK on `14b3ba7c`, 12 files,
++1472/-60, and all 59 real deletions accounted for as the expected F2 removals.
+
+**Rebase pre-checked:** tranche A's `backfill.go` is byte-identical to DEF-12's base (both blob
+`3443bb28`), so the delta will rebase onto landed-A cleanly.
 
 ## 5ao. 20:20-20:30Z — DEF-12 F1/F2 fixed, and the guards for F2 guard nothing (F3)
 
