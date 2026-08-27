@@ -9825,3 +9825,63 @@ The question that decides severity: does `hub_id` need to be stable only across 
 near-zero impact on a tier that loses all state on redeploy anyway (§5) — or across **container
 restarts within one deployment**, which Cloud Run does freely, and which would make this an
 intermittent, confusing fault rather than an ephemeral-tier footnote.
+
+### 35.10 The backout branch exists — `scion/sn-backout` at `6f463309`
+
+`sn-backout-dev` reported complete at 17:03:45Z. I verified the branch on the remote rather than
+taking the report: head `6f463309`, parent chain landing directly on upstream main `98a9d9c2` with
+no merge, 9 files, **+1408 / −1709**.
+
+| file | Δ |
+|---|---|
+| `cmd/deploy_instance.go` | −828 (deleted) |
+| `cmd/deploy_instance_test.go` | −736 (deleted) |
+| `cmd/deploy_script_test.go` | +607 (new) |
+| `cmd/deploy_script_pin_test.go` | +210 (new) |
+| `scripts/single-node/deploy.sh` | +603 |
+| `docs-site/.../hub-setup-cloudrun.md` | −126 |
+| `cmd/root.go`, `cmd/cli_mode.go`, `scripts/single-node/README.md` | small |
+
+Seven commits, not the four I specified. The developer added commits after my mid-flight §5
+correction and **did not rebase to make the history match my brief**. That is the right call and I
+told it so. A tidy four-commit history that hides a correction is worth less than seven honest ones.
+
+**The one claim worth recording, because it is the one I most wanted:** the developer changed
+`services` to `instances` in `deploy.sh` and watched **4 of 5 pin tests go red**, then restored it
+and watched them pass. That is the difference between a pin and a decoration, and it is the check
+people skip. The reviewer will reproduce it independently — I asked for that in its brief before
+the developer reported, so it is not a reaction to this claim.
+
+**What I did NOT do:** I did not run `go build`, `go test`, `shellcheck`, `git grep ptone-misc`, or
+read the diff for correctness. Every one of those is on the reviewer's list. This is ptone's 16:36
+correction applied — *"stop doing work redundant to the code reviewer role. brief them. accept
+their results."* Verifying that the branch exists at the SHA I was told is dispatch hygiene, not
+review; the reviewer cannot start without it.
+
+Notified `sn-backout-review` at 17:05 with the fetch refspecs, the diffstat, and the developer's
+five claims **framed as claims to test, not facts to accept**. Priority order given: Gate 2 first
+and make it lie; then the live walk on `sn-backout-t` following the published page rather than the
+developer's report; then a stranger's read of the docs.
+
+Told the developer to **stay available and signal blocked, not complete** — it owns the branch, so
+it makes whatever the reviewer finds.
+
+**Three questions outstanding to the developer:**
+
+1. **Which 2 of 28 tests were dropped?** 26 were ported. The two survivors of the cut are unnamed.
+   It proposed dropping two earlier — `TestDeployEnvVarsRoundTrip` and
+   `TestDeployHostedModeEnvRequired` — and I rejected that, so I need to know whether these are the
+   same two coming back through a different door.
+2. **Task #74:** does `deploy.sh` print API response bodies on any error path? Report, do not fix.
+3. **The gcloud version** it wrote into the CLI tools table, and what it measured. My only honest
+   floor is *absent at 575.0.0, present at 582.0.0*; the first version that has
+   `gcloud beta run instances deploy` is **not established**. An invented minimum in a published
+   tutorial is worse than no minimum.
+
+Question 3 is the one I expect to have to soften. It came from the reviewer's stale SDK — a real
+finding that surfaced only because the reviewer reported an anomaly instead of working around it.
+
+**Process note:** my first message to the developer was **2075 characters against a 2000 cap** and
+`scion message` reported "delivered" anyway. I do not know whether it was truncated. I resent the
+asks compactly at 1081. `wc -c` before every send; the success message is not proof of delivery of
+the whole body.
