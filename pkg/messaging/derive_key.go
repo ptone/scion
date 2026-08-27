@@ -150,30 +150,38 @@ func ResolveOrCreateConversationByKey(
 	if cfg.topicLookup != nil && kind == "group" && strings.HasPrefix(extRef, "thread:") {
 		// Extract threadID from "thread:<projectID>:<threadID>"
 		parts := strings.SplitN(extRef, ":", 3)
-		if len(parts) == 3 {
-			threadID := parts[2]
-			convID, lookupErr := cfg.topicLookup.GetTopicConversationID(ctx, threadID)
-			if lookupErr == nil && convID != "" {
-				log.Debug("conversation resolved via topic lookup (sink-level)",
-					"external_ref", extRef, "conversation_id", convID)
-				return &ConversationResult{ConversationID: convID}
-			}
-			if lookupErr == nil && convID == "" {
-				// Topic exists but not yet backfilled — return nil (don't mint).
-				log.Debug("topic has no conversation_id, returning unresolved (non-fatal)",
-					"external_ref", extRef)
+		if len(parts) != 3 {
+			// Malformed thread: ref — refuse, don't fall through to mint.
+			// DeriveConversationKey always produces 3-part refs, but handler
+			// sites pass extRef directly, so the guarantee is convention, not
+			// type. Treating this as a refusal closes the shape that DEF-20
+			// was opened to fix.
+			log.Warn("malformed thread: ref, refusing to resolve (non-fatal)",
+				"external_ref", extRef, "parts", len(parts))
+			return nil
+		}
+		threadID := parts[2]
+		convID, lookupErr := cfg.topicLookup.GetTopicConversationID(ctx, threadID)
+		if lookupErr == nil && convID != "" {
+			log.Debug("conversation resolved via topic lookup (sink-level)",
+				"external_ref", extRef, "conversation_id", convID)
+			return &ConversationResult{ConversationID: convID}
+		}
+		if lookupErr == nil && convID == "" {
+			// Topic exists but not yet backfilled — return nil (don't mint).
+			log.Debug("topic has no conversation_id, returning unresolved (non-fatal)",
+				"external_ref", extRef)
+			return nil
+		}
+		if lookupErr != nil {
+			if errors.Is(lookupErr, store.ErrNotFound) {
+				// Not a native topic — fall through to upsert.
+				// This is the normal case for non-native surface threads.
+			} else {
+				// Infrastructure failure — return nil, don't mint.
+				log.Warn("topic lookup infrastructure error, returning unresolved (non-fatal)",
+					"external_ref", extRef, "error", lookupErr)
 				return nil
-			}
-			if lookupErr != nil {
-				if errors.Is(lookupErr, store.ErrNotFound) {
-					// Not a native topic — fall through to upsert.
-					// This is the normal case for non-native surface threads.
-				} else {
-					// Infrastructure failure — return nil, don't mint.
-					log.Warn("topic lookup infrastructure error, returning unresolved (non-fatal)",
-						"external_ref", extRef, "error", lookupErr)
-					return nil
-				}
 			}
 		}
 	}

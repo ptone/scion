@@ -376,6 +376,57 @@ func TestResolveOrCreateConversationByKey_SinkTopicLookup_NoConvID_ReturnsNil(t 
 	}
 }
 
+func TestResolveOrCreateConversationByKey_SinkTopicLookup_MalformedThreadRef_Refuses(t *testing.T) {
+	// F2: "thread:abc" (2 parts) has the thread: prefix but is malformed.
+	// Must refuse (return nil), not fall through to upsert.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{ID: "should-not-be-used"},
+	}
+	lookup := &mockTopicLookup{topics: map[string]string{}}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	pid := "proj"
+
+	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+		"thread:abc", "group", &pid, WithKeyTopicLookup(lookup))
+
+	if got != nil {
+		t.Errorf("expected nil for malformed thread: ref, got %+v", got)
+	}
+	if mock.lastConv != nil {
+		t.Error("UpsertConversationByExternalRef must NOT be called for malformed thread: ref")
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("malformed thread: ref")) {
+		t.Error("expected warning log for malformed thread: ref")
+	}
+}
+
+func TestResolveOrCreateConversationByKey_SinkTopicLookup_WellFormedRef_Resolves(t *testing.T) {
+	// Paired positive for F2: a well-formed 3-part thread:proj:topicID still
+	// resolves via topic lookup as before.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{ID: "should-not-be-used"},
+	}
+	lookup := &mockTopicLookup{
+		topics: map[string]string{"topicID": "conv-from-topic"},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	pid := "proj"
+
+	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+		"thread:proj:topicID", "group", &pid, WithKeyTopicLookup(lookup))
+
+	if got == nil {
+		t.Fatal("expected non-nil result from well-formed thread ref")
+	}
+	if got.ConversationID != "conv-from-topic" {
+		t.Errorf("ConversationID: got %q, want %q", got.ConversationID, "conv-from-topic")
+	}
+	if mock.lastConv != nil {
+		t.Error("UpsertConversationByExternalRef must NOT be called when topic lookup succeeds")
+	}
+}
+
 func TestResolveOrCreateConversationByKey_SinkTopicLookup_SkipsNonGroupKind(t *testing.T) {
 	// Topic lookup should only intercept kind=="group" with "thread:" prefix.
 	// For "direct" kind, it should fall through to upsert even with a lookup.

@@ -1,8 +1,36 @@
 #!/usr/bin/env bash
-# Guard: UpsertConversationByExternalRef must only be called from pkg/messaging/
-# and pkg/store/ (including pkg/store/entadapter/). Any direct call from handler
-# code or other packages is a layering violation — route through the messaging
-# package's resolution helpers instead.
+# Guard: no conversation row may be minted outside the messaging layer
+# (pkg/messaging/) and the store layer (pkg/store/).
+#
+# The property this guard enforces is: "no conversation is minted outside the
+# messaging layer." It is NOT a function-name check — it is an enumeration of
+# every code path that can INSERT a row into the conversations table.
+#
+# Conversation-minting surface (enumerated 2026-08-27):
+#
+#   Go method calls (must only appear in pkg/messaging/ and pkg/store/):
+#     1. UpsertConversationByExternalRef — the primary resolve-or-create path
+#     2. CreateConversation             — direct INSERT (no production callers
+#                                         today, but the method is public)
+#
+#   Ent builder (must only appear in pkg/store/):
+#     3. .Conversation.Create()         — raw ent builder; only used inside
+#                                         pkg/store/entadapter/conversation_store.go
+#
+#   Raw SQL INSERT INTO conversations (must only appear in pkg/store/ or in the
+#   webchat store's atomic dual-write paths):
+#     4. INSERT INTO conversations      — used by CreateTopic, EnsureGeneralTopic,
+#                                         backfillTopicConversations, PromoteDM
+#                                         in pkg/hub/webchannel_store*.go. These
+#                                         are the §2.6.4 dual-write mechanism and
+#                                         are explicitly allowed.
+#
+# Test files (*_test.go) are excluded: test fixtures legitimately call store
+# methods to set up state. The guard protects production code paths.
+#
+# Enumeration method: grep -rn for each pattern across all .go files, then
+# subtract the allowed packages. If a new minting surface is added to the
+# store interface, it must be added to this guard.
 #
 # EXIT CODES
 #   0  no violations found
@@ -14,9 +42,12 @@ cd "$(dirname "$0")/.."
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
-# Find all non-test .go files that call UpsertConversationByExternalRef,
-# excluding the packages that own the method.
-grep -rn 'UpsertConversationByExternalRef' \
+rc=0
+
+# --- Check 1: Go method calls that mint conversations ---
+# UpsertConversationByExternalRef and CreateConversation must only be called
+# from pkg/messaging/ and pkg/store/.
+grep -rn 'UpsertConversationByExternalRef\|\.CreateConversation(' \
   --include='*.go' \
   --exclude='*_test.go' \
   . \
@@ -26,12 +57,61 @@ grep -rn 'UpsertConversationByExternalRef' \
   >"$tmp" || true
 
 if [[ -s "$tmp" ]]; then
-  echo "UpsertConversationByExternalRef called outside pkg/messaging/ and pkg/store/:" >&2
+  echo "Conversation-minting method called outside pkg/messaging/ and pkg/store/:" >&2
   cat "$tmp" >&2
   echo >&2
-  echo "Direct calls to UpsertConversationByExternalRef are not allowed outside" >&2
-  echo "pkg/messaging/ and pkg/store/. Use the messaging package's conversation" >&2
-  echo "resolution helpers (ResolveOrCreateConversationByKey, etc.) instead." >&2
+  echo "Direct calls to UpsertConversationByExternalRef and CreateConversation" >&2
+  echo "are not allowed outside pkg/messaging/ and pkg/store/. Use the messaging" >&2
+  echo "package's resolution helpers (ResolveOrCreateConversationByKey, etc.)." >&2
+  rc=1
+fi
+
+# --- Check 2: Ent builder conversation creation ---
+# .Conversation.Create() and .Conversation.CreateBulk() must only appear
+# inside pkg/store/ (where the ent adapter lives). pkg/ent/ is excluded
+# because it contains auto-generated code from the ent framework.
+: >"$tmp"
+grep -rn '\.Conversation\.Create\b\|\.Conversation\.CreateBulk\b' \
+  --include='*.go' \
+  --exclude='*_test.go' \
+  . \
+  | grep -v '^./pkg/store/' \
+  | grep -v '^./pkg/ent/' \
+  | grep -v '^./vendor/' \
+  >"$tmp" || true
+
+if [[ -s "$tmp" ]]; then
+  echo "Ent conversation builder used outside pkg/store/:" >&2
+  cat "$tmp" >&2
+  echo >&2
+  echo ".Conversation.Create() must only be used inside pkg/store/entadapter/." >&2
+  rc=1
+fi
+
+# --- Check 3: Raw SQL INSERT INTO conversations ---
+# Allowed in pkg/store/ and in pkg/hub/webchannel_store*.go (the §2.6.4
+# atomic dual-write paths: CreateTopic, EnsureGeneralTopic,
+# backfillTopicConversations, PromoteDM).
+: >"$tmp"
+grep -rn 'INSERT INTO conversations\|INSERT INTO "conversations"' \
+  --include='*.go' \
+  --exclude='*_test.go' \
+  . \
+  | grep -v '^./pkg/store/' \
+  | grep -v '^./pkg/hub/webchannel_store' \
+  | grep -v '^./vendor/' \
+  >"$tmp" || true
+
+if [[ -s "$tmp" ]]; then
+  echo "Raw SQL INSERT INTO conversations outside allowed packages:" >&2
+  cat "$tmp" >&2
+  echo >&2
+  echo "Raw SQL conversation inserts are only allowed in pkg/store/ and" >&2
+  echo "pkg/hub/webchannel_store*.go (§2.6.4 dual-write paths)." >&2
+  rc=1
+fi
+
+if [[ "$rc" -ne 0 ]]; then
   exit 1
 fi
 

@@ -149,12 +149,13 @@ func ResolveDMConversationForRead(
 // conversation and validated for canonicality by DeriveConversationKey. A
 // non-canonical dm: key is refused — never silently resolved.
 //
-// When a TopicConversationLookup is provided and the threadID resolves to a
-// webchat topic with a linked conversation_id, that conversation_id is returned
-// directly — no shadow row is minted. If the topic has no conversation_id (not
-// yet backfilled) or does not exist, the function returns nil for native topics
-// (non-fatal contract). Non-native surfaces (where the threadID is not a topic
-// UUID) fall through to the existing upsert path.
+// When a TopicConversationLookup is provided, it is forwarded to the shared
+// sink (ResolveOrCreateConversationByKey) via WithKeyTopicLookup. The sink
+// intercepts thread: group refs and resolves via the topic's linked
+// conversation_id. If the topic has no conversation_id (not yet backfilled),
+// the sink returns nil (don't mint). If the topic does not exist
+// (store.ErrNotFound), the sink falls through to upsert — this is the normal
+// path for non-native surfaces where the threadID is not a webchat topic UUID.
 //
 // On any error the function returns nil and logs the failure.
 // Callers MUST NOT treat a nil return as fatal (Phase 5 non-fatal contract).
