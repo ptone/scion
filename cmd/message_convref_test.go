@@ -16,7 +16,6 @@ package cmd
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -228,53 +227,51 @@ func TestSendMessageViaConversation_AgentRef(t *testing.T) {
 }
 
 // TestConvRef_ThreadRefGated verifies that #<thread> references are gated
-// at the CLI entry point and never reach sendMessageViaConversation.
-// The gate returns an error and zero messages are sent.
+// at the CLI entry point. The gate returns a non-zero exit with a clear
+// error, and zero messages are sent.
 func TestConvRef_ThreadRefGated(t *testing.T) {
-	// Verify ParseReference succeeds for the thread reference.
-	ref, err := messaging.ParseReference("#general")
-	require.NoError(t, err)
-	assert.Equal(t, messaging.RefThread, ref.Kind)
-
-	// The gate rejects RefThread with a clear error.
-	gateErr := fmt.Errorf("conversation reference %q is not yet supported in the CLI; use @<agent-name> to message an agent", ref.Raw)
-	assert.Contains(t, gateErr.Error(), "not yet supported")
-
-	// Verify that no messages would be sent (the gate prevents reaching
-	// sendMessageViaConversation). Set up a mock to confirm zero sends.
 	orig := saveMessageTestState()
 	defer orig.restore()
+	restore := resetMessageFlags()
+	defer restore()
 
+	// Stand up a mock so we can verify zero sends AFTER the invocation.
 	projectID := "proj-convref-thread-gated"
-	server, sent, _, _ := newConvRefMockHubServer(t, projectID)
+	server, sent, _, outbound := newConvRefMockHubServer(t, projectID)
 	defer server.Close()
 
-	// Zero sends — the gate prevents any message delivery.
-	assert.Len(t, *sent, 0, "thread reference must be gated; no messages should be sent")
+	// Execute the command path — the gate fires before any hub connection.
+	err := messageCmd.RunE(messageCmd, []string{"#general", "hello thread"})
+	require.Error(t, err, "thread reference must be rejected by the gate")
+	assert.Contains(t, err.Error(), "not yet supported")
+
+	// Zero sends — the gate prevented any message delivery.
+	assert.Len(t, *sent, 0, "no agent messages should be sent for gated ref")
+	assert.Len(t, *outbound, 0, "no outbound messages should be sent for gated ref")
 }
 
 // TestConvRef_ConvIDGated verifies that conv:<uuid> references are gated
-// at the CLI entry point and never reach sendMessageViaConversation.
+// at the CLI entry point. The gate returns a non-zero exit with a clear
+// error, and zero messages are sent.
 func TestConvRef_ConvIDGated(t *testing.T) {
-	// Verify ParseReference succeeds for the conv reference.
-	ref, err := messaging.ParseReference("conv:7f3a91c2-1234-5678-9abc-def012345678")
-	require.NoError(t, err)
-	assert.Equal(t, messaging.RefConversation, ref.Kind)
-
-	// The gate rejects RefConversation with a clear error.
-	gateErr := fmt.Errorf("conversation reference %q is not yet supported in the CLI; use @<agent-name> to message an agent", ref.Raw)
-	assert.Contains(t, gateErr.Error(), "not yet supported")
-
-	// Verify that no messages would be sent.
 	orig := saveMessageTestState()
 	defer orig.restore()
+	restore := resetMessageFlags()
+	defer restore()
 
+	// Stand up a mock so we can verify zero sends AFTER the invocation.
 	projectID := "proj-convref-convid-gated"
-	server, sent, _, _ := newConvRefMockHubServer(t, projectID)
+	server, sent, _, outbound := newConvRefMockHubServer(t, projectID)
 	defer server.Close()
 
-	// Zero sends — the gate prevents any message delivery.
-	assert.Len(t, *sent, 0, "conv: reference must be gated; no messages should be sent")
+	// Execute the command path — the gate fires before any hub connection.
+	err := messageCmd.RunE(messageCmd, []string{"conv:7f3a91c2-1234-5678-9abc-def012345678", "payload"})
+	require.Error(t, err, "conv: reference must be rejected by the gate")
+	assert.Contains(t, err.Error(), "not yet supported")
+
+	// Zero sends — the gate prevented any message delivery.
+	assert.Len(t, *sent, 0, "no agent messages should be sent for gated ref")
+	assert.Len(t, *outbound, 0, "no outbound messages should be sent for gated ref")
 }
 
 // TestSendMessageViaConversation_EmailRef_AgentContext verifies that @<email>
