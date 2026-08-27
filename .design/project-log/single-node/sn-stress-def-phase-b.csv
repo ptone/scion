@@ -1,0 +1,18 @@
+# sn-stress-def Phase B results (4 CPU / 8 GiB)
+# Workload: 100 MiB dd allocation + sha256sum /dev/zero CPU spin loop (matching sn-stress-max)
+# Instance: sn-stress-def, us-east4, ptone-experiments
+# Timestamp: 2026-08-27
+# Agent: sn-stress-def
+#
+# This is the PESSIMISTIC bound. sha256sum spin = 100% CPU per agent.
+# A real Claude agent is mostly blocked on model API, using far less CPU.
+# Phase A idle = OPTIMISTIC bound (17-18 agents). Reality is between.
+#
+N,timestamp,create_http,create_ms,agent_name,rss_mib,total_alive,total_dead,dead_names,notes
+1,07:49:05,201,1495,load-1,512,1,0,,clean start
+2,07:49:21,201,1264,load-2,531,2,0,,
+3,07:49:42,201,10960,load-3,520,3,0,,create time 11s - CPU contention starting
+4,07:50:18,201,14965,load-4,508,4,0,,create time 15s
+5,07:51:07,201,25962,load-5,504,5,0,,create time 26s - severe CPU starvation
+6,07:52:19,201,35613,load-6,519,6,0,,create time 36s - near-total CPU saturation
+7,07:53:56,503,67778,load-7,,,,,CREATE FAILED after 68s timeout then SIGTERM -> container restart -> total loss

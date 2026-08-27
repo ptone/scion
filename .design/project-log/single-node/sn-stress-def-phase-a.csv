@@ -1,0 +1,29 @@
+# sn-stress-def Phase A results (4 CPU / 8 GiB)
+# Idle agents: started, sitting at claude setup-token prompt, doing no work
+# Instance: sn-stress-def, us-east4, ptone-experiments
+# Timestamp: 2026-08-27
+# Agent: sn-stress-def
+#
+# This is the OPTIMISTIC bound. Idle agents = fixed overhead only.
+# Nobody runs idle agents. This isolates the per-agent constant.
+#
+N,timestamp,create_http,create_ms,agent_name,rss_mib,total_alive,total_dead,dead_names,notes
+1,06:58:09,201,~2000,idle-1,499,1,0,,
+2,06:58:44,201,~2000,idle-2,526,2,0,,
+3,06:59:01,201,~2000,idle-3,528,3,0,,
+4,06:59:20,201,~2000,idle-4,520,4,0,,
+5,06:59:44,201,~2000,idle-5,524,5,0,,
+6,07:00:10,201,~2000,idle-6,509,6,0,,
+7,07:00:33,201,~2000,idle-7,523,7,0,,
+8,07:00:56,201,~2000,idle-8,514,8,0,,
+9,07:01:21,201,~2000,idle-9,522,9,0,,
+10,07:01:56,201,~2000,idle-10,506,10,0,,idle-1 found dead here (died between 07:01:56 and 07:02:12)
+11,07:05:51,201,~2000,idle-11,514,10,1,idle-1,10 alive + 1 dead
+12,07:13:54,201,1946,idle-12,,11,1,idle-1,eviction hypothesis DISPROVED - idle-2 survived
+13,07:15:43,201,2022,idle-13,,12,1,idle-1,
+14,07:16:31,201,2634,idle-14,,13,1,idle-1,
+15,07:17:03,201,2172,idle-15,,14,1,idle-1,pre-registered prediction was 15
+16,07:17:48,201,3014,idle-16,,15,1,idle-1,
+17,07:18:38,201,2331,idle-17,,16,1,idle-1,
+18,07:19:31,201,2442,idle-18,,17,1,idle-1,17 concurrent alive
+19,07:20:15,201,3322,idle-19,,2,17,all except idle-18 and idle-19,SIGBUS (signal 7) at 07:20:22 -> TOTAL LOSS

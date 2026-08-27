@@ -7796,3 +7796,70 @@ mine only to put in front of him.**
 Held `sn-findings-dev` available rather than releasing it. Phase B will very likely
 produce one or two more filings, and it now carries the qualification rules and all
 nine collisions in context; a fresh agent would relearn them.
+
+## 08:00 — BOTH PHASE B LADDERS COMPLETE. Task #63 answered.
+
+**THE BRACKET, both sizes, same workload (claude harness + 100 MiB alloc +
+sha256sum spin):**
+
+| size | Phase A (idle) | Phase B (loaded) | ratio |
+|---|---|---|---|
+| 4 CPU / 8 GiB (**default**) | 17 | **6** | 2.8x |
+| 8 CPU / 32 GiB (**maximum**) | 51 | **15** | 3.4x |
+
+**Working agents cost about 3x idle agents, at BOTH sizes.** That ratio is the most
+portable thing the test produced, and it needed both instances to establish.
+
+**THE TWO AGENTS REACHED OPPOSITE CONCLUSIONS AND BOTH ARGUMENTS WERE INVALID.**
+
+- `max`: *"CPU IS NOT THE BINDING CONSTRAINT"* — 15 spin loops on 8 cores, so if CPU
+  bound the ceiling would be ~8. **Flaw:** CPU oversubscription does not kill
+  anything, it makes things slow. A ceiling above core count does not exclude CPU.
+- `def`: *"CPU IS THE BINDING CONSTRAINT"* — 6 × 515 MiB = 3.1 GiB, well inside
+  8 GiB, so not memory. **Flaw:** it used summed RSS, the instrument we had already
+  agreed is uncalibrated, to exclude a hypothesis. A discredited measure cannot
+  exclude anything.
+
+**We do not know what binds, and cannot until a memory instrument exists**
+(`ptone/scion#1304`). I let neither claim stand. Two confident opposite conclusions
+from the same data is the strongest argument yet for running two sizes.
+
+**THE FINDING I NEARLY LET BOTH OF THEM BURY.** `def` listed it fifth under
+"surprises". Phase B create times:
+
+```
+1.5s  1.3s  11s  15s  26s  36s  ->  HTTP 503 at 68s  ->  total loss
+```
+
+**A 24x latency ramp over four rungs, and `max` crashed with the same 68-second
+create and the same 503.** Two sizes, one signature.
+
+**So create latency IS the missing instrument, and it needs no new code.** We had
+been publishing "there is no warning before the crash". Under load that is false.
+Under **idle** it is true — `def`'s Phase A creates were flat at ~2000ms to N=18,
+then SIGBUS with no ramp. **The warning exists exactly when the load is realistic**,
+which is the case operators are actually in. Earlier I told docs "DO NOT DESCRIBE A
+SINGLE FAILURE SIGNATURE" — correct for idle, wrong for loaded.
+
+**Docs corrected and verified (`1d813d9`):** the claim is now split by load, names
+the ramp, and keeps "last signal is a success message" scoped to the idle case.
+Caught one residual overstatement — "*typically* returns a 503" from two
+observations — and sent the fix.
+
+**SIZING DECISION MADE (mine, not a measurement):** publish **6** and **15**, the
+working-agent figures. Reasoning given to docs for the reader: **running fewer
+agents than you could costs only capacity; running more destroys every workspace
+unrecoverably.** The errors are not symmetric, so the guidance is deliberately
+conservative. No per-CPU or per-GiB formula — the ceiling is linear in neither.
+
+**Both instances torn down.** All data on the shared volume. `def` completed;
+`max` authorised to tear down.
+
+**Sent ptone the consolidated answer in STE**, as promised: the numbers, the
+warning signal, what we do not know, and that 8 items await his decision, to be
+raised one at a time.
+
+**Unexplained, and cheap to check: `def` lost `idle-1` and `max` lost `w-1`** —
+different instances, sizes and phases, both losing the FIRST agent created. Twice
+is a coincidence, but I asked `def` to look before it tore down. It had already
+completed, so this stays open.
