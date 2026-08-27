@@ -12235,3 +12235,92 @@ project has been burned by precisely that class of claim.
 adding a new behaviour change restarts a clock ptone is waiting on. It is also a genuinely different
 defect — how the request is *built*, not where it is *sent* or how the response is *printed*. Sequence
 it after the merge, when it conflicts trivially.
+
+## §35.48 — r3: REQUEST CHANGES, no Critical, live deploy PASSED. Round 4 dispatched. (23:52)
+
+Report `reviews/adc-preflight-r3.md`; round-4 brief `briefs/sn-adcpreflight-dev-r4.md`.
+
+### What is now proven
+
+- **Live deploy passed end to end** on `c49a4c2d5`: real Instance `sn-r3-rev`, exit 0, `iapEnabled:
+  true` and `invokerIamDisabled: true` read back over REST, unauthenticated fetch → HTTP/2 302 to
+  `accounts.google.com` with `x-goog-iap-generated-response`. **Instance deleted; the nine baseline
+  names untouched.**
+- **#79's old-SDK diagnostic still fires first** — verified on a *genuine* gcloud 575.0.0 before the
+  reviewer upgraded its container, no overrides set, seam block silent. That was my stated worry about
+  moving the entry sequence above `di_check_gcloud_instances`, and it is clean.
+- **Force-push lost nothing**: six matching subjects, six identical patch-ids, tree diff limited to
+  `#1329`'s `pkg/hub` files plus one project-log file.
+- **All eleven mutations reproduced and re-read from the failure text, not the exit code** — the rule I
+  set this evening, applied. All eleven red for the property they name.
+
+### Required 2 is the finding of the round, and it is mine
+
+```
+_DI_API_BASE='https://us-east4-run.googleapis.com/v2/projects/victim/locations/us-east4/instances/victim?updateMask=iapEnabled&z='
+validator: ALLOW   (the host really is us-east4-run.googleapis.com)
+```
+
+The step 3b PATCH goes to **another project's Instance**, with the operator's live ADC token and a
+valid `updateMask`, and **the operator's own Instance is silently left with IAP off.** The trailing
+`&z=` swallows the appended path into the query string.
+
+**My "harmless because the only permitted non-Google hosts are loopback" is wrong.** It is reasoning
+about *hosts*; the attack uses a fully permitted host and abuses the *path*. The conclusion survives —
+it still needs environment control — but **the reason does not, and the reason is what gets carried
+into the next decision.**
+
+**The developer had already handed me "host allowlist, not URL allowlist" and I filed it as a comment
+fix.** It was a one-line security guard. **That is twice tonight I have taken a correct observation and
+drawn too small a boundary from it** — the first being the `?`/`#` bypass, where I named the exact risk
+in a brief and then accepted the condition as met without testing it.
+
+### Required 1: the validator and curl disagree on eleven inputs, and nothing leaks
+
+Space, TAB, LF, CR, `%2f`, `%23`, `%3f`, `;`, `,`, a non-numeric port, double-`@`. The validator returns
+0 — *asserting "host permitted"* — for strings that are not hosts. **curl refuses every one**: exit 3,
+`code=000`, no connection. The reviewer could not build an exfiltration from any row and said so.
+
+**Taken anyway, and the reason is the important part.** The safety is supplied by *curl's parser*, not
+by the check — and the check is what three documents say enforces this. **A rule that is correct only
+because a downstream component rescues it is not a rule; it is a coincidence with good manners.** curl's
+URL parsing has changed before.
+
+### The decision the reviewer put to me, and my answer
+
+It closed by offering the honest alternative: ship on not-exploitable-today, hand ptone the hardening as
+a follow-up, *"that is defensible and it is your call."* **Declined.**
+
+1. *"Harmless because an actor with environment control has already won"* is **the exact argument round
+   1 used to bless the unrestricted seam, and we overturned it once tonight already.** I will not spend
+   it a second time to avoid a one-line fix.
+2. **In round 2 and round 3 the check failed to enforce the property, and in round 2 that was
+   exploitable.** What changed between them is not the rule getting better — it is that curl refused to
+   parse the input. The reviewer wrote the same sentence about two different holes and the first time it
+   was load-bearing.
+
+### Also taken
+
+- **R3** — the new docs block claims the script *"detects this mismatch and warns"* while **the same
+  diff makes it skip the comparison for every service-account ADC.** The delta introduces both the
+  claim and the thing that falsifies it; the live run printed the skip message.
+- **R4, the Optional** — `TestScriptSeamsAreReadInExactlyOnePlace` is a grep. Indirection, `printenv`,
+  `env | grep`, a computed name and `[[ -v VAR ]]` all walk past it; plain `$VAR`/`${VAR}` die under
+  `set -u`, so those two cannot ship unnoticed. It also false-positives on a comment — **and line 79 of
+  my own brief contains the breaking string verbatim**, which is the neatest possible demonstration.
+  **A pin that fails on unrelated edits gets deleted by the next person**, which is the failure mode
+  that costs most. The replacement additionally goes red if the validation *call* is deleted, which the
+  current one cannot see.
+- **R5, the FYI** — `Contains(stderr, "evil.example")` passes under m8 because the connection-failure
+  message echoes the URL. Two of four assertions carry no signal. **An assertion that cannot fail is
+  worse than none, because it inflates the count.**
+
+### Corrections to my brief, both accepted
+
+1. §6 claimed `41/0/0` and then predicted the skip in the next paragraph. **Those two halves contradict
+   each other.** Real figure on gcloud 582: **40 pass / 0 fail / 1 skip.**
+2. Line 79 — see R4 above.
+
+**Round 4 is five lines and one sentence.** The reviewer applied all three Required to the real script,
+ran the full suite, shellcheck and 36 measured inputs with zero regressions, then reverted and
+committed nothing. Correct behaviour, and it means the fixes are known-good before the developer starts.
