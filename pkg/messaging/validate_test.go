@@ -89,6 +89,18 @@ func TestValidateMessage_ValidEventMessage(t *testing.T) {
 	}
 }
 
+func TestValidateMessage_MissingID(t *testing.T) {
+	msg := validTextMessage()
+	msg.ID = ""
+	err := ValidateMessage(msg)
+	if err == nil {
+		t.Fatal("expected error for missing id")
+	}
+	if !strings.Contains(err.Error(), "id") {
+		t.Fatalf("error should mention id, got: %v", err)
+	}
+}
+
 func TestValidateMessage_MissingConversationID(t *testing.T) {
 	msg := validTextMessage()
 	msg.ConversationID = ""
@@ -469,8 +481,9 @@ func TestValidateCrossProjectAddressees_SpanningProjects(t *testing.T) {
 	if !strings.Contains(err.Error(), "multiple projects") {
 		t.Fatalf("error should mention multiple projects, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "project-a") || !strings.Contains(err.Error(), "project-b") {
-		t.Fatalf("error should name both projects, got: %v", err)
+	// Project IDs must NOT be disclosed in the error (security audit M3).
+	if strings.Contains(err.Error(), "project-a") || strings.Contains(err.Error(), "project-b") {
+		t.Fatalf("error must not disclose project IDs, got: %v", err)
 	}
 }
 
@@ -508,6 +521,58 @@ func TestValidateCrossProjectAddressees_NoAgents(t *testing.T) {
 	}
 	if err := ValidateCrossProjectAddressees(context.Background(), s, addrs); err != nil {
 		t.Fatalf("no agent addressees should pass: %v", err)
+	}
+}
+
+// ---------- ValidateMessageAddressees tests ----------
+
+func TestValidateMessageAddressees_Valid(t *testing.T) {
+	s := &mockAgentStore{agents: map[string]*store.Agent{
+		"agent-1": {ID: "agent-1", ProjectID: "project-a"},
+	}}
+	msg := validTextMessage()
+	addrs := []Addressee{
+		{
+			MessageID:     msg.ID,
+			PrincipalKind: "agent",
+			PrincipalID:   "agent-1",
+			Via:           ViaExplicit,
+			DeliveryState: DeliveryPending,
+		},
+	}
+	if err := ValidateMessageAddressees(context.Background(), s, msg, addrs); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateMessageAddressees_CrossProjectRejected(t *testing.T) {
+	s := &mockAgentStore{agents: map[string]*store.Agent{
+		"agent-1": {ID: "agent-1", ProjectID: "project-a"},
+		"agent-2": {ID: "agent-2", ProjectID: "project-b"},
+	}}
+	msg := validTextMessage()
+	addrs := []Addressee{
+		{
+			MessageID:     msg.ID,
+			PrincipalKind: "agent",
+			PrincipalID:   "agent-1",
+			Via:           ViaExplicit,
+			DeliveryState: DeliveryPending,
+		},
+		{
+			MessageID:     msg.ID,
+			PrincipalKind: "agent",
+			PrincipalID:   "agent-2",
+			Via:           ViaBodyMention,
+			DeliveryState: DeliveryPending,
+		},
+	}
+	err := ValidateMessageAddressees(context.Background(), s, msg, addrs)
+	if err == nil {
+		t.Fatal("expected error for cross-project addressees")
+	}
+	if !strings.Contains(err.Error(), "multiple projects") {
+		t.Fatalf("error should mention multiple projects, got: %v", err)
 	}
 }
 

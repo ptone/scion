@@ -17,6 +17,7 @@ package messaging
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -193,9 +194,21 @@ func MapLegacyEnvelope(old *messages.StructuredMessage) (*Message, []Addressee, 
 }
 
 // buildPrincipalRef constructs a PrincipalRef from old sender/senderID fields.
+// The old format has name (e.g. "user:alice", "agent:builder") and id (a raw
+// UUID or a prefixed ref). When id is a raw identifier without a colon, the
+// kind prefix is derived from name so the result is a valid PrincipalRef.
 func buildPrincipalRef(name, id string) PrincipalRef {
 	if id != "" {
-		return PrincipalRef(id)
+		// If id is already a valid PrincipalRef (contains colon), use directly.
+		if strings.Contains(id, ":") {
+			return PrincipalRef(id)
+		}
+		// id is a raw identifier (e.g. UUID) — derive kind from name.
+		if idx := strings.IndexByte(name, ':'); idx > 0 {
+			return PrincipalRef(name[:idx] + ":" + id)
+		}
+		// No kind derivable from name — default to system.
+		return PrincipalRef("system:" + id)
 	}
 	// Heuristic: if name already has a colon prefix, use it directly.
 	if idx := len(name); idx > 0 {

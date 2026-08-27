@@ -15,6 +15,7 @@
 package messaging
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -154,6 +155,67 @@ func TestValidateLegacyMessage_BroadcastWithoutRecipient(t *testing.T) {
 	msg.Broadcasted = true
 	if err := ValidateLegacyMessage(msg); err != nil {
 		t.Fatalf("broadcast message without recipient should be valid: %v", err)
+	}
+}
+
+func TestValidateLegacyMessage_ChannelInvalidCharacters(t *testing.T) {
+	msg := validLegacyMessage()
+	msg.Channel = "my channel!" // contains space and exclamation mark
+	err := ValidateLegacyMessage(msg)
+	if err == nil {
+		t.Fatal("expected error for channel with invalid characters")
+	}
+	if !strings.Contains(err.Error(), "invalid characters") {
+		t.Fatalf("error should mention invalid characters, got: %v", err)
+	}
+}
+
+func TestValidateLegacyMessage_ChannelValidCharacters(t *testing.T) {
+	msg := validLegacyMessage()
+	msg.Channel = "my-channel-123"
+	if err := ValidateLegacyMessage(msg); err != nil {
+		t.Fatalf("valid channel should pass: %v", err)
+	}
+}
+
+func TestValidateLegacyMessage_TooManyMetadataEntries(t *testing.T) {
+	msg := validLegacyMessage()
+	msg.Metadata = make(map[string]string)
+	for i := 0; i < messages.MaxMetadataEntries+1; i++ {
+		msg.Metadata[fmt.Sprintf("key-%d", i)] = "value"
+	}
+	err := ValidateLegacyMessage(msg)
+	if err == nil {
+		t.Fatal("expected error for too many metadata entries")
+	}
+	if !strings.Contains(err.Error(), "metadata entries") {
+		t.Fatalf("error should mention metadata entries, got: %v", err)
+	}
+}
+
+func TestValidateLegacyMessage_MetadataKeyTooLong(t *testing.T) {
+	msg := validLegacyMessage()
+	longKey := strings.Repeat("k", messages.MaxMetadataKeySize+1)
+	msg.Metadata = map[string]string{longKey: "value"}
+	err := ValidateLegacyMessage(msg)
+	if err == nil {
+		t.Fatal("expected error for metadata key exceeding max size")
+	}
+	if !strings.Contains(err.Error(), "metadata key") {
+		t.Fatalf("error should mention metadata key, got: %v", err)
+	}
+}
+
+func TestValidateLegacyMessage_MetadataValueTooLong(t *testing.T) {
+	msg := validLegacyMessage()
+	longValue := strings.Repeat("v", messages.MaxMetadataValueSize+1)
+	msg.Metadata = map[string]string{"key": longValue}
+	err := ValidateLegacyMessage(msg)
+	if err == nil {
+		t.Fatal("expected error for metadata value exceeding max size")
+	}
+	if !strings.Contains(err.Error(), "metadata value") {
+		t.Fatalf("error should mention metadata value, got: %v", err)
 	}
 }
 

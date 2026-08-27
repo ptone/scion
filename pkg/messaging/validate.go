@@ -17,7 +17,6 @@ package messaging
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -30,50 +29,24 @@ type AgentProjectLookup interface {
 }
 
 // ValidateMessage checks that a Message is internally consistent.
+// It delegates to msg.Validate() for structural checks (ID, From, Kind,
+// Visibility, kind/intent/event mutual-exclusivity), then adds domain-level
+// checks that only the standalone validator knows about.
 // Every rule has a corresponding test that fails when the rule is removed.
 func ValidateMessage(msg *Message) error {
 	if msg == nil {
 		return fmt.Errorf("message must not be nil")
 	}
+	// Delegate structural checks to the type's own Validate.
+	if err := msg.Validate(); err != nil {
+		return err
+	}
+	// Domain-level checks not on the type itself:
 	// 1. ConversationID is required.
 	if msg.ConversationID == "" {
 		return fmt.Errorf("conversation_id is required")
 	}
-	// 2. From is required and well-formed.
-	if msg.From == "" {
-		return fmt.Errorf("from is required")
-	}
-	if err := ValidatePrincipalRef(msg.From); err != nil {
-		return fmt.Errorf("invalid from: %w", err)
-	}
-	// 3. Kind must be valid.
-	if err := ValidateMessageKind(msg.Kind); err != nil {
-		return err
-	}
-	// 4–6. Kind / intent / event mutual-exclusivity.
-	switch msg.Kind {
-	case KindText:
-		if msg.Intent == nil {
-			return fmt.Errorf("text message must have intent set")
-		}
-		if err := ValidateTextIntent(*msg.Intent); err != nil {
-			return err
-		}
-		if msg.Event != nil {
-			return fmt.Errorf("text message must not have event body")
-		}
-	case KindEvent:
-		if msg.Event == nil {
-			return fmt.Errorf("event message must have event body set")
-		}
-		if err := msg.Event.Validate(); err != nil {
-			return fmt.Errorf("invalid event body: %w", err)
-		}
-		if msg.Intent != nil {
-			return fmt.Errorf("event message must not have intent")
-		}
-	}
-	// 7. Body size limits (reuse constants from messages package).
+	// 2. Body size limits (reuse constants from messages package).
 	if len([]rune(msg.Body)) > messages.MaxMessageLength {
 		return fmt.Errorf("body exceeds %d character limit (current: %d chars)",
 			messages.MaxMessageLength, len([]rune(msg.Body)))
@@ -81,16 +54,12 @@ func ValidateMessage(msg *Message) error {
 	if len(msg.Body) > messages.MaxMsgSize {
 		return fmt.Errorf("body exceeds maximum size of %d bytes", messages.MaxMsgSize)
 	}
-	// 8. Attachment count limit.
+	// 3. Attachment count limit.
 	if len(msg.Attachments) > messages.MaxAttachments {
 		return fmt.Errorf("too many attachments: %d (max %d)",
 			len(msg.Attachments), messages.MaxAttachments)
 	}
-	// 9. Visibility is valid if set.
-	if err := ValidateVisibility(msg.Visibility); err != nil {
-		return err
-	}
-	// 10. ReplyToID, if present, must not be empty string.
+	// 4. ReplyToID, if present, must not be empty string.
 	if msg.ReplyToID != nil && *msg.ReplyToID == "" {
 		return fmt.Errorf("reply_to_id must not be empty when set")
 	}
@@ -155,15 +124,27 @@ func ValidateCrossProjectAddressees(
 		}
 		if agent.ProjectID != projectID {
 			projectAgents = append(projectAgents, a.PrincipalID)
-			// Collect the conflicting projects.
-			projects := []string{projectID, agent.ProjectID}
 			return fmt.Errorf(
-				"message addresses agents in multiple projects (%s); "+
+				"message addresses agents in multiple projects; " +
 					"a single message may only target agents within one project",
-				strings.Join(projects, ", "),
 			)
 		}
 		projectAgents = append(projectAgents, a.PrincipalID)
 	}
 	return nil
+}
+
+// ValidateMessageAddressees performs the full addressee validation including
+// the cross-project check (AC-33). Callers that have a store and addressees
+// should call this after ValidateMessage/ValidateLegacyMessage.
+func ValidateMessageAddressees(
+	ctx context.Context,
+	agentStore AgentProjectLookup,
+	msg *Message,
+	addrs []Addressee,
+) error {
+	if err := ValidateAddressees(addrs, msg); err != nil {
+		return err
+	}
+	return ValidateCrossProjectAddressees(ctx, agentStore, addrs)
 }

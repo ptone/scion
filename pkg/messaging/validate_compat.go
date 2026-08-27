@@ -48,6 +48,25 @@ func ValidateLegacyMessage(msg *messages.StructuredMessage) error {
 		if len(msg.Channel) > messages.MaxChannelLength {
 			return fmt.Errorf("channel exceeds maximum length of %d characters", messages.MaxChannelLength)
 		}
+		if !messages.IsValidChannel(msg.Channel) {
+			return fmt.Errorf("channel %q contains invalid characters", msg.Channel)
+		}
+	}
+
+	// Metadata limits (from old Validate).
+	if len(msg.Metadata) > messages.MaxMetadataEntries {
+		return fmt.Errorf("too many metadata entries: %d (max %d)",
+			len(msg.Metadata), messages.MaxMetadataEntries)
+	}
+	for k, v := range msg.Metadata {
+		if len(k) > messages.MaxMetadataKeySize {
+			return fmt.Errorf("metadata key exceeds maximum size of %d bytes",
+				messages.MaxMetadataKeySize)
+		}
+		if len(v) > messages.MaxMetadataValueSize {
+			return fmt.Errorf("metadata value for key %q exceeds maximum size of %d bytes",
+				k, messages.MaxMetadataValueSize)
+		}
 	}
 
 	// Body must not be empty (legacy rule).

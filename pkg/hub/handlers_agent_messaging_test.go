@@ -181,18 +181,10 @@ func TestOutboundMessage_UnknownTypeIsChargedAsAgentTraffic(t *testing.T) {
 	srv.chatSendLimiter = newChatSendLimiterWithClock(clock.Now)
 
 	rr := postOutboundTyped(t, srv, project.ID, agent.ID, "mislabelled", "not-a-real-type")
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected an unknown message type to be accepted as before, got %d: %s", rr.Code, rr.Body.String())
-	}
-
-	// It cost a token from the agent's aggregate allowance, not from the
-	// cheaper mirror reservation.
-	if got := srv.chatSendLimiter.buckets["agent:"+agent.ID].tokens; got != chatSendAgentRatePerMinute-1 {
-		t.Errorf("agent bucket = %v tokens, want %v: the send must be charged to the agent aggregate",
-			got, chatSendAgentRatePerMinute-1)
-	}
-	if _, ok := srv.chatSendLimiter.buckets["agent-mirror:"+agent.ID]; ok {
-		t.Error("an unknown type must not be classified as transcript-mirror traffic")
+	// After the S3 validation audit (M2), outbound messages go through
+	// ValidateLegacyMessage which rejects unknown message types.
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected unknown message type to be rejected with 400, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 

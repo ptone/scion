@@ -274,6 +274,13 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Visibility:  req.Visibility,
 		Metadata:    req.Metadata,
 	}
+	// Validate the assembled message through the legacy envelope choke point
+	// (Audit M2: outbound messages must not bypass validation).
+	if err := messaging.ValidateLegacyMessage(structuredMsg); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+
 	// Propagate recipients and group_id from metadata for group-set messages.
 	if req.Metadata != nil {
 		if r, ok := req.Metadata["recipients"]; ok {
@@ -590,6 +597,33 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Cap mentions to avoid oversized responses and wasted server resources (R1).
 	if len(req.Mentions) > messages.MaxMentionRecipients {
 		req.Mentions = req.Mentions[:messages.MaxMentionRecipients]
+	}
+
+	// AC-33: Cross-project mention check. Verify that all mentioned agents
+	// belong to the same project as the primary recipient before any dispatch.
+	if len(req.Mentions) > 0 {
+		primaryAgent, agentErr := s.store.GetAgent(ctx, id)
+		if agentErr == nil {
+			mentionAddrs := make([]messaging.Addressee, 0, len(req.Mentions)+1)
+			// Include the primary recipient agent.
+			mentionAddrs = append(mentionAddrs, messaging.Addressee{
+				PrincipalKind: "agent",
+				PrincipalID:   primaryAgent.ID,
+			})
+			// Resolve mention slugs to agent IDs for the cross-project check.
+			for _, slug := range req.Mentions {
+				if mentionAgent, lookupErr := s.store.GetAgentBySlug(ctx, primaryAgent.ProjectID, slug); lookupErr == nil {
+					mentionAddrs = append(mentionAddrs, messaging.Addressee{
+						PrincipalKind: "agent",
+						PrincipalID:   mentionAgent.ID,
+					})
+				}
+			}
+			if crossErr := messaging.ValidateCrossProjectAddressees(ctx, s.store, mentionAddrs); crossErr != nil {
+				ValidationError(w, crossErr.Error(), nil)
+				return
+			}
+		}
 	}
 
 	// Detect group[] recipient for multi-target fan-out.
@@ -1228,6 +1262,13 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 			req.StructuredMessage.SenderID = agentIdent.ID()
 			req.StructuredMessage.Sender = "agent:" + agentIdent.ID()
 		}
+	}
+
+	// Validate the assembled message through the legacy envelope choke point
+	// (Audit M2: broadcast messages must not bypass validation).
+	if err := messaging.ValidateLegacyMessage(req.StructuredMessage); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
 	}
 
 	// Compute broadcast targeting: list all agents, classify by phase.

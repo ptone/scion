@@ -896,6 +896,39 @@ func TestRoundTrip_NewToOldToNew(t *testing.T) {
 	}
 }
 
+// ---------- buildPrincipalRef ----------
+
+func TestBuildPrincipalRef_RawUUIDWithPrefixedName(t *testing.T) {
+	// When SenderID is a raw UUID (no colon), the kind should be derived
+	// from the Sender name field.
+	ref := buildPrincipalRef("user:alice", "be67fbc9-c869-5d43-b15d-c28ca3e8d355")
+	if ref != "user:be67fbc9-c869-5d43-b15d-c28ca3e8d355" {
+		t.Fatalf("expected user-prefixed ref, got %q", ref)
+	}
+	// Must pass PrincipalRef validation.
+	if err := ValidatePrincipalRef(ref); err != nil {
+		t.Fatalf("expected valid PrincipalRef, got error: %v", err)
+	}
+}
+
+func TestBuildPrincipalRef_PrefixedID(t *testing.T) {
+	// When SenderID already has a colon, use it directly.
+	ref := buildPrincipalRef("user:alice", "user:alice-uuid")
+	if ref != "user:alice-uuid" {
+		t.Fatalf("expected prefixed id used directly, got %q", ref)
+	}
+}
+
+func TestBuildPrincipalRef_AgentKindDerived(t *testing.T) {
+	ref := buildPrincipalRef("agent:builder", "814b7c0b-1a15-43a2-a3f1-2aa3b1548c94")
+	if ref != "agent:814b7c0b-1a15-43a2-a3f1-2aa3b1548c94" {
+		t.Fatalf("expected agent-prefixed ref, got %q", ref)
+	}
+	if err := ValidatePrincipalRef(ref); err != nil {
+		t.Fatalf("expected valid PrincipalRef, got error: %v", err)
+	}
+}
+
 // ---------- helpers ----------
 
 func ptrIntent(i TextIntent) *TextIntent     { return &i }

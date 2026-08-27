@@ -113,9 +113,16 @@ var validPrincipalPrefixes = map[string]bool{
 	"system": true,
 }
 
+// MaxPrincipalRefLength is the maximum allowed length for a PrincipalRef.
+const MaxPrincipalRefLength = 512
+
 // ValidatePrincipalRef returns an error if ref is not well-formed.
 func ValidatePrincipalRef(ref PrincipalRef) error {
 	s := string(ref)
+	if len(s) > MaxPrincipalRefLength {
+		return fmt.Errorf("principal ref exceeds maximum length of %d characters",
+			MaxPrincipalRefLength)
+	}
 	idx := strings.IndexByte(s, ':')
 	if idx < 1 {
 		return fmt.Errorf("invalid principal ref %q: must be kind:id (e.g. user:alice)", ref)

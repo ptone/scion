@@ -48,6 +48,11 @@ const MaxChannelLength = 64
 // channelRegexp validates that a channel name contains only alphanumeric characters and hyphens.
 var channelRegexp = regexp.MustCompile(`^[a-zA-Z0-9-]+$`)
 
+// IsValidChannel returns true if the channel name matches the channel regex.
+func IsValidChannel(ch string) bool {
+	return channelRegexp.MatchString(ch)
+}
+
 // Message type constants (closed enum).
 const (
 	TypeInstruction    = "instruction"

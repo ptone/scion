@@ -15,6 +15,7 @@
 package messaging
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -104,6 +105,30 @@ func TestValidatePrincipalRef(t *testing.T) {
 		if (err != nil) != tc.wantErr {
 			t.Errorf("ValidatePrincipalRef(%q): got err=%v, wantErr=%v", tc.ref, err, tc.wantErr)
 		}
+	}
+}
+
+func TestValidatePrincipalRef_TooLong(t *testing.T) {
+	// Create a PrincipalRef that exceeds the maximum length.
+	long := PrincipalRef("user:" + strings.Repeat("x", MaxPrincipalRefLength))
+	err := ValidatePrincipalRef(long)
+	if err == nil {
+		t.Fatal("expected error for PrincipalRef exceeding maximum length")
+	}
+	if !strings.Contains(err.Error(), "maximum length") {
+		t.Fatalf("error should mention maximum length, got: %v", err)
+	}
+}
+
+func TestValidatePrincipalRef_AtMaxLength(t *testing.T) {
+	// Create a PrincipalRef exactly at the maximum length — should pass.
+	id := strings.Repeat("x", MaxPrincipalRefLength-len("user:"))
+	ref := PrincipalRef("user:" + id)
+	if len(string(ref)) != MaxPrincipalRefLength {
+		t.Fatalf("test setup error: expected len %d, got %d", MaxPrincipalRefLength, len(string(ref)))
+	}
+	if err := ValidatePrincipalRef(ref); err != nil {
+		t.Fatalf("PrincipalRef at exact max length should pass: %v", err)
 	}
 }
 
