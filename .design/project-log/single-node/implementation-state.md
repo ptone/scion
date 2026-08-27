@@ -5509,3 +5509,69 @@ untrue" — check whether the claim is false or whether I am missing the owner's
 
 Doc edit deferred until `sn-ciscope-dev` has pushed. Two agents committing to `scion/sn-tier` at
 once is how you manufacture a conflict on a branch under active upstream review.
+
+---
+
+## 2026-08-27 02:49 — Task #44 CLOSED, measured live. The A/B is what makes it trustworthy.
+
+`sn-adminfix-dev` deployed `sn-adminfix-t` (`ptone-experiments`, `us-east4`) from
+`us-central1-docker.pkg.dev/ptone-experiments/scion/scion-omni:dev-a9131f1f` and called `/auth/me`:
+
+```json
+{"id":"19ee2ded-9c1c-4194-8beb-398217e7f4c1","email":"scion-instance-gym@serverless-team-scion.iam.gserviceaccount.com","displayName":"","role":"admin"}
+```
+
+**`role: admin`.**
+
+The matched pair, same service account identity on both sides:
+
+| Instance | Image | Variable | `/auth/me` role |
+|---|---|---|---|
+| `sn-adminseed-t` | `dev-eaa14b14` | `SCION_SEED_SERVER_HUB_ADMINEMAILS` | `member` |
+| `sn-adminfix-t` | `dev-a9131f1f` | `SCION_SERVER_HUB_ADMINEMAILS` | `admin` |
+
+A single positive result would have been much weaker. The controlled comparison is what closes it:
+one variable differs, the outcome inverts, same tier and same identity. It also retro-validates the
+root-cause story — the seed variable is **inert on SQLite, not broken** — rather than merely being
+consistent with it.
+
+### The caveat I am recording against my own closure
+
+The live deploy went through the **Cloud Run REST API with env vars transcribed by hand**, because
+`gcloud beta run instances deploy` returned 503 with the gym SA. The developer flagged the judgement
+call rather than burying it, which is exactly the behaviour the briefs ask for.
+
+Consequence: the chain has **one seam the live run did not cross.**
+
+- *"the fixed `deploy-instance` emits `SCION_SERVER_HUB_ADMINEMAILS`"* → rests on
+  `TestDeployEnvVarsRoundTrip`, a unit test.
+- *"that variable yields `admin`"* → rests on the live run.
+- **They meet at the unit test, not end to end.**
+
+Judged sufficient, and I did not order a redo. Reasoning: the §1 walkthrough (task #6, 2026-08-25)
+already exercised the real `deploy-instance` command end to end, so the command is not in doubt —
+only this one argument's name, which the unit test pins directly.
+
+Writing it down anyway. This project has been burned repeatedly by treating a structural check as an
+exercised one; #44 existed *because* of that. **A closed task should carry its own caveats, or the
+next reader inherits a stronger claim than the evidence supports.**
+
+### Housekeeping
+
+- `sn-adminfix-t` and `sn-adminseed-t` both left running. They are the evidence pair and are only
+  meaningful together. **Tear both down after #1310 merges, not before.** Told the developer.
+- Told `sn-adminfix-dev` not to touch `.github/` or push to `scion/sn-tier` — `sn-ciscope-dev` is
+  pushing there right now. Two developers on one branch under upstream review is an avoidable
+  collision.
+- The postgres gate at `server_foreground.go:1889` remains unchanged, as designed. Filed as
+  ptone/scion#1284: the gate is probably correct, **the silence is the defect.**
+
+### Status of #1310's blockers
+
+| Blocker | State |
+|---|---|
+| Admin seeding broken (#44) | **CLOSED, verified live** |
+| `Build and Push Omni Image` push denied | being removed by `sn-ciscope-dev` |
+| `zizmor-output` 11 findings | being removed by `sn-ciscope-dev` |
+| `cla/google` | known non-blocker (merged #1304 had the same agent author) |
+| `cloudbuild-omni.yaml` sound + conventional | **audit running** — ptone's stated condition |
