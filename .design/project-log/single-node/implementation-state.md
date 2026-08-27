@@ -10915,3 +10915,64 @@ reason to discount a genuine signal. The stall report was correct; only my expla
 Newly created agents block at the trust prompt and report as stalled-at-start. **`scion look <agent>`
 is the first diagnostic, not `scion list`** — `list` tells you a container is up, which is true and
 useless. A container can be up, phase `running`, and parked on a modal prompt indefinitely.
+
+---
+
+## §35.29 — the issue register reconciled, and my count was wrong
+
+**2026-08-27, 19:48. `sn-issuereconcile` reported.** Landed: `ptone/scion#1293` retitled from
+"deploy-instance requires --image" to "deploy.sh requires --image", still open, defect intact.
+`ptone/scion#1301` kept open with a comment recording that the behaviour is now step 6 of
+`scripts/single-node/deploy.sh`, that **step 6 is untested** because `#1325` dropped two "does not
+panic" pins and nothing replaced them, and that the fix should add the client-ID output *and* a test
+in one change. `ptone/scion#1314` verified and deliberately untouched; the closure recommendation went
+to ptone at 19:50, because it is his issue.
+
+### The brief was wrong and the developer caught it
+
+I wrote *"four open issues on `ptone/scion` name the deleted command"* and instructed a retitle of
+`ptone/scion#1291` on that basis. **`#1291` never named `deploy-instance`** — not in its title, not in
+its body. Its title is *"Image-pull failure on first deploy is undiagnosable — error names a cache
+mirror, not the requested image"*, which is already tool-agnostic. There was nothing to replace. The
+developer read it, found the precondition absent, did not touch it, and told me.
+
+**The mechanism of my error:** I generalised from *"four register entries relate to the deploy
+command"* to *"four issue texts name the deploy command"*. Those are different claims and only the
+first was ever checked. Internal #39, which backs `#1291`, was always phrased around the *failure*
+rather than the *tool* — which is exactly what good issue-writing looks like, and exactly why it did
+not need my fix.
+
+The only reason this did not become a wrong retitle is a line I put in the brief on general principle:
+*"If what you read contradicts what I wrote above, stop and tell me. Do not proceed on my
+description."* **That instruction has now paid for itself twice today** — once here, once when the
+same clause did not exist and I got the inverted rename in §35.26. The difference between the two
+outcomes is the clause.
+
+### The sweep found what I was not sure was there
+
+I asked for a sweep because *"I listed four; I am not certain four is all of them."* Two more open
+issues reference the command:
+
+- **`ptone/scion#1297`** — incidental, quoting `#1301`'s title inside the collision register. No action.
+- **`ptone/scion#1284`** — cites `cmd/deploy_instance_test.go:637` **as evidence**. That file no longer
+  exists upstream, so the citation now dangles. The defect itself (`SCION_SEED_*` silently ignored on
+  SQLite) has nothing to do with the deploy command and stands. Dispatched a one-line comment saying
+  the evidence pointer is stale; explicitly **not** a retitle and **not** a close.
+
+`#1284` is a fourth category I had not anticipated. My brief's taxonomy was *invalidated /
+still-valid-but-misnamed / unaffected*. This is **still valid, correctly named, but its supporting
+evidence was deleted underneath it** — the issue reads as sound and its proof is gone. That is the
+quietest of the four failure modes, because nothing about the issue looks wrong until someone follows
+the link.
+
+### Fork state, worth remembering
+
+**`ptone/scion` main has not synced `c13d910b`.** The fork still carries the old thin wrapper
+(`exec "$SCION_BIN" deploy-instance "$@"`) and `deploy_instance.go`. All verification was done against
+the upstream merged tree, which is the correct baseline, but the retitled issues will not match the
+fork's own code until it syncs. Flagged to ptone.
+
+**19:49 — done.** Comment on `ptone/scion#1284`: *"The test file cited as evidence
+(`cmd/deploy_instance_test.go:637`) was deleted by `GoogleCloudPlatform/scion#1325`. The evidence
+pointer is stale; the defect itself — `SCION_SEED_*` silently ignored on SQLite — still stands."*
+`#1297` untouched. Task #83 closed. Register is now consistent with the merged tree.
