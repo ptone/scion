@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -208,4 +209,92 @@ func TestHandleBrokerInbound_AcceptsValidMessage(t *testing.T) {
 	assert.NotEqual(t, http.StatusBadRequest, rec.Code,
 		"valid message should not be rejected by validation; got %d: %s",
 		rec.Code, rec.Body.String())
+}
+
+// TestNativeChatPath_RejectsInvalidMessage proves that the native chat send
+// path (handleConversationSend → sendAgentRouted) rejects messages that fail
+// ValidateLegacyMessage (AC-8, path 3 — native web chat).
+//
+// Rule 10: this test MUST FAIL when the ValidateLegacyMessage call in
+// sendAgentRouted is removed. It exercises a validation rule that is only
+// enforced by ValidateLegacyMessage (empty body), not by the handler's own
+// input checks. The handler allows empty content when attachments are
+// present, but the StructuredMessage ends up with Msg="" which
+// ValidateLegacyMessage rejects.
+func TestNativeChatPath_RejectsInvalidMessage(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Set up the WebChatStore.
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	wcs := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+
+	// Set up project + agent.
+	project := &store.Project{
+		ID:      tid("proj-val-chat"),
+		Slug:    "val-chat-proj",
+		Name:    "Validation Chat Test",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:        tid("agent-val-chat"),
+		Slug:      "val-chat-agent",
+		Name:      "Validation Chat Agent",
+		ProjectID: project.ID,
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Create a topic with default_agent so the message routes through
+	// sendAgentRouted.
+	topicID := tid("topic-val-chat")
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID:           topicID,
+		ProjectID:    project.ID,
+		Name:         "validation-chat-thread",
+		CreatedBy:    DevUserID,
+		CreatedAt:    time.Now().UTC(),
+		DefaultAgent: agent.ID,
+	}))
+
+	// Create an attachment so the handler allows empty content
+	// (content="" is permitted when attachments are present).
+	attachID := tid("attach-val-chat")
+	require.NoError(t, wcs.CreateAttachment(ctx, AttachmentMeta{
+		ID:         attachID,
+		ProjectID:  project.ID,
+		Filename:   "test.txt",
+		MimeType:   "text/plain",
+		Size:       42,
+		UploadedBy: DevUserID,
+		CreatedAt:  time.Now().UTC(),
+	}))
+
+	// Send a message with empty content but valid attachment. The handler
+	// lets this through (attachments present), but sendAgentRouted builds
+	// a StructuredMessage with Msg="" which ValidateLegacyMessage rejects.
+	body := map[string]interface{}{
+		"content":     "",
+		"attachments": []string{attachID},
+	}
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+
+	// Must be rejected by ValidateLegacyMessage (400 VALIDATION_ERROR).
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"expected 400 for empty body through validation choke point, got %d: %s",
+		rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "msg field is required",
+		"response should mention the specific validation failure from ValidateLegacyMessage")
 }

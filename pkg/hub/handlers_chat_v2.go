@@ -63,6 +63,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -1050,6 +1051,12 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				msg.Attachments = append(msg.Attachments, agentPath)
 			}
 		}
+	}
+
+	// Validate through the messaging choke point (AC-8).
+	if err := messaging.ValidateLegacyMessage(msg); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
+		return ""
 	}
 
 	// Persist the message.
