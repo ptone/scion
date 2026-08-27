@@ -12007,3 +12007,89 @@ and not an error — nothing in it is currently misleading.
 
 **ptone:** last contact 21:39, nothing outstanding that only he can unblock. Not interrupting. The
 next thing he gets is the compare URL.
+
+## §35.45 — r2 delta review: REQUEST CHANGES. The condition I attached was bypassable. (23:10)
+
+Report: `reviews/adc-preflight-r2.md`. Round-3 brief: `briefs/sn-adcpreflight-dev-r3.md`, dispatched to
+`sn-adcpreflight-dev2`.
+
+### The finding
+
+`di_validate_override_url` strips the path with `%%/*`. **It does not strip the query or the
+fragment.**
+
+```
+_DI_API_BASE='https://evil.example?.googleapis.com'   -> ALLOWED
+_DI_API_BASE='https://evil.example#.googleapis.com'   -> ALLOWED
+```
+
+**Every evasion I listed in the brief is correctly rejected** — `evil-googleapis.com`,
+`googleapis.com.evil.tld`, userinfo, ports, IPv6, uppercase. It is `?` and `#` that get through: the
+same class, one character cheaper, and not on my list.
+
+Proven end to end, not by reading. The real `di_preflight_rest_credential` passes the gate, mints the
+token, and curl 7.88 delivers `Authorization: Bearer <token>` to the host before the `?`, captured at a
+local listener. The same bypass on `_DI_TOKENINFO_URL` puts the token **in the query string** at the
+attacker's host — the exact round-1 scenario the narrowing existed to prevent.
+
+### The part that is mine
+
+I wrote in the brief: *"a host check that is fooled by string prefixing is worse than none, because it
+converts a known-open seam into one people believe is closed."* **Then I accepted that the condition I
+attached had been met, without testing it.** I specified the risk precisely and did not check for it.
+
+The reviewer's judgement, which I accept in full: the override itself was **not** a mistake — nothing
+pinned "step 3b reuses the preflight token", m7 proves the pin it bought is real, and there was no
+cheaper way to buy it. **What was wrong is narrower: a bypassable check on a widened seam is a worse
+position than the unrestricted-but-honestly-documented seam round 1 signed off on.** Until R1 lands,
+R7 is a net regression on the security axis.
+
+**The generalisation worth keeping.** Eight mutations, all independently reproduced, none escaped —
+and the ninth defect sat in the one function no test addressed directly. `di_validate_override_url`
+had **no direct test and one input per seam.** Mutation testing proves the tests you have can catch
+the defects you thought of; it is silent about a function nothing tests. **Coverage of the caller is
+not coverage of the rule.** The fix is three lines; the table-driven test of the helper is the part
+that matters.
+
+### Where I overrode the reviewer again — R3
+
+The reviewer marked "hoist `_DI_API_BASE` into `di_main` and pass it as a parameter" **Optional** and
+handed me the call. **I took it, and the reason is not preference.**
+
+The developer's placement holds today for three verified reasons. But it rests on *"the preflight
+always runs, and runs first"*, while the invariant that matters is *"nothing reads `_DI_API_BASE`
+without having been validated"* — and nothing pins that half. A `--skip-preflight` flag or a second
+caller orphans it silently, failing no test.
+
+**That is the same shape as the bug this branch exists to kill.** Step 3b assumed a credential
+established elsewhere. Step 3b now assumes a validation established elsewhere. Same function, one
+round later. I will not ship the second while fixing the first.
+
+### Also taken
+
+- **R2** — the 403 remedy. Round 1 measured a `SERVICE_DISABLED` 403 on this same call; the message
+  asserts an IAM cause and gives an IAM remedy that will not fix it. **That is the most likely 403 for
+  a fresh project — i.e. for ptone.** Rule, not string: *a message that asserts a wrong cause is more
+  expensive than one that asserts none.*
+- **R4** — m9, the default PATCH host is unpinned; the reviewer marked it Optional because it escapes
+  pre-R7 too. Taken anyway: **R7 turned that line from a constant into an environment-dependent
+  expression, which is when a default-branch pin starts earning its keep.**
+- **R5** — numeric `http_code` check. The unreachability claim was confirmed by measurement (curl emits
+  `000`, exit 7, never empty), so "keep it, comment it, do not test it" was right; the one-line change
+  closes `[[ non-numeric -ge 300 ]]` also failing open.
+
+### Corrections to my brief, both accepted
+
+1. "8 preflight/3b tests" — **there are nine.** Fixed before it reaches ptone, who re-runs numbers.
+2. "Same variable, same token, **no new class of risk**" — the first half is true, the conclusion is
+   not. The exposure is identical; the *consequence* is not. A redirected PATCH no-ops the mutation and
+   leaves a created Instance with IAP off. **Step 4 polls the real `run.app` URL and
+   `di_build_instance_url` does not honour the seam**, so the script cannot report false success. Good
+   backstop, and it was not designed as one.
+
+Also on the record: `TestScriptCheckGcloudInstances_FailureMessage` **passes where gcloud is absent and
+skips where it is present** — 37/0/0 here, 31/1/0 in round 1. The visible test count is a property of
+the runner, not the branch.
+
+**ptone told, in STE, on the working thread.** He is waiting on this script and I had said the compare
+URL would follow a round-2 pass. It did not pass, so he gets that plainly rather than silence.
