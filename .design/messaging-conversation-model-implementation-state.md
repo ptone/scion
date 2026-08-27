@@ -89,7 +89,8 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 **Active section:** S5 — Docs (spawned and briefed 2026-08-27 10:45Z)
 **Active manager:** `ca-msg-em5` — `ca-msg-em4` retired, all ten of its sub-agents confirmed
 deleted
-**Blocked on:** em5's workstream decomposition. S5 must document the build **as it ships**
+**Blocked on:** em5's four workstreams (skill, messaging page, CLI reference, glossary).
+S5 must document the build **as it ships**
 (phase row 12): the read switch is default-OFF, `conv:<id>` and `#<thread>` are **not
 available** in the CLI (DEF-5), `@<email>` works only from inside an agent container, and
 `@<agent>` is the one reference form a user can rely on today.
@@ -393,6 +394,13 @@ would bury the events that matter.
   constraint is documenting the shipped binary rather than the design's end state, with the
   four availability caveats stated explicitly and rule 13 applied to doc examples.
 
+- `2026-08-27 10:55Z` **D6 issued — how rule 13 applies to documentation.** em5 escalated
+  promptly (good) that the repo has no doc-test infrastructure, offering (a) accept the gap or
+  (b) build a harness running doc examples against a mock server. **Rejected both.** (b)'s mock
+  is the flaw: a harness proving a mock accepts an example is rule 13 in a new costume —
+  observing the call, not the effect — so I would be commissioning the defect S4 spent four
+  rounds rejecting. (a) is where the F-1 defect goes to live. Ruled **option (c)**, see §5a.
+
 ## 5f. S4 — CLOSED 2026-08-27 10:35Z (accepted on round 4)
 
 **Four rounds, five findings, one underlying defect.** F-1 (a warning routing users into the
@@ -644,6 +652,7 @@ sections.
 | D3 | **The S4 read switch lands behind a runtime flag, default OFF, flippable without redeploy.** Divergence counters must be exposed somewhere readable live (not log lines only). | User decision 2026-08-27: the beta hub is the validation event, run as a scheduled exercise with the user present and a DB snapshot for rollback. There is therefore **no production soak before the switch**, so the design's phase-8 gate cannot be met in its original form. A flag makes the exercise "snapshot, flag on, watch, flag off" — recovery is a config change rather than a snapshot restore. And since the exercise is the *only* window where the two models meet real traffic, the operator has to be able to read a verdict in the moment; log lines are the wrong shape for that. | 2026-08-27 |
 | D4 | **Backfill evidence is synthetic.** Require a seeded corpus exercising both named hazards plus messages that must come out flagged `inferred`. | Real dry-run counts are unobtainable pre-beta (em2 reported this twice). Recorded as **weaker than the design's requirement**, not as the requirement being met. Do not let a later section cite "backfill validated" without this caveat. | 2026-08-27 |
 | D5 | **Authorisation is a property of the resolved conversation, evaluated after resolution, identically for every grammar** — not a property of the reference syntax. Direct conversations: the sender must be a participant. Group and thread conversations: project membership authorises, and prior participation is **not** required. Rule-10 tests: non-participant rejected on a direct conversation; project member accepted on a group conversation they have never posted in; and the same direct-conversation rejection reached via **both** `conv:<id>` and `@<name>`. | em4 scoped DEF-1's participant check to `resolveConvByID` alone. But `#general` and `@agent` resolve to the same rows, so a check on one grammar is one you walk around by using another — the defect class this refactor exists to remove. The per-kind split matters too: requiring participation on group conversations would break resolve-or-create and the "say something in a room" case the design is built on, while global DMs have nil `ProjectID` and so cannot be carried by the project check at all. Without the cross-grammar test the hole survives and only the test is new. | 2026-08-27 |
+| D6 | **Rule 13 applied to documentation: parse-check documented commands against the real cobra tree, plus a deny-list for negative claims.** Extract every fenced `scion …` line from the docs a section touches and run `rootCmd.Find(args)` then `cmd.ParseFlags(rest)` — no mock, no execution, no new infrastructure. Additionally the check carries an explicit deny-list: any doc line presenting `scion message conv:<…>` or `scion message #<…>` as a working example **fails**. **Known and accepted limit:** this does not catch a command that parses and runs but does something other than what the prose says. | em5 offered (a) accept the gap or (b) a harness running doc examples against a mock server. (b) is the trap — a harness proving *a mock* accepts an example observes the call rather than the effect, which is rule 13's own failure mode, so it would commission the defect S4 spent four rounds rejecting. (a) is where F-1 goes to live: S4 opened with a warning naming three syntaxes the binary could not parse, and a docs site has more readers than a warning string. (c) validates against **the binary as built**, which is exactly the F-1 class. The deny-list exists because parse-checking cannot verify a negative and three of the four availability caveats are negatives — `conv:` and `#` *parse* fine and are rejected later by the CLI gate, so a parse check alone would wave them through. Narrow check with a documented edge beats a broad one that quietly proves nothing. | 2026-08-27 |
 | D2 | Normalization (slug → UUID) lives in **one shared exported helper**, written in phase 3, with the phase 4 backfill job as an intended second caller. Not two implementations. | Duplicated identity-resolution logic is already a named defect (findings §7). Two callers exist by design; two implementations would recreate the defect inside the fix. **em2 must be pointed at this helper.** | 2026-08-27 |
 
 ## 5b. Branch contract — issued to every manager
