@@ -86,7 +86,8 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 ## 3. Current position
 
-**Active section:** S4 — Surfaces (**REJECTED round 2 — G-1, G-2; see §5f**)
+**Active section:** S4 — Surfaces (**round 3 at `765a4ac4`: behaviour accepted, one tests-only
+blocker H-1; see §5f**)
 **Active manager:** `ca-msg-em4`
 **Blocked on:** em4's round-3 fix. DEF-1, DEF-3 and D3 are all due from this section;
 DEF-3 and D3 are now satisfied (see §5f), DEF-1 is implemented but bypassable (G-1).
@@ -352,7 +353,54 @@ would bury the events that matter.
   grammars for brokers and native chat; apply the delivery-assertion rule to every WS-3 send
   test. **Rule 13 issued** — see §1.
 
-## 5f. S4 rejection — open (round 1 2026-08-27 09:05Z; round 2 2026-08-27 09:55Z)
+- `2026-08-27 10:25Z` **S4 round 3 at `765a4ac4`: behaviour accepted, tests rejected.** G-1 and
+  G-2 are both correctly fixed and the suite is green and stable (my own runs: `pkg/hub` **0
+  failures twice**, `cmd` and `pkg/messaging` green — the DEF-4 baseline holds through thirteen
+  commits). One narrow blocker, **H-1**: the two tests named for the G-2 gate execute nothing.
+  Scoped to a single tests-only commit; on landing I accept and merge.
+
+## 5f. S4 rejection — open (round 1 09:05Z; round 2 09:55Z; round 3 10:25Z)
+
+### Round 3 (2026-08-27 10:25Z) at `765a4ac4` — behaviour accepted, one tests-only blocker
+
+**Accepted, verified, not to be re-litigated:**
+
+| Item | Evidence |
+|---|---|
+| **G-1 fixed** | `SenderPrincipalKind`/`SenderPrincipalID` **deleted** from `conversationResolveRequest`, `hubclient.ConversationResolveRequest`, and the dead CLI computation. Sender derives from `agentIdent.ID()`/`user.ID()` only. The attack surface is removed rather than guarded — a structural fix, stronger than any test. |
+| **G-2 behaviour fixed** | Gate returns non-zero exit with a clear message; zero sends; tail replaced with a defence-in-depth error; warning names only `@<agent-name>`; endpoint still resolves all four grammars |
+| **`@<email>` proven** | `EmailRef_AgentContext` asserts via the **outbound recorder** (recipient, text, sender agent); `EmailRef_NoAgentContext` asserts the error and zero on both recorders. Rule 13 done correctly — and the reason `@<email>` is rightly absent from the warning. **This is the model test shape for the rest of the project.** |
+| **Suite green and stable** | mine, at `765a4ac4`: `pkg/hub` **0 failures on two consecutive full runs** (~7 min each), `cmd` + `pkg/messaging` green |
+
+**H-1 (blocking, tests only).** `TestConvRef_ThreadRefGated` and `TestConvRef_ConvIDGated`
+build the gate's error string themselves with `fmt.Errorf` and assert that a string they just
+constructed contains a substring they just put in it; then they stand up a mock server, invoke
+nothing against it, and assert zero sends. **Verified by mutation: I deleted the gate from
+`message.go` entirely and both tests still PASSED.**
+
+Blocking on the name, not the coverage. A green test called `ThreadRefGated` tells the next
+reader the gate is covered. When someone removes that gate — and someone will, the moment DEF-5
+gets a routing policy — the suite stays green and `conv:`/`#` resume silently eating messages.
+**The gate is not left untested; it is left with a trap saying it is tested.** Worse than no
+test, and the same failure that put G-2 in the build in the first place.
+
+No obstacle existed: the gate returns before any hub connection, so
+`messageCmd.RunE(messageCmd, []string{"conv:<uuid>", "payload"})` reaches it in six lines. I
+confirmed this myself before raising it. Required: rewrite both to execute the command path,
+assert the returned error, assert zero sends **after** invocation, and mutation-verify before
+reporting. Tests only, single commit.
+
+**Also noted, non-blocking.** em4's G-1 regression test is tautological too — it marshals the
+struct and asserts the struct lacks fields it can see it lacks, then swallows a nil-store panic.
+I am **not** asking for a fix: when a check is replaced by deleting what it checked, there is
+nothing left to mutate. Recorded only so it is not counted as coverage later.
+
+**Second non-blocking.** Removing the body fields also removed the `senderID == ""` guard. An
+authenticated identity with an empty ID would now reach `Resolve` with an empty sender instead
+of a validation error. Fails closed today — `requireParticipant` cannot match an empty
+principal — so not a hole, but the guard was doing something and is gone.
+
+### Rounds 1 and 2
 
 ### Round 2 rejection (2026-08-27 09:55Z) at `24ba54f0`
 
