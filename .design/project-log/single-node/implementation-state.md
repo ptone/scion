@@ -4892,3 +4892,49 @@ on the task as the remaining step.
 calling `SetAccessSettingsProvider` now gets an **empty** admin list where it previously got the
 construction-time config value. That is a behaviour change, not a regression for us — our path
 sets it — but it would bite a caller that does not.
+
+---
+
+## 2026-08-27 00:16Z — ptone correction: **dispatch, do not do.** Rebase handed to `sn-rebase-dev`.
+
+ptone, 00:15: *"you really should be dispatching tasks like that to developer agents. NOT doing this
+work yourself."*
+
+He is right, and I had already drifted. I offered ptone that **I** would rebase his branch and
+force-push it. That is implementation. My brief says plainly that I design and do not implement,
+and I wrote that same constraint into two developer briefs today while quietly exempting myself
+from it. Recorded here because the pattern matters more than the instance: **the pull is strongest
+when the task looks small and I already have the context loaded.** That is exactly when to dispatch.
+
+### Dispatched: `sn-rebase-dev` (developer)
+
+Brief at `briefs/sn-rebase-dev.md`. What I put in it, and why:
+
+- **"Do not change what the guard does. This is a rebase, not a redesign."** With a stop-and-ask
+  rule if the only available resolution weakens or broadens the guard. A semantic rebase across a
+  rewritten constructor is precisely where a security fix quietly loses scope.
+- **The cause, pre-derived** — `1d1e4d76` (#1300) rewrote `pkg/hub/web.go` +74 −31 around
+  `NewWebServer` — plus **what #1300 actually did** (the provider interface, the nil-safe field,
+  the accessors, the setter, and the fact that `WebServer` no longer holds a by-value snapshot for
+  those three fields). A developer resolving a conflict without knowing the *shape* they are
+  rebasing onto will produce something that compiles and is wrong.
+- **"Both layers matter. Do not collapse them into one on the grounds that they look redundant."**
+  The `cmd` error and the `pkg/hub` fatal look duplicative and are not.
+- **An explicit instruction to confirm the guard's own tests still exist and still pass.** A
+  conflict resolution that silently drops a test is the failure mode I most want caught — and it
+  is not hypothetical here: my own §4.5 brief caused exactly that loss two hours ago (task #55).
+- **Do not remove `.design/project-log/p0-security-fixes.md`.** I flagged it to ptone; it is his
+  call, and a developer tidying it away mid-rebase would pre-empt him.
+- Report back **the `web.go` resolution and the reasoning**, because that is the part with
+  judgement in it, and asked it to say so explicitly if it had to make a call rather than bury it.
+
+Carried forward from the last dispatch: *"If a step contradicts what you find on disk, stop and
+message me — do not improvise around it."* That instruction is why `sn-repack-dev` caught my wrong
+file classification instead of complying with it.
+
+### Where I drew the line, and told ptone I had
+
+I did the #1300 analysis above myself. I judge that correctly mine — it is verification of a design
+claim against the code, which is what an architect owes a design doc. I said as much to ptone and
+offered to dispatch that too if he disagrees. The **live retest** of the admin-seeding defect is
+different: that is running a deployment, and I will dispatch it rather than do it.
