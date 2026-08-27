@@ -6200,3 +6200,50 @@ the 03:15–03:52 conflict window. Matches my own finding.
    identical at a glance, which is the whole reason this nearly shipped unnoticed.
 3. R3/R6 decline replies still unposted (agents get 403 upstream). Offered ptone the text to paste.
    Once he squashes, they close unanswered.
+
+### 04:00:10 — #1310 IS MERGED
+
+ptone squash-merged it. **`f99a81892195` on upstream `main`:**
+
+```
+feat(hosted): single-node Cloud Run tier - one-command deploy,
+              agents as sandboxes in one Instance (#1310)
+```
+
+Author on main is Preston Holmes, so `cla/google` — red on the PR throughout, and correctly
+identified as a non-blocker — is moot on the merge commit.
+
+**The tier is upstream.** 37 files, ahead 14, from `scion/sn-tier`.
+
+#### Main is now building this code for the first time
+
+The head that merged had never been compiled by CI (see 03:56). So the *merge commit* is where that
+finally happens:
+
+| check | status at 04:01 |
+|---|---|
+| `shellcheck` | success |
+| `Build & Test` | in_progress |
+| `golangci-lint` | in_progress |
+
+Watching to conclusion. The local out-of-band verifier is still running in parallel — deliberately
+redundant, because between the two the failure signal arrives fast rather than slowly.
+
+**Task #56 stays open until main is green.** A merge is not a build. That distinction has cost this
+project twice today already: once when a green CI concealed #1301's revert, and once when an absent
+CI impersonated a green one.
+
+#### What #1310 does and does not settle
+
+Landed: the tier itself, `cloudbuild-omni.yaml` meeting ptone's convention condition, the workflow
+drop, the admin-email fix, and R1/R2/R4/R5 from the automated review.
+
+**Not** settled, and not to be forgotten now the PR is closed:
+
+- **R3 and R6 decline replies were never posted.** Agents get 403 on upstream comments. The PR is
+  closed, so they now close unanswered. Text is in `briefs/sn-review-dev.md` §4 if ptone wants it.
+- **Task #60** — the skipped-CI guard, explicitly deferred by ptone as a follow-up.
+- **G4 remains unmet.** `deploy-instance` still requires `--image` with no default. Closing it needs
+  an org owner to create and publish `ghcr.io/googlecloudplatform/scion-omni`. Dropping the workflows
+  did not cause this; it was already unmet because the push was denied.
+- Task #50 (tutorial + scripts), and the open defect register: D-15, D-32, D-35, D-39, D-46, D-49.
