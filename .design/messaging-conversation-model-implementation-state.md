@@ -974,6 +974,33 @@
       bound** — "fails closed" is not sufficient outside the authz context. Same trap as rule 29
       (fail-closed is about authorization, not shape constraints), reached from the other side.
 
+53. **Test the wiring, not only the parts — and prove your double can tell the parts apart.** Issued
+    2026-08-27 22:18Z, from em9's DEF-27 at `f1745506`. Ten `TestDEF27_*` functions, all correct, all
+    at store level, and `grep -c ResolveOrCreateConversationByKey` on the file returns **0**. The
+    defect is *which accessor the sink calls*; no test looked at the sink. `TestDEF27_
+    SoftDeletedTopicDoesNotMint_SQLite` never exercises minting — it asserts an accessor's return.
+    **A green test carrying an AC's name is the most persuasive wrong signal we can generate**
+    (rule 42's corollary, now demonstrated twice).
+
+    - **Check the import edge before believing ANY mutation result.** I mutated
+      `derive_key.go:164` (`…IncludingDeleted` → the filtered accessor — DEF-27 itself, reintroduced
+      at the wiring point) and `go test ./pkg/hub/ -run TestDEF27` returned `ok`. That is only
+      evidence if the mutated package is compiled into that binary. It is: `go list -deps ./pkg/hub/`
+      contains `pkg/messaging`, and the reverse edge is only the leaf `pkg/hub/permissions`, so there
+      is no cycle. **A surviving mutant in a package the test binary never linked proves nothing —
+      and neither does a killed one.** Verify the edge, then report.
+    - **A test double whose two methods are byte-identical rubber-stamps every test written against
+      it.** `mockTopicLookup` (`conversation_test.go:461`) has the comment *"Mock has no deleted_at
+      concept — delegate to the same logic."* That comment is a declaration that **the mock cannot
+      test the thing under test.** Any sink test written against it passes under both wirings.
+    - **The two findings had to ship together.** Sending only the first would have produced a
+      sink-level test built on that mock — green, named for the AC, and unable to fail for the reason
+      it exists. **When you reject, name the trap the obvious fix falls into**, or the rework
+      reproduces the defect one layer up and arrives wearing a passing suite.
+    - **Make the fix's acceptance criterion the mutation itself:** "re-run my mutation; it must now
+      FAIL with an assertion naming the mint; paste both the failing and the restored run." That is
+      checkable by me without reading their tests, and it cannot be satisfied by a vacuous double.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -1163,7 +1190,7 @@ is a queue, not a blocker.
 | **Tranche A cut-point audit** | **DONE 21:15Z — 17 unchosen commits, verdict ACCEPT (§5av, rule 41). Follow-on D2/D3/D4 accepted 21:27Z (§5aw).** Golden vectors confirmed in A; omissions clean; warrant strengthened to `git diff origin/main 71b65292 -- pkg/hub` = **empty**. Remaining: re-issue D1 with the AC-DEF8-1 correction (it IS runnable and passes — rule 42) and file the **`resolve_test.go:1099` green-placeholder defect** (a second test named AC-DEF8-1 that only calls `Resolve` twice; rename or delete). | **em6** | correction issued 21:27Z |
 | **Four A-ACs deferred into B's merge** | 23f7c820's 5 handler call-site fixes; AC-DEF15-1 (source confinement); AC-DEF15-4 (invalid `dm:` → zero rows); AC-DEF16-1 (validation before creation). **These are tranche A's ACs, not B's** — not covered by AC-B-1..9, must be reported by name. AC-DEF15-1 + `b7651af9`'s unexport are one control in two files: **both or neither**. | **em10** | added to B's spec 21:28Z |
 | DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
-| **DEF-27 — soft-deleted native topic gets a shadow conversation** | **RELEASE BLOCKER for §2.6.4.** Found by `nc-arch` 21:59Z, verified by me on both backends. `GetTopicConversationID` filters `deleted_at IS NULL` (`webchannel_store.go:1364`, `webchannel_store_postgres.go:978`); `DeleteTopic` is soft. A tombstoned topic answers `ErrNotFound` → guard mints. Reachable: agent/broker paths validate DM-key *format* only, never topic existence; trigger is a human deleting a thread mid-agent-turn. **Root cause is one function answering two questions with opposite `deleted_at` needs — split it (rule 51).** Spec: `def27-spec.md`, 6 ACs. **Does NOT affect #1331** (tranche A is dormant, no `pkg/hub`). **CONTAINED TO THE BRANCH — nc-arch scanned the shipped surface and it is clean, so NO data remediation; em9 told explicitly not to write a migration** (22:04Z). Per-backend independent tests now standing for the whole webchat surface, not a DEF-27 special case. | **em9** | dispatched 22:01Z, scoped 22:04Z |
+| **DEF-27 — soft-deleted native topic gets a shadow conversation** | **RELEASE BLOCKER for §2.6.4.** Found by `nc-arch` 21:59Z, verified by me on both backends. `GetTopicConversationID` filters `deleted_at IS NULL` (`webchannel_store.go:1364`, `webchannel_store_postgres.go:978`); `DeleteTopic` is soft. A tombstoned topic answers `ErrNotFound` → guard mints. Reachable: agent/broker paths validate DM-key *format* only, never topic existence; trigger is a human deleting a thread mid-agent-turn. **Root cause is one function answering two questions with opposite `deleted_at` needs — split it (rule 51).** Spec: `def27-spec.md`, 6 ACs. **Does NOT affect #1331** (tranche A is dormant, no `pkg/hub`). **CONTAINED TO THE BRANCH — nc-arch scanned the shipped surface and it is clean, so NO data remediation; em9 told explicitly not to write a migration** (22:04Z). Per-backend independent tests now standing for the whole webchat surface, not a DEF-27 special case. **REJECTED 22:19Z at `f1745506` — fix correct, tests do not cover the defect.** All 10 `TestDEF27_*` are store-level; `grep -c ResolveOrCreateConversationByKey` = 0. I reintroduced the defect at `derive_key.go:164` and all 10 passed (edge verified: `pkg/hub` imports `pkg/messaging`, so the mutant WAS linked). Second finding sent with the first: `mockTopicLookup`'s two methods are byte-identical, so the obvious sink test would have been vacuous. Rework = sink-level AC-27-1 against the real store both backends + give the mock a `deleted` concept; acceptance is my mutation failing. Rule 53. | **em9** | dispatched 22:01Z, scoped 22:04Z, **rejected 22:19Z** |
 | **AC-12-6 (populated-DB exercise)** | beta-hub exercise scheduling. **Verification design now settled with integration2-operator (22:00Z):** snapshot is stop → `wal_checkpoint(TRUNCATE)` → cp → start, so restore is safe; explicit `backfill --dry-run` then `--execute` first, startup detection as *second* confirmation; atomicity treated as unknown, restore preferred over resume. **Three correctness checks added beyond the NULL count, which measures completeness only:** (a) convergence — `direct` conversations vs distinct principal pairs, with **fewer** being the STOP condition (collision = over-granting); (b) round-trip every backfilled DM through the **production** `ParseDMKey`, not a second parser; (c) INVARIANT D-1 on real data, kind-qualified. Review found and fixed: a kind-blind predicate that could not see kind confusion, an `external_ref != ''` filter excluding the worst rows, and two NULL holes (rules 51, 52). | **user** (scheduling) | design closed 22:02Z |
 | **§2.6.4 phases 1-4** | **ACCEPTED 21:56Z at `1aefd1e0`**, one doc item outstanding (guard header must state its residual). DEF-20 closed at the sink; F1 (guard hole) and F2 (malformed `thread:` ref) both closed and **independently re-verified by me** — my `INSERT OR IGNORE` and lowercase mutants now RC=1. **Accepted residual, documented not chased:** line-broken SQL and `fmt.Sprintf("INSERT INTO %s", tbl)` both evade any line-oriented grep. **Durable fix is structural and is MINE, phases 5-7:** `pkg/hub` should have no raw SQL path to `conversations` at all, at which point the control is the type system and there is no residual. **NOT YET CARRIED** — base `1e7bee72` is far behind `c13d910b`; carrier decided after #1331 lands. em9 pre-computing its aggregate-file list against the eventual rebase. | **me** (carrier) | accepted 21:56Z |
 | ~~§2.6.4 phases 1-4 (prev)~~ | ~~DEF-21 ✅ DEF-23 ✅ DEF-22 ✅ pending startup-ordering evidence. DEF-20 REOPENED~~ at `eb6c62a9` — mint has ≥7 entrances, three are guarded. Directed: drop the `Channel=="web"` predicate (sentinel makes it redundant), move the lookup into `ResolveOrCreateConversationByKey`, route the two direct `UpsertConversationByExternalRef` callers through it, add a CI grep gate. Plus the production-path integration test. **The mis-scope was mine (rule 40).** | **em9** | reopened 21:14Z |
@@ -2123,6 +2150,49 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5be. 22:14-22:23Z — heartbeat: DEF-27 rejected on a surviving mutant; three checked negatives
+
+**DEF-27 rejected at `f1745506`.** em9 reported all 6 ACs met. Per rule 42 I checked the one thing their
+transcript could not show: whether anything drives the sink. Nothing does — all 10 `TestDEF27_*` are
+store-level, `grep -c ResolveOrCreateConversationByKey` = 0. AC-27-1 says *drive the sink*; they assert on
+an accessor's return. `TestDEF27_SoftDeletedTopicDoesNotMint_SQLite` does not test minting.
+
+I proved the cost rather than arguing it: mutated `derive_key.go:164` back to the filtered accessor — DEF-27
+itself, at the wiring point — and the whole suite returned `ok`. **Before believing that I checked the import
+edge**, because a surviving mutant in an unlinked package is not evidence: `go list -deps ./pkg/hub/` contains
+`pkg/messaging`; the reverse edge is only leaf `pkg/hub/permissions`; no cycle. The mutant was linked and
+survived. em9's own AC-27-4 mutation has the same blind spot — they mutated the store method, which proves the
+accessor's test is specific and says nothing about which accessor the sink calls.
+
+**The second finding is the one that mattered.** Before sending, I read `mockTopicLookup`
+(`conversation_test.go:461`). Its two methods are byte-identical — *"Mock has no deleted_at concept — delegate
+to the same logic."* Had I sent only finding 1, em9 would very likely have written a sink test against that
+double: green, named for the AC, incapable of failing. **A rejection that does not name the trap the obvious fix
+falls into produces the same defect one layer up, wearing a passing suite.** Rule 53. Acceptance is now my own
+mutation failing, which I can check without reading their tests.
+
+**Three checked negatives from the base sweep, all worth more than the checks cost:**
+- `origin/main` moved `e201b6cd` → `78323b5b`. It touched **no aggregate file** since tranche A's base
+  `c13d910b` — not `models.go`, `store.go`, `composite.go`, `types.go`, `migrate/schema.go`. Rule-31 revert risk
+  on tranche A is **zero against current main, verified rather than assumed**.
+- Files changed by **both** main and trb since `c13d910b`: **empty**. No conflict surface. I told em10 not to
+  rebase again — there is nothing to pick up, and a needless rebase would re-anchor #1331's review comments.
+- Freeze honoured: `17986b10` is still an ancestor of #1331's head `14dcc636`. Two additive commits, no amend.
+  Rule 47 held in practice, by the owner, after being told.
+
+**em10's `499955d5` accepted**, and I checked the thing that could have sunk it. Registering both DM principals
+best-effort risks asymmetric listing, which my standing rule calls a defect. It is not one here: the upsert and
+participant loop run on **every** resolve, not only first create, and `ErrAlreadyExists` is swallowed — so
+registration is idempotent and **self-repairing**, and the next message fixes any partial failure. Residual (a DM
+that never gets a second message) is bounded and accepted. I asked for that reasoning in the comment, because a
+reader who sees only a swallowed error will "fix" it by returning it and make participant failure kill delivery —
+exactly inverting the index-vs-authority split.
+
+**integration2-operator dispatched to a staging baseline** (read-only, staging only, no repairs). Running the
+verification set *before* we land separates a pre-existing violation from one we caused; run only at beta, that
+forensics happens live during the user's scheduled exercise. Explicitly asked what the queries **cannot** see —
+a zero over an empty table is not coverage, and I would otherwise over-read it.
 
 ## 5bd. 21:59-22:02Z — DEF-27, and the same disease at three layers of the stack
 
