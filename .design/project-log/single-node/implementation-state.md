@@ -8274,3 +8274,71 @@ that file had one pending change, not six.
 `scion/sn-impl-arch` at `b2e4f547` before this commit. Task #66 moved to in_progress with the
 decision recorded. Nine Instances intact. One agent dispatched, fleet well under cap.
 Waiting on ptone for item 2 and on `sn-obs-dev` for the issues and the label name.
+
+## 12:42 — D1 approved and dispatched. A blanket fix would have made the doc worse, and I nearly shipped a decision ptone had not made
+
+ptone at 12:33: *"you can dispatch these grouped issue fixes now, I'm fine with that - larger issues
+we will prob still run through our other triage process, but feel free to proceed on these you've
+mentioned"*. So the two-PR split is approved. `sn-uppr-dev` dispatched 12:41,
+brief `briefs/sn-uppr-dev.md`.
+
+### The trap I found by reading the file instead of the issue title
+
+`ptone/scion#1297` is "fully qualify 18 bare issue refs." The obvious execution — prefix all 18 with
+`ptone/scion#` — **is wrong, and would leave the document worse than it is now.**
+
+The refs belong to **two repos**: 13 fork, 5 upstream. I re-derived the split myself from the file
+on upstream main and got exactly the issue's numbers: `#1273`×4, `#1274`×2, `#1275`×2, `#1276`×4,
+`#1281`×1 fork; `#1300`, `#1302`, `#1304`, `#1305`, `#1306` upstream. Independent derivation, same
+answer — the filing agent got this right and its issue body is better than my one-line summary of it.
+
+The sharp bit is a table where **each row cites a fork issue and an upstream PR side by side**:
+
+```
+| #1273 | resolve implicit `default` template ... | `fc523ecd` (PR #1305) |
+```
+
+Left column fork, right column upstream. Blanket-prefixed, that row cites `ptone/scion#1305` — the
+*sshd absent* issue — inside a row about template resolution. **It would read as entirely plausible.**
+A wrong ref that looks wrong is a nuisance; a wrong ref that looks right is the actual defect class,
+and the bulk fix manufactures more of them than it removes.
+
+And the asymmetry is worth keeping: because the file lives upstream, **the 5 upstream refs are correct
+today and the 13 fork refs are the broken ones.** We qualify all 18 anyway — a ref that is right only
+because of where the file happens to sit breaks the moment the text moves, which is exactly how this
+bug was born.
+
+The file also already contains `GoogleCloudPlatform/scion#1302` written correctly in one place and
+bare `#1302` in another. Same number, both treatments, one file.
+
+### I nearly smuggled an unmade decision into an approved PR
+
+I told ptone PR 1 carries "D4–D8". He replied "fine, proceed." **D7 is item 4 of a review he asked me
+to run one at a time, and he has not seen it.** It rewrites §5, the tier's headline durability
+framing — a positioning call, not a typo fix.
+
+He approved the *grouping*. Reading "proceed" as approval of the *contents* would have put my wording
+of the tier's durability story upstream under his name. That is not a technicality: D1 was a question
+about how to batch PRs, and the answer to it cannot authorise the substance of items he has not read.
+
+So the brief holds §5 out explicitly — including a line telling the developer that if §5 looks wrong
+while reading it, they are right, and it is still not theirs to fix today. D7 and D8.2 become
+commit C once he rules.
+
+Then I raised D7 immediately, out of queue order, because it now blocks a dispatched branch. Told him
+plainly that my earlier "D4 to D8" was wrong of me rather than letting the correction pass silently.
+
+### Verified before dispatching, not asserted
+
+- Upstream main is `3aeb7729`, **not** `f99a8189` — it has moved twice today. Brief says fetch fresh
+  and not to trust my SHA.
+- `image-build/.gitignore` genuinely absent upstream.
+- `cloudbuild-omni.yaml` line 192 is `timeout: 14400s`.
+
+Both `ptone/scion#1298` and `#1299` confirmed against the current tree rather than against the issue
+text. The issues were written yesterday; the tree is the thing that gets patched.
+
+### State
+
+Two agents running: `sn-obs-dev` (issues + label), `sn-uppr-dev` (two branches). Blocked on ptone for
+D7. Seven review items remain after it.
