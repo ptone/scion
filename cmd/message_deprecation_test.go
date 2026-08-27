@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -658,6 +659,72 @@ func TestBroadcastCmd_IsRegistered(t *testing.T) {
 	assert.True(t, found, "broadcast command should be registered on rootCmd")
 }
 
+// findReplacementProblems scans deprecation warning output for replacement
+// command references ("scion <subcommand>") and validates each resolves
+// against rootCmd. Returns problems found and the count of replacements examined.
+func findReplacementProblems(stderr string) (problems []string, checked int) {
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Quote-agnostic: find the token "scion " anywhere in the line,
+		// then take following words up to the first flag, quote, comma, or end.
+		idx := strings.Index(line, "scion ")
+		if idx < 0 {
+			continue
+		}
+		// Extract from "scion" onward
+		rest := line[idx:]
+		fields := strings.Fields(rest)
+		if len(fields) < 2 {
+			continue
+		}
+		// Collect subcommand tokens (skip "scion" itself), stop at flags, quotes, commas
+		var subArgs []string
+		for _, f := range fields[1:] {
+			// Stop at flags
+			if strings.HasPrefix(f, "--") || strings.HasPrefix(f, "-") {
+				break
+			}
+			// Stop at tokens that are just punctuation/quotes
+			cleaned := strings.Trim(f, "\"'`,;)")
+			if cleaned == "" {
+				break
+			}
+			// Strip trailing punctuation from the token itself
+			cleaned2 := strings.TrimRight(f, "\"'`,;)")
+			if cleaned2 == "" {
+				break
+			}
+			subArgs = append(subArgs, cleaned2)
+			// If the original token had trailing punctuation (closing quote,
+			// comma, etc.), we've reached the end of the command reference.
+			if cleaned2 != f {
+				break
+			}
+		}
+		if len(subArgs) == 0 {
+			continue
+		}
+		checked++
+		cmd, _, err := rootCmd.Find(subArgs)
+		if err != nil {
+			problems = append(problems,
+				fmt.Sprintf("replacement command not found: scion %s (from: %s)",
+					strings.Join(subArgs, " "), line))
+			continue
+		}
+		// Verify the command was fully consumed
+		if cmd.Name() != subArgs[len(subArgs)-1] {
+			problems = append(problems,
+				fmt.Sprintf("replacement resolves to wrong command: wanted %s, got %s (from: %s)",
+					subArgs[len(subArgs)-1], cmd.Name(), line))
+		}
+	}
+	return problems, checked
+}
+
 // TestDeprecationWarnings_ReplacementsExist validates AC-15a: every
 // deprecation warning must name a replacement that exists in the binary.
 // It triggers all deprecated flags, captures the warnings, extracts any
@@ -686,48 +753,37 @@ func TestDeprecationWarnings_ReplacementsExist(t *testing.T) {
 		emitDeprecationWarnings(messageCmd)
 	})
 
-	// Extract replacement commands: look for 'scion <something>'
-	for _, line := range strings.Split(stderr, "\n") {
-		// Find patterns like "use 'scion broadcast' instead"
-		idx := strings.Index(line, "'scion ")
-		if idx < 0 {
-			continue
-		}
-		rest := line[idx+1:] // skip opening quote
-		end := strings.Index(rest, "'")
-		if end < 0 {
-			continue
-		}
-		cmdStr := rest[:end] // e.g. "scion broadcast"
-		args := strings.Fields(cmdStr)
-		if len(args) < 2 {
-			continue
-		}
-		scionArgs := args[1:] // strip "scion"
-		// Strip flag args (--in, --at, --all) — they are flag examples, not subcommands
-		var subArgs []string
-		for _, a := range scionArgs {
-			if strings.HasPrefix(a, "--") {
-				break
-			}
-			subArgs = append(subArgs, a)
-		}
-		if len(subArgs) == 0 {
-			continue
-		}
-		cmd, _, err := rootCmd.Find(subArgs)
-		assert.NoError(t, err, "replacement command not found: %s (from warning: %s)", cmdStr, strings.TrimSpace(line))
-		// Verify the command was fully consumed (no unknown subcommand left as arg)
-		assert.Equal(t, subArgs[len(subArgs)-1], cmd.Name(),
-			"replacement resolves to wrong command: wanted %s, got %s (from: %s)",
-			subArgs[len(subArgs)-1], cmd.Name(), cmdStr)
+	problems, checked := findReplacementProblems(stderr)
+	for _, p := range problems {
+		t.Error(p)
 	}
+	// Six of the ten warnings name a 'scion ...' command; assert a floor.
+	// Raise this floor when adding replacement references; never lower it.
+	require.GreaterOrEqual(t, checked, 6,
+		"expected at least 6 replacement references in deprecation warnings; got %d — "+
+			"the extractor may be broken or warnings were removed", checked)
 
-	// Rule 10 mutation subtest: verify the check is load-bearing by
-	// confirming a nonexistent command fails rootCmd.Find().
-	t.Run("catches_nonexistent_replacement", func(t *testing.T) {
-		args := []string{"nonexistent-subcommand"}
-		_, _, err := rootCmd.Find(args)
-		assert.Error(t, err, "expected nonexistent command to fail Find")
+	// Rule 10: prove findReplacementProblems catches bad replacements.
+	// These call the same function used by the main body (Rule 13).
+	t.Run("catches_deepest_match_blind_spot", func(t *testing.T) {
+		problems, _ := findReplacementProblems(
+			"Warning: --x is deprecated, use 'scion schedule message' instead")
+		assert.NotEmpty(t, problems, "should catch nonexistent subcommand via deepest-match blind spot")
+	})
+	t.Run("catches_backtick_quoted_unknown", func(t *testing.T) {
+		problems, _ := findReplacementProblems(
+			"Warning: --x is deprecated, use `scion agent poke` instead")
+		assert.NotEmpty(t, problems, "should catch unknown command in backtick-quoted reference")
+	})
+	t.Run("catches_unquoted_unknown", func(t *testing.T) {
+		problems, _ := findReplacementProblems(
+			"Warning: --x is deprecated, use scion nonexistent-thing instead")
+		assert.NotEmpty(t, problems, "should catch unknown command in unquoted reference")
+	})
+	t.Run("accepts_valid_replacement", func(t *testing.T) {
+		problems, checked := findReplacementProblems(
+			"Warning: --x is deprecated, use 'scion broadcast' instead")
+		assert.Empty(t, problems, "should accept valid replacement command")
+		assert.Equal(t, 1, checked, "should have checked exactly one reference")
 	})
 }

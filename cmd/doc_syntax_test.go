@@ -162,14 +162,14 @@ func TestDocSyntax(t *testing.T) {
 		"scion msg #", "scion msg \"#",
 	}
 
+	totalLines := 0
 	for _, rel := range docFiles {
 		abs, err := filepath.Abs(rel)
 		require.NoError(t, err)
-		if _, err := os.Stat(abs); os.IsNotExist(err) {
-			t.Logf("skipping missing file: %s", rel)
-			continue
-		}
+		_, statErr := os.Stat(abs)
+		require.NoError(t, statErr, "doc file missing: %s — update docFiles or restore the file", rel)
 		lines := extractScionLines(t, abs)
+		totalLines += len(lines)
 		for _, p := range findCommandProblems(lines, rel) {
 			t.Error(p)
 		}
@@ -177,6 +177,11 @@ func TestDocSyntax(t *testing.T) {
 			t.Error(p)
 		}
 	}
+	// A drop means either the extractor broke or examples were deleted.
+	// Raise this floor when adding examples; never lower it.
+	require.GreaterOrEqual(t, totalLines, 9,
+		"expected at least 9 scion command lines across all doc files; got %d — "+
+			"raise this floor when adding examples, never lower it", totalLines)
 
 	// Rule 10: prove parse-check catches bad syntax.
 	// These subtests call the same findCommandProblems / findDenyListProblems
