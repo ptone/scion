@@ -67,6 +67,37 @@ corrected it). This is a pre-beta defect in unreleased code.
 
 ## 3. Proposed design
 
+### 3.0 Scope: this document is **topics only**
+
+**Corrected 18:30Z on nc-arch's review. This is the one thing in the doc that would have broken on
+contact, and it broke in the direction I keep warning others about: I generalised from the sub-kind
+I had read to the surface as a whole.**
+
+The native surface has **two sub-kinds with two different authority models**, and they must not
+share one linking rule:
+
+| | `kind=group` (topics) | `kind=direct` (DMs) |
+|---|---|---|
+| Spec | **this document** | §2.4.2 / §2.15 (`DeriveConversationKey`) |
+| Identity | `webchat_topic` row + reverse pointer | the `dm:` key itself |
+| Authority | project membership | **the key is the ACL** |
+| `project_id` | **NOT NULL** | **NULL — DMs are global pairs** |
+| `external_ref` | empty (§3.2) | **the `dm:` key** |
+| Participants | mutable | **immutable for life (INVARIANT D-1)** |
+
+Verified, not accepted: `pkg/messaging/conversation.go:81` reads *"DM conversations are global —
+ProjectID is intentionally nil."*
+
+**Confirming what nc-arch asked:** yes, the DM sub-kind is covered by a sibling spec with the
+*different* invariant. §2.4.2 as amended is the shared `DMConversationKey`/`ParseDMKey`; §2.15
+(em6, in flight) is `DeriveConversationKey`. The standing rules there are the opposite of this
+document's: **a DM `Conversation` must never become the authority for participant membership**
+— `webchat_dm` and the participant tables are a derived listing index, never the access authority
+— and adding a person is a *promotion to a new conversation under new authority*, never a mutation
+of the existing one.
+
+Nothing in §3.1–§3.7 or the AC list applies to `kind=direct` unless it says so.
+
 ### 3.1 The boundary
 
 > **Surface-uniform identity; surface-specific capability.**
@@ -89,6 +120,14 @@ CREATE UNIQUE INDEX idx_webchat_topic_conversation
 
 `Conversation.external_ref` **stays empty** for native topic conversations. One pointer, one
 writer. Two pointers is the DEF-8 pattern.
+
+**Native DMs are the deliberate exception, and they prove the rule rather than dent it.**
+`conversation.go:66-78` sets `external_ref` to the `dm:` key for `kind=direct`. That is not a
+handle to a foreign system — it is *the canonical identity, and the ACL*. The test for whether
+`external_ref` should carry a value is therefore not "is this surface external?" but **"is the ref
+the identity, or a pointer to where the identity lives?"** For DMs the key *is* the identity. For
+topics the identity lives in a row we own, under a uniqueness constraint we already enforce, so a
+ref would be a second pointer to it.
 
 **Why the reverse pointer is the correct direction, beyond the cargo-cult argument already in
 §2.6.3:** `external_ref` exists to *deduplicate rows whose creation we do not control*. The unique
@@ -113,15 +152,75 @@ posture, **it resolves to nothing and the caller reports "unresolved", never a f
 This tightens the Phase 5 non-fatal contract rather than breaking it: the function already returns
 `nil` on failure and callers already must not treat `nil` as fatal.
 
-### 3.4 Atomicity
+### 3.4 Atomicity — **RESOLVED, Q2 answered 18:26Z**
 
 The `Conversation` row and the `webchat_topic` row are written **in one transaction**. A topic
 without a conversation is invisible to cross-surface addressing; a conversation without a topic is
 an orphan with no name. Neither is repairable from the other side afterwards.
 
-This crosses the Ent / raw-SQL boundary, and that is the single largest implementation risk in this
-spec. **If the two stores cannot share a transaction, say so and stop — do not implement it
-best-effort with a reconciliation sweep.** A sweep is the design that produced DEF-9. §7 Q2.
+**One transaction is achievable on both engines.** nc-arch answered Q2 yes; I verified each
+citation rather than accepting the account (rule 15), and two things changed.
+
+**Verified as stated:**
+
+- The two stores share **one `*sql.DB`**, not two handles on one file. `CompositeStore.DB()`
+  returns the entsql driver's underlying handle (`entadapter/composite.go:673`, nil if the driver
+  is not `*entsql.Driver`), and that handle is passed straight into `hub.NewWebChatStore(rawDB,
+  ...)` at `cmd/server_foreground.go:596`.
+- Precedent exists **and is already on our branch**: `CompositeStore.RunSerializable(ctx, fn(ctx,
+  tx *sql.Tx))` at `entadapter/locking.go:264`, with the `db == nil` guard.
+- So one `*sql.Tx` carries both writes: the raw `webchat_topic` INSERT on the tx, and the
+  `Conversation` INSERT through a tx-scoped ent client
+  (`entsql.NewDriver(dialect, entsql.Conn{ExecQuerier: tx})`). One `Commit()`.
+
+**Cost 1 — bounded refactor.** The create-path webchat method takes an injected executor
+(`ExecContext`/`QueryContext`) instead of reaching for `s.db`. That method only, not the store.
+
+**Cost 2 — the ambient-connection invariant. nc-arch's conclusion is right; the mechanism they
+gave is not, and the real one is worse.**
+
+> **INVARIANT U-TX-1.** Inside the atomic block, **nothing** may touch the ambient pool — not
+> `s.db`, not `s.client`, not a helper that closes over either. Only the tx-bound executor and the
+> tx-scoped ent client.
+
+nc-arch attributed the hazard to SQLite write-lock contention between two connections, and drew a
+WAL distinction. Both are moot here:
+
+- **WAL is already on** — `PRAGMA journal_mode = WAL` at `pkg/ent/entc/client.go:89`. The "outside
+  WAL even a read can block" case does not arise.
+- **There is no second connection.** SQLite is forced to `MaxOpenConns = 1`
+  (`pkg/config/hub_config.go:545`, and `applyDatabasePoolDefaults` at `:571` forces it — the
+  comment says "MUST stay 1 to serialize").
+
+So an ambient call inside the block does not lose a race for the SQLite write lock. It **blocks in
+`database/sql` waiting for the one pooled connection, which the transaction is holding until
+commit.** That is a hard deadlock in the Go pool, before SQLite is ever consulted, and it resolves
+only when the context deadline fires.
+
+Two consequences the corrected mechanism produces that the original did not:
+
+1. **It is worse than described.** Not `SQLITE_BUSY`, not a degraded non-atomic write — a hang.
+   And it applies to ambient **reads** too, which the lock-contention story would have permitted
+   under WAL.
+2. **It is far more testable.** Pool starvation with `MaxOpenConns=1` is *deterministic*: it hangs
+   on the first execution, every time, not intermittently under load. This is a violation that
+   cannot hide in CI. AC-U-10.
+
+**Cost 3 — `fn` must be idempotent, which nothing currently tells its callers.**
+`RunSerializable` retries `fn` up to `maxSerializableRetries` on serialization failure
+(`locking.go:281-308`). Its ent-native sibling `runSerializableEntTx` documents this loudly —
+*"fn MUST be idempotent — it can be invoked more than once"* — and **`RunSerializable` carries the
+same loop with no such comment.** Therefore:
+
+- **Generate the conversation UUID and the topic UUID outside `fn`**, not inside. A retry would
+  otherwise mint different ids on each attempt, and any id captured before the retry is stale.
+- **Publish the topic-created event after commit, never inside `fn`.** `handlers_chat_v2.go:470`
+  publishes today; on a retried transaction an in-block publish emits an event for a rolled-back
+  row.
+
+Retries are Postgres-only (`attempts = 1` on SQLite, `locking.go:277-279`), so this defect would be
+**invisible in SQLite tests and live only in production Postgres.** That asymmetry is the reason to
+fix it by construction rather than by testing for it.
 
 ### 3.5 `drift_state` for native
 
@@ -130,13 +229,21 @@ best-effort with a reconciliation sweep.** A sweep is the design that produced D
 this rather than leaving it to convention (AC-U-5) — an enum with unreachable values invites a
 future writer to reach them.
 
-### 3.6 `project_id`
+### 3.6 `project_id` — scoped to topics
 
 `Conversation.project_id` is `Optional().Nillable()`. `webchat_topic.project_id` is `NOT NULL`.
-**The identity layer is weaker than the projection it claims to own.** A native conversation with a
-NULL project is unaddressable and unauthorizable — project membership is one of the two
-authorization sources. Enforce non-null for `surface=native` at the write path (AC-U-4). Do not
-widen the column's nullability contract for other surfaces in this change.
+For topics, **the identity layer is weaker than the projection it claims to own**: a topic
+conversation with a NULL project is unaddressable and unauthorizable, since project membership is
+its only authorization source. nc-arch confirms this is load-bearing on their side too — space
+visibility and authz key off project access.
+
+**Enforce non-null for `surface=native AND kind=group`.** Not for `surface=native` alone — that
+was the original wording and it would have rejected every human↔human DM, which is legitimately
+global (§3.0). The column's nullability contract is unchanged for DMs and for other surfaces.
+
+**The nullable column is therefore correct as it stands.** It is not a weakness to be fixed at the
+schema level; it is a schema that must accommodate two authority models, with the constraint
+applied per sub-kind at the write path. I had this as a schema defect; it is a write-path rule.
 
 ### 3.7 `display_name`
 
@@ -218,7 +325,13 @@ every native read through Ent, replacing working shipped code for no user-visibl
 - **AC-U-3** The message path **never mints** a `surface=native` conversation for a thread id that
   has no topic row. Assert the row count is unchanged and the caller reports unresolved.
   *This is the DEF-8-at-the-store-boundary regression test; it must fail before the fix.*
-- **AC-U-4** A `surface=native` conversation cannot be persisted with a NULL `project_id`.
+- **AC-U-4** A `surface=native, kind=group` conversation cannot be persisted with a NULL
+  `project_id`.
+- **AC-U-4b** *(paired with AC-U-4; neither lands without the other.)* A `surface=native,
+  kind=direct` conversation **can** be persisted with a NULL `project_id`, and a human↔human DM
+  still resolves end-to-end. **This is the regression test for the defect AC-U-4 originally
+  was** — a rule that fails closed on legitimate traffic. A one-sided constraint test would have
+  shipped it green.
 - **AC-U-5** `drift_state` is `active` for every `surface=native` row. Permanent test **with a
   floor** — vacuous on an empty table (rule 14).
 - **AC-U-6** Backfill of existing topics is **all-or-nothing per row** and idempotent: re-running it
@@ -228,8 +341,22 @@ every native read through Ent, replacing working shipped code for no user-visibl
   nobody woken) rather than erroring or waking the wrong agent.
 - **AC-U-8** Deleting an agent clears `default_agent_id` on native conversations, as
   `ClearTopicDefaultAgent` does today. Assert the post-delete value.
-- **AC-U-9** `webchat_read_state.conversation_key` is **unchanged** by this migration — still the
-  bare topic UUID / `dm:` key. Assert existing read-state rows still resolve after cut-over.
+- **AC-U-9** `webchat_read_state.conversation_key` **and `webchat_user_prefs`** are **unchanged**
+  by this migration — still keyed on the bare topic UUID / `dm:` key, never on `conversation_id`.
+  Assert existing read-state and prefs rows still resolve after cut-over. nc-arch flags the weight
+  here: keeping `conversation_key` stable is what makes this a **zero read-state migration**.
+  Phase 3 backfill touches `webchat_topic` **only** — never `webchat_read_state`,
+  `webchat_user_prefs`, or `webchat_dm`. Assert the row counts and checksums of those three tables
+  are identical before and after backfill.
+- **AC-U-10** *(from the corrected §3.4 mechanism.)* An ambient-pool call inside the atomic block
+  is caught. Add a deliberate `s.db` read inside the block in a test build and assert it **hangs
+  to context deadline** on SQLite rather than succeeding. Deterministic at `MaxOpenConns=1`, so
+  this cannot be flaky. *Verifies the invariant is real, not merely documented.*
+- **AC-U-11** No UUID is generated inside the `RunSerializable` closure. Static check — invoking
+  `fn` twice must produce identical ids. **`attempts=1` on SQLite, so a test that only runs SQLite
+  cannot see this**; the check must be structural or run against Postgres.
+- **AC-U-12** The topic-created event is published **after** commit. Assert no event is emitted
+  when the transaction rolls back.
 
 ---
 
@@ -239,13 +366,16 @@ every native read through Ent, replacing working shipped code for no user-visibl
 loses its default agent at migration. Accept the fail-closed NULL + report, or hold cut-over until
 the unresolvable set is empty?
 
-**Q2 (nc-arch, engineering).** §3.4: can a single transaction span the Ent `Conversation` write and
-the raw-SQL `webchat_topic` write, on **both** SQLite and Postgres? If not, this spec changes shape
-and alternative (A) reopens. **This one gates the phase breakdown, so it goes first.**
+**Q2 — ANSWERED 18:26Z, yes on both engines.** See §3.4. Alternative (A) stays closed. Their
+conclusion verified; their stated mechanism corrected (pool starvation at `MaxOpenConns=1`, not
+SQLite lock contention), which made the hazard worse and the test deterministic. Two costs they
+did not name added: `fn` idempotency and post-commit event publication.
 
-**Q3 (nc-arch, small).** Does `is_general` want a `Conversation` analogue, or does "#general" stay
-purely native? My read is purely native — no other surface has the concept — but it is nc-arch's
-field.
+**Q3 — ANSWERED 18:27Z, agree: `is_general` stays purely native.** It drives the partial unique
+index (`webchannel_store.go:497`) and UI pin-to-top; neither has cross-surface meaning. nc-arch's
+argument for it is better than mine was: a `Conversation` analogue would be **a second unwritten
+field, which is precisely the DEF-7 drift pattern** — and DEF-7 is the field this same document
+declines to write to (§3.7). Same defect, so the same answer, twice in one spec.
 
 ---
 
@@ -255,7 +385,8 @@ Sequenced so nothing user-visible moves until the link exists and is proven.
 
 1. **Column + index**, nullable, no writers. Inert.
 2. **Dual-write on create** (§3.2, §3.4) — new topics get conversations. AC-U-1, AC-U-2, AC-U-4.
-3. **Backfill** existing topics, all-or-nothing per row, idempotent. AC-U-6.
+3. **Backfill** existing topics, all-or-nothing per row, idempotent. **Touches `webchat_topic`
+   only** — never read-state, prefs or `webchat_dm`. AC-U-6, AC-U-9.
 4. **Close the mint path** (§3.3) — `ResolveOrCreateThreadConversation` reads instead of creating.
    AC-U-3. *This is the phase that actually stops the divergence; 1–3 only make it possible.*
 5. **`default_agent` promotion** + `ClearTopicDefaultAgent` move. AC-U-7, AC-U-8. **Gated on Q1.**
@@ -264,6 +395,10 @@ Sequenced so nothing user-visible moves until the link exists and is proven.
 
 Phases 1–4 are independent of Q1 and can proceed while it is open. **Phase 4 is the one that pays
 the debt** — if scheduling pressure forces a cut, cut from the back, not the front.
+
+**Phases 1–4 are unblocked as of 18:30Z**: Q2 answered yes, Q3 agreed, §3.6 rescoped. Q1 gates
+phase 5 only. **Not yet dispatched** — §2.15 is mid-flight in `pkg/messaging/conversation.go`,
+which phase 4 rewrites. Sequencing by file contention, not by readiness (rule 2).
 
 ---
 
