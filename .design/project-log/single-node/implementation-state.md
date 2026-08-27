@@ -9373,3 +9373,45 @@ documentation that lets a stranger walk it. That is what these three PRs are.
 - `ptone/scion#1316`'s intro still says "at least fifteen known collisions" (true at 23; links the
   register).
 - `scripts/single-node/deploy.sh` comments still reference the old `-o ./scion` placement.
+
+## §31 — THE TUTORIAL IS PUBLISHED UPSTREAM. `#1315` and `#1316` merged.
+
+ptone merged `GoogleCloudPlatform/scion#1316` at 15:03 and `GoogleCloudPlatform/scion#1315` at
+15:51. Upstream `main` is now `c5b2fadd`.
+
+**Verified on `main` itself, not on the PR page:**
+
+| check | result |
+|---|---|
+| `docs-site/src/content/docs/hosted/single-node/hub-setup-cloudrun.md` exists on `main` | yes |
+| length | **486 lines** (the generated stub was 36) |
+| `export PATH="$(go env GOPATH)/bin:$PATH"` (prepend) | present |
+| `make deploy-cloudrun-sandbox` (the command that never existed) | **gone** |
+
+**This is the milestone the tier has been working toward since the §1 walk on 2026-08-25.** §1
+capability was proven then; what was missing was a published page a stranger could follow. It is now
+on upstream `main`. The four-month-old distinction in my own §30.2 note — *"not §1 capability, but
+publishing the documentation that lets a stranger walk it"* — is closed on the docs side.
+
+### §31.1 — `#1317` is the only one left, and it is clean
+
+Re-tested against current `main` (`c5b2fadd`) with `git merge-tree`: **rc=0, no conflicts.** All
+checks green; `cla/google` red as always and gating nothing. GitHub reports `mergeable=UNKNOWN`
+purely because it is recomputing after the base moved — **that is not the same as CONFLICTING, and
+I checked rather than inferred**, having been caught by exactly that distinction at 15:00.
+
+**The argument for merging it rather than letting it sit:** upstream `main` still carries **18 bare
+issue references** in `.design/hosted/cloud-run-single-node.md` — I counted them on `main` just now,
+not from memory. With a 100% collision rate across `#1270`–`#1320` (§25.2), all 18 resolve to the
+wrong thing for any reader in the wrong repo. `#1317` is the fix. Put to ptone.
+
+### §31.2 — Heartbeat 16:01
+
+1. **Agents:** none of mine running; none stalled. `sn-impl-em3` is blocked and idle >1 day —
+   flagged, not reclaimed, pending a check of its brief.
+2. **Critical path:** ptone's merge of `#1317`. Nothing else, and no agent action can advance it.
+3. **Design doc in sync** — and after `#1317` lands, the upstream copy will be too. The single
+   deliberate divergence stands: the `harnessConfig` workaround stays in the published tutorial
+   until `ptone/scion#1316` phase 4.
+
+All nine Instances present (stderr visible, impersonation on).
