@@ -1217,6 +1217,220 @@ changing either.** If the answer is that changing it breaks rendering, then the 
 
 ---
 
+## 2.15 One key derivation, not five (DEF-15, DEF-16)
+
+### 2.15.0 Prior art in this repository (rule 16)
+
+Grepped `2724ed10` for the section's core nouns — `dm:` prefix discrimination and
+`thread:%s:%s` key construction.
+
+| Site | What it does | Discriminates `dm:`? |
+|---|---|---|
+| `pkg/hub/events.go:760,768` | web-channel event routing | **Yes** |
+| `pkg/hub/messagebroker.go:512,534` | delivery `switch` on `storeMsg.ThreadID` | **Yes** |
+| `pkg/hub/webchannel.go:90` | web channel dispatch | **Yes** |
+| `pkg/hub/handlers_agent_messaging.go:350` | chat notifier `NotifyDMReceived` | **Yes** |
+| `pkg/hub/handlers_chat_v2.go` (11 sites) | read gates, participants, search | **Yes** |
+| `pkg/messages/dm_key.go:91` | canonical DM key parse | **Yes** |
+| `pkg/messaging/dm_migration.go:135` | DM row migration | **Yes** |
+| `pkg/messaging/conversation.go:158` | `ResolveOrCreateThreadConversation` — **write** | **No** |
+| `pkg/messaging/conversation.go:198` | `ResolveThreadConversationForRead` — **read** | **No** |
+| `pkg/messaging/backfill.go:195` | `groupForMessage` — **bulk write** | **No** |
+| `pkg/hub/handlers_agent_messaging.go:245` | outbound dual-write call site | **No** |
+| `pkg/hub/handlers_agent_messaging.go:848` | agent-message dual-write call site | **No** |
+
+**This table is the design.** Nineteen sites in the delivery, notification and read paths
+treat a `dm:`-prefixed `ThreadID` as a first-class DM signal. Five sites in the conversation
+layer do not. **The convention is not in question; it is load-bearing in production today and
+predates this project.** The conversation layer is the outlier, and it is the only layer that
+mints rows.
+
+**DEF-15 is five sites, not the one found in review.** Two matter more than the three that
+were visible:
+
+- **`conversation.go:198` (read).** After a write-side fix, a read-side that still derives
+  `thread:<proj>:dm:…` looks up a key nothing writes. **A partial fix here does not leave a
+  cosmetic inconsistency; it silently empties the read switch's DM lookups.**
+- **`backfill.go:195` (bulk).** The backfill is a *volume* producer of the malformed shape:
+  every historical DM-keyed message becomes a `kind='group'` project-scoped row. Its own
+  comment reasons carefully about global DMs — "DMs are global per design 2.4.1; the
+  external_ref must match what dual-write produces" — in the `else` branch, having never
+  considered that a DM can arrive down the `if msg.ThreadID != ""` branch. **The author
+  reasoned correctly about the case they were looking at.**
+
+> **SEQUENCING BLOCKER, and it is mine.** §2.11 (DEF-12) is listed as unblocked and ready to
+> dispatch. **It must not be dispatched before this section lands.** Running the backfill today
+> converts a latent defect into a populated table. This is a hazard I created in my own plan by
+> ordering the work before finding DEF-15.
+
+### 2.15.1 The decision: route, do not refuse
+
+The question logged with DEF-15 was whether a `dm:`-prefixed `ThreadID` should route to DM
+resolution or be refused at ingress. **The prior-art table answers it: refuse is not available.**
+Nineteen consumers depend on the form, PR #1319 format-validates it, and PR #1322 now
+authorizes it. Refusing at ingress would break delivery and notification to close a defect that
+lives in row creation.
+
+**The fix is not a guard at each of the five sites.** That is the shape §5u and §5x already
+recorded twice this project: adding a check to each unguarded path leaves the system better
+defended and less likely to be defended further, and it leaves the two `conversation.go`
+functions mis-deriving for any future caller. The defect is not five missing checks. **It is
+that there are five key-derivation functions and they disagree.**
+
+Collapse them into one:
+
+```go
+// package messaging — the ONLY place a conversation external_ref is derived.
+//
+// Returns the canonical external_ref, the conversation kind, and the project
+// scope (nil for direct conversations, which are global per §2.4.1).
+//
+// Parse failure returns an error. Callers MUST NOT create a row on error and
+// MUST NOT fall back to a constructed key: any guess on any input to the key
+// derivation is a guess on the ACL.
+func DeriveConversationKey(in KeyInputs) (extRef string, kind string, projectID *string, err error)
+
+type KeyInputs struct {
+    ThreadID      string // may be a dm: key, a native thread id, or empty
+    ProjectID     string
+    SenderKind    string
+    SenderID      string
+    RecipientKind string
+    RecipientID   string
+}
+```
+
+Derivation, in order:
+
+1. `ThreadID` has prefix `dm:` → **must** satisfy `validDMKey`. On pass, return the key
+   **verbatim**, `kind = "direct"`, `projectID = nil`. On fail, **error** — do not fall through
+   to the thread branch. Falling through is precisely how DEF-15 produces its row.
+2. `ThreadID` non-empty, no `dm:` prefix → `thread:<projectID>:<threadID>`, `kind = "group"`,
+   project-scoped. Empty `projectID` is an **error**, not a warning-and-nil as today.
+3. `ThreadID` empty → derive from the principal pair via the existing
+   `messages.DMConversationKey`, `kind = "direct"`, `projectID = nil`.
+
+Note (1) returns the supplied key **unmodified**. The `dm:` key is already canonical and
+already the ACL; re-deriving it from parsed halves would introduce a second chance to differ
+from the string the read path gates on.
+
+All five sites become callers. `ResolveOrCreateThreadConversation` and
+`ResolveThreadConversationForRead` keep their names and signatures for their existing callers
+but delegate; `backfill.go:195` and both handler call sites lose their inline construction.
+
+> **Golden test vectors are a security control here, not a consistency check.** Once
+> `handlers_chat_v2.go` authorizes by parsing this key, `DeriveConversationKey` is the ACL
+> derivation. A vector table pinning input → `(extRef, kind, projectID, err)` for every branch,
+> including every error branch, is required. **Every error case gets a vector**, because the
+> failure mode this section exists to fix was an error case falling through to a success path.
+
+### 2.15.2 Ordering: validate before you persist (DEF-16)
+
+`handleAgentOutboundMessage` dual-writes at `:245`/`:247` and validates at `:288`.
+`handleAgentMessage` validates at `:615` and dual-writes at `:848`/`:851`. **The same two
+operations, opposite orders, no comment anywhere saying which is intended** (standing rule 19).
+
+Observed consequence: a request rejected `400 thread_id requires channel to be set` still leaves
+a conversation row, with no message attached and no participants. Before PR #1322 that extended
+to *unauthorized* keys — the refusal was real and its side effect outlived it.
+
+**Decision: validate first, in both handlers.** `handleAgentMessage` is already correct; move
+the outbound dual-write to after `ValidateLegacyMessage`.
+
+The argument for the current outbound order is that resolving early lets a conversation be
+recorded for a message that later fails a soft check. **That is not worth an orphan.** A
+conversation row is an assertion that a venue exists; the system should not assert it on behalf
+of a request it then refuses. Today the orphans are inert — no read path returns them — but they
+stop being inert the moment anything treats a conversation row as evidence a conversation
+happened: `external_ref` uniqueness, participant listings, or the DEF-12 backfill.
+
+**This is a behaviour change to a Phase-5 non-fatal path and must be called out in review**, not
+folded in silently: a message that today gets a `conversation_id` despite failing validation will
+no longer get one. Nothing reads that association, which is why it is safe — but "nothing reads
+it" is a claim the implementer cites, not one they inherit from this paragraph.
+
+### 2.15.3 Migration: the rows already in the database
+
+Any conversation whose `external_ref` matches `thread:%:dm:%` is a DEF-15 artifact. Reconcile
+through the existing `dm_migration.go` machinery rather than a new sweep.
+
+For each such row, the embedded suffix after `thread:<projectID>:` is the intended key.
+
+- Suffix satisfies `validDMKey` → the row's true identity is that key, `kind = 'direct'`,
+  `project_id = NULL`. If a correct row already exists for that key, **merge into it**; the
+  correct row wins.
+- Suffix does **not** satisfy `validDMKey` → **leave the row exactly as it is** and report it.
+  Do not repair, do not guess, do not delete. Under-granting is recoverable; over-granting is
+  not.
+- Row carries participants (it will, being `kind='group'`) that disagree with the key → **the
+  key wins.** Participant tables are a derived listing index, never the access authority. A
+  disagreement is reported, and the index is rebuilt from the key.
+
+All-or-nothing per row. A half-migrated DM lists asymmetrically, which is worse than an
+unmigrated one because it looks finished.
+
+### 2.15.4 Alternatives considered
+
+**(a) Guard at each of the five call sites.** Rejected. It is the failure mode this project has
+now recorded three times (§5o, §5u, §5x): a per-site check leaves the derivation functions
+themselves wrong, so the sixth caller reintroduces the defect and does so quietly. It also
+leaves five copies of a security-critical decision.
+
+**(b) Refuse `dm:`-prefixed `ThreadID` at ingress; require the principal pair.** Rejected on the
+prior-art table — nineteen consumers, two merged PRs, and the native chat surface all depend on
+the form. This alternative was the leading candidate when DEF-15 was logged, and the grep is
+what killed it. Recording that here because the ledger row still poses it as an open choice.
+
+**(c) Normalise the malformed key at the read gate — teach `isDMParticipant` to unwrap
+`thread:<proj>:dm:…`.** Rejected, and it is the most dangerous of the three because it works.
+It would make the injected rows readable by the right people and the symptom would disappear.
+It also makes the read gate responsible for undoing a write-side mistake, which means the ACL
+now depends on a normalisation step that the write path can change out from under it. **Fix the
+key at the point of derivation or the key is not the ACL.**
+
+**(d) Leave DEF-16 ordering as it is and clean orphans periodically.** Rejected. A reaper cannot
+distinguish an orphan from a legitimately empty new conversation without a race.
+
+### 2.15.5 Acceptance criteria
+
+- **AC-DEF15-1** — `DeriveConversationKey` is the only function in `pkg/` that constructs a
+  `thread:` or `dm:` external_ref. Verified by grep: `fmt.Sprintf("thread:%s:%s"` returns
+  exactly one non-test hit, inside that function.
+- **AC-DEF15-2** — A golden vector table covers all three branches and **every** error branch;
+  each vector pins `(extRef, kind, projectID, err)`.
+- **AC-DEF15-3** — An outbound message with `thread_id = dm:agent:X:user:Y` produces exactly one
+  conversation row: `kind='direct'`, `external_ref` equal to the supplied key **verbatim**,
+  `project_id IS NULL`. This is S6's restored `attachments_agent_test.go` assertion with the
+  `t.Skip` removed — **deleting that Skip line is the acceptance criterion**, not writing a new
+  test.
+- **AC-DEF15-4** — A `dm:`-prefixed `ThreadID` failing `validDMKey` creates **no** conversation
+  row of any kind. Verified by asserting a row count, not by asserting an error string.
+- **AC-DEF15-5** — Read and write derive identically: for the same inputs,
+  `ResolveThreadConversationForRead` finds the row `ResolveOrCreateThreadConversation` wrote.
+  A test that writes then reads, not two tests that each assert a literal.
+- **AC-DEF15-6** — Backfill over a fixture containing DM-keyed `ThreadID` messages produces
+  `kind='direct'` global rows, and produces **zero** rows matching `thread:%:dm:%`.
+- **AC-DEF16-1** — A request rejected by `ValidateLegacyMessage` at either handler leaves **no**
+  conversation row. Verified by row count before and after.
+- **AC-DEF16-2** — Both handlers validate before they persist. Verified by mutation: move the
+  validation call back below the dual-write and confirm AC-DEF16-1's test fails **by name**.
+- **AC-MIGRATE-1** — Migration over a fixture containing one repairable and one unrepairable
+  `thread:%:dm:%` row repairs the first, leaves the second byte-identical, and reports both.
+
+### 2.15.6 Implementation phases
+
+1. `DeriveConversationKey` + golden vectors. No call sites changed. Lands green and alone.
+2. Repoint `conversation.go:158` and `:198` at it. AC-DEF15-1, -2, -5.
+3. Repoint the two handler call sites; unskip S6's test. AC-DEF15-3, -4.
+4. Repoint `backfill.go:195`. AC-DEF15-6. **Gates §2.11.**
+5. DEF-16 ordering + its mutation check. AC-DEF16-1, -2.
+6. Migration sweep. AC-MIGRATE-1.
+
+Phases 1–2 touch no handler and can run concurrently with unrelated sections. Phases 3–5 all
+touch `handlers_agent_messaging.go` and must be one manager's serial work.
+
+---
+
 ## 3. Alternatives Considered
 
 ### 3.1 Native-only Conversation; external stays an opaque tuple (Option B)
