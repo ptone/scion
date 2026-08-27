@@ -54,6 +54,12 @@ func (s *stubAgentService) SendStructuredMessage(ctx context.Context, id string,
 	return &hubclient.MessageResponse{}, nil
 }
 
+func (s *stubAgentService) SendStructuredMessageWithConv(ctx context.Context, id string, msg *messages.StructuredMessage, interrupt, notify, wake bool, surface, externalRef, parentRef string) (*hubclient.MessageResponse, error) {
+	// Delegate to the same function — tests that need to verify conversation
+	// fields can inspect the stub's call arguments.
+	return s.SendStructuredMessage(ctx, id, msg, interrupt, notify, wake)
+}
+
 // stubSecretService implements hubclient.SecretService using function fields.
 type stubSecretService struct {
 	hubclient.SecretService // embed for compile-time interface satisfaction

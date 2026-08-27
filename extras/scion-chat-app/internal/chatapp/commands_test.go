@@ -835,3 +835,55 @@ func TestSubscribeFilterAction_UpdatesMessage(t *testing.T) {
 		t.Errorf("expected 'all activity types' (no checkboxes), got: %s", resp.UpdateMessage.Text)
 	}
 }
+
+// TestGchatConvFields verifies conversation resolution field derivation
+// from Google Chat events (Phase 11).
+func TestGchatConvFields(t *testing.T) {
+	t.Run("threaded event", func(t *testing.T) {
+		event := &ChatEvent{
+			SpaceID:  "spaces/AAAA",
+			ThreadID: "spaces/AAAA/threads/BBBB",
+		}
+		surface, extRef, parentRef := gchatConvFields(event)
+		if surface != "gchat" {
+			t.Errorf("surface = %q, want gchat", surface)
+		}
+		if extRef != "spaces/AAAA/threads/BBBB" {
+			t.Errorf("externalRef = %q, want spaces/AAAA/threads/BBBB", extRef)
+		}
+		if parentRef != "spaces/AAAA" {
+			t.Errorf("parentRef = %q, want spaces/AAAA", parentRef)
+		}
+	})
+
+	t.Run("space-only event uses space as external_ref", func(t *testing.T) {
+		event := &ChatEvent{
+			SpaceID: "spaces/CCCC",
+		}
+		surface, extRef, parentRef := gchatConvFields(event)
+		if surface != "gchat" {
+			t.Errorf("surface = %q, want gchat", surface)
+		}
+		if extRef != "spaces/CCCC" {
+			t.Errorf("externalRef = %q, want spaces/CCCC", extRef)
+		}
+		if parentRef != "spaces/CCCC" {
+			t.Errorf("parentRef = %q, want spaces/CCCC", parentRef)
+		}
+	})
+
+	t.Run("empty event returns empty fields", func(t *testing.T) {
+		event := &ChatEvent{}
+		surface, extRef, parentRef := gchatConvFields(event)
+		if surface != "" || extRef != "" || parentRef != "" {
+			t.Errorf("expected all empty, got surface=%q extRef=%q parentRef=%q", surface, extRef, parentRef)
+		}
+	})
+
+	t.Run("nil event returns empty fields", func(t *testing.T) {
+		surface, extRef, parentRef := gchatConvFields(nil)
+		if surface != "" || extRef != "" || parentRef != "" {
+			t.Errorf("expected all empty, got surface=%q extRef=%q parentRef=%q", surface, extRef, parentRef)
+		}
+	})
+}

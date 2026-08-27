@@ -417,7 +417,9 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 		if event.ThreadID != "" {
 			msg.ThreadID = event.ThreadID
 		}
-		if _, err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, agentID, msg, false, false, false); err != nil {
+		// Phase 11: send conversation resolution fields.
+		gcSurface, gcExtRef, gcParentRef := gchatConvFields(event)
+		if _, err := client.ProjectAgents(link.ProjectID).SendStructuredMessageWithConv(ctx, agentID, msg, false, false, false, gcSurface, gcExtRef, gcParentRef); err != nil {
 			return nil, r.reply(ctx, event, fmt.Sprintf("Failed to send response to agent: %v", err))
 		}
 		return nil, r.reply(ctx, event, fmt.Sprintf("Response sent to agent `%s`.", agentID))
@@ -1300,7 +1302,9 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 		msg.Msg = messageText
 	}
 
-	if _, err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, agentSlug, msg, false, false, false); err != nil {
+	// Phase 11: send conversation resolution fields.
+	gcSurface, gcExtRef, gcParentRef := gchatConvFields(event)
+	if _, err := client.ProjectAgents(link.ProjectID).SendStructuredMessageWithConv(ctx, agentSlug, msg, false, false, false, gcSurface, gcExtRef, gcParentRef); err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to send message to `%s`: %v", agentSlug, err)), nil
 	}
 
@@ -1659,7 +1663,9 @@ func (r *CommandRouter) cmdThread(ctx context.Context, event *ChatEvent, args []
 		} else if event.ThreadID != "" {
 			msg.ThreadID = event.ThreadID
 		}
-		if _, err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, createResp.Agent.Slug, msg, false, false, false); err != nil {
+		// Phase 11: send conversation resolution fields.
+		gcSurface, gcExtRef, gcParentRef := gchatConvFields(event)
+		if _, err := client.ProjectAgents(link.ProjectID).SendStructuredMessageWithConv(ctx, createResp.Agent.Slug, msg, false, false, false, gcSurface, gcExtRef, gcParentRef); err != nil {
 			return textResponse(event, fmt.Sprintf("Agent `%s` created and started, but failed to send instruction: %v", createResp.Agent.Slug, err)), nil
 		}
 	}
@@ -2169,4 +2175,25 @@ func (r *CommandRouter) clientForUser(ctx context.Context, event *ChatEvent) (hu
 		return nil, fmt.Errorf("user not registered")
 	}
 	return r.idMapper.ClientFor(ctx, mapping)
+}
+
+// gchatConvFields derives conversation resolution fields (Phase 11) from a
+// Google Chat event.  Surface is always "gchat".  ExternalRef is the thread
+// path (e.g. "spaces/AAAA/threads/BBBB") and ParentRef is the space path.
+func gchatConvFields(event *ChatEvent) (surface, externalRef, parentRef string) {
+	if event == nil {
+		return "", "", ""
+	}
+	if event.ThreadID == "" && event.SpaceID == "" {
+		return "", "", ""
+	}
+	surface = "gchat"
+	parentRef = event.SpaceID
+	if event.ThreadID != "" {
+		externalRef = event.ThreadID
+	} else {
+		// No thread: use the space itself as the conversation ref.
+		externalRef = event.SpaceID
+	}
+	return
 }
