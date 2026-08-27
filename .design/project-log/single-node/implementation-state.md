@@ -7696,3 +7696,43 @@ verbatim error text so a search lands on the page).
 
 Task #42 (`noAuth`) is NOT covered by this matrix and remains unverified against
 `GoogleCloudPlatform/scion#1304`.
+
+## 07:50 — Docs commit verified; and I had specified the wrong durability requirement
+
+**`6293a95d` verified against the file.** Both places right: the §3 caution carries
+the verbatim error as a code block so a search for the string lands on the page,
+and the troubleshooting heading is the error string itself. Correctly says the
+error "gives no indication that specifying `harnessConfig` is the fix". Uses 502.
+Claims nothing about what `#1305` did or did not fix, and does not speculate about
+why antigravity is unregistered — both constraints held.
+
+**MY OFF-INSTANCE REQUIREMENT WAS WRONG, and I only found out by trying to read the
+file.** I told both stress agents to write every measurement *off the instance* as
+they took it, because a Cloud Run crash destroys the whole instance without warning.
+They complied — `sn-stress-max` writes to `/workspace/.design/project-log/`.
+
+That defends against the failure I named and not against the one that is now more
+likely. **An agent's `/workspace` is its own, not shared with me.** The data
+survives the Cloud Run instance dying; it does not survive the *agent container*
+being reclaimed, which happens routinely after completion and without consulting
+me. I asked for the wrong property: I specified *off the instance* when what I
+needed was *readable by someone who outlives the writer*.
+
+Corrected both to also append to the shared volume, which is shared in every
+workspace mode:
+
+```
+/scion-volumes/scratchpad/projects/single-node/sn-stress-{def,max}-phase-b.csv
+```
+
+Told both to append rather than rewrite, and to keep their own copy — two copies
+cost nothing and this project has already lost one instance's state today.
+
+**This is the same error shape as the design doc's §5 framing.** There I described
+loss by redeploy, the event we choose, and missed loss by overload, the event we do
+not. Here I defended against the crash I was thinking about and missed the reclaim
+I was not. Both times the named threat crowded out the likelier one.
+
+**Agent states checked, not assumed:** `sn-stress-def` recovered from its stall and
+is executing. `sn-stress-max` blocked 3 min — told it that if it is waiting on me
+it is not, and to go. `sn-findings-dev` active on the antigravity filing.
