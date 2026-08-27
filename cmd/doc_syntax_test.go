@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -47,7 +48,7 @@ func extractScionLines(t *testing.T, path string) []string {
 		s := strings.TrimSpace(raw)
 		s = strings.TrimPrefix(s, "$ ")
 		s = strings.TrimPrefix(s, "# ") // shell prompt, not comment
-		if strings.HasPrefix(s, "#") {   // comment line
+		if strings.HasPrefix(s, "#") {  // comment line
 			continue
 		}
 		if !strings.HasPrefix(s, "scion ") {
@@ -182,6 +183,34 @@ func TestDocSyntax(t *testing.T) {
 	require.GreaterOrEqual(t, totalLines, 9,
 		"expected at least 9 scion command lines across all doc files; got %d — "+
 			"raise this floor when adding examples, never lower it", totalLines)
+
+	// Deny-list scan of cobra tree Long and Example fields.
+	// Guards against gated forms (conv:, #) appearing as runnable
+	// examples in --help output.
+	t.Run("cobra_help_deny_list", func(t *testing.T) {
+		var cobraLines []string
+		var walkCmd func(c *cobra.Command)
+		walkCmd = func(c *cobra.Command) {
+			for _, text := range []string{c.Long, c.Example} {
+				if text == "" {
+					continue
+				}
+				for _, line := range strings.Split(text, "\n") {
+					s := strings.TrimSpace(line)
+					if strings.HasPrefix(s, "scion ") {
+						cobraLines = append(cobraLines, s)
+					}
+				}
+			}
+			for _, sub := range c.Commands() {
+				walkCmd(sub)
+			}
+		}
+		walkCmd(rootCmd)
+		for _, p := range findDenyListProblems(cobraLines, denyPatterns, "cobra-help-text") {
+			t.Error(p)
+		}
+	})
 
 	// Rule 10: prove parse-check catches bad syntax.
 	// These subtests call the same findCommandProblems / findDenyListProblems

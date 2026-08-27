@@ -57,40 +57,32 @@ func emitDeprecationWarning(flag, replacement string) {
 	fmt.Fprintf(os.Stderr, "Warning: --%s is deprecated: %s\n", flag, replacement)
 }
 
+// deprecationReplacements maps deprecated message-command flags to their
+// replacement guidance. Tests assert that every replacement mentioning a
+// conversation-reference form (@<, conv:, #<) is documented in Long.
+var deprecationReplacements = []struct {
+	Flag    string
+	Message string
+}{
+	{"broadcast", "use 'scion broadcast' instead"},
+	{"all", "use 'scion broadcast --all' instead"},
+	{"raw", "use 'scion keys' instead"},
+	{"plain", "--plain is deprecated and will be removed"},
+	{"notify", "use 'scion notifications subscribe' instead"},
+	{"in", "use 'scion schedule create --in' instead"},
+	{"at", "use 'scion schedule create --at' instead"},
+	{"channel", "use @<agent-name> to message an agent directly"},
+	{"thread-id", "use @<agent-name> to message an agent directly"},
+	{"cc", "--cc is deprecated and will be removed"},
+}
+
 // emitDeprecationWarnings checks all deprecated flags and emits warnings
-// for any that were explicitly set. Returns an error if a deprecated flag
-// cannot be mapped to its replacement (e.g., scheduling flags that now
-// belong to a different command).
+// for any that were explicitly set.
 func emitDeprecationWarnings(cmd *cobra.Command) {
-	if cmd.Flags().Changed("broadcast") {
-		emitDeprecationWarning("broadcast", "use 'scion broadcast' instead")
-	}
-	if cmd.Flags().Changed("all") {
-		emitDeprecationWarning("all", "use 'scion broadcast --all' instead")
-	}
-	if cmd.Flags().Changed("raw") {
-		emitDeprecationWarning("raw", "use 'scion keys' instead")
-	}
-	if cmd.Flags().Changed("plain") {
-		emitDeprecationWarning("plain", "--plain is deprecated and will be removed")
-	}
-	if cmd.Flags().Changed("notify") {
-		emitDeprecationWarning("notify", "use 'scion notifications subscribe' instead")
-	}
-	if cmd.Flags().Changed("in") {
-		emitDeprecationWarning("in", "use 'scion schedule create --in' instead")
-	}
-	if cmd.Flags().Changed("at") {
-		emitDeprecationWarning("at", "use 'scion schedule create --at' instead")
-	}
-	if cmd.Flags().Changed("channel") {
-		emitDeprecationWarning("channel", "use @<agent-name> to message an agent directly")
-	}
-	if cmd.Flags().Changed("thread-id") {
-		emitDeprecationWarning("thread-id", "use @<agent-name> to message an agent directly")
-	}
-	if cmd.Flags().Changed("cc") {
-		emitDeprecationWarning("cc", "--cc is deprecated and will be removed")
+	for _, d := range deprecationReplacements {
+		if cmd.Flags().Changed(d.Flag) {
+			emitDeprecationWarning(d.Flag, d.Message)
+		}
 	}
 }
 
@@ -106,11 +98,16 @@ Recipients:
   agent:<name>       Send to an agent explicitly
   user:<name>        Send to a user's inbox (Hub mode only)
   group[a,b,...]     Send to multiple recipients (Hub mode only)
+  @<agent-name>      Send to an agent's conversation (preferred)
+  @<email>           Send to a user by email (global DM)
+  conv:<uuid>        Send to a conversation by ID (not yet supported — errors)
+  #<thread>          Send to a named thread (not yet supported — errors)
 
 If --broadcast is used, the recipient can be omitted and the message will be sent to all running agents.
 
 Examples:
   scion message my-agent "Please review the PR"
+  scion message @my-agent "Please review the PR"
   scion message user:alice "I need clarification on the auth module"
   scion message "group[agent:reviewer,user:alice,deploy-bot]" "Release v2 is ready"`,
 	Args:              cobra.MinimumNArgs(1),
