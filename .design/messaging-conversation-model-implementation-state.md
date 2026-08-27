@@ -67,13 +67,25 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 ## 3. Current position
 
-**Active section:** S2 — Migration (**REOPENED — reported complete, rejected on review**)
-**Active manager:** `ca-msg-em2`
-**Blocked on:** em2 fixing two blockers (see §5d). S3 does not start until S2 is accepted.
-**Last verified landing on integration branch:** `16294728` (end of S1). S2's commits
-`16294728..9e80a4e2` are merged but **not accepted** — treat the integration branch as
-containing unverified work until §5d clears.
-**S1 verified** 2026-08-27 01:40Z.
+**Active section:** S3 — Envelope
+**Active manager:** `ca-msg-em3` — spawning 2026-08-27 03:35Z
+**Blocked on:** nothing
+**Last verified landing on integration branch:** `cd4ee7ed` — **S2 accepted 2026-08-27 03:35Z
+on round 3.** S1 verified 01:40Z at `16294728`.
+
+S2 round-3 verification (mine, independent of em2's report):
+
+| Check | Result |
+|---|---|
+| Build + `pkg/messaging`, `pkg/store` tests | pass |
+| C-1 comparison is non-degenerate | `ComputeDivergenceMatch` now takes `actualExternalRef` read back from the DB; pair/thread/type mismatches are all reachable outcomes |
+| **Mutation test** — rule 10 enforced by hand | replaced `oldPair == newPair` with `true`; `TestComputeDivergenceMatch_GenuineDisagreement` **failed**. The check is load-bearing. |
+| C-2 thread dual-write | `ResolveOrCreateThreadConversation` wired at all six sites; `deliverToAgent` gap caught by em2's own audit and fixed pre-merge |
+| C-3 DM `ProjectID` | parameter removed; DMs created with nil `ProjectID` |
+
+I mutation-tested rather than reading the test. After two rounds of checks that looked like
+checks, "a test exists" was not the thing I needed to confirm — "the test fails when the
+check is removed" was.
 
 S1 verification (performed by me, independently of em1's report):
 
@@ -98,8 +110,8 @@ back into it.
 | # | Section | Design phases | Manager | Status |
 |---|---|---|---|---|
 | S1 | Foundation — schema, store, resolution | 1, 2, 3 | `ca-msg-em1` | **verified** (`fc523ecd..16294728`) |
-| S2 | Migration — backfill, dual-write | 4, 5 | `ca-msg-em2` | active |
-| S3 | Envelope — message type, validation, delivery format | 6, 7, 9 | `ca-msg-em3` | pending |
+| S2 | Migration — backfill, dual-write | 4, 5 | `ca-msg-em2` | **verified** (`16294728..cd4ee7ed`, 3 rounds) |
+| S3 | Envelope — message type, validation, delivery format | 6, 7, 9 | `ca-msg-em3` | active |
 | S4 | Surfaces — read switch, CLI split, broker edge | 8, 10, 11 | `ca-msg-em4` | pending |
 | S5 | Docs — skill, docs-site, glossary | 12 | `ca-msg-em5` | pending |
 | S6 | Removal — drop legacy fields | 13 | deferred | **post-beta only** |
@@ -193,8 +205,14 @@ would bury the events that matter.
   soak gate is now un-passable because dual-write never resolves thread conversations, and
   C-3 global DMs are stamped with a `ProjectID` that `resolve.go` enforces as auth. Rules 10
   and 11 added as countermeasures. Round 3.
+- `2026-08-27 03:31Z` em2 reported round 3, `1ff7c6af..cd4ee7ed`.
+- `2026-08-27 03:35Z` **S2 accepted.** C-1/C-2/C-3 fixed. I mutation-tested the comparison
+  (neutered `oldPair == newPair`; the mandatory disagreement test failed), so the check is
+  load-bearing rather than merely present. Recorded DEF-3: the phase-5 divergence gate is
+  structurally weaker than the design assumed — my spec gap, owed by S4. em2 retired.
+- `2026-08-27 03:35Z` S3 opened; `ca-msg-em3` spawned.
 
-## 5d. Open blockers — S2 rejection (2026-08-27 02:50Z)
+## 5d. S2 rejection history — CLOSED 2026-08-27 03:35Z (accepted on round 3)
 
 S2 was reported complete with three APPROVE gates. I rejected it. Both blockers are
 visible by grep and both were missed by review, test, and audit.
@@ -241,6 +259,14 @@ conversation. This table is the only thing that carries them.
 |---|---|---|---|---|
 | DEF-1 | **Participant-level auth on `conv:<id>`.** `resolveConvByID` checks the sender's *project* but not whether the sender is a *participant* in that conversation. Raised HIGH by S1 audit. | S1 | **S4** (surface layer, message-send time) | S1 is not wired into any live path, so the gap is not reachable. It becomes reachable the moment S4 switches reads. **S4 is not verifiable without this.** |
 | DEF-2 | **AC-33** — deferred to the envelope validation layer per design. | S1 | **S3** | The validation choke point does not exist until S3 builds it. |
+| DEF-3 | **The phase-5 divergence gate is weaker than the design assumed, and this is my spec gap, not em2's.** `ComputeDivergenceMatch` is now a genuine comparison, but at the call sites both models derive their answer from the same three fields (sender, recipient, thread_id), so a DM or thread pair mismatch is **unreachable in production**. The only divergence reachable today is resolution failure (`no-new-routing`). Note the consequence: this signal **would not have caught B-1**, the duplicate-key bug — dual-write would have returned its own row's ref and scored a match. | S2 | **S4, before the read switch** | Phase 5's new model has no independent source of truth; it constructs the key from the message. Nothing can diverge until something else is authoritative. |
+
+**What DEF-3 requires of S4.** Add a comparison with an independent source of truth:
+resolve the conversation for a message, then compare against the `conversation_id` already
+stored on prior messages of the same logical conversation. That detects key-format drift,
+duplicate rows, and upsert races — the class B-1 belonged to. Until that exists, a clean
+soak means "resolution did not fail", **not** "the new model routes where the old model
+routed". Do not let the read switch be approved on the weaker reading.
 
 ## 5a. Standing technical decisions made during implementation
 
