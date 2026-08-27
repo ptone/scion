@@ -1314,6 +1314,35 @@ Note (1) returns the supplied key **unmodified**. The `dm:` key is already canon
 already the ACL; re-deriving it from parsed halves would introduce a second chance to differ
 from the string the read path gates on.
 
+**Canonicality check — settled 2026-08-27 17:00Z.** "Has a `dm:` prefix and parses" is not
+canonical. `ParseDMKey` (`pkg/messages/dm_key.go:88`) enforces neither token order nor UUID
+formatting, while `DMConversationKey` (`:39`) sorts tokens lexicographically and re-renders each
+UUID through `uuid.Parse` to canonical lowercase hyphenated form. And `uuid.Parse` accepts 32
+unhyphenated hex digits, `{braced}` and `urn:uuid:` forms — so
+`dm:agent:<32-hex-no-hyphens>:user:<uuid>` is all-lowercase, parses cleanly, and is a **different
+string** from the canonical key for the same pair. Two external_refs, one DM, two rows: DEF-8,
+reintroduced by the function built to prevent it.
+
+Therefore case 1 **round-trips**: parse the halves, re-derive with `DMConversationKey`, compare
+to the input, and **error if they differ**. This does not contradict "return verbatim" — that
+rule governs the *return value*, not what may be compared against. What it forbids is returning
+the re-derived key: **never normalise here.** Silently rewriting a key makes the stored identity
+differ from the string a caller may already have authorised against, which is §2.15.4(c)'s
+read-gate normalisation moved to the write side. Differ means error.
+
+Rejected alternative: checking canonical *attributes* (e.g. all-lowercase). **Canonicality is
+defined by the function that produces keys, not by a list of properties canonical keys happen to
+have.** An attribute list drifts from its subject as the producer changes; a round-trip cannot.
+
+**`DirectMessageExternalRef` is the sixth derivation and must not survive this section.**
+`pkg/messaging/divergence.go:132` builds the kind-free `dm:{sorted(idA,idB)}` form and **never
+returns an error** — its doc states that an empty ID "produces a ref that makes the divergence
+visible", the exact inverse of this section's fail-closed rule. Its only production caller is
+`backfill.go:201`, which phase 4 repoints; after that it is production-dead. Delete it, or
+unexport it and confine it to the divergence tests that need the legacy shape. Shipping "one key
+derivation" alongside an exported, callable, non-failing alternative in the same package is
+shipping two.
+
 All five sites become callers. `ResolveOrCreateThreadConversation` and
 `ResolveThreadConversationForRead` keep their names and signatures for their existing callers
 but delegate; `backfill.go:195` and both handler call sites lose their inline construction.
@@ -1394,8 +1423,15 @@ distinguish an orphan from a legitimately empty new conversation without a race.
 ### 2.15.5 Acceptance criteria
 
 - **AC-DEF15-1** — `DeriveConversationKey` is the only function in `pkg/` that constructs a
-  `thread:` or `dm:` external_ref. Verified by grep: `fmt.Sprintf("thread:%s:%s"` returns
-  exactly one non-test hit, inside that function.
+  `thread:` or `dm:` external_ref. **Verified by a test that reads the package source, not by a
+  grep** — a grep runs when someone remembers, and this is an architectural constraint that has
+  to survive people who never read this document. Prior art for source-reading tests:
+  `cmd/doc_syntax_test.go`. The check must cover `DirectMessageExternalRef` as well as
+  `fmt.Sprintf("thread:`, or it certifies "one derivation" while a second sits in the same
+  package.
+- **AC-DEF15-1b** — case 1 rejects every non-canonical spelling of a valid pair: reversed token
+  order, uppercase UUID, unhyphenated 32-hex UUID, braced UUID, `urn:uuid:` UUID. Each is a
+  golden vector, and each expects an **error**, not a normalised key.
 - **AC-DEF15-2** — A golden vector table covers all three branches and **every** error branch;
   each vector pins `(extRef, kind, projectID, err)`.
 - **AC-DEF15-3** — An outbound message with `thread_id = dm:agent:X:user:Y` produces exactly one
