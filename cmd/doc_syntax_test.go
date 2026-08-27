@@ -48,7 +48,7 @@ func extractScionLines(t *testing.T, path string) []string {
 		s := strings.TrimSpace(raw)
 		s = strings.TrimPrefix(s, "$ ")
 		s = strings.TrimPrefix(s, "# ") // shell prompt, not comment
-		if strings.HasPrefix(s, "#") {   // comment line
+		if strings.HasPrefix(s, "#") {  // comment line
 			continue
 		}
 		if !strings.HasPrefix(s, "scion ") {
