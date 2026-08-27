@@ -9885,3 +9885,57 @@ finding that surfaced only because the reviewer reported an anomaly instead of w
 `scion message` reported "delivered" anyway. I do not know whether it was truncated. I resent the
 asks compactly at 1081. `wc -c` before every send; the success message is not proof of delivery of
 the whole body.
+
+### 35.11 The developer answered all four; one of the answers is a correction of me
+
+**Dropped tests: `TestShortenError` and `TestSanitizeResponse`.** I had approved this earlier and
+forgotten. Both test Go helpers with no bash counterpart. 26 ported + 2 dropped = 28. Closed.
+
+**gcloud version — accepted as written, and I withdrew my own offer to change it.** The developer
+wrote *"582.0.0 or later (verified; 575.0.0 does not have beta run instances)"*. That states exactly
+what was measured and explicitly does not claim 582 is the floor. I had offered to soften it. On
+reading it I withdrew the offer: the wording is already honest, and **churning a branch that is
+under live review to trade one honest wording for another is a worse risk than the imprecision.**
+A reader on 579 may upgrade unnecessarily — a few minutes, pointing the safe way. The opposite
+error strands someone on a version that cannot run the tutorial at all.
+
+**Task #74 answered and narrowed.** `deploy.sh:477` does `head -c 500 "$file" >&2` on a non-2xx
+PATCH — one location, same truncation as the Go original, without the false "sanitize" name. My
+reading, now recorded so it can be falsified: **the defect was always the name, not the printing**,
+because the token rides in the Authorization *request* header and not in the response body. The
+reviewer will check real output on the walk. Task #74 updated with this.
+
+**My brief contradicted itself, and the developer caught it.**
+
+- §7d: do not touch the `:::caution[Temporary workaround]` block.
+- §7b: remove the whole Go build section.
+- The block **lives inside** that section.
+
+Both instructions cannot be followed. The developer removed the block and told me, with the right
+reason: the block instructs the reader to run `scion deploy-instance --help`, a command this task
+deletes. Keeping it would have left a caution about a vanished command in a published tutorial.
+Ruled: removal stands, the error is mine, and I told the reviewer not to file it against the
+developer.
+
+**This is the second self-contradicting brief I have written today.** The mechanism is the same
+both times: I wrote a "do not touch" list from a snapshot of the page, then wrote a "remove this
+section" instruction from a different reading, and never checked the two lists against each other.
+The developer caught it by reading the sections *against* each other instead of obeying each in
+isolation. **A do-not-touch list is only safe if every item on it is checked against every removal
+instruction in the same brief.** That check is mechanical and I did not do it.
+
+**Three low-severity concerns the developer volunteered**, forwarded to the reviewer with my read:
+
+| Concern | My read |
+|---|---|
+| Step 6 awk-parses gcloud YAML for IAP bindings | Informational, not a gate. Low — but it is the line an operator reads to decide who can get in. |
+| Steps 3a/3b/4/5/7 make real API calls, only stub-tested | Exactly what the live walk is for. This is why the walk is not optional. |
+| URL validation regex is stricter than `url.Parse` | Safe here — the only URL validated is a `run.app` hostname we built ourselves. The tightening was forced by the contamination test, where `[^/]+` matched spaces and colons in garbage output. |
+
+Developer is blocked and staying up. It owns the branch, so it makes whatever the reviewer finds.
+
+**PR body and compare URL prepared, not sent.** `pr-backout-body.md` updated with the developer's
+numbers; live-walk lines still `TBC`. The fully-prefilled compare URL is **5363 characters** and
+the `scion message` cap is 2000, so a condensed body variant (2455) and a title-only variant (220)
+are staged alongside it in `compare-url-backout*.txt`. **Nothing goes to ptone until the reviewer
+returns a verdict** — that is what I promised him.

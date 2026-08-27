@@ -1,7 +1,8 @@
 # Draft PR body — deploy CLI backout + image removal (task #73)
 
-Status: DRAFT. Numbers marked `TBC` are filled in from the developer's report and the reviewer's
-verdict. Do not send the compare URL to ptone until `sn-backout-review` returns a verdict.
+Status: DRAFT. Branch `scion/sn-backout`, head `6f463309`, based on upstream main `98a9d9c2`.
+Developer numbers are in. Items marked `TBC` await the reviewer's live walk. **Do not send the
+compare URL to ptone until `sn-backout-review` returns a verdict.**
 
 Title:
 
@@ -51,12 +52,18 @@ format string out of the script so there is one authoritative copy.
 
 ## Testing
 
-- `go build ./...`, `go test ./...` — TBC
-- Ported test count: TBC of 28
-- Live walk on a throwaway Cloud Run Instance in a test project: deploy, log in through IAP, create
-  a project, start an agent, attach to its terminal, commit to a git remote — TBC
-- Perimeter gate exercised against both a correctly-secured Instance and a deliberately unprotected
-  one — TBC
+- `go build ./...` — pass
+- `go test ./cmd/...` — pass
+- 26 of the 28 deleted Go tests are ported against the shell functions
+- The audience pin was verified to **fail** when the format string in `deploy.sh` is wrong:
+  changing `services` to `instances` turned 4 of 5 pin tests red; restoring it turned them green
+- `shellcheck scripts/single-node/deploy.sh` — clean
+- Live walk on a throwaway Cloud Run Instance: deploy, log in through IAP, create a project, start
+  an agent, attach to its terminal, commit to a git remote — TBC
+- Perimeter gate exercised against a correctly-secured Instance and deliberately made to fail — TBC
+
+Two failures in `go test ./...` (`TestFixtureCoverage`, a `pkg/hub` timeout) reproduce on the base
+commit and are not introduced here.
 
 ## Notes
 
