@@ -832,6 +832,43 @@ there is a reason they kept both that I am not seeing.
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
 
+## 5r. Heartbeat 13:43Z — DEF-11 dispatched; a held item was held for nothing
+
+**Roster healthy**, not the alarm condition: `ca-msg-em6` blocked with two live sub-agents
+(`dev-def8-dualwrite` active, `dev-def8-convergence` completed 24m prior). Blocked-with-children
+is the normal shape.
+
+**Instance state, from integration2-operator (verified, not recalled).** scion-gteam is up on
+`scion/messaging-v2` @ `ebf8cc27`, 1h6m uptime, no redeploys or drift, read switch off. Board:
+`{matches:0, mismatches:0, fallbacks:0, total:0}`.
+
+**That zero total is a finding, not a null result.** An hour of a 23-agent hub produced *nothing*
+for the divergence comparison to see. It confirms from live data what I had inferred from code:
+the instrumentation sits downstream of successful delivery and observes only hub-routed sends, so
+**it can never serve as a pre-flight check — only an in-flight one.** A green board before
+traffic means the board is asleep.
+
+**DEF-11 specced (§2.12) and dispatched to S7 (`ca-msg-em7`).** The decision: populate
+`ExternalRef` by loading the conversation. The rejected alternative matters more than the chosen
+one — treating an empty ref as "not compared" is a one-line change that turns the board green by
+silencing the comparison on the majority of traffic. **Rule 14 at system scale: a check that
+reports success on empty input is worse than no check.**
+
+**I held DEF-11 for a file conflict that does not exist.** The stated reason was collision with
+S6 in `handlers_agent_messaging.go`. Checked at 13:45Z:
+`git diff --stat messaging-v2..ca-msg-em6 -- pkg/hub/` is **empty** — S6 touches no file in
+`pkg/hub` at all. I never verified it; I asserted it and scheduled around it.
+
+**Consequence for rule 15, which I am widening.** Rule 15 was written about capability claims in
+design prose. This was a *scheduling* premise, and it cost real serialisation on the item that
+gates the read switch. **Rule 15 now covers any premise that gates action** — if a belief is the
+reason something is not being done, it gets the same citation standard as a belief written into a
+design. Sequencing decisions are claims about the code too.
+
+Pattern worth naming across 5j, 5o and this entry: **all three were failures to act caused by an
+unexamined reason to wait**, not by bad analysis of work in progress. My errors cluster on the
+inputs to decisions, not the decisions.
+
 ## 5q. Invariant D-1, and the guard hole I caught in S6's version — 13:30-13:40Z
 
 **nc-arch supplied the boundary condition of the key-as-authority pattern, unprompted.** It is
