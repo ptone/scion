@@ -1034,6 +1034,34 @@ That is the second time today the ledger has been the thing that caught somethin
 stale "unblocked" nearly got dispatched onto a bulk defect. **The ledger is not documentation of
 decisions already made. It is the only artifact that re-asks them.**
 
+**16:55Z — S8's DEF-13 plan reviewed, approved with three changes.** Good plan; found
+`doc_syntax_test.go` unprompted and cited `resolve.go:36-45` correctly. The rejection-grade
+problem was that **their test could not catch a recurrence of the defect it exists to prevent**:
+a hand-written four-row table with a hand-written floor of `>= 4`. Both sides of the check come
+from the same source, so the floor catches an emptied table and not an *un-grown* one — and
+"a form exists and the help text does not mention it" is DEF-13 itself.
+
+Go cannot enumerate an enum, so this cannot be fully derived. Required instead: a tripwire on
+`int(RefThread) == 4`, **documented in the test as a tripwire and not as coverage.** Recording
+the general form, because I have now issued rule 14 three times and each time its surface was
+different: **rule 14 is not "assert a count". It is that a check whose input can silently stop
+covering is not a check** — empty is only the most obvious way to stop covering, and a
+hand-maintained list is the most common one.
+
+Second change: their plan fixed the reported defect *by coincidence*. The user's actual complaint
+is that the deprecation warnings at `:86-91` name `@<agent-name>` while `Long` never defines it.
+Documenting `@` satisfies that accidentally; nothing asserts the link. Required: hoist the
+replacement strings to a table both the emitter and the test read, then assert every reference
+form named in a warning appears in `Long`. **That is the one part of this section that can be
+genuinely derived rather than tripwired**, and it generalises to warnings nobody has written yet.
+
+Third: I checked the deny-list myself rather than accepting their read of it.
+`doc_syntax_test.go:151-162` scans **four markdown files** and does not look at cobra help text,
+so no collision — but that is an exemption by omission. **The most-read documentation surface in
+the product is not covered by the control that polices documentation.** Asked them to add the
+cobra tree's `Long`/`Example` to the scan, and to document the gated forms in Recipients only,
+never in Examples: describing a form and demonstrating it are different acts.
+
 ## 5y. 16:17-16:25Z — S7 verified by mutation; a defect that hides behind its own fix
 
 Three things landed in the same eight minutes and they interact.
