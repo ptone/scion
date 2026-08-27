@@ -238,7 +238,9 @@ would bury the events that matter.
   mutation-verified (choke point forced to fail; all chat tests still passed). Three further
   server-generated emitters found unvalidated — em3 must validate or document each. Also
   noted that AC-8's "three inbound paths" is looser than §2.10's "every inbound path"; my
-  wording, and it needs fixing before S5 documents it. See §5e.
+  wording. **Fixed the same hour:** AC-8 reworded to "every inbound path, not a fixed
+  count", with native chat named and mutation-verification required; AC-8c added for
+  server-generated emitters. See §5e.
 
 ## 5d. S2 rejection history — CLOSED 2026-08-27 03:35Z (accepted on round 3)
 
@@ -289,7 +291,10 @@ em3 reported S3 complete (`cd4ee7ed..d9fc7f51`) claiming the validation choke po
 design §2.10 says "a single choke point invoked on **every** inbound path — the CLI, the
 Hub HTTP handlers, and broker-inbound alike". The §2.10 list is illustrative and native
 chat is a Hub HTTP handler, so it is in scope. Where the AC and §2.10 disagree, §2.10
-governs. **AC-8 should be reworded before S5 documents it.**
+governs. **AC-8 reworded 2026-08-27** — it now says "every inbound path, not a fixed count",
+enumerates native chat explicitly, and requires verification by mutation rather than
+inspection. Added **AC-8c** covering the server-generated emitters. Done; not owed by
+anyone.
 
 **Three further unvalidated emitters**, found while checking E-1. Server-generated, so
 §2.10 does not strictly cover them; I ruled that em3 must either route them through the

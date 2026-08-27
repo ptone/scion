@@ -808,8 +808,22 @@ Commit-sized, ordered, each independently reviewable.
   `gchat` resolves and routes, closing the `Name`/`ChannelID` mismatch.
 - **AC-7** A send to an `orphaned` conversation fails with a specific error and does not
   reach the parent container.
-- **AC-8** `Validate()` is invoked on all three inbound paths. Specific regression: the
-  Teams `channel:"" + thread_id:set` combination is rejected at the boundary.
+- **AC-8** `Validate()` is invoked on **every** inbound path, not a fixed count of them.
+  Enumerated at time of writing: the CLI, each Hub HTTP handler that accepts a message
+  (**including native chat**), and broker-inbound. Specific regression: the Teams
+  `channel:"" + thread_id:set` combination is rejected at the boundary.
+  **Verification is by mutation, not by inspection:** make the choke point fail
+  unconditionally and confirm that every inbound path's tests fail. A path whose tests
+  still pass is a bypass.
+  > Reworded 2026-08-27. The original said "all three inbound paths", which S3 built to
+  > literally and satisfied while leaving native chat unvalidated. The count was never the
+  > requirement, and naming one invited the reading that the list was closed. §2.10 always
+  > said "every". Do not reintroduce a number here.
+- **AC-8c** Server-generated emitters that deliver an envelope to an agent — mention
+  fan-out, notifications, scheduler messages — either pass through the same choke point or
+  are listed as explicit exemptions with a stated reason. An unvalidated emitter that is
+  merely undocumented is a defect; the current system's condition is what that accumulates
+  into.
 - **AC-8a** `reply_to` never affects routing. A message whose `reply_to` names a message in a
   *different* conversation is rejected. Constructing an envelope where `conversation` is
   absent but `reply_to` is present is rejected at the API boundary — resolution happens in
