@@ -124,3 +124,25 @@ The per-sandbox overhead from gVisor is likely much larger than the sum-of-RSS p
 1. **Do not publish a per-GiB scaling rule.** The 3× agents from 4× memory result shows non-linear scaling.
 2. **The instance restart is catastrophic.** If hub state is in-memory, the failure mode destroys all context. Persistent hub storage would change the failure from catastrophic to recoverable.
 3. **The earliest-created agent dies first.** Both Phase A and Phase B show FIFO eviction of the oldest agent before the cascade. This is a sizing signal: the system can sustain N-1 agents longer than it sustained N.
+
+## Post-Report Correction (from sn-impl-arch)
+
+**My claim "CPU IS NOT THE BINDING CONSTRAINT" is invalid.** The reasoning flaw: CPU oversubscription does not kill anything — it makes everything slow. A saturated CPU alone does not explain a container dying, so the ceiling being above core count does not rule CPU out.
+
+sn-stress-def reached the opposite conclusion ("CPU IS the binding constraint") using equally invalid reasoning (using uncalibrated summed RSS to exclude a memory hypothesis).
+
+**The honest answer is that we do not know what binds.** We cannot know without a working memory instrument, which does not exist for this resource type (ptone/scion#1304).
+
+### What the data DOES establish:
+
+| Size | Idle ceiling | Working ceiling | Ratio |
+|---|---|---|---|
+| 4 CPU / 8 GiB | 17 | 6 | 2.8× |
+| 8 CPU / 32 GiB | 51 | 15 | 3.4× |
+
+**Working agents cost roughly 3× idle agents at both sizes.** This is the consistent, useful ratio.
+
+### Common crash signature under load (both sizes):
+- 68-second agent creation (normal: <1s)
+- 503 error from Cloud Run proxy immediately before crash
+- Instance termination within seconds of the slow creation completing
