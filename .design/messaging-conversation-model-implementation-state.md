@@ -18,8 +18,10 @@
 
 1. **I do not implement.** I am the architect. I spawn engineering managers, review what
    they land, and keep this file current. I do not write production code.
-2. **Managers run in sequence, not in parallel.** One active manager at a time. The
-   workspace mode is `shared-plain`; concurrent git work is unsafe.
+2. **Managers run in sequence, not in parallel.** One active manager at a time. Not for
+   workspace-safety reasons (managers have their own clones — see §6), but because the
+   sections build on each other and because parallel branches onto one integration branch
+   produce merge conflicts I would have to adjudicate without having written the code.
 3. **Everything lands on `scion/messaging-v2`.** Never `main`. The integration branch is
    the beta-hub testing target.
 4. **I never check out another branch in `/workspace`.** It is shared. Branch refs are
@@ -47,8 +49,8 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 **Active section:** S1 — Foundation
 **Active manager:** `ca-msg-em1` — spawned 2026-08-27 00:42Z, template `eng-manager`
-**Awaiting from em1:** isolation test result (sentinel + HEAD comparison)
-**Blocked on:** confirming whether managers share `/workspace` with the coordinator
+**Awaiting from em1:** phase 1 (schema) completion report
+**Blocked on:** nothing — em1 implementing
 **Last verified landing on integration branch:** none (branch is at `origin/main`)
 
 ## 4. Section plan
@@ -117,6 +119,17 @@ would bury the events that matter.
   `/workspace/.ca-msg-arch-sentinel-1787791468` written from my tree, plus a HEAD
   comparison (mine: `scion/ca-msg-arch` @ `741fd76d`). Awaiting em1's raw output.
 - `2026-08-27` Decisions D1 and D2 issued to em1 (see §5a).
+- `2026-08-27` **Isolation resolved: managers get their own clone.** em1's sentinel lookup
+  failed and its HEAD was `scion/ca-msg-em1` @ `fc523ec` vs my `741fd76d`. **`SCION_WORKSPACE_MODE`
+  reported `shared-plain` in both containers and was wrong about em1's** — it describes the
+  project's configured mode, not the container's actual provisioning. Do not trust that
+  variable for a spawned agent; test it. Sequencing managers remains the plan for review
+  and merge-conflict reasons, but it is no longer forced by shared mutable state.
+- `2026-08-27` Corrected em1: it planned to create `scion/messaging-v2` locally from main.
+  The branch already exists on origin. Issued the branch contract (§5b) — work branch based
+  on `origin/scion/messaging-v2`, merge in at section end, rebase forward never merge
+  backwards. Harmless today (same commit) but would diverge once anything lands.
+- `2026-08-27` em1 began implementation, phase 1 (schema).
 
 ## 5a. Standing technical decisions made during implementation
 
@@ -128,11 +141,31 @@ sections.
 | D1 | `ConversationStore` accepts **UUID only** for `DefaultAgentID`, and validates it. A slug is rejected, not stored. | The slug-or-UUID union is the class of defect this refactor removes. A store that accepts both propagates the ambiguity instead of resolving it, and every downstream reader must re-ask which form it holds. A narrow store contract forces the ambiguity to be settled at a known place. | 2026-08-27 |
 | D2 | Normalization (slug → UUID) lives in **one shared exported helper**, written in phase 3, with the phase 4 backfill job as an intended second caller. Not two implementations. | Duplicated identity-resolution logic is already a named defect (findings §7). Two callers exist by design; two implementations would recreate the defect inside the fix. **em2 must be pointed at this helper.** | 2026-08-27 |
 
+## 5b. Branch contract — issued to every manager
+
+Give this verbatim to each manager on spawn.
+
+```
+git fetch origin
+git checkout -B scion/ca-msg-em<N> origin/scion/messaging-v2
+```
+
+- Base your work branch on `origin/scion/messaging-v2`. **Do not create that branch — it
+  already exists on origin.** Do not base on `main`.
+- Push your own work branch continuously.
+- At section end, merge your branch into `scion/messaging-v2` and push the integration
+  branch. That is the only time you touch it.
+- If the integration branch moves while you work, **rebase your branch onto it**. Never
+  merge the integration branch backwards into yours — it makes the section diff unreviewable.
+- Never push `main`.
+
 ## 6. Open items / risks
 
-- **Workspace sharing.** `shared-plain` means managers may share `/workspace`. Each
-  manager must confirm its own `SCION_WORKSPACE_MODE` on start and report it. If shared,
-  strict sequencing is mandatory and no manager may switch branches in the shared tree.
+- ~~**Workspace sharing.**~~ **Resolved 2026-08-27.** Managers get their own clone (Hub
+  mode HTTPS-clones per agent). `SCION_WORKSPACE_MODE` is not a reliable indicator of a
+  spawned agent's provisioning — it reported `shared-plain` for em1, which was false. If
+  isolation matters again, test it (sentinel file + HEAD comparison), do not read the
+  variable. Sequencing is retained by choice, not necessity.
 - **Beta hub target.** The user wants this testable on a beta hub. Deployment mechanics
   for pointing a beta hub at `scion/messaging-v2` are not yet established — resolve
   before S4 completes.
