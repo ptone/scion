@@ -10769,3 +10769,40 @@ regression test**, on the tier's only security gate. Asked for exactly one — 3
 **asserting the `SECURITY FAILURE` text, not the exit code**, because the exit code is 1 both with and
 without the fix and an exit-code assertion would pass on broken code. That is the decorative pin this
 project has already shipped once. Developer must prove it red, then green.
+
+### §35.26 — the pin lands; my own instruction produces an inverted rename (2026-08-27, 19:18)
+
+Developer pushed **`36721736`**. **The pin is exactly right and I accept it:**
+`TestScriptAssertPerimeter_302NoLocationHeader` — stub returns 302 with no `Location`, and it asserts
+**`SECURITY FAILURE` and `not to accounts.google.com` in stderr**, not the exit code. Proven red then
+green: without `|| location=""` stderr is **empty** (silent `set -e` death); with it, the diagnostic
+prints and it fails closed. That is a pin that can fail, which is the whole point.
+
+**But the rename it also made is wrong, and the cause is my instruction.**
+
+I asked it to rename `TestScriptAssertPerimeter_IAPNoHeader` because the name "reads like coverage of
+the branch it does not cover", adding "rename if trivial, skip if not." **I described the problem and
+never gave the target name.** It resolved the ambiguity in the inverted direction:
+
+`TestScriptAssertPerimeter_MissingLocationHeader` (line 121) **sets** a `Location` header —
+`w.Header().Set("Location", "https://accounts.google.com/signin?...")` — and omits the *IAP* header.
+So the new name asserts the opposite of what the test does, and it now sits 14 lines from
+`TestScriptAssertPerimeter_302NoLocationHeader`, which genuinely has no `Location`. **Two near-identical
+names, one precisely wrong.** That is worse than the original: `IAPNoHeader` was awkward but at least
+pointed at the IAP header.
+
+Corrected to `TestScriptAssertPerimeter_MissingIAPHeader`, which is what it tests — a 302 to
+accounts.google.com with no `X-Goog-Iap-Generated-Response`, passing because the redirect alone proves
+enforcement.
+
+**The lesson is about the instruction, not the agent.** "This name is misleading, rename it if trivial"
+names a defect and leaves the remedy underdetermined. There were two ways to make the name match, and
+I marked the task *trivial*, which discourages exactly the pause that would have surfaced the ambiguity.
+**When I ask for a rename I should supply the target string, or say plainly that choosing it is part of
+the task.** Cheap tasks are where under-specified instructions do their damage, because nobody stops to
+question them.
+
+Also worth noting: I only caught it because the developer's own report contained the contradiction —
+it said the test "actually tests a missing IAP header ... with a valid Location present" **in the same
+sentence** as renaming it to `MissingLocationHeader`. An accurate report of a wrong action. Reading the
+report carefully was enough; the file confirmed it.
