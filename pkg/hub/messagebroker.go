@@ -457,17 +457,20 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	}
 	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered user messages.
 	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
-	if !msg.Broadcasted && msg.SenderID != "" && msg.RecipientID != "" {
-		if convID := messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, msg.SenderID, msg.RecipientID, projectID); convID != "" {
+	if !msg.Broadcasted {
+		convID := messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, msg.SenderID, msg.RecipientID, projectID)
+		if convID != "" {
 			storeMsg.ConversationID = convID
-			messaging.LogDivergence(p.log, messaging.DivergenceEntry{
-				MessageID:  storeMsg.ID,
-				OldRouting: messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID),
-				NewRouting: "conv:" + convID,
-				Match:      true,
-				Reason:     "broker deliverToUser",
-			})
 		}
+		// Always log divergence — even when convID is empty, that is a divergence signal.
+		match, reason := messaging.ComputeDivergenceMatch(msg.SenderID, msg.RecipientID, msg.ThreadID, convID)
+		messaging.LogDivergence(p.log, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID),
+			NewRouting: messaging.NewRoutingStr(convID),
+			Match:      match,
+			Reason:     reason,
+		})
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
@@ -610,17 +613,20 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	}
 	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered agent messages.
 	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
-	if !msg.Broadcasted && msg.SenderID != "" {
-		if convID := messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, msg.SenderID, agent.ID, projectID); convID != "" {
+	if !msg.Broadcasted {
+		convID := messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, msg.SenderID, agent.ID, projectID)
+		if convID != "" {
 			storeMsg.ConversationID = convID
-			messaging.LogDivergence(p.log, messaging.DivergenceEntry{
-				MessageID:  storeMsg.ID,
-				OldRouting: messaging.OldRoutingFromMessage(msg.SenderID, agent.ID, ""),
-				NewRouting: "conv:" + convID,
-				Match:      true,
-				Reason:     "broker deliverToAgent",
-			})
 		}
+		// Always log divergence — even when convID is empty, that is a divergence signal.
+		match, reason := messaging.ComputeDivergenceMatch(msg.SenderID, agent.ID, "", convID)
+		messaging.LogDivergence(p.log, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: messaging.OldRoutingFromMessage(msg.SenderID, agent.ID, ""),
+			NewRouting: messaging.NewRoutingStr(convID),
+			Match:      match,
+			Reason:     reason,
+		})
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)

@@ -146,3 +146,60 @@ func TestDivergenceCounter_Concurrent(t *testing.T) {
 func contains(s, substr string) bool {
 	return len(s) > 0 && len(substr) > 0 && bytes.Contains([]byte(s), []byte(substr))
 }
+
+// ---------------------------------------------------------------------------
+// ComputeDivergenceMatch tests
+// ---------------------------------------------------------------------------
+
+func TestComputeDivergenceMatch_EmptyConvID(t *testing.T) {
+	match, reason := ComputeDivergenceMatch("sender", "recip", "", "")
+	if match {
+		t.Error("expected match=false when convID is empty")
+	}
+	if reason != "no-new-routing" {
+		t.Errorf("expected reason 'no-new-routing', got %q", reason)
+	}
+}
+
+func TestComputeDivergenceMatch_ThreadIDNonEmpty(t *testing.T) {
+	match, reason := ComputeDivergenceMatch("sender", "recip", "thread-123", "conv-abc")
+	if match {
+		t.Error("expected match=false when threadID is non-empty")
+	}
+	if reason != "old-model-thread vs new-model-dm" {
+		t.Errorf("expected reason 'old-model-thread vs new-model-dm', got %q", reason)
+	}
+}
+
+func TestComputeDivergenceMatch_NormalDM(t *testing.T) {
+	match, reason := ComputeDivergenceMatch("sender", "recip", "", "conv-abc")
+	if !match {
+		t.Error("expected match=true for normal DM (no thread, valid convID)")
+	}
+	if reason != "both-models-dm-agreement" {
+		t.Errorf("expected reason 'both-models-dm-agreement', got %q", reason)
+	}
+}
+
+func TestComputeDivergenceMatch_NoOldRouting(t *testing.T) {
+	match, reason := ComputeDivergenceMatch("", "", "", "conv-abc")
+	if match {
+		t.Error("expected match=false when senderID and recipientID are both empty")
+	}
+	if reason != "unknown/no-old-routing" {
+		t.Errorf("expected reason 'unknown/no-old-routing', got %q", reason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NewRoutingStr tests
+// ---------------------------------------------------------------------------
+
+func TestNewRoutingStr(t *testing.T) {
+	if got := NewRoutingStr(""); got != "none" {
+		t.Errorf("expected 'none' for empty convID, got %q", got)
+	}
+	if got := NewRoutingStr("conv-abc"); got != "conv:conv-abc" {
+		t.Errorf("expected 'conv:conv-abc', got %q", got)
+	}
+}
