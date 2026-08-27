@@ -868,6 +868,81 @@ both projects. Not two implementations that agree by convention, which is how DE
 
 ---
 
+## 2.13 Making addressees real (DEF-9)
+
+*Added 2026-08-27 14:42Z. Prior art grepped per rule 16 — findings below are cited, not recalled.*
+
+**State of the code, verified on `origin/scion/messaging-v2`:**
+
+| Element | Reality |
+|---|---|
+| `AddAddressee` | Defined at `entadapter/conversation_store.go:663`, declared at `store.go:1610`. **Zero callers.** The table is never written. |
+| `DefaultAgentID` | **Written** at `handlers_agent_messaging.go:666`, `handlers_broker_inbound.go:217`, `backfill.go:298`. **Read nowhere.** Dead data. |
+| `MessageAddressee.Via` | Already enumerates `explicit \| body-mention \| default-agent \| direct` (`models.go:1812`) — the vocabulary §2.4 needs already exists. |
+| `pkg/messaging/delivery.go` | Contains one function, `FormatNewDelivery`. **There is no routing engine.** `conversation_id` is a stamp on a row. |
+
+**No new semantics are required.** §2.4 already fixes the resolution order and it stands
+unchanged: `kind=direct` → the other participant; else `DefaultAgentID` set → that agent, with
+`Via: default-agent`; else → persisted, visible to all participants, **no agent woken**. §2.4
+already states that case 3 is a real outcome and must be reported distinctly. DEF-9 is that
+paragraph made executable. **This is implementation of a settled design, not a reopening of it —
+and it needs no product decision, which I checked before escalating one.**
+
+**2.13.1 The hazard, and it is today's lesson in a new place.**
+
+Case 3 writes **zero addressee rows**. So does a bug that skips resolution entirely. So does a
+crash between inserting the message and inserting its addressees. **Three very different events,
+one observable.** That is precisely DEF-11 — an empty value standing for both "we looked and the
+answer is none" and "we never looked" — and it will be materially worse here, because the
+consequence is a message that silently woke nobody rather than a miscounted metric.
+
+**Decision: record the decision, not merely its output.** The message row carries an
+always-populated resolution outcome:
+
+```
+addressee_resolution ENUM('direct','default-agent','explicit','body-mention','none') NOT NULL
+```
+
+- `none` means *resolution ran and correctly selected nobody* — §2.4 case 3, a success.
+- A row that reaches persistence without the field set is a **bug**, and is now visibly one.
+
+The field is cheap, it is on the row that already exists, and it converts an ambiguous absence
+into an explicit statement. **Do not infer "nobody was addressed" from an empty join.**
+
+**2.13.2 Atomicity.** Addressee rows are written **in the same transaction as the message**. A
+message that exists without its addressees is unrecoverable after the fact: nothing downstream
+can distinguish it from case 3, and by then the sender is gone. If the store's current write path
+cannot express this, say so and stop — **do not implement it best-effort and log on failure.**
+That is the pattern that produced DEF-9 in the first place.
+
+**2.13.3 `DeliveryState` is per-addressee and must be moved, not copied.** `pending → delivered |
+failed` belongs to the addressee row. The message-level `DispatchState` remains for the legacy
+path. Two writers on one concept is how the DM key ended up with two formats (§2.4.2); do not
+repeat it. Where both exist during transition, the message-level field is derived and the
+addressee rows are authoritative.
+
+**2.13.4 Reading `DefaultAgentID`.** It is written in three places already, so the write side
+needs no work — only the read at resolution time, per §2.4 step 2. **Confirm the three writers
+agree** before relying on it; they were written independently and nothing has ever read them, so
+nothing has ever forced them to be consistent. **Unread data has never been tested by use.**
+
+**Acceptance criteria.**
+
+- **AC-DEF9-1** A send into a `kind=direct` conversation with no explicit addressee writes
+  exactly one addressee row, `Via: direct`, naming the other participant. Assert the row.
+- **AC-DEF9-2** A send into a conversation with `DefaultAgentID` set and no explicit addressee
+  writes one row with `Via: default-agent`, and **that agent is woken**. Assert the dispatch, not
+  the row alone — the row is the record, the wake is the behaviour.
+- **AC-DEF9-3** A send into a conversation with no default and no explicit addressee writes
+  **zero addressee rows**, sets `addressee_resolution = 'none'`, wakes nobody, and the API
+  reports "posted, nobody woken" distinctly from "posted, agent dispatched".
+- **AC-DEF9-4** `addressee_resolution` is non-null on every persisted message. Permanent test
+  **with a floor** — vacuous on an empty table.
+- **AC-DEF9-5** Killing the transaction between message insert and addressee insert leaves
+  **neither**. Mutation-verified.
+- **AC-DEF9-6** Mutation: make resolution return an empty addressee set unconditionally. AC-DEF9-1
+  and AC-DEF9-2 must both fail **by name**. If only one fails, the other is decorative.
+
 ## 2.12 Repairing the divergence comparison (DEF-11)
 
 *Added 2026-08-27 13:46Z. Dispatchable now — see the note on the conflict that does not exist.*
