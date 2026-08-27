@@ -6862,3 +6862,68 @@ correction so the log does not carry a wrong fact forward.
 - Task #50 (docs): content complete; **still blocked on §3.3 sizing**, placeholder intact.
 - Stress agents `sn-stress-def` and `sn-stress-max`: running. Awaiting §3.0 instrument validation
   before either ladder is worth reading.
+
+## 2026-08-27 06:59 — stress §3.0: the instrument validation FAILED, and that is the finding
+
+`sn-stress-def` (4 CPU / 8Gi) reported §3.0 before running any ladder, as instructed. It tried five
+instruments. **All five are dead.**
+
+| candidate | result |
+|---|---|
+| Cloud Monitoring `run.googleapis.com/container/{memory,cpu}/utilizations` | **zero time series** for `cloud_run_instance` in this project. Not lag — checked over 60 min against long-lived instances. Metrics appear unimplemented for Instances. |
+| `free -m` / `/proc/meminfo` inside a sandbox | **wrong scope, and proved so.** `MemTotal` is correct (7942 MiB ≈ 8Gi). `Used` is **per-sandbox**: creating a second agent left the first sandbox's `Used` unchanged at 432 MiB. |
+| Hub stats API `/api/v1/agents/{id}/stats` | exists, returns hardcoded zeros. |
+| SSH to the instance | port 22 closed; `gcloud beta run instances ssh` fails. |
+| cgroup stats inside a sandbox | `/sys/fs/cgroup` empty under gVisor. |
+
+The `free -m` disproof is the part I want to keep. It did not reason that the scope might be wrong —
+it **constructed a discriminating test**: measure sandbox A, add sandbox B, re-measure A. If the
+figure were instance-scoped it had to move. It did not move. That is the shape of §3.0 working
+exactly as intended, and it is the shape I failed to apply to my own three wrong-population
+measurements yesterday.
+
+### I verified the stats-API claim, and the verification WIDENED it
+
+Reported as `handlers.go:1959`. Actual: **`pkg/runtimebroker/handlers.go:1958`**, `getStats`:
+
+```go
+func (s *Server) getStats(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	// TODO: Implement real stats from runtime
+	// For now, return placeholder data
+	writeJSON(w, http.StatusOK, StatsResponse{CPUUsagePercent: 0.0, MemoryUsageBytes: 0})
+}
+```
+
+**This is in `runtimebroker`, not the Cloud Run runtime.** It returns zeros for *every* runtime, on
+every tier. So this is **not a single-node defect** — it is product-wide, and single-node is merely
+where it becomes load-bearing, because there the other four instruments are absent too. The agent
+framed it as a tier gap. It is bigger than that, and filing it as a tier gap would have buried it.
+
+### The headline result
+
+**An operator on this tier cannot observe memory pressure at all.** Not from the platform, not from
+the product, not from inside a sandbox. This may matter more than the ceiling number the test was
+commissioned to produce — a ceiling you cannot see yourself approaching is a cliff.
+
+It also predicts the failure mode: with no instance-level signal, there is no gradual warning
+available to anyone, so the only advance indicator is agent-create behaviour at the boundary.
+
+### Direction given (both agents)
+
+1. **Sum-of-RSS is a LOWER BOUND, not instance usage.** It omits per-sandbox gVisor sentry overhead
+   and hub/broker growth. A lower bound presented as a measurement **over-predicts the ceiling**, and
+   over-predicting a ceiling is the specific way this test hurts an operator.
+2. **Pre-register the predicted ceiling before reaching it.** Computed afterwards, the prediction
+   gets unconsciously fitted and the discrepancy signal is destroyed. A large predicted-vs-actual gap
+   is evidence of an unaccounted cost.
+3. **Stream Cloud Logging off the instance NOW, not at the ceiling.** If the instance OOMs the hub
+   dies with it. *The most valuable evidence here is produced by the exact event most likely to
+   destroy it.*
+4. "Sudden not gradual" is `sn-stress-def`'s **hypothesis**, not a finding. Told it not to let the
+   hypothesis shape what it looks for.
+5. Record whether a create at the ceiling **refuses or hangs**. A refusal is actionable; a hang is
+   indistinguishable from a slow agent.
+
+Sent `sn-stress-max` the five dead ends so it does not re-derive them — but told it explicitly
+**not** to adopt the 515 MiB figure. Two sizes measured independently check each other; one size
+plus an assumption is a single measurement wearing a disguise.
