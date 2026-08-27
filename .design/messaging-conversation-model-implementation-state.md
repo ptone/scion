@@ -605,6 +605,79 @@
     harmless:** anything touching DM key derivation, principal-kind determination, or
     authorization — an unchosen commit there is raised immediately and separately.
 
+40. **Specify a fix by its sink, never by its callers — and a guard without a gate decays.**
+    Issued 2026-08-27 21:14Z. **This one is my error, not a manager's.**
+
+    I filed DEF-20 as "`WithTopicLookup` has zero non-test callers; wire it at all three call
+    sites." em9 wired exactly those three, correctly, with a compile-time conformance assertion.
+    **The mint is still open**, because it has at least seven entrances:
+
+    - `handlers_agent_messaging.go:284` and `:891` → `DeriveConversationKey` +
+      `ResolveOrCreateConversationByKey`. Case 2 (`derive_key.go:74-80`) turns any non-dm ThreadID
+      into `thread:<projectID>:<threadID>` and upserts it. **This is how an agent posts into a
+      webchat topic** — the exact native case Phase 4 exists for.
+    - `handlers_broker_inbound.go:225` and `handlers_agent_messaging.go:697` call
+      `store.UpsertConversationByExternalRef` **directly**, bypassing `pkg/messaging` entirely.
+
+    **Rule 36 told me to count callers of the option. I counted callers of the function I was
+    looking at and stopped.** That is rule 20 in my own hand — I narrowed three funnels and left
+    the sink open. The generalisation: **"who calls X" is a question about a name; "what can reach
+    this effect" is a question about the system, and only the second one closes a defect.** When
+    the finding is "an effect happens where it should not," enumerate the writes, not the callers.
+
+    **Corollary — the surface predicate that could not generalise.** em9's `Channel == "web"` was
+    sound prior art (`events.go:759,768`) and still wrong for the job: an agent outbound request at
+    `:284` has no Channel field. A signal available on some paths cannot guard an effect reachable
+    from all of them. And with their `store.ErrNotFound` sentinel in place the predicate was
+    redundant anyway — **the sentinel was the whole fix, and the Channel check was scaffolding
+    around a problem already solved.** Watch for the fix that keeps its own scaffolding.
+
+    **Corollary — a guard without a gate decays.** Directing the lookup into
+    `ResolveOrCreateConversationByKey` covers today's paths; it does nothing about the eighth
+    entrance added next month. So the fix has to include a CI grep gate forbidding
+    `UpsertConversationByExternalRef` outside `pkg/messaging` and `pkg/store` (precedent:
+    `make check-authz-guards`). **The reason we are here is that nobody could see the first three
+    were unguarded — a chokepoint that is not enforced is a convention, and conventions are what
+    DEF-8 was about.**
+
+41. **Reachability decides what a tranche risks, not content — and reachability is a property of a
+    tree that the next merge voids.** Issued 2026-08-27 21:20Z, from em6's tranche A audit.
+
+    em6 found 17 post-phase-4 commits riding into tranche A unchosen, six of them on DM key
+    derivation and authorization. That looks like a stop-the-line finding and it is not, because of
+    one fact neither the commit list nor the compile status contains: **no file in `pkg/hub` — all
+    454 — references `pkg/messaging` in tranche A.** Zero importers outside the package. Every
+    `AddParticipant` caller is inside `pkg/messaging` or an interface declaration. The whole DM
+    key/auth apparatus is dormant, so landing it changes no runtime behaviour.
+
+    **The inventory answers "what is in here." Only the reachability check answers "what can it
+    do."** Rule 39 said detect wide and decide narrow; this is the missing third step — decide on
+    reachability. A wrong-but-unreachable control and a wrong-and-live one are the same diff and
+    completely different incidents.
+
+    **Corollary — when every commit in a set looks half-carried, the seam is not a commit seam.**
+    All six flagged commits split at exactly the same place: `pkg/messages`/`pkg/messaging`/
+    `pkg/store` on one side, `pkg/hub` on the other. That is not six broken commits, it is one
+    package boundary, and A-is-the-library / B-is-the-switch is a defensible design rather than an
+    accident. Rule 38 said half a commit is worse than none; the qualifier was always
+    *unexamined*. A package-aligned split survives examination if A compiles standalone, A is
+    unreachable, B carries the exact complement, and the ordering is enforced. **The per-commit
+    lens finds the seam; only naming the seam tells you whether it is a wound or a joint.**
+
+    **Corollary — an expiring warrant must name its expiry.** Tranche A's acceptance now rests on
+    unreachability. Tranche B is the merge that voids it: every guard A ships inert goes live, and
+    every guessed principal kind in `pkg/hub` starts feeding a kind-sensitive DM key. **The risk
+    profile between the two tranches is inverted from how they were reviewed** — A got the hard
+    look and carries nothing executable; B was "just the hub half." Written-down warrants have to
+    state the check, that it is a property of a tree and not of a commit, and when it dies.
+    Otherwise the next merger silently renews it.
+
+    **Corollary — reverting a dormant control is not the safe option.** Stripping DEF-8 out of A
+    requires adaptation code (rule 38's stop condition) *and* means deliberately landing the weaker
+    key derivation we quarantined. **Between landing a stronger control dormant and a weaker one
+    dormant there is no dilemma** — "revert the unchosen change" is a default worth resisting when
+    the thing unchosen is a hardening.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -766,13 +839,13 @@ tranche A** — asked 19:55Z, unanswered.
 | `origin/main` | **`c13d910b`** | — | moves ~hourly. **Do not cache** (rule 24). |
 | `scion/messaging-v2` | **`80558a03`** | — | staging ground. DEF-12 merged in at 20:47Z, control preservation verified against both parents. Not a merge unit. |
 | `scion/ca-msg-arch` (mine) | `b80b4ad9` | — | pushed |
-| **Tranche A** `scion/ca-msg-em10` | `71b65292` | `b09e7f49` | **VERIFIED GREEN by me.** `ptone/scion#1319` (**fork** namespace — rule 34 corollary). CI green, MERGEABLE/CLEAN. Awaiting landing gate only. **SHA must not move.** Carries the pre-fix DEF-12-F2 code; reachability is zero non-test callers, so it can still land. |
-| **Tranche B** `scion/ca-msg-em10-trb` | `9333f943` | `71b65292` (tranche A) | **BLOCKED 20:58Z — STALE CUT POINT (rule 37).** Was green on every gate; cut from `1ff7c6af` and therefore missing `60670c0e` (non-tautological divergence + global DM ProjectID) and `cd4ee7ed` (deliverToAgent thread resolution). em10 re-classifying every hunk against staging, then re-cutting. **Green-on-cut did not survive the cargo being wrong.** |
+| **Tranche A** `scion/ca-msg-em10` | `71b65292` | `b09e7f49` | **VERIFIED GREEN by me. Cut-point audit COMPLETE 21:15Z — ACCEPTED as-is.** `ptone/scion#1319` (**fork** namespace — rule 34 corollary). CI green, MERGEABLE/CLEAN. Awaiting landing gate only. **SHA must not move.** **It is NOT "phases 1-4"** — it carries 17 unchosen post-phase-4 commits incl. DEF-8 ×4, DEF-15, half of DEF-16. **Accepted on an EXPIRING WARRANT: zero of `pkg/hub`'s 454 files reference `pkg/messaging`, so the whole apparatus is production-dormant** (rule 41). Warrant dies when tranche B lands. Omits `divergence.go` + `dm_migration.go` as whole files. |
+| **Tranche B** `scion/ca-msg-em10-trb` | `9333f943` | `71b65292` (tranche A) | **BLOCKED 20:58Z — STALE CUT POINT (rule 37); spec corrected 21:20Z.** Was green on every gate; cut from `1ff7c6af`, missing `60670c0e` and `cd4ee7ed`. **The A/B seam is a PACKAGE seam** — A took the `pkg/messages`/`pkg/messaging`/`pkg/store` half of all five carry-commits, B owes the exact `pkg/hub` complement. **B is where A's dormant controls go live** — `23f7c820`'s 5 call-site fixes and `69ac6a12`'s hub converge are a merge gate on this branch, not deferrable cargo. |
 | DEF-12 `scion/ca-msg-em6-def12` | `74bcb24c` | `14b3ba7c` | **F1–F4 all resolved and verified by me. MERGED to `messaging-v2` at `80558a03`.** Needs `git rebase --onto origin/main 14b3ba7c` after A lands. |
 | §2.6.4 `scion/ca-msg-em9-unify` | `d053e896` | `1e7bee72` | **REWORK — verdict issued 20:53Z. Phase 4 is inert in production (DEF-20).** See §5aq. |
 
-**Managers:** em9 (§2.6.4 rework), em10 (tranche B held, writing the DEF-24 spec). em6 idle —
-DEF-12 closed and merged; available for dispatch.
+**Managers:** em9 (§2.6.4 — DEF-20 reopened), em10 (tranche B re-cut, spec corrected 21:20Z),
+em6 (tranche A audit delivered 21:15Z; on the AC re-run + expiring-warrant follow-on).
 
 **Blocked items, each with the owner of the unblock named (rule 28).** A row whose owner is *me*
 is a queue, not a blocker.
@@ -780,11 +853,12 @@ is a queue, not a blocker.
 | Item | Waiting on | Owner | Asked? |
 |---|---|---|---|
 | **Tranche A landing** | who opens the upstream `GoogleCloudPlatform/scion` PR | **user** | yes, 19:55Z, **still unanswered — now blocking TWO tranches** (A and the verified-and-held B) |
-| **Tranche B re-cut** | classification **done + accepted** 21:04Z. Now: delete `9333f943` (do not amend), re-cut carrying `60670c0e` + `cd4ee7ed` + `69ac6a12` + `23f7c820`, seam re-scan of the (b) column, full AC re-run plus **AC-B-8** (ComputeDivergenceMatch must be able to return a mismatch) and **AC-B-9** (undetermined principal kind is rejected, not defaulted) | **em10** | directed 21:05Z |
-| **Tranche A cut-point audit** | rule-37/38/39 test on A's file set. Now scoped as an **inventory**: for each file, every commit touching it between the phase-4 boundary and the revision A carries, marking those not part of phases 1-4. Confirmed lead: `b7651af9`'s `groupForMessage` half is already in A. Harmless-but-unchosen still gets recorded; anything on DM key derivation / principal-kind / authz is raised immediately and separately. | **em6** | dispatched 20:59Z, scope extended 21:06Z and 21:10Z. **Wanted before the user answers the landing question.** |
+| **Tranche B re-cut** | delete `9333f943` (do not amend), re-cut. **Spec corrected 21:20Z: carry the `pkg/hub` COMPLEMENT of each of `69ac6a12` / `23f7c820` / `60670c0e` / `cd4ee7ed` / `b7651af9`, plus whole-file `divergence.go` + `dm_migration.go`.** A's part + B's part must equal each whole commit or the omission is recorded. Full AC re-run plus **AC-B-8** (ComputeDivergenceMatch must be able to return a mismatch) and **AC-B-9** (undetermined principal kind rejected, not defaulted). Report which of the six guessed-kind sites is fixed by which commit. | **em10** | directed 21:05Z, re-specced 21:20Z |
+| **Tranche A cut-point audit** | **DONE 21:15Z — 17 unchosen commits found, verdict ACCEPT (see §5av, rule 41).** Follow-on now open: (1) re-run the six DM-key/auth commits' original staging ACs against A's tree, per-AC with provenance; (2) confirm the DM key **golden vectors** are in A, not deferred — a key format must not land ahead of the test that pins it; (3) write the unreachability claim as an **expiring warrant** naming the check, that it is a tree property, and that tranche B voids it; (4) confirm `divergence.go`/`dm_migration.go` are deliberate whole-file omissions with no dangling references. | **em6** | follow-on dispatched 21:20Z |
 | DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
 | AC-12-6 (populated-DB exercise) | beta-hub exercise scheduling | **user** — deliberately deferred; pre-beta gate item | told em6 + integration2-operator 20:0xZ |
-| **§2.6.4 phases 1-4** | **DEF-20/21/22/23 rework** | **em9** | verdict sent 20:53Z |
+| **§2.6.4 phases 1-4** | **DEF-21 ✅ DEF-23 ✅ DEF-22 ✅ pending startup-ordering evidence. DEF-20 REOPENED** at `eb6c62a9` — mint has ≥7 entrances, three are guarded. Directed: drop the `Channel=="web"` predicate (sentinel makes it redundant), move the lookup into `ResolveOrCreateConversationByKey`, route the two direct `UpsertConversationByExternalRef` callers through it, add a CI grep gate. Plus the production-path integration test. **The mis-scope was mine (rule 40).** | **em9** | reopened 21:14Z |
+| **DEF-25 — `compat-literals` gate fails on staging content** | `cmd/message_deprecation_test.go` (S8/DEF-13, `edd4e4bd`) carries 7 `grove-*` literals. **Verified: exit 0 on `origin/main`, exit 1 on the branch; the file does not exist on main.** Not em9's, but ours. **Will block tranche F.** | **me** — queue, spec then dispatch | filed 21:14Z |
 | ~~**DEF-24**~~ | **WITHDRAWN 20:58Z — not a defect, a stale cut point.** Already fixed on staging at `cd4ee7ed` (em2, 03:30Z). Rolled into the tranche B re-cut. | — | spec cancelled |
 | §2.6.4 phases 5-7 | phases 1-4 landing | **me** — queue | n/a |
 | Tranches C-G | tranche B, then supervision capacity | **me** — queue | n/a |
@@ -1739,6 +1813,111 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5av. 21:15-21:21Z — tranche A is not phases 1-4, and that turns out not to matter
+
+em6 delivered the cut-point audit: **17 post-phase-4 commits ride into tranche A unchosen**, six on
+DM key derivation / auth (DEF-8 ×4, DEF-15, half of DEF-16), three Phase 8, three Phase 5 /
+divergence, two S3/CLI fixes in `types.go`, one Permissions P1 from the base. **No hand-written
+bridging code** — the rule-38 seam check came back negative, which is the answer I wanted and could
+not assume.
+
+**Verified independently at `71b65292`, not from the report** (rule 32): `checkPostResolutionAuth`
+at `resolve.go:209`; kind-prefixed `DMConversationKey` at `pkg/messages/dm_key.go:40`; the
+key-derived AddParticipant guard at `conversation_store.go:516-532`, whose own comment explains why
+a count-based check is wrong (soft-remove B → count 1 → AddParticipant(C) passes → `{A,C}` while the
+key says `{A,B}`). All present, all as described.
+
+**Verdict: accept as-is, documented and justified. Revert nothing.** The basis is one grep em6 did
+not run: **`pkg/hub`'s 454 files contain zero references to `pkg/messaging`.** Every
+`AddParticipant` caller is inside `pkg/messaging` or an interface declaration. The apparatus is
+dormant; landing it changes no runtime behaviour. Rule 41.
+
+**The finding that outranks the inventory: the A/B seam is a package seam.** Checking each of the
+five commits I had sent em10, all split at the same line —
+
+| commit | in A | owed by B |
+|---|---|---|
+| `69ac6a12` | `pkg/messages/dm_key.go`, `pkg/messaging/conversation.go` | 6 `pkg/hub` files |
+| `23f7c820` | `pkg/messaging` parts | 5 guessed-kind call sites + `dm_migration.go` (absent from A entirely) |
+| `60670c0e` | `conversation.go` half | `divergence.go` + 2 `pkg/hub` files |
+| `cd4ee7ed` | nothing | all of it |
+| `b7651af9` | `backfill.go` half | `divergence.go` unexport + 4 more |
+
+Not six broken commits — one boundary. **A is the library, B is the switch.** `divergence.go` and
+`dm_migration.go` are absent from A as whole files, which is why the tautological comparator and the
+exported wrong-format `DirectMessageExternalRef` are both tranche B's problem and not on main.
+
+**The risk inversion, which is the thing to remember.** A got the hard look and carries nothing
+executable. B was scoped as "just the hub half." It is the merge where every dormant guard goes live
+and every guessed principal kind in `pkg/hub` starts feeding a kind-sensitive DM key. Told em10:
+`23f7c820`'s five call-site fixes and `69ac6a12`'s hub converge are **a merge gate on their own
+branch**, not cargo deferrable to a later tranche.
+
+**Why not re-cut A.** Two reasons and the second decides it. `DeriveConversationKey` needs DEF-8's
+key format to compile and `conversation.go` needs `DeriveConversationKey`, so stripping means
+adaptation code — rule 38's stop condition. And reverting DEF-8 would deliberately land the *weaker*
+derivation we quarantined. **Between a stronger control dormant and a weaker one dormant there is no
+dilemma.**
+
+**What acceptance does not carry (rule 35).** A was accepted as "phases 1-4," so its ACs do not
+describe its contents. em6 is now re-running the six commits' original staging ACs against A's tree,
+confirming the DM key golden vectors are in A rather than deferred (a key format must not land ahead
+of the test that pins it), and writing the unreachability claim down as an expiring warrant.
+
+## 5au. 21:11-21:15Z — em9 fixed exactly what I asked for, and the defect is still there
+
+`eb6c62a9`, 7 commits on `1e7bee72`. Reviewed against the code, not the report.
+
+**DEF-21, DEF-22, DEF-23 accepted.** The DEF-21 fix is the best work on the branch: `store.ErrNotFound`
+following the package's own prior art, and the regression test **run against the broken code first**,
+which is the step that converts a guard from a hypothesis. And em9 reported the missing
+production-path integration test as a **gap rather than softening it into a pass** — one message
+after I criticised them for exactly that. Worth recording as a correction that took.
+
+**DEF-20 is not fixed, and the fault is mine.** I filed it as *"`WithTopicLookup` has zero non-test
+callers; wire it at all three call sites."* They wired those three, correctly, with a compile-time
+conformance assertion. Meanwhile a native topic UUID still reaches the mint through four other
+doors:
+
+```
+handlers_agent_messaging.go:284, :891  -> DeriveConversationKey + ResolveOrCreateConversationByKey
+                                          case 2: thread:<projectID>:<threadID>, upserted
+handlers_broker_inbound.go:225         -> store.UpsertConversationByExternalRef, direct
+handlers_agent_messaging.go:697        -> store.UpsertConversationByExternalRef, direct
+```
+
+`:284` is how an agent posts into a webchat topic — the precise native case Phase 4 exists for.
+
+**Rule 40.** Rule 36 told me to count callers of the *option*; I counted callers of the *function I
+happened to be reading* and stopped. Having written rule 20 myself — narrowing a funnel is not
+closing a sink — I then specified a funnel fix and shipped the instruction. **The lesson is that
+"who calls X" is a question about a name, while "what can reach this effect" is a question about
+the system, and only the second one closes anything.**
+
+**Their surface predicate deserves a note of its own.** `Channel == "web"` was sound prior art
+(`events.go:759,768` use it) and still wrong for the job: an agent outbound request has no Channel
+field, so the signal is unavailable on precisely the paths that leak. And their own sentinel had
+already made it unnecessary — ErrNotFound distinguishes "not a topic" from "lookup failed," which
+is the only distinction the branch needs. **The fix solved the problem and then kept the
+scaffolding**, and the scaffolding was what constrained where the fix could be applied.
+
+Directed: drop the predicate, move the lookup into `ResolveOrCreateConversationByKey` (its own doc
+comment already calls it "the shared resolve step" — make that true), route the two direct
+upsert callers through it, **and add a CI grep gate forbidding `UpsertConversationByExternalRef`
+outside `pkg/messaging`/`pkg/store`.** Without the gate the other three steps decay; a chokepoint
+nobody enforces is a convention, and conventions are what DEF-8 was.
+
+**DEF-25 filed.** em9 reported `compat-literals` as "pre-existing, not our code." I ran it both
+ways: **exit 0 on `origin/main`, exit 1 on the branch**, and `cmd/message_deprecation_test.go` does
+not exist on main at all — it arrived with S8/DEF-13 and carries 7 `grove-*` literals. Not em9's
+commits, but ours. **A gate that passes on main and fails on the branch is a branch failure,
+whoever wrote the line** — attributing it outward is how it survives to block tranche F.
+
+**DEF-22 held on one question.** Erroring when the conversations table is absent is fail-closed on
+a *shape* constraint (rule 29), and the wrong-rejection cost is all topic creation.
+`hasConversationsTable()` reads `sqlite_master`, so it is false whenever the webchat store runs
+before ent migration. Asked for the startup ordering with evidence rather than assumption.
 
 ## 5at. 21:08-21:12Z — right answer, wrong mechanism, and a quarantine nearly reversed
 
