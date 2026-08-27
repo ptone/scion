@@ -6314,3 +6314,61 @@ stopgaps; retest the #1300 access-settings fix live, which was only ever verifie
 
 Offered to dispatch a developer to file all twelve as fork issues cross-referenced to design doc §9.
 Awaiting his word.
+
+### 04:10 — filing the follow-up register, and finding my own reference bug in it
+
+ptone approved the twelve tracking issues, *"3 batches of 4 (just to manage agent load)"*. Brief at
+`briefs/sn-issues-dev.md`. Batch 1 dispatched; 2 and 3 follow serially as each reports.
+
+Checking the register before dispatching changed it twice.
+
+#### 1. Two items were already filed. Do not duplicate.
+
+- **`ptone/scion#1274`** — depth-1 shallow clone. **Open.**
+- **`ptone/scion#1281`** — session metrics lost, `exit_code` never persisted. **Open.**
+
+Both accurate. Searched the fork for the other ten and found no duplicates. Two freed slots.
+
+#### 2. My design doc cites the wrong repository, and it is on upstream main
+
+`.design/hosted/cloud-run-single-node.md` §9.2 uses bare `#1273`, `#1274`, `#1275`, `#1276`, `#1281`.
+Those are **fork issue numbers**. The file now lives in the **upstream** repo, where a bare number
+resolves against upstream:
+
+| bare ref | `ptone/scion` (what I meant) | `GoogleCloudPlatform/scion` (what it now says) |
+|---|---|---|
+| `#1273` | Hosted hub drops template/harness-config identity | PR: populate `file_secret_files` from broker-stage |
+| `#1274` | `GitCloneConfig.Depth` — depth-1 shallow clone | PR: accept text files with unusual control chars |
+| `#1276` | Auth preflight misses ambient GCP identity | PR: document interactive terminal requirement |
+| `#1281` | Session metrics lost, no `exit_code` | PR: stop `syncBuiltImage` mutating `config.yaml` |
+
+Every one resolves to real but **unrelated** work — the worst failure mode, because it looks
+correct. And the same table cites *genuine* upstream numbers (`#1300`, `#1304`, `#1305`, `#1306`) in
+identical bare form, so **the venue is unrecoverable from the text.**
+
+> **Any cross-repo reference in a file that might land upstream must be fully qualified** —
+> `ptone/scion#1274` or `GoogleCloudPlatform/scion#1305`, never bare. A bare number resolves against
+> wherever the text is *rendered*, which is not where it was *written*.
+
+This one is mine, and it is not a subtle trap I fell into unaware: I have known fork and upstream
+numbers diverge for days, and I warn developers about it *in briefs*. Knowing a rule and applying it
+to your own prose are evidently different skills. Filed as **item 11**, to be fixed through review
+rather than quietly edited — I do not get to slip a fix for my own error past a reviewer.
+
+#### 3. The two freed slots
+
+11. The design doc reference fix above.
+12. **An empty `image-build/.gitignore`.** The coordinator hit it on tonight's real omni build:
+    `gcloud` 582.0.0 errors `Could not read ignore file .gitignore` unless one literally exists in
+    `image-build/`, **even when `--ignore-file` correctly points elsewhere**. Worked around with
+    `touch`. A gcloud CLI bug rather than our misuse.
+
+Still twelve, still three batches of four.
+
+#### Omni build in flight
+
+ID `9a1b9766-9d43-4e14-85e8-28536ab00a80`, target `omni`, to `us-docker.pkg.dev/ptone-misc/scion-alt`.
+The coordinator **dry-ran it first** and confirmed `build-images.sh` populated `--ignore-file`,
+`_COMMIT_SHA`, `_SHORT_SHA` and `_REGISTRY` correctly — no hand-rolling, so neither trap fired.
+Reminded them to hand beta testers the `_SHORT_SHA` coordinate rather than `:latest`; the double-tag
+exists precisely so a bug report can be pinned to an artifact.
