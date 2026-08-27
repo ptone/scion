@@ -879,6 +879,17 @@ Commit-sized, ordered, each independently reviewable.
   > the docs must cover them too, or the one surface a user cannot avoid reading is the one
   > surface nothing verifies.
 
+  > **Amended 2026-08-27 after S5 round 2. The verifier must assert it verified something.**
+  > The round-2 test resolved every single-quoted `'scion …'` reference correctly and was
+  > load-bearing against the exact I-1 defect — and still passed with the warning emitter
+  > replaced by an empty body, and still passed the whole `cmd` suite with a *new* deprecated
+  > flag naming `scion agent poke`, a command that does not exist, because it was back-tick
+  > quoted. Extraction that keys on a delimiter fails open. **Two requirements:** extraction
+  > is delimiter-agnostic, and the test asserts a floor on the number of replacements it
+  > found (>= 7 today, of ten warnings). The same floor requirement applies to any check that
+  > iterates over discovered input — the docs parse-check passed green with all four of its
+  > source files renamed away. A check whose input can silently become empty is not a check.
+
 ### Non-regression
 
 - **AC-16** Fast-fail delivery is unchanged: 409 on a stopped agent, no queuing.

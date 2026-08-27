@@ -71,6 +71,19 @@
     Operationally: a test asserting a message was sent must observe the send, never the
     resolution that precedes it.
 
+14. **A test must assert it had something to observe.** Rule 13's dual, issued
+    2026-08-27 12:05Z after S5 round 2. Put it in every manager brief alongside rules 10
+    and 13. Any test that iterates over discovered input — files on disk, lines of captured
+    output, records from a query — **must assert a non-zero floor on what it found**, and
+    must fail rather than skip when an expected input is absent. J-1 and J-2 were both
+    fully green while examining zero real artefacts: one because its extractor keyed on a
+    quote character, the other because four `t.Logf("skipping missing file")` branches
+    swallowed a path change. Rule 10 subtests over `t.TempDir()` fixtures prove the
+    *function* is correct and say nothing about whether it was ever *fed*. **A check whose
+    input can silently become empty is not a check.** Operationally: no `continue` on
+    missing input without a failing assertion elsewhere, and every discovery loop carries
+    a documented minimum count that may be raised but never lowered.
+
 ## 2. Source documents
 
 | Doc | Path |
@@ -89,7 +102,9 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 **Active section:** S5 — Docs (spawned and briefed 2026-08-27 10:45Z)
 **Active manager:** `ca-msg-em5` — `ca-msg-em4` retired, all ten of its sub-agents confirmed
 deleted
-**Blocked on:** em5's four workstreams (skill, messaging page, CLI reference, glossary).
+**Blocked on:** em5 fixing **S5 round 2** (rejected 12:05Z at `e0269857` on J-1/J-2 — see
+§5h). Round 1's I-1..I-4 are all verified fixed. Round 3 is two test files, ~30 lines: add
+input-floor assertions and a quote-agnostic extracted `findReplacementProblems`.
 S5 must document the build **as it ships**
 (phase row 12): the read switch is default-OFF, `conv:<id>` and `#<thread>` are **not
 available** in the CLI (DEF-5), `@<email>` works only from inside an agent container, and
@@ -405,7 +420,47 @@ would bury the events that matter.
   three deprecation warnings on the *already-accepted* integration branch name replacements
   that do not exist. See §5g.
 
-## 5g. S5 rejection — open (2026-08-27 11:10Z)
+- `2026-08-27 12:05Z` **S5 rejected on round 2** at `e0269857`. I-1..I-4 verified fixed by
+  mutation and by a positive control against real docs. Two new findings, J-1/J-2: both new
+  tests pass green while examining zero real input. **Rule 14 issued.** See §5h.
+
+## 5h. S5 round 2 — REJECTED 2026-08-27 12:05Z (`e0269857`)
+
+Fast-forward from `19681bc1`. 14 files, +858/-44. `cmd` suite green. **I-1, I-2, I-3, I-4 all
+verified fixed** — see below. Rejected on two new findings that are one defect.
+
+**Verified fixed (by running code, not reading the diff):**
+- **I-1** — `scion schedule create` really does register `--in` and `--at`
+  (`cmd/schedule.go:783-784`); `--cc` no longer names a nonexistent flag. **MUT-A:** reverting
+  the string to `scion schedule message` makes `TestDeprecationWarnings_ReplacementsExist`
+  fail with *"replacement resolves to wrong command: wanted message, got schedule"*. The
+  consumed-command assertion is load-bearing.
+- **I-2** — **positive control:** appended `scion schedule message --in 5m` to the real
+  `glossary.md`; `TestDocSyntax` failed with *unknown subcommand "message" for "schedule"*.
+  Wiring is live against real docs today.
+- **I-3** — `findCommandProblems` / `findDenyListProblems` are standalone; all three subtests
+  call them. No reimplementation remains.
+- **I-4** — three conditions plus the counter-example `matches: 0, mismatches: 0,
+  fallbacks: 50000 is not clean`. Closes the `total = matches + mismatches` blind spot.
+
+| # | Finding | Mutation evidence | Required fix |
+|---|---|---|---|
+| **J-1** | **`TestDeprecationWarnings_ReplacementsExist` passes while checking nothing.** The extractor keys on `strings.Index(line, "'scion ")` — single quotes only — and asserts nothing about how many replacements it examined. Zero extractions is indistinguishable from all-correct. AC-15a's purpose is to be the *standing* guard so a future deprecation cannot reintroduce I-1; today's ten warnings are also covered by hardcoded `Contains()` assertions in `TestDeprecatedFlag_*`, so the eleventh warning someone adds is covered by nothing. | **MUT-B:** gave `emitDeprecationWarning` an empty body — test PASSES. **MUT-D:** added a new deprecated-flag branch naming a nonexistent backtick-quoted command (``use `scion agent poke` instead``) — **the entire `cmd` suite goes green.** | Extract `findReplacementProblems(stderr string) []string`, called from the main body. Quote-agnostic extraction (scan for `scion ` anywhere, take words up to first flag/quote/comma). Assert a floor of >= 7 references found. Replace `catches_nonexistent_replacement` — it re-implements the check with a bare `rootCmd.Find` and survives deletion of the consumed-command assertion — with four synthetic-stderr cases through the extracted function. |
+| **J-2** | **`TestDocSyntax` passes while checking nothing, same shape.** `os.IsNotExist -> t.Logf + continue`, and no assertion on total lines examined. A docs reorganisation silently disables the whole check. | **MUT-E:** renamed all four entries in `docFiles` to nonexistent paths — `TestDocSyntax` and all three subtests PASS, logging four "skipping missing file" lines. | `require.NoError` on the stat so a moved doc breaks the build. Accumulate a total across files and assert a floor. Real counts today: SKILL.md 3, messaging.md 3, cli.md 3, glossary.md 0 = **9**. Raise the floor, never lower it. |
+
+**J-1 and J-2 are one defect: a test that proves the mechanism works on synthetic fixtures but
+never asserts it ran on the real artefact.** Rule 13 held that a test must observe the effect
+rather than the call. This is its dual — **a test must also assert it had something to
+observe.** A check whose input can silently become empty is not a check; three green Rule 10
+subtests over `t.TempDir()` fixtures say only that the function is correct, never that
+anything was fed to it. **Rule 14, below.**
+
+**This is my miss as much as em5's.** I specified D6 as a parse-check and reviewed round 1 for
+whether the check was *correct*, not for whether it could be *starved*. I-3 taught "shared
+implementation, two callers"; em5 applied that faithfully and the extraction is good work. The
+starvation hole is a different axis and I did not name it.
+
+## 5g. S5 rejection round 1 — CLOSED 2026-08-27 12:05Z (all four fixed)
 
 Diff correctly scoped: docs plus one test file, fast-forward from `19681bc1`, no production
 code. The four availability caveats are well documented — SKILL.md states them bluntly
