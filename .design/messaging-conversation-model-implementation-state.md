@@ -1212,7 +1212,7 @@ is a queue, not a blocker.
 | **Tranche A cut-point audit** | **DONE 21:15Z — 17 unchosen commits, verdict ACCEPT (§5av, rule 41). Follow-on D2/D3/D4 accepted 21:27Z (§5aw).** Golden vectors confirmed in A; omissions clean; warrant strengthened to `git diff origin/main 71b65292 -- pkg/hub` = **empty**. Remaining: re-issue D1 with the AC-DEF8-1 correction (it IS runnable and passes — rule 42) and file the **`resolve_test.go:1099` green-placeholder defect** (a second test named AC-DEF8-1 that only calls `Resolve` twice; rename or delete). | **em6** | correction issued 21:27Z |
 | **Four A-ACs deferred into B's merge** | 23f7c820's 5 handler call-site fixes; AC-DEF15-1 (source confinement); AC-DEF15-4 (invalid `dm:` → zero rows); AC-DEF16-1 (validation before creation). **These are tranche A's ACs, not B's** — not covered by AC-B-1..9, must be reported by name. AC-DEF15-1 + `b7651af9`'s unexport are one control in two files: **both or neither**. | **em10** | added to B's spec 21:28Z |
 | DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
-| **DEF-30 — stored DM keys are in a format our derivation can no longer produce** | **POSSIBLE RELEASE BLOCKER / may reorder tranches.** Found by `integration2-operator`'s staging dump 22:30Z. Staging holds `dm:<uuid>:<uuid>` (no kind qualifiers); `pkg/messages/dm_key.go:40` emits `dm:<kind>:<uuid>:<kind>:<uuid>` sorted, kinds validated. Upsert keys on `(surface, external_ref)`, so the new derivation **cannot match an old row and will silently MINT a duplicate**, orphaning the original and its messages. No error, no log. **DECIDING QUESTION ASKED 22:31Z: does beta have `conversations` rows?** Zero → staging-only dev detritus, wipe staging, no migration. Non-zero → real format migration before anything lands, and the tranche order changes. **Escalate to user only once answered** — premature either way. | **me** (pending i2op beta counts) | opened 22:31Z |
+| **DEF-30 — stored DM keys in a format our derivation can no longer produce** | **CLOSED 22:33Z — no migration, no exposure.** Found by `integration2-operator` 22:30Z: staging holds `dm:<uuid>:<uuid>`; `dm_key.go:40` emits `dm:<kind>:<uuid>:<kind>:<uuid>`. Risk was that the upsert keys on `(surface, external_ref)`, so a new-format derivation mints a duplicate rather than matching. **Closed by two checked negatives:** (1) beta has no `conversations`/`conversation_participants`/`message_addressees` tables at all — zero rows to migrate, the staging keys are dev detritus from our own branch; (2) `ParseDMKey` on the legacy form splits the body expecting 4 segments, gets 2, and **errors** — no best-effort parse, no fallback, so a legacy key fails closed and never reaches the ACL. Tranche order unchanged. **Staging rows deliberately NOT deleted** — see log 5bh. | — | closed 22:33Z |
 | **DEF-29 — `CreateConversation` accepts a keyless `direct` conversation (no ACL)** | **Security-relevant. Confirmed in live data, not theory:** staging row `adf13f87`, kind=direct, `external_ref` empty, 2 participants. `conversation_store.go:114` validates ID and DefaultAgentID then does a bare `SetExternalRef` with no check; the upsert path rejects empty in **two** places (`:341`, `:374`). **A direct conversation's key IS its access-control basis** — a keyless direct row has no ACL. Exactly the class hidden by the `external_ref != ''` filter I made i2op delete, which is how it surfaced. **SCOPE IS NARROW: reject only `kind=="direct" && external_ref==""`** — a native *group* may legitimately have no external ref, so an over-broad guard breaks group creation (paired-positive test required). Third rule-54 instance today. | **em10** | dispatched 22:32Z, queued 3rd behind DEF-28 |
 | **DEF-28 — `UpsertConversationByExternalRef` silently erases `parent_ref`** | Found by me 22:25Z while verifying an nc-arch premise. `conversation_store.go:400` update branch does `SetParentRef(conv.ParentRef)` **unconditionally** while all four sibling optional fields are guarded — and the comment justifying the guard sits one line below it. Only writer is `derive_key.go:196` (conditional); DM path, both `resolve.go` sites and `backfill.go` never set it, so any resolve of an existing threaded conversation erases the parent with no error. DM path re-upserts per message → re-clobbers continuously. No preservation test exists (`DisplayName` has one; never generalised — rule 54). Ships in tranche A, file absent from main. Fix = guard it; trade-off accepted (upsert can no longer *clear* `parent_ref`; re-parenting needs its own method). Acceptance = faithful mutation naming the erased parent. | **em10** | dispatched 22:25Z, additive on #1331 |
 | **DEF-27 — soft-deleted native topic gets a shadow conversation** | **RELEASE BLOCKER for §2.6.4.** Found by `nc-arch` 21:59Z, verified by me on both backends. `GetTopicConversationID` filters `deleted_at IS NULL` (`webchannel_store.go:1364`, `webchannel_store_postgres.go:978`); `DeleteTopic` is soft. A tombstoned topic answers `ErrNotFound` → guard mints. Reachable: agent/broker paths validate DM-key *format* only, never topic existence; trigger is a human deleting a thread mid-agent-turn. **Root cause is one function answering two questions with opposite `deleted_at` needs — split it (rule 51).** Spec: `def27-spec.md`, 6 ACs. **Does NOT affect #1331** (tranche A is dormant, no `pkg/hub`). **CONTAINED TO THE BRANCH — nc-arch scanned the shipped surface and it is clean, so NO data remediation; em9 told explicitly not to write a migration** (22:04Z). Per-backend independent tests now standing for the whole webchat surface, not a DEF-27 special case. **REJECTED 22:19Z at `f1745506` — fix correct, tests do not cover the defect.** All 10 `TestDEF27_*` are store-level; `grep -c ResolveOrCreateConversationByKey` = 0. I reintroduced the defect at `derive_key.go:164` and all 10 passed (edge verified: `pkg/hub` imports `pkg/messaging`, so the mutant WAS linked). Second finding sent with the first: `mockTopicLookup`'s two methods are byte-identical, so the obvious sink test would have been vacuous. Rework = sink-level AC-27-1 against the real store both backends + give the mock a `deleted` concept; acceptance is my mutation failing. Rule 53. | **em9** | dispatched 22:01Z, scoped 22:04Z, **rejected 22:19Z** |
@@ -2175,6 +2175,38 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5bh. 22:32-22:34Z — DEF-30 closed by two negatives, and DO NOT DELETE THE EVIDENCE
+
+**Beta has none of the three tables.** `conversations`, `conversation_participants`,
+`message_addressees` — `no such table`. Beta runs main, which has never had them. Zero rows to migrate. The
+old-format keys are development detritus from our own branch.
+
+**Second negative, which is the one I actually cared about.** `ParseDMKey` on `dm:<uuid>:<uuid>` splits the
+body expecting exactly 4 segments, gets 2, and **returns an error** — no best-effort parse, no repair, no
+fallback. A legacy key therefore fails closed and never reaches authorization. Standing rule satisfied: once
+authorization parses the key the derivation is security-critical, and a parser that guessed at a malformed key
+would be guessing at the ACL. **DEF-30 closed, tranche order unchanged, no user escalation needed** — which is
+why holding it until the answer was right. Reporting "possible blocker" 20 minutes earlier would have been
+exactly the FYI traffic I was told not to send.
+
+**I REVERSED MYSELF ON THE OBVIOUS NEXT STEP, and this is the durable lesson.** Having established the staging
+rows are worthless, the reflex is to delete them so they stop polluting future runs. **I told i2op not to.**
+Those two rows (`adf13f87` keyless-with-participants, `f003ad87` keyed-with-message) are **the only live
+reproduction of DEF-29 anywhere.** Once em10's guard lands, such a row becomes impossible to create — and if we
+have thrown it away we can never check that our fix would have caught it in the wild.
+
+> **Do not delete the evidence of a defect you have not fixed yet.** "Worthless data" and "the only
+> reproduction" are frequently the same rows. The cleanup instinct fires hardest exactly when a finding has
+> just been explained away, which is the worst moment to act on it.
+
+Handled instead by **naming the expected noise**: future staging runs should expect 2 rows from Query 1 and 1
+from Query 2, both tracing to `adf13f87`, reported as "expected, DEF-29 reproduction" rather than as findings —
+**and a CHANGE in those counts is a new event**, because it means something is still creating them. That
+converts known-bad data from a source of false positives into a live tripwire.
+
+Also declined to wipe the staging DB: other projects use `scion-gteam` and its 24,688 messages are not mine to
+destroy.
 
 ## 5bg. 22:29-22:32Z — the staging dump: my framing was wrong, and it found two defects anyway
 
