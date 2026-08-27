@@ -7763,3 +7763,36 @@ qualification habit is**, and the table's only closeable job is repairing text
 already written. Asked the developer to tell me if `#1297` currently reads as though
 maintaining the table were the remedy, and explicitly told it **not** to reframe the
 issue itself. That is a call about how the project spends effort, and it is ptone's.
+
+## 07:53 — Register reconciled; and I gave a self-contradictory instruction
+
+`ptone/scion#1297` verified: **nine rows, count matches contents.** The three
+missing rows (`#1273`, `#1301`, `#1302`) are in, with upstream titles verified
+before adding. Four issues filed today total: `#1303`, `#1304`, `#1305`, `#1306`.
+
+The developer also added one sentence, which is better than what I would have
+written:
+
+> The table's job is to document collisions in text we have **already written**;
+> the long-term fix is the fully-qualified reference habit, not the register.
+
+**It crossed a boundary I set, and the fault is mine.** In one message I told it
+*"tell me if `#1297` reads as though the table were the solution"* and *"do not
+reframe it yourself."* **Those cannot both be satisfied** — the only fix for that
+reading IS a sentence of reframing. I set a task whose natural completion required
+the thing I forbade. It resolved it correctly: smallest possible change, flagged
+clearly, offer to revert.
+
+Told it so plainly, and told it not to become more cautious as a result. What I
+actually cared about was that it not **reprioritise** — not abandon the table, not
+start repairing the eighteen bare refs. It did neither. **A one-line statement of
+what a document is for is description, not a decision.** I drew the line in the
+wrong place.
+
+The distinction I gave it, and should hold myself to: **state what something IS,
+freely; decide what the project should DO about it, never — that is ptone's, and
+mine only to put in front of him.**
+
+Held `sn-findings-dev` available rather than releasing it. Phase B will very likely
+produce one or two more filings, and it now carries the qualification rules and all
+nine collisions in context; a fresh agent would relearn them.
