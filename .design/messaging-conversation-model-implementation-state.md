@@ -948,6 +948,24 @@
       every message unread" survives whatever SQL someone reaches for; "handle NULL `last_read_at`"
       invites a `COALESCE` in one of the three places and passes.
 
+    - **A filter whose safety lives in another function's interpretation is the worst case, because
+      no local review can see it.** nc-arch's find in shipped native chat, 22:07Z, and it is a
+      sharper instance than anything I sent them. The wave-1→2 seed at `webchannel_store.go:1380`
+      carries `WHERE last_read_at IS NOT NULL`. That filter is safe **only because** the consumer at
+      `handlers_chat_v2.go:149` treats a missing watermark as unread (`!ok || LastReadMessageID ==
+      ""`). Nothing at the filter says so. Change the consumer — or write a second one — and the
+      filter silently becomes a defect, with the two halves in different files and no link between
+      them. **When a narrowing predicate's justification is non-local, the justification must be
+      written at the predicate and the coupling named in both places** — or, better, removed by
+      making the consumer's robustness unnecessary.
+
+    - **A data invariant is a weaker mitigation than a computation that handles the case.**
+      `handlers_chat_v2.go:1070` mitigates by "never store a NULL watermark, because it would break
+      the comparison" — correctness delegated to every writer, forever, instead of to the one place
+      that reads. It passes review while staying brittle: a single new writer reintroduces the bug,
+      far from the code that depends on it. **Prefer the computation that is right for the NULL over
+      the invariant that promises NULL never arrives.**
+
     - **CAUTION — "under-granting is recoverable, over-granting is not" is a rule about
       AUTHORIZATION and does not transfer.** For read-tracking and presence there is no safe
       direction: an unread count too high is noise, too low means the user never opens the thread
