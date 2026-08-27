@@ -882,13 +882,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// ExternalRefs from thread conversations or unmigrated rows still
 		// flow through ComputeDivergenceMatch as intended.
 		if lookupFailed {
-			messaging.DivergenceMetrics.IncFallback()
 			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
 				MessageID:  storeMsg.ID,
 				OldRouting: oldRouting,
 				NewRouting: messaging.NewRoutingStr(convID),
 				Match:      false,
 				Reason:     "conv-lookup-failed",
+				Fallback:   true,
 			})
 		} else {
 			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)

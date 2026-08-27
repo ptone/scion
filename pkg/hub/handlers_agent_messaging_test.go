@@ -444,13 +444,13 @@ func TestDEF11_PreResolvedConversation_DivergenceMatch(t *testing.T) {
 // TestDEF11_PreResolvedConversation_LookupFailure verifies that when a
 // pre-resolved ConversationID does not exist in the store, the handler records
 // a fallback with reason "conv-lookup-failed" — not a plain
-// "routing-type-mismatch". LogDivergence also increments Mismatches (Match:
-// false), which is expected; the distinguishability requirement is the
-// fallback counter and the distinct reason string.
+// "routing-type-mismatch". The Fallback flag on DivergenceEntry routes the
+// event to the fallback counter only, leaving mismatches at zero.
 func TestDEF11_PreResolvedConversation_LookupFailure(t *testing.T) {
 	srv, _, projectID, agentSlug, _, userID := def11Setup(t)
 
 	beforeFallbacks := messaging.DivergenceMetrics.Fallbacks()
+	beforeMismatches := messaging.DivergenceMetrics.Mismatches()
 
 	// Use a non-existent conversation ID.
 	rec := doRequest(t, srv, http.MethodPost,
@@ -472,10 +472,15 @@ func TestDEF11_PreResolvedConversation_LookupFailure(t *testing.T) {
 	}
 
 	afterFallbacks := messaging.DivergenceMetrics.Fallbacks()
+	afterMismatches := messaging.DivergenceMetrics.Mismatches()
 
 	if afterFallbacks-beforeFallbacks < 1 {
 		t.Errorf("expected Fallbacks delta >= 1 (conv-lookup-failed recorded), got %d",
 			afterFallbacks-beforeFallbacks)
+	}
+	if afterMismatches-beforeMismatches != 0 {
+		t.Errorf("expected Mismatches delta == 0 (fallback must not register as mismatch), got %d",
+			afterMismatches-beforeMismatches)
 	}
 }
 
