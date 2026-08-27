@@ -1158,6 +1158,31 @@ em10 and every agent I dispatch hereafter.
       reflect-based field-classification test is for.
 
 
+
+60. **`origin/main` is the FORK's main and it LAGS. The real main is `upstream/main`.** Issued
+    2026-08-27 23:45Z, after discovering #1331 was `MERGED` on GitHub while its content was absent
+    from the ref I had been calling "main" all evening. `origin` = `ptone/scion`; upstream =
+    `GoogleCloudPlatform/scion`. At the moment of discovery the fork was **2 commits behind, and one
+    of the two was our own tranche A.**
+
+    - **Every base check I ran tonight was against a stale ref.** The method was right and the
+      conclusions happened to hold, because the fork was current up to `cca1f87d` — but that was luck
+      about timing, not correctness. **I trusted a NAME (`origin/main`) instead of verifying what it
+      pointed at**, which is the same failure shape as every defect found today, applied to my own
+      instruments.
+    - **The tell I missed for an hour:** `git merge-base --is-ancestor <em10-tip> origin/main`
+      returning NO *after* GitHub reported the PR merged. I read that as "not merged yet." The
+      correct reading is **"these two refs do not mean what I assume."** When an authoritative source
+      and a local ref disagree, suspect the ref before disbelieving the source.
+    - **Standing:** `git fetch upstream main` and verify against `upstream/main` for the rest of this
+      project. Broadcast to every manager the moment it is discovered — em9 was mid-task on
+      `cca1f87d` and their entire cost check was void; the cost of telling them late is their whole
+      work product.
+    - **Generalisation.** A lagging mirror is more dangerous than a missing one, because it answers
+      every question plausibly. A missing ref errors; a stale ref returns a confident wrong answer.
+      **Anything that can silently fall behind must have its freshness checked, not its existence.**
+
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -4784,3 +4809,52 @@ before standing at the gate is worth more than the idle time it replaces.**
 
 **Replies owed, cleared:** integration2-operator (DEF-30 closed, DEF-29 rows retention as standing
 instruction, the "baseline" framing corrected), nc-arch (done 22:57Z), user (DEF-31 escalation 23:04Z).
+
+## 5bl. 23:43-23:47Z — TRANCHE A LANDED, and the ref I was measuring against was stale
+
+**#1331 MERGED 23:34:56Z as `9668909c` by ptone. Tranche A is on main.** Upstream main is now
+`c600df51` (also gained #1332). **Section boundary reported to user 23:46Z.**
+
+**Found by accident, which is the part worth recording.** `gh pr view 1331` said `MERGED`; my local
+check said `7e81d053` was not an ancestor of `origin/main` and `conversation_store.go` was absent.
+I could have read that as "GitHub is ahead of my fetch" and moved on. Instead I asked why two sources
+disagreed — and the answer was **rule 60**: `origin` is the fork `ptone/scion`, lagging upstream by
+2 commits, one of which was our own merged tranche A. Every base check tonight was against a ref that
+was quietly behind.
+
+**Verified tranche A landed INTACT rather than trusting the merge:**
+
+| Check | Result |
+|---|---|
+| Pure deletions in the merge | **none** |
+| Non-generated deletions | `models.go` +81/−25, `types.go` +25/−19 — additive rewrites |
+| #1329's six modified files, `cca1f87d` → `9668909c` | **empty diff — fully preserved** |
+| DEF-29 fix on main | `externalRef is required` at `conversation_store.go:354` ✅ |
+| DEF-28 fix on main | `SetParentRef` now inside `if conv.ParentRef != ""` at `:421-423` ✅ |
+
+The #1329 check is the one that mattered: **a new entity fails loudly, a modified one reverts in
+silence**, so the only real evidence is an empty diff over the files main changed most recently.
+
+### Queue re-based on the true main
+
+- **Tranche B** (`em10-trb` `2ba538c0`) merged clean against old main, **conflicts against `c600df51`**
+  — expected with A in front of it. em10 dispatched to rebase, with the aggregate-file deletion check
+  spelled out and an explicit *"do not skip it because the build is green."*
+- **Tranche C** (em9) — **my second error of the night, caught in 8 minutes.** I had dispatched the
+  cost check against `cca1f87d`. Void. Worse than void: tranche A came off em10's branch, which shares
+  28 non-generated files with em9's, so **an unknown number of em9's 15 commits are now already on
+  main in substance under different SHAs.** Re-dispatched with the real question — which commits to
+  DROP (matched by content, never by SHA), which still apply, and **whether tranche A took a piece
+  out of the middle of the phases 1-4 chain**, which would reshape tranche C. That third question is
+  the valuable one and em9 is best placed to answer it.
+- **em6** — phase-2 warrant exercise was gated on tranche A and is now dispatched. Also told to look
+  at em10's `store.Conversation` field-classification test now on main **before** building their own
+  reflect-guard, rather than re-deriving it.
+
+### The wrinkle I created earlier tonight and had to notice
+
+Both em9 and em10 were signalling `blocked` while owing me reports. Having spent the previous hour
+making `blocked` the trusted signal (rules 57/58), I had made **"waiting on purpose" and "parked on an
+unsent deliverable" look identical again** — the exact ambiguity I had just removed, reintroduced one
+level up. Chased both, and added to the standing instruction: **send the report BEFORE you block.**
+A signal is only as good as the thing it is not allowed to hide.
