@@ -4681,3 +4681,65 @@ failure is pre-existing on `main` and not something we introduced, since CI is g
 **I am now genuinely blocked, and correctly so.** Every remaining step belongs to someone else:
 #1265 upstream → #1302 → my rebase → the compare URL. There is no work I can pull forward without
 manufacturing it. Task #56 holds the sequence so nothing is carried in my head.
+
+---
+
+## 2026-08-27 00:03Z — Heartbeat check. The gate is not what I thought, and it is ptone's own PR.
+
+I checked the three heartbeat questions rather than restating last hour's answer. One material
+finding.
+
+### The critical path is blocked on #1265 **not having been proposed upstream at all**
+
+I had been describing the gate as "waiting for #1265 to land". That framing is wrong, and it
+matters, because it implies review is in progress. It is not.
+
+Verified directly, not inferred:
+
+- **The guard is absent from upstream `main`.** Fetched `pkg/hub/web.go` at `ref=main` from
+  `GoogleCloudPlatform/scion` and grepped for `loopback`. **Zero matches.**
+- **The branch does not exist upstream.** `GET /repos/GoogleCloudPlatform/scion/branches/scion/security-fix-p0-s1`
+  → **404 Branch not found**.
+- **There is no upstream PR for it.** Not in the open list; nothing matching in merged.
+- On the fork: **CI fully green** (Build & Test 4m4s, golangci-lint 2m14s, shellcheck 27s),
+  `draft=false`, **0 reviews**, created 03:07:47Z, last touched 03:12:13Z — **~21 hours untouched**.
+- **Author is ptone.**
+
+So the thing gating the tier is a green, unreviewed, never-proposed P0 security fix belonging to
+the one person who can unblock it. That is a one-step unblock, not a wait. Reporting it as "we are
+waiting on 1265" would have hidden that — which is precisely the failure mode of reasoning off a
+signal instead of checking the path.
+
+Independently of us: a P0 fix for a *publicly reachable unauthenticated admin UI* has sat
+unreviewed for 21 hours. That is worth saying out loud even though it is not my call.
+
+### Three of our five filed issues now have upstream fixes in flight
+
+Confirmed by reading each PR body, not by title-matching:
+
+| Upstream PR | Fixes | Our issue |
+|---|---|---|
+| #1304 | `Fixes #1275` | noAuth:true breaks agent create |
+| #1305 | `Fixes #1273` | hosted hub drops template / HC identity |
+| #1306 | `Fixes #1276` | auth preflight blind to passthrough GCP identity |
+
+All three: CI green, reviewer **APPROVE**. This is what ptone meant by "being reviewed now".
+
+Not yet fixed upstream: **#1274** (`GitCloneConfig.Depth`) and **#1281** (D-35 telemetry).
+
+**Design-doc consequence, flagged not yet acted on.** §9.2 currently says the tier needs
+deploy-time workarounds "until #1273 and #1276 land". When #1305 and #1306 merge upstream that
+sentence becomes false and the stopgaps should be deleted. **No tier code changes** — the stopgaps
+are operator settings, which is why the tier never blocked on them. I will edit §9.2 on the merge,
+not before; editing ahead of the merge would put an unmeasured claim in the doc.
+
+### Agents
+
+No agent of mine is running. `sn-repack-dev` completed and its work is verified and pushed. Nothing
+of mine is silently stalled, because nothing of mine is dispatched. I did not re-dispatch — there
+is no work to pull forward that is not someone else's gate.
+
+### Design doc sync
+
+In sync as of now. §9.2's dependency statement remains true because none of 1304/1305/1306 has
+merged yet. The trigger for the edit is their merge.
