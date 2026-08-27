@@ -7255,3 +7255,64 @@ about memory but a configured constant.
 
 Told it to abandon the SSH lead for now and produce a true exec-verified alive count, because its
 reported N=30 is hub state and may be far from real.
+
+## 2026-08-27 07:14 — the SSH dead end was a missing package, and the real instrument was never missing
+
+`sn-stress-def` took the 15-minute timebox and finished in five, with the best-formed evidence of the
+run.
+
+### The exact chain
+
+```
+1. IAP auth              OK   (OSLogin resolves the gym SA)
+2. SSH certificate       OK   (signed by oslogin.googleapis.com)
+3. IAP WebSocket tunnel  OK   (connects to wss://us-east4.ssh.run.app/v4)
+4. Gateway -> port 22    FAIL WebSocket Close 4003 "failed to connect to backend"
+```
+
+**Root cause: `sshd` is not running in the omni image.** A missing daemon — not a missing role, not
+a missing route.
+
+This is the right shape of diagnosis: it walks the path, marks where each hop succeeds, and isolates
+the failure to one component. Three hops confirmed good is what makes the fourth conclusive.
+
+**The correction matters more than the fact.** We had recorded "SSH is unavailable" — a platform
+limitation, permanent, nothing to do. The truth is "the platform feature is on and the image lacks
+the daemon" — a one-line image change. **We were one sentence away from accepting a fixable problem
+as a law of nature**, and the difference was entirely in how precisely the original failure was
+described.
+
+Secondary finding, and a real second bug: `gcloud beta run instances ssh` shells out to
+`gcloud alpha run instances describe` **without propagating `--impersonate-service-account`**. That
+is why the earlier attempts failed. Worked around with config-level impersonation. Asked for the
+exact command and error text so it can be filed.
+
+### Where its conclusion stopped one step short
+
+It wrote: *"Without sshd, there is no path to instance-scoped `/proc/meminfo`."*
+
+**There is, and it does not involve SSH at all.**
+
+`getStats` lives at `pkg/runtimebroker/handlers.go:1958`. The **broker runs in the main launcher
+container** — it is the process that launches the gVisor sandboxes. So the broker is *already* at
+instance scope. Every instrument rejected today failed because it was scoped to a sandbox; the one
+piece of code returning hardcoded zeros is the one piece already sitting in the right container.
+
+**The data we hunted all morning is one `/proc/meminfo` read away from code that already runs in
+exactly the right place.** The gap is not architectural. It is an unimplemented TODO.
+
+Marked as an assessment needing confirmation, not a fact — asked `sn-stress-def` to verify the
+broker's container. If it is right, this reframes task #65 from "platform cannot observe itself" to
+"the product declines to report what it can already see", and reframes the design-doc question in
+task #66: a gap you can close in one function is much harder to justify as a non-goal.
+
+### Three follow-ups, deliberately separated
+
+- **(a) Implement `getStats` from the broker's own view.** The real fix. Product-wide, since the stub
+  serves every runtime on every tier.
+- **(b) `sshd` absent from the omni image.** A diagnostic affordance, and a **security decision, not
+  a convenience** — a new surface even behind IAP and OS Login. ptone's call, not mine.
+- **(c) The gcloud impersonation-propagation bug.** Needs exact reproduction text.
+
+Keeping (a) and (b) apart on purpose. (b) is the tempting quick win and it is the one with a
+security cost; (a) is unglamorous and is the correct answer.
