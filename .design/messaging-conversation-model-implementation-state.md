@@ -75,11 +75,30 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 ## 3. Current position
 
-**Active section:** S3 — Envelope (**REOPENED — reported complete, rejected on review**)
-**Active manager:** `ca-msg-em3`
-**Blocked on:** em3 fixing E-1 (native chat bypasses the validation choke point). S4 held.
-**Last verified landing on integration branch:** `cd4ee7ed` — **S2 accepted 2026-08-27 03:35Z
-on round 3.** S1 verified 01:40Z at `16294728`.
+**Active section:** S4 — Surfaces (opening)
+**Active manager:** `ca-msg-em4` (spawning)
+**Last verified landing on integration branch:** `f206a0d9` — **S3 accepted 2026-08-27 06:40Z
+on round 2.** S2 accepted 03:35Z at `cd4ee7ed` (round 3); S1 verified 01:40Z at `16294728`.
+
+S3 round-2 verification (mine, independent of em3's report):
+
+| Check | Method | Result |
+|---|---|---|
+| **E-1 fixed** | **Mutation:** forced `ValidateLegacyMessage` to return an error unconditionally in a scratch clone | `TestNativeChatPath_RejectsInvalidMessage` **failed**. Before the fix, the same mutation left every chat test passing. The path now genuinely reaches the choke point. |
+| **AC-8 as reworded — every path, not a count** | Diffed the full `pkg/hub` failure set mutated vs clean, plus `go test ./cmd/...` | All seven claimed paths have at least one test that fails only under mutation: `TestHandleAgentMessage_*` (hub handler), `TestHandleBrokerInbound_*` (broker inbound), `TestNativeChatPath_*` + `TestChatV2_Send_*` (native chat), `TestOutboundMessage_*` (hub outbound), `TestHandleProjectBroadcast_*` (hub broadcast); `./cmd` fails under mutation (both CLI paths). **No path survives the mutation.** |
+| Attachment-only relaxation (`c1acaf86`) — is the check being widened until tests pass? | read the diff | **No.** `msg.Msg = "[attachment]"` is guarded by `len(msg.Attachments) > 0`; persistence uses `storeMsg.Msg = content` and dispatch passes `content`, so the synthetic body exists only for the validation call and never reaches the store or the agent. A message with neither text nor attachments is still rejected upstream at `handlers_chat_v2.go:795`. |
+| Documented exemptions (AC-8c) | read `pkg/messaging/VALIDATION_EXEMPTIONS.md` | three server-generated emitters listed with reasons and a stated re-entry condition |
+
+I checked the relaxation specifically because "wire in a check, then loosen the check" is the
+shape S2's B-2 took. Here it is not that: the loosening is conditioned on the exact case that
+made it necessary, and it does not touch what is stored or delivered.
+
+**Found during verification, not S3's fault — see DEF-4.** The `pkg/hub` suite is
+progressively failing on the integration branch: `origin/main` 0 failures (3 runs),
+`cd4ee7ed` 5, `d9fc7f51` 18, `f206a0d9` 17–19, with **non-deterministic membership**
+(two consecutive runs shared only 2 failures). Every failure is SQLite
+`out of memory (7)` at test-store creation, with 109 GB free on the host. This predates
+S3 and I did not catch it when I accepted S2 — that is my miss.
 
 S2 round-3 verification (mine, independent of em2's report):
 
@@ -119,8 +138,8 @@ back into it.
 |---|---|---|---|---|
 | S1 | Foundation — schema, store, resolution | 1, 2, 3 | `ca-msg-em1` | **verified** (`fc523ecd..16294728`) |
 | S2 | Migration — backfill, dual-write | 4, 5 | `ca-msg-em2` | **verified** (`16294728..cd4ee7ed`, 3 rounds) |
-| S3 | Envelope — message type, validation, delivery format | 6, 7, 9 | `ca-msg-em3` | active (rejected round 1) |
-| S4 | Surfaces — read switch, CLI split, broker edge | 8, 10, 11 | `ca-msg-em4` | pending |
+| S3 | Envelope — message type, validation, delivery format | 6, 7, 9 | `ca-msg-em3` | **verified** (`cd4ee7ed..f206a0d9`, 2 rounds) |
+| S4 | Surfaces — read switch, CLI split, broker edge | 8, 10, 11 | `ca-msg-em4` | active |
 | S5 | Docs — skill, docs-site, glossary | 12 | `ca-msg-em5` | pending |
 | S6 | Removal — drop legacy fields | 13 | deferred | **post-beta only** |
 
@@ -253,6 +272,14 @@ would bury the events that matter.
   blanket removal of the `msg` requirement, and that a text-less, attachment-less
   message is still rejected.
 
+- `2026-08-27 06:40Z` **S3 accepted on round 2**, `cd4ee7ed..f206a0d9`. E-1 mutation-verified
+  fixed; all seven inbound paths have tests that fail when the choke point is neutered; the
+  attachment-only relaxation is narrowly conditioned and does not alter stored or delivered
+  content. §5e closed. **DEF-4 opened** — the `pkg/hub` suite is degrading commit over commit
+  with non-deterministic SQLite OOM failures; assigned to S4 as its first task, because it
+  invalidates the full-suite runs my own acceptance method depends on. S4 opened; `ca-msg-em4`
+  spawned; em3 retired.
+
 ## 5d. S2 rejection history — CLOSED 2026-08-27 03:35Z (accepted on round 3)
 
 S2 was reported complete with three APPROVE gates. I rejected it. Both blockers are
@@ -289,14 +316,14 @@ deterministic key. Both are single-grep findings. Every manager brief from S3 on
 require reviewers to check (a) that a comparison actually compares, and (b) that a
 deterministic key has exactly one constructor.
 
-## 5e. S3 rejection — open (2026-08-27 05:10Z)
+## 5e. S3 rejection — CLOSED 2026-08-27 06:40Z (accepted on round 2)
 
 em3 reported S3 complete (`cd4ee7ed..d9fc7f51`) claiming the validation choke point had
 "no bypass". It has one.
 
 | # | Finding | Evidence | Required fix | State |
 |---|---|---|---|---|
-| E-1 | **Native chat bypasses the validation choke point.** `handlers_chat_v2.go:986` builds a `StructuredMessage`, persists it via `CreateMessage`, and dispatches via `dispatchWithBrokerRetry` — never calling `ValidateLegacyMessage`. The six real call sites cover hub agent-messaging, broker inbound and CLI; native chat is a fourth surface. | **Mutation-verified:** made `ValidateLegacyMessage` return an error unconditionally; `go test ./pkg/hub/ -run 'ChatV2\|Chat'` still passed. Only possible if the path never reaches it. | Validate on the native-chat inbound path before persist and dispatch, plus a test that fails if the call is removed. | open |
+| E-1 (**fixed round 2**) | **Native chat bypasses the validation choke point.** `handlers_chat_v2.go:986` builds a `StructuredMessage`, persists it via `CreateMessage`, and dispatches via `dispatchWithBrokerRetry` — never calling `ValidateLegacyMessage`. The six real call sites cover hub agent-messaging, broker inbound and CLI; native chat is a fourth surface. | **Mutation-verified:** made `ValidateLegacyMessage` return an error unconditionally; `go test ./pkg/hub/ -run 'ChatV2\|Chat'` still passed. Only possible if the path never reaches it. | Validate on the native-chat inbound path before persist and dispatch, plus a test that fails if the call is removed. | open |
 
 **Scope note — my own wording was the weaker one.** AC-8 says "all three inbound paths";
 design §2.10 says "a single choke point invoked on **every** inbound path — the CLI, the
@@ -325,6 +352,13 @@ conversation. This table is the only thing that carries them.
 | DEF-1 | **Participant-level auth on `conv:<id>`.** `resolveConvByID` checks the sender's *project* but not whether the sender is a *participant* in that conversation. Raised HIGH by S1 audit. | S1 | **S4** (surface layer, message-send time) | S1 is not wired into any live path, so the gap is not reachable. It becomes reachable the moment S4 switches reads. **S4 is not verifiable without this.** |
 | DEF-2 | **AC-33** — deferred to the envelope validation layer per design. | S1 | **S3** | The validation choke point does not exist until S3 builds it. |
 | DEF-3 | **The phase-5 divergence gate is weaker than the design assumed, and this is my spec gap, not em2's.** `ComputeDivergenceMatch` is now a genuine comparison, but at the call sites both models derive their answer from the same three fields (sender, recipient, thread_id), so a DM or thread pair mismatch is **unreachable in production**. The only divergence reachable today is resolution failure (`no-new-routing`). Note the consequence: this signal **would not have caught B-1**, the duplicate-key bug — dual-write would have returned its own row's ref and scored a match. | S2 | **S4, before the read switch** | Phase 5's new model has no independent source of truth; it constructs the key from the message. Nothing can diverge until something else is authoritative. |
+
+| DEF-4 | **The `pkg/hub` test suite is degrading commit over commit on the integration branch.** Full-suite failure counts: `origin/main` **0** (3 runs), `cd4ee7ed` **5**, `d9fc7f51` **18**, `f206a0d9` **17–19**. Failure membership is **non-deterministic** — two consecutive runs at the same commit shared only 2 of ~18. Every failure is SQLite `out of memory (7)` raised at test-store creation (`newTestStore(":memory:")` / `sql.Open("sqlite3", ":memory:")`), with 109 GB free on the host and unaffected by `-parallel 2`. Each test opens its own in-memory DB and runs the full ent migration; the branch adds tables, so per-DB cost has risen. Suspected cause is stores never being closed, so every in-memory DB stays live for the whole package run — but that is a lead, not a diagnosis. | S1/S2 (accumulating) | **S4, as its first task, before any new feature work** | It does not affect shipped behaviour. It does destroy the verification method: my acceptance of every section from here rests on diffing full-suite results, and a suite whose failure set changes run to run cannot support that. It will get worse with S4 and S5. |
+
+**How I missed DEF-4.** I accepted S2 at `cd4ee7ed`, which already had 5 failures, because I
+ran targeted package tests rather than the full suite. Targeted runs pass at every commit —
+that is precisely why the problem was invisible. From S4 onward the acceptance check is the
+full suite, run twice, compared for stability.
 
 **What DEF-3 requires of S4.** Add a comparison with an independent source of truth:
 resolve the conversation for a message, then compare against the `conversation_id` already
