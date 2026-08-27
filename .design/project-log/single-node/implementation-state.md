@@ -10601,3 +10601,33 @@ even when the branch is mine.
 **Dispatch hygiene, not review:** verified head SHA and diff on the remote. Did not re-review.
 
 Awaiting ptone's merge. That is his gate.
+
+### §35.22 — #1325's blast radius on the tracking register (2026-08-27, 18:50)
+
+The coordinator flagged #1325 to me as news in my own domain (I designed it, briefed it, cleared it;
+ptone opened it at my request). Two things in its message were stale — it had head `5e01ea5e`, not
+`6e64e07f`, and it listed closed task #44 as active. But it asked one good question, and chasing it
+surfaced a consequence nobody had registered.
+
+**Q: does the untested step-6 IAP-binding print need a tracking issue? A: no — it already has one.**
+`ptone/scion#1301` (internal #64) *is* step 6's print: "deploy-instance creates an IAP OAuth client
+and does not output its ID". The two dropped Go tests were `doesn't panic` pins on that same
+function. So the defect and the coverage gap are one small piece of work: whoever adds the client ID
+to the print adds the test with it. Filing a second issue would fragment that across two. Noted on
+#1301 instead.
+
+**The consequence nobody flagged: `ptone/scion#1314` is invalidated outright by #1325.** It asks for
+`deploy-instance` to ship in a published release so the tutorial can drop its build-from-source
+workaround. #1325 deletes the command and removes the Go toolchain prerequisite entirely — the page
+now needs only `git` and `gcloud`. The issue's *problem* is solved by a route it did not consider,
+and its proposed *remedy* is now impossible. Close on merge, with the explanation, linked to #1325.
+
+**`ptone/scion#1293` (G4: still requires `--image`) and `ptone/scion#1291` (internal #39: image-pull
+undiagnosable) survive intact** — both defects live on in `deploy.sh`. They name a deleted command in
+their titles, so they need retitling to stay findable, not closing. The distinction matters: closing
+them would silently drop two live defects because the artifact was renamed.
+
+Generalising: **deleting a command silently rots every tracking issue that names it, in three
+different directions — invalidated, still-valid-but-misnamed, and unaffected.** Sorting them is part
+of the merge, not follow-up. Captured as task #83, gated on the merge, because until #1325 lands all
+four issues are still accurate as written.
