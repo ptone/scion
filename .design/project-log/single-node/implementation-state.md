@@ -6247,3 +6247,70 @@ drop, the admin-email fix, and R1/R2/R4/R5 from the automated review.
   an org owner to create and publish `ghcr.io/googlecloudplatform/scion-omni`. Dropping the workflows
   did not cause this; it was already unmet because the push was denied.
 - Task #50 (tutorial + scripts), and the open defect register: D-15, D-32, D-35, D-39, D-46, D-49.
+
+### 04:04 — main is GREEN. Task #56 closed. The tier is upstream and built.
+
+Two independent signals, and they agree.
+
+**CI on `f99a8189`:** `Build & Test` success, `golangci-lint` success, `shellcheck` success.
+
+**Out-of-band verifier** (dispatched because the merged head had never been compiled — see #60):
+
+- merge of `38ba412e` with restored main **conflict-free**; the 24 files it pulled in were all
+  `deploy/helm/scion-hub/**`, zero overlap with our Go changes
+- `go build ./...` clean
+- `pkg/runtime`, `pkg/runtime/cloudrun`, `pkg/runtimebroker` **all pass**
+- all 5 `TestWaitForSandboxLiveness_*` exist and pass
+
+It found 7 failures and then **ran the control I would have asked for, unprompted**: built a second
+worktree at bare main with none of our code and reproduced the *same 7 failures, same names, same
+packages*. Both causes environmental in that container — `docker` absent from `$PATH`, and a stray
+`/tmp/.scion` that makes the project-root walk find a project where the tests expect none. Nothing
+PR-attributable.
+
+It also declined to lean on `go build`, saying so explicitly, and named its own coverage gap: the
+`ctx`-threading in `diRunGcloud`/`diRESTCall` is covered only insofar as `./cmd/...` compiled and
+ran. That is the right way to report.
+
+> **ptone was right that it was clean. I was right that we could not yet know it.** Both are true
+> and neither cancels the other. The verification was never a prediction that it would fail — it
+> was the difference between believing and knowing.
+
+#### The omni build target — conferral closed
+
+ptone: *"build the omni-image where we have been building the others."*
+
+Coordinator's operational answer: every image build goes to **`us-docker.pkg.dev/ptone-misc/scion-alt`**,
+an established target, used twice tonight already.
+
+I had raised whether omni's divergent `_REGISTRY` default (`/scion`, versus `/public-docker` on all
+six siblings) signalled a deliberate semi-private ACL. **The coordinator's reading is better than
+mine:** ptone named the destination explicitly, so the file's own default does not gate a build
+that passes `_REGISTRY` on the command line. My theory probably explains *why the default differs*
+without changing *what to do now*. Conceded.
+
+**But I flagged two traps I deliberately built into that file**, both verified on merged main:
+
+1. **`--ignore-file` is mandatory for omni.** Root `.gcloudignore` excludes `web/src`, `web/*.json`.
+   omni's Dockerfile does `COPY web/ ./web/` then `npm install`. Without the override the build
+   fails ENOENT on `web/package.json` — *late*, after earlier stages have run. `cloud-build.sh`
+   handles it (lines 136-141); a raw `gcloud builds submit` does not.
+2. **`$_COMMIT_SHA` and `$_SHORT_SHA` are used (4×) but deliberately not defaulted.** A raw submit
+   fails with an unmatched-substitution error. That is the intended behaviour — I had the empty
+   default deleted because it converts a loud failure into a silently blank version stamp.
+   `cloud-build.sh` passes both (lines 118-122).
+
+Guidance given: **use `build-images.sh --builder cloud-build --target omni`, do not hand-roll.**
+And hand `_SHORT_SHA`'s immutable coordinate to beta testers, not `:latest` — that tag exists so a
+bug report can be pinned to an artifact.
+
+#### ptone asked for the follow-up register (04:03)
+
+He remembered resource specification correctly. Twelve items, sent: four shipped-as-designed limits
+(no per-agent resource limits, ephemeral only, no HA, no Templated Sandboxes), four live defects
+(#1274 depth-1 clone, #1281 telemetry 400, image-pull diagnosis, lost sandbox stderr), two created
+by the merge (G4, the CI guard), and two housekeeping (delete the now-obsolete #1273/#1276
+stopgaps; retest the #1300 access-settings fix live, which was only ever verified by code-read).
+
+Offered to dispatch a developer to file all twelve as fork issues cross-referenced to design doc §9.
+Awaiting his word.
