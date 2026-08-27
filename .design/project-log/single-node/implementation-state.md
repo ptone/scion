@@ -11799,3 +11799,99 @@ the comment is stale may well delete the PATCH — which silently removes the ti
 
 Added as a one-line item to round 2. **A wrong comment next to correct code is a trap primed for
 whoever touches it next**; this one sits directly above the line that must not be removed.
+
+---
+
+## §35.42 — `#85` round 2: six pins, six red, and one of them was mine to catch (22:34)
+
+`sn-adcpreflight-dev2` reported. **Verified the push before reading the claims:** `2260887e8`,
+**ahead 5 / behind 0**, 4 files. Rebased onto a `main` that had moved further than the review's
+snapshot — now `78323b5b`, including two Go PRs (`GoogleCloudPlatform/scion#1327`, `#1328`), not just
+the two docs commits. Fork `main` == upstream `main`, checked via API.
+
+All six required items done. Gates: `TestScript` **35 pass / 0 fail / 0 skip**, whole `cmd` package
+ok, **shellcheck 62/62 clean under CI's exact `-x --source-path=SCRIPTDIR` invocation**, `gofmt`,
+`go vet`, `go build` clean. No live deploy — none of R1–R5 needed one, and it did not invent a reason
+to have one.
+
+### The mutation battery, and the false pin it caught
+
+Six defects reintroduced, six pins red:
+
+| Defect reintroduced | Result |
+|---|---|
+| Preflight moved to after step 3a (the reviewer's mutation, verbatim) | RED |
+| `gcloud auth print-access-token` restored | RED — 6 of 7 |
+| Unconditional email-vs-`azp` comparison | RED |
+| Tokeninfo URL echo deleted | RED |
+| Host restriction deleted | RED |
+| 403 remedy reverted to a blanket re-login | RED |
+
+**shellcheck stayed clean under all six** — the same blindness that let r1 ship.
+
+**The battery caught a false pin of its own, which is the entire argument for running it.** The
+tokeninfo-echo pin first came back **green**: both stub seams pointed at the same `host:port`, so
+`stdout contains server.URL` was already satisfied by the API `GET` line, and deleting the tokeninfo
+echo changed nothing observable. Giving the stub a distinct `/tokeninfo` path made it go red. It
+committed that separately (`d238f1c65`) so the failure mode is on the record.
+
+**That is a test that passed for a reason unrelated to the thing it named.** Exactly the r1 disease,
+caught this time *before* shipping, and caught only because someone tried to break it. Add to the
+standing rules: **a pin is not a pin until you have watched it fail.** Writing it is a hypothesis;
+mutating it is the experiment.
+
+It also verified hermeticity directly rather than asserting it — whole preflight suite green with
+egress blackholed via `https_proxy=127.0.0.1:9`, and proved the blackhole was real (`curl` to
+`oauth2.googleapis.com` through it exits 7). And it **measured the r1 credential leak** rather than
+taking my word: the old mock's `command gcloud "$@"` fallthrough really did mint a live 1024-char
+`ya29.` token in-container. The new mock returns 0 chars on the same probe, and the stub server
+receives **zero** requests in the no-ADC test.
+
+### Its own generalisation of R3, which is better than mine
+
+I told it to "correct the bar, not just the code." It came back with the rule:
+
+> Never compare two values unless you know they are the same kind of thing — a numeric client ID
+> against an email is not a mismatch, it is a **category error**, and **a check that cannot succeed is
+> not a check.**
+
+That is the sharper statement. My framing was about the acceptance bar being too weak; the real defect
+was that the comparison was **type-incoherent**, so it could only ever produce one answer. A check
+with one possible outcome carries no information — it is the always-green test and the always-red
+warning, the same bug wearing two hats.
+
+### Three decisions it escalated, and what I decided
+
+**1. Keep all three non-Required items**, including the 403 remedy wording it flagged as "the one with
+an opinion in it". Naming `run.instances.list` and the project *is* the opinion, and it is the right
+one: **name the action the operator must take, not the shape of the failure.** That is the same
+principle this entire task exists to serve — ptone's original error named a token type when it should
+have named a missing login.
+
+**2. Keep the untested guard, and comment it.** It is unreachable by construction today (curl's
+non-zero exit is caught by the `||` first), so a test would have to lie to reach it. **It told me the
+branch was untested rather than writing a test that pretends** — that is the behaviour I want, and the
+remedy is a one-line comment, not a fake test. An untested branch with no explanation becomes
+somebody's bug hunt in six months.
+
+**3. Extend the seam to step 3b — my call, my risk.** It correctly refused to widen a security seam on
+its own authority and handed me the decision. I took it:
+
+- **"Step 3b reuses the preflight token" is the exact line that broke for ptone, and nothing pins it.**
+  The token-source mutation covers the *preflight's* source only. If someone re-added a mint inside
+  step 3b, every test would stay green and we would ship ptone's original bug back to him.
+- The marginal exposure is close to zero: `_DI_API_BASE` **already** redirects a bearer-carrying GET.
+  Extending it to the PATCH is the same variable and the same token, not a new class of risk.
+
+**With one condition: apply the `*.googleapis.com`-or-loopback validation to `_DI_API_BASE` too.** The
+developer deliberately left it unrestricted and the reviewer accepted that; **I am overriding an
+accepted review judgement because the premise changed, not because I disagreed with it.** Once the
+seam spans a *mutating* call, "two seams, one rule" beats "two seams, two rules, and a paragraph
+explaining the difference." The validator already exists, so it is near-free.
+
+### Still open after R7
+
+`di_build_iap_patch_url` hardcoding the real API host is what made step 3b untestable in the first
+place. Worth remembering as a shape: **a URL builder that cannot be pointed anywhere else makes
+everything downstream of it unpinnable.** The seam is not a testing convenience here — it is the only
+way the property can be checked at all.
