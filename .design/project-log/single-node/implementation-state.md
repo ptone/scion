@@ -10007,3 +10007,56 @@ and ptone has been told exactly that and why.
 **Process note, twice now:** I sent a 2075-character message and then a 2130-character message
 against a 2000 cap, and `scion message` reported "delivered" both times. I resent compactly both
 times. `wc -c` before the send, not after.
+
+### 35.13 Task #73 CLOSED — and an honest limit on what the walk proved
+
+Branch `scion/sn-backout`, head **`20c60a60`**, 8 commits, on upstream main `98a9d9c2`. Compare URL
+and PR body sent to ptone at 17:31. **Opening the upstream PR is his gate.** Both agents completed
+and stood down.
+
+**Final green list:** verdict READY; Gate 2 unable to lie across five stub shapes, two real public
+URLs, and a live probe; live walk end to end; docs-site build passed **independently twice**
+(`starlightLinksValidator`: all internal links valid, 84 pages, zero dangling anchors); F1 fixed in
+**both** Gate 1 and Gate 2 (I had reported only one site) with all five perimeter tests re-run green
+afterwards.
+
+**THE LIMIT, stated because nobody else will state it.** The reviewer's live walk covered
+deploy → health → API through IAP → project create → agent create → agent `running`. It did **not**
+cover the last two steps of §1: **attach to the terminal from the browser, and watch the agent
+commit to a git remote.**
+
+So this change has not been measured against the full §1 path. My reasoning for accepting that, so
+it can be falsified rather than trusted:
+
+- The deploy writes **the same six env vars** as the Go command, and that is pinned by tests that
+  read the variable *names* out of `deploy.sh` rather than hardcoding them.
+- The resulting Instance is the same image with the same configuration. Terminal attach and git push
+  are hub and sandbox behaviour, downstream of anything a deploy script can influence.
+- The full §1 path was walked end to end on 2026-08-25 and the tier merged at `f99a8189`.
+
+**That is an argument, not a measurement.** If it is wrong, the failure appears in the two steps
+nobody re-ran. I judged a second full walk not worth the cost for a change that cannot reach those
+steps — but the judgement is recorded here so the cost of being wrong is visible.
+
+**Heartbeat answers (17:30).**
+
+1. **Agents:** neither stalled. Both `sn-backout-dev` and `sn-backout-review` reported COMPLETED,
+   and I verified the branch and its 8 commits on the remote myself rather than trusting the
+   reports. Earlier "STALLED" notifications for both were the inactivity detector firing on waits I
+   had explicitly ordered.
+2. **Critical path:** nothing blocks it on my side. The work is with ptone, who is awake and
+   engaged — he asked for the docs at 17:23 and has the compare URL.
+3. **Design doc:** in sync for this change; it never named the command or the image. The one
+   divergence remains **#75** (`hub_id` mandated in bold, never set by any deploy), unchanged since
+   §35.9 and deliberately not folded into #73.
+
+**Two process facts worth keeping.**
+
+- **The `scion message` 2000-character cap is enforced on the `user:` path and rejects with usage
+  text — but agent-path sends at 2075 and 2130 characters reported "delivered".** I do not know
+  whether those were truncated. I resent both compactly. `wc -c` before every send; a success line
+  is not proof the whole body arrived.
+- **Four corrections landed on me today and every one was right**: ptone on reserving the reviewer's
+  work; the developer on my self-contradicting §7b/§7d; the reviewer on my Gate 2 description; and
+  my own `comm` on the test accounting that two agents and I had all repeated. The recurring shape
+  is unchanged — *a wrong conclusion sitting one command away from being checked.*
