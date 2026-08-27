@@ -47,8 +47,8 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 **Active section:** S1 — Foundation
 **Active manager:** `ca-msg-em1` — spawned 2026-08-27 00:42Z, template `eng-manager`
-**Awaiting from em1:** workspace mode confirmation + design feasibility read
-**Blocked on:** nothing
+**Awaiting from em1:** isolation test result (sentinel + HEAD comparison)
+**Blocked on:** confirming whether managers share `/workspace` with the coordinator
 **Last verified landing on integration branch:** none (branch is at `origin/main`)
 
 ## 4. Section plan
@@ -111,6 +111,22 @@ would bury the events that matter.
   ("Hub mode uses HTTPS clone with GITHUB_TOKEN"), so managers get their own working
   copy — the `shared-plain` concern in §6 appears to apply to the coordinator's
   `/workspace` only. Awaiting em1's confirmation before treating that as settled.
+- `2026-08-27` em1 reports its own `SCION_WORKSPACE_MODE` is also `shared-plain` and
+  correctly stopped before touching git. Contradicts the per-agent-clone inference above,
+  so I issued a definitive test rather than reasoning about it: sentinel file
+  `/workspace/.ca-msg-arch-sentinel-1787791468` written from my tree, plus a HEAD
+  comparison (mine: `scion/ca-msg-arch` @ `741fd76d`). Awaiting em1's raw output.
+- `2026-08-27` Decisions D1 and D2 issued to em1 (see §5a).
+
+## 5a. Standing technical decisions made during implementation
+
+Decisions I have issued to managers that are not in the design doc. Binding on all
+sections.
+
+| # | Decision | Rationale | Issued |
+|---|---|---|---|
+| D1 | `ConversationStore` accepts **UUID only** for `DefaultAgentID`, and validates it. A slug is rejected, not stored. | The slug-or-UUID union is the class of defect this refactor removes. A store that accepts both propagates the ambiguity instead of resolving it, and every downstream reader must re-ask which form it holds. A narrow store contract forces the ambiguity to be settled at a known place. | 2026-08-27 |
+| D2 | Normalization (slug → UUID) lives in **one shared exported helper**, written in phase 3, with the phase 4 backfill job as an intended second caller. Not two implementations. | Duplicated identity-resolution logic is already a named defect (findings §7). Two callers exist by design; two implementations would recreate the defect inside the fix. **em2 must be pointed at this helper.** | 2026-08-27 |
 
 ## 6. Open items / risks
 
