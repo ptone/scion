@@ -17,10 +17,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -511,50 +513,54 @@ func TestDualWrite_UnparseableSenderAddress_NoConversationCreated(t *testing.T) 
 	}
 	require.NoError(t, s.CreateUser(ctx, bob))
 
-	// Sender address with no kind prefix — PrincipalKindFromAddress will fail.
-	senderAddress := "bare-name-no-prefix"
-	senderID := bob.ID // valid UUID, but address has no kind
-
-	// Replicate the kind-safe pattern from handlers_agent_messaging.go:836
-	var convResult *messaging.ConversationResult
-	if senderKind, ok := messages.PrincipalKindFromAddress(senderAddress); ok {
-		convResult = messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog,
-			senderKind, senderID, "agent", agent.ID)
+	// Build a MessageRequest with a StructuredMessage whose Sender has no
+	// kind prefix — PrincipalKindFromAddress will return ("", false) inside
+	// the handler, so no DM conversation should be created.
+	msgReq := MessageRequest{
+		StructuredMessage: &messages.StructuredMessage{
+			Sender:    "bare-name-no-prefix", // no kind prefix
+			SenderID:  bob.ID,
+			Recipient: "agent:rs-agent",
+			Msg:       "unparseable sender test",
+			Type:      "instruction",
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		},
 	}
-	// If kind undetermined, convResult stays nil — no conversation created.
+	body, err := json.Marshal(msgReq)
+	require.NoError(t, err)
 
-	// Stamp message only if conversation was resolved (mirrors handler logic).
-	storeMsg := &store.Message{
-		ID:          uuid.NewString(),
-		ProjectID:   agent.ProjectID,
-		Sender:      senderAddress,
-		SenderID:    senderID,
-		Recipient:   "agent:rs-agent",
-		RecipientID: agent.ID,
-		Msg:         "unparseable sender test",
-		Type:        "instruction",
-		AgentID:     agent.ID,
-		Channel:     "discord",
-		CreatedAt:   time.Now(),
-	}
-	if convResult != nil {
-		storeMsg.ConversationID = convResult.ConversationID
-	}
-	require.NoError(t, s.CreateMessage(ctx, storeMsg))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/actions/message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 
-	// Rule 13: count conversation rows, do not assert on return value.
+	// Set up user auth context so the handler passes phase checks.
+	userIdent := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, string(bob.Role), "api")
+	req = req.WithContext(contextWithIdentity(req.Context(), userIdent))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentMessage(rr, req, agent.ID)
+	// Response status is NOT checked — the handler returns 503 because no
+	// dispatcher is configured, but the dual-write code at line 836 has
+	// already executed by that point. We only care about the DB side effect.
+
+	// Count conversation rows: no DM should exist for bob+agent.
 	convs, err := s.ListConversations(ctx, store.ConversationFilter{Kind: "direct"}, store.ListOptions{})
 	require.NoError(t, err)
 
-	// Count conversations involving this senderID + agentID pair.
 	var matchCount int
 	for _, conv := range convs.Items {
-		if strings.Contains(conv.ExternalRef, senderID) && strings.Contains(conv.ExternalRef, agent.ID) {
+		if strings.Contains(conv.ExternalRef, bob.ID) && strings.Contains(conv.ExternalRef, agent.ID) {
 			matchCount++
 		}
 	}
 	assert.Equal(t, 0, matchCount,
 		"unparseable sender address must NOT create a conversation row")
+
+	// Floor assertion (Rule 14): readSwitchWorld creates an alice+agent DM,
+	// so there must be at least 1 direct conversation. This proves the query
+	// is hitting the right table.
+	assert.GreaterOrEqual(t, len(convs.Items), 1,
+		"floor: at least 1 direct conversation should exist (alice+agent DM from readSwitchWorld)")
 }
 
 // ---------------------------------------------------------------------------
