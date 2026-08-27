@@ -17,20 +17,27 @@ The two routing models actually agreed; the comparison was being fed a blank.
 
 ## Fix
 
-Two changes in `pkg/hub/handlers_agent_messaging.go`:
+Three changes across `pkg/messaging/divergence.go` and `pkg/hub/handlers_agent_messaging.go`:
 
 1. **Populate ExternalRef from the store:** After building the `ConversationResult`
-   for a pre-resolved `ConversationID` (lines 828-832), call
+   for a pre-resolved `ConversationID`, call
    `s.store.GetConversation(ctx, structuredMsg.ConversationID)` and set
-   `convResult.ExternalRef = conv.ExternalRef` on success. This gives
-   `ComputeDivergenceMatch` the real database value instead of an empty string.
+   `convResult.ExternalRef = conv.ExternalRef` on success. On failure, set an
+   explicit `lookupFailed` boolean (scoped to the pre-resolved branch only —
+   empty ExternalRefs from thread conversations or unmigrated rows still flow
+   through `ComputeDivergenceMatch` as intended).
 
-2. **Fallback handling for lookup failures:** When `ExternalRef` is still empty
-   but `ConversationID` is non-empty (pre-resolved but store lookup failed),
-   record a fallback via `DivergenceMetrics.IncFallback()` and log a dedicated
-   `conv-lookup-failed` entry. This path skips `ComputeDivergenceMatch` entirely
-   to avoid the ambiguous `routing-type-mismatch: ... new=` artifact. The
-   fallback does NOT increment the mismatch counter, preserving metric accuracy.
+2. **Fallback field on DivergenceEntry:** Added `Fallback bool` to
+   `DivergenceEntry`. When set, `LogDivergence` routes the event to
+   `IncFallback()` instead of `Inc(match)`, ensuring one event increments
+   exactly one counter. This prevents lookup failures from blocking the
+   read-switch gate that requires zero mismatches.
+
+3. **Fallback handling for lookup failures:** When `lookupFailed` is true,
+   log a `DivergenceEntry` with `Reason: "conv-lookup-failed"` and
+   `Fallback: true` through the standard `LogDivergence` path. This skips
+   `ComputeDivergenceMatch` entirely, avoids the ambiguous empty-ref artifact,
+   and produces the same parseable record shape as all other divergence entries.
 
 ## Tests Added
 
@@ -52,5 +59,7 @@ reverts to empty, producing `routing-type-mismatch` instead of
 
 ## Files Changed
 
-- `pkg/hub/handlers_agent_messaging.go` -- the fix + fallback handling
+- `pkg/messaging/divergence.go` -- added `Fallback` field to `DivergenceEntry`, updated `LogDivergence`
+- `pkg/messaging/divergence_test.go` -- added `TestLogDivergence_Fallback`
+- `pkg/hub/handlers_agent_messaging.go` -- the fix + fallback handling with `lookupFailed` flag
 - `pkg/hub/handlers_agent_messaging_test.go` -- four new tests
