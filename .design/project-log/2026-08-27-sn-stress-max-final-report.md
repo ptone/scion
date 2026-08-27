@@ -177,6 +177,36 @@ Cloud Logging shows **17 unique sandbox names** with exit_code=0 during Phase B:
 **Corrected ceiling: 15 alive sandboxes at last stable step (14 w-* + test-claude).**
 **Crash at: 16 alive sandboxes (15 w-* + test-claude).**
 
+### Independent verification correction (sn-impl-arch, 08:09Z)
+
+sn-impl-arch ran independent Cloud Logging queries and confirmed all three answers. One additional finding:
+
+**w-1 last appears in logs at 07:38:37.** Every other w-* agent runs to 07:50-07:51. w-1 silently died mid-ladder (same FIFO eviction pattern as idle-1..idle-5 in Phase A). This means the 15 alive sandboxes at the last stable step were:
+
+- **14 WORKING agents**: w-2 through w-15 (running sha256sum workload)
+- **1 IDLE leftover**: test-claude (hub-deleted, no workload, just alive)
+
+This is NOT 15 working agents. The ceiling composition matters for cross-size comparison.
+
+### Cross-size ratio is NOT a constant
+
+Using working-only agents:
+| Size | Idle ceiling | Working ceiling (working-only) | Idle/Working ratio |
+|------|-------------|-------------------------------|-------------------|
+| 4 CPU / 8 GiB | 17 | 6 | 2.83× |
+| 8 CPU / 32 GiB | 51 | 14 | 3.64× |
+
+The "~3× constant" that appeared in the uncorrected data (3.33 and 3.40) does not survive correction. The ratios are 2.83 and 3.64. **No constant idle-to-working ratio is established.**
+
+### Defect: hub DELETE leaks sandboxes
+
+Hub DELETE removed test-claude from the hub database but DID NOT kill the sandbox on the broker. The leaked sandbox:
+- Consumed instance memory budget
+- Was invisible to the operator (not in hub agent list)
+- Was only visible in broker liveness sweeps (Cloud Logging)
+
+This is the exact mirror of the known defect where hub reports "running" for a dead sandbox (task #17). Both directions of one missing reconciliation loop between hub state and broker state.
+
 ### Q2: Was ANY sandbox alive during Phase A other than the counted 51?
 
 **NO.** Phase A count is CLEAN.
@@ -198,15 +228,10 @@ stress-test--stress-test-0, stress-test--idle-6, stress-test--idle-7, stress-tes
 - UNCOUNTED: retest--test-claude (alive throughout, hub-deleted but sandbox survived)
 - DEAD: retest--test-generic (not alive during Phase B)
 
-### Corrected cross-size table
-
-| Size | Idle ceiling | Working ceiling (corrected) | Ratio |
-|------|-------------|----------------------------|-------|
-| 4 CPU / 8 GiB | 17 | TBD (pending sn-stress-def correction) | — |
-| 8 CPU / 32 GiB | 51 | 15 (was 14, +1 for test-claude) | 3.4× |
-
 ### Branch scion/sn-stress-max
 
-2 commits on main:
+3 commits ahead of main:
 - `f06c3dd` — stress test: sn-stress-max findings (8 CPU / 32 GiB)
 - `5c9ab82` — stress test: add sn-impl-arch correction to final report
+- `5f207c9` — stress test: add counting error verification to final report
+- (next) — stress test: w-1 death time and ratio correction from independent verification
