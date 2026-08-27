@@ -9231,3 +9231,32 @@ reads `running`.** Adopted as a standing check.
 
 `#1315` currently reports `mergeable=UNKNOWN` (GitHub recomputing after the base moved); head is
 still `724d8a6d`, i.e. nothing has been pushed yet. Told ptone plainly, including the lost minutes.
+
+### §28.7 — Second dispatch failure: the agent started, then blocked on an interactive trust prompt
+
+At 15:14 `sn-rival-dev` reported **STALLED**. It had been `running` and heartbeating cleanly since
+15:07 — container up, hub heartbeats every 30s, nothing in `scion logs` suggesting trouble.
+
+`scion look sn-rival-dev` showed the actual state: the harness was sitting on Claude Code's
+**"Is this a project you created or one you trust?"** workspace prompt, waiting for a keystroke. It
+had never read the brief. `--dangerously-skip-permissions` does not cover this prompt, and the
+`default` template does not pre-trust `/workspace`.
+
+Cleared with `scion message sn-rival-dev "1"`. It is now reading the brief and working.
+
+**Two distinct silent dispatch failures inside fifteen minutes:**
+
+| # | failure | how it presents | how to detect |
+|---|---|---|---|
+| 1 (§28.6) | `scion create` provisions but does not start | phase `created`, no activity, **no error** | check phase is `running` |
+| 2 | started harness blocks on the workspace trust prompt | phase `running`, **healthy heartbeats**, reported as *stalled* | `scion look` |
+
+**The heartbeat log is the trap in the second case.** Every 30s "Heartbeat sent successfully" reads
+as a working agent; it only proves the container is alive. **A liveness signal from the wrapper is
+not evidence the harness is doing anything** — the same shape as tier defect #17, where the hub
+reported agents running while the sandbox entrypoint had hung, and the same shape as §27's red
+check. *Ask what the signal actually measures.*
+
+**Standing rule adopted:** after dispatch, confirm phase is `running` **and** `scion look` shows the
+agent has begun the task. Neither alone is sufficient. Total cost today: ~13 minutes on the critical
+path while ptone was waiting.
