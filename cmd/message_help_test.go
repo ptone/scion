@@ -15,6 +15,9 @@
 package cmd
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 
@@ -24,27 +27,64 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 )
 
+// countReferenceKinds parses pkg/messaging/resolve.go and counts the number of
+// ValueSpec entries in the const block that defines RefConversation (the
+// ReferenceKind enum). This is a source-parsed drift guard: when a new member
+// is added to the const block, the count rises and forces the test table to be
+// updated in lockstep.
+func countReferenceKinds(t *testing.T) int {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "../pkg/messaging/resolve.go", nil, 0)
+	require.NoError(t, err, "failed to parse resolve.go")
+
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		// Identify the right const block by looking for RefConversation.
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, name := range vs.Names {
+				if name.Name == "RefConversation" {
+					return len(gen.Specs)
+				}
+			}
+		}
+	}
+	t.Fatal("could not find ReferenceKind const block containing RefConversation in resolve.go")
+	return 0
+}
+
 // TestMessageHelpCoversAllRefForms asserts that every conversation-reference
 // form accepted by messaging.ParseReference is documented in messageCmd.Long.
 // The table entries are validated against the live parser, so they cannot drift
 // from the implementation.
 func TestMessageHelpCoversAllRefForms(t *testing.T) {
-	// Go cannot enumerate iota constants. This is a tripwire, not coverage —
-	// it fails loudly when a new ReferenceKind is added, which is the best
-	// available guarantee that the table stays current.
-	require.Equal(t, 4, int(messaging.RefThread),
-		"ReferenceKind enum gained a member — add it to the table below AND to messageCmd.Long")
-
 	table := []struct {
-		Kind          messaging.ReferenceKind
+		Kind           messaging.ReferenceKind
 		CanonicalInput string
-		PrefixInHelp  string
+		PrefixInHelp   string
 	}{
 		{messaging.RefAgent, "@test-agent", "@<agent"},
 		{messaging.RefEmail, "@user@example.com", "@<email"},
 		{messaging.RefConversation, "conv:00000000-0000-0000-0000-000000000000", "conv:<"},
 		{messaging.RefThread, "#my-thread", "#<thread"},
 	}
+
+	// Source-parsed drift guard: count the members of the ReferenceKind const
+	// block in resolve.go and assert it matches the table length. When a new
+	// enum member is added, this fails and forces the table (and messageCmd.Long)
+	// to be updated.
+	kindCount := countReferenceKinds(t)
+	require.Equal(t, len(table), kindCount,
+		"ReferenceKind const block in resolve.go has %d members but the table has %d — "+
+			"add the new kind to the table AND to messageCmd.Long", kindCount, len(table))
 
 	long := messageCmd.Long
 
