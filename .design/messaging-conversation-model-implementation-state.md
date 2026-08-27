@@ -620,7 +620,7 @@ is a queue, not a blocker.
 |---|---|---|---|
 | **Tranche A landing** | who opens the upstream `GoogleCloudPlatform/scion` PR | **user** | yes, 19:55Z, unanswered |
 | Tranche B | cut + rule-31 check | **em10** | dispatched 20:17Z |
-| DEF-12 (F1, F2) | fixes + new ACs | **em6** | dispatched 20:05Z |
+| DEF-12 (F1 ✅, F2 fix ✅ / **guards vacuous = F3**, F4) | F1 verified fixed by mutation; F2 fix verified correct incl. 4 bad-input classes; **F3: both F2 regression tests pass on pre-fix code, proven with a tripwire — they guard nothing**; F4 cursor has no project scope | **em6** | F1/F2 dispatched 20:05Z; F3/F4 dispatched 20:30Z |
 | AC-12-6 (populated-DB exercise) | beta-hub exercise scheduling | **user** — deliberately deferred; pre-beta gate item | told em6 + integration2-operator 20:0xZ |
 | §2.6.4 phases 1-4 | implementation | **em9** | dispatched 19:45Z |
 | §2.6.4 phases 5-7 | phases 1-4 landing | **me** — queue | n/a |
@@ -1576,6 +1576,52 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5ao. 20:20-20:30Z — DEF-12 F1/F2 fixed, and the guards for F2 guard nothing (F3)
+
+em6 reported F1 and F2 fixed at `06accdef`. Verified rather than accepted, and the verification
+split three ways — which is the point of this entry.
+
+**F1: fixed, and the mutation now kills specifically.** `DryRun: !backfillExecute` ->
+`DryRun: backfillExecute` fails exactly one test on the assertion that matters
+("Should be empty, but was 45ed0fa4…"). Specificity, not just a kill.
+
+**F2: the fix is right, and better than what I asked for.** They threaded `ListMessages`' existing
+cursor rather than repairing the bespoke one — the DEF-8 lesson applied without being told twice.
+I probed four bad-input classes and **all four fail loudly**, including the one that mattered most:
+a real message UUID, i.e. *the old contract an operator still has saved*, yields
+`invalid cursor: expected 'timestamp,id' format`. The error text doubles as proof the cursor is a
+genuine total order. Flag help updated to "pagination cursor" — the contract change was caught.
+
+**F3 (NEW, HIGH): both F2 regression tests PASS on the pre-fix code.** I checked out `fda9977f`'s
+`backfill.go` into their tree; `TestBackfillResumeViaCheckpoint_SameTimestamp` and
+`TestBackfill_SameTimestampMessages` both went green on the bug. **I did not trust that result** —
+a green test after a file swap is equally consistent with the swap not having taken — so I armed a
+`panic("OLD CODE IS LIVE")` tripwire inside the old file. It panicked. The old code was genuinely
+compiled in. Disarm, and the guards pass on the bug. **Revert the fix and CI stays green.**
+
+**The vacuity has a shape worth naming: the test's precondition already satisfies its
+postcondition.** Run1 is a full scan that backfills everything; run2 then "resumes" over
+already-complete data, so whether run2 skips rows is unobservable — every message has a
+`conversation_id` either way. My probe caught it only by resuming against a *fresh* project where
+run1 had never run, giving the skip somewhere to show. **Whenever a regression test's setup
+succeeds at the very thing the test is supposed to detect the absence of, it is measuring nothing.**
+
+**F4 (MEDIUM):** the cursor carries no project scope. Project A's cursor passed to a `--project B`
+run gives `processed=1, errors=[], exit success, 4 of 5 unbackfilled`. Their multi-project guard
+(blanking `LastCheckpoint` when >1 project) covers the common case; a cross-project paste does not.
+
+**Third instance today of one pattern, and I have now said it to em6 as a standing bar.** The
+coexistence test's vacuous persistence assertions, DEF-19's unpinned `Via`, and now this: every
+report establishes *"the fix works"* and none establishes *"the test would catch the regression."*
+Those are different claims and **only the second one survives the author**. A regression test that
+has never been run against the bug is a hypothesis, not a guard; running it against the broken code
+is what converts it, and it costs one `git show`. New acceptance bar issued: **the tests must FAIL
+on `fda9977f`, and I want the failure output, not a pass on the fix.**
+
+**Method note for future me.** The tripwire is the transferable trick. When an experiment's result
+is "nothing happened," the first hypothesis to eliminate is that **the experiment never ran** —
+and a deliberate panic is a cheaper, more certain answer than re-reading the setup.
 
 ## 5an. Heartbeat 20:13Z — an idle manager, and a check that will cry wolf when the plan works
 
