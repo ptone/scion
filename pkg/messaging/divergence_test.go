@@ -452,8 +452,11 @@ func TestLogDivergence_Fallback(t *testing.T) {
 	}
 
 	output := buf.String()
-	if !contains(output, "DIVERGENCE") {
-		t.Errorf("expected 'DIVERGENCE' in log output for fallback (Match: false), got: %s", output)
+	if !contains(output, "fallback") {
+		t.Errorf("expected 'fallback' in log output for fallback entry, got: %s", output)
+	}
+	if contains(output, "DIVERGENCE") {
+		t.Errorf("fallback entry must NOT log as 'DIVERGENCE', got: %s", output)
 	}
 	if !contains(output, "conv-lookup-failed") {
 		t.Errorf("expected 'conv-lookup-failed' reason in log output, got: %s", output)

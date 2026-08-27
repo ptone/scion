@@ -101,7 +101,9 @@ func LogDivergence(log *slog.Logger, entry DivergenceEntry) {
 		attrs = append(attrs, "reason", entry.Reason)
 	}
 
-	if entry.Match {
+	if entry.Fallback {
+		log.Warn("conversation routing check: fallback", attrs...)
+	} else if entry.Match {
 		log.Info("conversation routing check: match", attrs...)
 	} else {
 		log.Warn("conversation routing check: DIVERGENCE", attrs...)
