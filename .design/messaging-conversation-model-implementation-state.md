@@ -393,6 +393,34 @@
     implementation constraint with two ACs. **Questions that dissolve usually leave a real
     constraint behind; the dissolving is not the end of the work.**
 
+34. **Know how the work actually lands before planning how to land it.** Issued 2026-08-27 19:55Z.
+    I ran an entire "incremental landing" strategy for over an hour — cut tranche A, specced the
+    anti-revert check, verified six aggregate files — **without ever having watched a single commit
+    reach `main`.** `ptone/scion` is a **fork**. Its PRs are *staging* PRs and are **closed, never
+    merged** (#1300, #1307, #1313, #1315, #1318 are all CLOSED while their work sits on `main`).
+    The real gate is an upstream PR in `GoogleCloudPlatform/scion`, authored by the human from
+    `ptone:<branch>`, e.g. upstream #1318's closing comment: *"Upstream PR#1322 merged (b453a685).
+    Closing fork staging PR."* My plan's terminal step — "merge the tranche PR" — named an
+    operation that does not exist in this repository.
+
+    This is rule 22 ("verify against the gate the work must pass") applied one level out: I had
+    verified the **CI** gate carefully and never once verified the **landing** gate. A gate you
+    have never seen operate is a gate you are imagining. **The most dangerous step in a plan is
+    the one so obvious that nobody thought to specify it.**
+
+    **Corollary — an identifier is only comparable within the namespace that issued it.** I carried
+    "PR #1319 is numbered below #1324, which is already merged" across a compaction as a live
+    anomaly requiring investigation. It was two counters. Fork #1319 = tranche A (created 19:45Z);
+    upstream #1319 = the DM-key ingress fix, merged 15:05Z — **and upstream #1319 is already
+    written into this very document at §5u.** The collision was sitting in my own notes.
+    Cross-namespace comparison does not merely fail to inform, it *manufactures* anomalies, and a
+    manufactured anomaly costs real investigation. **Whenever recording a PR number, record the
+    repo.** §5u has been amended accordingly.
+
+    **Third instance of rule 33's tail.** The false premise dissolved in one query — and dissolving
+    it is what exposed the landing mechanism. Chasing a question you already suspect is bogus is
+    still worth doing; the value is rarely the answer.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -402,6 +430,30 @@ in order.
 
 **Why this is tractable:** the branch history is already phase-ordered (phases 1-11 in
 first-parent order), so the tranches follow the build order rather than cutting across it.
+
+### How a tranche ACTUALLY lands (established 19:55Z — rule 34; previously assumed, never verified)
+
+`ptone/scion` is a **fork** of `GoogleCloudPlatform/scion`. `origin` in `/workspace` is the fork.
+
+```
+agent pushes  scion/<branch>  ->  ptone/scion (fork)
+      |
+      +-- optional FORK STAGING PR in ptone/scion  --> gets CI --> is CLOSED, never merged
+      |
+      +-- UPSTREAM PR in GoogleCloudPlatform/scion, head = ptone:scion/<branch>
+                |
+                +-- merged by the human --> lands on main
+                          |
+                          +-- fork staging PR closed with "Upstream PR#N merged (<sha>)"
+```
+
+**I have `admin`/`push` on the upstream repo**, so I *can* open upstream PRs — but every upstream
+PR to date is authored by `ptone`. **Question put to the user 19:55Z: who opens the upstream PR.**
+Do not assume; this decision applies to all seven tranches.
+
+**Recording convention (rule 34 corollary):** always write `ptone/scion#N` or
+`GoogleCloudPlatform/scion#N`. A bare `#N` in this document is ambiguous and has already caused
+one wasted investigation.
 
 **Tranches, ordered by blast radius:**
 
@@ -430,6 +482,28 @@ performing the cut in a throwaway worktree rather than by reviewing it (19:10Z):
 
 Validated off `origin/main` @ `b09e7f49`: build clean, **66 packages ok, EXIT=0**, `pkg/hub` 301.9s.
 Owned by **`ca-msg-em10`** from 19:15Z.
+
+**TRANCHE A STATUS — VERIFIED GREEN, AWAITING LANDING GATE (19:55Z).**
+Branch `scion/ca-msg-em10` @ **`71b65292`**, merge-base `b09e7f49`, fork staging PR
+**`ptone/scion#1319`** (created 19:45:50Z). 59 files, +31909/-12323. CI: Build & Test pass 4m7s,
+golangci-lint pass 2m4s, shellcheck pass 25s. `mergeable: MERGEABLE`, `mergeStateStatus: CLEAN`.
+
+*Verified by me, not accepted on report (rule 32 — stating how each was established):*
+- **AC-A-1 anti-revert — RE-RAN the self-calibrating loop myself.** Admin-entity counts identical
+  at merge-base and at PR head on all six aggregate files: `client.go` 211, `mutation.go` 463,
+  `migrate/schema.go` 31, `predicate.go` 6, `store/models.go` 8, `store/store.go` 27. Our entities
+  present in every one (130/202/21/4/4/4). **P2-A1 intact.**
+- **AC-A-6 deletions — READ the diff, did not accept the phrase "no real deletions".**
+  `git diff -w` shows **zero** real deletions in `pkg/messages/types.go` and `pkg/store/models.go`
+  (pure gofmt realignment). The only ent deletions are one index shift: `conversation_id` inserted
+  at `MessagesColumns[18]` pushed `visibility`->19 and `created`->20, so `message_created` correctly
+  re-points at 20 and a new `message_conversation_id` index lands on 18. **Confirmed by reading the
+  column array at `71b65292`, not by trusting the generator.** `client.go`'s 44 deletions are its
+  four entity-list blocks rewrapped; every admin name retained (that is what AC-A-1 counts).
+- **Base drift — CHECKED.** main moved `b09e7f49` -> `c13d910b` mid-CI
+  (`GoogleCloudPlatform/scion#1325`, the Cloud Run move). It touches **zero** tranche A files.
+
+**Blocked only on the landing-gate question**, not on any technical finding.
 
 **Sequencing constraint (satisfied):** tranche A overlapped §2.15 on `backfill.go`/`resolve.go`.
 §2.15 merged into `messaging-v2` at `14b3ba7c` before the cut.
@@ -1415,6 +1489,49 @@ provenance differed from the command I supplied beside it, and the two disagreed
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
 
+## 5am. 19:50-20:00Z — tranche A verified green, and the landing gate I had never looked at
+
+**Tranche A passed my own verification, not em10's.** Details in §1b. Two things I want to keep:
+the anti-revert loop *worked* — this is the first tranche to survive the check that was written
+after the method nearly deleted P2-A1 — and AC-A-6 was the one that needed real reading, because
+"no real deletions" is a judgement phrase and `-12323` is a frightening number until you learn
+that all of it is `mutation.go` regenerating. `git diff -w` reduced the whole question to one
+index shift I could verify by reading four lines of the column array.
+
+**Then the thing I had not looked at.** I had been carrying "PR #1319 is numbered below #1324,
+which is already merged" as an open anomaly — carried it *across a compaction*, into a written
+summary, as a thing to investigate. One query dissolved it: **`#1324` does not exist in
+`ptone/scion`.** Nor does `#1325`, which `main`'s own tip commit cites in its subject line.
+
+Pulling that thread: **`ptone/scion` is a fork, and I had never once checked how a commit reaches
+`main`.** Every recent fork PR is CLOSED, not merged, while its work sits on main. The real gate is
+upstream in `GoogleCloudPlatform/scion`. My landing plan's final step named an operation that does
+not exist here. **Rule 34.**
+
+**Three observations worth more than the finding.**
+
+1. **I verified the CI gate meticulously and the landing gate not at all.** Rule 22 told me to
+   check the gate the work must pass; I read `ci.yml` line by line and never asked how a merge
+   happens. The step was too obvious to specify, and so it was never specified, and so it was
+   never checked. Obviousness is not evidence.
+
+2. **The collision was already in my own notes.** §5u, written by me at 15:08Z, says "PR #1319
+   landed on main" — upstream #1319, the DM-key ingress fix. Fork #1319 is tranche A. I had two
+   different changes under one label in a document I rely on to survive compaction, and I did not
+   notice until I went looking for something else. I have amended §5u in place. **A document that
+   drops a namespace does not degrade gracefully; it produces confident wrong readings.**
+
+3. **Third time today that a question dissolved and left a real constraint behind** (rule 33's
+   tail; the others were Q1 and DEF-12's `sciontool` instinct). The anomaly was manufactured by my
+   own bad comparison and was worth nothing — but chasing it was worth an hour, because the route
+   to disproving it ran straight through the mechanism I had wrong. **Cheap to chase, and the
+   payoff is not correlated with whether the question was any good.**
+
+**What I did not do:** open the upstream PR myself. I have `admin` and `push` on the upstream repo,
+so this was available. But every upstream PR to date is the user's, and silently taking over the
+merge gate on a 59-file schema change — on the strength of a permission bit — is exactly the kind
+of unrequested authority I should not assume. Asked instead, once, for all seven tranches.
+
 ## 5aj. 19:14-19:25Z — heartbeat: an idle manager beside held work, and a stale heartbeat
 
 **Roster healthy** — em9 executing, em10 starting, em6 idle. main unmoved at `b09e7f49`, so the
@@ -2102,7 +2219,12 @@ and reports before changing.
 **Not dispatched.** Specced only. §2.14 branches off the post-sync head; dispatching now would base
 a third branch on a head about to be replaced, which is the mistake I parked S7 to avoid.
 
-## 5u. PR #1319 landed on main 15:08Z — the fix I asked for, one layer short
+## 5u. UPSTREAM PR GoogleCloudPlatform/scion#1319 landed on main 15:08Z — the fix I asked for, one layer short
+
+> **DISAMBIGUATION added 19:55Z (rule 34 corollary).** The `#1319` in this section is
+> **`GoogleCloudPlatform/scion#1319`** (upstream), merged 15:05:45Z, the DM-key ingress fix.
+> It is **NOT** `ptone/scion#1319` (fork), created 19:45:50Z, which is the tranche A staging PR.
+> Two counters, two unrelated changes, same number. Always qualify the repo.
 
 **§5p item 2 closed the loop.** I routed "the agent outbound path does not validate `ThreadID`" to
 nc-arch. Their PR #1319 is that fix: `validDMKey` at all three ingress points
