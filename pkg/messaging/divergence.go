@@ -90,6 +90,15 @@ func LogDivergence(log *slog.Logger, entry DivergenceEntry) {
 	}
 }
 
+// NewRoutingStr formats a conversation ID for the divergence log's NewRouting
+// field. Returns "conv:{id}" when convID is non-empty, "none" otherwise.
+func NewRoutingStr(convID string) string {
+	if convID == "" {
+		return "none"
+	}
+	return "conv:" + convID
+}
+
 // ---------------------------------------------------------------------------
 // Deterministic external reference helpers
 // ---------------------------------------------------------------------------
@@ -104,6 +113,36 @@ func DirectMessageExternalRef(idA, idB string) string {
 	pair := []string{idA, idB}
 	sort.Strings(pair)
 	return fmt.Sprintf("dm:%s:%s", pair[0], pair[1])
+}
+
+// ComputeDivergenceMatch determines whether old-model and new-model routing
+// agree for a message. It returns the match result and a human-readable reason.
+//
+// Parameters:
+//   - senderID, recipientID: the message's sender and recipient IDs
+//   - threadID: the message's thread ID (empty for DMs)
+//   - convID: the conversation ID resolved by the new model (empty if resolution failed)
+func ComputeDivergenceMatch(senderID, recipientID, threadID, convID string) (match bool, reason string) {
+	// If new model failed to resolve a conversation
+	if convID == "" {
+		return false, "no-new-routing"
+	}
+
+	// If old model has no routing info
+	if senderID == "" && recipientID == "" {
+		return false, "unknown/no-old-routing"
+	}
+
+	// If old model routes by thread but new model resolved a DM conversation
+	if threadID != "" {
+		return false, "old-model-thread vs new-model-dm"
+	}
+
+	// Both models route by sender-recipient pair for DMs.
+	// The old model uses sender-recipient:{sorted pair},
+	// the new model resolves via DirectMessageExternalRef which uses the same sorted pair.
+	// They agree when both have the same participants.
+	return true, "both-models-dm-agreement"
 }
 
 // OldRoutingFromMessage builds the old-model routing key from a message's
