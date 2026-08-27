@@ -10730,3 +10730,42 @@ converting a failure into a success.
 **Deliberately did NOT tell ptone "fixed, merge now."** I offered exactly that prematurely earlier
 today and withdrew it within a minute. The verdict comes first. He is holding on my word and the
 word has to be worth something.
+
+### §35.25 — the answer was (b): the harness is correct and inert (2026-08-27, 19:15)
+
+**Reviewer verdict on `5a62a6ca`: READY, no findings.** Accepted without re-running its checks.
+
+**It settled §35.24's question by experiment and the answer is (b).** Two experiments, not one:
+
+1. **`set -e` DOES fire inside a function invoked via `&&`.** A bare `result="$(false)"` inside a
+   function called as `source script && func` under `set -euo pipefail` kills the shell. So **(c) is
+   disproved** — the harness change is structurally correct, not decorative.
+2. **No existing test drives a substitution into a failing branch.** It proved this by reverting the
+   `:276` fix and re-running `TestScriptAssertPerimeter_IAPNoHeader` — **which still passed.**
+
+**The trap inside that second experiment is worth keeping.** `TestScriptAssertPerimeter_IAPNoHeader`
+sends a 302 **with** a `Location` header — its "NoHeader" refers to the *IAP* header, not `Location`.
+So the test is named as though it covers exactly the branch it does not cover. A name that describes
+a different absence than the one it tests will fool the next reader; it nearly stood in for coverage
+that was never there.
+
+So: **option B is correct and inert today.** It will catch regressions in future tests that exercise
+failing branches. It catches nothing now, because no such test exists. That is a materially different
+claim from "the fix is complete," and it is the claim that goes in the PR.
+
+**Everything else cleared.** The reviewer exercised the perimeter gate with a stub rather than reading
+it: 302 with no `Location` now prints `SECURITY FAILURE … (Location: )` and exits 1. **It fails closed
+both before and after the fix — the fix buys the diagnostic, not the safety.** Worth stating precisely,
+because I framed this as a security-adjacent finding and it is not one. The polling loop cannot spin:
+`elapsed` increments unconditionally, so an empty `location` just falls through to the timeout.
+
+**Class enumeration audited and complete: 17 command substitutions in `di_main`** — 6 fixed here, 1
+already safe via `if !`, 2 via `|| true`, 2 curl probes via `|| code="000"`, 6 pure functions that
+cannot fail, 1 `mktemp`. My `|| true` suspicion was **wrong**: both sites are Step 6 informational
+read-backs *after* deploy and IAP have succeeded, where aborting would be the defect.
+
+**Remaining, and the only reason the merge is still held:** the six fixes have **no automated
+regression test**, on the tier's only security gate. Asked for exactly one — 302 without `Location`,
+**asserting the `SECURITY FAILURE` text, not the exit code**, because the exit code is 1 both with and
+without the fix and an exit-code assertion would pass on broken code. That is the decorative pin this
+project has already shipped once. Developer must prove it red, then green.
