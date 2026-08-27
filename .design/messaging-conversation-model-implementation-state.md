@@ -324,6 +324,47 @@
     unless I read the aside. **The manager who scopes work tightly inherits the duty to read
     everything the scope excluded.** Green suites do not report the tests nobody wrote.
 
+## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
+
+**The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
+*staging ground* — sections still merge there and stay integrated and tested — but it is **never
+PR'd to `main` as one change**. Instead we cut tranche branches from current `main` and land them
+in order.
+
+**Why this is tractable:** the branch history is already phase-ordered (phases 1-11 in
+first-parent order), so the tranches follow the build order rather than cutting across it.
+
+**Tranches, ordered by blast radius:**
+
+| # | Content | Reachability | Risk |
+|---|---|---|---|
+| **A** | Phases 1-4: ent schema + generated code, store adapter, resolution, drift, normalize, backfill | Additive; nothing reads it | **The DB migration, not the code** — new tables + `conversation_id` on Message |
+| **B** | Phase 5: dual-write + divergence logging | Writes on the live path | Low — Phase 5 non-fatal contract |
+| **C** | Phases 6, 9, 11: envelope types, delivery format, broker edge + 5 adapters | Additive + broker inbound | Low-medium |
+| **D** | Phase 7: validation choke point | **Rejects traffic** | **HIGHEST — blocked by DEF-19** |
+| **E** | Phase 8: read-switch machinery + divergence board | Flag-gated, switch OFF | Low while off |
+| **F** | Phase 10 + S8: CLI subcommands, help grammar, deprecations | User-visible | Medium, revertible alone |
+| **G** | Flip `conversation_read_switch` | One setting | Revertible alone |
+
+**Tranche A file set (computed, not recalled):** all `pkg/ent/**` for Conversation /
+ConversationParticipant / MessageAddressee / Message; `pkg/messaging/{backfill,drift,normalize,resolve}.go`
++ tests; `pkg/store/entadapter/{composite,conversation_store,message_store}.go`;
+`pkg/store/{models,store}.go`. **Excludes `pkg/messaging/conversation.go`** — that arrives with
+Phase 5.
+
+**Sequencing constraint:** tranche A overlaps §2.15 on `backfill.go` and `resolve.go`, so **§2.15
+settles into `messaging-v2` before tranche A is cut.**
+
+**Tranches are cut as final-state, not as original commits.** Replaying the original phase commits
+would land code that later commits fixed — S6/S7/S8 and §2.15 all repaired defects in phase-1-5
+files. Each tranche PR carries the *current* reviewed state of its file set. History granularity
+is traded for not shipping known defects.
+
+**CI gates are per-tranche, not once.** The 15 gofmt violations span phases 3, 5, 6 and 9, and
+`golangci-lint` runs `--new-from-merge-base=origin/main`, so each tranche PR is measured against
+main independently. Fixing formatting once on `messaging-v2` does **not** make the tranche PRs
+green. Run all seven gates from `.github/workflows/ci.yml` on every tranche branch (rule 22).
+
 ## 2. Source documents
 
 | Doc | Path |
