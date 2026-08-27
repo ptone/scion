@@ -1124,6 +1124,18 @@
       the missing signal is the cheap one, and it is almost always the writer's omission.**
     - Corollary for the fallback: idle-**without**-blocked is legitimately nudgeable. If the
       supervisor did not signal, the ambiguity is theirs and the nudge is fair.
+    - **Addendum 23:11Z — I wrote this rule and then did not apply it.** Having diagnosed the
+      unsignalled park and got the coordinator to change their conventions, I checked `scion list`
+      again: em9 was **still** showing a bare timestamp. My re-park message had said "stay parked"
+      and never asked for the signal. The gap was live the whole time I was describing it.
+      **Writing the rule felt like fixing the problem.** It is not the same act, the gap between them
+      is measured in minutes, and the only thing that closes it is checking the actual state
+      afterwards. Sent the explicit `sciontool status blocked` instruction to em9, and pre-emptively
+      to em10 so they signal on finishing rather than being chased for it later.
+
+STANDING PRACTICE (adopted 23:11Z): **every park instruction I issue must include the literal
+`sciontool status blocked "<reason>"` line.** Not "stay parked" — the command. Applies to em6, em9,
+em10 and every agent I dispatch hereafter.
 
 59. **A warning applied to one sibling and not the rest makes the others look intentionally
     unwarned.** Issued 2026-08-27 23:10Z from em6's P3-F1 write-up. I sent them at **one** entity —
