@@ -39,7 +39,15 @@
    reports are captured.** The container ceiling is shared hub-wide (~50). One manager
    fans out ~6 sub-agents per round; a rejected section doubles it. Put this in every
    manager brief. I never stop another manager's children while that manager is active.
-10. **Do not participate in the engineering work.** (Same instruction.) I spawn, review
+10. **Every check ships with a test that fails when the check is removed.** Put this in
+    every manager brief. A comparison with no failing test case is indistinguishable from
+    a constant — that is not a theory, it is how S2 shipped `Match: true` and then shipped
+    a replacement expression that was also always true. When a manager reports "now
+    computed", ask for the input that makes it false. If there isn't one, it isn't computed.
+11. **When an auditor's finding conflicts with a design claim, read the enforcement code.**
+    S2's audit found DM `ProjectID` being treated as authorisation and was talked out of it
+    with "advisory, by design". Two lines of `resolve.go` settled it the other way.
+12. **Do not participate in the engineering work.** (Same instruction.) I spawn, review
    against acceptance criteria, and advance. I do not review implementation approach
    unsolicited, debug, or answer questions a manager should resolve itself. Default state
    is `blocked`.
@@ -179,6 +187,12 @@ would bury the events that matter.
   managers retire sub-agents as reports are captured, not at section end.** A manager
   fans out ~6 sub-agents per round and a rejected section doubles that; told the
   coordinator I will gate the next section on its signal if the ceiling gets tight.
+- `2026-08-27 03:10Z` em2 re-reported S2, `9e80a4e2..1ff7c6af`. B-1/B-3/B-4 fixed.
+- `2026-08-27 03:15Z` **S2 rejected again.** B-2 not fixed: the literal `true` was replaced
+  by an always-true expression (C-1, verified empirically). Two further findings: C-2 the
+  soak gate is now un-passable because dual-write never resolves thread conversations, and
+  C-3 global DMs are stamped with a `ProjectID` that `resolve.go` enforces as auth. Rules 10
+  and 11 added as countermeasures. Round 3.
 
 ## 5d. Open blockers — S2 rejection (2026-08-27 02:50Z)
 
@@ -188,9 +202,22 @@ visible by grep and both were missed by review, test, and audit.
 | # | Blocker | Evidence | Required fix | State |
 |---|---|---|---|---|
 | B-1 | **Two `external_ref` formats for the same DM.** `dm:%s:%s` (`divergence.go:106`, dual-write) vs `direct:%s:%s:%s` (`backfill.go:200`, with projectID). Under `UNIQUE(surface, external_ref)` the same DM gets two conversation rows — backfill fills one, live traffic fills the other, and DM history splits at the S4 read switch. Also a design-conformance bug on its own: **DMs are global** (§2.4.1, and S1 `resolve.go:310` sets `ProjectID: ""`), so a project-scoped DM key fragments one DM into one row per shared project. | grep both format strings | One exported project-free DM-key helper, called by backfill and dual-write. Thread keys keep projectID. | open |
-| B-2 | **Divergence logging cannot detect divergence.** All six call sites pass `Match: true` as a literal (`handlers_agent_messaging.go:243,736,971,1076`; `messagebroker.go:467,620`). `Mismatches()` can only return 0. | grep `Match:` | Compute `Match` by resolving each model independently and comparing. "Old model has no answer" is a third outcome, not a match. | open |
-| B-3 | `ProjectID` required in `BackfillConfig` (audit Medium, promoted — thread grouping can cross a project boundary; §2.6.1 is an invariant, not a recommendation). | audit report | required | open |
-| B-4 | Unit tests for `ResolveOrCreateDMConversation` (test gate marked PARTIAL). It is now the shared correctness point for both phases. | test report | required | open |
+| B-2 | **Divergence logging cannot detect divergence.** All six call sites pass `Match: true` as a literal (`handlers_agent_messaging.go:243,736,971,1076`; `messagebroker.go:467,620`). `Mismatches()` can only return 0. | grep `Match:` | Compute `Match` by resolving each model independently and comparing. "Old model has no answer" is a third outcome, not a match. | **still open after round 2 — see C-1** |
+| B-3 | `ProjectID` required in `BackfillConfig` (audit Medium, promoted — thread grouping can cross a project boundary; §2.6.1 is an invariant, not a recommendation). | audit report | required | fixed round 2 |
+| B-4 | Unit tests for `ResolveOrCreateDMConversation` (test gate marked PARTIAL). It is now the shared correctness point for both phases. | test report | required | fixed round 2 |
+
+### Round 2 rejection (2026-08-27 03:15Z)
+
+B-1, B-3, B-4 fixed. B-2 was not. Two further findings.
+
+| # | Finding | Evidence | Required fix | State |
+|---|---|---|---|---|
+| C-1 | **The DM comparison is still a tautology.** `divergence.go:145–153` builds both sides from the same two inputs with the same sort and join; after prefix-trimming they are equal by construction. `convID` — the parameter holding the new model's actual answer — is never examined past the emptiness check. A literal `true` was replaced by an expression that is always true. | I ran a table of DM inputs through `ComputeDivergenceMatch`; none produced a mismatch. | Compare the destination `convID` actually denotes (load it, read `external_ref`/participants) against the old model's destination. **Plus a mandatory test that fails if the comparison is degenerate** — a case where the models genuinely disagree, asserting `match==false` and `Mismatches()` increments. | open |
+| C-2 | **The gate is now un-passable — the inverse of the old failure.** `divergence.go:137`: any non-empty `threadID` returns false. Every threaded message scores as divergence, so "Mismatches() stays at 0" is unreachable with any thread traffic. Root cause: dual-write only calls `ResolveOrCreateDMConversation`; S1 shipped `resolveThread` and it is unused. Design phase 5 says send paths resolve-or-create, not "DMs only". | read `divergence.go` + dual-write call sites | Dual-write resolves thread conversations via the S1 resolver; threaded messages get a real comparison. S4 needs those rows to exist anyway. | open |
+| C-3 | **Global DMs are stamped with a `ProjectID` that is enforced as authorisation.** `conversation.go` sets `conv.ProjectID` whenever projectID is non-empty; `resolve.go:198` enforces any non-empty `ProjectID` as a project lock (`:218` comment: "nil ProjectID means global DM"). Contradicts §2.4.1 and S1. With last-writer-wins upsert, a multi-project user's DM flips project by who spoke last → intermittent boundary-violation/not-found on a conversation they own. Audit raised it as M1; em2 dismissed it as "advisory". | read both files | DM conversations created with nil `ProjectID`. Originating project, if wanted, goes in a field `resolveConvByID` does not read. | open |
+
+**The pattern to watch.** Two rounds, one defect class: code that has the shape of a check
+without the substance of one. The countermeasure is now a standing rule — see rule 11.
 
 **Why B-2 is the serious one.** A missing check fails to find problems. This one
 *manufactures evidence of safety*: the design makes the phase-5 divergence signal the gate
