@@ -5255,3 +5255,34 @@ that same sentence in this log yesterday about this same test without then chang
 - **#1276 needed no workaround.** IAP auth preflight worked immediately.
 - **New observation:** repeated "no session secret" warnings on startup. Not a blocker for a
   single request; a problem for real usage. Needs its own look.
+
+## 2026-08-27 02:00Z — #1310's CI found a defect that only exists upstream
+
+One real failure. Everything else green: Build & Test, golangci-lint, scan-pr, shellcheck,
+check-changes, zizmor. `cla/google` fails as always on agent-authored commits.
+
+```
+ERROR: failed to build: invalid tag
+"ghcr.io/GoogleCloudPlatform/thick-prep:dev-d0baa2c...": repository name must be lowercase
+```
+
+`.github/workflows/publish-omni.yml` sets, in **three separate places** (`:56`, `:82`, `:106`):
+
+```yaml
+REGISTRY: ghcr.io/${{ github.repository_owner }}
+```
+
+On the fork the owner is `ptone` — already lowercase, so it passes. Upstream the owner is
+`GoogleCloudPlatform`, and Docker requires lowercase repository names.
+
+**This workflow fails on upstream by construction, and there was no way to catch it on the fork.**
+It is the first thing this PR has hit that only exists in the real venue. Worth remembering the
+next time a fork PR being "all green" feels like evidence: it is evidence about the fork.
+
+The fix is to compute the registry once, lowercased, in shell (`${GITHUB_REPOSITORY_OWNER,,}` —
+GitHub expressions have no `toLower`) and delete the three hardcoded copies. I told the developer
+that collapsing the triplication is **part of the fix, not a tidy-up**: three copies of a value is
+how a thing ends up wrong in one place and right in another.
+
+Dispatched to `sn-adminfix-dev`, which is already on this branch for the admin-emails fix — one
+agent per branch, rather than two racing.
