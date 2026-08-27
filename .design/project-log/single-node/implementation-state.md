@@ -10141,3 +10141,57 @@ Also corrected: **`scion create` takes `-t/--type`, not `--template`.** My own n
 
 Trust prompt appeared on `sn-iaplogin-inv` as expected and was cleared in ~35 seconds. **Fourth for
 four today.** It is the default state after `scion start`, not an anomaly.
+
+### 35.15 #76 and #78 closed — and a circular verification caught before it published
+
+Branch `scion/sn-backout` now at **`02220842`**, 10 commits. `12f907ab` (build time), `02220842`
+(raw API calls). Docs build passes.
+
+**#76.** The unmeasured duration is gone, replaced by a description of the eight-image chain rather
+than a different invented number. The developer confirmed the Cloud Workstations predefined base is
+publicly pullable — manifest endpoint returns **200 with no auth** — which was the one thing that
+could have made the build-your-own steps unusable.
+
+**#78.** Agent-create curl and its bearer-token prose removed. Three things kept with reasons: the
+troubleshooting probe (a diagnostic, not a way to drive the product); the identity-token note,
+retitled and made self-contained after the developer noticed it had become an *"alternative"* to a
+curl that no longer exists; and the `harnessConfig` caution, now scoped to the API.
+
+---
+
+**THE THING WORTH RECORDING.** The developer's first justification for *"you cannot omit
+harnessConfig in the web UI"* was **line 216 of the document** — it verified the documentation using
+the documentation. Circular, and it read as a citation.
+
+That mattered because of **#48**: an empty harness-config reaching the broker is a thing that
+happens in this system. Publishing *"the web UI is not affected"* on a false basis would point
+readers at the exact path that breaks, under a caution telling them it is safe.
+
+Sent back with two options — verify in the web source with file and line, or **drop the claim
+entirely**, on the grounds that *silence is honest and a wrong reassurance is not*. It took option A
+and produced real citations. **I spot-checked them, because the claim is now a published safety
+statement:**
+
+- `web/src/components/pages/agent-create.ts:69` — harness state initialises to `'gemini-cli'`,
+  never empty. **Confirmed.**
+- `resolvedHarness` (741) returns `customHarness` **only** when `harness === '__other__'`.
+  **Confirmed.**
+- Line 880 always includes `harnessConfig: this.resolvedHarness`. **Confirmed.**
+
+Empty is reachable only by selecting "Other…" and blanking the name — a deliberate override. The
+published claim is accurate.
+
+**This is the correct division of labour rather than a breach of it.** I did not re-review the
+change; I checked three specific line citations underpinning a safety claim we are publishing to
+strangers. That is proportionate, and it took under a minute.
+
+**A free result for #48.** Mechanism A (empty name) **does not originate in the browser form**. If A
+still reproduces from a browser-driven create, the empty value is introduced *after* the form, in
+the hub's resolution path. One candidate origin removed; #48 not closed. Recorded on the task.
+
+**The pattern, now five for five today.** Every one of these was a conclusion sitting one command
+away from being checked: `cla/google`; my "three pinning tests"; the gcloud SDK scare; the
+26-of-28 test accounting; and now a doc citing itself. The only one that cost nothing was the one
+where the reporter surfaced an anomaly instead of working around it.
+
+**Still open with ptone: #77**, the double login. Section 2 untouched. `sn-iaplogin-inv` measuring.
