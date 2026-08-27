@@ -84,6 +84,20 @@
     missing input without a failing assertion elsewhere, and every discovery loop carries
     a documented minimum count that may be raised but never lowered.
 
+15. **Grep `origin/main` before speccing a mechanism, and treat another agent's account of
+    their own shipped system as a claim to verify, not as evidence.** Issued 2026-08-27
+    13:25Z. Twice in one day my design asserted something about code with nothing checking
+    it: §2.9 said `scion schedule message` "already exists" and it never did (that produced
+    I-1); §2.4.2 invented a DM key format that **already existed, shipped and
+    regex-validated**, in the same repository — along with the entire principal-kind
+    security hazard I briefed S6 on at length, which that shipped format had already
+    solved. The second one I compounded by repeating another architect's "implementation is
+    in flight" as fact; the code had moved past their design doc and the work was landed.
+    **I required mutation-level proof from every manager while my own documents and my
+    peers' descriptions went unverified. The standard applies upward.** Operationally: a
+    design section that claims a capability exists cites the file and line, or it does not
+    make the claim.
+
 ## 2. Source documents
 
 | Doc | Path |
@@ -507,6 +521,7 @@ would bury the events that matter.
 - `2026-08-27 13:01Z` Answered the user on DEF-7/DEF-9: DEF-9 needs no input (unbuilt, not undecided; downstream of DEF-5). DEF-7 has one real question, routed to **`nc-arch`** rather than escalated — see §5l.
 - `2026-08-27 13:03Z` **`nc-arch` answered DEF-7 and surfaced a parallel-entity collision.** DEF-7 resolved (build no naming path). **DM key format changed to kind-encoding, eliminating the §2.4.2 security hazard outright.** Shared derivation function owed to `pkg/messages`. See §5m.
 - `2026-08-27 13:06Z` **ESCALATED to user:** unify `Conversation` and `webchat_topic`, or keep both? Recommended declaring unification the end state and sequencing the migration after native-chat wave 2. **This is the one open user question.**
+- `2026-08-27 13:25Z` **CORRECTION: native-chat wave 2 is LANDED on main, not in flight, and the kind-encoded DM key is shipped and regex-validated.** My design duplicated a shipped construct. Second such failure today. Rule 15 added. §5m's framing superseded by **§5o**. Revised recommendation sent to the user; S6 and nc-arch both re-briefed.
 - `2026-08-27 13:15Z` **Heartbeat prompt replaced** — old `1a899567` deleted, new `a80a92ed` (`ca-msg-impl-heartbeat-v2`). Roster check is now **step 1** and an empty roster is the alarm condition; adds a ledger sweep for unblocked-but-undispatched work, and requires `blocked` to name what is blocked *and what remains runnable*. Closes the §5j blind spot structurally rather than in my memory.
 - `2026-08-27 13:15Z` **DEF-1 ledger row corrected to CLOSED** — §3 has said 'implemented' since S4 while the ledger row still read 'open'. Ledger drifted from the body of the same document.
 - `2026-08-27 13:15Z` DEF-7 answer written up as design **§2.6.2**; the escalated unification question as **§2.6.3**.
@@ -688,6 +703,65 @@ want and am recording so it is reinforced rather than lost:
 old-format ref → no lookup, no inference, fail closed, **counted** (silence must be
 distinguishable from zero); parseable new-format ref → kind from key, lookup to verify; both →
 all-or-nothing per row.
+
+## 5o. CORRECTION 2026-08-27 13:25Z — my design duplicated shipped code
+
+**The user challenged my premise and was right.** I had reported native chat's wave 2 as "approved
+and implementation in flight". I got that from `nc-arch` and **passed it on without checking it.**
+
+**Verified against `origin/main`. Wave 2 is landed.** Tables `webchat_topic`,
+`webchat_read_state`, `webchat_user_prefs`, `webchat_dm`. Handlers `CreateTopic`, `UpdateTopic`,
+`handleTopicPatch`, `handleTopicDelete`. Project-create hook `ensureProjectGeneralTopic`. Tests in
+`webchannel_store_wave2_test.go`.
+
+**And the DM key is shipped and regex-validated** (`pkg/hub/handlers_chat_v2.go:390`):
+
+```
+dmKeyRegexp = ^dm:(user|agent):[0-9a-f-]{36}:(user|agent):[0-9a-f-]{36}$
+validDMKey()   parseAgentDMKey()   dmUserParticipants()
+```
+
+> **So §5m was wrong about what happened.** It was not two designs converging. **My design
+> invented a second, incompatible DM key format for a concept that already had a shipped,
+> validated one in the same repository.** The elaborate principal-kind security hazard in §2.4.2 —
+> which I briefed S6 on at length — existed because I did not grep before speccing. A format
+> already in the codebase had solved it.
+
+**This is the second instance today of the same failure.** §2.9 asserted `scion schedule message`
+"already exists"; it never did (that produced I-1). Now §2.4.2 invented a key that already existed.
+**Both are my design making a claim about code without verification, while I demanded
+mutation-level proof from every manager.** The standard I enforce downward has not been applied to
+my own documents or to peer architects' descriptions of their systems.
+
+**Standing rule, added as §1 rule 15:** *before speccing a mechanism, grep `origin/main` for it.*
+And: **treat another agent's description of their own shipped system as a claim to verify, not as
+evidence.** nc-arch was describing their design doc; the code had moved past it.
+
+**Not duplication: scope.** `webchat_*` is explicitly web-only (Discord's tables live in
+`extras/scion-discord`). `Conversation` spans native/discord/slack/telegram/gchat/teams with
+`external_ref` and drift state. Mine is a **superset abstraction built without noticing the shipped
+subset underneath it.** Real distinction; does not rescue the key duplication, which is pure.
+
+**Revised recommendation on §2.6.3, sent to the user.** The "sequence after wave 2 lands" caveat is
+void — it has landed, and a finished system is safer to migrate than a moving one. Direction:
+`webchat_topic` becomes a projection of `Conversation`. **But with a caveat that cuts against my
+own work and which I put in writing to the user:** webchat is shipped, working and populated;
+messaging-v2 has six open defects, a read switch that cannot be turned on, and one conversation row
+in the only database it has touched. **Mine earns the role of core model by closing its defects,
+not by being newer.** Migrating live chat data into a model that cannot turn on its own read switch
+would trade a working system for an architectural preference.
+
+Order: (1) S6 adopts the shipped key as *the* format, `pkg/messages` owning one derivation and the
+hub's existing helpers becoming consumers — not a third implementation; (2) DEF-8/10/11/12 close;
+(3) unify. Pulling (3) earlier is a risk-appetite call for the user, not for me.
+
+**Asked `nc-arch` directly whether anything else they described as designed is already built**, and
+to answer from the code rather than the design doc. Better an awkward question now than speccing
+around a phantom twice.
+
+**Free conformance test now available to S6:** the shipped `dmKeyRegexp` is an independent oracle.
+Its derivation must produce keys that satisfy the *real* regex — referenced, not copied. A local
+copy would drift, which is the disease itself.
 
 ## 5i. S5 — CLOSED 2026-08-27 12:40Z (accepted on round 3, `55dd6e16`)
 
