@@ -30,7 +30,7 @@ func TestBroadcastCmd_ProjectScoped(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-bcast-project"
+	projectID := "proj-bcast-project"
 	agents := []hubclient.Agent{
 		{Name: "agent-1", Status: "running"},
 		{Name: "agent-2", Status: "running"},
@@ -73,7 +73,7 @@ func TestBroadcastCmd_GlobalAll(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-bcast-all"
+	projectID := "proj-bcast-all"
 	agents := []hubclient.Agent{
 		{Name: "cross-1", Status: "running", ProjectID: "proj-a"},
 		{Name: "cross-2", Status: "running", ProjectID: "proj-b"},
@@ -111,7 +111,7 @@ func TestBroadcastCmd_NoAgents(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-bcast-empty"
+	projectID := "proj-bcast-empty"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -152,7 +152,7 @@ func TestBroadcastCmd_WithInterrupt(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-bcast-interrupt"
+	projectID := "proj-bcast-interrupt"
 	agents := []hubclient.Agent{
 		{Name: "agent-1", Status: "running"},
 	}

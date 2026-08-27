@@ -1,4 +1,4 @@
-# DEF-25: Rename grove-* fixture project IDs in message_deprecation_test.go
+# DEF-25: Rename grove-* fixture project IDs in test files
 
 **Date:** 2026-08-27
 **Agent:** dev-def25-compat
@@ -6,13 +6,13 @@
 
 ## Summary
 
-Renamed 7 test fixture project IDs in `cmd/message_deprecation_test.go` from
-legacy `grove-*` vocabulary to `proj-*` vocabulary, resolving compat-literals
-violations for this file.
+Renamed 11 test fixture project IDs across two test files from legacy `grove-*`
+vocabulary to `proj-*` vocabulary, making the `compat-literals` CI gate pass
+(exit 0) on this branch.
 
 ## Changes
 
-All changes in `cmd/message_deprecation_test.go`:
+### `cmd/message_deprecation_test.go` (7 renames)
 
 | Before | After |
 |---|---|
@@ -24,13 +24,18 @@ All changes in `cmd/message_deprecation_test.go`:
 | grove-depr-plain-works | proj-depr-plain-works |
 | grove-depr-channel-works | proj-depr-channel-works |
 
+### `cmd/broadcast_test.go` (4 renames)
+
+| Before | After |
+|---|---|
+| grove-bcast-project | proj-bcast-project |
+| grove-bcast-all | proj-bcast-all |
+| grove-bcast-empty | proj-bcast-empty |
+| grove-bcast-interrupt | proj-bcast-interrupt |
+
 ## Verification
 
-- `go test ./cmd/ -run TestDeprecation -count=1` — all tests pass
-- No `grove` literals remain in `cmd/message_deprecation_test.go`
+- `bash hack/check-project-compat-literals.sh` exits 0
+- `go test ./cmd/ -run 'TestBroadcastCmd|TestDeprecation' -count=1` — all tests pass
+- No `grove` literals remain in either file
 - These were internal test fixture IDs with no external dependencies
-
-## Notes
-
-The compat-literals check (`hack/check-project-compat-literals.sh`) still reports
-violations in `cmd/broadcast_test.go`, which is outside the scope of this task.
