@@ -8769,3 +8769,57 @@ paths filter. #1315 touches `docs-site`, so the workflow runs and the new admoni
 verified. **The residual risk flagged at §22.4 is closed.** Recording because the previous developer
 correctly declined to claim a verification they had not run, and the right response to that honesty
 is to go and get the answer rather than let it sit as an unknown.
+
+## §23 — Heartbeat verification, 13:33. All three PRs are open; ONE blocker remains
+
+Verified against the live API, not from this log.
+
+| PR | branch | head | state | CI |
+|---|---|---|---|---|
+| `GoogleCloudPlatform/scion#1315` | `scion/sn-docs-dev` | `fd30d72c` | OPEN, MERGEABLE | Build & Test IN_PROGRESS, rest green |
+| `GoogleCloudPlatform/scion#1316` | `scion/sn-buildfix-upstream` | `1765ff13` | OPEN, MERGEABLE | all SUCCESS/SKIPPED |
+| `GoogleCloudPlatform/scion#1317` | `scion/sn-docpr-upstream` | `70aceeb4` | OPEN, MERGEABLE | all SUCCESS/SKIPPED |
+
+**ptone opened #1316 and #1317 from the prefilled compare URLs and I did not know it.** Task #62
+still said "waiting on ptone to open". The heartbeat's instruction to check rather than assume is
+what surfaced it. **The prefilled-URL protocol fix worked** — both carry proper titles and bodies,
+unlike #1315 which he had to paste into.
+
+**Single remaining blocker, and it is on all three: `cla/google` = FAILURE.** First-contribution
+CLA. No agent can act on it. **That is now the entire critical path** — nothing else stands between
+these three PRs and merge. Reported to ptone at 13:34, with an explicit correction that my earlier
+message said the CLA affected only #1315; I had checked one PR and generalised from it.
+
+**Ruled out, deliberately:** `Build & Test` showing `conclusion: None` on #1315 is the shape task
+#60 recorded — *"a conflicted PR silently loses all pull_request CI, and an empty check list looks
+like a passing one."* It is **not** that here. Status is `IN_PROGRESS`, the PR is `MERGEABLE`, and
+the check list is populated. #60's failure mode is an *empty* list on a *conflicted* PR. Checked
+rather than assumed, because the two look alike at a glance and I have been caught by exactly this
+before.
+
+### §23.1 — I nearly reported nine Instances destroyed
+
+My first instance-list call returned **nothing at all**, and I had written `2>/dev/null`. An empty
+list is indistinguishable from a total loss. Re-ran with stderr visible and the impersonation flag I
+had omitted: **all nine present** — `e2e-omni`, `e2e-walk-r2`, `iap-demo`, `q2-control`,
+`sn-adminfix-t`, `sn-adminseed-t`, `sn-ready`, `sn-step6`, `sn-walk`.
+
+**The bug was mine and the silence was self-inflicted.** Recording it because it is the same
+lesson as the `iap-demo` near-alarm this morning, arriving from the opposite direction: there I
+reasoned from a signal instead of inspecting the artifact; here I inspected the artifact but
+suppressed the channel that would have told me the inspection failed. **`2>/dev/null` on a
+verification command converts a failed check into a passing one.** Do not use it when the answer
+matters.
+
+### §23.2 — Answers to the three heartbeat questions
+
+1. **Progressing, not stalled.** Four developer agents dispatched today; three returned verified
+   work and were reclaimed; one is in flight (the `"built from this branch"` fix). Zero silent stalls.
+2. **Critical path: the `cla/google` check on all three PRs.** ptone-only. Everything else that was
+   blocking is cleared.
+3. **Design doc in sync.** `#1317` carries the corrections (§5 both loss events, §6 measured, §9.1
+   observability gap + sizing caveats, all refs qualified). The one known divergence is deliberate:
+   the `harnessConfig` workaround in the tutorial stays until #1273 Phase 4 lands, per §22.
+
+**Not manufacturing work while blocked.** Holding for ptone on the CLA and on the #1273 triage
+ruling.
