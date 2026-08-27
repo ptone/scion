@@ -6153,3 +6153,50 @@ head. Flagged to the coordinator to sweep.
 
 `mergeable=true` is a text-merge fact, not a compile fact. Our own long-standing lesson.
 Still held; nothing dispatched.
+
+### 03:59 — ptone overrules the merge; verification moves out of band
+
+ptone, 03:57:59: *"we can address potential CI slip ins as a follwup."* Squash `#1310` as-is.
+
+**His message crossed mine.** He decided at 03:57:59; my risk write-up landed 03:58:26. I told him
+they crossed, pointed at the message, and did not re-argue. He had said the PR *"seems pretty clean
+to go"* — which is precisely the illusion, since it looks clean because CI never ran. But I had
+already committed to not re-litigating, and a principal is entitled to decide against advice.
+
+> **When a decision and its supporting analysis cross in flight, name the crossing and offer one
+> clean re-decide.** Do not silently comply — he may have decided without the information. Do not
+> re-argue either. Say it once, then defer.
+
+Merge plan is **off**. `briefs/sn-merge-dev.md` is written and shelved in case he reverses.
+
+#### What I did instead
+
+Dispatched a developer to build and test `38ba412e` merged with restored `f876e27b`, in a throwaway
+clone. **No push, no branch change, no PR change.** Explicitly steered off `/tmp/mergetest`, which
+still holds my partial #1301 repair and would have contaminated the result.
+
+This does not block him. He can squash whenever he likes. If it comes back red he gets the
+diagnosis in minutes instead of learning it from a broken main; if green, he has the evidence
+anyway.
+
+> **When overruled on a verification step, look for a version of the verification that costs the
+> principal nothing.** Refusal is not available and sulking is useless, but an out-of-band local
+> build is free and preserves the signal. The point of verifying was never to gate him — it was to
+> know. That survives the overrule.
+
+Told the developer plainly that `go build` passing is a **weak** signal because it does not compile
+test files — the mistake I made two hours ago, written into the brief so it is not repeated.
+
+#### Sweep result
+
+`repo-maintenance` confirms **`#1310` is the only PR the CI gap touched.** No other collateral from
+the 03:15–03:52 conflict window. Matches my own finding.
+
+#### Follow-up work this creates, unowned
+
+1. The CI gap itself, per ptone's *"as a follow-up"*.
+2. **Whether the skipped-workflow behaviour deserves a guard** — a required check that fails closed
+   when the `pull_request` set does not run. Today an empty check list and a passing one look
+   identical at a glance, which is the whole reason this nearly shipped unnoticed.
+3. R3/R6 decline replies still unposted (agents get 403 upstream). Offered ptone the text to paste.
+   Once he squashes, they close unanswered.
