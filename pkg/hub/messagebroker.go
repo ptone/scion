@@ -458,15 +458,27 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered user messages.
 	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
 	if !msg.Broadcasted {
-		convID := messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, msg.SenderID, msg.RecipientID, projectID)
-		if convID != "" {
-			storeMsg.ConversationID = convID
+		var convResult *messaging.ConversationResult
+		if msg.ThreadID != "" {
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
+		} else if msg.SenderID != "" && msg.RecipientID != "" {
+			convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, msg.SenderID, msg.RecipientID)
 		}
-		// Always log divergence — even when convID is empty, that is a divergence signal.
-		match, reason := messaging.ComputeDivergenceMatch(msg.SenderID, msg.RecipientID, msg.ThreadID, convID)
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
+		// Always log divergence — even when convResult is nil, that is a divergence signal.
+		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
+		convID := ""
+		actualRef := ""
+		if convResult != nil {
+			convID = convResult.ConversationID
+			actualRef = convResult.ExternalRef
+		}
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
 		messaging.LogDivergence(p.log, messaging.DivergenceEntry{
 			MessageID:  storeMsg.ID,
-			OldRouting: messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID),
+			OldRouting: oldRouting,
 			NewRouting: messaging.NewRoutingStr(convID),
 			Match:      match,
 			Reason:     reason,
@@ -614,15 +626,25 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered agent messages.
 	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
 	if !msg.Broadcasted {
-		convID := messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, msg.SenderID, agent.ID, projectID)
-		if convID != "" {
-			storeMsg.ConversationID = convID
+		var convResult *messaging.ConversationResult
+		if msg.SenderID != "" && agent.ID != "" {
+			convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, msg.SenderID, agent.ID)
 		}
-		// Always log divergence — even when convID is empty, that is a divergence signal.
-		match, reason := messaging.ComputeDivergenceMatch(msg.SenderID, agent.ID, "", convID)
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
+		// Always log divergence — even when convResult is nil, that is a divergence signal.
+		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, agent.ID, "")
+		convID := ""
+		actualRef := ""
+		if convResult != nil {
+			convID = convResult.ConversationID
+			actualRef = convResult.ExternalRef
+		}
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
 		messaging.LogDivergence(p.log, messaging.DivergenceEntry{
 			MessageID:  storeMsg.ID,
-			OldRouting: messaging.OldRoutingFromMessage(msg.SenderID, agent.ID, ""),
+			OldRouting: oldRouting,
 			NewRouting: messaging.NewRoutingStr(convID),
 			Match:      match,
 			Reason:     reason,

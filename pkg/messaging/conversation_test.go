@@ -51,15 +51,25 @@ func (m *mockConversationUpserter) UpsertConversationByExternalRef(
 	return &result, nil
 }
 
+// ---------------------------------------------------------------------------
+// ResolveOrCreateDMConversation tests
+// ---------------------------------------------------------------------------
+
 func TestResolveOrCreateDMConversation_HappyPath(t *testing.T) {
 	mock := &mockConversationUpserter{
-		returnConv: &store.Conversation{ID: "conv-abc"},
+		returnConv: &store.Conversation{ID: "conv-abc", ExternalRef: "dm:alice:bob"},
 	}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "bob", "proj-1")
-	if got != "conv-abc" {
-		t.Errorf("expected conv-abc, got %q", got)
+	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "bob")
+	if got == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if got.ConversationID != "conv-abc" {
+		t.Errorf("expected conv-abc, got %q", got.ConversationID)
+	}
+	if got.ExternalRef != "dm:alice:bob" {
+		t.Errorf("expected ExternalRef dm:alice:bob, got %q", got.ExternalRef)
 	}
 }
 
@@ -68,9 +78,9 @@ func TestResolveOrCreateDMConversation_EmptySender(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "", "bob", "proj-1")
-	if got != "" {
-		t.Errorf("expected empty string for empty sender, got %q", got)
+	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "", "bob")
+	if got != nil {
+		t.Errorf("expected nil for empty sender, got %+v", got)
 	}
 	if mock.lastConv != nil {
 		t.Error("upsert should not have been called with empty sender")
@@ -82,9 +92,9 @@ func TestResolveOrCreateDMConversation_EmptyRecipient(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "", "proj-1")
-	if got != "" {
-		t.Errorf("expected empty string for empty recipient, got %q", got)
+	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "")
+	if got != nil {
+		t.Errorf("expected nil for empty recipient, got %+v", got)
 	}
 	if mock.lastConv != nil {
 		t.Error("upsert should not have been called with empty recipient")
@@ -98,9 +108,9 @@ func TestResolveOrCreateDMConversation_UpsertError(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "bob", "proj-1")
-	if got != "" {
-		t.Errorf("expected empty string on upsert error, got %q", got)
+	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "bob")
+	if got != nil {
+		t.Errorf("expected nil on upsert error, got %+v", got)
 	}
 	output := buf.String()
 	if !strings.Contains(output, "conversation resolution failed") {
@@ -113,7 +123,7 @@ func TestResolveOrCreateDMConversation_ExternalRefIsSortedDMPair(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
 	// Call with "bob" first, "alice" second — ref should sort to alice:bob.
-	ResolveOrCreateDMConversation(context.Background(), mock, logger, "bob", "alice", "")
+	ResolveOrCreateDMConversation(context.Background(), mock, logger, "bob", "alice")
 	if mock.lastConv == nil {
 		t.Fatal("expected upsert to be called")
 	}
@@ -123,31 +133,149 @@ func TestResolveOrCreateDMConversation_ExternalRefIsSortedDMPair(t *testing.T) {
 	}
 }
 
-func TestResolveOrCreateDMConversation_ProjectIDSet(t *testing.T) {
+func TestResolveOrCreateDMConversation_ProjectIDAlwaysNil(t *testing.T) {
 	mock := &mockConversationUpserter{}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "bob", "proj-42")
+	// DM conversations must never have ProjectID set (design 2.4.1).
+	ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "bob")
+	if mock.lastConv == nil {
+		t.Fatal("expected upsert to be called")
+	}
+	if mock.lastConv.ProjectID != nil {
+		t.Errorf("expected ProjectID to be nil for DM conversations, got %v", *mock.lastConv.ProjectID)
+	}
+}
+
+func TestResolveOrCreateDMConversation_ReturnsExternalRefFromDB(t *testing.T) {
+	// Verify that the ExternalRef in the result comes from the DB response,
+	// not reconstructed from inputs.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{
+			ID:          "conv-from-db",
+			ExternalRef: "dm:actual-from-db",
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "bob")
+	if got == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if got.ExternalRef != "dm:actual-from-db" {
+		t.Errorf("expected ExternalRef from DB 'dm:actual-from-db', got %q", got.ExternalRef)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ResolveOrCreateThreadConversation tests
+// ---------------------------------------------------------------------------
+
+func TestResolveOrCreateThreadConversation_HappyPath(t *testing.T) {
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{
+			ID:          "conv-thread-abc",
+			ExternalRef: "thread:proj1:thread-123",
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	got := ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-123", "proj1")
+	if got == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if got.ConversationID != "conv-thread-abc" {
+		t.Errorf("expected conv-thread-abc, got %q", got.ConversationID)
+	}
+	if got.ExternalRef != "thread:proj1:thread-123" {
+		t.Errorf("expected ExternalRef thread:proj1:thread-123, got %q", got.ExternalRef)
+	}
+}
+
+func TestResolveOrCreateThreadConversation_EmptyThreadID(t *testing.T) {
+	mock := &mockConversationUpserter{}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	got := ResolveOrCreateThreadConversation(context.Background(), mock, logger, "", "proj1")
+	if got != nil {
+		t.Errorf("expected nil for empty threadID, got %+v", got)
+	}
+	if mock.lastConv != nil {
+		t.Error("upsert should not have been called with empty threadID")
+	}
+}
+
+func TestResolveOrCreateThreadConversation_EmptyProjectID(t *testing.T) {
+	mock := &mockConversationUpserter{}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	got := ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-123", "")
+	if got != nil {
+		t.Errorf("expected nil for empty projectID, got %+v", got)
+	}
+	if mock.lastConv != nil {
+		t.Error("upsert should not have been called with empty projectID")
+	}
+}
+
+func TestResolveOrCreateThreadConversation_UpsertError(t *testing.T) {
+	mock := &mockConversationUpserter{
+		returnErr: errors.New("db error"),
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	got := ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-123", "proj1")
+	if got != nil {
+		t.Errorf("expected nil on upsert error, got %+v", got)
+	}
+	output := buf.String()
+	if !strings.Contains(output, "thread conversation resolution failed") {
+		t.Errorf("expected error log, got: %s", output)
+	}
+}
+
+func TestResolveOrCreateThreadConversation_ExternalRefFormat(t *testing.T) {
+	mock := &mockConversationUpserter{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-ABC", "proj-42")
+	if mock.lastConv == nil {
+		t.Fatal("expected upsert to be called")
+	}
+	expected := "thread:proj-42:thread-ABC"
+	if mock.lastConv.ExternalRef != expected {
+		t.Errorf("expected external_ref %q, got %q", expected, mock.lastConv.ExternalRef)
+	}
+}
+
+func TestResolveOrCreateThreadConversation_ProjectIDSet(t *testing.T) {
+	mock := &mockConversationUpserter{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-ABC", "proj-42")
 	if mock.lastConv == nil {
 		t.Fatal("expected upsert to be called")
 	}
 	if mock.lastConv.ProjectID == nil {
-		t.Fatal("expected ProjectID to be set")
+		t.Fatal("expected ProjectID to be set for thread conversations")
 	}
 	if *mock.lastConv.ProjectID != "proj-42" {
 		t.Errorf("expected ProjectID proj-42, got %q", *mock.lastConv.ProjectID)
 	}
 }
 
-func TestResolveOrCreateDMConversation_ProjectIDNilWhenEmpty(t *testing.T) {
+func TestResolveOrCreateThreadConversation_KindIsGroup(t *testing.T) {
 	mock := &mockConversationUpserter{}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "bob", "")
+	ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-ABC", "proj-42")
 	if mock.lastConv == nil {
 		t.Fatal("expected upsert to be called")
 	}
-	if mock.lastConv.ProjectID != nil {
-		t.Errorf("expected ProjectID to be nil for empty projectID, got %v", mock.lastConv.ProjectID)
+	if mock.lastConv.Kind != "group" {
+		t.Errorf("expected Kind 'group', got %q", mock.lastConv.Kind)
 	}
 }

@@ -115,43 +115,54 @@ func DirectMessageExternalRef(idA, idB string) string {
 	return fmt.Sprintf("dm:%s:%s", pair[0], pair[1])
 }
 
-// ComputeDivergenceMatch determines whether old-model and new-model routing
-// agree for a message. It returns the match result and a human-readable reason.
+// ComputeDivergenceMatch compares old-model routing against the ACTUAL
+// external_ref of the conversation the new model resolved. The comparison
+// is non-tautological: actualExternalRef comes from the database, not from
+// reconstructing inputs.
 //
 // Parameters:
-//   - senderID, recipientID: the message's sender and recipient IDs
-//   - threadID: the message's thread ID (empty for DMs)
+//   - oldRouting: the old-model routing key (from OldRoutingFromMessage)
+//   - actualExternalRef: the external_ref read from the DB via ConversationResult
 //   - convID: the conversation ID resolved by the new model (empty if resolution failed)
-func ComputeDivergenceMatch(senderID, recipientID, threadID, convID string) (match bool, reason string) {
-	// If new model failed to resolve a conversation
+func ComputeDivergenceMatch(oldRouting, actualExternalRef, convID string) (match bool, reason string) {
+	// New model failed
 	if convID == "" {
 		return false, "no-new-routing"
 	}
-
-	// If old model has incomplete routing info (either ID missing)
-	if senderID == "" || recipientID == "" {
+	// Old model has no routing
+	if oldRouting == "" {
 		return false, "unknown/no-old-routing"
 	}
 
-	// If old model routes by thread but new model resolved a DM conversation
-	if threadID != "" {
-		return false, "old-model-thread vs new-model-dm"
+	// DM comparison: old="sender-recipient:{sorted pair}", new="dm:{sorted pair}"
+	if strings.HasPrefix(oldRouting, "sender-recipient:") && strings.HasPrefix(actualExternalRef, "dm:") {
+		oldPair := strings.TrimPrefix(oldRouting, "sender-recipient:")
+		newPair := strings.TrimPrefix(actualExternalRef, "dm:")
+		if oldPair == newPair {
+			return true, "dm-routing-agreement"
+		}
+		return false, fmt.Sprintf("dm-routing-mismatch: old=%s new=%s", oldPair, newPair)
 	}
 
-	// Both models route by sender-recipient pair for DMs.
-	// Verify the old-model pair produces the same DM key the new model used.
-	// ResolveOrCreateDMConversation resolves via DirectMessageExternalRef(sender, recipient),
-	// so we reconstruct the expected key and compare against the old-model routing.
-	oldPairKey := OldRoutingFromMessage(senderID, recipientID, "")
-	newDMKey := DirectMessageExternalRef(senderID, recipientID)
-	// The old key is "sender-recipient:{A}:{B}" and new key is "dm:{A}:{B}",
-	// both sorted. Extract the pair portion and compare.
-	oldPair := strings.TrimPrefix(oldPairKey, "sender-recipient:")
-	newPair := strings.TrimPrefix(newDMKey, "dm:")
-	if oldPair != newPair {
-		return false, "dm-key-mismatch"
+	// Thread comparison: old="thread:{threadID}", new="thread:{projectID}:{threadID}"
+	if strings.HasPrefix(oldRouting, "thread:") && strings.HasPrefix(actualExternalRef, "thread:") {
+		oldThreadID := strings.TrimPrefix(oldRouting, "thread:")
+		// New format is "thread:{projectID}:{threadID}" — extract the threadID part
+		newAfterPrefix := strings.TrimPrefix(actualExternalRef, "thread:")
+		// Split on first ":" to separate projectID from threadID
+		if idx := strings.Index(newAfterPrefix, ":"); idx >= 0 {
+			newThreadID := newAfterPrefix[idx+1:]
+			if oldThreadID == newThreadID {
+				return true, "thread-routing-agreement"
+			}
+			return false, fmt.Sprintf("thread-routing-mismatch: old=%s new=%s", oldThreadID, newThreadID)
+		}
+		// Unexpected format — no projectID separator
+		return false, fmt.Sprintf("thread-format-unexpected: %s", actualExternalRef)
 	}
-	return true, "both-models-dm-agreement"
+
+	// Routing type mismatch (e.g., old says DM but new resolved a thread, or vice versa)
+	return false, fmt.Sprintf("routing-type-mismatch: old=%s new=%s", oldRouting, actualExternalRef)
 }
 
 // OldRoutingFromMessage builds the old-model routing key from a message's

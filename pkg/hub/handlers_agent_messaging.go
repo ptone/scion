@@ -233,15 +233,27 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Phase 5 dual-write: resolve-or-create conversation, stamp conversation_id.
-	convID := messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, agent.ID, recipientID, agent.ProjectID)
-	if convID != "" {
-		storeMsg.ConversationID = convID
+	var convResult *messaging.ConversationResult
+	if req.ThreadID != "" {
+		convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, req.ThreadID, agent.ProjectID)
+	} else if agent.ID != "" && recipientID != "" {
+		convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, agent.ID, recipientID)
 	}
-	// Always log divergence — even when convID is empty, that is a divergence signal.
-	match, reason := messaging.ComputeDivergenceMatch(agent.ID, recipientID, req.ThreadID, convID)
+	if convResult != nil {
+		storeMsg.ConversationID = convResult.ConversationID
+	}
+	// Always log divergence — even when convResult is nil, that is a divergence signal.
+	oldRouting := messaging.OldRoutingFromMessage(agent.ID, recipientID, req.ThreadID)
+	convID := ""
+	actualRef := ""
+	if convResult != nil {
+		convID = convResult.ConversationID
+		actualRef = convResult.ExternalRef
+	}
+	match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
 	messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
 		MessageID:  storeMsg.ID,
-		OldRouting: messaging.OldRoutingFromMessage(agent.ID, recipientID, req.ThreadID),
+		OldRouting: oldRouting,
 		NewRouting: messaging.NewRoutingStr(convID),
 		Match:      match,
 		Reason:     reason,
@@ -728,15 +740,27 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			CreatedAt:     time.Now(),
 		}
 		// Phase 5 dual-write: resolve-or-create conversation for user/agent → agent messages.
-		convID := messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, structuredMsg.SenderID, agent.ID, agent.ProjectID)
-		if convID != "" {
-			storeMsg.ConversationID = convID
+		var convResult *messaging.ConversationResult
+		if structuredMsg.ThreadID != "" {
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, structuredMsg.ThreadID, agent.ProjectID)
+		} else if structuredMsg.SenderID != "" && agent.ID != "" {
+			convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, structuredMsg.SenderID, agent.ID)
 		}
-		// Always log divergence — even when convID is empty, that is a divergence signal.
-		match, reason := messaging.ComputeDivergenceMatch(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID, convID)
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
+		// Always log divergence — even when convResult is nil, that is a divergence signal.
+		oldRouting := messaging.OldRoutingFromMessage(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID)
+		convID := ""
+		actualRef := ""
+		if convResult != nil {
+			convID = convResult.ConversationID
+			actualRef = convResult.ExternalRef
+		}
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
 		messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
 			MessageID:  storeMsg.ID,
-			OldRouting: messaging.OldRoutingFromMessage(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID),
+			OldRouting: oldRouting,
 			NewRouting: messaging.NewRoutingStr(convID),
 			Match:      match,
 			Reason:     reason,
@@ -966,15 +990,25 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				CreatedAt:     time.Now(),
 			}
 			// Phase 5 dual-write: resolve-or-create conversation for group set message.
-			convID := messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, agentMsg.SenderID, agent.ID, projectID)
-			if convID != "" {
-				storeMsg.ConversationID = convID
+			var convResult *messaging.ConversationResult
+			if agentMsg.SenderID != "" && agent.ID != "" {
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, agentMsg.SenderID, agent.ID)
 			}
-			// Always log divergence — even when convID is empty, that is a divergence signal.
-			match, reason := messaging.ComputeDivergenceMatch(agentMsg.SenderID, agent.ID, "", convID)
+			if convResult != nil {
+				storeMsg.ConversationID = convResult.ConversationID
+			}
+			// Always log divergence — even when convResult is nil, that is a divergence signal.
+			oldRouting := messaging.OldRoutingFromMessage(agentMsg.SenderID, agent.ID, "")
+			convID := ""
+			actualRef := ""
+			if convResult != nil {
+				convID = convResult.ConversationID
+				actualRef = convResult.ExternalRef
+			}
+			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
 			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
 				MessageID:  storeMsg.ID,
-				OldRouting: messaging.OldRoutingFromMessage(agentMsg.SenderID, agent.ID, ""),
+				OldRouting: oldRouting,
 				NewRouting: messaging.NewRoutingStr(convID),
 				Match:      match,
 				Reason:     reason,
@@ -1074,15 +1108,25 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				CreatedAt:   time.Now(),
 			}
 			// Phase 5 dual-write: resolve-or-create conversation for group set message to user.
-			convID := messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, userMsg.SenderID, userID, projectID)
-			if convID != "" {
-				storeMsg.ConversationID = convID
+			var convResult *messaging.ConversationResult
+			if userMsg.SenderID != "" && userID != "" {
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, userMsg.SenderID, userID)
 			}
-			// Always log divergence — even when convID is empty, that is a divergence signal.
-			match, reason := messaging.ComputeDivergenceMatch(userMsg.SenderID, userID, "", convID)
+			if convResult != nil {
+				storeMsg.ConversationID = convResult.ConversationID
+			}
+			// Always log divergence — even when convResult is nil, that is a divergence signal.
+			oldRouting := messaging.OldRoutingFromMessage(userMsg.SenderID, userID, "")
+			convID := ""
+			actualRef := ""
+			if convResult != nil {
+				convID = convResult.ConversationID
+				actualRef = convResult.ExternalRef
+			}
+			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
 			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
 				MessageID:  storeMsg.ID,
-				OldRouting: messaging.OldRoutingFromMessage(userMsg.SenderID, userID, ""),
+				OldRouting: oldRouting,
 				NewRouting: messaging.NewRoutingStr(convID),
 				Match:      match,
 				Reason:     reason,

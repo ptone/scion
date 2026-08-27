@@ -17,6 +17,7 @@ package messaging
 import (
 	"bytes"
 	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -152,7 +153,7 @@ func contains(s, substr string) bool {
 // ---------------------------------------------------------------------------
 
 func TestComputeDivergenceMatch_EmptyConvID(t *testing.T) {
-	match, reason := ComputeDivergenceMatch("sender", "recip", "", "")
+	match, reason := ComputeDivergenceMatch("sender-recipient:a:b", "dm:a:b", "")
 	if match {
 		t.Error("expected match=false when convID is empty")
 	}
@@ -161,53 +162,122 @@ func TestComputeDivergenceMatch_EmptyConvID(t *testing.T) {
 	}
 }
 
-func TestComputeDivergenceMatch_ThreadIDNonEmpty(t *testing.T) {
-	match, reason := ComputeDivergenceMatch("sender", "recip", "thread-123", "conv-abc")
-	if match {
-		t.Error("expected match=false when threadID is non-empty")
-	}
-	if reason != "old-model-thread vs new-model-dm" {
-		t.Errorf("expected reason 'old-model-thread vs new-model-dm', got %q", reason)
-	}
-}
-
-func TestComputeDivergenceMatch_NormalDM(t *testing.T) {
-	match, reason := ComputeDivergenceMatch("sender", "recip", "", "conv-abc")
-	if !match {
-		t.Error("expected match=true for normal DM (no thread, valid convID)")
-	}
-	if reason != "both-models-dm-agreement" {
-		t.Errorf("expected reason 'both-models-dm-agreement', got %q", reason)
-	}
-}
-
 func TestComputeDivergenceMatch_NoOldRouting(t *testing.T) {
-	match, reason := ComputeDivergenceMatch("", "", "", "conv-abc")
+	match, reason := ComputeDivergenceMatch("", "dm:a:b", "conv-abc")
 	if match {
-		t.Error("expected match=false when senderID and recipientID are both empty")
+		t.Error("expected match=false when oldRouting is empty")
 	}
 	if reason != "unknown/no-old-routing" {
 		t.Errorf("expected reason 'unknown/no-old-routing', got %q", reason)
 	}
 }
 
-func TestComputeDivergenceMatch_OneEmptyID(t *testing.T) {
-	// Only sender empty
-	match, reason := ComputeDivergenceMatch("", "recip", "", "conv-abc")
-	if match {
-		t.Error("expected match=false when senderID is empty")
+func TestComputeDivergenceMatch_DMAgreement(t *testing.T) {
+	oldRouting := OldRoutingFromMessage("sender", "recip", "")
+	actualExternalRef := DirectMessageExternalRef("sender", "recip")
+	match, reason := ComputeDivergenceMatch(oldRouting, actualExternalRef, "conv-abc")
+	if !match {
+		t.Error("expected match=true for DM agreement")
 	}
-	if reason != "unknown/no-old-routing" {
-		t.Errorf("expected reason 'unknown/no-old-routing', got %q", reason)
+	if reason != "dm-routing-agreement" {
+		t.Errorf("expected reason 'dm-routing-agreement', got %q", reason)
+	}
+}
+
+func TestComputeDivergenceMatch_ThreadAgreement(t *testing.T) {
+	oldRouting := OldRoutingFromMessage("", "", "thread-ABC")
+	actualExternalRef := "thread:proj1:thread-ABC"
+	match, reason := ComputeDivergenceMatch(oldRouting, actualExternalRef, "conv-xyz")
+	if !match {
+		t.Error("expected match=true for thread agreement")
+	}
+	if reason != "thread-routing-agreement" {
+		t.Errorf("expected reason 'thread-routing-agreement', got %q", reason)
+	}
+}
+
+func TestComputeDivergenceMatch_RoutingTypeMismatch(t *testing.T) {
+	// Old says DM, new says thread
+	oldRouting := OldRoutingFromMessage("sender", "recip", "")
+	actualExternalRef := "thread:proj1:thread-ABC"
+	match, reason := ComputeDivergenceMatch(oldRouting, actualExternalRef, "conv-xyz")
+	if match {
+		t.Error("expected match=false when routing types differ")
+	}
+	if !strings.Contains(reason, "routing-type-mismatch") {
+		t.Errorf("expected reason to contain 'routing-type-mismatch', got %q", reason)
 	}
 
-	// Only recipient empty
-	match, reason = ComputeDivergenceMatch("sender", "", "", "conv-abc")
+	// Old says thread, new says DM
+	oldRouting = OldRoutingFromMessage("", "", "thread-ABC")
+	actualExternalRef = DirectMessageExternalRef("sender", "recip")
+	match, reason = ComputeDivergenceMatch(oldRouting, actualExternalRef, "conv-xyz")
 	if match {
-		t.Error("expected match=false when recipientID is empty")
+		t.Error("expected match=false when routing types differ (thread vs DM)")
 	}
-	if reason != "unknown/no-old-routing" {
-		t.Errorf("expected reason 'unknown/no-old-routing', got %q", reason)
+	if !strings.Contains(reason, "routing-type-mismatch") {
+		t.Errorf("expected reason to contain 'routing-type-mismatch', got %q", reason)
+	}
+}
+
+func TestComputeDivergenceMatch_ThreadFormatUnexpected(t *testing.T) {
+	// Thread without projectID separator
+	oldRouting := "thread:thread-ABC"
+	actualExternalRef := "thread:noProjectSep"
+	match, reason := ComputeDivergenceMatch(oldRouting, actualExternalRef, "conv-xyz")
+	if match {
+		t.Error("expected match=false for unexpected thread format")
+	}
+	if !strings.Contains(reason, "thread-format-unexpected") {
+		t.Errorf("expected reason to contain 'thread-format-unexpected', got %q", reason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MANDATORY: Genuine disagreement tests (architect-required)
+// ---------------------------------------------------------------------------
+
+func TestComputeDivergenceMatch_GenuineDisagreement(t *testing.T) {
+	// Construct a case where old-model and new-model genuinely disagree:
+	// message has sender=A, recipient=B (old routing = sender-recipient:A:B)
+	// but the conversation it was stamped with belongs to a different pair (dm:X:Y)
+	oldRouting := OldRoutingFromMessage("agent-A", "user-B", "")
+	actualExternalRef := DirectMessageExternalRef("agent-X", "user-Y") // DIFFERENT pair
+
+	match, reason := ComputeDivergenceMatch(oldRouting, actualExternalRef, "some-conv-id")
+	if match {
+		t.Fatal("expected match=false when conversation belongs to a different pair than the message's sender/recipient")
+	}
+	if !strings.Contains(reason, "mismatch") {
+		t.Errorf("expected reason to contain 'mismatch', got %q", reason)
+	}
+
+	// Also verify Mismatches counter increments
+	DivergenceMetrics = &DivergenceCounter{}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	LogDivergence(logger, DivergenceEntry{
+		MessageID:  "test-msg",
+		OldRouting: oldRouting,
+		NewRouting: "conv:some-conv-id",
+		Match:      match,
+		Reason:     reason,
+	})
+	if DivergenceMetrics.Mismatches() != 1 {
+		t.Fatalf("expected Mismatches()=1, got %d", DivergenceMetrics.Mismatches())
+	}
+}
+
+func TestComputeDivergenceMatch_ThreadDisagreement(t *testing.T) {
+	oldRouting := OldRoutingFromMessage("", "", "thread-ABC")
+	actualExternalRef := "thread:proj1:thread-XYZ" // DIFFERENT thread
+
+	match, reason := ComputeDivergenceMatch(oldRouting, actualExternalRef, "some-conv-id")
+	if match {
+		t.Fatal("expected match=false when thread IDs differ")
+	}
+	if !strings.Contains(reason, "mismatch") {
+		t.Errorf("expected reason to contain 'mismatch', got %q", reason)
 	}
 }
 
