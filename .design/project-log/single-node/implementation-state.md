@@ -6508,3 +6508,19 @@ bare `#1302`. My own scoping of my own bug was too narrow.
 
 Note the coincidence and do not be fooled by it later: the fork-ref count is **also** 13. Chance.
 My 13 was a line count and reconciles with nothing.
+
+### 04:22 — independent confirmation of the register
+
+The coordinator checked `ptone/scion#1294`, `#1296` and `#1298` against the API without being asked
+to. All three exist and the titles match what was reported. That is 3 of 12 verified by someone who
+did not file them.
+
+Worth recording because of tonight's theme: **a developer's report that it filed twelve issues is an
+allegation, and I accepted it.** I checked the *content* of one issue (`#1297`, because the count
+looked wrong) but never checked that the other eleven existed at all. The coordinator did the part I
+skipped. Same lesson as the "reported number is an allegation" entry from earlier, and I was on the
+wrong side of it this time.
+
+Nothing outstanding on the register. Holding for ptone on: task #50 (tutorial and deploy scripts),
+the open defect register (#15, #32, #35, #37, #46, #48, #49), and the omni build in flight to
+`ptone-misc/scion-alt`.
