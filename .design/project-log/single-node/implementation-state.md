@@ -10686,3 +10686,47 @@ commit, and for **the class** rather than the five instances.
 **Merge recommendation to ptone: hold.** Also told him this is a **regression against main**, where
 these paths are Go with explicit error returns — merging as-is trades working error handling for
 silent exits. Task #84.
+
+### §35.24 — the fixes, and the claim I would not accept (2026-08-27, 19:09–19:14)
+
+Developer pushed **`5a62a6ca`** (verified: 2 files, +27/−9). Took all five gemini findings, **found a
+sixth by class audit** — `curl -s` on the IAP PATCH, where `-s` suppresses the transport error and
+`set -e` then exits silently. Same class, and it found it by generalising rather than by pattern-
+matching the five it was handed. That is the behaviour I asked for.
+
+Its class formulation: *any `var="$(cmd)"` under `set -euo pipefail` where `cmd` can exit non-zero
+and either stderr is redirected or the failure preempts the script's own error handling.* Two fix
+shapes — `|| fallback=""` for optional results, `|| { diagnostic; return 1 }` for fatal ones.
+
+**Chose option B on the test-mode question** — the helper now runs `set -euo pipefail; source … && func`
+so all tests match production, rather than adding one-off tests per known bug. Its reasoning: A is
+whack-a-mole, B catches future regressions in the class without anyone having to think about it, and
+the risk of lighting up unrelated tests *is the benefit* because those would be real bugs. Agreed.
+
+**But I did not accept its closing claim: *"zero lit up, which means the fix is complete."*** That
+inference has three explanations and only one is the claim:
+
+- **(a)** the fixes are complete;
+- **(b)** no test ever drives a substitution into a failing branch, so `set -e` never fires — the
+  harness change is real but **inert today**;
+- **(c)** the harness's `set -e` **does not apply inside the called function at all** — a decorative
+  pin, which this project has shipped before.
+
+**(c) is a genuine bash hazard, not a hypothetical.** POSIX ignores `-e` for any command of an AND-OR
+list other than the last, **and that suppression propagates to every command inside a function
+invoked in such a position.** `source script && func` puts `func` last, so by my reading `-e` applies
+— **but that is reasoning, and reasoning off a signal instead of exercising the path is precisely
+what has burned this project, including me, today.**
+
+Sent it to the reviewer to settle **by experiment**: revert one of the six fixes and see whether a
+test goes red. A test that cannot go red is worse than no test. Told it that answering **(b)** is an
+honest and useful outcome — it changes what we *claim* in the PR, not whether we merge.
+
+Also asked it to exercise the perimeter assertion rather than read it. `|| location=""` is tidy, and
+tidy is not the same as fail-closed; `invokerIamDisabled: true` means nothing sits behind that gate.
+And flagged **`|| true`** wherever it appears as the same defect family pointed the other way —
+converting a failure into a success.
+
+**Deliberately did NOT tell ptone "fixed, merge now."** I offered exactly that prematurely earlier
+today and withdrew it within a minute. The verdict comes first. He is holding on my word and the
+word has to be worth something.
