@@ -106,31 +106,73 @@ When connecting to a Hub behind Google Identity-Aware Proxy (IAP), `scion attach
 - **Key Bindings:**
     - `Ctrl+P, Ctrl+Q`: Detach from the session without stopping the agent.
 
+## Messaging
+
 ### `scion message` (or `msg`)
 
-Sends a message to a running agent's harness by enqueuing it into its input stream (requires Tmux).
+Sends a message to a recipient — typically a running agent's harness — by enqueuing it into the recipient's input stream.
 
-**Usage:** `scion message [agent] <message> [flags]`
+**Usage:** `scion message [recipient] <message> [flags]`
 
 - **Arguments:**
-    - `[agent]`: The name of the agent (optional if `--broadcast` is used).
-    - `<message>`: The text to send to the agent.
+    - `[recipient]`: The target for the message. Recipient forms:
+        - `<agent-name>` — Send to an agent (default, same as `agent:<name>`).
+        - `agent:<name>` — Send to an agent explicitly.
+        - `user:<name>` — Send to a user's inbox (Hub mode only).
+        - `group[a,b,...]` — Send to multiple recipients (Hub mode only).
+        - `@<agent-name>` — Conversation reference: resolves the agent and routes via the conversation model. Fully available.
+    - `<message>`: The text to send.
 - **Flags:**
     - `-i, --interrupt`: Interrupt the harness before sending the message.
-    - `-b, --broadcast`: Send the message to all running agents in the current project.
-    - `-a, --all`: Send the message to all running agents across all projects.
     - `-w, --wake`: Resume a suspended agent before delivering the message.
-    - `--attach <path>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`.
-        - **Constraints:** Cannot be combined with `--raw`, `--in`, or `--at`.
-        - **Requirements:** Requires Hub mode (`scion hub enable`). If run in local mode, the command will fail with an error suggesting you include file contents directly in the message text. If the file is not a regular file (e.g., is a directory) or is outside allowed roots, the command will fail.
-    - `--notify`: Get notified when the target agent(s) respond or reach a terminal state after receiving the message.
-    - `--in <duration>`: Schedule message delivery after a duration (e.g., `30m`, `1h`). *(Requires Hub mode)*
-    - `--at <time>`: Schedule message delivery at an absolute time (ISO 8601, e.g., `2026-02-28T14:00:00Z`). *(Requires Hub mode)*
-    - `--plain`: Mark for plain-text delivery (the message still flows as structured JSON internally).
-    - `--raw`: Send literal bytes via tmux send-keys with no trailing Enter (supports control keys like arrows and Escape). Cannot be combined with `--attach`.
-    - `--channel <channel>`: Target a specific message channel (e.g., `telegram`, `gchat`, `teams`, `web`).
-    - `--thread-id <id>`: Target a specific thread ID within the channel.
-    - `--cc <agents>`: Carbon copy additional agents. This flag is **repeatable** and also accepts a **comma-separated list** of agent names (e.g., `--cc dev-agent,qa-agent --cc test-agent`). Strict empty-value validation is enforced.
+    - `-a, --attach <file>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`. Requires Hub mode.
+    - `--visibility <level>`: Set message visibility (`normal`, `verbose`, `full`).
+- **Deprecated Flags** (still work, emit stderr warnings):
+    - `-b, --broadcast` → use `scion broadcast`
+    - `-a, --all` → use `scion broadcast --all`
+    - `--raw` → use `scion keys`
+    - `--in <duration>` → use `scion schedule message --in`
+    - `--at <time>` → use `scion schedule message --at`
+    - `--plain` → deprecated, will be removed
+    - `--notify` → use `scion notifications subscribe`
+    - `--channel <name>` → use `@<agent-name>` to message an agent directly
+    - `--thread-id <id>` → use `@<agent-name>` to message an agent directly
+    - `--cc <agents>` → use `--to` instead
+
+:::caution[Conversation Reference Availability]
+Only `@<agent-name>` is fully supported as a conversation reference today.
+- `@<email>` only works from within an agent container (requires `SCION_AGENT_NAME`). From a human CLI it errors.
+- `conv:<uuid>` and `#<thread-name>` parse correctly but are **gated in the CLI** with a clear error — delivery routing is not yet implemented. Do not use these forms.
+:::
+
+### `scion broadcast`
+
+Sends a message to all running agents in the current project (default) or across all projects (`--all`). Replaces the deprecated `scion message --broadcast` flag.
+
+**Usage:** `scion broadcast <message> [flags]`
+
+- **Flags:**
+    - `-a, --all`: Send to all running agents across all projects (global broadcast).
+    - `-i, --interrupt`: Interrupt each agent's harness before sending.
+    - `-w, --wake`: Resume suspended agents before delivering.
+    - `--visibility <level>`: Set message visibility (`normal`, `verbose`, `full`).
+
+### `scion keys`
+
+Sends raw keystrokes to an agent's terminal via tmux send-keys, with no trailing Enter. Replaces the deprecated `scion message --raw` flag.
+
+**Usage:** `scion keys <agent-name> <keystrokes>`
+
+- **Arguments:**
+    - `<agent-name>`: The name of the target agent.
+    - `<keystrokes>`: Literal keystrokes to send (supports tmux key names like `Escape`, `C-c`, `Up`, `Enter`).
+
+**Examples:**
+```bash
+scion keys my-agent "Escape"
+scion keys my-agent "C-c"
+scion keys my-agent "Up Up Enter"
+```
 
 ### `scion messages` (aliases: `msgs`, `inbox`)
 
@@ -145,6 +187,8 @@ Manages bidirectional communication and persistent messages sent by agents to hu
 - **Flags:**
     - `--agent <string>`: Filter messages by a specific agent.
     - `--all`: Show all messages, including those already marked as read.
+
+## Agent Management
 
 ### `scion logs`
 
