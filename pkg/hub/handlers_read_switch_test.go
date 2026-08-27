@@ -21,22 +21,33 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"io"
+	"log/slog"
+
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"github.com/knadh/koanf/v2"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// slogDiscard returns a *slog.Logger that discards all output.
+func slogDiscard() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -564,6 +575,429 @@ func TestDualWrite_UnparseableSenderAddress_NoConversationCreated(t *testing.T) 
 }
 
 // ---------------------------------------------------------------------------
+// Test 7: AC-DEF15-4 — invalid dm: key as ThreadID creates zero conversations
+// ---------------------------------------------------------------------------
+
+func TestOutbound_InvalidDMKeyThreadID_NoConversationCreated(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: uuid.NewString(), Name: "def15-project",
+		Slug: "def15-project", Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	recipient := &store.User{
+		ID: uuid.NewString(), Email: "human@def15.test",
+		DisplayName: "Human", Role: store.UserRoleMember, Status: "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, recipient))
+
+	agent := &store.Agent{
+		ID: uuid.NewString(), Name: "def15-agent", Slug: "def15-agent",
+		ProjectID: project.ID, Phase: "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Count conversations before the request.
+	convsBefore, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	countBefore := len(convsBefore.Items)
+
+	// Send an outbound message with an INVALID dm: key as ThreadID.
+	// "bot" is not a valid principal kind and the UUID is malformed.
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:human@def15.test",
+		Msg:       "bad dm key test",
+		ThreadID:  "dm:bot:baduuid:user:" + uuid.NewString(),
+		Channel:   "web",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+	// The request may succeed (message delivered without conversation) or fail
+	// validation, but either way no conversation row should be created.
+
+	// Count conversations after the request.
+	convsAfter, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	countAfter := len(convsAfter.Items)
+
+	assert.Equal(t, countBefore, countAfter,
+		"AC-DEF15-4: invalid dm: key must not create any conversation rows")
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: AC-DEF16-1 — ValidateLegacyMessage rejects BEFORE conversation row
+// ---------------------------------------------------------------------------
+
+func TestDEF16_ValidationRejectsBeforeConversationCreated_Outbound(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: uuid.NewString(), Name: "def16-project",
+		Slug: "def16-project", Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	recipient := &store.User{
+		ID: uuid.NewString(), Email: "human@def16.test",
+		DisplayName: "Human", Role: store.UserRoleMember, Status: "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, recipient))
+
+	agent := &store.Agent{
+		ID: uuid.NewString(), Name: "def16-agent", Slug: "def16-agent",
+		ProjectID: project.ID, Phase: "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Count conversations before.
+	convsBefore, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	countBefore := len(convsBefore.Items)
+
+	// Send a request that ValidateLegacyMessage rejects:
+	// thread_id set but channel not set → "thread_id requires channel to be set".
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:human@def16.test",
+		Msg:       "should be rejected",
+		ThreadID:  "some-thread",
+		// Channel intentionally omitted — triggers validation failure.
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+	// Must be rejected with 400.
+	assert.Equal(t, http.StatusBadRequest, rr.Code,
+		"AC-DEF16-1: thread_id without channel should be rejected")
+	assert.Contains(t, rr.Body.String(), "thread_id requires channel",
+		"AC-DEF16-1: error message should mention the validation rule")
+
+	// Count conversations after — must be unchanged.
+	convsAfter, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	countAfter := len(convsAfter.Items)
+
+	assert.Equal(t, countBefore, countAfter,
+		"AC-DEF16-1: rejected request must not create any conversation rows")
+}
+
+func TestDEF16_ValidationRejectsBeforeConversationCreated_Inbound(t *testing.T) {
+	srv, s, alice, agent, _, _, _, _ := readSwitchWorld(t)
+	ctx := context.Background()
+
+	// Count conversations before.
+	convsBefore, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	countBefore := len(convsBefore.Items)
+
+	// Send a message that ValidateLegacyMessage rejects:
+	// thread_id set but channel not set.
+	msgReq := MessageRequest{
+		StructuredMessage: &messages.StructuredMessage{
+			Sender:    "user:" + alice.DisplayName,
+			SenderID:  alice.ID,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "should be rejected",
+			Type:      "instruction",
+			ThreadID:  "some-thread",
+			// Channel intentionally omitted — triggers validation failure.
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	body, err := json.Marshal(msgReq)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/actions/message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	userIdent := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, string(alice.Role), "api")
+	req = req.WithContext(contextWithIdentity(req.Context(), userIdent))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentMessage(rr, req, agent.ID)
+
+	// Must be rejected with 400.
+	assert.Equal(t, http.StatusBadRequest, rr.Code,
+		"AC-DEF16-1 inbound: thread_id without channel should be rejected")
+	assert.Contains(t, rr.Body.String(), "thread_id requires channel",
+		"AC-DEF16-1 inbound: error message should mention the validation rule")
+
+	// Count conversations after — must be unchanged.
+	convsAfter, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	countAfter := len(convsAfter.Items)
+
+	assert.Equal(t, countBefore, countAfter,
+		"AC-DEF16-1 inbound: rejected request must not create any conversation rows")
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: Broker delegation — dm: ThreadID produces kind=direct
+// ---------------------------------------------------------------------------
+
+func TestBrokerDelegation_DMThreadID_ProducesDirectConversation(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	agentID := uuid.NewString()
+	userID := uuid.NewString()
+
+	// Build a dm: key.
+	dmKey, err := messages.DMConversationKey("agent", agentID, "user", userID)
+	require.NoError(t, err)
+
+	// Send the dm:-keyed ThreadID through ResolveOrCreateThreadConversation,
+	// which is the delegation path that broker inbound and messagebroker.go use.
+	convResult := messaging.ResolveOrCreateThreadConversation(ctx, s, slogDiscard(), dmKey, "some-project")
+	require.NotNil(t, convResult, "dm: key through thread delegation should resolve")
+
+	// Verify the conversation has kind=direct (not group).
+	conv, err := s.GetConversation(ctx, convResult.ConversationID)
+	require.NoError(t, err)
+	assert.Equal(t, "direct", conv.Kind,
+		"dm:-keyed ThreadID through broker delegation must produce kind=direct")
+	assert.Equal(t, dmKey, conv.ExternalRef,
+		"dm:-keyed ThreadID through broker delegation must preserve the dm: key as external_ref")
+	assert.Nil(t, conv.ProjectID,
+		"dm conversations are global — ProjectID must be nil")
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: AC-S215-COEXISTENCE — validDMKey and DeriveConversationKey guard
+// different sinks
+// ---------------------------------------------------------------------------
+
+// TestValidDMKey_CoexistenceWithDeriveConversationKey proves that the two DM
+// guards in the outbound message handler protect DIFFERENT sinks:
+//
+//   - validDMKey guards the message row: a malformed dm: key is rejected with
+//     HTTP 400 and the message is never persisted.
+//   - DeriveConversationKey guards the conversation row: a well-formed but
+//     non-canonical dm: key passes validDMKey but fails DeriveConversationKey's
+//     canonicality check. The message IS persisted (HTTP 200) but no
+//     conversation row is created.
+//
+// Traceability: AC-S215-COEXISTENCE
+func TestValidDMKey_CoexistenceWithDeriveConversationKey(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// --- Setup: project, user, agent ---
+	project := &store.Project{
+		ID: uuid.NewString(), Name: "coexist-project",
+		Slug: "coexist-project", Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	user := &store.User{
+		ID: uuid.NewString(), Email: "human@coexist.test",
+		DisplayName: "Human", Role: store.UserRoleMember, Status: "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	agent := &store.Agent{
+		ID: uuid.NewString(), Name: "coexist-agent", Slug: "coexist-agent",
+		ProjectID: project.ID, Phase: "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// -------------------------------------------------------------------
+	// Sub-test 1: validDMKey rejects malformed dm: key → HTTP 400.
+	//
+	// PROVEN: validDMKey returns 400 for a malformed dm: key.
+	//
+	// NOT PROVEN HERE: that validDMKey is what prevents the message row.
+	// In this test environment there is no broker proxy, so channel
+	// validation (line ~196) would also block persistence with a 503
+	// even if validDMKey were disabled. A positive control confirms
+	// this: a well-formed dm: key with Channel="web" also fails to
+	// persist (503 broker_unavailable), and without Channel the request
+	// fails ValidateLegacyMessage ("thread_id requires channel"). No
+	// message with a ThreadID can reach CreateMessage in this
+	// environment, so row-count assertions would be decoration — they
+	// pass regardless of whether the guard exists. (Rule 14.)
+	//
+	// The "different sinks" conclusion is established by code reading
+	// (validDMKey at :121 exits before CreateMessage; DeriveConversationKey
+	// at :269 only skips conversation resolution) and by sub-test 2's
+	// unit-level demonstration, not by an API-level persistence proof.
+	// -------------------------------------------------------------------
+	t.Run("malformed_dm_key_rejected_by_validDMKey", func(t *testing.T) {
+		// "bot" is not "user" or "agent", so this fails the dmKeyRegexp.
+		badKey := "dm:bot:00000000-0000-0000-0000-000000000001:user:" + user.ID
+
+		body, _ := json.Marshal(OutboundMessageRequest{
+			Recipient: "user:human@coexist.test",
+			Msg:       "bad dm key test",
+			ThreadID:  badKey,
+			Channel:   "web",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: agent.ID},
+			ProjectID: project.ID,
+		}}))
+
+		rr := httptest.NewRecorder()
+		srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code,
+			"AC-S215-COEXISTENCE sub1: malformed dm: key must be rejected with 400")
+		assert.Contains(t, rr.Body.String(), "invalid DM key format",
+			"AC-S215-COEXISTENCE sub1: error message must identify the DM key guard")
+
+		// Positive control: a well-formed dm: key also cannot persist in this
+		// environment (no broker → 503 on channel validation), confirming that
+		// row-count assertions would be vacuous here.
+		canonicalKey, dmErr := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
+		require.NoError(t, dmErr)
+		goodBody, _ := json.Marshal(OutboundMessageRequest{
+			Recipient: "user:human@coexist.test",
+			Msg:       "positive control",
+			ThreadID:  canonicalKey,
+			Channel:   "web",
+		})
+		goodReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(goodBody))
+		goodReq.Header.Set("Content-Type", "application/json")
+		goodReq = goodReq.WithContext(contextWithIdentity(goodReq.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: agent.ID},
+			ProjectID: project.ID,
+		}}))
+		goodRR := httptest.NewRecorder()
+		srv.handleAgentOutboundMessage(goodRR, goodReq, agent.ID)
+
+		// The positive control must NOT succeed (503 from channel validation
+		// without a broker). This proves that row-count assertions would be
+		// vacuous: no ThreadID message can persist in this test environment.
+		assert.NotEqual(t, http.StatusOK, goodRR.Code,
+			"AC-S215-COEXISTENCE sub1 positive control: well-formed dm: key "+
+				"with Channel='web' must also fail to persist (no broker), "+
+				"confirming row-count assertions would be decoration")
+	})
+
+	// -------------------------------------------------------------------
+	// Sub-test 2: Key passes validDMKey but fails DeriveConversationKey
+	// canonicality → message IS stored without conversation.
+	//
+	// dm:user:<UUID>:agent:<UUID> matches dmKeyRegexp (both kinds are
+	// valid, both UUIDs are well-formed) but DeriveConversationKey
+	// re-derives the canonical form as dm:agent:<UUID>:user:<UUID>
+	// (sorted lexicographically) and rejects the mismatch.
+	//
+	// We simulate the outbound handler's dual-write pattern directly
+	// (as TestBrokerInbound_DualWrite_StampsConversationID does) because
+	// the full HTTP path requires a registered broker proxy with a "web"
+	// channel, which is beyond the scope of this unit test.
+	// -------------------------------------------------------------------
+	t.Run("non_canonical_dm_key_message_stored_no_conversation", func(t *testing.T) {
+		convsBefore, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+		require.NoError(t, err)
+		countBefore := len(convsBefore.Items)
+
+		// Non-canonical: user before agent. validDMKey passes this
+		// (regex allows both "user" and "agent" in either position).
+		nonCanonicalKey := "dm:user:" + user.ID + ":agent:" + agent.ID
+
+		// Verify the key passes validDMKey (the regex guard).
+		require.True(t, validDMKey(nonCanonicalKey),
+			"precondition: non-canonical key must pass validDMKey regex")
+
+		// Verify the key fails DeriveConversationKey (canonicality check).
+		_, _, _, deriveErr := messaging.DeriveConversationKey(messaging.KeyInputs{
+			ThreadID:      nonCanonicalKey,
+			ProjectID:     project.ID,
+			SenderKind:    "agent",
+			SenderID:      agent.ID,
+			RecipientKind: "user",
+			RecipientID:   user.ID,
+		})
+		require.Error(t, deriveErr,
+			"precondition: non-canonical key must fail DeriveConversationKey")
+		assert.Contains(t, deriveErr.Error(), "not canonical",
+			"precondition: DeriveConversationKey must reject with canonicality error")
+
+		// Simulate the outbound handler's dual-write pattern:
+		// 1. Build the message.
+		storeMsg := &store.Message{
+			ID:          uuid.NewString(),
+			ProjectID:   project.ID,
+			Sender:      "agent:" + agent.Slug,
+			SenderID:    agent.ID,
+			Recipient:   "user:" + user.DisplayName,
+			RecipientID: user.ID,
+			Msg:         "non-canonical dm key test",
+			Type:        messages.TypeInputNeeded,
+			AgentID:     agent.ID,
+			Channel:     "web",
+			ThreadID:    nonCanonicalKey,
+			CreatedAt:   time.Now(),
+		}
+
+		// 2. Attempt conversation resolution (mirrors handler lines 269-288).
+		extRef, kind, projID, keyErr := messaging.DeriveConversationKey(messaging.KeyInputs{
+			ThreadID:      storeMsg.ThreadID,
+			ProjectID:     project.ID,
+			SenderKind:    "agent",
+			SenderID:      agent.ID,
+			RecipientKind: "user",
+			RecipientID:   user.ID,
+		})
+		// Key derivation fails — handler logs warning and skips conversation.
+		require.Error(t, keyErr, "DeriveConversationKey must reject non-canonical key")
+
+		var convResult *messaging.ConversationResult
+		if keyErr == nil {
+			convResult = messaging.ResolveOrCreateConversationByKey(ctx, s, slogDiscard(), extRef, kind, projID)
+		}
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
+
+		// 3. Persist the message — this succeeds regardless of conversation failure.
+		require.NoError(t, s.CreateMessage(ctx, storeMsg),
+			"message persistence must succeed even when conversation resolution fails")
+
+		// Assert: message IS stored with the non-canonical ThreadID.
+		msg, err := s.GetMessage(ctx, storeMsg.ID)
+		require.NoError(t, err)
+		assert.Equal(t, nonCanonicalKey, msg.ThreadID,
+			"AC-S215-COEXISTENCE sub2: message must carry the original non-canonical ThreadID")
+		assert.Empty(t, msg.ConversationID,
+			"AC-S215-COEXISTENCE sub2: no conversation_id should be stamped")
+
+		// Assert: no new conversation rows created.
+		convsAfter, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, countBefore, len(convsAfter.Items),
+			"AC-S215-COEXISTENCE sub2: DeriveConversationKey failure must not create conversation rows")
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Helper: emptyKoanf for tests that don't need file/env config.
 // ---------------------------------------------------------------------------
 
@@ -574,4 +1008,132 @@ func TestDualWrite_UnparseableSenderAddress_NoConversationCreated(t *testing.T) 
 func init() {
 	// Ensure koanf import is used.
 	_ = koanf.New(".")
+}
+
+// TestHandleGroupMessage_ThreadID_NotPropagated proves that even when a
+// StructuredMessage arrives at handleGroupMessage with a ThreadID set, that
+// ThreadID does NOT appear in persisted message rows and does NOT influence
+// conversation key derivation.
+//
+// We call handleGroupMessage directly (same-package test access) to isolate
+// the unit under test from upstream validation that rejects group[] recipients.
+// This is the exact code path from handleAgentMessage line ~668:
+//
+//	if messages.IsGroupRecipient(structuredMsg.Recipient) {
+//	    s.handleGroupMessage(w, r, id, structuredMsg, plainMessage, req.Interrupt)
+//	}
+//
+// Traceability: AC-S215-M1
+func TestHandleGroupMessage_ThreadID_NotPropagated(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// --- Setup: project, user, two agents (anchor + target) ---
+
+	project := &store.Project{
+		ID:         api.NewUUID(),
+		Name:       "groupmsg-threadid-project",
+		Slug:       "groupmsg-threadid-project",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	userID := api.NewUUID()
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          userID,
+		Email:       "test@example.com",
+		DisplayName: "Test",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}))
+
+	anchorAgent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "anchor-agent",
+		Slug:       "anchor-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, anchorAgent))
+
+	targetAgent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "target-agent",
+		Slug:       "target-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, targetAgent))
+
+	// --- Call handleGroupMessage directly with a ThreadID-bearing message ---
+	// This simulates what handleAgentMessage does at line ~668 when it detects
+	// a group[] recipient. The StructuredMessage carries a ThreadID that should
+	// NOT propagate into persisted store.Message rows.
+
+	injectedThreadID := "thread:proj:some-thread-id"
+
+	structuredMsg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender:    "user:Test",
+		SenderID:  userID,
+		Recipient: fmt.Sprintf("group[agent:%s,agent:%s]", targetAgent.Slug, anchorAgent.Slug),
+		Msg:       "test group message with thread id",
+		Type:      messages.TypeInstruction,
+		Channel:   "web",
+		ThreadID:  injectedThreadID,
+	}
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+anchorAgent.ID+"/actions/message",
+		nil)
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	srv.handleGroupMessage(rr, req, anchorAgent.ID, structuredMsg, structuredMsg.Msg, false)
+
+	// handleGroupMessage returns 200 with a GroupMessageResponse. Individual
+	// recipients may show "failed" (no dispatcher/broker), but messages are
+	// persisted before dispatch is attempted.
+	require.Equal(t, http.StatusOK, rr.Code,
+		"handleGroupMessage should return 200; got: %s", rr.Body.String())
+
+	// --- Assert 1: No stored message has a non-empty ThreadID ---
+
+	result, err := s.ListMessages(ctx,
+		store.MessageFilter{ProjectID: project.ID},
+		store.ListOptions{})
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Items,
+		"expected at least one persisted message")
+
+	for _, msg := range result.Items {
+		assert.Empty(t, msg.ThreadID,
+			"AC-S215-M1: persisted message %s has ThreadID=%q, want empty: "+
+				"handleGroupMessage must not propagate StructuredMessage.ThreadID "+
+				"into stored messages", msg.ID, msg.ThreadID)
+	}
+
+	// --- Assert 2: ThreadID did not influence conversation key derivation ---
+	// handleGroupMessage uses ResolveOrCreateDMConversation (principal-pair only),
+	// NOT DeriveConversationKey. Verify no stored field echoes the injected ThreadID.
+
+	for _, msg := range result.Items {
+		assert.NotEqual(t, injectedThreadID, msg.GroupID,
+			"AC-S215-M1: message %s GroupID must not be the injected ThreadID", msg.ID)
+	}
+
+	// Verify conversations (if any) don't reference the injected ThreadID.
+	convs, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	for _, conv := range convs.Items {
+		assert.NotContains(t, conv.ExternalRef, injectedThreadID,
+			"AC-S215-M1: conversation %s ExternalRef must not contain the injected ThreadID", conv.ID)
+	}
+
+	t.Logf("AC-S215-M1 PASS: %d message(s) persisted, none carry the "+
+		"injected ThreadID %q", len(result.Items), injectedThreadID)
 }

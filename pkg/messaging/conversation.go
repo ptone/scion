@@ -16,7 +16,6 @@ package messaging
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -137,6 +136,10 @@ func ResolveDMConversationForRead(
 // conversation for the given thread ID and project. Thread conversations
 // are project-scoped. External ref format: thread:{projectID}:{threadID}.
 //
+// When threadID carries a "dm:" prefix the key is treated as a direct-message
+// conversation and validated for canonicality by DeriveConversationKey. A
+// non-canonical dm: key is refused — never silently resolved.
+//
 // On any error the function returns nil and logs the failure.
 // Callers MUST NOT treat a nil return as fatal (Phase 5 non-fatal contract).
 func ResolveOrCreateThreadConversation(
@@ -149,58 +152,57 @@ func ResolveOrCreateThreadConversation(
 		log.Warn("skipping thread conversation resolution: empty threadID")
 		return nil
 	}
-	if projectID == "" {
-		log.Warn("skipping thread conversation resolution: empty projectID",
-			"thread_id", threadID)
-		return nil
-	}
 
-	extRef := fmt.Sprintf("thread:%s:%s", projectID, threadID)
-
-	conv := &store.Conversation{
-		Kind:        "group",
-		Surface:     "native",
-		ExternalRef: extRef,
-		DriftState:  DriftStateActive,
-		ProjectID:   &projectID, // threads ARE project-scoped
-	}
-
-	result, err := cs.UpsertConversationByExternalRef(ctx, conv)
+	extRef, kind, projID, err := DeriveConversationKey(KeyInputs{
+		ThreadID:  threadID,
+		ProjectID: projectID,
+	})
 	if err != nil {
-		log.Error("thread conversation resolution failed (non-fatal)",
-			"external_ref", extRef,
+		// CHANGE 5: A dm: key that fails canonicality is a REFUSAL, not a resolution miss.
+		// Log distinctly so it's visible on the divergence board.
+		log.Warn("conversation key derivation refused (non-fatal)",
 			"thread_id", threadID,
+			"project_id", projectID,
 			"error", err,
 		)
 		return nil
 	}
 
-	return &ConversationResult{
-		ConversationID: result.ID,
-		ExternalRef:    result.ExternalRef,
-	}
+	return ResolveOrCreateConversationByKey(ctx, cs, log, extRef, kind, projID)
 }
 
 // ResolveThreadConversationForRead looks up a thread conversation without
 // creating it. Returns nil if the conversation does not exist or the lookup
 // fails. This is the read-only counterpart of ResolveOrCreateThreadConversation,
 // used by the Phase 8 read-switch to query by ConversationID.
+//
+// Note: the projectID empty-check is intentionally omitted from the early
+// return. DeriveConversationKey case 2 validates empty ProjectID for thread
+// keys, while dm:-prefixed ThreadIDs (case 1) do not require projectID at all.
 func ResolveThreadConversationForRead(
 	ctx context.Context,
 	cr ConversationReader,
 	log *slog.Logger,
 	threadID, projectID string,
 ) *ConversationResult {
-	if threadID == "" || projectID == "" {
+	if threadID == "" {
 		return nil
 	}
 
-	extRef := fmt.Sprintf("thread:%s:%s", projectID, threadID)
-
-	conv, err := cr.GetConversationByExternalRef(ctx, "native", extRef)
+	extRef, _, _, err := DeriveConversationKey(KeyInputs{
+		ThreadID:  threadID,
+		ProjectID: projectID,
+	})
 	if err != nil {
+		log.Debug("read-switch: conversation key derivation refused",
+			"thread_id", threadID, "error", err)
+		return nil
+	}
+
+	conv, lookupErr := cr.GetConversationByExternalRef(ctx, "native", extRef)
+	if lookupErr != nil {
 		log.Debug("read-switch: thread conversation lookup returned no result",
-			"external_ref", extRef, "error", err)
+			"external_ref", extRef, "error", lookupErr)
 		return nil
 	}
 

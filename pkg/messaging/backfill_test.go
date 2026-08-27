@@ -17,10 +17,12 @@ package messaging
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -508,14 +510,17 @@ func TestBackfill_HazardA_EmailBasedDMKeys(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, result.TotalProcessed)
-	assert.Equal(t, 1, result.Inferred, "hazard-A message should be inferred")
-	assert.Equal(t, 0, result.Attributed)
-	assert.Equal(t, 1, result.HazardAEmailCount)
-	assert.Equal(t, 1, result.ConversationsCreated, "conversation still created for inferred messages")
+	// After DeriveConversationKey repoint, email-based IDs fail key derivation
+	// (DMConversationKey requires valid UUIDs). The message is skipped with an
+	// error rather than being assigned to a hazard-A group.
+	assert.Equal(t, 0, result.Attributed, "key derivation fails for email IDs")
+	assert.Equal(t, 0, result.Inferred, "message is skipped, not inferred")
+	assert.Equal(t, 0, result.ConversationsCreated, "no conversation created for failed derivation")
+	assert.NotEmpty(t, result.Errors, "derivation failure should be recorded as an error")
 
-	// Message should still be stamped.
+	// Message should NOT be stamped — derivation failed.
 	stamped, _ := msgStore.GetMessage(ctx, msg.ID)
-	assert.NotEmpty(t, stamped.ConversationID)
+	assert.Empty(t, stamped.ConversationID)
 }
 
 func TestBackfill_HazardB_SlugResolution(t *testing.T) {
@@ -727,9 +732,12 @@ func TestBackfill_HazardA_BothSidesEmail(t *testing.T) {
 	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
 	require.NoError(t, err)
 
-	assert.Equal(t, 1, result.HazardAEmailCount)
-	assert.Equal(t, 1, result.Inferred)
+	// After DeriveConversationKey repoint, email-based IDs fail key derivation.
+	// The message is skipped with an error, not assigned to a hazard-A group.
+	assert.Equal(t, 0, result.HazardAEmailCount, "key derivation fails before hazard detection")
+	assert.Equal(t, 0, result.Inferred, "message is skipped, not inferred")
 	assert.Equal(t, 0, result.Attributed)
+	assert.NotEmpty(t, result.Errors, "derivation failure should be recorded as an error")
 }
 
 func TestBackfill_ConversationParticipants(t *testing.T) {
@@ -784,10 +792,15 @@ func TestBackfill_ConversationExternalRef(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, conv.ExternalRef, "conversation should have an external ref for upsert idempotency")
-	// DM external_ref must match the dual-write format: dm:{sorted(idA,idB)}.
-	wantRef := DirectMessageExternalRef(userID, agentID)
+	// DM external_ref must match DMConversationKey format (kind-prefixed, canonical).
+	// The backfill now uses DeriveConversationKey which delegates to DMConversationKey,
+	// producing dm:<kind>:<uuid>:<kind>:<uuid> — not the old DirectMessageExternalRef
+	// format dm:<sorted-id>:<sorted-id>. The old format predates the kind-safe
+	// convergence in DEF-8 and no longer matches what dual-write produces.
+	wantRef, err := messages.DMConversationKey("user", userID, "agent", agentID)
+	require.NoError(t, err)
 	assert.Equal(t, wantRef, conv.ExternalRef,
-		"DM external_ref must match DirectMessageExternalRef (dual-write format)")
+		"DM external_ref must match DMConversationKey (dual-write format)")
 }
 
 func TestBackfill_MixedDirectAndThread(t *testing.T) {
@@ -925,4 +938,54 @@ func TestBackfill_LastCheckpointTracked(t *testing.T) {
 	assert.NotEmpty(t, result.LastCheckpoint, "should track last checkpoint")
 	// The last checkpoint should be one of the message IDs.
 	assert.True(t, result.LastCheckpoint == msg1.ID || result.LastCheckpoint == msg2.ID)
+}
+
+// ---------------------------------------------------------------------------
+// AC-DEF15-6: dm:-prefixed ThreadID backfill produces kind=direct
+// ---------------------------------------------------------------------------
+
+func TestBackfill_DMPrefixedThreadID_ProducesDirectConversation(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	// Build a canonical dm: key.
+	dmKey, err := messages.DMConversationKey("agent", agentID, "user", userID)
+	require.NoError(t, err)
+
+	// Create a message whose ThreadID is dm:-prefixed.
+	msg := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, time.Now())
+	msg.ThreadID = dmKey
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg}}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.Attributed, "dm:-prefixed ThreadID should be attributed")
+	assert.Equal(t, 1, result.ConversationsCreated)
+
+	// Verify the created conversation.
+	stamped, err := msgStore.GetMessage(ctx, msg.ID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, stamped.ConversationID)
+
+	conv, err := convStore.GetConversation(ctx, stamped.ConversationID)
+	require.NoError(t, err)
+
+	// AC-DEF15-6: kind must be "direct", not "group".
+	assert.Equal(t, "direct", conv.Kind,
+		"AC-DEF15-6: dm:-prefixed ThreadID must produce kind=direct")
+
+	// AC-DEF15-6: external_ref must NOT match "thread:%:dm:%" pattern.
+	assert.False(t, strings.HasPrefix(conv.ExternalRef, "thread:"),
+		"AC-DEF15-6: external_ref must not have thread: prefix for dm: keys")
+
+	// AC-DEF15-6: external_ref must equal the dm: key verbatim.
+	assert.Equal(t, dmKey, conv.ExternalRef,
+		"AC-DEF15-6: external_ref must equal the dm: key verbatim")
 }

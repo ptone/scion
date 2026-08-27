@@ -24,10 +24,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-func TestDirectMessageExternalRef_Deterministic(t *testing.T) {
+func TestLegacyDirectMessageExternalRef_Deterministic(t *testing.T) {
 	// Order should not matter — the ref is sorted.
-	refAB := DirectMessageExternalRef("aaa", "bbb")
-	refBA := DirectMessageExternalRef("bbb", "aaa")
+	refAB := directMessageExternalRef("aaa", "bbb")
+	refBA := directMessageExternalRef("bbb", "aaa")
 	if refAB != refBA {
 		t.Errorf("refs should be identical regardless of order: %q vs %q", refAB, refBA)
 	}
@@ -36,8 +36,8 @@ func TestDirectMessageExternalRef_Deterministic(t *testing.T) {
 	}
 }
 
-func TestDirectMessageExternalRef_EmptyID(t *testing.T) {
-	ref := DirectMessageExternalRef("", "xyz")
+func TestLegacyDirectMessageExternalRef_EmptyID(t *testing.T) {
+	ref := directMessageExternalRef("", "xyz")
 	if ref != "dm::xyz" {
 		t.Errorf("expected dm::xyz, got %q", ref)
 	}
@@ -177,7 +177,7 @@ func TestComputeDivergenceMatch_NoOldRouting(t *testing.T) {
 
 func TestComputeDivergenceMatch_DMAgreement(t *testing.T) {
 	oldRouting := OldRoutingFromMessage("sender", "recip", "")
-	actualExternalRef := DirectMessageExternalRef("sender", "recip")
+	actualExternalRef := directMessageExternalRef("sender", "recip")
 	match, reason := ComputeDivergenceMatch(oldRouting, actualExternalRef, "conv-abc")
 	if !match {
 		t.Error("expected match=true for DM agreement")
@@ -213,7 +213,7 @@ func TestComputeDivergenceMatch_RoutingTypeMismatch(t *testing.T) {
 
 	// Old says thread, new says DM
 	oldRouting = OldRoutingFromMessage("", "", "thread-ABC")
-	actualExternalRef = DirectMessageExternalRef("sender", "recip")
+	actualExternalRef = directMessageExternalRef("sender", "recip")
 	match, reason = ComputeDivergenceMatch(oldRouting, actualExternalRef, "conv-xyz")
 	if match {
 		t.Error("expected match=false when routing types differ (thread vs DM)")
@@ -245,7 +245,7 @@ func TestComputeDivergenceMatch_GenuineDisagreement(t *testing.T) {
 	// message has sender=A, recipient=B (old routing = sender-recipient:A:B)
 	// but the conversation it was stamped with belongs to a different pair (dm:X:Y)
 	oldRouting := OldRoutingFromMessage("agent-A", "user-B", "")
-	actualExternalRef := DirectMessageExternalRef("agent-X", "user-Y") // DIFFERENT pair
+	actualExternalRef := directMessageExternalRef("agent-X", "user-Y") // DIFFERENT pair
 
 	match, reason := ComputeDivergenceMatch(oldRouting, actualExternalRef, "some-conv-id")
 	if match {

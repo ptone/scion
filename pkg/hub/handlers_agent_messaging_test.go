@@ -20,8 +20,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,6 +35,16 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
+
+// testDirectMessageExternalRef replicates the legacy (pre-DEF-8) external ref
+// format: dm:<sortedID1>:<sortedID2>. The canonical format was changed to
+// dm:<kind>:<uuid>:<kind>:<uuid> via DMConversationKey, but the divergence
+// tests need the old shape for comparison.
+func testDirectMessageExternalRef(idA, idB string) string {
+	pair := []string{idA, idB}
+	sort.Strings(pair)
+	return fmt.Sprintf("dm:%s:%s", pair[0], pair[1])
+}
 
 // postOutbound sends one agent→human message as the given agent.
 func postOutbound(t *testing.T, srv *Server, projectID, agentID, msg string) *httptest.ResponseRecorder {
@@ -332,7 +344,7 @@ func TestDEF11_PreResolvedConversation_PopulatesExternalRef(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a conversation with a known ExternalRef.
-	extRef := messaging.DirectMessageExternalRef(userID, agentID)
+	extRef := testDirectMessageExternalRef(userID, agentID)
 	conv := &store.Conversation{
 		Kind:        "direct",
 		Surface:     "native",
@@ -397,7 +409,7 @@ func TestDEF11_PreResolvedConversation_DivergenceMatch(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a conversation matching the sender/agent DM pair.
-	extRef := messaging.DirectMessageExternalRef(userID, agentID)
+	extRef := testDirectMessageExternalRef(userID, agentID)
 	conv := &store.Conversation{
 		Kind:        "direct",
 		Surface:     "native",
@@ -493,7 +505,7 @@ func TestDEF11_PreResolvedConversation_GenuineDisagreement(t *testing.T) {
 
 	// Create a conversation with an ExternalRef that does NOT match the
 	// sender/agent pair used in the message (different principals).
-	wrongRef := messaging.DirectMessageExternalRef("wrong-id-x", "wrong-id-y")
+	wrongRef := testDirectMessageExternalRef("wrong-id-x", "wrong-id-y")
 	conv := &store.Conversation{
 		Kind:        "direct",
 		Surface:     "native",

@@ -282,7 +282,7 @@ func TestResolveOrCreateThreadConversation_UpsertError(t *testing.T) {
 		t.Errorf("expected nil on upsert error, got %+v", got)
 	}
 	output := buf.String()
-	if !strings.Contains(output, "thread conversation resolution failed") {
+	if !strings.Contains(output, "conversation resolution failed") {
 		t.Errorf("expected error log, got: %s", output)
 	}
 }
@@ -327,5 +327,128 @@ func TestResolveOrCreateThreadConversation_KindIsGroup(t *testing.T) {
 	}
 	if mock.lastConv.Kind != "group" {
 		t.Errorf("expected Kind 'group', got %q", mock.lastConv.Kind)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AC-DEF15-5: write-then-read tests
+//
+// These use mockConversationStore from backfill_test.go, which implements
+// both ConversationUpserter and ConversationReader with in-memory storage.
+// ---------------------------------------------------------------------------
+
+func TestWriteThenRead_DMPrefixedThreadID(t *testing.T) {
+	// AC-DEF15-5: Write with dm:-prefixed ThreadID, then read with same inputs.
+	// The read must find the row the write created (same ConversationID).
+	cs := &mockConversationStore{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	dmKey := "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"
+
+	writeResult := ResolveOrCreateThreadConversation(
+		context.Background(), cs, logger, dmKey, "")
+	if writeResult == nil {
+		t.Fatal("write: expected non-nil result for dm:-prefixed ThreadID")
+	}
+
+	readResult := ResolveThreadConversationForRead(
+		context.Background(), cs, logger, dmKey, "")
+	if readResult == nil {
+		t.Fatal("read: expected non-nil result — should find the row the write created")
+	}
+
+	if readResult.ConversationID != writeResult.ConversationID {
+		t.Errorf("ConversationID mismatch: write=%q, read=%q",
+			writeResult.ConversationID, readResult.ConversationID)
+	}
+	if readResult.ExternalRef != writeResult.ExternalRef {
+		t.Errorf("ExternalRef mismatch: write=%q, read=%q",
+			writeResult.ExternalRef, readResult.ExternalRef)
+	}
+}
+
+func TestWriteThenRead_NonDMThreadID(t *testing.T) {
+	// AC-DEF15-5: Write with a non-dm ThreadID, then read with same inputs.
+	cs := &mockConversationStore{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	writeResult := ResolveOrCreateThreadConversation(
+		context.Background(), cs, logger, "thread-xyz", "proj-1")
+	if writeResult == nil {
+		t.Fatal("write: expected non-nil result for non-dm ThreadID")
+	}
+
+	readResult := ResolveThreadConversationForRead(
+		context.Background(), cs, logger, "thread-xyz", "proj-1")
+	if readResult == nil {
+		t.Fatal("read: expected non-nil result — should find the row the write created")
+	}
+
+	if readResult.ConversationID != writeResult.ConversationID {
+		t.Errorf("ConversationID mismatch: write=%q, read=%q",
+			writeResult.ConversationID, readResult.ConversationID)
+	}
+	if readResult.ExternalRef != writeResult.ExternalRef {
+		t.Errorf("ExternalRef mismatch: write=%q, read=%q",
+			writeResult.ExternalRef, readResult.ExternalRef)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Delegation tests — verify distinct log text (Change 5)
+// ---------------------------------------------------------------------------
+
+func TestResolveOrCreateThreadConversation_DMKeyRefusalLogsDistinctly(t *testing.T) {
+	// A non-canonical dm: key must be logged as "conversation key derivation
+	// refused" — distinct from "thread conversation resolution failed" so it's
+	// visible on the divergence board.
+	mock := &mockConversationUpserter{}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Non-canonical: user before agent (canonical order is agent before user).
+	nonCanonical := "dm:user:550e8400-e29b-41d4-a716-446655440000:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+
+	got := ResolveOrCreateThreadConversation(context.Background(), mock, logger,
+		nonCanonical, "")
+	if got != nil {
+		t.Errorf("expected nil for non-canonical dm key, got %+v", got)
+	}
+	if mock.lastConv != nil {
+		t.Error("upsert should not have been called for refused key")
+	}
+	output := buf.String()
+	if !strings.Contains(output, "conversation key derivation refused") {
+		t.Errorf("expected distinct refusal log, got: %s", output)
+	}
+	if strings.Contains(output, "thread conversation resolution failed") {
+		t.Errorf("refusal log should NOT contain the old resolution-failed text, got: %s", output)
+	}
+}
+
+func TestResolveThreadConversationForRead_DMKeyWithEmptyProjectID(t *testing.T) {
+	// dm:-prefixed ThreadIDs should work without projectID — the old code
+	// would have returned nil for empty projectID before even trying.
+	cs := &mockConversationStore{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	dmKey := "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"
+
+	// Write first.
+	writeResult := ResolveOrCreateThreadConversation(
+		context.Background(), cs, logger, dmKey, "")
+	if writeResult == nil {
+		t.Fatal("write: expected non-nil result")
+	}
+
+	// Read with empty projectID — should still find the DM.
+	readResult := ResolveThreadConversationForRead(
+		context.Background(), cs, logger, dmKey, "")
+	if readResult == nil {
+		t.Fatal("read: expected non-nil result for dm key with empty projectID")
+	}
+	if readResult.ConversationID != writeResult.ConversationID {
+		t.Errorf("ConversationID mismatch: write=%q, read=%q",
+			writeResult.ConversationID, readResult.ConversationID)
 	}
 }
