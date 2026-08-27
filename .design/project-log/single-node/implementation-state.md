@@ -7863,3 +7863,52 @@ raised one at a time.
 different instances, sizes and phases, both losing the FIRST agent created. Twice
 is a coincidence, but I asked `def` to look before it tore down. It had already
 completed, so this stays open.
+
+## 08:02 — THE NUMBERS ARE FROZEN. A miscount surfaced 15 minutes after I published them.
+
+**I reopened task #63.** I marked it complete at 08:00 and that was premature.
+
+**`sn-stress-def` found an error in its own measurement, unprompted, after its
+instance was already deleted and its task already closed.** It counted only the
+sandboxes in the ladder it was driving. **`probe-0` and `probe-1` were alive on the
+same instance throughout Phase A and were never counted.** Its idle ceiling was
+**19-20 concurrent sandboxes, not 17**.
+
+**I had already sent both figures to ptone and told docs to publish 6 and 15.**
+
+Actions, in order, within four minutes:
+
+1. **Froze the docs sizing section.** Told `sn-docs-dev` to write no number at all —
+   not 6, 15, 17 or 51 — and to proceed with everything that does not depend on a
+   count. The load-split callout and the 503 wording fix are unaffected.
+2. **Sent ptone a HOLD.** Included the one fact that decides whether he is exposed:
+   **the error runs in the safe direction.** Uncounted sandboxes mean the instance
+   held MORE than reported, so the published numbers are too low, not too high.
+   Nobody is at risk from having acted on them. Told him he will get one corrected
+   set and not a third version.
+3. **Asked `def` the question that actually matters: was Phase B affected?** Phase B
+   is what we publish. Demanded sandbox NAMES rather than totals — a total is
+   precisely what produced the error.
+4. **Reopened `sn-stress-max` with the same question**, because a shared method
+   means a shared error. Its CSV tracks `n_alive` over `w-*` only. Cloud Logging
+   survives instance deletion, which `def` proved by investigating after teardown.
+
+**`def` also killed my first-agent hypothesis using its own data**, and said so
+plainly: `probe-0` was created **nine minutes before** `idle-1` and was alive
+**twenty-two minutes after** `idle-1` died. So `idle-1` was neither first nor
+oldest. It wrote that its finding *"weakens rather than strengthens"* the pattern —
+the correct reading, and most would have let a tidy pattern stand. My third
+mechanism guess of the day to die, and again a developer killed it.
+
+**A separate finding inside that investigation:** `idle-1`'s death has **no log
+entry at all** — no signal, no exit code, no `sandbox wait end`. **A sandbox can
+disappear with no signal, no exit code and no log line.** That is its own defect.
+
+**The pattern I keep repeating, now in my own numbers.** I told two agents this week
+that a total is not evidence. Then I published two totals. The instrument I never
+questioned was the count itself.
+
+Minor, noted, not chased: `sn-stress-max` pushed a branch `scion/sn-stress-max`
+(`5c9ab825`) despite its brief saying to touch no branch. Asked what is on it; told
+it not to delete it. All seven do-not-delete instances verified alive; both stress
+instances confirmed gone.

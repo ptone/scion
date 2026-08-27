@@ -7,6 +7,11 @@
 # This is the OPTIMISTIC bound. Idle agents = fixed overhead only.
 # Nobody runs idle agents. This isolates the per-agent constant.
 #
+# CORRECTION: probe-0 (created 06:49:16) and probe-1 (created 06:51:37) were
+# alive throughout Phase A but NOT counted in the totals below. Actual concurrent
+# sandbox count = total_alive + 2 (probes). The ceiling is ~19-20 concurrent
+# sandboxes, not 17-18. Repeatability: UNMEASURED (each ceiling observed once).
+#
 N,timestamp,create_http,create_ms,agent_name,rss_mib,total_alive,total_dead,dead_names,notes
 1,06:58:09,201,~2000,idle-1,499,1,0,,
 2,06:58:44,201,~2000,idle-2,526,2,0,,
@@ -25,5 +30,5 @@ N,timestamp,create_http,create_ms,agent_name,rss_mib,total_alive,total_dead,dead
 15,07:17:03,201,2172,idle-15,,14,1,idle-1,pre-registered prediction was 15
 16,07:17:48,201,3014,idle-16,,15,1,idle-1,
 17,07:18:38,201,2331,idle-17,,16,1,idle-1,
-18,07:19:31,201,2442,idle-18,,17,1,idle-1,17 concurrent alive
-19,07:20:15,201,3322,idle-19,,2,17,all except idle-18 and idle-19,SIGBUS (signal 7) at 07:20:22 -> TOTAL LOSS
+18,07:19:31,201,2442,idle-18,,17,1,idle-1,17 idle alive (+2 probes = 19 total sandboxes)
+19,07:20:15,201,3322,idle-19,,2,17,all except idle-18 and idle-19,SIGBUS (signal 7) at 07:20:22 -> TOTAL LOSS (21 total sandboxes at crash)
