@@ -1285,6 +1285,55 @@ there is a reason they kept both that I am not seeing.
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
 
+## 5aj. 19:14-19:25Z — heartbeat: an idle manager beside held work, and a stale heartbeat
+
+**Roster healthy** — em9 executing, em10 starting, em6 idle. main unmoved at `b09e7f49`, so the
+tranche A recipe validation still holds.
+
+**Rule 28 caught something, one cycle after I wrote it.** DEF-12's ledger row said *"BLOCKED ON
+DEF-15 — do not dispatch."* DEF-15 closed hours ago: `backfill.go:196` now derives through
+`DeriveConversationKey` and `conversation.go:139-161` refuses non-canonical `dm:` keys. Nothing
+updated the row. Meanwhile em6 had been idle for twenty minutes. **A stale "do not dispatch" in a
+ledger is a standing order that nobody re-reads** — it does not decay, and it does not announce
+that its premise expired. Verified the closure in the code, specced DEF-12, dispatched em6.
+
+**Specced DEF-12 — and found my own recorded instinct was wrong.** The ledger said the entry point
+belongs in `sciontool`. It does not: `cmd/sciontool/commands/` is agent-side tooling with no
+server-database surface. I learned that by listing the directory, which took ten seconds and which
+I had not done when I wrote the instinct down. **An instinct recorded in a ledger acquires the
+authority of a finding.** I put the correction in the spec *and* repeated it in the dispatch
+message, because the spec could be skimmed.
+
+Real prior art is `maybeMigrateLegacySQLite` (`cmd/server_foreground.go:1309`): detect first, back
+up, opt-out flag, fail loudly when opted out but action is needed, report struct. Design position:
+**detection automatic, execution explicit.** The backfill has batching, resume and dry-run — three
+features that only make sense for a long interruptible job, which is precisely what you must not
+block startup on. But "operator-invoked" is how DEF-12 happened in the first place, so startup
+warns with a row count and the command. Where the command lives is left to em6 deliberately.
+
+**DEF-19 nearly done, one hour after dispatch.** em9 verified: `IsGroupRecipient` is pre-existing
+so no second parser (AC-19-6); merges clean onto `14b3ba7c` despite branching from `edd4e4bd`;
+parse-error fall-through denies rather than guesses. Held on one point — they hardcoded
+`Via: ViaExplicit` for group members while the single path uses the computed `via`, and those
+diverge for `TypeMention`. **The choice is probably right; what is wrong is that it is incidental.**
+`via` is computed at the top of the function and silently unused in the new branch, which is an
+invitation for a future refactor to "fix" it with no test objecting. Asked for reachability, a
+pinning test, and one line of comment.
+
+**Both new managers stalled on start** — em9 and em10 both sat at *"stalled (was working): Agent
+started"* until messaged. This is the harness, not the agent. Added to the heartbeat as step 2 so
+a future cycle does not read it as a failed dispatch and re-create the agent.
+
+**em10's `/workspace` was empty** — no clone. Sent the repo URL. Worth remembering that a dispatch
+brief written entirely in repo-relative paths assumes a repo.
+
+**Replaced the heartbeat: v4 deleted, v5 active.** v4 still instructed me to run the seven CI gates
+against `messaging-v2` as a merge candidate — a strategy abandoned at 18:30Z. It also lacked the
+aggregate-file check. **A heartbeat is the instruction set that survives my own compaction, so a
+stale one is worse than none: post-compaction me would have followed it without knowing better.**
+v5 leads with the strategy, adds rule 31's deletion review, adds the stall-on-start note, and tells
+future-me to say so rather than comply when an instruction assumes the old plan.
+
 ## 5ai. 18:50-19:10Z — S2.15 merged; the tranche A cut nearly reverted main
 
 **S2.15 accepted and merged. `messaging-v2` is now `14b3ba7c`**, 91 commits ahead of main.
