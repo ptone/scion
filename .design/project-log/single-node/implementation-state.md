@@ -7175,3 +7175,83 @@ does not open in 15 minutes it stays a dead end, but it gets recorded accurately
 
 Priority given to `sn-stress-def`: freeze-N first (cheap, gates the meaning of everything else), SSH
 second, ladder last and only once liveness is trustworthy.
+
+## 2026-08-27 07:12 — freeze-N result, and the finding hiding in its own timestamps
+
+`sn-stress-def` ran the freeze cleanly and reported good data. Its conclusion was half right; the
+decisive fact was in the table and went unremarked.
+
+### What the freeze established
+
+**No further deaths at constant N over ~3.5 minutes.** Ages at probe:
+
+```
+idle-1  age 12m19s  DEAD (died 07:01:56-07:02:12, age ~4m at death)
+idle-2  age 11m44s  ALIVE  RSS=526MiB     idle-7  age  9m55s  ALIVE  RSS=523MiB
+idle-3  age 11m27s  ALIVE  RSS=528MiB     idle-8  age  9m32s  ALIVE  RSS=514MiB
+idle-4  age 11m08s  ALIVE  RSS=520MiB     idle-9  age  9m07s  ALIVE  RSS=522MiB
+idle-5  age 10m44s  ALIVE  RSS=524MiB     idle-10 age  8m32s  ALIVE  RSS=506MiB
+idle-6  age 10m18s  ALIVE  RSS=509MiB     idle-11 age  4m37s  ALIVE  RSS=514MiB
+```
+
+**Age-based death is dead.** idle-2 is nearly 3× idle-1's age at death and is fine. Clean negative.
+
+**`exit_code=137` appears nowhere** in Cloud Logging (the one hit was `elapsed=137ms`). **idle-1 was
+not OOM-killed.** Also a clean negative, and it kills the memory story on its own.
+
+RSS is tight — 506 to 528 MiB across eleven agents. That constant is solid and it is the one number
+from today I would actually publish.
+
+### Where its inference went wrong, and it inherited the error from me
+
+It concluded *"capacity survives as the explanation."* That is my false dichotomy coming back at me:
+I framed the freeze as time-versus-capacity, so ruling out time looked like establishing capacity.
+**It does neither.** Two independent facts argue against capacity: no 137, and 10 agents × ~515 MiB
+is ~5.1 GiB of 8192 MiB. Nowhere near the limit.
+
+A test that eliminates one of two named hypotheses does not confirm the other unless the two are
+exhaustive, and mine were not.
+
+### The finding it did not flag
+
+From its own timestamps:
+
+```
+idle-1 died between 07:01:56 and 07:02:12
+idle-10 was CREATED at    07:01:56
+```
+
+**The death window opens at the exact second of a create.**
+
+**Hypothesis: deaths are triggered by CREATE EVENTS, not by load — and the victim is the oldest.**
+
+This explains the one thing memory never could. **Oldest-first is the signature of an eviction
+policy**: least-recently-used eviction picks the oldest *idle* entry, and idle agents are by
+construction never used. Memory pressure has no reason to prefer the oldest; an LRU reaper does.
+
+It also re-reads the freeze result. Nothing died during the freeze **because nothing was created
+during the freeze.** The freeze did not hold load constant — it held *creates* at zero. The
+experiment I designed to separate time from capacity accidentally separated creates from everything,
+and that turned out to be the more useful cut.
+
+**Count the survivors: idle-2 through idle-11 is exactly 10.** After idle-1 died the count was 9;
+idle-11 restored it to 10. Consistent with a **hard cap of 10 concurrent sandboxes**.
+
+### My pre-registered prediction, made before the data
+
+**Creating idle-12 will either be REFUSED, or will SUCCEED AND KILL idle-2. If the result is 11
+alive, I am wrong and idle-1 was a one-off.** Recorded here before the fact, since I required the
+same of both agents and the requirement is worthless if the architect exempts himself.
+
+Protocol ordered for the next create: probe every agent, create exactly one, probe every agent again
+within seconds, report before/after counts and which agent went quiet.
+
+### sn-stress-max is now the decisive instrument
+
+With 4× the memory: **if the cap is resource-derived it should be ~4× higher; if it is a fixed
+number, its cap will also be 10.** A limit that does not move when you quadruple memory is not a
+capacity limit at all — and that would mean the answer to ptone's sizing question is not a number
+about memory but a configured constant.
+
+Told it to abandon the SSH lead for now and produce a true exec-verified alive count, because its
+reported N=30 is hub state and may be far from real.
