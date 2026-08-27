@@ -5009,3 +5009,106 @@ added #1281, and recorded that the split-brain was fixed upstream by #1300 with 
 verified it **by reading, not by exercising**.
 
 Doc is now 473 lines. (I first wrote 460 here from memory instead of counting. Corrected.)
+
+---
+
+## 2026-08-27 01:20Z — the tier is rebased onto upstream main and its compare URL is posted
+
+`scion/sn-tier` @ **`eaa14b14`** — 40 files, +6911 −52, ahead=9, **behind=0 against
+`GoogleCloudPlatform/scion` main**. #1282 OPEN / MERGEABLE. Compare URL posted to thread
+1532864101909528737. This closes the last gate on task #56 that was mine to close; what remains is
+ptone clicking the URL and upstream review.
+
+Every figure above was measured against the remote after the final push, not carried forward from
+the developer's report.
+
+### What I got wrong, and the shape of it
+
+**A conflict-surface measurement has a short half-life.** I measured the rebase surface at 00:31 —
+eight commits behind, `factory.go` untouched — and wrote into the brief that the predicted
+`factory.go` conflict had been overtaken by landing order, *and told the developer not to look for
+it*. #1302 merged upstream as `83ee4bd9` about twenty minutes later. Re-measured at 00:49: behind
+eleven, and the surface was exactly the three files §4.4 had predicted from the start —
+`factory.go`, `cmd/server_foreground.go`, `pkg/config/settings_v1.go`.
+
+So the original design reasoning was right, my correction to it was wrong, and I had already
+propagated the wrong version into a brief, a PR description and the design doc. Caught it only
+because I re-measured out of habit before posting the URL. The correction reached the developer
+before it pushed, which was luck rather than process.
+
+The generalisable rule: **re-measure immediately before resolution, not once at brief-writing
+time.** An active upstream invalidates a snapshot faster than a rebase takes to run.
+
+§4.4 now carries both entries — the prediction, my wrong retraction, and the outcome. Deleting the
+retraction would have made the section read as cleanly prescient, which is not what happened.
+
+### `MERGEABLE` is not `compiles`
+
+Worth stating plainly because it nearly cost us. Throughout this, #1282 read `MERGEABLE`. Both
+sides registered `cloudrun-instances`, so a clean three-way merge produces a **duplicated `case`
+in a Go switch** — a compile error, and one that shows up as no conflict at all. I flagged the
+shape to the coordinator before the developer reported, and it did materialise:
+
+- `pkg/hub/web_test.go` — git silently auto-merged our branch's changes so as to **revert
+  upstream's `AccessSettingsProvider` pattern** back to direct field access, and dropped upstream's
+  AccessSettings tests while duplicating two guard tests. Resolution: restore upstream's file
+  wholesale, since our branch has no legitimate changes there.
+- `pkg/runtime/factory.go` — #1302 changed `NewCloudRunRuntimeFromInstances` to return an error and
+  removed a field. Both callers needed adapting.
+
+**Third time on this project a clean-looking auto-merge was wrong; second time it was caught only
+at compile.** That is now a standing item for any brief involving a rebase: build before trusting
+the merge, and say so explicitly.
+
+### The dropped commit, and its unreported consequence
+
+The developer dropped commit `563ae825` ("remove our duplicate guard"). That was the right call —
+replayed onto upstream it would have deleted *upstream's* guard, not our copy. But it had a
+consequence they did not report and I found by diffing file lists: our branch then **deleted
+`.design/project-log/p0-security-fixes.md`**, which had landed upstream with #1307. In scope before
+the rebase, out of scope after it. Restored; count went 41 → 40.
+
+Worth noting the mechanism, because it will recur: **dropping a commit during a rebase silently
+re-scopes every deletion it contained.** Diffing the file list against the pre-rebase list is what
+caught it; the test suite and the build could not have.
+
+### A brief of mine that was wrong, corrected to the developer
+
+My repack brief listed `cmd/server_bridge_test.go` as a pure dev-auth-guard file to delete
+entirely. I read its contents this time: all seven tests are tier tests
+(`TestResolveHubListenPort_HostedTier`, `TestIAPAudienceToCloudRunURL`,
+`TestContainerBridgeEndpoint`, …). No guard tests. Keeping it was right and my brief was wrong.
+Told the developer directly rather than letting the correction sit only in my head.
+
+### Verification I actually ran before posting the URL
+
+| Check | Result |
+|---|---|
+| Base | `behind=0` vs **upstream** main — not stale fork main |
+| Guard duplicated? | our diff adds **zero** guard code; `IsLoopbackHost` defined once, `web.go:442` |
+| `pkg/hub/web.go` / `web_test.go` | absent from our diff — untouched, correct |
+| `factory.go` | three cases at :210 / :224 / :243, no duplicate |
+| Internal logs | no `project-log` path in the diff |
+| Design doc | byte-identical to my working copy, 486 lines |
+
+### Two process notes
+
+**Don't put machine-derivable numbers in prose you cannot edit later.** My first compare URL
+carried "40 files, +6860 −52". The doc refresh landed straight after and made it +6911. I have
+fork write access only, so once ptone clicks, that body is unfixable. Reposted one superseding URL
+with the line count removed entirely — the diff stat is on the PR anyway. Both URLs resolve to the
+same head, so only the description differed.
+
+**`gh pr edit` fails on this repo** with a projects-classic GraphQL deprecation error.
+`gh api -X PATCH repos/ptone/scion/pulls/N --input <json>` works. Used it to correct #1282's body,
+which had carried my wrong retraction of the `factory.go` claim.
+
+### Still open
+
+- #1274 (depth-1 workspace cannot push to a non-`origin` remote) — the one filed issue with teeth,
+  constrains §1's final step.
+- Task #44 — admin-email seeding retest. Root cause fixed upstream by #1300, **verified by reading
+  only**. This is the sole outstanding item that would move a §1 claim from read to exercised. Not
+  dispatched while the rebase was in flight; it is now the next thing worth a live deploy.
+- Task #50 — tutorial and deploy scripts, gated on an unanswered decision.
+- Two drive-by branches held at the coordinator's request until the tier lands.
