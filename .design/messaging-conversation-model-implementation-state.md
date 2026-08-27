@@ -870,6 +870,27 @@ applied it faithfully *there*. The violation appeared one layer upstream on the 
 rule stated about a function gets applied to that function; the property it protects lives on the
 data path.** Worth stating rules against the data next time.
 
+**AMENDED 14:20Z — my root cause above was wrong, and S6 supplied the right one.** I wrote that
+the reviewers graded against a stale threat model. S6 checked what they had actually briefed and
+reported that the auditor's threat model was substantially post-1c; the failure was in how the
+security-critical region was *bounded*. They had described the kind default as a call-site
+detail, and described the derivation path as **ending at `ParseDMKey`** rather than **starting at
+`PrincipalKindFromAddress`**. A reviewer told where the sensitive region ends reviews it there.
+
+**Rule, promoted out of that reply because it generalises:** when you designate something
+security-critical, **state where it begins, not only what it is.** A path named by its endpoint
+gets reviewed at its endpoint; every input reaching the sensitive function is inside the
+boundary, and a briefing that omits this has drawn the boundary in the wrong place. S6's
+compressed form, which does the work of a four-point list on someone scanning a diff:
+**any guess on any input to the key derivation is a guess on the ACL.**
+
+Worth recording *how* this correction arrived. I offered S6 an explanation that was flattering to
+them and cost them nothing to accept. They checked what they had actually told the auditor and
+returned a worse answer about themselves and a more accurate one about the system. Third time
+today S6 improved on an instruction rather than executing it. **The failure mode I should watch
+for in myself is the mirror image: my explanations of other agents' errors are also claims about
+code, and they get graded by nobody unless the agent pushes back.**
+
 **DEF-11 defect — the fix reproduces its own bug one layer up.** S7 gated the new
 `conv-lookup-failed` fallback on `actualRef == "" && convID != ""`. That is a strictly larger set
 than "pre-resolved and lookup failed": it also swallows thread conversations with empty refs
