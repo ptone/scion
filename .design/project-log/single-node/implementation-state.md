@@ -9466,3 +9466,40 @@ be presented as a decision, or a tutorial whose value is removing decisions gets
 workspace trust prompt again** — the §28.7 failure, reproduced first try. Caught it inside 45
 seconds with `scion look` instead of losing eight minutes to a stall notification. **Both failure
 modes are reproducible, not flukes.** The rule stands: phase `running` **and** eyes on the terminal.
+
+## §33 — `28ef41c8`: the ninth flag documented; the site has republished
+
+### §33.1 — Verified against the branch
+
+| claim | verified |
+|---|---|
+| branch `scion/sn-flagdoc`, head `28ef41c8`, based on current upstream `main` | yes (`merge-base --is-ancestor`) |
+| one file, **5 insertions**, no deletions | yes |
+| `--image-registry` row added to the Optional flags table | yes |
+| three sentences at the end of the Container image section | yes |
+| nothing else touched | yes — the diff is those two hunks and nothing more |
+
+The added prose:
+
+> The deploy derives the agent image registry from `--image` automatically; if derivation fails, the
+> error names `--image-registry` as the explicit override. **When this value is wrong, agent creation
+> fails — not the deploy itself.**
+
+That last clause is the whole justification for the entry. A flag whose misconfiguration breaks a
+*different, later* command than the one you ran must be findable; one that merely tunes the command
+you are already reading about does not need prose. The developer kept it to an escape hatch and did
+not oversell it (brief §4).
+
+### §33.2 — The site republished
+
+`deploy-docs` for `#1315` completed successfully. Re-fetched the live page:
+**`deploy-cloudrun-sandbox` → 0 occurrences, `go env GOPATH` → 2.** The published tutorial is now
+the real one. Told ptone to look again, with a prefilled compare URL for `scion/sn-flagdoc`.
+
+**§32.1's lesson, closed:** the reader's view and the repository's contents were out of step for
+about twenty minutes, and only fetching the URL a reader would fetch showed it. `git show` on `main`
+would have said everything was fine, twice.
+
+### §33.3 — Fleet
+
+`sn-flagdoc-dev` reclaimed after verification. **Zero developer agents of mine running.**
