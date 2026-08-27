@@ -1276,3 +1276,44 @@ morning and never propagated it to the docs agent. **My omission, and the regist
 caught it.**
 
 Fix dispatched to `sn-docs-dev`. Nothing blocked.
+
+## §21 — D8: the sizing delta §18 deferred is now unblocked (08:30)
+
+§18 ended with a deliberate hold: *"Sizing guidance. Both stress agents are mid-ladder. Nothing about
+capacity should enter the design doc or the tutorial until Phase B lands, and Phase B is the number
+we would publish."*
+
+**Phase B has landed at both sizes.** That hold is retired. This is the only design-doc delta that
+changed since §18 — D4, D5, D6 and D7 stand exactly as written and need nothing new from you.
+
+### D8 — §9.1 and §5 now have measured capacity behind them
+
+| size | idle | working |
+|---|---|---|
+| 4 CPU / 8 GiB (default) | 20 | 6 |
+| 8 CPU / 32 GiB (maximum) | 51 | 14 |
+
+Single observation each; repeatability unmeasured. Both verified by enumerating sandbox names from
+Cloud Logging, not by counting a ladder.
+
+Three things this changes in the doc, all small, all belonging in the same PR as D4–D7:
+
+1. **§9.1's "No per-agent resource limits"** can now say what the shared budget actually holds. It
+   currently states the constraint without its magnitude, which reads as milder than it is.
+2. **§5's loss framing** (this is D7) gains a number: the Instance is destroyed at these counts, and
+   the create that destroys it returns HTTP 201 first.
+3. **§2 or §9.1 gains the sizing caveat** that no per-CPU or per-GiB rule is derivable. 4× memory and
+   2× CPU bought ~3× idle and ~2× working. Two points, non-linear in both resources.
+
+### One correction to something I told you earlier today
+
+I reported ratios of 3.33 and 3.40 and called the working-to-idle penalty "a real constant."
+**It is not, and I should not have said so.** The larger Instance's 15 live sandboxes were 14 working
+agents plus one leaked idle one (`ptone/scion#1308`); the smaller Instance's 6 were all working. The
+two figures were never the same population. Counting working agents only, the ratios are 3.33 and
+3.64.
+
+Nothing downstream depends on this — no ratio was published, and the tutorial carries only the four
+counts and the create-latency rule. I am flagging it because you read the earlier claim.
+
+**Nothing here is a decision for you.** D5 and D7 remain the two that are.
