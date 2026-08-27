@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS webchat_topic (
     name          TEXT NOT NULL,
     is_general    BOOLEAN NOT NULL DEFAULT FALSE,
     default_agent TEXT,
+    conversation_id TEXT,
     created_by    TEXT NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL,
     last_message_id TEXT,
@@ -84,6 +85,9 @@ CREATE TABLE IF NOT EXISTS webchat_topic (
 
 CREATE INDEX IF NOT EXISTS idx_webchat_topic_project_activity
     ON webchat_topic (project_id, deleted_at, last_activity_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_conversation
+    ON webchat_topic (conversation_id) WHERE conversation_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS webchat_read_state (
     user_id          TEXT NOT NULL,
@@ -309,20 +313,58 @@ UPDATE webchat_thread
 // Wave-2 Topic methods (Postgres)
 // ---------------------------------------------------------------------------
 
-// CreateTopic inserts a new topic. Returns an error on name conflict.
+// CreateTopic inserts a new topic and, when ConversationID is set, atomically
+// creates a linked conversations row inside the same transaction.
 func (s *pgWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic) error {
-	const query = `
-INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent, created_by, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-`
 	var defaultAgent interface{}
 	if topic.DefaultAgent != "" {
 		defaultAgent = topic.DefaultAgent
 	}
-	_, err := s.db.ExecContext(ctx, query, topic.ID, topic.ProjectID, topic.Name,
-		topic.IsGeneral, defaultAgent, topic.CreatedBy, topic.CreatedAt)
+
+	if topic.ConversationID == "" {
+		// Legacy path: no conversation linkage.
+		const query = `
+INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent, created_by, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+`
+		_, err := s.db.ExecContext(ctx, query, topic.ID, topic.ProjectID, topic.Name,
+			topic.IsGeneral, defaultAgent, topic.CreatedBy, topic.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("webchat store: create topic: %w", err)
+		}
+		return nil
+	}
+
+	// Atomic dual-write: topic + conversation in one transaction.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("webchat store: begin create topic tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var convID interface{}
+	if topic.ConversationID != "" {
+		convID = topic.ConversationID
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent, conversation_id, created_by, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		topic.ID, topic.ProjectID, topic.Name, topic.IsGeneral,
+		defaultAgent, convID, topic.CreatedBy, topic.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("webchat store: create topic: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
+		 VALUES ($1, $2, 'group', 'native', '', '', $3, 'active', $4, $5)`,
+		topic.ConversationID, topic.ProjectID, topic.Name, topic.CreatedAt, topic.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("webchat store: create conversation for topic: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("webchat store: commit create topic tx: %w", err)
 	}
 	return nil
 }
@@ -331,6 +373,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)
 func (s *pgWebChatStore) GetTopic(ctx context.Context, topicID string) (*WebChatTopic, error) {
 	const query = `
 SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
        created_by, created_at, COALESCE(last_message_id, ''),
        last_activity_at, deleted_at
   FROM webchat_topic
@@ -341,6 +384,7 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 	var deletedAt *time.Time
 	err := s.db.QueryRowContext(ctx, query, topicID).Scan(
 		&t.ID, &t.ProjectID, &t.Name, &t.IsGeneral, &t.DefaultAgent,
+		&t.ConversationID,
 		&t.CreatedBy, &t.CreatedAt, &t.LastMessageID, &activityAt, &deletedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -360,6 +404,7 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 func (s *pgWebChatStore) ListTopics(ctx context.Context, projectID string) ([]WebChatTopic, error) {
 	const query = `
 SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
        created_by, created_at, COALESCE(last_message_id, ''),
        last_activity_at, deleted_at
   FROM webchat_topic
@@ -379,6 +424,7 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 		var activityAt *time.Time
 		var deletedAt *time.Time
 		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Name, &t.IsGeneral, &t.DefaultAgent,
+			&t.ConversationID,
 			&t.CreatedBy, &t.CreatedAt, &t.LastMessageID, &activityAt, &deletedAt); err != nil {
 			return nil, fmt.Errorf("webchat store: scan topic: %w", err)
 		}
@@ -490,17 +536,40 @@ func (s *pgWebChatStore) TouchTopicActivity(ctx context.Context, topicID, messag
 
 // EnsureGeneralTopic idempotently creates the #general topic for a project.
 // Returns the topic ID (existing or new) and whether a new row was inserted.
+// When creating a new topic, a linked conversations row is atomically created.
 func (s *pgWebChatStore) EnsureGeneralTopic(ctx context.Context, projectID, createdBy string) (string, bool, error) {
 	newID := uuid.New().String()
+	convID := uuid.New().String()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", false, fmt.Errorf("webchat store: begin ensure general tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
 
 	const insert = `
-INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
-VALUES ($1, $2, 'general', TRUE, $3, NOW())
+INSERT INTO webchat_topic (id, project_id, name, is_general, conversation_id, created_by, created_at)
+VALUES ($1, $2, 'general', TRUE, $3, $4, NOW())
 ON CONFLICT DO NOTHING
 `
-	_, err := s.db.ExecContext(ctx, insert, newID, projectID, createdBy)
+	res, err := tx.ExecContext(ctx, insert, newID, projectID, convID, createdBy)
 	if err != nil {
 		return "", false, fmt.Errorf("webchat store: ensure general topic: %w", err)
+	}
+
+	inserted, _ := res.RowsAffected()
+	if inserted > 0 {
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
+			 VALUES ($1, $2, 'group', 'native', '', '', 'general', 'active', NOW(), NOW())`,
+			convID, projectID)
+		if err != nil {
+			return "", false, fmt.Errorf("webchat store: create conversation for general topic: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", false, fmt.Errorf("webchat store: commit ensure general tx: %w", err)
 	}
 
 	const lookup = `SELECT id FROM webchat_topic WHERE project_id = $1 AND is_general = TRUE AND deleted_at IS NULL`
@@ -903,7 +972,35 @@ func (s *pgWebChatStore) runMigrations() error {
 	if err := s.addThreadIDIndex(); err != nil {
 		return fmt.Errorf("thread_id index: %w", err)
 	}
+	if err := s.addTopicConversationID(); err != nil {
+		return fmt.Errorf("topic conversation_id: %w", err)
+	}
 	return nil
+}
+
+// addTopicConversationID adds the conversation_id column and unique index
+// to the webchat_topic table for existing databases.
+func (s *pgWebChatStore) addTopicConversationID() error {
+	done, err := s.migrationCompleted("topic_conversation_id")
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	// ALTER TABLE ADD COLUMN IF NOT EXISTS is Postgres 9.6+.
+	_, err = s.db.Exec(`ALTER TABLE webchat_topic ADD COLUMN IF NOT EXISTS conversation_id TEXT`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_conversation ON webchat_topic (conversation_id) WHERE conversation_id IS NOT NULL`)
+	if err != nil {
+		return err
+	}
+
+	return s.markMigrationCompleted("topic_conversation_id")
 }
 
 // migrationCompleted checks whether a named migration has already run.
@@ -1339,6 +1436,7 @@ func (s *pgWebChatStore) MigrateReadState(ctx context.Context, oldKey, newKey st
 }
 
 // PromoteDM atomically promotes a DM conversation into a space thread.
+// When ConversationID is set on topic, a linked conversations row is also created.
 func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, dmKey string) (*WebChatTopic, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1351,15 +1449,30 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, dmKe
 	if topic.DefaultAgent != "" {
 		defaultAgent = topic.DefaultAgent
 	}
+	var convID interface{}
+	if topic.ConversationID != "" {
+		convID = topic.ConversationID
+	}
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent,
-		 created_by, created_at, last_activity_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		 conversation_id, created_by, created_at, last_activity_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		topic.ID, topic.ProjectID, topic.Name, topic.IsGeneral,
-		defaultAgent, topic.CreatedBy,
+		defaultAgent, convID, topic.CreatedBy,
 		topic.CreatedAt, topic.LastActivityAt)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: create topic in promote: %w", err)
+	}
+
+	// Step 1b: Create linked conversation if ConversationID is set.
+	if topic.ConversationID != "" {
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
+			 VALUES ($1, $2, 'group', 'native', '', '', $3, 'active', $4, $5)`,
+			topic.ConversationID, topic.ProjectID, topic.Name, topic.CreatedAt, topic.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("webchat store: create conversation in promote: %w", err)
+		}
 	}
 
 	// Step 2: Re-key all messages

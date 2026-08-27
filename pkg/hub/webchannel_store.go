@@ -272,7 +272,8 @@ type WebChatTopic struct {
 	ProjectID      string     `json:"projectId"`
 	Name           string     `json:"name"`
 	IsGeneral      bool       `json:"isGeneral"`
-	DefaultAgent   string     `json:"defaultAgent,omitempty"` // empty = no default
+	DefaultAgent   string     `json:"defaultAgent,omitempty"`   // empty = no default
+	ConversationID string     `json:"conversationId,omitempty"` // reverse pointer to conversations.id
 	CreatedBy      string     `json:"createdBy"`
 	CreatedAt      time.Time  `json:"createdAt"`
 	LastMessageID  string     `json:"lastMessageId,omitempty"`
@@ -412,6 +413,7 @@ CREATE TABLE IF NOT EXISTS webchat_topic (
     name          TEXT NOT NULL,
     is_general    INTEGER NOT NULL DEFAULT 0,
     default_agent TEXT,
+    conversation_id TEXT,
     created_by    TEXT NOT NULL,
     created_at    TEXT NOT NULL,
     last_message_id TEXT,
@@ -421,6 +423,9 @@ CREATE TABLE IF NOT EXISTS webchat_topic (
 
 CREATE INDEX IF NOT EXISTS idx_webchat_topic_project_activity
     ON webchat_topic (project_id, deleted_at, last_activity_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_conversation
+    ON webchat_topic (conversation_id) WHERE conversation_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS webchat_read_state (
     user_id          TEXT NOT NULL,
@@ -662,21 +667,62 @@ UPDATE webchat_thread
 // Wave-2 Topic methods (SQLite)
 // ---------------------------------------------------------------------------
 
-// CreateTopic inserts a new topic. Returns an error on name conflict.
+// CreateTopic inserts a new topic and, when ConversationID is set and the
+// conversations table exists, atomically creates a linked conversations row
+// inside the same transaction.
 func (s *sqliteWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic) error {
-	const query = `
-INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent, created_by, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-`
 	isGeneral := 0
 	if topic.IsGeneral {
 		isGeneral = 1
 	}
-	_, err := s.db.ExecContext(ctx, query, topic.ID, topic.ProjectID, topic.Name,
-		isGeneral, nullableString(topic.DefaultAgent), topic.CreatedBy,
+
+	hasConvTable := topic.ConversationID != "" && s.hasConversationsTable()
+
+	if topic.ConversationID == "" && !hasConvTable {
+		// Legacy path: no conversation linkage.
+		const query = `
+INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent, created_by, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+`
+		_, err := s.db.ExecContext(ctx, query, topic.ID, topic.ProjectID, topic.Name,
+			isGeneral, nullableString(topic.DefaultAgent), topic.CreatedBy,
+			topic.CreatedAt.UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			return fmt.Errorf("webchat store: create topic: %w", err)
+		}
+		return nil
+	}
+
+	// Atomic dual-write: topic + conversation in one transaction.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("webchat store: begin create topic tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent, conversation_id, created_by, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		topic.ID, topic.ProjectID, topic.Name, isGeneral,
+		nullableString(topic.DefaultAgent), topic.ConversationID, topic.CreatedBy,
 		topic.CreatedAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("webchat store: create topic: %w", err)
+	}
+
+	if hasConvTable {
+		now := topic.CreatedAt.UTC().Format(time.RFC3339Nano)
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
+			 VALUES (?, ?, 'group', 'native', '', '', ?, 'active', ?, ?)`,
+			topic.ConversationID, topic.ProjectID, topic.Name, now, now)
+		if err != nil {
+			return fmt.Errorf("webchat store: create conversation for topic: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("webchat store: commit create topic tx: %w", err)
 	}
 	return nil
 }
@@ -685,6 +731,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
 func (s *sqliteWebChatStore) GetTopic(ctx context.Context, topicID string) (*WebChatTopic, error) {
 	const query = `
 SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
        created_by, created_at, COALESCE(last_message_id, ''),
        COALESCE(last_activity_at, ''), deleted_at
   FROM webchat_topic
@@ -696,6 +743,7 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 	var deletedAtStr *string
 	err := s.db.QueryRowContext(ctx, query, topicID).Scan(
 		&t.ID, &t.ProjectID, &t.Name, &isGeneral, &t.DefaultAgent,
+		&t.ConversationID,
 		&t.CreatedBy, &createdAtStr, &t.LastMessageID, &activityStr, &deletedAtStr)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -718,6 +766,7 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 func (s *sqliteWebChatStore) ListTopics(ctx context.Context, projectID string) ([]WebChatTopic, error) {
 	const query = `
 SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
        created_by, created_at, COALESCE(last_message_id, ''),
        COALESCE(last_activity_at, ''), deleted_at
   FROM webchat_topic
@@ -738,6 +787,7 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 		var createdAtStr, activityStr string
 		var deletedAtStr *string
 		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Name, &isGeneral, &t.DefaultAgent,
+			&t.ConversationID,
 			&t.CreatedBy, &createdAtStr, &t.LastMessageID, &activityStr, &deletedAtStr); err != nil {
 			return nil, fmt.Errorf("webchat store: scan topic: %w", err)
 		}
@@ -843,23 +893,60 @@ func (s *sqliteWebChatStore) TouchTopicActivity(ctx context.Context, topicID, me
 
 // EnsureGeneralTopic idempotently creates the #general topic for a project.
 // Returns the topic ID (existing or new) and whether a new row was inserted.
+// When creating a new topic, a linked conversations row is atomically created
+// if the conversations table exists (it is Ent-managed and may not exist in
+// all environments).
 func (s *sqliteWebChatStore) EnsureGeneralTopic(ctx context.Context, projectID, createdBy string) (string, bool, error) {
 	newID := uuid.New().String()
+	convID := uuid.New().String()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	const insert = `
-INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+	hasConvTable := s.hasConversationsTable()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", false, fmt.Errorf("webchat store: begin ensure general tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var insert string
+	if hasConvTable {
+		insert = `INSERT INTO webchat_topic (id, project_id, name, is_general, conversation_id, created_by, created_at)
+VALUES (?, ?, 'general', 1, ?, ?, ?)
+ON CONFLICT DO NOTHING`
+	} else {
+		insert = `INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
 VALUES (?, ?, 'general', 1, ?, ?)
-ON CONFLICT DO NOTHING
-`
-	_, err := s.db.ExecContext(ctx, insert, newID, projectID, createdBy, now)
+ON CONFLICT DO NOTHING`
+	}
+
+	var res sql.Result
+	if hasConvTable {
+		res, err = tx.ExecContext(ctx, insert, newID, projectID, convID, createdBy, now)
+	} else {
+		res, err = tx.ExecContext(ctx, insert, newID, projectID, createdBy, now)
+	}
 	if err != nil {
 		return "", false, fmt.Errorf("webchat store: ensure general topic: %w", err)
 	}
 
+	inserted, _ := res.RowsAffected()
+	if inserted > 0 && hasConvTable {
+		// New topic was created — also create the linked conversation.
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
+			 VALUES (?, ?, 'group', 'native', '', '', 'general', 'active', ?, ?)`,
+			convID, projectID, now, now)
+		if err != nil {
+			return "", false, fmt.Errorf("webchat store: create conversation for general topic: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", false, fmt.Errorf("webchat store: commit ensure general tx: %w", err)
+	}
+
 	// Return the ID of the existing or newly created #general topic.
-	// If the returned ID matches the one we tried to insert, we created
-	// a new row; otherwise, the topic already existed.
 	const lookup = `SELECT id FROM webchat_topic WHERE project_id = ? AND is_general = 1 AND deleted_at IS NULL`
 	var id string
 	err = s.db.QueryRowContext(ctx, lookup, projectID).Scan(&id)
@@ -867,6 +954,15 @@ ON CONFLICT DO NOTHING
 		return "", false, fmt.Errorf("webchat store: ensure general topic lookup: %w", err)
 	}
 	return id, id == newID, nil
+}
+
+// hasConversationsTable checks whether the conversations table exists.
+// The conversations table is Ent-managed and may not exist in test
+// environments or during initial setup.
+func (s *sqliteWebChatStore) hasConversationsTable() bool {
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='conversations'").Scan(&count)
+	return err == nil && count > 0
 }
 
 // ---------------------------------------------------------------------------
@@ -1252,7 +1348,36 @@ func (s *sqliteWebChatStore) runMigrations() error {
 	if err := s.addThreadIDIndex(); err != nil {
 		return fmt.Errorf("thread_id index: %w", err)
 	}
+	if err := s.addTopicConversationID(); err != nil {
+		return fmt.Errorf("topic conversation_id: %w", err)
+	}
 	return nil
+}
+
+// addTopicConversationID adds the conversation_id column and unique index
+// to the webchat_topic table for existing databases.
+func (s *sqliteWebChatStore) addTopicConversationID() error {
+	done, err := s.migrationCompleted("topic_conversation_id")
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	// ALTER TABLE ADD COLUMN is idempotent-safe: if the column already exists
+	// (DDL ran first), we just skip the error.
+	_, err = s.db.Exec(`ALTER TABLE webchat_topic ADD COLUMN conversation_id TEXT`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+
+	_, err = s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_conversation ON webchat_topic (conversation_id) WHERE conversation_id IS NOT NULL`)
+	if err != nil {
+		return err
+	}
+
+	return s.markMigrationCompleted("topic_conversation_id")
 }
 
 // migrationCompleted checks whether a named migration has already run.
@@ -1802,7 +1927,12 @@ func (s *sqliteWebChatStore) MigrateReadState(ctx context.Context, oldKey, newKe
 }
 
 // PromoteDM atomically promotes a DM conversation into a space thread.
+// When ConversationID is set on topic, a linked conversations row is also created.
 func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, dmKey string) (*WebChatTopic, error) {
+	// Check for conversations table BEFORE starting the transaction to avoid
+	// ambient pool access inside the tx (which deadlocks at MaxOpenConns=1).
+	writeConv := topic.ConversationID != "" && s.hasConversationsTable()
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: begin promote tx: %w", err)
@@ -1816,14 +1946,28 @@ func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, 
 	}
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent,
-		 created_by, created_at, last_activity_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		 conversation_id, created_by, created_at, last_activity_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		topic.ID, topic.ProjectID, topic.Name, isGeneral,
-		nullableString(topic.DefaultAgent), topic.CreatedBy,
+		nullableString(topic.DefaultAgent), nullableString(topic.ConversationID),
+		topic.CreatedBy,
 		topic.CreatedAt.UTC().Format(time.RFC3339Nano),
 		topic.LastActivityAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: create topic in promote: %w", err)
+	}
+
+	// Step 1b: Create linked conversation if ConversationID is set
+	// and the conversations table exists (checked before tx).
+	if writeConv {
+		now := topic.CreatedAt.UTC().Format(time.RFC3339Nano)
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
+			 VALUES (?, ?, 'group', 'native', '', '', ?, 'active', ?, ?)`,
+			topic.ConversationID, topic.ProjectID, topic.Name, now, now)
+		if err != nil {
+			return nil, fmt.Errorf("webchat store: create conversation in promote: %w", err)
+		}
 	}
 
 	// Step 2: Re-key all messages

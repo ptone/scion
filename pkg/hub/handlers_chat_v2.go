@@ -447,12 +447,14 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	topicID := uuid.New().String()
+	conversationID := uuid.New().String()
 	now := time.Now().UTC()
 	topic := WebChatTopic{
 		ID:             topicID,
 		ProjectID:      projectID,
 		Name:           body.Name,
 		DefaultAgent:   body.DefaultAgent,
+		ConversationID: conversationID,
 		CreatedBy:      user.ID(),
 		CreatedAt:      now,
 		LastActivityAt: now,
@@ -467,7 +469,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
-	// Publish topic created event.
+	// Publish topic created event AFTER commit (transaction has committed by here).
 	s.events.PublishChatTopicEvent(r.Context(), projectID, "created", topic)
 
 	writeJSON(w, http.StatusCreated, topic)
@@ -2298,12 +2300,14 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 
 	// 11. Build topic struct
 	topicID := uuid.New().String()
+	conversationID := uuid.New().String()
 	now := time.Now().UTC()
 	topic := WebChatTopic{
 		ID:             topicID,
 		ProjectID:      projectID,
 		Name:           body.Name,
 		DefaultAgent:   agentID,
+		ConversationID: conversationID,
 		CreatedBy:      user.ID(),
 		CreatedAt:      now,
 		LastActivityAt: now,
