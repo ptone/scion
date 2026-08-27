@@ -322,7 +322,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	if !storeMsg.Broadcasted {
 		var convResult *messaging.ConversationResult
 		if storeMsg.ThreadID != "" {
-			convResult = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, s.messageLog, storeMsg.ThreadID, agent.ProjectID)
+			var threadOpts []messaging.ThreadConversationOption
+			if req.Message.Channel == "web" && s.webChatStore != nil {
+				threadOpts = append(threadOpts, messaging.WithTopicLookup(s.webChatStore))
+			}
+			convResult = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, s.messageLog, storeMsg.ThreadID, agent.ProjectID, threadOpts...)
 		} else if senderUserID != "" && agent.ID != "" {
 			convResult = messaging.ResolveOrCreateDMConversation(r.Context(), s.store, s.messageLog, "user", senderUserID, "agent", agent.ID)
 		}

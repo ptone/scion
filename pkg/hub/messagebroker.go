@@ -460,7 +460,11 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	if !msg.Broadcasted {
 		var convResult *messaging.ConversationResult
 		if msg.ThreadID != "" {
-			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
+			var threadOpts []messaging.ThreadConversationOption
+			if msg.Channel == "web" && p.webChatStore != nil {
+				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
+			}
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
 		} else if msg.SenderID != "" && msg.RecipientID != "" {
 			senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
 			recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
@@ -637,7 +641,11 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	if !msg.Broadcasted {
 		var convResult *messaging.ConversationResult
 		if msg.ThreadID != "" {
-			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
+			var threadOpts []messaging.ThreadConversationOption
+			if msg.Channel == "web" && p.webChatStore != nil {
+				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
+			}
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
 		} else if msg.SenderID != "" && agent.ID != "" {
 			if senderKind, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
 				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)

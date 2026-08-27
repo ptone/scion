@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -79,6 +80,11 @@ type WebChatStore interface {
 	MarkThreadRead(ctx context.Context, userID, projectID, agentID string) error
 
 	// --- Wave-2 Topic methods ---
+
+	// GetTopicConversationID returns the conversation_id for a webchat topic.
+	// Returns ("", store.ErrNotFound) if the topic does not exist.
+	// Returns ("", nil) if the topic exists but has no conversation_id yet.
+	GetTopicConversationID(ctx context.Context, topicID string) (string, error)
 
 	// CreateTopic inserts a new topic. Returns an error on name conflict
 	// within the same project.
@@ -367,6 +373,9 @@ func NewWebChatStore(db *sql.DB, driverName string) WebChatStore {
 type sqliteWebChatStore struct {
 	db *sql.DB
 }
+
+// Compile-time conformance: sqliteWebChatStore satisfies TopicConversationLookup.
+var _ messaging.TopicConversationLookup = (*sqliteWebChatStore)(nil)
 
 // DefaultMigrationBatchSize is the number of rows updated per batch
 // during the thread_id backfill migration.

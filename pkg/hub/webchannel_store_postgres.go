@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -33,6 +34,9 @@ import (
 type pgWebChatStore struct {
 	db *sql.DB
 }
+
+// Compile-time conformance: pgWebChatStore satisfies TopicConversationLookup.
+var _ messaging.TopicConversationLookup = (*pgWebChatStore)(nil)
 
 // Init creates the webchat_* tables using Postgres DDL conventions,
 // then runs any pending idempotent migrations.
