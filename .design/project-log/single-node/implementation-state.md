@@ -9217,3 +9217,17 @@ answer and am not proceeding as though I do.
 
 Reported to ptone 15:03 (1516 chars), including that I had told him the opposite half an hour
 earlier.
+
+### §28.6 — Dispatch error: `scion create` does not start the agent
+
+ptone asked at 15:06 why `#1315` was still not mergeable. Checking, I found `sn-rival-dev` sitting in
+phase **`created`**, not `running`, since 15:02. **`scion create` provisions; it does not start.** I
+issued `scion start sn-rival-dev -y` at 15:07 and it is now `running`.
+
+**Four minutes lost, and I would not have noticed without his prompt.** I dispatched and signalled
+blocked without confirming the agent had actually started — the same class of error as §27: acting
+on the expectation of a signal rather than reading it. **A dispatch is not complete until the phase
+reads `running`.** Adopted as a standing check.
+
+`#1315` currently reports `mergeable=UNKNOWN` (GitHub recomputing after the base moved); head is
+still `724d8a6d`, i.e. nothing has been pushed yet. Told ptone plainly, including the lost minutes.
