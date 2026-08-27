@@ -627,14 +627,16 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
 	if !msg.Broadcasted {
 		var convResult *messaging.ConversationResult
-		if msg.SenderID != "" && agent.ID != "" {
+		if msg.ThreadID != "" {
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
+		} else if msg.SenderID != "" && agent.ID != "" {
 			convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, msg.SenderID, agent.ID)
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.
-		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, agent.ID, "")
+		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, agent.ID, msg.ThreadID)
 		convID := ""
 		actualRef := ""
 		if convResult != nil {
