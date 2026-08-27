@@ -7590,3 +7590,55 @@ The three:
 Also had it record, neutrally and as my error, that design doc §5 frames loss
 around redeploy: **a redeploy is chosen, an overload is not.** That is review-queue
 D7 reaching an issue rather than waiting on the doc PR.
+
+## 07:44 — Three issues filed; EIGHT collisions now; and the defect register may be stale
+
+**Filed:** `ptone/scion#1303` (ceiling destroys the Instance after 201),
+`ptone/scion#1304` (getStats zeros, product-wide), `ptone/scion#1305` (sshd absent
+from the omni image). `sn-findings-dev` independently confirmed `getStats` at
+`pkg/runtimebroker/handlers.go:1958`, character-for-character.
+
+**It challenged one citation and was half right — the more useful half of a
+correction I nearly accepted whole.** It reported that `server_dispatcher.go` "does
+not exist on origin/main and has never existed on any branch". Checked: the file is
+at **`cmd/server_dispatcher.go`**, and **line 34 is exactly the quoted comment**.
+Right file, right line, wrong directory. `sn-stress-def` was one level off, not
+inventing. The developer tested "does this path exist" and got a true answer to a
+narrower question than the one that mattered, then substituted a vaguer citation
+into the filed issue. Ordered the precise citation restored. **When a citation
+fails, search for the filename before concluding it never existed.**
+
+**THREE NEW COLLISIONS. The total is now EIGHT.**
+
+| bare ref | fork | upstream |
+|---|---|---|
+| `#1303` | ceiling destroys Instance | PR: PATCH endpoint for secret metadata |
+| `#1304` | getStats zeros | PR: skip env-gather when noAuth is true |
+| `#1305` | sshd absent | PR: resolve implicit default template |
+
+These are worse than the earlier five: **upstream `#1304` and `#1305` are cited by
+number in our own design doc §9.2 and in an earlier issue body.** The same bare
+number now means two different things inside text we have already written. Ordered
+all three rows added to `ptone/scion#1297`.
+
+**THE REAL FIND, and it came out of checking the collisions.** Both colliding
+upstream PRs are directly relevant to our open defects, and both merged **00:27 and
+00:28 today — before our tier merged at 04:00** — and both verified as ancestors of
+`origin/main`:
+
+- `GoogleCloudPlatform/scion#1305` — resolve implicit `"default"` template
+- `GoogleCloudPlatform/scion#1304` — skip env-gather when `noAuth` is true
+
+**Tasks #37/#48 and #42 may already be fixed, and the omni image under stress test
+(`f99a8189`) contains both fixes.** Stress-brief Trap 2 and docs-brief §4 both rest
+on that premise.
+
+**Not assuming it.** #1305 says TEMPLATE; our defect involves an empty template
+**and** an empty harness-config name, so it may close one half. Dispatched
+`sn-docs-dev` a **four-cell matrix** — neither / template only / harnessConfig only
+/ both — because two cells cannot say which field is responsible. Same shape as the
+six-way audience matrix that found the real IAP cause after I guessed wrong.
+
+If cell 1 returns 201, the register and two briefs need correcting. **If cell 1
+still fails, that is the more valuable result**: it means #1305 did not close our
+defect and the register is right.
