@@ -519,6 +519,49 @@
     treated it as one file's judgement call. It was the first sighting of a pattern, and a
     single instance examined as an instance is how a pattern goes unnoticed.
 
+38. **A tranche has as many cut points as it has transplant methods, and the seams between them
+    split commits in half.** Issued 2026-08-27 21:05Z, from em10's hunk classification. Rule 37
+    said "the cut point"; that was already wrong when I wrote it.
+
+    Tranche B's `pkg/messaging/conversation.go` arrived via **tranche A** (cut recently);
+    `pkg/messaging/divergence.go` arrived via the Phase 5 transplant (cut at `1ff7c6af`). Commit
+    `60670c0e` touches both. **Its conversation.go half is present and its divergence.go half is
+    not.** The branch therefore holds, in one package:
+
+    - `conversation.go:42` — `ExternalRef string // actual external_ref from the DB, not reconstructed`
+    - `divergence.go:145` — the reconstruction that field was added to replace
+
+    **Half a commit is worse than none.** An omitted commit leaves code that is old and
+    self-consistent; a split one leaves code that contradicts itself, each half correct against its
+    own neighbours. Nothing flags it: it compiles, CI is green, and the file documents the bug it
+    contains.
+
+    **The detection rule: classify per commit across all its files, never per file.** em10's report
+    listed `conversation.go (0 gap) — no action needed` as a non-event, on the same page as a large
+    divergence.go gap attributed to the same commit. **A zero gap in one file of a commit whose
+    sibling files show gaps is the loudest available signal that the commit was split** — and it
+    presents as the most reassuring line in the report.
+
+    **Corollary — an adaptation commit is a seam announcing itself.** `9333f943` was written to
+    reconcile a signature mismatch the cut created. **Upstream never needed that code, because
+    upstream never had the mismatch.** Code written to make a transplant build is not integration
+    work; it is a hand-stitched bridge that reconstructs, untested, whatever the missing half did
+    properly. This one guessed principal kinds at six sites — reimplementing the exact fallback
+    `23f7c820` had replaced with rejection, on the **DM key derivation path**, where a guess on any
+    input is a guess on the ACL. One site comments `// safe default for agent-to-agent paths`; the
+    word "safe" is doing work nobody checked.
+
+    **"I had to write code to make the transplant build" is a stop condition, not a task.**
+    Tranche A is *more* exposed than B: its cut is regenerated code + `git apply --3way` on four
+    aggregate files + hand-picked feature files — **four cut points by construction.**
+
+    **What the tautology cost.** The divergence comparison B carries derives both sides of its
+    equality from the same two variables through two formatters that sort identically; the
+    inequality at `divergence.go:151` is unreachable. Every resolved DM returns
+    `both-models-dm-agreement`. **We were one landing away from reading a clean board and calling
+    it evidence for flipping the read switch.** A comparison that cannot fail is not a check, it is
+    a constant — hence AC-B-8: assert that `ComputeDivergenceMatch` can return a mismatch.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -694,7 +737,7 @@ is a queue, not a blocker.
 | Item | Waiting on | Owner | Asked? |
 |---|---|---|---|
 | **Tranche A landing** | who opens the upstream `GoogleCloudPlatform/scion` PR | **user** | yes, 19:55Z, **still unanswered — now blocking TWO tranches** (A and the verified-and-held B) |
-| **Tranche B re-cut** | hunk classification vs staging `80558a03`, then re-cut + full AC re-run | **em10** | blocked 20:58Z |
+| **Tranche B re-cut** | classification **done + accepted** 21:04Z. Now: delete `9333f943` (do not amend), re-cut carrying `60670c0e` + `cd4ee7ed` + `69ac6a12` + `23f7c820`, seam re-scan of the (b) column, full AC re-run plus **AC-B-8** (ComputeDivergenceMatch must be able to return a mismatch) and **AC-B-9** (undetermined principal kind is rejected, not defaulted) | **em10** | directed 21:05Z |
 | **Tranche A cut-point audit** | same rule-37 test applied to A's file set; fold in or justify by reachability | **em6** | dispatched 20:59Z. **Wanted before the user answers the landing question, not after.** |
 | DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
 | AC-12-6 (populated-DB exercise) | beta-hub exercise scheduling | **user** — deliberately deferred; pre-beta gate item | told em6 + integration2-operator 20:0xZ |
@@ -1653,6 +1696,53 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5as. 21:00-21:10Z — the seam, and the security defect the bridge across it reintroduced
+
+em10's hunk classification came back fast and thorough: every commit between the cut point and
+staging, classified per file into must-carry / later-phase / known-omission. The (b) and (c)
+columns I accepted outright — they are careful and I told them not to re-derive them.
+
+**Class (a), settled: `60670c0e`, `cd4ee7ed`, `69ac6a12`, `23f7c820`.**
+
+**Their one raised ambiguity (DEF-8) is not ambiguous, and their argument for it was the weak
+one.** They reasoned "the calls need the kind-qualified API" — a compilation argument. I grepped
+the branch:
+
+```
+messagebroker.go:462  if senderKind == "" { senderKind = "agent" }
+messagebroker.go:466  if recipientKind == "" { recipientKind = "user" }
+messagebroker.go:628  if senderKind == "" { senderKind = "agent" }
+handlers_agent_messaging.go:778  senderKind = "agent" // safe default for agent-to-agent paths
+handlers_agent_messaging.go:1022, :1136  same
+```
+
+**Six sites guessing a principal kind, feeding DM key derivation.** That is precisely the fallback
+`23f7c820` replaced with rejection. The tranche did not merely fail to carry DEF-8 — **it
+reimplemented the defect DEF-8 fixed.** For DMs the key *is* the ACL; there is no second authority
+to catch a wrong one. So `69ac6a12` and `23f7c820` must travel together and splitting them is
+forbidden: the first supplies the kinds, only the second makes an undetermined kind fail closed.
+
+**Their best finding was filed as a non-event.** The line `conversation.go (0 gap) — no action
+needed`, sitting on the same page as a large divergence.go gap attributed to the same commit
+`60670c0e`. That zero gap *is* the seam: conversation.go came via tranche A, divergence.go via the
+Phase 5 transplant. **Rule 38.** I verified both halves on their branch — the `ExternalRef` field
+whose comment says "not reconstructed" and, four files away, the reconstruction it replaced.
+
+**And I confirmed the tautology by reading rather than trusting the commit subject.**
+`divergence.go:145-151` derives `oldPair` and `newPair` from the *same two variables* through two
+formatters that sort identically; the inequality is unreachable; every resolved DM returns
+`both-models-dm-agreement`. Worse than a constant, it is a *reconstruction compared against a
+reconstruction* — `dm:{A}:{B}` when the real key format, documented eight lines above in the same
+tranche, is `dm:<kind>:<uuid>:<kind>:<uuid>`. **Neither side of the comparison is the key the
+database used.**
+
+**The thing I keep having to relearn today.** Three times now the reassuring artifact was the
+dangerous one: a green suite over a configuration that never occurs (rule 36), a tranche faithful
+to a base nobody should have used (37), and now a zero-diff reported as good news (38). **The
+common shape is that our checks are all *agreement* checks, and agreement is cheap when both sides
+come from the same place.** The tautological comparator is that failure written in miniature — it
+is what our whole verification scheme looks like when you shrink it to nine lines.
 
 ## 5ar. 20:55-21:00Z — the fix was seventeen hours old and three of us re-derived it
 
