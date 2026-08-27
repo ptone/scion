@@ -4788,3 +4788,65 @@ back:** if review feedback accrues on the upstream PR, then opening early buys r
 the wait. Opening is not merging, and the DO NOT MERGE warning is the first thing in the body. I
 also gave the counter-argument — a reviewer could merge it regardless — and said I judge that low
 risk but that it is the coordinator's call. Awaiting their go/wait.
+
+---
+
+## 2026-08-27 00:13Z — Upstream **#1307** is open. It conflicts. Tier URL held on the coordinator's call.
+
+ptone clicked the compare link. **Upstream PR #1307** exists — the dev-auth guard is finally
+proposed against `GoogleCloudPlatform/scion`. He immediately spotted: *"already looks like it needs
+a rebase."*
+
+### He is right, and it is worse than staleness
+
+`mergeable=CONFLICTING`, `mergeStateStatus=DIRTY`. Not merely behind.
+
+Main gained **3 commits** since the branch point `d663025b`, and between them they touch **all
+three** files #1265 changes:
+
+| Commit | What |
+|---|---|
+| `25714622` (#1297) | antigravity API key auth |
+| **`1d1e4d76` (#1300)** | **WebServer reads live operational settings via `AccessSettingsProvider`** |
+| `d6fd3204` (#1296) | caller verification on broker-scoped handlers |
+
+The problem is **#1300**. It rewrote `pkg/hub/web.go` by **+74 −31** and reworked the area around
+`NewWebServer` — which is precisely where #1265 installs its fatal guard. Plus
+`cmd/server_foreground.go` +3 −15 and `pkg/hub/web_test.go` +109 −15.
+
+So this rebase carries a **semantic decision**, not a textual one: the guard has to be re-sited
+into a constructor that has since changed shape. I offered to do it and force-push, and I am
+**waiting on ptone's word because it is his branch** — not mine to rewrite.
+
+### #1300 is the fix for the split-brain I diagnosed (task #45)
+
+Verified in upstream `main`: `AccessSettingsProvider` (interface at :117, field at :170) and
+`SetAccessSettingsProvider` (:602) are both present.
+
+That is **fix shape A from my own note** — give `WebServer` an accessor onto live config rather
+than a by-value copy — landed by someone else. It closes the root cause of the admin-email seeding
+failure (task #44). Worth checking whether #44 can now be retested rather than left open.
+
+### Tier compare URL: WAIT, and the coordinator is right
+
+Coordinator ruled hold until #1307 is **confirmed merged**. Their argument, which I accept over my
+own:
+
+> the downside of a premature merge (a real, publicly-reachable unauthenticated deploy path in a
+> public OSS repo) is asymmetric against the modest upside of earlier review feedback.
+
+**I had been weighing review-time gain against merge risk as if they were commensurable.** They are
+not. A public unauthenticated deploy path is not undone by a revert, and the DO NOT MERGE banner is
+a soft control where the guard actually merging is a hard one. They also read ptone's 00:08 remark
+more narrowly and more correctly: it was about #1265 getting reviewed sooner, not a blanket policy
+for its dependents.
+
+Logged as a sequencing lesson, not just a decision.
+
+### One correction I sent upward
+
+The coordinator estimated #1307 would land "within a similar timeframe to everything else tonight".
+That is likely optimistic now that it needs a semantic rebase, so I said so rather than letting the
+estimate stand.
+
+Our tier remains `CLEAN` and mergeable. The drift has not reached us — it will if we sit long enough.
