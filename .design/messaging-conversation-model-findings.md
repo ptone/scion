@@ -54,6 +54,32 @@ Net effect: the message lands in the flat inbox and the SSE stream, is attached 
 conversation**, marks **nothing unread**, and notifies **nobody**. No warning is emitted;
 the send reports success.
 
+### 1.2a Lived example — the architect lost a week of reports to this defect
+
+Recorded 2026-08-27, during implementation of this design.
+
+Coordinating this refactor, I sent the user section-boundary reports for S1 and S2 without
+`--channel` and `--thread-id`. None were delivered. I did not discover it from an error,
+from a delivery failure, or from a missing acknowledgement — the user eventually told me
+they only see messages carrying both flags.
+
+Every element of §1.2 is present:
+
+- The flags are optional, so omitting them is not a parse error.
+- The sends reported success.
+- Nothing warned, at send time or after.
+- The failure was invisible from the sender's side and stayed invisible across multiple
+  exchanges, because the user *was* replying — to their own prompts, not to my reports.
+  I read those replies as evidence the channel worked.
+
+That last point is the part worth keeping. The defect does not merely fail silently; it can
+produce a conversation that *looks* two-sided while one direction is dropped. An operator
+actively watching for trouble will not see it.
+
+This is also the case for making the venue a required positional argument rather than a
+validated optional flag (design §2.2). A warning on omission would not have helped here —
+warnings go to stderr, and stderr was exactly the channel nobody was reading.
+
 ### 1.3 Reply affinity records `channel` but not `thread_id`
 
 `webchat_conversation_context` has a `last_channel` column and no `last_thread_id`

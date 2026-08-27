@@ -35,6 +35,14 @@
    2026-08-27.) A section landing and verifying is a report. A blocker I cannot resolve is
    a report. Nothing else is — no progress notes, no interesting findings, no phase-level
    updates, no acknowledgements. Those go in §5 of this file, not to the user.
+8a. **Reports to the user MUST be sent with the channel and thread flags, or they are not
+    delivered:**
+    ```
+    scion message user:ptone@google.com --channel discord --thread-id 1541161053118005308 "..."
+    ```
+    Terminal output is invisible. Every S1 and S2 report I wrote as assistant text reached
+    nobody, and I only found out because the user said so. **The user-directed cap is 2000
+    runes** (agent-directed is 16000) — split long reports and number the parts.
 9. **Retire managers when their section closes; managers retire their own sub-agents as
    reports are captured.** The container ceiling is shared hub-wide (~50). One manager
    fans out ~6 sub-agents per round; a rejected section doubles it. Put this in every
@@ -211,6 +219,11 @@ would bury the events that matter.
   load-bearing rather than merely present. Recorded DEF-3: the phase-5 divergence gate is
   structurally weaker than the design assumed — my spec gap, owed by S4. em2 retired.
 - `2026-08-27 03:35Z` S3 opened; `ca-msg-em3` spawned.
+- `2026-08-27 03:40Z` **User reports my S1/S2 section reports were never delivered.** I had
+  been writing them as terminal output. Rule 8a added. Logged as findings §1.2a — a lived
+  instance of the exact defect this refactor removes, and a sharper one than the original
+  bug report: the missing direction was invisible to me because the user kept replying to
+  their own prompts, which read as evidence the channel worked.
 
 ## 5d. S2 rejection history — CLOSED 2026-08-27 03:35Z (accepted on round 3)
 
