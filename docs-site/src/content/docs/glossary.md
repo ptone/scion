@@ -161,11 +161,29 @@ A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user a
 
 ## Messaging
 
-### Native Web Chat
-The built-in interactive messaging interface in the Web Dashboard (enabled via the `web.native_chat` feature flag) that promotes chat to a top-level fourth ShellType (alongside standalone, profile, and app). It features a dedicated thread rail, unread indicators, three-state visibility filtering (Conversation/Verbose/Full), @-mention autocomplete, and cross-channel reply coherence.
+### Backfill
+The one-time process that scans existing messages and groups them into Conversation records, stamping each with a `conversation_id`. Enables the conversation model to cover historical messages that predate dual-write.
+
+### Conversation
+A structured record that groups related messages between participants. Each conversation has a kind (direct or group), a surface (native, discord, slack, telegram, gchat, teams), optional project scoping, and participant tracking. Conversations are created automatically when messages are sent and are the foundation for the conversation-based routing model. Currently, the conversation model runs alongside the legacy flat model, gated by the **Conversation Read Switch**.
+
+### Conversation Read Switch
+A runtime flag (`messaging.conversation_read_switch` in Hub operational settings) that controls whether message read paths use conversation-based routing or the legacy flat model. Default OFF. When ON, read queries resolve conversations by ID instead of using thread/channel keys. Flippable without redeploy.
+
+### Conversation Reference
+A recipient identifier that addresses a message via the conversation model rather than the legacy agent-name or user-email forms. Four grammar forms exist: `@<agent-name>` (fully available), `@<email>` (agent-container-only), `conv:<uuid>` (not yet available in the CLI), and `#<thread-name>` (not yet available in the CLI). Only `@<agent-name>` is fully supported today.
+
+### Divergence
+The metric tracking agreement between the legacy message routing model (thread/sender-recipient pairs) and the new conversation-based routing. Divergence counters (matches, mismatches, fallbacks) are exposed via `GET /api/v1/admin/messaging/divergence`. A clean divergence board (zero mismatches) is the prerequisite for enabling the **Conversation Read Switch**.
+
+### Dual-Write
+The transitional pattern where every message send path resolves-or-creates a Conversation record and stamps `conversation_id` on the message, while the legacy routing fields remain populated. This allows both models to run simultaneously and divergence to be measured.
 
 ### Message Group
 A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project. Distinct from **Group** (Hub users).
+
+### Native Web Chat
+The built-in interactive messaging interface in the Web Dashboard (enabled via the `web.native_chat` feature flag) that promotes chat to a top-level fourth ShellType (alongside standalone, profile, and app). It features a dedicated thread rail, unread indicators, three-state visibility filtering (Conversation/Verbose/Full), @-mention autocomplete, and cross-channel reply coherence.
 
 ### Notification
 An event delivered when an agent reaches a tracked trigger activity (e.g. `completed`, `waiting_for_input`, `limits_exceeded`). Recipients register a **Subscription** — scoped to a single agent or to a whole project, naming which trigger activities fire it and whether an agent or a user receives it. Backs `scion notifications` and the `--notify` flag on `scion message`.
