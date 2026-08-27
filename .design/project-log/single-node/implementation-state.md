@@ -5325,3 +5325,92 @@ variables, one `/auth/me`. If it says `admin`, §1 step 2 is exercised rather th
 Re-running at `a9131f1f`. `cla/google` fails as always. The one that matters is
 **Build and Push Omni Image** — green would confirm the lowercase-registry fix in the only venue
 where the bug exists.
+
+---
+
+## 2026-08-27 02:30 — #1310 is NOT ready to merge. Two independent failures, and I misattributed one of them first.
+
+ptone asked at 02:24: *"still awaiting your confirmation the PR is ready to merge"*. Answer sent: **no**.
+
+Head under review: `a9131f1f`. Passing: Build & Test, golangci-lint, shellcheck, scan-pr,
+check-changes, zizmor-scan, zizmor-config, zizmor-upload. `cla/google` fails as always — known
+non-blocker (merged #1304 had the same agent author).
+
+### Failure 1 — `Build and Push Omni Image`: org package does not exist
+
+```
+denied: installation not allowed to Create organization package
+```
+
+Fail at 8m25s, versus 1m6s before the lowercase-registry fix. **So the fix worked** — the build now
+runs to completion and only the push is refused. `ghcr.io/googlecloudplatform/scion-omni` does not
+exist and the `GITHUB_TOKEN` app installation cannot create an org-level package.
+
+**Not a code defect, and not fixable by any agent here.** Needs an org admin.
+
+**The part the coordinator and the developer both missed:** `publish-omni.yml` triggers on
+`pull_request` with paths `**.go`, `go.mod`, `go.sum`, `web/**`, `image-build/**`. If it merges
+as-is, **every future Go PR upstream gets a red check**, not just this one. That is a repo-wide
+consequence hiding inside a tier PR.
+
+### Failure 2 — `zizmor-output`: independent, and mostly not ours
+
+The coordinator reported this as "just its 'Evaluate mandatory checks' gate step failing downstream"
+of failure 1. **That is wrong.** Annotations for check-run `98388304393`, 20 raw / 11 unique:
+
+| File | Lines | Finding | Ours? |
+|---|---|---|---|
+| `build-images.yml` | 78, 81, 85 | unpinned action refs | **no** — upstream 75/78/82, shifted +3 by our `on:` inputs edit |
+| `build-images.yml` | 94–97 | template-expansion injection | **no** — upstream 91–94 |
+| `build-release.yml` | 49 | unpinned `actions/checkout@v6` | **no** — upstream 48 |
+| `build-release.yml` | 102 | injection via `${{ steps.version.outputs.ldflags }}` | **no** — upstream 101 |
+| `build-release.yml` | 23 | `contents: write` overly broad | **no** |
+| `build-release.yml` | 24 | `packages: write` overly broad | **YES — one line we added** |
+
+**10 of 11 are pre-existing upstream debt.** Why nobody has seen them: `zizmor-output` is `skipped`
+on #1300, #1302, #1304 and #1307 — none touched `.github/`. Ours is the first PR in a while that
+does, so it is the first measured against a blanket pinning policy that upstream's own workflow
+files cannot pass.
+
+### Recommendation to ptone: drop all three workflow files
+
+`build-images.yml`, `build-release.yml`, `publish-omni.yml`.
+
+- Both failures go away at once.
+- `deploy-instance` **requires** `--image` (`cmd/deploy_instance.go:84`) and has no default, so §1's
+  walkthrough is unaffected. Verified before recommending.
+- Image publishing is a separate concern that needs a GHCR package which does not exist yet.
+- Same scope argument already accepted for the two drive-by branches.
+
+Awaiting his call.
+
+### Lesson: a raw job log line is an allegation; the annotation API is the evidence
+
+My first read of this failure said *"`zizmor/unpinned-uses` at line 48 of `publish-omni.yml` — ours,
+self-inflicted by our own registry fix; dispatch someone to pin the action to a hash."* Every clause
+of that was wrong. `publish-omni.yml` appears in **none** of the 11 findings. The real findings are
+in two other files and are almost entirely upstream's.
+
+Had I acted on the first read I would have dispatched a developer to fix a non-defect in the wrong
+file, and left the actual scope decision unmade. What stopped it was asking the boring provenance
+question — *is this line ours, or did we merely shift its number?* — and answering it by diffing our
+patch hunks against upstream content rather than by reading the file as it now stands.
+
+**Rule: before attributing a lint finding to your own change, check whether your change added the
+line or only moved it.** Adding three lines to a YAML `on:` block renamed eight pre-existing
+findings into what looked like new ones.
+
+### `sn-adminfix-dev` deploy blocker was not an IAM grant
+
+It reported it could not `run.instances.create` and asked for `roles/run.admin`. It was in project
+`deploy-demo-test` as `scion-my-grove@deploy-demo-test`. **Wrong project, wrong identity.** The
+working path is `ptone-experiments` / `us-east4` / impersonate
+`scion-instance-gym@serverless-team-scion.iam.gserviceaccount.com`, exactly as `sn-adminseed-dev`
+used at 01:55. Redirected; no grant needed.
+
+Cause on my side: the fix brief (`sn-adminfix-dev.md`) carried the code change but **not the
+environment facts**, because the live retest was tacked on as a later dispatch rather than written
+into the brief. A brief that grows a new phase needs the new phase's preconditions written down too.
+
+**Task #44 status: the fix is verified structurally, not exercised.** That distinction is the whole
+reason #44 exists — do not let it close on a code read.
