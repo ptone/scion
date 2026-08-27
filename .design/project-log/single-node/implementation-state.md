@@ -4743,3 +4743,48 @@ is no work to pull forward that is not someone else's gate.
 
 In sync as of now. §9.2's dependency statement remains true because none of 1304/1305/1306 has
 merged yet. The trigger for the edit is their merge.
+
+---
+
+## 2026-08-27 00:11Z — #1265's compare URL is posted. The tier's is built and gated on the coordinator.
+
+ptone, 00:08: *"yes. a compare url to the dedicated thread is the path to upstream. we usually have
+additional review feedback on the upstream PR. so the sooner we open that. the sooner it can be
+reviewed and landed."*
+
+### #1265 — posted to thread 1532864101909528737
+
+Compare ref validated against the API before posting (`files=6 ahead=1 behind=3`), so the link
+cannot 404 on him.
+
+**The body is written for an upstream reviewer who has no context on this project.** Three jobs:
+state the exposure in one sentence (cookieless request → admin; on `0.0.0.0` that is a public
+unauthenticated admin UI), note CI is already green, and — the part that actually buys urgency —
+an **ordering note** explaining that the single-node tier deliberately carries no copy of this
+guard, so this is a hard prerequisite. Without that, a ten-line fix reads as low priority.
+
+**Size constraint worth recording, because it will recur.** Messages cap at **2000 characters**, and
+the compare URL carries the entire body URL-encoded. My first draft came to 3121 characters and
+would have been silently unsendable. Final: URL 1673, message 1725. The tier's needed three passes
+to land at 1996. **Budget roughly 1900 characters of URL, which is about 1200 characters of prose.**
+Write the body short rather than trimming a long one.
+
+### Flagged on #1265, not acted on
+
+Its 6 files include **`.design/project-log/p0-security-fixes.md`, +75**. ptone's own rule (22:14)
+was that project logs should not be durably recorded in the repo — and this one would land
+upstream. It is his PR, so I raised it and left it. Not a blocker, and not mine to strip.
+
+### The tier URL is built, validated, and deliberately held
+
+`main...ptone:scion:scion/sn-tier`, validated `files=40 ahead=6 behind=1`.
+
+**I am not posting it yet, because the coordinator explicitly asked to check any tier compare URL
+before it goes out.** ptone's approval was for #1265; extending it to the tier myself would walk
+through someone else's stated gate on my own say-so.
+
+**But I recommended posting now rather than waiting for #1265 to land, using ptone's own argument
+back:** if review feedback accrues on the upstream PR, then opening early buys review time during
+the wait. Opening is not merging, and the DO NOT MERGE warning is the first thing in the body. I
+also gave the counter-argument — a reviewer could merge it regardless — and said I judge that low
+risk but that it is the coordinator's call. Awaiting their go/wait.
