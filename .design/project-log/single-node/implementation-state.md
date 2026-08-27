@@ -10976,3 +10976,62 @@ fork's own code until it syncs. Flagged to ptone.
 (`cmd/deploy_instance_test.go:637`) was deleted by `GoogleCloudPlatform/scion#1325`. The evidence
 pointer is stale; the defect itself — `SCION_SEED_*` silently ignored on SQLite — still stands."*
 `#1297` untouched. Task #83 closed. Register is now consistent with the merged tree.
+
+---
+
+## §35.30 — `hub_id` Q1: not inert, and the conclusion rests on one unverified premise
+
+**2026-08-27, 19:51. `sn-hubid-inv` answered Q1.** `hub_id` is **not inert**. Three consumer
+categories, each cited to file and line:
+
+1. **GCS storage path prefix.** Every storage path is `hubs/{hubID}/`. `pkg/storage/storage.go:247,295,306`,
+   consumed by roughly fifteen handler files. **No impact on this tier** — no GCS bucket is configured
+   and all storage is ephemeral disk.
+2. **Secret and signing-key namespacing — the dangerous one.** Keys are looked up by
+   `(keyName, ScopeHub, hubID)`: `pkg/hub/server.go:1551-1596`, `pkg/hub/oidckeys.go:110,134,407`,
+   `pkg/secret/secret.go:170`, `gcpbackend.go:74`, `localbackend.go:53`. A changed `hubID` misses the
+   old key, generates a new one, and **invalidates every live JWT**, orphaning agents.
+3. **Observability labels.** Metrics, tracing, logging, health endpoint. Cosmetic.
+
+Also useful: within one container lifetime `hubID` is computed once behind a `sync.Once`
+(`pkg/config/hub_config.go:128-129`), so it cannot change mid-process.
+
+Its conclusion was **Shape 1** — matters only across redeploys, therefore fix the design doc rather
+than the deploy.
+
+### I accepted Q1 and refused the conclusion
+
+The conclusion rests on **one premise, stated twice**: *"container restart loses the DB, so new keys
+are generated regardless of hubID"* and *"no agents survive a restart."* Nothing else in the argument
+does any work. **That premise is unverified.**
+
+If a Cloud Run Instance container restart **preserves** the ephemeral filesystem, then the SQLite DB
+and the signing keys survive it, a changed `hub_id` fails to find its key, and every live JWT dies —
+which is the investigator's *own* category 2, and exactly the intermittent Shape 2 failure this task
+was written to catch. The analysis contains the refutation of its own conclusion; it just did not
+turn the argument around on itself.
+
+So Q2 is no longer "is the hostname stable". It is **two measurements that only decide the question
+together**: does state survive a container restart, and does the hostname change across that same
+restart. State-lost is Shape 1 and the doc is wrong. State-survives *and* hostname-changes is Shape 2
+and we have a live defect.
+
+### The trap I set and did not warn about
+
+The investigator "corrected" my brief: *"deploy.sh is only 94 lines — the env vars are in
+`cmd/deploy_instance.go:291-293`."* **That is the fork.** `ptone/scion` has not synced `c13d910b`,
+`/workspace` is the fork checkout, and upstream's `deploy.sh` is 657 lines with no
+`deploy_instance.go` at all. The correction is wrong, but it was worth having: it told me exactly
+which tree the whole investigation had been reading, and it did so within four minutes. **My brief
+named the upstream commit for the deploy step and never said the local checkout was a different
+tree.** That is my omission, and I told it so.
+
+**Q1 survives the mix-up, and I checked that rather than asserting it.** `#1325` touched **no files
+under `pkg/`** — verified from the merge diff by name — so every file the investigator cited is
+byte-identical across both trees. Q2 must run against upstream, because `deploy.sh` is the artifact
+that actually gets executed and the two versions are entirely different scripts.
+
+**The general point:** when a subordinate's factual correction contradicts something I verified, the
+correction is itself evidence — usually about their environment rather than about the fact. I nearly
+replied "you are wrong" and stopped there, which would have left the fork/upstream confusion running
+underneath Q2.
