@@ -6372,3 +6372,51 @@ The coordinator **dry-ran it first** and confirmed `build-images.sh` populated `
 `_COMMIT_SHA`, `_SHORT_SHA` and `_REGISTRY` correctly — no hand-rolling, so neither trap fired.
 Reminded them to hand beta testers the `_SHORT_SHA` coordinate rather than `:latest`; the double-tag
 exists precisely so a bug report can be pinned to an artifact.
+
+### 04:12 — batch 1 filed; and I nearly reported two things that were both false
+
+**Batch 1 done:** `ptone/scion#1287` (no per-agent resource limits), `#1288` (ephemeral only),
+`#1289` (no HA), `#1290` (no Templated Sandboxes). No duplicates. The developer confirmed the
+descriptions matched the design doc rather than taking my register on trust, and correctly labelled
+all four as by-design non-goals. Batch 2 dispatched.
+
+#### A contaminated measurement that produced two false alarms
+
+Checking whether the bare-reference bug was systemic, I ran
+`git checkout FETCH_HEAD -- .design` into `/tmp/arcpush` and grepped the working tree. That
+overwrites files present upstream but **does not remove files present only locally** — and
+`/tmp/arcpush` is my archive branch, which mirrors the whole scratchpad into
+`.design/project-log/single-node/`. So the result was upstream and local content blended, with no
+way to tell them apart.
+
+It produced two alarming claims, **both wrong**:
+
+| apparent finding | reality |
+|---|---|
+| 196 bare refs in `implementation-state.md`, 17 in a brief, etc. — a widespread problem | Those are **my local files**. Not upstream. |
+| `.design/project-log/single-node/` appears to be on upstream main — the 1.4MB log dump ptone said must never merge | **404.** Not there. Zero `project-log` paths in the `#1310` diff. |
+
+The second one was the frightening one, and I am glad I checked it against the API before saying a
+word rather than reporting it as a leak.
+
+**Clean re-measurement**, grepping the commit object directly (`git grep FETCH_HEAD --`) so no
+working tree is involved:
+
+```
+.design/hosted/cloud-run-single-node.md:13
+total upstream .design files carrying bare refs: 1
+```
+
+**Exactly one file — mine — with 13 occurrences, not 18.** So item 11 is correctly scoped as a
+single-file fix. It is *not* a class of problem across the design corpus, and I should not have
+implied it might be until I had a clean number.
+
+> **`git checkout <ref> -- <dir>` does not give you `<ref>`'s version of that directory.** It
+> overlays `<ref>` onto whatever is already there. To measure a ref, grep the ref
+> (`git grep <pattern> <ref> -- <path>`), never a working tree you have checked it into.
+
+Same failure family as the `go build`/`go test` confusion earlier tonight and the 6→3 grep count
+yesterday: **a measurement that is technically correct about the wrong population.** Third instance
+today. The tell each time was a number that felt too dramatic for the change that produced it.
+
+Working tree restored and verified clean before continuing.
