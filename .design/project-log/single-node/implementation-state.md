@@ -11599,3 +11599,42 @@ that never made it into the report.
 
 **The general rule I want to keep:** an agent that has reported is a *resource*, not a leak. Reap it
 when the work it did is accepted, not when it goes quiet.
+
+### Heartbeat 22:00 — the three questions, answered by checking
+
+**1. Are dispatched agents progressing?** Checked, not assumed.
+
+- `sn-adcpreflight-rev` is **active** — 15 minutes in, 37k tokens read, currently writing the review.
+  Its last visible line before that: *"Confirmed, and worse than expected."* So it has found
+  something. I do not know what yet and I am not going to guess at it.
+- `sn-adcpreflight-dev` is idle-after-report, held deliberately (see above). Branch verified at
+  `82fe8e8f` by API.
+
+**2. What blocks the critical path?** The `#85` review verdict, and nothing else. `#75` is merged.
+
+**3. Is the design doc in sync? — I suspected a gap, checked, and was wrong.**
+
+Worth recording *because* it came out negative. §6.1 says the open configuration is now the supported
+one, so *"the deploy command must gate on it rather than merely warn"*, and acceptance criterion 9
+requires that **a deploy with `iapEnabled: false` is refused, not warned about.** Given that ptone's
+failure left an Instance up with IAP never enabled, I expected to find that criterion unimplemented —
+a doc asserting a property the script lacks.
+
+**It is implemented, and implemented better than the doc describes.** `di_assert_perimeter`
+(`deploy.sh:245`) fetches the instance URL **with no credential** and requires a 302 to
+`accounts.google.com`. It fails closed on five enumerated cases, including `200` (app answered
+directly → UNPROTECTED) and `502/503` (container not serving). That is stronger than reading
+`iapEnabled` back, because it **exercises the unauthenticated path** rather than trusting a field —
+and it doubles as a liveness check, since a dead container returns Cloud Run's own error instead of
+IAP's redirect. The doc is in sync; if anything it undersells the implementation.
+
+**And the failure path fails closed, which I also had backwards.** I assumed a failed step 3b left an
+Instance *open* to the internet. It does not. `invokerIamDisabled` is a **v2-only field set by that
+same PATCH** — so if the PATCH never runs, the Cloud Run invoker IAM check is still **on**, and the
+half-built Instance is unreachable rather than exposed. The residue from ptone's failure is a
+confusing, billable, inaccessible Instance. That is a real defect and `#85` fixes it, but it is **not
+a security hole**, and I would have reported it as one.
+
+**Twice in one entry I formed a confident expectation from the shape of a failure and had it inverted
+by reading the code.** The heartbeat's instruction is *"verify claims before believing them"* — the
+claims that need it most are my own, because those are the ones I never think to check.
