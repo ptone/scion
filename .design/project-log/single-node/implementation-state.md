@@ -5575,3 +5575,100 @@ next reader inherits a stronger claim than the evidence supports.**
 | `zizmor-output` 11 findings | being removed by `sn-ciscope-dev` |
 | `cla/google` | known non-blocker (merged #1304 had the same agent author) |
 | `cloudbuild-omni.yaml` sound + conventional | **audit running** — ptone's stated condition |
+
+---
+
+## 2026-08-27 02:53 — `cloudbuild-omni.yaml` audit: ptone's condition is NOT met. Five blocking defects.
+
+His approval was conditional — *"as long as we have a sound cloudbuild file for that which follows
+the existing conventions"*. I audited against all seven siblings and **verified every finding myself**
+before acting, because the audit was a subagent's and because I have been wrong twice on this PR.
+
+### M1 — the file is unreachable, and the PR contradicts itself
+
+`image-build/scripts/builders/cloud-build.sh:52-57` on our branch:
+
+```bash
+    omni)
+      echo "cloud-build: no cloudbuild-*.yaml for target 'omni'." >&2
+      echo "The omni chain has no Cloud Build config. Use --builder local-docker" >&2
+      echo "(the default), which works both locally and in GitHub Actions CI." >&2
+      return 1
+      ;;
+```
+
+`image-build/README.md:136`, same branch: `| omni | cloudbuild-omni.yaml |`.
+
+**The PR ships the config, documents the mapping, then hard-refuses to use it with an error saying it
+does not exist.** Leftover from a revision that added the refusal before the YAML was written.
+
+Doubly wrong now: the message points users at GitHub Actions CI, the path ptone has just asked us to
+delete. Deleting the workflows without fixing this leaves the repo with **no working omni build path
+at all** and an error message recommending one that no longer exists.
+
+**This is the strongest argument yet that the workflow drop and this fix must land together.**
+
+### M5 — no immutable tag, which breaks his actual stated use case
+
+Ours: `images: ['$_REGISTRY/scion-omni:$_TAG']`. Siblings double-tag with `$_SHORT_SHA`.
+Measured: `grep -c '_SHORT_SHA'` → **0** ours, **1** hub.
+
+He wants to *"share a pre-built image"* with beta testers. A mutable tag alone means testers pin
+nothing and bug reports cannot be tied to an artifact. This is the finding most tied to his goal, and
+it is not one I would have thought to look for without his sentence about beta testers.
+
+### M3, M4, M2
+
+- **M3** no `verify-registry` pre-flight. All seven siblings open with it; ours has 0. Ours is an
+  8-stage chain that pushes only at the end, so an ACL problem surfaces after the whole chain runs.
+  For a **semi-private** registry — where the ACL is the entire point — this is the worst file to
+  drop it from.
+- **M4** `GIT_COMMIT=$COMMIT_SHA` (lines 58, 149) should be `$_COMMIT_SHA`. Two independent failures:
+  the built-in is empty for `gcloud builds submit` from local source, **and** `cloud-build.sh`'s
+  `grep -q '_COMMIT_SHA'` guard cannot match `GIT_COMMIT=$COMMIT_SHA` (no such substring), so the
+  value is never passed even after M1. Verified the substring logic by hand.
+- **M2** no Apache header. All siblings have one; our own `omni/Dockerfile` has one. One-file
+  oversight.
+
+### What is already right — including the bit he asked about
+
+Registry parameterisation **passes**:
+
+```yaml
+_REGISTRY: 'us-central1-docker.pkg.dev/${PROJECT_ID}/scion'
+```
+
+Identical shape to all seven siblings, dynamic `${PROJECT_ID}`, no hardcoded project, overridable at
+submit time. The only delta is the repo segment (`scion` vs `public-docker`) — which is exactly the
+right way to express "semi-private". **The specific thing ptone worried about is the one thing that
+was already correct.**
+
+Also verified correct and explicitly fenced off in the brief: `docker build` over `buildx` (each
+stage must be daemon-resident for the next stage's `BASE_IMAGE`), amd64-only, and absence of
+`waitFor` (a step with no `waitFor` waits for all prior steps — correct for a sequential chain).
+Told the developer to leave all three alone, so nobody "tidies" them into breakage.
+
+### The trap in fixing M1 alone
+
+`gcloudignore-omni` (+83, no sibling precedent) exists because the root `.gcloudignore` excludes
+`web/src/`, `web/*.json` etc., while omni's Dockerfile does `COPY web/ ./web/` then `npm install`.
+But **`cloud-build.sh` submits with no `--ignore-file`**. So fixing M1 without wiring the ignore file
+makes `--target omni` route to the YAML and then **fail with the exact ENOENT the file was written to
+prevent**. M1 alone is worse than neither. Brief says to wire it generically on
+`image-build/gcloudignore-<target>`, not to hardcode `omni`.
+
+### Dispatch sequencing
+
+Brief written: `briefs/sn-cloudbuild-dev.md`. **Held, not dispatched** — `sn-ciscope-dev` is pushing
+to `scion/sn-tier` right now. Two developers on one branch under upstream review is a manufactured
+conflict. Dispatch when it reports.
+
+Three judgement calls delegated rather than decided: the `7200s` timeout (I think 14400s; nobody has
+timed a real run, so I said so rather than asserting), the deliberate five-of-eight harness subset
+duplicated across three files, and generalising the operator-specific header comment that hardcodes
+`ptone-experiments`. Each is written as "tell me what you chose", with explicit permission to decline
+the deduplication if it cannot be done cleanly.
+
+One thing neither I nor the audit could verify, flagged for the developer to check: whether Node and
+`npm` exist in the `thick-prep` → `scion-base` lineage that omni's web build depends on. If not, the
+final stage fails regardless of all five fixes.
