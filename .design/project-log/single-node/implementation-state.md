@@ -6808,3 +6808,57 @@ there is no second net behind it.
 **`deploy-instance` does not output the OAuth client ID, and the deploy is what creates it.** Any
 reader needing the identity-token path must go spelunking with `gcloud alpha iap oauth-clients list`
 and a project number. The command that generates a value should surface it.
+
+## 2026-08-27 06:52 — docs IAP revision verified; OAuth-client-ID gap filed as ptone/scion#1301
+
+### sn-docs-dev commit `a75fcf99` — verified, not taken on trust
+
+Branch `scion/sn-docs-dev`, one file, +31/-7. I read the diff rather than accepting the report.
+All three requirements met:
+
+1. `roles/iap.httpsResourceAccessor` is **named**, and attributed to the deploy command that grants
+   it. A reader who gets a 401 now has the term to search for.
+2. Identity token kept as a documented alternative, in a note callout, with the audience requirement
+   stated as a hard **must** and the failure text quoted ("Invalid JWT audience"). The discovery
+   command is present with the project-number/brand path spelled out.
+3. The IAP callout is now a measured fact, not an assertion: `invokerIamDisabled: true` is quoted,
+   and the doc says plainly there is **no second gate behind IAP**.
+
+Checked specifically for the residual wrong claim: **absent.** No sentence says or hedges that
+`Proxy-Authorization` is unsupported. The doc states both headers work. This is what I asked for —
+a retracted claim must be removed, not softened, because a hedge preserves the doubt.
+
+The old callout said IAP was the sole perimeter *before* anyone had measured it. It was right by
+luck. It is now right by evidence, and the evidence is in the text. That is the whole difference
+between §6 of the design doc as written and §6 as verified.
+
+### ptone/scion#1301 — "deploy-instance creates an IAP OAuth client and does not output its ID"
+
+Filed by the coordinator with the six-way audience matrix as supporting evidence, and with the
+alpha-gcloud discovery command noted as a **workaround, not a fix**. That distinction was worth
+making: the workaround is in the tutorial now, so there is a live temptation to treat the issue as
+already handled.
+
+sn-docs-dev confirmed the gap independently from its own run. The command that *creates* the OAuth
+client is the one command guaranteed to know its ID, and it is the one place the ID is not printed.
+
+### A fourth number collision, on the same day, and it is ours
+
+`ptone/scion#1301` (this issue) vs `GoogleCloudPlatform/scion#1301`
+(`feat: Permissions Foundation Phase 1 — authorization refactor`, MERGED).
+
+The collision table in `ptone/scion#1297` had three rows, all discovered retrospectively. This one
+was created **today, by us, while the issue about the problem was already open.** That is the
+strongest argument yet that qualifying refs has to be a habit rather than a cleanup pass: the
+namespace keeps generating new collisions faster than any one fix can drain them. Comment added to
+#1297 with this row.
+
+Note also that my earlier notes recorded upstream #1301 as the revert PR. The API says it is the
+Permissions Foundation refactor. The revert was its consequence, not its title. Recording the
+correction so the log does not carry a wrong fact forward.
+
+### Status
+
+- Task #50 (docs): content complete; **still blocked on §3.3 sizing**, placeholder intact.
+- Stress agents `sn-stress-def` and `sn-stress-max`: running. Awaiting §3.0 instrument validation
+  before either ladder is worth reading.
