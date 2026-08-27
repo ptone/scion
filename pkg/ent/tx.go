@@ -30,6 +30,10 @@ type Tx struct {
 	BrokerSecret *BrokerSecretClient
 	// ChatLinkCode is the client for interacting with the ChatLinkCode builders.
 	ChatLinkCode *ChatLinkCodeClient
+	// Conversation is the client for interacting with the Conversation builders.
+	Conversation *ConversationClient
+	// ConversationParticipant is the client for interacting with the ConversationParticipant builders.
+	ConversationParticipant *ConversationParticipantClient
 	// EnvVar is the client for interacting with the EnvVar builders.
 	EnvVar *EnvVarClient
 	// GCPServiceAccount is the client for interacting with the GCPServiceAccount builders.
@@ -62,6 +66,8 @@ type Tx struct {
 	MaintenanceOperationRun *MaintenanceOperationRunClient
 	// Message is the client for interacting with the Message builders.
 	Message *MessageClient
+	// MessageAddressee is the client for interacting with the MessageAddressee builders.
+	MessageAddressee *MessageAddresseeClient
 	// NonceCache is the client for interacting with the NonceCache builders.
 	NonceCache *NonceCacheClient
 	// Notification is the client for interacting with the Notification builders.
@@ -242,6 +248,8 @@ func (tx *Tx) init() {
 	tx.BrokerJoinToken = NewBrokerJoinTokenClient(tx.config)
 	tx.BrokerSecret = NewBrokerSecretClient(tx.config)
 	tx.ChatLinkCode = NewChatLinkCodeClient(tx.config)
+	tx.Conversation = NewConversationClient(tx.config)
+	tx.ConversationParticipant = NewConversationParticipantClient(tx.config)
 	tx.EnvVar = NewEnvVarClient(tx.config)
 	tx.GCPServiceAccount = NewGCPServiceAccountClient(tx.config)
 	tx.GitHubResolutionCache = NewGitHubResolutionCacheClient(tx.config)
@@ -258,6 +266,7 @@ func (tx *Tx) init() {
 	tx.MaintenanceOperation = NewMaintenanceOperationClient(tx.config)
 	tx.MaintenanceOperationRun = NewMaintenanceOperationRunClient(tx.config)
 	tx.Message = NewMessageClient(tx.config)
+	tx.MessageAddressee = NewMessageAddresseeClient(tx.config)
 	tx.NonceCache = NewNonceCacheClient(tx.config)
 	tx.Notification = NewNotificationClient(tx.config)
 	tx.NotificationSubscription = NewNotificationSubscriptionClient(tx.config)

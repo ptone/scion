@@ -14,6 +14,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -30,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/messageaddressee"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/noncecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
@@ -306,6 +309,46 @@ func init() {
 	chatlinkcodeDescID := chatlinkcodeFields[0].Descriptor()
 	// chatlinkcode.DefaultID holds the default value on creation for the id field.
 	chatlinkcode.DefaultID = chatlinkcodeDescID.Default.(func() uuid.UUID)
+	conversationFields := schema.Conversation{}.Fields()
+	_ = conversationFields
+	// conversationDescExternalRef is the schema descriptor for external_ref field.
+	conversationDescExternalRef := conversationFields[4].Descriptor()
+	// conversation.DefaultExternalRef holds the default value on creation for the external_ref field.
+	conversation.DefaultExternalRef = conversationDescExternalRef.Default.(string)
+	// conversationDescParentRef is the schema descriptor for parent_ref field.
+	conversationDescParentRef := conversationFields[5].Descriptor()
+	// conversation.DefaultParentRef holds the default value on creation for the parent_ref field.
+	conversation.DefaultParentRef = conversationDescParentRef.Default.(string)
+	// conversationDescDisplayName is the schema descriptor for display_name field.
+	conversationDescDisplayName := conversationFields[6].Descriptor()
+	// conversation.DefaultDisplayName holds the default value on creation for the display_name field.
+	conversation.DefaultDisplayName = conversationDescDisplayName.Default.(string)
+	// conversationDescLastActivityAt is the schema descriptor for last_activity_at field.
+	conversationDescLastActivityAt := conversationFields[9].Descriptor()
+	// conversation.DefaultLastActivityAt holds the default value on creation for the last_activity_at field.
+	conversation.DefaultLastActivityAt = conversationDescLastActivityAt.Default.(func() time.Time)
+	// conversationDescCreatedAt is the schema descriptor for created_at field.
+	conversationDescCreatedAt := conversationFields[10].Descriptor()
+	// conversation.DefaultCreatedAt holds the default value on creation for the created_at field.
+	conversation.DefaultCreatedAt = conversationDescCreatedAt.Default.(func() time.Time)
+	// conversationDescID is the schema descriptor for id field.
+	conversationDescID := conversationFields[0].Descriptor()
+	// conversation.DefaultID holds the default value on creation for the id field.
+	conversation.DefaultID = conversationDescID.Default.(func() uuid.UUID)
+	conversationparticipantFields := schema.ConversationParticipant{}.Fields()
+	_ = conversationparticipantFields
+	// conversationparticipantDescPrincipalID is the schema descriptor for principal_id field.
+	conversationparticipantDescPrincipalID := conversationparticipantFields[3].Descriptor()
+	// conversationparticipant.PrincipalIDValidator is a validator for the "principal_id" field. It is called by the builders before save.
+	conversationparticipant.PrincipalIDValidator = conversationparticipantDescPrincipalID.Validators[0].(func(string) error)
+	// conversationparticipantDescJoinedAt is the schema descriptor for joined_at field.
+	conversationparticipantDescJoinedAt := conversationparticipantFields[5].Descriptor()
+	// conversationparticipant.DefaultJoinedAt holds the default value on creation for the joined_at field.
+	conversationparticipant.DefaultJoinedAt = conversationparticipantDescJoinedAt.Default.(func() time.Time)
+	// conversationparticipantDescID is the schema descriptor for id field.
+	conversationparticipantDescID := conversationparticipantFields[0].Descriptor()
+	// conversationparticipant.DefaultID holds the default value on creation for the id field.
+	conversationparticipant.DefaultID = conversationparticipantDescID.Default.(func() uuid.UUID)
 	envvarFields := schema.EnvVar{}.Fields()
 	_ = envvarFields
 	// envvarDescKey is the schema descriptor for key field.
@@ -792,6 +835,16 @@ func init() {
 	messageDescID := messageFields[0].Descriptor()
 	// message.DefaultID holds the default value on creation for the id field.
 	message.DefaultID = messageDescID.Default.(func() uuid.UUID)
+	messageaddresseeFields := schema.MessageAddressee{}.Fields()
+	_ = messageaddresseeFields
+	// messageaddresseeDescPrincipalID is the schema descriptor for principal_id field.
+	messageaddresseeDescPrincipalID := messageaddresseeFields[3].Descriptor()
+	// messageaddressee.PrincipalIDValidator is a validator for the "principal_id" field. It is called by the builders before save.
+	messageaddressee.PrincipalIDValidator = messageaddresseeDescPrincipalID.Validators[0].(func(string) error)
+	// messageaddresseeDescID is the schema descriptor for id field.
+	messageaddresseeDescID := messageaddresseeFields[0].Descriptor()
+	// messageaddressee.DefaultID holds the default value on creation for the id field.
+	messageaddressee.DefaultID = messageaddresseeDescID.Default.(func() uuid.UUID)
 	noncecacheFields := schema.NonceCache{}.Fields()
 	_ = noncecacheFields
 	// noncecacheDescNonce is the schema descriptor for nonce field.
