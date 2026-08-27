@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/messageaddressee"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -508,6 +509,26 @@ func (s *ConversationStore) AddParticipant(ctx context.Context, p *store.Convers
 	convUID, err := parseUUID(p.ConversationID)
 	if err != nil {
 		return err
+	}
+
+	// Immutability guard for direct conversations: only principals named in
+	// the kind-encoded DM key may be added. A count-based guard (count>=2)
+	// is wrong because soft-remove B → count drops to 1 → AddParticipant(C)
+	// would pass → conversation has {A, C} while key says {A, B}. The
+	// key-derived guard prevents this regardless of current participant count.
+	conv, err := s.client.Conversation.Get(ctx, convUID)
+	if err != nil {
+		return fmt.Errorf("loading conversation for participant guard: %w", err)
+	}
+	if string(conv.Kind) == "direct" {
+		kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(conv.ExternalRef)
+		if parseErr != nil {
+			return fmt.Errorf("direct conversation has unparseable external_ref: %w", store.ErrInvalidInput)
+		}
+		if !((p.PrincipalKind == kindA && p.PrincipalID == idA) ||
+			(p.PrincipalKind == kindB && p.PrincipalID == idB)) {
+			return fmt.Errorf("participant (%s, %s) not named in direct conversation key: %w", p.PrincipalKind, p.PrincipalID, store.ErrInvalidInput)
+		}
 	}
 
 	// Check for a soft-removed participant that can be re-joined.

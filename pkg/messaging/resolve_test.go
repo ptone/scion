@@ -24,11 +24,21 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// mustDMKey builds a kind-encoded DM key, panicking on error. Test helper only.
+func mustDMKey(kindA, idA, kindB, idB string) string {
+	key, err := messages.DMConversationKey(kindA, idA, kindB, idB)
+	if err != nil {
+		panic(fmt.Sprintf("mustDMKey: %v", err))
+	}
+	return key
+}
 
 // ---------------------------------------------------------------------------
 // Mock ResolutionStore
@@ -413,12 +423,15 @@ func TestResolve_ConvByID_NilProjectID_GlobalDM_Allowed(t *testing.T) {
 	ctx := context.Background()
 	projectA := uuid.NewString()
 	senderID := uuid.NewString()
+	otherID := uuid.NewString()
 	convID := uuid.NewString()
 
-	// Global DM (nil ProjectID).
+	// Global DM (nil ProjectID) with kind-encoded external_ref.
+	extRef := mustDMKey("user", senderID, "user", otherID)
 	ms.addConversation(
-		&store.Conversation{ID: convID, ProjectID: nil, Kind: "direct", Surface: "native"},
+		&store.Conversation{ID: convID, ProjectID: nil, Kind: "direct", Surface: "native", ExternalRef: extRef},
 		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: senderID},
+		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: otherID},
 	)
 
 	result, err := Resolve(ctx, ms, "conv:"+convID, ResolveContext{
@@ -855,14 +868,17 @@ func TestResolveConvByID_RejectsNonParticipant(t *testing.T) {
 	ms := newMockStore()
 	ctx := context.Background()
 	projectID := uuid.NewString()
-	principalA := uuid.NewString() // participant
-	principalB := uuid.NewString() // same project, NOT a participant
+	principalA := uuid.NewString()   // participant
+	principalB := uuid.NewString()   // same project, NOT a participant
+	otherParty := uuid.NewString()   // the other side of the DM
 	convID := uuid.NewString()
 
-	// Create a direct conversation in projectID with only principalA as participant.
+	// Create a direct conversation in projectID with kind-encoded external_ref.
+	extRef := mustDMKey("user", principalA, "user", otherParty)
 	ms.addConversation(
-		&store.Conversation{ID: convID, ProjectID: &projectID, Kind: "direct", Surface: "native"},
+		&store.Conversation{ID: convID, ProjectID: &projectID, Kind: "direct", Surface: "native", ExternalRef: extRef},
 		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: principalA, Role: "member"},
+		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: otherParty, Role: "member"},
 	)
 
 	// Give principalB presence in the same project (so project isolation passes).
@@ -944,10 +960,11 @@ func TestResolve_DirectConv_RejectionGrammarIndependent(t *testing.T) {
 	// Register an agent in the project.
 	ms.agents[projectID+"/target-agent"] = &store.Agent{ID: agentID, Slug: "target-agent", ProjectID: projectID}
 
-	// Create an existing DM between userA and the agent.
+	// Create an existing DM between userA and the agent with kind-encoded key.
 	dmConvID := uuid.NewString()
+	dmExtRef := mustDMKey("user", userA, "agent", agentID)
 	ms.addConversation(
-		&store.Conversation{ID: dmConvID, ProjectID: &projectID, Kind: "direct", Surface: "native"},
+		&store.Conversation{ID: dmConvID, ProjectID: &projectID, Kind: "direct", Surface: "native", ExternalRef: dmExtRef},
 		store.ConversationParticipant{ConversationID: dmConvID, PrincipalKind: "user", PrincipalID: userA, Role: "member"},
 		store.ConversationParticipant{ConversationID: dmConvID, PrincipalKind: "agent", PrincipalID: agentID, Role: "member"},
 	)
@@ -1255,4 +1272,142 @@ func TestAC_DEF8_2_AllDirectConversationsHaveNilProjectID(t *testing.T) {
 	// Rule 14: floor — at least 5 direct conversations were examined.
 	require.GreaterOrEqual(t, directCount, 5,
 		"floor violation: expected at least 5 direct conversations, found %d", directCount)
+}
+
+// ---------------------------------------------------------------------------
+// Key-based DM auth tests (DEF-8, WS-1c)
+// ---------------------------------------------------------------------------
+
+// TestKeyBasedAuth_AuthorizedCaller verifies that a caller named in the DM key
+// passes the key-based auth check when resolving via conv:<id>.
+func TestKeyBasedAuth_AuthorizedCaller(t *testing.T) {
+	ms := newMockStore()
+	ctx := context.Background()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+	convID := uuid.NewString()
+
+	extRef := mustDMKey("user", userID, "agent", agentID)
+	ms.addConversation(
+		&store.Conversation{ID: convID, Kind: "direct", Surface: "native", ExternalRef: extRef},
+		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "agent", PrincipalID: agentID},
+	)
+
+	// User resolves — authorized.
+	result, err := Resolve(ctx, ms, "conv:"+convID, ResolveContext{
+		SenderPrincipalKind: "user",
+		SenderPrincipalID:   userID,
+	})
+	require.NoError(t, err, "caller named in key should be authorized")
+	assert.Equal(t, convID, result.ConversationID)
+
+	// Agent resolves — also authorized.
+	result2, err := Resolve(ctx, ms, "conv:"+convID, ResolveContext{
+		SenderPrincipalKind: "agent",
+		SenderPrincipalID:   agentID,
+	})
+	require.NoError(t, err, "agent named in key should be authorized")
+	assert.Equal(t, convID, result2.ConversationID)
+}
+
+// TestKeyBasedAuth_UnauthorizedCaller_WrongID verifies that a caller with a
+// different UUID is rejected even if they are of the right kind.
+func TestKeyBasedAuth_UnauthorizedCaller_WrongID(t *testing.T) {
+	ms := newMockStore()
+	ctx := context.Background()
+	userA := uuid.NewString()
+	userB := uuid.NewString()
+	intruder := uuid.NewString()
+	convID := uuid.NewString()
+
+	extRef := mustDMKey("user", userA, "user", userB)
+	ms.addConversation(
+		&store.Conversation{ID: convID, Kind: "direct", Surface: "native", ExternalRef: extRef},
+		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: userA},
+		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: userB},
+	)
+
+	_, err := Resolve(ctx, ms, "conv:"+convID, ResolveContext{
+		SenderPrincipalKind: "user",
+		SenderPrincipalID:   intruder,
+	})
+	require.Error(t, err)
+	var resErr *ResolutionError
+	require.ErrorAs(t, err, &resErr)
+	assert.Equal(t, "not-a-participant", resErr.Reason)
+}
+
+// TestKeyBasedAuth_UnauthorizedCaller_WrongKind verifies that a caller with
+// the right UUID but wrong kind is rejected. This tests the kind-check
+// tightening — the shipped isDMParticipant only checked UUID, not kind.
+func TestKeyBasedAuth_UnauthorizedCaller_WrongKind(t *testing.T) {
+	ms := newMockStore()
+	ctx := context.Background()
+	sharedUUID := uuid.NewString()
+	agentID := uuid.NewString()
+	convID := uuid.NewString()
+
+	// DM key names (user, sharedUUID) and (agent, agentID).
+	extRef := mustDMKey("user", sharedUUID, "agent", agentID)
+	ms.addConversation(
+		&store.Conversation{ID: convID, Kind: "direct", Surface: "native", ExternalRef: extRef},
+		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: sharedUUID},
+		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "agent", PrincipalID: agentID},
+	)
+
+	// An agent with the same UUID as the user position should be rejected.
+	_, err := Resolve(ctx, ms, "conv:"+convID, ResolveContext{
+		SenderPrincipalKind: "agent", // wrong kind — key says "user" for this UUID
+		SenderPrincipalID:   sharedUUID,
+	})
+	require.Error(t, err)
+	var resErr *ResolutionError
+	require.ErrorAs(t, err, &resErr)
+	assert.Equal(t, "not-a-participant", resErr.Reason,
+		"same UUID but wrong kind must be rejected (kind-check tightening)")
+}
+
+// TestKeyBasedAuth_UnparseableExternalRef verifies that a direct conversation
+// with an unparseable external_ref (old format, empty, or corrupt) results in
+// denial (fail closed). No fallback to the participants table.
+func TestKeyBasedAuth_UnparseableExternalRef(t *testing.T) {
+	ms := newMockStore()
+	ctx := context.Background()
+	userID := uuid.NewString()
+
+	badRefs := []struct {
+		name string
+		ref  string
+	}{
+		{"empty", ""},
+		{"old_format_no_kinds", "dm:" + uuid.NewString() + ":" + uuid.NewString()},
+		{"garbage", "not-a-dm-key"},
+		{"partial", "dm:user:" + uuid.NewString()},
+	}
+
+	for _, tc := range badRefs {
+		t.Run(tc.name, func(t *testing.T) {
+			convID := uuid.NewString()
+			ms.addConversation(
+				&store.Conversation{ID: convID, Kind: "direct", Surface: "native", ExternalRef: tc.ref},
+				// User IS in the participants table — but key-based auth must NOT fall back.
+				store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: userID},
+			)
+
+			_, err := Resolve(ctx, ms, "conv:"+convID, ResolveContext{
+				SenderPrincipalKind: "user",
+				SenderPrincipalID:   userID,
+			})
+			require.Error(t, err, "unparseable external_ref %q must deny", tc.ref)
+			var resErr *ResolutionError
+			require.ErrorAs(t, err, &resErr)
+			assert.Equal(t, "not-a-participant", resErr.Reason,
+				"fail closed: unparseable ref must return not-a-participant")
+		})
+	}
+
+	// Rule 14: floor — at least 4 bad-ref scenarios examined.
+	require.GreaterOrEqual(t, len(badRefs), 4,
+		"floor violation: expected at least 4 bad-ref scenarios")
 }

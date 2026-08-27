@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -38,8 +39,24 @@ func newTestConversationStore(t *testing.T) *ConversationStore {
 func newTestConversation() *store.Conversation {
 	return &store.Conversation{
 		ID:      uuid.NewString(),
-		Kind:    "direct",
+		Kind:    "group",
 		Surface: "native",
+	}
+}
+
+// newTestDMConversation creates a direct conversation with a valid kind-encoded
+// DM key. Returns the conversation and the two participant identities (kindA/idA,
+// kindB/idB) that are named in the key.
+func newTestDMConversation(kindA, idA, kindB, idB string) *store.Conversation {
+	extRef, err := messages.DMConversationKey(kindA, idA, kindB, idB)
+	if err != nil {
+		panic("newTestDMConversation: " + err.Error())
+	}
+	return &store.Conversation{
+		ID:          uuid.NewString(),
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: extRef,
 	}
 }
 
@@ -744,4 +761,178 @@ func TestParticipantDefaultRole(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, participants, 1)
 	assert.Equal(t, "member", participants[0].Role)
+}
+
+// ---------------------------------------------------------------------------
+// AddParticipant immutability guard tests (DEF-8, WS-1c)
+//
+// Rule 10: Removing the guard from AddParticipant should make tests
+// TestAddParticipant_DM_SoftRemoveThenSubstitute,
+// TestAddParticipant_DM_ThirdPartyRejection, and
+// TestAddParticipant_DM_EmptyExternalRefRejection fail.
+// ---------------------------------------------------------------------------
+
+// TestAddParticipant_DM_SoftRemoveThenSubstitute is THE test that discriminates
+// between the correct key-derived guard and the wrong count-based guard.
+// Sequence: create DM(A,B), soft-remove B, attempt AddParticipant(C) where C is
+// NOT named in the key. A count>=2 guard would pass (count is 1 after remove),
+// but the key-derived guard correctly rejects C.
+func TestAddParticipant_DM_SoftRemoveThenSubstitute(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	userA := uuid.NewString()
+	userB := uuid.NewString()
+	userC := uuid.NewString() // intruder — NOT named in key
+
+	conv := newTestDMConversation("user", userA, "user", userB)
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	// Add both named participants.
+	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userA, Role: "member",
+	}))
+	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userB, Role: "member",
+	}))
+
+	// Soft-remove B.
+	require.NoError(t, s.RemoveParticipant(ctx, conv.ID, "user", userB))
+
+	// Attempt to add C — must be rejected by key-derived guard.
+	err := s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userC, Role: "member",
+	})
+	require.Error(t, err, "adding participant not named in DM key must fail")
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+
+	// Rule 13: Assert effects — active participant set is exactly {A}, not {A, C}.
+	participants, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Len(t, participants, 1, "active participant set must be exactly {A}")
+	if len(participants) == 1 {
+		assert.Equal(t, userA, participants[0].PrincipalID)
+	}
+}
+
+// TestAddParticipant_DM_ThirdPartyRejection verifies that a third party cannot
+// be added to a direct conversation that already has 2 active participants.
+func TestAddParticipant_DM_ThirdPartyRejection(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	userA := uuid.NewString()
+	userB := uuid.NewString()
+	userC := uuid.NewString()
+
+	conv := newTestDMConversation("user", userA, "user", userB)
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userA, Role: "member",
+	}))
+	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userB, Role: "member",
+	}))
+
+	// Add C — not named in key.
+	err := s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userC, Role: "member",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+
+	// Rule 13: Assert participant count is still 2.
+	participants, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Len(t, participants, 2, "participant count must still be 2")
+}
+
+// TestAddParticipant_DM_EmptyExternalRefRejection verifies that a direct
+// conversation with an empty/unparseable external_ref rejects all AddParticipant
+// calls.
+func TestAddParticipant_DM_EmptyExternalRefRejection(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	conv := &store.Conversation{
+		ID:          uuid.NewString(),
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: "", // unparseable
+	}
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	err := s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: uuid.NewString(), Role: "member",
+	})
+	require.Error(t, err, "direct conversation with empty external_ref must reject AddParticipant")
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+// TestAddParticipant_DM_NamedParticipantAllowed verifies that a principal named
+// in the DM key can be added successfully.
+func TestAddParticipant_DM_NamedParticipantAllowed(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	userA := uuid.NewString()
+	agentB := uuid.NewString()
+
+	conv := newTestDMConversation("user", userA, "agent", agentB)
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	// Add userA — named in key.
+	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userA, Role: "member",
+	}))
+
+	// Add agentB — also named in key.
+	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "agent", PrincipalID: agentB, Role: "member",
+	}))
+
+	// Rule 13: Assert effects.
+	participants, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Len(t, participants, 2)
+}
+
+// TestAddParticipant_DM_ReAddAfterSoftRemove verifies that a principal named
+// in the DM key can be re-added after soft-remove. This proves the guard does
+// not block legitimate re-adds.
+func TestAddParticipant_DM_ReAddAfterSoftRemove(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	userA := uuid.NewString()
+	userB := uuid.NewString()
+
+	conv := newTestDMConversation("user", userA, "user", userB)
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	// Add both.
+	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userA, Role: "member",
+	}))
+	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userB, Role: "member",
+	}))
+
+	// Soft-remove B.
+	require.NoError(t, s.RemoveParticipant(ctx, conv.ID, "user", userB))
+
+	// Re-add B — named in key, should succeed.
+	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userB, Role: "member",
+	}))
+
+	// Rule 13: Assert effects — both participants active.
+	participants, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Len(t, participants, 2, "both named participants should be active after re-add")
+
+	// Rule 14: Assert non-zero floor — at least 2 participants examined.
+	require.GreaterOrEqual(t, len(participants), 2,
+		"floor violation: expected at least 2 participants")
 }

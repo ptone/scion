@@ -223,9 +223,20 @@ func checkPostResolutionAuth(ctx context.Context, s ResolutionStore, convID, ref
 
 	switch conv.Kind {
 	case "direct":
-		// Direct conversations require participant membership regardless of
-		// how the reference was formed.
-		return requireParticipant(ctx, s, conv.ID, ref, rctx)
+		// Direct conversations: derive auth from the kind-encoded DM key
+		// rather than the participants table. This is strictly tighter than
+		// a table scan — it checks BOTH kind AND ID, so a user UUID that
+		// coincidentally matches an agent position is rejected.
+		kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(conv.ExternalRef)
+		if parseErr != nil {
+			// Fail closed: unparseable key (old format, empty, corrupt) → deny.
+			return &ResolutionError{Ref: ref, Reason: "not-a-participant"}
+		}
+		if (rctx.SenderPrincipalKind == kindA && rctx.SenderPrincipalID == idA) ||
+			(rctx.SenderPrincipalKind == kindB && rctx.SenderPrincipalID == idB) {
+			return nil // authorized
+		}
+		return &ResolutionError{Ref: ref, Reason: "not-a-participant"}
 	case "group":
 		// Group conversations are authorised by project membership, which is
 		// already enforced by the project isolation check. No additional
