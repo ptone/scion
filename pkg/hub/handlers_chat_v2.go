@@ -1624,7 +1624,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			// DM key format: dm:<kind>:<id>:<kind>:<id>
 			parts := strings.Split(key, ":")
 			if len(parts) >= 5 {
-				convResult = messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[2], parts[4])
+				convResult = messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
 			}
 		} else {
 			// Thread key — look up the topic to get the projectID for the external_ref.

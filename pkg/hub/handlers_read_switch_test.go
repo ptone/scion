@@ -17,10 +17,13 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +33,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -96,7 +100,7 @@ func readSwitchWorld(t *testing.T) (
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
 	// --- create a DM conversation (simulating dual-write) ---
-	convResult := messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog, agent.ID, alice.ID)
+	convResult := messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog, "agent", agent.ID, "user", alice.ID)
 	require.NotNil(t, convResult, "conversation resolution should succeed")
 	convID = convResult.ConversationID
 
@@ -445,7 +449,7 @@ func TestBrokerInbound_DualWrite_StampsConversationID(t *testing.T) {
 	ctx := context.Background()
 
 	// Pre-create the DM conversation that the dual-write will resolve.
-	convResult := messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog, alice.ID, agent.ID)
+	convResult := messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog, "user", alice.ID, "agent", agent.ID)
 	require.NotNil(t, convResult)
 
 	// Send a broker inbound message. This requires broker auth + HMAC,
@@ -477,7 +481,7 @@ func TestBrokerInbound_DualWrite_StampsConversationID(t *testing.T) {
 	if storeMsg.ThreadID != "" {
 		cr = messaging.ResolveOrCreateThreadConversation(ctx, s, srv.messageLog, storeMsg.ThreadID, agent.ProjectID)
 	} else if storeMsg.SenderID != "" && agent.ID != "" {
-		cr = messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog, storeMsg.SenderID, agent.ID)
+		cr = messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog, "user", storeMsg.SenderID, "agent", agent.ID)
 	}
 	if cr != nil {
 		storeMsg.ConversationID = cr.ConversationID
@@ -490,6 +494,73 @@ func TestBrokerInbound_DualWrite_StampsConversationID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, convResult.ConversationID, msg.ConversationID,
 		"broker inbound message should be stamped with conversation_id")
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: Unparseable sender address must NOT create a conversation
+// ---------------------------------------------------------------------------
+
+func TestDualWrite_UnparseableSenderAddress_NoConversationCreated(t *testing.T) {
+	srv, s, _, agent, _, _, _, _ := readSwitchWorld(t)
+	ctx := context.Background()
+
+	// Create a dedicated user for this test to avoid ambiguity with the
+	// alice+agent DM that readSwitchWorld already creates.
+	bob := &store.User{
+		ID: uuid.NewString(), Email: "bob@rs.test",
+		DisplayName: "Bob", Role: store.UserRoleMember, Status: "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, bob))
+
+	// Build a MessageRequest with a StructuredMessage whose Sender has no
+	// kind prefix — PrincipalKindFromAddress will return ("", false) inside
+	// the handler, so no DM conversation should be created.
+	msgReq := MessageRequest{
+		StructuredMessage: &messages.StructuredMessage{
+			Sender:    "bare-name-no-prefix", // no kind prefix
+			SenderID:  bob.ID,
+			Recipient: "agent:rs-agent",
+			Msg:       "unparseable sender test",
+			Type:      "instruction",
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	body, err := json.Marshal(msgReq)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/actions/message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	// Set up user auth context so the handler passes phase checks.
+	userIdent := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, string(bob.Role), "api")
+	req = req.WithContext(contextWithIdentity(req.Context(), userIdent))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentMessage(rr, req, agent.ID)
+	// Response status is NOT checked — the handler returns 503 because no
+	// dispatcher is configured, but the dual-write code at line 836 has
+	// already executed by that point. We only care about the DB side effect.
+
+	// Count conversation rows: no DM should exist for bob+agent.
+	convs, err := s.ListConversations(ctx, store.ConversationFilter{Kind: "direct"}, store.ListOptions{})
+	require.NoError(t, err)
+
+	var matchCount int
+	for _, conv := range convs.Items {
+		if strings.Contains(conv.ExternalRef, bob.ID) && strings.Contains(conv.ExternalRef, agent.ID) {
+			matchCount++
+		}
+	}
+	assert.Equal(t, 0, matchCount,
+		"unparseable sender address must NOT create a conversation row")
+
+	// Floor assertion (Rule 14): readSwitchWorld creates an alice+agent DM,
+	// so there must be at least 1 direct conversation. This proves the query
+	// is hitting the right table.
+	assert.GreaterOrEqual(t, len(convs.Items), 1,
+		"floor: at least 1 direct conversation should exist (alice+agent DM from readSwitchWorld)")
 }
 
 // ---------------------------------------------------------------------------

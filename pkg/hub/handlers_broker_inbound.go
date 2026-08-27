@@ -318,7 +318,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		if storeMsg.ThreadID != "" {
 			convResult = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, s.messageLog, storeMsg.ThreadID, agent.ProjectID)
 		} else if senderUserID != "" && agent.ID != "" {
-			convResult = messaging.ResolveOrCreateDMConversation(r.Context(), s.store, s.messageLog, senderUserID, agent.ID)
+			convResult = messaging.ResolveOrCreateDMConversation(r.Context(), s.store, s.messageLog, "user", senderUserID, "agent", agent.ID)
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID

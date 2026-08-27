@@ -64,7 +64,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// filter is provided, resolve the DM conversation and add ConversationID
 	// to the filter so reads use the conversation model.
 	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() && agentID != "" {
-		convResult := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, agentID, user.ID())
+		convResult := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, "agent", agentID, "user", user.ID())
 		if convResult != nil {
 			filter.ConversationID = convResult.ConversationID
 		} else {
@@ -261,7 +261,7 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 			}
 		} else if channel == "web" || channel == "" {
 			// Default: DM conversation between agent and current user.
-			convResult := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, agentID, user.ID())
+			convResult := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, "agent", agentID, "user", user.ID())
 			if convResult != nil {
 				filter.ConversationID = convResult.ConversationID
 			} else {

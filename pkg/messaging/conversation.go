@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -45,7 +46,7 @@ type ConversationResult struct {
 // ResolveOrCreateDMConversation resolves (or creates) a direct-message
 // conversation for the given sender/recipient pair. DM conversations are
 // GLOBAL — they have no ProjectID (design 2.4.1). The external_ref is
-// deterministic: dm:{sorted(senderID, recipientID)}.
+// deterministic and kind-encoded: dm:<kind>:<uuid>:<kind>:<uuid> (sorted).
 //
 // On any error the function returns nil and logs the failure. Callers MUST NOT
 // treat a nil return as fatal — message delivery continues without a
@@ -54,7 +55,7 @@ func ResolveOrCreateDMConversation(
 	ctx context.Context,
 	cs ConversationUpserter,
 	log *slog.Logger,
-	senderID, recipientID string,
+	senderKind, senderID, recipientKind, recipientID string,
 ) *ConversationResult {
 	if senderID == "" || recipientID == "" {
 		log.Warn("skipping conversation resolution: missing sender or recipient ID",
@@ -62,7 +63,14 @@ func ResolveOrCreateDMConversation(
 		return nil
 	}
 
-	extRef := DirectMessageExternalRef(senderID, recipientID)
+	extRef, err := messages.DMConversationKey(senderKind, senderID, recipientKind, recipientID)
+	if err != nil {
+		log.Warn("skipping conversation resolution: invalid DM key inputs (non-fatal)",
+			"sender_kind", senderKind, "sender_id", senderID,
+			"recipient_kind", recipientKind, "recipient_id", recipientID,
+			"error", err)
+		return nil
+	}
 
 	conv := &store.Conversation{
 		Kind:        "direct",
@@ -97,13 +105,20 @@ func ResolveDMConversationForRead(
 	ctx context.Context,
 	cr ConversationReader,
 	log *slog.Logger,
-	idA, idB string,
+	idAKind, idA, idBKind, idB string,
 ) *ConversationResult {
 	if idA == "" || idB == "" {
 		return nil
 	}
 
-	extRef := DirectMessageExternalRef(idA, idB)
+	extRef, err := messages.DMConversationKey(idAKind, idA, idBKind, idB)
+	if err != nil {
+		log.Debug("read-switch: invalid DM key inputs, skipping lookup",
+			"id_a_kind", idAKind, "id_a", idA,
+			"id_b_kind", idBKind, "id_b", idB,
+			"error", err)
+		return nil
+	}
 
 	conv, err := cr.GetConversationByExternalRef(ctx, "native", extRef)
 	if err != nil {
