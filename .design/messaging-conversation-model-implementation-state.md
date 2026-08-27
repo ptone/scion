@@ -180,6 +180,26 @@
     that decides what gets dispatched first. Every defect row states which refs it is reachable
     on, by name.
 
+22. **Verify against the gate the work must pass, not only the tests it must satisfy.**
+    Issued 2026-08-27 17:10Z. `origin/main` is 100% `gofmt`-clean. `scion/messaging-v2` carries
+    **18** unformatted files, every one of them ours, accumulated across S5–S8. I accepted six
+    sections on full-suite green and never once ran `gofmt -l`, because `go test` is what I had
+    decided verification meant. **A green suite is evidence about behaviour and says nothing
+    about mergeability.** The defect is invisible per-section — one or two files each, always
+    below the threshold where anyone objects — and only legible branch-wide, which is the level
+    nobody was checking because each manager checks their own diff and I was checking their
+    tests. Merge-readiness is now a standing step in the heartbeat, run against the whole branch
+    and diffed against `origin/main`, not against the previous run of itself.
+
+23. **A tripwire's covered case and its blind spot are not obvious from reading it — mutate both.**
+    Issued 2026-08-27 17:10Z. S8 pinned `int(RefThread) == 4` to catch drift in a hand-maintained
+    table, and disclosed the blind spot as "a new kind inserted before RefThread". That is exactly
+    backwards: `RefThread` is the last member, so insertion shifts it and fires, while **appending
+    — how Go iota enums are extended nearly every time — leaves it at 4 and passes silently.**
+    Verified by mutation, both directions. The disclosure is worse than no disclosure: it names
+    the covered case as the gap, so a future reader sees the risk acknowledged and stops looking.
+    **An honestly-declared limitation is still a claim about code and gets tested like one.**
+
 ## 2. Source documents
 
 | Doc | Path |
@@ -712,6 +732,7 @@ would bury the events that matter.
 - `2026-08-27 13:27Z` **Possible elimination of S6's step 2.** The shipped hub authorises DMs by *parsing the key* (`isDMParticipant`, `handlers_chat_v2.go:2932`) and treats `webchat_dm` as a **derived index for listing**, rebuilt from the key. §2.4.2 conflated index with authority — which is the only reason its migration was security-critical. S6 asked to assess adopting the split for `kind='direct'`. See §5p.
 - `2026-08-27 13:26Z` **nc-arch confirmed all four items shipped and self-corrected** — they had answered from a design doc gone stale during a standby period. Also found a live defect: `validDMKey` is enforced only on chat-v2 REST paths; the agent outbound path does not validate `ThreadID`, and `attachments_agent_test.go:290` commits a malformed `dm:<userID>+<agentID>` key as expected usage. **They own that filing.** Consequence for us: never assume a stored key is well-formed.
 - `2026-08-27 13:25Z` **CORRECTION: native-chat wave 2 is LANDED on main, not in flight, and the kind-encoded DM key is shipped and regex-validated.** My design duplicated a shipped construct. Second such failure today. Rule 15 added. §5m's framing superseded by **§5o**. Revised recommendation sent to the user; S6 and nc-arch both re-briefed.
+- `2026-08-27 17:12Z` **Heartbeat prompt replaced again** — old `a80a92ed` deleted, new `cf7b37e7` (`ca-msg-impl-heartbeat-v3`), same `13,43 * * * *` cron, verified as the only heartbeat on the roster afterwards. Adds **step 5, MERGE READINESS** (rule 22): `gofmt -l` branch-wide compared against `origin/main`, plus a prompt to ask which other gates `main` enforces that I have never run. Also folds the `scion list | tail` truncation trap into step 1. **Rules that live only in the state doc are advice; rules that live in the heartbeat get executed.** DEF-17 existed for six sections because no recurring instruction ever asked the question.
 - `2026-08-27 13:15Z` **Heartbeat prompt replaced** — old `1a899567` deleted, new `a80a92ed` (`ca-msg-impl-heartbeat-v2`). Roster check is now **step 1** and an empty roster is the alarm condition; adds a ledger sweep for unblocked-but-undispatched work, and requires `blocked` to name what is blocked *and what remains runnable*. Closes the §5j blind spot structurally rather than in my memory.
 - `2026-08-27 13:15Z` **DEF-1 ledger row corrected to CLOSED** — §3 has said 'implemented' since S4 while the ledger row still read 'open'. Ledger drifted from the body of the same document.
 - `2026-08-27 13:15Z` DEF-7 answer written up as design **§2.6.2**; the escalated unification question as **§2.6.3**.
@@ -989,6 +1010,68 @@ there is a reason they kept both that I am not seeing.
    paths; the agent outbound path does not validate `ThreadID`. A committed test bakes in a malformed
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
+
+## 5ab. 17:01-17:12Z — DEF-13 reviewed; a tripwire that guards the wrong direction, and a gate I never ran
+
+S8 reported DEF-13 complete on `scion/ca-msg-em8` (`2e6178ee`, `04b16214` off `e2b5c37d`), with an
+internal code review of APPROVE, no Critical or Required findings, and two Optional nits. Rule 18
+sweep against the merge parent: 4 files, +209/−32, no deletions. Clean.
+
+**Two of the three changes I required are genuinely load-bearing, and I confirmed it by mutation
+rather than by reading the tests.** M3 — inserting `scion message conv:<uuid>` into
+`messageCmd.Example` — was killed by `cobra_help_deny_list` with a message naming both the pattern
+and the source (`from cobra-help-text`). That is specificity, which is the signal; a kill alone
+would only have proved reachability. The deprecation-linkage test carries a `checked > 0` guard,
+which is rule 14 applied correctly and without being told.
+
+**The third change does not do its job, and its own disclosure points at the wrong hole.** The
+tripwire is `require.Equal(t, 4, int(messaging.RefThread))`, protecting a hand-maintained table of
+reference forms. S8's review logs the limitation as "blind spot if a new kind is inserted before
+RefThread", attributing it to Go's inability to enumerate iota constants. Both halves are wrong.
+
+`RefThread` is the **last** member of the enum (`pkg/messaging/resolve.go:44`). I ran both
+mutations:
+
+- **M2, insert a member before `RefThread`** → `RefThread` becomes 5 → **KILLED.** The case S8
+  declared uncovered is the one that works.
+- **M1, append a member after `RefThread`** → `RefThread` stays 4 → **SURVIVES**, suite green.
+
+Appending is how a Go iota enum is extended essentially every time. So the guard covers the rare
+direction and misses the common one — and someone adding `RefRoom` without touching `Long`
+reproduces DEF-13 exactly, through the mechanism built to prevent it.
+
+**The disclosure is the worse half.** An undisclosed blind spot is found by the next person who
+looks. A blind spot disclosed in the wrong direction is *not* found by the next person who looks,
+because they check the nit, see the risk acknowledged and reasoned about, and move on. Honest
+disclosure bought false confidence. Hence rule 23: an admitted limitation is a claim about code and
+gets mutated like one.
+
+The "Go limitation" defence also fails a grep. `pkg/hub/project_settings_registry_test.go:19-20`
+imports `go/ast` and `go/parser` and does precisely this — parses its own source file, counts
+constants matching a naming convention, asserts the count against a registry so that adding one
+without registering it fails. **Prior art, in this repo, for the problem declared unsolvable**
+(rule 16, applied to a review's reasoning rather than to a design). Required S8 to replace the
+value pin with an AST count and to prove it with M1, and to remove the old assertion rather than
+keep both — a weak check beside a strong one only creates ambiguity about which is authoritative.
+
+### The finding that is mine, not S8's
+
+Chasing their "struct alignment is cosmetic" nit, I ran `gofmt -l` — **for the first time in this
+project.** `cmd/message_help_test.go` is dirty. So are two neighbours, but both were already dirty
+at the merge parent. So I ran it branch-wide: **18 files.** Then against `origin/main`: **0**.
+
+Every violation is ours, accumulated across S5–S8, one or two files at a time — always small
+enough per section that nothing looked wrong, only visible at the branch level, which is the one
+level nobody was inspecting. Each manager reviews their own diff; I review their tests. Logged as
+DEF-17, owned by me, swept in one commit after both in-flight branches land so the sweep does not
+conflict with them.
+
+**I accepted six sections on full-suite green and never checked whether the branch could merge.**
+The suite answers "does it behave"; the formatter answers "will it land". I had silently equated
+verification with the first question because `go test` was the tool I had reached for on day one.
+Rule 22. Merge-readiness — formatter, and anything else `main` enforces that I have not thought to
+run — is now a heartbeat step, diffed against `origin/main` rather than against the branch's own
+previous state, since a branch that has been drifting for six sections agrees with itself perfectly.
 
 ## 5aa. 17:00Z — the section named "one derivation" was about to ship six
 
@@ -1878,6 +1961,7 @@ conversation. This table is the only thing that carries them.
 | DEF-14 | **Message ingress checks DM key format but not membership.** PR #1319 (native chat, merged to `main` at `6268bac` 2026-08-27) added `validDMKey` at `handlers_agent_messaging.go:120`/`:562` and `handlers_broker_inbound.go:98`, rejecting malformed `dm:`-prefixed thread_ids with 400 before dispatch or persistence — this closed the gap I logged as §5p item 2. It does **not** check that the authenticated caller is one of the two principals the key names. `storeMsg.ThreadID` and `.Channel` both come from the request body (`:236`) and go to `CreateMessage`; the read path (`handlers_chat_v2.go:1550` primary list, `:2848` search) gates on `isDMParticipant` and then filters by key **with no project filter**. So agent A in P1 can post `channel='web'`, `thread_id='dm:agent:<B>:user:<V>'` and the row appears inside B↔V's private DM for V, across projects. | found 2026-08-27 15:10Z reviewing #1319; **confirmed by nc-arch on the primary list path**, closing the caveat I raised about having traced only search | **native chat** owns the fix (nc-arch routed it to native-chat-lead and called it worth doing). Mine only as `AC-INGRESS-1`, so my step 1c does not inherit it | Bounded: no read access is gained, and `Sender` is the authenticated agent's honest slug — injection, not impersonation or exfiltration. nc-arch's refinement: attribution is honest but **placement is deceptive**, since V's UI renders the message inside the B conversation. #1319 strictly narrows the hole; the danger is that it *reads* as closing it, and nothing downstream re-checks. **Adding a partial check to an unguarded path can leave it better defended and less likely to be defended further.** **REPRODUCED 15:34Z and I ran it myself**, not on the developer's report: branch `scion/ca-msg-inject-repro` @ `07866490` (test file only, no production change), `TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM` in `pkg/hub/dm_injection_security_test.go`, FAIL on main in 0.68s with distinct project IDs in the run log. It asserts the **correct** invariant (V must not see A's message), so it goes green on fix rather than needing inversion. Handed to nc-arch and native-chat-lead; agent retired, absence confirmed by name. **One control it does not run, flagged on handover:** both test messages carry the same DM key, so an unfiltered history read would produce an identical failure with a much worse diagnosis — the test proves the message is visible, not that the *key* is what makes it visible. I am confident reads are key-filtered (`handlers_chat_v2.go:1550`, traced by me and independently by nc-arch), but the test is not self-contained on the point. **A reproduction that cannot distinguish its own defect from a worse one is still evidence, provided you say which.** |
 | DEF-15 | **A `dm:`-prefixed `ThreadID` creates a third DM shape, inside the section that existed to eliminate the second.** On the merged branch, `handlers_agent_messaging.go:244` branches `if req.ThreadID != "" { ResolveOrCreateThreadConversation(...) } else if ... { ResolveOrCreateDMConversation(...) }` — **ThreadID is prioritised**, and the pair-based DM path runs only when it is empty. `ResolveOrCreateThreadConversation` (`pkg/messaging/conversation.go:158-161`) applies **no `dm:` prefix check**: it builds `external_ref = "thread:<projectID>:<threadID>"` with `Kind = "group"`. So an outbound message carrying `dm:agent:X:user:Y` produces `external_ref = 'thread:<proj>:dm:agent:X:user:Y'`, `kind = 'group'`, project-scoped. **Because `kind` is `group` it takes the participant-table path and never reaches the key-based authorization S6 just built** (§2.4.2.1). | found 2026-08-27 16:10Z reviewing S6's merge resolution | **me** to spec — the choice is whether a `dm:`-prefixed ThreadID routes to DM resolution or is refused at ingress, and it interacts with DEF-14 | **EXPOSURE CORRECTED 16:35Z — DEF-15 is branch-local, not live.** I wrote this row as if the defect were reachable in production. It is not. `pkg/messaging/conversation.go` and `pkg/messaging/backfill.go` **do not exist on `origin/main`**, and `git grep 'fmt.Sprintf("thread:' origin/main -- pkg/ cmd/` returns **zero hits** (verified by me at `98a9d9c2`, after nc-arch raised it). Every DEF-15 site is ours. It is reachable on `scion/messaging-v2` via `POST /agents/{id}/outbound-message` with a `thread_id`, which #1319 format-validates and therefore implicitly blesses — but that path only mints the malformed row on our branch. **This is a pre-beta defect in unreleased code, not a production security issue, and I had been writing it as the latter.** Caught by another architect running the grep I should have run on my own ledger row (rule 17 turned inward). The severity is unchanged for beta and the fix is unchanged; what changes is that nothing is burning right now. **How it surfaced is the part worth keeping:** S6 deleted the DM `ThreadID` line from `attachments_agent_test.go` — the line #1319 had just corrected to canonical format — on the stated grounds that "DM routing no longer uses ThreadID". A grep disproves that at `:237` and `:244`. Most likely the canonical key started producing this malformed row, the test looked wrong, and removing the line made the symptom vanish without the cause being found. **The evidence that would have exposed a defect was removed, and the justification was a claim about code that did not survive a grep.** Instructed S6 to restore the line and report what it produces, and explicitly *not* to fix the routing in a merge resolution. **CONFIRMED 16:20Z, by two independent observations.** S6 restored the line, ran it, and observed the row directly: `kind=group surface=native external_ref=thread:<proj>:dm:agent:<X>:user:<Y> project_id=<proj>`. I confirmed the code path separately by grep at `2724ed10` rather than taking their report. **DEF-15 is two sites, not one:** `:848` calls the same `ResolveOrCreateThreadConversation` with `structuredMsg.ThreadID` and has no `dm:` guard either. **PR #1322 does not fix it, and reduces who can see it.** #1322 adds the DM-key ownership check at `:174`, *upstream* of the dual-write at `:245`, so after it lands the only keys reaching the thread branch are well-formed **and correctly owned** — the mis-shaping then happens exclusively to legitimate traffic, where nobody is looking for it. A fix that filters the input to a broken function makes the breakage rarer and better disguised. **The restored test is red for the wrong reason and that is why it must not land red:** it dies at 400 `thread_id requires channel to be set` — our own S3 `ValidateLegacyMessage` addition — *before* it exercises routing, so a reader of that failure learns "validation rejects it" and stops. It also means #1319's canonical `dm:`-in-`ThreadID` usage is simply invalid on our branch, which is a contract collision with main, not a test bug. Instructed S6 to land it asserting the **correct** invariant behind `t.Skip("DEF-15")`; the acceptance criterion for the fix is deleting the Skip line. |
 | DEF-16 | **The conversation dual-write happens before validation, so a rejected request still leaves a row behind.** `handlers_agent_messaging.go` @ `2724ed10`: `handleAgentOutboundMessage` dual-writes at `:245`/`:247` and validates at `:288`; `handleAgentMessage` validates at `:615` and dual-writes at `:848`/`:851`. **The two ingress handlers perform the same two operations in opposite orders** (rule 19). Observed, not inferred: S6 restored a DM `ThreadID` to `attachments_agent_test.go`, the request was rejected 400, and the `kind=group` conversation row persisted with no message attached to it. The row survives; the message does not. | found 2026-08-27 16:17Z by S6 running the restored DEF-15 test | **me** to spec. The fix is an ordering change, but *which* order is correct is a real design question, not a cleanup: validate-then-write gives up the ability to record a conversation for a message that fails a soft check; write-then-validate manufactures orphans. Answer it before moving either line. | Orphans are harmless today — no messages, no participants, invisible to every read path. They stop being harmless the moment anything treats a conversation row as evidence that a conversation happened: `external_ref` uniqueness, the DEF-12 backfill, or a participant listing. **Note what this does to DEF-14's blast radius before #1322: an unauthorized key was refused, and still left a row.** The refusal was real and the side effect outlived it. |
+| DEF-17 | **The integration branch fails the formatting gate; `origin/main` passes it cleanly.** `gofmt -l` at `98a9d9c2` (excluding vendor): **0 files**. At `scion/ca-msg-em8` (= `scion/messaging-v2` + DEF-13): **18 files** — `cmd/{doc_syntax_test,message_convref_test,message_help_test}.go`, `extras/scion-slack/internal/slack/broker_test.go`, `pkg/hub/{admin_messaging_divergence.go,handlers_read_switch_test.go,route_classification_test.go}`, `pkg/messages/{dm_key_test.go,types.go}`, `pkg/messaging/{delivery,divergence,divergence_test,envelope,envelope_compat_test,envelope_test,resolve,resolve_test}.go`, `pkg/store/models.go`. **Every one is ours**, spread across S5–S8; no single section is a large offender, which is precisely why it survived six section reviews. | found 2026-08-27 17:08Z while reviewing DEF-13, by running `gofmt -l` for the first time in the project | **me.** Not delegated: it spans every manager's files and a per-section fix would collide with in-flight work. Sweep in one commit on the integration branch **after** ca-msg-em6 and ca-msg-em8 land, so the sweep does not conflict with either. `pkg/store/models.go` is ent-generated — check whether it is regenerated rather than hand-formatted before touching it. | Zero behavioural risk and zero urgency before beta; `gofmt` changes whitespace only. The reason it is a ledger row and not a chore: it is a **merge gate**, and the branch's whole purpose is to merge. Discovering it at the PR-to-`main` step, with a beta scheduled around a live exercise, converts a two-minute fix into a blocked deploy. **My process gap (rule 22), not a section's** — nobody was asked to run the formatter and I verified only what I had asked for. |
 | DEF-3 **(CLOSED 2026-08-27 09:55Z)** | **The phase-5 divergence gate is weaker than the design assumed, and this is my spec gap, not em2's.** `ComputeDivergenceMatch` is now a genuine comparison, but at the call sites both models derive their answer from the same three fields (sender, recipient, thread_id), so a DM or thread pair mismatch is **unreachable in production**. The only divergence reachable today is resolution failure (`no-new-routing`). Note the consequence: this signal **would not have caught B-1**, the duplicate-key bug — dual-write would have returned its own row's ref and scored a match. **Closed on S4's branch:** `CheckConversationConsistency` compares against the `conversation_id` stored on prior messages of the same logical conversation — the independent source of truth this asked for — with `TestCheckConversationConsistency_DetectsMismatch`, `_GenuineDisagreement`, `_ThreadDisagreement` and `_RoutingTypeMismatch` proving disagreement is reachable. Carries forward with S4's merge, not before. | S2 | **S4, before the read switch** | Phase 5's new model has no independent source of truth; it constructs the key from the message. Nothing can diverge until something else is authoritative. |
 
 | DEF-4 **(CLOSED 2026-08-27 07:55Z at `b92926dd`)** | **The `pkg/hub` test suite is degrading commit over commit on the integration branch.** Full-suite failure counts: `origin/main` **0** (3 runs), `cd4ee7ed` **5**, `d9fc7f51` **18**, `f206a0d9` **17–19**. Failure membership is **non-deterministic** — two consecutive runs at the same commit shared only 2 of ~18. Every failure is SQLite `out of memory (7)` raised at test-store creation (`newTestStore(":memory:")` / `sql.Open("sqlite3", ":memory:")`), with 109 GB free on the host and unaffected by `-parallel 2`. Each test opens its own in-memory DB and runs the full ent migration; the branch adds tables, so per-DB cost has risen. Suspected cause is stores never being closed, so every in-memory DB stays live for the whole package run — but that is a lead, not a diagnosis. | S1/S2 (accumulating) | **S4, as its first task, before any new feature work** | It does not affect shipped behaviour. It does destroy the verification method: my acceptance of every section from here rests on diffing full-suite results, and a suite whose failure set changes run to run cannot support that. It will get worse with S4 and S5. |
