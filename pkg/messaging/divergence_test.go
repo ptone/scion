@@ -191,6 +191,26 @@ func TestComputeDivergenceMatch_NoOldRouting(t *testing.T) {
 	}
 }
 
+func TestComputeDivergenceMatch_OneEmptyID(t *testing.T) {
+	// Only sender empty
+	match, reason := ComputeDivergenceMatch("", "recip", "", "conv-abc")
+	if match {
+		t.Error("expected match=false when senderID is empty")
+	}
+	if reason != "unknown/no-old-routing" {
+		t.Errorf("expected reason 'unknown/no-old-routing', got %q", reason)
+	}
+
+	// Only recipient empty
+	match, reason = ComputeDivergenceMatch("sender", "", "", "conv-abc")
+	if match {
+		t.Error("expected match=false when recipientID is empty")
+	}
+	if reason != "unknown/no-old-routing" {
+		t.Errorf("expected reason 'unknown/no-old-routing', got %q", reason)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // NewRoutingStr tests
 // ---------------------------------------------------------------------------

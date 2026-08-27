@@ -128,8 +128,8 @@ func ComputeDivergenceMatch(senderID, recipientID, threadID, convID string) (mat
 		return false, "no-new-routing"
 	}
 
-	// If old model has no routing info
-	if senderID == "" && recipientID == "" {
+	// If old model has incomplete routing info (either ID missing)
+	if senderID == "" || recipientID == "" {
 		return false, "unknown/no-old-routing"
 	}
 
@@ -139,9 +139,18 @@ func ComputeDivergenceMatch(senderID, recipientID, threadID, convID string) (mat
 	}
 
 	// Both models route by sender-recipient pair for DMs.
-	// The old model uses sender-recipient:{sorted pair},
-	// the new model resolves via DirectMessageExternalRef which uses the same sorted pair.
-	// They agree when both have the same participants.
+	// Verify the old-model pair produces the same DM key the new model used.
+	// ResolveOrCreateDMConversation resolves via DirectMessageExternalRef(sender, recipient),
+	// so we reconstruct the expected key and compare against the old-model routing.
+	oldPairKey := OldRoutingFromMessage(senderID, recipientID, "")
+	newDMKey := DirectMessageExternalRef(senderID, recipientID)
+	// The old key is "sender-recipient:{A}:{B}" and new key is "dm:{A}:{B}",
+	// both sorted. Extract the pair portion and compare.
+	oldPair := strings.TrimPrefix(oldPairKey, "sender-recipient:")
+	newPair := strings.TrimPrefix(newDMKey, "dm:")
+	if oldPair != newPair {
+		return false, "dm-key-mismatch"
+	}
 	return true, "both-models-dm-agreement"
 }
 
