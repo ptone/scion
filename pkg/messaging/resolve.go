@@ -340,22 +340,33 @@ func resolveThread(ctx context.Context, s ResolutionStore, name string, rctx Res
 		}
 	}
 
-	// List group conversations in this project and find one matching the display name.
-	result, err := s.ListConversations(ctx, store.ConversationFilter{
-		ProjectID: rctx.ProjectID,
-		Kind:      "group",
-	}, store.ListOptions{Limit: 0}) // 0 = no limit, fetch all
-	if err != nil {
-		return nil, fmt.Errorf("listing conversations in project %s: %w", rctx.ProjectID, err)
-	}
-
-	for _, c := range result.Items {
-		if c.DisplayName == name {
-			return &ResolveResult{
-				ConversationID: c.ID,
-				Created:        false,
-			}, nil
+	// Paginate through all group conversations in this project to find one
+	// matching the display name. A previous implementation passed Limit:0
+	// expecting "no limit", but clampLimit(0) returns 50 (the default page
+	// size), silently missing threads beyond the first page.
+	var cursor string
+	for {
+		result, err := s.ListConversations(ctx, store.ConversationFilter{
+			ProjectID: rctx.ProjectID,
+			Kind:      "group",
+		}, store.ListOptions{Limit: 100, Cursor: cursor})
+		if err != nil {
+			return nil, fmt.Errorf("listing conversations in project %s: %w", rctx.ProjectID, err)
 		}
+
+		for _, c := range result.Items {
+			if c.DisplayName == name {
+				return &ResolveResult{
+					ConversationID: c.ID,
+					Created:        false,
+				}, nil
+			}
+		}
+
+		if result.NextCursor == "" {
+			break
+		}
+		cursor = result.NextCursor
 	}
 
 	return nil, &ResolutionError{

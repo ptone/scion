@@ -340,8 +340,8 @@ func (s *ConversationStore) ListConversations(ctx context.Context, filter store.
 // Implementation note: SQLite does not support ON CONFLICT with partial unique
 // indexes, so we implement this as a query-then-create/update pattern. The
 // partial unique index still prevents concurrent inserts from creating
-// duplicates; a constraint-violation on insert triggers a retry that updates
-// the existing row instead.
+// duplicates; a constraint-violation on insert triggers a bounded retry that
+// updates the existing row instead.
 func (s *ConversationStore) UpsertConversationByExternalRef(ctx context.Context, conv *store.Conversation) (*store.Conversation, error) {
 	if conv.ExternalRef == "" {
 		return nil, fmt.Errorf("externalRef is required for upsert: %w", store.ErrInvalidInput)
@@ -352,93 +352,101 @@ func (s *ConversationStore) UpsertConversationByExternalRef(ctx context.Context,
 		return nil, err
 	}
 
-	// Look for an existing non-deleted conversation with the same (surface, external_ref).
-	existing, err := s.client.Conversation.Query().
-		Where(
-			conversation.SurfaceEQ(conversation.Surface(conv.Surface)),
-			conversation.ExternalRefEQ(conv.ExternalRef),
-			conversation.DeletedAtIsNil(),
-		).
-		Only(ctx)
-	if err != nil && !ent.IsNotFound(err) {
-		return nil, err
-	}
+	const maxRetries = 3
+	var lastErr error
 
-	if existing != nil {
-		// Update the existing row.
-		update := s.client.Conversation.UpdateOneID(existing.ID).
-			SetDisplayName(conv.DisplayName).
-			SetParentRef(conv.ParentRef).
-			SetLastActivityAt(time.Now())
-
-		if conv.DriftState != "" {
-			update.SetDriftState(conversation.DriftState(conv.DriftState))
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Look for an existing non-deleted conversation with the same (surface, external_ref).
+		existing, err := s.client.Conversation.Query().
+			Where(
+				conversation.SurfaceEQ(conversation.Surface(conv.Surface)),
+				conversation.ExternalRefEQ(conv.ExternalRef),
+				conversation.DeletedAtIsNil(),
+			).
+			Only(ctx)
+		if err != nil && !ent.IsNotFound(err) {
+			return nil, err
 		}
+
+		if existing != nil {
+			// Update the existing row.
+			update := s.client.Conversation.UpdateOneID(existing.ID).
+				SetDisplayName(conv.DisplayName).
+				SetParentRef(conv.ParentRef).
+				SetLastActivityAt(time.Now())
+
+			if conv.DriftState != "" {
+				update.SetDriftState(conversation.DriftState(conv.DriftState))
+			}
+			if conv.ProjectID != nil {
+				pid, pErr := parseUUID(*conv.ProjectID)
+				if pErr != nil {
+					return nil, pErr
+				}
+				update.SetProjectID(pid)
+			}
+			if agentUID != nil {
+				update.SetDefaultAgentID(*agentUID)
+			}
+
+			updated, uErr := update.Save(ctx)
+			if uErr != nil {
+				return nil, uErr
+			}
+			return entConversationToStore(updated), nil
+		}
+
+		// No existing row — create a new one.
+		uid := uuid.New()
+		if conv.ID != "" {
+			uid, err = parseUUID(conv.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		driftState := conversation.DriftState(conv.DriftState)
+		if conv.DriftState == "" {
+			driftState = conversation.DriftStateActive
+		}
+
+		create := s.client.Conversation.Create().
+			SetID(uid).
+			SetKind(conversation.Kind(conv.Kind)).
+			SetSurface(conversation.Surface(conv.Surface)).
+			SetExternalRef(conv.ExternalRef).
+			SetParentRef(conv.ParentRef).
+			SetDisplayName(conv.DisplayName).
+			SetDriftState(driftState)
+
 		if conv.ProjectID != nil {
 			pid, pErr := parseUUID(*conv.ProjectID)
 			if pErr != nil {
 				return nil, pErr
 			}
-			update.SetProjectID(pid)
+			create.SetProjectID(pid)
 		}
 		if agentUID != nil {
-			update.SetDefaultAgentID(*agentUID)
+			create.SetDefaultAgentID(*agentUID)
+		}
+		if !conv.LastActivityAt.IsZero() {
+			create.SetLastActivityAt(conv.LastActivityAt)
 		}
 
-		updated, uErr := update.Save(ctx)
-		if uErr != nil {
-			return nil, uErr
+		created, cErr := create.Save(ctx)
+		if cErr != nil {
+			// If we hit a unique constraint violation (race with a concurrent insert),
+			// retry by looping back to query the now-existing row.
+			if isUniqueConstraintError(cErr) {
+				lastErr = cErr
+				continue
+			}
+			return nil, mapError(cErr)
 		}
-		return entConversationToStore(updated), nil
+		return entConversationToStore(created), nil
 	}
 
-	// No existing row — create a new one.
-	uid := uuid.New()
-	if conv.ID != "" {
-		uid, err = parseUUID(conv.ID)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	driftState := conversation.DriftState(conv.DriftState)
-	if conv.DriftState == "" {
-		driftState = conversation.DriftStateActive
-	}
-
-	create := s.client.Conversation.Create().
-		SetID(uid).
-		SetKind(conversation.Kind(conv.Kind)).
-		SetSurface(conversation.Surface(conv.Surface)).
-		SetExternalRef(conv.ExternalRef).
-		SetParentRef(conv.ParentRef).
-		SetDisplayName(conv.DisplayName).
-		SetDriftState(driftState)
-
-	if conv.ProjectID != nil {
-		pid, pErr := parseUUID(*conv.ProjectID)
-		if pErr != nil {
-			return nil, pErr
-		}
-		create.SetProjectID(pid)
-	}
-	if agentUID != nil {
-		create.SetDefaultAgentID(*agentUID)
-	}
-	if !conv.LastActivityAt.IsZero() {
-		create.SetLastActivityAt(conv.LastActivityAt)
-	}
-
-	created, err := create.Save(ctx)
-	if err != nil {
-		// If we hit a unique constraint violation (race with a concurrent insert),
-		// retry by fetching and updating the now-existing row.
-		if isUniqueConstraintError(err) {
-			return s.UpsertConversationByExternalRef(ctx, conv)
-		}
-		return nil, mapError(err)
-	}
-	return entConversationToStore(created), nil
+	return nil, fmt.Errorf("upsert failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // isUniqueConstraintError checks if the error is a unique constraint violation.
@@ -459,6 +467,9 @@ func isUniqueConstraintError(err error) bool {
 // ---------------------------------------------------------------------------
 
 // AddParticipant adds a principal to a conversation.
+// If a soft-removed participant with the same (conversation_id, principal_kind,
+// principal_id) exists (left_at IS NOT NULL), the row is re-activated instead
+// of inserting a duplicate.
 func (s *ConversationStore) AddParticipant(ctx context.Context, p *store.ConversationParticipant) error {
 	if p.ConversationID == "" || p.PrincipalID == "" {
 		return fmt.Errorf("conversationID and principalID are required: %w", store.ErrInvalidInput)
@@ -466,6 +477,38 @@ func (s *ConversationStore) AddParticipant(ctx context.Context, p *store.Convers
 	convUID, err := parseUUID(p.ConversationID)
 	if err != nil {
 		return err
+	}
+
+	// Check for a soft-removed participant that can be re-joined.
+	existing, err := s.client.ConversationParticipant.Query().
+		Where(
+			conversationparticipant.ConversationIDEQ(convUID),
+			conversationparticipant.PrincipalKindEQ(conversationparticipant.PrincipalKind(p.PrincipalKind)),
+			conversationparticipant.PrincipalIDEQ(p.PrincipalID),
+			conversationparticipant.LeftAtNotNil(),
+		).
+		Only(ctx)
+	if err != nil && !ent.IsNotFound(err) {
+		return err
+	}
+
+	if existing != nil {
+		// Re-join: clear left_at and update role.
+		role := conversationparticipant.Role(p.Role)
+		if p.Role == "" {
+			role = conversationparticipant.RoleMember
+		}
+		updated, uErr := s.client.ConversationParticipant.UpdateOneID(existing.ID).
+			ClearLeftAt().
+			SetRole(role).
+			Save(ctx)
+		if uErr != nil {
+			return uErr
+		}
+		p.ID = updated.ID.String()
+		p.JoinedAt = updated.JoinedAt
+		p.LeftAt = nil
+		return nil
 	}
 
 	create := s.client.ConversationParticipant.Create().

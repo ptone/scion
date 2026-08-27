@@ -17,6 +17,8 @@ package messaging
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -61,7 +63,7 @@ func (m *mockResolutionStore) CreateConversation(_ context.Context, conv *store.
 	return nil
 }
 
-func (m *mockResolutionStore) ListConversations(_ context.Context, filter store.ConversationFilter, _ store.ListOptions) (*store.ListResult[store.Conversation], error) {
+func (m *mockResolutionStore) ListConversations(_ context.Context, filter store.ConversationFilter, opts store.ListOptions) (*store.ListResult[store.Conversation], error) {
 	var items []store.Conversation
 	for _, conv := range m.conversations {
 		if filter.ProjectID != "" && (conv.ProjectID == nil || *conv.ProjectID != filter.ProjectID) {
@@ -78,6 +80,34 @@ func (m *mockResolutionStore) ListConversations(_ context.Context, filter store.
 		}
 		items = append(items, *conv)
 	}
+
+	// Simulate pagination when a limit is set.
+	if opts.Limit > 0 && len(items) > 0 {
+		// Sort by ID for deterministic pagination.
+		sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
+
+		// Apply cursor (cursor = last ID seen).
+		if opts.Cursor != "" {
+			idx := 0
+			for i, it := range items {
+				if it.ID == opts.Cursor {
+					idx = i + 1
+					break
+				}
+			}
+			items = items[idx:]
+		}
+
+		if len(items) > opts.Limit {
+			nextCursor := items[opts.Limit-1].ID
+			return &store.ListResult[store.Conversation]{
+				Items:      items[:opts.Limit],
+				TotalCount: len(items),
+				NextCursor: nextCursor,
+			}, nil
+		}
+	}
+
 	return &store.ListResult[store.Conversation]{Items: items, TotalCount: len(items)}, nil
 }
 
@@ -667,6 +697,48 @@ func TestResolve_Thread_NoProject(t *testing.T) {
 	var resErr *ResolutionError
 	require.ErrorAs(t, err, &resErr)
 	assert.Equal(t, "no-shared-project", resErr.Reason)
+}
+
+func TestResolve_Thread_ManyConversations(t *testing.T) {
+	// Regression: resolveThread used Limit:0 which clamped to 50, missing
+	// threads beyond the first page.
+	ms := newMockStore()
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	senderID := uuid.NewString()
+
+	// Create 65 group conversations. The target is the last one created,
+	// which should be beyond the first page (limit=100 in the real code,
+	// but the mock paginates at opts.Limit).
+	var targetID string
+	for i := 0; i < 65; i++ {
+		convID := uuid.NewString()
+		name := fmt.Sprintf("thread-%03d", i)
+		ms.addConversation(
+			&store.Conversation{
+				ID:          convID,
+				ProjectID:   &projectID,
+				Kind:        "group",
+				Surface:     "native",
+				DisplayName: name,
+			},
+			store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: senderID},
+		)
+		if i == 64 {
+			targetID = convID
+		}
+	}
+
+	// Resolve the last thread by name — this would fail with the old
+	// single-page implementation if the mock limits pages.
+	result, err := Resolve(ctx, ms, "#thread-064", ResolveContext{
+		SenderPrincipalKind: "user",
+		SenderPrincipalID:   senderID,
+		ProjectID:           projectID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, targetID, result.ConversationID)
+	assert.False(t, result.Created)
 }
 
 func TestResolve_Thread_SpaceSlashThread_Rejected(t *testing.T) {

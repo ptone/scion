@@ -655,6 +655,49 @@ func TestConversationNilProjectID(t *testing.T) {
 // Default role for participants
 // ---------------------------------------------------------------------------
 
+func TestParticipantReJoinAfterRemove(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	// 1. Add a participant.
+	p := &store.ConversationParticipant{
+		ConversationID: conv.ID,
+		PrincipalKind:  "user",
+		PrincipalID:    "user-alice",
+		Role:           "member",
+	}
+	require.NoError(t, s.AddParticipant(ctx, p))
+	assert.NotEmpty(t, p.ID)
+
+	// 2. Remove them (soft-remove sets left_at).
+	require.NoError(t, s.RemoveParticipant(ctx, conv.ID, "user", "user-alice"))
+
+	// Verify they are gone from active list.
+	participants, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Len(t, participants, 0)
+
+	// 3. Re-add them — should succeed, not ErrAlreadyExists.
+	p2 := &store.ConversationParticipant{
+		ConversationID: conv.ID,
+		PrincipalKind:  "user",
+		PrincipalID:    "user-alice",
+		Role:           "observer",
+	}
+	require.NoError(t, s.AddParticipant(ctx, p2))
+
+	// 4. Verify the participant is active again with left_at = nil.
+	participants, err = s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	require.Len(t, participants, 1)
+	assert.Equal(t, "user-alice", participants[0].PrincipalID)
+	assert.Equal(t, "observer", participants[0].Role)
+	assert.Nil(t, participants[0].LeftAt)
+}
+
 func TestParticipantDefaultRole(t *testing.T) {
 	s := newTestConversationStore(t)
 	ctx := context.Background()
