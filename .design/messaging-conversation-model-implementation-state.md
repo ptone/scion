@@ -55,22 +55,25 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 ## 3. Current position
 
-**Active section:** S1 — Foundation
-**Active manager:** `ca-msg-em1` — spawned 2026-08-27 00:42Z, template `eng-manager`
-**Awaiting from em1:** S1 section-complete report (phases 1–3) + merge into `scion/messaging-v2`
-**Blocked on:** nothing — em1 implementing phase 3
-**Last verified landing on integration branch:** none (branch is at `origin/main`) — expected;
-em1 merges at section end. Work in flight is on `origin/scion/ca-msg-em1`.
+**Active section:** S2 — Migration
+**Active manager:** `ca-msg-em2` — spawning 2026-08-27 01:40Z
+**Blocked on:** nothing
+**Last verified landing on integration branch:** `16294728` — **S1 verified 2026-08-27 01:40Z**
 
-Phase progress on `origin/scion/ca-msg-em1` (verified by `git log`, not by report):
+S1 verification (performed by me, independently of em1's report):
 
-| Phase | Commit | State |
+| Check | Method | Result |
 |---|---|---|
-| 1 schema | `d81c1093` | landed on em1 branch, unverified by me |
-| 2 store | `151a616e` | landed on em1 branch, unverified by me |
-| 3 resolution | — | in progress (`dev-resolution` executing) |
+| Builds | `go build ./...` in a detached worktree at `origin/scion/messaging-v2` | pass |
+| Tests | `go test ./pkg/messaging/... ./pkg/store/...` | pass |
+| **Additive only** | `git diff --name-only origin/main...` minus `pkg/ent/` and `.design/` | 11 files: 6 new in `pkg/messaging`, 3 new in `pkg/store`, plus `store.go`/`models.go` interface additions and a one-line struct embed in `composite.go`. **No live messaging path modified.** |
+| D1 (UUID-only `DefaultAgentID`) | `validateDefaultAgentID` at `conversation_store.go:97`, called on all three write paths | pass |
+| D2 (one normalization helper) | `pkg/messaging.NormalizeAgentRef` | pass — em2 must call it |
+| Disclosure rule (AC-32) | read `resolve.go:198–218` against design §2.6.1 | pass — boundary-violation only when `senderBelongsToProject`, otherwise not-found |
 
-I verify against acceptance criteria at section merge, not per phase.
+I did not re-review implementation quality; em1 ran review/test/audit gates. I checked the
+things that are mine: the section is additive, the standing decisions were honoured, and the
+isolation semantics match the design rather than a plausible-looking approximation of them.
 
 ## 4. Section plan
 
@@ -79,8 +82,8 @@ back into it.
 
 | # | Section | Design phases | Manager | Status |
 |---|---|---|---|---|
-| S1 | Foundation — schema, store, resolution | 1, 2, 3 | `ca-msg-em1` | pending |
-| S2 | Migration — backfill, dual-write | 4, 5 | `ca-msg-em2` | pending |
+| S1 | Foundation — schema, store, resolution | 1, 2, 3 | `ca-msg-em1` | **verified** (`fc523ecd..16294728`) |
+| S2 | Migration — backfill, dual-write | 4, 5 | `ca-msg-em2` | active |
 | S3 | Envelope — message type, validation, delivery format | 6, 7, 9 | `ca-msg-em3` | pending |
 | S4 | Surfaces — read switch, CLI split, broker edge | 8, 10, 11 | `ca-msg-em4` | pending |
 | S5 | Docs — skill, docs-site, glossary | 12 | `ca-msg-em5` | pending |
@@ -153,6 +156,23 @@ would bury the events that matter.
   `origin/scion/ca-msg-em1`; phase 3 in progress. em1 is delegating to its own developers
   (`dev-schema`, `dev-store`, `dev-resolution`) — it manages, they implement. Integration
   branch still at `origin/main`, correct for mid-section. No action taken.
+- `2026-08-27 01:40Z` **S1 landed and verified.** `fc523ecd..16294728`, 7 commits. Independent
+  build + test + additive-only + D1/D2 + disclosure-semantics checks all pass (see §3). em1
+  reported test APPROVE, review REQUEST-CHANGES→fixed, audit APPROVE with one HIGH deferred.
+  Two deferrals recorded as DEF-1 and DEF-2 in §5c. em1 released.
+- `2026-08-27 01:40Z` S2 opened; `ca-msg-em2` spawned.
+
+## 5c. Deferred-item ledger — debt accepted during implementation
+
+**Nothing leaves this table except by landing or by an explicit decision to drop it.** A
+deferral agreed in one section is the single easiest thing to lose across a manager handoff:
+the manager that accepted it is gone, and the manager that must honour it never heard the
+conversation. This table is the only thing that carries them.
+
+| # | Item | Deferred from | Owed by | Why deferral is safe |
+|---|---|---|---|---|
+| DEF-1 | **Participant-level auth on `conv:<id>`.** `resolveConvByID` checks the sender's *project* but not whether the sender is a *participant* in that conversation. Raised HIGH by S1 audit. | S1 | **S4** (surface layer, message-send time) | S1 is not wired into any live path, so the gap is not reachable. It becomes reachable the moment S4 switches reads. **S4 is not verifiable without this.** |
+| DEF-2 | **AC-33** — deferred to the envelope validation layer per design. | S1 | **S3** | The validation choke point does not exist until S3 builds it. |
 
 ## 5a. Standing technical decisions made during implementation
 
