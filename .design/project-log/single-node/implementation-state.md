@@ -6927,3 +6927,48 @@ available to anyone, so the only advance indicator is agent-create behaviour at 
 Sent `sn-stress-max` the five dead ends so it does not re-derive them — but told it explicitly
 **not** to adopt the 515 MiB figure. Two sizes measured independently check each other; one size
 plus an assumption is a single measurement wearing a disguise.
+
+## 2026-08-27 07:02 — heartbeat check: three questions answered
+
+**Q1 — are the agents progressing, or silently stalled? Checked, not assumed.**
+
+| agent | last activity | reading |
+|---|---|---|
+| `sn-stress-def` | executing, 2 min ago | mid Phase A ladder |
+| `sn-stress-max` | active, 4 sec ago | live |
+| `sn-docs-dev` | blocked, 7 min ago | **correct** — I told it to stand by for sizing |
+
+All three healthy. `sn-docs-dev` being blocked is the intended state, not a stall; it is waiting on
+data that does not exist yet. Worth distinguishing, because "blocked" and "stalled" look identical
+in the agent list and only the brief tells them apart.
+
+**Q2 — what blocks the critical path?**
+
+Nothing blocks §1. The §1 path was walked end to end and the tier is merged upstream. The remaining
+work is documentation completeness, and its single blocker is Phase B of the stress test.
+
+**Q3 — is the design doc in sync with what has been measured? NO, and one of the gaps is mine.**
+
+Logged as review-queue §18 (D4/D5/D6) for a single future doc PR. The one that matters:
+
+**Grep the whole design doc for `observab|monitor|metric|stats|utiliz` — zero matches.**
+
+§2 non-goals says *"Per-agent resource isolation guarantees. All agents share the Instance's CPU and
+memory budget."* §9.1 says *"No per-agent resource limits."* Every word of that is true. Both are
+incomplete in the same way: **they record that the budget is shared and never notice that it is also
+invisible.**
+
+Those are two different propositions. A shared budget is a reasonable Tier 0 trade-off — an operator
+manages it by watching usage and stopping something. A shared budget **nobody can see** is not
+manageable at all; the operator's only feedback is the failure itself.
+
+I wrote the trade-off down and never checked that it was actionable. That is the error worth naming,
+precisely because nothing in §2 or §9.1 is factually wrong. **A trade-off stated without checking
+whether the user can act on it is a decision that was never really made.** It reads as considered
+because it is written in the register of a considered decision.
+
+Whether this becomes a stated non-goal ("we accept this") or a known gap ("we intend to close this")
+is a genuine decision and it is ptone's. Queued, not escalated — he is awake but I told him at 06:54
+that nothing needed him, and this does not change that. It changes what I will put in front of him
+when the sizing data lands, because the two belong together: a capacity number is much less useful
+to an operator who has no way to see where they are on the curve.

@@ -1119,3 +1119,58 @@ and when I checked that anchor I found `14400s` appears in three files and **nev
 justification comment**, while every timeout anyone actually reasoned about carries one and sits far
 lower. I copied an unexamined constant and presented it as analysis. `#1299` fixes it and requires
 the comment, which matters more than the number.
+
+---
+
+## §18 — design-doc deltas accumulating for the next upstream doc PR (2026-08-27 07:02)
+
+`.design/hosted/cloud-run-single-node.md` is on upstream `main` at `f99a8189`. I cannot edit it;
+only ptone opens upstream PRs. These are the changes it now needs. **None is urgent on its own.
+They should go up as one PR, together with the `ptone/scion#1297` reference-qualification fix.**
+
+### D4 — §6 is now measured, not asserted (upgrade, not a correction)
+
+§6.1 "One gate, and it must be designed for" was written as a design intent. It is now a measured
+fact: the deploy sets `invokerIamDisabled: true`, so the Cloud Run invoker check is off and IAP is
+the sole perimeter. Evidence: `sn-docs-dev`'s six-way header × token × audience matrix, 2026-08-27.
+
+The doc should say this is verified and cite how. §6 was right, but it was right without evidence,
+and a security section that cannot say how it was checked invites the next reader to re-derive it.
+
+### D5 — the doc has a hole, and it is mine
+
+**Grep for `observab|monitor|metric|stats|utiliz` across the whole file: zero matches.**
+
+§2 lists as a non-goal: *"Per-agent resource isolation guarantees. All agents share the Instance's
+CPU and memory budget."* §9.1 repeats it: *"No per-agent resource limits."*
+
+Both are honest. Both are incomplete in the same way. **They record that the budget is shared and
+never notice that it is also invisible.** `sn-stress-def` has now established that no instrument
+exists at any layer — not Cloud Monitoring, not `/proc` inside a sandbox, not the hub stats API, not
+SSH, not cgroups.
+
+Those are two different propositions:
+
+- *Agents share a budget* — a reasonable trade-off for a Tier 0 tier, and one an operator can manage
+  by watching usage and stopping something.
+- *Agents share a budget nobody can see* — not manageable at all. The operator's only feedback is
+  the failure itself.
+
+**I wrote the trade-off down and never checked that it was actionable.** That is the error, and it
+is worth naming precisely because it is not a factual mistake — every sentence in §2 and §9.1 is
+true. A trade-off stated without checking whether the user can act on it is a decision that was
+never actually made.
+
+Proposed: §2 gains an explicit non-goal for observability, or §9.1 gains a gap entry, depending on
+whether we intend to fix it. **That choice is a real decision and it is ptone's, not mine** — a
+named non-goal says "we accept this"; a known gap says "we intend to close this."
+
+### D6 — §10 AC 11 has execution evidence
+
+Recorded for completeness: the omni image is now produced by the chained build and verified by
+digest. AC 11 moves from "reasoned" to "run".
+
+### Not yet included
+
+Sizing guidance. Both stress agents are mid-ladder. **Nothing about capacity should enter the design
+doc or the tutorial until Phase B lands**, and Phase B is the number we would publish.
