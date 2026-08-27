@@ -15,10 +15,13 @@
 package messaging
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1133,6 +1136,64 @@ func TestAC_DEF8_1_ConvergenceTwoPathsSameConversation(t *testing.T) {
 				}
 			}
 			if hasSender && hasAgent {
+				directCount++
+			}
+		}
+	}
+	assert.Equal(t, 1, directCount,
+		"there must be exactly ONE direct conversation for the sender+agent pair, found %d", directCount)
+}
+
+// TestAC_DEF8_1_CrossPath_DualWriteAndResolverConverge verifies that the
+// dual-write path (ResolveOrCreateDMConversation) and the resolver path
+// (Resolve with @agent syntax) produce the SAME conversation for the same
+// principal pair. This is the true cross-path convergence test — unlike the
+// original TestAC_DEF8_1 which only exercised the resolver path twice.
+//
+// Steps:
+//  1. Call ResolveOrCreateDMConversation (dual-write/legacy path)
+//  2. Call Resolve with @agent-slug (resolver path)
+//  3. Assert both return the SAME conversation ID
+//  4. Assert exactly ONE direct conversation row exists (rule 13: observe effect)
+func TestAC_DEF8_1_CrossPath_DualWriteAndResolverConverge(t *testing.T) {
+	ms := newMockStore()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	projectID := uuid.NewString()
+	senderID := uuid.NewString()
+	agentID := uuid.NewString()
+	agentSlug := "crosspath-agent"
+
+	ms.agents[projectID+"/"+agentSlug] = &store.Agent{
+		ID: agentID, Slug: agentSlug, ProjectID: projectID,
+	}
+
+	// Step 1: Legacy dual-write path.
+	convResult := ResolveOrCreateDMConversation(ctx, ms, log, "user", senderID, "agent", agentID)
+	require.NotNil(t, convResult, "dual-write path must return a result (rule 14: non-zero floor)")
+
+	// Step 2: Resolver path via @agent.
+	rctx := ResolveContext{
+		SenderPrincipalKind: "user",
+		SenderPrincipalID:   senderID,
+		ProjectID:           projectID,
+	}
+	resolveResult, err := Resolve(ctx, ms, "@"+agentSlug, rctx)
+	require.NoError(t, err)
+	require.NotNil(t, resolveResult, "resolver path must return a result")
+
+	// Step 3: Same conversation ID.
+	assert.Equal(t, convResult.ConversationID, resolveResult.ConversationID,
+		"dual-write and resolver paths must converge to the same conversation")
+
+	// Step 4: Exactly one direct conversation row for this pair (rule 13: observe EFFECT).
+	var directCount int
+	for _, conv := range ms.conversations {
+		if conv.Kind == "direct" && conv.ExternalRef != "" {
+			// Check if this conversation belongs to our sender+agent pair by
+			// examining the external_ref for both UUIDs.
+			if strings.Contains(conv.ExternalRef, senderID) && strings.Contains(conv.ExternalRef, agentID) {
 				directCount++
 			}
 		}

@@ -96,7 +96,7 @@ func readSwitchWorld(t *testing.T) (
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
 	// --- create a DM conversation (simulating dual-write) ---
-	convResult := messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog, agent.ID, alice.ID)
+	convResult := messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog, "agent", agent.ID, "user", alice.ID)
 	require.NotNil(t, convResult, "conversation resolution should succeed")
 	convID = convResult.ConversationID
 
@@ -445,7 +445,7 @@ func TestBrokerInbound_DualWrite_StampsConversationID(t *testing.T) {
 	ctx := context.Background()
 
 	// Pre-create the DM conversation that the dual-write will resolve.
-	convResult := messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog, alice.ID, agent.ID)
+	convResult := messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog, "user", alice.ID, "agent", agent.ID)
 	require.NotNil(t, convResult)
 
 	// Send a broker inbound message. This requires broker auth + HMAC,
@@ -477,7 +477,7 @@ func TestBrokerInbound_DualWrite_StampsConversationID(t *testing.T) {
 	if storeMsg.ThreadID != "" {
 		cr = messaging.ResolveOrCreateThreadConversation(ctx, s, srv.messageLog, storeMsg.ThreadID, agent.ProjectID)
 	} else if storeMsg.SenderID != "" && agent.ID != "" {
-		cr = messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog, storeMsg.SenderID, agent.ID)
+		cr = messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog, "user", storeMsg.SenderID, "agent", agent.ID)
 	}
 	if cr != nil {
 		storeMsg.ConversationID = cr.ConversationID

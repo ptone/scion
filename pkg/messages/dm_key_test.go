@@ -15,6 +15,7 @@
 package messages
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -139,4 +140,130 @@ func TestDMConversationKey_AgentAgent(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, key1, key2, "agent-agent key must be order-independent")
+}
+
+// ---------------------------------------------------------------------------
+// Deliverable 1: Conformance test — DMConversationKey matches production regex
+// ---------------------------------------------------------------------------
+
+// TestDMConversationKey_MatchesProductionRegex verifies that every key produced
+// by DMConversationKey matches the production DM key regex shipped in the hub.
+//
+// Source of truth: pkg/hub/handlers_chat_v2.go:391
+//   dmKeyRegexp = regexp.MustCompile(`^dm:(user|agent):[0-9a-f-]{36}:(user|agent):[0-9a-f-]{36}$`)
+//
+// The regex is unexported, so we reproduce the exact pattern here. If the hub
+// pattern changes, this test should be updated to match — the comment above
+// serves as the cross-reference.
+func TestDMConversationKey_MatchesProductionRegex(t *testing.T) {
+	// Exact regex from pkg/hub/handlers_chat_v2.go:391.
+	dmKeyRegexp := regexp.MustCompile(`^dm:(user|agent):[0-9a-f-]{36}:(user|agent):[0-9a-f-]{36}$`)
+
+	cases := []struct {
+		name  string
+		kindA string
+		idA   string
+		kindB string
+		idB   string
+	}{
+		{"agent+user", "agent", uuid.NewString(), "user", uuid.NewString()},
+		{"user+agent", "user", uuid.NewString(), "agent", uuid.NewString()},
+		{"user+user", "user", uuid.NewString(), "user", uuid.NewString()},
+		{"agent+agent", "agent", uuid.NewString(), "agent", uuid.NewString()},
+		{"uppercase UUID", "user", "AABBCCDD-0011-2233-4455-667788990011", "agent", uuid.NewString()},
+	}
+
+	require.Greater(t, len(cases), 0, "conformance test must have at least one case (rule 14)")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key, err := DMConversationKey(tc.kindA, tc.idA, tc.kindB, tc.idB)
+			require.NoError(t, err)
+			assert.Regexp(t, dmKeyRegexp, key,
+				"DMConversationKey output must match production regex from handlers_chat_v2.go:391")
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Deliverable 6: Golden test vectors for cross-language conformance
+// ---------------------------------------------------------------------------
+
+// TestDMConversationKey_GoldenVectors provides deterministic, hardcoded test
+// vectors whose expected output can be consumed by both the Go test suite and
+// the TypeScript client test suite (web/src/components/pages/chat.ts:2325
+// buildDMKey). Every input UUID and expected key string is byte-identical
+// across languages — do NOT replace these with uuid.NewString().
+func TestDMConversationKey_GoldenVectors(t *testing.T) {
+	// Exact regex from pkg/hub/handlers_chat_v2.go:391.
+	dmKeyRegexp := regexp.MustCompile(`^dm:(user|agent):[0-9a-f-]{36}:(user|agent):[0-9a-f-]{36}$`)
+
+	vectors := []struct {
+		name     string
+		kindA    string
+		idA      string
+		kindB    string
+		idB      string
+		expected string
+	}{
+		{
+			name:     "agent+user (mixed kind, standard order)",
+			kindA:    "agent",
+			idA:      "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+			kindB:    "user",
+			idB:      "550e8400-e29b-41d4-a716-446655440000",
+			expected: "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000",
+		},
+		{
+			name:     "user+agent (mixed kind, reversed argument order — must produce same key as case 1)",
+			kindA:    "user",
+			idA:      "550e8400-e29b-41d4-a716-446655440000",
+			kindB:    "agent",
+			idB:      "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+			expected: "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000",
+		},
+		{
+			name:     "user+user (same kind, different UUIDs)",
+			kindA:    "user",
+			idA:      "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+			kindB:    "user",
+			idB:      "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+			expected: "dm:user:7c9e6679-7425-40de-944b-e07fc1f90ae7:user:f47ac10b-58cc-4372-a567-0e02b2c3d479",
+		},
+		{
+			name:     "agent+agent (same kind)",
+			kindA:    "agent",
+			idA:      "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+			kindB:    "agent",
+			idB:      "12345678-1234-5678-1234-567812345678",
+			expected: "dm:agent:12345678-1234-5678-1234-567812345678:agent:a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+		},
+		{
+			name:     "uppercase UUID requires lowercase normalisation",
+			kindA:    "user",
+			idA:      "AABBCCDD-0011-2233-4455-667788990011",
+			kindB:    "agent",
+			idB:      "6BA7B810-9DAD-11D1-80B4-00C04FD430C8",
+			expected: "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:aabbccdd-0011-2233-4455-667788990011",
+		},
+	}
+
+	require.Greater(t, len(vectors), 0, "golden vectors must have at least one case (rule 14)")
+
+	for _, tc := range vectors {
+		t.Run(tc.name, func(t *testing.T) {
+			key, err := DMConversationKey(tc.kindA, tc.idA, tc.kindB, tc.idB)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, key,
+				"golden vector mismatch — if this fails, the TS buildDMKey must also be updated")
+			assert.Regexp(t, dmKeyRegexp, key,
+				"golden vector must match production regex from handlers_chat_v2.go:391")
+		})
+	}
+
+	// Cross-check: case 1 and case 2 use the same UUIDs in reversed argument
+	// order and must produce byte-identical keys.
+	key1, _ := DMConversationKey(vectors[0].kindA, vectors[0].idA, vectors[0].kindB, vectors[0].idB)
+	key2, _ := DMConversationKey(vectors[1].kindA, vectors[1].idA, vectors[1].kindB, vectors[1].idB)
+	assert.Equal(t, key1, key2, "reversed argument order must produce the same key")
 }

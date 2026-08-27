@@ -462,7 +462,15 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		if msg.ThreadID != "" {
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
 		} else if msg.SenderID != "" && msg.RecipientID != "" {
-			convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, msg.SenderID, msg.RecipientID)
+			senderKind := "user"
+			if k, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
+				senderKind = k
+			}
+			recipientKind := "user"
+			if k, ok := messages.PrincipalKindFromAddress(msg.Recipient); ok {
+				recipientKind = k
+			}
+			convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
@@ -632,7 +640,11 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		if msg.ThreadID != "" {
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
 		} else if msg.SenderID != "" && agent.ID != "" {
-			convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, msg.SenderID, agent.ID)
+			senderKind := "user"
+			if k, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
+				senderKind = k
+			}
+			convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID

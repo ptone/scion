@@ -57,19 +57,21 @@ func (m *mockConversationUpserter) UpsertConversationByExternalRef(
 
 func TestResolveOrCreateDMConversation_HappyPath(t *testing.T) {
 	mock := &mockConversationUpserter{
-		returnConv: &store.Conversation{ID: "conv-abc", ExternalRef: "dm:alice:bob"},
+		returnConv: &store.Conversation{ID: "conv-abc", ExternalRef: "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"},
 	}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "bob")
+	got := ResolveOrCreateDMConversation(context.Background(), mock, logger,
+		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+		"user", "550e8400-e29b-41d4-a716-446655440000")
 	if got == nil {
 		t.Fatal("expected non-nil result")
 	}
 	if got.ConversationID != "conv-abc" {
 		t.Errorf("expected conv-abc, got %q", got.ConversationID)
 	}
-	if got.ExternalRef != "dm:alice:bob" {
-		t.Errorf("expected ExternalRef dm:alice:bob, got %q", got.ExternalRef)
+	if got.ExternalRef != "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000" {
+		t.Errorf("expected ExternalRef from mock, got %q", got.ExternalRef)
 	}
 }
 
@@ -78,7 +80,7 @@ func TestResolveOrCreateDMConversation_EmptySender(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "", "bob")
+	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "user", "", "agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 	if got != nil {
 		t.Errorf("expected nil for empty sender, got %+v", got)
 	}
@@ -92,7 +94,7 @@ func TestResolveOrCreateDMConversation_EmptyRecipient(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "")
+	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "user", "550e8400-e29b-41d4-a716-446655440000", "agent", "")
 	if got != nil {
 		t.Errorf("expected nil for empty recipient, got %+v", got)
 	}
@@ -108,7 +110,9 @@ func TestResolveOrCreateDMConversation_UpsertError(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "bob")
+	got := ResolveOrCreateDMConversation(context.Background(), mock, logger,
+		"user", "550e8400-e29b-41d4-a716-446655440000",
+		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 	if got != nil {
 		t.Errorf("expected nil on upsert error, got %+v", got)
 	}
@@ -118,16 +122,18 @@ func TestResolveOrCreateDMConversation_UpsertError(t *testing.T) {
 	}
 }
 
-func TestResolveOrCreateDMConversation_ExternalRefIsSortedDMPair(t *testing.T) {
+func TestResolveOrCreateDMConversation_ExternalRefIsKindEncoded(t *testing.T) {
 	mock := &mockConversationUpserter{}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	// Call with "bob" first, "alice" second — ref should sort to alice:bob.
-	ResolveOrCreateDMConversation(context.Background(), mock, logger, "bob", "alice")
+	// Call with user first, agent second — ref should sort to agent:...:user:...
+	ResolveOrCreateDMConversation(context.Background(), mock, logger,
+		"user", "550e8400-e29b-41d4-a716-446655440000",
+		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 	if mock.lastConv == nil {
 		t.Fatal("expected upsert to be called")
 	}
-	expected := "dm:alice:bob"
+	expected := "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"
 	if mock.lastConv.ExternalRef != expected {
 		t.Errorf("expected external_ref %q, got %q", expected, mock.lastConv.ExternalRef)
 	}
@@ -138,7 +144,9 @@ func TestResolveOrCreateDMConversation_ProjectIDAlwaysNil(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
 	// DM conversations must never have ProjectID set (design 2.4.1).
-	ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "bob")
+	ResolveOrCreateDMConversation(context.Background(), mock, logger,
+		"user", "550e8400-e29b-41d4-a716-446655440000",
+		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 	if mock.lastConv == nil {
 		t.Fatal("expected upsert to be called")
 	}
@@ -158,12 +166,34 @@ func TestResolveOrCreateDMConversation_ReturnsExternalRefFromDB(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, logger, "alice", "bob")
+	got := ResolveOrCreateDMConversation(context.Background(), mock, logger,
+		"user", "550e8400-e29b-41d4-a716-446655440000",
+		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 	if got == nil {
 		t.Fatal("expected non-nil result")
 	}
 	if got.ExternalRef != "dm:actual-from-db" {
 		t.Errorf("expected ExternalRef from DB 'dm:actual-from-db', got %q", got.ExternalRef)
+	}
+}
+
+func TestResolveOrCreateDMConversation_InvalidKindReturnsNil(t *testing.T) {
+	mock := &mockConversationUpserter{}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	got := ResolveOrCreateDMConversation(context.Background(), mock, logger,
+		"bot", "550e8400-e29b-41d4-a716-446655440000",
+		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+	if got != nil {
+		t.Errorf("expected nil for invalid kind, got %+v", got)
+	}
+	if mock.lastConv != nil {
+		t.Error("upsert should not have been called with invalid kind")
+	}
+	output := buf.String()
+	if !strings.Contains(output, "invalid DM key inputs") {
+		t.Errorf("expected warning log about invalid DM key, got: %s", output)
 	}
 }
 

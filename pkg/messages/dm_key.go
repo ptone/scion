@@ -69,6 +69,21 @@ func DMConversationKey(kindA, idA, kindB, idB string) (string, error) {
 	return "dm:" + tokenA + ":" + tokenB, nil
 }
 
+// PrincipalKindFromAddress extracts the kind prefix ("user" or "agent") from
+// a principal address string like "user:alice" or "agent:my-bot". Returns the
+// kind and true if the prefix is a known kind, or ("", false) otherwise.
+func PrincipalKindFromAddress(address string) (string, bool) {
+	idx := strings.IndexByte(address, ':')
+	if idx < 0 {
+		return "", false
+	}
+	kind := strings.ToLower(address[:idx])
+	if validDMKinds[kind] {
+		return kind, true
+	}
+	return "", false
+}
+
 // ParseDMKey parses a key produced by DMConversationKey back into its
 // constituent parts. The returned kinds and IDs are in sorted token order
 // (the same order they appear in the key).
