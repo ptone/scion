@@ -4722,3 +4722,65 @@ Non-DEF-31 sweep output, all deliberately **not** started:
 `seedFromWave1` `WHERE last_read_at IS NOT NULL` filter is safe by construction, but its
 justification lives in `handlers_chat_v2.go`, not at the filter site — worth a comment whenever that
 file is next open, not worth a trip of its own.
+
+## 5bk. 23:13-23:17Z — HEARTBEAT v5: main moved, tranche C decided, and a park I should never have set
+
+**origin/main `78323b5b` → `cca1f87d`** (#1329, user-management admin permission checks). Touches
+`pkg/hub/admin_*.go`, `route_metadata.go`, `bypass_census_test.go` — **no aggregate files**, no
+overlap with our messaging surface.
+
+**Aggregate-file / deletion check (rule 31, heartbeat item 4) — em10 / #1331 is SAFE against new main.**
+Raw numbers looked exactly like the disaster shape the heartbeat warns about: **12,323 deleted lines.**
+Localized before reacting: **12,232 of them are `pkg/ent/mutation.go` regeneration churn**
+(+14,621/−12,232). Non-generated deletions total ~44 lines across two files, both additive struct
+rewrites (`models.go` +81/−25, `messages/types.go` +25/−19). Also inspected `migrate/schema.go`'s
+single deletion — a column-index shift (`MessagesColumns[19]`), not a dropped table.
+
+Then the check that actually decides it, because a three-dot diff **cannot** show a silent revert of
+main's work: `git merge-tree --write-tree origin/main origin/scion/ca-msg-em10` → **clean, RC=0**, and
+diffing the merged tree against main over #1329's six modified files returns **empty**. #1329 fully
+preserved. **A green merge is not evidence; the empty diff over the specific files main just changed
+is.**
+
+| Branch | vs current main |
+|---|---|
+| `scion/ca-msg-em10` (#1331 head, now `7e81d053`) | merges **clean**, #1329 preserved |
+| `scion/ca-msg-em10-trb` (`2ba538c0`) | merges **clean** |
+| `scion/ca-msg-em9-unify` (`25fad0a2`) | **conflicts** — expected, see below |
+| `scion/tranche-a-frozen` (`17986b10`) | not merged to main |
+
+em10 advanced `1aadc3cf` → `7e81d053`: *"test(store): add bypass test for AddParticipant empty-external_ref
+guard."* That is the DEF-29 follow-up hole I flagged — em10 closed it without being chased.
+
+### The real finding: em9's park was my error, not a dependency
+
+Heartbeat item 5 is right and it caught me. *"If the owner is me, it is a queue and not a blocker."*
+I had em9 parked pending a **carrier decision I owned**, which I had told myself was gated on #1331.
+**It was not.** What #1331 gates is the *cut*; the *decision* needed only a comparison I had not run.
+em9 sat idle for hours on a question I could have closed in five minutes.
+
+Ran it: `comm -12` on the non-generated file lists of `em9-unify` and `em10-trb` → **28 shared files**
+(`resolve.go`, `normalize.go`, `conversation_store.go`, `models.go`, …). **em9-unify is a SUPERSET of
+tranche A and B content** — "unify" is precisely what it was built to be. Merging it as a unit would
+re-land work already queued ahead of it.
+
+**DECISION: DEF-27 rides in TRANCHE C, cherry-picked. `em9-unify` is never merged as a unit, to any
+target.** Tranche C = §2.6.4 phases 1-4 (`3b098b16`, `b6cdeb58`) + the DEF-20/21/22/23 chain + DEF-27
+(`f1745506`, `25fad0a2`). DEF-27 **cannot ship earlier than its feature**: it fixes a lookup against
+`webchat_topic.conversation_id`, a column phases 1-2 create.
+
+em9-unify's conflicts with main (`ent/client.go`, `migrate/schema.go`, `handlers_agent_messaging.go`)
+are **expected and must not be fixed** — a staging artifact on an old base, and two branches
+independently regenerating ent always conflict. Told em9 explicitly not to rebase or resolve, because
+the alarming-looking output would otherwise invite exactly that.
+
+**Dispatched em9 runnable prep:** produce the tranche C SHA list in order and verify each applies to a
+scratch branch cut from `cca1f87d`, reporting clean/dirty and the actual conflict for any dirty one.
+Hard limits: no tranche C branch pushed, `em9-unify` stays at `25fad0a2`. **Knowing tranche C's cost
+before standing at the gate is worth more than the idle time it replaces.**
+
+> **A blocker whose owner is me is a queue I have not worked.** The tell is an agent parked on a
+> decision rather than on an artifact — artifacts have to arrive, decisions only have to be made.
+
+**Replies owed, cleared:** integration2-operator (DEF-30 closed, DEF-29 rows retention as standing
+instruction, the "baseline" framing corrected), nc-arch (done 22:57Z), user (DEF-31 escalation 23:04Z).
