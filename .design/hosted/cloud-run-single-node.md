@@ -236,15 +236,28 @@ matters: both register a runtime, so whichever lands second reconciles the
 registration. That is expected, and it is the ordinary cost of the two runtimes being
 genuinely separate rather than one overloaded implementation.
 
-**Correction, 2026-08-27: the predicted `factory.go` conflict never happened.** The
-Instances runtime landed upstream first, and this tier was developed on top of it
-rather than beside it — `factory.go` on this branch already registers all three of
-`cloudrun`, `cloudrun-instances` and `cloudrun-sandbox`. Measured at the rebase: of
-the eight upstream commits this branch was behind, **none touched `factory.go`**, and
-the entire conflict surface was two files in `cmd/`. The reasoning above was sound in
-the abstract and simply overtaken by the landing order. Recorded rather than deleted,
-because a design doc that quietly erases its wrong predictions teaches nothing about
-how much to trust the right ones.
+**Outcome, 2026-08-27 — the prediction held, and my first attempt to correct it was
+itself wrong.** Both entries stay, because the sequence is the lesson.
+
+At 00:31 I measured the rebase surface and found `factory.go` untouched by any of the
+eight upstream commits the branch was behind. I concluded the predicted conflict had
+been overtaken by landing order, wrote that here, and told the rebase developer
+explicitly not to go looking for it.
+
+That measurement was accurate and the conclusion drawn from it was not. #1302 — the
+Instances runtime, the *other* half of the pair this section is about — merged
+upstream as `83ee4bd9` roughly twenty minutes after I measured. Re-measured at 00:49,
+the branch was behind by eleven rather than eight, and the conflict surface was
+exactly the three files named above: `factory.go`, `cmd/server_foreground.go`,
+`pkg/config/settings_v1.go`. The original reasoning was right on all three.
+
+Two things are worth carrying forward. **A conflict-surface measurement is a snapshot
+with a short half-life**, and an active upstream invalidates one faster than a rebase
+takes to run; the measurement needs re-taking immediately before resolution, not once
+at brief-writing time. And the `factory.go` conflict has a shape that a clean
+auto-merge hides: both sides register `cloudrun-instances`, so git resolving it
+without complaint can yield a duplicated `case` — a compile error, not a merge marker.
+The branch appeared `MERGEABLE` throughout.
 
 ### 4.5 Every address handed into a sandbox needs an explicit decision
 
