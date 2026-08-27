@@ -7912,3 +7912,40 @@ Minor, noted, not chased: `sn-stress-max` pushed a branch `scion/sn-stress-max`
 (`5c9ab825`) despite its brief saying to touch no branch. Asked what is on it; told
 it not to delete it. All seven do-not-delete instances verified alive; both stress
 instances confirmed gone.
+
+## 08:03 — Phase B recount confirmed BY MY OWN QUERY. The correction improved the result.
+
+**`def`'s Phase B is clean: 6.** It enumerated by name and cross-checked four ways.
+**I did not take a fourth self-report on trust** — I ran my own Cloud Logging query
+over its 07:52-07:54 window and got exactly `global--load-1` … `global--load-6`,
+nothing else.
+
+**Corrected figures for 4 CPU / 8 GiB:** Phase A **20** concurrent (2 probes + 18
+idle; crash as the 20th passed ~8s), Phase B **6** (crash at the 7th).
+
+**THE MISCOUNT WAS HIDING THE CLEANEST RESULT IN THE TEST.**
+
+| size | idle | working | ratio |
+|---|---|---|---|
+| 4 CPU / 8 GiB | 20 | 6 | **3.33x** |
+| 8 CPU / 32 GiB | 51 | 15 | **3.40x** *(pending recount)* |
+
+Before the fix those were 2.8x and 3.4x — scatter. At 3.33 and 3.40 the
+working-to-idle penalty looks like **a real constant**, not two numbers that landed
+near each other. A correction that makes a result *stronger* is rare enough to note.
+
+**What `def` did is the behaviour I want to design for.** It reopened a finished
+task, after its instance was deleted and its report delivered, to correct a number
+that made its own headline smaller. Nobody would have caught it — **I had already
+published it.** It had every incentive to stay quiet.
+
+**And it answered with NAMES when asked for names.** That is why this settled in
+four minutes instead of becoming an argument. **A total cannot be checked; a list
+can.** I am adopting that as a standing rule for anything counted on this project.
+
+**New defect to file:** a sandbox can die with **no log entry whatsoever** — no
+signal, no exit code, no `sandbox wait end`. `idle-1` did exactly that, and the
+10ms failure of the next exec shows the CLI knew instantly it was gone. Mine to
+file, not `def`'s.
+
+Still waiting on `sn-stress-max` for the same recount before the 15 is publishable.

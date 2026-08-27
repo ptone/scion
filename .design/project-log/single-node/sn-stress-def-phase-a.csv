@@ -9,8 +9,10 @@
 #
 # CORRECTION: probe-0 (created 06:49:16) and probe-1 (created 06:51:37) were
 # alive throughout Phase A but NOT counted in the totals below. Actual concurrent
-# sandbox count = total_alive + 2 (probes). The ceiling is ~19-20 concurrent
-# sandboxes, not 17-18. Repeatability: UNMEASURED (each ceiling observed once).
+# sandbox count = total_alive + 2 (probes).
+# VERIFIED CEILING: 20 concurrent sandboxes (2 probes + 18 idle). Crash at 20th.
+# Confirmed by exhaustive name enumeration from Cloud Logging broker probes.
+# Repeatability: UNMEASURED (each ceiling observed once).
 #
 N,timestamp,create_http,create_ms,agent_name,rss_mib,total_alive,total_dead,dead_names,notes
 1,06:58:09,201,~2000,idle-1,499,1,0,,
