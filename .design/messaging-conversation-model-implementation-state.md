@@ -127,6 +127,30 @@
     native chat reads as a UI feature. **We treated a product-surface boundary as a code
     boundary.** It is not one — both are the same addressing problem over the same noun.
 
+17. **A ledger row that characterises the cost or difficulty of unstarted work is a claim
+    about code, and carries the same citation burden as a design section.** "The fix is real
+    work" is a finding, not a note. Issued 2026-08-27 15:50Z after the DEF-6 row was found to
+    be wrong on two independent counts — it asserted a storage constraint I had never read,
+    and it scoped as novel a mechanism that already shipped. **The ledger is the one place a
+    wrong claim is inherited without review**, because the next reader takes it as settled
+    history rather than as an assertion to check.
+
+18. **A revert-detection sweep is run against the merge parent, never against the branch head
+    that has moved since.** Issued 2026-08-27 16:15Z. **The tool that finds reverts is itself
+    the tool most likely to manufacture one.** I ran a files-present-on-main-but-absent-here
+    sweep against live `origin/main`, which had advanced past the merge, and got three dropped
+    files and a 468-line docs gutting — all false, all belonging to a commit that landed after
+    the merge parent. I had the rejection drafted. This is the §5s decay rule, which I had
+    issued to two managers that same day and had not applied to my own verification of their
+    work. **A verification procedure is not exempt from the epistemics it enforces.**
+
+19. **Ordering between validation and persistence is a design decision and must be stated,
+    not inherited.** A persistent write placed before validation creates facts the request was
+    then refused permission to create. Issued 2026-08-27 16:20Z on DEF-16, where the two agent
+    ingress handlers were found to perform the *same two operations in opposite orders* — one
+    validates then writes, the other writes then validates. That is not a style difference;
+    at least one of them is wrong, and nothing in the code says which.
+
 ## 2. Source documents
 
 | Doc | Path |
@@ -150,7 +174,39 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 > historical record and is accurate *as of the timestamps it names* — read it as log, not as
 > current position.
 
-**CURRENT POSITION as of 2026-08-27 15:25Z**
+**CURRENT POSITION as of 2026-08-27 16:25Z**
+
+**Integration branch head:** `2724ed10`, fast-forwarding to `459a6ce8` (S7/DEF-11) once the full
+suite returns. S7 rebased cleanly onto `2724ed10` in a single rebase, 5 commits, no conflicts.
+
+**S7 VERIFIED — and I mutation-tested it rather than reading the diff.** All four
+`TestDEF11_PreResolvedConversation_*` pass on my own run. Three mutations, each killing exactly
+the tests it should and no others:
+- **M1** remove `convResult.ExternalRef = conv.ExternalRef` → `PopulatesExternalRef` and
+  `DivergenceMatch` FAIL; the other two pass.
+- **M2** `if lookupFailed` → `if lookupFailed && false` → `LookupFailure` FAIL, alone.
+- **M3** `Fallback: true` → `Fallback: false` → `LookupFailure` FAIL, alone.
+
+`GenuineDisagreement` survives all three, which is the control that matters: it proves the
+mutations are not simply breaking the package. **Specificity is the signal, not the kill.** A
+mutation that fails everything proves only that the code is reachable; a mutation that fails
+exactly one named test proves that test observes exactly that effect.
+
+**S6 reopened on DEF-15/DEF-16, section work still accepted.** See both ledger rows. Their
+merge of main was verified clean on the revert axis against the **merge parent** — after I ran
+that same sweep against a moved `origin/main` and manufactured a false finding I was about to
+send as a rejection (§5x, rule 18).
+
+**PR #1322 (native chat) reviewed 16:22Z — sound, closes DEF-14, does not close DEF-15.**
+Ownership check at `handlers_agent_messaging.go:174` sits *before* the dual-write at `:245`, so
+an unauthorized key is refused before it can leave a row. `parseDMKeyIDs` returns `("","")` on
+any non-canonical key and the comparison then denies — fails closed, as required. The
+`isDMParticipant` tightening also fixes the kind-half bug (old code compared IDs while ignoring
+whether the slot said `user` or `agent`). No change requested. Absorb at final merge.
+
+---
+
+**SUPERSEDED — position as of 2026-08-27 15:25Z**
 
 **Integration branch head:** `2724ed10` — S6's merge of `origin/main` @ `6268bac4` (16:09Z), on top of `916eae7c` (S6 section, 15:12Z), the first section to land since
 `ebf8cc27`. Build clean; `go test ./pkg/hub/... ./pkg/messaging/... ./pkg/messages/...` green
@@ -879,6 +935,53 @@ there is a reason they kept both that I am not seeing.
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
 
+## 5y. 16:17-16:25Z — S7 verified by mutation; a defect that hides behind its own fix
+
+Three things landed in the same eight minutes and they interact.
+
+**S7 (DEF-11) passed, and I did not accept it on the test results.** Four green tests prove
+nothing on their own — S5 cost three rounds and S6's round 3 was settled only by a mutation. So I
+mutated three separate lines of the fix and required each to kill a *named* test. All three did,
+and each killed only the tests that should die. `GenuineDisagreement` survived all three, which is
+the part I actually wanted: it shows the mutations are hitting specific behaviour rather than
+breaking the package wholesale. **A mutation that fails everything proves reachability. A mutation
+that fails exactly one named test proves observation.** Only the second is evidence.
+
+**S6 did the right thing with DEF-15 and produced a better finding than the one I asked for.**
+I asked them to restore the deleted `ThreadID` line and report what it produced. They did, and
+also noticed that the rejected request *still left the conversation row behind* — the dual-write
+runs before `ValidateLegacyMessage`. I confirmed the ordering myself by grep rather than accepting
+it, and found the sharper version: **the two ingress handlers do the same two operations in
+opposite orders.** `handleAgentOutboundMessage` writes at `:245` then validates at `:288`;
+`handleAgentMessage` validates at `:615` then writes at `:848`. Nothing in the code says which is
+intended. Logged DEF-16, issued rule 19.
+
+**I told S6 not to land the restored test red, and the reason is the interesting part.** The test
+fails at 400 `thread_id requires channel to be set` — our own S3 validation addition — *before* it
+ever reaches the routing it was restored to expose. So the red is real but it points at the wrong
+thing. A reader sees "validation rejects it", concludes the system is behaving, and stops.
+**A test that is red for the wrong reason is worse than a missing test: it trains people to
+explain away a colour.** It lands asserting the correct invariant behind a `t.Skip("DEF-15")`,
+and the acceptance criterion for the fix becomes deleting the Skip line.
+
+That same 400 is itself a finding I nearly filed as noise: it means #1319's canonical
+`dm:`-key-in-`ThreadID` usage is *invalid on our branch*. That is a contract collision between
+main and the integration branch, not a broken test.
+
+**PR #1322 closes DEF-14 and makes DEF-15 harder to see.** I reviewed it for the two things that
+would have made me object and both are right — the ownership check is upstream of the dual-write
+rather than downstream of it, and `parseDMKeyIDs` denies on any key it cannot parse instead of
+falling through. But #1322 filters *which* keys reach the broken thread-resolution branch; it does
+not change what that branch does with them. Afterwards, the only keys arriving there are
+well-formed and correctly owned. **The mis-shaping survives, now restricted to legitimate traffic,
+which is exactly the population nobody audits.**
+
+The generalisable shape, and it is the second time today a fix has had this property:
+**narrowing the input to a broken function makes the breakage rarer, later, and better
+disguised — and it reads in review as a fix.** §5u recorded #1319 doing this to DEF-14 (format
+validation implicitly blessing an unauthorized path). #1322 now does it to DEF-15. Neither PR is
+wrong. What is wrong is treating "the exploit no longer reproduces" as "the defect is closed."
+
 ## 5x. Merge review 16:05-16:15Z — I nearly rejected on a manufactured finding
 
 **The user warned: be careful not to revert other work on main as agents rebase.** That warning
@@ -1592,7 +1695,8 @@ conversation. This table is the only thing that carries them.
 | DEF-10 | **`@<agent>` DMs are project-scoped, contradicting Q2.** `resolveAgentDM` requires a non-empty `ProjectID` (`resolve.go:317-322`) and `createDirectConversation` sets `conv.ProjectID` whenever the context has one (`resolve.go:505-507`). Q2 and §2.4.1 settle that direct conversations are **global, `ProjectID` nil**. `@<email>` obeys this (it passes an empty project context, `resolve.go:378-382`); `@<agent>` does not. | verified 2026-08-27 | **me**; likely resolved together with DEF-8 | Consequence, not cosmetic: a project-scoped DM row is invisible to a global lookup, which is one of the two mechanisms producing DEF-8. |
 | DEF-13 **(SPECCED 2026-08-27 15:50Z — design §2.14.2)** | **The conversation-reference forms shipped undocumented.** `cmd/message.go:98-114` — the `Long` help text lists only `<agent-name>`, `agent:<name>`, `user:<name>`, `group[...]`, and all three examples are legacy form. No mention of `@<agent>`, `conv:<uuid>` or `#<thread>`, which are the headline feature of this project. The code is present and works (`sendMessageViaConversation` at `:655`, reference parsing at `:141`). Sharpest edge: the deprecation warnings at `:86-91` say "use `@<agent-name>` to message an agent directly" — **pointing at a form the help text never defines**, so a user who follows the advice must guess the syntax. The only written description is my QA walkthrough. | reported by the user 2026-08-27 15:16Z after rebuilding gteam binaries at `ebf8cc27` and finding nothing about conversations in `--help` | **me** to spec; fold into an existing section, do not dispatch alone | Cosmetic in the sense that nothing is broken, load-bearing in the sense that an undiscoverable feature is not shipped. **This is my spec gap, not a section's.** I wrote ACs requiring the deprecation warnings to fire and requiring the new reference forms to work; I wrote none requiring the help text to describe them. Both managers built exactly what I asked. AC to add: `Long` and the examples cover `@`, `conv:` and `#`, including the two that currently error by design, so the error is not a surprise. |
 | DEF-14 | **Message ingress checks DM key format but not membership.** PR #1319 (native chat, merged to `main` at `6268bac` 2026-08-27) added `validDMKey` at `handlers_agent_messaging.go:120`/`:562` and `handlers_broker_inbound.go:98`, rejecting malformed `dm:`-prefixed thread_ids with 400 before dispatch or persistence — this closed the gap I logged as §5p item 2. It does **not** check that the authenticated caller is one of the two principals the key names. `storeMsg.ThreadID` and `.Channel` both come from the request body (`:236`) and go to `CreateMessage`; the read path (`handlers_chat_v2.go:1550` primary list, `:2848` search) gates on `isDMParticipant` and then filters by key **with no project filter**. So agent A in P1 can post `channel='web'`, `thread_id='dm:agent:<B>:user:<V>'` and the row appears inside B↔V's private DM for V, across projects. | found 2026-08-27 15:10Z reviewing #1319; **confirmed by nc-arch on the primary list path**, closing the caveat I raised about having traced only search | **native chat** owns the fix (nc-arch routed it to native-chat-lead and called it worth doing). Mine only as `AC-INGRESS-1`, so my step 1c does not inherit it | Bounded: no read access is gained, and `Sender` is the authenticated agent's honest slug — injection, not impersonation or exfiltration. nc-arch's refinement: attribution is honest but **placement is deceptive**, since V's UI renders the message inside the B conversation. #1319 strictly narrows the hole; the danger is that it *reads* as closing it, and nothing downstream re-checks. **Adding a partial check to an unguarded path can leave it better defended and less likely to be defended further.** **REPRODUCED 15:34Z and I ran it myself**, not on the developer's report: branch `scion/ca-msg-inject-repro` @ `07866490` (test file only, no production change), `TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM` in `pkg/hub/dm_injection_security_test.go`, FAIL on main in 0.68s with distinct project IDs in the run log. It asserts the **correct** invariant (V must not see A's message), so it goes green on fix rather than needing inversion. Handed to nc-arch and native-chat-lead; agent retired, absence confirmed by name. **One control it does not run, flagged on handover:** both test messages carry the same DM key, so an unfiltered history read would produce an identical failure with a much worse diagnosis — the test proves the message is visible, not that the *key* is what makes it visible. I am confident reads are key-filtered (`handlers_chat_v2.go:1550`, traced by me and independently by nc-arch), but the test is not self-contained on the point. **A reproduction that cannot distinguish its own defect from a worse one is still evidence, provided you say which.** |
-| DEF-15 | **A `dm:`-prefixed `ThreadID` creates a third DM shape, inside the section that existed to eliminate the second.** On the merged branch, `handlers_agent_messaging.go:244` branches `if req.ThreadID != "" { ResolveOrCreateThreadConversation(...) } else if ... { ResolveOrCreateDMConversation(...) }` — **ThreadID is prioritised**, and the pair-based DM path runs only when it is empty. `ResolveOrCreateThreadConversation` (`pkg/messaging/conversation.go:158-161`) applies **no `dm:` prefix check**: it builds `external_ref = "thread:<projectID>:<threadID>"` with `Kind = "group"`. So an outbound message carrying `dm:agent:X:user:Y` produces `external_ref = 'thread:<proj>:dm:agent:X:user:Y'`, `kind = 'group'`, project-scoped. **Because `kind` is `group` it takes the participant-table path and never reaches the key-based authorization S6 just built** (§2.4.2.1). | found 2026-08-27 16:10Z reviewing S6's merge resolution | **me** to spec — the choice is whether a `dm:`-prefixed ThreadID routes to DM resolution or is refused at ingress, and it interacts with DEF-14 | Reachable today via `POST /agents/{id}/outbound-message` with a `thread_id`, which #1319 now format-validates and therefore implicitly blesses. **How it surfaced is the part worth keeping:** S6 deleted the DM `ThreadID` line from `attachments_agent_test.go` — the line #1319 had just corrected to canonical format — on the stated grounds that "DM routing no longer uses ThreadID". A grep disproves that at `:237` and `:244`. Most likely the canonical key started producing this malformed row, the test looked wrong, and removing the line made the symptom vanish without the cause being found. **The evidence that would have exposed a defect was removed, and the justification was a claim about code that did not survive a grep.** Instructed S6 to restore the line and report what it produces, and explicitly *not* to fix the routing in a merge resolution. |
+| DEF-15 | **A `dm:`-prefixed `ThreadID` creates a third DM shape, inside the section that existed to eliminate the second.** On the merged branch, `handlers_agent_messaging.go:244` branches `if req.ThreadID != "" { ResolveOrCreateThreadConversation(...) } else if ... { ResolveOrCreateDMConversation(...) }` — **ThreadID is prioritised**, and the pair-based DM path runs only when it is empty. `ResolveOrCreateThreadConversation` (`pkg/messaging/conversation.go:158-161`) applies **no `dm:` prefix check**: it builds `external_ref = "thread:<projectID>:<threadID>"` with `Kind = "group"`. So an outbound message carrying `dm:agent:X:user:Y` produces `external_ref = 'thread:<proj>:dm:agent:X:user:Y'`, `kind = 'group'`, project-scoped. **Because `kind` is `group` it takes the participant-table path and never reaches the key-based authorization S6 just built** (§2.4.2.1). | found 2026-08-27 16:10Z reviewing S6's merge resolution | **me** to spec — the choice is whether a `dm:`-prefixed ThreadID routes to DM resolution or is refused at ingress, and it interacts with DEF-14 | Reachable today via `POST /agents/{id}/outbound-message` with a `thread_id`, which #1319 now format-validates and therefore implicitly blesses. **How it surfaced is the part worth keeping:** S6 deleted the DM `ThreadID` line from `attachments_agent_test.go` — the line #1319 had just corrected to canonical format — on the stated grounds that "DM routing no longer uses ThreadID". A grep disproves that at `:237` and `:244`. Most likely the canonical key started producing this malformed row, the test looked wrong, and removing the line made the symptom vanish without the cause being found. **The evidence that would have exposed a defect was removed, and the justification was a claim about code that did not survive a grep.** Instructed S6 to restore the line and report what it produces, and explicitly *not* to fix the routing in a merge resolution. **CONFIRMED 16:20Z, by two independent observations.** S6 restored the line, ran it, and observed the row directly: `kind=group surface=native external_ref=thread:<proj>:dm:agent:<X>:user:<Y> project_id=<proj>`. I confirmed the code path separately by grep at `2724ed10` rather than taking their report. **DEF-15 is two sites, not one:** `:848` calls the same `ResolveOrCreateThreadConversation` with `structuredMsg.ThreadID` and has no `dm:` guard either. **PR #1322 does not fix it, and reduces who can see it.** #1322 adds the DM-key ownership check at `:174`, *upstream* of the dual-write at `:245`, so after it lands the only keys reaching the thread branch are well-formed **and correctly owned** — the mis-shaping then happens exclusively to legitimate traffic, where nobody is looking for it. A fix that filters the input to a broken function makes the breakage rarer and better disguised. **The restored test is red for the wrong reason and that is why it must not land red:** it dies at 400 `thread_id requires channel to be set` — our own S3 `ValidateLegacyMessage` addition — *before* it exercises routing, so a reader of that failure learns "validation rejects it" and stops. It also means #1319's canonical `dm:`-in-`ThreadID` usage is simply invalid on our branch, which is a contract collision with main, not a test bug. Instructed S6 to land it asserting the **correct** invariant behind `t.Skip("DEF-15")`; the acceptance criterion for the fix is deleting the Skip line. |
+| DEF-16 | **The conversation dual-write happens before validation, so a rejected request still leaves a row behind.** `handlers_agent_messaging.go` @ `2724ed10`: `handleAgentOutboundMessage` dual-writes at `:245`/`:247` and validates at `:288`; `handleAgentMessage` validates at `:615` and dual-writes at `:848`/`:851`. **The two ingress handlers perform the same two operations in opposite orders** (rule 19). Observed, not inferred: S6 restored a DM `ThreadID` to `attachments_agent_test.go`, the request was rejected 400, and the `kind=group` conversation row persisted with no message attached to it. The row survives; the message does not. | found 2026-08-27 16:17Z by S6 running the restored DEF-15 test | **me** to spec. The fix is an ordering change, but *which* order is correct is a real design question, not a cleanup: validate-then-write gives up the ability to record a conversation for a message that fails a soft check; write-then-validate manufactures orphans. Answer it before moving either line. | Orphans are harmless today — no messages, no participants, invisible to every read path. They stop being harmless the moment anything treats a conversation row as evidence that a conversation happened: `external_ref` uniqueness, the DEF-12 backfill, or a participant listing. **Note what this does to DEF-14's blast radius before #1322: an unauthorized key was refused, and still left a row.** The refusal was real and the side effect outlived it. |
 | DEF-3 **(CLOSED 2026-08-27 09:55Z)** | **The phase-5 divergence gate is weaker than the design assumed, and this is my spec gap, not em2's.** `ComputeDivergenceMatch` is now a genuine comparison, but at the call sites both models derive their answer from the same three fields (sender, recipient, thread_id), so a DM or thread pair mismatch is **unreachable in production**. The only divergence reachable today is resolution failure (`no-new-routing`). Note the consequence: this signal **would not have caught B-1**, the duplicate-key bug — dual-write would have returned its own row's ref and scored a match. **Closed on S4's branch:** `CheckConversationConsistency` compares against the `conversation_id` stored on prior messages of the same logical conversation — the independent source of truth this asked for — with `TestCheckConversationConsistency_DetectsMismatch`, `_GenuineDisagreement`, `_ThreadDisagreement` and `_RoutingTypeMismatch` proving disagreement is reachable. Carries forward with S4's merge, not before. | S2 | **S4, before the read switch** | Phase 5's new model has no independent source of truth; it constructs the key from the message. Nothing can diverge until something else is authoritative. |
 
 | DEF-4 **(CLOSED 2026-08-27 07:55Z at `b92926dd`)** | **The `pkg/hub` test suite is degrading commit over commit on the integration branch.** Full-suite failure counts: `origin/main` **0** (3 runs), `cd4ee7ed` **5**, `d9fc7f51` **18**, `f206a0d9` **17–19**. Failure membership is **non-deterministic** — two consecutive runs at the same commit shared only 2 of ~18. Every failure is SQLite `out of memory (7)` raised at test-store creation (`newTestStore(":memory:")` / `sql.Open("sqlite3", ":memory:")`), with 109 GB free on the host and unaffected by `-parallel 2`. Each test opens its own in-memory DB and runs the full ent migration; the branch adds tables, so per-DB cost has risen. Suspected cause is stores never being closed, so every in-memory DB stays live for the whole package run — but that is a lead, not a diagnosis. | S1/S2 (accumulating) | **S4, as its first task, before any new feature work** | It does not affect shipped behaviour. It does destroy the verification method: my acceptance of every section from here rests on diffing full-suite results, and a suite whose failure set changes run to run cannot support that. It will get worse with S4 and S5. |
