@@ -940,6 +940,22 @@
     - Same disease as rule 51 one layer down — there the finding hid in the WHERE clause, here it
       hides in the type system. Both make the query come back clean.
 
+    - **NULL reaches computations, not only predicates** (nc-arch's wave-2 cases, 22:04Z).
+      `COUNT(col)` skips NULLs where `COUNT(*)` does not; `SUM` over an empty set is NULL, not 0;
+      and any comparison against a NULL column — `created > last_read_at` for a never-read user —
+      is NULL for **every** row, so the count comes out zero **with no filter involved at all.**
+      **Phrase the AC over the outcome, not the query:** "a user who has never read a thread reports
+      every message unread" survives whatever SQL someone reaches for; "handle NULL `last_read_at`"
+      invites a `COALESCE` in one of the three places and passes.
+
+    - **CAUTION — "under-granting is recoverable, over-granting is not" is a rule about
+      AUTHORIZATION and does not transfer.** For read-tracking and presence there is no safe
+      direction: an unread count too high is noise, too low means the user never opens the thread
+      and the message is functionally lost; rendering a member absent is not conservative, just
+      differently wrong. **Where the asymmetry is absent, pin the exact expected value rather than a
+      bound** — "fails closed" is not sufficient outside the authz context. Same trap as rule 29
+      (fail-closed is about authorization, not shape constraints), reached from the other side.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
