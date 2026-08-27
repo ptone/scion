@@ -35,7 +35,11 @@
    2026-08-27.) A section landing and verifying is a report. A blocker I cannot resolve is
    a report. Nothing else is — no progress notes, no interesting findings, no phase-level
    updates, no acknowledgements. Those go in §5 of this file, not to the user.
-9. **Do not participate in the engineering work.** (Same instruction.) I spawn, review
+9. **Retire managers when their section closes; managers retire their own sub-agents as
+   reports are captured.** The container ceiling is shared hub-wide (~50). One manager
+   fans out ~6 sub-agents per round; a rejected section doubles it. Put this in every
+   manager brief. I never stop another manager's children while that manager is active.
+10. **Do not participate in the engineering work.** (Same instruction.) I spawn, review
    against acceptance criteria, and advance. I do not review implementation approach
    unsolicited, debug, or answer questions a manager should resolve itself. Default state
    is `blocked`.
@@ -169,6 +173,12 @@ would bury the events that matter.
   (B-1 duplicate DM key format, B-2 hardcoded `Match: true`), plus B-3/B-4 promoted from the
   gates' own non-blocking notes. See §5d. Section reopened, em2 sent back to fix on its
   branch and re-report. S3 held.
+- `2026-08-27 03:10Z` Fleet hygiene: coordinator reports 43/50 containers. `ca-msg-em1`
+  stopped and removed (S1 closed). em2 asked to reap its own 11 completed sub-agents —
+  I do not remove children out from under an active manager. **Standing rule added:
+  managers retire sub-agents as reports are captured, not at section end.** A manager
+  fans out ~6 sub-agents per round and a rejected section doubles that; told the
+  coordinator I will gate the next section on its signal if the ceiling gets tight.
 
 ## 5d. Open blockers — S2 rejection (2026-08-27 02:50Z)
 
