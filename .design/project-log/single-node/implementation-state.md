@@ -9076,3 +9076,76 @@ only thing left.
   `extras/scion-a2a-bridge`, but the next two commands invoke `./bin/scion-a2a-bridge`, which only
   `make build-a2a-bridge` produces from the repo root. **Same class as the seam we just closed:
   build output location versus invocation path.** Outside this tier; documented, not fixed.
+
+## §27 — 14:30 heartbeat: THE CLA BLOCKER IS NOT A BLOCKER. I reported it twice and I was wrong.
+
+Since 13:34 I have told ptone that `cla/google` is the critical path. **It is not, and one control
+would have shown me that at any point in the last hour.** I read a red check and called it a gate
+without ever testing whether it gates.
+
+### §27.1 — The control
+
+`GoogleCloudPlatform/scion#1310` — **our own tier PR** — **MERGED today at 04:00:10 with
+`cla/google` = FAILURE.** Identical commit authorship to the three open PRs.
+
+Widening the sample:
+
+| PR | state | cla/google | commit authors mapped to a GitHub account |
+|---|---|---|---|
+| `#1305` | **MERGED** | FAILURE | none |
+| `#1306` | **MERGED** | FAILURE | none |
+| `#1310` (tier) | **MERGED** | FAILURE | none |
+| `#1312` | **MERGED** | FAILURE | none |
+| `#1313` | **MERGED** | FAILURE | none |
+| `#1311` | CLOSED | FAILURE | none |
+| `#1318` | OPEN | FAILURE | none |
+
+**Nine of nine PRs examined fail `cla/google`. Five of them merged anyway.** The check has never
+gated a merge in this repository.
+
+### §27.2 — Why it fails, and why it can never pass
+
+Every commit on all three PRs is authored **and** committed by `Scion Agent (<name>) <agent@scion.dev>`.
+`agent@scion.dev` **maps to no GitHub account** — the API returns `author.login = null` on every
+commit. The CLA bot has no identity to match against, so it fails closed.
+
+**Consequence that matters: waiting for it to turn green is waiting for something that cannot
+happen.** ptone signing a CLA would not clear it, because not one commit is attributed to him or to
+any signed identity. Only rewriting authorship across every commit would, and nobody has asked for
+that. The bot comment on `#1315` carries no re-trigger instruction either — I checked the text rather
+than assuming the usual `@googlebot I signed it!` affordance exists here.
+
+### §27.3 — The actual state of the three PRs
+
+CI genuinely ran on all three — 12, 10 and 10 checks, real SUCCESS values, not the empty-list trap
+from §60 (task #60).
+
+| PR | branch | checks | non-green |
+|---|---|---|---|
+| `#1315` docs tutorial | `scion/sn-docs-dev` | 12 | `cla/google` only |
+| `#1316` build fix | `scion/sn-buildfix-upstream` | 10 | `cla/google` only |
+| `#1317` design doc | `scion/sn-docpr-upstream` | 10 | `cla/google` only |
+
+Gemini reviewed `#1316` and `#1317` at 13:25 and 13:27. **Both reviews contain zero findings** — I
+had not read them and was carrying them as possible unactioned work. `#1315`'s review was actioned
+earlier (2 taken, 2 declined).
+
+**Nothing blocks these three PRs. They wait on ptone's merge decision and on nothing else.**
+
+### §27.4 — The lesson, stated against myself
+
+This is the same failure mode as §25.3's "pushed ≠ landed", inverted: there I treated an unfinished
+thing as finished; here I treated a finished thing as blocked. Both come from **reading a signal
+instead of exercising the path.** A red check is evidence that a check is red. It is not evidence
+that anything is blocked. **The test for "is X a gate" is "did anything ship with X red" — a single
+query, available the whole time.**
+
+Corrected to ptone at 14:33. Task #62's premise is void and the task is closed.
+
+### §27.5 — Heartbeat answers
+
+1. **Agents:** zero of mine in flight. Six dispatched today, six returned verified work, all
+   reclaimed, zero stalls.
+2. **Critical path: ptone's merge decision on `#1315`/`#1316`/`#1317`.** Not the CLA. Corrected.
+3. **Design doc in sync**, via `#1317`. One deliberate divergence stands: the `harnessConfig`
+   workaround in the tutorial survives until `ptone/scion#1316` phase 4.
