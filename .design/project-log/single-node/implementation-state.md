@@ -11383,3 +11383,90 @@ before concluding the prompt is stuck.
 **Critical path now:** `#85` — the step-3b credential preflight — is the only thing between the tier
 and a clean §1 run for an operator who is not us. `#75`'s doc edit is queued behind
 `GoogleCloudPlatform/scion#1326`. Nothing else is blocking.
+
+---
+
+## §35.39 — `#75` closed: the design doc now states the measurement, not the guess (21:35)
+
+ptone merged `GoogleCloudPlatform/scion#1326` at 21:31. That unblocked the `#75` edit, which touches
+the same file and the adjacent paragraph.
+
+**I verified the merge on the tree rather than on the notification.** Added `upstream` to `/tmp/dd`,
+fetched, and read the file out of the ref:
+
+```
+upstream/main = 2c4990e739559034d1c56880678a49cd72676452
+git show upstream/main:.design/hosted/cloud-run-single-node.md \
+  | grep -c 'gcloud beta run instances` command, which speaks the v1'   ->  1
+```
+
+My `#1326` text is present. Branch cut from that commit: `scion/sn-hubid-doc`, commit `3e80c0ec`,
+pushed to the `ptone/scion` fork. Local and remote SHAs compared by explicit refspec fetch — equal.
+ptone has the branch name; he opens the upstream PR, because I have fork write access only.
+
+### What the edit says, and why it is not a deletion
+
+The old §4.3 bullet:
+
+> `hub_id` cannot derive from `K_SERVICE` and falls back to hostname. **Set `server.hub.hub_id`
+> explicitly in the deploy**; hostname stability across redeploys is unverified.
+
+A bold instruction qualified by the admission that its premise was unverified. **No deploy ever
+followed it.** It was reasoning presented as a requirement.
+
+The replacement records three things:
+
+1. **The measurement.** `K_SERVICE` unset → hostname fallback → hostname is always `localhost` →
+   `hub_id` is always `49960de5880e` = `SHA-256("localhost")[:12]`, on every Instance in every
+   project. I checked the hash myself: `printf 'localhost' | sha256sum | cut -c1-12` →
+   `49960de5880e` (with a trailing newline it is `d906aecb61d0`, so the digest is over the bare
+   string).
+2. **Why setting it buys nothing.** `hub_id` is *not* inert — it seeds the hub signing key, so
+   changing it invalidates live JWTs. But across four startups the signing keys differed **every
+   time** while `hub_id` held constant. Nothing on this tier persists key material, so the keys are
+   regenerated per start regardless. Pinning `hub_id` cannot stabilise what is already unstable for
+   an unrelated reason.
+3. **The condition that makes the old advice correct again.** Today one `hub_id` is shared by every
+   Instance everywhere, and that is harmless *only because the value is never used to tell two hubs
+   apart*. Add a persistent secret backend (GCS, Secret Manager), or run a second Instance against
+   shared state, and uniqueness starts to matter — at which point setting `hub_id` to the Instance
+   name is right. The doc now names that trigger.
+
+**The general form worth keeping:** deleting a wrong instruction throws away the reason it was
+written. Replacing it with the measurement *and* its expiry condition means the next person to hit
+this does not re-derive it — and knows when the answer flips. Stability by constancy and stability by
+uniqueness are different properties; this tier only needs the first, and the doc now says which.
+
+`#75` is closed.
+
+### Tooling note: `scion message ptone` stopped resolving
+
+`scion message ptone "…"` now returns `agent_not_found: Agent "ptone" not found in project (404)` and
+falls through to help text. It worked earlier today. **`scion message user:ptone "…"` works** —
+`Message sent to user:ptone via Hub.` The recipient is a *user*, not an agent, and the bare-name
+fallback that used to cover that has evidently gone away. Two failures cost about a minute; recording
+it so the next one costs none.
+
+This is the same failure shape as the `--thread-id` trap: the command exits non-zero and prints usage,
+which is easy to skim past as noise. **Grep the output for `Error:` after every `scion message`** —
+do not assume a message was delivered because the command returned.
+
+### Protocol miss, caught by ptone: send the compare URL, not the branch name
+
+ptone, 21:35: *"did you send the compare URL per protocol?"* I had not. I sent him the branch name and
+the commit SHA and left him to assemble the URL.
+
+The protocol exists because **I cannot open upstream PRs** — fork write access only, by design. Every
+branch I push is a handoff, and a handoff that makes the recipient do assembly work is a worse
+handoff. The form is:
+
+```
+https://github.com/GoogleCloudPlatform/scion/compare/main...ptone:scion:<branch>?expand=1
+```
+
+Sent, and verified before sending that it resolves — `gh api repos/ptone/scion/branches/<branch>`
+returns `3e80c0ec…`, and the compare URL returns HTTP 200. A dead link in a handoff is worse than no
+link, because it looks like the work is available when it is not.
+
+**Standing rule:** when pushing a branch that ptone must turn into an upstream PR, the message
+contains the compare URL. Branch name and SHA are supporting detail, not the deliverable.
