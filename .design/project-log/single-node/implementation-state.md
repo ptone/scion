@@ -10806,3 +10806,65 @@ Also worth noting: I only caught it because the developer's own report contained
 it said the test "actually tests a missing IAP header ... with a valid Location present" **in the same
 sentence** as renaming it to `MissingLocationHeader`. An accurate report of a wrong action. Reading the
 report carefully was enough; the file confirmed it.
+
+---
+
+## §35.27 — `#1325` merged; and my archive copy of the design doc was stale
+
+**2026-08-27, 19:29:22Z. ptone squash-merged `GoogleCloudPlatform/scion#1325` as
+`c13d910b74245ff096332f38fa3e618da8c9ac2b`.** Message: *"squash merged. awaiting gh actions to
+publish"*. Final PR head `6ae20a21`; Build & Test, golangci-lint, shellcheck, build-docs, scan-pr and
+check-changes all green; `cla/google` red and once again gating nothing — a fifth data point for
+task #62, now on a PR that merged with it failing.
+
+Verified on the merged tree rather than trusting the merge notification: `scripts/single-node/deploy.sh`
+and `teardown.sh` exist; `deploy-instance` appears nowhere under `cmd/` or `docs-site/`. The command is
+gone and the script is the tier's only deploy path.
+
+That merge released the two deliberately gated tasks, #81 and #83.
+
+### The thing I nearly got wrong
+
+Task #83 (issue reconciliation) went to a developer, `sn-issuereconcile`, with a brief whose entire
+point is one distinction: **an issue that names a deleted artifact is not thereby obsolete.** Ask
+whether the *defect* survives in `deploy.sh`, not whether the *command* still exists. `ptone/scion#1293`
+and `#1291` describe defects that survive intact, so they get retitled and stay open; closing them as
+"obsolete" would drop two live defects because the artifact was renamed. `#1301` stays open with a note
+that its behaviour is now step 6 and that step 6 is untested. `#1314` is ptone's and I only asked the
+developer to check my reasoning — recommendations to close his issues come from me, to him.
+
+### The stale copy
+
+Task #81 was recorded as "one sentence next to the existing v1/`sandboxLauncher` rationale." **Both
+halves of that were wrong, and I found out only by looking.**
+
+First: **the design doc never recorded the v1-surface requirement at all.** `grep` for
+`sandboxLauncher`, `v1 surface`, `gcloud` returns nothing relevant in §4. So there was no existing
+rationale to append to. My own task description asserted a fact about a file I had not re-read.
+
+Second, and worse: **`.design/hosted/cloud-run-single-node.md` on my archive branch is BEHIND the
+upstream copy.** Diffing against `c13d910b` showed my branch missing the measured agent-count table,
+missing the agent-ceiling paragraph in §5, and carrying `#1302` where upstream carries
+`GoogleCloudPlatform/scion#1302`. **Had I edited the file where I was standing, I would have pushed a
+regression** — reverting content someone else had landed, in the name of a one-line addition.
+
+This is the second time today that the file in front of me was not the file I assumed. The workspace is
+`shared-plain` and the design doc is now an upstream-tracked artifact with more than one writer. **An
+archive branch is a log, not a source of truth, and I had started treating mine as both.**
+
+So the edit went on a fresh branch cut from the merged upstream commit, not from my branch:
+`scion/sn-designdoc-gcloud`, commit **`7c96b14b`**, pushed to `ptone/scion` and SHA-verified against the
+remote by explicit refspec.
+
+### What it says
+
+A paragraph at the end of §4.3, because §4.3 is already titled *"Runtime selection probes the
+capability, not the product"* and the deploy path is the same principle in a second place. It records
+that the v1 surface is **absent at 575.0.0** (the `instances` noun is alpha-only there) and **present at
+582.0.0**, that **576–581 is unmeasured**, and therefore that **the design states no version floor** —
+publishing an unchecked number is the failure the note exists to prevent. It also records that gcloud's
+own suggestion on failure, *"try `gcloud alpha run instances`"*, is a **wrong fix**: alpha uses `create`
+rather than `deploy` and has no `--sandbox-launcher`, so an operator who follows it gets an Instance
+whose server crashes on startup.
+
+The design doc is upstream, so this needs ptone to open a PR. It is one file, +19 lines, no code.
