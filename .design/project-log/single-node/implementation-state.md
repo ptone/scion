@@ -12172,3 +12172,66 @@ prefix, curl takes the last `@`; I believe they agree and asked for it to be che
 Gates claimed: `TestScript` 41/0/0 top-level with 21 subtests in the table, full `cmd` ok, shellcheck
 62/62 CI-exact, 14 preflight/3b/seam tests green with egress blackholed, and `cmd.Env` now scrubs
 `_DI_*` — without which the default-endpoint pins are defeatable by an ambient variable.
+
+## §35.47 — Blocked on review, so I closed a decision I owed: #74 closed, #87 filed (23:45)
+
+Round 3 is still running (`sn-adcpreflight-rev2`, active, live deploy included). Rather than poll it, I
+settled the one item on my pending list that was waiting on **my** judgement rather than anyone's work.
+
+### #74 — CLOSED. Nothing left to file.
+
+The original defect was a **false security claim, not a leak**: `diSanitizeResponse` was documented as
+*"removes potential access tokens from API response text"* and only truncated at 500 characters. The
+name promised redaction the code never performed.
+
+It closes on three grounds:
+
+1. **The misleading name is gone** — `#73`'s backout deleted the Go function upstream.
+2. **What replaced it makes no claim.** `deploy.sh` does `head -c 500` on a non-2xx response to stderr:
+   the same truncation, plainly named. **Truncation that is called truncation is not a defect.**
+3. **The implied leak does not occur, and there is now evidence rather than a reading.** The prior
+   assessment said *"probably harmless — this is a reading, not a measurement."* Round 1's live run
+   produced a real 403 body through exactly this path — `"Cloud Run Admin API has not been used in
+   project test-project..."` — with no credential in it. The token travels in the *request*, never in a
+   Cloud Run Admin API error body.
+
+**Lesson: the issue was named after the symptom someone feared rather than the defect that existed, and
+it stayed open partly because the name kept implying unfinished work.** Close the issue you have; file
+the one you found.
+
+### #87 — FILED. The token really is somewhere it should not be, just not where #74 said.
+
+Measured on the branch at `c49a4c2d5`. **Three call sites put a live ADC access token into curl's
+argv:**
+
+```
+344: curl -s "${tokeninfo_url}?access_token=${tok}"      <- in the URL *and* in argv
+388: curl ... -H "Authorization: Bearer ${tok}"          <- preflight validating GET
+807: curl ... -H "Authorization: Bearer ${access_token}" <- step 3b PATCH
+```
+
+**Pre-existing. Not introduced by #85.** Two distinct exposures, both plausible for this tier's
+audience, neither catastrophic:
+
+- **Local.** `/proc/<pid>/cmdline` is world-readable by default. Nil on a single-user laptop; real on a
+  shared bastion or CI runner — **and the script is documented as `curl`-able, which is how it ends up
+  on shared machines.**
+- **Proxy logs, tokeninfo only.** The token is in the query string. HTTPS hides it from ordinary
+  intermediaries, but a **TLS-inspecting corporate proxy — common in exactly the enterprises this tier
+  targets — logs full URLs.** The two bearer-header calls are not exposed this way.
+
+Round 1 flagged the query-parameter shape as a **caveat under P4** rather than as a finding, and it was
+never filed. **That is the whole reason for filing it now: a caveat inside a passing check is
+indistinguishable from no finding at all**, and it would have been re-derived by someone in a month.
+
+Fix shape for later, not decided: **`curl -K -` reads its config from stdin**, including `header =` and
+`url =`, which keeps a credential out of argv entirely. One heredoc per site, no new dependency — which
+matters, because the dependency set is frozen and there is no `jq` and no `python3`. The tokeninfo call
+has a second question to **settle by measurement**: does `/tokeninfo` accept the token as a POST body
+parameter? It historically accepts both, and **"historically accepts" is not a measurement** — this
+project has been burned by precisely that class of claim.
+
+**Deliberately NOT folded into #85.** That branch has survived three review rounds and is nearly done;
+adding a new behaviour change restarts a clock ptone is waiting on. It is also a genuinely different
+defect — how the request is *built*, not where it is *sent* or how the response is *printed*. Sequence
+it after the merge, when it conflicts trivially.
