@@ -990,6 +990,60 @@ there is a reason they kept both that I am not seeing.
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
 
+## 5aa. 17:00Z — the section named "one derivation" was about to ship six
+
+S6's §2.15 plan was strong: right decomposition, right sequencing, a five-step mutation protocol
+for DEF-16 they wrote without being asked. They also asked the right question and offered the
+wrong answer, and the wrong answer was the plausible one.
+
+**Their question:** case 1 has to reject non-canonical `dm:` keys. Either (a) re-derive with
+`DMConversationKey` and compare, or (b) check the UUID segments are lowercase. They leaned (b) —
+simpler, and it avoids re-deriving from parsed halves, which my own spec had warned against.
+
+**(b) is unsound, and the reason is a detail nobody would guess.** `uuid.Parse` accepts 32
+unhyphenated hex digits, `{braced}` and `urn:uuid:` forms. So
+`dm:agent:<32-hex-no-hyphens>:user:<uuid>` is all-lowercase, parses, passes the lowercase check —
+and is a different string from the canonical key for the same pair. Two external_refs, one DM,
+two rows. **DEF-8, reintroduced by the function whose entire purpose is to prevent it.**
+`ParseDMKey` also does not enforce token order while `DMConversationKey` sorts, so (b) admits
+`dm:user:<u>:agent:<a>` as well — a key #1322 refuses at ingress.
+
+The rule worth keeping: **canonicality is defined by the function that produces keys, not by a
+list of properties canonical keys happen to have.** An attribute list drifts from its subject as
+the producer changes; a round-trip cannot.
+
+**My own spec contributed to the wrong answer.** I wrote "return the key verbatim, do not
+re-derive from parsed halves", and S6 read that as forbidding (a). It does not — it governs the
+*return value*. Comparing against a re-derivation is fine; returning it is not. **A rule stated
+as a prohibition on a technique, when what it actually protects is an outcome, will be obeyed in
+the wrong place.** Design updated to say which of the two it means, and to name the real trap:
+never normalise, because silently rewriting a key makes the stored identity differ from the
+string a caller may already have authorised against — §2.15.4(c)'s read-gate normalisation moved
+to the write side.
+
+**The finding neither of us had: the section ships six derivations, not one.**
+`DirectMessageExternalRef` (`divergence.go:132`) builds the kind-free `dm:{sorted(idA,idB)}` form
+and **never returns an error** — its doc says an empty ID "produces a ref that makes the
+divergence visible", the exact inverse of this section's fail-closed rule. Its only production
+caller is `backfill.go:201`, which phase 4 repoints, after which it is production-dead but still
+exported and callable in the same package. **A section titled "one key derivation, not five"
+would have shipped with an exported non-failing alternative sitting beside it.** Neither the
+plan nor my own spec caught it; a grep for callers did.
+
+**And a stale-comment trap of exactly the DEF-15 shape, in the file S6 is about to edit.**
+`backfill_test.go:786-790` asserts the old key format, justified by the comment "must match
+DirectMessageExternalRef (dual-write format)". Dual-write was converged onto `DMConversationKey`
+by S6's *own* DEF-8 section, so the test pins the old contract while claiming the authority of
+the new one. The change to it is correct — and I told them that being correct is not what makes
+it safe. **Changing evidence so it agrees with new code is how DEF-15 got buried. Saying so out
+loud in the commit is the difference.**
+
+Also required: AC-DEF15-1 becomes a source-reading test rather than a grep (a grep runs when
+someone remembers, and this is an architectural constraint that must outlive readers of this
+document), and the delegation must log a canonicality refusal distinctly from a resolution miss —
+following S7's `Fallback` pattern rather than inventing a second one, because **a refusal that
+looks like "not found" on the divergence board is a defect you cannot see.**
+
 ## 5z. Heartbeat 16:43Z — a rule that outlived its own reason
 
 **Roster: healthy, and I checked it properly.** `scion list | tail -20` did not show
