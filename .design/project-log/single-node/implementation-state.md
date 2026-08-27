@@ -10492,3 +10492,63 @@ plainly closes the class**, and that a negative result is worth as much to me as
 
 **Sixth over-length message today** — 2038 chars, 38 over. Resent the tail. The failure is not
 arithmetic; it is that I keep composing to completeness and measuring afterwards.
+
+### 35.20 Class closed, branch cleared, compare URL posted per protocol
+
+**The class question came back closed, and closed properly.** `sn-backout-review` audited all nine
+`gcloud` calls in `deploy.sh` and produced the thing I actually wanted — **the conjunction**, not a
+verdict:
+
+> The hang pattern requires three conditions simultaneously: (1) stderr redirected so the prompt is
+> invisible, (2) stdin live so `input()` blocks, (3) a command that can trigger a component-install
+> prompt.
+
+Six calls redirect stderr but are **core** commands (`config get`, `projects describe`,
+`auth print-access-token`, `iap web get-iam-policy`, `projects get-iam-policy`) — always installed,
+so condition 3 fails. Step 3a is the other beta-track call but has **no redirect**, so condition 1
+fails and a prompt there is visible and answerable. Only line 195 had all three.
+
+**That three-condition formulation is the durable output of this task.** A verdict ("only one")
+expires the next time someone edits the file; a rule for recognising the shape does not. It is worth
+more than the fix.
+
+**Branch cleared at `5e01ea5e`.** Verified myself, as dispatch hygiene: one line in one file,
+exactly the change the reviewer specified, and the branch still merges onto `b09e7f49` with zero
+conflicts. The reviewer's verdict was READY *contingent on that exact line*; the contingency is
+objectively met, so I accepted it without re-reviewing.
+
+**I did not hold the merge for the class question,** and said why: any other call with the same
+shape would be pre-existing translated behaviour, not something this branch introduces. A finding
+there is a follow-up commit, not a merge gate. I still asked for the answer — *"I would rather know
+its full extent while you have the trace loaded than rediscover it from an operator's bug report in
+three weeks."*
+
+**ptone: "fine to wait for a single clean compare URL. please send per the protocol to dedicated
+thread."** So the ship-now/hold trade resolved in favour of holding — the right call, and his.
+
+**The protocol, re-read from §before rather than remembered.** I had two details wrong in memory.
+The dedicated thread is **1532864101909528737**, not the working thread, and *"that thread carries
+nothing else"* — so the message is the URL alone, with the status note going to the working thread
+separately. And the URL must be **validated against the API first** so it cannot 404 on him.
+
+Validated: `ahead 12, behind 3, 9 files, 12 commits`. `behind 3` is the three commits that landed
+while we worked; **checked and reported unprompted that no rebase is needed**, because he has
+reacted to a stale-looking compare before (*"already looks like it needs a rebase"*).
+
+**The size budget, which I got wrong four times before getting it right.** The recorded rule is
+~1900 chars of URL ≈ ~1200 of prose. My first body came to **2365**; then 2239, 2179, 2158, 1987,
+finally **1942**. Removing backticks helped (each encodes to `%60`), but the real fix was cutting
+content, not characters. **1987 was under the 2000 cap and I trimmed anyway** — the `user:` path
+*rejects* over-length outright rather than truncating, and a 13-character margin on a mechanism
+that has bitten six times today is not a margin.
+
+This is the same failure as the six over-length messages: **composing to completeness and measuring
+afterwards.** The difference here is only that the loop was cheap enough to run six times. Next
+compare URL: write to 1200 characters of prose from the start.
+
+**Body written for a stranger.** Three changes, the perimeter assertion flagged as the thing worth
+reading, and **the test gap declared rather than hidden** — 22 of 28 carried over, 4 new, and the
+step-6 IAP-binding print now untested. An upstream reviewer who finds that gap themselves trusts
+nothing else in the description.
+
+**Open: one sentence in tutorial section 2.** Still frozen. Still his call.
