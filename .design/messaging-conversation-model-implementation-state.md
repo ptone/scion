@@ -324,6 +324,30 @@
     unless I read the aside. **The manager who scopes work tightly inherits the duty to read
     everything the scope excluded.** Green suites do not report the tests nobody wrote.
 
+31. **A file that accumulates entries from independent features cannot be transplanted between
+    branches — only its diff can.** Issued 2026-08-27 19:05Z, from the tranche A cut. Selecting
+    tranche A by file list, I took `pkg/ent/predicate/predicate.go`, `client.go`, `mutation.go`,
+    `migrate/schema.go`, `pkg/store/models.go`, `store.go`, `entadapter/composite.go` and
+    `pkg/messages/types.go` wholesale from `messaging-v2`. Every one of them silently **deleted**
+    main's P2-A1 admin work — roughly a thousand references to `LimitDefinition`,
+    `EntitlementBinding` and `UsageReservation`, **including their entries in `migrate/schema.go`,
+    which is the migration definition.** The cut would have dropped three tables.
+
+    It broke the build loudly, and *only* because those entities were entirely new. **Had main
+    merely modified an existing entity, the transplant would have compiled and reverted the change
+    in silence.** The loud failure was luck, not detection.
+
+    Method: generated code is **regenerated** (`cd pkg/ent && go generate ./...` carrying only the
+    hand-written schema files), never copied. Hand-written aggregate files get `git apply --3way`
+    of the diff against the merge-base, never `git checkout <branch> -- <file>`. Feature-specific
+    files transplant safely. The tell for an aggregate is that unrelated features append to it.
+
+    Note the shape of the near-miss: this is **rule 25 arriving through a door I was not watching**,
+    because I had filed rule 25 under *reviewing* a branch and this was *constructing* one. **A rule
+    learned in one activity does not announce itself in another.** It is also the user's warning of
+    two days ago — "be very careful not to revert other work on main" — which I had read as being
+    about rebasing. It was more general than the reading I gave it.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -1247,6 +1271,48 @@ there is a reason they kept both that I am not seeing.
    paths; the agent outbound path does not validate `ThreadID`. A committed test bakes in a malformed
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
+
+## 5ai. 18:50-19:10Z — S2.15 merged; the tranche A cut nearly reverted main
+
+**S2.15 accepted and merged. `messaging-v2` is now `14b3ba7c`**, 91 commits ahead of main.
+
+em6's fix at `52076280` is the right kind of fix. They did not soften the conclusion to make the
+test pass, and they did not quietly delete the awkward assertions. They established **by
+experiment** that a well-formed key also fails to persist in that environment, deleted the
+assertions as demonstrably non-discriminating, wrote the reasoning into the comment, and left a
+positive control that fails loudly if the environment assumption ever stops holding. The comment
+now states which part of the conclusion comes from the test and which from code reading.
+
+I re-ran M1 myself rather than accept the report: lines 868 and 870 die, positive control survives.
+Merge tree byte-identical to `52076280`, so the green suite is the merge result, not a proxy for
+it. `pkg/hub` 277.9s, EXIT=0, `go vet` clean.
+
+Minor, logged not blocked: the positive control asserts `NotEqual(200)`, which would stay green if
+the well-formed key started failing for some *other* reason — the justification would go silently
+false while the test stayed green. Told em6 to tighten it opportunistically, not to spend a commit.
+
+**Then the tranche A cut produced the most important finding of the day.** Full detail in rule 31.
+Short version: cutting a tranche by file selection transplants **aggregate files** — generated ent
+code that enumerates every entity, and hand-written grab-bags like `store/models.go` — and doing so
+**deletes** whatever main added to them since the branch point. Here that was P2-A1's three admin
+entities and their `migrate/schema.go` entries. The build failed loudly only because the entities
+were new; a *modification* would have compiled and reverted in silence.
+
+Corrected method, validated end to end rather than reasoned about: **regenerate** generated code on
+top of main from the four hand-written schema files; **`git apply --3way` the diff** for aggregate
+files; transplant only feature-specific ones. After that, main's 234/35/6 admin references survive
+alongside ours, and `go build ./...` is clean.
+
+**The §1b boundary for tranche A was also wrong on dependencies**, found by the same build.
+`backfill.go`/`resolve.go` need `derive_key.go`, which needs `ConversationUpserter`/
+`ConversationResult` from `pkg/messaging/conversation.go` — a file §1b **explicitly excluded** —
+plus `pkg/messages/dm_key.go`. Tranche A carries all of them. §1b amended.
+
+**What I want to remember about how this was found.** I did not find it by reviewing the plan. I
+found it by *trying the cut* on a throwaway worktree and letting the compiler answer. The plan had
+been written, reviewed by me, and reported to the user as sound. **A cut plan is a hypothesis about
+a merge, and the cheapest way to test it is to perform it somewhere it does not matter.** Twenty
+minutes in `/tmp` against a class of defect that, in its silent form, no review would have caught.
 
 ## 5ah. 18:45Z — strategy cut over to incremental; DEF-19 found within minutes and dispatched
 
