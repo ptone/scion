@@ -9681,3 +9681,67 @@ finding.
 from its three most interesting functions instead of counting it. One `grep -c '^func Test'` —
 available the whole time — was the difference between a correct brief and one that would have
 shipped an open perimeter past a reviewer who was reading my table as the specification.
+
+### 35.6 Test-porting plan: go with three changes (16:50)
+
+`sn-backout-dev` classified all 28 tests and asked for go/no-go before writing. Good plan, well
+structured. Two of its five proposed drops were wrong.
+
+**Rejected: `TestDeployEnvVarsRoundTrip` and `TestDeployHostedModeEnvRequired.**" The developer
+filed these as "tests Go internals — the Go config system, not the deploy script". I read them.
+They set the **exact five env vars the deploy writes** — `SCION_SERVER_MODE`,
+`SCION_SERVER_AUTH_MODE`, `SCION_SERVER_AUTH_PROXY_PROVIDER`,
+`SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE`, `SCION_SERVER_HUB_ADMINEMAILS` — then call the hub's own
+`config.LoadGlobalConfig` and assert the resulting runtime config. They are **contract tests
+between the deploy and the hub**, not internals tests.
+
+One assertion message is literally defect #40: *"without this the server runs in workstation mode,
+auto-enables dev auth, and crashes on a non-loopback host"*. Another pins the nested-pointer
+allocation from task #13. **Both were measured §1 blockers.** Dropping these drops the only CI
+protection against re-introducing them.
+
+They port with the seam already built in commit 2, and the port is *stronger* than the original:
+read the env var **names** out of `deploy.sh`, set them, call `LoadGlobalConfig`, assert. The
+original hardcodes the list and so cannot catch a rename in the script; the ported version can.
+
+**Accepted: `TestShortenError`, `TestSanitizeResponse`.** Cosmetic. But see §35.7 — the second one
+is not as cosmetic as its name suggests.
+
+**Changed: `TestEnableIAPPatchBody`** — proposed as inspection of the constructed `curl` arguments.
+Told to use a stub server instead, the same machinery as its own `updateMask` plan. Test the
+request that is sent, not the string that builds it.
+
+**Count discrepancy, noted to the developer.** Its list yields 24 ported/subsumed and 4 dropped;
+its summary said 23 and 5; item 26 sits under a "CANNOT PORT" heading while saying it will port.
+Target after my changes: **26 ported, 2 dropped.** Given the same class of error in my own brief
+an hour earlier, this was raised gently.
+
+Extra commits rather than a rebase: correct call, endorsed. Commit count is not a constraint;
+correctness is.
+
+### 35.7 New defect #74 — a function that claims to redact and only truncates
+
+Found while checking the drop list rather than by looking for it:
+
+```go
+// diSanitizeResponse removes potential access tokens from API response text
+// before including it in error messages.
+func diSanitizeResponse(resp string) string {
+    if len(resp) > 500 { return resp[:500] + "... (truncated)" }
+    return resp
+}
+```
+
+**Truncation is not redaction.** A token in the first 500 characters passes straight through. The
+comment asserts a security property the body does not implement, and this project has a standing
+rule that access tokens never reach stdout — this function is nominally what enforces it, and it
+enforces nothing.
+
+Severity is probably low: the bodies are Google API errors from the IAP REST v2 `PATCH`, which do
+not normally echo the caller's bearer token. The durable harm is the **name**, which makes the job
+look done to every future reader.
+
+Actions: developer told to accept the dropped test but **not** to carry the misleading name into
+bash, and to report — not fix — whether the new script prints API response bodies on any error
+path. Reviewer asked to judge severity during the live walk. Filed as task #74; decide after the
+review whether it warrants an upstream issue of its own.
