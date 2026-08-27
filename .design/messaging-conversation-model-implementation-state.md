@@ -481,6 +481,44 @@
     satisfied is checked by nobody; the one-line assertion is checked by the compiler on every
     build, and it would also have made the missing wiring louder.
 
+37. **A tranche cut from an interior commit silently discards everything the project learned after
+    that commit.** Issued 2026-08-27 20:58Z, from the tranche B cut point. em10 cut Phase 5 from
+    `1ff7c6af` — the commit where Phase 5 was *introduced*. Three commits fix Phase 5 after that
+    point on `scion/messaging-v2`, and the tranche carries none of them. One, `cd4ee7ed`, is a fix
+    em2 landed at 03:30Z **for the exact defect em10 rediscovered from scratch at 20:48Z and I then
+    confirmed, specced and dispatched at 20:56Z.** Three agents spent an evening re-deriving a fix
+    that was seventeen hours old.
+
+    **The cut point was chosen for where the code was introduced. The right criterion is where the
+    code currently stands.** Those coincide only for work nobody has revisited, which is precisely
+    the work least likely to need a tranche.
+
+    **Why it is invisible:** every check we run on a tranche compares it to its *base* — anti-revert
+    counts, deletion review, CI, `merge-base`. Not one compares it to the *staging branch*. A stale
+    tranche is faithful to its base, green on every gate, and wrong. It is rule 35's cargo problem
+    with a mechanism: the cargo is not merely unverified, it is a **known-superseded revision**, and
+    the knowledge that supersedes it is sitting in our own history.
+
+    **Standing procedure, applies to every remaining tranche:** before cutting, run
+    `git log <cut-point>..scion/messaging-v2 -- <the tranche's files>` and classify **every**
+    commit as (a) a correction the tranche must carry, (b) a later phase it must not, or (c) a
+    deliberate recorded omission. Classify per *hunk* where a commit spans categories — `divergence.go`
+    differed by +169/−35 between tranche B and staging, part Phase 8 board (tranche E) and part
+    `60670c0e` (tranche B), and the totals told me nothing. **Omissions are allowed; unexamined
+    omissions are not.** S7/DEF-11 is omitted from B by decision and that is fine — the defect is
+    the omission nobody chose.
+
+    **Corollary — the staging branch is the record, and we stopped reading it.** Once the
+    integration branch was abandoned as a *merge unit* (§1b), it quietly stopped being consulted as
+    a *source of truth* either. Nobody decided that. Abandoning an artifact's primary role tends to
+    abandon its secondary ones by inattention; name the surviving roles explicitly when you retire
+    the main one. `scion/messaging-v2` is still where every defect we have already paid for lives.
+
+    **And the tell I ignored:** I had *already* accepted one instance of this — tranche A carries
+    the pre-fix DEF-12-F2 backfill code, which I signed off on reachability grounds at 20:20Z. I
+    treated it as one file's judgement call. It was the first sighting of a pattern, and a
+    single instance examined as an instance is how a pattern goes unnoticed.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -643,7 +681,7 @@ tranche A** — asked 19:55Z, unanswered.
 | `scion/messaging-v2` | **`80558a03`** | — | staging ground. DEF-12 merged in at 20:47Z, control preservation verified against both parents. Not a merge unit. |
 | `scion/ca-msg-arch` (mine) | `b80b4ad9` | — | pushed |
 | **Tranche A** `scion/ca-msg-em10` | `71b65292` | `b09e7f49` | **VERIFIED GREEN by me.** `ptone/scion#1319` (**fork** namespace — rule 34 corollary). CI green, MERGEABLE/CLEAN. Awaiting landing gate only. **SHA must not move.** Carries the pre-fix DEF-12-F2 code; reachability is zero non-test callers, so it can still land. |
-| **Tranche B** `scion/ca-msg-em10-trb` | **`9333f943`** | `71b65292` (tranche A) | **CUT + VERIFIED by em10, PR deliberately NOT opened.** 7 files, +687/−0, all 7 CI gates green, anti-revert counts equal tranche A exactly. Held until A lands. |
+| **Tranche B** `scion/ca-msg-em10-trb` | `9333f943` | `71b65292` (tranche A) | **BLOCKED 20:58Z — STALE CUT POINT (rule 37).** Was green on every gate; cut from `1ff7c6af` and therefore missing `60670c0e` (non-tautological divergence + global DM ProjectID) and `cd4ee7ed` (deliverToAgent thread resolution). em10 re-classifying every hunk against staging, then re-cutting. **Green-on-cut did not survive the cargo being wrong.** |
 | DEF-12 `scion/ca-msg-em6-def12` | `74bcb24c` | `14b3ba7c` | **F1–F4 all resolved and verified by me. MERGED to `messaging-v2` at `80558a03`.** Needs `git rebase --onto origin/main 14b3ba7c` after A lands. |
 | §2.6.4 `scion/ca-msg-em9-unify` | `d053e896` | `1e7bee72` | **REWORK — verdict issued 20:53Z. Phase 4 is inert in production (DEF-20).** See §5aq. |
 
@@ -656,11 +694,12 @@ is a queue, not a blocker.
 | Item | Waiting on | Owner | Asked? |
 |---|---|---|---|
 | **Tranche A landing** | who opens the upstream `GoogleCloudPlatform/scion` PR | **user** | yes, 19:55Z, **still unanswered — now blocking TWO tranches** (A and the verified-and-held B) |
-| **Tranche B landing** | tranche A landing, then `rebase --onto` | **user** (transitively), then **em10** | held 20:48Z by design |
+| **Tranche B re-cut** | hunk classification vs staging `80558a03`, then re-cut + full AC re-run | **em10** | blocked 20:58Z |
+| **Tranche A cut-point audit** | same rule-37 test applied to A's file set; fold in or justify by reachability | **em6** | dispatched 20:59Z. **Wanted before the user answers the landing question, not after.** |
 | DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
 | AC-12-6 (populated-DB exercise) | beta-hub exercise scheduling | **user** — deliberately deferred; pre-beta gate item | told em6 + integration2-operator 20:0xZ |
 | **§2.6.4 phases 1-4** | **DEF-20/21/22/23 rework** | **em9** | verdict sent 20:53Z |
-| **DEF-24** (divergence board blind spot — empty threadID in `deliverToAgent`) | spec | **em10** | requested 20:53Z. **Gates the read switch, not tranche B.** |
+| ~~**DEF-24**~~ | **WITHDRAWN 20:58Z — not a defect, a stale cut point.** Already fixed on staging at `cd4ee7ed` (em2, 03:30Z). Rolled into the tranche B re-cut. | — | spec cancelled |
 | §2.6.4 phases 5-7 | phases 1-4 landing | **me** — queue | n/a |
 | Tranches C-G | tranche B, then supervision capacity | **me** — queue | n/a |
 | DEF-5, DEF-6, DEF-7, DEF-9, DEF-11 | dispatch capacity; specs complete | **me** — queue, not blocker | n/a |
@@ -1614,6 +1653,56 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5ar. 20:55-21:00Z — the fix was seventeen hours old and three of us re-derived it
+
+em10 filed a spec for the `deliverToAgent` divergence blind spot. I read the code, decided their
+diagnosis understated it, and sent a correction: the board is not lying, the *routing* is wrong —
+agent delivery calls `ResolveOrCreateDMConversation` unconditionally, so a thread-bearing message
+is filed as a DM. I specified the fix: branch on `msg.ThreadID`, resolve the thread conversation,
+pass the real threadID to `OldRoutingFromMessage`.
+
+Then I went to pick the next tranche and ran `git log --first-parent` on the staging branch, and
+five lines above Phase 6 sat this:
+
+```
+cd4ee7ed  fix(hub): add thread resolution to deliverToAgent broker path
+          ca-msg-em2, 2026-08-27 03:30:04Z
+```
+
+Its diff is my specification, line for line. **em2 found it, fixed it, and landed it at 03:30Z.
+em10 rediscovered it at 20:48Z. I confirmed and re-specced it at 20:56Z.** Two minutes later I
+found the original.
+
+**Nobody was reading the record.** Tranche B was cut from `1ff7c6af`; `cd4ee7ed` and `60670c0e`
+land after it and fix Phase 5. Every check we run on a tranche compares it to its **base** —
+anti-revert counts, deletion review, CI, merge-base. Not one compares it to **staging**. So a
+stale tranche is faithful, green, and wrong, and the thing that would have caught it is a command
+nobody in the plan runs. **Rule 37.**
+
+`60670c0e`'s subject is the part that turns this from embarrassing into blocking: *non-tautological
+divergence comparison*. The version tranche B carries matches unconditionally. Tranche B's entire
+safety argument is that the divergence board is observational — and **a board that cannot report a
+mismatch is not observational, it is decorative.** We would have shipped it, read it clean, and
+called that evidence for flipping the read switch.
+
+**What I should have caught two hours ago.** I had already accepted one instance: tranche A carries
+the pre-fix DEF-12-F2 backfill, signed off at 20:20Z on reachability grounds. That reasoning was
+sound and I would make it again. But I examined it as *one file's judgement call*, and it was the
+first sighting of a pattern. **A single instance examined as an instance is how a pattern goes
+unnoticed** — the reasoning that disposes of the case correctly is also the reasoning that stops
+you asking whether there are others. em6 is now auditing tranche A's whole file set with the same
+test, and I want it back before the user answers the landing question.
+
+**And the quiet cause.** When the integration branch was abandoned as a *merge unit* (§1b, user
+directive 18:30Z), it silently stopped being consulted as a *source of truth* as well. Nobody
+decided that; the second role went out with the first. **Retiring an artifact's primary role tends
+to retire its secondary ones by inattention.** `scion/messaging-v2` is still where every defect we
+have already paid for lives, and for two and a half hours we have been cutting tranches as though
+it were only history.
+
+Credit where it is due: em10's independent discovery is what surfaced all of this. The symptom was
+real and their instinct to file it was right.
 
 ## 5aq. 20:45-20:55Z — em9's §2.6.4: the phase was built, tested, green, and switched off
 
