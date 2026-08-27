@@ -60,10 +60,30 @@ git apply --3way /tmp/agg.patch     # applied cleanly at 14b3ba7c; if it conflic
 (cd pkg/ent && go generate ./...)
 
 # 4. Verify BOTH symbol sets survive. This is the anti-revert check; do not skip it.
-grep -c 'EntitlementBinding\|LimitDefinition\|UsageReservation' pkg/ent/client.go        # expect ~234
-grep -c 'EntitlementBinding\|LimitDefinition\|UsageReservation' pkg/ent/migrate/schema.go # expect ~35
-grep -c 'ConversationParticipant\|MessageAddressee'             pkg/ent/client.go        # expect ~140
-grep -c 'ConversationParticipant\|MessageAddressee'             pkg/ent/migrate/schema.go # expect ~26
+#
+# CORRECTED 19:26Z. The first version of this step printed approximate expected
+# values ("~234"). They were measured with `grep -ci` while the command below is
+# `grep -c`, so they were all ~10% high and invited exactly the wrong response:
+# eyeballing a mismatch and calling it the right order of magnitude. An AC with an
+# approximate expected value is not an AC.
+#
+# The check is now self-calibrating: compare against main's OWN counts, computed
+# now, with the same command. Equality is required, not similarity.
+ADMIN='EntitlementBinding|LimitDefinition|UsageReservation'
+OURS='ConversationParticipant|MessageAddressee'
+for f in pkg/ent/client.go pkg/ent/migrate/schema.go pkg/ent/predicate/predicate.go; do
+  before=$(git show origin/main:$f | grep -Ec "$ADMIN")
+  after=$(grep -Ec "$ADMIN" $f)
+  ours=$(grep -Ec "$OURS" $f)
+  printf '%-34s admin main=%-4s ours=%-4s  new=%s\n' "$f" "$before" "$after" "$ours"
+  [ "$before" = "$after" ] || echo "  *** ADMIN COUNT CHANGED — STOP. This is the revert. ***"
+  [ "$ours" -gt 0 ]        || echo "  *** OUR ENTITIES ABSENT — the regeneration did not take. ***"
+done
+
+# Reference values at origin/main b09e7f49, case-SENSITIVE, for sanity only —
+# if main has moved these will differ legitimately and the loop above is authoritative:
+#   client.go            admin 211   ours 130
+#   migrate/schema.go    admin  31   ours  21
 
 go build ./... && go test ./pkg/... ./cmd/...
 ```
@@ -76,8 +96,11 @@ go build ./... && go test ./pkg/... ./cmd/...
 
 ## Acceptance criteria
 
-- **AC-A-1** The four `grep -c` counts in step 4 all non-zero and at their expected magnitudes.
-  **This is the tranche's most important AC. It is the revert check.**
+- **AC-A-1** Step 4's loop reports **`admin main == admin new` exactly** for every file, and
+  **`ours > 0`** for every file. Not "the right magnitude" — equal. **This is the tranche's most
+  important AC; it is the revert check.** If a count differs by even one, stop and report it rather
+  than judging whether the difference looks acceptable. That judgement is not available to you: a
+  revert and a legitimate regeneration difference look identical from inside the tree.
 - **AC-A-2** `go build ./...` clean; `go test ./pkg/... ./cmd/...` EXIT=0.
 - **AC-A-3** All seven CI gates in `.github/workflows/ci.yml` pass. **Read the file; do not work
   from memory of it** (rule 22). gofmt in particular — the branch has ~15 pre-existing violations
