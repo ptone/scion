@@ -216,11 +216,11 @@ func TestHandleBrokerInbound_AcceptsValidMessage(t *testing.T) {
 // path (handleConversationSend → sendAgentRouted) rejects messages that fail
 // validation (AC-8, path 3 — native web chat).
 //
-// It sends a body that exceeds MaxMsgSize (64KB byte limit). Because
-// MaxMsgSize+1 bytes of ASCII also exceeds MaxMessageLength (16000 runes),
-// the handler's own rune-count check catches it first. ValidateLegacyMessage
-// serves as defense-in-depth: if the handler's check were ever relaxed,
-// the choke point in sendAgentRouted would still reject it.
+// Rule 10: this test MUST FAIL when the ValidateLegacyMessage call in
+// sendAgentRouted is removed. The handler does not check metadata value
+// sizes, but ValidateLegacyMessage does (MaxMetadataValueSize = 4KB).
+// When an attachment has a very long filename, the JSON-encoded attachment
+// metadata exceeds 4KB, which only the choke point catches.
 func TestNativeChatPath_RejectsInvalidMessage(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -268,21 +268,34 @@ func TestNativeChatPath_RejectsInvalidMessage(t *testing.T) {
 		DefaultAgent: agent.ID,
 	}))
 
-	// Build an oversized body: MaxMsgSize+1 bytes (65537 ASCII chars).
-	// This exceeds both the handler's rune-count check (MaxMessageLength =
-	// 16000) and ValidateLegacyMessage's byte-size check (MaxMsgSize = 64KB).
-	oversizedBody := strings.Repeat("a", messages.MaxMsgSize+1)
+	// Create an attachment with a very long filename (~4100 chars).
+	// When JSON-marshaled as part of an AttachmentRef array, the metadata
+	// value will exceed MaxMetadataValueSize (4KB = 4096 bytes).
+	longFilename := strings.Repeat("a", 4100)
+	attachmentID := tid("attach-val-chat")
+	require.NoError(t, wcs.CreateAttachment(ctx, AttachmentMeta{
+		ID:         attachmentID,
+		ProjectID:  project.ID,
+		Filename:   longFilename,
+		MimeType:   "application/octet-stream",
+		Size:       42,
+		UploadedBy: DevUserID,
+		CreatedAt:  time.Now().UTC(),
+	}))
 
+	// Send a message with valid content but the oversized-filename attachment.
 	body := map[string]interface{}{
-		"content": oversizedBody,
+		"content":     "hello",
+		"attachments": []string{attachmentID},
 	}
 	rec := doRequest(t, srv, http.MethodPost,
 		"/api/v1/chat/conversations/"+topicID+"/messages", body)
 
-	// Must be rejected (400) — the handler's character-limit check fires first.
+	// Must be rejected (400) — ValidateLegacyMessage catches the oversized
+	// metadata value produced by the JSON-encoded attachment refs.
 	assert.Equal(t, http.StatusBadRequest, rec.Code,
-		"expected 400 for oversized body, got %d: %s",
+		"expected 400 for oversized attachment metadata, got %d: %s",
 		rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "character limit",
-		"response should mention the character limit")
+	assert.Contains(t, rec.Body.String(), "metadata value",
+		"response should mention the metadata value size violation")
 }
