@@ -9554,3 +9554,74 @@ The register (`ptone/scion#1297`) remains the standing mitigation, and the 100% 
 ### §34.3 — Fleet and status
 
 Zero developer agents running. Nothing is blocked on me or on any agent.
+
+---
+
+## §35 — ptone's review reverses two shipped decisions (2026-08-27, 16:25–16:40)
+
+ptone, 16:25:58Z, verbatim:
+
+> in reviewing it need to make the following changes we should only have a script in scripts/ we
+> should NOT be adding to scion cli surface for deploy. back that out we should not share the
+> actual ptone-misc image. that is not fully public. share an example and include steps to cloud
+> build submit to get your own.
+
+Three changes. All land on files merged upstream earlier today. Task #73.
+
+### 35.1 Measured surface (upstream main `98a9d9c2`)
+
+| Item | Measurement |
+|---|---|
+| `cmd/deploy_instance.go` | 828 lines. Imports are **stdlib + cobra only** — no Go GCP client library. All GCP work via `exec.Command("gcloud", ...)` (`diRunGcloud`) and `net/http` (`diRESTCall`). |
+| `scripts/single-node/deploy.sh` | 94 lines, thin wrapper. Last line `exec "$SCION_BIN" deploy-instance "$@"`. |
+| Registration | `cmd/root.go:90`, `cmd/cli_mode.go:111`. |
+| `cmd/deploy_instance_test.go` | Pins the IAP audience against the hub's own `isSupportedIAPAudience`. |
+| Tutorial (491 lines) | 5 × `scion deploy-instance`, 5 × `ptone-misc`. |
+| `scripts/single-node/README.md` | 1 × `ptone-misc`. |
+| `.design/hosted/cloud-run-single-node.md` | Names **neither** the command nor the image. **Stays in sync — no change owed.** |
+| `image-build/cloudbuild-omni.yaml` | Already upstream, and already carries a documented `gcloud builds submit` invocation at ~line 27. The build-your-own steps derive from it. |
+
+**Because no Go GCP SDK is involved, a bash rewrite is a translation, not a redesign.** That was the
+one fact that decided feasibility, and it was worth measuring before answering ptone.
+
+### 35.2 Two findings that shape the work
+
+**A. The Go toolchain prerequisite becomes dead.** `deploy-instance` is the *only* use of the
+`scion` binary anywhere in the tutorial (grep of every `\bscion\b` occurrence, lines 51–101 and
+170/358). Removing the command therefore removes ~50 lines of prerequisite: the
+`go build -tags no_embed_web`, the `$(go env GOPATH)/bin` install, the **`PATH` prepend**, the
+`scion deploy-instance --help` check, and the `unknown command "deploy-instance"` troubleshooting
+pair. The reader ends up needing `git` and `gcloud` only. **ptone's constraint makes the page
+shorter and deletes the stale-binary trap that cost us a troubleshooting entry.** Not merely
+compliance — a real improvement.
+
+**B. One safety property is genuinely at risk, and it is the reason this is not a doc edit.**
+Deleting the Go file deletes the audience pin. Bash cannot be unit-tested against a Go validator,
+and a wrong audience means IAP login fails — a §1 blocker CI would stop catching.
+**Design answer: a Go test that reads the format strings out of `deploy.sh` and feeds them to the
+same `isSupportedIAPAudience` / `iapAudienceToCloudRunURL`.** One authoritative copy of each string
+(in the script), pin preserved, CLI command gone. Ordered so the replacement lands *before* the
+deletion — no commit exists in which neither is present.
+
+### 35.3 Gate 2 is the thing most likely to be lost
+
+`diAssertPerimeter` (step 7, labelled in-source as the most valuable deliverable) sends an
+unauthenticated request and requires it to **fail**. With `invokerIamDisabled: true`, IAP is the
+sole perimeter and there is nothing behind this check. The bash idiom `curl -f` exits non-zero on
+the 403 that means *the gate passed* — inverted polarity would turn a success banner into a
+report on an open Instance. Called out explicitly in the brief; probes must branch on an explicit
+status code.
+
+### 35.4 Dispatch
+
+One branch, one developer, four commits — deliberately not split. The code change and the doc
+change edit the same region of the same tutorial; two branches would conflict with each other,
+which is exactly what cost us time on `#1315` this afternoon.
+
+Brief: `briefs/sn-backout-dev.md`. Agent `sn-backout-dev` created, then **started** (phase after
+`create` was `created`, as always — `scion create` does not start), then verified with
+`scion look`. Required gate in brief §8: a live §1 walk on `sn-backout-t` in `ptone-experiments`,
+including evidence that Gate 2 fired.
+
+Reported the plan and the pin trade-off to ptone at 16:40 before dispatching, offering to ship the
+image fix alone first if he wants the not-public reference off the published page sooner.
