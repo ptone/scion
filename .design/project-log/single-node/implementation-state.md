@@ -8156,3 +8156,46 @@ this is independent support for it.
 **Status.** No agents outstanding. Design doc unchanged since D8 was queued at 08:30. ptone has not
 posted since 06:24 and has not answered the 08:11 report — treating him as asleep, accumulating.
 Ten items in `review-queue.md`; D5 and D7 are the two that need him.
+
+## 09:32 — A near-miss on reclamation, and a bad mechanism claim in the surviving record
+
+**Correction to my own log.** I recorded `scion/sn-stress-max` as final at `5f207c9`. It is at
+**`735b50fe`** — "w-1 death time and ratio correction from independent verification", committed
+**08:10:26**. My 08:03 and 08:15 entries have the wrong SHA.
+
+### The near-miss
+
+That commit is the agent acting on the findings I sent it at 08:09. **I deleted the agent at
+08:11:47 — eighty-one seconds later.**
+
+I sent an agent substantive new findings and reclaimed it two minutes afterwards, while it was
+actively working on them. It happened to finish, and it pushed to both the branch and the shared
+volume before it went. That is luck, not process.
+
+**The rule I should have been following, and now will: never hand an agent new findings and reclaim
+it in the same breath.** Either send nothing before deletion, or wait for its acknowledgement. My
+close-out for `sn-findings-dev` and `sn-docs-dev` used `message -> sleep 2 -> delete`, which is the
+same mistake with a shorter fuse; those messages were pure close-outs carrying no new work, so
+nothing was at risk. Here there was.
+
+### The bad claim, and it is in the file that survives
+
+The Instance and the agent are gone, so `sn-stress-max-final-report.md` is now the only record of
+that run. It attributes `w-1`'s death, and `idle-1..idle-5` in Phase A, to **"FIFO eviction — oldest
+agent evicted."**
+
+**The pattern is real; the named cause is not.** `sn-stress-def`'s `probe-0` was created nine
+minutes *before* `idle-1` and lived twenty-two minutes *after* it died. Under eviction-by-age the
+older sandbox goes first. It did not.
+
+Within `max`'s two runs the ordering is perfectly consistent, which is exactly why the reading is
+tempting — and exactly why it is wrong to write down. **Symptom identity is not cause identity**, for
+the third time on this project.
+
+I have appended a clearly-marked editor's note to the report rather than rewriting the author's text.
+It states what is solid (the counts, `w-1`'s timestamp, the composition, the 3.64× ratio, the leak)
+and what is not (the mechanism). `sn-findings-dev` read this file to draft `ptone/scion#1309`, and
+future readers will read it with no author left to question.
+
+**A finding that outlives its author needs its uncertainty written into it, not held by whoever
+happened to be in the conversation.**
