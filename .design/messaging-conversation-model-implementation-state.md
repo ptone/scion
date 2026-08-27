@@ -282,6 +282,28 @@
     a blocker written as *what it depends on* hides *who owes it*, and only the second form can be
     audited. Write blockers as owners.
 
+29. **"Fail closed" is a rule about authorization, not about shape constraints — and a constraint
+    test that only asserts rejection cannot see over-rejection.** Issued 2026-08-27 18:32Z.
+    §2.6.4 AC-U-4 said "a `surface=native` conversation cannot be persisted with a NULL
+    `project_id`". nc-arch caught that this **fails closed on every human↔human DM**, which is
+    legitimately global — `pkg/messaging/conversation.go:81`, *"ProjectID is intentionally nil"*,
+    which I verified rather than accepted. Two distinct errors, and the second is the durable one:
+
+    - I generalised from the sub-kind I had read (topics) to the surface as a whole. The grep that
+      informed §3.2 was a topic grep; I wrote a native-surface rule from it.
+    - **I imported "under-granting is recoverable; over-granting is not" into a place it does not
+      belong.** That posture is correct for *authority* decisions, where the cost of a wrong
+      "allow" is unbounded and a wrong "deny" is a retry. A `NOT NULL` constraint is not an
+      authority decision — it is an assertion about shape, and over-tightening it does not
+      under-grant, it **breaks a working feature**. Applying the security instinct outside security
+      turned a safety reflex into an outage. **Ask what a wrong rejection costs before reaching for
+      fail-closed; if the answer is "a legitimate feature stops working", the reflex is wrong.**
+
+    The test consequence generalises past this spec: **every constraint AC needs its paired
+    positive — assert what must still be *allowed*, not only what must be refused.** A one-sided
+    constraint test goes green on a rule that rejects the world. AC-U-4 and AC-U-4b now land
+    together or not at all.
+
 ## 2. Source documents
 
 | Doc | Path |
