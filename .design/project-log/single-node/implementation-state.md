@@ -6688,3 +6688,69 @@ not see 3 and raise a false alarm against a number that was never meant to apply
 Unchanged from 04:31, and now checked rather than assumed.
 
 Still holding for ptone on task #50 and the defect register. Asked once at 04:21. Not asking again.
+
+### 06:45 — docs landed (task #50). Verified, and one conclusion sent back.
+
+`sn-docs-dev` pushed `67fb67570` to `scion/sn-docs-dev`: 7 files, 534 insertions. Tutorial at
+`docs-site/src/content/docs/hosted/single-node/cloud-run.md`, scripts under `scripts/single-node/`,
+sidebar entry, overview link, and one disambiguating sentence in `scripts/cloudrun/README.md`.
+
+**Verified rather than accepted** — the failure I made at 04:22 and do not intend to repeat:
+
+| claim | check |
+|---|---|
+| branch and commit exist | `67fb67570`, 7 files, 534 insertions ✓ |
+| **no sizing number** | placeholder only, with an HTML comment forbidding estimates ✓ |
+| `sn-docs-verify` torn down | absent from the instance list ✓ |
+| do-not-delete intact | all seven still present ✓ |
+| sidebar slug matches file path | `hosted/single-node/cloud-run` ↔ `.../cloud-run.md` ✓ |
+
+The four first-run breakages it reported — gcloud 575 lacking `beta run instances`, the released
+`scion` binary lacking `deploy-instance`, `projectId` vs `project`, and the IAP header — are the
+kind of specifics that only come from actually running the thing. **The instruction to follow its
+own doc worked.**
+
+#### A contradiction between two docs in the same site
+
+It reported: `Proxy-Authorization` failed with *"Invalid IAP credentials: empty token"*;
+`Authorization: Bearer` worked.
+
+The HA doc already in the repo says the opposite in plain words:
+
+```
+docs-site/.../hosted/ha/auth-proxy-iap.md:143
+| Authorization: Bearer <Google OIDC ID token> or Proxy-Authorization: Bearer <Google OIDC ID
+| token> | ... Cloud Run native IAP fully supports Proxy-Authorization. |
+```
+
+**Two docs in one site disagreeing about an auth header is worse than either being wrong alone.**
+
+**And I think it may be a wrong attribution rather than a real difference.** The HA line specifies an
+**ID token**. The working example uses `gcloud auth print-access-token` — an **access token**. So the
+header changed *and* the credential type changed, and the failure may belong to the credential.
+
+> **Two variables moved, one conclusion drawn.** Same shape as every attribution error on this
+> project. The A/B has to hold everything constant except the thing being tested.
+
+Asked for the full four-way matrix — two headers × two token types — before any doc change. One of
+three things will be true: the HA doc is wrong, the attribution was wrong, or Instances and Services
+genuinely differ, which would be a real finding for both docs.
+
+**A second concern the same test answers.** If an access token works where an ID token is
+documented, the example may be satisfying the Cloud Run **invoker IAM check** rather than **IAP**. A
+reader with IAP access but no invoker permission would follow the doc and fail. I want to know which
+guard the example actually passes.
+
+#### Two findings worth keeping
+
+**The released `scion` binary has no `deploy-instance`.** It had to build from source. That is
+expected — the tier merged 2.5 hours ago and nothing has been released since — but it means the doc
+now carries a build-from-source workaround **that becomes wrong on the next release**. Someone has
+to remove it. A doc with a time-limited workaround and no marker rots silently.
+
+**`gcloud` must be ≥ 582.** 575 has no `beta run instances`. Note 582 is also the version with the
+`.gitignore` quirk from `ptone/scion#1298`, so it is now both required and known-quirky.
+
+**The unverified docs-site build is covered.** `.github/workflows/docs.yml` runs on `pull_request` to
+main with a `docs-site/**` path filter, so CI will catch a build break — **provided the PR is not
+conflicted**, which last night proved silently strips `pull_request` workflows.
