@@ -1104,6 +1104,38 @@ there is a reason they kept both that I am not seeing.
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
 
+## 5af. 18:12Z — em6's rebase verified, and rule 18 caught me a second time
+
+em6 rebased and pushed without announcing it. I found out by accident: preparing an unrelated
+`cmd/` cleanup, I ran `git diff --name-only b7669831 origin/scion/ca-msg-em6` — their *old* base —
+and got back `cmd/deploy_instance.go`, `cmd/helm_chart_ha_contract_test.go`, `cmd/hub_token.go`.
+Nonsense for a key-derivation section. Had I trusted it I would have opened a second false alarm
+against a manager who had just fixed the first one.
+
+**This is rule 18 in a costume I did not recognise.** The rule says compare against the merge
+parent, never a branch head that has moved. I obeyed it for the head and violated it for the
+*base* — I cached `b7669831` as a fact when it was a fact with a timestamp. Symmetric with §5x,
+where I nearly rejected a merge on a manufactured finding. **A stale reference point produces
+confident, specific, entirely fictional diffs, and they read exactly like real ones.** Re-fetch and
+re-derive both endpoints at the moment of comparison; never carry either across an interval in
+which the other side was working.
+
+Re-checked properly. `git merge-base --is-ancestor edd4e4bd origin/scion/ca-msg-em6` → **PASS**.
+Five commits on the integration head. `git diff --stat edd4e4bd origin/scion/ca-msg-em6` → 16
+files, +1,694 / −108, every one a §2.15 file; zero whole-file deletions. The 299-file, 80,471-line
+revert is gone.
+
+**The controls that were missing are back, and the conflict resolution kept them.** This was the
+real risk of the rebase — the conflicts land exactly where DEF-11 and #1319 live, and a
+resolution that dropped them would look identical to the pre-rebase state I had just rejected.
+Counts in `handlers_agent_messaging.go`, em6 vs integration head: `lookupFailed` 3 = 3, `Fallback`
+2 = 2, `validDMKey` 2 = 2, plus `DeriveConversationKey` 3 (new). Preserved, not re-implemented.
+
+**Item 2 has evaporated exactly as predicted, and Item 1 is now a genuine question for the first
+time.** `validDMKey` and `DeriveConversationKey` coexist in one handler, so em6 must state what
+each is for rather than assume the newer subsumes the older. `dev-validdmkey-test` is running that
+check now. Awaiting their report; I have not interrupted them, and I did not pre-empt the answer.
+
 ## 5ae. 17:48Z — the user calls the integration-branch strategy flawed, and I think they are right
 
 Verbatim: "this approach of large integration branch is prob a flawed strategy". I proposed this
