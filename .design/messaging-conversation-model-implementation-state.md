@@ -216,7 +216,20 @@ mutations are not simply breaking the package. **Specificity is the signal, not 
 mutation that fails everything proves only that the code is reachable; a mutation that fails
 exactly one named test proves that test observes exactly that effect.
 
-**S6 reopened on DEF-15/DEF-16, section work still accepted.** See both ledger rows. Their
+**ACTIVE SECTION: §2.15, dispatched to `ca-msg-em6` 16:40Z off `e2b5c37d`.** Six phases; 1-2
+touch no handler, 3-5 are serial on `handlers_agent_messaging.go`. Phase 4 repoints
+`backfill.go:195`'s derivation only — **the backfill stays unwired**, DEF-12 gated behind it.
+
+**S7 CLOSED 16:38Z.** Merged at `e2b5c37d`, branch `scion/ca-msg-em7` @ `459a6ce8` confirmed on
+remote, agent retired (`scion stop --rm`, absence from `scion list` confirmed).
+
+**Branch contract restated to S6 on dispatch.** They pushed `dfb348c3` directly to the
+integration branch. That was inside the main-sync mandate and is not a violation, but the mandate
+ended with the sync — from here they push `scion/ca-msg-em6` and **I merge**. The gate exists
+because the person who resolved a conflict is the worst-placed person to notice what it dropped,
+which is exactly how DEF-15 surfaced.
+
+**S6's earlier section still accepted; DEF-15/DEF-16 now their next section rather than a reopen.** See both ledger rows. Their
 merge of main was verified clean on the revert axis against the **merge parent** — after I ran
 that same sweep against a moved `origin/main` and manufactured a false finding I was about to
 send as a rejection (§5x, rule 18).
