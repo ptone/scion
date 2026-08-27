@@ -1212,6 +1212,8 @@ is a queue, not a blocker.
 | **Tranche A cut-point audit** | **DONE 21:15Z — 17 unchosen commits, verdict ACCEPT (§5av, rule 41). Follow-on D2/D3/D4 accepted 21:27Z (§5aw).** Golden vectors confirmed in A; omissions clean; warrant strengthened to `git diff origin/main 71b65292 -- pkg/hub` = **empty**. Remaining: re-issue D1 with the AC-DEF8-1 correction (it IS runnable and passes — rule 42) and file the **`resolve_test.go:1099` green-placeholder defect** (a second test named AC-DEF8-1 that only calls `Resolve` twice; rename or delete). | **em6** | correction issued 21:27Z |
 | **Four A-ACs deferred into B's merge** | 23f7c820's 5 handler call-site fixes; AC-DEF15-1 (source confinement); AC-DEF15-4 (invalid `dm:` → zero rows); AC-DEF16-1 (validation before creation). **These are tranche A's ACs, not B's** — not covered by AC-B-1..9, must be reported by name. AC-DEF15-1 + `b7651af9`'s unexport are one control in two files: **both or neither**. | **em10** | added to B's spec 21:28Z |
 | DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
+| **DEF-30 — stored DM keys are in a format our derivation can no longer produce** | **POSSIBLE RELEASE BLOCKER / may reorder tranches.** Found by `integration2-operator`'s staging dump 22:30Z. Staging holds `dm:<uuid>:<uuid>` (no kind qualifiers); `pkg/messages/dm_key.go:40` emits `dm:<kind>:<uuid>:<kind>:<uuid>` sorted, kinds validated. Upsert keys on `(surface, external_ref)`, so the new derivation **cannot match an old row and will silently MINT a duplicate**, orphaning the original and its messages. No error, no log. **DECIDING QUESTION ASKED 22:31Z: does beta have `conversations` rows?** Zero → staging-only dev detritus, wipe staging, no migration. Non-zero → real format migration before anything lands, and the tranche order changes. **Escalate to user only once answered** — premature either way. | **me** (pending i2op beta counts) | opened 22:31Z |
+| **DEF-29 — `CreateConversation` accepts a keyless `direct` conversation (no ACL)** | **Security-relevant. Confirmed in live data, not theory:** staging row `adf13f87`, kind=direct, `external_ref` empty, 2 participants. `conversation_store.go:114` validates ID and DefaultAgentID then does a bare `SetExternalRef` with no check; the upsert path rejects empty in **two** places (`:341`, `:374`). **A direct conversation's key IS its access-control basis** — a keyless direct row has no ACL. Exactly the class hidden by the `external_ref != ''` filter I made i2op delete, which is how it surfaced. **SCOPE IS NARROW: reject only `kind=="direct" && external_ref==""`** — a native *group* may legitimately have no external ref, so an over-broad guard breaks group creation (paired-positive test required). Third rule-54 instance today. | **em10** | dispatched 22:32Z, queued 3rd behind DEF-28 |
 | **DEF-28 — `UpsertConversationByExternalRef` silently erases `parent_ref`** | Found by me 22:25Z while verifying an nc-arch premise. `conversation_store.go:400` update branch does `SetParentRef(conv.ParentRef)` **unconditionally** while all four sibling optional fields are guarded — and the comment justifying the guard sits one line below it. Only writer is `derive_key.go:196` (conditional); DM path, both `resolve.go` sites and `backfill.go` never set it, so any resolve of an existing threaded conversation erases the parent with no error. DM path re-upserts per message → re-clobbers continuously. No preservation test exists (`DisplayName` has one; never generalised — rule 54). Ships in tranche A, file absent from main. Fix = guard it; trade-off accepted (upsert can no longer *clear* `parent_ref`; re-parenting needs its own method). Acceptance = faithful mutation naming the erased parent. | **em10** | dispatched 22:25Z, additive on #1331 |
 | **DEF-27 — soft-deleted native topic gets a shadow conversation** | **RELEASE BLOCKER for §2.6.4.** Found by `nc-arch` 21:59Z, verified by me on both backends. `GetTopicConversationID` filters `deleted_at IS NULL` (`webchannel_store.go:1364`, `webchannel_store_postgres.go:978`); `DeleteTopic` is soft. A tombstoned topic answers `ErrNotFound` → guard mints. Reachable: agent/broker paths validate DM-key *format* only, never topic existence; trigger is a human deleting a thread mid-agent-turn. **Root cause is one function answering two questions with opposite `deleted_at` needs — split it (rule 51).** Spec: `def27-spec.md`, 6 ACs. **Does NOT affect #1331** (tranche A is dormant, no `pkg/hub`). **CONTAINED TO THE BRANCH — nc-arch scanned the shipped surface and it is clean, so NO data remediation; em9 told explicitly not to write a migration** (22:04Z). Per-backend independent tests now standing for the whole webchat surface, not a DEF-27 special case. **REJECTED 22:19Z at `f1745506` — fix correct, tests do not cover the defect.** All 10 `TestDEF27_*` are store-level; `grep -c ResolveOrCreateConversationByKey` = 0. I reintroduced the defect at `derive_key.go:164` and all 10 passed (edge verified: `pkg/hub` imports `pkg/messaging`, so the mutant WAS linked). Second finding sent with the first: `mockTopicLookup`'s two methods are byte-identical, so the obvious sink test would have been vacuous. Rework = sink-level AC-27-1 against the real store both backends + give the mock a `deleted` concept; acceptance is my mutation failing. Rule 53. | **em9** | dispatched 22:01Z, scoped 22:04Z, **rejected 22:19Z** |
 | **AC-12-6 (populated-DB exercise)** | beta-hub exercise scheduling. **Verification design now settled with integration2-operator (22:00Z):** snapshot is stop → `wal_checkpoint(TRUNCATE)` → cp → start, so restore is safe; explicit `backfill --dry-run` then `--execute` first, startup detection as *second* confirmation; atomicity treated as unknown, restore preferred over resume. **Three correctness checks added beyond the NULL count, which measures completeness only:** (a) convergence — `direct` conversations vs distinct principal pairs, with **fewer** being the STOP condition (collision = over-granting); (b) round-trip every backfilled DM through the **production** `ParseDMKey`, not a second parser; (c) INVARIANT D-1 on real data, kind-qualified. Review found and fixed: a kind-blind predicate that could not see kind confusion, an `external_ref != ''` filter excluding the worst rows, and two NULL holes (rules 51, 52). | **user** (scheduling) | design closed 22:02Z |
@@ -2173,6 +2175,45 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5bg. 22:29-22:32Z — the staging dump: my framing was wrong, and it found two defects anyway
+
+**MY FRAMING WAS WRONG.** I asked i2op for a "baseline" to separate pre-existing damage from damage we cause.
+Staging runs `scion/messaging-v2` — **our** branch — and `conversations` has never existed on main. So every
+row found was written by our own in-flight code. It is a test of us, not a baseline of the world before us.
+More useful than what I asked for, but "pre-existing by definition" was false and I told them so before they
+carried it into the next run.
+
+**DEF-29 — keyless `direct` conversation, confirmed in live data.** Staging row `adf13f87`: kind=direct,
+`external_ref` empty, two participants, zero messages; beside it `f003ad87` with a `dm:` key, one message and
+zero participants. One logical DM split across two rows. Root cause found in code: `CreateConversation`
+(`:114`) validates ID and DefaultAgentID then does a bare `SetExternalRef` with **no check**, while the upsert
+path rejects empty in two places. **A direct conversation's key IS its ACL**, so a keyless direct row is
+unauthorizable. This is precisely the class my `external_ref != ''` correction unhid — I made them delete that
+filter three hours ago and it found the row on the first run. **Third rule-54 instance today.**
+Scope trap recorded: the fix must be `kind=="direct" && external_ref==""`, **not** all conversations — a native
+*group* legitimately has no external ref, and the over-broad guard breaks group creation.
+
+**DEF-30 — the headline, and i2op did not see how big their own item 4 was.** Stored keys are
+`dm:<uuid>:<uuid>`; `dm_key.go:40` emits `dm:<kind>:<uuid>:<kind>:<uuid>`. The upsert keys on
+`(surface, external_ref)`, so the new derivation **cannot match an old row and mints a duplicate instead**,
+silently orphaning the original and its messages. An unwritten migration requirement, surfaced by a read-only
+SELECT. **I am NOT escalating to the user yet** — whether this is a migration or a `rm` depends entirely on
+whether beta has any `conversations` rows, which I asked for and do not have. Reporting a "might be a blocker"
+before that answer is exactly the FYI traffic the user told me not to send.
+
+**What their honesty bought.** Their part 3 is the deliverable. 99.992% of messages (24,686) sit outside the
+verification surface; the one DM-keyed conversation has zero participants so D-1's join never examines it;
+`message_addressees` is empty so any check there returns zero by emptiness. **Had those been reported as
+passes I would have believed the surface was clean.** I asked for "what the queries cannot see" precisely
+because a zero over an empty table is not coverage — that question earned more than the queries did.
+
+**Backfill constraint, from their schema dump.** `messages` carries `sender_id`/`recipient_id` as bare UUIDs
+with **no kind columns**; only the `sender` text field is kind-qualified (`agent:name`). The DM key requires
+kinds, so backfilling 24,686 messages means deriving kind from a text field. **Any guess there is a guess on
+the ACL** — so the rule is: where kind cannot be determined with certainty, leave the message unlinked.
+Under-linking is recoverable. Also noted: `conversation_participants` has **no `deleted_at`**, only `left_at`,
+which is the right shape for D-1 (departure is not deletion) and needs to stay that way.
 
 ## 5bf. 22:24-22:27Z — naming settled by nc-arch; verifying their premise found DEF-28
 

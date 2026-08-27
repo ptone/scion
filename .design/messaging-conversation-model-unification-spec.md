@@ -27,7 +27,7 @@ as timestamped, not permanent (rule 24).
 | Default-agent binding is cleared when an agent is deleted | `handlers_chat_v2.go:661` `ClearTopicDefaultAgent` |
 | `Conversation` DDL | `pkg/ent/schema/conversation.go` |
 | Branch mints `surface=native` conversations | `pkg/messaging/conversation.go:77` (DM), `:162` (thread), `resolve.go:365,410`, `backfill.go:287`, `delivery_compat.go:69` |
-| `Conversation.display_name` is written by nothing in production; upsert wipes it | DEF-7; `entadapter/conversation_store.go:400` unconditional `SetDisplayName` |
+| `Conversation.display_name` is written by nothing in production | DEF-7. **CORRECTED 22:29Z: the upsert does NOT wipe it** — `SetDisplayName` is guarded at `conversation_store.go:404` with a regression test. The unconditional setter at `:400` is `SetParentRef` (DEF-28). See §3.7. |
 
 **Two things I had written in §2.6.3 that the grep changed:**
 
@@ -260,10 +260,35 @@ applied per sub-kind at the write path. I had this as a schema defect; it is a w
 ### 3.7 `display_name`
 
 Stays vestigial, per DEF-7. **Do not mirror `webchat_topic.name` into it.**
-`UpsertConversationByExternalRef` does an unconditional `SetDisplayName` on update
-(`conversation_store.go:400`), so a mirrored name would be silently wiped by the next upsert —
-a rename that reverts itself with no error. One writer, in `webchat_topic`. `#<thread>` resolution
-reads `webchat_topic.name`.
+
+> **CORRECTED 2026-08-27 22:29Z — the original justification here was factually wrong, and it
+> propagated.** This section previously claimed `UpsertConversationByExternalRef` does an
+> *unconditional* `SetDisplayName` on update at `conversation_store.go:400`. **It does not.** The
+> setter is guarded at `:404` by `if conv.DisplayName != ""`, with an anti-clobber comment and a
+> regression test (`TestUpsertConversationByExternalRef_EmptyDisplayNamePreservesExisting`). A
+> mirrored name would **not** be silently wiped.
+>
+> nc-arch cited this line back to me as load-bearing support for a design ruling without re-opening
+> the file — reasonably, because a precise `file:line` in a spec reads as already verified. **My
+> wrong citation was the vector.** Checking it is what found DEF-28: `:400` *is* an unconditional
+> setter, but of **`SetParentRef`**, one line above the comment explaining why such setters are
+> guarded.
+
+**The ruling stands; only the reason changes.** `display_name` stays empty because a populated
+"explicitly non-authoritative" column is not a stable state — it gets read by accident and then
+relied upon, so the only safe non-authority is **absence** (nc-arch, adopted). A guarded setter
+would have made mirroring *survivable*, not *correct*. Secondary: a mirror is a second holder of the
+name, which is the drift the reverse-pointer direction exists to eliminate.
+
+One writer, in `webchat_topic`. `#<thread>` resolution reads `webchat_topic.name`. Non-native
+surfaces render through the link (`SELECT name FROM webchat_topic WHERE conversation_id = ?` on the
+unique `idx_webchat_topic_conversation`), never from a copy.
+
+**Visibility interaction with the DEF-27 split:** name-for-display is a *visibility* question, so it
+must filter `deleted_at IS NULL` — a tombstoned topic renders `[deleted]`, never a stale name. The
+name accessor therefore belongs on the **hide**-deleted side, **not** the see-deleted identity
+accessor. Three call sites, each named for its question: name-for-display (hide), live-link-target
+(hide), is-this-ours (see).
 
 ---
 
