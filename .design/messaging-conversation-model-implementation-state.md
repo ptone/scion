@@ -1,0 +1,113 @@
+# Messaging Refactor — Implementation State
+
+**Owner:** `ca-msg-arch` (architect, acting as implementation coordinator)
+**Started:** 2026-08-27
+**Integration branch:** `scion/messaging-v2` (created from `origin/main` @ `fc523ecd`)
+
+> **READ THIS FIRST AFTER ANY COMPACTION OR RESTART.**
+> This file is the authoritative record of implementation progress. The conversation
+> history is not. If they disagree, this file wins — update it, do not re-derive it.
+>
+> **Recovery procedure:** read §1 (contract), §3 (current position), §5 (log). Then run
+> `scion list` to see which managers are alive, and `git log --oneline origin/main..origin/scion/messaging-v2`
+> to see what has actually landed. Reconcile §3 against those two facts before acting.
+
+---
+
+## 1. Standing contract — rules that do not change
+
+1. **I do not implement.** I am the architect. I spawn engineering managers, review what
+   they land, and keep this file current. I do not write production code.
+2. **Managers run in sequence, not in parallel.** One active manager at a time. The
+   workspace mode is `shared-plain`; concurrent git work is unsafe.
+3. **Everything lands on `scion/messaging-v2`.** Never `main`. The integration branch is
+   the beta-hub testing target.
+4. **I never check out another branch in `/workspace`.** It is shared. Branch refs are
+   created with `git branch <name> <ref>` and pushed without checkout.
+5. **Phase 13 (Removal) does not land before beta validation.** It is irreversible.
+6. **A section is not done until its acceptance criteria pass.** Manager says done →
+   I verify against the AC list in the design → then I advance.
+7. **Heartbeat:** recurring schedule `ca-msg-impl-heartbeat`, `13,43 * * * *`. On each
+   beat: check the active manager is progressing, update §3, act if stalled.
+
+## 2. Source documents
+
+| Doc | Path |
+|---|---|
+| Design (authoritative) | `.design/messaging-conversation-model.md` |
+| Findings / defect inventory | `.design/messaging-conversation-model-findings.md` |
+| Community announcement | `.design/messaging-conversation-model-announcement.md` |
+| Scratchpad copies | `/scion-volumes/scratchpad/projects/ca-msg-arch/` |
+
+Design decisions already settled (do not reopen): Option A; one message row + N addressee
+rows (Q1); global DMs with explicit ambiguity failures (Q2); eager surface conversations
+with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
+
+## 3. Current position
+
+**Active section:** S1 — Foundation
+**Active manager:** `ca-msg-em1` — NOT YET SPAWNED
+**Blocked on:** nothing
+**Last verified landing on integration branch:** none (branch is at `origin/main`)
+
+## 4. Section plan
+
+Sequential. Each manager owns one section, branches off `scion/messaging-v2`, and merges
+back into it.
+
+| # | Section | Design phases | Manager | Status |
+|---|---|---|---|---|
+| S1 | Foundation — schema, store, resolution | 1, 2, 3 | `ca-msg-em1` | pending |
+| S2 | Migration — backfill, dual-write | 4, 5 | `ca-msg-em2` | pending |
+| S3 | Envelope — message type, validation, delivery format | 6, 7, 9 | `ca-msg-em3` | pending |
+| S4 | Surfaces — read switch, CLI split, broker edge | 8, 10, 11 | `ca-msg-em4` | pending |
+| S5 | Docs — skill, docs-site, glossary | 12 | `ca-msg-em5` | pending |
+| S6 | Removal — drop legacy fields | 13 | deferred | **post-beta only** |
+
+Statuses: `pending` → `active` → `landed` → `verified`.
+
+### Section detail
+
+**S1 Foundation.** `conversations`, `conversation_participants`, `message_addressees` ent
+schemas + dual-dialect migrations; `ConversationStore` interface + ent adapter with
+upsert on `(surface, external_ref)`; `ResolveConversation` service implementing the
+`conv:` / `@` / `#` grammar and `DriftState` transitions. Purely additive — no live code
+path reads or writes these. Key ACs: AC-30–AC-34 (project isolation), AC-28 (concurrent
+first-send uniqueness).
+
+**S2 Migration.** Backfill per design §4.1 including both named hazards (wave-1
+email-based DM keys that fail the UUID regex; `DefaultAgent` slug-or-UUID union).
+Idempotent, resumable, dry-run. Then dual-write: send paths resolve-or-create and stamp
+`conversation_id` alongside existing fields. Reads unchanged. Divergence logging.
+
+**S3 Envelope.** New `Message` + `Addressee` types; the split taxonomy
+(`kind`/`intent`/`event.type`); addressee resolution per §2.4; single `Validate()` choke
+point on all three inbound paths; new agent-facing delivery JSON per Appendix B. Old
+envelope still accepted and mapped.
+
+**S4 Surfaces.** Read switch to `conversation_id` (gated on divergence being clean);
+`scion broadcast` and `scion keys` split out, `scion message` reduced to six flags with
+deprecation mapping; per-plugin `ResolveConversation` at the broker edge, one commit per
+plugin.
+
+**S5 Docs.** Skill rewrite (design Appendix B), docs-site messaging page, GLOSSARY
+entries for Conversation / Surface / Addressee / Participant.
+
+## 5. Log
+
+Append-only. Newest last. One line per event.
+
+- `2026-08-27` Integration branch `scion/messaging-v2` created from `origin/main` @ `fc523ecd`, pushed. Working tree untouched.
+- `2026-08-27` State doc created.
+
+## 6. Open items / risks
+
+- **Workspace sharing.** `shared-plain` means managers may share `/workspace`. Each
+  manager must confirm its own `SCION_WORKSPACE_MODE` on start and report it. If shared,
+  strict sequencing is mandatory and no manager may switch branches in the shared tree.
+- **Beta hub target.** The user wants this testable on a beta hub. Deployment mechanics
+  for pointing a beta hub at `scion/messaging-v2` are not yet established — resolve
+  before S4 completes.
+- **Phase 8 soak gate.** The design requires divergence logging to run against real
+  traffic before the read switch. On a beta hub this becomes beta soak; the gate must not
+  be silently skipped just because it is inconvenient on a branch.
