@@ -6055,3 +6055,39 @@ a local `git diff` against a possibly-stale local `main`.
 lacking `pull_requests:write` on upstream. The code half is done; the communication half is not, and
 an unanswered bot comment reads as an unaddressed one. That was the whole reason the replies were
 written.
+
+### 03:42 — the `pkg/hub` failure is attributed, and it vindicates the security fix
+
+I left this open at 03:39 — "not claiming either way until the control lands". The control landed.
+
+| tree | `pkg/hub` |
+|---|---|
+| unmodified main `23d7003a` | **ok**, 256.081s |
+| my repaired tree | **FAIL**, 240.926s |
+
+So it is **not** the known flaky race and **not** pre-existing. It is the repair.
+
+**Cause, from the log rather than from reasoning:**
+
+```
+dev auth cannot be enabled when the server is bound to a non-loopback address (0.0.0.0).
+```
+
+That is #1307's own guard firing. It is a `log.Fatalf`, so the test binary exits — which is why
+`FAIL` appeared with **no `--- FAIL` line**, and why my earlier greps for a failing test name found
+nothing. The 240s is just how far it got first.
+
+**Why it fired:** I re-applied #1307's *source* hunk to `pkg/hub/web.go` but not its *test* hunk.
+`pkg/hub/web_test.go` went from 12 loopback references to 0 when #1301 reverted it, and #1307
+originally shipped both halves together. Test code at HEAD constructs a `WebServer` with dev auth
+bound to `0.0.0.0`, and the restored guard correctly refuses it.
+
+**The guard is not wrong. My repair was incomplete.** Read the other way, this is the most direct
+evidence yet that the reverted fix does real work: within minutes of restoring it, it caught live
+code binding dev auth to `0.0.0.0`.
+
+> **A `log.Fatalf` guard is load-bearing on test setup.** Re-applying such a fix source-first, tests
+> later, does not fail gracefully — it kills the test binary with no failing test name to grep for.
+> #1307's source and test hunks must be restored together.
+
+Adds `pkg/hub/web_test.go` and `cmd/server_foreground_test.go` to the repair surface.
