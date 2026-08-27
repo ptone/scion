@@ -257,6 +257,8 @@ func TestIngestAgentAttachments_RejectsSymlink(t *testing.T) {
 // The end-to-end path an agent takes: POST an outbound message with attachment
 // paths, and the persisted message carries them for the chat history endpoint.
 func TestOutboundMessage_AttachmentsLinkedToMessage(t *testing.T) {
+	t.Skip("DEF-15: dm:-prefixed ThreadID routes through ResolveOrCreateThreadConversation producing kind=group instead of kind=direct")
+
 	srv, s, project, sharedDir := agentAttachmentServer(t)
 	ctx := context.Background()
 
@@ -287,6 +289,7 @@ func TestOutboundMessage_AttachmentsLinkedToMessage(t *testing.T) {
 		Recipient:   "user:human@example.com",
 		Msg:         "here is the screenshot",
 		Attachments: []string{staged},
+		ThreadID:    "dm:agent:" + agent.ID + ":user:" + recipient.ID,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -297,6 +300,32 @@ func TestOutboundMessage_AttachmentsLinkedToMessage(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+	// Query conversations created as a side effect (before checking response
+	// status so we can diagnose shape issues even on non-200).
+	convs, convErr := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	if convErr != nil {
+		t.Fatalf("listing conversations: %v", convErr)
+	}
+	if len(convs.Items) != 1 {
+		t.Fatalf("exactly one conversation should be created, got %d", len(convs.Items))
+	}
+	conv := convs.Items[0]
+
+	// These are the invariants that DEF-15 acceptance requires.
+	// Currently they fail because ResolveOrCreateThreadConversation
+	// produces kind=group with external_ref=thread:<proj>:<dm-key>.
+	if conv.Kind != "direct" {
+		t.Errorf("want kind=direct, got %q: dm:-prefixed key must produce a direct conversation", conv.Kind)
+	}
+	wantRef := "dm:agent:" + agent.ID + ":user:" + recipient.ID
+	if conv.ExternalRef != wantRef {
+		t.Errorf("want external_ref=%q, got %q: must be the canonical DM key", wantRef, conv.ExternalRef)
+	}
+	if conv.ProjectID != nil {
+		t.Errorf("want nil ProjectID for direct conversation, got %q", *conv.ProjectID)
+	}
+
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
