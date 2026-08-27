@@ -6754,3 +6754,57 @@ to remove it. A doc with a time-limited workaround and no marker rots silently.
 **The unverified docs-site build is covered.** `.github/workflows/docs.yml` runs on `pull_request` to
 main with a `docs-site/**` path filter, so CI will catch a build break — **provided the PR is not
 conflicted**, which last night proved silently strips `pull_request` workflows.
+
+### 06:50 — the IAP question resolved. My hypothesis was also wrong.
+
+`sn-docs-dev` deployed a fresh instance, ran **six** tests, and tore it down.
+
+| # | header | token | audience | result |
+|---|---|---|---|---|
+| 1 | `Authorization` | access | n/a | **200** |
+| 2 | `Authorization` | identity | OAuth client ID | **200** |
+| 3 | `Proxy-Authorization` | access | n/a | **200** |
+| 4 | `Proxy-Authorization` | identity | OAuth client ID | **200** |
+| 5 | `Authorization` | identity | resource path | 401 `Invalid JWT audience` |
+| 6 | `Proxy-Authorization` | identity | resource path | 401 `empty token` |
+
+**All four header × token combinations work. The deciding variable is the AUDIENCE.** The HA doc is
+correct; `Proxy-Authorization` is fully supported. The original conclusion was wrong.
+
+**And so was mine.** I predicted the confound was the token **type**. It was the token **audience**.
+The first run used `--audiences=<resource path>`, which is right for a Cloud Run invoker check and
+wrong for IAP, then switched to an access token and credited the header.
+
+> I was right that two variables had moved and one conclusion had been drawn. I was wrong about
+> **which** variables. **Correctly diagnosing "this is a confound" is not the same as identifying
+> the confounded variable** — and stopping at the first plausible candidate is its own version of
+> the error. The developer found it by testing the matrix rather than testing my guess.
+
+Third time this week a developer has corrected me: the `#1100` non-duplicate, the 13-vs-18 count,
+and now this. All three came from someone declining to accept an assertion of mine.
+
+#### Direction given: access token as the primary example
+
+The identity-token path requires discovering an auto-generated client ID via an **alpha** gcloud
+command, using the project number and the brand. **Three new failure surfaces to gain one conceptual
+nicety.** A tutorial should minimise failure surface. Access token primary; identity token kept as a
+documented alternative with the audience requirement stated.
+
+Required with it: **name the IAM role.** The access token works because the principal holds
+`roles/iap.httpsResourceAccessor`. A reader without it gets a 401 and no clue why. "Logged in" is
+not the requirement, and the doc must not imply it is.
+
+#### The most valuable thing in the report, which was not the answer to the question
+
+The deploy sets **`invokerIamDisabled: true`**, so the Cloud Run invoker check is **off** and **IAP
+is the only guard**.
+
+Until now, §6's auth perimeter was an **assertion**. It is now **measured**. Asked for one sentence
+in the doc saying so — a reader should know that IAP access is the whole of the access control and
+there is no second net behind it.
+
+#### A real gap, to be filed
+
+**`deploy-instance` does not output the OAuth client ID, and the deploy is what creates it.** Any
+reader needing the identity-token path must go spelunking with `gcloud alpha iap oauth-clients list`
+and a project number. The command that generates a value should surface it.
