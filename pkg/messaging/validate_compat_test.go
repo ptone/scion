@@ -297,6 +297,76 @@ func TestValidateLegacyMessage_GroupRecipient_BareNames(t *testing.T) {
 	}
 }
 
+// TestValidateLegacyMessage_GroupRecipient_ViaExplicitPinned verifies that
+// group[] members always get ViaExplicit, even when the message type would
+// yield a different Via for a single-principal recipient. TypeMention maps to
+// ViaBodyMention on the single-principal path; the group branch must still
+// produce ViaExplicit because group[] is explicit addressing regardless of
+// the legacy type field. This test dies when the group branch is changed to
+// use the computed `via` variable (mutation-verified).
+func TestValidateLegacyMessage_GroupRecipient_ViaExplicitPinned(t *testing.T) {
+	msg := validLegacyMessage()
+	msg.Type = messages.TypeMention
+	msg.Recipient = "group[agent:reviewer,agent:deploy-bot]"
+
+	_, addrs, err := MapLegacyEnvelope(msg)
+	if err != nil {
+		t.Fatalf("MapLegacyEnvelope: %v", err)
+	}
+	if len(addrs) != 2 {
+		t.Fatalf("expected 2 addressees, got %d", len(addrs))
+	}
+	for i, a := range addrs {
+		if a.Via != ViaExplicit {
+			t.Errorf("addrs[%d].Via = %q, want %q; group[] members must be ViaExplicit regardless of message type",
+				i, a.Via, ViaExplicit)
+		}
+	}
+
+	// Positive control: a single-principal mention produces ViaBodyMention.
+	singleMsg := validLegacyMessage()
+	singleMsg.Type = messages.TypeMention
+	singleMsg.Recipient = "agent:reviewer"
+	_, singleAddrs, err := MapLegacyEnvelope(singleMsg)
+	if err != nil {
+		t.Fatalf("MapLegacyEnvelope (single): %v", err)
+	}
+	if len(singleAddrs) != 1 {
+		t.Fatalf("expected 1 addressee for single recipient, got %d", len(singleAddrs))
+	}
+	if singleAddrs[0].Via != ViaBodyMention {
+		t.Errorf("single-recipient mention Via = %q, want %q; positive control failed",
+			singleAddrs[0].Via, ViaBodyMention)
+	}
+}
+
+// TestValidateLegacyMessage_SetRecipient_LegacyAlias verifies that the
+// deprecated set[] syntax works through the same validation and mapping
+// path as group[]. This pins the legacy alias so a refactor cannot silently
+// drop it.
+func TestValidateLegacyMessage_SetRecipient_LegacyAlias(t *testing.T) {
+	msg := validLegacyMessage()
+	msg.Recipient = "set[agent:reviewer,user:alice]"
+
+	if err := ValidateLegacyMessage(msg); err != nil {
+		t.Fatalf("ValidateLegacyMessage(set[...]) returned error: %v", err)
+	}
+
+	_, addrs, err := MapLegacyEnvelope(msg)
+	if err != nil {
+		t.Fatalf("MapLegacyEnvelope(set[...]): %v", err)
+	}
+	if len(addrs) != 2 {
+		t.Fatalf("expected 2 addressees from set[], got %d", len(addrs))
+	}
+	if addrs[0].PrincipalKind != "agent" || addrs[0].PrincipalID != "reviewer" {
+		t.Errorf("addrs[0]: got %s:%s, want agent:reviewer", addrs[0].PrincipalKind, addrs[0].PrincipalID)
+	}
+	if addrs[1].PrincipalKind != "user" || addrs[1].PrincipalID != "alice" {
+		t.Errorf("addrs[1]: got %s:%s, want user:alice", addrs[1].PrincipalKind, addrs[1].PrincipalID)
+	}
+}
+
 // TestValidateLegacyMessage_GroupRecipient_Malformed (AC-19-3) verifies that
 // malformed group[] recipients are rejected.
 func TestValidateLegacyMessage_GroupRecipient_Malformed(t *testing.T) {
