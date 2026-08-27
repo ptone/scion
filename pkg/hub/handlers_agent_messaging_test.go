@@ -496,6 +496,125 @@ func TestDEF11_PreResolvedConversation_LookupFailure(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// DEF-19 regression tests
+// ---------------------------------------------------------------------------
+
+// TestDEF19_GroupRecipient_FullHandlerPath (AC-19-2) verifies that a group[]
+// message survives the FULL HTTP handler path — going through
+// POST /api/v1/projects/{pid}/agents/{slug}/message with a group[] recipient.
+// It must reach handleGroupMessage and fan out, returning 200 (not 400).
+func TestDEF19_GroupRecipient_FullHandlerPath(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("def19-project")
+	agentSlugA := "agent-a"
+	agentIDA := tid("def19-agent-a")
+	agentSlugB := "agent-b"
+	agentIDB := tid("def19-agent-b")
+	userID := tid("def19-user")
+	// Use agentSlugA as the anchor agent in the URL path.
+	anchorSlug := agentSlugA
+
+	if err := s.CreateProject(ctx, &store.Project{
+		ID:         projectID,
+		Name:       "def19-project",
+		Slug:       "def19-project",
+		Visibility: store.VisibilityPrivate,
+	}); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	brokerID := tid("def19-broker")
+	if err := s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:     brokerID,
+		Name:   "def19-broker",
+		Slug:   "def19-broker",
+		Status: store.BrokerStatusOnline,
+	}); err != nil {
+		t.Fatalf("CreateRuntimeBroker: %v", err)
+	}
+	if err := s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  projectID,
+		BrokerID:   brokerID,
+		BrokerName: "def19-broker",
+		Status:     store.BrokerStatusOnline,
+	}); err != nil {
+		t.Fatalf("AddProjectProvider: %v", err)
+	}
+	if err := s.CreateAgent(ctx, &store.Agent{
+		ID:              agentIDA,
+		Name:            "agent-a",
+		Slug:            agentSlugA,
+		ProjectID:       projectID,
+		RuntimeBrokerID: brokerID,
+		Phase:           "running",
+		Visibility:      store.VisibilityPrivate,
+	}); err != nil {
+		t.Fatalf("CreateAgent A: %v", err)
+	}
+	if err := s.CreateAgent(ctx, &store.Agent{
+		ID:              agentIDB,
+		Name:            "agent-b",
+		Slug:            agentSlugB,
+		ProjectID:       projectID,
+		RuntimeBrokerID: brokerID,
+		Phase:           "running",
+		Visibility:      store.VisibilityPrivate,
+	}); err != nil {
+		t.Fatalf("CreateAgent B: %v", err)
+	}
+	if err := s.CreateUser(ctx, &store.User{
+		ID:          userID,
+		Email:       "def19@example.com",
+		DisplayName: "DEF19 User",
+	}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	// Set a dispatcher so the handler doesn't fail with 503.
+	srv.SetDispatcher(&recordingDispatcher{})
+
+	// Send a group[] message through the full HTTP path.
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/agents/"+anchorSlug+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Sender:    "user:def19",
+				SenderID:  userID,
+				Recipient: "group[agent:" + agentSlugA + ",agent:" + agentSlugB + "]",
+				Msg:       "DEF-19 group message test",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for group[] message, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the response is a GroupMessageResponse.
+	var resp GroupMessageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal GroupMessageResponse: %v", err)
+	}
+	if resp.GroupID == "" {
+		t.Error("expected non-empty group_id in response")
+	}
+	if resp.Delivered != 2 {
+		t.Errorf("expected 2 delivered, got %d", resp.Delivered)
+	}
+	if len(resp.Results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(resp.Results))
+	}
+	for i, r := range resp.Results {
+		if r.Status != "delivered" {
+			t.Errorf("result[%d]: expected status=delivered, got %q (error: %s)", i, r.Status, r.Error)
+		}
+	}
+}
+
 // TestDEF11_PreResolvedConversation_GenuineDisagreement verifies that the
 // divergence comparison is active and can detect a real mismatch when the
 // stored ExternalRef does not agree with the old-model routing.

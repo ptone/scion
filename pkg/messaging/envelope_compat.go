@@ -226,6 +226,11 @@ func buildPrincipalRef(name, id string) PrincipalRef {
 }
 
 // buildAddressees constructs Addressee records from the old message.
+//
+// When old.Recipient uses the group[] form (e.g. "group[agent:a,user:b]"),
+// one Addressee is emitted per member using messages.ParseGroupRecipient.
+// The old.RecipientID field does not apply to group recipients (it names a
+// single principal) and is ignored in that case.
 func buildAddressees(old *messages.StructuredMessage, msgID string) []Addressee {
 	var addrs []Addressee
 
@@ -235,16 +240,48 @@ func buildAddressees(old *messages.StructuredMessage, msgID string) []Addressee 
 		via = *artifact
 	}
 
-	if old.Recipient != "" {
-		ref := buildPrincipalRef(old.Recipient, old.RecipientID)
-		addrs = append(addrs, Addressee{
-			MessageID:     msgID,
-			PrincipalKind: ref.PrincipalKind(),
-			PrincipalID:   ref.PrincipalID(),
-			Via:           via,
-			DeliveryState: DeliveryPending,
-		})
+	if old.Recipient == "" {
+		return addrs
 	}
+
+	// Handle group[] recipients: parse with the canonical parser and emit
+	// one Addressee per member. If parsing fails, fall through to the
+	// single-principal path so downstream validation catches the error.
+	//
+	// Via is ViaExplicit unconditionally, not the computed `via` from
+	// MapLegacyDeliveryArtifact. group[] is an explicit addressing form —
+	// every member was named by the sender. The single-principal `via`
+	// varies only for TypeMention (→ ViaBodyMention), which the CLI cannot
+	// combine with group[] (it uses TypeGroupSet; mentions fan out as
+	// individual single-recipient messages). A raw API caller sending
+	// TypeMention + group[] would still get ViaExplicit, which is correct:
+	// they explicitly listed the recipients.
+	if messages.IsGroupRecipient(old.Recipient) {
+		members, err := messages.ParseGroupRecipient(old.Recipient)
+		if err == nil {
+			for _, m := range members {
+				addrs = append(addrs, Addressee{
+					MessageID:     msgID,
+					PrincipalKind: string(m.Kind),
+					PrincipalID:   m.Name,
+					Via:           ViaExplicit,
+					DeliveryState: DeliveryPending,
+				})
+			}
+			return addrs
+		}
+		// Parse error: fall through to single-principal path.
+	}
+
+	// Single-principal path.
+	ref := buildPrincipalRef(old.Recipient, old.RecipientID)
+	addrs = append(addrs, Addressee{
+		MessageID:     msgID,
+		PrincipalKind: ref.PrincipalKind(),
+		PrincipalID:   ref.PrincipalID(),
+		Via:           via,
+		DeliveryState: DeliveryPending,
+	})
 
 	return addrs
 }
