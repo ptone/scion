@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -229,6 +230,19 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		ThreadID:    req.ThreadID,
 		Visibility:  req.Visibility,
 		CreatedAt:   time.Now(),
+	}
+
+	// Phase 5 dual-write: resolve-or-create conversation, stamp conversation_id.
+	if convID := messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, agent.ID, recipientID, agent.ProjectID); convID != "" {
+		storeMsg.ConversationID = convID
+		oldRouting := messaging.OldRoutingFromMessage(agent.ID, recipientID, req.ThreadID)
+		messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: oldRouting,
+			NewRouting: "conv:" + convID,
+			Match:      true,
+			Reason:     "outbound agent->user DM",
+		})
 	}
 
 	// Build a structured message for external dispatch paths.
@@ -711,6 +725,18 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			DispatchState: store.MessageDispatchDispatched,
 			CreatedAt:     time.Now(),
 		}
+		// Phase 5 dual-write: resolve-or-create conversation for user/agent → agent messages.
+		if convID := messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, structuredMsg.SenderID, agent.ID, agent.ProjectID); convID != "" {
+			storeMsg.ConversationID = convID
+			oldRouting := messaging.OldRoutingFromMessage(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID)
+			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: oldRouting,
+				NewRouting: "conv:" + convID,
+				Match:      true,
+				Reason:     "inbound user/agent->agent DM",
+			})
+		}
 		// Propagate GroupID from metadata so CLI-originated group[] messages
 		// preserve correlation in the store.
 		if structuredMsg.Metadata != nil {
@@ -935,6 +961,17 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				DispatchState: store.MessageDispatchDispatched,
 				CreatedAt:     time.Now(),
 			}
+			// Phase 5 dual-write: resolve-or-create conversation for group set message.
+			if convID := messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, agentMsg.SenderID, agent.ID, projectID); convID != "" {
+				storeMsg.ConversationID = convID
+				messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+					MessageID:  storeMsg.ID,
+					OldRouting: messaging.OldRoutingFromMessage(agentMsg.SenderID, agent.ID, ""),
+					NewRouting: "conv:" + convID,
+					Match:      true,
+					Reason:     "group[] fan-out to agent",
+				})
+			}
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			}
@@ -1028,6 +1065,17 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				AgentID:     anchorAgent.ID,
 				GroupID:     groupID,
 				CreatedAt:   time.Now(),
+			}
+			// Phase 5 dual-write: resolve-or-create conversation for group set message to user.
+			if convID := messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, userMsg.SenderID, userID, projectID); convID != "" {
+				storeMsg.ConversationID = convID
+				messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+					MessageID:  storeMsg.ID,
+					OldRouting: messaging.OldRoutingFromMessage(userMsg.SenderID, userID, ""),
+					NewRouting: "conv:" + convID,
+					Match:      true,
+					Reason:     "group[] fan-out to user",
+				})
 			}
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)

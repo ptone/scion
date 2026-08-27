@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -454,6 +455,20 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		Visibility:  msg.Visibility,
 		CreatedAt:   time.Now(),
 	}
+	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered user messages.
+	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
+	if !msg.Broadcasted && msg.SenderID != "" && msg.RecipientID != "" {
+		if convID := messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, msg.SenderID, msg.RecipientID, projectID); convID != "" {
+			storeMsg.ConversationID = convID
+			messaging.LogDivergence(p.log, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID),
+				NewRouting: "conv:" + convID,
+				Match:      true,
+				Reason:     "broker deliverToUser",
+			})
+		}
+	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
 	}
@@ -592,6 +607,20 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		AgentID:       agent.ID,
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     time.Now(),
+	}
+	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered agent messages.
+	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
+	if !msg.Broadcasted && msg.SenderID != "" {
+		if convID := messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, msg.SenderID, agent.ID, projectID); convID != "" {
+			storeMsg.ConversationID = convID
+			messaging.LogDivergence(p.log, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: messaging.OldRoutingFromMessage(msg.SenderID, agent.ID, ""),
+				NewRouting: "conv:" + convID,
+				Match:      true,
+				Reason:     "broker deliverToAgent",
+			})
+		}
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)
