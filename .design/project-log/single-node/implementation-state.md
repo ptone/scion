@@ -8342,3 +8342,69 @@ text. The issues were written yesterday; the tree is the thing that gets patched
 
 Two agents running: `sn-obs-dev` (issues + label), `sn-uppr-dev` (two branches). Blocked on ptone for
 D7. Seven review items remain after it.
+
+## 12:45 — Item 1 delivered. The fix for the observability gap created the worst collision on the project
+
+`sn-obs-dev` reported at 12:37 and was reclaimed at 12:39 after confirming it had produced no branch
+— its output is issues and labels, so there was nothing to lose. **I verified every claim against the
+API rather than accepting the report**, and one thing it could not have known turned up.
+
+### Delivered
+
+- `ptone/scion#1310` — Cloud Logging is not organised per agent. Near-term stage.
+- `ptone/scion#1311` — No CPU or memory visibility for cloudrun-sandbox agents. Longer-term.
+- Label **`tier:cloud-run-single-node`**, on exactly 17 issues (verified by query, not by counting the
+  report's list — *a total cannot be checked; a list can*, and here I had both).
+
+The label name is the agent's and it is better than my fallback. I had written "if there is no
+convention, use `tier/cloud-run-single-node`". It checked, found the repo already uses **colons**
+(`area:distribution`, `type:bug`, `area:auth`), and followed the house style. My slash would have
+been the only one of its kind in the repo.
+
+### The judgement call held
+
+Four left unlabelled as product-wide: `ptone/scion#1304`, `#1308`, `#1281`, `#1274`. Two left
+unlabelled as genuinely unclear: `#1297` and `#1306`. I agree with all six.
+
+`#1306` is the one worth recording. The agent said it could not tell whether the hub's `antigravity`
+default is wrong everywhere (product-wide) or whether this tier is missing a harness it should have
+(tier-specific), and that it could not resolve that without testing another tier. **That is exactly
+right, and it is the rule working rather than an agent being timid.** I could have pushed a guess
+from tasks #37/#48; the honest position is that "hosted mode" is not unique to this tier, so the
+evidence points product-wide without establishing it.
+
+### The part nobody could have planned for
+
+**Filing the two issues that close the observability gap created two new collisions, and one of them
+is the worst on the project.**
+
+**Fork `#1310` is the new logging issue. Upstream `#1310` is the single-node tier's own PR** — the one
+that merged this very design doc as `f99a8189`. It is the most-cited number on this project; task #56
+is literally titled "Tier proposed upstream as #1310". A bare `#1310` in any note we have written now
+resolves to the tier PR upstream and to a logging issue in the fork.
+
+Fork `#1311` collides with a closed, unmerged upstream revert PR.
+
+Register `ptone/scion#1297` updated by me from 12 rows to 14, with `#1310` flagged explicitly. Third
+time filing has grown it: **9 → 11 → 12 → 14.**
+
+And the timing mattered: `sn-uppr-dev` asked me for these two numbers at 12:38 *because the brief told
+it to ask rather than guess*. It was about to write `#1310` into a file that lives upstream. Had the
+brief let it guess, or had I answered with just the numbers, the doc would have shipped a reference
+to the tier's own merge commit inside a sentence about missing logging — **and it would have read
+perfectly.** The instruction to ask is what caught it, one hop before publication.
+
+### One check that came back empty, which is the right outcome
+
+Upstream `#1311` is *"Revert: Permissions Foundation Phase 1 (#1301)"* — and task #59 recorded
+upstream `#1301` as having reverted the P0 security fix and the Cloud Run runtime. So a revert of the
+revert was worth thirty seconds. It is **closed and unmerged**, and `pkg/runtime/cloudrun/*` is
+present on upstream main at `3aeb7729`. No regression, no action.
+
+One call at the artifact, not four calls reasoning from a signal. That is the `iap-demo` lesson
+applied rather than restated.
+
+### State
+
+`sn-uppr-dev` running and unblocked. Task #66 closed, #62 in progress. Blocked on ptone for D7, which
+gates commit C of branch 1. Seven review items remain after it.
