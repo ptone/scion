@@ -11515,3 +11515,72 @@ Both notes in this file are now superseded by this paragraph:
 - `--thread-id` is correct and required for threaded delivery; pair it with `--channel discord`.
 - PR handoffs: URL alone, dedicated thread `1532864101909528737`, validated first. Everything else
   goes to the working thread.
+
+---
+
+## §35.40 — `#85` implemented, handed to review with two findings I added myself (21:44)
+
+`sn-adcpreflight-dev` reported. Branch `fix/adc-preflight` on the fork, based on `c13d910b`,
+3 files, +322/-6. New `di_preflight_rest_credential`, called **between step 2 and step 3a** — before
+any mutation. Step 3b's own `gcloud auth print-access-token` call is gone; it reuses the preflight
+token. shellcheck clean, 32/32 Go tests pass (28 existing + 4 new). It reported nothing wrong in my
+brief and confirmed the three facts I had asserted about `c13d910b`.
+
+**I did not re-run its checks.** That is the process: architect briefs, developer implements, code
+reviewer reviews and walks, architect accepts the verdict. `sn-adcpreflight-rev` is dispatched with
+`briefs/sn-adcpreflight-rev.md`, which I had staged before the report arrived so the handoff had no
+gap.
+
+But I did read the report, and **two things in it are worth a reviewer's attention that no one asked
+for.** Both are consequences of *how* the change was made testable, not of what it does.
+
+### Finding P5 — making it testable added a seam that redirects a live credential
+
+To test the preflight, the developer added two env-var overrides: `_DI_API_BASE` and
+`_DI_TOKENINFO_URL`. The tests point them at a local stub.
+
+**`_DI_TOKENINFO_URL` is the endpoint the access token is sent to.** So an environment variable can
+now redirect a live credential to an arbitrary host.
+
+I am deliberately **not** calling this a vulnerability, and I told the reviewer so. The honest
+counter-argument is strong: an operator runs this in their own shell with their own credentials, and
+anyone who can set your environment has easier routes. What makes me want a second opinion anyway is
+that **this script is documented as `curl`-able**, and an inherited or prepended variable on a
+copy-pasted command line is a more plausible accident than an attack. I asked for a judgement in one
+of three shapes — fine as-is (with a sentence I can put in the design doc), fine but comment the seam,
+or narrow it — rather than a reflex.
+
+The precedent matters: **test-mode blindness was itself a defect on this exact file** (`#84`). A seam
+that exists only for tests and that changes where a credential goes deserves one careful look before
+it ships. The general form: *a testability seam is a production code path until someone proves it is
+not.*
+
+### Finding P6 — the four new tests cannot detect the defect being fixed
+
+This is the one I would most expect to be missed, and I nearly missed it myself.
+
+All four new tests exercise `di_preflight_rest_credential` **as a function, in isolation**. They are
+good tests of what the function does: ADC missing names the remedy, non-2xx GET aborts, mismatch
+warns, happy path succeeds.
+
+**None of them tests P1.** P1 is a property of `di_main` — that the preflight is *called before step
+3a*. A unit test of the function passes identically whether the call site sits before step 3a, after
+it, or is deleted. **The defect we are fixing is an ordering defect, so a suite that cannot detect a
+reordering has not tested the fix.** The four tests would all stay green while the original bug walked
+straight back in.
+
+The remedy is cheap — assert on the sequence of the script's own step output, or on the order of calls
+to the gcloud mock. I asked the reviewer to confirm whether any test pins the order and to report it;
+not to implement it.
+
+**The general lesson, which is bigger than this change:** unit tests naturally attach to the *unit*,
+and ordering defects live *between* units. When the bug is "the right code ran at the wrong time,"
+testing the code proves nothing about the time. Ask what a test would still pass through.
+
+### Rebase state, checked before it becomes a handoff problem
+
+`ahead=1 behind=2 status=diverged` against upstream `main`. The two commits behind are tonight's doc
+merges (`GoogleCloudPlatform/scion#1326` and the `hub_id` change), and the branch's three files —
+`cmd/deploy_script_test.go`, `docs-site/.../hub-setup-cloudrun.md`, `scripts/single-node/deploy.sh` —
+**do not overlap them**, so no conflict. A rebase is still wanted before handoff: ptone has reacted
+to a stale-looking compare before, and `diverged` reads as stale whether or not it is.
