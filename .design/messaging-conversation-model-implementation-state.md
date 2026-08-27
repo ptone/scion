@@ -75,8 +75,10 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 ## 3. Current position
 
-**Active section:** S4 — Surfaces (opening)
-**Active manager:** `ca-msg-em4` (spawning)
+**Active section:** S4 — Surfaces
+**Active manager:** `ca-msg-em4` (spawned and briefed 06:42Z; em3 retired)
+**Blocked on:** em4's DEF-4 plan. DEF-4 (hub suite stability) is gated ahead of phases 8/10/11;
+DEF-1 and DEF-3 and D3 are also due from this section.
 **Last verified landing on integration branch:** `f206a0d9` — **S3 accepted 2026-08-27 06:40Z
 on round 2.** S2 accepted 03:35Z at `cd4ee7ed` (round 3); S1 verified 01:40Z at `16294728`.
 
