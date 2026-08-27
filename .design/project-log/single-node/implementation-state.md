@@ -9781,3 +9781,47 @@ a precision we never measured.
 **Note the shape:** this is the third time today a wrong conclusion was one command away from being
 checked — `cla/google`, my own "three pinning tests", and now this. The difference is that this one
 was caught before it cost anything.
+
+### 35.9 Heartbeat answers, 17:00 — and one real design divergence (#75)
+
+**Q1 — agents progressing or silently stalled?** Checked, not assumed. Both `running` and both
+executing within the last minute: `sn-backout-dev` (9s), `sn-backout-review` (41s). The reviewer's
+earlier "stalled" flag was the inactivity detector firing on a correct wait; it has since done its
+pre-work and is active again.
+
+**Q2 — what blocks the critical path?** Nothing outside the change itself. The developer is on its
+last commit (docs). The reviewer is ready and holding for the branch push. Nothing is waiting on
+ptone, and nothing is waiting on me.
+
+**Q3 — is the design doc still in sync?** Mostly yes, and I checked rather than assumed. The doc
+never names `scion deploy-instance` or any image coordinate — it speaks of "one deploy command"
+(G4) and "the deploy command" abstractly, so **today's change owes it no edit**. G4 is still
+satisfied by `./scripts/single-node/deploy.sh`, and §6's requirement that "the deploy command must
+gate on it" is now carried by the script's perimeter gate.
+
+**But one divergence is real, and it is pre-existing rather than caused by today's work.**
+
+§4.3, on the missing `K_SERVICE`, says in bold:
+
+> `hub_id` cannot derive from `K_SERVICE` and falls back to hostname. **Set `server.hub.hub_id`
+> explicitly in the deploy**; hostname stability across redeploys is unverified.
+
+`diGcloudDeploy` sets exactly six env vars — `SCION_SERVER_MODE`, `SCION_SERVER_AUTH_MODE`,
+`SCION_SERVER_AUTH_PROXY_PROVIDER`, `SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE`,
+`SCION_SERVER_HUB_ADMINEMAILS`, `SCION_IMAGE_REGISTRY`. **There is no `hub_id`.**
+
+So the design doc prescribes, in bold, a deploy-time setting that **no deploy has ever made**.
+`hub_id` has been falling back to hostname on every Instance we have stood up, including every
+live walk we recorded as a success. The doc's own "unverified" is still unverified — nobody has
+measured whether the hostname is stable.
+
+Filed as **#75**, explicitly **not** folded into #73: that change is a translation of existing
+behaviour and nearly done, and choosing the right `hub_id` value is a decision this task has not
+made. Order of work when it is picked up: **measure hostname stability first**, then decide whether
+the fix belongs in the deploy or whether the design-doc instruction should be deleted. Do not
+implement a fix for an unmeasured problem.
+
+The question that decides severity: does `hub_id` need to be stable only across **redeploys** —
+near-zero impact on a tier that loses all state on redeploy anyway (§5) — or across **container
+restarts within one deployment**, which Cloud Run does freely, and which would make this an
+intermittent, confusing fault rather than an ephemeral-tier footnote.
