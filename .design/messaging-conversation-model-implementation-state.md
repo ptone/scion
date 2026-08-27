@@ -1075,6 +1075,33 @@
       backfilled row *and* mutates it to prove the duplicate mint. A policy test can be reversed by
       someone who disagrees with the policy; a mechanism test makes them confront the bug first.
 
+
+57. **A parked agent and a stalled agent are indistinguishable from outside, and the correct remedy
+    is opposite.** Issued 2026-08-27 23:08Z, after the stall detector nudged `ca-msg-em9` with
+    "continue." em9 was not stalled — I had parked them: DEF-27 closed at `25fad0a2`, explicitly told
+    not to grow `scion/ca-msg-em9-unify` without checking with me, waiting on a carrier decision that
+    is mine and gated on #1331.
+
+    - **Both states present as idle. "Continue" unblocks a stalled agent and, to a parked one, reads
+      as an instruction to go find something to do** — and what it finds is unrequested work, usually
+      on the branch someone is keeping stable. The nudge attacks the exact property parking was
+      protecting.
+    - **Re-park explicitly and name the temptation.** Not "stay parked" but *do not start new work,
+      do not grow the branch past `<sha>`, do not go looking for something useful.* An agent that has
+      just been told to continue needs the negative spelled out, because the generic instruction it
+      just received is more specific-sounding than "hold."
+    - **Ask what they already started, and say the discard is cheap.** Ten minutes of work thrown
+      away costs nothing; an unplanned commit on a frozen branch costs a re-verify of everything
+      downstream of it. Give them explicit permission to bin it so they don't rationalise keeping it.
+    - **Verify rather than trust the re-park.** I checked `origin/scion/ca-msg-em9-unify` was still
+      at `25fad0a2` before believing the nudge was harmless. It was. **Confirming a negative took one
+      command; assuming it would have been free until it wasn't.**
+    - **Routing fix, for the supervisor side:** when idleness is ambiguous, nudge the *supervisor*,
+      not the agent. The supervisor answers in one line whether the idleness is intended. **If an
+      agent's last inbound message told them to hold, idle is compliance, not a stall** — and a
+      monitor that cannot see that distinction should escalate rather than act.
+
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
