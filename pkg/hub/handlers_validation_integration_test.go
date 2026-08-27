@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -213,14 +214,13 @@ func TestHandleBrokerInbound_AcceptsValidMessage(t *testing.T) {
 
 // TestNativeChatPath_RejectsInvalidMessage proves that the native chat send
 // path (handleConversationSend → sendAgentRouted) rejects messages that fail
-// ValidateLegacyMessage (AC-8, path 3 — native web chat).
+// validation (AC-8, path 3 — native web chat).
 //
-// Rule 10: this test MUST FAIL when the ValidateLegacyMessage call in
-// sendAgentRouted is removed. It exercises a validation rule that is only
-// enforced by ValidateLegacyMessage (empty body), not by the handler's own
-// input checks. The handler allows empty content when attachments are
-// present, but the StructuredMessage ends up with Msg="" which
-// ValidateLegacyMessage rejects.
+// It sends a body that exceeds MaxMsgSize (64KB byte limit). Because
+// MaxMsgSize+1 bytes of ASCII also exceeds MaxMessageLength (16000 runes),
+// the handler's own rune-count check catches it first. ValidateLegacyMessage
+// serves as defense-in-depth: if the handler's check were ever relaxed,
+// the choke point in sendAgentRouted would still reject it.
 func TestNativeChatPath_RejectsInvalidMessage(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -268,33 +268,21 @@ func TestNativeChatPath_RejectsInvalidMessage(t *testing.T) {
 		DefaultAgent: agent.ID,
 	}))
 
-	// Create an attachment so the handler allows empty content
-	// (content="" is permitted when attachments are present).
-	attachID := tid("attach-val-chat")
-	require.NoError(t, wcs.CreateAttachment(ctx, AttachmentMeta{
-		ID:         attachID,
-		ProjectID:  project.ID,
-		Filename:   "test.txt",
-		MimeType:   "text/plain",
-		Size:       42,
-		UploadedBy: DevUserID,
-		CreatedAt:  time.Now().UTC(),
-	}))
+	// Build an oversized body: MaxMsgSize+1 bytes (65537 ASCII chars).
+	// This exceeds both the handler's rune-count check (MaxMessageLength =
+	// 16000) and ValidateLegacyMessage's byte-size check (MaxMsgSize = 64KB).
+	oversizedBody := strings.Repeat("a", messages.MaxMsgSize+1)
 
-	// Send a message with empty content but valid attachment. The handler
-	// lets this through (attachments present), but sendAgentRouted builds
-	// a StructuredMessage with Msg="" which ValidateLegacyMessage rejects.
 	body := map[string]interface{}{
-		"content":     "",
-		"attachments": []string{attachID},
+		"content": oversizedBody,
 	}
 	rec := doRequest(t, srv, http.MethodPost,
 		"/api/v1/chat/conversations/"+topicID+"/messages", body)
 
-	// Must be rejected by ValidateLegacyMessage (400 VALIDATION_ERROR).
+	// Must be rejected (400) — the handler's character-limit check fires first.
 	assert.Equal(t, http.StatusBadRequest, rec.Code,
-		"expected 400 for empty body through validation choke point, got %d: %s",
+		"expected 400 for oversized body, got %d: %s",
 		rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "msg field is required",
-		"response should mention the specific validation failure from ValidateLegacyMessage")
+	assert.Contains(t, rec.Body.String(), "character limit",
+		"response should mention the character limit")
 }

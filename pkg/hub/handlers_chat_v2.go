@@ -1053,9 +1053,16 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		}
 	}
 
+	// Attachment-only messages have empty content (allowed by the handler at
+	// line 795). Set a synthetic body so ValidateLegacyMessage's Msg=="" check
+	// does not reject them.
+	if msg.Msg == "" && len(msg.Attachments) > 0 {
+		msg.Msg = "[attachment]"
+	}
+
 	// Validate through the messaging choke point (AC-8).
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
-		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
+		ValidationError(w, err.Error(), nil)
 		return ""
 	}
 
