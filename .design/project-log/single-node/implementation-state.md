@@ -10286,3 +10286,62 @@ first machine outside our own. Every one sat a single command away from being ch
 
 **Still frozen: section 2 of the tutorial**, pending ptone's one-line answer on `sn-ready`. I told
 him I would not touch it until he says, and I have not.
+
+### 35.17 The preflight lands — and the interesting risk is the one we introduced, not the one we fixed
+
+`sn-backout-dev` pushed **`450a5822`**, 11 commits. Verified: top commit touches exactly two files,
+`scripts/single-node/deploy.sh` (+48) and `cmd/deploy_script_test.go` (+22), no docs. That check is
+dispatch hygiene, not review — the branch went straight to `sn-backout-review` as a **delta review**,
+with its earlier READY at `02220842` explicitly left standing and those ten commits out of scope.
+
+`di_check_gcloud_instances` probes `gcloud beta run instances --help` before any side effects. No
+version parsing. On failure it names the missing command, states the measurement, gives the update
+path, and warns against the alpha surface. The developer exercised the failure path on a real
+575.0.0 install and added `TestScriptCheckGcloudInstances_FailureMessage`.
+
+**The risk analysis that shaped the review brief.** The obvious framing is "we fixed a bug, confirm
+the fix". That framing is wrong and would have produced a shallow review.
+
+What we actually did is **install a new gate in front of the only deploy path this tier has** — the
+CLI command is deleted, so there is no second route. Compare the two failure modes honestly:
+
+| | Cost to the reader |
+|---|---|
+| The defect we fixed | A confusing error partway through, recoverable once understood |
+| A **false rejection** by the new gate | The deploy is impossible, with no way around it |
+
+**The gate's failure mode is worse than the defect's.** So the review question is not "does it fail
+correctly on 575" — the developer already demonstrated that and it reproduces in seconds. It is
+**"would this let a working installation through?"**
+
+And that is precisely the half nobody can observe, because **our containers ship 575.0.0, the broken
+version.** The developer could only exercise the failure path. So can the reviewer. The success path
+is unobserved by every person who has touched this change.
+
+Asked the reviewer to **force the pass branch with a stub `gcloud` on `PATH`**, and named the
+specific ways a probe can wrongly reject: testing a narrower or broader capability than step 3a
+actually needs; `--help` failing for reasons unrelated to version (unset project, no credentials, a
+component-install prompt); conflating "absent" with "present but errored"; and — the one with
+history here — **emitting anything on the success path**, since captured output in this file gets
+spliced into the Instance URL and the IAP audience (#33). Told it plainly that if the pass branch
+cannot be exercised honestly, I want that said rather than passed on inspection: *better to ship
+knowing which half is untested.*
+
+**A decision the developer asked for, and a better reason than the one it offered.** It proposed no
+extra tutorial line, arguing the preflight gives a better message than prose can. True, but weak.
+The stronger argument: **the preflight sits on the only deploy path that exists.** A third mention
+in prose could only ever reach a reader who read the first two and did not act. Agreed, and told the
+reviewer that the absence is *not* a finding, so it cannot come back as one.
+
+**A process failure of mine, fifth occurrence.** Sent the review brief at **2193 characters** —
+over the 2000 cap. Worse than the previous four: I put `wc -c` and `scion message` in the *same
+command*, so I measured and sent simultaneously and learned the number too late to act on it.
+Measuring is not a check unless it can change what you do. Resent the load-bearing half at 1468.
+
+**ptone told to keep holding.** Also told the compare URL he already has **tracks the branch head**,
+so no new link is needed — I had promised him a new URL, which was wrong; the promise was based on
+not thinking about how the compare link works. Corrected rather than honoured.
+
+**Not cleared yet, and that is the point.** The change is small, the developer is competent, the
+reviewer already passed the surrounding work, and every instinct says wave it through. The reason
+not to is that the untested half is the half that breaks strangers.
