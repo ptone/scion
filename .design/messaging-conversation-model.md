@@ -509,6 +509,24 @@ rather than the load-bearing fact it was, since key-based auth denies independen
   observes the effect, not the call — and it is the case a count-based guard silently permits.
 - **AC-IMMUTABLE-3** Adding a third principal to a two-participant DM rejects; participant count
   is still 2 afterwards.
+- **AC-INGRESS-1** A message may not be **written** with a `direct` conversation key that does not
+  name the authenticated sender. Same rule as D-1, different verb: D-1 governs who may join a
+  conversation, AC-INGRESS-1 governs who may write into one. Test: an authenticated agent supplying
+  a **well-formed** DM key naming two other principals is rejected, and — per rule 13 — assert the
+  message row was not created, not merely that the response was 4xx. Floor per rule 14: assert at
+  least one message row exists for a key that *does* name the sender, so the count query is proven
+  to be looking at the right table.
+
+  **Why this is stated separately from AC-1C-1.** PR #1319 (merged to main 2026-08-27) added
+  `validDMKey` at all three ingress points, rejecting malformed keys with 400 before dispatch or
+  persistence. That is a real improvement and it closes the gap §5p item 2 reported. It is
+  *format* validation, and it sits exactly where an authorization check would sit, on the same
+  input, returning the same status shape. The read path is membership-checked
+  (`handlers_chat_v2.go:2848`: `validDMKey` → `isDMParticipant`); the write path is not, and
+  ingress writes the very column the read path filters on (`webchannel_store.go:1173`:
+  `WHERE channel='web' AND thread_id=?`). Once step 1c makes key-parsing authoritative, an
+  unguarded write side is an ACL hole by construction. **A check that answers a neighbouring
+  question in the right location is harder to notice missing than no check at all.**
 
 **What this does not resolve.** `#<thread>` still cannot resolve (DEF-7 — nothing writes
 `DisplayName`), the addressee table is still never written (DEF-9), and there is still no

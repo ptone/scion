@@ -832,6 +832,69 @@ there is a reason they kept both that I am not seeing.
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
 
+## 5u. PR #1319 landed on main 15:08Z — the fix I asked for, one layer short
+
+**§5p item 2 closed the loop.** I routed "the agent outbound path does not validate `ThreadID`" to
+nc-arch. Their PR #1319 is that fix: `validDMKey` at all three ingress points
+(`handlers_agent_messaging.go:120`, `:561`, `handlers_broker_inbound.go:97`), 400 before dispatch,
+and the malformed `dm:<userID>+<agentID>` test vector I flagged is corrected. Routing to the owning
+team worked.
+
+**But format validation is not authorization, and it is shaped like it.** Reads are
+membership-checked; writes are now format-checked. Verified chain, every link read on `origin/main`:
+
+| Step | Location | What it does |
+|---|---|---|
+| ingress | `handlers_agent_messaging.go:120` | `validDMKey` — well-formedness only; caller need not be named by the key |
+| persist | `:236` | `storeMsg.ThreadID = req.ThreadID`, `Channel = req.Channel` — both request-body controlled |
+| read gate | `handlers_chat_v2.go:2848` | `validDMKey` → `isDMParticipant` → `filter.ConversationKey`. Correct. That branch sets **no project filter** |
+| query | `webchannel_store.go:1173` | `SELECT ... FROM messages WHERE channel='web' AND thread_id=?` |
+
+Ingress writes the column the read path filters on. Agent A posts `thread_id:
+dm:agent:<B>:user:<V>`, `channel: web`; V sees it inside the B↔V DM, across projects.
+
+**Bounded, and I said so when escalating:** no read access is gained, and `Sender` is
+`"agent:"+agent.Slug` from the authenticated agent, so attribution stays honest. Injection, not
+impersonation or exfiltration. #1319 strictly narrows it — arbitrary strings no longer pass.
+
+**The generalisable point.** A validation that runs at the same place an authorization check would
+run, on the same input, returning the same 400/403 shape, is read by the next reviewer as the
+authorization check. #1319's own description says "malformed DM keys are rejected before any
+dispatch or persistence" — true, and it invites the inference that *well-formed* keys have been
+cleared. Nothing downstream re-checks. **Adding a partial check to an unguarded path can leave it
+better defended and less likely to be defended further.**
+
+This is the boundary rule from S6 (§5s) pointing the other way. There I said: name where a
+security-critical path *begins*, not just where it ends. Here the path was correctly identified at
+its beginning — ingress — and the check placed there answers a different question than the one the
+path needs answered.
+
+**Not my section.** Escalated to the user, full trace to nc-arch, explicitly including their right
+to judge it not worth fixing. I also flagged my own unverified edge: I traced visibility through
+`SearchChatMessages` and did *not* trace the primary DM message-list path. Rule 15 applies upward
+and it applies to findings I am pleased with.
+
+**Design consequence (mine to carry):** §2.4.2.2 mandates the key-derived participant guard on
+`AddParticipant`. It does not state the write-side rule for message ingress. It must: *a message may
+not be written with a `direct` conversation key that does not name the authenticated sender.* Same
+rule as D-1, different verb. Adding as AC-INGRESS-1.
+
+## 5v. Main diverged under the integration branch — 15:10Z
+
+`git merge origin/main` into `scion/messaging-v2` conflicts in 13 files. Eight are generated
+`pkg/ent/*` — **regenerate, never hand-merge**; a hand-resolved generated file is a silent
+divergence from its schema. Real conflicts: `handlers_agent_messaging.go` (S6 and #1319 both edited
+it), `attachments_agent_test.go` (both changed the DM key vector), `server.go`, `store.go`,
+`entadapter/composite.go`.
+
+Sequencing decision: push S6's merge first (clean onto `ebf8cc27`, build green), then have **S6**
+do the main-sync — they own the colliding hunks and wrote them within the hour — then signal S7 to
+rebase **once** onto the synced head. S7 has been parked at `4a7a3844` for 35 minutes; making them
+rebase twice would be my scheduling error charged to them.
+
+Per the §5s refinement, the conflict list above is a measurement with a shelf life. Whoever performs
+the sync re-runs it; they do not work from this table.
+
 ## 5t. Heartbeat 14:43Z — the mutation that came back green
 
 **Roster healthy.** S6 blocked with `dev-def8-hubtest` active; S7 blocked with work complete,
