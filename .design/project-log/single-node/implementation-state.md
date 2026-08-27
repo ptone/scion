@@ -6524,3 +6524,50 @@ wrong side of it this time.
 Nothing outstanding on the register. Holding for ptone on: task #50 (tutorial and deploy scripts),
 the open defect register (#15, #32, #35, #37, #46, #48, #49), and the omni build in flight to
 `ptone-misc/scion-alt`.
+
+### 04:28 — omni image published; M5's double-tag verified on a real build
+
+The coordinator's build succeeded and pushed to `us-docker.pkg.dev/ptone-misc/scion-alt`. **I checked
+the registry myself rather than taking the report** — the correct habit, and one I failed to apply to
+the issue register twenty minutes ago:
+
+```
+TAG           DIGEST
+f99a818       sha256:e3eab113675848be634513b1e35bb40a03c0ba109b4ce771eac4b8905beafaaa
+latest        sha256:e3eab113675848be634513b1e35bb40a03c0ba109b4ce771eac4b8905beafaaa
+dev-a9131f1f  sha256:5e7fbfe4...   (older, unrelated)
+```
+
+**Both tags resolve to the same digest.** That is `M5` — the immutable-tag defect I raised against
+`cloudbuild-omni.yaml`, where the file shipped with only `:$_TAG` and zero occurrences of
+`_SHORT_SHA`. First real exercise of the fix, and it produced what it was designed to produce.
+
+#### A refinement to my own beta-tester guidance
+
+I said: hand testers the `_SHORT_SHA` coordinate, not `:latest`. That is directionally right and
+**still not sufficient**. A tag is mutable. Anyone can rebuild `f99a818` and move the `f99a818` tag
+to a different digest, and a tester's bug report is untied to an artifact again — the exact failure
+M5 existed to prevent, just one step further out.
+
+The immutable coordinate is the **digest**:
+
+```
+us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni@sha256:e3eab113...
+```
+
+Recommended to the coordinator: give testers **both**. The SHA tag is the human coordinate; the
+digest is the evidence. Ask for the digest in bug reports.
+
+> **A SHA-derived tag is not an immutable reference. It is a mutable pointer that usually is not
+> moved.** Only the digest is the artifact.
+
+#### An open number I should now be able to close
+
+The build finished well inside `timeout`. In §9 of the cloudbuild brief I recommended raising it from
+`7200s` to **`14400s`** and said plainly that I had not timed a real run and neither had anyone else.
+That was a guess dressed as a recommendation, and it is now measurable for the first time. Asked the
+coordinator for the duration.
+
+If the real figure is far below `14400s`, the timeout should come down. **A timeout set four hours
+past reality never fires, and a timeout that never fires is not a safety net** — it is a
+four-hour delay between a hang and anyone noticing.
