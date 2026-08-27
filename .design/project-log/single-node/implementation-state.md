@@ -8017,3 +8017,58 @@ warning. The errors are not the same size.
 - ptone sent one corrected set in STE, as promised.
 - `sn-stress-def` deleted after grepping its log — nothing unrelayed, heartbeats only.
   Branch `scion/sn-stress-max` preserved (`5f207c9`, 3 commits).
+
+## 08:15 — Two more defects filed, two more collisions created by filing them, and a measurement of my own hypocrisy
+
+`sn-findings-dev` filed both new defects. Verified against both repos:
+
+- **`ptone/scion#1308`** — hub DELETE removes the agent from the database but does not kill the
+  sandbox; the leak consumes Instance budget invisibly.
+- **`ptone/scion#1309`** — a sandbox can die leaving no log entry; the death is detectable on demand
+  but never reported.
+
+It distinguished `#1309` from `ptone/scion#1292` (stderr lost during provisioning) — a check I had
+not thought to ask for. Different failures: one is capture of a recorded event, the other is the
+absence of any event to capture.
+
+### The register grew by the act of writing it
+
+Filing two issues created **two new collisions**. `#1297` went from 9 rows to 11. `sn-findings-dev`
+also caught a twelfth, which it correctly declined to add unasked and which I have now asked for:
+
+| bare ref | fork | upstream |
+|---|---|---|
+| `#1307` | docs: nightly doc update Aug 27 | PR: **refuse dev auth on non-loopback interfaces (P0-S1)** |
+| `#1308` | hub DELETE leaks the sandbox | PR: pre-fetch models.dev catalog in opencode provisioner |
+| `#1309` | sandbox death leaves no log entry | PR: Cloud SQL Auth Proxy sidecar (phase 2) |
+
+**`#1307` is the most dangerous row yet.** This project has spent a day calling it "the P0 security
+fix `#1307`" (task #59 still says exactly that, bare). In the fork that number is a nightly docs
+update. A reader following it lands somewhere harmless and concludes nothing was reverted.
+
+### I measured my own files
+
+410 bare cross-repo references across 37 distinct numbers, against 79 qualified ones. Written by the
+person who has spent the morning drilling the qualification rule into two other agents.
+
+**I am not mass-rewriting them.** Most never leave the scratchpad, and a sweep of an internal log is
+manufactured work. The number matters for a different reason: it settles what the register is *for*.
+
+**A catalogue of every collision is unbounded** — both repos are active, both share one number
+space, so every issue we file is a future collision. The table cannot be the fix. It can do exactly
+two things: repair references in text we have already published, and carry the rule. That is §19,
+now with a number behind it, and it is queued for ptone.
+
+### Docs closed out
+
+`sn-docs-dev` published the sizing section (`6217834`) — verified by reading the file, correct on
+every constraint. Then fixed the two mis-targeted links (`fa8f2a8`), also verified:
+
+```
+362: ([ptone/scion#1274](https://github.com/ptone/scion/issues/1274)).
+412: ([ptone/scion#1291](https://github.com/ptone/scion/issues/1291)). Verify:
+```
+
+Line 103's upstream link is correct and stays — it points at a real upstream file.
+
+Task #63 closed. Task #69 open against `#1308`. Nine items now queued for ptone; none blocks work.
