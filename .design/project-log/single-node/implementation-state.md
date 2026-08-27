@@ -9316,3 +9316,60 @@ instead of in hindsight for once.
 
 The merge brought in upstream's `changelog/2026-08-26-changelog.md`, which carries **12 unqualified
 issue/PR references**. Upstream content, out of scope for this branch, logged for the register.
+
+## §30 — All three upstream PRs green. Nothing is blocked on us.
+
+`#1315` CI completed at 15:31 on head `eb8eb082`:
+
+| check | result |
+|---|---|
+| **`build-docs`** | **SUCCESS** — the one that mattered; link validation on a renamed published page |
+| `Build & Test` | SUCCESS |
+| `check-changes`, `scan-pr`, `golangci-lint`, `shellcheck` | SUCCESS |
+| `deploy-docs`, four `zizmor` steps | SKIPPED |
+| `cla/google` | FAILURE — noise, gates nothing (§27) |
+
+**State of the tier's upstream work:**
+
+| PR | branch | state | CI |
+|---|---|---|---|
+| `GoogleCloudPlatform/scion#1315` tutorial | `scion/sn-docs-dev` | OPEN, MERGEABLE | green |
+| `GoogleCloudPlatform/scion#1316` build fix | `scion/sn-buildfix-upstream` | OPEN, MERGEABLE | green, no findings |
+| `GoogleCloudPlatform/scion#1317` design doc | `scion/sn-docpr-upstream` | OPEN, MERGEABLE | green, no findings |
+
+**Nothing is blocked on me or on any agent. All three wait on ptone's merge decision alone.**
+Reported 15:31.
+
+### §30.1 — Fleet
+
+`sn-rival-dev` reclaimed at 15:31 after its report was verified and CI cleared. **Zero developer
+agents of mine on the fleet.** I held it deliberately through CI rather than reclaim-and-re-dispatch,
+because of §28.6/§28.7 — a re-dispatch costs two known silent failure modes.
+
+Coordinator asked me to clean up `audit-def11`, `test-def11`, `review-def11`. **Not mine** — no brief,
+no mention of `def11` anywhere in this scratchpad, and all my agents use the `sn-` prefix. I declined
+to delete and flagged a fourth agent the coordinator had not listed, `dev-def11`, alive and blocked
+50 minutes, whose name implies it is the parent of the other three. Confirmed by the coordinator:
+`dev-def11` is holding for a rebase signal on messaging-v2, and the three were routed to their real
+owner. **The standing "check the brief before deleting" rule earned its keep.**
+
+### §30.2 — Heartbeat 15:30
+
+1. **Agents:** none of mine running. None stalled. Two silent-dispatch failure modes found and
+   documented today (§28.6, §28.7).
+2. **Critical path: ptone's merge decision on `#1315`/`#1316`/`#1317`.** Nothing else. No agent
+   action can advance it.
+3. **Design doc in sync**, via `#1317`. The one deliberate divergence stands: the `harnessConfig`
+   workaround remains in the tutorial until `ptone/scion#1316` phase 4.
+
+**Against §1:** the path was walked end-to-end and verified 2026-08-25, and the tier merged upstream
+at `f99a8189` on 2026-08-27 04:00. What is outstanding is not §1 capability — it is publishing the
+documentation that lets a stranger walk it. That is what these three PRs are.
+
+### §30.3 — Carried forward, not actioned
+
+- Upstream's `changelog/2026-08-26-changelog.md` carries **12 bare issue references**. Offered to
+  ptone as separate work; not in scope for these branches.
+- `ptone/scion#1316`'s intro still says "at least fifteen known collisions" (true at 23; links the
+  register).
+- `scripts/single-node/deploy.sh` comments still reference the old `-o ./scion` placement.
