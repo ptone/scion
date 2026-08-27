@@ -1214,3 +1214,132 @@ func TestInboundDelivery_ErrorFeedback(t *testing.T) {
 		return false
 	}, 5*time.Second, 50*time.Millisecond, "expected error feedback message in Telegram chat")
 }
+
+// TestTelegramConvFields verifies that conversation resolution fields are
+// correctly derived from Telegram messages (Phase 11).
+func TestTelegramConvFields(t *testing.T) {
+	t.Run("forum topic message", func(t *testing.T) {
+		msg := &messages.StructuredMessage{
+			Channel:  "telegram",
+			ThreadID: "42",
+			Metadata: map[string]string{
+				"telegram_chat_id":    "-1001234567890",
+				"telegram_message_id": "100",
+			},
+		}
+		surface, extRef, parentRef := telegramConvFields(msg)
+		assert.Equal(t, "telegram", surface)
+		assert.Equal(t, "42", extRef)
+		assert.Equal(t, "-1001234567890", parentRef)
+	})
+
+	t.Run("non-forum message uses chat_id as external_ref", func(t *testing.T) {
+		msg := &messages.StructuredMessage{
+			Channel: "telegram",
+			Metadata: map[string]string{
+				"telegram_chat_id":    "-1001234567890",
+				"telegram_message_id": "100",
+			},
+		}
+		surface, extRef, parentRef := telegramConvFields(msg)
+		assert.Equal(t, "telegram", surface)
+		assert.Equal(t, "-1001234567890", extRef)
+		assert.Equal(t, "-1001234567890", parentRef)
+	})
+
+	t.Run("nil metadata returns empty fields", func(t *testing.T) {
+		msg := &messages.StructuredMessage{Channel: "telegram"}
+		surface, extRef, parentRef := telegramConvFields(msg)
+		assert.Empty(t, surface)
+		assert.Empty(t, extRef)
+		assert.Empty(t, parentRef)
+	})
+
+	t.Run("nil message returns empty fields", func(t *testing.T) {
+		surface, extRef, parentRef := telegramConvFields(nil)
+		assert.Empty(t, surface)
+		assert.Empty(t, extRef)
+		assert.Empty(t, parentRef)
+	})
+}
+
+// TestDeliverInbound_ConversationFields_V1 verifies that the V1 Telegram broker
+// populates conversation resolution fields in the inbound payload.
+func TestDeliverInbound_ConversationFields_V1(t *testing.T) {
+	var receivedPayload inboundPayload
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&receivedPayload)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"delivered": true,
+			"agentId":   "agent-123",
+		})
+	}))
+	defer hub.Close()
+
+	b := &TelegramBroker{
+		log:        slog.Default(),
+		hubURL:     hub.URL,
+		httpClient: http.DefaultClient,
+	}
+
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Channel:   "telegram",
+		ThreadID:  "42",
+		Sender:    "user:alice@example.com",
+		Recipient: "agent:coder",
+		Msg:       "hello from telegram",
+		Type:      messages.TypeInstruction,
+		Metadata: map[string]string{
+			"telegram_chat_id":    "-1001234567890",
+			"telegram_message_id": "100",
+		},
+	}
+
+	he := b.deliverInbound("scion.project.p1.agent.coder.messages", msg)
+	assert.Nil(t, he)
+	assert.Equal(t, "telegram", receivedPayload.Surface)
+	assert.Equal(t, "42", receivedPayload.ExternalRef)
+	assert.Equal(t, "-1001234567890", receivedPayload.ParentRef)
+}
+
+// TestDeliverInbound_ConversationFields_AC8Regression verifies that a message
+// without metadata (no chat_id) does not produce a bare external_ref (AC-8).
+func TestDeliverInbound_ConversationFields_AC8Regression(t *testing.T) {
+	var receivedPayload inboundPayload
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&receivedPayload)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"delivered": true,
+			"agentId":   "agent-123",
+		})
+	}))
+	defer hub.Close()
+
+	b := &TelegramBroker{
+		log:        slog.Default(),
+		hubURL:     hub.URL,
+		httpClient: http.DefaultClient,
+	}
+
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Channel:   "telegram",
+		Sender:    "user:alice@example.com",
+		Recipient: "agent:coder",
+		Msg:       "hello",
+		Type:      messages.TypeInstruction,
+	}
+
+	he := b.deliverInbound("scion.project.p1.agent.coder.messages", msg)
+	assert.Nil(t, he)
+
+	// Without metadata, no conversation fields should be set.
+	assert.Empty(t, receivedPayload.Surface)
+	assert.Empty(t, receivedPayload.ExternalRef)
+	assert.Empty(t, receivedPayload.ParentRef)
+}

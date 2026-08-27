@@ -62,6 +62,32 @@ const (
 type inboundPayload struct {
 	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
+
+	// Conversation resolution fields (Phase 11).
+	Surface     string `json:"surface,omitempty"`
+	ExternalRef string `json:"external_ref,omitempty"`
+	ParentRef   string `json:"parent_ref,omitempty"`
+}
+
+// telegramConvFields derives conversation resolution fields from a Telegram
+// message.  The ExternalRef is the forum topic ID (ThreadID) when set, falling
+// back to the chat ID.  The ParentRef is always the chat ID.
+func telegramConvFields(msg *messages.StructuredMessage) (surface, externalRef, parentRef string) {
+	if msg == nil || msg.Metadata == nil {
+		return "", "", ""
+	}
+	chatID := msg.Metadata["telegram_chat_id"]
+	if chatID == "" {
+		return "", "", ""
+	}
+	surface = "telegram"
+	parentRef = chatID
+	if msg.ThreadID != "" {
+		externalRef = msg.ThreadID
+	} else {
+		externalRef = chatID
+	}
+	return
 }
 
 // hubError represents a structured error returned by the hub API.
@@ -789,9 +815,17 @@ func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMe
 		return nil
 	}
 
+	// Phase 11: Derive conversation resolution fields from the message.
+	// Telegram uses the forum topic ID (or chat ID) as ExternalRef and
+	// the chat ID as ParentRef.
+	surface, externalRef, parentRef := telegramConvFields(msg)
+
 	payload := inboundPayload{
-		Topic:   topic,
-		Message: msg,
+		Topic:       topic,
+		Message:     msg,
+		Surface:     surface,
+		ExternalRef: externalRef,
+		ParentRef:   parentRef,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

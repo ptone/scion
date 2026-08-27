@@ -2615,9 +2615,14 @@ func (b *TelegramBrokerV2) deliverInbound(topic string, msg *messages.Structured
 		return
 	}
 
+	surface, externalRef, parentRef := telegramConvFields(msg)
+
 	payload := inboundPayload{
-		Topic:   topic,
-		Message: msg,
+		Topic:       topic,
+		Message:     msg,
+		Surface:     surface,
+		ExternalRef: externalRef,
+		ParentRef:   parentRef,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -2707,9 +2712,14 @@ func (b *TelegramBrokerV2) deliverInboundWithFeedback(ctx context.Context, topic
 		return http.StatusOK, ""
 	}
 
+	surface, externalRef, parentRef := telegramConvFields(msg)
+
 	payload := inboundPayload{
-		Topic:   topic,
-		Message: msg,
+		Topic:       topic,
+		Message:     msg,
+		Surface:     surface,
+		ExternalRef: externalRef,
+		ParentRef:   parentRef,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
