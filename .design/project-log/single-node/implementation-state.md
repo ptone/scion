@@ -12093,3 +12093,82 @@ the runner, not the branch.
 
 **ptone told, in STE, on the working thread.** He is waiting on this script and I had said the compare
 URL would follow a round-2 pass. It did not pass, so he gets that plainly rather than silence.
+
+## §35.46 — R3 landed; the developer corrected my mechanism and pinned it. Review round 3 dispatched with a live deploy. (23:28)
+
+Head verified independently before reading a word of the claims: `c49a4c2d5`,
+`status=ahead ahead=8 behind=0 files=4`, tip subject *"test: make the seam-rejection pins fail for the
+reason they claim"*. Matches the report exactly. The branch was **force-pushed**
+(`--force-with-lease` pinned to `5b5f4ce9a`, the SHA I had verified) because R6 rewrote it; I have
+asked the reviewer to confirm nothing was lost, since a force-push is the one operation that can lose
+work silently.
+
+### The correction that matters: my R3 mechanism was wrong
+
+I wrote that hoisting into `di_main` means *"there is no configuration in which an unvalidated base
+reaches a curl."* **That is not what hoisting buys.** It makes an unvalidated read **visible at a call
+site** instead of invisible in the environment — a real gain, and the right call — but nothing stops a
+future function adding its own `${_DI_API_BASE:-...}` and silently reacquiring the orphaning. No test
+would fail.
+
+**I criticised the developer's placement for resting on an unpinned invariant, and then specified a fix
+resting on an unpinned invariant, one level up.** Same error, one abstraction higher, in the same
+breath as diagnosing it.
+
+The developer closed it without being asked: `TestScriptSeamsAreReadInExactlyOnePlace` asserts each
+variable is read in exactly one resolver and each resolver is called exactly once; **m11 adds a second
+read in step 3b — precisely the orphaning shape — and goes RED.** Its framing is the correct one:
+*"Without that test, R3 is a refactor that reads better; with it, R3 is an invariant."*
+
+**Keep the distinction. A refactor that makes a mistake easier to see is not the same as a test that
+makes it impossible to keep.** I have been conflating the two.
+
+### Both seams hoisted — I confirmed, do not revert
+
+I asked for `_DI_API_BASE`. The developer hoisted `_DI_TOKENINFO_URL` too and offered to revert it.
+**Confirmed keep.** Its argument is my own R7 argument handed back: one seam hoisted and one left in
+the environment is *two seams under two rules*, which is exactly what I overrode it to avoid.
+`di_preflight_rest_credential` now reads **no environment at all** — behaviour fully determined by its
+five arguments. That is worth more than the change I asked for.
+
+Also accepted: the rule is a **host** allowlist, not a **URL** allowlist —
+`https://oauth2.googleapis.com/../evil` is honoured. Harmless while the only permitted non-Google hosts
+are loopback, and the comment now says so rather than overclaiming.
+
+### The weak pin the developer caught in its own work
+
+`TestScriptRejectsNonGoogle{APIBase,TokeninfoHost}` went red under m5/m8 **for the wrong reason**: the
+gcloud stub did not answer the SDK capability probe, so with the check deleted `di_main` aborted
+*there*, not at the mint. **They distinguished clean from mutated by accident.** Fixed with a stub that
+carries `di_main` to the mint.
+
+**Standing rule as of tonight: a red mutation is necessary, not sufficient — you have to read WHY it
+went red.** That is the third instance of this class today (m4, the two seam pins, and my own
+`grep`-based false negatives), and they share one property: **a wrong result that looks exactly like a
+right one.**
+
+### Round 3 review dispatched to `sn-adcpreflight-rev2` — and it requires a live deploy
+
+Same reviewer, deliberately: it found the bypass, and reviewing the fix to your own finding carries no
+bias problem. It did also *propose* the hoist, which is the shape I avoided last round — but the
+implementation is objectively checkable (does the invariant hold, is the pin real), and the developer
+has already pushed back on the substance. Recorded so the trade is on the record rather than assumed.
+
+Two things it has not seen:
+
+1. **The entry sequence moved.** Both seams now resolve and validate **above
+   `di_check_gcloud_instances`**, so the first thing the script does has changed and **round 1's live
+   walk no longer covers it.** Specifically to check: **task #79's old-SDK diagnostic must still fire
+   first for an operator who sets no overrides** — which is every real operator. #79 was a whole task
+   about making that failure nameable and it would be quiet to lose it.
+2. The weak-pin repair, plus **spot-check all eleven mutations by reading why each went red.**
+
+On the bypass itself I told it not to re-run the table: **the table encodes the evasions we already
+thought of, which is exactly how the last hole survived eight green mutations.** The question is not
+"does the table pass" but **"do the validator and curl agree on what the host is, for every input"** —
+whitespace and control characters, odd or absent schemes, multiple `@` (`${host##*@}` takes the longest
+prefix, curl takes the last `@`; I believe they agree and asked for it to be checked), empty host.
+
+Gates claimed: `TestScript` 41/0/0 top-level with 21 subtests in the table, full `cmd` ok, shellcheck
+62/62 CI-exact, 14 preflight/3b/seam tests green with egress blackholed, and `cmd.Env` now scrubs
+`_DI_*` — without which the default-endpoint pins are defeatable by an ambient variable.
