@@ -10641,3 +10641,48 @@ Not raising it now, though. The action is gated on the merge either way, he is m
 PR, and he has told me my communications are too voluminous. It goes in the post-merge report with
 the rest of the register reconciliation — one message, after the thing it depends on, rather than an
 interrupt about an issue that is still accurate as written until #1325 lands.
+
+### §35.23 — the automated review was right, and the tests are blind to why (2026-08-27, 19:00–19:08)
+
+`gemini-code-assist` reviewed #1325 and left **5 inline findings on `deploy.sh`** (2 high, 3 medium).
+**I nearly dismissed them as bot noise.** The prior was reasonable — on #1310 we took 4 of 6 and
+declined 2 — and it was wrong. I checked all five against source. **All five are real.**
+
+**Verified premise:** `di_main` runs `set -euo pipefail` as its first statement, `deploy.sh:341`.
+`set -e` is a **global shell option, not function-scoped**, so every function `di_main` calls
+inherits it. My first check (`grep -n "^set "`) returned nothing and briefly suggested the whole
+review was built on a false premise — the flag is indented inside the function, so an anchored grep
+missed it. **Nearly killed a correct review with a bad grep.**
+
+The findings:
+
+- **`:306`, HIGH, worst.** IAP polling loop. Missing `Location` header → `grep` exits 1 → `pipefail`
+  → `set -e` kills the deploy. **A transient becomes a total deploy failure** — the same
+  "rejects a good install" category I used to frame the preflight review.
+- **`:274`, HIGH.** Perimeter assertion. Dies *before* printing its own `SECURITY FAILURE` message.
+  Still fails **closed**, which is right; it just cannot say why. Defect #79's class exactly.
+- **`:405`, `:429`, `:505`, MEDIUM.** `gcloud` captured with `2>/dev/null`. On non-zero exit, `set -e`
+  exits and gcloud's error is discarded — bash prints nothing either. **A completely silent exit.**
+
+**Where the bot's reasoning is wrong, and it matters.** It calls the `[[ -z ]]` checks "dead code".
+They are not: they still catch **gcloud exiting 0 and printing nothing** (unset account, no project
+number), which is the *common* real-world case. Dead only for the non-zero branch. Told the developer
+to keep them. Also warned against "fixing" this by collapsing to `local x="$(cmd)"` — that takes
+`local`'s exit status and masks the failure **entirely**, which is worse than the bug.
+
+**THE FINDING NOBODY FILED, and the one worth keeping.** `cmd/deploy_script_test.go:52` invokes
+functions as `source %q && %s`. Tests never call `di_main`, so **they never run under `set -e`.**
+Production and tests execute these functions **in different shell modes.** The test suite is
+structurally incapable of catching this entire class.
+
+That seam — sourceable functions, main guard, no file-scope side effects — is the thing I have
+praised for three cycles as the reason 22 of 28 tests survived the Go deletion. It is still good.
+It is *also* exactly why the developer, the reviewer, and I all missed this. **A seam that preserves
+tests by decoupling them from the entry point decouples them from the entry point's behaviour too.**
+
+Asked the developer for A/B/C on closing that gap as a **separate decision**, not buried in the fix
+commit, and for **the class** rather than the five instances.
+
+**Merge recommendation to ptone: hold.** Also told him this is a **regression against main**, where
+these paths are Go with explicit error returns — merging as-is trades working error handling for
+silent exits. Task #84.
