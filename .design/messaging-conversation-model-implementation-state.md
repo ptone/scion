@@ -1091,6 +1091,46 @@ there is a reason they kept both that I am not seeing.
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
 
+## 5ae. 17:48Z — the user calls the integration-branch strategy flawed, and I think they are right
+
+Verbatim: "this approach of large integration branch is prob a flawed strategy". I proposed this
+strategy, so the honest test is whether the evidence supports it, not whether I like it. It does
+not.
+
+**Every defect found today is an integration defect.** DEF-8, DEF-15 and DEF-16 are gaps *between*
+sections — my own QA walkthrough already said it: "each section did what it was asked; nobody was
+asked to join them up." DEF-17's three red gates were invisible per-section and legible only
+branch-wide. §5ad's near-revert happened because a long-lived branch requires managers to be
+manually re-pointed at a moving target, and manual re-pointing fails silently.
+
+**The design error, stated precisely: we run a default-off read switch *and* a long-lived branch.**
+Two mechanisms doing one job, and we pay both bills. The flag is what makes partial work safe on
+`main`. The branch adds no CI over 81 commits, manual base management, late integration discovery,
+and one high-variance merge — while buying nothing the flag does not already buy. Review is not the
+branch's contribution either; a PR is reviewed too.
+
+**The sharpest cost is CI.** `main` enforces seven gates. The integration branch enforces me. I
+substituted myself for a mechanism that already existed and is better at this than I am, and three
+gates then stayed red across six sections. Rule 22 was the symptom; this is the cause.
+
+**One argument that cuts against my own position, recorded because it is the strongest one and it
+still loses.** The read switch gates *reads*, not *writes* — the conversation dual-write is
+unconditional. So landing incrementally would have started writing conversation rows in production
+much sooner, which is real risk. But DEF-8's duplicate rows would then have appeared on the
+divergence board under live traffic, cheaply and early, instead of being found by me reading code
+three days later. **Telemetry under real traffic beats an architect reading code**, and the branch
+denied us that for the entire project.
+
+**Proposed cut-over, and the timing is nearly free.** §2.15 must be rebased regardless (§5ad), so
+rebasing it onto a better target costs nothing extra. Sequence: fix DEF-17/DEF-18's three gates,
+PR the 81 commits to `main` as one reviewed change, then §2.15 rebases onto `main` and every
+section after is an ordinary PR. It cannot rebase onto `main` before that — it depends on
+`conversation.go` and `backfill.go`, which exist only on the branch. **Awaiting the user's
+decision; this is their call, not mine.**
+
+Note em6's in-flight rebase onto `edd4e4bd` is correct under *either* outcome, since `edd4e4bd`
+would itself be in `main` after the cut-over. No need to interrupt them, and I have not.
+
 ## 5ad. 17:41-17:45Z — §2.15 reported complete on a branch that reverts 80,471 lines
 
 `ca-msg-em6` reported §2.15 done: five commits, all ACs satisfied, my five required changes
