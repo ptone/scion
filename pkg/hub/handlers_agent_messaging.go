@@ -844,6 +844,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			convResult = &messaging.ConversationResult{
 				ConversationID: structuredMsg.ConversationID,
 			}
+			// DEF-11: The CLI pre-resolved the ConversationID but didn't send
+			// the ExternalRef. Look it up from the store so
+			// ComputeDivergenceMatch gets the real value instead of "".
+			if conv, err := s.store.GetConversation(ctx, structuredMsg.ConversationID); err == nil {
+				convResult.ExternalRef = conv.ExternalRef
+			}
 		} else if structuredMsg.ThreadID != "" {
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, structuredMsg.ThreadID, agent.ProjectID)
 		} else if structuredMsg.SenderID != "" && agent.ID != "" {
@@ -865,14 +871,30 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			convID = convResult.ConversationID
 			actualRef = convResult.ExternalRef
 		}
-		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
-		messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
-			MessageID:  storeMsg.ID,
-			OldRouting: oldRouting,
-			NewRouting: messaging.NewRoutingStr(convID),
-			Match:      match,
-			Reason:     reason,
-		})
+		// DEF-11: When the CLI pre-resolved a ConversationID but the store
+		// lookup failed (ExternalRef still empty), record a fallback instead
+		// of feeding an empty ref into ComputeDivergenceMatch — that would
+		// produce "routing-type-mismatch: old=… new=" which is the exact
+		// DEF-11 artifact.
+		if actualRef == "" && convID != "" {
+			messaging.DivergenceMetrics.IncFallback()
+			s.messageLog.Warn("conversation routing check: conv-lookup-failed",
+				"message_id", storeMsg.ID,
+				"old_routing", oldRouting,
+				"new_routing", messaging.NewRoutingStr(convID),
+				"match", false,
+				"reason", "conv-lookup-failed",
+			)
+		} else {
+			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: oldRouting,
+				NewRouting: messaging.NewRoutingStr(convID),
+				Match:      match,
+				Reason:     reason,
+			})
+		}
 		// DEF-3: Independent consistency check against prior messages.
 		messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, structuredMsg.ThreadID, structuredMsg.SenderID, agent.ID, s.messageLog)
 		// Propagate GroupID from metadata so CLI-originated group[] messages
