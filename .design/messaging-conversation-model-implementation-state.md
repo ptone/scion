@@ -55,10 +55,13 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 ## 3. Current position
 
-**Active section:** S2 — Migration
-**Active manager:** `ca-msg-em2` — spawning 2026-08-27 01:40Z
-**Blocked on:** nothing
-**Last verified landing on integration branch:** `16294728` — **S1 verified 2026-08-27 01:40Z**
+**Active section:** S2 — Migration (**REOPENED — reported complete, rejected on review**)
+**Active manager:** `ca-msg-em2`
+**Blocked on:** em2 fixing two blockers (see §5d). S3 does not start until S2 is accepted.
+**Last verified landing on integration branch:** `16294728` (end of S1). S2's commits
+`16294728..9e80a4e2` are merged but **not accepted** — treat the integration branch as
+containing unverified work until §5d clears.
+**S1 verified** 2026-08-27 01:40Z.
 
 S1 verification (performed by me, independently of em1's report):
 
@@ -161,6 +164,34 @@ would bury the events that matter.
   reported test APPROVE, review REQUEST-CHANGES→fixed, audit APPROVE with one HIGH deferred.
   Two deferrals recorded as DEF-1 and DEF-2 in §5c. em1 released.
 - `2026-08-27 01:40Z` S2 opened; `ca-msg-em2` spawned.
+- `2026-08-27 02:44Z` em2 reported S2 complete, merged `16294728..9e80a4e2`, three APPROVE gates.
+- `2026-08-27 02:50Z` **S2 rejected.** Two blocking findings verified in the merged code
+  (B-1 duplicate DM key format, B-2 hardcoded `Match: true`), plus B-3/B-4 promoted from the
+  gates' own non-blocking notes. See §5d. Section reopened, em2 sent back to fix on its
+  branch and re-report. S3 held.
+
+## 5d. Open blockers — S2 rejection (2026-08-27 02:50Z)
+
+S2 was reported complete with three APPROVE gates. I rejected it. Both blockers are
+visible by grep and both were missed by review, test, and audit.
+
+| # | Blocker | Evidence | Required fix | State |
+|---|---|---|---|---|
+| B-1 | **Two `external_ref` formats for the same DM.** `dm:%s:%s` (`divergence.go:106`, dual-write) vs `direct:%s:%s:%s` (`backfill.go:200`, with projectID). Under `UNIQUE(surface, external_ref)` the same DM gets two conversation rows — backfill fills one, live traffic fills the other, and DM history splits at the S4 read switch. Also a design-conformance bug on its own: **DMs are global** (§2.4.1, and S1 `resolve.go:310` sets `ProjectID: ""`), so a project-scoped DM key fragments one DM into one row per shared project. | grep both format strings | One exported project-free DM-key helper, called by backfill and dual-write. Thread keys keep projectID. | open |
+| B-2 | **Divergence logging cannot detect divergence.** All six call sites pass `Match: true` as a literal (`handlers_agent_messaging.go:243,736,971,1076`; `messagebroker.go:467,620`). `Mismatches()` can only return 0. | grep `Match:` | Compute `Match` by resolving each model independently and comparing. "Old model has no answer" is a third outcome, not a match. | open |
+| B-3 | `ProjectID` required in `BackfillConfig` (audit Medium, promoted — thread grouping can cross a project boundary; §2.6.1 is an invariant, not a recommendation). | audit report | required | open |
+| B-4 | Unit tests for `ResolveOrCreateDMConversation` (test gate marked PARTIAL). It is now the shared correctness point for both phases. | test report | required | open |
+
+**Why B-2 is the serious one.** A missing check fails to find problems. This one
+*manufactures evidence of safety*: the design makes the phase-5 divergence signal the gate
+for S4's read switch, and a clean soak report from this code is indistinguishable from a
+real one. I would have approved the read switch on it.
+
+**Lesson for later sections — do not let this recur.** Three independent gates approved
+code containing a hardcoded comparison result and two competing constructors for one
+deterministic key. Both are single-grep findings. Every manager brief from S3 onward must
+require reviewers to check (a) that a comparison actually compares, and (b) that a
+deterministic key has exactly one constructor.
 
 ## 5c. Deferred-item ledger — debt accepted during implementation
 
