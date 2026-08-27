@@ -5112,3 +5112,29 @@ which had carried my wrong retraction of the `factory.go` claim.
   dispatched while the rebase was in flight; it is now the next thing worth a live deploy.
 - Task #50 — tutorial and deploy scripts, gated on an unanswered decision.
 - Two drive-by branches held at the coordinator's request until the tier lands.
+
+### Captured before agent cleanup — two developer findings that were not yet in this file
+
+Caught while checking the coordinator's cleanup request against the record. Both would have been
+lost with the containers. **Grepping the log for the agent's own findings before deleting it is
+now part of how I retire an agent**, not a courtesy.
+
+**`sn-rebase-dev`, on `scion/security-fix-p0-s1` (00:27Z).** The `pkg/hub/web.go` conflict resolved
+itself cleanly — #1300's changes were structurally additive and non-overlapping with the guard. The
+real conflict was somewhere I had not pointed it: **`cmd/server_foreground_test.go`**. #1300 removed
+the `adminEmailList` parameter from `initWebServer`, taking it from nine arguments to eight, while
+the branch's test still called it with nine. **Git auto-merged it silently and produced a stale
+call signature** that surfaced only at compile. This is the first of the three bad auto-merges, and
+the one that set the pattern I then warned the next developer about.
+
+**`sn-tier-rebase-dev` added behaviour during a rebase, and said so.** In `factory.go`'s
+`cloudrun-instances` case it added a nil-config fallback: when `CLOUD_RUN_INSTANCE` is auto-detected
+but no explicit `cloudrun_instances` config exists, fall back to `NewCloudRunRuntime` with an empty
+config and let it auto-discover from GCP metadata. It flagged this as a judgement call rather than
+burying it, which is exactly what I asked for.
+
+I am recording it rather than reverting it. It mirrors how the `cloudrun` case already handles nil
+config, so it is consistent rather than inventive. But it is **new behaviour inside a changeset
+described as a rebase**, and an upstream reviewer will meet it with no context. If review asks why
+it is there, the honest answer is that #1302 changed the constructor's contract under us and this
+is the branch adapting to it — not a feature smuggled in. Worth watching for on the upstream PR.
