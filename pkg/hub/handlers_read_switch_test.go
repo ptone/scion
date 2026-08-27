@@ -825,15 +825,27 @@ func TestValidDMKey_CoexistenceWithDeriveConversationKey(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
 	// -------------------------------------------------------------------
-	// Sub-test 1: validDMKey rejects malformed dm: key → message NOT stored.
+	// Sub-test 1: validDMKey rejects malformed dm: key → HTTP 400.
+	//
+	// PROVEN: validDMKey returns 400 for a malformed dm: key.
+	//
+	// NOT PROVEN HERE: that validDMKey is what prevents the message row.
+	// In this test environment there is no broker proxy, so channel
+	// validation (line ~196) would also block persistence with a 503
+	// even if validDMKey were disabled. A positive control confirms
+	// this: a well-formed dm: key with Channel="web" also fails to
+	// persist (503 broker_unavailable), and without Channel the request
+	// fails ValidateLegacyMessage ("thread_id requires channel"). No
+	// message with a ThreadID can reach CreateMessage in this
+	// environment, so row-count assertions would be decoration — they
+	// pass regardless of whether the guard exists. (Rule 14.)
+	//
+	// The "different sinks" conclusion is established by code reading
+	// (validDMKey at :121 exits before CreateMessage; DeriveConversationKey
+	// at :269 only skips conversation resolution) and by sub-test 2's
+	// unit-level demonstration, not by an API-level persistence proof.
 	// -------------------------------------------------------------------
-	t.Run("malformed_dm_key_rejected_no_message_stored", func(t *testing.T) {
-		// Count messages and conversations before the request.
-		msgsBefore, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: project.ID}, store.ListOptions{})
-		require.NoError(t, err)
-		convsBefore, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
-		require.NoError(t, err)
-
+	t.Run("malformed_dm_key_rejected_by_validDMKey", func(t *testing.T) {
 		// "bot" is not "user" or "agent", so this fails the dmKeyRegexp.
 		badKey := "dm:bot:00000000-0000-0000-0000-000000000001:user:" + user.ID
 
@@ -855,18 +867,36 @@ func TestValidDMKey_CoexistenceWithDeriveConversationKey(t *testing.T) {
 
 		assert.Equal(t, http.StatusBadRequest, rr.Code,
 			"AC-S215-COEXISTENCE sub1: malformed dm: key must be rejected with 400")
+		assert.Contains(t, rr.Body.String(), "invalid DM key format",
+			"AC-S215-COEXISTENCE sub1: error message must identify the DM key guard")
 
-		// Message count must not change.
-		msgsAfter, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: project.ID}, store.ListOptions{})
-		require.NoError(t, err)
-		assert.Equal(t, len(msgsBefore.Items), len(msgsAfter.Items),
-			"AC-S215-COEXISTENCE sub1: validDMKey rejection must prevent message persistence")
+		// Positive control: a well-formed dm: key also cannot persist in this
+		// environment (no broker → 503 on channel validation), confirming that
+		// row-count assertions would be vacuous here.
+		canonicalKey, dmErr := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
+		require.NoError(t, dmErr)
+		goodBody, _ := json.Marshal(OutboundMessageRequest{
+			Recipient: "user:human@coexist.test",
+			Msg:       "positive control",
+			ThreadID:  canonicalKey,
+			Channel:   "web",
+		})
+		goodReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(goodBody))
+		goodReq.Header.Set("Content-Type", "application/json")
+		goodReq = goodReq.WithContext(contextWithIdentity(goodReq.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: agent.ID},
+			ProjectID: project.ID,
+		}}))
+		goodRR := httptest.NewRecorder()
+		srv.handleAgentOutboundMessage(goodRR, goodReq, agent.ID)
 
-		// Conversation count must not change.
-		convsAfter, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
-		require.NoError(t, err)
-		assert.Equal(t, len(convsBefore.Items), len(convsAfter.Items),
-			"AC-S215-COEXISTENCE sub1: validDMKey rejection must prevent conversation creation")
+		// The positive control must NOT succeed (503 from channel validation
+		// without a broker). This proves that row-count assertions would be
+		// vacuous: no ThreadID message can persist in this test environment.
+		assert.NotEqual(t, http.StatusOK, goodRR.Code,
+			"AC-S215-COEXISTENCE sub1 positive control: well-formed dm: key "+
+				"with Channel='web' must also fail to persist (no broker), "+
+				"confirming row-count assertions would be decoration")
 	})
 
 	// -------------------------------------------------------------------
