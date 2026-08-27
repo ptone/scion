@@ -505,6 +505,9 @@ would bury the events that matter.
 - `2026-08-27 12:58Z` **User challenged whether I had been dispatching managers against the discovered gaps. I had not, and said so.** Correction recorded in §5j.
 - `2026-08-27 13:00Z` **QA results from scion-gteam.** Parts 0/1/2 **PASS** — identical conversation UUID across two sends (Created→Resolved), both must-fail cases exit 1 with the refusal text. **DEF-12 confirmed as measurement: 24,684 messages, 0 with `conversation_id`.** **DEF-10 confirmed by direct observation** (row carries non-null `project_id`). **DEF-8 and DEF-11 remain UNTESTED** — see §5k.
 - `2026-08-27 13:01Z` Answered the user on DEF-7/DEF-9: DEF-9 needs no input (unbuilt, not undecided; downstream of DEF-5). DEF-7 has one real question, routed to **`nc-arch`** rather than escalated — see §5l.
+- `2026-08-27 13:03Z` **`nc-arch` answered DEF-7 and surfaced a parallel-entity collision.** DEF-7 resolved (build no naming path). **DM key format changed to kind-encoding, eliminating the §2.4.2 security hazard outright.** Shared derivation function owed to `pkg/messages`. See §5m.
+- `2026-08-27 13:06Z` **ESCALATED to user:** unify `Conversation` and `webchat_topic`, or keep both? Recommended declaring unification the end state and sequencing the migration after native-chat wave 2. **This is the one open user question.**
+- `2026-08-27 13:07Z` S6 plan received in 3 parts and accepted with corrections; **rule-14 violation caught in its step-4 guards** (vacuous on an empty table). Step 1 in progress. See §5n.
 - `2026-08-27 13:00Z` **S6 spawned (`ca-msg-em6`), scope DEF-8 + DEF-10**, spec design §2.4.2, branch `scion/ca-msg-em6` off `ebf8cc27`. Briefed hard on the step-2 security hazard. Merge gated on QA completion. Asked for a plan before the migration is written.
 
 ## 5j. Correction 2026-08-27 12:58Z — I stopped dispatching and did not notice
@@ -599,6 +602,89 @@ name (which decides whether `#<name>` can be a unique reference at all, or needs
 cross-project design question routed to the other project is not an escalation, it is coordination,
 and treating the two as the same thing is how a user's queue fills with questions his own system
 already knows the answer to.
+
+## 5m. Cross-project alignment with native chat — 2026-08-27 13:03-13:07Z
+
+Asking `nc-arch` about DEF-7 (§5l) returned far more than DEF-7. **Recorded at length because the
+highest-value output of this project so far came from a half-hour conversation, not a section.**
+
+**DEF-7 answered — and my framing of it was wrong.** I offered the user (a) native room vs
+(b) broker thread. Answer is (a), but **both my options assumed the naming lived in my entity.**
+It doesn't: group threads are `webchat_topic` rows with a required name, unique per project
+(case-insensitive), created by `POST /api/v1/chat/spaces/{projectId}/threads` and renamed by
+`PATCH /api/v1/chat/threads/{topicId}` — endpoints already in their approved design. DMs are
+deliberately **nameless**; display name is derived from the peer at render time. So: build no
+naming path, invest nothing in `Conversation.DisplayName`. **A question with two wrong options is
+worse than no question — it invites a decision that forecloses the real one.**
+
+Also confirmed: `#<name>` is unique **per project only** (every project has a `#general`), so it is
+maximally ambiguous without scope. §2.6.1 ambient-project resolution is correct; never global.
+
+**THE KEY FORMAT — the finding that mattered.** Their DM identity key is
+`dm:agent:X:user:Y` / `dm:user:A:user:B`, global pair. **It encodes principal kinds. Mine did not.**
+
+> The entire security hazard in §2.4.2 — the backfill must infer each principal's kind, and
+> `requireParticipant` trusts that inference, so a wrong inference is an access grant to the wrong
+> principal — **was a property of my key format, not of the problem.** I briefed S6 at length on
+> mitigating it. A key that carries the kind means there is nothing to infer. Combined with
+> resolver rows already storing participant kinds, the migration is **guess-free end to end.**
+> **The hazard is eliminated, not mitigated.**
+>
+> Generalise: before building careful handling for a hazard, check whether the hazard is inherent
+> or self-inflicted. I could not see this from inside my own design.
+
+**Cost of the change: zero, and the window was closing.** QA had just measured one conversation row
+in the whole production database and zero `dm:` rows. Nothing to migrate. Untrue the moment
+traffic flows — which is why this was worth interrupting a running section for.
+
+**Settled derivation rule** (nc-arch, adopted verbatim): render each participant as
+`<kind>:<uuid>`, kind lowercase, UUID normalised to canonical lowercase **before** sorting;
+byte-wise lexicographic sort of the two tokens; join with `:`, prefix `dm:`. Because `agent:` <
+`user:`, mixed pairs always render `dm:agent:<aid>:user:<uid>`. One rule, no special cases.
+Normalisation is load-bearing — a case-sensitive sort over unnormalised UUIDs yields two keys for
+one pair. Malformed UUIDs and unknown kinds are **rejected**, not passed through.
+
+**Ownership: `pkg/messages`**, one exported `DMConversationKey` + `ParseDMKey`, imported by both
+projects. **Not two implementations that agree by convention — that is exactly how DEF-8
+happened.** I refused to reproduce it across a project boundary.
+
+**ESCALATED to the user (the one open question).** `Conversation` and `webchat_topic` are parallel
+constructs for the same concept, in two different stores, both under active construction.
+(i) minimal — `#<thread>` reads their table, both entities persist; (ii) structural — unify,
+`webchat_topic` becomes a chat-specific projection. **My recommendation: declare (ii) the end state
+now, sequence the migration after their wave 2 lands.** (i) institutionalises across two stores the
+defect S6 is being paid to fix inside one; but their design is approved and in flight, so unifying
+now destabilises delivered work for no urgent gain. Declaring the direction buys the thing that
+matters: neither project builds more divergence starting today. nc-arch flagged the same to
+native-chat-lead. Neither architect should call the sequencing alone.
+
+**Fixed regardless of that outcome:** `UpsertConversationByExternalRef` does an unconditional
+`SetDisplayName` on its update branch (`conversation_store.go:400`), silently wiping any
+out-of-band name. Added to S6's scope. Agreed with nc-arch; needed either way.
+
+## 5n. S6 exchange 13:05-13:07Z — a rule-14 catch and two manager improvements
+
+**Rule-14 violation caught in S6's step-4 guards, and it is the canonical form of the failure.**
+Both proposed guards are **vacuous on an empty table**: 'zero direct rows with empty
+`external_ref`' passes when there are no direct rows; 'every `dm:` row has exactly two
+participants' passes when there are no `dm:` rows. **Against today's production database — one
+conversation row — both would pass on a completely unmigrated system.** Each must assert a
+non-zero floor on what it examined before asserting the invariant over it, and fail rather than
+skip on an empty population.
+
+**S6 improved on two of my instructions rather than executing them**, which is the behaviour I
+want and am recording so it is reinforced rather than lost:
+1. **'Verification, not discovery'** — for a kind-encoded ref, parse the kind from the key then
+   look up to *confirm* the ID exists in the claimed table. Strictly better than my blanket 'never
+   look up': it catches a forged or corrupted key instead of trusting it.
+2. **All-or-nothing per row**, which I never specified. A half-backfilled row passes
+   `requireParticipant` for one party and denies the other — asymmetric access, worse than denying
+   both.
+
+**Final coherent rule** (our messages crossed twice; this supersedes the exchange): unparseable
+old-format ref → no lookup, no inference, fail closed, **counted** (silence must be
+distinguishable from zero); parseable new-format ref → kind from key, lookup to verify; both →
+all-or-nothing per row.
 
 ## 5i. S5 — CLOSED 2026-08-27 12:40Z (accepted on round 3, `55dd6e16`)
 
