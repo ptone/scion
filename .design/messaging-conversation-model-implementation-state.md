@@ -881,6 +881,42 @@
     **Prefer fast-forward for contributed work specifically because it makes the contributor's
     transcript transferable**, and re-run every gate yourself after any merge that is not one.
 
+51. **One function cannot answer two questions whose filters disagree — and the filter that makes a
+    query come back clean is where the finding went.** Issued 2026-08-27 22:00Z, from DEF-27
+    (`nc-arch`'s find). `GetTopicConversationID` filters `deleted_at IS NULL`. It serves two callers
+    with **opposite** requirements: "what conversation does this *live* topic link to?" must hide
+    tombstones; "is this thread ID *ours*?" must see them. So a soft-deleted native topic answers
+    `ErrNotFound` and the mint guard reads that as "not native, safe to mint."
+
+    - **Patching the predicate is not the fix.** One function still serves both questions and drifts
+      back the first time someone notices tombstoned rows reaching a user-facing caller. **Split it
+      and name each function after the question it answers.**
+    - **Domain form, from nc-arch and not improvable: "soft-deletion is not declassification."**
+      Deletion hides a row from users; it must not make a guard forget the row was ours.
+    - **Corollary — the same shape at the query layer.** Reviewing the beta-exercise SQL the same
+      hour: `AND c.external_ref != ''` excluded from a D-1 violation check the very rows that are
+      most violating — a `direct` conversation with no key has no ACL. **Treat every filter in a
+      security query as a claim to justify, never as tidying.**
+    - **Corollary — backend parity proves agreement, not correctness (extends rule 26).** DEF-27's
+      wrong predicate is in *both* SQLite and Postgres, because the two were written from one
+      template and inherited one mistake. Running the suite against both backends could never have
+      caught it. **Where two implementations share an author, they share a blind spot; test them
+      separately or the second run is decoration.**
+
+52. **A zero-rows check is only as good as its NULL handling.** Issued 2026-08-27 22:01Z. In SQL's
+    three-valued logic `NULL NOT LIKE '...'` is NULL, not TRUE, and WHERE returns only TRUE — so
+    every row with a NULL in the predicate is **silently dropped from a violation query**. The
+    beta-exercise D-1 check would have passed clean over a `direct` conversation with
+    `external_ref IS NULL`, which is the worst row in the table.
+
+    - The coverage existed only because a *second* query happened to test `IS NULL` explicitly.
+      **Cover-by-accident is not cover: make each check stand alone**, or trimming the redundant one
+      silently reopens the hole.
+    - **Procedure: before writing a check that must return zero rows, list the nullable columns it
+      touches and handle each NULL case deliberately.**
+    - Same disease as rule 51 one layer down — there the finding hid in the WHERE clause, here it
+      hides in the type system. Both make the query come back clean.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -1070,7 +1106,8 @@ is a queue, not a blocker.
 | **Tranche A cut-point audit** | **DONE 21:15Z — 17 unchosen commits, verdict ACCEPT (§5av, rule 41). Follow-on D2/D3/D4 accepted 21:27Z (§5aw).** Golden vectors confirmed in A; omissions clean; warrant strengthened to `git diff origin/main 71b65292 -- pkg/hub` = **empty**. Remaining: re-issue D1 with the AC-DEF8-1 correction (it IS runnable and passes — rule 42) and file the **`resolve_test.go:1099` green-placeholder defect** (a second test named AC-DEF8-1 that only calls `Resolve` twice; rename or delete). | **em6** | correction issued 21:27Z |
 | **Four A-ACs deferred into B's merge** | 23f7c820's 5 handler call-site fixes; AC-DEF15-1 (source confinement); AC-DEF15-4 (invalid `dm:` → zero rows); AC-DEF16-1 (validation before creation). **These are tranche A's ACs, not B's** — not covered by AC-B-1..9, must be reported by name. AC-DEF15-1 + `b7651af9`'s unexport are one control in two files: **both or neither**. | **em10** | added to B's spec 21:28Z |
 | DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
-| AC-12-6 (populated-DB exercise) | beta-hub exercise scheduling | **user** — deliberately deferred; pre-beta gate item | told em6 + integration2-operator 20:0xZ |
+| **DEF-27 — soft-deleted native topic gets a shadow conversation** | **RELEASE BLOCKER for §2.6.4.** Found by `nc-arch` 21:59Z, verified by me on both backends. `GetTopicConversationID` filters `deleted_at IS NULL` (`webchannel_store.go:1364`, `webchannel_store_postgres.go:978`); `DeleteTopic` is soft. A tombstoned topic answers `ErrNotFound` → guard mints. Reachable: agent/broker paths validate DM-key *format* only, never topic existence; trigger is a human deleting a thread mid-agent-turn. **Root cause is one function answering two questions with opposite `deleted_at` needs — split it (rule 51).** Spec: `def27-spec.md`, 6 ACs. **Does NOT affect #1331** (tranche A is dormant, no `pkg/hub`). | **em9** | dispatched 22:01Z |
+| **AC-12-6 (populated-DB exercise)** | beta-hub exercise scheduling. **Verification design now settled with integration2-operator (22:00Z):** snapshot is stop → `wal_checkpoint(TRUNCATE)` → cp → start, so restore is safe; explicit `backfill --dry-run` then `--execute` first, startup detection as *second* confirmation; atomicity treated as unknown, restore preferred over resume. **Three correctness checks added beyond the NULL count, which measures completeness only:** (a) convergence — `direct` conversations vs distinct principal pairs, with **fewer** being the STOP condition (collision = over-granting); (b) round-trip every backfilled DM through the **production** `ParseDMKey`, not a second parser; (c) INVARIANT D-1 on real data, kind-qualified. Review found and fixed: a kind-blind predicate that could not see kind confusion, an `external_ref != ''` filter excluding the worst rows, and two NULL holes (rules 51, 52). | **user** (scheduling) | design closed 22:02Z |
 | **§2.6.4 phases 1-4** | **ACCEPTED 21:56Z at `1aefd1e0`**, one doc item outstanding (guard header must state its residual). DEF-20 closed at the sink; F1 (guard hole) and F2 (malformed `thread:` ref) both closed and **independently re-verified by me** — my `INSERT OR IGNORE` and lowercase mutants now RC=1. **Accepted residual, documented not chased:** line-broken SQL and `fmt.Sprintf("INSERT INTO %s", tbl)` both evade any line-oriented grep. **Durable fix is structural and is MINE, phases 5-7:** `pkg/hub` should have no raw SQL path to `conversations` at all, at which point the control is the type system and there is no residual. **NOT YET CARRIED** — base `1e7bee72` is far behind `c13d910b`; carrier decided after #1331 lands. em9 pre-computing its aggregate-file list against the eventual rebase. | **me** (carrier) | accepted 21:56Z |
 | ~~§2.6.4 phases 1-4 (prev)~~ | ~~DEF-21 ✅ DEF-23 ✅ DEF-22 ✅ pending startup-ordering evidence. DEF-20 REOPENED~~ at `eb6c62a9` — mint has ≥7 entrances, three are guarded. Directed: drop the `Channel=="web"` predicate (sentinel makes it redundant), move the lookup into `ResolveOrCreateConversationByKey`, route the two direct `UpsertConversationByExternalRef` callers through it, add a CI grep gate. Plus the production-path integration test. **The mis-scope was mine (rule 40).** | **em9** | reopened 21:14Z |
 | ~~**DEF-25**~~ | **CLOSED 21:47Z.** Fixed in `77db74e6` (7 literals, `message_deprecation_test.go`) + `91c9e314` (4 more, `cmd/broadcast_test.go` — the ones my location-scoped spec missed, rule 46). Gate re-run by me: **EXIT=0**. Fast-forwarded onto staging. | — | done |
@@ -2029,6 +2066,71 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5bd. 21:59-22:02Z — DEF-27, and the same disease at three layers of the stack
+
+**`nc-arch` answered my ErrNotFound question with YES and found a real DEF-20-class hole.** Verified
+before filing: `GetTopicConversationID` carries `AND deleted_at IS NULL` in **both** backends
+(`webchannel_store.go:1364`, `webchannel_store_postgres.go:978`), and `DeleteTopic` is soft. A
+tombstoned native topic therefore answers `ErrNotFound`, which the sink guard reads as "not native,
+safe to mint." Reachable because the agent and broker paths validate DM-key *format* only and never
+topic existence — a human deleting a thread mid-agent-turn mints a shadow conversation for a topic
+that already had one. Spec `def27-spec.md`, dispatched to em9. **Does not touch #1331.**
+
+**The root cause is not the predicate**, and that is the part worth keeping: one function is being
+asked two questions whose `deleted_at` requirements are opposite. Patch it and it drifts back.
+Rule 51.
+
+**What makes this hour unusual is that the same shape appeared three times, independently, in three
+different layers:**
+
+1. **DEF-27** — a filter correct for the user-facing caller, wrong for the guard.
+2. **The beta-exercise D-1 query** — `AND c.external_ref != ''` excluding from a violation check the
+   rows that are most violating. A `direct` conversation with no key has no ACL.
+3. **The same query's NULL handling** — `NULL NOT LIKE '...'` is NULL, so the worst row is dropped
+   by three-valued logic rather than by an explicit filter. Then, after the fix, **the identical bug
+   on the other operand**: a NULL `principal_kind` nulls the whole concatenated pattern.
+
+Each time, **the thing that made the check come back clean was the finding.** Rules 51 and 52.
+
+Two smaller notes worth keeping. DEF-27's wrong predicate is in both backends because they were
+written from one template — **backend parity testing proves the two agree, not that either is
+right** (rule 26 extended; AC-27-3 requires separate per-backend tests as a result). And
+integration2-operator called the query set "final" *before* running the nullable-column sweep they
+had just committed to — the conclusion scheduled ahead of the work that would have overturned it,
+which is the same ordering as a green test written before its mutation.
+
+**nc-arch also corrected me, and I was wrong against my own notes.** I had said the durable fix for
+the raw-SQL mint path is "`pkg/hub` should have no raw path to `conversations`." That breaks
+atomicity — the dual-write tx must begin in the webchat store. The correct target: **hub owns the
+tx, but the row is written by the ent mutation over that tx** (`entsql.Conn{ExecQuerier: tx}` plus a
+tx-scoped ent client), keeping ent the single typed writer with validation and hooks. End state is
+zero raw INSERTs, reached by changing *how* hub writes, not *where* the write lives. I already hold
+INVARIANT U-TX-1 which says exactly this, and still aimed at the wrong target. Retargeted.
+
+## 5bc. 21:57-22:00Z — em9's rebase inventory reproduced my own rule-43 error
+
+em9 reported that `pkg/messaging` had been **"removed"** from main and that four `pkg/hub` files
+carried main-side deletions of −270, −102, −54, −75 lines requiring semantic reapplication.
+
+Both wrong, from one measurement error — diffing main's tip against their branch's tip. Their base
+sits on `messaging-v2`, ~95 commits of **our own** work, so every line our team added appeared as a
+line main "deleted." Computed from the true merge base `6268bac4`:
+
+    handlers_agent_messaging.go   main: +30  -0     us: +281 -0
+    handlers_broker_inbound.go    main: +20 -11     us:  +89 -0
+    handlers_chat_v2.go           main: +21  -3     us:  +56 -4
+    messagebroker.go              main:  (nothing)  us:  +83 -0
+
+Main deleted nothing anywhere. Tier 3 dissolved from 9 files to 3 ordinary merges; `messagebroker.go`
+moved to Tier 1. And `git log --oneline origin/main -- pkg/messaging` is **empty** — never existed,
+not removed. **Absence inferred as removal** (rule 25), and the dangerous part is that the
+plausible response to "removed" is to re-add the files, reverting a deletion that never happened.
+
+This is rule 43, which I wrote this morning about **my own** identical error. Their conclusion
+("the rebase target is not main, it is wherever #1331 lands") was right for the wrong reason and
+survives; their Tier 2 aggregate-file finding — `Makefile` and `ci.yml` list membership — was
+correct all along and is the real risk. Corrected inventory re-issued within three minutes.
 
 ## 5bb. 21:49-21:55Z — #1331 IS OPEN, and seven HIGH findings are one gap plus two deferrals
 
