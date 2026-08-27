@@ -5138,3 +5138,31 @@ config, so it is consistent rather than inventive. But it is **new behaviour ins
 described as a rebase**, and an upstream reviewer will meet it with no context. If review asks why
 it is there, the honest answer is that #1302 changed the constructor's contract under us and this
 is the branch adapting to it — not a feature smuggled in. Worth watching for on the upstream PR.
+
+## 2026-08-27 01:48Z — the tier is proposed upstream as #1310
+
+ptone clicked the compare URL. **`GoogleCloudPlatform/scion#1310`** — head `eaa14b14`, base `main`,
+`MERGEABLE`, 40 files, 0 reviews. Same head I verified after the rebase, so what is under review is
+what I checked.
+
+CI at open: `cla/google` fails, which is the known non-blocker on agent-authored commits (merged
+#1304 carried the same `agent@scion.dev` author and the same failure). Six checks still running.
+
+He clicked the **first** URL rather than the corrected one, so the body reads "+6860 −52" where the
+real figure is +6911. The difference is 51 lines of design doc and nothing else. I told him once,
+recommended leaving it, and did not press — I have no write access upstream and it is not worth his
+attention. Recording it so nobody later reads the discrepancy as a sign the branch moved.
+
+**Task #56 is now out of my hands.** What remains is upstream review, then repo-maintenance closing
+the fork PR and syncing fork main.
+
+### The one thing that would have been worth getting right
+
+The stale line count is trivial in itself, but the mechanism is not: **I put a machine-derivable
+number into prose I could not edit afterwards.** Fork write access does not extend upstream, so the
+moment ptone clicked, that body froze. The second URL existed precisely because I had spotted this,
+but a superseding message only works if the reader sees it before acting.
+
+The fix is not "post faster". It is **don't restate in prose what the PR page already shows.** The
+corrected body dropped the line count entirely rather than updating it, which is the right shape;
+I just shipped the wrong version first.
