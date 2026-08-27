@@ -5166,3 +5166,92 @@ but a superseding message only works if the reader sees it before acting.
 The fix is not "post faster". It is **don't restate in prose what the PR page already shows.** The
 corrected body dropped the line count entirely rather than updating it, which is the right shape;
 I just shipped the wrong version first.
+
+## 2026-08-27 01:55Z — #44 is NOT fixed. Measured broken on the exact head under upstream review.
+
+`sn-adminseed-dev` built an image from `scion/sn-tier` @ `eaa14b14` — the head now under review as
+#1310 — deployed `sn-adminseed-t` in `us-east4`, and called `/auth/me`:
+
+```json
+{"email":"scion-instance-gym@serverless-team-scion.iam.gserviceaccount.com","role":"member"}
+```
+
+**`role: member`.** The operator the tier's one-command deploy nominates as admin is not an admin.
+That is step 2 of §1, broken on the shipped path.
+
+### The actual root cause, verified by me and not taken on report
+
+`cmd/server_foreground.go:1889` gates the whole operational-settings subsystem on the driver, and
+the comment at `:1898` says it is *for postgres*. `SCION_SEED_*` reaches the hub **only** via
+bootstrap koanf → operational-settings DB → `ApplySnapshot`. The tier runs SQLite —
+`deploy_instance.go` contains zero postgres references and the instance logged
+`Database: sqlite (/root/.scion/hub.db)`.
+
+So the seed variable is **inert, not broken**. There was never a bug in the seed path to find. I
+spent hours yesterday looking for one.
+
+The chain that does work, intact on SQLite and post-#1300:
+
+```
+SCION_SERVER_HUB_ADMINEMAILS -> cfg.Hub.AdminEmails -> parseAdminEmails (:227, :1464)
+  -> hub.ServerConfig.AdminEmails (:1572) -> Server.AdminEmails() -> the provider (:2261)
+  -> ws.adminEmails() -> checkUserAuthorized (web.go:1672)
+```
+
+### Why I got this wrong, which is the part worth keeping
+
+**Two independent breaks sat in series on one chain.** #1300 fixed a genuine one — WebServer read a
+stale by-value copy. So when I traced the chain afterwards, *every line I looked at was correct*,
+and I concluded the whole thing was fixed.
+
+The error was where I started. **I traced from the defect backwards until the code stopped looking
+wrong, and stopped there.** I never traced forward from where the value originates to confirm it
+enters the chain at all. A chain can be flawless from its second link onward and still carry
+nothing.
+
+That is a different failure from the ones already in this log. It is not explaining away a bad
+signal (15:50), nor grepping for a literal, nor trusting a stale measurement (00:31). It is
+**stopping a trace at the point the code becomes correct rather than at the point the data
+originates.**
+
+**The caveat is the only reason this was caught.** I wrote "verified by reading, not exercising"
+into task #44 and refused to close it on that basis, over an entry that otherwise read as
+near-certain. One deploy falsified it. Had I closed it, an upstream reviewer or an operator would
+have found this instead — and ptone already found this same defect once.
+
+### My earlier refusal is now obsolete, and I am saying so rather than quietly reversing
+
+At 15:50 I refused to switch to `SCION_SERVER_HUB_ADMINEMAILS`: *"switching one variable to
+`SCION_SERVER_*` would hide a broken mechanism rather than fix it."*
+
+Right then, wrong now. That reasoning depended on not knowing why the seed failed. The seed path is
+postgres-only **by design**, so there is no broken mechanism to hide and the driver-appropriate
+variable is simply the correct one. I put this explicitly in the developer's brief, because they
+will find the old refusal in this log and would otherwise think they were contradicting me.
+
+### Dispatched and filed
+
+- **`sn-adminfix-dev`** — brief at `briefs/sn-adminfix-dev.md`. One line at `deploy_instance.go:289`,
+  plus the test at `deploy_instance_test.go:637` that **passes today while the feature does not
+  work**. Set only `SCION_SERVER_HUB_ADMINEMAILS`, not both: the tier is SQLite by construction, and
+  shipping a postgres-only variable in a SQLite-only deploy path is dead code that reads as intent.
+- **`ptone/scion#1284`** — filed upstream. The gate itself is probably correct; **the silence is the
+  defect.** Setting `SCION_SEED_*` on SQLite expresses an intent the server cannot honour and the
+  operator is told nothing.
+
+Timing: #1310 has zero reviews, so this is the cheapest moment there will ever be to land the fix.
+
+### A test that was green about a mechanism that does not work — for the third time
+
+`deploy_instance_test.go:637` asserts the seed variable maps to `server.hub.admin_emails` in the
+koanf. It passes. It checks the wiring one hop short of the consumer that decides the role. **A test
+asserting "a user with this email gets role=admin" would have caught this on day one**, and I wrote
+that same sentence in this log yesterday about this same test without then changing the test.
+
+### Secondary, free from the same deploy
+
+- **#1273 needed no workaround.** The implicit `default` template bootstrapped cleanly. Confirmed
+  live, not read.
+- **#1276 needed no workaround.** IAP auth preflight worked immediately.
+- **New observation:** repeated "no session secret" warnings on startup. Not a blocker for a
+  single request; a problem for real usage. Needs its own look.
