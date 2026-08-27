@@ -106,10 +106,25 @@ S6 (phase 13, Removal) is deferred until after the beta exercise — rule 5.
 five sub-agents deleted by name: dev-i1-warnings, dev-i2i3-parsecheck, review-i1i4-fixes,
 audit-i1i4-fixes, dev-j1j2-floors. `ca-msg-em4` retired earlier, all ten of its sub-agents
 confirmed deleted. **No agents remain under this project but me.**
-**Blocked on:** a user decision, escalated 2026-08-27 13:20Z — **run the beta on what works
-now, or hold it until conversation routing is wired and the two DM row shapes are reconciled?**
-I recommended holding the full beta and first commissioning one failing test to turn DEF-8 from
-a code reading into evidence. **Nothing is running; spawn nothing until the user answers.**
+**Blocked on:** QA results from the integration hub. The earlier beta escalation (13:20Z) was
+overtaken by events — the user chose to deploy to the **integration** hub rather than the beta
+hub, which is the lower-risk version of the same experiment and does not need the question
+answered first. **Nothing is running; spawn nothing until QA reports back.**
+
+**DEPLOYED 2026-08-27 12:37Z.** `scion/messaging-v2` @ `ebf8cc27` is live on **scion-gteam**
+(`https://gteam.projects.scion-ai.dev`), deployed by `agent:integration2-operator`. Hub healthy,
+5 brokers reconnected, ent AutoMigrate applied the new tables silently, read switch off, no
+backfill activity (DEF-12, as predicted). 23 active agents, 39 projects.
+**The branch is frozen at `ebf8cc27` for the duration** — I instructed the operator not to
+rebase, so QA findings stay tied to a known commit. Branch is 58 ahead of `origin/main` and
+**9 behind**; `/readyz` returns 401 because the `isPublicRoute` fix (#1312) is among those 9.
+Not a messaging defect. **Rebase is owed before merge.**
+
+**QA is running against a populated production-like hub, which invalidated part of my own
+walkthrough.** It tells the tester to message `<some-agent>`; on a hub with 23 working agents
+that wakes a real agent mid-task and it acts on `QA check one` as an instruction. Corrected in
+flight — use a throwaway target. Recorded because the failure mode is general: **a document
+written for an empty environment carries assumptions it never states.**
 
 **DEF-5's premise was wrong and the item is superseded.** I scoped it as "resolution works,
 delivery policy is missing." Resolution does not work for either form, for data reasons, and
@@ -480,6 +495,13 @@ would bury the events that matter.
   an access grant to the wrong principal. Ambiguity must leave the row participant-less and fail
   closed. Nothing is exploitable today only because every `dm:` row has zero participants and so
   denies everyone. **Do not let a manager treat that backfill as routine data migration.**
+- `2026-08-27 12:37Z` **DEPLOYED.** `scion/messaging-v2` @ `ebf8cc27` live on **scion-gteam** via `agent:integration2-operator`. Hub healthy, 5 brokers up, migrations silent, read switch off, no backfill (DEF-12 as predicted). Branch frozen at `ebf8cc27` — operator instructed not to rebase.
+- `2026-08-27 12:35Z` **DEF-12 logged**: conversation backfill has **zero production callers** (`git grep Backfill` on `ebf8cc27`, excluding the file and tests, returns nothing). Historical messages will never get a `conversation_id`.
+- `2026-08-27 12:30Z` **DEF-11 logged**: divergence board counts every CLI `@<agent>` send as a mismatch; the Hub hand-builds `ConversationResult` with an empty `ExternalRef` so the comparator is fed a blank. Models agree; instrument lies.
+- `2026-08-27 12:34Z` QA walkthrough written and pushed (`fd0357d5`, `.design/messaging-qa-walkthrough.md`). Path sent to the user.
+- `2026-08-27 12:42Z` Smoke-test scope issued to the operator: baseline the board **before** any send, UUID-identity check, both must-fail cases, and the DEF-8 SQL. Part 4 interpretation **withheld** — raw JSON only, because a red board driven by DEF-11 will mislead anyone reasoning from it directly.
+- `2026-08-27 12:42Z` **Walkthrough correction issued in flight**: it says to message `<some-agent>`; on a live 23-agent hub that wakes a working agent, which then acts on the QA text as an instruction. Use a throwaway target. My omission — the doc was written for an empty beta hub.
+- `2026-08-27 12:43Z` Heartbeat: no managers running (correct — branch frozen for QA), branch unchanged at `ebf8cc27`/58 commits. Blocked on QA results.
 
 ## 5i. S5 — CLOSED 2026-08-27 12:40Z (accepted on round 3, `55dd6e16`)
 
