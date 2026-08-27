@@ -1,0 +1,63 @@
+package cmd
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// PROBE: checkpoint resume when messages share an identical created_at.
+// Realistic: a group[] fan-out writes N rows in the same instant.
+func TestProbe_CheckpointSameTimestampSiblings(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	projectID := seedBackfillProject(t, ctx, s)
+	senderID := uuid.NewString()
+
+	// Five messages, IDENTICAL created_at, distinct recipients so they form
+	// distinct conversations (so none can be attributed via another's group).
+	same := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		seedDMMessage(t, ctx, s, projectID, senderID, uuid.NewString(), same)
+	}
+
+	// Simulate an interrupted run: process, then resume from its checkpoint.
+	r1, err := runBackfillWithStore(ctx, s, messaging.BackfillConfig{
+		DryRun: false, ProjectID: projectID, BatchSize: 1,
+	})
+	require.NoError(t, err)
+	t.Logf("run1: processed=%d attributed=%d inferred=%d skipped=%d checkpoint=%s",
+		r1.TotalProcessed, r1.Attributed, r1.Inferred, r1.Skipped, r1.LastCheckpoint)
+
+	// Now the real question: a FRESH resume from that checkpoint, on a fresh
+	// set of same-timestamp rows, must not silently drop the siblings.
+	projectID2 := seedBackfillProject(t, ctx, s)
+	var ids []string
+	for i := 0; i < 5; i++ {
+		ids = append(ids, seedDMMessage(t, ctx, s, projectID2, senderID, uuid.NewString(), same))
+	}
+	// Checkpoint on the FIRST of the five; the other four share its timestamp.
+	r2, err := runBackfillWithStore(ctx, s, messaging.BackfillConfig{
+		DryRun: false, ProjectID: projectID2, Checkpoint: ids[0],
+	})
+	require.NoError(t, err)
+	t.Logf("run2 (resume from ids[0]): processed=%d attributed=%d errors=%v",
+		r2.TotalProcessed, r2.Attributed, r2.Errors)
+
+	got, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: projectID2}, store.ListOptions{Limit: 100})
+	require.NoError(t, err)
+	var missing int
+	for _, m := range got.Items {
+		if m.ConversationID == "" {
+			missing++
+		}
+	}
+	t.Logf(">>> messages left WITHOUT conversation_id after resume: %d of %d", missing, len(got.Items))
+	assert.Zero(t, missing, "resume silently skipped same-timestamp siblings")
+}
