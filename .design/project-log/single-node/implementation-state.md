@@ -5893,8 +5893,15 @@ Present at `f876e27b`, ABSENT at `23d7003a`: `pkg/runtime/cloudrun/iap_exec.go` 
 
 The revert is **self-consistent** — it removed callers and definitions together, so main compiles.
 
-> **A green CI is not evidence that nothing was lost.** It only proves internal consistency. A
-> revert is perfectly self-consistent.
+Verified rather than assumed: `go build ./...` at `23d7003a` exits **0**, no errors.
+
+> **A green CI is not evidence that nothing was lost.** It only proves internal consistency, and a
+> revert is perfectly self-consistent. Tests that would have caught the loss were deleted in the
+> same commit as the code they covered.
+
+The coordinator confirmed the whole finding independently at 03:26. Worth noting the process point:
+a claim this size — "a merged P0 security fix is gone from main" — should not rest on one agent's
+measurement, and I asked for it to be checked rather than assumed.
 
 ### Why "only one conflict" is the trap
 
