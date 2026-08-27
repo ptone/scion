@@ -479,6 +479,28 @@ Do not assume; this decision applies to all seven tranches.
 `GoogleCloudPlatform/scion#N`. A bare `#N` in this document is ambiguous and has already caused
 one wasted investigation.
 
+### Upstream SQUASH-merges — established 20:16Z, and it breaks one of my own checks
+
+`git log --merges origin/main` returns **nothing**, and every recent tip commit is single-parent
+with `(#N)` in the subject. **Each tranche will land as ONE new-SHA commit.** Its branch commits
+never appear on `main`. Two consequences, the second of which invalidates a check this very
+heartbeat instructs:
+
+1. **Rebasing a dependent tranche needs `--onto`.** After tranche A lands, tranche B (cut from A's
+   head `71b65292`) must move with `git rebase --onto origin/main 71b65292`. A plain
+   `git rebase origin/main` replays A's commits against content already squashed into `main` and
+   conflicts in **every file A touched**. That conflict is *the wrong command*, not hard work —
+   nobody should be forcing through it.
+2. **`git merge-base --is-ancestor <tranche-A-head> <branch>` will start FAILING once A lands, and
+   that failure is correct.** Heartbeat step 3 and rule 24 tell me to treat a false base claim as
+   an alarm. Here the alarm fires on healthy state. **A verification step that cannot distinguish
+   "the base is wrong" from "the base was squashed" will manufacture exactly the false alarm it
+   was written to catch** — and it will do so at the moment the plan is finally working. After a
+   tranche lands, the base check becomes: does the branch's *content* rebase cleanly onto main
+   with `--onto`, not is the old SHA an ancestor.
+
+Both points issued to em10 with tranche B (20:17Z) so the trap is disarmed before it is stepped in.
+
 **Tranches, ordered by blast radius:**
 
 | # | Content | Reachability | Risk |
@@ -568,7 +590,49 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 > historical record and is accurate *as of the timestamps it names* — read it as log, not as
 > current position.
 
-**CURRENT POSITION as of 2026-08-27 18:35Z**
+**CURRENT POSITION as of 2026-08-27 20:18Z**
+
+**Strategy: TRANCHES A-G off current `main`.** `scion/messaging-v2` is a **staging ground** and is
+never PR'd as one unit. Any instruction assuming a single integration-branch merge is stale.
+
+**Landing mechanism (established 20:00Z, rule 34 — previously assumed and never verified):**
+`ptone/scion` is a **fork**; its PRs are *staging* PRs and are closed, never merged. The real gate
+is an upstream PR in `GoogleCloudPlatform/scion`, authored by the user, and upstream
+**squash-merges** (see §1b). **Who opens the upstream PR is the one question currently blocking
+tranche A** — asked 19:55Z, unanswered.
+
+| Branch | Head | Base | State |
+|---|---|---|---|
+| `origin/main` | **`c13d910b`** | — | moves ~hourly. **Do not cache** (rule 24). |
+| `scion/messaging-v2` | `1e7bee72` | — | staging ground, 95 ahead. Not a merge unit. |
+| `scion/ca-msg-arch` (mine) | `b80b4ad9` | — | pushed |
+| **Tranche A** `scion/ca-msg-em10` | `71b65292` | `b09e7f49` | **VERIFIED GREEN by me.** `ptone/scion#1319`, CI green, MERGEABLE/CLEAN. Awaiting landing gate only. **SHA must not move.** |
+| **Tranche B** `scion/ca-msg-em10-trb` | not cut | `71b65292` (tranche A) | dispatched to em10 20:17Z |
+| DEF-12 `scion/ca-msg-em6-def12` | `068ddc17` | `14b3ba7c` | **2 HIGH findings from me** (F1, F2 — see §5c). em6 has 3 sub-agents on them. |
+| §2.6.4 `scion/ca-msg-em9-unify` | not pushed | `1e7bee72` | em9, phases 1-4, two serial devs |
+
+**Managers:** em6 (DEF-12 fixes), em9 (unification 1-4), em10 (tranche B). All live.
+
+**Blocked items, each with the owner of the unblock named (rule 28).** A row whose owner is *me*
+is a queue, not a blocker.
+
+| Item | Waiting on | Owner | Asked? |
+|---|---|---|---|
+| **Tranche A landing** | who opens the upstream `GoogleCloudPlatform/scion` PR | **user** | yes, 19:55Z, unanswered |
+| Tranche B | cut + rule-31 check | **em10** | dispatched 20:17Z |
+| DEF-12 (F1, F2) | fixes + new ACs | **em6** | dispatched 20:05Z |
+| AC-12-6 (populated-DB exercise) | beta-hub exercise scheduling | **user** — deliberately deferred; pre-beta gate item | told em6 + integration2-operator 20:0xZ |
+| §2.6.4 phases 1-4 | implementation | **em9** | dispatched 19:45Z |
+| §2.6.4 phases 5-7 | phases 1-4 landing | **me** — queue | n/a |
+| Tranches C-G | tranche B, then supervision capacity | **me** — queue | n/a |
+| DEF-5, DEF-6, DEF-7, DEF-9, DEF-11 | dispatch capacity; specs complete | **me** — queue, not blocker | n/a |
+| DEF-17/DEF-18 gate sweep | tranche sequencing | **me** — queue | n/a |
+
+---
+
+*Historical record below — accurate as of the timestamps it names. Read as log, not as position.*
+
+**POSITION as of 2026-08-27 18:35Z**
 
 **Integration branch head:** `edd4e4bd`, pushed, full suite green, 81 commits ahead of
 `origin/main`. Unchanged since 17:20Z — I have deliberately not pushed to it while em6 rebases
@@ -1512,6 +1576,40 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5an. Heartbeat 20:13Z — an idle manager, and a check that will cry wolf when the plan works
+
+**Roster healthy.** em6 blocked-but-productive (3 sub-agents already spawned on my F1/F2 findings —
+branch advanced `fda9977f`->`068ddc17`, +1260, **zero deletions**), em9 executing, em10 idle at
+"completed, 27 minutes ago". main unmoved at `c13d910b`.
+
+**em10 idle beside held work is the failure the heartbeat tells me to look for**, and it was mine:
+tranche B's blocker was "tranche A must land first", owner **me**, which rule 28 says is a queue.
+But A is blocked on a *procedural* gate, not a technical one — B needs A's *schema*, not A's
+*landing*. Cut B off A's head and the two proceed in parallel. **I had conflated "depends on A" with
+"waits for A," and one of those is about code while the other is about paperwork.**
+
+**Then the thing worth keeping.** Before dispatching B I checked how upstream merges, because B's
+endgame is a rebase. `git log --merges origin/main` returns **nothing** — upstream **squash-merges**.
+So each tranche lands as one new-SHA commit and its branch commits never become ancestors of main.
+
+That yields a trap in **my own standing procedure**. Rule 24 and heartbeat step 3 both say: verify
+the base with `merge-base --is-ancestor`, and treat failure as an alarm. Once tranche A lands, that
+check **fails for tranche B — correctly, on healthy state.** The check cannot tell "the base is
+wrong" from "the base was squashed."
+
+**A verification step that cannot distinguish success from the failure it hunts will fire precisely
+when the plan starts working** — and it fires on the tranche after the first successful landing,
+i.e. at the moment everyone is most inclined to believe the process is sound and least inclined to
+question the alarm. Worse, the *remedy* is also mis-signalled: a plain `git rebase origin/main`
+conflicts in every file A touched, which reads as "this tranche is a hard merge" when it actually
+means "you typed the wrong command." Both had to be pre-empted, so both went to em10 in the
+dispatch rather than into a note I would rely on someone reading later.
+
+**Generalising past git:** rule 22 says verify against the gate the work must pass. This is its
+mirror — **verify that your verifications can still tell pass from fail after the system changes
+state.** A check is written against a world; landing tranches changes that world. Nothing prompts
+you to re-derive a check that has been correct all day.
 
 ## 5am. 19:50-20:00Z — tranche A verified green, and the landing gate I had never looked at
 
