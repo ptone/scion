@@ -88,19 +88,81 @@ only thing standing between us and a script that prints a cheerful success banne
 Instance that is open to the internet. This tier runs with `invokerIamDisabled: true` — IAP is the
 *sole* network perimeter. There is no second line of defence behind this check.
 
-A bash rewrite makes it very easy to lose, because the natural bash idiom for "call a URL" is
-`curl -f`, which exits non-zero on a 403 — the exact response that means **the gate passed**. Get
-the polarity right, and make the failure message say plainly that the perimeter is open.
+### CORRECTION, 16:50 — my original §4 was wrong, and would have made you build the wrong gate
+
+I first wrote here that Gate 2 is a status-code check and told you to "branch on the status code".
+**That is wrong.** The reviewer's pre-work made me go back and read the five tests that pin this
+behaviour, and Gate 2 is not a status check at all — it is a **classifier over the redirect target
+and the response headers**. There is no `403` anywhere in it.
+
+Do not follow redirects. Capture the status line, the `Location` header, and the
+`X-Goog-Iap-Generated-Response` header, and classify:
+
+| Response | Verdict | The message must contain |
+|---|---|---|
+| `302` → `accounts.google.com`, IAP header present | **PASS** | — |
+| `302` → `accounts.google.com`, **no** IAP header | **PASS** — the redirect alone proves IAP is enforcing; the header is a bonus | — |
+| `200`, the app answers directly | **FAIL** | `UNPROTECTED` |
+| `302` to anywhere else | **FAIL** | `not to accounts.google.com` |
+| `502` or `503` (Cloud Run's own error page) | **FAIL** | `not be serving` **and** `CMD` |
+
+That last row is not perimeter logic — it is diagnosis. When the container is dead (wrong port,
+crash loop, missing binary) Cloud Run answers instead of IAP, and the operator needs to be told the
+problem is their image, not their auth. Keep that distinction; collapsing rows 3–5 into one generic
+"gate failed" throws away the whole diagnostic value.
+
+`curl` does not follow redirects unless you pass `-L`, so the default gets you the 302. **Do not
+pass `-L`, and do not pass `-f`** — `-f` suppresses the body and exits non-zero on codes you need
+to inspect.
 
 Both gates must keep their current pass/fail conditions, their timeouts, and their retry
 behaviour. **If you change any timing value, tell me the old value, the new one, and why.**
 
-Do not use `curl -f` for the probes. Capture the status code explicitly and branch on it.
+## 5. TRAP 2 — you are deleting 28 tests, not three
 
-## 5. TRAP 2 — the pin you must not silently drop
+### CORRECTION, 16:50 — I under-counted this badly
 
-`cmd/deploy_instance_test.go` is not a formality. It contains pinning tests that check the deploy's
-own output against the hub's own parser:
+I originally described `cmd/deploy_instance_test.go` as "three pinning tests". **It has 28 test
+functions in 737 lines.** Deleting the Go file deletes all of them. That is the single largest
+risk in this change and I got it wrong on the first pass.
+
+**This forces a structural requirement on `deploy.sh`, and you must adopt it before you write the
+script, not after.**
+
+Write `deploy.sh` as **sourceable shell functions** with a main guard at the bottom:
+
+```bash
+di_assert_perimeter() { ... }      # one function per step, no work at file scope
+di_derive_registry()  { ... }
+# ...
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  di_main "$@"
+fi
+```
+
+Sourcing the script must have **no side effects** — no gcloud calls, no output, no `set -e` trap
+firing, no argument parsing. That one property is what lets a test call a single function in
+isolation. Retrofitting it onto a monolithic script is a rewrite, which is why you are getting this
+now.
+
+With that seam, the tests survive. The five `TestAssertPerimeter_*` cases in §4 are the ones that
+matter most: each stands up a local stub HTTP server returning one of the five response shapes and
+asserts the verdict and the message text. A test can do exactly the same against
+`di_assert_perimeter` — stub server on localhost, call the function, check exit status and stderr.
+**Those five are mandatory.** They pin the classifier that is the whole point of Gate 2.
+
+The pure-function tests port the same way and should also survive: project-number validation,
+instance-URL validation, registry derivation, response sanitisation, the IAM member prefix, the
+IAP PATCH body and update mask, and the admin-email comma rejection. Several of these exist because
+we measured the defect they prevent — the "contaminated" validation cases are the impersonation
+warning being spliced into the URL, and the comma cases are a real `gcloud` failure.
+
+**Tell me your porting plan before you write the tests.** If you conclude some cannot be ported,
+say which and why — an honest gap I know about is worth far more than a number that looks intact.
+
+### The audience pin specifically
+
+Within those 28, three check the deploy's own output against the hub's own parser:
 
 - `TestBuildIAPAudienceAcceptedByIsSupportedIAPAudience` — the audience the deploy builds must be
   accepted by `isSupportedIAPAudience`.

@@ -9625,3 +9625,59 @@ including evidence that Gate 2 fired.
 
 Reported the plan and the pin trade-off to ptone at 16:40 before dispatching, offering to ship the
 image fix alone first if he wants the not-public reference off the published page sooner.
+
+### 35.5 ptone corrects the process; the reviewer immediately corrects me
+
+**ptone, 16:36:40Z:** *"stop doing work redundant to the code reviewer role. brief them. accept
+their results. this is the process"* (with a follow-up correcting the typo to "brief them").
+
+I had reserved the live walk and the verification evidence for myself. Both belong to a
+`code-reviewer` agent. Corrected:
+
+- Wrote `briefs/sn-backout-review.md` and dispatched `sn-backout-review`, told explicitly that its
+  verdict is final and that I will not re-run its checks.
+- Amended the developer brief. §8's live-walk gate is deleted; the developer keeps only
+  `go build`, `go test`, `bash -n`, and one cheap check — that the replacement pin **fails** when
+  the format string is deliberately broken. §10 now asks for a candid handover note (weakest step,
+  what could not be tested without a deploy) instead of proof for me to re-check.
+- Both agents were parked on the workspace trust prompt behind a healthy `running` phase. Cleared
+  each within 40s. **That is three for three today** — treat it as the default state after
+  `scion start`, not an anomaly.
+
+**The process change paid for itself within four minutes.** The reviewer's pre-work report
+mentioned `deploy_instance_test.go` is **737 lines**. I had told the developer it held "three
+pinning tests". I went back and read it:
+
+| My brief said | Measured |
+|---|---|
+| 3 pinning tests | **28 test functions** |
+| Gate 2 branches on a status code, `403` means it passed | **Gate 2 never sees a 403.** It is a classifier over the redirect target and headers |
+
+The five `TestAssertPerimeter_*` cases, each an `httptest` stub:
+
+| Response | Verdict | Required message |
+|---|---|---|
+| `302` → `accounts.google.com` + IAP header | PASS | — |
+| `302` → `accounts.google.com`, no header | PASS (redirect alone proves enforcement) | — |
+| `200`, app answers | FAIL | `UNPROTECTED` |
+| `302` elsewhere | FAIL | `not to accounts.google.com` |
+| `502`/`503` | FAIL | `not be serving` + `CMD` |
+
+**My "branch on the status code" instruction would have produced a Gate 2 that passes on an open
+Instance.** I wrote that sentence in the same brief where I called Gate 2 the most dangerous part
+of the change — the warning was right and the instruction under it was wrong.
+
+**Design consequence, issued to the developer before it writes any bash:** `deploy.sh` must be
+**sourceable functions with a main guard**, and sourcing must have **no side effects** (no gcloud,
+no output, no argument parsing at file scope). That seam is what lets the five perimeter cases be
+ported against a local stub server rather than lost. Retrofitting it onto a monolithic script is a
+rewrite, which is why the instruction had to arrive now.
+
+Briefs §4 and §5 rewritten in place; developer told to stop and re-read; reviewer given the
+five-case table as the review specification and told a non-sourceable `deploy.sh` is a blocking
+finding.
+
+**The lesson, and it is the same one as the `cla/google` false blocker:** I characterised a file
+from its three most interesting functions instead of counting it. One `grep -c '^func Test'` —
+available the whole time — was the difference between a correct brief and one that would have
+shipped an open perimeter past a reviewer who was reading my table as the specification.
