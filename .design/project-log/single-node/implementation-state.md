@@ -5992,3 +5992,66 @@ with `git apply -3`, cleanly, zero conflict markers, and `IsLoopbackHost` is res
 **Judged against §1, not against activity:** nothing in tonight's work moved the §1 walkthrough,
 because §1 already passes. Tonight was about making the branch mergeable and honest. The revert is
 now the only thing between the tier and a squash merge.
+
+### 03:39 — CORRECTION: my repair sizing was too optimistic, and the tool I used is why
+
+I reported "16 files, `go build ./...` exit 0" with the caveat that tests had not run. The tests
+have now run. **They fail.** The corrected surface is **at least 19 files and I cannot bound it.**
+
+> **`go build ./...` does not compile test files.** I presented a build result as if it measured
+> the repair. It measured less than half of it. The very first `go test` produced
+> `cmd/server_foreground_broker_test.go:105: undefined: config.V1CloudRunConfig`.
+
+**The mechanism, which matters more than the count.** `V1CloudRunConfig` is a type that #1302
+removed and #1301 restored. #1301's *test* files are written against the reverted shape. So the
+repair does not converge file-by-file — each restore breaks the next test that had adapted:
+
+```
+restore pkg/config/settings_v1.go
+  -> breaks cmd/server_foreground_broker_test.go   (undefined: config.V1CloudRunConfig)
+restore cmd/server_foreground_broker_test.go
+  -> breaks pkg/config/settings_overlay_test.go    (undefined: V1CloudRunConfig)
+  -> breaks pkg/config/settings_v1_test.go         (CloudRun.Project undefined)
+```
+
+This is the accretion hazard I flagged at 03:35, and it is **worse than I described it**. I called
+it "a one-line rename today". It is not one stale call site; it is a spreading front through the
+test suite.
+
+**Where my method was wrong.** The pure-revert/mixed classification was correct *for source files*
+and I verified it properly. But I then used it to estimate **total repair cost**, and it cannot
+support that, because it never examined test files at all. A correct sub-measurement used to answer
+a question it does not address is still a wrong answer.
+
+**Unattributed:** `pkg/hub` FAIL at 240s, no `--- FAIL` line surfaced. It may be the known flaky
+race rather than the repair. Control run against unmodified `23d7003a` is in flight. **Not claiming
+either way until the control lands.**
+
+**Ownership:** ptone corrected me at 03:36 — "This is not the workstream that caused the damage".
+#1301 came from `scion/auth-refactor`; `auth-refactor-lead` owns the repair. I have stood down. The
+correction above was sent anyway, because my understated figure may have reached them and planning
+against it would hurt.
+
+### 03:37 — task #58 verified, and one reported number was wrong
+
+`sn-review-dev` pushed `38ba412e`. Verified independently against the compare API, not taken on
+trust:
+
+| Claim | Verified |
+|---|---|
+| `_COMMIT_SHA: ''` removed | yes — `substitutions:` now holds only `_REGISTRY` and `_TAG`, matching all seven siblings |
+| `waitForSandboxLiveness` + 5 tests | yes — all five `TestWaitForSandboxLiveness_*` present |
+| `resizeSandboxTerminal` extracted | yes |
+| R1/R2 context threading | yes — `NewRequestWithContext` present, `CommandContext` x11 |
+| "**61 files** vs main" | **NO — it is 37, ahead 14.** |
+
+The work is right; the file count in the report was not. Had I taken 61 at face value I would have
+believed the branch ballooned by 24 files and dispatched someone to shrink a branch that never grew.
+Same class of error as the zizmor misattribution earlier: **a reported number is an allegation; the
+authoritative source is the evidence.** Here the authoritative source is the GitHub compare API, not
+a local `git diff` against a possibly-stale local `main`.
+
+**#58 stays open.** The two decline replies (R3, R6) are still unposted — both PATs return 403,
+lacking `pull_requests:write` on upstream. The code half is done; the communication half is not, and
+an unanswered bot comment reads as an unaddressed one. That was the whole reason the replies were
+written.
