@@ -134,6 +134,9 @@ type Store interface {
 
 	// AgentSessionMetrics operations (Hub Metrics Reporting)
 	AgentSessionMetricsStore
+
+	// Conversation operations (Multi-Party Messaging)
+	ConversationStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -1546,4 +1549,60 @@ type AgentSessionMetricsStore interface {
 	// CountDistinctAgentsByProject returns the number of distinct agents with
 	// session metrics in a project.
 	CountDistinctAgentsByProject(ctx context.Context, projectID string) (int, error)
+}
+
+// =============================================================================
+// Conversations (Multi-Party Messaging)
+// =============================================================================
+
+// ConversationStore manages conversation, participant, and addressee persistence.
+type ConversationStore interface {
+	// CreateConversation creates a new conversation.
+	// Returns ErrAlreadyExists if a conversation with the same ID exists.
+	CreateConversation(ctx context.Context, conv *Conversation) error
+
+	// GetConversation retrieves a conversation by ID.
+	// Returns ErrNotFound if the conversation doesn't exist.
+	GetConversation(ctx context.Context, id string) (*Conversation, error)
+
+	// UpdateConversation updates an existing conversation.
+	// Returns ErrNotFound if the conversation doesn't exist.
+	UpdateConversation(ctx context.Context, conv *Conversation) error
+
+	// DeleteConversation soft-deletes a conversation by setting DeletedAt.
+	// Returns ErrNotFound if the conversation doesn't exist.
+	DeleteConversation(ctx context.Context, id string) error
+
+	// ListConversations returns conversations matching the filter.
+	ListConversations(ctx context.Context, filter ConversationFilter, opts ListOptions) (*ListResult[Conversation], error)
+
+	// UpsertConversationByExternalRef creates or updates a conversation keyed on (surface, external_ref).
+	// This is the idempotent broker-edge operation. Returns the conversation (created or existing).
+	// CRITICAL: this must be safe under concurrent calls — the UNIQUE partial index is the guard.
+	UpsertConversationByExternalRef(ctx context.Context, conv *Conversation) (*Conversation, error)
+
+	// AddParticipant adds a principal to a conversation.
+	// Returns ErrAlreadyExists if the participant already exists.
+	AddParticipant(ctx context.Context, p *ConversationParticipant) error
+
+	// RemoveParticipant soft-removes a participant by setting LeftAt.
+	// Returns ErrNotFound if the participant doesn't exist.
+	RemoveParticipant(ctx context.Context, conversationID, principalKind, principalID string) error
+
+	// ListParticipants returns active participants of a conversation (where left_at IS NULL).
+	ListParticipants(ctx context.Context, conversationID string) ([]ConversationParticipant, error)
+
+	// GetConversationsForPrincipal returns conversations a principal participates in (active, left_at IS NULL).
+	GetConversationsForPrincipal(ctx context.Context, principalKind, principalID string) ([]Conversation, error)
+
+	// AddAddressee adds an addressee record to a message.
+	// Returns ErrAlreadyExists if the addressee already exists.
+	AddAddressee(ctx context.Context, a *MessageAddressee) error
+
+	// ListAddressees returns all addressees for a message.
+	ListAddressees(ctx context.Context, messageID string) ([]MessageAddressee, error)
+
+	// UpdateDeliveryState updates the delivery state of an addressee.
+	// Returns ErrNotFound if the addressee doesn't exist.
+	UpdateDeliveryState(ctx context.Context, id string, state string, failureReason *string) error
 }

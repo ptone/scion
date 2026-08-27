@@ -1767,6 +1767,60 @@ type MessageFilter struct {
 }
 
 // =============================================================================
+// Conversations (Multi-Party Messaging)
+// =============================================================================
+
+// Conversation represents a conversation container for a thread of messages.
+// It may be a direct (1:1) or group conversation, and may originate from a
+// native or external surface (Discord, Slack, etc.).
+type Conversation struct {
+	ID             string     `json:"id"`
+	ProjectID      *string    `json:"projectId,omitempty"`      // nil for direct conversations
+	Kind           string     `json:"kind"`                     // direct | group
+	Surface        string     `json:"surface"`                  // native | discord | slack | telegram | gchat | teams
+	ExternalRef    string     `json:"externalRef,omitempty"`
+	ParentRef      string     `json:"parentRef,omitempty"`
+	DisplayName    string     `json:"displayName,omitempty"`
+	DefaultAgentID *string    `json:"defaultAgentId,omitempty"` // MUST be a valid UUID; slugs rejected
+	DriftState     string     `json:"driftState"`               // active | orphaned | unresolvable
+	LastActivityAt time.Time  `json:"lastActivityAt"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	ArchivedAt     *time.Time `json:"archivedAt,omitempty"`
+	DeletedAt      *time.Time `json:"deletedAt,omitempty"`
+}
+
+// ConversationParticipant links a principal (user or agent) to a conversation.
+type ConversationParticipant struct {
+	ID             string     `json:"id"`
+	ConversationID string     `json:"conversationId"`
+	PrincipalKind  string     `json:"principalKind"` // user | agent
+	PrincipalID    string     `json:"principalId"`
+	Role           string     `json:"role"` // member | observer
+	JoinedAt       time.Time  `json:"joinedAt"`
+	LeftAt         *time.Time `json:"leftAt,omitempty"`
+}
+
+// MessageAddressee records one principal that a message is addressed to,
+// how the addressing was resolved, and the current delivery state.
+type MessageAddressee struct {
+	ID            string  `json:"id"`
+	MessageID     string  `json:"messageId"`
+	PrincipalKind string  `json:"principalKind"` // user | agent
+	PrincipalID   string  `json:"principalId"`
+	Via           string  `json:"via"`           // explicit | body-mention | default-agent | direct
+	DeliveryState string  `json:"deliveryState"` // pending | delivered | failed
+	FailureReason *string `json:"failureReason,omitempty"`
+}
+
+// ConversationFilter defines query parameters for listing conversations.
+type ConversationFilter struct {
+	ProjectID  string
+	Kind       string
+	Surface    string
+	DriftState string
+}
+
+// =============================================================================
 // Scheduled Events (One-Shot Timers)
 // =============================================================================
 
