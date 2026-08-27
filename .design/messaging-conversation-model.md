@@ -868,6 +868,68 @@ both projects. Not two implementations that agree by convention, which is how DE
 
 ---
 
+## 2.12 Repairing the divergence comparison (DEF-11)
+
+*Added 2026-08-27 13:46Z. Dispatchable now — see the note on the conflict that does not exist.*
+
+**The defect.** When the CLI has already resolved a conversation, the Hub correctly skips
+re-resolution but then builds its result object by hand and populates only one field
+(`handlers_agent_messaging.go:828-832`):
+
+```go
+if structuredMsg.ConversationID != "" {
+    storeMsg.ConversationID = structuredMsg.ConversationID
+    convResult = &messaging.ConversationResult{
+        ConversationID: structuredMsg.ConversationID,   // ExternalRef left empty
+    }
+}
+```
+
+The divergence comparison then tests that empty `ExternalRef` for a `dm:` prefix, finds none, and
+records `routing-type-mismatch` (`divergence.go:176`). **The two models agree; the comparison is
+being handed a blank.** Every `scion message @<agent>` send therefore reports as a mismatch.
+
+**Why this is the gate, not a cosmetic bug.** The documented precondition for enabling the read
+switch is non-zero matches and **zero** mismatches. DEF-11 makes zero unreachable, so the switch
+could only be enabled by overriding its own safety criterion — which converts a gate into a
+formality. Nothing downstream of the read switch can proceed honestly until this is fixed.
+
+**Decision: populate `ExternalRef` by loading the conversation.** The handler has the ID; it
+reads the row and copies the ref onto the hand-built result.
+
+**Alternative rejected — treat an empty `ExternalRef` as "not compared" rather than a mismatch.**
+Superficially attractive: it is a one-line change and the board goes green. That is precisely
+what makes it wrong. Nearly all new-model traffic arrives CLI-resolved, so this would silence the
+comparison on the majority of sends while reporting clean. **This is rule 14 applied to a system
+rather than a test: a check whose input can silently become empty is not a check, and one that
+reports success on an empty input is worse than no check at all.** The blank is the symptom; the
+fix is to stop producing it.
+
+**Cost.** One indexed read by primary key on a path that already performs a write. Acceptable. If
+it later proves not to be, the correct optimisation is for the CLI to send the ref it already
+computed — not to weaken the comparison.
+
+**Note on sequencing — I held this work for a conflict that does not exist.** DEF-11 was deferred
+to a later section on the belief that its fix would collide with S6 in
+`handlers_agent_messaging.go`. Checked 13:45Z: `git diff --stat messaging-v2..ca-msg-em6 --
+pkg/hub/` is **empty**. S6 touches no file in `pkg/hub`. The premise was never verified — the
+same failure as rule 15, applied to a scheduling decision rather than a design claim. Rule 15 is
+hereby read to cover **any** premise that gates action, not only capability claims in prose.
+
+**Acceptance criteria.**
+
+- **AC-DEF11-1** A send carrying a pre-resolved `ConversationID` produces a `ConversationResult`
+  whose `ExternalRef` equals the stored conversation's `external_ref`. Asserted on the value, not
+  on the fact that a loader was called.
+- **AC-DEF11-2** Two sends to the same agent — one legacy, one CLI-resolved — produce a
+  divergence **match**, not a mismatch. This is the observable that matters.
+- **AC-DEF11-3** A pre-resolved ID naming a conversation that does not exist, or one whose ref is
+  empty, is recorded as a **fallback** with a distinct reason string — never silently as a match.
+  Mutation-verified: make the loader return an empty ref and confirm the named test fails.
+- **AC-DEF11-4** The mismatch counter has a **floor** in test: a run with known-divergent traffic
+  must report non-zero mismatches, so that a comparison which has stopped comparing cannot pass
+  as clean.
+
 ## 2.11 Running the backfill (DEF-12)
 
 *Added 2026-08-27, after the integration-hub deploy. Describes work that does not exist yet.*
