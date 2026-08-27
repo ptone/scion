@@ -11895,3 +11895,68 @@ explaining the difference." The validator already exists, so it is near-free.
 place. Worth remembering as a shape: **a URL builder that cannot be pointed anywhere else makes
 everything downstream of it unpinnable.** The seam is not a testing convenience here — it is the only
 way the property can be checked at all.
+
+## §35.43 — R7 verified on the API, delta review dispatched to a FRESH reviewer (22:52)
+
+### The developer's counts were right when it said them and stale by the time I checked
+
+Independent verification of `5b5f4ce9a`:
+
+```
+5b5f4ce9a93d508beba2f9e50403aa01e518ddd8
+status=diverged ahead=6 behind=1 files=4
+```
+
+The developer reported `ahead 6 / behind 0`. **Both are true.** Upstream `main` moved in the ten
+minutes between its rebase and my check — `cca1f87d3` (`GoogleCloudPlatform/scion#1329`, user-management
+admin handlers). I checked the overlap rather than assuming: that commit touches
+`.design/project-log/` and seven files under `pkg/hub/`, and this branch touches
+`cmd/deploy_script_pin_test.go`, `cmd/deploy_script_test.go`, the hub-setup doc, and
+`scripts/single-node/deploy.sh`. **No overlap.** The rebase is mechanical.
+
+**I am not rebasing now.** The reviewer is about to run gates against a specific SHA and a force-push
+under it would make its results unattributable. The branch stays frozen at `5b5f4ce9a` until the
+verdict, then I rebase immediately before generating the compare URL — because the one thing the
+compare URL must not do is read as stale to ptone, and he has reacted to exactly that before.
+
+**Standing note: `behind` is a reading with a shelf life.** It was accurate when measured and wrong
+twenty minutes later, through nobody's error. Measure it last, not first.
+
+### Fresh reviewer, not the round-1 reviewer — and why that cost me something
+
+`sn-adcpreflight-rev` is still up and responsive, with the whole of round 1 in context. Reusing it
+would have been cheaper and it is the obvious move.
+
+**I started `sn-adcpreflight-rev2` instead.** The central question of this delta is whether my override
+of the round-1 reviewer's own accepted judgement on `_DI_API_BASE` was right. That reviewer has already
+said in writing that the unwidened seam was fine as-is; asking it whether widening it is also fine
+invites the answer it already gave. **A reviewer cannot be adversarial about a position it holds.**
+
+The cost is real — the new agent re-reads the round-1 report instead of remembering it. That cost is
+payable precisely because **the handoff is on disk**: `reviews/adc-preflight-r1.md`,
+`briefs/sn-adcpreflight-dev-r2.md`, and the new brief carry everything. This is the second time today
+that writing the handoff down before it was needed turned an agent swap from a crisis into a choice.
+The first was `sn-adcpreflight-dev` wedging.
+
+### What the delta brief actually asks for
+
+Scoped to `5b5f4ce9a` plus the two round-2 items round 1 never saw. Explicitly **do not redo** the live
+walk — round 1 already proved `iapEnabled: true` and the 302 on a real Instance.
+
+The sharp questions:
+
+1. **Is "same variable, same token, no new class of risk" true?** A GET is a read; the PATCH is a
+   write. I believe the difference is immaterial. I have asked to be shown otherwise.
+2. **Can the `*.googleapis.com`-or-loopback check be defeated by string prefixing?**
+   `evil-googleapis.com`, `googleapis.com.evil.tld`, userinfo `https://x@evil/`, ports, IPv6 loopback
+   forms, uppercase. **A host check that a prefix defeats is worse than no check**, because it converts
+   a seam people know is open into one they believe is closed. This is the finding that would flip the
+   verdict.
+3. **Is validating in the preflight on behalf of step 3b orphanable by a future refactor?** The
+   developer kept `di_build_iap_patch_url` a pure echo helper deliberately and leans on the ordering
+   pin for the invariant. That is a design judgement and I want a second one.
+4. **Spot-check the pins by mutation, not by reading** — especially m7 and m8, and check no other pin
+   has the m4 shape (a pin that cannot distinguish the mutated tree from the clean one).
+
+I also told it, as I tell all of them: **tell me what in the brief is wrong.** The round-1 reviewer
+sent four corrections and all four landed; the developer has corrected me twice since.
