@@ -7949,3 +7949,71 @@ signal, no exit code, no `sandbox wait end`. `idle-1` did exactly that, and the
 file, not `def`'s.
 
 Still waiting on `sn-stress-max` for the same recount before the 15 is publishable.
+
+## 08:10 — Both ceilings verified by independent enumeration; a result I liked did not survive
+
+`sn-stress-max` reported its recount at 08:07. I verified it myself with my own Cloud Logging
+queries rather than accept a self-report, exactly as I did for `sn-stress-def`.
+
+**Phase B, my query, first and last log timestamp per sandbox:**
+
+```
+w-1          07:30:36 -> 07:38:37      <-- died early, NOT alive at the ceiling
+w-2 .. w-15  07:30:53 -> 07:50:37..07:51:20
+w-16         07:51:25 -> 07:51:37      <-- the create that triggered the crash
+test-claude  07:28:13 -> 07:50:33      <-- LEAKED, alive throughout, uncounted
+test-generic 07:27:08 -> 07:27:19      <-- 11 seconds, never alive
+```
+
+**Phase A, my query, window 07:08:30-07:10:00:** 52 names — `stress-test-0` plus `idle-6..idle-56`.
+`idle-56` was created at 07:09:44, after the 07:09:07-27 sweep. So the sweep is **51**. Zero
+non-`stress-test--` names. Phase A is clean.
+
+### FINAL, both sizes
+
+| size | idle | working |
+|---|---|---|
+| 4 CPU / 8 GiB (default) | **20** | **6** |
+| 8 CPU / 32 GiB (maximum) | **51** | **14** |
+
+### The correction that cost me a result
+
+Ninety minutes ago I told `sn-stress-def` that its own correction had revealed "the cleanest result
+in the test" — Phase A/Phase B ratios of 3.33 and 3.40, which looked like a real constant rather
+than two numbers that happened to land near each other.
+
+**It is not a constant, and the reason is composition.** `max`'s 15 live sandboxes were 14 working
+agents plus one leaked idle one. `def`'s 6 were 6 working agents. The two Phase B figures were never
+measuring the same population. Counting working agents only, the ratios are **3.33 and 3.64**.
+
+Two points, and the ratio moves depending on which definition you pick. That is not a constant; it
+is a coincidence I was pleased by and did not interrogate. **I have spent this week telling agents
+that a number they like is the one to check hardest, and then failed to apply it to mine within the
+hour.** The published guidance carries no ratio.
+
+`max` did not report `w-1`'s early death — I found it. It did report the leak, which is the larger
+finding, without labelling it as a defect.
+
+### Published guidance: the rule, not the number
+
+No per-CPU or per-GiB formula is derivable. 4x memory and 2x CPU bought ~3x idle and ~2x working.
+
+The operating guidance is **create latency**, not a headcount: under 2s means headroom, 10s or more
+means stop. Measured at both sizes, needs no new code, and it responds to what agents are doing
+rather than how many exist. **The number is context; the signal is the guidance.**
+
+Chose 14 over 15 for the maximum size deliberately. One of the 15 was the leaked idle sandbox.
+Running fewer agents than you could costs capacity; running more destroys every workspace with no
+warning. The errors are not the same size.
+
+### Actions
+
+- `sn-findings-dev` dispatched (`briefs/sn-findings-dev-2.md`) to file two new defects:
+  **hub DELETE leaks the sandbox** (mirror of task #17 — hub-dead/sandbox-alive vs
+  hub-alive/sandbox-dead, one missing reconciliation in both directions), and **a sandbox can die
+  with no log entry at all**. Told explicitly not to merge them: surfacing together is not evidence
+  of a shared cause.
+- `sn-docs-dev` unfrozen with the four numbers and the latency rule.
+- ptone sent one corrected set in STE, as promised.
+- `sn-stress-def` deleted after grepping its log — nothing unrelayed, heartbeats only.
+  Branch `scion/sn-stress-max` preserved (`5f207c9`, 3 commits).
