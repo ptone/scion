@@ -208,6 +208,10 @@ func (m *mockIntegrationManager) GetGRPCBrokerAdapter(name string) plugin.GRPCBr
 	return nil
 }
 
+func (m *mockIntegrationManager) BrokerQuery(ctx context.Context, name string, operation string, params json.RawMessage) (json.RawMessage, error) {
+	return nil, plugin.ErrUnsupportedOperation
+}
+
 // --- Auth tests ---
 
 func TestIntegrations_Unauthenticated(t *testing.T) {

@@ -856,6 +856,24 @@ func (b *DiscordBroker) GetInfo() (*plugin.PluginInfo, error) {
 	}, nil
 }
 
+// BrokerQuery handles named query/action operations.
+func (b *DiscordBroker) BrokerQuery(ctx context.Context, operation string, params json.RawMessage) (json.RawMessage, error) {
+	switch operation {
+	case "list-channels":
+		return b.queryListChannels(ctx, params)
+	case "list-threads":
+		return b.queryListThreads(ctx, params)
+	case "set-default":
+		return b.querySetDefault(ctx, params)
+	case "channel-history":
+		return b.queryChannelHistory(ctx, params)
+	case "send-dm":
+		return b.querySendDM(ctx, params)
+	default:
+		return nil, plugin.ErrUnsupportedOperation
+	}
+}
+
 // HealthCheck returns the runtime health of the Discord broker.
 func (b *DiscordBroker) HealthCheck() (*plugin.HealthStatus, error) {
 	b.mu.RLock()
