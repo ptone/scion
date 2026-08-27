@@ -7642,3 +7642,57 @@ six-way audience matrix that found the real IAP cause after I guessed wrong.
 If cell 1 returns 201, the register and two briefs need correcting. **If cell 1
 still fails, that is the more valuable result**: it means #1305 did not close our
 defect and the register is right.
+
+## 07:49 — The four-cell matrix found a mutated defect, not a fixed one (task #68 closed)
+
+`sn-docs-dev` ran the matrix on a throwaway instance and tore it down:
+
+| template | harnessConfig | HTTP |
+|---|---|---|
+| omitted | omitted | **502** |
+| `"default"` | omitted | **502** |
+| omitted | `"claude"` | 201 |
+| `"default"` | `"claude"` | 201 |
+
+```
+runtime_error: failed to find harness-config "antigravity":
+harness-config "antigravity" not found
+```
+
+**harnessConfig is the deciding field; template is not.** `GoogleCloudPlatform/scion#1305`
+DID fix the template half — both failing cells resolve template correctly. **Two
+cells would have shown "still broken" and stopped there.** The matrix is what
+separated the fixed half from the surviving one.
+
+**THE DEFECT MUTATED RATHER THAN CLOSING, AND MY REGISTER NOW DESCRIBES THE OLD
+ONE.** Tasks #37/#48 say the dispatched harness-config name is **empty**. It is not
+empty any more. #1305 made template resolve, so the default template's harness
+field now resolves to a **real** name that is **unregistered**. Same symptom,
+different cause — the lesson I have been repeating all week, this time against my
+own register. Both entries rewritten as superseded rather than closed.
+
+Also: it is **502**, not the **500** I asserted in two briefs.
+
+**Two source facts I checked, which make this much worse than "specify both
+fields":**
+
+- `pkg/config/embeds/default_settings.yaml:32` — `default_harness_config: antigravity`.
+  Product-wide default, not a quirk of one template.
+- `image-build/cloudbuild-omni.yaml` — builds antigravity as **stage 6**, its comment
+  calling the chain *"a deliberate subset of harnesses for single-node deployment"*.
+
+**So the omni image is built ON PURPOSE to carry the default harness, and the
+default path is still broken on it.** An operator who omits the field gets a 502
+naming a harness they never chose and have never heard of, with no route from that
+string to the fix.
+
+I nearly answered `sn-docs-dev`'s question as asked — "should the callout say
+harnessConfig is required, or specify both?" — which would have settled a wording
+question and missed the defect standing behind it. **The question was smaller than
+the finding.**
+
+Dispatched: filing to `sn-findings-dev`, doc update to `sn-docs-dev` (lead with the
+verbatim error text so a search lands on the page).
+
+Task #42 (`noAuth`) is NOT covered by this matrix and remains unverified against
+`GoogleCloudPlatform/scion#1304`.
