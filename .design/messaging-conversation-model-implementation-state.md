@@ -832,6 +832,53 @@ there is a reason they kept both that I am not seeing.
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
 
+## 5t. Heartbeat 14:43Z — the mutation that came back green
+
+**Roster healthy.** S6 blocked with `dev-def8-hubtest` active; S7 blocked with work complete,
+correctly parked awaiting a merge signal. Integration branch still `ebf8cc27` — nothing landed,
+which is correct: the gate is mine and it is shut pending one test.
+
+**The most valuable thing that happened today came back green.** I required three mutations from
+S6 before merging DEF-8. Two bit. **Mutation 1 — restore `senderKind := "user"` — left the entire
+suite passing.** The safety test checks *empty* kind at the function level; the mutation produces
+`"user"`, a valid kind yielding a wrong-but-well-formed key. **The bug lives at the handler and
+the test lives at the function, so the test cannot see it.** The security-critical fix of the
+round was the only one of the three with no live coverage.
+
+S6 self-reported this. "All three pass" would have been accepted without question and I would
+never have known. **A green mutation concealed converts a known gap into an unknown one** — worse
+than a red test, because a red test is information.
+
+They then asked whether the function-level net was sufficient "given the handler code is
+structurally correct and the if/else is visible in review." **That argument had already failed
+today: that exact line was visible in review twice** — non-blocking from the reviewer, Low from
+the auditor. Review is not the safety net for a defect that review passed. Also worth naming:
+mutation 1 is not hypothetical, it **replays code that was on the branch ninety minutes earlier**,
+so the test is a regression test for a real defect, not a speculative one.
+
+**S7 approved at round 3.** Counter fix verified directly: `LogDivergence` branches
+`if entry.Fallback { IncFallback() } else { Inc(entry.Match) }` — one event, one counter, gate
+reachable. Their trajectory is the useful record: round 1 put tests where they could not observe
+the fix; round 2 inferred a condition from an empty value; round 3 was correct except for a
+deviation they had spotted and self-rated acceptable. **The defect analysis was right in their
+first message and never changed. What moved across three rounds was the standard for done.**
+
+**DEF-9 specced (§2.13), and I checked before escalating.** Grepped first per rule 16:
+`AddAddressee` has **zero callers**; `DefaultAgentID` is written at three sites and read at none;
+`delivery.go` holds a single formatter, so nothing routes by conversation. §2.4 already settles
+the resolution order, so **DEF-9 needed no product decision from the user** — worth noting because
+my instinct was to escalate it, and reading my own design first was the cheaper answer.
+
+The one design addition is today's lesson relocated: **zero addressee rows currently means three
+things** — resolution ran and correctly chose nobody, a bug skipped resolution, or a crash landed
+between the message insert and the addressee insert. Same empty-value ambiguity as DEF-11, worse
+consequence: not a miscounted metric but a message that silently woke nobody. Hence an
+always-populated `addressee_resolution` field: `none` is a statement, an unset field is a bug.
+
+**Blocked, precisely:** merge gate held on S6's handler-level test. DEF-9 is specced but
+**genuinely** blocked — it touches `handlers_agent_messaging.go`, `conversation_store.go` and
+`models.go`, all contested by both branches. Verified by file list, not assumed (cf. 5s).
+
 ## 5s. Heartbeat 14:14Z — verification has a shelf life; two defects caught in review
 
 **Roster.** S6 six commits, S7 one, both managers live. S6 showed blocked with no sub-agents
