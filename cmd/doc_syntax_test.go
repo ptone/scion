@@ -92,7 +92,23 @@ func TestDocSyntax(t *testing.T) {
 			args := strings.Fields(line)[1:] // strip "scion"
 			cmd, rest, err := rootCmd.Find(args)
 			require.NoError(t, err, "command not found: %s (from %s)", line, rel)
-			require.NoError(t, cmd.ParseFlags(rest), "flag parse failed: %s (from %s)", line, rel)
+			// Validate flag names exist without calling ParseFlags, which
+			// mutates global cobra state (Changed bits + bound variables)
+			// and breaks other tests in the full suite.
+			for _, tok := range rest {
+				if !strings.HasPrefix(tok, "-") {
+					continue // positional arg or flag value
+				}
+				name := strings.TrimLeft(tok, "-")
+				if i := strings.Index(name, "="); i >= 0 {
+					name = name[:i]
+				}
+				if name == "" {
+					continue
+				}
+				assert.NotNil(t, cmd.Flags().Lookup(name),
+					"unknown flag --%s: %s (from %s)", name, line, rel)
+			}
 		}
 		// Deny-list check.
 		for _, line := range lines {
