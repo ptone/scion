@@ -37,6 +37,19 @@
 # subtract the allowed packages. If a new minting surface is added to the
 # store interface, it must be added to this guard.
 #
+# LIMITATIONS
+# This guard is textual and line-oriented. It does NOT detect:
+#   - SQL split across lines (e.g., "INSERT INTO\n    conversations ...")
+#   - A table name supplied through a format verb or variable
+#     (e.g., fmt.Sprintf("INSERT INTO %s ...", tbl))
+# Both are low-risk in practice: every existing INSERT site in this codebase
+# puts "INSERT INTO conversations" on a single line (house style), and no
+# site constructs the table name dynamically. But a green gate from this
+# script guarantees only that the enumerated textual patterns are absent
+# outside the allowed packages — it is not a proof that no mint path exists.
+# The structural fix (hub has no raw SQL path to the conversations table)
+# is a phase 5-7 concern.
+#
 # EXIT CODES
 #   0  no violations found
 #   1  violations found
