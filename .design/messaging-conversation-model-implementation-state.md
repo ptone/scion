@@ -305,6 +305,21 @@ would bury the events that matter.
   acceptance; my instruction to "land DEF-4 as its own merge before phase work" read as
   permission when I meant sequencing. Corrected with em4 for the section merge; no harm here.
 
+- `2026-08-27 07:49Z` **S4 decomposition approved**, receipt confirmed by em4. Four
+  workstreams: WS-1 foundation (DEF-1 + DEF-3 + D3 infra, critical path), WS-2 phase 8 read
+  switch (blocked on WS-1), WS-3 phase 10 CLI split, WS-4 phase 11 broker edge (independent).
+  WS-1 and WS-4 running. D3's counters land at
+  `GET /api/v1/admin/messaging/divergence` — an endpoint the operator reads during the beta
+  exercise, not log lines. DEF-3 compares a message's freshly resolved conversation against
+  the `conversation_id` already stored on prior messages of the same logical conversation —
+  an independent source of truth, and the comparison that would have caught B-1.
+  **Design ruling issued (D5) — see §5a.** Plus three constraints: the full suite stays green
+  **per workstream**, not at section end (otherwise DEF-4's baseline is worthless and a red
+  suite means bisecting four parallel efforts); WS-2 must test the flag in the OFF position
+  and state what happens to messages written while it was ON if the operator flips back
+  mid-exercise; WS-4 adds the Teams `channel:"" + thread_id:set` regression test per plugin,
+  because boundary resolution across five plugins is where it comes back.
+
 ## 5d. S2 rejection history — CLOSED 2026-08-27 03:35Z (accepted on round 3)
 
 S2 was reported complete with three APPROVE gates. I rejected it. Both blockers are
@@ -402,6 +417,7 @@ sections.
 | D1 | `ConversationStore` accepts **UUID only** for `DefaultAgentID`, and validates it. A slug is rejected, not stored. | The slug-or-UUID union is the class of defect this refactor removes. A store that accepts both propagates the ambiguity instead of resolving it, and every downstream reader must re-ask which form it holds. A narrow store contract forces the ambiguity to be settled at a known place. | 2026-08-27 |
 | D3 | **The S4 read switch lands behind a runtime flag, default OFF, flippable without redeploy.** Divergence counters must be exposed somewhere readable live (not log lines only). | User decision 2026-08-27: the beta hub is the validation event, run as a scheduled exercise with the user present and a DB snapshot for rollback. There is therefore **no production soak before the switch**, so the design's phase-8 gate cannot be met in its original form. A flag makes the exercise "snapshot, flag on, watch, flag off" — recovery is a config change rather than a snapshot restore. And since the exercise is the *only* window where the two models meet real traffic, the operator has to be able to read a verdict in the moment; log lines are the wrong shape for that. | 2026-08-27 |
 | D4 | **Backfill evidence is synthetic.** Require a seeded corpus exercising both named hazards plus messages that must come out flagged `inferred`. | Real dry-run counts are unobtainable pre-beta (em2 reported this twice). Recorded as **weaker than the design's requirement**, not as the requirement being met. Do not let a later section cite "backfill validated" without this caveat. | 2026-08-27 |
+| D5 | **Authorisation is a property of the resolved conversation, evaluated after resolution, identically for every grammar** — not a property of the reference syntax. Direct conversations: the sender must be a participant. Group and thread conversations: project membership authorises, and prior participation is **not** required. Rule-10 tests: non-participant rejected on a direct conversation; project member accepted on a group conversation they have never posted in; and the same direct-conversation rejection reached via **both** `conv:<id>` and `@<name>`. | em4 scoped DEF-1's participant check to `resolveConvByID` alone. But `#general` and `@agent` resolve to the same rows, so a check on one grammar is one you walk around by using another — the defect class this refactor exists to remove. The per-kind split matters too: requiring participation on group conversations would break resolve-or-create and the "say something in a room" case the design is built on, while global DMs have nil `ProjectID` and so cannot be carried by the project check at all. Without the cross-grammar test the hole survives and only the test is new. | 2026-08-27 |
 | D2 | Normalization (slug → UUID) lives in **one shared exported helper**, written in phase 3, with the phase 4 backfill job as an intended second caller. Not two implementations. | Duplicated identity-resolution logic is already a named defect (findings §7). Two callers exist by design; two implementations would recreate the defect inside the fix. **em2 must be pointed at this helper.** | 2026-08-27 |
 
 ## 5b. Branch contract — issued to every manager
