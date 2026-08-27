@@ -99,19 +99,22 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 ## 3. Current position
 
-**Active section:** S5 — Docs (spawned and briefed 2026-08-27 10:45Z)
-**Active manager:** `ca-msg-em5` — `ca-msg-em4` retired, all ten of its sub-agents confirmed
-deleted
-**Blocked on:** em5 fixing **S5 round 2** (rejected 12:05Z at `e0269857` on J-1/J-2 — see
-§5h). Round 1's I-1..I-4 are all verified fixed. Round 3 is two test files, ~30 lines: add
-input-floor assertions and a quote-agnostic extracted `findReplacementProblems`.
+**Active section:** none. **S5 CLOSED 2026-08-27 12:40Z at `55dd6e16` (round 3).**
+S6 (phase 13, Removal) is deferred until after the beta exercise — rule 5.
+**Active manager:** none. `ca-msg-em5` sent closeout instructions 12:40Z, retirement pending
+its confirmation. `ca-msg-em4` retired, all ten of its sub-agents confirmed deleted.
+**Blocked on:** the user's beta exercise. All five implemented sections (S1–S5) are on
+`scion/messaging-v2`. Nothing is in flight. The next architect action is **DEF-5** (owed by
+me): spec the CLI delivery policy for `conv:<id>` and `#<thread>`, which the gate currently
+rejects outright.
 S5 must document the build **as it ships**
 (phase row 12): the read switch is default-OFF, `conv:<id>` and `#<thread>` are **not
 available** in the CLI (DEF-5), `@<email>` works only from inside an agent container, and
 `@<agent>` is the one reference form a user can rely on today.
-**Integration branch head:** `19681bc1` (**S4** + closeout log, fast-forward from `b92926dd`).
-**Last verified landing on integration branch:** `19681bc1` — **S4 accepted 2026-08-27 10:35Z
-on round 4** (rounds 1–3 rejected: F-1/F-2, G-1/G-2, H-1). S3 accepted 06:40Z at `f206a0d9`
+**Integration branch head:** `ebf8cc27` (**S5** + closeout log, fast-forward from `19681bc1`).
+**Last verified landing on integration branch:** `ebf8cc27` — **S5 accepted 2026-08-27
+12:40Z on round 3** (rounds 1–2 rejected: I-1..I-4, J-1/J-2). S4 accepted 10:35Z at `e8a0755d`
+on round 4 (rounds 1–3 rejected: F-1/F-2, G-1/G-2, H-1). S3 accepted 06:40Z at `f206a0d9`
 (round 2); S2 accepted 03:35Z at `cd4ee7ed` (round 3); S1 verified 01:40Z at `16294728`.
 
 DEF-1, DEF-3 and D3 were all due from S4. **DEF-3 and D3 are discharged.** DEF-1 is
@@ -424,7 +427,44 @@ would bury the events that matter.
   mutation and by a positive control against real docs. Two new findings, J-1/J-2: both new
   tests pass green while examining zero real input. **Rule 14 issued.** See §5h.
 
-## 5h. S5 round 2 — REJECTED 2026-08-27 12:05Z (`e0269857`)
+- `2026-08-27 12:40Z` **S5 ACCEPTED on round 3** at `55dd6e16`; merged fast-forward, closeout
+  `ebf8cc27`. Six mutations reproduced independently. **Implementation complete for S1–S5;
+  S6 deferred to post-beta.** See §5i.
+
+## 5i. S5 — CLOSED 2026-08-27 12:40Z (accepted on round 3, `55dd6e16`)
+
+Fast-forward from `19681bc1`; closeout at `ebf8cc27`. Round 3 was two test files, ~140 lines.
+**All six mutations reproduced independently rather than taken on report:**
+
+| Mutation | Result |
+|---|---|
+| MUT-A revert warning to `scion schedule message` | FAIL — *wanted message, got schedule* |
+| MUT-B `emitDeprecationWarning` empty body | FAIL — *"0" is not greater than or equal to "6"* |
+| MUT-D new flag naming backtick `scion agent poke` | FAIL on the **full** suite |
+| MUT-E one `docFiles` entry renamed | FAIL — *doc file missing … update docFiles* |
+| MUT-F `denyPatterns` emptied | FAIL — `catches_deny_listed_pattern` |
+| positive control: `scion schedule message --in 5m` into real `glossary.md` | FAIL — *unknown subcommand* |
+
+`go test ./cmd/ ./pkg/messaging/` green; tree clean.
+
+**I was wrong about the floor and em5 was right.** I specified `>= 7` replacement references;
+the count is **6** — four of the ten warnings (`--plain`, `--channel`, `--thread-id`, `--cc`)
+name no `scion` command. em5 pushed back with the enumeration and I confirmed it from source.
+A floor accepted on my authority rather than on a count would have been a number nobody had
+verified — the same failure mode as I-1 itself. **Recorded because the correction, not the
+compliance, is the behaviour to reinforce.**
+
+**Residual limits — accepted, not deferred work:**
+1. **MUT-G is not caught.** Deleting the main-body *call* to `findDenyListProblems` (or
+   `findCommandProblems`, or `findReplacementProblems`) leaves every subtest green; I verified
+   this by deleting the loop and appending a deny-listed line to a real doc — `ok`. Floors
+   guard starved input, not a deleted invocation. Accepted: unlike a docs rename this requires
+   deliberately removing a visible `t.Error` loop.
+2. D6's original limit stands — the parse-check proves a documented command *parses*, never
+   that it does what the prose says.
+3. `findReplacementProblems` examines only the first `scion ` reference per line.
+
+## 5h. S5 round 2 — rejected 2026-08-27 12:05Z (`e0269857`), CLOSED by round 3
 
 Fast-forward from `19681bc1`. 14 files, +858/-44. `cmd` suite green. **I-1, I-2, I-3, I-4 all
 verified fixed** — see below. Rejected on two new findings that are one defect.
