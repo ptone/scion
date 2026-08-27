@@ -33,9 +33,16 @@ Choosing the right recipient is critical to avoid spam and ensure the message re
 ### Conversation references
 
 - **`@<agent-name>`**: Shorthand for addressing an agent (e.g., `@builder`). Fully supported and equivalent to `agent:<name>`.
-- **`@<email>`**: Addresses a user by email (e.g., `@user@example.com`). **Only works from within an agent container** (requires the `SCION_AGENT_NAME` environment variable). From a human CLI context this form errors out.
+- **`@<email>`**: Addresses a user by email (e.g., `@user@example.com`). **Only works from within an agent container** (requires the `SCION_AGENT_NAME` environment variable). If you are running outside an agent container (e.g., human CLI context), this form will error — use `user:<email>` instead.
 
-> **Note:** `conv:<id>` and `#<thread>` reference forms are reserved but **not available in the CLI** — they will produce an error. Do not use them.
+### Unavailable recipient forms — do NOT use
+
+The following forms parse correctly but **will error at the CLI**. Delivery routing for them is not implemented (DEF-5).
+
+- **`conv:<id>`** — NOT available. Will produce a CLI error. Do not use.
+- **`#<thread>`** — NOT available. Will produce a CLI error. Do not use.
+
+If you need to reach a specific agent, use `agent:<name>` or `@<agent-name>`. There is currently no CLI mechanism for addressing a conversation or thread directly.
 
 **Anti-Pattern:** NEVER use `scion broadcast` for routine communication. It sends to every agent in the project, wastes context windows, and is often ignored or causes confusion. Reserve it for genuine project-wide announcements.
 
