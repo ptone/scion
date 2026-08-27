@@ -678,6 +678,36 @@
     dormant there is no dilemma** — "revert the unchosen change" is a default worth resisting when
     the thing unchosen is a hardening.
 
+42. **Run the check. A conclusion about a test is a claim about its behaviour, and reading is not
+    observation.** Issued 2026-08-27 21:27Z, from em6's deliverable 1.
+
+    em6 reported AC-DEF8-1 as "not runnable in tranche A — requires hub handlers," citing
+    `resolve_test.go:1167`. That line is inside the doc comment of
+    `TestAC_DEF8_1_CrossPath_DualWriteAndResolverConverge`, which is in tranche A's own
+    `resolve_test.go` in **`package messaging`** — an internal test package that *cannot* import
+    `pkg/hub` without an import cycle. `go test -run TestAC_DEF8_1` : two tests, both PASS, **4ms**.
+
+    They found the right line and drew the opposite conclusion from it, at a cost of four
+    milliseconds not spent. **When the check is cheap, a conclusion reached by reading is a guess**
+    — and note the error direction: "we cannot verify this yet" *sounds* like the conservative
+    call, which is exactly why it passed my first read too.
+
+    **Corollary — a green test carrying an AC's name is the most persuasive wrong signal we can
+    generate.** At `resolve_test.go:1099` sits a *second* test named for AC-DEF8-1,
+    `..._ConvergenceTwoPathsSameConversation`, which is green and whose own comment concedes it
+    "only exercised the resolver path twice." It calls `Resolve` twice and never touches the
+    dual-write path. Someone repaired it by **adding** the real cross-path test beside it rather
+    than renaming or deleting the placeholder. So the placeholder keeps its AC name and its green
+    tick permanently. **A bad test fixed by addition is not fixed** — the name is the artifact
+    everyone reads, and it now certifies something no test asserts. Rename or delete; never
+    accumulate.
+
+    **Corollary — a warrant is worth exactly the check it names.** em6's recorded unreachability
+    grep excluded `_test.go`, though the stronger claim (no reference *at all*, tests included)
+    was true. Record the strongest check that passed, not the one you happened to type. And prefer
+    the fact that dominates the grep: **`git diff origin/main 71b65292 -- pkg/hub` is empty** — A
+    does not merely avoid importing `pkg/messaging` from hub, it does not touch `pkg/hub` at all.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -854,7 +884,8 @@ is a queue, not a blocker.
 |---|---|---|---|
 | **Tranche A landing** | who opens the upstream `GoogleCloudPlatform/scion` PR | **user** | yes, 19:55Z, **still unanswered — now blocking TWO tranches** (A and the verified-and-held B) |
 | **Tranche B re-cut** | delete `9333f943` (do not amend), re-cut. **Spec corrected 21:20Z: carry the `pkg/hub` COMPLEMENT of each of `69ac6a12` / `23f7c820` / `60670c0e` / `cd4ee7ed` / `b7651af9`, plus whole-file `divergence.go` + `dm_migration.go`.** A's part + B's part must equal each whole commit or the omission is recorded. Full AC re-run plus **AC-B-8** (ComputeDivergenceMatch must be able to return a mismatch) and **AC-B-9** (undetermined principal kind rejected, not defaulted). Report which of the six guessed-kind sites is fixed by which commit. | **em10** | directed 21:05Z, re-specced 21:20Z |
-| **Tranche A cut-point audit** | **DONE 21:15Z — 17 unchosen commits found, verdict ACCEPT (see §5av, rule 41).** Follow-on now open: (1) re-run the six DM-key/auth commits' original staging ACs against A's tree, per-AC with provenance; (2) confirm the DM key **golden vectors** are in A, not deferred — a key format must not land ahead of the test that pins it; (3) write the unreachability claim as an **expiring warrant** naming the check, that it is a tree property, and that tranche B voids it; (4) confirm `divergence.go`/`dm_migration.go` are deliberate whole-file omissions with no dangling references. | **em6** | follow-on dispatched 21:20Z |
+| **Tranche A cut-point audit** | **DONE 21:15Z — 17 unchosen commits, verdict ACCEPT (§5av, rule 41). Follow-on D2/D3/D4 accepted 21:27Z (§5aw).** Golden vectors confirmed in A; omissions clean; warrant strengthened to `git diff origin/main 71b65292 -- pkg/hub` = **empty**. Remaining: re-issue D1 with the AC-DEF8-1 correction (it IS runnable and passes — rule 42) and file the **`resolve_test.go:1099` green-placeholder defect** (a second test named AC-DEF8-1 that only calls `Resolve` twice; rename or delete). | **em6** | correction issued 21:27Z |
+| **Four A-ACs deferred into B's merge** | 23f7c820's 5 handler call-site fixes; AC-DEF15-1 (source confinement); AC-DEF15-4 (invalid `dm:` → zero rows); AC-DEF16-1 (validation before creation). **These are tranche A's ACs, not B's** — not covered by AC-B-1..9, must be reported by name. AC-DEF15-1 + `b7651af9`'s unexport are one control in two files: **both or neither**. | **em10** | added to B's spec 21:28Z |
 | DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
 | AC-12-6 (populated-DB exercise) | beta-hub exercise scheduling | **user** — deliberately deferred; pre-beta gate item | told em6 + integration2-operator 20:0xZ |
 | **§2.6.4 phases 1-4** | **DEF-21 ✅ DEF-23 ✅ DEF-22 ✅ pending startup-ordering evidence. DEF-20 REOPENED** at `eb6c62a9` — mint has ≥7 entrances, three are guarded. Directed: drop the `Channel=="web"` predicate (sentinel makes it redundant), move the lookup into `ResolveOrCreateConversationByKey`, route the two direct `UpsertConversationByExternalRef` callers through it, add a CI grep gate. Plus the production-path integration test. **The mis-scope was mine (rule 40).** | **em9** | reopened 21:14Z |
@@ -1813,6 +1844,44 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5aw. 21:26-21:29Z — the audit's headline was wrong, and the thing it missed was better
+
+em6 delivered the four follow-ons. Deliverables 2, 3, 4 accepted; deliverable 1 corrected.
+
+**Golden vectors confirmed in A (D2):** `dm_key_test.go` 5 vectors + 5 production-regex conformance
+cases; `derive_key_test.go` 13 vectors (3 success, 10 error branches). Hardcoded, not computed, and
+shipping in the same files as the format — so the format cannot land ahead of the test pinning it.
+That was the property I asked for and it holds.
+
+**Omissions confirmed clean (D4):** `divergence.go`, `dm_migration.go`, `key_consolidation_test.go`
+absent as whole files, zero dangling references to any of their exports. The pairing is the right
+outcome — the confinement test arrives with the `divergence.go` it confines.
+
+**D1 correction — AC-DEF8-1 is runnable, in A, and passes.** em6 called it hub-dependent, citing
+`resolve_test.go:1167`. That line is in the doc comment of
+`TestAC_DEF8_1_CrossPath_DualWriteAndResolverConverge`, in `package messaging`, which cannot import
+`pkg/hub` (cycle). Ran it: both AC_DEF8_1 tests PASS in 4ms. Rule 42. **Deferred list is four, not
+five.**
+
+**What the wrong answer was standing next to.** At `:1099` there is a *second* test named for
+AC-DEF8-1 whose own comment concedes it "only exercised the resolver path twice." It is green. It
+will stay green forever, under an AC name it does not satisfy, because the fix was to **add** the
+real test beside it rather than rename the placeholder. **A bad test fixed by addition is not
+fixed.** Filed back to em6 as a defect.
+
+**D3 strengthened.** em6's warrant grep excluded `_test.go`; the stronger claim was true anyway.
+And the dominating fact neither of us used first: **`git diff origin/main 71b65292 -- pkg/hub` is
+empty.** A does not touch `pkg/hub` at all. That is better than the import grep because it needs no
+interpretation, and it hands em10 a rebase invariant: any `pkg/hub` conflict in tranche B means a
+stale source commit, not contention with A.
+
+**Four ACs now owed by B on A's behalf**, all in files em10 already owes: 23f7c820's 5 handler
+call-site fixes, AC-DEF15-1 (source confinement), AC-DEF15-4 (invalid `dm:` → zero rows), AC-DEF16-1
+(validation before creation). Told em10 these are **tranche A's acceptance criteria executing inside
+B's merge** and are not covered by AC-B-1..9. Flagged that AC-DEF15-1 and `b7651af9`'s unexport are
+one control in two files: **carry both or neither, and "neither" means main gets an exported
+wrong-format DM key derivation with nothing stopping a new caller.**
 
 ## 5av. 21:15-21:21Z — tranche A is not phases 1-4, and that turns out not to matter
 
