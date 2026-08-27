@@ -821,6 +821,66 @@
     staging fails. A fix on a manager branch has exactly the practical status of the "carrier: none"
     em6 had correctly diagnosed for DEF-26 — **pushed is not landed, and a branch is not a carrier.**
 
+47. **A freeze applies to a branch NAME, and the name belongs to somebody — tell them.** Issued
+    2026-08-27 21:46Z. **Mine.** I froze tranche A at 21:39Z, recorded the freeze in §3, and never
+    noticed that the branch in the compare URL was `scion/ca-msg-em10` — em10's own working branch,
+    which I had simultaneously told em10 to re-cut tranche B on. **The freeze existed only in my
+    document.** Nothing stopped em10 from force-pushing a rebase over an about-to-be-opened upstream
+    PR; the only reason it did not happen is that em10 independently chose to work on `-trb`. Luck
+    is not a control.
+
+    - **Procedure: when a compare URL leaves your hands, message the branch's owner in the same
+      minute, and push a recovery ref at the frozen SHA.** `scion/tranche-a-frozen` at `17986b10`.
+    - **A recovery ref restores the commit, not the PR.** It is a floor, not a fix — if the head
+      moves under an open PR the review is invalidated, whatever you can rebuild.
+    - **Corollary — a freeze ends when review demands a change, and what replaces it is stricter,
+      not looser.** Once the PR is open the branch must be edited, but **additive commits only: no
+      rebase, no amend, no force-push.** A force-push re-anchors every inline comment and can drop
+      reviewed content undetectably. The frozen ref then becomes the marker for *what was reviewed*,
+      which is more useful than what it was created for.
+
+48. **A mutation must be the defect, not merely a break.** Issued 2026-08-27 21:48Z, from em9's F2.
+    Their mutation (`if false && len(parts) != 3`) made the code panic at `parts[2]`. That kills
+    every test in the package — including a test with no assertions in it at all. **A kill by crash
+    measures nothing about discrimination.** The faithful mutation is the original behaviour, which
+    for a fix is almost always obtainable for free:
+
+        git checkout <pre-fix-commit> -- path/to/file.go   # keep the new tests
+
+    Run that way the test failed with `UpsertConversationByExternalRef must NOT be called` — the
+    assertion naming the actual defect — while the paired positive still passed. **That pair is the
+    transcript: a narrow kill plus a surviving positive.** em9's fix and test were both right; only
+    the proof was worthless, which is the dangerous case, because a wrong proof of a correct thing
+    stays invisible until the thing stops being correct.
+
+    - **Ask of every mutant: "is this the bug I claim the test catches?"** If it is a different bug
+      that happens to also fail, the test is unproven. **Specificity is the signal, not the kill.**
+
+49. **A reviewer's findings are a list, not a work plan — triage before routing.** Issued
+    2026-08-27 21:52Z, on GoogleCloudPlatform/scion#1331's seven findings. Six came back HIGH; the
+    true shape was one real gap, one cheap defensive fix, and one suggestion counted three times and
+    worth deferring. Routing that through undifferentiated makes the manager do the triage without
+    the context to do it.
+
+    - **Severity is a claim about impact, and impact depends on reachability.** The participant gap
+      was labelled "breaking." It compiles and CI is green. Its real effect is a listing gap in
+      dormant code, failing in the *under-granting* direction — the recoverable one.
+    - **A suggestion that touches an aggregate file is never "just a perf fix"** while another
+      tranche is being cut from that branch (rule 31).
+    - **Look for the correctness change wearing a performance costume.** "Push the match into SQL"
+      changes a string comparison's collation and case sensitivity, and we ship both SQLite and
+      Postgres. That is the objection to post, because it is the one a reviewer accepts.
+    - **Decline in the thread with the reason, never by silence.** An undeclined finding on an open
+      PR is an open question against the merge.
+
+50. **A fast-forward preserves the contributor's evidence; a merge commit destroys it.** Issued
+    2026-08-27 21:47Z, merging em6's DEF-25. Because staging was already an ancestor of em6's head,
+    their `compat-literals` exit-0 was a run on the exact tree staging acquired — so verifying their
+    claim and verifying the post-merge state were one act. Had it been a true merge, their green run
+    would have described a tree that existed nowhere, and the gate would have owed a re-run.
+    **Prefer fast-forward for contributed work specifically because it makes the contributor's
+    transcript transferable**, and re-run every gate yourself after any merge that is not one.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -966,7 +1026,14 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 > historical record and is accurate *as of the timestamps it names* — read it as log, not as
 > current position.
 
-**CURRENT POSITION as of 2026-08-27 20:55Z**
+**CURRENT POSITION as of 2026-08-27 21:55Z**
+
+> **21:55Z — TRANCHE A IS IN UPSTREAM REVIEW.** ptone opened
+> **`GoogleCloudPlatform/scion#1331`** (rule 34: repo recorded) — base `main`, head
+> `ptone:scion/ca-msg-em10`, OPEN, MERGEABLE. Seven review findings, triaged and routed (§5bb).
+> The 21:39Z freeze is **converted, not lifted**: additive commits only, no rebase/amend/
+> force-push while the PR is open (rule 47). `scion/tranche-a-frozen` @ `17986b10` marks what
+> was reviewed. **Staging moved to `91c9e314`** — DEF-25 closed and merged by fast-forward.
 
 **Strategy: TRANCHES A-G off current `main`.** `scion/messaging-v2` is a **staging ground** and is
 never PR'd as one unit. Any instruction assuming a single integration-branch merge is stale.
@@ -980,10 +1047,12 @@ tranche A** — asked 19:55Z, unanswered.
 | Branch | Head | Base | State |
 |---|---|---|---|
 | `origin/main` | **`c13d910b`** | — | moves ~hourly. **Do not cache** (rule 24). |
-| `scion/messaging-v2` | **`80558a03`** | — | staging ground. DEF-12 merged in at 20:47Z, control preservation verified against both parents. Not a merge unit. |
+| `scion/messaging-v2` | **`91c9e314`** | — | staging ground. DEF-12 merged 20:47Z; **DEF-25 fast-forwarded in 21:47Z** (`80558a03`→`91c9e314`, 5 files +84/−23, no aggregate files). Gate re-verified by me pre-merge: `check-project-compat-literals.sh` EXIT=0. FF chosen deliberately so em6's transcript stayed valid (rule 50). Carries DEF-26 `b484cc3f`. Not a merge unit. |
+| **`scion/tranche-a-frozen`** | **`17986b10`** | `c13d910b` | **Recovery + review marker for #1331** (rule 47). Never move it. |
 | `scion/ca-msg-arch` (mine) | `b80b4ad9` | — | pushed |
-| **Tranche A** `scion/ca-msg-em10` | **`17986b10`** | **`c13d910b`** (rebased 21:34Z) | **COMPARE URL SENT 21:39Z — awaiting ptone to open the upstream PR. FROZEN as of 21:39Z (rule 44).** CI green on `ptone/scion#1319`: Build & Test 4m7s, golangci-lint, shellcheck. MERGEABLE/CLEAN. Rebase verified content-neutral: old and new patches byte-identical, 51709 lines. **It is NOT "phases 1-4"** — 17 unchosen post-phase-4 commits incl. DEF-8 ×4, DEF-15, half of DEF-16. **Accepted on an EXPIRING WARRANT: nothing outside `pkg/messaging` references it; zero files changed under `pkg/hub` or `cmd/`** (rule 41). Two-phase expiry: pre-merge "safe to land," post-merge "still unreachable on main"; dies when tranche B lands. Omits `divergence.go` + `dm_migration.go` as whole files. |
-| **Tranche B** `scion/ca-msg-em10-trb` | `9333f943` | `71b65292` (tranche A) | **BLOCKED 20:58Z — STALE CUT POINT (rule 37); spec corrected 21:20Z.** Was green on every gate; cut from `1ff7c6af`, missing `60670c0e` and `cd4ee7ed`. **The A/B seam is a PACKAGE seam** — A took the `pkg/messages`/`pkg/messaging`/`pkg/store` half of all five carry-commits, B owes the exact `pkg/hub` complement. **B is where A's dormant controls go live** — `23f7c820`'s 5 call-site fixes and `69ac6a12`'s hub converge are a merge gate on this branch, not deferrable cargo. |
+| **Tranche A** `scion/ca-msg-em10` | **`17986b10`** | **`c13d910b`** (rebased 21:34Z) | **OPEN UPSTREAM AS `GoogleCloudPlatform/scion#1331`** (opened ~21:49Z, MERGEABLE). **Freeze CONVERTED, not lifted — additive commits only while under review (rule 47).** 7 findings triaged 21:52Z: TAKE the participant gap (3 comments, 1 issue — but NOT via widening `ConversationUpserter`), TAKE the nil checks, DEFER the DisplayName filter (aggregate file + dormant + SQLite/PG collation change). Compare URL sent 21:39Z (rule 44). CI green on `ptone/scion#1319`: Build & Test 4m7s, golangci-lint, shellcheck. MERGEABLE/CLEAN. Rebase verified content-neutral: old and new patches byte-identical, 51709 lines. **It is NOT "phases 1-4"** — 17 unchosen post-phase-4 commits incl. DEF-8 ×4, DEF-15, half of DEF-16. **Accepted on an EXPIRING WARRANT: nothing outside `pkg/messaging` references it; zero files changed under `pkg/hub` or `cmd/`** (rule 41). Two-phase expiry: pre-merge "safe to land," post-merge "still unreachable on main"; dies when tranche B lands. Omits `divergence.go` + `dm_migration.go` as whole files. |
+| **Tranche B** `scion/ca-msg-em10-trb` | `89b46e2a` | **`71b65292` — WRONG** | **BLOCKED 21:46Z — CUT ON THE PRE-REBASE TRANCHE A.** `git merge-base --is-ancestor 17986b10 <trb>` **exits 1**. Relative to current `main` this branch **reverts `c13d910b` (#1325)**: `git diff --stat 17986b10 <trb>` re-adds `cmd/deploy_instance.go` (+828) and `deploy_instance_test.go` (+736), deletes `deploy_script_test.go` (−655) and `deploy_script_pin_test.go` (−210), guts `scripts/single-node/deploy.sh` (−665). **None of it is ours.** Caught by the heartbeat base check *during* the section, not at acceptance. Fix issued 21:46Z: `git rebase --onto 17986b10 71b65292 <trb>`, expect a real conflict in `handlers_agent_messaging.go`, then paste all three verifications incl. `git diff --stat 17986b10 <trb> -- cmd/ scripts/ extras/` **empty**. Prior 20:58Z stale-cut-point finding (rule 37) still applies on top. |
+| ~~Tranche B (prev)~~ | ~~`9333f943`~~ | ~~`71b65292`~~ | superseded — **STALE CUT POINT (rule 37); spec corrected 21:20Z.** Was green on every gate; cut from `1ff7c6af`, missing `60670c0e` and `cd4ee7ed`. **The A/B seam is a PACKAGE seam** — A took the `pkg/messages`/`pkg/messaging`/`pkg/store` half of all five carry-commits, B owes the exact `pkg/hub` complement. **B is where A's dormant controls go live** — `23f7c820`'s 5 call-site fixes and `69ac6a12`'s hub converge are a merge gate on this branch, not deferrable cargo. |
 | DEF-12 `scion/ca-msg-em6-def12` | `74bcb24c` | `14b3ba7c` | **F1–F4 all resolved and verified by me. MERGED to `messaging-v2` at `80558a03`.** Needs `git rebase --onto origin/main 14b3ba7c` after A lands. |
 | §2.6.4 `scion/ca-msg-em9-unify` | `d053e896` | `1e7bee72` | **REWORK — verdict issued 20:53Z. Phase 4 is inert in production (DEF-20).** See §5aq. |
 
@@ -995,14 +1064,17 @@ is a queue, not a blocker.
 
 | Item | Waiting on | Owner | Asked? |
 |---|---|---|---|
-| **Tranche A landing** | who opens the upstream `GoogleCloudPlatform/scion` PR | **user** | yes, 19:55Z, **still unanswered — now blocking TWO tranches** (A and the verified-and-held B) |
+| **Tranche A merge** | **UNBLOCKED 21:49Z — `GoogleCloudPlatform/scion#1331` is OPEN and MERGEABLE.** Now waiting on review-finding fixes, then upstream squash-merge. | **em10** (fixes), then **upstream** (merge) | routed 21:52Z |
+| **#1331 review findings** | Participant gap + nil checks to land as **additive commits**; DisplayName filter to be **declined in-thread with the collation argument**. Interface shape for the participant fix is em10's call, reported back with reasoning. Needs a test showing the D-1 guard **refusing** a third principal, not only the two successes. | **em10** | triaged + routed 21:52Z |
 | **Tranche B re-cut** | delete `9333f943` (do not amend), re-cut. **Spec corrected 21:20Z: carry the `pkg/hub` COMPLEMENT of each of `69ac6a12` / `23f7c820` / `60670c0e` / `cd4ee7ed` / `b7651af9`, plus whole-file `divergence.go` + `dm_migration.go`.** A's part + B's part must equal each whole commit or the omission is recorded. Full AC re-run plus **AC-B-8** (ComputeDivergenceMatch must be able to return a mismatch) and **AC-B-9** (undetermined principal kind rejected, not defaulted). Report which of the six guessed-kind sites is fixed by which commit. | **em10** | directed 21:05Z, re-specced 21:20Z |
 | **Tranche A cut-point audit** | **DONE 21:15Z — 17 unchosen commits, verdict ACCEPT (§5av, rule 41). Follow-on D2/D3/D4 accepted 21:27Z (§5aw).** Golden vectors confirmed in A; omissions clean; warrant strengthened to `git diff origin/main 71b65292 -- pkg/hub` = **empty**. Remaining: re-issue D1 with the AC-DEF8-1 correction (it IS runnable and passes — rule 42) and file the **`resolve_test.go:1099` green-placeholder defect** (a second test named AC-DEF8-1 that only calls `Resolve` twice; rename or delete). | **em6** | correction issued 21:27Z |
 | **Four A-ACs deferred into B's merge** | 23f7c820's 5 handler call-site fixes; AC-DEF15-1 (source confinement); AC-DEF15-4 (invalid `dm:` → zero rows); AC-DEF16-1 (validation before creation). **These are tranche A's ACs, not B's** — not covered by AC-B-1..9, must be reported by name. AC-DEF15-1 + `b7651af9`'s unexport are one control in two files: **both or neither**. | **em10** | added to B's spec 21:28Z |
 | DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
 | AC-12-6 (populated-DB exercise) | beta-hub exercise scheduling | **user** — deliberately deferred; pre-beta gate item | told em6 + integration2-operator 20:0xZ |
-| **§2.6.4 phases 1-4** | **DEF-21 ✅ DEF-23 ✅ DEF-22 ✅ pending startup-ordering evidence. DEF-20 REOPENED** at `eb6c62a9` — mint has ≥7 entrances, three are guarded. Directed: drop the `Channel=="web"` predicate (sentinel makes it redundant), move the lookup into `ResolveOrCreateConversationByKey`, route the two direct `UpsertConversationByExternalRef` callers through it, add a CI grep gate. Plus the production-path integration test. **The mis-scope was mine (rule 40).** | **em9** | reopened 21:14Z |
-| **DEF-25 — `compat-literals` gate fails on staging content** | `cmd/message_deprecation_test.go` (S8/DEF-13, `edd4e4bd`) carries 7 `grove-*` literals. **Verified: exit 0 on `origin/main`, exit 1 on the branch; the file does not exist on main.** Not em9's, but ours. **Will block tranche F.** | **me** — queue, spec then dispatch | filed 21:14Z |
+| **§2.6.4 phases 1-4** | **ACCEPTED 21:56Z at `1aefd1e0`**, one doc item outstanding (guard header must state its residual). DEF-20 closed at the sink; F1 (guard hole) and F2 (malformed `thread:` ref) both closed and **independently re-verified by me** — my `INSERT OR IGNORE` and lowercase mutants now RC=1. **Accepted residual, documented not chased:** line-broken SQL and `fmt.Sprintf("INSERT INTO %s", tbl)` both evade any line-oriented grep. **Durable fix is structural and is MINE, phases 5-7:** `pkg/hub` should have no raw SQL path to `conversations` at all, at which point the control is the type system and there is no residual. **NOT YET CARRIED** — base `1e7bee72` is far behind `c13d910b`; carrier decided after #1331 lands. em9 pre-computing its aggregate-file list against the eventual rebase. | **me** (carrier) | accepted 21:56Z |
+| ~~§2.6.4 phases 1-4 (prev)~~ | ~~DEF-21 ✅ DEF-23 ✅ DEF-22 ✅ pending startup-ordering evidence. DEF-20 REOPENED~~ at `eb6c62a9` — mint has ≥7 entrances, three are guarded. Directed: drop the `Channel=="web"` predicate (sentinel makes it redundant), move the lookup into `ResolveOrCreateConversationByKey`, route the two direct `UpsertConversationByExternalRef` callers through it, add a CI grep gate. Plus the production-path integration test. **The mis-scope was mine (rule 40).** | **em9** | reopened 21:14Z |
+| ~~**DEF-25**~~ | **CLOSED 21:47Z.** Fixed in `77db74e6` (7 literals, `message_deprecation_test.go`) + `91c9e314` (4 more, `cmd/broadcast_test.go` — the ones my location-scoped spec missed, rule 46). Gate re-run by me: **EXIT=0**. Fast-forwarded onto staging. | — | done |
+| **DEF-26 — green placeholder test** | Renamed to `TestResolve_SamePathIdempotency_AgentDM` at `b484cc3f`, **on staging**. **Carrier: none** — cannot ride tranche A (edits `resolve_test.go`, which is A content and now under review in #1331). Lands as its own follow-up PR to `main` after #1331 merges. Deliberately left interleaved on em6's branch: isolating it would have cost the fast-forward (rule 50) and bought nothing, since carrier is decided at cut time, not by commit order. | **me** — queue | decided 21:47Z |
 | ~~**DEF-24**~~ | **WITHDRAWN 20:58Z — not a defect, a stale cut point.** Already fixed on staging at `cd4ee7ed` (em2, 03:30Z). Rolled into the tranche B re-cut. | — | spec cancelled |
 | §2.6.4 phases 5-7 | phases 1-4 landing | **me** — queue | n/a |
 | Tranches C-G | tranche B, then supervision capacity | **me** — queue | n/a |
@@ -1957,6 +2029,68 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5bb. 21:49-21:55Z — #1331 IS OPEN, and seven HIGH findings are one gap plus two deferrals
+
+ptone opened **`GoogleCloudPlatform/scion#1331`** — upstream, base `main`, head
+`ptone:scion/ca-msg-em10`, OPEN, MERGEABLE. Verified with `gh pr view` rather than inferred from
+the coordinator's relay, because the message said "PR#1331" without a repo and a fork PR and an
+upstream PR are different objects with the same number space (rule 34).
+
+**Seven findings, six marked HIGH. The true shape is one real gap, one cheap fix, and one
+suggestion counted three times.** Routing that list through as-is would have made em10 do the
+triage, and em10 does not have the reachability context to do it.
+
+- **The participant gap** (3 comments, 1 issue). `ResolveOrCreateDMConversation` creates a
+  `direct` conversation and never writes participant rows, so the DM appears in nobody's sidebar.
+  The reviewer calls it "breaking." **It compiles and CI is green** — the word is wrong, and the
+  wrongness matters, because severity is a claim about impact and impact depends on reachability.
+  Its real consequence is a listing gap in dormant code, and it fails in the **under-granting**
+  direction, which is the recoverable one: participants are a derived index, the DM key is the ACL.
+  Real, worth fixing, **not a merge blocker.**
+  **I rejected the suggested fix's shape.** It widens `ConversationUpserter` to carry
+  `AddParticipant` — and that is the same one-method interface em9's sink guard
+  `ResolveOrCreateConversationByKey` takes. Widening it hands participant mutation to a function
+  whose only job is minting, and every future implementer inherits it. **The reason the fix is safe
+  at all is D-1's guard**, which refuses any principal not named in the key; so I required a test
+  showing the *refusal* of a third principal, not merely the two successes.
+- **Nil checks** (MEDIUM). Cheap and correct. Take, with paired positives.
+- **The DisplayName filter** (3 comments, 1 suggestion). **Deferred, and the reason I gave em10 to
+  post is the third one, not the first two:** it touches `pkg/store/models.go`, an aggregate file,
+  while tranche B is being cut from this very branch (rule 31); it optimises code with no
+  production callers; and — the argument a reviewer actually accepts — **moving a string match from
+  Go into SQL is not a pure perf change**, because collation and case sensitivity differ between our
+  SQLite and Postgres backends. A correctness change wearing a performance costume.
+  Separately filed: resolving a group conversation **by display name at all** is suspect, since
+  display names are mutable and non-unique. Pre-existing, not a regression, so not #1331's problem.
+
+**And the finding that was mine.** The compare URL names `ptone:scion/ca-msg-em10` — **em10's own
+working branch**, the one I had told em10 to re-cut tranche B on. I recorded the freeze in §3 at
+21:39Z and never told the branch's owner. It survived only because em10 independently chose `-trb`.
+Rule 47. Pushed `scion/tranche-a-frozen` at `17986b10`; converted the freeze to additive-only.
+
+## 5ba. 21:44-21:47Z — the base check caught a live revert, and DEF-25 closed
+
+**Tranche B was cut on the pre-rebase tranche A.** `git merge-base --is-ancestor 17986b10
+origin/scion/ca-msg-em10-trb` exits 1. Against current `main` the branch **reverts `c13d910b`
+(#1325)**: re-adds `cmd/deploy_instance.go` (+828) and its test (+736), deletes
+`deploy_script_test.go` (−655) and `deploy_script_pin_test.go` (−210), guts
+`scripts/single-node/deploy.sh` (−665). None of it ours.
+
+This is the exact failure the heartbeat's base check exists for, and it fired **during** the section
+rather than at acceptance, which is the whole value of running it early. Nothing was damaged: `-trb`
+had not been PR'd. Fix issued as `git rebase --onto 17986b10 71b65292`, with the verification I want
+pasted being `git diff --stat 17986b10 <trb> -- cmd/ scripts/ extras/` **empty** — deletions are
+what to read for, and a green build will not catch a silent revert of a *modified* file, only of a
+new one.
+
+**DEF-25 closed.** em6 fixed `cmd/broadcast_test.go` too — the four literals my location-scoped spec
+missed (rule 46). I re-ran the gate myself (EXIT=0) before merging, and merged by **fast-forward**,
+which is what made their transcript transferable: staging was already an ancestor of their head, so
+the tree they tested is the tree staging acquired. A merge commit would have invalidated their green
+run and owed a re-run (rule 50). em6 offered to un-interleave DEF-26 from the DEF-25 commits;
+declined — it would have cost the fast-forward and bought nothing, since carrier is decided at
+cut time, not by commit order. DEF-26's carrier is now recorded explicitly instead.
 
 ## 5az. 21:33-21:40Z — TRANCHE A URL SENT. Landing protocol, in full.
 
