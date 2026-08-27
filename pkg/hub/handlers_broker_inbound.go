@@ -311,6 +311,37 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			storeMsg.GroupID = gid
 		}
 	}
+	// Phase 5 dual-write: resolve-or-create conversation for broker-inbound messages.
+	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
+	if !storeMsg.Broadcasted {
+		var convResult *messaging.ConversationResult
+		if storeMsg.ThreadID != "" {
+			convResult = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, s.messageLog, storeMsg.ThreadID, agent.ProjectID)
+		} else if senderUserID != "" && agent.ID != "" {
+			convResult = messaging.ResolveOrCreateDMConversation(r.Context(), s.store, s.messageLog, senderUserID, agent.ID)
+		}
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
+		// Always log divergence — even when convResult is nil, that is a divergence signal.
+		oldRouting := messaging.OldRoutingFromMessage(senderUserID, agent.ID, storeMsg.ThreadID)
+		convID := ""
+		actualRef := ""
+		if convResult != nil {
+			convID = convResult.ConversationID
+			actualRef = convResult.ExternalRef
+		}
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+		messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: oldRouting,
+			NewRouting: messaging.NewRoutingStr(convID),
+			Match:      match,
+			Reason:     reason,
+		})
+		// DEF-3: Independent consistency check against prior messages.
+		messaging.CheckConversationConsistency(r.Context(), s.store, storeMsg.ID, convID, storeMsg.ThreadID, senderUserID, agent.ID, s.messageLog)
+	}
 	if err := s.store.CreateMessage(r.Context(), storeMsg); err != nil {
 		log.Error("Failed to persist inbound broker message", "error", err)
 		// Non-fatal: the dispatch already succeeded, so the agent got the

@@ -259,6 +259,19 @@ func (m *mockConversationStore) UpsertConversationByExternalRef(_ context.Contex
 	return &cp, nil
 }
 
+func (m *mockConversationStore) GetConversationByExternalRef(_ context.Context, surface, externalRef string) (*store.Conversation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.conversations {
+		c := &m.conversations[i]
+		if c.ExternalRef == externalRef && c.Surface == surface && c.DeletedAt == nil {
+			cp := *c
+			return &cp, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
 func (m *mockConversationStore) AddParticipant(_ context.Context, p *store.ConversationParticipant) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

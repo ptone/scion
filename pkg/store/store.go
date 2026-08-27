@@ -1581,6 +1581,11 @@ type ConversationStore interface {
 	// ListConversations returns conversations matching the filter.
 	ListConversations(ctx context.Context, filter ConversationFilter, opts ListOptions) (*ListResult[Conversation], error)
 
+	// GetConversationByExternalRef looks up a conversation by (surface, external_ref).
+	// Returns ErrNotFound if no matching active (non-deleted) conversation exists.
+	// This is the read-only counterpart of UpsertConversationByExternalRef.
+	GetConversationByExternalRef(ctx context.Context, surface, externalRef string) (*Conversation, error)
+
 	// UpsertConversationByExternalRef creates or updates a conversation keyed on (surface, external_ref).
 	// This is the idempotent broker-edge operation. Returns the conversation (created or existing).
 	// CRITICAL: this must be safe under concurrent calls — the UNIQUE partial index is the guard.

@@ -29,6 +29,12 @@ type ConversationUpserter interface {
 	UpsertConversationByExternalRef(ctx context.Context, conv *store.Conversation) (*store.Conversation, error)
 }
 
+// ConversationReader is the minimal interface for read-only conversation
+// lookups. It is satisfied by store.Store (which embeds ConversationStore).
+type ConversationReader interface {
+	GetConversationByExternalRef(ctx context.Context, surface, externalRef string) (*store.Conversation, error)
+}
+
 // ConversationResult carries the outcome of a resolve-or-create operation,
 // including the actual ExternalRef read back from the database.
 type ConversationResult struct {
@@ -83,6 +89,35 @@ func ResolveOrCreateDMConversation(
 	}
 }
 
+// ResolveDMConversationForRead looks up a DM conversation without creating it.
+// Returns nil if the conversation does not exist or the lookup fails.
+// This is the read-only counterpart of ResolveOrCreateDMConversation,
+// used by the Phase 8 read-switch to query by ConversationID.
+func ResolveDMConversationForRead(
+	ctx context.Context,
+	cr ConversationReader,
+	log *slog.Logger,
+	idA, idB string,
+) *ConversationResult {
+	if idA == "" || idB == "" {
+		return nil
+	}
+
+	extRef := DirectMessageExternalRef(idA, idB)
+
+	conv, err := cr.GetConversationByExternalRef(ctx, "native", extRef)
+	if err != nil {
+		log.Debug("read-switch: DM conversation lookup returned no result",
+			"external_ref", extRef, "error", err)
+		return nil
+	}
+
+	return &ConversationResult{
+		ConversationID: conv.ID,
+		ExternalRef:    conv.ExternalRef,
+	}
+}
+
 // ResolveOrCreateThreadConversation resolves (or creates) a thread-based
 // conversation for the given thread ID and project. Thread conversations
 // are project-scoped. External ref format: thread:{projectID}:{threadID}.
@@ -128,5 +163,34 @@ func ResolveOrCreateThreadConversation(
 	return &ConversationResult{
 		ConversationID: result.ID,
 		ExternalRef:    result.ExternalRef,
+	}
+}
+
+// ResolveThreadConversationForRead looks up a thread conversation without
+// creating it. Returns nil if the conversation does not exist or the lookup
+// fails. This is the read-only counterpart of ResolveOrCreateThreadConversation,
+// used by the Phase 8 read-switch to query by ConversationID.
+func ResolveThreadConversationForRead(
+	ctx context.Context,
+	cr ConversationReader,
+	log *slog.Logger,
+	threadID, projectID string,
+) *ConversationResult {
+	if threadID == "" || projectID == "" {
+		return nil
+	}
+
+	extRef := fmt.Sprintf("thread:%s:%s", projectID, threadID)
+
+	conv, err := cr.GetConversationByExternalRef(ctx, "native", extRef)
+	if err != nil {
+		log.Debug("read-switch: thread conversation lookup returned no result",
+			"external_ref", extRef, "error", err)
+		return nil
+	}
+
+	return &ConversationResult{
+		ConversationID: conv.ID,
+		ExternalRef:    conv.ExternalRef,
 	}
 }

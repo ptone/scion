@@ -1615,9 +1615,42 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	filter := store.MessageFilter{
-		Channel:  "web",
-		ThreadID: key,
+	// Phase 8 read-switch: when ConversationReadSwitch is ON, resolve the
+	// conversation and query by ConversationID instead of Channel+ThreadID.
+	var filter store.MessageFilter
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
+		var convResult *messaging.ConversationResult
+		if isDM {
+			// DM key format: dm:<kind>:<id>:<kind>:<id>
+			parts := strings.Split(key, ":")
+			if len(parts) >= 5 {
+				convResult = messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[2], parts[4])
+			}
+		} else {
+			// Thread key — look up the topic to get the projectID for the external_ref.
+			if wcs != nil {
+				if topic, err := wcs.GetTopic(ctx, key); err == nil && topic != nil {
+					convResult = messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, key, topic.ProjectID)
+				}
+			}
+		}
+		if convResult != nil {
+			filter = store.MessageFilter{
+				ConversationID: convResult.ConversationID,
+			}
+		} else {
+			// Conversation not found — fall back to old path so we don't
+			// return an empty result for data written before dual-write.
+			filter = store.MessageFilter{
+				Channel:  "web",
+				ThreadID: key,
+			}
+		}
+	} else {
+		filter = store.MessageFilter{
+			Channel:  "web",
+			ThreadID: key,
+		}
 	}
 	// Support visibility filter.
 	if vis := q["visibility"]; len(vis) > 0 {

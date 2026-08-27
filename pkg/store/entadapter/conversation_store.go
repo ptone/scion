@@ -333,6 +333,32 @@ func (s *ConversationStore) ListConversations(ctx context.Context, filter store.
 	return result, nil
 }
 
+// GetConversationByExternalRef looks up a conversation by (surface, external_ref).
+// Returns store.ErrNotFound if no matching active (non-deleted) conversation exists.
+func (s *ConversationStore) GetConversationByExternalRef(ctx context.Context, surface, externalRef string) (*store.Conversation, error) {
+	if externalRef == "" {
+		return nil, fmt.Errorf("externalRef is required: %w", store.ErrInvalidInput)
+	}
+	if surface == "" {
+		surface = "native"
+	}
+
+	e, err := s.client.Conversation.Query().
+		Where(
+			conversation.SurfaceEQ(conversation.Surface(surface)),
+			conversation.ExternalRefEQ(externalRef),
+			conversation.DeletedAtIsNil(),
+		).
+		Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	return entConversationToStore(e), nil
+}
+
 // UpsertConversationByExternalRef creates or updates a conversation keyed on
 // (surface, external_ref). The partial unique index in the schema is the guard
 // for concurrency safety.
