@@ -109,6 +109,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/project-defaults":            "hub-admin:project-defaults",
 	"/api/v1/admin/agents/reset-auth-all":       "hub-admin:agent-reset",
 	"/api/v1/admin/gcp-quota":                   "hub-admin:gcp-quota",
+	"/api/v1/admin/messaging/divergence":        "hub-admin:messaging",
 	"/api/v1/admin/lifecycle-hooks":             "hub-admin:lifecycle-hook",
 	"/api/v1/admin/lifecycle-hooks/":            "hub-admin:lifecycle-hook",
 	"/api/v1/admin/validate-resources":          "hub-admin:resource-validation",

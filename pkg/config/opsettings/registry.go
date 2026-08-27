@@ -160,6 +160,14 @@ func init() {
 			KoanfPaths: []string{"harness_configs"},
 			New:        func() any { m := make(HarnessConfigsSettings); return &m },
 		},
+		{
+			// messaging is durable via DB but has no settings.yaml representation.
+			// It is runtime/API-owned state: absent DB row = compiled defaults
+			// (conversation_read_switch=false). Seeding skips this section.
+			Name:       "messaging",
+			KoanfPaths: nil,
+			New:        func() any { return &MessagingSettings{} },
+		},
 	}
 
 	ensureIndexes()
@@ -422,6 +430,15 @@ func compileSchemas() {
 					"model_aliases":      map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
 				},
 			},
+		},
+		// messaging schema is hand-written — like maintenance, it has
+		// no $defs in settings-v1.schema.json because it is runtime state.
+		"messaging": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"conversation_read_switch": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
 		},
 		// federation schema is hand-written — federation config has no $defs
 		// in settings-v1.schema.json because it is a new Layer-1 section.

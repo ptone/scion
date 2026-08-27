@@ -3666,6 +3666,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/project-defaults", s.requireAdminHandler(s.handleAdminProjectDefaults))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.requireAdminHandler(s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.requireAdminHandler(s.handleAdminGCPQuota))
+	s.mux.HandleFunc("/api/v1/admin/messaging/divergence", s.requireAdminHandler(s.handleAdminMessagingDivergence))
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.requireAdminHandler(s.handleAdminLifecycleHooks))
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks/", s.requireAdminHandler(s.handleAdminLifecycleHookByID))
 	s.mux.HandleFunc("/api/v1/admin/validate-resources", s.requireAdminHandler(s.handleAdminValidateResources))

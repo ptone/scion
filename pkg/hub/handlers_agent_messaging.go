@@ -258,6 +258,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Match:      match,
 		Reason:     reason,
 	})
+	// DEF-3: Independent consistency check against prior messages.
+	messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, req.ThreadID, agent.ID, recipientID, s.messageLog)
 
 	// Build a structured message for external dispatch paths.
 	structuredMsg := &messages.StructuredMessage{
@@ -808,6 +810,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Match:      match,
 			Reason:     reason,
 		})
+		// DEF-3: Independent consistency check against prior messages.
+		messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, structuredMsg.ThreadID, structuredMsg.SenderID, agent.ID, s.messageLog)
 		// Propagate GroupID from metadata so CLI-originated group[] messages
 		// preserve correlation in the store.
 		if structuredMsg.Metadata != nil {
@@ -1056,6 +1060,8 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Match:      match,
 				Reason:     reason,
 			})
+			// DEF-3: Independent consistency check against prior messages.
+			messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", agentMsg.SenderID, agent.ID, s.messageLog)
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			}
@@ -1174,6 +1180,8 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Match:      match,
 				Reason:     reason,
 			})
+			// DEF-3: Independent consistency check against prior messages.
+			messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", userMsg.SenderID, userID, s.messageLog)
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			}

@@ -1761,8 +1761,9 @@ type MessageFilter struct {
 	OnlyUnread bool      // Only unread messages
 	Type       string    // Filter by message type
 	Channel    string    // Filter by channel (e.g. "web", "discord")
-	ThreadID   string    // Filter by thread_id (wave-2 conversation key)
-	Visibility []string  // Filter to listed visibility levels
+	ThreadID       string // Filter by thread_id (wave-2 conversation key)
+	ConversationID string // Filter by conversation_id (S4 conversation model)
+	Visibility     []string  // Filter to listed visibility levels
 	Before     time.Time // Upper bound for created_at (exclusive)
 	After      time.Time // Lower bound for created_at (exclusive)
 }

@@ -483,6 +483,8 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			Match:      match,
 			Reason:     reason,
 		})
+		// DEF-3: Independent consistency check against prior messages.
+		messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, convID, msg.ThreadID, msg.SenderID, msg.RecipientID, p.log)
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
@@ -651,6 +653,8 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			Match:      match,
 			Reason:     reason,
 		})
+		// DEF-3: Independent consistency check against prior messages.
+		messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, convID, msg.ThreadID, msg.SenderID, agent.ID, p.log)
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)

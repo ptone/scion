@@ -16,9 +16,12 @@ package messaging
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 func TestDirectMessageExternalRef_Deterministic(t *testing.T) {
@@ -291,5 +294,157 @@ func TestNewRoutingStr(t *testing.T) {
 	}
 	if got := NewRoutingStr("conv-abc"); got != "conv:conv-abc" {
 		t.Errorf("expected 'conv:conv-abc', got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEF-3: CheckConversationConsistency tests (Rule 10)
+// ---------------------------------------------------------------------------
+
+// mockMessageQueryStore implements MessageQueryStore for testing.
+type mockMessageQueryStore struct {
+	messages []store.Message
+}
+
+func (m *mockMessageQueryStore) ListMessages(_ context.Context, filter store.MessageFilter, _ store.ListOptions) (*store.ListResult[store.Message], error) {
+	var result []store.Message
+	for _, msg := range m.messages {
+		if filter.ThreadID != "" && msg.ThreadID != filter.ThreadID {
+			continue
+		}
+		if filter.SenderID != "" && msg.SenderID != filter.SenderID {
+			continue
+		}
+		if filter.RecipientID != "" && msg.RecipientID != filter.RecipientID {
+			continue
+		}
+		if filter.ConversationID != "" && msg.ConversationID != filter.ConversationID {
+			continue
+		}
+		result = append(result, msg)
+	}
+	return &store.ListResult[store.Message]{Items: result, TotalCount: len(result)}, nil
+}
+
+// TestCheckConversationConsistency_DetectsMismatch verifies that
+// CheckConversationConsistency detects when a new message's conversation_id
+// disagrees with prior messages in the same logical thread.
+//
+// Rule 10 mutation check: removing the comparison (making the function always
+// return true) causes this test to fail.
+func TestCheckConversationConsistency_DetectsMismatch(t *testing.T) {
+	DivergenceMetrics = &DivergenceCounter{}
+	ctx := context.Background()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Store a prior message with conversation_id = "conv-A" for thread "thread-1".
+	ms := &mockMessageQueryStore{
+		messages: []store.Message{
+			{
+				ID:             "msg-prior",
+				ThreadID:       "thread-1",
+				ConversationID: "conv-A",
+			},
+		},
+	}
+
+	// Call CheckConversationConsistency for a new message with
+	// conversation_id = "conv-B" for the same thread "thread-1".
+	match := CheckConversationConsistency(
+		ctx, ms,
+		"msg-new",   // messageID
+		"conv-B",    // resolvedConvID — different from conv-A
+		"thread-1",  // threadID — same thread
+		"sender-1",  // senderID
+		"recip-1",   // recipientID
+		logger,
+	)
+
+	// Assert the function returns false (mismatch detected).
+	if match {
+		t.Fatal("expected match=false when conversation_id disagrees with prior messages in the same thread")
+	}
+
+	// Verify WARN was logged.
+	output := buf.String()
+	if !strings.Contains(output, "MISMATCH") {
+		t.Errorf("expected MISMATCH in log output, got: %s", output)
+	}
+
+	// Verify DivergenceMetrics incremented.
+	if DivergenceMetrics.Mismatches() < 1 {
+		t.Errorf("expected mismatches >= 1, got %d", DivergenceMetrics.Mismatches())
+	}
+}
+
+// TestCheckConversationConsistency_AgreementReturnsTrue verifies that
+// consistent conversation IDs return true.
+func TestCheckConversationConsistency_AgreementReturnsTrue(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	ms := &mockMessageQueryStore{
+		messages: []store.Message{
+			{
+				ID:             "msg-prior",
+				ThreadID:       "thread-1",
+				ConversationID: "conv-A",
+			},
+		},
+	}
+
+	// Same conversation_id — should agree.
+	match := CheckConversationConsistency(
+		ctx, ms, "msg-new", "conv-A", "thread-1", "sender-1", "recip-1", logger,
+	)
+	if !match {
+		t.Fatal("expected match=true when conversation_id agrees with prior messages")
+	}
+}
+
+// TestCheckConversationConsistency_NoPriorMessages verifies that the function
+// returns true when no prior messages exist (nothing to compare against).
+func TestCheckConversationConsistency_NoPriorMessages(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	ms := &mockMessageQueryStore{messages: nil}
+
+	match := CheckConversationConsistency(
+		ctx, ms, "msg-new", "conv-A", "thread-1", "sender-1", "recip-1", logger,
+	)
+	if !match {
+		t.Fatal("expected match=true when no prior messages exist")
+	}
+}
+
+// TestCheckConversationConsistency_DMByPrincipalPair verifies the DM path
+// (no threadID, matches by sender/recipient pair).
+func TestCheckConversationConsistency_DMByPrincipalPair(t *testing.T) {
+	DivergenceMetrics = &DivergenceCounter{}
+	ctx := context.Background()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	ms := &mockMessageQueryStore{
+		messages: []store.Message{
+			{
+				ID:             "msg-prior",
+				SenderID:       "user-A",
+				RecipientID:    "agent-B",
+				ConversationID: "conv-X",
+			},
+		},
+	}
+
+	// Different conversation_id for the same sender/recipient pair.
+	match := CheckConversationConsistency(
+		ctx, ms, "msg-new", "conv-Y", "", "user-A", "agent-B", logger,
+	)
+	if match {
+		t.Fatal("expected match=false when DM conversation_id disagrees")
 	}
 }

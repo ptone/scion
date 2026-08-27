@@ -305,6 +305,13 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	if filter.ThreadID != "" {
 		query.Where(message.ThreadIDEQ(filter.ThreadID))
 	}
+	if filter.ConversationID != "" {
+		cid, err := parseUUID(filter.ConversationID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid conversation_id filter: %w", err)
+		}
+		query.Where(message.ConversationIDEQ(cid))
+	}
 	// Visibility filter with NULL backfill awareness (review R1 fix):
 	// Old rows have NULL visibility. The read-time backfill in entMessageToStore
 	// normalises after fetch, but a simple IN predicate drops NULL rows before

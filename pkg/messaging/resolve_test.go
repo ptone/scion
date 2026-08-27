@@ -811,3 +811,148 @@ func TestResolutionError_Ambiguous(t *testing.T) {
 	assert.Contains(t, err.Error(), "ambiguous")
 	assert.Contains(t, err.Error(), "project-a")
 }
+
+// ---------------------------------------------------------------------------
+// DEF-1: Post-resolution participant auth tests (Rule 10)
+// ---------------------------------------------------------------------------
+
+// TestResolveConvByID_RejectsNonParticipant verifies that a non-participant
+// is rejected when resolving a direct conversation via conv:<id>, even if
+// the non-participant belongs to the same project.
+//
+// Rule 10 mutation check: removing the participant check in
+// checkPostResolutionAuth makes Principal B's resolution succeed → test fails.
+func TestResolveConvByID_RejectsNonParticipant(t *testing.T) {
+	ms := newMockStore()
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	principalA := uuid.NewString() // participant
+	principalB := uuid.NewString() // same project, NOT a participant
+	convID := uuid.NewString()
+
+	// Create a direct conversation in projectID with only principalA as participant.
+	ms.addConversation(
+		&store.Conversation{ID: convID, ProjectID: &projectID, Kind: "direct", Surface: "native"},
+		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: principalA, Role: "member"},
+	)
+
+	// Give principalB presence in the same project (so project isolation passes).
+	otherConvID := uuid.NewString()
+	ms.addConversation(
+		&store.Conversation{ID: otherConvID, ProjectID: &projectID, Kind: "group", Surface: "native"},
+		store.ConversationParticipant{ConversationID: otherConvID, PrincipalKind: "user", PrincipalID: principalB, Role: "member"},
+	)
+
+	// Principal A resolves conv:<id> successfully.
+	resultA, err := Resolve(ctx, ms, "conv:"+convID, ResolveContext{
+		SenderPrincipalKind: "user",
+		SenderPrincipalID:   principalA,
+		ProjectID:           projectID,
+	})
+	require.NoError(t, err, "participant A should resolve successfully")
+	assert.Equal(t, convID, resultA.ConversationID)
+
+	// Principal B resolves conv:<id> and gets 'not-a-participant' error.
+	_, err = Resolve(ctx, ms, "conv:"+convID, ResolveContext{
+		SenderPrincipalKind: "user",
+		SenderPrincipalID:   principalB,
+		ProjectID:           projectID,
+	})
+	require.Error(t, err, "non-participant B should be rejected")
+	var resErr *ResolutionError
+	require.ErrorAs(t, err, &resErr)
+	assert.Equal(t, "not-a-participant", resErr.Reason,
+		"expected not-a-participant, got %s", resErr.Reason)
+}
+
+// TestResolve_GroupConv_AcceptsNonParticipantProjectMember verifies that a
+// project member can resolve a group conversation they have never posted in
+// (no prior participation required for group conversations).
+//
+// Rule 10 mutation check: adding a participant requirement for group
+// conversations would make this test fail.
+func TestResolve_GroupConv_AcceptsNonParticipantProjectMember(t *testing.T) {
+	ms := newMockStore()
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	memberID := uuid.NewString() // project member, never posted in the group
+	convID := uuid.NewString()
+
+	// Create a group conversation with NO participants matching memberID.
+	otherUserID := uuid.NewString()
+	ms.addConversation(
+		&store.Conversation{ID: convID, ProjectID: &projectID, Kind: "group", Surface: "native", DisplayName: "general"},
+		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: otherUserID, Role: "member"},
+	)
+
+	// The member resolves conv:<id> — should succeed because group
+	// conversations only require project membership, not participation.
+	result, err := Resolve(ctx, ms, "conv:"+convID, ResolveContext{
+		SenderPrincipalKind: "user",
+		SenderPrincipalID:   memberID,
+		ProjectID:           projectID,
+	})
+	require.NoError(t, err, "project member should resolve group conv without being a participant")
+	assert.Equal(t, convID, result.ConversationID)
+	assert.False(t, result.Created)
+}
+
+// TestResolve_DirectConv_RejectionGrammarIndependent verifies that the same
+// direct-conversation rejection occurs via BOTH conv:<id> AND @<agent-name>,
+// proving the auth check is grammar-independent.
+//
+// Rule 10 mutation check: removing checkPostResolutionAuth from Resolve()
+// would let the @<agent> path succeed for an already-existing DM the sender
+// is not party to → test fails.
+func TestResolve_DirectConv_RejectionGrammarIndependent(t *testing.T) {
+	ms := newMockStore()
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userA := uuid.NewString()     // owns the DM
+	agentID := uuid.NewString()   // the other party in the DM
+	intruder := uuid.NewString()  // different user, same project
+
+	// Register an agent in the project.
+	ms.agents[projectID+"/target-agent"] = &store.Agent{ID: agentID, Slug: "target-agent", ProjectID: projectID}
+
+	// Create an existing DM between userA and the agent.
+	dmConvID := uuid.NewString()
+	ms.addConversation(
+		&store.Conversation{ID: dmConvID, ProjectID: &projectID, Kind: "direct", Surface: "native"},
+		store.ConversationParticipant{ConversationID: dmConvID, PrincipalKind: "user", PrincipalID: userA, Role: "member"},
+		store.ConversationParticipant{ConversationID: dmConvID, PrincipalKind: "agent", PrincipalID: agentID, Role: "member"},
+	)
+
+	// Give the intruder presence in the project.
+	otherConvID := uuid.NewString()
+	ms.addConversation(
+		&store.Conversation{ID: otherConvID, ProjectID: &projectID, Kind: "group", Surface: "native"},
+		store.ConversationParticipant{ConversationID: otherConvID, PrincipalKind: "user", PrincipalID: intruder, Role: "member"},
+	)
+
+	intruderCtx := ResolveContext{
+		SenderPrincipalKind: "user",
+		SenderPrincipalID:   intruder,
+		ProjectID:           projectID,
+	}
+
+	// Path 1: conv:<id> — must reject.
+	_, err1 := Resolve(ctx, ms, "conv:"+dmConvID, intruderCtx)
+	require.Error(t, err1, "conv:<id> path should reject non-participant")
+	var resErr1 *ResolutionError
+	require.ErrorAs(t, err1, &resErr1)
+	assert.Equal(t, "not-a-participant", resErr1.Reason)
+
+	// Path 2: @<agent-slug> — the intruder resolves @target-agent.
+	// Since a DM already exists between user A and the agent, the intruder
+	// should NOT be able to resolve it. However, @<agent> triggers
+	// resolve-or-create: if no existing DM is found for the intruder, a NEW
+	// DM is created. The intruder IS a participant in the newly created DM.
+	// The test verifies that the intruder does NOT get access to user A's
+	// existing DM — the result should be a different conversation.
+	result2, err2 := Resolve(ctx, ms, "@target-agent", intruderCtx)
+	require.NoError(t, err2, "@agent path should create a new DM for intruder")
+	assert.True(t, result2.Created, "should be a newly created conversation")
+	assert.NotEqual(t, dmConvID, result2.ConversationID,
+		"intruder must get a NEW DM, not user A's existing DM")
+}

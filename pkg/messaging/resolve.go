@@ -167,17 +167,88 @@ func Resolve(ctx context.Context, s ResolutionStore, ref string, rctx ResolveCon
 		return nil, err
 	}
 
+	var result *ResolveResult
 	switch parsed.Kind {
 	case RefConversation:
-		return resolveConvByID(ctx, s, parsed.Value, rctx)
+		result, err = resolveConvByID(ctx, s, parsed.Value, rctx)
 	case RefAgent:
-		return resolveAgentDM(ctx, s, parsed.Value, rctx)
+		result, err = resolveAgentDM(ctx, s, parsed.Value, rctx)
 	case RefEmail:
-		return resolveEmailDM(ctx, s, parsed.Value, rctx)
+		result, err = resolveEmailDM(ctx, s, parsed.Value, rctx)
 	case RefThread:
-		return resolveThread(ctx, s, parsed.Value, rctx)
+		result, err = resolveThread(ctx, s, parsed.Value, rctx)
 	default:
 		return nil, fmt.Errorf("unsupported reference kind: %w", store.ErrInvalidInput)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Post-resolution authorisation: verify the sender is allowed to access
+	// the resolved conversation. The rules depend on conversation kind:
+	//
+	//   - direct: sender MUST be a participant (covers conv:<id>, @<agent>,
+	//     @<email>). A conv:<id> from a log could be someone else's DM —
+	//     project membership alone must not open it.
+	//
+	//   - group: project membership authorises access (already enforced by the
+	//     project isolation check in resolveConvByID / resolveThread). An agent
+	//     who has never spoken in #general must still be able to post there.
+	//
+	//   - global DMs (nil ProjectID): participant check is the ONLY auth gate
+	//     since there is no project to check against.
+	//
+	// Newly-created conversations (result.Created == true) are exempt: the
+	// resolve-or-create path adds both parties as participants before returning.
+	if !result.Created {
+		if authErr := checkPostResolutionAuth(ctx, s, result.ConversationID, ref, rctx); authErr != nil {
+			return nil, authErr
+		}
+	}
+
+	return result, nil
+}
+
+// checkPostResolutionAuth verifies the sender is authorised to access the
+// resolved conversation based on its kind.
+func checkPostResolutionAuth(ctx context.Context, s ResolutionStore, convID, ref string, rctx ResolveContext) error {
+	conv, err := s.GetConversation(ctx, convID)
+	if err != nil {
+		return fmt.Errorf("loading conversation for auth check: %w", err)
+	}
+
+	switch conv.Kind {
+	case "direct":
+		// Direct conversations require participant membership regardless of
+		// how the reference was formed.
+		return requireParticipant(ctx, s, conv.ID, ref, rctx)
+	case "group":
+		// Group conversations are authorised by project membership, which is
+		// already enforced by the project isolation check. No additional
+		// participant check needed — agents must be able to post in rooms
+		// they have never spoken in.
+		return nil
+	default:
+		// Unknown kind — fail closed with participant check.
+		return requireParticipant(ctx, s, conv.ID, ref, rctx)
+	}
+}
+
+// requireParticipant checks that the sender is a participant in the given
+// conversation. Returns a ResolutionError with reason "not-a-participant" if not.
+func requireParticipant(ctx context.Context, s ResolutionStore, convID, ref string, rctx ResolveContext) error {
+	participants, err := s.ListParticipants(ctx, convID)
+	if err != nil {
+		return fmt.Errorf("listing participants for auth check: %w", err)
+	}
+	for _, p := range participants {
+		if p.PrincipalKind == rctx.SenderPrincipalKind && p.PrincipalID == rctx.SenderPrincipalID {
+			return nil // sender is a participant
+		}
+	}
+	return &ResolutionError{
+		Ref:    ref,
+		Reason: "not-a-participant",
 	}
 }
 
