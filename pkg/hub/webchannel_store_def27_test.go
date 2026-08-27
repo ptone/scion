@@ -19,13 +19,71 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// testConvUpserter implements messaging.ConversationUpserter against the raw
+// SQLite conversations table. It inserts or updates a conversation row,
+// matching the semantics of the real Ent-backed store.
+type testConvUpserter struct {
+	db *sql.DB
+}
+
+func (u *testConvUpserter) UpsertConversationByExternalRef(ctx context.Context, conv *store.Conversation) (*store.Conversation, error) {
+	// Check if a row with this external_ref already exists.
+	var existingID string
+	err := u.db.QueryRowContext(ctx,
+		`SELECT id FROM conversations WHERE external_ref = ?`, conv.ExternalRef).Scan(&existingID)
+	if err == nil {
+		// Row exists — return it.
+		conv.ID = existingID
+		return conv, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, fmt.Errorf("test upsert lookup: %w", err)
+	}
+	// Insert new row.
+	id := fmt.Sprintf("conv-auto-%d", time.Now().UnixNano())
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	projectID := ""
+	if conv.ProjectID != nil {
+		projectID = *conv.ProjectID
+	}
+	_, err = u.db.ExecContext(ctx,
+		`INSERT INTO conversations (id, project_id, kind, surface, external_ref, drift_state, last_activity_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, projectID, conv.Kind, conv.Surface, conv.ExternalRef, conv.DriftState, now, now)
+	if err != nil {
+		return nil, fmt.Errorf("test upsert insert: %w", err)
+	}
+	conv.ID = id
+	return conv, nil
+}
+
+func countConversations(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM conversations`).Scan(&n))
+	return n
+}
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(&discardWriter{}, nil))
+}
+
+type discardWriter struct{}
+
+func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // ---------------------------------------------------------------------------
 // AC-27-1: Soft-deleted topic does NOT cause the mint guard to mint
@@ -365,9 +423,306 @@ func TestDEF27_TombstonedTopicWithNoConvID_ReturnsUnresolved_Postgres(t *testing
 }
 
 // ---------------------------------------------------------------------------
+// AC-27-1 PROPER: Sink-level tests — drive ResolveOrCreateConversationByKey
+// against the real store and assert on the conversations table.
+// ---------------------------------------------------------------------------
+
+func TestDEF27_SinkLevel_SoftDeletedTopicDoesNotMint_SQLite(t *testing.T) {
+	wcStore, db := newUnifyTestStore(t)
+	defer db.Close() //nolint:errcheck
+	upserter := &testConvUpserter{db: db}
+
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Create a topic with a linked conversation via dual-write.
+	topic := WebChatTopic{
+		ID:             "topic-sink-deleted",
+		ProjectID:      "proj-1",
+		Name:           "sink-deleted-topic",
+		ConversationID: "conv-sink-existing",
+		CreatedBy:      "user-1",
+		CreatedAt:      now,
+	}
+	require.NoError(t, wcStore.CreateTopic(ctx, topic))
+
+	// Soft-delete the topic.
+	require.NoError(t, wcStore.DeleteTopic(ctx, "topic-sink-deleted"))
+
+	// Count conversations BEFORE driving the sink.
+	countBefore := countConversations(t, db)
+
+	// Drive the sink with the thread ref for the soft-deleted topic.
+	pid := "proj-1"
+	result := messaging.ResolveOrCreateConversationByKey(
+		ctx, upserter, testLogger(),
+		"thread:proj-1:topic-sink-deleted", "group", &pid,
+		messaging.WithKeyTopicLookup(wcStore))
+
+	// Count conversations AFTER — must be unchanged (no mint).
+	countAfter := countConversations(t, db)
+	require.Equal(t, countBefore, countAfter,
+		"conversation count must not increase — soft-deleted topic must NOT cause a mint")
+
+	// Verify no row with the thread ref was created.
+	var refCount int
+	require.NoError(t, db.QueryRow(
+		`SELECT COUNT(*) FROM conversations WHERE external_ref = ?`,
+		"thread:proj-1:topic-sink-deleted").Scan(&refCount))
+	require.Equal(t, 0, refCount,
+		"no conversations row bearing the soft-deleted topic's thread ref should exist — "+
+			"UpsertConversationByExternalRef must NOT be called for a soft-deleted native topic")
+
+	// The result should resolve to the existing conversation (or nil is acceptable per spec §5).
+	if result != nil {
+		require.Equal(t, "conv-sink-existing", result.ConversationID,
+			"if resolved, must be the existing conversation, not a minted one")
+	}
+}
+
+func TestDEF27_SinkLevel_LiveTopicResolvesToExistingConv_SQLite(t *testing.T) {
+	wcStore, db := newUnifyTestStore(t)
+	defer db.Close() //nolint:errcheck
+	upserter := &testConvUpserter{db: db}
+
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	topic := WebChatTopic{
+		ID:             "topic-sink-live",
+		ProjectID:      "proj-1",
+		Name:           "sink-live-topic",
+		ConversationID: "conv-sink-live",
+		CreatedBy:      "user-1",
+		CreatedAt:      now,
+	}
+	require.NoError(t, wcStore.CreateTopic(ctx, topic))
+
+	countBefore := countConversations(t, db)
+
+	pid := "proj-1"
+	result := messaging.ResolveOrCreateConversationByKey(
+		ctx, upserter, testLogger(),
+		"thread:proj-1:topic-sink-live", "group", &pid,
+		messaging.WithKeyTopicLookup(wcStore))
+
+	countAfter := countConversations(t, db)
+	require.Equal(t, countBefore, countAfter,
+		"conversation count must not increase — live topic resolves to existing conversation")
+
+	require.NotNil(t, result, "live topic must resolve")
+	require.Equal(t, "conv-sink-live", result.ConversationID,
+		"must resolve to the topic's linked conversation")
+}
+
+func TestDEF27_SinkLevel_UnknownThreadStillMints_SQLite(t *testing.T) {
+	wcStore, db := newUnifyTestStore(t)
+	defer db.Close() //nolint:errcheck
+	upserter := &testConvUpserter{db: db}
+
+	ctx := context.Background()
+
+	countBefore := countConversations(t, db)
+
+	pid := "proj-1"
+	result := messaging.ResolveOrCreateConversationByKey(
+		ctx, upserter, testLogger(),
+		"thread:proj-1:unknown-thread-id", "group", &pid,
+		messaging.WithKeyTopicLookup(wcStore))
+
+	countAfter := countConversations(t, db)
+	require.Equal(t, countBefore+1, countAfter,
+		"conversation count must increase by 1 — unknown thread should mint")
+
+	require.NotNil(t, result, "unknown thread must mint a conversation")
+}
+
+func TestDEF27_SinkLevel_TombstonedNoConvID_ReturnsUnresolved_SQLite(t *testing.T) {
+	wcStore, db := newUnifyTestStore(t)
+	defer db.Close() //nolint:errcheck
+	upserter := &testConvUpserter{db: db}
+
+	ctx := context.Background()
+
+	// Insert a topic WITHOUT conversation_id (pre-backfill legacy), then soft-delete.
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+		 VALUES ('topic-sink-noconv', 'proj-1', 'no-conv', 0, 'user-1', ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`UPDATE webchat_topic SET deleted_at = ? WHERE id = 'topic-sink-noconv'`,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	countBefore := countConversations(t, db)
+
+	pid := "proj-1"
+	result := messaging.ResolveOrCreateConversationByKey(
+		ctx, upserter, testLogger(),
+		"thread:proj-1:topic-sink-noconv", "group", &pid,
+		messaging.WithKeyTopicLookup(wcStore))
+
+	countAfter := countConversations(t, db)
+	require.Equal(t, countBefore, countAfter,
+		"conversation count must not increase — tombstoned topic with no convID must not mint")
+
+	// §8 decision: returns unresolved (nil). Message stored unlinked. Degraded, not dropped.
+	require.Nil(t, result,
+		"tombstoned topic with empty conversation_id must return unresolved")
+}
+
+// ---------------------------------------------------------------------------
+// AC-27-3: Sink-level Postgres tests (separate functions, own setup)
+// ---------------------------------------------------------------------------
+
+func TestDEF27_SinkLevel_SoftDeletedTopicDoesNotMint_Postgres(t *testing.T) {
+	wcStore, db := newDEF27PgTestStore(t)
+	defer db.Close() //nolint:errcheck
+	upserter := &testConvUpserter{db: db}
+
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	topic := WebChatTopic{
+		ID:             "topic-sink-pg-deleted",
+		ProjectID:      "proj-1",
+		Name:           "pg-sink-deleted",
+		ConversationID: "conv-sink-pg-existing",
+		CreatedBy:      "user-1",
+		CreatedAt:      now,
+	}
+	require.NoError(t, wcStore.CreateTopic(ctx, topic))
+	require.NoError(t, wcStore.DeleteTopic(ctx, "topic-sink-pg-deleted"))
+
+	countBefore := countConversations(t, db)
+
+	pid := "proj-1"
+	result := messaging.ResolveOrCreateConversationByKey(
+		ctx, upserter, testLogger(),
+		"thread:proj-1:topic-sink-pg-deleted", "group", &pid,
+		messaging.WithKeyTopicLookup(wcStore))
+
+	countAfter := countConversations(t, db)
+	require.Equal(t, countBefore, countAfter,
+		"conversation count must not increase — soft-deleted topic must NOT cause a mint (Postgres)")
+
+	var refCount int
+	require.NoError(t, db.QueryRow(
+		`SELECT COUNT(*) FROM conversations WHERE external_ref = $1`,
+		"thread:proj-1:topic-sink-pg-deleted").Scan(&refCount))
+	require.Equal(t, 0, refCount,
+		"no conversations row bearing the soft-deleted topic's thread ref should exist (Postgres)")
+
+	if result != nil {
+		require.Equal(t, "conv-sink-pg-existing", result.ConversationID)
+	}
+
+	_, _ = db.Exec(`DELETE FROM webchat_topic WHERE id = 'topic-sink-pg-deleted'`)
+	_, _ = db.Exec(`DELETE FROM conversations WHERE id = 'conv-sink-pg-existing'`)
+}
+
+func TestDEF27_SinkLevel_LiveTopicResolvesToExistingConv_Postgres(t *testing.T) {
+	wcStore, db := newDEF27PgTestStore(t)
+	defer db.Close() //nolint:errcheck
+	upserter := &testConvUpserter{db: db}
+
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	topic := WebChatTopic{
+		ID:             "topic-sink-pg-live",
+		ProjectID:      "proj-1",
+		Name:           "pg-sink-live",
+		ConversationID: "conv-sink-pg-live",
+		CreatedBy:      "user-1",
+		CreatedAt:      now,
+	}
+	require.NoError(t, wcStore.CreateTopic(ctx, topic))
+
+	countBefore := countConversations(t, db)
+
+	pid := "proj-1"
+	result := messaging.ResolveOrCreateConversationByKey(
+		ctx, upserter, testLogger(),
+		"thread:proj-1:topic-sink-pg-live", "group", &pid,
+		messaging.WithKeyTopicLookup(wcStore))
+
+	countAfter := countConversations(t, db)
+	require.Equal(t, countBefore, countAfter,
+		"conversation count must not increase — live topic resolves (Postgres)")
+
+	require.NotNil(t, result)
+	require.Equal(t, "conv-sink-pg-live", result.ConversationID)
+
+	_, _ = db.Exec(`DELETE FROM webchat_topic WHERE id = 'topic-sink-pg-live'`)
+	_, _ = db.Exec(`DELETE FROM conversations WHERE id = 'conv-sink-pg-live'`)
+}
+
+func TestDEF27_SinkLevel_UnknownThreadStillMints_Postgres(t *testing.T) {
+	wcStore, db := newDEF27PgTestStore(t)
+	defer db.Close() //nolint:errcheck
+	upserter := &testConvUpserter{db: db}
+
+	ctx := context.Background()
+
+	countBefore := countConversations(t, db)
+
+	pid := "proj-1"
+	result := messaging.ResolveOrCreateConversationByKey(
+		ctx, upserter, testLogger(),
+		"thread:proj-1:unknown-pg-thread", "group", &pid,
+		messaging.WithKeyTopicLookup(wcStore))
+
+	countAfter := countConversations(t, db)
+	require.Equal(t, countBefore+1, countAfter,
+		"conversation count must increase by 1 — unknown thread should mint (Postgres)")
+
+	require.NotNil(t, result)
+
+	_, _ = db.Exec(`DELETE FROM conversations WHERE external_ref = 'thread:proj-1:unknown-pg-thread'`)
+}
+
+func TestDEF27_SinkLevel_TombstonedNoConvID_ReturnsUnresolved_Postgres(t *testing.T) {
+	wcStore, db := newDEF27PgTestStore(t)
+	defer db.Close() //nolint:errcheck
+	upserter := &testConvUpserter{db: db}
+
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+		 VALUES ('topic-sink-pg-noconv', 'proj-1', 'pg-no-conv', FALSE, 'user-1', NOW())`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`UPDATE webchat_topic SET deleted_at = NOW() WHERE id = 'topic-sink-pg-noconv'`)
+	require.NoError(t, err)
+
+	countBefore := countConversations(t, db)
+
+	pid := "proj-1"
+	result := messaging.ResolveOrCreateConversationByKey(
+		ctx, upserter, testLogger(),
+		"thread:proj-1:topic-sink-pg-noconv", "group", &pid,
+		messaging.WithKeyTopicLookup(wcStore))
+
+	countAfter := countConversations(t, db)
+	require.Equal(t, countBefore, countAfter,
+		"conversation count must not increase — tombstoned no-convID must not mint (Postgres)")
+
+	require.Nil(t, result,
+		"tombstoned topic with empty conversation_id must return unresolved (Postgres)")
+
+	_, _ = db.Exec(`DELETE FROM webchat_topic WHERE id = 'topic-sink-pg-noconv'`)
+}
+
+// ---------------------------------------------------------------------------
 // AC-27-4: Mutation proof (documented, not a test)
 //
-// To verify AC-27-4 (the mutation that proves the test catches the defect):
+// Two mutations are documented. Both must produce FAIL with an assertion
+// naming the mint (not a panic, not a compile error).
+//
+// MUTATION 1 — Accessor mutation (store layer):
 //
 //   1. In pkg/hub/webchannel_store.go, restore the deleted_at filter:
 //      Change:
@@ -381,7 +736,31 @@ func TestDEF27_TombstonedTopicWithNoConvID_ReturnsUnresolved_Postgres(t *testing
 //   3. The test must fail with:
 //        "GetTopicConversationIDIncludingDeleted must NOT return error for soft-deleted topic"
 //      This names the defect: the mint guard fails to see the tombstoned topic.
-//      It is NOT a panic or compile error.
 //
 //   The same applies to the Postgres backend by mutating webchannel_store_postgres.go.
+//
+// MUTATION 2 — Wiring mutation (sink layer):
+//
+//   1. In pkg/messaging/derive_key.go line 164, change:
+//        convID, lookupErr := cfg.topicLookup.GetTopicConversationIDIncludingDeleted(ctx, threadID)
+//      To:
+//        convID, lookupErr := cfg.topicLookup.GetTopicConversationID(ctx, threadID)
+//
+//   2. Run:
+//        go test ./pkg/hub/... -run TestDEF27_SinkLevel -v -count=1
+//
+//   3. Two tests fail:
+//        TestDEF27_SinkLevel_SoftDeletedTopicDoesNotMint_SQLite:
+//          "conversation count must not increase — soft-deleted topic must NOT cause a mint"
+//          (expected 1, actual 2)
+//        TestDEF27_SinkLevel_TombstonedNoConvID_ReturnsUnresolved_SQLite:
+//          "conversation count must not increase — tombstoned topic with no convID must not mint"
+//          (expected 0, actual 1)
+//
+//   Both failures name the mint (conversation count increased). The paired
+//   positives (LiveTopicResolves, UnknownThreadStillMints) remain PASS.
+//   No panics, no compile errors — the mutation is the defect.
+//
+// Mutation 2 is the architect's exact test: it proves the sink-level tests
+// catch DEF-27 reintroduced at the wiring point, not just at the accessor.
 // ---------------------------------------------------------------------------

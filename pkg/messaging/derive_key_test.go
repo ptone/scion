@@ -451,6 +451,39 @@ func TestResolveOrCreateConversationByKey_SinkTopicLookup_SkipsNonGroupKind(t *t
 	}
 }
 
+func TestResolveOrCreateConversationByKey_SinkTopicLookup_SoftDeletedTopic_DoesNotMint(t *testing.T) {
+	// DEF-27 unit-level: a soft-deleted topic must resolve via the
+	// including-deleted accessor, NOT the user-facing one. The sink must
+	// call GetTopicConversationIDIncludingDeleted, which sees tombstoned
+	// topics, and return the existing conversation_id without minting.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{ID: "shadow-should-not-appear"},
+	}
+	lookup := &mockTopicLookup{
+		topics:  map[string]string{"deletedTopic": "conv-existing"},
+		deleted: map[string]bool{"deletedTopic": true},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	pid := "proj"
+
+	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+		"thread:proj:deletedTopic", "group", &pid, WithKeyTopicLookup(lookup))
+
+	if got == nil {
+		t.Fatal("expected non-nil result for soft-deleted topic with linked conversation")
+	}
+	if got.ConversationID != "conv-existing" {
+		t.Errorf("ConversationID: got %q, want %q — sink minted instead of resolving via tombstoned topic",
+			got.ConversationID, "conv-existing")
+	}
+	if mock.lastConv != nil {
+		t.Error("UpsertConversationByExternalRef must NOT be called for soft-deleted native topic — would mint a shadow conversation")
+	}
+	if lookup.calledMethod != "GetTopicConversationIDIncludingDeleted" {
+		t.Errorf("sink must call GetTopicConversationIDIncludingDeleted, called %q", lookup.calledMethod)
+	}
+}
+
 func TestResolveOrCreateConversationByKey_WithSurfaceAndParentRef(t *testing.T) {
 	// Verify WithSurface and WithParentRef are applied to the conversation.
 	mock := &mockConversationUpserter{}

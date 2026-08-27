@@ -462,9 +462,24 @@ type mockTopicLookup struct {
 	// topics maps topicID -> conversationID. Empty string means topic exists
 	// but has no conversation_id. Missing key means topic not found.
 	topics map[string]string
+
+	// deleted is the set of topicIDs that are soft-deleted. A topic in
+	// deleted must also have an entry in topics (it still exists, just
+	// tombstoned). GetTopicConversationID returns ErrNotFound for these;
+	// GetTopicConversationIDIncludingDeleted returns the conversation_id.
+	deleted map[string]bool
+
+	// calledMethod records which method was last called, so tests can
+	// verify the sink calls the correct accessor.
+	calledMethod string
 }
 
 func (m *mockTopicLookup) GetTopicConversationID(_ context.Context, topicID string) (string, error) {
+	m.calledMethod = "GetTopicConversationID"
+	// User-facing: hides soft-deleted topics.
+	if m.deleted[topicID] {
+		return "", fmt.Errorf("topic not found (deleted) %s: %w", topicID, store.ErrNotFound)
+	}
 	convID, ok := m.topics[topicID]
 	if !ok {
 		return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
@@ -473,7 +488,8 @@ func (m *mockTopicLookup) GetTopicConversationID(_ context.Context, topicID stri
 }
 
 func (m *mockTopicLookup) GetTopicConversationIDIncludingDeleted(_ context.Context, topicID string) (string, error) {
-	// Mock has no deleted_at concept — delegate to the same logic.
+	m.calledMethod = "GetTopicConversationIDIncludingDeleted"
+	// Mint guard: sees soft-deleted topics.
 	convID, ok := m.topics[topicID]
 	if !ok {
 		return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
