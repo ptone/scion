@@ -472,12 +472,25 @@ func (m *mockTopicLookup) GetTopicConversationID(_ context.Context, topicID stri
 	return convID, nil
 }
 
+func (m *mockTopicLookup) GetTopicConversationIDIncludingDeleted(_ context.Context, topicID string) (string, error) {
+	// Mock has no deleted_at concept — delegate to the same logic.
+	convID, ok := m.topics[topicID]
+	if !ok {
+		return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+	}
+	return convID, nil
+}
+
 // mockTopicLookupWithError returns a configurable error for any topicID.
 type mockTopicLookupWithError struct {
 	err error
 }
 
 func (m *mockTopicLookupWithError) GetTopicConversationID(_ context.Context, _ string) (string, error) {
+	return "", m.err
+}
+
+func (m *mockTopicLookupWithError) GetTopicConversationIDIncludingDeleted(_ context.Context, _ string) (string, error) {
 	return "", m.err
 }
 

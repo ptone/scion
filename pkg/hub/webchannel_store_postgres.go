@@ -987,6 +987,25 @@ func (s *pgWebChatStore) GetTopicConversationID(ctx context.Context, topicID str
 	return convID, nil
 }
 
+// GetTopicConversationIDIncludingDeleted returns the conversation_id for a
+// webchat topic regardless of its deletion state.
+//
+// Soft-deletion is not declassification. A tombstoned native topic is still
+// a native topic for the purpose of "should I mint." Deletion hides a topic
+// from users; it must not make the mint guard forget the topic was ours.
+func (s *pgWebChatStore) GetTopicConversationIDIncludingDeleted(ctx context.Context, topicID string) (string, error) {
+	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = $1`
+	var convID string
+	err := s.db.QueryRowContext(ctx, query, topicID).Scan(&convID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+		}
+		return "", fmt.Errorf("webchat store: get topic conversation_id (including deleted): %w", err)
+	}
+	return convID, nil
+}
+
 // runMigrations executes idempotent data migrations.
 func (s *pgWebChatStore) runMigrations() error {
 	if err := s.migrateThreadIDs(DefaultMigrationBatchSize); err != nil {

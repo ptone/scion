@@ -161,7 +161,7 @@ func ResolveOrCreateConversationByKey(
 			return nil
 		}
 		threadID := parts[2]
-		convID, lookupErr := cfg.topicLookup.GetTopicConversationID(ctx, threadID)
+		convID, lookupErr := cfg.topicLookup.GetTopicConversationIDIncludingDeleted(ctx, threadID)
 		if lookupErr == nil && convID != "" {
 			log.Debug("conversation resolved via topic lookup (sink-level)",
 				"external_ref", extRef, "conversation_id", convID)

@@ -36,6 +36,13 @@ type ConversationUpserter interface {
 // a shadow conversation row.
 type TopicConversationLookup interface {
 	GetTopicConversationID(ctx context.Context, topicID string) (string, error)
+	// GetTopicConversationIDIncludingDeleted returns the conversation_id for a
+	// webchat topic regardless of its deletion state.
+	//
+	// Soft-deletion is not declassification. A tombstoned native topic is still
+	// a native topic for the purpose of "should I mint." Deletion hides a topic
+	// from users; it must not make the mint guard forget the topic was ours.
+	GetTopicConversationIDIncludingDeleted(ctx context.Context, topicID string) (string, error)
 }
 
 // ConversationReader is the minimal interface for read-only conversation
