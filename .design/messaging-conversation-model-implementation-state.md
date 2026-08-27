@@ -101,8 +101,11 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 **Active section:** none. **S5 CLOSED 2026-08-27 12:40Z at `55dd6e16` (round 3).**
 S6 (phase 13, Removal) is deferred until after the beta exercise — rule 5.
-**Active manager:** none. `ca-msg-em5` sent closeout instructions 12:40Z, retirement pending
-its confirmation. `ca-msg-em4` retired, all ten of its sub-agents confirmed deleted.
+**Active manager:** none. **`ca-msg-em5` retired 12:48Z** (`scion stop --rm`, absence from
+`scion list` confirmed) after confirming a clean tree at `55dd6e16` pushed to remote and all
+five sub-agents deleted by name: dev-i1-warnings, dev-i2i3-parsecheck, review-i1i4-fixes,
+audit-i1i4-fixes, dev-j1j2-floors. `ca-msg-em4` retired earlier, all ten of its sub-agents
+confirmed deleted. **No agents remain under this project but me.**
 **Blocked on:** the user's beta exercise. All five implemented sections (S1–S5) are on
 `scion/messaging-v2`. Nothing is in flight. The next architect action is **DEF-5** (owed by
 me): spec the CLI delivery policy for `conv:<id>` and `#<thread>`, which the gate currently
@@ -431,6 +434,23 @@ would bury the events that matter.
   `ebf8cc27`. Six mutations reproduced independently. **Implementation complete for S1–S5;
   S6 deferred to post-beta.** See §5i.
 
+- `2026-08-27 12:55Z` **Root cause of I-1 found, and it is the design document.** While
+  starting DEF-5 I checked §2.9's verb table against `cmd/schedule.go`. It read
+  "`scion schedule message …` | deferred send (**already exists**)". **There is no `message`
+  subcommand under `schedule` and there never has been** — the tree is `list | get | cancel |
+  create | create-recurring | pause | resume | delete | history` (`cmd/schedule.go:766-774`).
+  S4 wrote the `--in`/`--at` deprecation warnings **faithfully against that paragraph**. I
+  charged I-1 to my verification of AC-15a; the verification miss was real, but the defect was
+  authored here. **A design document that says a capability "already exists" is making a claim
+  about code, and nothing was checking it.** Corrected §2.9, Appendix A SEE ALSO, and the
+  Appendix A changed-table; the AC-15a amendment keeps the broken string deliberately, as
+  history. **Opened DEF-6:** `schedule create` takes `--agent`, not a conversation, so §2.9's
+  "fixes by construction" claim about dropped envelopes is unimplemented work.
+  **Follow-up worth its one line:** the S5 parse-check would have caught this — the Appendix A
+  fenced block contains a bare `scion schedule message` line with no placeholder tokens. Adding
+  `.design/messaging-conversation-model.md` to `docFiles` in `cmd/doc_syntax_test.go` extends
+  the check to the design doc itself. Specced for the next section; I do not implement.
+
 ## 5i. S5 — CLOSED 2026-08-27 12:40Z (accepted on round 3, `55dd6e16`)
 
 Fast-forward from `19681bc1`; closeout at `ebf8cc27`. Round 3 was two test files, ~140 lines.
@@ -757,6 +777,7 @@ conversation. This table is the only thing that carries them.
 | DEF-1 | **Participant-level auth on `conv:<id>`.** `resolveConvByID` checks the sender's *project* but not whether the sender is a *participant* in that conversation. Raised HIGH by S1 audit. | S1 | **S4** (surface layer, message-send time) | S1 is not wired into any live path, so the gap is not reachable. It becomes reachable the moment S4 switches reads. **S4 is not verifiable without this.** |
 | DEF-2 | **AC-33** — deferred to the envelope validation layer per design. | S1 | **S3** | The validation choke point does not exist until S3 builds it. |
 | DEF-5 | **`conv:<id>` and `#<thread>` have no CLI delivery policy.** Resolving a reference to a conversation does not say *who receives the message*. For `@<agent>` the answer is obvious; for a conversation ID or a thread it is a policy question the design never answered — wake the default agent? fan out to every participant? fan out and wake none? S4 round 2 shipped a stub that resolved and then silently dropped the message (G-2), which is what an unanswered policy question looks like when a developer has to ship anyway. Round 3 takes option (b): the CLI hard-errors on both forms with a non-zero exit, and the warning text names only what works. **The resolve endpoint keeps handling all four grammars** — brokers and native chat need them, and resolution is not the broken part. | S4 | **me, before the section that wires conversation-reference sending for these two forms** | Nothing regresses: neither form works today, and erroring is strictly better than the silent drop it replaces. The risk is not technical but bookkeeping — an unanswered design question is easy to lose once the error message makes the gap look intentional. |
+| DEF-6 | **Scheduled sends cannot address a conversation.** `scion schedule create` takes `--agent <name>`, not a conversation reference (`cmd/schedule.go:783-786`). Design §2.9 claimed the split "fixes by construction" the bug where scheduled messages drop `--channel`/`--thread-id`/`--attach`/`--cc` and are re-authored as `sender=scheduler` (`findings.md` §8). It does not, because there is nowhere on a scheduled event to put a conversation. The fix is real work: a conversation reference on the scheduled event, resolved at fire time rather than at create time (a conversation can be archived or drift between the two), and the original sender preserved. | discovered 2026-08-27 while correcting §2.9; the underlying gap predates the project | **me** to spec, then a section to build. Blocks nothing before beta. | The `--in`/`--at` deprecation warnings now name `scion schedule create --in/--at`, which exists and works for the agent case — so the advice is true for the common path. It is incomplete rather than wrong. Do not close phase 13 (Removal) on the strength of the warning alone: AC's precondition is that every named replacement "has shipped and been exercised", and the conversation case has not. |
 | DEF-3 **(CLOSED 2026-08-27 09:55Z)** | **The phase-5 divergence gate is weaker than the design assumed, and this is my spec gap, not em2's.** `ComputeDivergenceMatch` is now a genuine comparison, but at the call sites both models derive their answer from the same three fields (sender, recipient, thread_id), so a DM or thread pair mismatch is **unreachable in production**. The only divergence reachable today is resolution failure (`no-new-routing`). Note the consequence: this signal **would not have caught B-1**, the duplicate-key bug — dual-write would have returned its own row's ref and scored a match. **Closed on S4's branch:** `CheckConversationConsistency` compares against the `conversation_id` stored on prior messages of the same logical conversation — the independent source of truth this asked for — with `TestCheckConversationConsistency_DetectsMismatch`, `_GenuineDisagreement`, `_ThreadDisagreement` and `_RoutingTypeMismatch` proving disagreement is reachable. Carries forward with S4's merge, not before. | S2 | **S4, before the read switch** | Phase 5's new model has no independent source of truth; it constructs the key from the message. Nothing can diverge until something else is authoritative. |
 
 | DEF-4 **(CLOSED 2026-08-27 07:55Z at `b92926dd`)** | **The `pkg/hub` test suite is degrading commit over commit on the integration branch.** Full-suite failure counts: `origin/main` **0** (3 runs), `cd4ee7ed` **5**, `d9fc7f51` **18**, `f206a0d9` **17–19**. Failure membership is **non-deterministic** — two consecutive runs at the same commit shared only 2 of ~18. Every failure is SQLite `out of memory (7)` raised at test-store creation (`newTestStore(":memory:")` / `sql.Open("sqlite3", ":memory:")`), with 109 GB free on the host and unaffected by `-parallel 2`. Each test opens its own in-memory DB and runs the full ent migration; the branch adds tables, so per-DB cost has risen. Suspected cause is stores never being closed, so every in-memory DB stays live for the whole package run — but that is a lead, not a diagnosis. | S1/S2 (accumulating) | **S4, as its first task, before any new feature work** | It does not affect shipped behaviour. It does destroy the verification method: my acceptance of every section from here rests on diffing full-suite results, and a suite whose failure set changes run to run cannot support that. It will get worse with S4 and S5. |

@@ -521,17 +521,34 @@ management, attachments and broadcast, producing 34 exclusion rules. Splitting b
 |---|---|---|
 | `scion message <conv> <text>` | post to a conversation | — |
 | `scion broadcast <text>` | project / global fan-out (not a conversation) | ~12 rules |
-| `scion schedule message …` | deferred send (already exists) | ~8 rules |
+| `scion schedule create …` | deferred send (exists, but see the correction below) | ~8 rules |
 | `scion keys <agent> <literal>` | raw keystroke injection, local/terminal only | ~5 rules |
 | `scion notifications subscribe` | subscription management (already exists) | ~2 rules |
 
 `scion message` retains six flags: `--to`, `--attach`, `--reply-to`, `--interrupt`,
 `--wake`, `--visibility`. The exclusion matrix collapses to three rules (G5).
 
-Splitting scheduling out also fixes by construction the bug where scheduled messages
-silently drop `--channel`, `--thread-id`, `--attach` and `--cc` and are re-authored as
-`sender=scheduler` (`findings.md` §8): `scion schedule message` stores a complete envelope
-including its conversation, and fires it with the original sender preserved.
+Splitting scheduling out is *intended* to fix by construction the bug where scheduled
+messages silently drop `--channel`, `--thread-id`, `--attach` and `--cc` and are re-authored as
+`sender=scheduler` (`findings.md` §8): the scheduled event should store a complete envelope
+including its conversation, and fire it with the original sender preserved.
+
+> **Correction 2026-08-27 — this section named a command that does not exist, and I-1 is its
+> consequence.** The earlier text read "`scion schedule message …` (already exists)". There is
+> no `message` subcommand under `schedule`; the tree is `list | get | cancel | create |
+> create-recurring | pause | resume | delete | history` (`cmd/schedule.go:766-774`). S4
+> implemented the `--in`/`--at` deprecation warnings *faithfully against this paragraph* and
+> so shipped a warning directing users at a command that has never existed. I found that in
+> S5 and charged it to my verification of AC-15a; the deeper cause is here. **A design
+> document that asserts a capability "already exists" is a claim about the code, and nothing
+> was checking it.**
+>
+> What actually exists is `scion schedule create --agent <name> --message "…" --in 30m`. It
+> **takes an agent, not a conversation** (`cmd/schedule.go:783-786`), so the envelope-preserving
+> property this paragraph claims is unimplemented work rather than an existing capability. That
+> gap is **DEF-6**.
+
+
 
 Full proposed help text: **Appendix A**.
 
@@ -1037,7 +1054,7 @@ EXAMPLES
 
 SEE ALSO
   scion broadcast              Send to all agents. Not a conversation.
-  scion schedule message       Send later.
+  scion schedule create        Send later.
   scion keys                   Send literal keystrokes to a harness.
   scion notifications          Subscribe to agent lifecycle events.
 ```
@@ -1049,7 +1066,7 @@ SEE ALSO
 | `--channel` + `--thread-id`, both optional | the conversation, required and positional | Cannot be forgotten. Omitting it is a parse error, not a silent misroute. |
 | `--cc` | `--to` | CC implied a copy. These are addressees. |
 | `--broadcast` / `--all` | `scion broadcast` | Not conversations. Removes ~12 exclusion rules. |
-| `--in` / `--at` | `scion schedule message` | Removes ~8 rules and fixes the dropped-envelope bug. |
+| `--in` / `--at` | `scion schedule create --in/--at` | Removes ~8 rules. The dropped-envelope fix needs conversation addressing on scheduled events — DEF-6, not yet built. |
 | `--raw` | `scion keys` | Keystroke injection, not messaging. Also honest that it is local-only. |
 | `--notify` | `scion notifications subscribe` | Subscription management. |
 | `--plain` | (removed) | A rendering hint that leaked into the envelope. |
