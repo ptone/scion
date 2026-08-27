@@ -215,28 +215,29 @@ These are load-bearing and each was fixed for a measured reason:
 
 Do not retitle the page, do not change the frontmatter, do not reorder sections.
 
-## 8. THE GATE — a live walk, before this is done
+## 8. AMENDED 16:40 — a code reviewer owns verification, not you and not me
 
-**This is a rewrite of a deploy path that a published page tells strangers to run.** A green
-`go test` proves nothing about it.
+**This section replaces an earlier version that asked you to do the live walk. Do not do it.**
 
-Deploy a real Instance with your rewritten script, in project `ptone-experiments`, region
-`us-east4`, and walk §1: open the `run.app` URL, log in, create a project, start a Claude agent,
-attach to its terminal, watch it commit to a git remote. Use image
-`us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni:f99a818` for *your own test* — it stays out of
-the docs, it does not stay out of your test.
+A separate `code-reviewer` agent owns the review and the live §1 walk on this change. That is the
+process here, and I was wrong to fold it into your task. **Do not deploy anything. Do not create,
+restart, or delete any Instance.**
 
-Name your Instance `sn-backout-t`. **Delete it when you are done.**
+What you still owe on your own work:
 
-Credentials come from the metadata server — no key file. Impersonate
-`scion-instance-gym@serverless-team-scion.iam.gserviceaccount.com`. **Do not print access tokens to
-stdout.** That has happened before on this project.
+- `go build ./...` and `go test ./...` pass on your branch.
+- `scion deploy-instance --help` returns `unknown command` on a binary built **from your branch**
+  (not one on your `PATH` — that is the stale-binary symptom, not proof).
+- `bash -n scripts/single-node/deploy.sh` parses, and `shellcheck` is clean if it is available.
+- The new audience pin test passes, and you can show it failing when the format string in
+  `deploy.sh` is deliberately broken. **A pin that cannot fail is not a pin** — check that once,
+  then restore the string.
 
-Also confirm, on the live deploy, that **Gate 2 actually fired** — not that the script exited zero.
-Show me the line of output.
+That last item is the only extra verification I want from you, and it is cheap. Everything else —
+the live deploy, Gate 2 firing for real, the §1 walk — belongs to the reviewer.
 
-If the walk fails, that is a good outcome for the walk and you should report it immediately, not
-debug it silently for an hour.
+Do not chase the reviewer's findings pre-emptively by testing against a live Instance "just to be
+sure". That is the duplication we are removing.
 
 ## 9. Rules
 
@@ -258,12 +259,17 @@ Message `sn-impl-arch` with:
 
 1. The four commit SHAs and `git diff --stat` against upstream `main`.
 2. **The §5 answer first if it went wrong** — is the audience pin still enforced by CI, and how?
+   Include the result of deliberately breaking the format string.
 3. Your independent confirmation of §7b: is `deploy-instance` really the only use of the `scion`
    binary in the tutorial? Quote your grep.
-4. The Gate 2 output line from the live walk, and the §1 result step by step.
-5. Confirmation that `scion deploy-instance --help` returns `unknown command` on a binary built
-   from your branch.
+4. The §8 self-checks: build, tests, `bash -n`, `unknown command`.
+5. **A handover note for the code reviewer**: which of the eight steps you are least confident in,
+   what you could not test without a live deploy, and anything you changed from the Go original
+   rather than translated. Be candid — the reviewer walking straight at your weakest point is the
+   cheapest outcome available to us. Hiding it costs a whole deploy cycle.
 6. Confirmation that the unqualified-ref grep returned zero and that `git grep ptone-misc` returns
-   zero outside your own test notes.
+   zero outside your own notes.
 7. **Anything in this brief you think I have got wrong.** Say it plainly. I would rather be
    corrected than agreed with, and today that has paid off four times.
+
+Send the same report to the code reviewer when it is dispatched. I will tell you its name.
