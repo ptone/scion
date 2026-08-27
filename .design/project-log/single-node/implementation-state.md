@@ -9149,3 +9149,71 @@ Corrected to ptone at 14:33. Task #62's premise is void and the task is closed.
 2. **Critical path: ptone's merge decision on `#1315`/`#1316`/`#1317`.** Not the CLA. Corrected.
 3. **Design doc in sync**, via `#1317`. One deliberate divergence stands: the `harnessConfig`
    workaround in the tutorial survives until `ptone/scion#1316` phase 4.
+
+## §28 — 15:00 heartbeat: a rival Cloud Run page landed upstream and put `#1315` into conflict
+
+Twenty-seven minutes after I told ptone "nothing blocks these three", `#1315` flipped **MERGEABLE →
+CONFLICTING**. Upstream `main` moved `3aeb7729` → `06a3130d`: *"docs: nightly doc update Aug 27
+(Permissions Foundation, Cloud Run, Helm P2-3) (#1314)"*.
+
+**That commit added a second Cloud Run page for our tier**:
+`docs-site/src/content/docs/hosted/single-node/hub-setup-cloudrun.md`.
+
+Conflicting files: `docs-site/astro.config.mjs` (**same sidebar slot, different slug** — line 156 on
+both sides) and `hosted/single-node/overview.md` (both added a Cloud Run section).
+
+### §28.1 — The `#1314` collision was not only a number collision
+
+§25 flagged `#1314` as the most dangerous shape in the register: a **fork issue about docs** against
+an **upstream PR about docs**. That was framed as a citation hazard. It is worse than that — **the
+upstream `#1314` actually shipped a competing document into the exact slot our PR targets.** The
+number collision and the content collision are the same event. Logged because I recorded the
+citation risk and missed the content risk sitting inside the same commit title.
+
+### §28.2 — The upstream page is wrong, verified not assumed
+
+36 lines. Three faults, descending:
+
+1. **Its only instruction is a command that does not exist.** `make deploy-cloudrun-sandbox`,
+   annotated *"refer to your internal tooling or scripts directory"*. `git grep` across upstream
+   `main` matches **only that document**, and the upstream `Makefile` has **no deploy targets at
+   all**. First command, dead stop. Ours is `scion deploy-instance`.
+2. **It implies durability is attainable** — *"lost or reset ... unless a persistent network volume
+   is attached"*. Measured §5 is pure ephemeral Tier 0, and it misses the overload-destruction loss
+   event entirely (§27 of the design doc's §5 work, D7).
+3. **No mention of IAP**, the entire perimeter.
+
+This is a generated summary that got ahead of the implementation, not a turf dispute. The brief
+forbids any disparagement of it in the diff or commit message.
+
+### §28.3 — Decision: adopt the upstream slug
+
+Our tutorial content moves into `hub-setup-cloudrun.md`; `cloud-run.md` ceases to exist.
+
+Considered and rejected:
+
+- **Keep both pages.** Leaves a published page whose only command does not exist. Rejected.
+- **Delete theirs, keep `cloud-run.md`.** `starlightLinksValidator` is enabled and upstream
+  `overview.md:74` already links `/scion/hosted/single-node/hub-setup-cloudrun/`, so this is a build
+  failure unless every inbound link is chased — and a future nightly could recreate the page beside
+  ours **silently**. Rejected.
+- **Adopt the slug.** One page, one slug; the inbound link keeps resolving; and any future
+  regeneration collides with a file we own and surfaces as **a diff we can see**. Chosen.
+
+### §28.4 — The gate that could invalidate it
+
+The commit is titled *"nightly doc update"*. **If a generator rewrites that path from a manifest
+each night, our tutorial is silently reverted tonight and the decision above is wrong.** `sn-rival-dev`
+is dispatched with that as an explicit stop-and-report gate ahead of any edit. I do not yet know the
+answer and am not proceeding as though I do.
+
+### §28.5 — Heartbeat answers
+
+1. **Agents:** one dispatched at 15:02 (`sn-rival-dev`, task #71). Zero stalled.
+2. **Critical path:** `#1315`'s conflict, now owned. `#1316`/`#1317` remain MERGEABLE, CI green,
+   reviews empty — **ptone can merge those two independently and was told so.**
+3. **Design doc in sync.** No new divergence; the `harnessConfig` workaround still stands until
+   `ptone/scion#1316` phase 4.
+
+Reported to ptone 15:03 (1516 chars), including that I had told him the opposite half an hour
+earlier.
