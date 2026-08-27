@@ -75,8 +75,8 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 ## 3. Current position
 
-**Active section:** S4 — Surfaces
-**Active manager:** `ca-msg-em4` (spawned and briefed 06:42Z; em3 retired)
+**Active section:** S4 — Surfaces (**REJECTED round 1 — F-1, F-2; em4 fixing via option (a)**)
+**Active manager:** `ca-msg-em4`
 **Blocked on:** my own verification of DEF-4 at `b92926dd`, then em4's phase 8/10/11
 decomposition. DEF-1, DEF-3 and D3 are all due from this section.
 **Integration branch head:** `b92926dd` (DEF-4, test-only).
@@ -321,6 +321,41 @@ would bury the events that matter.
   and state what happens to messages written while it was ON if the operator flips back
   mid-exercise; WS-4 adds the Teams `channel:"" + thread_id:set` regression test per plugin,
   because boundary resolution across five plugins is where it comes back.
+
+- `2026-08-27 09:05Z` **S4 rejected on round 1** at `0c94a685`. Two blockers, both WS-3;
+  WS-1, WS-2 and WS-4 sound. See §5f. em4 confirmed receipt and took option (a) — wire the
+  conversation positional argument — which fixes F-1 and F-2 together, plus the fallback
+  counter. **Design amended:** phase 10's row now states the positional conversation argument
+  explicitly, and **AC-15a** added — a deprecation warning may only name a replacement that
+  works in the same build, verified by a test that executes the named replacement.
+
+## 5f. S4 rejection — open (2026-08-27 09:05Z)
+
+em4 reported S4 complete at `0c94a685` with three APPROVE gates (review, audit, test), ~55
+new test functions, and its own four green full-suite runs. The gates were not wrong about
+what they checked. Neither they nor I would have caught F-1 by reading the diff — I found it
+by asking what happens to a user who obeys the warning text.
+
+| # | Finding | Evidence | Required fix | State |
+|---|---|---|---|---|
+| F-1 | **The `--channel` / `--thread-id` deprecation warnings direct users into the exact defect this project exists to remove.** They say "use conversation references instead: `conv:<id>`, `@<agent>`, `#<thread>`". `scion message` cannot parse any of the three; `ParseReference` and `Resolve` have **no production caller**. Traced at `cmd/message.go:137`: `conv:<id>` and `#<thread>` are slugified and looked up as **agent names**; `@builder` contains `@` so becomes **`user:@builder`**, a plausible-looking email recipient. The `@` case **does not error** — it succeeds and delivers nowhere. That is findings §1.2a, newly caused by our own migration guidance. Violates AC-15 in substance and AC-15a in letter. | read `cmd/message.go:118–175`; `grep` for production callers of `ParseReference` / `Resolve` — none | Option (a), chosen: wire `scion message <conversation> <text>` through `ParseReference` and `Resolve`. Option (b) was to strip the syntax from the warnings and hard-error on `conv:`/`#` prefixes rather than slugifying them. | em4 took (a) |
+| F-2 | **DEF-1 is implemented correctly but unreachable.** `checkPostResolutionAuth` matches D5 exactly — one call in `Resolve()` after grammar dispatch, direct requires participant, group authorised by project membership, unknown kind fails closed. But `Resolve()` has no production caller, so D5's cross-grammar guarantee holds **only in unit tests**. My ledger rationale for deferring DEF-1 to S4 — "it becomes reachable the moment S4 switches reads" — was wrong: the read switch resolves from server-side inputs (authenticated user + agent, or thread key + project) and never from a user-supplied reference. | `grep` for callers of `messaging.Resolve` — none outside tests; read `handlers_messages.go:63–72, 247–265` | Option (a) makes it reachable. Otherwise DEF-1 stays open and moves to whichever section wires conversation-reference sending. **Not to be recorded as discharged on unit tests alone.** | resolves with (a) |
+
+**Non-blocking, raised for the beta exercise.** The read switch **fails open**: when
+`ResolveDMConversationForRead` returns nil, `filter.ConversationID` stays unset and the read
+silently uses the old path while the flag reads ON. With audit L1 (the consistency check also
+fails open on query errors), the exercise could show "flag ON, zero divergence" without the
+new model having run at all. The fallback itself is correct and must stay — but the
+divergence endpoint needs a **fallback counter**, so the operator can tell "no disagreement"
+from "never ran". em4 is adding it.
+
+**My spec gap, second occurrence of the same shape.** Phase 10's row said only
+"`scion broadcast`, `scion keys`; `scion message` reduced to six flags; deprecation mapping",
+omitting the positional conversation argument that §2 and the announcement both specify. em4
+built to the row. This is AC-8's "three inbound paths" again: **a terse phase summary read as
+the whole requirement.** The design body is authoritative, but managers work from the phase
+table, so the phase table has to carry the load-bearing parts. I have amended the row and
+added AC-15a. Before S5 opens I should audit the remaining phase rows for the same defect.
 
 ## 5d. S2 rejection history — CLOSED 2026-08-27 03:35Z (accepted on round 3)
 

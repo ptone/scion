@@ -779,7 +779,7 @@ Commit-sized, ordered, each independently reviewable.
 | 7 | Validation choke point | Single `Validate()` invoked on CLI, hub handlers, and broker-inbound. Fixes the Teams violation. |
 | 8 | Read switch | Reads move to `conversation_id`. Old fields derived. **Gate: soak with divergence logging before proceeding.** |
 | 9 | Delivery formatter | New agent-facing JSON (Appendix B). `status` and `visibility` delivered. Metadata allowlist removed — the fields it was smuggling are now first-class. |
-| 10 | CLI split | `scion broadcast`, `scion keys`; `scion message` reduced to six flags; deprecation mapping. |
+| 10 | CLI split | **`scion message <conversation> <text>` — the conversation becomes a required positional argument, parsed by `ParseReference` and resolved by `Resolve` (§2.5).** Plus `scion broadcast`, `scion keys`; `scion message` reduced to six flags; deprecation mapping. **A deprecation warning may not name a replacement syntax the command cannot yet parse** — see AC-15a. |
 | 11 | Broker edge | Per-plugin `ResolveConversation` at inbound; spoke selection by `conversation.surface`. One commit per plugin. |
 | 12 | Docs | Skill (Appendix B), `docs-site` messaging page, GLOSSARY entries for Conversation / Surface / Addressee / Participant. Fixes the three doc-drift items in `findings.md` §10. |
 | 13 | Removal | Drop `channel`, `thread_id`, `recipient*`, old type enum. **Not reversible.** |
@@ -853,6 +853,16 @@ Commit-sized, ordered, each independently reviewable.
   divergence is logged with both decisions.
 - **AC-15** Every deprecated flag emits a warning naming its replacement and either succeeds
   identically or fails — never silently changes behaviour.
+- **AC-15a** A deprecation warning may only name a replacement that **works in the same
+  build**. Verification: for every replacement named in a warning string, a test executes that
+  replacement and asserts it reaches the intended destination.
+  > Added 2026-08-27 after S4 round 1. `--channel` and `--thread-id` were made to warn "use
+  > conversation references instead: `conv:<id>`, `@<agent>`, `#<thread>`" in a build where
+  > `scion message` could not parse any of the three. Following the advice did not error:
+  > `@builder` became the user `user:@builder` and the message went nowhere, reporting
+  > success. That is findings §1.2a — the defect this design exists to remove — newly caused
+  > by the migration guidance. A warning that names an unusable replacement is worse than no
+  > warning, because it converts a working invocation into a silently misrouted one.
 
 ### Non-regression
 
