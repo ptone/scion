@@ -273,6 +273,34 @@ func TestUpsertConversationByExternalRef_UpdateIfExists(t *testing.T) {
 	assert.Equal(t, "updated-name", r2.DisplayName)
 }
 
+func TestUpsertConversationByExternalRef_EmptyDisplayNamePreservesExisting(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	// Create with a display name.
+	conv1 := &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: "dm:agent:aaa:user:bbb",
+		DisplayName: "Alice ↔ Builder",
+	}
+	r1, err := s.UpsertConversationByExternalRef(ctx, conv1)
+	require.NoError(t, err)
+	assert.Equal(t, "Alice ↔ Builder", r1.DisplayName)
+
+	// Upsert with empty display name — must NOT clobber the existing name.
+	conv2 := &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: "dm:agent:aaa:user:bbb",
+		DisplayName: "", // empty
+	}
+	r2, err := s.UpsertConversationByExternalRef(ctx, conv2)
+	require.NoError(t, err)
+	assert.Equal(t, r1.ID, r2.ID, "should be the same conversation")
+	assert.Equal(t, "Alice ↔ Builder", r2.DisplayName, "original display name must be preserved")
+}
+
 func TestUpsertConversationByExternalRef_RequiresExternalRef(t *testing.T) {
 	s := newTestConversationStore(t)
 	ctx := context.Background()

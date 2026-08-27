@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -139,6 +140,9 @@ type ResolutionStore interface {
 	AddParticipant(ctx context.Context, p *store.ConversationParticipant) error
 	ListParticipants(ctx context.Context, conversationID string) ([]store.ConversationParticipant, error)
 	GetConversationsForPrincipal(ctx context.Context, principalKind, principalID string) ([]store.Conversation, error)
+
+	// Upsert
+	UpsertConversationByExternalRef(ctx context.Context, conv *store.Conversation) (*store.Conversation, error)
 
 	// Agent resolution
 	GetAgentBySlug(ctx context.Context, projectID, slug string) (*store.Agent, error)
@@ -313,6 +317,9 @@ func senderBelongsToProject(ctx context.Context, s ResolutionStore, principalKin
 
 // resolveAgentDM resolves an @<agent-slug> reference to a direct conversation.
 // Creates the conversation if it doesn't exist (resolve-or-create).
+//
+// The project context is used ONLY to resolve the agent slug. The resulting
+// DM conversation is global (nil ProjectID) — DMs are not project-scoped.
 func resolveAgentDM(ctx context.Context, s ResolutionStore, slug string, rctx ResolveContext) (*ResolveResult, error) {
 	if rctx.ProjectID == "" {
 		return nil, &ResolutionError{
@@ -333,27 +340,33 @@ func resolveAgentDM(ctx context.Context, s ResolutionStore, slug string, rctx Re
 		return nil, fmt.Errorf("resolving agent slug %q: %w", slug, err)
 	}
 
-	// Look for an existing direct conversation between sender and this agent
-	// in the current project.
-	existing, err := findDirectConversation(ctx, s, rctx, "agent", agent.ID)
+	// Compute deterministic DM key.
+	extRef, err := messages.DMConversationKey("agent", agent.ID, rctx.SenderPrincipalKind, rctx.SenderPrincipalID)
 	if err != nil {
-		return nil, err
-	}
-	if existing != nil {
-		return &ResolveResult{
-			ConversationID: existing.ID,
-			Created:        false,
-		}, nil
+		return nil, fmt.Errorf("computing DM key for @%s: %w", slug, err)
 	}
 
-	// Create a new direct conversation.
-	conv, err := createDirectConversation(ctx, s, rctx, "agent", agent.ID)
+	// Upsert: find-or-create by (surface, external_ref). No ProjectID — DMs
+	// are global, fixing DEF-10.
+	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: extRef,
+		DriftState:  DriftStateActive,
+		// ProjectID intentionally nil — DMs are global.
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("upserting DM conversation for @%s: %w", slug, err)
 	}
+
+	// Ensure both participants exist. AddParticipant returns
+	// ErrAlreadyExists on a re-add — that is expected, not an error.
+	created := ensureParticipant(ctx, s, conv.ID, rctx.SenderPrincipalKind, rctx.SenderPrincipalID)
+	ensureParticipant(ctx, s, conv.ID, "agent", agent.ID)
+
 	return &ResolveResult{
 		ConversationID: conv.ID,
-		Created:        true,
+		Created:        created,
 	}, nil
 }
 
@@ -372,33 +385,32 @@ func resolveEmailDM(ctx context.Context, s ResolutionStore, email string, rctx R
 		return nil, fmt.Errorf("resolving user email %q: %w", email, err)
 	}
 
-	// Email DMs are global — no project restriction. Pass an empty project
-	// context so findDirectConversation matches conversations without a
-	// project ID.
-	globalCtx := ResolveContext{
-		SenderPrincipalKind: rctx.SenderPrincipalKind,
-		SenderPrincipalID:   rctx.SenderPrincipalID,
-		ProjectID:           "", // global
+	// Compute deterministic DM key.
+	extRef, err := messages.DMConversationKey("user", user.ID, rctx.SenderPrincipalKind, rctx.SenderPrincipalID)
+	if err != nil {
+		return nil, fmt.Errorf("computing DM key for @%s: %w", email, err)
 	}
 
-	existing, err := findDirectConversation(ctx, s, globalCtx, "user", user.ID)
+	// Upsert: find-or-create by (surface, external_ref). No ProjectID — email
+	// DMs are global.
+	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: extRef,
+		DriftState:  DriftStateActive,
+		// ProjectID intentionally nil — email DMs are global.
+	})
 	if err != nil {
-		return nil, err
-	}
-	if existing != nil {
-		return &ResolveResult{
-			ConversationID: existing.ID,
-			Created:        false,
-		}, nil
+		return nil, fmt.Errorf("upserting DM conversation for @%s: %w", email, err)
 	}
 
-	conv, err := createDirectConversation(ctx, s, globalCtx, "user", user.ID)
-	if err != nil {
-		return nil, err
-	}
+	// Ensure both participants exist.
+	created := ensureParticipant(ctx, s, conv.ID, rctx.SenderPrincipalKind, rctx.SenderPrincipalID)
+	ensureParticipant(ctx, s, conv.ID, "user", user.ID)
+
 	return &ResolveResult{
 		ConversationID: conv.ID,
-		Created:        true,
+		Created:        created,
 	}, nil
 }
 
@@ -450,88 +462,24 @@ func resolveThread(ctx context.Context, s ResolutionStore, name string, rctx Res
 // Helpers
 // ---------------------------------------------------------------------------
 
-// findDirectConversation finds an existing direct conversation between the
-// sender and a target principal in the given project context.
-func findDirectConversation(ctx context.Context, s ResolutionStore, rctx ResolveContext, targetKind, targetID string) (*store.Conversation, error) {
-	// Get all conversations the sender participates in.
-	senderConvs, err := s.GetConversationsForPrincipal(ctx, rctx.SenderPrincipalKind, rctx.SenderPrincipalID)
-	if err != nil {
-		return nil, fmt.Errorf("listing sender conversations: %w", err)
-	}
-
-	for _, conv := range senderConvs {
-		if conv.Kind != "direct" {
-			continue
-		}
-
-		// Match project context.
-		if rctx.ProjectID == "" {
-			// Global DM — only match conversations without a project.
-			if conv.ProjectID != nil && *conv.ProjectID != "" {
-				continue
-			}
-		} else {
-			if conv.ProjectID == nil || *conv.ProjectID != rctx.ProjectID {
-				continue
-			}
-		}
-
-		// Check if the target is a participant.
-		participants, err := s.ListParticipants(ctx, conv.ID)
-		if err != nil {
-			return nil, fmt.Errorf("listing participants for conversation %s: %w", conv.ID, err)
-		}
-		for _, p := range participants {
-			if p.PrincipalKind == targetKind && p.PrincipalID == targetID {
-				return &conv, nil
-			}
-		}
-	}
-
-	return nil, nil
-}
-
-// createDirectConversation creates a new direct conversation between the sender
-// and a target principal, adding both as participants.
-func createDirectConversation(ctx context.Context, s ResolutionStore, rctx ResolveContext, targetKind, targetID string) (*store.Conversation, error) {
-	conv := &store.Conversation{
-		ID:         uuid.NewString(),
-		Kind:       "direct",
-		Surface:    "native",
-		DriftState: DriftStateActive,
-	}
-
-	if rctx.ProjectID != "" {
-		conv.ProjectID = &rctx.ProjectID
-	}
-
-	if err := s.CreateConversation(ctx, conv); err != nil {
-		return nil, fmt.Errorf("creating direct conversation: %w", err)
-	}
-
-	// Add sender as participant.
-	if err := s.AddParticipant(ctx, &store.ConversationParticipant{
+// ensureParticipant adds a participant to a conversation, returning true if
+// the participant was newly added (i.e. the conversation was just created for
+// this pair). ErrAlreadyExists is swallowed — re-adding an existing
+// participant is expected on the upsert path.
+func ensureParticipant(ctx context.Context, s ResolutionStore, convID, kind, id string) bool {
+	err := s.AddParticipant(ctx, &store.ConversationParticipant{
 		ID:             uuid.NewString(),
-		ConversationID: conv.ID,
-		PrincipalKind:  rctx.SenderPrincipalKind,
-		PrincipalID:    rctx.SenderPrincipalID,
+		ConversationID: convID,
+		PrincipalKind:  kind,
+		PrincipalID:    id,
 		Role:           "member",
-	}); err != nil {
-		return nil, fmt.Errorf("adding sender as participant: %w", err)
+	})
+	if err != nil && errors.Is(err, store.ErrAlreadyExists) {
+		return false // already a participant — not newly created
 	}
-
-	// Add target as participant.
-	if err := s.AddParticipant(ctx, &store.ConversationParticipant{
-		ID:             uuid.NewString(),
-		ConversationID: conv.ID,
-		PrincipalKind:  targetKind,
-		PrincipalID:    targetID,
-		Role:           "member",
-	}); err != nil {
-		return nil, fmt.Errorf("adding target as participant: %w", err)
-	}
-
-	return conv, nil
+	// err == nil means newly added; other errors are swallowed because the
+	// upsert path should not fail fatally on participant adds.
+	return err == nil
 }
 
 // ---------------------------------------------------------------------------

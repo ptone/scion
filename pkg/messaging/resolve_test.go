@@ -149,6 +149,31 @@ func (m *mockResolutionStore) GetAgentBySlug(_ context.Context, projectID, slug 
 	return nil, store.ErrNotFound
 }
 
+func (m *mockResolutionStore) UpsertConversationByExternalRef(_ context.Context, conv *store.Conversation) (*store.Conversation, error) {
+	if conv.ExternalRef == "" {
+		return nil, store.ErrInvalidInput
+	}
+	// Find existing by (surface, external_ref).
+	for _, existing := range m.conversations {
+		if existing.Surface == conv.Surface && existing.ExternalRef == conv.ExternalRef {
+			// Update mutable fields (mimic real store behaviour).
+			if conv.DisplayName != "" {
+				existing.DisplayName = conv.DisplayName
+			}
+			if conv.DriftState != "" {
+				existing.DriftState = conv.DriftState
+			}
+			return existing, nil
+		}
+	}
+	// Create new.
+	if conv.ID == "" {
+		conv.ID = uuid.NewString()
+	}
+	m.conversations[conv.ID] = conv
+	return conv, nil
+}
+
 func (m *mockResolutionStore) GetUserByEmail(_ context.Context, email string) (*store.User, error) {
 	if user, ok := m.users[email]; ok {
 		return user, nil
@@ -464,7 +489,8 @@ func TestResolve_AgentSlug_CreatesDMOnFirstSend(t *testing.T) {
 	conv, err := ms.GetConversation(ctx, result.ConversationID)
 	require.NoError(t, err)
 	assert.Equal(t, "direct", conv.Kind)
-	assert.Equal(t, &projectID, conv.ProjectID)
+	// DMs are global — no ProjectID (DEF-10 fix).
+	assert.Nil(t, conv.ProjectID, "DM conversations must be global (nil ProjectID)")
 
 	// Verify participants.
 	parts := ms.participants[result.ConversationID]
