@@ -116,7 +116,7 @@ If you use external messaging systems alongside the Web Dashboard, Scion ensures
 
 ## CLI Message Management
 
-You can also interact with the messaging system directly from the CLI using the `scion messages` command (aliases: `msgs`, `inbox`).
+You can interact with the messaging system directly from the CLI using the `scion messages` command (aliases: `msgs`, `inbox`).
 
 ```bash
 # View unread messages
@@ -128,6 +128,27 @@ scion messages --agent <agent-name>
 # Mark a message as read
 scion messages read <message-id>
 ```
+
+### Sending Messages with Conversation References
+
+The `scion message` command now supports **conversation references** as recipients. The primary form available today is `@<agent-name>`, which resolves via the conversation model:
+
+```bash
+scion message @tech-lead "Ready for review"
+```
+
+:::note[Conversation Reference Availability]
+Only `@<agent-name>` is fully available as a conversation reference today. The `conv:<id>` and `#<thread>` forms parse correctly but are **gated in the CLI** — delivery routing for these forms is not yet implemented (see DEF-5). The `@<email>` form only works from within an agent container (requires `SCION_AGENT_NAME` to be set). See [Conversation References](#6-conversation-references) in the Developer Guide for the full status table.
+:::
+
+### Additional Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `scion broadcast` | Send a message to all agents in the current project. Replaces the deprecated `--broadcast` and `--all` flags. |
+| `scion keys` | Manage and inspect message encryption keys. Replaces the deprecated `--raw` flag for key operations. |
+
+For complete command syntax, flags, and usage examples, see the [CLI Reference](/scion/reference/cli/).
 
 ## Discord
 
@@ -154,6 +175,53 @@ When an agent uses the `ask_user` tool (or similar mechanism depending on the ha
 ## Real-Time Delivery
 
 Messages are delivered in real-time to the Web Dashboard via Server-Sent Events (SSE). The **Messages Tab** on the individual agent detail page provides a real-time stream of all communication with that specific agent.
+
+---
+
+## Conversation Model
+
+The messaging system now includes an underlying **conversation model** that tracks message threads, participants, and routing. Every message is associated with a `Conversation` record, enabling structured thread resolution and participant-aware delivery.
+
+### Current Status
+
+The conversation model is being rolled out incrementally. A **read switch** (`ConversationReadSwitch`) controls whether message reads use the new conversation-based routing or the legacy flat model.
+
+:::caution[Default OFF]
+The conversation read switch is **off by default**. When off, all message reads use the legacy flat model. The conversation model writes are active (messages are associated with conversations), but reads and routing still follow the original path.
+:::
+
+### Enabling the Read Switch
+
+To enable conversation-based routing, set the following in your Hub's `scion-settings.yaml` under the `messaging` section:
+
+```yaml
+messaging:
+  conversation_read_switch: true
+```
+
+This is a **runtime flag** — no redeploy is needed. The Hub picks up the change on next settings reload.
+
+### Divergence Monitoring
+
+Before enabling the read switch in production, monitor routing divergence to confirm that the new conversation-based routing agrees with the legacy model. The divergence endpoint is available to administrators:
+
+```
+GET /api/v1/admin/messaging/divergence
+```
+
+The response includes:
+
+| Field | Description |
+|-------|-------------|
+| `matches` | Count of messages where old and new routing agreed. |
+| `mismatches` | Count of messages where old and new routing disagreed. |
+| `total` | Sum of matches and mismatches. |
+| `fallbacks` | Count of cases where conversation resolution failed and fell back to legacy routing. |
+| `read_switch_enabled` | Current state of the read switch flag. |
+
+:::tip[Recommendation]
+Enable the read switch only after monitoring divergence and seeing a **clean board** — zero mismatches over sustained traffic. If mismatches appear, investigate before flipping the switch.
+:::
 
 ---
 
@@ -254,4 +322,37 @@ For each recipient listed in the `--cc` flag, Scion resolves their name against 
    - It cannot be combined with `--in` or `--at` (delayed/scheduled messaging).
    - It cannot be used with user recipients (only agent-to-agent mentions are supported).
    - It requires Hub mode to resolve and fan-out (use `scion hub enable` first if running locally).
+
+### 6. Conversation References
+
+The messaging system supports conversation references as recipient identifiers. These are an alternative to the `agent:<name>` and `user:<email>` forms:
+
+| Form | Status | Notes |
+|------|--------|-------|
+| `@<agent-name>` | **Available** | Resolves the agent and routes the message. Equivalent to `agent:<name>` but uses conversation resolution. |
+| `@<email>` | **Agent-only** | Works from within an agent container (requires `SCION_AGENT_NAME`). Errors from a human CLI context. |
+| `conv:<uuid>` | **Not available** | Parses and resolves server-side, but the CLI gates it — delivery routing is not yet implemented. |
+| `#<thread-name>` | **Not available** | Same as `conv:<uuid>` — gated in the CLI pending delivery routing. |
+
+:::caution[Availability]
+Only `@<agent-name>` is fully usable today. The `conv:<uuid>` and `#<thread-name>` forms are recognized by the parser but blocked at the CLI layer until delivery routing lands (tracked as DEF-5). Using them will produce a clear error message rather than silently failing.
+:::
+
+### 7. Deprecated Flags
+
+Several `scion message` flags have been deprecated in favor of dedicated subcommands and updated syntax. All deprecated flags **still work** and will emit a warning to `stderr`, but they will be removed in a future release.
+
+| Deprecated Flag | Replacement | Notes |
+|-----------------|-------------|-------|
+| `--broadcast`, `--all` | `scion broadcast` | Use the dedicated broadcast subcommand. |
+| `--raw` | `scion keys` | Use the dedicated keys subcommand. |
+| `--in`, `--at` | `scion schedule message` | Use the scheduling subcommand for delayed delivery. |
+| `--notify` | `scion notifications subscribe` | Use the notifications subcommand. |
+| `--channel`, `--thread-id` | `@<agent-name>` | Message the agent directly using a conversation reference. |
+| `--cc` | `--to` | Use the `--to` flag for additional recipients. |
+| `--plain` | *(none)* | Will be removed; no replacement planned. |
+
+:::note
+Deprecated flags emit a one-line warning to `stderr` on each use. The primary message is still delivered normally. Plan to migrate scripts and automation to the replacement commands before the flags are removed. For full flag syntax, see the [CLI Reference](/scion/reference/cli/).
+:::
 
