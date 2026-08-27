@@ -10424,3 +10424,71 @@ active use by the DOA probe. `entrypointRCFile` is absent — **deliberately**, 
 left in the code: *"No .rc file: `exec` replaces the shell on success … and `sandbox wait` already
 provides the exit code on the host side."* Landed, half superseded by something better, nothing
 outstanding. Still not mine, still no brief.
+
+### 35.19 The gate that was worse than the defect — confirmed, and caught before it shipped
+
+`sn-backout-review` returned **READY contingent on one line**. The contingency is the thing worth
+recording.
+
+**The hang is real.** `deploy.sh:195`:
+
+```bash
+if gcloud beta run instances --help &>/dev/null; then   # stdin still on the terminal
+```
+
+stdout and stderr go to `/dev/null`; **stdin does not.** If gcloud prompts to install the `beta`
+component, the prompt is written to stderr and vanishes, then gcloud reads stdin and blocks. The
+operator gets **a blank terminal at step zero and nothing else** — no message, no progress, no clue.
+
+The reviewer traced it rather than asserting it: `parser_extensions.py:866` →
+`update_manager.py:1582` (`Install`, `throw_if_unattended=True`) → `console_io.py:271` (prompt to
+stderr) → `:276` (`input()` blocks). The decisive detail: **`PromptContinue` never calls
+`CanPrompt()`.** It checks `disable_prompts` and then reads stdin regardless of whether stderr is
+a tty. A trace beats a theory, and this one changed the fix I chose.
+
+**Fix: `</dev/null`, and NOT `CLOUDSDK_CORE_DISABLE_PROMPTS=1`.** Both work; the reviewer verified
+both. The trace is the argument for the first: gcloud's prompt path was *just shown to ignore its
+own guard*, so **a fix depending on gcloud honouring a setting is weaker than one that removes the
+thing it would block on.** `</dev/null` cannot be ignored by any future change to that logic.
+Declined to add both — one mechanism is easier to reason about than two.
+
+**The design judgement that produced this find was made before any evidence existed.** I did not ask
+"does the fix work". I asked **"would this gate reject or trap a working install?"**, on the
+reasoning that the new gate's failure mode is worse than the defect's: the bug cost a reader a
+confusing error partway through; the gate can cost them the deploy entirely. I raised the hang as
+speculation and told the developer explicitly **not** to act on it — *"I am speculating and I have a
+habit of churning branches on speculation"* — and routed it to the reviewer to settle. It settled
+as real. **Speculation handed to the right role is not churn; speculation acted on is.**
+
+**Everything else passed, including the half I had called untestable.** Pass branch exercised for
+real on 582: returns 0, emits zero bytes. Placement before step 1, function called from `di_main`,
+no version arithmetic anywhere (575/582 appear only in comments and the error text). And the
+capability question I flagged is answered properly: the probe tests the `instances` **group**, step
+3a uses `deploy` **within** it, and calliope loads groups all-or-nothing — so it is genuinely the
+same capability, not a similar-looking one.
+
+**A correction of mine, and the third instance of the same error.** The reviewer flagged that my
+brief's claim *"this container ships 575.0.0"* was false — **it had upgraded to 582 during the FIRST
+review**, before I ever wrote the sentence. So the constraint I built an entire review strategy
+around ("you can only stub the pass branch") was never true. Three times today I have stated a
+constraint confidently without checking it: the ten-minute build, "we all ship 575" to the
+reviewer, and again to the investigator. **Each time the correction came from the agent I had
+misinformed, and each time it improved the work** — here it converted a stub test into a real one.
+
+**I withdrew the ship-now offer to ptone within a minute of the finding.** Twenty minutes earlier I
+had told him five lines of his private image were public and offered to ship immediately. That offer
+now pointed at a head containing a hang. Told him plainly not to merge `450a5822`, and — the part
+that matters — that **option 2 (merge the previous head `02220842`, ten commits, no preflight) is
+now MORE attractive than when I first offered it, not less, because the risky commit is the one he
+would be leaving out.** Both options still remove his private image. An offer made in good faith on
+stale information has to be retracted faster than it was made.
+
+**One question left open with the reviewer: is this an instance or a class?** `deploy.sh` makes many
+gcloud calls. The lethal combination is *stdin live while stderr is discarded* — that is what turns
+a prompt into a silent hang. Asked it to check the other invocations, especially step 3a (the one
+that actually needs the `beta` component, hence the likeliest real-world prompt site), noting that
+a visible prompt there is a lesser problem. Told it that **"the preflight was the only one" stated
+plainly closes the class**, and that a negative result is worth as much to me as a finding.
+
+**Sixth over-length message today** — 2038 chars, 38 over. Resent the tail. The failure is not
+arithmetic; it is that I keep composing to completeness and measuring afterwards.
