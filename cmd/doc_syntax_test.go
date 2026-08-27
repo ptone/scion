@@ -19,6 +19,7 @@ package cmd
 // the prose says it does — only that the syntax is recognised by the cobra tree.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +66,87 @@ func extractScionLines(t *testing.T, path string) []string {
 	return lines
 }
 
+// findCommandProblems validates that each scion command line resolves to a real
+// cobra command with valid flags. It returns a list of human-readable problems.
+//
+// I-2 fix: cobra's Find returns the deepest match and leaves unrecognised
+// tokens in rest without error. When the resolved command is a pure group
+// (has subcommands but no Run/RunE of its own) and the first unconsumed
+// token is not a flag, it must match a registered subcommand — otherwise
+// the doc example references a command that doesn't exist. Commands that
+// have their own RunE accept positional args, so the unconsumed token is
+// valid in that case.
+func findCommandProblems(lines []string, source string) []string {
+	var problems []string
+	for _, line := range lines {
+		args := strings.Fields(line)[1:] // strip "scion"
+		cmd, rest, findErr := rootCmd.Find(args)
+		if findErr != nil {
+			problems = append(problems,
+				fmt.Sprintf("command not found: %s (from %s)", line, source))
+			continue
+		}
+
+		// I-2: detect unconsumed subcommand-like tokens on pure group
+		// commands (no Run/RunE). Runnable commands accept positional
+		// args, so non-flag tokens are valid there.
+		if cmd.HasSubCommands() && !cmd.Runnable() && len(rest) > 0 {
+			first := rest[0]
+			if !strings.HasPrefix(first, "-") {
+				found := false
+				for _, sub := range cmd.Commands() {
+					if sub.Name() == first {
+						found = true
+						break
+					}
+				}
+				if !found {
+					problems = append(problems,
+						fmt.Sprintf("unknown subcommand %q for %q: %s (from %s)",
+							first, cmd.Name(), line, source))
+				}
+			}
+		}
+
+		// Validate flag names exist without calling ParseFlags, which
+		// mutates global cobra state (Changed bits + bound variables)
+		// and breaks other tests in the full suite.
+		for _, tok := range rest {
+			if !strings.HasPrefix(tok, "-") {
+				continue // positional arg or flag value
+			}
+			name := strings.TrimLeft(tok, "-")
+			if i := strings.Index(name, "="); i >= 0 {
+				name = name[:i]
+			}
+			if name == "" {
+				continue
+			}
+			if cmd.Flags().Lookup(name) == nil {
+				problems = append(problems,
+					fmt.Sprintf("unknown flag --%s: %s (from %s)", name, line, source))
+			}
+		}
+	}
+	return problems
+}
+
+// findDenyListProblems returns problems for any command lines that contain
+// deny-listed patterns.
+func findDenyListProblems(lines []string, denyPatterns []string, source string) []string {
+	var problems []string
+	for _, line := range lines {
+		for _, pat := range denyPatterns {
+			if strings.Contains(line, pat) {
+				problems = append(problems,
+					fmt.Sprintf("deny-listed pattern %q in code block: %s (from %s)",
+						pat, line, source))
+			}
+		}
+	}
+	return problems
+}
+
 func TestDocSyntax(t *testing.T) {
 	docFiles := []string{
 		"../resources/platform_skills/scion-messaging/SKILL.md",
@@ -88,46 +170,26 @@ func TestDocSyntax(t *testing.T) {
 			continue
 		}
 		lines := extractScionLines(t, abs)
-		for _, line := range lines {
-			args := strings.Fields(line)[1:] // strip "scion"
-			cmd, rest, err := rootCmd.Find(args)
-			require.NoError(t, err, "command not found: %s (from %s)", line, rel)
-			// Validate flag names exist without calling ParseFlags, which
-			// mutates global cobra state (Changed bits + bound variables)
-			// and breaks other tests in the full suite.
-			for _, tok := range rest {
-				if !strings.HasPrefix(tok, "-") {
-					continue // positional arg or flag value
-				}
-				name := strings.TrimLeft(tok, "-")
-				if i := strings.Index(name, "="); i >= 0 {
-					name = name[:i]
-				}
-				if name == "" {
-					continue
-				}
-				assert.NotNil(t, cmd.Flags().Lookup(name),
-					"unknown flag --%s: %s (from %s)", name, line, rel)
-			}
+		for _, p := range findCommandProblems(lines, rel) {
+			t.Error(p)
 		}
-		// Deny-list check.
-		for _, line := range lines {
-			for _, pat := range denyPatterns {
-				assert.False(t, strings.Contains(line, pat),
-					"deny-listed pattern %q in code block: %s (from %s)", pat, line, rel)
-			}
+		for _, p := range findDenyListProblems(lines, denyPatterns, rel) {
+			t.Error(p)
 		}
 	}
 
 	// Rule 10: prove parse-check catches bad syntax.
+	// These subtests call the same findCommandProblems / findDenyListProblems
+	// functions used by the main body — deleting those functions would break
+	// these subtests too (I-3 fix).
 	t.Run("catches_bad_command", func(t *testing.T) {
 		tmp := filepath.Join(t.TempDir(), "bad.md")
 		require.NoError(t, os.WriteFile(tmp, []byte("```bash\nscion nonexistent-command --fake-flag\n```\n"), 0644))
 		lines := extractScionLines(t, tmp)
 		require.Len(t, lines, 1)
-		args := strings.Fields(lines[0])[1:]
-		_, _, err := rootCmd.Find(args)
-		assert.Error(t, err, "expected parse-check to reject unknown command")
+		problems := findCommandProblems(lines, tmp)
+		assert.NotEmpty(t, problems,
+			"expected findCommandProblems to reject unknown command")
 	})
 
 	// Rule 10: prove deny-list catches gated forms.
@@ -136,13 +198,33 @@ func TestDocSyntax(t *testing.T) {
 		require.NoError(t, os.WriteFile(tmp, []byte("```bash\nscion message conv:abc123 \"hello\"\n```\n"), 0644))
 		lines := extractScionLines(t, tmp)
 		require.Len(t, lines, 1)
-		found := false
-		for _, pat := range denyPatterns {
-			if strings.Contains(lines[0], pat) {
-				found = true
-				break
-			}
-		}
-		assert.True(t, found, "expected deny-list to catch gated conv: pattern")
+		problems := findDenyListProblems(lines, denyPatterns, tmp)
+		assert.NotEmpty(t, problems,
+			"expected findDenyListProblems to catch gated conv: pattern")
+	})
+
+	// Rule 10: prove the I-2 blind-spot fix catches unconsumed subcommands.
+	t.Run("catches_unconsumed_subcommand", func(t *testing.T) {
+		tmp := filepath.Join(t.TempDir(), "bad-sub.md")
+		require.NoError(t, os.WriteFile(tmp, []byte("```bash\nscion schedule message --in 5m\n```\n"), 0644))
+		lines := extractScionLines(t, tmp)
+		require.Len(t, lines, 1)
+
+		// Verify the blind spot: rootCmd.Find succeeds (no error) but
+		// "message" is left as an unconsumed non-flag token after
+		// "schedule", which is a pure group with no "message" subcommand.
+		args := strings.Fields(lines[0])[1:] // ["schedule", "message", "--in", "5m"]
+		cmd, rest, err := rootCmd.Find(args)
+		require.NoError(t, err, "Find should succeed (returns deepest match)")
+		require.True(t, cmd.HasSubCommands(), "schedule should have subcommands")
+		require.False(t, cmd.Runnable(), "schedule should be a pure group (no Run/RunE)")
+		require.True(t, len(rest) > 0, "should have unconsumed args")
+		assert.Equal(t, "message", rest[0],
+			"first unconsumed token should be 'message'")
+
+		// The same function used by the main body should catch this.
+		problems := findCommandProblems(lines, tmp)
+		assert.NotEmpty(t, problems,
+			"expected findCommandProblems to catch unconsumed subcommand 'message' on 'schedule'")
 	})
 }
