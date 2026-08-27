@@ -220,7 +220,12 @@ The response includes:
 | `read_switch_enabled` | Current state of the read switch flag. |
 
 :::tip[Recommendation]
-Enable the read switch only after monitoring divergence and seeing a **clean board** — zero mismatches over sustained traffic. If mismatches appear, investigate before flipping the switch.
+Enable the read switch only after all three conditions hold over sustained traffic:
+1. **Non-zero matches** — confirms the new model is actually running (not just idle).
+2. **Zero mismatches** — the old and new routing agree on every message.
+3. **Fallbacks near zero** relative to total — a high fallback count means conversation resolution is failing and the system is silently falling back to legacy routing, which masks real mismatches.
+
+A board showing `matches: 0, mismatches: 0, fallbacks: 50000` is not clean — it means the new model never ran. Investigate fallbacks before proceeding.
 :::
 
 ---
