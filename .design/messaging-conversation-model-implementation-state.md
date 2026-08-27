@@ -1102,6 +1102,50 @@
       monitor that cannot see that distinction should escalate rather than act.
 
 
+
+58. **An unsignalled park is not observable, and an unobservable park will eventually be nudged.**
+    Issued 2026-08-27 23:10Z, correcting my own half of rule 57. I blamed the monitor's "continue"
+    for waking a parked em9, and the coordinator accepted the correction — but **the root cause was
+    mine.** `scion list` already distinguishes `blocked, 6s ago` from a bare timestamp; em6 and
+    nc-arch both showed `blocked`. em9 did not, because I parked them **in prose and never told them
+    to signal it.** From the monitor's side em9 was indistinguishable from a stall. They read the only
+    signal available, and read it correctly.
+
+    - **The convention, cost placed on the supervisor where it belongs:** when parking an agent,
+      instruct them to signal `sciontool status blocked "parked by <supervisor> pending <thing>"`.
+      Machine-visible, reason travels with it, no prose parsing by anyone.
+    - **The fix I nearly shipped instead was worse.** I had the coordinator agreeing to check each
+      idle agent's last inbound message for a hold instruction — per agent, every time, by reading
+      intent out of prose. That holds until someone phrases a park as "nothing further from me for
+      now" and it reads as a sign-off. **I proposed a process where a signal already existed.**
+    - **Generalisation worth more than the incident:** when a monitor misreads a state, check whether
+      the state was *emitted* before blaming the reading. A observer acting on the only available
+      signal is not making an error. **Adding a check to the reader is the expensive fix; emitting
+      the missing signal is the cheap one, and it is almost always the writer's omission.**
+    - Corollary for the fallback: idle-**without**-blocked is legitimately nudgeable. If the
+      supervisor did not signal, the ambiguity is theirs and the nudge is fair.
+
+59. **A warning applied to one sibling and not the rest makes the others look intentionally
+    unwarned.** Issued 2026-08-27 23:10Z from em6's P3-F1 write-up. I sent them at **one** entity —
+    `store.GCPServiceAccount`, whose immutable authorization fields are protected by a 50-line comment
+    ending *"if you are here to add a setter, this comment is the entire control."* They returned
+    **four**: `RuntimeBroker`, `Project` and `GitHubInstallation` carry the same immutability
+    requirement with **no documentation at all**.
+
+    - **The ordering inverts the obvious reading. The documented case is the SAFE one.** Its comment
+      is what made it findable — a beacon that worked exactly as intended: it caught me, I aimed em6
+      at it, and it led to three silent siblings. The undocumented three are strictly more dangerous
+      than the one that confesses to being undefended.
+    - **This is rule 54 one level up:** not a *fix* applied to one sibling and not the rest, but a
+      *warning*. Identical failure mode — the omission reads as deliberate. A reader who finds the
+      GCPServiceAccount comment reasonably infers that entities lacking one do not need one. **The
+      document made the undocumented cases look intentionally undocumented.**
+    - **Operational consequence:** whenever a hazard comment is found, immediately enumerate its
+      siblings and ask which share the hazard. The comment's existence is evidence the hazard is
+      real, not evidence it is contained. And a comment is never the control — that is what the
+      reflect-based field-classification test is for.
+
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
