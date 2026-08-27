@@ -6617,3 +6617,35 @@ attached invites the next person to copy it — which is precisely what I did.
 
 Asked the coordinator to file it as a 13th tracking issue rather than dispatching a developer for a
 one-line YAML change at this hour. Recorded as task #62.
+
+### 04:31 — heartbeat check. Answering the three questions with evidence, not impression.
+
+**1. Are dispatched agents progressing or silently stalled?** Checked `scion list` rather than
+assuming. None of mine are stalled because none of mine are left. `sn-issues-dev` finished all three
+batches and was deleted at 04:21. `sn-review-dev` had been idle 54 minutes on a completed task (#58)
+and is now deleted. No agent of mine is running. Nothing is waiting on a subagent.
+
+**2. What blocks the critical path?** **Nothing.** §1 was walked end-to-end on 2026-08-25 and the
+tier squash-merged upstream at 04:00 as `f99a8189`. There is no blocker to raise, and inventing one
+would be worse than saying so. Remaining work is real but not on the §1 path: task #50 (tutorial and
+deploy scripts), the open defect register (#15, #32, #35, #37, #46, #48, #49), and task #62. I told
+ptone at 04:21 what is outstanding and he has not replied. **I will not ask again** — repeating the
+question is pestering, not diligence.
+
+**3. Is the design doc in sync with what has been measured?** Read §10 against tonight's results.
+
+**No false statements found.** G4 is stated as a *goal* at line 47, not as achieved, and
+`ptone/scion#1293` correctly records it as unmet. Publishing an image to `ptone-misc/scion-alt` does
+**not** move G4 — G4 requires a *public default* so the operator needs no registry setup, and a
+semi-private beta repo is not that. The doc is honest as written.
+
+**One acceptance criterion did gain evidence tonight.** AC 11: *"The omni image is produced by the
+chained build."* Until tonight the chain had only ever been exercised through `local-docker`. The
+Cloud Build path had been repaired (M1, the `omni)` arm that refused to run) but never actually run.
+It ran, it succeeded in 641s, and it produced both tag coordinates on one digest. **AC 11's first
+half is now satisfied by execution rather than by inspection.** The second half — no harness version
+pinned in two places — remains an inspection result only.
+
+Worth stating plainly because it is the theme of the entire night: a repaired code path that has
+never been executed is not a working code path, and I would have carried M1 as "fixed" on the
+strength of a `grep` if the coordinator had not run a real build.
