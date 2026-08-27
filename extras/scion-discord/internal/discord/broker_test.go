@@ -397,6 +397,91 @@ func TestDeliverInbound_ReturnsHubError(t *testing.T) {
 	})
 }
 
+// TestDeliverInbound_ConversationFields verifies that the Discord plugin
+// populates conversation resolution fields (Phase 11) in the inbound payload.
+func TestDeliverInbound_ConversationFields(t *testing.T) {
+	t.Run("discord message includes conversation fields", func(t *testing.T) {
+		var receivedPayload inboundPayload
+		hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&receivedPayload))
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"delivered": true,
+				"agentId":   "agent-123",
+			})
+		}))
+		defer hub.Close()
+
+		b := &DiscordBroker{
+			log:        discardLogger(),
+			hubURL:     hub.URL,
+			httpClient: http.DefaultClient,
+		}
+
+		msg := &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "discord",
+			ThreadID:  "123456789012345678",
+			Sender:    "user:alice@example.com",
+			Recipient: "agent:coder",
+			Msg:       "hello",
+			Type:      messages.TypeInstruction,
+			Metadata: map[string]string{
+				"discord_channel_id": "123456789012345678",
+				"discord_guild_id":   "987654321098765432",
+				"discord_message_id": "111111111111111111",
+				"project_id":         "proj-1",
+			},
+		}
+
+		he := b.deliverInbound("scion.project.p1.agent.coder.messages", msg)
+		assert.Nil(t, he)
+
+		assert.Equal(t, "discord", receivedPayload.Surface)
+		assert.Equal(t, "123456789012345678", receivedPayload.ExternalRef)
+		assert.Equal(t, "987654321098765432", receivedPayload.ParentRef)
+	})
+
+	t.Run("AC-8 regression: non-discord channel skips conversation fields", func(t *testing.T) {
+		var receivedPayload inboundPayload
+		hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&receivedPayload))
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"delivered": true,
+				"agentId":   "agent-123",
+			})
+		}))
+		defer hub.Close()
+
+		b := &DiscordBroker{
+			log:        discardLogger(),
+			hubURL:     hub.URL,
+			httpClient: http.DefaultClient,
+		}
+
+		msg := &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "",
+			ThreadID:  "",
+			Sender:    "user:alice@example.com",
+			Recipient: "agent:coder",
+			Msg:       "hello",
+			Type:      messages.TypeInstruction,
+		}
+
+		he := b.deliverInbound("scion.project.p1.agent.coder.messages", msg)
+		assert.Nil(t, he)
+
+		// Without a discord channel, no conversation fields should be set.
+		assert.Empty(t, receivedPayload.Surface)
+		assert.Empty(t, receivedPayload.ExternalRef)
+		assert.Empty(t, receivedPayload.ParentRef)
+	})
+}
+
 const testGuildID = "guild1"
 
 func stubSession(channels []*discordgo.Channel) *discordgo.Session {

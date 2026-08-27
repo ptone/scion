@@ -68,6 +68,11 @@ type Config struct {
 type inboundPayload struct {
 	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
+
+	// Conversation resolution fields (Phase 11).
+	Surface     string `json:"surface,omitempty"`
+	ExternalRef string `json:"external_ref,omitempty"`
+	ParentRef   string `json:"parent_ref,omitempty"`
 }
 
 // hubError represents a structured error returned by the hub API.
@@ -1569,9 +1574,28 @@ func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMes
 		return nil
 	}
 
+	// Phase 11: Derive conversation resolution fields from the message.
+	// Discord uses the channel/thread snowflake as the ExternalRef and the
+	// guild ID (from metadata) as the ParentRef.
+	surface := ""
+	externalRef := ""
+	parentRef := ""
+	if msg.Channel == "discord" && msg.ThreadID != "" {
+		surface = "discord"
+		externalRef = msg.ThreadID
+		if msg.Metadata != nil {
+			if gid, ok := msg.Metadata["discord_guild_id"]; ok {
+				parentRef = gid
+			}
+		}
+	}
+
 	payload := inboundPayload{
-		Topic:   topic,
-		Message: msg,
+		Topic:       topic,
+		Message:     msg,
+		Surface:     surface,
+		ExternalRef: externalRef,
+		ParentRef:   parentRef,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
