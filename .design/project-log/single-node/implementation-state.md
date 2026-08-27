@@ -8726,3 +8726,46 @@ Brief explicitly fences off the IAP/OIDC passages so the second developer cannot
 
 **For ptone, needs him:** the `google-cla` check is failing on #1315 (first-contribution CLA). No
 agent can act on it.
+
+### §22.4 — Three doc-accuracy defects fixed (13:29), `fd30d72c`
+
+Pushed `fd30d72c` to `scion/sn-docs-dev`, fast-forward from `98fbbd2a`. PR #1315 head confirmed.
+
+1. **Build-from-source workaround** — marker added, workaround left intact (it is correct today).
+   The developer **searched both repos and found no tracking issue**, then **correctly declined to
+   cite `ptone/scion#1295`** after reading its body: #1295 is scoped to two *operator-settings*
+   stopgaps, not the binary. **Citing it would have been wrong and would have looked right.** They
+   invented nothing and said so. That is the reference discipline working as intended.
+   The marker is **self-retiring**: it tells the reader to run `scion deploy-instance --help` first
+   and skip the build if it succeeds. That is better than a tracking ref alone, because it does not
+   depend on anyone remembering.
+2. **`README.md:15` false teardown claim — verified and fixed.** The script's own header (lines
+   21-25) says it only prints a reminder; the sole `gcloud` mutation is the Instance delete at line
+   76; every IAP command in the file is inside an `echo`. README now says teardown does **not** run
+   them, and a new section makes the residue explicit: *"every identity you granted IAP access is
+   still authorized in that region — do not assume teardown revoked it."*
+3. **`$SCION_BIN` documented** in `deploy.sh`'s usage block.
+
+Verification: `bash -n` clean, `shellcheck` clean, functional smoke tests of the `SCION_BIN` chain
+including the hard-error path. Admonition confirmed three-colon, matching the 8 siblings.
+
+**My brief was right this time** — the developer explicitly checked defect 2 against the script
+rather than taking my word, and it held. Three consecutive briefs before this one contained an error
+the developer caught; recording the break in the streak honestly, not as evidence the practice can stop.
+
+### §22.5 — Fourth pass dispatched (13:31): the branch reference is wrong ON MERGE
+
+The developer flagged `cloud-run.md:51` — the CLI must be *"built from this branch"* — as out of
+scope, same rot as defect 1. **It is worse than they framed it.** Defect 1 goes stale at the next
+release; **"this branch" is wrong the moment #1315 merges, because the branch ceases to exist.** A
+beta tester reading the published page has no branch to build from. Shorter fuse, and ptone is
+recruiting testers now. Dispatched, together with sweeping the file for other branch-relative
+phrasing, and filing the missing tracking issue on the fork.
+
+### §22.6 — Docs render IS covered by CI (checked myself, 13:31)
+
+`.github/workflows/docs.yml` triggers on `pull_request: branches: [main]` with a `docs-site/**`
+paths filter. #1315 touches `docs-site`, so the workflow runs and the new admonition's render is
+verified. **The residual risk flagged at §22.4 is closed.** Recording because the previous developer
+correctly declined to claim a verification they had not run, and the right response to that honesty
+is to go and get the answer rather than let it sit as an unknown.
