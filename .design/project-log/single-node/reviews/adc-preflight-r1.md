@@ -261,7 +261,8 @@ and the docs change adds the ADC prerequisite. The docs edit is accurate and wel
 
 | Gate | Result |
 |---|---|
-| `go test ./cmd/ -run TestScript` | **31/31 pass**, 0 failures |
+| `go test ./cmd/ -run TestScript` | **31 pass, 1 skip, 0 fail** (32 `TestScript*` funcs) |
+| `go test ./cmd/` (whole package) | **525 pass, 0 fail** |
 | `shellcheck 0.9.0` | **clean** (also clean at `-S style`) |
 | Real deploy walk (`ptone-experiments`/`us-east4`) | **pass** — exit 0, `iapEnabled: true`, IAP 302 |
 | P1 negative (broken ADC) | **pass** — exit 1, 0 resources created |
@@ -285,6 +286,41 @@ Created `sn-adcpf-rev` (deleted). The two aborted runs created nothing. Final li
 `ptone-experiments/us-east4` is **9 instances, identical to baseline**: `e2e-omni`, `e2e-walk-r2`,
 `iap-demo`, `q2-control`, `sn-adminfix-t`, `sn-adminseed-t`, `sn-ready`, `sn-step6`, `sn-walk`. No
 instance that was not mine was touched.
+
+## Corrections to the review brief
+
+You asked to be told what is wrong in the brief. Four things; none changes the outcome.
+
+1. **§2 P1 — `CLOUDSDK_CONFIG` at an empty temp dir would have given you a false pass.** You offered it
+   as "one way to break ADC". It also breaks `gcloud config get account` and `gcloud projects describe`,
+   so the script dies at **step 1 or 2, above the preflight**, and never reaches the code under test —
+   the exact "failure caused by something other than missing ADC" you warned about. I used
+   `GOOGLE_APPLICATION_CREDENTIALS=/nonexistent/adc.json` instead and verified steps 1 and 2 still
+   succeed under it before trusting the result. Recommend the brief switch to that mechanism.
+
+2. **§2 P2 / dev-brief §3 — "there is no gcloud flag that ENABLES IAP" is right for this script but the
+   stated reasoning is not.** gcloud 582 **does** have an `--iap` flag
+   (`AddIapFlag`, `command_lib/run/flags.py:388`). It is registered on the **Services** surface only —
+   `gcloud run deploy`, `gcloud run services update`, `gcloud run services dev sync` — and **not** on
+   the `instances` noun this script uses. Worse, `gcloud beta run instances deploy --help` describes
+   `--public` as *"Equivalent to setting --no-invoker-iam-check and --no-iap"*, referencing a flag that
+   surface does not expose. So a future reader grepping the help text will find `--iap`, conclude the
+   PATCH is removable, and be wrong. Suggest restating the constraint as **"`--iap` exists on Services,
+   not on `run instances`; the PATCH is the only way to enable IAP on an Instance"**, which is both true
+   and durable. Your conclusion stands and the branch correctly keeps the PATCH.
+
+3. **§4 — the 28 tests are spread over two files, not one.** `cmd/deploy_script_test.go` had 23 at base;
+   the other 5 are in `cmd/deploy_script_pin_test.go`. Your count of 28 is correct, the attribution is
+   not. Worth knowing because the pin file is where an ordering pin (Required 1) most naturally belongs.
+
+4. **FYI, not a brief error** — `TestScriptCheckGcloudInstances_FailureMessage` **skips** on gcloud 582,
+   because it can only run where `beta run instances` is absent. Pre-existing and unrelated to this
+   branch, but it means the count you see depends on the SDK version of the runner, which is a trap of
+   the same family as the step-6 gap you flagged.
+
+Two of your predictions were dead on and I want that on the record: P6 (the tests cannot detect a
+reordering) and P3 (the identity check being the part most likely to be under-built). Both confirmed by
+measurement.
 
 ## Final Verdict
 

@@ -11638,3 +11638,118 @@ a security hole**, and I would have reported it as one.
 **Twice in one entry I formed a confident expectation from the shape of a failure and had it inverted
 by reading the code.** The heartbeat's instruction is *"verify claims before believing them"* — the
 claims that need it most are my own, because those are the ones I never think to check.
+
+---
+
+## §35.41 — `#85` review: pass-with-findings, and the tests could not detect either defect (22:03)
+
+`sn-adcpreflight-rev` reported. **Verdict accepted as given; I did not re-run a single one of its
+checks.** That is the process ptone set: architect briefs, developer implements, reviewer reviews and
+walks, architect accepts. Report at `reviews/adc-preflight-r1.md`.
+
+### What holds, verified against reality
+
+- **P1 — nothing is created before the credential is proven.** Verified two ways, as asked. By
+  reading: preflight at line 597, create at 609, everything above read-only. By running: ADC broken
+  with `GOOGLE_APPLICATION_CREDENTIALS=/nonexistent`, script exited 1, **instance count 9 before and 9
+  after.** The reviewer then got a *second, unplanned* negative that is better than the contrived one
+  — the SA has `projects.describe` but not `run.instances.list`, so a **real token** met a **real
+  HTTP 403** from the live API and aborted before step 3a. Not a stub.
+- **P2 — IAP is really on.** Real deploy, `iapEnabled: true`, `invokerIamDisabled: true`, unauth fetch
+  → 302 to `accounts.google.com`. The PATCH was not simplified away.
+- **P4, traps, dependencies** — clean. Six-for-six on the `local x` split (notable given five prior
+  bugs of that exact shape), no `2>/dev/null`, dependency set unchanged.
+
+### The finding that justifies the whole review
+
+**P6 was right, and the reviewer proved it by mutation rather than by reading.** It moved the entire
+preflight block to *after* step 3a — reintroducing the original defect in full — and **the suite
+stayed green and shellcheck stayed clean.**
+
+Then it found the same hole one layer down: reverting line 245 to the buggy
+`gcloud auth print-access-token` **also** left all four new tests passing. So of the two defects this
+change exists to fix, **the test suite could detect neither.**
+
+And a third thing nobody was looking for: `TestScriptPreflightFailsWithoutADC` is the only one of the
+four that does not set the stub endpoints, so when its mock misses it mints a **real 1024-character
+token**, ships it to the **real** `tokeninfo`, hits the **real** Cloud Run API — and **passes anyway**,
+because the generic remedy string happens to appear in stderr. A unit test putting a live
+`cloud-platform` credential on the wire and passing for the wrong reason.
+
+**The lesson, which is the durable part:** four tests were written, all four passed, and none could
+detect the bug being fixed. **A test that has never been observed to fail is a claim, not a check.**
+Round 2 requires every new pin to be mutation-tested — reintroduce the defect, watch it go red, revert
+— and reported per pin.
+
+### P3: my acceptance bar was met and the behaviour was still wrong
+
+I asked that the missing-`email` case "print something useful rather than an empty string or `null`".
+It does. It prints `azp` — a **numeric client ID** — and then **compares that to an email address.**
+Those can never be equal, so **every service-account ADC warns on every run**: metadata, GCE, Cloud
+Shell, CI. The reviewer's live deploy warned `110532853671892060667` against the gcloud email and then
+succeeded, because both were the same principal.
+
+**A warning that always fires is not a warning.** It trains the operator to ignore the real one — on
+the exact signal P3 exists to carry. My bar was satisfiable without the property I wanted; the fix is
+to correct the bar, not just the code.
+
+### P5 judgement, and a discriminating reason I had not found
+
+I asked for a call on the two test seams and got one I accept. `_DI_API_BASE` is fine — my "an
+attacker who can set your environment has already won" argument holds. `_DI_TOKENINFO_URL` is not,
+**for a reason specific to this file that I missed: the script echoes the API GET URL but never echoes
+the tokeninfo URL.** So a redirected live credential produces output *indistinguishable from a normal
+run*. Invisibility is what tips it, not the redirect itself. Cheapest sufficient fix is one line: echo
+the URL.
+
+Also noted, and inherent: `tokeninfo` takes the token as a **query parameter**, so it is in the curl
+argv (`/proc`) and in the receiving host's logs regardless. That is precisely why P5 matters.
+
+### Four corrections to my brief. All four are right.
+
+- **(a) My suggested way to break ADC would have produced a false pass.** I proposed pointing
+  `CLOUDSDK_CONFIG` at an empty directory. That breaks `config get-value account` and
+  `projects describe` too, so the script dies at step 1 or 2 **above the code under test** and never
+  reaches the preflight — a green "abort" proving nothing. `GOOGLE_APPLICATION_CREDENTIALS` breaks
+  only the ADC store, and the reviewer **verified that first** before trusting the negative. This is
+  the failure mode I warned about in the same brief, in my own suggested method.
+- **(b) "No gcloud flag ENABLES IAP" — right conclusion, wrong reasoning, and the reasoning is what
+  gets reused.** gcloud 582 **does** have `--iap` (`AddIapFlag`, `command_lib/run/flags.py:388`) — on
+  the **Services** surface, not the `instances` noun. Worse, `instances deploy --help` describes
+  `--public` as *"equivalent to `--no-invoker-iam-check` and `--no-iap`"*, referencing a flag that
+  surface does not expose. **A future reader will grep, find `--iap`, and conclude the PATCH is
+  removable.** Correct form, which supersedes my earlier note: **`--iap` exists on Services, not on
+  `run instances`.** The reviewer checked surface registration directly rather than trusting a
+  grep-negative — my own ANSI rule, applied back to me.
+- **(c)** The 28 tests live in **two** files: 23 in `deploy_script_test.go`, 5 in
+  `deploy_script_pin_test.go`. The pin file is where the ordering pin belongs.
+- **(d)** `TestScriptCheckGcloudInstances_FailureMessage` **skips on gcloud 582** — it can only run
+  where `beta run instances` is absent — so the visible test count depends on the runner's SDK. Same
+  family as the step-6 gap: a count that looks like coverage and is not.
+
+### Cleanup and hygiene
+
+`sn-adcpf-rev` created and deleted; the two aborted runs created nothing; final list is the same nine
+protected Instances, byte-identical to baseline. Reviewed in a private clone at `/tmp/rev`, shared
+`/workspace` untouched. No upstream PR.
+
+### The developer wedged, and my "keep the agent" reasoning lost
+
+I argued above for holding `sn-adcpreflight-dev` **because its context was worth more than the
+container**. Then I tried to hand it round 2 and **the harness would not accept input** — four
+messages, including a `--wake` and a raw `Enter`, all landed in the pane as queued text that never
+submitted.
+
+**The argument was sound and the premise died:** context you cannot reach is worth nothing. Stopped it
+and dispatched `sn-adcpreflight-dev2` against the written brief.
+
+**What made that cheap was writing the follow-up to disk first.** `briefs/sn-adcpreflight-dev-r2.md`
+and `reviews/adc-preflight-r1.md` are both on the scratchpad, so a fresh agent starts with everything
+the wedged one knew. **Generalise: put the handoff in a file, not in an agent's head.** The agent is
+the perishable part.
+
+**And another false-negative grep, mine, again.** I filtered `scion message` output with
+`grep -iE "^Error:|sent"`. The success string is **"Message delivered"** — no "sent" — so three
+successful deliveries all looked like silent failures and I re-sent each time. Harmless here; it is
+the fourth instance today of a pattern too narrow for text I had not read. **Match on the actual
+output, or print it.**
