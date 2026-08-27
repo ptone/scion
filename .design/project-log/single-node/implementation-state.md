@@ -4938,3 +4938,74 @@ I did the #1300 analysis above myself. I judge that correctly mine — it is ver
 claim against the code, which is what an architect owes a design doc. I said as much to ptone and
 offered to dispatch that too if he disagrees. The **live retest** of the admin-seeding defect is
 different: that is running a deployment, and I will dispatch it rather than do it.
+
+---
+
+## 2026-08-27 00:34Z — **Both gates cleared.** Tier rebase dispatched. One of my predictions was wrong.
+
+ptone, 00:30: *"1307 has been squash merged"*, and 00:33: *"since we squash merge PRs. please rebase
+the next set of work. then send a full compare URL to the dedicated thread."*
+
+### Verified, not taken on report
+
+- **The guard is in upstream `main`.** `IsLoopbackHost` at `pkg/hub/web.go:439`, fatal check at
+  `:462`. Merged as **`f22db257`** at 00:29:55. The blocker that has governed this tier all night
+  is gone.
+- **The Instances runtime is also in upstream `main`** — `pkg/runtime/cloudrun_runtime.go` exists,
+  and `factory.go` registers both `cloudrun` (:169) and `cloudrun-instances` (:175).
+- **Discrepancy flagged to ptone:** PR **#1302 still reads `OPEN`** even though its code is in
+  main. The code landed; the PR did not close. Raised rather than assumed away.
+
+### I was wrong about `factory.go`, and I have said so in three places
+
+I predicted `pkg/runtime/factory.go` would be the live conflict with the Instances runtime, and
+that reconciling it would be our job. **It is not, and it will not be.**
+
+Measured: of the 8 upstream commits this branch is behind, **none touches `factory.go`**. Our
+branch already registers all three runtimes. The Instances work landed *before* our branch point,
+so we were built on top of it, not beside it.
+
+That claim is in the **#1282 PR description**, in **design doc §4.4**, and it was in my head as the
+main post-merge risk. I have corrected §4.4 — and kept the original text with the correction
+underneath rather than quietly rewriting it, because a design doc that erases its wrong
+predictions gives no basis for judging its right ones. I told the developer explicitly **not to go
+looking for a conflict I invented.**
+
+The real conflict surface, computed by intersecting the 11 files the 8 upstream commits touch
+against our 40: **exactly two files**, `cmd/server_foreground.go` and `cmd/server_foreground_test.go`.
+
+### Dispatched: `sn-tier-rebase-dev`
+
+Three things it could not derive alone:
+
+1. **Rebase onto UPSTREAM main, not fork main.** The fork's main was **3 commits behind** upstream
+   at 00:29. This is not hypothetical — **the previous rebase tonight hit exactly this**, producing
+   a branch that looked clean locally and was still behind its target. I gave explicit remote
+   commands.
+2. The two-file conflict surface, pre-computed.
+3. **Resolution is KEEP BOTH** — inherit the guard from main, preserve the tier changes — plus a
+   hard "do not re-add a copy of the guard", since a duplicate is precisely what we spent two hours
+   removing. And a warning that git may auto-merge one of these *silently and wrongly*, which is
+   what bit the last rebase.
+
+Verification I required: `IsLoopbackHost` present and appearing **exactly once**, all four guard
+tests passing by name, and a file count near 40 either way.
+
+### Design doc §9.2 updated — three of four upstream fixes have landed
+
+| Issue | Landed as |
+|---|---|
+| #1273 | `fc523ecd` (#1305) |
+| #1275 | `6edf6ed0` (#1304) |
+| #1276 | `a30368aa` (#1306) |
+
+The deploy-time stopgaps for #1273 and #1276 are now obsolete. Recorded that they were *operator
+settings, not code* — which is exactly why this tier never blocked on them and why §1 completed
+end to end on 2026-08-25 with all four open.
+
+**#1274 stays open and is the one with teeth:** a depth-1 workspace cannot push to any remote but
+`origin`, which constrains §1's final step. A real shipped limitation, not a theoretical one. Also
+added #1281, and recorded that the split-brain was fixed upstream by #1300 with the caveat that I
+verified it **by reading, not by exercising**.
+
+Doc is now 460 lines.

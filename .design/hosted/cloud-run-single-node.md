@@ -236,6 +236,16 @@ matters: both register a runtime, so whichever lands second reconciles the
 registration. That is expected, and it is the ordinary cost of the two runtimes being
 genuinely separate rather than one overloaded implementation.
 
+**Correction, 2026-08-27: the predicted `factory.go` conflict never happened.** The
+Instances runtime landed upstream first, and this tier was developed on top of it
+rather than beside it — `factory.go` on this branch already registers all three of
+`cloudrun`, `cloudrun-instances` and `cloudrun-sandbox`. Measured at the rebase: of
+the eight upstream commits this branch was behind, **none touched `factory.go`**, and
+the entire conflict surface was two files in `cmd/`. The reasoning above was sound in
+the abstract and simply overtaken by the landing order. Recorded rather than deleted,
+because a design doc that quietly erases its wrong predictions teaches nothing about
+how much to trust the right ones.
+
 ### 4.5 Every address handed into a sandbox needs an explicit decision
 
 A sandbox is not on the launcher's network, and it is not on the public internet's
@@ -409,6 +419,34 @@ surfaced first.
 
 Until #1273 and #1276 land, this tier needs deploy-time workarounds. They are
 stopgaps and should be removed when the fixes arrive.
+
+**Update, 2026-08-27 — three of the four have landed upstream.**
+
+| Issue | Fix | Landed as |
+|---|---|---|
+| #1273 | resolve implicit `default` template when none is specified | `fc523ecd` (PR #1305) |
+| #1275 | skip env-gather when `noAuth` is true | `6edf6ed0` (PR #1304) |
+| #1276 | auth preflight recognises passthrough GCP identity mode | `a30368aa` (PR #1306) |
+
+So **the deploy-time stopgaps for #1273 and #1276 are now obsolete and should be
+deleted.** They were operator settings rather than code, which is why this tier never
+had to carry a workaround for them and never blocked on them — the §1 walkthrough was
+completed end to end on 2026-08-25 with all four open.
+
+**#1274 remains open** and is the one with a live consequence: a depth-1 workspace
+cannot push to any remote but `origin`. That constrains §1's final step to
+origin-only pushes. It is a real limitation of the tier as shipped, not a
+theoretical one.
+
+A fifth defect was filed after this section was first written — **#1281**, session-end
+telemetry rejected with a 400 because `SessionID` is dropped in `Finalize()`, so
+`exit_code` is never persisted. Also open, also not blocking.
+
+A sixth, the `WebServer` access-settings split-brain, was **fixed upstream by #1300**
+(`AccessSettingsProvider`) before it was ever filed from here. All browser login paths
+now read live settings, so tightening access mode in the admin UI reaches browser
+logins. Verified by reading the merged code, **not yet exercised on a live deployment** —
+that retest is still outstanding.
 
 ## 10. Acceptance criteria
 
