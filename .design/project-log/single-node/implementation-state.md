@@ -11245,3 +11245,90 @@ Worth noting the shape of the review: the suggestion improved the prose and woul
 wrong claim. Accepting review feedback verbatim because it reads better is how imprecision survives
 being reviewed. I cannot comment on upstream PRs (fork write access only), so the rationale lives in
 the commit message where it stays attached to the change.
+
+## §35.36 — `hub_id` is the same twelve characters on every Cloud Run Instance in the world
+
+**2026-08-27, 21:26. `sn-hubid-inv2` closed Q2.** Four container startups across two deploys:
+
+| # | UTC | context | `hub_id` | user key | agent key |
+|---|-----|---------|----------|----------|-----------|
+| 1 | 21:10:35 | initial deploy, first start | `49960de5880e` | `743840fa715c1435` | `c797e24cd22138ec` |
+| 2 | 21:12:16 | restart during initial deploy | `49960de5880e` | `e3be6ab709e49d6e` | `21e6b0df61b9ceb1` |
+| 3 | 21:24:04 | first start after redeploy | `49960de5880e` | `3a61e518589a7053` | `5f39a5c66d3b520d` |
+| 4 | 21:24:37 | restart during redeploy | `49960de5880e` | `63be9ec98ae3c40e` | `02ccc76b5f46e8c2` |
+
+`K_SERVICE` is not set on Cloud Run Instances, so resolution falls through to `os.Hostname()`, which
+returns `localhost`. **`hub_id` = SHA-256("localhost")[:12].** I verified the hash myself rather than
+take it on trust — `printf 'localhost' | sha256sum | cut -c1-12` is `49960de5880e`. (With a trailing
+newline it is `d906aecb61d0`, so the report's no-newline form is the right one. Checking that took
+one command and it is the load-bearing claim of the whole report.)
+
+### The design doc was worried about the wrong property
+
+It said *"hostname stability across redeploys is unverified."* The hostname is **not unstable. It is
+immovably `localhost`, on every instance anyone deploys.** The real property is not instability but
+**universal collision** — a question nobody thought to ask, arrived at by measuring the thing we did
+ask about.
+
+### The measurement that actually decides it
+
+**`hub_id` is identical across all four startups while both signing keys differ every time.** So
+setting `hub_id` explicitly would not stabilise the keys; they regenerate regardless, because the
+secret backend is ephemeral. The bold instruction fixes a value that is already fixed, against a
+problem the keys do not have. This also retires the Q1 worry from §35.30 — *changed hubID → new
+signing key → live JWTs invalid* — because the keys turn over anyway.
+
+### Decision: B, modified — replace the line, do not merely delete it
+
+Recommendation B was "delete the design-doc instruction." I am taking it, with a change. A bare
+deletion **discards the measurement and invites someone to re-derive the same worry in three months.**
+The replacement records: `K_SERVICE` unset → hostname → always `localhost`; keys vary anyway; and the
+**trigger that makes this wrong again** — a persistent secret backend or a second instance, at which
+point `hub_id` *uniqueness* starts to matter and a global constant becomes the hazard, and
+recommendation A becomes correct.
+
+Held until `GoogleCloudPlatform/scion#1326` merges: same file, same section, avoidable conflict.
+
+### Two incidental findings worth more than the headline
+
+- **Step 3b appears to restart the container.** Both deploys restarted 90–120s after first startup,
+  apparently on the IAP PATCH. Nobody was looking for this. On an ephemeral-state tier a mid-deploy
+  restart is not free, and it interacts with the #85 ordering work.
+- **The investigator refused a claim in my own brief, correctly.** I wrote that its create test would
+  distinguish "503 specific to the create operation" from "503 was transient." **It does not — both
+  hypotheses predict success now.** I had built a discriminator that discriminates nothing and
+  described it as decisive. Accepted without argument. Naming the acceptable failure in a brief keeps
+  producing this: the second investigator, like the first, told me the thing I had got wrong.
+
+## §35.37 — ADC accepted, with the ordering fix that matters more
+
+**2026-08-27, 21:26. ptone confirmed ADC works on his machine** and chose to switch the script to it,
+with a configuration instruction and an in-script check. At 21:28 he added that an identity mismatch
+should warn, not fail — which the brief already said.
+
+I took the decision but widened it, because **switching the token source fixes only the symptom.**
+
+- **Defect 1, the token source.** `gcloud auth print-access-token` returns a non-OAuth2 token on his
+  machine. ADC fixes it.
+- **Defect 2, the order.** Step 3b learns it cannot authenticate *after* step 3a created the Instance.
+  That is the half-built deploy — Instance up, IAP off, no rollback. **Fixing only defect 1 leaves
+  this shape in place for the next credential problem we have not imagined.**
+
+The brief therefore moves the credential check **before any mutation**: mint the ADC token, validate
+it with one cheap GET, resolve and print its identity, and compare that identity with the gcloud
+account 3a will use. Warn on mismatch, naming both.
+
+That last part is the piece most likely to be under-built, so the brief says so explicitly. **A check
+that only asks "is ADC configured?" passes cleanly in exactly the case that hurts** — `gcloud auth`
+and ADC are separate stores, so 3a and 3b could run as different *principals*, turning a mechanism
+difference into a permission failure that looks like nothing.
+
+One measured detail folded into the brief so it is not rediscovered: **`tokeninfo` does not always
+return `email`.** A service-account token scoped only to `cloud-platform` returns `azp`/`aud`/`scope`
+and no email — I hit this in this container. An implementation that assumes `email` prints nothing at
+exactly the moment the operator needs the identity.
+
+Dispatched `sn-adcpreflight-dev`. Brief carries the standing traps: do not remove the REST PATCH
+(gcloud 582 can disable IAP but cannot enable it), `set -e` is global not function-scoped, no
+`2>/dev/null` on new checks, never print the token, keep the script curl-able with no new external
+commands, and `/workspace` is the fork and has not synced `c13d910b`.
