@@ -282,6 +282,17 @@ would bury the events that matter.
   invalidates the full-suite runs my own acceptance method depends on. S4 opened; `ca-msg-em4`
   spawned; em3 retired.
 
+- `2026-08-27 06:47Z` em4 acknowledged and diagnosed DEF-4: **72 `newTestStore(":memory:")`
+  call sites in `pkg/hub`, only ~19 with any Close/Cleanup**; each runs a full 49-schema ent
+  migration and the DB stays live for the package run. Matches my suspected cause. Plan
+  approved with three amendments: (a) fix the class not the instances — `newTestStore` takes
+  `*testing.T` and registers cleanup itself, so a caller cannot forget; (b) acceptance is
+  `-count=3` green plus a `-count=1` run **plus a revert check** — reverting the cleanup must
+  reproduce the failures, or the diagnosis is wrong; (c) DEF-4 merges into the integration
+  branch on its own, before any phase 8/10/11 work, so it is not entangled with a read switch
+  that may have to be reverted. Warned that closing stores will surface tests that relied on a
+  leaked handle — those are defects the leak was masking, not reasons to restore it.
+
 ## 5d. S2 rejection history — CLOSED 2026-08-27 03:35Z (accepted on round 3)
 
 S2 was reported complete with three APPROVE gates. I rejected it. Both blockers are
