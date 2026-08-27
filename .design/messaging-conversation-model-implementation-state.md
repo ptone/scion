@@ -503,6 +503,8 @@ would bury the events that matter.
 - `2026-08-27 12:42Z` **Walkthrough correction issued in flight**: it says to message `<some-agent>`; on a live 23-agent hub that wakes a working agent, which then acts on the QA text as an instruction. Use a throwaway target. My omission — the doc was written for an empty beta hub.
 - `2026-08-27 12:43Z` Heartbeat: no managers running (correct — branch frozen for QA), branch unchanged at `ebf8cc27`/58 commits. Blocked on QA results.
 - `2026-08-27 12:58Z` **User challenged whether I had been dispatching managers against the discovered gaps. I had not, and said so.** Correction recorded in §5j.
+- `2026-08-27 13:00Z` **QA results from scion-gteam.** Parts 0/1/2 **PASS** — identical conversation UUID across two sends (Created→Resolved), both must-fail cases exit 1 with the refusal text. **DEF-12 confirmed as measurement: 24,684 messages, 0 with `conversation_id`.** **DEF-10 confirmed by direct observation** (row carries non-null `project_id`). **DEF-8 and DEF-11 remain UNTESTED** — see §5k.
+- `2026-08-27 13:01Z` Answered the user on DEF-7/DEF-9: DEF-9 needs no input (unbuilt, not undecided; downstream of DEF-5). DEF-7 has one real question, routed to **`nc-arch`** rather than escalated — see §5l.
 - `2026-08-27 13:00Z` **S6 spawned (`ca-msg-em6`), scope DEF-8 + DEF-10**, spec design §2.4.2, branch `scion/ca-msg-em6` off `ebf8cc27`. Briefed hard on the step-2 security hazard. Merge gated on QA completion. Asked for a plan before the migration is written.
 
 ## 5j. Correction 2026-08-27 12:58Z — I stopped dispatching and did not notice
@@ -532,6 +534,71 @@ critical path, and the heartbeat prompt — which asks whether the *active manag
 has no question that fires when there is **no** manager at all. It reported healthy every time.
 **A monitor that only checks running things cannot see a stop.** Heartbeat handling must now ask:
 if no manager is running, is that a decision or a drift?
+
+## 5k. QA on scion-gteam 2026-08-27 13:00Z — what it proved and what it did not
+
+Run by `agent:integration2-operator` against `ebf8cc27`. **Parts 0, 1, 2, 5 executed; Part 3 left
+for the user.**
+
+**Settled.**
+- **DEF-12 — confirmed, and now a measurement rather than a reading.** 24,684 messages in the DB,
+  **0** carrying a `conversation_id`. Total conversation rows: 1, the one the tester created.
+- **DEF-10 — confirmed by direct observation.** The resolver-created row carries a non-null
+  `project_id`; §2.4.1 and Q2 say direct conversations are global.
+- **Parts 1 and 2 pass.** Two sends to the same target returned the *same* UUID with the verb
+  changing `Created`→`Resolved`. Both `conv:<uuid>` and `#general` exited 1 with the refusal text.
+  No silent success — the failure mode this project exists to eliminate.
+
+**Not settled, and this must not be allowed to drift into "confirmed".**
+- **DEF-8 is half-tested.** The observed row matched my predicted *resolver* shape exactly — empty
+  `external_ref`, non-null `project_id`, 2 participants. But the prediction was that a **second**
+  row exists from the dual-write path, and **that path never executed.** The data is *consistent
+  with* DEF-8 and is not a *test* of it. The tester wrote "cannot confirm or deny" unprompted,
+  which was the correct call and better discipline than the result deserved.
+- **DEF-11 untested.** Divergence board all zeros, before and after.
+
+**One root cause for both gaps, and it is the most useful thing the run produced.**
+`agent_not_running` (409) short-circuits **before** the handler where dual-write and the divergence
+comparison live. The throwaway agent could not start — no `ANTHROPIC_API_KEY` for the tester's
+user — so nothing was delivered. Therefore:
+
+> **The entire new-model instrumentation sits downstream of successful delivery.** It cannot be
+> exercised without a live agent, and it observes only live sends. I designed the read-switch gate
+> around that board without noticing it has no visibility into anything that fails early, and none
+> at all into historical data. **A gate that can only see successful traffic is not a safety gate.**
+
+**Next:** organic traffic from the hub's 23 agents should populate the board without any forced
+sends; operator to re-check the board and re-run the Part 5 SQL in a couple of hours. But the
+**definitive** evidence for DEF-8 comes from S6's AC-DEF8-1, in a controlled environment where I
+can mutate the implementation and confirm the test fails. Production poking cannot do that.
+
+**Out of scope, routed onward:** `SCION_AUTH_TOKEN` is sent by the CLI as an agent token
+(`hubsync/sync.go:1366`, `WithAgentToken`), so the documented integration-testing path fails auth;
+`SCION_HUB_TOKEN` works. Asked the operator to file it rather than leave it in a Discord thread.
+
+## 5l. DEF-7 routed to nc-arch, not escalated — 2026-08-27 13:01Z
+
+The user asked whether DEF-7 and DEF-9 need his input.
+
+**DEF-9: no.** It is unbuilt, not undecided — §2.4 already specifies the behaviour and nobody
+implemented it. It is also downstream of DEF-5. Recording the distinction because "open defect"
+and "open question" look identical in a ledger and only one of them needs a human.
+
+**DEF-7: one real question, but the wrong human.** The fix depends entirely on whether `#general`
+names a **native chat room** (build a naming path) or a **broker thread** (re-point the grammar at
+`external_ref`). Opposite builds. Native chat is a live parallel design in this project (`nc-arch`,
+`native-chat-lead`), a room with no name is unusable in a chat UI, so they need conversation naming
+whatever I decide — and my grammar is what their UI would have to live with. Deciding alone risks
+duplicating or contradicting them.
+
+Asked `nc-arch` four questions: does their design need named conversations; who writes the name and
+when; are they already building a create/rename surface I should consume; can two rooms share a
+name (which decides whether `#<name>` can be a unique reference at all, or needs a scope qualifier).
+
+**Principle worth keeping: escalate to a human only what no other agent can answer.** A
+cross-project design question routed to the other project is not an escalation, it is coordination,
+and treating the two as the same thing is how a user's queue fills with questions his own system
+already knows the answer to.
 
 ## 5i. S5 — CLOSED 2026-08-27 12:40Z (accepted on round 3, `55dd6e16`)
 
