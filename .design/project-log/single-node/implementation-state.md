@@ -6420,3 +6420,32 @@ yesterday: **a measurement that is technically correct about the wrong populatio
 today. The tell each time was a number that felt too dramatic for the change that produced it.
 
 Working tree restored and verified clean before continuing.
+
+### 04:16 — batch 2 filed; the developer caught a near-duplicate I would have missed
+
+`ptone/scion#1291` (image-pull failure undiagnosable), `#1292` (sandbox stderr lost), `#1293` (G4
+unmet, no public default image), `#1294` (conflicted PR silently loses `pull_request` CI).
+
+**The developer found `ptone/scion#1100` and correctly declined to call it a duplicate.** #1100 is
+"stacked PRs get zero check-runs", caused by a **workflow filter on `base=main`**. Item 8 is
+"conflicted PR gets no check-runs", caused by **no computable merge commit**. Identical symptom,
+different mechanism, different fix. It cross-referenced them as related-but-distinct instead of
+collapsing them.
+
+That is exactly the discrimination I have been failing at all night — three times today I produced a
+measurement that was correct about the wrong population. Here the developer had two things that
+looked the same and refused to merge them without checking the mechanism. I did not ask for that
+check; my brief only said "search for duplicates".
+
+> **Symptom identity is not cause identity.** Two failures that present the same way can have
+> unrelated mechanisms, and filing them as one issue destroys the information needed to fix either.
+
+It also confirmed the framing switch landed — batch 1 as by-design non-goals, batch 2 as real
+defects — which was the correction I sent with the dispatch.
+
+**Batch 3 dispatched** (items 9-12). Three of the four carry an explicit "do not fix it" caution:
+item 9 must file an issue rather than closing `ptone/scion#1273`/`#1276`; items 11 and 12 are
+one-line fixes that a developer will naturally want to just make. Item 11 in particular is **my**
+reference bug, and I want it fixed through review rather than quietly by the agent who found the
+brief. I gave it the clean numbers — one file, 13 occurrences — so the issue does not imply a
+corpus-wide cleanup.
