@@ -123,13 +123,18 @@ func NewRoutingStr(convID string) string {
 // Deterministic external reference helpers
 // ---------------------------------------------------------------------------
 
-// DirectMessageExternalRef builds a deterministic, order-independent external
+// directMessageExternalRef builds a deterministic, order-independent external
 // reference for a direct-message conversation between two principals.
 // Format: dm:{sorted(idA, idB)}
 //
+// UNEXPORTED: This is the legacy format that predates kind-safe convergence
+// (DEF-8). Production code must use DeriveConversationKey / DMConversationKey
+// instead. This function is retained only for divergence tests that need the
+// old shape for comparison.
+//
 // Both IDs are required; an empty ID produces a ref that makes the divergence
 // visible rather than silently swallowing the error.
-func DirectMessageExternalRef(idA, idB string) string {
+func directMessageExternalRef(idA, idB string) string {
 	pair := []string{idA, idB}
 	sort.Strings(pair)
 	return fmt.Sprintf("dm:%s:%s", pair[0], pair[1])

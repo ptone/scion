@@ -144,6 +144,10 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 			result.LastCheckpoint = msg.ID
 
 			g := s.groupForMessage(msg, cfg.ProjectID, groups)
+			if g == nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("message %s: key derivation failed", msg.ID))
+				continue
+			}
 			g.messageIDs = append(g.messageIDs, msg.ID)
 		}
 
@@ -183,24 +187,26 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 }
 
 // groupForMessage finds or creates the conversation group for a message.
+// Returns nil when key derivation fails (e.g. malformed dm: key); the caller
+// MUST check for nil before appending message IDs.
 func (s *BackfillService) groupForMessage(msg *store.Message, projectID string, groups map[string]*conversationGroup) *conversationGroup {
 	senderKind, senderID := parsePrincipal(msg.Sender, msg.SenderID)
 	recipientKind, recipientID := parsePrincipal(msg.Recipient, msg.RecipientID)
 
-	var key string
-	var kind string
-
-	if msg.ThreadID != "" {
-		// Thread-based conversation.
-		key = fmt.Sprintf("thread:%s:%s", projectID, msg.ThreadID)
-		kind = "group"
-	} else {
-		// Direct conversation — use the canonical project-free DM external ref.
-		// DMs are global per design 2.4.1; the external_ref must match what
-		// dual-write produces so both paths resolve to the same conversation row.
-		key = DirectMessageExternalRef(senderID, recipientID)
-		kind = "direct"
+	extRef, derivedKind, _, deriveErr := DeriveConversationKey(KeyInputs{
+		ThreadID:      msg.ThreadID,
+		ProjectID:     projectID,
+		SenderKind:    senderKind,
+		SenderID:      senderID,
+		RecipientKind: recipientKind,
+		RecipientID:   recipientID,
+	})
+	if deriveErr != nil {
+		// Key derivation refused — return nil so the caller skips this message.
+		return nil
 	}
+	key := extRef
+	kind := derivedKind
 
 	g, ok := groups[key]
 	if !ok {

@@ -479,7 +479,7 @@ func TestStep3b_OldFormatRekey(t *testing.T) {
 	ms.agents[agentID] = &store.Agent{ID: agentID, Slug: "test-agent"}
 
 	// Old format key: dm:{sorted(id1,id2)}.
-	oldKey := DirectMessageExternalRef(userID, agentID)
+	oldKey := directMessageExternalRef(userID, agentID)
 	ms.addConv(&store.Conversation{
 		ID:          convID,
 		Kind:        "direct",
@@ -511,7 +511,7 @@ func TestStep3b_AmbiguousIDInNeither(t *testing.T) {
 	convID := uuid.NewString()
 
 	// Neither ID exists in any table.
-	oldKey := DirectMessageExternalRef(id1, id2)
+	oldKey := directMessageExternalRef(id1, id2)
 	ms.addConv(&store.Conversation{
 		ID:          convID,
 		Kind:        "direct",
@@ -542,7 +542,7 @@ func TestStep3b_AmbiguousIDInBoth(t *testing.T) {
 	ms.agents[sharedID] = &store.Agent{ID: sharedID, Slug: "ambig-agent"}
 	ms.users[otherID] = &store.User{ID: otherID, Email: "other@example.com"}
 
-	oldKey := DirectMessageExternalRef(sharedID, otherID)
+	oldKey := directMessageExternalRef(sharedID, otherID)
 	ms.addConv(&store.Conversation{
 		ID:          convID,
 		Kind:        "direct",
@@ -573,7 +573,7 @@ func TestStep3b_OldFormatMerge(t *testing.T) {
 	ms.agents[agentID] = &store.Agent{ID: agentID, Slug: "test-agent"}
 
 	// Old-format row.
-	oldKey := DirectMessageExternalRef(userID, agentID)
+	oldKey := directMessageExternalRef(userID, agentID)
 	ms.addConv(&store.Conversation{
 		ID:          oldConvID,
 		Kind:        "direct",
@@ -664,7 +664,7 @@ func TestDryRun_NoWrites(t *testing.T) {
 	ms.agents[agent3ID] = &store.Agent{ID: agent3ID, Slug: "test-agent-3"}
 
 	convID3 := uuid.NewString()
-	oldKey := DirectMessageExternalRef(user3ID, agent3ID)
+	oldKey := directMessageExternalRef(user3ID, agent3ID)
 	ms.addConv(&store.Conversation{
 		ID:          convID3,
 		Kind:        "direct",
@@ -833,7 +833,7 @@ func TestGuardC_Migration_AllDMKeysAreParseable(t *testing.T) {
 	agentOld := uuid.NewString()
 	ms.users[userOld] = &store.User{ID: userOld, Email: "old@example.com"}
 	ms.agents[agentOld] = &store.Agent{ID: agentOld, Slug: "old-agent"}
-	oldKey := DirectMessageExternalRef(userOld, agentOld)
+	oldKey := directMessageExternalRef(userOld, agentOld)
 	oldConvID := uuid.NewString()
 	ms.addConv(&store.Conversation{
 		ID:          oldConvID,
@@ -1156,7 +1156,7 @@ func TestMigration_MixedScenarios(t *testing.T) {
 	ms.agents[agent3] = &store.Agent{ID: agent3}
 
 	conv3ID := uuid.NewString()
-	oldKey := DirectMessageExternalRef(user3, agent3)
+	oldKey := directMessageExternalRef(user3, agent3)
 	ms.addConv(&store.Conversation{
 		ID: conv3ID, Kind: "direct", Surface: "native", ExternalRef: oldKey,
 	})

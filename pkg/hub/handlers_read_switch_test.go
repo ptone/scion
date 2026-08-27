@@ -27,6 +27,10 @@ import (
 	"testing"
 	"time"
 
+	"io"
+	"log/slog"
+
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"github.com/knadh/koanf/v2"
 	_ "github.com/mattn/go-sqlite3"
@@ -37,6 +41,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// slogDiscard returns a *slog.Logger that discards all output.
+func slogDiscard() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -561,6 +570,215 @@ func TestDualWrite_UnparseableSenderAddress_NoConversationCreated(t *testing.T) 
 	// is hitting the right table.
 	assert.GreaterOrEqual(t, len(convs.Items), 1,
 		"floor: at least 1 direct conversation should exist (alice+agent DM from readSwitchWorld)")
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: AC-DEF15-4 — invalid dm: key as ThreadID creates zero conversations
+// ---------------------------------------------------------------------------
+
+func TestOutbound_InvalidDMKeyThreadID_NoConversationCreated(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: uuid.NewString(), Name: "def15-project",
+		Slug: "def15-project", Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	recipient := &store.User{
+		ID: uuid.NewString(), Email: "human@def15.test",
+		DisplayName: "Human", Role: store.UserRoleMember, Status: "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, recipient))
+
+	agent := &store.Agent{
+		ID: uuid.NewString(), Name: "def15-agent", Slug: "def15-agent",
+		ProjectID: project.ID, Phase: "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Count conversations before the request.
+	convsBefore, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	countBefore := len(convsBefore.Items)
+
+	// Send an outbound message with an INVALID dm: key as ThreadID.
+	// "bot" is not a valid principal kind and the UUID is malformed.
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:human@def15.test",
+		Msg:       "bad dm key test",
+		ThreadID:  "dm:bot:baduuid:user:" + uuid.NewString(),
+		Channel:   "web",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+	// The request may succeed (message delivered without conversation) or fail
+	// validation, but either way no conversation row should be created.
+
+	// Count conversations after the request.
+	convsAfter, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	countAfter := len(convsAfter.Items)
+
+	assert.Equal(t, countBefore, countAfter,
+		"AC-DEF15-4: invalid dm: key must not create any conversation rows")
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: AC-DEF16-1 — ValidateLegacyMessage rejects BEFORE conversation row
+// ---------------------------------------------------------------------------
+
+func TestDEF16_ValidationRejectsBeforeConversationCreated_Outbound(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: uuid.NewString(), Name: "def16-project",
+		Slug: "def16-project", Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	recipient := &store.User{
+		ID: uuid.NewString(), Email: "human@def16.test",
+		DisplayName: "Human", Role: store.UserRoleMember, Status: "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, recipient))
+
+	agent := &store.Agent{
+		ID: uuid.NewString(), Name: "def16-agent", Slug: "def16-agent",
+		ProjectID: project.ID, Phase: "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Count conversations before.
+	convsBefore, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	countBefore := len(convsBefore.Items)
+
+	// Send a request that ValidateLegacyMessage rejects:
+	// thread_id set but channel not set → "thread_id requires channel to be set".
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:human@def16.test",
+		Msg:       "should be rejected",
+		ThreadID:  "some-thread",
+		// Channel intentionally omitted — triggers validation failure.
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+	// Must be rejected with 400.
+	assert.Equal(t, http.StatusBadRequest, rr.Code,
+		"AC-DEF16-1: thread_id without channel should be rejected")
+	assert.Contains(t, rr.Body.String(), "thread_id requires channel",
+		"AC-DEF16-1: error message should mention the validation rule")
+
+	// Count conversations after — must be unchanged.
+	convsAfter, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	countAfter := len(convsAfter.Items)
+
+	assert.Equal(t, countBefore, countAfter,
+		"AC-DEF16-1: rejected request must not create any conversation rows")
+}
+
+func TestDEF16_ValidationRejectsBeforeConversationCreated_Inbound(t *testing.T) {
+	srv, s, alice, agent, _, _, _, _ := readSwitchWorld(t)
+	ctx := context.Background()
+
+	// Count conversations before.
+	convsBefore, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	countBefore := len(convsBefore.Items)
+
+	// Send a message that ValidateLegacyMessage rejects:
+	// thread_id set but channel not set.
+	msgReq := MessageRequest{
+		StructuredMessage: &messages.StructuredMessage{
+			Sender:    "user:" + alice.DisplayName,
+			SenderID:  alice.ID,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "should be rejected",
+			Type:      "instruction",
+			ThreadID:  "some-thread",
+			// Channel intentionally omitted — triggers validation failure.
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	body, err := json.Marshal(msgReq)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/actions/message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	userIdent := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, string(alice.Role), "api")
+	req = req.WithContext(contextWithIdentity(req.Context(), userIdent))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentMessage(rr, req, agent.ID)
+
+	// Must be rejected with 400.
+	assert.Equal(t, http.StatusBadRequest, rr.Code,
+		"AC-DEF16-1 inbound: thread_id without channel should be rejected")
+	assert.Contains(t, rr.Body.String(), "thread_id requires channel",
+		"AC-DEF16-1 inbound: error message should mention the validation rule")
+
+	// Count conversations after — must be unchanged.
+	convsAfter, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	countAfter := len(convsAfter.Items)
+
+	assert.Equal(t, countBefore, countAfter,
+		"AC-DEF16-1 inbound: rejected request must not create any conversation rows")
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: Broker delegation — dm: ThreadID produces kind=direct
+// ---------------------------------------------------------------------------
+
+func TestBrokerDelegation_DMThreadID_ProducesDirectConversation(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	agentID := uuid.NewString()
+	userID := uuid.NewString()
+
+	// Build a dm: key.
+	dmKey, err := messages.DMConversationKey("agent", agentID, "user", userID)
+	require.NoError(t, err)
+
+	// Send the dm:-keyed ThreadID through ResolveOrCreateThreadConversation,
+	// which is the delegation path that broker inbound and messagebroker.go use.
+	convResult := messaging.ResolveOrCreateThreadConversation(ctx, s, slogDiscard(), dmKey, "some-project")
+	require.NotNil(t, convResult, "dm: key through thread delegation should resolve")
+
+	// Verify the conversation has kind=direct (not group).
+	conv, err := s.GetConversation(ctx, convResult.ConversationID)
+	require.NoError(t, err)
+	assert.Equal(t, "direct", conv.Kind,
+		"dm:-keyed ThreadID through broker delegation must produce kind=direct")
+	assert.Equal(t, dmKey, conv.ExternalRef,
+		"dm:-keyed ThreadID through broker delegation must preserve the dm: key as external_ref")
+	assert.Nil(t, conv.ProjectID,
+		"dm conversations are global — ProjectID must be nil")
 }
 
 // ---------------------------------------------------------------------------

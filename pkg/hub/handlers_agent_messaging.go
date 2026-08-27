@@ -239,12 +239,49 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		CreatedAt:   time.Now(),
 	}
 
+	// Build a structured message for external dispatch paths.
+	structuredMsg := &messages.StructuredMessage{
+		Sender:      storeMsg.Sender,
+		SenderID:    storeMsg.SenderID,
+		Recipient:   storeMsg.Recipient,
+		RecipientID: storeMsg.RecipientID,
+		Msg:         storeMsg.Msg,
+		Type:        storeMsg.Type,
+		Urgent:      storeMsg.Urgent,
+		Attachments: req.Attachments,
+		Channel:     req.Channel,
+		ThreadID:    req.ThreadID,
+		Visibility:  req.Visibility,
+		Metadata:    req.Metadata,
+	}
+	// Validate the assembled message through the legacy envelope choke point
+	// (Audit M2: outbound messages must not bypass validation).
+	// DEF-16: Validation MUST run BEFORE conversation resolution so that a
+	// rejected request never creates a conversation row.
+	if err := messaging.ValidateLegacyMessage(structuredMsg); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+
 	// Phase 5 dual-write: resolve-or-create conversation, stamp conversation_id.
+	// Uses DeriveConversationKey to unify thread and DM key derivation (§2.15).
 	var convResult *messaging.ConversationResult
-	if req.ThreadID != "" {
-		convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, req.ThreadID, agent.ProjectID)
-	} else if agent.ID != "" && recipientID != "" {
-		convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, "agent", agent.ID, "user", recipientID)
+	extRef, kind, projID, deriveErr := messaging.DeriveConversationKey(messaging.KeyInputs{
+		ThreadID:      req.ThreadID,
+		ProjectID:     agent.ProjectID,
+		SenderKind:    "agent",
+		SenderID:      agent.ID,
+		RecipientKind: "user",
+		RecipientID:   recipientID,
+	})
+	if deriveErr != nil {
+		s.messageLog.Warn("skipping conversation resolution: key derivation refused",
+			"thread_id", req.ThreadID,
+			"agent_id", agent.ID,
+			"error", deriveErr,
+		)
+	} else {
+		convResult = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID)
 	}
 	if convResult != nil {
 		storeMsg.ConversationID = convResult.ConversationID
@@ -267,28 +304,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	})
 	// DEF-3: Independent consistency check against prior messages.
 	messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, req.ThreadID, agent.ID, recipientID, s.messageLog)
-
-	// Build a structured message for external dispatch paths.
-	structuredMsg := &messages.StructuredMessage{
-		Sender:      storeMsg.Sender,
-		SenderID:    storeMsg.SenderID,
-		Recipient:   storeMsg.Recipient,
-		RecipientID: storeMsg.RecipientID,
-		Msg:         storeMsg.Msg,
-		Type:        storeMsg.Type,
-		Urgent:      storeMsg.Urgent,
-		Attachments: req.Attachments,
-		Channel:     req.Channel,
-		ThreadID:    req.ThreadID,
-		Visibility:  req.Visibility,
-		Metadata:    req.Metadata,
-	}
-	// Validate the assembled message through the legacy envelope choke point
-	// (Audit M2: outbound messages must not bypass validation).
-	if err := messaging.ValidateLegacyMessage(structuredMsg); err != nil {
-		ValidationError(w, err.Error(), nil)
-		return
-	}
 
 	// Propagate recipients and group_id from metadata for group-set messages.
 	if req.Metadata != nil {
@@ -853,14 +868,27 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			} else {
 				lookupFailed = true
 			}
-		} else if structuredMsg.ThreadID != "" {
-			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, structuredMsg.ThreadID, agent.ProjectID)
-		} else if structuredMsg.SenderID != "" && agent.ID != "" {
-			if senderKind, ok := messages.PrincipalKindFromAddress(structuredMsg.Sender); ok {
-				convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, senderKind, structuredMsg.SenderID, "agent", agent.ID)
+		} else {
+			senderKind := ""
+			if k, ok := messages.PrincipalKindFromAddress(structuredMsg.Sender); ok {
+				senderKind = k
+			}
+			extRef, kind, projID, deriveErr := messaging.DeriveConversationKey(messaging.KeyInputs{
+				ThreadID:      structuredMsg.ThreadID,
+				ProjectID:     agent.ProjectID,
+				SenderKind:    senderKind,
+				SenderID:      structuredMsg.SenderID,
+				RecipientKind: "agent",
+				RecipientID:   agent.ID,
+			})
+			if deriveErr != nil {
+				s.messageLog.Warn("skipping conversation resolution: key derivation refused",
+					"thread_id", structuredMsg.ThreadID,
+					"sender", structuredMsg.Sender,
+					"error", deriveErr,
+				)
 			} else {
-				s.messageLog.Warn("skipping DM conversation resolution: sender kind undetermined",
-					"sender", structuredMsg.Sender, "sender_id", structuredMsg.SenderID)
+				convResult = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID)
 			}
 		}
 		if convResult != nil && storeMsg.ConversationID == "" {
