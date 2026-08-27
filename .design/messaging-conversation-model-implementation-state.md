@@ -348,6 +348,29 @@
     two days ago — "be very careful not to revert other work on main" — which I had read as being
     about rebasing. It was more general than the reading I gave it.
 
+32. **A review checklist flattens evidence: items established by running something and items
+    established by reading something appear in the same format and read as equally settled.**
+    Issued 2026-08-27 19:25Z, from DEF-19. em9's reviewer returned nine checkmarks in one uniform
+    list. "All existing tests pass" was verified by running the suite. "Via=ViaExplicit correct for
+    group[]" and "set[] legacy alias handled" were verified by reading the code. On the page they
+    are indistinguishable.
+
+    I mutated the first of those — changed `ViaExplicit` to the computed `via` in the group branch,
+    the exact refactor the checkmark was supposed to protect against — and **nothing failed.** The
+    one existing `Via` assertion (`validate_compat_test.go:266`) is vacuous, because
+    `validLegacyMessage()` uses a type that maps to `nil`, so `via` equals `ViaExplicit` regardless.
+    The second checkmark was *true* — I confirmed `set[]` by probe — but equally untested.
+
+    Two consequences. **For reports:** state how each item was established, not merely that it was.
+    **For the argument "it is unreachable, so it needs no test":** that has it backwards.
+    Unreachable is the cheapest thing in the world to test — five lines, green forever, and the only
+    thing that will notice when it stops being unreachable. em9 had themselves observed that a raw
+    API caller could reach it.
+
+    This is the §2.15 vacuous-assertion shape recurring in a different costume within eight hours,
+    which is the point: **the defect is not in any one test, it is in accepting a green suite as
+    evidence about code paths it never distinguishes.**
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
