@@ -1344,7 +1344,7 @@ func isAllowedSubjectChar(c rune) bool {
 // isPublicRoute returns true for routes that do not require authentication.
 func isPublicRoute(path string) bool {
 	switch {
-	case path == "/healthz" || path == "/health":
+	case path == "/healthz" || path == "/health" || path == "/readyz":
 		return true
 	case strings.HasPrefix(path, "/assets/"):
 		return true
