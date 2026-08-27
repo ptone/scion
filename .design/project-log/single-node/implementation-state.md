@@ -8661,3 +8661,68 @@ the two script findings — a deploy script that misparses an argument fails in 
 project — and arms the developer against the one way the doc findings could be wrong: the tier sets
 `invokerIamDisabled: true`, so **IAP is the sole perimeter**, verified by the six-way matrix. If a
 finding contradicts that, the finding is wrong and should be declined citing the matrix.
+
+### §22.1 — Outcome: 2 fixed, 2 declined as factually wrong (13:24)
+
+Pushed `98fbbd2a` to `scion/sn-docs-dev` (fast-forward `fa8f2a8e..98fbbd2a`, no force, no rebase).
+Upstream PR #1315 head confirmed updated and still open.
+
+**FIXED — `deploy.sh` binary resolution.** A genuine bug, and it broke the documented quick start:
+`cloud-run.md:58` tells the operator to build `./scion` into the repo root (gitignored at
+`.gitignore:10`), then the README says to run `./scripts/single-node/deploy.sh` — but the script only
+searched `$PATH`. **The tier's one-command deploy failed if you followed the tutorial exactly.** Now
+`$SCION_BIN` → repo-root `./scion` → cwd `./scion` → `$PATH`, with the error naming every location
+searched. Developer deviated from the bot deliberately: an explicitly set but unusable `$SCION_BIN`
+is a hard error, not a silent fallthrough. **That is the right call** — an operator who set it meant it.
+
+**FIXED — `teardown.sh` argument parsing.** Real but smaller than I claimed. See the correction below.
+
+**DECLINED — findings 1 and 2, both factually wrong.** The reviewer asserted IAP rejects standard
+OAuth access tokens. The six-way matrix (06:50) measured `Authorization` + access token = **200** and
+`Proxy-Authorization` + access token = **200**. Rows 5/6 returned IAP-generated errors, which proves
+IAP was enforcing during the run; and because the deploy sets `invokerIamDisabled: true`, those 200s
+**cannot** be credited to the invoker check — it was off. **The deciding variable is audience, not
+token type — which is the exact attribution error the matrix was run to settle.**
+
+**Accepting these two would have put a measurably false security claim into the tutorial ptone is
+about to hand beta testers.** Both suggestions were also defective on their own terms: finding 1
+hardcodes `IAP_CLIENT_ID` sixteen lines before the doc introduces its discovery command; finding 2
+uses `::::note` (four colons) instead of Starlight's `:::note`, so it would have broken the render.
+
+### §22.2 — Where my brief was wrong (developer's corrections, all accepted)
+
+1. **I overstated finding 4.** I wrote that bad argument parsing "fails in a stranger's GCP project",
+   implying a wrong-resource deletion. **It does not reproduce.** Every malformed case already exited
+   nonzero. The real defects were `$2: unbound variable` and `--name --project foo` swallowing
+   `--project` as the name. Fixed on **error-quality** grounds, not safety. **I relayed the weaker,
+   correct claim to ptone rather than the stronger one I had written.**
+2. **My steer on findings 1/2 was right but insufficient.** I told the developer to test them against
+   "IAP is the sole perimeter". That fact alone does not say whether IAP accepts access tokens —
+   matrix rows 1 and 3 settle that. `invokerIamDisabled` matters as the *reason the 200s cannot be
+   attributed elsewhere*. The developer used both and was correct to.
+3. I framed findings 1/2 as "clarifications". **They were assertions of a fact the matrix disproves.**
+   The framing understated them and could have biased the developer toward accepting.
+
+**Lesson, and it is the same one as the two brief-traps this morning:** the brief's job is to arm the
+developer against the specific way the obvious answer is wrong. Here the obvious answer was "a
+reviewer flagged a security doc, tighten it" — and tightening would have made it false.
+
+### §22.3 — Three further defects dispatched (13:25)
+
+The developer surfaced three it was scoped out of fixing. Two mislead beta testers directly, so they
+go in before publish, not into a follow-up:
+
+1. **`scripts/single-node/README.md:15` says `teardown.sh` removes the IAP policy binding. It does
+   not** — it prints a reminder and leaves bindings alone, and the script's own header says so.
+   Security-relevant in the dangerous direction: **an operator leaves a live binding believing it is
+   gone.** Brief tells the developer to verify against the script and contradict me if I am wrong.
+2. **Build-from-source workaround (`cloud-run.md:53-59`) has no marker and no tracking ref** — it
+   goes stale on the next release. My own log flagged this at 06:45 and I had not actioned it.
+   Instructed: add a marker, do **not** remove the workaround (correct today), and **never invent an
+   issue number** — say so if none can be found.
+3. `deploy.sh` usage block does not document `$SCION_BIN`, now load-bearing. Trivial, cheap.
+
+Brief explicitly fences off the IAP/OIDC passages so the second developer cannot undo the declines.
+
+**For ptone, needs him:** the `google-cla` check is failing on #1315 (first-contribution CLA). No
+agent can act on it.
