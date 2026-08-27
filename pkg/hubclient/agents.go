@@ -73,6 +73,11 @@ type AgentService interface {
 	// If wake is true, a suspended agent will be resumed before delivering the message.
 	SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt bool, notify bool, wake bool) (*MessageResponse, error)
 
+	// SendStructuredMessageWithConv sends a structured message with conversation
+	// resolution fields.  The hub resolves (or creates) a conversation keyed on
+	// (surface, externalRef) before dispatching the message (Phase 11).
+	SendStructuredMessageWithConv(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool, surface, externalRef, parentRef string) (*MessageResponse, error)
+
 	// BroadcastMessage broadcasts a structured message to all running agents in the project.
 	// Uses the Hub's broadcast endpoint which routes through the message broker (if available)
 	// or performs direct fan-out as a fallback.
@@ -528,6 +533,33 @@ func (s *agentService) SendStructuredMessage(ctx context.Context, agentID string
 		Interrupt:         interrupt,
 		Notify:            notify,
 		Wake:              wake,
+	}
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/message", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[MessageResponse](resp)
+}
+
+// SendStructuredMessageWithConv sends a structured message with conversation
+// resolution fields for broker edge resolution (Phase 11).
+func (s *agentService) SendStructuredMessageWithConv(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool, surface, externalRef, parentRef string) (*MessageResponse, error) {
+	body := struct {
+		StructuredMessage *messages.StructuredMessage `json:"structured_message"`
+		Interrupt         bool                        `json:"interrupt,omitempty"`
+		Notify            bool                        `json:"notify,omitempty"`
+		Wake              bool                        `json:"wake,omitempty"`
+		Surface           string                      `json:"surface,omitempty"`
+		ExternalRef       string                      `json:"external_ref,omitempty"`
+		ParentRef         string                      `json:"parent_ref,omitempty"`
+	}{
+		StructuredMessage: msg,
+		Interrupt:         interrupt,
+		Notify:            notify,
+		Wake:              wake,
+		Surface:           surface,
+		ExternalRef:       externalRef,
+		ParentRef:         parentRef,
 	}
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/message", body, nil)
 	if err != nil {

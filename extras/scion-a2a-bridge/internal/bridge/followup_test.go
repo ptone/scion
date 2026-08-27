@@ -129,6 +129,9 @@ func (m *mockAgentService) GetCloudLogs(ctx context.Context, agentID string, opt
 func (m *mockAgentService) StreamCloudLogs(ctx context.Context, agentID string, opts *hubclient.GetCloudLogsOptions, handler func(hubclient.CloudLogEntry)) error {
 	return fmt.Errorf("not implemented")
 }
+func (m *mockAgentService) SendStructuredMessageWithConv(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool, surface, externalRef, parentRef string) (*hubclient.MessageResponse, error) {
+	return m.SendStructuredMessage(ctx, agentID, msg, interrupt, notify, wake)
+}
 
 // mockHubClient implements hubclient.Client for testing, delegating to a mockAgentService.
 type mockHubClient struct {

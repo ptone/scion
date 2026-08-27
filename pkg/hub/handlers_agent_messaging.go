@@ -510,6 +510,13 @@ type MessageRequest struct {
 	// Mentions lists agent slugs to receive mention notifications (max 10).
 	// The primary recipient is automatically excluded from mention fan-out.
 	Mentions []string `json:"mentions,omitempty"`
+
+	// Conversation resolution fields (Phase 11).
+	// When Surface and ExternalRef are set, the hub resolves (or creates) a
+	// conversation before dispatching the message.
+	Surface     string `json:"surface,omitempty"`
+	ExternalRef string `json:"external_ref,omitempty"`
+	ParentRef   string `json:"parent_ref,omitempty"`
 }
 
 func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id string) {
@@ -638,6 +645,36 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// Phase 11: Conversation resolution for broker plugins using the SDK path
+	// (e.g. Google Chat).  Same logic as handleBrokerInbound.
+	if req.ExternalRef != "" && req.Surface == "" {
+		ValidationError(w, "external_ref requires surface to be set", nil)
+		return
+	}
+	if req.Surface != "" && req.ExternalRef != "" {
+		conv := &store.Conversation{
+			ProjectID:   &agent.ProjectID,
+			Kind:        "group",
+			Surface:     req.Surface,
+			ExternalRef: req.ExternalRef,
+			ParentRef:   req.ParentRef,
+			DriftState:  "active",
+		}
+		if agent.ID != "" {
+			conv.DefaultAgentID = &agent.ID
+		}
+		resolved, convErr := s.store.UpsertConversationByExternalRef(ctx, conv)
+		if convErr != nil {
+			s.messageLog.Error("Failed to resolve conversation for agent message",
+				"surface", req.Surface, "external_ref", req.ExternalRef, "error", convErr)
+		} else {
+			if structuredMsg.Metadata == nil {
+				structuredMsg.Metadata = make(map[string]string)
+			}
+			structuredMsg.Metadata["conversation_id"] = resolved.ID
+		}
 	}
 
 	// Wake handling: if requested, resume a suspended agent before message delivery.

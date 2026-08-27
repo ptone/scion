@@ -35,6 +35,15 @@ import (
 type inboundMessageRequest struct {
 	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
+
+	// Conversation resolution fields (Phase 11).
+	// When Surface and ExternalRef are set, the hub resolves (or creates) a
+	// conversation before dispatching the message.  This moves conversation
+	// attribution to the broker edge so every inbound message carries a
+	// conversation_id.
+	Surface     string `json:"surface,omitempty"`
+	ExternalRef string `json:"external_ref,omitempty"`
+	ParentRef   string `json:"parent_ref,omitempty"`
 }
 
 // handleBrokerInbound handles POST /api/v1/broker/inbound.
@@ -184,6 +193,47 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	if err := messaging.ValidateLegacyMessage(req.Message); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
 		return
+	}
+
+	// Phase 11: Broker edge conversation resolution.
+	// If the plugin provided surface + external_ref, resolve or create a
+	// conversation before dispatch.  ExternalRef without Surface is rejected
+	// (AC-8 regression guard: a bare thread/ref with no surface is malformed).
+	if req.ExternalRef != "" && req.Surface == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"external_ref requires surface to be set", nil)
+		return
+	}
+	if req.Surface != "" && req.ExternalRef != "" {
+		conv := &store.Conversation{
+			ProjectID:   &agent.ProjectID,
+			Kind:        "group",
+			Surface:     req.Surface,
+			ExternalRef: req.ExternalRef,
+			ParentRef:   req.ParentRef,
+			DriftState:  "active",
+		}
+		if agent.ID != "" {
+			conv.DefaultAgentID = &agent.ID
+		}
+		resolved, convErr := s.store.UpsertConversationByExternalRef(r.Context(), conv)
+		if convErr != nil {
+			log.Error("Failed to resolve conversation for broker inbound",
+				"surface", req.Surface, "external_ref", req.ExternalRef, "error", convErr)
+			// Non-fatal: dispatch proceeds without a conversation_id.
+		} else {
+			log.Info("Resolved conversation for broker inbound",
+				"conversation_id", resolved.ID,
+				"surface", req.Surface,
+				"external_ref", req.ExternalRef,
+			)
+			// Attach the resolved conversation_id to the message metadata
+			// so downstream consumers can reference it.
+			if req.Message.Metadata == nil {
+				req.Message.Metadata = make(map[string]string)
+			}
+			req.Message.Metadata["conversation_id"] = resolved.ID
+		}
 	}
 
 	// Dispatch directly to the agent, bypassing the broker to avoid circular delivery
