@@ -771,7 +771,10 @@ func TestBackfill_ConversationExternalRef(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, conv.ExternalRef, "conversation should have an external ref for upsert idempotency")
-	assert.Contains(t, conv.ExternalRef, "direct:", "direct conversation key should start with direct:")
+	// DM external_ref must match the dual-write format: dm:{sorted(idA,idB)}.
+	wantRef := DirectMessageExternalRef(userID, agentID)
+	assert.Equal(t, wantRef, conv.ExternalRef,
+		"DM external_ref must match DirectMessageExternalRef (dual-write format)")
 }
 
 func TestBackfill_MixedDirectAndThread(t *testing.T) {
@@ -807,10 +810,10 @@ func TestBackfill_MixedDirectAndThread(t *testing.T) {
 
 func TestParsePrincipal(t *testing.T) {
 	tests := []struct {
-		label      string
-		id         string
-		wantKind   string
-		wantID     string
+		label    string
+		id       string
+		wantKind string
+		wantID   string
 	}{
 		{"user:alice", "abc-123", "user", "abc-123"},
 		{"agent:bot", "def-456", "agent", "def-456"},
@@ -873,6 +876,19 @@ func TestBackfill_CheckpointNotFound(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, store.ErrNotFound))
+}
+
+func TestBackfill_EmptyProjectID(t *testing.T) {
+	ctx := context.Background()
+
+	msgStore := &mockMessageStore{}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	_, err := svc.Run(ctx, BackfillConfig{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ProjectID is required")
 }
 
 func TestBackfill_LastCheckpointTracked(t *testing.T) {

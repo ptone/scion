@@ -55,15 +55,15 @@ type BackfillResult struct {
 
 // conversationGroup collects messages that belong to the same conversation.
 type conversationGroup struct {
-	key           string // canonical key used for dedup
-	kind          string // "direct" or "group"
-	projectID     string
-	participants  []participant    // deduplicated participants
-	agentRef      string           // agent reference for DefaultAgent resolution
-	messageIDs    []string         // message IDs to stamp
-	driftState    string           // computed drift state
-	hazardA       bool             // Hazard (a): non-UUID sender/recipient
-	hazardB       bool             // Hazard (b): slug-based agent reference
+	key          string // canonical key used for dedup
+	kind         string // "direct" or "group"
+	projectID    string
+	participants []participant // deduplicated participants
+	agentRef     string        // agent reference for DefaultAgent resolution
+	messageIDs   []string      // message IDs to stamp
+	driftState   string        // computed drift state
+	hazardA      bool          // Hazard (a): non-UUID sender/recipient
+	hazardB      bool          // Hazard (b): slug-based agent reference
 }
 
 // participant represents a conversation participant extracted from a message.
@@ -91,6 +91,10 @@ func NewBackfillService(convStore store.ConversationStore, msgStore store.Messag
 // Run executes the backfill. It is safe to call multiple times (idempotent)
 // and supports resumption via BackfillConfig.Checkpoint.
 func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*BackfillResult, error) {
+	if cfg.ProjectID == "" {
+		return nil, errors.New("BackfillConfig.ProjectID is required")
+	}
+
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = defaultBatchSize
 	}
@@ -191,13 +195,10 @@ func (s *BackfillService) groupForMessage(msg *store.Message, projectID string, 
 		key = fmt.Sprintf("thread:%s:%s", projectID, msg.ThreadID)
 		kind = "group"
 	} else {
-		// Direct conversation — canonical key uses sorted pair.
-		a := senderKind + ":" + senderID
-		b := recipientKind + ":" + recipientID
-		if a > b {
-			a, b = b, a
-		}
-		key = fmt.Sprintf("direct:%s:%s:%s", projectID, a, b)
+		// Direct conversation — use the canonical project-free DM external ref.
+		// DMs are global per design 2.4.1; the external_ref must match what
+		// dual-write produces so both paths resolve to the same conversation row.
+		key = DirectMessageExternalRef(senderID, recipientID)
 		kind = "direct"
 	}
 
@@ -387,4 +388,3 @@ func isValidUUID(s string) bool {
 	_, err := uuid.Parse(s)
 	return err == nil
 }
-
