@@ -1237,3 +1237,42 @@ which should ride the same upstream doc PR as D4-D7.
 **Decision wanted:** should `#1297` be reframed from "register of collisions" to
 "repair the already-written text, and qualify everything from here"? I have not
 reframed it — that is a call about how the project spends effort, not a fact.
+
+## §20 — The collision reached a user-facing doc. New evidence for §19.
+
+Raised 08:14. **No decision needed from you separately — this is evidence for §19, not a new question.**
+
+`sn-docs-dev` published the single-node tutorial with two links:
+
+```
+[#1274](https://github.com/GoogleCloudPlatform/scion/issues/1274)
+[#1291](https://github.com/GoogleCloudPlatform/scion/issues/1291)
+```
+
+Both numbers are **fork** issue numbers. Both URLs point at **upstream**. A reader who clicks lands on:
+
+| written | intended (fork) | what the reader gets (upstream) |
+|---|---|---|
+| `#1274` | depth-1 shallow clone blocks second remote | PR: accept text files with unusual control chars |
+| `#1291` | image-pull failure undiagnosable | PR: fix(grok-build) instructions path |
+
+Checked against both repos at 08:13.
+
+**Why this matters for §19.** Until now every collision we found was in internal text — design docs,
+issue bodies, my own register. This is the first one to reach **user-facing published
+documentation**, where the reader is an operator with no context and no way to tell they have been
+sent somewhere unrelated.
+
+**And the brief was correct.** `sn-docs-dev`'s brief §4 qualified both as `ptone/scion#1274` and
+`ptone/scion#1291`. The agent had the right string in front of it and dropped the prefix when it
+converted the reference into a link. **A correct reference is not self-preserving; it degrades at
+the point where prose becomes a URL.**
+
+That is the argument for §19's reframing, stated better than I stated it there. A register of known
+collisions would not have prevented this — `#1274` was already row two of the table. What would have
+prevented it is the rule applied at the moment of writing: **never write a bare cross-repo number,
+and never point a fork number at an upstream URL.** I taught that rule to the issue-filing agent all
+morning and never propagated it to the docs agent. **My omission, and the register would not have
+caught it.**
+
+Fix dispatched to `sn-docs-dev`. Nothing blocked.
