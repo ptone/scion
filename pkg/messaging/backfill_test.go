@@ -16,7 +16,6 @@ package messaging
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -664,56 +663,56 @@ func TestBackfill_Resumable(t *testing.T) {
 
 	now := time.Now()
 
-	// Three messages at distinct times.
-	msg1 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-3*time.Minute))
-	msg2 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-2*time.Minute))
-	msg3 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-1*time.Minute))
+	// Four messages at distinct times.
+	msg1 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-4*time.Minute))
+	msg2 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-3*time.Minute))
+	msg3 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-2*time.Minute))
+	msg4 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-1*time.Minute))
 
-	msgStore := &mockMessageStore{messages: []store.Message{msg1, msg2, msg3}}
+	msgStore := &mockMessageStore{messages: []store.Message{msg1, msg2, msg3, msg4}}
 	convStore := &mockConversationStore{}
 	agents := &mockAgentLookup{}
 
 	svc := NewBackfillService(convStore, msgStore, agents)
 
-	// First run with batch size 1 — process all but use msg1 as checkpoint for next run.
-	// We'll manually process only msg1, then resume from msg1.
-
-	// Run full backfill first.
+	// Full run with batch size 2 → forces 2 pages in DESC order:
+	//   Page 1: [msg4, msg3]  → cursor = msg3.ID, LastCheckpoint = cursor
+	//   Page 2: [msg2, msg1]  → NextCursor="" → break
 	result1, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID, BatchSize: 2})
 	require.NoError(t, err)
-	assert.Equal(t, 3, result1.TotalProcessed)
-	assert.Equal(t, 3, result1.Attributed)
+	assert.Equal(t, 4, result1.TotalProcessed)
+	assert.Equal(t, 4, result1.Attributed)
+	assert.NotEmpty(t, result1.LastCheckpoint, "multi-page run should record a checkpoint")
 
-	// Reset messages to unprocessed state for testing resumption.
+	// Reset all messages to simulate an interrupted run that only completed page 1.
 	for i := range msgStore.messages {
 		msgStore.messages[i].ConversationID = ""
 	}
+	convStore.mu.Lock()
+	convStore.conversations = nil
+	convStore.participants = nil
+	convStore.mu.Unlock()
 
-	// Process with a small batch, all messages.
-	result2, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID, BatchSize: 10})
-	require.NoError(t, err)
-	assert.Equal(t, 3, result2.TotalProcessed)
-
-	// Reset and resume from msg2 — only msg3 should be processed (after msg2's time).
-	for i := range msgStore.messages {
-		msgStore.messages[i].ConversationID = ""
-	}
-
-	result3, err := svc.Run(ctx, BackfillConfig{
+	// Resume from checkpoint — should process only page 2 (the remaining older messages).
+	result2, err := svc.Run(ctx, BackfillConfig{
 		ProjectID:  projectID,
-		Checkpoint: msg2.ID,
+		Checkpoint: result1.LastCheckpoint,
+		BatchSize:  10,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 1, result3.TotalProcessed, "only messages after checkpoint should be processed")
-	assert.Equal(t, 1, result3.Attributed)
+	assert.Equal(t, 2, result2.TotalProcessed,
+		"resume should process only messages after the checkpoint cursor position")
+	assert.Equal(t, 2, result2.Attributed)
 
-	// Verify only msg3 was stamped.
-	stampedMsg1, _ := msgStore.GetMessage(ctx, msg1.ID)
-	stampedMsg2, _ := msgStore.GetMessage(ctx, msg2.ID)
-	stampedMsg3, _ := msgStore.GetMessage(ctx, msg3.ID)
-	assert.Empty(t, stampedMsg1.ConversationID, "msg1 before checkpoint — should not be stamped")
-	assert.Empty(t, stampedMsg2.ConversationID, "msg2 is checkpoint — should not be re-processed")
-	assert.NotEmpty(t, stampedMsg3.ConversationID, "msg3 after checkpoint — should be stamped")
+	// Verify only the older messages (msg1, msg2) were stamped.
+	stamped1, _ := msgStore.GetMessage(ctx, msg1.ID)
+	stamped2, _ := msgStore.GetMessage(ctx, msg2.ID)
+	stamped3, _ := msgStore.GetMessage(ctx, msg3.ID)
+	stamped4, _ := msgStore.GetMessage(ctx, msg4.ID)
+	assert.NotEmpty(t, stamped1.ConversationID, "msg1 after cursor — should be stamped")
+	assert.NotEmpty(t, stamped2.ConversationID, "msg2 after cursor — should be stamped")
+	assert.Empty(t, stamped3.ConversationID, "msg3 before cursor — should not be stamped")
+	assert.Empty(t, stamped4.ConversationID, "msg4 before cursor — should not be stamped")
 }
 
 func TestBackfill_DefaultBatchSize(t *testing.T) {
@@ -901,21 +900,29 @@ func TestBackfill_HazardB_InvalidAgentRef(t *testing.T) {
 	assert.Equal(t, 1, result.Inferred, "invalid agent ref should mark messages as inferred")
 }
 
-func TestBackfill_CheckpointNotFound(t *testing.T) {
+func TestBackfill_UnrecognizedCheckpointDoesNotCrash(t *testing.T) {
 	ctx := context.Background()
 	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
 
-	msgStore := &mockMessageStore{}
+	msg := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, time.Now())
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg}}
 	convStore := &mockConversationStore{}
 	agents := &mockAgentLookup{}
 
 	svc := NewBackfillService(convStore, msgStore, agents)
-	_, err := svc.Run(ctx, BackfillConfig{
+	// An unrecognized cursor is passed through to ListMessages. The mock treats
+	// an unknown cursor the same as no cursor (returns all messages). The real
+	// store may return an error for a malformed cursor, but the backfill service
+	// itself does not validate the cursor format — that is the store's concern.
+	result, err := svc.Run(ctx, BackfillConfig{
 		ProjectID:  projectID,
-		Checkpoint: uuid.NewString(), // non-existent message
+		Checkpoint: "bogus-cursor-value",
 	})
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, store.ErrNotFound))
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalProcessed)
 }
 
 func TestBackfill_EmptyProjectID(t *testing.T) {
@@ -946,12 +953,84 @@ func TestBackfill_LastCheckpointTracked(t *testing.T) {
 	agents := &mockAgentLookup{}
 
 	svc := NewBackfillService(convStore, msgStore, agents)
+	// Use BatchSize=1 to force multi-page pagination and checkpoint tracking.
+	// With default batch size both messages fit on a single page and
+	// LastCheckpoint would remain empty (single-page run).
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID, BatchSize: 1})
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, result.LastCheckpoint, "multi-page run should track a checkpoint")
+
+	// LastCheckpoint is an opaque page cursor, not a message ID.
+	// Verify it can be used for a resume run without error.
+	result2, err := svc.Run(ctx, BackfillConfig{
+		ProjectID:  projectID,
+		Checkpoint: result.LastCheckpoint,
+	})
+	require.NoError(t, err)
+	// The remaining message was already attributed, so resume should skip it.
+	assert.Equal(t, 1, result2.TotalProcessed)
+	assert.Equal(t, 1, result2.Skipped)
+}
+
+func TestBackfill_SinglePageNoCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	msg := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, time.Now())
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg}}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
 	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
 	require.NoError(t, err)
 
-	assert.NotEmpty(t, result.LastCheckpoint, "should track last checkpoint")
-	// The last checkpoint should be one of the message IDs.
-	assert.True(t, result.LastCheckpoint == msg1.ID || result.LastCheckpoint == msg2.ID)
+	assert.Empty(t, result.LastCheckpoint,
+		"single-page run should have empty checkpoint (all data processed)")
+}
+
+func TestBackfill_SameTimestampMessages(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	senderID := uuid.NewString()
+
+	// 6 messages at IDENTICAL timestamp, different recipients.
+	same := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var msgs []store.Message
+	for i := 0; i < 6; i++ {
+		msg := newTestMessage(projectID, "user:alice", senderID,
+			"agent:bot", uuid.NewString(), same)
+		msgs = append(msgs, msg)
+	}
+
+	msgStore := &mockMessageStore{messages: msgs}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+
+	// Run with BatchSize=2 to force 3 pages of same-timestamp messages.
+	result, err := svc.Run(ctx, BackfillConfig{
+		ProjectID: projectID,
+		BatchSize: 2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 6, result.TotalProcessed,
+		"all same-timestamp messages should be processed")
+
+	// Verify all 6 have conversation_id.
+	missing := 0
+	for _, m := range msgStore.messages {
+		if m.ConversationID == "" {
+			missing++
+		}
+	}
+	assert.Zero(t, missing,
+		"cursor-based pagination must not silently skip same-timestamp messages")
 }
 
 // ---------------------------------------------------------------------------

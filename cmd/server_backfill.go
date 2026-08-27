@@ -56,7 +56,7 @@ Examples:
   scion server backfill --project <project-id> --execute
 
   # Resume an interrupted run:
-  scion server backfill --execute --checkpoint <message-id>`,
+  scion server backfill --execute --checkpoint <cursor>`,
 	RunE: runServerBackfill,
 }
 
@@ -65,7 +65,7 @@ func init() {
 	serverBackfillCmd.Flags().BoolVar(&backfillExecute, "execute", false, "Apply changes (default: dry-run)")
 	serverBackfillCmd.Flags().StringVar(&backfillProject, "project", "", "Backfill a specific project ID (default: all)")
 	serverBackfillCmd.Flags().IntVar(&backfillBatchSize, "batch-size", 0, "Messages per batch (0 = default 100)")
-	serverBackfillCmd.Flags().StringVar(&backfillCheckpoint, "checkpoint", "", "Resume from this message ID")
+	serverBackfillCmd.Flags().StringVar(&backfillCheckpoint, "checkpoint", "", "Resume from this pagination cursor (from a previous run's LastCheckpoint)")
 	serverBackfillCmd.Flags().StringVar(&backfillDB, "db", "", "Database DSN (overrides config/env)")
 }
 

@@ -150,8 +150,8 @@ func TestBackfillExecuteAndIdempotent(t *testing.T) {
 	assert.Equal(t, 0, result2.ConversationsCreated, "idempotent re-run should create no conversations")
 }
 
-// TestBackfillResumeViaCheckpoint verifies AC-12-4: the checkpoint mechanism
-// allows resuming a backfill from where it left off.
+// TestBackfillResumeViaCheckpoint verifies AC-12-4: the cursor-based checkpoint
+// mechanism allows resuming a backfill from where pagination left off.
 func TestBackfillResumeViaCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -160,60 +160,84 @@ func TestBackfillResumeViaCheckpoint(t *testing.T) {
 	senderID := uuid.NewString()
 	recipientID := uuid.NewString()
 
-	// Seed an initial batch of messages (the "old" messages).
+	// Seed 6 messages with distinct timestamps.
 	baseTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 6; i++ {
 		seedDMMessage(t, ctx, s, projectID, senderID, recipientID, baseTime.Add(time.Duration(i)*time.Minute))
 	}
 
-	// First run: process the initial batch.
+	// Run with batch size 2 → 3 pages (DESC order: newest first).
+	// All messages get processed; LastCheckpoint records the cursor of the
+	// second-to-last completed page.
 	result1, err := runBackfillWithStore(ctx, s, messaging.BackfillConfig{
 		DryRun:    false,
 		ProjectID: projectID,
+		BatchSize: 2,
 	})
 	require.NoError(t, err)
-	assert.NotEmpty(t, result1.LastCheckpoint, "first run should record a checkpoint")
-	assert.Equal(t, 3, result1.TotalProcessed, "first run should process all 3 messages")
-	assert.True(t, result1.Attributed+result1.Inferred > 0, "first run should attribute messages")
+	assert.Equal(t, 6, result1.TotalProcessed)
+	assert.NotEmpty(t, result1.LastCheckpoint, "multi-page run should record a checkpoint")
 
-	// Seed new messages well AFTER the first batch's timestamps.
-	for i := 0; i < 2; i++ {
-		seedDMMessage(t, ctx, s, projectID, senderID, recipientID, baseTime.Add(time.Duration(10+i)*time.Minute))
-	}
-
-	// Resume from the checkpoint. The checkpoint's CreatedAt filters out
-	// messages at or before that timestamp. Messages after the checkpoint
-	// that already have conversation_id are counted as "processed" but
-	// immediately skipped by the idempotency guard.
-	result2, err := runBackfillWithStore(ctx, s, messaging.BackfillConfig{
-		DryRun:     false,
-		Checkpoint: result1.LastCheckpoint,
-		ProjectID:  projectID,
-	})
-	require.NoError(t, err)
-
-	// The resume must process exactly the messages after the checkpoint's
-	// CreatedAt (using strict >). With the test data: 2 already-stamped
-	// messages from the first batch that fall after the checkpoint timestamp,
-	// plus 2 new un-stamped messages = 4 total.
-	//
-	// Mutation guard: if the store filter changes from > to >= on the
-	// checkpoint timestamp, the checkpoint message itself would be
-	// re-scanned, making TotalProcessed=5 and Skipped=3.
-	assert.Equal(t, 4, result2.TotalProcessed,
-		"resume should process exactly 4 messages (2 old-but-after-checkpoint + 2 new)")
-	assert.Equal(t, 2, result2.Attributed+result2.Inferred,
-		"resume should attribute exactly the 2 new messages")
-	assert.Equal(t, 2, result2.Skipped,
-		"resume should skip exactly the 2 already-stamped messages after checkpoint")
-
-	// Verify the new messages now have conversation_id.
+	// All messages should be attributed after the full run.
 	msgs, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: projectID}, store.ListOptions{Limit: 100})
 	require.NoError(t, err)
 	for _, msg := range msgs.Items {
 		assert.NotEmpty(t, msg.ConversationID,
-			"all messages should have conversation_id after backfill+resume")
+			"all messages should have conversation_id after full backfill")
 	}
+
+	// Resume from checkpoint: the remaining messages (those after the cursor
+	// in DESC pagination order) were already attributed, so they are skipped.
+	result2, err := runBackfillWithStore(ctx, s, messaging.BackfillConfig{
+		DryRun:     false,
+		Checkpoint: result1.LastCheckpoint,
+		ProjectID:  projectID,
+		BatchSize:  2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, result2.Skipped, result2.TotalProcessed,
+		"resume after completed run should skip all remaining messages (idempotent)")
+}
+
+// TestBackfillResumeViaCheckpoint_SameTimestamp is the KEY regression test
+// for the cursor-based checkpoint fix. It verifies that messages sharing an
+// identical created_at timestamp are NOT silently skipped during multi-page
+// pagination — the bug that the old timestamp-only checkpoint caused.
+func TestBackfillResumeViaCheckpoint_SameTimestamp(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	projectID := seedBackfillProject(t, ctx, s)
+	senderID := uuid.NewString()
+
+	// 6 messages at IDENTICAL timestamp, different recipients.
+	same := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 6; i++ {
+		seedDMMessage(t, ctx, s, projectID, senderID, uuid.NewString(), same)
+	}
+
+	// Run with BatchSize=2 to force 3 pages of same-timestamp messages.
+	result, err := runBackfillWithStore(ctx, s, messaging.BackfillConfig{
+		DryRun:    false,
+		ProjectID: projectID,
+		BatchSize: 2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 6, result.TotalProcessed,
+		"all same-timestamp messages should be processed")
+
+	// Verify all 6 have conversation_id.
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: projectID},
+		store.ListOptions{Limit: 100})
+	require.NoError(t, err)
+	missing := 0
+	for _, m := range msgs.Items {
+		if m.ConversationID == "" {
+			missing++
+		}
+	}
+	assert.Zero(t, missing,
+		"cursor-based checkpoint must not silently skip same-timestamp siblings")
 }
 
 // TestBackfillDefaultIsDryRun_FlagWiring exercises the flag-to-config wiring
