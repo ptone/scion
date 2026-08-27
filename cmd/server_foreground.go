@@ -1308,7 +1308,9 @@ func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryL
 // It is called once at startup after migrations succeed. Errors are
 // non-fatal: a failed count is logged but does not prevent boot.
 func maybeWarnUnbackfilledMessages(ctx context.Context, s store.Store) {
-	count, err := s.CountUnbackfilledMessages(ctx, "")
+	tCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	count, err := s.CountUnbackfilledMessages(tCtx, "")
 	if err != nil {
 		slog.Warn("Failed to check for unbackfilled messages", "error", err)
 		return

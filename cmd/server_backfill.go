@@ -84,12 +84,19 @@ func runServerBackfill(cmd *cobra.Command, _ []string) error {
 	if backfillProject != "" {
 		projectIDs = []string{backfillProject}
 	} else {
-		projects, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
-		if err != nil {
-			return fmt.Errorf("listing projects: %w", err)
-		}
-		for _, p := range projects.Items {
-			projectIDs = append(projectIDs, p.ID)
+		cursor := ""
+		for {
+			projects, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500, Cursor: cursor})
+			if err != nil {
+				return fmt.Errorf("listing projects: %w", err)
+			}
+			for _, p := range projects.Items {
+				projectIDs = append(projectIDs, p.ID)
+			}
+			if projects.NextCursor == "" {
+				break
+			}
+			cursor = projects.NextCursor
 		}
 		if len(projectIDs) == 0 {
 			_, _ = fmt.Fprintln(out, "No projects found.")
@@ -97,15 +104,28 @@ func runServerBackfill(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Build the backfill config once; per-project runs share it.
+	cfg := messaging.BackfillConfig{
+		DryRun:     !backfillExecute,
+		BatchSize:  backfillBatchSize,
+		Checkpoint: backfillCheckpoint,
+	}
+
 	// Aggregate results across all projects.
 	total := &messaging.BackfillResult{}
 
 	for _, pid := range projectIDs {
-		result, err := runBackfillForProject(ctx, s, pid)
+		cfg.ProjectID = pid
+		result, err := runBackfillWithStore(ctx, s, cfg)
 		if err != nil {
 			return fmt.Errorf("backfill project %s: %w", pid, err)
 		}
 		mergeBackfillResult(total, result)
+	}
+
+	// Checkpoint is only meaningful for single-project runs.
+	if len(projectIDs) > 1 {
+		total.LastCheckpoint = ""
 	}
 
 	// Print report.
@@ -115,17 +135,6 @@ func runServerBackfill(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("backfill completed with %d error(s)", len(total.Errors))
 	}
 	return nil
-}
-
-// runBackfillForProject runs the backfill for a single project.
-func runBackfillForProject(ctx context.Context, s store.Store, projectID string) (*messaging.BackfillResult, error) {
-	svc := messaging.NewBackfillService(s, s, s)
-	return svc.Run(ctx, messaging.BackfillConfig{
-		DryRun:     !backfillExecute,
-		BatchSize:  backfillBatchSize,
-		Checkpoint: backfillCheckpoint,
-		ProjectID:  projectID,
-	})
 }
 
 // runBackfillWithStore is the testable core: given a store and config, run
@@ -184,7 +193,7 @@ func openBackfillStore(ctx context.Context) (*entadapter.CompositeStore, error) 
 	case "postgres":
 		client, err := entc.OpenPostgres(cfg.Database.URL, entc.PoolConfig{MaxOpenConns: 10, MaxIdleConns: 5})
 		if err != nil {
-			return nil, fmt.Errorf("opening postgres: %w", err)
+			return nil, fmt.Errorf("opening postgres: connection failed (verify DSN and network connectivity)")
 		}
 		if err := entc.AutoMigrate(ctx, client); err != nil {
 			_ = client.Close()
@@ -240,6 +249,9 @@ func printBackfillReport(out io.Writer, r *messaging.BackfillResult, projectIDs 
 	_, _ = fmt.Fprintf(out, "Errors:                %d\n", len(r.Errors))
 	if r.LastCheckpoint != "" {
 		_, _ = fmt.Fprintf(out, "Last checkpoint:       %s\n", r.LastCheckpoint)
+	}
+	if len(projectIDs) > 1 {
+		_, _ = fmt.Fprintln(out, "  (checkpoint valid for single-project runs only)")
 	}
 
 	if len(r.Errors) > 0 {
