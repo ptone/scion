@@ -174,7 +174,7 @@ A runtime flag (`messaging.conversation_read_switch` in Hub operational settings
 A recipient identifier that addresses a message via the conversation model rather than the legacy agent-name or user-email forms. Four grammar forms exist: `@<agent-name>` (fully available), `@<email>` (agent-container-only), `conv:<uuid>` (not yet available in the CLI), and `#<thread-name>` (not yet available in the CLI). Only `@<agent-name>` is fully supported today.
 
 ### Divergence
-The metric tracking agreement between the legacy message routing model (thread/sender-recipient pairs) and the new conversation-based routing. Divergence counters (matches, mismatches, fallbacks) are exposed via `GET /api/v1/admin/messaging/divergence`. A clean divergence board (zero mismatches) is the prerequisite for enabling the **Conversation Read Switch**.
+The metric tracking agreement between the legacy message routing model (thread/sender-recipient pairs) and the new conversation-based routing. Divergence counters (matches, mismatches, fallbacks) are exposed via the admin-only endpoint `GET /api/v1/admin/messaging/divergence`. A clean divergence board (zero mismatches) is the prerequisite for enabling the **Conversation Read Switch**.
 
 ### Dual-Write
 The transitional pattern where every message send path resolves-or-creates a Conversation record and stamps `conversation_id` on the message, while the legacy routing fields remain populated. This allows both models to run simultaneously and divergence to be measured.

@@ -125,7 +125,7 @@ Sends a message to a recipient — typically a running agent's harness — by en
 - **Flags:**
     - `-i, --interrupt`: Interrupt the harness before sending the message.
     - `-w, --wake`: Resume a suspended agent before delivering the message.
-    - `-a, --attach <file>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`. Requires Hub mode.
+    - `--attach <file>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`. Requires Hub mode.
     - `--visibility <level>`: Set message visibility (`normal`, `verbose`, `full`).
 - **Deprecated Flags** (still work, emit stderr warnings):
     - `-b, --broadcast` → use `scion broadcast`
@@ -137,7 +137,7 @@ Sends a message to a recipient — typically a running agent's harness — by en
     - `--notify` → use `scion notifications subscribe`
     - `--channel <name>` → use `@<agent-name>` to message an agent directly
     - `--thread-id <id>` → use `@<agent-name>` to message an agent directly
-    - `--cc <agents>` → use `--to` instead
+    - `--cc <agents>` → deprecated; replacement pending
 
 :::caution[Conversation Reference Availability]
 Only `@<agent-name>` is fully supported as a conversation reference today.

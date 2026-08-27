@@ -92,7 +92,8 @@ The following flags still work but emit deprecation warnings. Prefer the replace
 | `--notify` | Use `scion notifications subscribe` instead. |
 | `--in <delay>`, `--at <time>` | Use `scion schedule message` instead (the flags still work). |
 | `--plain` | No replacement needed — default behavior. |
-| `--channel`, `--thread-id`, `--cc` | Use `@<agent-name>` conversation references instead. |
+| `--channel`, `--thread-id` | Use `@<agent-name>` conversation references instead. |
+| `--cc` | Deprecated; replacement pending. |
 
 ## New Subcommands
 

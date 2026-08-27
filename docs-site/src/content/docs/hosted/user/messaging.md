@@ -349,7 +349,7 @@ Several `scion message` flags have been deprecated in favor of dedicated subcomm
 | `--in`, `--at` | `scion schedule message` | Use the scheduling subcommand for delayed delivery. |
 | `--notify` | `scion notifications subscribe` | Use the notifications subcommand. |
 | `--channel`, `--thread-id` | `@<agent-name>` | Message the agent directly using a conversation reference. |
-| `--cc` | `--to` | Use the `--to` flag for additional recipients. |
+| `--cc` | *(pending)* | Deprecated; replacement pending. |
 | `--plain` | *(none)* | Will be removed; no replacement planned. |
 
 :::note
