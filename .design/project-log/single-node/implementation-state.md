@@ -8457,3 +8457,68 @@ root cause.
 
 No agents running. Both branches safe on the fork and verified. Task #62 remains open until ptone
 opens the PRs and commit C lands. Blocked on ptone for D7 (item 3 of 10). Seven items after it.
+
+## 12:58 — I inflated a queue, and the recount found the biggest gap on the project
+
+ptone at 12:54: *"I don't have any concerns about the terminology of the deploy - this seems like a
+trivial question - please surface the remainder of the questions in approximate order of impact,
+groups then into 3 questions or so at a time. Keep them crisp"*.
+
+### D7 — cleared, but he had it as something smaller than it is
+
+He read D7 as terminology. **It is not.** §5 names one way to lose state (redeploy) and omits a
+second (overload destroys the Instance). Deleting the word "disposable" would achieve nothing; a
+reader would still finish §5 believing *"if I do not redeploy, my work is safe."*
+
+He is the owner and "trivial" is his call to make, so I did not relitigate. But I sent one sentence
+naming what will actually land, because **approving a word change and receiving a fact change is the
+same mismatch I refused to create an hour ago** when he said "proceed" to D1. Consent has to be to
+the thing that ships. One line, then dispatched `sn-s5-dev`.
+
+The brief leads with that trap, because the obvious execution of "§5 needs fixing" is to soften the
+adjective.
+
+### The recount — 10 items was wrong, and wrong in my favour
+
+He asked for the remainder in impact order. Counting honestly: **3, not 10.** Four resolved (D1, D5,
+D7, the sizing hold) and three — D4, D6, D8 — were never questions at all. They are updates already
+committed to PR A.
+
+I had been carrying updates in a queue of decisions and reporting the total as decisions. That
+inflates my own apparent throughput and it wastes the attention of the one person on this project
+whose attention is scarce. I told him plainly that I over-counted rather than quietly sending three
+and letting the earlier "10" stand.
+
+### And the recount found the thing that was not in the queue at all
+
+Re-reading D3 to rank it, I found it stale: it lists the tutorial as the top remaining gap, and the
+tutorial was **finished this morning**. So I checked where it went.
+
+**`docs-site/src/content/docs/hosted/single-node/cloud-run.md` is not on upstream main.** Seven
+files, 620 lines — a 437-line walkthrough that its author followed on a clean deploy and repaired
+until a literal run worked, plus deploy and teardown scripts — have been sitting on a fork branch
+since this morning. Nobody could open the PR but ptone, and **I never asked him to.**
+
+The tier is merged, measured, sized, and documented. The documentation is invisible to every operator
+outside this project. That is the largest remaining gap between "shipped" and "usable", it was not on
+my list of ten, and it went unnoticed because I was tracking *questions I had asked* rather than
+*work that had not landed.*
+
+I checked before raising it rather than raising it and checking after: merge-base is `3aeb7729`,
+current main, **zero conflicts.** It is one click.
+
+### The three sent
+
+1. Open the tutorial PR. Highest impact, and flagged as my miss.
+2. D2 — the `deploy-instance` stopgap, now with the fact that saying no leaves the tier with zero
+   stopgaps.
+3. D3 — what next, honestly reduced to "the defect register, none of it blocking, or is this tier
+   done for now?"
+
+Two lower-impact items (the collision register's structural nature, and its reaching a user-facing
+doc) held back for the next group, as he asked.
+
+### State
+
+`sn-s5-dev` running on commit C. Both PR branches ready. Docs branch clean against main. Blocked on
+ptone for the three questions.
