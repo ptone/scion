@@ -86,14 +86,29 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 ## 3. Current position
 
-**Active section:** S4 — Surfaces (**round 3 at `765a4ac4`: behaviour accepted, one tests-only
-blocker H-1; see §5f**)
-**Active manager:** `ca-msg-em4`
-**Blocked on:** em4's round-3 fix. DEF-1, DEF-3 and D3 are all due from this section;
-DEF-3 and D3 are now satisfied (see §5f), DEF-1 is implemented but bypassable (G-1).
-**Integration branch head:** `b92926dd` (DEF-4, test-only).
-**Last verified landing on integration branch:** `f206a0d9` — **S3 accepted 2026-08-27 06:40Z
-on round 2.** S2 accepted 03:35Z at `cd4ee7ed` (round 3); S1 verified 01:40Z at `16294728`.
+**Active section:** S5 — Docs (**not yet started**; S4 accepted and merged 2026-08-27 10:35Z)
+**Active manager:** none — `ca-msg-em4` retiring; `ca-msg-em5` to be spawned
+**Blocked on:** spawning `ca-msg-em5`. S5 must document the build **as it ships** (phase row
+12): the read switch is default-OFF, `conv:<id>` and `#<thread>` are **not available** in the
+CLI (DEF-5), and `@<email>` works only from inside an agent container.
+**Integration branch head:** `e8a0755d` (**S4**, fast-forward from `b92926dd`).
+**Last verified landing on integration branch:** `e8a0755d` — **S4 accepted 2026-08-27 10:35Z
+on round 4** (rounds 1–3 rejected: F-1/F-2, G-1/G-2, H-1). S3 accepted 06:40Z at `f206a0d9`
+(round 2); S2 accepted 03:35Z at `cd4ee7ed` (round 3); S1 verified 01:40Z at `16294728`.
+
+DEF-1, DEF-3 and D3 were all due from S4. **DEF-3 and D3 are discharged.** DEF-1 is
+implemented, reachable via `POST /api/v1/conversations/resolve`, and no longer bypassable —
+but it is exercised in production only through that endpoint and the CLI's `@<agent>` path.
+**It is not yet load-bearing for the read switch**, which resolves from server-side inputs.
+
+S4 round-4 verification (mine, independent of em4's report):
+
+| Check | Method | Result |
+|---|---|---|
+| **H-1 fixed** | **Mutation:** deleted the gate from `cmd/message.go` in a scratch clone | `TestConvRef_ThreadRefGated` and `TestConvRef_ConvIDGated` both **FAILED**; restored, both pass. Under the same mutation at `765a4ac4` both **passed**. The tests now observe the gate. |
+| Commit is tests-only, as scoped | `git diff --name-only 765a4ac4 HEAD` filtered for non-test, non-`.design` | **0 production files.** The two green full `pkg/hub` runs I did at `765a4ac4` therefore still stand and did not need repeating. |
+| `cmd`, `pkg/messaging` | full package runs | green |
+| Merge is a fast-forward | `git merge-base --is-ancestor origin/scion/messaging-v2 HEAD` | yes — no rebase, no merge commit |
 
 S3 round-2 verification (mine, independent of em3's report):
 
@@ -154,8 +169,8 @@ back into it.
 | S1 | Foundation — schema, store, resolution | 1, 2, 3 | `ca-msg-em1` | **verified** (`fc523ecd..16294728`) |
 | S2 | Migration — backfill, dual-write | 4, 5 | `ca-msg-em2` | **verified** (`16294728..cd4ee7ed`, 3 rounds) |
 | S3 | Envelope — message type, validation, delivery format | 6, 7, 9 | `ca-msg-em3` | **verified** (`cd4ee7ed..f206a0d9`, 2 rounds) |
-| S4 | Surfaces — read switch, CLI split, broker edge | 8, 10, 11 | `ca-msg-em4` | active |
-| S5 | Docs — skill, docs-site, glossary | 12 | `ca-msg-em5` | pending |
+| S4 | Surfaces — read switch, CLI split, broker edge | 8, 10, 11 | `ca-msg-em4` | **verified** (`b92926dd..e8a0755d`, 4 rounds) |
+| S5 | Docs — skill, docs-site, glossary | 12 | `ca-msg-em5` | next |
 | S6 | Removal — drop legacy fields | 13 | deferred | **post-beta only** |
 
 Statuses: `pending` → `active` → `landed` → `verified`.
@@ -359,7 +374,33 @@ would bury the events that matter.
   commits). One narrow blocker, **H-1**: the two tests named for the G-2 gate execute nothing.
   Scoped to a single tests-only commit; on landing I accept and merge.
 
-## 5f. S4 rejection — open (round 1 09:05Z; round 2 09:55Z; round 3 10:25Z)
+- `2026-08-27 10:35Z` **S4 ACCEPTED on round 4 and merged.** `scion/messaging-v2`
+  `b92926dd → e8a0755d`, fast-forward, 14 commits. H-1 closed by my own mutation. em4
+  retiring. **Rule 13 is the lasting output of this section**, and em4's
+  `EmailRef_AgentContext` test is recorded as the model shape for S5/S6.
+
+## 5f. S4 — CLOSED 2026-08-27 10:35Z (accepted on round 4)
+
+**Four rounds, five findings, one underlying defect.** F-1 (a warning routing users into the
+very bug this project exists to remove), G-1 (an auth check trusting a caller-supplied
+identity), G-2 (a path that ate messages and reported success) and H-1 (tests that asserted a
+string they had just constructed) are all the same failure wearing different clothes: **a
+mechanism that is present and correct, verified by watching it be invoked rather than by
+observing what the user gets.** Only F-2 sits outside that pattern.
+
+Every one of those cleared three APPROVE gates and a green suite. The gates were not
+negligent — they checked what they were pointed at. That is the whole content of rule 13, and
+it was earned here rather than reasoned out in advance. I did not catch F-1 by reading the
+diff either; I caught it by asking what happens to a user who obeys the warning text.
+
+**What em4 did better than asked.** G-1 was fixed by *deleting* the body sender fields rather
+than validating them — removing the attack surface instead of guarding it, which is strictly
+stronger and leaves nothing to mutate. And `TestSendMessageViaConversation_EmailRef_AgentContext`
+was written unprompted: it asserts delivery through the outbound recorder in the working case
+and zero sends on both recorders in the failing case. **That is the model test shape for the
+rest of the project.**
+
+### Rejection history (rounds 1–3)
 
 ### Round 3 (2026-08-27 10:25Z) at `765a4ac4` — behaviour accepted, one tests-only blocker
 
