@@ -19,7 +19,9 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -30,6 +32,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// testEncodeCursor replicates the store's cursor format for test use.
+// Format: base64(RFC3339Nano + "," + uuid)
+func testEncodeCursor(created time.Time, id string) string {
+	raw := created.Format(time.RFC3339Nano) + "," + id
+	return base64.URLEncoding.EncodeToString([]byte(raw))
+}
 
 // seedBackfillProject creates a project and returns its ID.
 func seedBackfillProject(t *testing.T, ctx context.Context, s store.Store) string {
@@ -201,43 +210,63 @@ func TestBackfillResumeViaCheckpoint(t *testing.T) {
 
 // TestBackfillResumeViaCheckpoint_SameTimestamp is the KEY regression test
 // for the cursor-based checkpoint fix. It verifies that messages sharing an
-// identical created_at timestamp are NOT silently skipped during multi-page
-// pagination — the bug that the old timestamp-only checkpoint caused.
+// identical created_at timestamp are NOT silently skipped when resuming from
+// a checkpoint cursor.
+//
+// Unlike the prior version of this test, NO prior backfill run is performed.
+// Instead, a cursor is manually constructed pointing at a middle message,
+// and the checkpoint's behaviour is the ONLY thing determining whether the
+// remaining same-timestamp messages get processed.
+//
+// On FIXED code (cursor-based): the store paginates past the cursor position
+// using (created, id) keyset, so same-timestamp siblings after the cursor
+// are returned → TotalProcessed = 2.
+//
+// On BUGGY code (fda9977f, filter.After = T): the checkpoint is resolved to
+// a timestamp and "created > T" filters out ALL same-timestamp messages
+// → the test fails (either via error or TotalProcessed = 0).
 func TestBackfillResumeViaCheckpoint_SameTimestamp(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-
 	projectID := seedBackfillProject(t, ctx, s)
 	senderID := uuid.NewString()
 
-	// 6 messages at IDENTICAL timestamp, different recipients.
+	// 5 messages at IDENTICAL timestamp, different recipients.
 	same := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	for i := 0; i < 6; i++ {
-		seedDMMessage(t, ctx, s, projectID, senderID, uuid.NewString(), same)
+	var ids []string
+	for i := 0; i < 5; i++ {
+		ids = append(ids, seedDMMessage(t, ctx, s, projectID, senderID, uuid.NewString(), same))
 	}
 
-	// Run with BatchSize=2 to force 3 pages of same-timestamp messages.
+	// Sort IDs to get deterministic ordering. ListMessages uses DESC by (created, id).
+	// So sorted ascending: ids[0] < ids[1] < ids[2] < ids[3] < ids[4]
+	// DESC order: ids[4], ids[3], ids[2], ids[1], ids[0]
+	sort.Strings(ids)
+
+	// Construct a cursor pointing at ids[2] — the middle message.
+	// This simulates "we already processed ids[4] and ids[3] (first page in DESC),
+	// and the cursor is positioned at ids[2]."
+	// Messages after the cursor in DESC: ids[1], ids[0] — these should be processed.
+	//
+	// NO prior backfill run — all messages still have empty conversation_id.
+	cursor := testEncodeCursor(same, ids[2])
+
 	result, err := runBackfillWithStore(ctx, s, messaging.BackfillConfig{
-		DryRun:    false,
-		ProjectID: projectID,
-		BatchSize: 2,
+		DryRun:     false,
+		ProjectID:  projectID,
+		Checkpoint: cursor,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 6, result.TotalProcessed,
-		"all same-timestamp messages should be processed")
 
-	// Verify all 6 have conversation_id.
-	msgs, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: projectID},
-		store.ListOptions{Limit: 100})
-	require.NoError(t, err)
-	missing := 0
-	for _, m := range msgs.Items {
-		if m.ConversationID == "" {
-			missing++
-		}
-	}
-	assert.Zero(t, missing,
-		"cursor-based checkpoint must not silently skip same-timestamp siblings")
+	// EXACT counts — this is the regression guard.
+	// Fixed code (cursor-based): processes ids[1] and ids[0] — 2 messages at same timestamp.
+	// Buggy code (filter.After = T): "created > T" matches 0 messages. TotalProcessed = 0.
+	assert.Equal(t, 2, result.TotalProcessed,
+		"cursor-based resume must process same-timestamp messages after cursor position")
+	assert.Equal(t, 2, result.Attributed+result.Inferred,
+		"should attribute the 2 same-timestamp messages after cursor")
+	assert.Equal(t, 0, result.Skipped,
+		"no messages should be skipped (none have conversation_id)")
 }
 
 // TestBackfillDefaultIsDryRun_FlagWiring exercises the flag-to-config wiring

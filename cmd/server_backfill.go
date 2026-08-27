@@ -65,7 +65,11 @@ func init() {
 	serverBackfillCmd.Flags().BoolVar(&backfillExecute, "execute", false, "Apply changes (default: dry-run)")
 	serverBackfillCmd.Flags().StringVar(&backfillProject, "project", "", "Backfill a specific project ID (default: all)")
 	serverBackfillCmd.Flags().IntVar(&backfillBatchSize, "batch-size", 0, "Messages per batch (0 = default 100)")
-	serverBackfillCmd.Flags().StringVar(&backfillCheckpoint, "checkpoint", "", "Resume from this pagination cursor (from a previous run's LastCheckpoint)")
+	// Note: checkpoint cursors are project-scoped. Using a cursor from one project
+	// with a different --project flag may produce incorrect results. When running
+	// without --project (all projects), checkpoint is not used (cleared for multi-project runs).
+	serverBackfillCmd.Flags().StringVar(&backfillCheckpoint, "checkpoint", "",
+		"Resume from this pagination cursor (from a previous run's output; project-scoped)")
 	serverBackfillCmd.Flags().StringVar(&backfillDB, "db", "", "Database DSN (overrides config/env)")
 }
 

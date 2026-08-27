@@ -16,6 +16,7 @@ package messaging
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -993,19 +994,38 @@ func TestBackfill_SinglePageNoCheckpoint(t *testing.T) {
 		"single-page run should have empty checkpoint (all data processed)")
 }
 
+// TestBackfill_SameTimestampMessages is the service-level regression test for
+// the cursor-based checkpoint fix. It uses a manually constructed checkpoint
+// (a message ID, which is the mock store's cursor format) on FRESH data — no
+// prior backfill — so the checkpoint's behaviour is the ONLY thing determining
+// whether same-timestamp messages get processed.
+//
+// On FIXED code: checkpoint is used as cursor → mock skips to after that
+// position → remaining same-timestamp messages are processed.
+//
+// On BUGGY code (fda9977f): checkpoint is resolved via GetMessage, then
+// filter.After = CreatedAt → "created > T" excludes ALL same-timestamp
+// messages → TotalProcessed = 0.
 func TestBackfill_SameTimestampMessages(t *testing.T) {
 	ctx := context.Background()
 	projectID := uuid.NewString()
 	senderID := uuid.NewString()
 
-	// 6 messages at IDENTICAL timestamp, different recipients.
+	// 5 messages at IDENTICAL timestamp, different recipients.
 	same := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	var msgs []store.Message
-	for i := 0; i < 6; i++ {
+	var ids []string
+	for i := 0; i < 5; i++ {
 		msg := newTestMessage(projectID, "user:alice", senderID,
 			"agent:bot", uuid.NewString(), same)
 		msgs = append(msgs, msg)
+		ids = append(ids, msg.ID)
 	}
+
+	// Sort IDs to get deterministic ordering. The mock sorts DESC by (created, id).
+	// Sorted ascending: ids[0] < ids[1] < ids[2] < ids[3] < ids[4]
+	// DESC order: ids[4], ids[3], ids[2], ids[1], ids[0]
+	sort.Strings(ids)
 
 	msgStore := &mockMessageStore{messages: msgs}
 	convStore := &mockConversationStore{}
@@ -1013,24 +1033,27 @@ func TestBackfill_SameTimestampMessages(t *testing.T) {
 
 	svc := NewBackfillService(convStore, msgStore, agents)
 
-	// Run with BatchSize=2 to force 3 pages of same-timestamp messages.
+	// Use ids[2] as the checkpoint — the mock's cursor format is a message ID.
+	// This simulates resuming after processing ids[4] and ids[3] (the first
+	// page in DESC order), with the cursor positioned at ids[2].
+	// Messages after the cursor in DESC: ids[1], ids[0] — these should be processed.
+	//
+	// NO prior backfill run — all messages still have empty conversation_id.
 	result, err := svc.Run(ctx, BackfillConfig{
-		ProjectID: projectID,
-		BatchSize: 2,
+		ProjectID:  projectID,
+		Checkpoint: ids[2],
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 6, result.TotalProcessed,
-		"all same-timestamp messages should be processed")
 
-	// Verify all 6 have conversation_id.
-	missing := 0
-	for _, m := range msgStore.messages {
-		if m.ConversationID == "" {
-			missing++
-		}
-	}
-	assert.Zero(t, missing,
-		"cursor-based pagination must not silently skip same-timestamp messages")
+	// EXACT counts — this is the regression guard.
+	// Fixed code (cursor-based): processes ids[1] and ids[0] → TotalProcessed = 2.
+	// Buggy code (filter.After = T): "created > T" matches 0 messages → TotalProcessed = 0.
+	assert.Equal(t, 2, result.TotalProcessed,
+		"cursor-based resume must process same-timestamp messages after cursor position")
+	assert.Equal(t, 2, result.Attributed,
+		"should attribute the 2 same-timestamp messages after cursor")
+	assert.Equal(t, 0, result.Skipped,
+		"no messages should be skipped (none have conversation_id)")
 }
 
 // ---------------------------------------------------------------------------
