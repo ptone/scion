@@ -241,6 +241,17 @@ would bury the events that matter.
   wording. **Fixed the same hour:** AC-8 reworded to "every inbound path, not a fixed
   count", with native chat named and mutation-verification required; AC-8c added for
   server-generated emitters. See §5e.
+- `2026-08-27 05:45Z` S3 round 2 in progress. em3's branch carries the E-1 fix:
+  `fad34947` wires `ValidateLegacyMessage` into the native-chat send path, then
+  `c1acaf86` "allow attachment-only messages through validation choke point".
+  Not yet merged to the integration branch; no report yet. **Flag for verification:**
+  the second commit relaxes the choke point to admit an input it previously rejected
+  (`Msg == ""`). That may be a correct discovery — native chat can legitimately send
+  an attachment with no text, and `Validate()` requires a non-empty `msg` — or it may
+  be the check being widened until the tests pass. Read the diff, not the message:
+  confirm the relaxation is conditioned on attachments being present rather than a
+  blanket removal of the `msg` requirement, and that a text-less, attachment-less
+  message is still rejected.
 
 ## 5d. S2 rejection history — CLOSED 2026-08-27 03:35Z (accepted on round 3)
 
