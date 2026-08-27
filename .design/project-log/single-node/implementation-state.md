@@ -7553,3 +7553,40 @@ The durability rewrite is right. Three corrections sent:
 `sn-stress-max` earlier. Told it a hung liveness exec is DATA, and needs a third
 outcome category (timeout) distinct from alive and dead, because a sandbox that is
 neither answering nor gone fits neither.
+
+## 07:40 — Docs corrections verified; dispatched sn-findings-dev to bank three findings
+
+**`7b2d3bca` verified by reading the file, not the report.** All three corrections
+landed accurately. The overload callout now says the container is terminated
+(outcome, no mechanism), that the service self-recovers in ~30s "healthy,
+responsive, and completely empty — a new Hub with no trace of what was running…
+more dangerous than an outage that announces itself", and gives the only honest
+guidance available: push to a remote often.
+
+**Dispatched `sn-findings-dev`** (brief: `briefs/sn-findings-dev.md`) to file
+tasks #67 and the two halves of #65 as fork issues. Rationale for doing it NOW
+rather than after Phase B: **both stress instances are about to be torn down, and
+the evidence for all three findings lives on them.** A finding that survives only
+in an agent's transcript is a finding we have lost. This work also does not depend
+on Phase B, so it is genuine parallelism rather than manufactured work.
+
+The three:
+1. **#67 — the ceiling destroys the Instance after returning 201.** Briefed with
+   every fact that blocks a wrong conclusion: no 137 at either size (so not the OOM
+   killer), two different mechanisms at the two sizes (so no single signature),
+   negative fitted overhead (so no per-GiB rule), and **repeatability unmeasured**.
+   Told it to distinguish this from the by-design "shared budget" item: sharing a
+   budget is the accepted design; **destroying the Instance when it is exhausted is
+   not**, and that distinction is the whole issue.
+2. **#65a — `getStats` returns hardcoded zeros.** Ordered independent verification
+   of file and line, because the first report placed it in the hub and widening the
+   check is what revealed it is product-wide across every runtime and tier.
+3. **#65b — `sshd` absent from the omni image.** Explicitly told it NOT to
+   recommend adding `sshd`. We nearly recorded this as a permanent platform
+   limitation, which it is not; **the opposite error — treating a security decision
+   as a packaging oversight — is just as easy.** Frame as fact plus a decision for
+   ptone.
+
+Also had it record, neutrally and as my error, that design doc §5 frames loss
+around redeploy: **a redeploy is chosen, an overload is not.** That is review-queue
+D7 reaching an issue rather than waiting on the doc PR.
