@@ -10631,3 +10631,13 @@ Generalising: **deleting a command silently rots every tracking issue that names
 different directions — invalidated, still-valid-but-misnamed, and unaffected.** Sorting them is part
 of the merge, not follow-up. Captured as task #83, gated on the merge, because until #1325 lands all
 four issues are still accurate as written.
+
+**§35.22 addendum — who closes `ptone/scion#1314`.** I had assumed it was mine to close, on the
+grounds that task #61 filed the follow-up register on that repo. Checked instead of assuming:
+**#1314 was authored by ptone**, not by the register. So the coordinator was right about ownership
+and I was wrong. It is a recommendation to him, not an action of mine.
+
+Not raising it now, though. The action is gated on the merge either way, he is mid-merge on a green
+PR, and he has told me my communications are too voluminous. It goes in the post-merge report with
+the rest of the register reconciliation — one message, after the thing it depends on, rather than an
+interrupt about an issue that is still accurate as written until #1325 lands.
