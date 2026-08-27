@@ -8408,3 +8408,52 @@ applied rather than restated.
 
 `sn-uppr-dev` running and unblocked. Task #66 closed, #62 in progress. Blocked on ptone for D7, which
 gates commit C of branch 1. Seven review items remain after it.
+
+## 12:47 — Both upstream branches ready and independently verified. §5 held, as promised
+
+`sn-uppr-dev` reported at 12:43 and was reclaimed at 12:47 after I verified both branches were on the
+remote. **Everything below I checked myself against the pushed refs.** The agent's report was
+accurate in every particular, which is worth recording because it usually is not.
+
+### Branch 1 — `scion/sn-docpr-upstream`, base `3aeb7729`, merge-base clean
+
+- **21 issue refs in the file. All 21 fully qualified. Zero bare.** The arithmetic reconciles: 18 bare
+  + 1 already-qualified + 2 new observability refs. I counted from the pushed blob, not the report.
+- **The trap row survived contact.** It now reads
+  `| ptone/scion#1273 | resolve implicit default template | (PR GoogleCloudPlatform/scion#1305) |` —
+  fork left, upstream right, same row. This is the row that a blanket prefix would have turned into a
+  citation of the *sshd* issue inside a paragraph about template resolution.
+- **§5 is byte-identical to upstream.** I diffed the section in isolation rather than trusting
+  "untouched": 13 lines, no difference.
+- One file changed. 40 insertions, 16 deletions.
+
+### Branch 2 — `scion/sn-buildfix-upstream`
+
+Two files, one line changed, one empty file. `timeout: 2400s # 40 minutes - measured 641s (build
+9a1b9766, 2026-08-27)`. The provenance comment is the actual fix; 2400s without it would be the next
+unreasoned constant.
+
+### What I told ptone, and the bit I made sure not to soften
+
+PR B is complete. **PR A is not**, and I said so plainly in the same message as the compare URLs
+rather than letting two green links imply two finished PRs. He can open it now and read it while D7
+is outstanding, or wait and see it whole. His choice, stated as a choice.
+
+The temptation was to send two links and a clean summary. A branch that is 90% done and described as
+done is how a reviewer merges the 90%.
+
+### The brief instruction that earned its place
+
+The one line worth carrying forward: *"ask me for their numbers before you write the entry; do not
+guess them and do not omit them."* That single sentence is why the agent stopped at 12:38 and asked,
+which is why it learned that fork `#1310` collides with the tier's own upstream PR, which is why the
+doc does not now contain a link to its own merge commit dressed as a logging reference.
+
+**The instruction cost one message. Its absence would have cost a wrong link in an upstream design
+doc** — the same failure that already reached the tutorial yesterday, in the same week, from the same
+root cause.
+
+### State
+
+No agents running. Both branches safe on the fork and verified. Task #62 remains open until ptone
+opens the PRs and commit C lands. Blocked on ptone for D7 (item 3 of 10). Seven items after it.
