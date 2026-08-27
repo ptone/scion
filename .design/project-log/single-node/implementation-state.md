@@ -5756,3 +5756,74 @@ One developer on `scion/sn-tier` at a time. `sn-cloudbuild-dev` dispatched now a
 Also told the developer, in the brief, that if it thinks either decline is wrong it should **argue
 before implementing**. Silent compliance with a call the implementer believes is bad is how a wrong
 architectural decision gets laundered into the record.
+
+---
+
+## 2026-08-27 03:09 — All five cloudbuild-omni defects fixed. Verified. Two corrections to record.
+
+`sn-cloudbuild-dev` pushed `728d17cd`. Verified independently:
+
+- M1 — `cloud-build.sh:52` now reads `omni)      file="cloudbuild-omni.yaml" ;;`. The hard-refusal is
+  gone.
+- Ignore-file wiring is **generic, not hardcoded** (`:137-141`): it appends `--ignore-file` when a
+  `gcloudignore-<target>` exists. That was the requirement and it was met.
+- 37 files, 0 added, 0 deleted. `_SHORT_SHA` now at lines 174 and 183; `verify-registry` present;
+  timeout `14400s`.
+- CI: `golangci-lint`, `shellcheck`, `scan-pr`, `check-changes` pass; `Build & Test` in progress;
+  zizmor all `skipped`; only `cla/google` red.
+
+### Correction 1 — my brief gave a false instruction, and the developer caught it
+
+I wrote: *"declare `_COMMIT_SHA` in `substitutions:` with a default, **exactly as the siblings do**."*
+
+**The siblings do not do this.** `cloudbuild-hub.yaml`, `-scion-base.yaml` and `-thick.yaml` declare
+only `_REGISTRY` and `_TAG` — verified all three. `scion-base` *uses* `$_COMMIT_SHA` without
+declaring it, relying on `cloud-build.sh` to pass it.
+
+The developer complied **and flagged the divergence explicitly** rather than silently doing it. That
+is precisely the behaviour the briefs ask for, and it is the only reason I caught my own error.
+
+Ordering the removal, for three reasons beyond convention-matching:
+
+1. **Internal inconsistency** — our file now declares `_COMMIT_SHA` but not `_SHORT_SHA`, and uses
+   both.
+2. **It defeats the fix it belongs to.** An empty default converts an unmatched-substitution *error*
+   into a **silently blank version stamp** — the exact defect M4 existed to fix. Loud failure beats
+   quiet wrongness here.
+3. **No longer needed** — the header now documents an invocation passing both explicitly, and
+   `cloud-build.sh` passes them automatically.
+
+Folded into `sn-review-dev`'s brief as §0 rather than spinning a third agent for one line.
+
+**Lesson: "exactly as the siblings do" is a claim about the world, not a rhetorical flourish.** I
+appended it to give an instruction authority I had not earned by checking. Assertions of conformance
+need the same verification as assertions of fact — arguably more, because they are the ones an
+implementer will not think to question.
+
+### Correction 2 — the Node/npm answer is right, but the stated reasoning is wrong
+
+The developer reported Node/npm present, citing (a) Cloud Workstations base "includes Node.js as a
+standard dev tool" and (b) *"core-base explicitly uses `FROM node:20-slim`"*.
+
+**(b) is irrelevant to the path in question.** The Cloud Build omni chain is
+`thick-prep → scion-base → harnesses → omni`, and `thick-prep` defaults to
+`ARG BASE_IMAGE=us-central1-docker.pkg.dev/cloud-workstations-images/predefined/base:latest`.
+**core-base is not in that lineage at all.** And (a) is an inference about a third-party base image,
+not a measurement. Neither `thick-prep` nor `scion-base` installs Node — thick-prep only *creates*
+`/usr/local/share/npm-global` and scion-base only *chowns* it.
+
+**The conclusion is nevertheless correct, on much stronger evidence than either reason given:** the
+omni image has been built and deployed successfully at least three times — `dev-3f99cb79`,
+`dev-eaa14b14`, and `dev-a9131f1f` tonight — and those images serve the embedded web UI, which only
+exists if `npm install && npm run build` succeeded (that was task #14). **Empirically settled by
+artefacts that already exist**, which beats reading Dockerfiles.
+
+Recording this because the failure mode is subtle and recurring: *a correct conclusion supported by
+wrong reasoning is not a verified conclusion.* It is a guess that happened to land, and it will be
+cited later as though it were checked. The pointer to `core-base` would have sent the next person
+down a lineage this chain never touches.
+
+### Sequencing
+
+`sn-cloudbuild-dev` retired after verification. `sn-review-dev` dispatched against task #58 with §0
+prepended. Still one developer at a time on `scion/sn-tier`.

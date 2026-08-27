@@ -11,6 +11,27 @@ One developer at a time on a branch under upstream review.
 
 ---
 
+## 0. First, a one-line fix that is my error, not the bot's
+
+**Delete `_COMMIT_SHA: ''` from the `substitutions:` block of `image-build/cloudbuild-omni.yaml`
+(line 189).** Change nothing else in that file.
+
+Why: my previous brief told `sn-cloudbuild-dev` to *"declare `_COMMIT_SHA` in `substitutions:` with a
+default, exactly as the siblings do."* **The clause "exactly as the siblings do" was false.** I
+checked afterwards: `cloudbuild-hub.yaml`, `cloudbuild-scion-base.yaml` and `cloudbuild-thick.yaml`
+declare only `_REGISTRY` and `_TAG`. None declares `_COMMIT_SHA`, even though `scion-base` uses it.
+The developer followed my instruction and flagged the divergence — correctly. The error is mine.
+
+Three reasons to remove it, beyond matching the convention:
+
+1. **Internal inconsistency.** Our own file now declares `_COMMIT_SHA` but not `_SHORT_SHA`, and uses
+   both.
+2. **It defeats the fix it belongs to.** An empty default turns an unmatched-substitution *error*
+   into a **silently blank version stamp** — which is exactly the defect M4 existed to fix. A loud
+   failure is better here.
+3. **It is no longer needed.** The file's header now documents an invocation that passes
+   `_COMMIT_SHA` and `_SHORT_SHA` explicitly, and `cloud-build.sh` passes them automatically.
+
 ## 1. What this is
 
 `gemini-code-assist[bot]` left **six** comments on `GoogleCloudPlatform/scion#1310`, all rated
