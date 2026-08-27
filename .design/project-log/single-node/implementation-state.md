@@ -11172,3 +11172,76 @@ Dispatched `sn-hubid-inv2` with the discriminating test as its first action: one
 impersonated SA, one-line result before anything else. Q1 marked done in the brief so it is not
 re-derived; the two rejected workarounds (hand-rolled v2 POST, borrow-and-restart) named explicitly as
 out of bounds. Verified afterwards that all nine protected instances survive.
+
+## §35.34 — step 3b's hand-rolled auth is the seam, and the 503 cleared on its own
+
+**2026-08-27, 21:02. ptone ran `deploy.sh` end to end in a FRESH project (`ptone-emblem`) as a test
+user and step 3b failed 401.**
+
+```
+PATCH .../v2/projects/ptone-emblem/locations/us-east4/instances/my-scion-hub
+      ?updateMask=iapEnabled,invokerIamDisabled
+401 UNAUTHENTICATED — reason ACCESS_TOKEN_TYPE_UNSUPPORTED, service run.googleapis.com
+```
+
+Step 3a succeeded. Only 3b failed. **`deploy.sh:511` is `gcloud auth print-access-token`, sent raw as
+a bearer at `:531`** — no impersonation, no quota project.
+
+### I checked the clean fix first, and it does not exist
+
+The obvious repair is to delete the REST seam and let gcloud do it. **It cannot, at 582.** Both
+`deploy --help` and `update --help` expose only `--[no-]invoker-iam-check` and `--public`, and
+`--public` is documented as *"disabling invoker IAM checks and IAP."* There is **no flag that ENABLES
+IAP** on either verb. So the PATCH is load-bearing and the design doc's §4.3 rationale still holds.
+Recording this explicitly so nobody "simplifies" step 3b later and silently disables IAP.
+
+My first grep said the flags did not exist at all — it was `^\s+--[a-z-]+`, which misses
+`--[no-]invoker-iam-check` because of the brackets, and misses the detail entries because of ANSI
+bold codes. **Stripping ANSI before grepping help output is not optional.** A too-narrow regex on
+`--help` produces a confident false negative, which is exactly the kind of "measurement" that reads
+like evidence.
+
+### The correction I had to make to my own evidence
+
+I told ptone "the method is sound, I got a 200 with the same raw-bearer shape." **That test differed
+from his in two ways, not one: identity *and* project** — my SA in `ptone-experiments` versus his user
+account in `ptone-emblem`. I criticised precisely this error in §35.33 and committed it within the
+hour. Told him so directly. The claim is probably right; it is not proven, and the difference between
+those two states is the whole discipline.
+
+### 21:12 — the 503 cleared, and it took the second question with it
+
+`sn-hubid-inv2` ran `deploy.sh --name sn-hubid-t` as the impersonated SA. **Step 3a created cleanly.**
+So the v1 CREATE 503 of §35.31 was transient, not an outage and not an identity ban. #75 unblocked.
+
+**The same run passed step 3b** — it reached the IAP-302 poll, which only happens after the PATCH. So
+a service-account token succeeds on the exact code path that 401s for ptone. Three signals now agree
+that #85 is credential-type-specific: his raw GET also 401s (so it is not the PATCH), an SA token
+passes the same PATCH, and the error names a token *type* rather than a permission. Still unproven —
+the project remains uncontrolled — and the tokeninfo `aud`/`scope`/`email` is the outstanding fact.
+
+### The design point, which outlives whatever the token turns out to be
+
+**Step 3a authenticates through gcloud; step 3b authenticates by hand.** One deploy, two auth
+mechanisms, so a credential good enough for the first half can fail the second. The failure shape is
+the bad one: **partial success with no rollback** — the Instance exists, IAP does not, and the error
+message names a token type rather than an action. For a private beta that is a tester whose deploy is
+half-built and who cannot tell what to do next. Registered as #85.
+
+## §35.35 — PR 1326 review: took the style note, refused the imprecision inside it
+
+Gemini flagged the §4.3 paragraph as choppy and *"the v1 `gcloud` surface"* as ambiguous. Both fair;
+the paragraph now names `gcloud beta run instances` in its first sentence.
+
+**I did not take the suggested wording, because it preserved the original's error.** Both my text and
+the suggestion imply the v1 requirement is about *creating an Instance*. It is not — **v2 creates
+Instances perfectly well**, and an investigator did exactly that by accident. The constraint is that a
+v2-created Instance carries no `sandboxLauncher`, so it is a different artifact whose scion server
+cannot start: **it looks like a success and is not.** Since the paragraph exists precisely to stop
+someone reaching for a working-looking alternative surface, that distinction *is* the content. Pushed
+as `149b0cf`.
+
+Worth noting the shape of the review: the suggestion improved the prose and would have locked in the
+wrong claim. Accepting review feedback verbatim because it reads better is how imprecision survives
+being reviewed. I cannot comment on upstream PRs (fork write access only), so the rationale lives in
+the commit message where it stays attached to the change.
