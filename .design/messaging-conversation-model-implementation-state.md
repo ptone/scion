@@ -469,6 +469,18 @@ would bury the events that matter.
   one place, implying unbounded DM row growth, which `findDirectConversation`'s
   participant-based lookup rules out. **Rule 11 applied to a surveyor rather than an auditor.**
 
+- `2026-08-27 14:15Z` Heartbeat: integration head unchanged at `ebf8cc27`, no managers running,
+  still blocked on the user's beta-scope decision. **Used the wait to write design §2.4.2 —
+  the DEF-8/DEF-10 reconciliation** (`53f40efa`), which is on the critical path under either
+  answer, so it does not pre-empt the decision. Decision recorded there: converge on
+  `external_ref` as the DM identity key, delete `findDirectConversation`, make all direct
+  conversations global. Three alternatives rejected. **The section's sharpest point is the
+  migration hazard:** `dm:{sorted(a,b)}` encodes principal *IDs* but not *kinds*, and
+  `requireParticipant` will trust whatever the participant backfill writes — so a wrong kind is
+  an access grant to the wrong principal. Ambiguity must leave the row participant-less and fail
+  closed. Nothing is exploitable today only because every `dm:` row has zero participants and so
+  denies everyone. **Do not let a manager treat that backfill as routine data migration.**
+
 ## 5i. S5 — CLOSED 2026-08-27 12:40Z (accepted on round 3, `55dd6e16`)
 
 Fast-forward from `19681bc1`; closeout at `ebf8cc27`. Round 3 was two test files, ~140 lines.
