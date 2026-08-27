@@ -1096,17 +1096,11 @@ func TestGuardB_EveryDMRowHasTwoParticipants(t *testing.T) {
 // AC tests (DEF-8, DEF-10)
 // ---------------------------------------------------------------------------
 
-// TestAC_DEF8_1_ConvergenceTwoPathsSameConversation verifies that two sends
-// to the same agent — one via resolveAgentDM (Resolve with @agent syntax) and
-// one through the legacy ResolveOrCreateDMConversation path — resolve to the
-// SAME conversation. This is the single most important convergence test.
-//
-// NOTE: The legacy path (ResolveOrCreateDMConversation) uses a different key
-// format (dm:{sorted(idA,idB)} without kind prefixes). Full convergence onto
-// a single key format requires the migration (steps 2+3, separate task).
-// This test verifies convergence within the new code path: two calls to
-// Resolve with the same (sender, agent) pair yield ONE conversation row.
-func TestAC_DEF8_1_ConvergenceTwoPathsSameConversation(t *testing.T) {
+// TestResolve_SamePathIdempotency_AgentDM verifies that two sends to the same
+// agent via @agent syntax resolve to the SAME conversation. This is same-path
+// idempotency — a valid property, but not cross-path convergence (which is
+// tested by TestAC_DEF8_1_CrossPath_DualWriteAndResolverConverge).
+func TestResolve_SamePathIdempotency_AgentDM(t *testing.T) {
 	ms := newMockStore()
 	ctx := context.Background()
 	projectID := uuid.NewString()
@@ -1165,7 +1159,8 @@ func TestAC_DEF8_1_ConvergenceTwoPathsSameConversation(t *testing.T) {
 // dual-write path (ResolveOrCreateDMConversation) and the resolver path
 // (Resolve with @agent syntax) produce the SAME conversation for the same
 // principal pair. This is the true cross-path convergence test — unlike the
-// original TestAC_DEF8_1 which only exercised the resolver path twice.
+// original same-path test (now TestResolve_SamePathIdempotency_AgentDM) which
+// only exercised the resolver path twice.
 //
 // Steps:
 //  1. Call ResolveOrCreateDMConversation (dual-write/legacy path)
