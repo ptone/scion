@@ -17,13 +17,16 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -189,12 +192,20 @@ func TestBackfillResumeViaCheckpoint(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// The resume should attribute the 2 new messages. Some old messages
-	// after the checkpoint timestamp may also be seen but skipped.
-	assert.True(t, result2.Attributed+result2.Inferred > 0,
-		"resume should attribute new messages")
-	assert.True(t, result2.TotalProcessed >= 2,
-		"resume should process at least the 2 new messages")
+	// The resume must process exactly the messages after the checkpoint's
+	// CreatedAt (using strict >). With the test data: 2 already-stamped
+	// messages from the first batch that fall after the checkpoint timestamp,
+	// plus 2 new un-stamped messages = 4 total.
+	//
+	// Mutation guard: if the store filter changes from > to >= on the
+	// checkpoint timestamp, the checkpoint message itself would be
+	// re-scanned, making TotalProcessed=5 and Skipped=3.
+	assert.Equal(t, 4, result2.TotalProcessed,
+		"resume should process exactly 4 messages (2 old-but-after-checkpoint + 2 new)")
+	assert.Equal(t, 2, result2.Attributed+result2.Inferred,
+		"resume should attribute exactly the 2 new messages")
+	assert.Equal(t, 2, result2.Skipped,
+		"resume should skip exactly the 2 already-stamped messages after checkpoint")
 
 	// Verify the new messages now have conversation_id.
 	msgs, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: projectID}, store.ListOptions{Limit: 100})
@@ -202,6 +213,78 @@ func TestBackfillResumeViaCheckpoint(t *testing.T) {
 	for _, msg := range msgs.Items {
 		assert.NotEmpty(t, msg.ConversationID,
 			"all messages should have conversation_id after backfill+resume")
+	}
+}
+
+// TestBackfillDefaultIsDryRun_FlagWiring exercises the flag-to-config wiring
+// in runServerBackfill. It verifies that when backfillExecute is false (the
+// default, meaning --execute was NOT passed), the config sent to the backfill
+// engine has DryRun=true and messages are NOT stamped.
+//
+// Mutation guard: if someone changes `!backfillExecute` to `backfillExecute`
+// on line ~109 of server_backfill.go, DryRun becomes false and the assertion
+// on ConversationID will fail.
+func TestBackfillDefaultIsDryRun_FlagWiring(t *testing.T) {
+	// Save and restore all global flags that runServerBackfill reads.
+	origExecute := backfillExecute
+	origDB := backfillDB
+	origProject := backfillProject
+	origBatch := backfillBatchSize
+	origCheckpoint := backfillCheckpoint
+	origConfigPath := serverConfigPath
+	defer func() {
+		backfillExecute = origExecute
+		backfillDB = origDB
+		backfillProject = origProject
+		backfillBatchSize = origBatch
+		backfillCheckpoint = origCheckpoint
+		serverConfigPath = origConfigPath
+	}()
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	// Seed data through a direct store connection.
+	backfillDB = dbPath
+	serverConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
+	seedStore, err := openBackfillStore(ctx)
+	require.NoError(t, err)
+
+	projectID := seedBackfillProject(t, ctx, seedStore)
+	senderID := uuid.NewString()
+	recipientID := uuid.NewString()
+	seedDMMessage(t, ctx, seedStore, projectID, senderID, recipientID, time.Now())
+	require.NoError(t, seedStore.Close())
+
+	// Set global flags to their defaults (no --execute).
+	backfillExecute = false // default: should produce DryRun=true
+	backfillDB = dbPath
+	backfillProject = projectID
+	backfillBatchSize = 0
+	backfillCheckpoint = ""
+
+	// Call runServerBackfill — the actual production code path where the
+	// flag-to-config wiring lives.
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+
+	err = runServerBackfill(cmd, nil)
+	require.NoError(t, err)
+
+	// Re-open and verify messages were NOT stamped.
+	verifyStore, err := openBackfillStore(ctx)
+	require.NoError(t, err)
+	defer func() { _ = verifyStore.Close() }()
+
+	msgs, err := verifyStore.ListMessages(ctx, store.MessageFilter{ProjectID: projectID}, store.ListOptions{Limit: 100})
+	require.NoError(t, err)
+	require.True(t, len(msgs.Items) > 0, "should have seeded at least one message")
+	for _, msg := range msgs.Items {
+		assert.Empty(t, msg.ConversationID,
+			"default (no --execute) must be dry-run: message %s should not be stamped", msg.ID)
 	}
 }
 
