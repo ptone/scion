@@ -673,6 +673,63 @@ archived, and deleted without telling us. Designing for this from day one rather
 
 ---
 
+## 2.11 Running the backfill (DEF-12)
+
+*Added 2026-08-27, after the integration-hub deploy. Describes work that does not exist yet.*
+
+**The defect.** `pkg/messaging/backfill.go` is complete — batching, resume, dry-run, progress
+reporting — and **nothing calls it.** `git grep 'Backfill' -- '*.go'` at `ebf8cc27`, excluding the
+file itself and `_test.go`, returns zero hits. No CLI subcommand, no admin endpoint, no startup
+hook. Every message predating this branch therefore has an empty `conversation_id` permanently.
+
+This is a different failure from DEF-7..DEF-11. Those are seams between sections. This is a
+finished component with no doorway, which is harder to notice precisely because the code reviews
+clean and its unit tests pass.
+
+**Decision: a `sciontool` subcommand. Not a startup hook.**
+
+```
+sciontool messaging backfill [--dry-run] [--batch-size N] [--resume-from <id>] [--max N]
+```
+
+**Why not a startup hook**, which is the tempting option because it needs no operator action: it
+converts a deploy into an unbounded write over the whole message table, on a hub whose message
+count nobody has checked, with no operator watching and no way to stop it short of killing the
+process mid-batch. A migration that cannot be paused should not be attached to the one event that
+must always succeed. Rollout is also the moment you least want a long-running write competing with
+live traffic.
+
+| Alternative | Rejected because |
+|---|---|
+| Run on server startup | Above. Also makes the backfill's runtime a component of boot time, so a slow backfill reads as a failed deploy. |
+| Admin HTTP endpoint | Needs progress streaming, cancellation, and timeout handling over HTTP to be usable on a large table — that is a job queue, and we do not have one. A CLI process the operator owns gets all of this from the terminal for free. |
+| Leave it unwired; let the read switch tolerate null `conversation_id` | This is the current state by accident, and it is defensible **only** while the switch is off. Once on, historical messages read as unrouted, which is indistinguishable at the UI from data loss. |
+
+**Requirements.**
+
+1. `--dry-run` is the default posture in documentation: report what would change, write nothing.
+2. Idempotent. Running twice must not double-stamp or produce a second conversation. The existing
+   service claims this; the command must have a test that proves it by running the backfill twice
+   and asserting the row count and every `conversation_id` are unchanged after the second pass.
+3. Resumable, and the resume token must be logged on every batch — an operator who loses the
+   terminal must be able to continue without starting over.
+4. **Ordering constraint: this runs *after* DEF-8 lands, never before.** The backfill creates DM
+   conversations; doing that while two divergent creation paths exist would mass-produce exactly
+   the duplicate rows §2.4.2 exists to eliminate. **This is a hard dependency, not a preference.**
+
+**Acceptance criteria.**
+
+- **AC-DEF12-1** The command exists, appears in `sciontool --help`, and `--dry-run` writes nothing —
+  asserted by snapshotting the message and conversation tables before and after and comparing.
+- **AC-DEF12-2** A real run stamps `conversation_id` on messages that lacked one. The test asserts
+  the count of newly-stamped rows is non-zero (rule 14 — a backfill test that finds nothing to
+  backfill and passes is the exact failure mode we keep hitting).
+- **AC-DEF12-3** Running twice changes nothing on the second pass.
+- **AC-DEF12-4** A permanent test asserts the command is reachable from the root command tree, so
+  this defect — a working component with no caller — cannot recur silently.
+
+---
+
 ## 3. Alternatives Considered
 
 ### 3.1 Native-only Conversation; external stays an opaque tuple (Option B)
