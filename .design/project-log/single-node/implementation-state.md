@@ -7043,3 +7043,77 @@ rung cannot see the rungs behind it going quiet.**
 
 That was a gap in my brief. §3.1 asked for the observation but did not make re-probing the earlier
 agents a required step at each rung, and both agents read it as optional.
+
+## 2026-08-27 07:05 — the ceiling may not be a ceiling: three problems, one of them mine
+
+`sn-stress-def` reported its pre-registered prediction and, in passing, that **idle-1 — its FIRST
+agent — died at N=10 with `exit_code=1`, while the hub still reported it running.**
+
+### Problem 1 — the "pre-registration" was fitted to the observation
+
+It gave two numbers: a naive 15 from RSS arithmetic, and a "revised" 10-11. The revision was
+computed *from* the fact that idle-1 died at N=10, and then the per-agent sentry overhead
+(200-250 MiB) was derived **backwards** from that same fact.
+
+That is circular twice over. It assumes N=10 is a memory ceiling — the very proposition in question
+— and it produces an overhead figure that cannot be wrong, because it was solved for. **A number
+that cannot fail carries no information.** Directive 1 existed precisely to prevent this and it
+still happened, which suggests the instruction "pre-register" is not self-explanatory: the agent
+believed it was complying, because it did produce a number before the *final* ceiling.
+
+Told it to retract the 10-11 and keep 15 as the standing prediction, and to let it be wrong.
+
+### Problem 2 — `exit_code=1` is the wrong signature for an OOM
+
+The OOM killer sends SIGKILL, which surfaces as **137**. Exit 1 is a process that ran and returned
+an error. This was not killed; it *exited*.
+
+And note **which** agent died: idle-1, the oldest. Memory exhaustion does not preferentially kill the
+longest-lived process — it kills the largest allocator or whoever asks next. **Oldest-first is the
+wrong shape for capacity.** Asked both agents to grep specifically for 137 and report whether it
+appears anywhere at all.
+
+`sn-stress-max` independently shows the same shape at 32 GiB: early agents failing `agent_not_found`
+while the hub reports success.
+
+### Problem 3 — MY BRIEF CONFOUNDS N WITH ELAPSED TIME
+
+This is the real error and it is mine.
+
+**In a one-at-a-time ladder, N rises monotonically with wall-clock time. They are perfectly
+correlated.** So any time-based failure — an idle harness timing out, a credential expiring, a
+session reaper — is *indistinguishable* from a capacity ceiling. It will produce a clean, plausible,
+repeatable "ceiling at N" that is not about capacity at all.
+
+I wrote §3.1 to insist on one agent at a time, for good reasons (it separates capacity from
+admission limits and preserves the curve). I did not notice that the same design welds N to time.
+The brief has no step that varies one while holding the other.
+
+**The fix is cheap and I have ordered it on both instances: FREEZE N.** Stop adding agents, wait
+roughly as long as the climb took, re-probe everything.
+
+- More deaths at constant N → **time, not capacity**, and the ceiling number means nothing.
+- No further deaths → capacity survives as the explanation.
+
+Also asked for the wall-clock **age** of each agent at death. If death tracks age rather than N, this
+is a timeout, and this project already has four closed tasks in exactly that area — #28, #29, #30,
+#31 — all agent-exit detection and sandbox lifecycle.
+
+### Why sn-stress-max is now the decisive run
+
+It has **4× the memory** (32 GiB vs 8 GiB). The cross-size comparison is now worth more than either
+ladder:
+
+- Same early-agent death at a similar N → **not capacity.** No memory ceiling stays put when you
+  quadruple memory.
+- Deaths at roughly 4× the N → capacity survives.
+
+This is the payoff from running two sizes, and it is not the payoff I expected when I designed it. I
+asked for two sizes to get a curve. What they are actually delivering is a control.
+
+### Standing risk to the deliverable
+
+If this resolves as a lifecycle defect rather than a capacity limit, **we will have no sizing number
+at all**, and task #50's §3.3 stays blocked. That is an acceptable outcome and far better than
+publishing a ceiling that is really a timeout. A wrong number in a tutorial outlives every caveat
+attached to it.
