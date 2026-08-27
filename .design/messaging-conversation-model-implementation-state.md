@@ -261,6 +261,16 @@
     named authority is gone, verify from refs rather than downgrading to an assumption** — the
     request degrades silently into "assume it is fine", which is what it was written to prevent.
 
+28. **A ledger row naming a blocker does not say who owns the blocker.** Issued 2026-08-27 18:30Z.
+    DEF-5 and DEF-7 both read "depends on the escalated unification decision, §2.6.3". The
+    decision had been made at 13:28Z; what was actually missing was **the draft I owed nc-arch**.
+    "Blocked on the unification decision" and "blocked on work only I can do" render as the same
+    sentence, and the first one reads as external. I carried it for five hours and told the
+    coordinator "runnable meanwhile: nothing safe" while holding the one task with zero file
+    contention on the board. **When a row says blocked, name the owner of the blocker in the same
+    breath; if it is you, it is not a blocker, it is a queue.** The self-check: for each blocked
+    item, who do I expect to unblock it, and have I asked them?
+
 ## 2. Source documents
 
 | Doc | Path |
@@ -1103,6 +1113,50 @@ there is a reason they kept both that I am not seeing.
    paths; the agent outbound path does not validate `ThreadID`. A committed test bakes in a malformed
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
+
+## 5ag. 18:30Z — the blocker I owed myself; unification spec drafted
+
+Heartbeat step 7 ("replies owed") caught what my own status message got wrong. I had told the
+coordinator **"runnable meanwhile: nothing safe"** — true of anything touching em6's files, false
+overall. The unification spec owed to nc-arch since 13:28Z is pure design work with **zero file
+contention**: my scratchpad, my branch, no overlap with `messaging-v2`. Rule 28.
+
+Worse, DEF-5 and DEF-7 both carried "depends on the §2.6.3 unification decision" — and the
+decision was made at 13:28Z. **The dependency was on my own unwritten draft**, recorded in a form
+that reads as external.
+
+Drafted `unification-spec.md` (§2.6.4). Grepping the core nouns first (rule 16) changed three
+things I would otherwise have written from memory:
+
+1. **The branch implements the opposite of the decided direction.** §2.6.3 decided the reverse
+   pointer (`webchat_topic.conversation_id`); `pkg/messaging/conversation.go:158-162` mints
+   `surface=native` Conversations keyed by `external_ref="thread:<proj>:<threadID>"`. When
+   `<threadID>` is a topic UUID that **shadows a `webchat_topic` row with no link** — DEF-8
+   reproduced across the store boundary, by the section built to eliminate it. Pre-beta only;
+   `conversation.go` is not on main.
+2. **`webchat_topic.default_agent` holds a slug *or* a UUID**, disambiguated by a read-time
+   fallback chain (`handlers_chat_v2.go:938-941`), while `Conversation.default_agent_id` is a typed
+   UUID. Not just duplicated — **incompatible domains**, so the migration is lossy and slug→UUID
+   can fail. Resolution: unresolvable → NULL (§2.4 case 3, a defined outcome), never a guess,
+   with an operator-reviewed report. Under-granting is recoverable.
+3. **This inverts §2.13.4.** I wrote there that unread data has never been tested by use, and
+   used it to argue *my* three `DefaultAgentID` writers were fine. The same argument says
+   native's column — the one actually read, at `:935` — is the tested one and **mine are the
+   unproven target**. I had the right principle pointing the wrong way.
+
+Also found: `Conversation.project_id` is `Optional().Nillable()` while `webchat_topic.project_id`
+is `NOT NULL` — **the identity layer is weaker than the projection it claims to own**, and project
+membership is one of the two authorization sources. AC-U-4.
+
+I verified nc-arch's name-uniqueness claim rather than repeating it (rule 15): true,
+`webchannel_store.go:508`, case-insensitive per project excluding deleted.
+
+Three open questions, raised serially **per recipient**: Q2 (Ent/raw-SQL shared transaction) to
+nc-arch now, because it gates the phase breakdown and could reopen alternative (A). Q1
+(default-agent behaviour change) is the user's, and **held** — they already have an unanswered
+question from me on the integration-branch strategy. Q3 (`is_general`) follows Q2.
+
+`main` moved `98a9d9c2` → `b09e7f49` during this. Citations are timestamped, not permanent.
 
 ## 5af. 18:12Z — em6's rebase verified, and rule 18 caught me a second time
 
