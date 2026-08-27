@@ -57,9 +57,20 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 **Active section:** S1 — Foundation
 **Active manager:** `ca-msg-em1` — spawned 2026-08-27 00:42Z, template `eng-manager`
-**Awaiting from em1:** phase 1 (schema) completion report
-**Blocked on:** nothing — em1 implementing
-**Last verified landing on integration branch:** none (branch is at `origin/main`)
+**Awaiting from em1:** S1 section-complete report (phases 1–3) + merge into `scion/messaging-v2`
+**Blocked on:** nothing — em1 implementing phase 3
+**Last verified landing on integration branch:** none (branch is at `origin/main`) — expected;
+em1 merges at section end. Work in flight is on `origin/scion/ca-msg-em1`.
+
+Phase progress on `origin/scion/ca-msg-em1` (verified by `git log`, not by report):
+
+| Phase | Commit | State |
+|---|---|---|
+| 1 schema | `d81c1093` | landed on em1 branch, unverified by me |
+| 2 store | `151a616e` | landed on em1 branch, unverified by me |
+| 3 resolution | — | in progress (`dev-resolution` executing) |
+
+I verify against acceptance criteria at section merge, not per phase.
 
 ## 4. Section plan
 
@@ -138,6 +149,10 @@ would bury the events that matter.
   on `origin/scion/messaging-v2`, merge in at section end, rebase forward never merge
   backwards. Harmless today (same commit) but would diverge once anything lands.
 - `2026-08-27` em1 began implementation, phase 1 (schema).
+- `2026-08-27 01:13Z` Heartbeat. em1 phases 1 (`d81c1093`) and 2 (`151a616e`) landed on
+  `origin/scion/ca-msg-em1`; phase 3 in progress. em1 is delegating to its own developers
+  (`dev-schema`, `dev-store`, `dev-resolution`) — it manages, they implement. Integration
+  branch still at `origin/main`, correct for mid-section. No action taken.
 
 ## 5a. Standing technical decisions made during implementation
 
