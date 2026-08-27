@@ -271,6 +271,17 @@
     breath; if it is you, it is not a blocker, it is a queue.** The self-check: for each blocked
     item, who do I expect to unblock it, and have I asked them?
 
+    **This is the second occurrence, and rule 15 was already supposed to catch it.** §5r, 13:43Z:
+    I held DEF-11 for a file conflict with S6 that a one-line `git diff --stat` disproved, and
+    widened rule 15 that day to cover *"any premise that gates action."* That widened rule did not
+    catch today's case, and the reason is worth more than the rule. A premise like "S6 touches
+    `handlers_agent_messaging.go`" **looks like a claim** — it names a file, it invites a grep.
+    "Depends on the §2.6.3 unification decision" looks like an **attribution**, and attributions
+    do not read as checkable. **The dangerous premises are the ones phrased as provenance rather
+    than as fact.** So rule 28 is not "verify your blockers" — rule 15 already said that. It is:
+    a blocker written as *what it depends on* hides *who owes it*, and only the second form can be
+    audited. Write blockers as owners.
+
 ## 2. Source documents
 
 | Doc | Path |
@@ -294,7 +305,47 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 > historical record and is accurate *as of the timestamps it names* — read it as log, not as
 > current position.
 
-**CURRENT POSITION as of 2026-08-27 17:20Z**
+**CURRENT POSITION as of 2026-08-27 18:35Z**
+
+**Integration branch head:** `edd4e4bd`, pushed, full suite green, 81 commits ahead of
+`origin/main`. Unchanged since 17:20Z — I have deliberately not pushed to it while em6 rebases
+onto it (moving their target is how the 80k revert happened).
+
+**`main` is now `b09e7f49`** (was `98a9d9c2` at 17:20Z, `98a9d9c2` before that). It moves roughly
+hourly. Not absorbed; absorb at final merge. **Do not cache this value** (rule 24).
+
+**§2.15 / `ca-msg-em6`: rebased, base verified by me, formal report outstanding.**
+`scion/ca-msg-em6` @ `9cf1df92`. `merge-base --is-ancestor edd4e4bd HEAD` passes; diff is 16 files,
++1,694/−108, no whole-file deletions, all §2.15 files. Control preservation checked by symbol
+count, not by reading: `lookupFailed` 3=3, `Fallback` 2=2, `validDMKey` 2=2, `DeriveConversationKey`
+3 (new). Still owed by em6: re-run ACs (all were measured against the wrong tree), the
+`dev-validdmkey-test` result on Item 1, and the auditor's M1 (`handleGroupMessage` `:1120`/`:1245`
+bypassing `DeriveConversationKey`) proven by test.
+
+**Blocked items, each with the owner of the unblock named (rule 28).** A row whose owner is *me*
+is a queue, not a blocker.
+
+| Item | Waiting on | Owner | Asked? |
+|---|---|---|---|
+| Integration-branch strategy (cut over to PR-per-section?) | decision | **user** | yes, 17:55Z, unanswered |
+| §2.15 merge | formal report + re-run ACs | **em6** | yes, standing instruction |
+| DEF-17 + DEF-18 gate sweep | §2.15 landing (file contention) | **em6**, then me | n/a |
+| DEF-12 | §2.15 phase 4 | **em6** | n/a |
+| DEF-6 (§2.14.1) | supervision capacity | **me** — queue, not blocker | n/a |
+| DEF-9 (§2.13) | dispatch capacity; spec is complete with ACs | **me** — queue | n/a |
+| DEF-5, DEF-7, `#<thread>` | ~~unification decision~~ → unification **spec**, §2.6.4 phase 6 | **was me — drafted 18:30Z**; now nc-arch Q2 | yes, 18:32Z |
+| §2.6.4 phase breakdown | Q2, Ent/raw-SQL shared transaction | **nc-arch** | yes, 18:32Z |
+| §2.6.4 default-agent behaviour change (Q1) | decision | **user** | **held** — they already have one unanswered question from me |
+
+**MERGE BLOCKERS, both mine, both non-behavioural (DEF-17, DEF-18).** Three CI gates red that
+`main` passes: `gofmt` (15 files after em8's `cmd/` cleanup), `make compat-literals` (11 legacy
+literals in two files absent from main, so all ours), `golangci-lint --new-from-merge-base` (7,
+ours by construction). Passing: vet, authz-guards, build, tests. **Seven gates total — enumerate
+from `.github/workflows/ci.yml`, do not check from memory** (rule 22).
+
+---
+
+**Historical — position as of 2026-08-27 17:20Z**
 
 **Integration branch head:** `edd4e4bd` — S8/DEF-13 merged, **pushed**, full suite green (8
 packages, `pkg/hub` 279.1s). 81 commits ahead of `origin/main`. Zero files
