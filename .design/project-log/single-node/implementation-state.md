@@ -8978,3 +8978,101 @@ the whole time.
 
 Both deferred to one later touch **because an agent is editing #1297 right now** and a concurrent
 edit would clobber it. Batching to avoid a lost update, not from inattention.
+
+## §25 — `724d8a6d`: the PATH seam closed, and the register reconciled by enumeration (14:07)
+
+### §25.1 — The fix was better than the one I specified
+
+I asked for the binary to be put on `PATH`. The developer found **appending is not sufficient**: a
+stale `scion` earlier on `PATH` keeps winning, and it presents as a *different* symptom —
+`unknown command "deploy-instance"`, **not** `command not found`. They hit it for real in the
+container (`/opt/scion/bin/scion` shadowed the fresh build). And it is precisely the reader the
+caution block routes into the build who is most likely to have an old binary. Fix is **prepend**:
+`export PATH="$(go env GOPATH)/bin:$PATH"`, with both symptoms named.
+
+They then **walked the tutorial as a bare-machine reader and ran each step**, including against a
+nonexistent `GOPATH`, and validated the prepend beats the shadowing binary. That is exercising the
+path rather than reasoning about it — the standard the heartbeat keeps asking for.
+
+### §25.2 — THE STRUCTURAL FINDING: 48 of 48 numbers collide
+
+I asked for a corrected count. What came back reframes the problem.
+
+**Swept 1270-1320 on both repos: 48 of 48 collide. A 100% collision rate.** Only `#1318` (upstream
+only), `#1319` and `#1320` (unissued) do not.
+
+**Therefore a complete register is impossible.** Every number both repos have issued is a collision —
+thousands, regenerable by script but not maintainable by hand. The register is now explicitly framed
+as an **annotated subset of numbers our prose cites or is likely to cite**, with a note telling
+anyone tempted to "finish" it to stop.
+
+**This retires §19's framing as too weak.** I had written "every issue we file is a future
+collision", which is true but sounds like a trend. It is not a trend, it is **saturation**. The list
+was never going to be the protection. Only qualifying every reference is. **The durable version is a
+lint rule that rejects a bare `#NNNN` in prose** — raised to ptone as a small separate piece of work,
+not taken on here.
+
+Register now **23 rows**, and the heading says *rows*, not *collisions*, with an explicit rule that
+if heading and row count disagree, **the rows win**. That is the §19 principle finally implemented
+rather than asserted: *a total nobody can check is worse than no total.*
+
+### §25.3 — Three corrections to me, all accepted
+
+1. **I said "three of today's collisions were created by our own filings". It is twelve.** The
+   developer checked `created_at` on every row: `#1300` (04:35), `#1307`, `#1308`, `#1309`, `#1310`,
+   `#1311`, `#1312`, `#1313`, `#1314`, `#1315`, `#1316`, `#1317` — **over half the register, created
+   by us in one day, five of them inside twenty-one minutes.** They wrote the enumerated twelve
+   rather than my asserted three, correctly noting that *repeating an unchecked count inside the
+   section that fixes unchecked counts would have been self-defeating.*
+2. **I told them the design-file ref fix "landed". It has not.** `GoogleCloudPlatform/scion#1317` is
+   **open, not merged**; upstream main still carries all 18 bare refs. **I conflated "pushed to a
+   branch and PR opened" with "landed"** — the exact error I have spent the day warning others
+   about. They verified both mains, did the separation anyway since it stood on its own merits, and
+   wrote the status accurately as *not yet fixed*.
+3. **I wrote a bare `#1315` inside a brief whose subject is the rule against bare refs** — and
+   `ptone/scion#1315` is an unrelated PR about `thread_id` validation. **The best available evidence
+   that this rule needs mechanical checking rather than good intentions**, and the direct argument
+   for the lint rule in §25.2.
+
+Also corrected: `pkg/hub/httpdispatcher` is a **file**, not a package. Noted in
+`ptone/scion#1316`, where the missing evidence (`httpdispatcher.go:492-509`, `buildCreateRequest`)
+was added — line numbers verified unchanged, upstream main still `3aeb7729`.
+
+### §25.4 — A second dangerous-shape cluster
+
+Alongside `#1314` (docs-vs-docs), the **`#1300` cluster** is arguably worse:
+`ptone/scion#1300` "Permissions Foundation Phase 1 v2", `GoogleCloudPlatform/scion#1301`
+"Permissions Foundation Phase 1", `GoogleCloudPlatform/scion#1312` the re-land,
+`GoogleCloudPlatform/scion#1311` the revert. **Four near-identical titles, two repos, four numbers.**
+`#1300` is cited **bare in the design file at line 458**. Called out in the register.
+
+## §26 — Heartbeat 14:00, verified
+
+| PR | head | state | non-green checks |
+|---|---|---|---|
+| `GoogleCloudPlatform/scion#1315` | `724d8a6d` | OPEN, MERGEABLE | `cla/google` only |
+| `GoogleCloudPlatform/scion#1316` | `1765ff13` | OPEN, MERGEABLE | `cla/google` only |
+| `GoogleCloudPlatform/scion#1317` | `70aceeb4` | OPEN, MERGEABLE | `cla/google` only |
+
+All nine Instances present (stderr visible, impersonation on — per the §23.1 rule).
+
+**1. Agents:** six dispatched today, all six returned verified work, all reclaimed. Zero stalls, zero
+in flight now.
+**2. Critical path: `cla/google` on all three PRs. ptone-only.** Unchanged since 13:34 and it is the
+only thing left.
+**3. Design doc in sync.** `#1317` carries the corrections. One deliberate divergence: the
+`harnessConfig` workaround stays in the tutorial until `ptone/scion#1316` phase 4 lands.
+
+**Not manufacturing work.** Holding.
+
+### §26.1 — Open, deliberately not actioned
+
+- `ptone/scion#1316`'s intro says "at least fifteen known collisions" — literally still true at 23,
+  and it links the register. Left; flagged.
+- `scripts/single-node/deploy.sh` comments reference the old `-o ./scion` placement. Still
+  functionally correct (its `$PATH` fallback hits). Left; flagged.
+- **`ptone/scion#1317`** filed for the `a2a-bridge.md` missing-clone defect, which the developer
+  found has a **second** defect: the manual build produces `scion-a2a-bridge` in
+  `extras/scion-a2a-bridge`, but the next two commands invoke `./bin/scion-a2a-bridge`, which only
+  `make build-a2a-bridge` produces from the repo root. **Same class as the seam we just closed:
+  build output location versus invocation path.** Outside this tier; documented, not fixed.
