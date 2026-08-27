@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -466,9 +467,18 @@ type mockTopicLookup struct {
 func (m *mockTopicLookup) GetTopicConversationID(_ context.Context, topicID string) (string, error) {
 	convID, ok := m.topics[topicID]
 	if !ok {
-		return "", errors.New("topic not found: " + topicID)
+		return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
 	}
 	return convID, nil
+}
+
+// mockTopicLookupWithError returns a configurable error for any topicID.
+type mockTopicLookupWithError struct {
+	err error
+}
+
+func (m *mockTopicLookupWithError) GetTopicConversationID(_ context.Context, _ string) (string, error) {
+	return "", m.err
 }
 
 // ---------------------------------------------------------------------------
@@ -608,5 +618,42 @@ func TestAC_U3_WithoutTopicLookup_StillMints(t *testing.T) {
 	}
 	if mock.lastConv == nil {
 		t.Error("upsert must have been called (backwards compat)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEF-21 regression: infrastructure error must NOT fall through to upsert
+// ---------------------------------------------------------------------------
+
+func TestDEF21_InfraErrorMustNotMint(t *testing.T) {
+	// DEF-21: When GetTopicConversationID returns an infrastructure error
+	// (e.g. DB connection lost — NOT store.ErrNotFound), the function must
+	// NOT fall through to the upsert path and mint a spurious conversation.
+	// It must return nil (non-fatal contract) without calling the upserter.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{
+			ID:          "conv-spurious",
+			ExternalRef: "thread:proj-1:some-topic",
+		},
+	}
+	lookup := &mockTopicLookupWithError{
+		err: errors.New("connection refused"), // infra error, NOT ErrNotFound
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	got := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger,
+		"some-topic", "proj-1",
+		WithTopicLookup(lookup))
+
+	// After the DEF-21 fix:
+	// - got must be nil (no spurious conversation minted)
+	// - mock.lastConv must be nil (upserter must NOT be called)
+	if got != nil {
+		t.Errorf("DEF-21: expected nil on infra error, got %+v (spurious mint!)", got)
+	}
+	if mock.lastConv != nil {
+		t.Errorf("DEF-21: upserter was called on infra error — spurious conversation minted")
 	}
 }

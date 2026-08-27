@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
 
@@ -971,7 +972,7 @@ func (s *pgWebChatStore) GetTopicConversationID(ctx context.Context, topicID str
 	err := s.db.QueryRowContext(ctx, query, topicID).Scan(&convID)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return "", fmt.Errorf("topic not found: %s", topicID)
+			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
 		}
 		return "", fmt.Errorf("webchat store: get topic conversation_id: %w", err)
 	}

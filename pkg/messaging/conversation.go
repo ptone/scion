@@ -16,6 +16,7 @@ package messaging
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 
@@ -189,7 +190,7 @@ func ResolveOrCreateThreadConversation(
 				ConversationID: convID,
 			}
 		}
-		// Topic exists but has no conversation_id yet, or topic does not exist.
+		// Topic exists but has no conversation_id yet.
 		// For native topics (non-dm threadIDs), return nil — do NOT mint.
 		// For dm:-prefixed threadIDs, fall through to the existing path.
 		if err == nil && convID == "" && !strings.HasPrefix(threadID, "dm:") {
@@ -197,8 +198,25 @@ func ResolveOrCreateThreadConversation(
 				"thread_id", threadID)
 			return nil
 		}
-		// err != nil means topic not found — fall through to existing path
-		// (could be a non-native surface thread).
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Topic genuinely doesn't exist. For native surfaces
+				// (non-dm threadIDs with lookup provided), return nil — do NOT mint.
+				if !strings.HasPrefix(threadID, "dm:") {
+					log.Debug("topic not found, returning unresolved (non-fatal)",
+						"thread_id", threadID)
+					return nil
+				}
+				// dm:-prefixed threadIDs fall through to the existing path.
+			} else {
+				// Infrastructure failure (DB down, timeout, etc.).
+				// Do NOT fall through to upsert — that would mint a
+				// spurious conversation for a topic that might already have one.
+				log.Warn("topic lookup infrastructure error, returning unresolved (non-fatal)",
+					"thread_id", threadID, "error", err)
+				return nil
+			}
+		}
 	}
 
 	extRef, kind, projID, err := DeriveConversationKey(KeyInputs{
