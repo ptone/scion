@@ -8072,3 +8072,45 @@ every constraint. Then fixed the two mis-targeted links (`fa8f2a8`), also verifi
 Line 103's upstream link is correct and stays — it points at a real upstream file.
 
 Task #63 closed. Task #69 open against `#1308`. Nine items now queued for ptone; none blocks work.
+
+## 08:17 — Register verified row by row; stress work closed out
+
+`ptone/scion#1297` now has **12 rows**, and I verified every one against the GitHub API rather than
+against its titles.
+
+Fork entry types, checked via the `pull_request` field: `#1273`, `#1274`, `#1281`, `#1301`, `#1302`,
+`#1303`, `#1304`, `#1305`, `#1306`, `#1308`, `#1309` are all **issues**; **`#1307` is an open PR**.
+Every label in the table matches.
+
+That last one was the correction worth making. The row had said `ISSUE:` for `#1307`, which made it
+the only PR-vs-PR collision in a table whose entire job is to say precisely what a number refers to.
+I caught it only because the title *looked* like a PR title — a weak reason to notice something, and
+a much worse reason to assume the other eleven were fine. So I asked for all twelve to be checked by
+field rather than by eye. They were, and they were right.
+
+**Same shape as this morning's `server_dispatcher.go` error**: a true answer to a narrower question
+than the one being asked. It keeps recurring because it never feels like an error at the time.
+
+### Closed
+
+- **#63** — sizing measured, verified, published.
+- **#65** — observability; five dead instruments, filed as `ptone/scion#1304`, product-wide not
+  tier-specific. The one working instrument (create latency) needs no new code and shipped as the
+  guidance.
+- **#67** — ceiling destroys the Instance; filed as `ptone/scion#1303`, documented in the tutorial.
+  Mechanism explicitly **not** established, and the doc says so.
+- **#69** — hub DELETE leaks the sandbox; filed as `ptone/scion#1308`.
+- **#50** — tutorial and scripts complete, every commit verified by reading the file.
+- **#59** — subject repaired; it had carried bare `#1307` and `#1302`, both collisions, in my own
+  task register.
+
+`sn-findings-dev`, `sn-stress-def` and `sn-stress-max` all reclaimed. Fleet 41 -> 31.
+
+### What I owe ptone
+
+Nine items in `review-queue.md` (§17 D1-D3, §18 D4-D7, §19, §20). None blocks work. To be raised
+one at a time, not batched.
+
+The two that need a real decision rather than a nod are **D5 and D7** — whether observability is a
+non-goal or a known gap — and **§19/§20**, whether the collision register is a catalogue (unbounded,
+and it grew by two today merely by our filing two issues) or a repair list plus a rule.
