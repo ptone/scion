@@ -4622,3 +4622,20 @@ traffic. The conclusion survives; the reasoning inverted, so the operator report
 which were working. Keeping a right answer while its justification collapses is worth flagging in
 place, not quietly correcting: the next person to touch §3.3 needs to know which of the two arguments
 is load-bearing.
+
+### 5bj addendum — sweep queue (23:06Z)
+
+Non-DEF-31 sweep output, all deliberately **not** started:
+
+| Item | Disposition |
+|---|---|
+| **P1-F1** duplicate `SetMessageReplyTo` in both send paths | **Queued behind the tranches.** Harmless (idempotent upsert, one wasted round-trip) and it touches the exact send paths our tranches are moving. Fixing it now buys a rebase conflict for no behaviour change. |
+| **P3-F1** GCPServiceAccount immutable fields guarded by comment only | **Adopted as a proposal, em6 to write up, not implement.** Reflect-based field-classification test modelled on `project_settings_resolved_guard_test.go` — same instrument em10 built for `store.Conversation`. The existing comment says *"if you are here to add a setter, this comment is the entire control"* — **that sentence is a defect report someone already wrote and nobody actioned.** Failure mode is a writable authorization input. |
+| **P2-F2** `seedFromWave1` SQLite/PG mechanism difference | One comment per side. **Undocumented-intentional is how the next sweep wastes its budget** re-deriving a decision someone already made. |
+| Scope gap: Conversation surface absent from `main` | Expected. That code arrives with the tranches; nothing to do. |
+
+**Hot-spot corroboration, recorded because negatives are cheap to lose:** `seedFromWave1` and
+`migrateThreadIDs` both came back clean from **both** sub-agents on independent framings. The
+`seedFromWave1` `WHERE last_read_at IS NOT NULL` filter is safe by construction, but its
+justification lives in `handlers_chat_v2.go`, not at the filter site — worth a comment whenever that
+file is next open, not worth a trip of its own.
