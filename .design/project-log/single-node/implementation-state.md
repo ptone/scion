@@ -10552,3 +10552,52 @@ step-6 IAP-binding print now untested. An upstream reviewer who finds that gap t
 nothing else in the description.
 
 **Open: one sentence in tutorial section 2.** Still frozen. Still his call.
+
+### §35.21 — PR opened upstream, section 2 fixed, #1325 green (2026-08-27, 18:31–18:45)
+
+**ptone opened `GoogleCloudPlatform/scion#1325`** at 18:31:16Z from `scion/sn-backout`, head
+`5e01ea5e` — verified to be the cleared head, not a stale one. MERGEABLE.
+
+**Section 2 unfrozen.** ptone at 18:35:53Z: *"yes. remove the wrong sentence. push a commit to the
+branch backing the open pr"*.
+
+**The edit was NOT a one-line deletion, and saying so was the load-bearing part of the brief.**
+The list item was labelled `**Hub login**`. That label is itself the false claim. Deleting only the
+sentence would have left a numbered step titled "Hub login" whose body is about admin seeding —
+which reads as though a second login still exists. I gave the developer two shapes and let it
+choose, because the remainder is a readability call, not a correctness one.
+
+Developer chose shape B (keep two items, retitle) at `6e64e07f`, 1 file, 2 lines:
+
+```
+-2. **Hub login** — After IAP, the Hub presents its own login. The deployer is
+-   automatically seeded as the first admin.
++2. **Hub access** — After sign-in you land directly in the Hub. There is no
++   second login. The deployer is automatically seeded as the first admin.
+```
+
+Its reason for B over A: a reader opening the URL for the first time needs to know what happens
+after the IAP challenge, and shape A would bury that in a trailing note they might skip. Accepted.
+Heading stays "First login" — it is the first login, and now the only one.
+
+**The true sentence survived.** *"The deployer is automatically seeded as the first admin"* is the
+page's only statement of how the operator gets admin rights, and #44 and #45 were both about that
+mechanism. The investigator's split test is the only reason it is still there; I had been treating
+section 2 as one unit.
+
+**CI on `6e64e07f`: all green** — Build & Test, golangci-lint, shellcheck, build-docs, scan-pr,
+check-changes. `cla/google` fail, non-gating per #62 (5 merged PRs with it red).
+
+`build-docs` was the real risk on a docs edit (`starlightLinksValidator` turns a dangling internal
+link into a build failure). I put "get the docs build green locally BEFORE you push, because you are
+pushing under ptone's open PR" in the brief rather than discovering it in CI. Developer reported 84
+pages, all internal links valid; CI agreed.
+
+**Not fixed, deliberately:** the commit body names `sn-iaplogin-inv`, an internal agent, in what is
+now an upstream commit message. Rewriting it needs a force-push under an open PR. Cosmetic cost is
+lower than the churn cost — this is the "churning branches on speculation" habit, and the rule holds
+even when the branch is mine.
+
+**Dispatch hygiene, not review:** verified head SHA and diff on the remote. Did not re-review.
+
+Awaiting ptone's merge. That is his gate.
