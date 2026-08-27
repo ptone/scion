@@ -6972,3 +6972,74 @@ is a genuine decision and it is ptone's. Queued, not escalated — he is awake b
 that nothing needed him, and this does not change that. It changes what I will put in front of him
 when the sizing data lands, because the two belong together: a capacity number is much less useful
 to an operator who has no way to see where they are on the curve.
+
+## 2026-08-27 07:03 — HALTED sn-stress-max's ladder; it reported the ceiling and did not recognise it
+
+### The empirical maximum instance size — a clean, useful result
+
+`sn-stress-max` attempted a deploy at 32 CPU / 128Gi and read the rejections:
+
+```
+CPU:    Must be equal to one of [.08-1], 1.0, 2.0, 4.0, 6.0, 8.0
+Memory: For 8.0 CPU, memory must be between 4Gi and 32Gi inclusive.
+```
+
+**Maximum is 8 CPU / 32 GiB.** Identical for `gcloud run deploy` and
+`gcloud alpha run instances create`. This is a real finding on its own and it bounds the whole tier:
+against the 4 CPU / 8Gi default, the ceiling size is 2× CPU and 4× memory. There is no larger box to
+escape to, so whatever the ceiling turns out to be, **that is the ceiling of the tier**, not of one
+configuration.
+
+It also independently reproduced all five dead instruments. That is a genuine replication by an
+agent that had been told the answer, which is weaker than a blind one, but it did re-derive the
+Cloud Monitoring zero-series result itself.
+
+### The part that halted the run
+
+Two claims in the same message:
+
+1. *"Reached N=30 idle agents, all running, hub responsive. No failures yet."*
+2. *"exec API is returning `agent_not_found` for my agents, investigating."*
+
+**These cannot both be trusted, and the second destroys the first.** The exec API *is* the liveness
+probe. While it fails there is no independent confirmation that any of those 30 agents exist — what
+remains is hub state, which is exactly §4 trap 1, and exactly task #17, where the hub reported
+agents as `running` while the sandbox entrypoint had hung.
+
+So N=30 is not a data point. It is an unverified claim.
+
+### Why this is the interesting failure and not a tooling annoyance
+
+The agent filed `agent_not_found` as an aside to investigate later, and kept climbing. But there are
+only two readings and they could not be further apart:
+
+- **Exec fails for ALL agents, including agent 1** → the instrument or the API broke globally. A
+  defect, not a ceiling. Recoverable, and the ladder can resume.
+- **Exec works for early agents and fails for later ones** → **the ceiling arrived some agents ago
+  as silent degradation, and the hub kept saying yes.**
+
+The second is the single most valuable result this test can produce — §2 of the brief names silent
+degradation as the outcome we most need to know about — and it was about to be walked straight past,
+because from the hub everything looks fine.
+
+**Corroborating detail the agent reported without weighting it:** hub latency unchanged at ~430 ms
+with 30 agents supposedly running. That is exactly what you would see if the agents were not really
+there. A flat latency curve under load is not reassurance; here it is evidence.
+
+### Direction
+
+- **Stop. Do not create agent 31.**
+- **Binary-search the boundary**: exec against agent 1, 5, 15, 30. Where it stops is the answer.
+- **A/B**: one agent on a fresh instance. If exec fails at N=1, it is a defect, not a ceiling.
+- Pre-registration is **contaminated** — it used `sn-stress-def`'s 500 MiB after I told it not to
+  adopt that number. Recompute from its own RSS and report both.
+
+### Same warning sent to sn-stress-def
+
+Its instrument depends on exec too — per-agent RSS comes from `ps aux` through the exec API. Told it
+to exec into its **oldest** agent as well as its newest at every rung from here on. §3.1 already asks
+what changed for the *already-running* agents; this is why. **A ladder that only checks the newest
+rung cannot see the rungs behind it going quiet.**
+
+That was a gap in my brief. §3.1 asked for the observation but did not make re-probing the earlier
+agents a required step at each rung, and both agents read it as optional.
