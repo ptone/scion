@@ -708,6 +708,119 @@
     the fact that dominates the grep: **`git diff origin/main 71b65292 -- pkg/hub` is empty** — A
     does not merely avoid importing `pkg/messaging` from hub, it does not touch `pkg/hub` at all.
 
+43. **A diff names two trees; if one of them is not the branch's base, the diff is not the branch's
+    change.** Issued 2026-08-27 21:31Z. **My error, ten minutes after I quoted rule 25 at em6.**
+
+    I strengthened em6's dormancy warrant with `git diff origin/main 71b65292 -- pkg/hub` → empty,
+    called it "better evidence than the grep," and handed em10 a rebase invariant built on it. The
+    diff compares A to **current main**, not to **A's base** `b09e7f49`. It returned empty only
+    because main has not touched `pkg/hub` since A was cut.
+
+    **The same shape on `cmd/` shows what it costs:**
+
+    ```
+    git diff --stat c13d910b 71b65292 -- cmd
+      cmd/deploy_instance.go     | 828 +
+      cmd/deploy_script_test.go  | 655 -
+      6 files changed, 1566 insertions(+), 866 deletions(-)
+    ```
+
+    Read against main, tranche A adds 828 lines of deploy tooling and **deletes two entire test
+    files**. It does none of that. That is main moving forward, rendered as if the branch had done
+    it. Against its own base, A touches **zero** files in `cmd/` and **zero** in `pkg/hub`.
+
+    **Had a manager shown me that stat block I would have escalated it as a control deletion.**
+    Rule 25 said absence in a tree is indistinguishable from removal, and only the base tells them
+    apart; I wrote it, quoted it at em6 at 21:20Z, and then reached for main at 21:27Z because main
+    was the thing I cared about. **The question you care about does not select the tree you compare
+    against.**
+
+    **Corollary — the coincidence is silent and expires without notice.** Diffing against main
+    gives the right answer for exactly as long as main sits at the base, and nothing announces the
+    moment it stops. Every base-relative check has to name its base SHA in the report, so the claim
+    can be audited instead of the number.
+
+    **Corollary — prefer tree scans to diffs for reachability claims.** em6's tree-wide grep ("no
+    file outside `pkg/messaging` references it") inspects one tree and raises no base question at
+    all. I demoted the sound check in favour of the unsound one because the unsound one was
+    tidier. **When a claim is about what a tree contains, do not answer it with a comparison.**
+
+44. **A branch stops being editable when its compare URL leaves your hands, not when it turns
+    green.** Issued 2026-08-27 21:37Z.
+
+    em6 wrote that tranche A "is frozen at `17986b10`." It was not — it had been frozen at
+    `71b65292` until I rebased it twenty minutes earlier. The real constraint is that **A's SHA must
+    not move once ptone holds a compare URL**, because he opens the PR from that URL: a head moving
+    under an open review is a different and worse problem than a head moving before one.
+
+    The cost was concrete. DEF-26 (the AC-DEF8-1 placeholder rename) lives in
+    `pkg/messaging/resolve_test.go`, which **only tranche A carries**. There was a window in which
+    it could have ridden A to main. I closed that window by rebasing before deciding, and DEF-26
+    now needs a standalone follow-up PR — a carrier it would not otherwise have required.
+
+    **Procedure for tranches B-F: before generating a tranche's URL, ask once whether anything else
+    belongs in the cut.** It is far cheaper than discovering an orphan afterwards, and "no" is a
+    fine answer as long as it was asked. **Record the freeze as an event with a time, not as a
+    property of the branch** — the difference between "A is frozen" and "A froze at 21:4xZ when the
+    URL went out" is the difference between a fact you can act on and one you cannot.
+
+45. **A gate is worth the completeness of its enumeration, and a guard you have never seen fail is
+    a guard you have not tested.** Issued 2026-08-27 21:36Z, from em9's DEF-20 rework.
+
+    em9 built the CI guard I asked for and reported "Guard passes: zero violations." That is
+    green-on-clean. I mutated it — two minted conversations dropped into `pkg/hub`:
+
+    ```
+    UpsertConversationByExternalRef  -> guard fires, rc=1
+    CreateConversation               -> "no violations", rc=0
+    ```
+
+    `store.CreateConversation` (`store.go:1606`) is a public, unguarded second sink. No `pkg/hub`
+    caller today — **which is exactly what was true of the four paths we had just finished
+    fixing.** A hub author wanting to create a conversation reaches for the method named
+    `CreateConversation`, and the gate waves them through.
+
+    **This is rule 40 one level down, and this time in the fix rather than the spec.** The guard
+    names a function; the property is "no conversation is minted outside the messaging layer." I
+    deliberately did **not** tell em9 to add `CreateConversation` — I told them to enumerate the
+    minting surface and report *how* they enumerated it, because patching the one hole I happened
+    to find is the same mistake at a smaller scale.
+
+    **Corollary — rule 23 applies to CI gates, not only to test tripwires.** Every new gate needs
+    both transcripts: the mutation it catches, and a plausible mutation it does not. The second one
+    is the deliverable; the first is table stakes.
+
+    **Corollary — an unexplained exclusion is the next person's blind spot.** The guard excludes
+    `*_test.go`, which is probably right for fixtures. Unstated, it is indistinguishable from an
+    oversight, and the next reader must re-derive the intent or work around it.
+
+46. **Specify by the condition that must hold; when the evidence is a failing gate, the gate's own
+    exit code is the only acceptance criterion.** Issued 2026-08-27 21:40Z. **Third instance of the
+    same error in one day, all mine.**
+
+    - **DEF-20:** I named `WithTopicLookup`'s three call sites. The property was "nothing mints a
+      conversation for a native topic." The mint had seven entrances.
+    - **The CI guard:** em9 named `UpsertConversationByExternalRef`. The property was "no
+      conversation is minted outside the messaging layer." `CreateConversation` walked through.
+    - **DEF-25:** I named `cmd/message_deprecation_test.go` and its 7 literals. The property was
+      "`make compat-literals` exits 0." `cmd/broadcast_test.go` has 4 more, is absent from main,
+      and is not allowlisted — **so the fix I specified leaves the gate red.**
+
+    **The tell, every time, is that I wrote the spec as a location.** A location is where I found
+    the evidence; it is almost never the condition that has to hold. "Rename these 7 literals" is
+    checkable and wrong; "the gate exits 0" is the actual requirement and happens to be checkable
+    too, at lower cost, by the thing that failed in the first place.
+
+    **Procedure: when a defect's evidence is a gate failure, the AC is the gate, and the deliverable
+    is its exit code pasted into the report.** Not a description of what was changed. The gate is
+    already the oracle — accepting a prose summary instead is choosing the weaker instrument while
+    holding the stronger one.
+
+    **Corollary — "a fix is not on the path to main until it is on the path to main."** em6's DEF-25
+    and DEF-26 commits were pushed to `scion/ca-msg-em6`, and `merge-base --is-ancestor` against
+    staging fails. A fix on a manager branch has exactly the practical status of the "carrier: none"
+    em6 had correctly diagnosed for DEF-26 — **pushed is not landed, and a branch is not a carrier.**
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -869,7 +982,7 @@ tranche A** — asked 19:55Z, unanswered.
 | `origin/main` | **`c13d910b`** | — | moves ~hourly. **Do not cache** (rule 24). |
 | `scion/messaging-v2` | **`80558a03`** | — | staging ground. DEF-12 merged in at 20:47Z, control preservation verified against both parents. Not a merge unit. |
 | `scion/ca-msg-arch` (mine) | `b80b4ad9` | — | pushed |
-| **Tranche A** `scion/ca-msg-em10` | `71b65292` | `b09e7f49` | **VERIFIED GREEN by me. Cut-point audit COMPLETE 21:15Z — ACCEPTED as-is.** `ptone/scion#1319` (**fork** namespace — rule 34 corollary). CI green, MERGEABLE/CLEAN. Awaiting landing gate only. **SHA must not move.** **It is NOT "phases 1-4"** — it carries 17 unchosen post-phase-4 commits incl. DEF-8 ×4, DEF-15, half of DEF-16. **Accepted on an EXPIRING WARRANT: zero of `pkg/hub`'s 454 files reference `pkg/messaging`, so the whole apparatus is production-dormant** (rule 41). Warrant dies when tranche B lands. Omits `divergence.go` + `dm_migration.go` as whole files. |
+| **Tranche A** `scion/ca-msg-em10` | **`17986b10`** | **`c13d910b`** (rebased 21:34Z) | **COMPARE URL SENT 21:39Z — awaiting ptone to open the upstream PR. FROZEN as of 21:39Z (rule 44).** CI green on `ptone/scion#1319`: Build & Test 4m7s, golangci-lint, shellcheck. MERGEABLE/CLEAN. Rebase verified content-neutral: old and new patches byte-identical, 51709 lines. **It is NOT "phases 1-4"** — 17 unchosen post-phase-4 commits incl. DEF-8 ×4, DEF-15, half of DEF-16. **Accepted on an EXPIRING WARRANT: nothing outside `pkg/messaging` references it; zero files changed under `pkg/hub` or `cmd/`** (rule 41). Two-phase expiry: pre-merge "safe to land," post-merge "still unreachable on main"; dies when tranche B lands. Omits `divergence.go` + `dm_migration.go` as whole files. |
 | **Tranche B** `scion/ca-msg-em10-trb` | `9333f943` | `71b65292` (tranche A) | **BLOCKED 20:58Z — STALE CUT POINT (rule 37); spec corrected 21:20Z.** Was green on every gate; cut from `1ff7c6af`, missing `60670c0e` and `cd4ee7ed`. **The A/B seam is a PACKAGE seam** — A took the `pkg/messages`/`pkg/messaging`/`pkg/store` half of all five carry-commits, B owes the exact `pkg/hub` complement. **B is where A's dormant controls go live** — `23f7c820`'s 5 call-site fixes and `69ac6a12`'s hub converge are a merge gate on this branch, not deferrable cargo. |
 | DEF-12 `scion/ca-msg-em6-def12` | `74bcb24c` | `14b3ba7c` | **F1–F4 all resolved and verified by me. MERGED to `messaging-v2` at `80558a03`.** Needs `git rebase --onto origin/main 14b3ba7c` after A lands. |
 | §2.6.4 `scion/ca-msg-em9-unify` | `d053e896` | `1e7bee72` | **REWORK — verdict issued 20:53Z. Phase 4 is inert in production (DEF-20).** See §5aq. |
@@ -1844,6 +1957,114 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5az. 21:33-21:40Z — TRANCHE A URL SENT. Landing protocol, in full.
+
+**THE LANDING PROTOCOL (from `native-chat-lead`, 21:32Z). Applies to all six tranches.**
+
+1. URL form: `https://github.com/GoogleCloudPlatform/scion/compare/main...ptone:<branch>?quick_pull=1&title=<enc>&body=<enc>` — **`quick_pull=1`, not `expand=1`.**
+2. Base: `main` on `GoogleCloudPlatform/scion`.
+3. **The shared remote IS the `ptone/scion` fork**, so the branch name in the URL is just the branch name on origin.
+4. Title: conventional-commit, <70 chars. Body: `## Summary` bullets, `## Test plan` checkboxes. Fork issues referenced as `ptone/scion#N`, **never bare `#N`** — that resolves against upstream.
+5. Rebase onto current main first; clean fast-forward preferred.
+6. **Send the URL to Discord thread `1532864101909528737`, not the working thread.**
+7. **Verify CI green via `gh pr checks` on the fork staging PR BEFORE sending.**
+8. URL-encode with `python3 -c 'import urllib.parse; print(urllib.parse.quote(...))'`.
+
+**Executed for tranche A.** Rebase `b09e7f49` → `c13d910b`, new head **`17986b10`**. Clean by
+construction and I checked it rather than trusting it: A changes 59 files, main changed 9 since A's
+base, **intersection empty**. Then the check that actually matters — `git diff b09e7f49 71b65292`
+vs `git diff c13d910b 17986b10`: **byte-identical, 51709 lines each.** The branch's change is
+untouched; only its base moved. Local gates green, then CI on `ptone/scion#1319`: Build & Test 4m7s
+pass, golangci-lint pass, shellcheck pass, **MERGEABLE / CLEAN**. URL sent 21:39Z.
+
+**Protocol defect found in the doing: the URL did not fit the channel.** Fully encoded it was
+**2304 chars against `scion message`'s 2000 cap** — the URL alone was unsendable. Trimmed the body
+to land at 1637. **The practical ceiling is ~700-800 chars of raw PR body**; longer descriptions go
+as a follow-up message in the same thread. This will recur on every tranche, so it belongs in the
+protocol, not in my head.
+
+**em10 notified immediately** — B is cut from A, so A's SHA move relocated B's base mid-flight.
+Sent them `git rebase --onto 17986b10 71b65292 <branch>` with the warning that a plain
+`git rebase 17986b10` replays against the wrong merge base and drags A's own commits into range.
+Doing this while em10 was still re-cutting was the cheap moment; after they finished it would have
+been a redo.
+
+**Rule 44 came out of the cost I paid.** DEF-26 lives in `resolve_test.go`, which **only tranche A
+carries**. I rebased before settling what else belonged in the cut, so it now needs a standalone
+follow-up PR. em6 called A "frozen"; it was not frozen, it froze at 21:39Z when the URL went out.
+**Freeze is an event with a time, not a property of a branch.**
+
+## 5ay. 21:32-21:37Z — em9's rework is right, and its guard has a hole I proved
+
+**Accepted:** the sink-level intercept in `ResolveOrCreateConversationByKey`, all four functional
+options, all seven paths routed, the CI gate, the integration test, and DEF-22's startup-ordering
+trace (`initStore`/`Migrate` at `server_foreground.go:192`, webchat `Init()` at 596-609, sequential
+in `runServerStart`, no goroutines — evidence, not assumption). em9 also retracted the
+compat-literals misattribution unprompted.
+
+**Two things I checked because they were the load-bearing risks, and both came back clean.**
+`WithSurface` is only reachable behind `req.Surface != ""` (`handlers_broker_inbound.go:213`), so
+the `"native"` default cannot silently re-key an existing conversation — surface is half the upsert
+key, so this mattered. And nil-on-infra-error does **not** drop the message: `if convResult != nil
+{ storeMsg.ConversationID = ... }` stores it unlinked. Fail-closed costs a missing link, not a lost
+message — rule 29 satisfied. Their comment *"Always log divergence — even when convResult is nil,
+that is a divergence signal"* makes the degraded state observable, which is the best line in the
+changeset.
+
+**F1 — the gate has a hole, mutation-proved (rule 45).** em9 reported "guard passes: zero
+violations," which is green-on-clean. I dropped two minted conversations into `pkg/hub`:
+`UpsertConversationByExternalRef` → fires, rc=1; **`CreateConversation` → "no violations", rc=0.**
+`store.CreateConversation` is a public unguarded second sink with no hub caller *today* — exactly
+what was true of the four paths we just fixed. **I did not tell em9 to add it**; I told them to
+enumerate the minting surface and report how, because patching the one hole I found is my own
+DEF-20 mis-scope at smaller scale.
+
+**F2 — `len(parts) == 3` skips the guard.** `thread:abc` has the prefix, fails the length test,
+falls through, mints. The original defect's exact shape: a condition that skips the guard and
+reaches the sink. `DeriveConversationKey` always emits three parts, but four handler sites pass
+`extRef` in directly, so that guarantee is a convention, not a type.
+
+## 5ax. 21:29-21:33Z — the landing gate opens, and I break rule 25 in my own hand
+
+**LANDING PROTOCOL ANSWERED (user, 21:31Z):** *"ask the coordinator for a refresher on our compare
+URL protocol, you send a specific URL - i open the PR."* **The gate that has blocked tranches A and
+B since 19:55Z is now open.** Asked `native-chat-lead` (the dispatching coordinator) for the exact
+form rather than guessing it: URL shape, base branch, whether the branch must first be pushed to the
+`ptone/scion` fork, house PR-description format, and whether a rebase onto current main is expected
+before the URL goes out. Five tranches follow A, so this is worth getting exact once.
+
+My working assumption, to be confirmed or corrected:
+`https://github.com/GoogleCloudPlatform/scion/compare/main...ptone:scion:<branch>?expand=1`
+
+**Rule 43 — my error, and the ugly part is the timing.** At 21:20Z I quoted rule 25 at em6:
+absence in a tree is indistinguishable from removal, only the base tells them apart. At 21:27Z I
+told em6 that `git diff origin/main 71b65292 -- pkg/hub` (empty) was "better evidence than the
+grep," and handed em10 a rebase invariant built on it. Wrong tree. A's base is `b09e7f49`; main is
+`c13d910b`. The check returned empty by luck.
+
+`cmd/` is the proof: against main, A appears to add 828 lines of deploy tooling and **delete
+`cmd/deploy_script_test.go` (-655) and `cmd/deploy_script_pin_test.go` (-210)**. Against its base, A
+touches `cmd/` not at all. **Had a manager put that stat block in front of me I would have
+escalated it as a control deletion** — which is exactly the failure rule 25 exists to prevent.
+
+**The conclusion survives; the evidence did not.** Base-relative: `git diff b09e7f49 71b65292 --
+pkg/hub` and `-- cmd` are both empty. And em6's tree-wide grep was always the stronger check because
+it inspects one tree and raises no base question — **I demoted the sound check for the tidier one.**
+Corrected to both managers; told em10 to state B's base SHA in their report so the claim is
+auditable rather than the number.
+
+**DEF-25 and DEF-26 dispatched to em6** with the part that matters attached: **neither fix has a
+carrier.** A took `resolve_test.go` and its SHA must not move, so DEF-26 cannot go into A; DEF-25's
+file rides tranche F. em6 owes the carrier for each, and *"none"* is an acceptable answer only if
+it is said out loud. **A fix with no carrier does not land — it just stops being visible on
+staging, which is how we stopped reading staging in the first place.**
+
+On DEF-25 I read `hack/check-project-compat-literals.sh` before specifying (rule 22). It is a path
+allowlist whose header invites new entries "with intent." All 7 literals are fixture project IDs
+(`grove-depr-bcast`, ...) copied from the allowlisted `cmd/message_test.go`. **Directed: rename the
+fixtures, do not extend the allowlist** — allowlisting would record an intent that does not exist,
+and every intentless entry makes the next real one harder to see.
 
 ## 5aw. 21:26-21:29Z — the audit's headline was wrong, and the thing it missed was better
 
