@@ -206,7 +206,19 @@ Two consequences the corrected mechanism produces that the original did not:
    on the first execution, every time, not intermittently under load. This is a violation that
    cannot hide in CI. AC-U-10.
 
-**Cost 3 — `fn` must be idempotent, which nothing currently tells its callers.**
+**USE A PLAIN TRANSACTION, NOT `RunSerializable`. Fork resolved 18:33Z on nc-arch's challenge.**
+`CreateTopic` is a single `INSERT` with no read (`webchannel_store.go:666-682`), and the
+conversation write is also a pure insert. Two inserts need no read-then-write snapshot. Concurrent
+creates collide on `idx_webchat_topic_project_name` as a **constraint violation, not a `40001`**,
+so `RunSerializable`'s retry can never fire — it would contribute nothing while imposing the
+idempotency burden below. Use a plain `BeginTx`/`Commit` on the shared handle, still with
+`entsql.Conn{ExecQuerier: tx}` for the ent write. **INVARIANT U-TX-1 still applies in full** — it
+is a property of holding the one connection, not of the isolation level.
+
+Cost 3 is therefore **avoided by construction rather than managed**, and is retained here only
+because it becomes mandatory the moment anyone adds a read inside the block:
+
+**Cost 3 (conditional) — `fn` must be idempotent, which nothing currently tells its callers.**
 `RunSerializable` retries `fn` up to `maxSerializableRetries` on serialization failure
 (`locking.go:281-308`). Its ent-native sibling `runSerializableEntTx` documents this loudly —
 *"fn MUST be idempotent — it can be invoked more than once"* — and **`RunSerializable` carries the
@@ -349,14 +361,17 @@ every native read through Ent, replacing working shipped code for no user-visibl
   `webchat_user_prefs`, or `webchat_dm`. Assert the row counts and checksums of those three tables
   are identical before and after backfill.
 - **AC-U-10** *(from the corrected §3.4 mechanism.)* An ambient-pool call inside the atomic block
-  is caught. Add a deliberate `s.db` read inside the block in a test build and assert it **hangs
-  to context deadline** on SQLite rather than succeeding. Deterministic at `MaxOpenConns=1`, so
-  this cannot be flaky. *Verifies the invariant is real, not merely documented.*
-- **AC-U-11** No UUID is generated inside the `RunSerializable` closure. Static check — invoking
-  `fn` twice must produce identical ids. **`attempts=1` on SQLite, so a test that only runs SQLite
-  cannot see this**; the check must be structural or run against Postgres.
-- **AC-U-12** The topic-created event is published **after** commit. Assert no event is emitted
-  when the transaction rolls back.
+  is caught. Add a deliberate `s.db` read inside the block in a test build and assert it **hangs**
+  on SQLite rather than succeeding. **Use a short-deadline context and assert
+  `context.DeadlineExceeded`** (nc-arch's refinement) so the test proving the hang is itself
+  bounded and cannot wedge the suite. Deterministic at `MaxOpenConns=1`, so it cannot be flaky.
+  *Verifies the invariant is real, not merely documented.*
+- **AC-U-11** *(dropped — the plain-tx decision removes the retry entirely. Reinstate if any read
+  is ever added inside the block.)*
+- **AC-U-12** The topic-created event is published **after** commit — `handlers_chat_v2.go:470`
+  publishes inside today. Assert no event is emitted when the transaction rolls back. **This one
+  survives the plain-tx decision**: an event for a rolled-back row is wrong with or without
+  retries.
 
 ---
 
