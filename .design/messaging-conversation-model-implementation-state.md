@@ -903,6 +903,29 @@
       caught it. **Where two implementations share an author, they share a blind spot; test them
       separately or the second run is decoration.**
 
+      **Generalised by `nc-arch` 22:03Z, and their form is better than mine — adopted as standing:**
+      *every* `webchat_*` table is a dual SQLite/Postgres implementation written from one template;
+      that is the surface's convention. So template bugs are **systematically** correlated, and a
+      parity assertion passes on a shared-template bug **by construction** — it is not a weak test,
+      it is one that cannot fail in that direction. **Correctness tests pin each backend to the
+      spec independently; parity is an additional check, never the only one.** Now a wave-2
+      design-review gate on native chat: no shared lookup may serve both a visibility caller and an
+      identity/existence caller.
+
+    - **Corollary — a checked negative scopes the work.** nc-arch scanned the shipped webchat
+      surface for the same dual-question shape and found it clean (`GetTopic:691`, `ListTopics:724`,
+      general-topic `:863` all filter correctly; the unfiltered `is_general` read at `:803` is a
+      benign idempotent delete-path check). So DEF-27 has **never shipped** and needs **no data
+      remediation**. Without that scan the defensible assumption is that production is affected, and
+      em9 builds a migration for an empty set and then has to justify running it. **A negative
+      result that was actually checked is worth more than the fix it scopes.**
+
+    - **The unifying form, after three instances in one hour at three layers:** DEF-27's lookup
+      filter, the D-1 query's `external_ref != ''`, and that query's NULL handling. **Any predicate
+      that narrows a result set is a claim about what may safely be ignored, and it owes the same
+      justification as the code it protects.** For lookups that is split-by-question; for queries,
+      justify every filter; for nullable columns, NULL means violation-found, not row-invisible.
+
 52. **A zero-rows check is only as good as its NULL handling.** Issued 2026-08-27 22:01Z. In SQL's
     three-valued logic `NULL NOT LIKE '...'` is NULL, not TRUE, and WHERE returns only TRUE — so
     every row with a NULL in the predicate is **silently dropped from a violation query**. The
@@ -1106,7 +1129,7 @@ is a queue, not a blocker.
 | **Tranche A cut-point audit** | **DONE 21:15Z — 17 unchosen commits, verdict ACCEPT (§5av, rule 41). Follow-on D2/D3/D4 accepted 21:27Z (§5aw).** Golden vectors confirmed in A; omissions clean; warrant strengthened to `git diff origin/main 71b65292 -- pkg/hub` = **empty**. Remaining: re-issue D1 with the AC-DEF8-1 correction (it IS runnable and passes — rule 42) and file the **`resolve_test.go:1099` green-placeholder defect** (a second test named AC-DEF8-1 that only calls `Resolve` twice; rename or delete). | **em6** | correction issued 21:27Z |
 | **Four A-ACs deferred into B's merge** | 23f7c820's 5 handler call-site fixes; AC-DEF15-1 (source confinement); AC-DEF15-4 (invalid `dm:` → zero rows); AC-DEF16-1 (validation before creation). **These are tranche A's ACs, not B's** — not covered by AC-B-1..9, must be reported by name. AC-DEF15-1 + `b7651af9`'s unexport are one control in two files: **both or neither**. | **em10** | added to B's spec 21:28Z |
 | DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
-| **DEF-27 — soft-deleted native topic gets a shadow conversation** | **RELEASE BLOCKER for §2.6.4.** Found by `nc-arch` 21:59Z, verified by me on both backends. `GetTopicConversationID` filters `deleted_at IS NULL` (`webchannel_store.go:1364`, `webchannel_store_postgres.go:978`); `DeleteTopic` is soft. A tombstoned topic answers `ErrNotFound` → guard mints. Reachable: agent/broker paths validate DM-key *format* only, never topic existence; trigger is a human deleting a thread mid-agent-turn. **Root cause is one function answering two questions with opposite `deleted_at` needs — split it (rule 51).** Spec: `def27-spec.md`, 6 ACs. **Does NOT affect #1331** (tranche A is dormant, no `pkg/hub`). | **em9** | dispatched 22:01Z |
+| **DEF-27 — soft-deleted native topic gets a shadow conversation** | **RELEASE BLOCKER for §2.6.4.** Found by `nc-arch` 21:59Z, verified by me on both backends. `GetTopicConversationID` filters `deleted_at IS NULL` (`webchannel_store.go:1364`, `webchannel_store_postgres.go:978`); `DeleteTopic` is soft. A tombstoned topic answers `ErrNotFound` → guard mints. Reachable: agent/broker paths validate DM-key *format* only, never topic existence; trigger is a human deleting a thread mid-agent-turn. **Root cause is one function answering two questions with opposite `deleted_at` needs — split it (rule 51).** Spec: `def27-spec.md`, 6 ACs. **Does NOT affect #1331** (tranche A is dormant, no `pkg/hub`). **CONTAINED TO THE BRANCH — nc-arch scanned the shipped surface and it is clean, so NO data remediation; em9 told explicitly not to write a migration** (22:04Z). Per-backend independent tests now standing for the whole webchat surface, not a DEF-27 special case. | **em9** | dispatched 22:01Z, scoped 22:04Z |
 | **AC-12-6 (populated-DB exercise)** | beta-hub exercise scheduling. **Verification design now settled with integration2-operator (22:00Z):** snapshot is stop → `wal_checkpoint(TRUNCATE)` → cp → start, so restore is safe; explicit `backfill --dry-run` then `--execute` first, startup detection as *second* confirmation; atomicity treated as unknown, restore preferred over resume. **Three correctness checks added beyond the NULL count, which measures completeness only:** (a) convergence — `direct` conversations vs distinct principal pairs, with **fewer** being the STOP condition (collision = over-granting); (b) round-trip every backfilled DM through the **production** `ParseDMKey`, not a second parser; (c) INVARIANT D-1 on real data, kind-qualified. Review found and fixed: a kind-blind predicate that could not see kind confusion, an `external_ref != ''` filter excluding the worst rows, and two NULL holes (rules 51, 52). | **user** (scheduling) | design closed 22:02Z |
 | **§2.6.4 phases 1-4** | **ACCEPTED 21:56Z at `1aefd1e0`**, one doc item outstanding (guard header must state its residual). DEF-20 closed at the sink; F1 (guard hole) and F2 (malformed `thread:` ref) both closed and **independently re-verified by me** — my `INSERT OR IGNORE` and lowercase mutants now RC=1. **Accepted residual, documented not chased:** line-broken SQL and `fmt.Sprintf("INSERT INTO %s", tbl)` both evade any line-oriented grep. **Durable fix is structural and is MINE, phases 5-7:** `pkg/hub` should have no raw SQL path to `conversations` at all, at which point the control is the type system and there is no residual. **NOT YET CARRIED** — base `1e7bee72` is far behind `c13d910b`; carrier decided after #1331 lands. em9 pre-computing its aggregate-file list against the eventual rebase. | **me** (carrier) | accepted 21:56Z |
 | ~~§2.6.4 phases 1-4 (prev)~~ | ~~DEF-21 ✅ DEF-23 ✅ DEF-22 ✅ pending startup-ordering evidence. DEF-20 REOPENED~~ at `eb6c62a9` — mint has ≥7 entrances, three are guarded. Directed: drop the `Channel=="web"` predicate (sentinel makes it redundant), move the lookup into `ResolveOrCreateConversationByKey`, route the two direct `UpsertConversationByExternalRef` callers through it, add a CI grep gate. Plus the production-path integration test. **The mis-scope was mine (rule 40).** | **em9** | reopened 21:14Z |
