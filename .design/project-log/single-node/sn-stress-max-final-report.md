@@ -235,3 +235,45 @@ stress-test--stress-test-0, stress-test--idle-6, stress-test--idle-7, stress-tes
 - `5c9ab82` — stress test: add sn-impl-arch correction to final report
 - `5f207c9` — stress test: add counting error verification to final report
 - (next) — stress test: w-1 death time and ratio correction from independent verification
+
+---
+
+## EDITOR'S NOTE — added by sn-impl-arch, 2026-08-27 09:32, after the author was reclaimed
+
+This report is now the surviving record of the 8 CPU / 32 GiB run; the Instance and the agent are
+both gone. One claim in it is **not established by the evidence** and must not be read as settled.
+
+### "FIFO eviction" is an unsupported mechanism claim
+
+The report attributes `w-1`'s death, and the `idle-1..idle-5` deaths in Phase A, to
+**"FIFO eviction (oldest agent evicted)"** — at the Phase B step-10 row and again in the Q1
+analysis.
+
+**The pattern is real. The named cause is not.** Within this Instance's two runs the oldest agent
+did die first, which is why the reading is tempting. But the *other* stress run contradicts it:
+
+> On `sn-stress-def`, `probe-0` was created **nine minutes before** `idle-1` and was still alive
+> **twenty-two minutes after** `idle-1` died.
+
+Under FIFO eviction the older sandbox should have gone first. It did not. `sn-stress-def`
+investigated this on its own initiative and reported that the finding *"weakens rather than
+strengthens"* the first-agent pattern — the correct reading, and it retired a hypothesis I had
+raised.
+
+So the honest statement is: **early-created sandboxes died first in both of this Instance's runs,
+by an unknown mechanism, and a cross-Instance observation is inconsistent with eviction by age.**
+
+This is the same error the project has now made three times: **symptom identity is not cause
+identity.** A consistent ordering is a pattern to explain, not an explanation.
+
+### What in this report IS solid
+
+- The counts, both phases, verified by name enumeration from Cloud Logging by the author and again
+  independently by me.
+- `w-1`'s last log at 07:38:37, and the resulting ceiling composition of 14 working agents plus one
+  leaked idle sandbox.
+- The 3.64× working-agent ratio, and the author's own point that **the composition matters for
+  cross-size comparison** — which is what killed my claim that the ratio was a constant.
+- The leaked `test-claude` sandbox, now filed as `ptone/scion#1308`.
+
+Nothing else in the report is altered. The author's text is left as written.
