@@ -1001,6 +1001,28 @@
       FAIL with an assertion naming the mint; paste both the failing and the restored run." That is
       checkable by me without reading their tests, and it cannot be satisfied by a vacuous double.
 
+54. **A template fix applied to one sibling and not the rest reads as deliberate — which is why review
+    passes it.** Issued 2026-08-27 22:26Z, from DEF-28. `UpsertConversationByExternalRef`'s update
+    branch guards four optional fields (`DisplayName`, `DriftState`, `ProjectID`, `DefaultAgentID`)
+    and leaves `SetParentRef(conv.ParentRef)` unconditional — **and the comment explaining why the
+    guard exists sits one line BELOW the call that does the thing it warns about.**
+
+    - **This is the inverse of rule 26, and the more dangerous direction.** DEF-27 was one mistake
+      replicated across siblings — findable by looking at the second implementation. This is one *fix*
+      replicated to some siblings and not others, and the surrounding guards make the omission look
+      intentional. A reviewer scanning for "is this field handled" sees four that are and stops.
+    - **The regression test that would have caught it already existed, for the sibling.**
+      `TestUpsert…_EmptyDisplayNamePreservesExisting` is exactly the right test and was never
+      generalised. **When you write a preservation test for one optional field, enumerate the others
+      in that struct and say why each does or does not need the same test.**
+    - **Procedure, cheap and mechanical:** at any update path that copies a struct onto a row, list
+      every optional field and confirm each has the same guard discipline. Asymmetry is the finding.
+    - **nc-arch had the right instinct and the wrong column.** They asserted an unconditional
+      `SetDisplayName`; it is guarded, with a test. I checked because the claim was load-bearing for
+      my phase 5-7 spec — and the check found the real defect one line up. **Verifying someone's
+      supporting fact is worth doing even when you intend to accept their conclusion**; their
+      conclusion here stood on its other two arguments regardless.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -1190,6 +1212,7 @@ is a queue, not a blocker.
 | **Tranche A cut-point audit** | **DONE 21:15Z — 17 unchosen commits, verdict ACCEPT (§5av, rule 41). Follow-on D2/D3/D4 accepted 21:27Z (§5aw).** Golden vectors confirmed in A; omissions clean; warrant strengthened to `git diff origin/main 71b65292 -- pkg/hub` = **empty**. Remaining: re-issue D1 with the AC-DEF8-1 correction (it IS runnable and passes — rule 42) and file the **`resolve_test.go:1099` green-placeholder defect** (a second test named AC-DEF8-1 that only calls `Resolve` twice; rename or delete). | **em6** | correction issued 21:27Z |
 | **Four A-ACs deferred into B's merge** | 23f7c820's 5 handler call-site fixes; AC-DEF15-1 (source confinement); AC-DEF15-4 (invalid `dm:` → zero rows); AC-DEF16-1 (validation before creation). **These are tranche A's ACs, not B's** — not covered by AC-B-1..9, must be reported by name. AC-DEF15-1 + `b7651af9`'s unexport are one control in two files: **both or neither**. | **em10** | added to B's spec 21:28Z |
 | DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
+| **DEF-28 — `UpsertConversationByExternalRef` silently erases `parent_ref`** | Found by me 22:25Z while verifying an nc-arch premise. `conversation_store.go:400` update branch does `SetParentRef(conv.ParentRef)` **unconditionally** while all four sibling optional fields are guarded — and the comment justifying the guard sits one line below it. Only writer is `derive_key.go:196` (conditional); DM path, both `resolve.go` sites and `backfill.go` never set it, so any resolve of an existing threaded conversation erases the parent with no error. DM path re-upserts per message → re-clobbers continuously. No preservation test exists (`DisplayName` has one; never generalised — rule 54). Ships in tranche A, file absent from main. Fix = guard it; trade-off accepted (upsert can no longer *clear* `parent_ref`; re-parenting needs its own method). Acceptance = faithful mutation naming the erased parent. | **em10** | dispatched 22:25Z, additive on #1331 |
 | **DEF-27 — soft-deleted native topic gets a shadow conversation** | **RELEASE BLOCKER for §2.6.4.** Found by `nc-arch` 21:59Z, verified by me on both backends. `GetTopicConversationID` filters `deleted_at IS NULL` (`webchannel_store.go:1364`, `webchannel_store_postgres.go:978`); `DeleteTopic` is soft. A tombstoned topic answers `ErrNotFound` → guard mints. Reachable: agent/broker paths validate DM-key *format* only, never topic existence; trigger is a human deleting a thread mid-agent-turn. **Root cause is one function answering two questions with opposite `deleted_at` needs — split it (rule 51).** Spec: `def27-spec.md`, 6 ACs. **Does NOT affect #1331** (tranche A is dormant, no `pkg/hub`). **CONTAINED TO THE BRANCH — nc-arch scanned the shipped surface and it is clean, so NO data remediation; em9 told explicitly not to write a migration** (22:04Z). Per-backend independent tests now standing for the whole webchat surface, not a DEF-27 special case. **REJECTED 22:19Z at `f1745506` — fix correct, tests do not cover the defect.** All 10 `TestDEF27_*` are store-level; `grep -c ResolveOrCreateConversationByKey` = 0. I reintroduced the defect at `derive_key.go:164` and all 10 passed (edge verified: `pkg/hub` imports `pkg/messaging`, so the mutant WAS linked). Second finding sent with the first: `mockTopicLookup`'s two methods are byte-identical, so the obvious sink test would have been vacuous. Rework = sink-level AC-27-1 against the real store both backends + give the mock a `deleted` concept; acceptance is my mutation failing. Rule 53. | **em9** | dispatched 22:01Z, scoped 22:04Z, **rejected 22:19Z** |
 | **AC-12-6 (populated-DB exercise)** | beta-hub exercise scheduling. **Verification design now settled with integration2-operator (22:00Z):** snapshot is stop → `wal_checkpoint(TRUNCATE)` → cp → start, so restore is safe; explicit `backfill --dry-run` then `--execute` first, startup detection as *second* confirmation; atomicity treated as unknown, restore preferred over resume. **Three correctness checks added beyond the NULL count, which measures completeness only:** (a) convergence — `direct` conversations vs distinct principal pairs, with **fewer** being the STOP condition (collision = over-granting); (b) round-trip every backfilled DM through the **production** `ParseDMKey`, not a second parser; (c) INVARIANT D-1 on real data, kind-qualified. Review found and fixed: a kind-blind predicate that could not see kind confusion, an `external_ref != ''` filter excluding the worst rows, and two NULL holes (rules 51, 52). | **user** (scheduling) | design closed 22:02Z |
 | **§2.6.4 phases 1-4** | **ACCEPTED 21:56Z at `1aefd1e0`**, one doc item outstanding (guard header must state its residual). DEF-20 closed at the sink; F1 (guard hole) and F2 (malformed `thread:` ref) both closed and **independently re-verified by me** — my `INSERT OR IGNORE` and lowercase mutants now RC=1. **Accepted residual, documented not chased:** line-broken SQL and `fmt.Sprintf("INSERT INTO %s", tbl)` both evade any line-oriented grep. **Durable fix is structural and is MINE, phases 5-7:** `pkg/hub` should have no raw SQL path to `conversations` at all, at which point the control is the type system and there is no residual. **NOT YET CARRIED** — base `1e7bee72` is far behind `c13d910b`; carrier decided after #1331 lands. em9 pre-computing its aggregate-file list against the eventual rebase. | **me** (carrier) | accepted 21:56Z |
@@ -2150,6 +2173,47 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5bf. 22:24-22:27Z — naming settled by nc-arch; verifying their premise found DEF-28
+
+**Conversation naming: option (a) — the row carries NO name.** nc-arch's ruling, adopted. §2.6.4 phases 5-7
+unblocked. The tx-scoped ent client simply must not call `SetDisplayName`; `display_name` is
+`Optional().Default("")`, so the create path is never forced to name the row. Non-native surfaces render a
+native topic's name by resolving through the link (`SELECT name FROM webchat_topic WHERE conversation_id = ?`
+on the unique `idx_webchat_topic_conversation`). Native chat stays sole source of truth. **The decisive
+argument is their third: "explicitly non-authoritative" is not a stable state for a populated column — it gets
+read by accident and then relied upon, so the only safe non-authority is absence.**
+
+**Their DEF-27 interaction goes into the spec verbatim:** name-for-display is a *visibility* question and must
+filter `deleted_at IS NULL` — a tombstoned topic renders `[deleted]`, never a stale name. So the name accessor
+belongs on the **hide**-deleted side of the split, not the see-deleted identity accessor. Three call sites,
+named by question: name-for-display (hide), live-link-target (hide), is-this-ours (see).
+
+**But their point 1 was wrong, and checking it found DEF-28.** They asserted `UpsertConversationByExternalRef`
+does an unconditional `SetDisplayName` that would silently wipe a mirrored name. It does not — it is guarded by
+`if conv.DisplayName != ""` with a regression test. I checked only because the claim was load-bearing for my
+spec. One line above the guard:
+
+    SetParentRef(conv.ParentRef).   // UNCONDITIONAL
+
+`DisplayName`, `DriftState`, `ProjectID`, `DefaultAgentID` — all guarded. `ParentRef` — not. Every caller treats
+it as optional (`derive_key.go:196` is the only writer, and it is conditional; the DM path, both `resolve.go`
+sites and `backfill.go` never set it), so resolving an existing threaded conversation from any of them erases
+the parent silently. em10's DM path re-upserts on **every** message, so it re-clobbers continuously. Ships in
+tranche A; `conversation_store.go` does not exist on main. Dispatched to em10 as an additive commit on #1331,
+with the trade-off named explicitly: guarding means upsert can no longer *clear* `parent_ref`, which I accept —
+re-parenting deserves its own method, not a side effect of a resolve that omitted a field.
+
+**Two lessons, and the second is the one I did not have:**
+- Rule 54. This is the *inverse* of DEF-27's correlated blind spot and the worse direction. One mistake copied
+  across siblings is findable by looking at the sibling. One *fix* copied to four of five siblings makes the
+  omission look deliberate, and review stops at the four that are handled.
+- **Verify a supporting fact even when you intend to accept the conclusion.** I could have taken (a) on the
+  strength of arguments 2 and 3 — which do carry it alone — and never looked. The defect was found by the
+  check, not by the disagreement.
+
+Asked nc-arch whether `parent_ref` is meant to carry native-chat thread parentage or only external surfaces
+(Slack `thread_ts`). If native chat will ever populate it, DEF-28 is data loss on their surface too.
 
 ## 5be. 22:14-22:23Z — heartbeat: DEF-27 rejected on a surviving mutant; three checked negatives
 
