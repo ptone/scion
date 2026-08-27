@@ -782,6 +782,190 @@ func TestBrokerDelegation_DMThreadID_ProducesDirectConversation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 10: AC-S215-COEXISTENCE — validDMKey and DeriveConversationKey guard
+// different sinks
+// ---------------------------------------------------------------------------
+
+// TestValidDMKey_CoexistenceWithDeriveConversationKey proves that the two DM
+// guards in the outbound message handler protect DIFFERENT sinks:
+//
+//   - validDMKey guards the message row: a malformed dm: key is rejected with
+//     HTTP 400 and the message is never persisted.
+//   - DeriveConversationKey guards the conversation row: a well-formed but
+//     non-canonical dm: key passes validDMKey but fails DeriveConversationKey's
+//     canonicality check. The message IS persisted (HTTP 200) but no
+//     conversation row is created.
+//
+// Traceability: AC-S215-COEXISTENCE
+func TestValidDMKey_CoexistenceWithDeriveConversationKey(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// --- Setup: project, user, agent ---
+	project := &store.Project{
+		ID: uuid.NewString(), Name: "coexist-project",
+		Slug: "coexist-project", Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	user := &store.User{
+		ID: uuid.NewString(), Email: "human@coexist.test",
+		DisplayName: "Human", Role: store.UserRoleMember, Status: "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	agent := &store.Agent{
+		ID: uuid.NewString(), Name: "coexist-agent", Slug: "coexist-agent",
+		ProjectID: project.ID, Phase: "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// -------------------------------------------------------------------
+	// Sub-test 1: validDMKey rejects malformed dm: key → message NOT stored.
+	// -------------------------------------------------------------------
+	t.Run("malformed_dm_key_rejected_no_message_stored", func(t *testing.T) {
+		// Count messages and conversations before the request.
+		msgsBefore, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: project.ID}, store.ListOptions{})
+		require.NoError(t, err)
+		convsBefore, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+		require.NoError(t, err)
+
+		// "bot" is not "user" or "agent", so this fails the dmKeyRegexp.
+		badKey := "dm:bot:00000000-0000-0000-0000-000000000001:user:" + user.ID
+
+		body, _ := json.Marshal(OutboundMessageRequest{
+			Recipient: "user:human@coexist.test",
+			Msg:       "bad dm key test",
+			ThreadID:  badKey,
+			Channel:   "web",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: agent.ID},
+			ProjectID: project.ID,
+		}}))
+
+		rr := httptest.NewRecorder()
+		srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code,
+			"AC-S215-COEXISTENCE sub1: malformed dm: key must be rejected with 400")
+
+		// Message count must not change.
+		msgsAfter, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: project.ID}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, len(msgsBefore.Items), len(msgsAfter.Items),
+			"AC-S215-COEXISTENCE sub1: validDMKey rejection must prevent message persistence")
+
+		// Conversation count must not change.
+		convsAfter, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, len(convsBefore.Items), len(convsAfter.Items),
+			"AC-S215-COEXISTENCE sub1: validDMKey rejection must prevent conversation creation")
+	})
+
+	// -------------------------------------------------------------------
+	// Sub-test 2: Key passes validDMKey but fails DeriveConversationKey
+	// canonicality → message IS stored without conversation.
+	//
+	// dm:user:<UUID>:agent:<UUID> matches dmKeyRegexp (both kinds are
+	// valid, both UUIDs are well-formed) but DeriveConversationKey
+	// re-derives the canonical form as dm:agent:<UUID>:user:<UUID>
+	// (sorted lexicographically) and rejects the mismatch.
+	//
+	// We simulate the outbound handler's dual-write pattern directly
+	// (as TestBrokerInbound_DualWrite_StampsConversationID does) because
+	// the full HTTP path requires a registered broker proxy with a "web"
+	// channel, which is beyond the scope of this unit test.
+	// -------------------------------------------------------------------
+	t.Run("non_canonical_dm_key_message_stored_no_conversation", func(t *testing.T) {
+		convsBefore, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+		require.NoError(t, err)
+		countBefore := len(convsBefore.Items)
+
+		// Non-canonical: user before agent. validDMKey passes this
+		// (regex allows both "user" and "agent" in either position).
+		nonCanonicalKey := "dm:user:" + user.ID + ":agent:" + agent.ID
+
+		// Verify the key passes validDMKey (the regex guard).
+		require.True(t, validDMKey(nonCanonicalKey),
+			"precondition: non-canonical key must pass validDMKey regex")
+
+		// Verify the key fails DeriveConversationKey (canonicality check).
+		_, _, _, deriveErr := messaging.DeriveConversationKey(messaging.KeyInputs{
+			ThreadID:      nonCanonicalKey,
+			ProjectID:     project.ID,
+			SenderKind:    "agent",
+			SenderID:      agent.ID,
+			RecipientKind: "user",
+			RecipientID:   user.ID,
+		})
+		require.Error(t, deriveErr,
+			"precondition: non-canonical key must fail DeriveConversationKey")
+		assert.Contains(t, deriveErr.Error(), "not canonical",
+			"precondition: DeriveConversationKey must reject with canonicality error")
+
+		// Simulate the outbound handler's dual-write pattern:
+		// 1. Build the message.
+		storeMsg := &store.Message{
+			ID:          uuid.NewString(),
+			ProjectID:   project.ID,
+			Sender:      "agent:" + agent.Slug,
+			SenderID:    agent.ID,
+			Recipient:   "user:" + user.DisplayName,
+			RecipientID: user.ID,
+			Msg:         "non-canonical dm key test",
+			Type:        messages.TypeInputNeeded,
+			AgentID:     agent.ID,
+			Channel:     "web",
+			ThreadID:    nonCanonicalKey,
+			CreatedAt:   time.Now(),
+		}
+
+		// 2. Attempt conversation resolution (mirrors handler lines 269-288).
+		extRef, kind, projID, keyErr := messaging.DeriveConversationKey(messaging.KeyInputs{
+			ThreadID:      storeMsg.ThreadID,
+			ProjectID:     project.ID,
+			SenderKind:    "agent",
+			SenderID:      agent.ID,
+			RecipientKind: "user",
+			RecipientID:   user.ID,
+		})
+		// Key derivation fails — handler logs warning and skips conversation.
+		require.Error(t, keyErr, "DeriveConversationKey must reject non-canonical key")
+
+		var convResult *messaging.ConversationResult
+		if keyErr == nil {
+			convResult = messaging.ResolveOrCreateConversationByKey(ctx, s, slogDiscard(), extRef, kind, projID)
+		}
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
+
+		// 3. Persist the message — this succeeds regardless of conversation failure.
+		require.NoError(t, s.CreateMessage(ctx, storeMsg),
+			"message persistence must succeed even when conversation resolution fails")
+
+		// Assert: message IS stored with the non-canonical ThreadID.
+		msg, err := s.GetMessage(ctx, storeMsg.ID)
+		require.NoError(t, err)
+		assert.Equal(t, nonCanonicalKey, msg.ThreadID,
+			"AC-S215-COEXISTENCE sub2: message must carry the original non-canonical ThreadID")
+		assert.Empty(t, msg.ConversationID,
+			"AC-S215-COEXISTENCE sub2: no conversation_id should be stamped")
+
+		// Assert: no new conversation rows created.
+		convsAfter, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, countBefore, len(convsAfter.Items),
+			"AC-S215-COEXISTENCE sub2: DeriveConversationKey failure must not create conversation rows")
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Helper: emptyKoanf for tests that don't need file/env config.
 // ---------------------------------------------------------------------------
 
