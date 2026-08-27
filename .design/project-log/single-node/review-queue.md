@@ -1174,3 +1174,35 @@ digest. AC 11 moves from "reasoned" to "run".
 
 Sizing guidance. Both stress agents are mid-ladder. **Nothing about capacity should enter the design
 doc or the tutorial until Phase B lands**, and Phase B is the number we would publish.
+
+### D7 — §5 describes the wrong loss event (added 07:31, measured today)
+
+§5 currently reads, in full on the point that matters:
+
+> Workspaces and the SQLite control plane live on the Instance's ephemeral filesystem.
+> **A redeploy loses both.**
+> This is a deliberate trade for G5, not an oversight. The tier is aimed at cheap, fast,
+> **disposable** deployments.
+
+Every word is true and the framing is wrong. **A redeploy is not the only thing that loses both, and
+it is not the dangerous one.** Exceeding the agent ceiling destroys the instance and everything on
+it — measured today at both sizes (task #67).
+
+The difference is not a detail:
+
+- **A redeploy is chosen.** The operator picks the moment, and can save work first.
+- **An overload is not chosen.** It arrives eight seconds after a request that returned HTTP 201, on
+  a tier with no memory instrument of any kind (task #65), so nothing warned them and nothing could
+  have.
+
+"Disposable" is the load-bearing word and it does the damage. It tells the reader the loss is
+scheduled. As written, §5 would leave an operator confident that not redeploying keeps their work.
+
+Proposed: §5 states both loss events, and says explicitly that one is unplanned and cannot currently
+be anticipated. Cross-reference the ceiling.
+
+**This is the same error as D5, in a different section.** In D5, §2 recorded that the budget is
+shared and missed that it is invisible. Here, §5 records that state is ephemeral and misses that the
+loss can be involuntary. Both times I wrote down a true property and did not follow it to what the
+operator would experience. That is worth naming as a pattern rather than logging twice as bad luck —
+**I have been describing the system's properties rather than the operator's day.**
