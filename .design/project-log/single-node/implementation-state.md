@@ -7117,3 +7117,61 @@ If this resolves as a lifecycle defect rather than a capacity limit, **we will h
 at all**, and task #50's §3.3 stays blocked. That is an acceptable outcome and far better than
 publishing a ceiling that is really a timeout. A wrong number in a tutorial outlives every caveat
 attached to it.
+
+## 2026-08-27 07:11 — sn-stress-max stalled; I checked its instance instead of assuming, and found a live lead
+
+### The stall was the agent, not the instance
+
+`sn-stress-max` went `stalled` mid-Bash. The tempting inference — after an hour of discussing OOM
+kills — is that its instance died. **I checked instead of assuming.**
+
+```
+Instance uptime: 33m37s      Restart Policy: OnFailure
+GET /health -> http=200 total=0.177s
+```
+
+The instance is healthy and the hub is fast. The agent is stuck in its own shell call, most likely a
+network call without a timeout — plausible given it had just reported an exec API returning
+`agent_not_found`, and an endpoint that returns a wrong answer can equally well return none. Told it
+to put a timeout on every network call.
+
+Worth noting how close this came to being read as the headline result. "Agent goes silent during a
+stress test, minutes after we started discussing OOM" is a compelling story, and it was wrong.
+
+### Two things the describe output settled for free
+
+**1. `Invoker IAM Check: disabled`** — printed by the platform, on a *different* instance from the
+one `sn-docs-dev` tested. That is second, independent confirmation of the §6 auth measurement (D4 in
+review-queue §18). The first was inferred from a deploy's behaviour; this is the platform stating it.
+
+**2. `SSH: enabled` — and this contradicts dead end 4.**
+
+`sn-stress-def` recorded SSH as unavailable, on the evidence that port 22 was not listening and
+`gcloud beta run instances ssh` returned `failed to connect to backend`. But the platform reports the
+feature as **on**. So the accurate finding is **"SSH is enabled and the connection fails"**, not
+"SSH is unavailable". Different problem, different follow-up, and only one of the two is a dead end.
+
+This is the same error class as several of mine this week: a true observation ("I could not connect")
+generalised into a stronger claim ("the capability is absent") that the evidence does not support.
+
+### Why the SSH lead outranks the ladder
+
+Every instrument rejected this morning failed for **one shared reason**: it was scoped to a sandbox
+rather than the instance. `/proc/meminfo` in a sandbox is per-sandbox. cgroups are empty under
+gVisor. Cloud Monitoring has no series. The hub API is stubbed.
+
+**The main container is the right scope.** A shell there makes `free -m` a direct instance-level
+measurement. If SSH connects:
+
+- the RSS figure stops being a lower bound and becomes a measurement;
+- the gVisor sentry overhead that `sn-stress-def` tried to derive backwards becomes directly
+  observable;
+- **the capacity-versus-time question resolves far faster**, because memory can be *watched* during
+  the freeze-N window instead of inferred from which agents died.
+
+Both agents given a **15-minute timebox** and told to report the exact error with a verbosity flag
+rather than the summary line — and to name the missing role or route if that is what it is. If it
+does not open in 15 minutes it stays a dead end, but it gets recorded accurately this time.
+
+Priority given to `sn-stress-def`: freeze-N first (cheap, gates the meaning of everything else), SSH
+second, ladder last and only once liveness is trustworthy.
