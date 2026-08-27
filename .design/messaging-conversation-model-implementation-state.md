@@ -832,6 +832,64 @@ there is a reason they kept both that I am not seeing.
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
 
+## 5s. Heartbeat 14:14Z — verification has a shelf life; two defects caught in review
+
+**Roster.** S6 six commits, S7 one, both managers live. S6 showed blocked with no sub-agents
+(the condition the heartbeat flags) but had committed six minutes earlier, so mid-turn rather
+than stalled. Integration branch still `ebf8cc27` — nothing merged, correct, merging is my gate.
+
+**My own error, and it is a new category.** When I dispatched S7 at 13:45Z I told them
+"you have no file overlap with S6, I verified this rather than assumed it." **True when said,
+false by 14:08.** S6's later commits moved into `pkg/hub/handlers_agent_messaging.go`; their hunk
+at 835-836 now sits inside S7's insertion zone at 833-838, in the same function, and changes the
+`ResolveOrCreateDMConversation` signature S7 is adjacent to.
+
+Rule 15 as widened in 5r says verify a premise that gates action. **That is necessary and not
+sufficient: a verified fact about concurrently-moving branches decays.** 5r's lesson was
+"check before you schedule"; this one is "a scope check against a live branch is a measurement,
+not a property, and it expires." Recording as a refinement rather than a new rule — the
+operational form is that any no-overlap finding is re-run at merge, never carried forward.
+Sequenced S6 first, S7 rebases; told both, told them not to coordinate directly.
+
+**DEF-8 defect — silent principal-kind default (HIGH).** `handlers_agent_messaging.go:835`:
+
+```go
+senderKind := "user"
+if k, ok := messages.PrincipalKindFromAddress(structuredMsg.Sender); ok { senderKind = k }
+```
+
+A guess on the **input** to the key derivation, where I had only forbidden guessing on the
+output. After step 1c the key is the ACL, so an agent sender whose address does not parse yields
+`dm:user:X:agent:Y` — a different conversation, keyed to *a user with ID X*, locking the real
+sender out of their own DM and naming someone else. Unexploitable only if user and agent UUID
+spaces never collide, which nobody has asserted. Required: no kind, no key, no row — leave
+`convResult` nil, which the surrounding code already treats as a divergence signal.
+
+**Note the shape.** I gave S6 "parse failure denies, no fallback, no repair" for 1c and they
+applied it faithfully *there*. The violation appeared one layer upstream on the same data. **A
+rule stated about a function gets applied to that function; the property it protects lives on the
+data path.** Worth stating rules against the data next time.
+
+**DEF-11 defect — the fix reproduces its own bug one layer up.** S7 gated the new
+`conv-lookup-failed` fallback on `actualRef == "" && convID != ""`. That is a strictly larger set
+than "pre-resolved and lookup failed": it also swallows thread conversations with empty refs
+(where `thread-routing-mismatch` is a wanted signal) and **every unmigrated resolver row**, which
+is most direct conversations until S6 step 3 lands. Net effect: a large slice of genuine
+comparisons filed as fallbacks, board quieter, comparing less — **the alternative §2.12
+explicitly rejected, reached by accident.**
+
+The irony is the instructive part: **DEF-11 exists because code treated an empty string as
+meaningful, and the fix infers a condition from an empty string one layer up.** Required an
+explicit `lookupFailed` flag set where the failure happens. Also required routing the fallback
+through `LogDivergence` rather than a hand-rolled `messageLog.Warn`, which would have given the
+board two record shapes for one concept.
+
+**Pattern across both:** neither manager misunderstood their defect. Both analyses were right
+from the first message. Both defects are *inference from an absent value* instead of observation
+of the condition — the same family as rules 13 and 14, which I have been applying to tests only.
+**Rules 13/14 are not test rules. They are rules about evidence, and production code takes them
+too.**
+
 ## 5r. Heartbeat 13:43Z — DEF-11 dispatched; a held item was held for nothing
 
 **Roster healthy**, not the alarm condition: `ca-msg-em6` blocked with two live sub-agents
