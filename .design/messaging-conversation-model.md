@@ -1080,6 +1080,143 @@ live traffic.
 
 ---
 
+## 2.14 The CLI section — scheduled sends (DEF-6) and the undocumented grammar (DEF-13)
+
+Paired because both are CLI-surface work with no overlap into `pkg/hub` or `pkg/ent`, so this
+section can run alongside store-layer work without contention. That co-scheduling claim is a
+**measurement, not a property** — whoever takes this re-runs the scope check at merge.
+
+### 2.14.0 Prior art (rule 16)
+
+Grepped on `origin/scion/messaging-v2` for this design's own nouns before speccing:
+
+| Fact | Location |
+|---|---|
+| `ScheduledEvent.Payload` is a free-form JSON string, "handler-specific" | `pkg/store/models.go:1835` |
+| `ScheduledEvent.CreatedBy` exists and is populated | `pkg/store/models.go:1838` |
+| `MessageEventPayload` = AgentID, AgentName, Message, Interrupt, Plain | `pkg/hub/server.go:2761-2767` |
+| Payload auto-constructed from convenience fields; requires `agentId` **or** `agentName` | `pkg/hub/handlers_scheduled_events.go:183-201`, `handlers_schedules.go:200` |
+| Fire-time handler re-authors the sender: `NewSystemMessage("scheduler", …)`, `SenderID = "SCHEDULER"` | `pkg/hub/server.go:2830-2832` |
+| **`dispatch_agent` already resolves `evt.CreatedBy` at fire time and authorizes as that principal, failing closed if the creator is gone or lacks scope** | `pkg/hub/server.go:2855-2875` |
+| `scion schedule create` exposes `--agent`, `--message`, `--in`, `--at`, `--interrupt` — no conversation flag | `cmd/schedule.go:782-786` |
+
+**Two things this falsifies, both mine.**
+
+1. My DEF-6 ledger row says "there is nowhere on a scheduled event to put a conversation." False.
+   `Payload` is an opaque JSON blob and `MessageEventPayload` is an ordinary struct; adding a field
+   is additive and needs **no schema migration**. I asserted a storage constraint without reading
+   the storage. Rule 15 applies to my own ledger, and a ledger row is exactly the kind of claim that
+   gets inherited without re-checking.
+2. I scoped DEF-6 as novel design work. It is mostly **not**. The `dispatch_agent` path already
+   implements fire-time creator resolution with fail-closed authorization. The message path simply
+   does not use it. **The design here is to extend an existing mechanism, not to invent one** — and
+   had I not grepped, I would have specced a parallel one.
+
+### 2.14.1 DEF-6 — a conversation reference on a scheduled message
+
+**Add one field.** `MessageEventPayload.ConversationRef string \`json:"conversationRef,omitempty"\``.
+`omitempty` plus Go zero-values means every existing pending event unmarshals unchanged with an
+empty ref — the compatibility story is "old rows keep working", not a backfill.
+
+**Resolve at fire time, never at create time.** A conversation can be archived, renamed, promoted
+(§2.4.2.3) or deleted between scheduling and firing, and `--at` accepts arbitrarily distant times.
+Create-time resolution stores an answer that silently rots; fire-time resolution can fail loudly.
+Create time validates *grammar only* — that the reference parses — so typos are caught while the
+user is still present.
+
+**Authorize the creator at fire time, not the scheduler.** This is the load-bearing rule.
+
+> A scheduled send is a **deferred act by its creator**, not an act by the scheduler. If the
+> scheduler's own identity authorizes the write, then "schedule a message into a conversation I am
+> not a member of" is DEF-14 with a delay — and worse, because a fired event has no interactive
+> caller to attribute it to.
+
+Follow `authorizeScheduledAgentCreate` (`server.go:2855`): resolve `evt.CreatedBy`, fail closed if
+the creator no longer exists, is in a different project, or is not a participant in the target
+conversation. Membership is checked **at fire time** against the conversation as it then exists,
+because membership can be revoked after scheduling. Ties directly to AC-INGRESS-1: same rule, third
+verb — D-1 governs joining, AC-INGRESS-1 governs writing, this governs writing *later*.
+
+**Preserve the original sender.** `SenderID = "SCHEDULER"` is the re-authoring bug from
+`findings.md` §8. The fired message should carry the creator as sender and record the scheduler as
+the *delivery mechanism*, not the author. Deliberately left as an open question below rather than
+specced — see 2.14.3.
+
+### 2.14.2 DEF-13 — document the grammar that shipped
+
+`cmd/message.go:98-114`. The `Long` text lists only `<agent-name>`, `agent:<name>`, `user:<name>`,
+`group[...]`, and all three examples are legacy. Add `@<agent>`, `@<email>`, `conv:<uuid>` and
+`#<thread>`, **including the two that currently error by design**, each annotated with its status,
+so a user meets the limitation in the help text rather than in a failed command. The deprecation
+warnings at `:86-91` already point at `@<agent-name>`; after this change the form they name is
+defined in the same output.
+
+**My spec gap, not a section's.** I wrote ACs requiring the warnings to fire and the reference forms
+to work, and none requiring the help text to describe them. Both managers built what I asked. The
+generalisable rule, now standing: **a user-facing grammar is not shipped until `--help` describes
+it; an AC that covers behaviour but not discoverability covers half the feature.**
+
+### 2.14.3 Open question — sender attribution on a fired message
+
+Preserving the creator as sender is clearly right for attribution and clearly interacts with things
+I have not traced: the `SystemCategoryScheduler` classification, whatever UI filters on
+`sender = "scheduler"`, and the harness-side rendering of system messages. I am not speccing a
+change to a field whose readers I have not enumerated. **Whoever takes this section enumerates the
+readers of `SenderID == "SCHEDULER"` and `SystemCategoryScheduler` first and reports back before
+changing either.** If the answer is that changing it breaks rendering, then the fix is an added
+`OnBehalfOf` field rather than a changed `SenderID`, and that is a smaller change.
+
+### 2.14.4 Alternatives considered
+
+- **A new `conversation_id` column on `scheduled_events`.** Rejected: `Payload` is already the
+  handler-specific extension point, a column adds a migration for zero benefit, and a *reference*
+  is the right thing to store rather than a resolved ID — which is the create-time-resolution
+  mistake wearing a schema.
+- **Resolve at create time and store the conversation ID.** Rejected above: stores an answer that
+  rots silently. Its one real advantage — the error surfaces while the user is watching — is
+  recovered by validating grammar at create time.
+- **Authorize as the scheduler.** Rejected: it is DEF-14 with a delay and no interactive caller.
+  Recorded because it is the path of least resistance and the one a developer lands by accident,
+  since the scheduler identity is already in hand at fire time.
+- **Leave DEF-13 to the docs site.** Rejected: the deprecation warning names a form the help does
+  not define, so the user who follows our own advice is the one who gets stuck. Docs are additive
+  to this, not a substitute.
+
+### 2.14.5 Acceptance criteria
+
+- **AC-DEF6-1** `scion schedule create` accepts a conversation reference; grammar is validated at
+  create time and a malformed reference fails immediately with a non-zero exit.
+- **AC-DEF6-2** Firing resolves the reference **at fire time**. Test: schedule against a
+  conversation, mutate it (archive/delete) before firing, assert the event fails loudly with the
+  reason recorded on `ScheduledEvent.Error` — not silently dropped. Per rule 13 assert the stored
+  error, not the return value.
+- **AC-DEF6-3** **Creator authorization at fire time.** A scheduled message whose creator is not a
+  participant in the target conversation does not deliver. Assert no message row is created, not
+  merely that the handler errored. Floor per rule 14: the equivalent event from a legitimate
+  creator *does* produce a row, so the count query is proven to observe the right table.
+- **AC-DEF6-4** Creator deleted between schedule and fire → fails closed, error recorded.
+- **AC-DEF6-5** A pending event created **before** this change fires unchanged. Test against a
+  payload JSON literal lacking `conversationRef`, not against a struct built by current code — the
+  point is wire compatibility with rows already in the database.
+- **AC-DEF6-6** `--agent` continues to work unchanged and is not deprecated by this section.
+- **AC-DEF13-1** `scion message --help` documents `@<agent>`, `@<email>`, `conv:<uuid>` and
+  `#<thread>`, each with its current status, and at least one example uses the `@` form.
+- **AC-DEF13-2** A test asserts the `Long` text mentions every reference form the parser accepts,
+  enumerated **from the parser** rather than from a hand-written list, so a future grammar addition
+  fails this test instead of silently shipping undocumented. This is the AC I should have written
+  the first time.
+
+### 2.14.6 Phases
+
+1. DEF-13 help text + AC-DEF13-2's parser-derived test. Self-contained; land first so the smaller
+   change is not queued behind the larger one.
+2. Enumerate readers of `SenderID == "SCHEDULER"` / `SystemCategoryScheduler`; report before coding.
+3. `ConversationRef` on the payload, create-time grammar validation, `--conversation` flag.
+4. Fire-time resolution + creator authorization + fail-closed error recording.
+5. Sender attribution, only if phase 2 shows it is safe; otherwise `OnBehalfOf`.
+
+---
+
 ## 3. Alternatives Considered
 
 ### 3.1 Native-only Conversation; external stays an opaque tuple (Option B)
