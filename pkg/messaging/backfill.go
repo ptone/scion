@@ -43,18 +43,18 @@ type BackfillConfig struct {
 
 // BackfillResult summarises what a backfill run did (or would do in dry-run).
 type BackfillResult struct {
-	TotalProcessed       int      `json:"totalProcessed"`
-	Attributed           int      `json:"attributed"`
-	Inferred             int      `json:"inferred"`
-	Skipped              int      `json:"skipped"`
-	ConversationsCreated int      `json:"conversationsCreated"`
-	HazardAEmailCount    int      `json:"hazardAEmailCount"`
-	HazardBSlugCount     int      `json:"hazardBSlugCount"`
+	TotalProcessed       int `json:"totalProcessed"`
+	Attributed           int `json:"attributed"`
+	Inferred             int `json:"inferred"`
+	Skipped              int `json:"skipped"`
+	ConversationsCreated int `json:"conversationsCreated"`
+	HazardAEmailCount    int `json:"hazardAEmailCount"`
+	HazardBSlugCount     int `json:"hazardBSlugCount"`
 	// LastCheckpoint is the pagination cursor of the last completed page.
 	// Pass this value as BackfillConfig.Checkpoint to resume from this position.
 	// Empty when the backfill completed in a single page (no more data to process).
-	LastCheckpoint string `json:"lastCheckpoint,omitempty"`
-	Errors               []string `json:"errors,omitempty"`
+	LastCheckpoint string   `json:"lastCheckpoint,omitempty"`
+	Errors         []string `json:"errors,omitempty"`
 }
 
 // conversationGroup collects messages that belong to the same conversation.

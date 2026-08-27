@@ -1006,6 +1006,13 @@ func TestBackfill_SinglePageNoCheckpoint(t *testing.T) {
 // On BUGGY code (fda9977f): checkpoint is resolved via GetMessage, then
 // filter.After = CreatedAt → "created > T" excludes ALL same-timestamp
 // messages → TotalProcessed = 0.
+//
+// NOTE: This test guards the SERVICE-LAYER mutation site (the filter.After
+// form of the bug) against a mock store. The companion test
+// TestBackfillResumeViaCheckpoint_SameTimestamp in cmd/ guards the
+// STORE-LAYER mutation site (the (created, id) tuple comparison in
+// message_store.go). Neither is redundant — they guard different layers.
+// Do not remove one believing the other covers it.
 func TestBackfill_SameTimestampMessages(t *testing.T) {
 	ctx := context.Background()
 	projectID := uuid.NewString()
