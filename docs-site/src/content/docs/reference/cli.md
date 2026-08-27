@@ -131,13 +131,13 @@ Sends a message to a recipient — typically a running agent's harness — by en
     - `-b, --broadcast` → use `scion broadcast`
     - `-a, --all` → use `scion broadcast --all`
     - `--raw` → use `scion keys`
-    - `--in <duration>` → use `scion schedule message --in`
-    - `--at <time>` → use `scion schedule message --at`
+    - `--in <duration>` → use `scion schedule create --in`
+    - `--at <time>` → use `scion schedule create --at`
     - `--plain` → deprecated, will be removed
     - `--notify` → use `scion notifications subscribe`
     - `--channel <name>` → use `@<agent-name>` to message an agent directly
     - `--thread-id <id>` → use `@<agent-name>` to message an agent directly
-    - `--cc <agents>` → deprecated; replacement pending
+    - `--cc <agents>` → deprecated, will be removed
 
 :::caution[Conversation Reference Availability]
 Only `@<agent-name>` is fully supported as a conversation reference today.

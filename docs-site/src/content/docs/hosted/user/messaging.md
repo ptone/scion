@@ -346,10 +346,10 @@ Several `scion message` flags have been deprecated in favor of dedicated subcomm
 |-----------------|-------------|-------|
 | `--broadcast`, `--all` | `scion broadcast` | Use the dedicated broadcast subcommand. |
 | `--raw` | `scion keys` | Use the dedicated keys subcommand. |
-| `--in`, `--at` | `scion schedule message` | Use the scheduling subcommand for delayed delivery. |
+| `--in`, `--at` | `scion schedule create` | Use the scheduling subcommand for delayed delivery. |
 | `--notify` | `scion notifications subscribe` | Use the notifications subcommand. |
 | `--channel`, `--thread-id` | `@<agent-name>` | Message the agent directly using a conversation reference. |
-| `--cc` | *(pending)* | Deprecated; replacement pending. |
+| `--cc` | *(none)* | Deprecated, will be removed. |
 | `--plain` | *(none)* | Will be removed; no replacement planned. |
 
 :::note
