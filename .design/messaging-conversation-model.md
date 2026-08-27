@@ -673,6 +673,73 @@ archived, and deleted without telling us. Designing for this from day one rather
 
 ---
 
+## 2.6.2 What `#<thread>` names (DEF-7, resolved by the native-chat architect)
+
+*Added 2026-08-27 after consulting `nc-arch`. Supersedes the implied claim in §2.6 that
+`#<thread>` resolves against `Conversation.DisplayName`.*
+
+**The defect.** `resolveThread` matches `Conversation.DisplayName` (`resolve.go:429`) and nothing
+in production ever writes that field. `UpsertConversationByExternalRef` also does an unconditional
+`SetDisplayName` on its update branch (`conversation_store.go:400`), so a name set out of band is
+wiped by the next upsert. The form is CLI-gated, so no user reaches it, but the design claimed it
+worked.
+
+**I framed this wrongly when I raised it.** I offered two options — `#general` names a native chat
+room, or it names a broker thread. **Both assumed the naming lived in my entity.** It does not, and
+the real answer is neither option as stated. Recorded because a question with two wrong options is
+worse than no question: it invites a decision that forecloses the actual one.
+
+**The answer.** `#general` names a **native chat thread**, and native chat already owns naming:
+
+| | |
+|---|---|
+| Storage | `webchat_topic` (raw SQL, dual SQLite/PG — deliberately **not** Ent, per the `webchat_*` convention) |
+| Name | **Required** for group threads, user-facing, **unique per project, case-insensitive** |
+| Create | `POST /api/v1/chat/spaces/{projectId}/threads {name, defaultAgent?}` |
+| Rename | `PATCH /api/v1/chat/threads/{topicId}` |
+| Who | The system writes `#general` at project-create (plus lazy bootstrap for pre-existing projects; `is_general` rows cannot be renamed or deleted); thereafter any project member |
+| DMs | **Deliberately nameless.** Identity is the canonical pair key; display name is derived from the peer at render time. |
+
+**Consequences for this design.**
+
+1. **Build no naming path, and invest nothing further in `Conversation.DisplayName`.** A second
+   create/rename surface would be a competing source of truth for the same user-visible string.
+2. **`#<name>` resolution must stay project-scoped. Never global.** Every project has a `#general`,
+   so the name is maximally ambiguous without a scope. §2.6.1's ambient-project resolution is
+   correct as written — independently confirmed rather than merely unchallenged.
+3. **Fix the unconditional `SetDisplayName` overwrite regardless of anything else.** A write path
+   that silently wipes an out-of-band name is a landmine for whoever ends up owning naming.
+   Assigned to S6; agreed with `nc-arch`; needed under either outcome below.
+4. **The final resolution target depends on an open decision.** See §2.6.3.
+
+## 2.6.3 OPEN: `Conversation` and `webchat_topic` are parallel constructs
+
+**Escalated 2026-08-27 13:06Z. Not an architect's call on either side.**
+
+Two entities model the same concept, in two stores, both under active construction. My envelope
+carries `conversation.id`; theirs has agents echoing `thread_id`.
+
+| Option | Shape | Cost |
+|---|---|---|
+| **(i) Minimal** | `#<thread>` resolution reads `webchat_topic.name`, keyed by topic UUID. `Conversation.DisplayName` stays vestigial. | Cheap now. The two entities coexist **permanently**. |
+| **(ii) Structural** | `webchat_topic` rows become — or 1:1-link to, e.g. via `external_ref` — `Conversation` rows; `thread_id` conventions become `conv:` references. | Right end state if messaging-v2 is *the* conversation model. But native chat's design is approved and implementation is in flight. |
+
+**My recommendation: declare (ii) the end state now; sequence the migration after native-chat wave
+2 lands.**
+
+Option (i) institutionalises across two stores and two projects **exactly the defect S6 is
+currently being paid to fix inside one** — two constructs for the same DM that cannot see each
+other. That is DEF-8, scaled up and made permanent, and it would arrive with a cross-store join
+tax on every future reader. But unifying *now* destabilises approved, in-flight work for no urgent
+gain. Declaring the direction without scheduling the migration buys the only thing that is
+time-critical: **neither project builds more divergence starting today.**
+
+**Already banked from this alignment, independent of the decision** — the shared DM key
+(§2.4.2 as amended): one exported `DMConversationKey` / `ParseDMKey` in `pkg/messages`, consumed by
+both projects. Not two implementations that agree by convention, which is how DEF-8 happened.
+
+---
+
 ## 2.11 Running the backfill (DEF-12)
 
 *Added 2026-08-27, after the integration-hub deploy. Describes work that does not exist yet.*
