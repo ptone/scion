@@ -9745,3 +9745,39 @@ Actions: developer told to accept the dropped test but **not** to carry the misl
 bash, and to report — not fix — whether the new script prints API response bodies on any error
 path. Reviewer asked to judge severity during the live walk. Filed as task #74; decide after the
 review whether it warrants an upstream issue of its own.
+
+### 35.8 A near-miss false blocker, and a real gap it exposed (16:58)
+
+The reviewer's pre-work (cloud access proven read-only before the walk, Gate 2 stub server built
+in advance) paid off twice.
+
+**All access checks passed**, including impersonation and inspection of the test image digest
+`sha256:e3eab113...`. Then it reported: *"this SDK (575.0.0) has `gcloud alpha run instances
+create/update`, NOT `gcloud beta run instances deploy`. The Go original uses beta."*
+
+Read as written, that says the currently-published tutorial is broken for every reader.
+**I checked instead of believing it.** `diGcloudDeploy` does invoke
+`gcloud beta run instances deploy <name> --sandbox-launcher …` — the reviewer read the original
+correctly. But on **SDK 582.0.0** the command exists, exit 0, full help text. The reviewer is on
+**575.0.0**. The command is not gone; its SDK is old.
+
+Had the reviewer walked on 575.0.0 it would have hit an unknown-command error and filed a blocker
+against the script that the script did not cause. It was told to update before the walk. **It
+reported the anomaly instead of working around it, which is exactly why it was worth pre-verifying
+access.**
+
+**The real finding underneath it:** the tutorial states no minimum gcloud version. A reader on an
+older SDK fails on the very first command with an unknown-command error — **the same failure class
+we are deleting from this page today** for the stale `scion` binary. Removing one version trap
+while leaving another is not an improvement.
+
+Measured floor, and no more than that: **absent at 575.0.0, present at 582.0.0.** The exact first
+version is unestablished and the docs must not claim one. Developer asked to add a `gcloud` row
+with a version requirement and a verification command to the CLI-tools table — about three lines,
+in scope for the docs commit already in progress, with an explicit instruction not to add a
+troubleshooting section or go version-hunting. Reviewer asked to check the wording does not assert
+a precision we never measured.
+
+**Note the shape:** this is the third time today a wrong conclusion was one command away from being
+checked — `cla/google`, my own "three pinning tests", and now this. The difference is that this one
+was caught before it cost anything.
