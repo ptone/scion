@@ -208,6 +208,46 @@
     the covered case as the gap, so a future reader sees the risk acknowledged and stops looking.
     **An honestly-declared limitation is still a claim about code and gets tested like one.**
 
+24. **A branch's base is a claim, and it is the first one to verify — before the diff, before the
+    tests, before the review.** Issued 2026-08-27 17:45Z. `ca-msg-em6` reported "5 commits on base
+    `e2b5c37d`". `git merge-base --is-ancestor e2b5c37d origin/scion/ca-msg-em6` returns **false**.
+    The real base was `b7669831`, a commit inside their own already-merged work: after I merged
+    their DEF-8 branch they kept building from their old head instead of the integration head.
+    Merging would have reverted **23 commits / 80,471 lines across 299 files**, including the whole
+    `origin/main` merge `2724ed10` — Permissions Foundation (#1312), single-node Cloud Run (#1310),
+    Cloud SQL Auth Proxy (#1309), Cloud Run Instances runtime (#1302), OAuth client credentials
+    (#1313), the non-loopback dev-auth security fix (#1307). Other teams' shipped work, and the
+    exact hazard the user warned me about by name. **I specified the base at dispatch and never once
+    verified it** — through a plan review, a design question and a completion report. Now mandatory
+    in every acceptance, before reading a line of the change: `merge-base --is-ancestor
+    <integration-head> <branch>`, plus `git diff --stat <integration-head> <branch>` sanity-read for
+    files nobody meant to touch. **Rule 18 is not enough**: it sweeps for dropped *files* between
+    merge parents, and would have caught this only at merge time, after review had already approved.
+
+25. **Absence of a control in your tree is indistinguishable from removal of it; only the base tells
+    them apart.** Issued 2026-08-27 17:45Z. Both of em6's escalations — "Agent 2 removed the
+    `validDMKey` 400 rejection" and "the repoint dropped DEF-11's `lookupFailed`/`Fallback`" — were
+    reported as deliberate deletions by their own developer. Neither control was ever in their tree:
+    `validDMKey` reached `handlers_agent_messaging.go` via #1319 and `lookupFailed` via S7, both in
+    commits they did not have. **A developer cannot delete what was never there.** The diff was
+    honest; the reference point was wrong. **The dangerous half is the corollary: answering the
+    questions as posed would have hidden the defect.** Both were framed as small repairs — restore a
+    400, re-add a Fallback entry. Approving them yields hand-written re-implementations of #1319 and
+    DEF-11 on a tree missing 23 commits: suite green, controls apparently present, 80,471 lines still
+    reverted on merge, now wearing a convincing disguise. **A repair can conceal the defect it was
+    reported as.** When a report says "our own agent removed a safety control", suspect the base
+    before the agent.
+
+26. **Three independent quality gates passed a branch none of them had located.** Issued
+    2026-08-27 17:45Z. `ca-msg-em6` (manager), `review-s215` (code reviewer, APPROVE) and
+    `audit-s215` (security auditor, 0 Critical / 0 High) all cleared a branch that reverts an entire
+    `origin/main` merge. Not one of the three was wrong about the code in front of them; the
+    auditor's M1/L1/L2 findings are sound and still owed. **They all reviewed the change and none
+    reviewed where it started.** Adding reviewers does not cover this, because independent reviewers
+    share the working tree and therefore share its blind spot — the omission is *correlated*, so
+    redundancy buys nothing. Base verification cannot be delegated to more eyes on the diff; it is a
+    different question, asked once, of the ref.
+
 ## 2. Source documents
 
 | Doc | Path |
@@ -241,7 +281,13 @@ their report: M1 (append a `ReferenceKind`) survived the original iota pin and i
 form; M3 (gated `conv:` example in cobra help) killed by the new deny-list scan, naming pattern
 *and* source. Full suite running at merge time.
 
-**Managers:** `ca-msg-em6` active on §2.15 with three sub-agents (`dev-derive-key` and
+**§2.15 BLOCKED ON A BAD BASE (17:45Z).** `ca-msg-em6` reported complete; the branch is based on
+`b7669831`, not `e2b5c37d`, and would revert 23 commits / 80,471 lines including the whole
+`origin/main` merge. Rebase onto `edd4e4bd` ordered; every AC is unverified until it re-runs against
+the right tree. **Both questions they escalated were symptoms of the bad base, not code changes** —
+see §5ad. Timeline for the beta slips by the length of that rebase plus re-verification.
+
+**Historical (17:20Z) — Managers:** `ca-msg-em6` active on §2.15 with three sub-agents (`dev-derive-key` and
 `dev-migration-sweep` reporting complete, `dev-handler-fixes` executing). **`ca-msg-em8` retired
 17:25Z** along with `dev-def13`, `dev-def13-fix` and `review-def13`; absence confirmed by name on
 the roster afterwards, not assumed from the stop command's exit code.
@@ -765,6 +811,7 @@ would bury the events that matter.
 - `2026-08-27 13:27Z` **Possible elimination of S6's step 2.** The shipped hub authorises DMs by *parsing the key* (`isDMParticipant`, `handlers_chat_v2.go:2932`) and treats `webchat_dm` as a **derived index for listing**, rebuilt from the key. §2.4.2 conflated index with authority — which is the only reason its migration was security-critical. S6 asked to assess adopting the split for `kind='direct'`. See §5p.
 - `2026-08-27 13:26Z` **nc-arch confirmed all four items shipped and self-corrected** — they had answered from a design doc gone stale during a standby period. Also found a live defect: `validDMKey` is enforced only on chat-v2 REST paths; the agent outbound path does not validate `ThreadID`, and `attachments_agent_test.go:290` commits a malformed `dm:<userID>+<agentID>` key as expected usage. **They own that filing.** Consequence for us: never assume a stored key is well-formed.
 - `2026-08-27 13:25Z` **CORRECTION: native-chat wave 2 is LANDED on main, not in flight, and the kind-encoded DM key is shipped and regex-validated.** My design duplicated a shipped construct. Second such failure today. Rule 15 added. §5m's framing superseded by **§5o**. Revised recommendation sent to the user; S6 and nc-arch both re-briefed.
+- `2026-08-27 17:46Z` **Heartbeat v4** — `cf7b37e7` deleted, `d4dac308` (`ca-msg-impl-heartbeat-v4`) created, verified as the only `ca-msg-impl` heartbeat afterwards. Adds **step 3, BASE CHECK** (rule 24): `merge-base --is-ancestor` plus a `--stat` read for every live manager branch, run *during* the section rather than at acceptance. §2.15's bad base survived a plan review, a design exchange and a completion report because nothing recurring ever asked the question. Step 6 also rewritten to enumerate gates from `ci.yml` rather than naming `gofmt`.
 - `2026-08-27 17:12Z` **Heartbeat prompt replaced again** — old `a80a92ed` deleted, new `cf7b37e7` (`ca-msg-impl-heartbeat-v3`), same `13,43 * * * *` cron, verified as the only heartbeat on the roster afterwards. Adds **step 5, MERGE READINESS** (rule 22): `gofmt -l` branch-wide compared against `origin/main`, plus a prompt to ask which other gates `main` enforces that I have never run. Also folds the `scion list | tail` truncation trap into step 1. **Rules that live only in the state doc are advice; rules that live in the heartbeat get executed.** DEF-17 existed for six sections because no recurring instruction ever asked the question.
 - `2026-08-27 13:15Z` **Heartbeat prompt replaced** — old `1a899567` deleted, new `a80a92ed` (`ca-msg-impl-heartbeat-v2`). Roster check is now **step 1** and an empty roster is the alarm condition; adds a ledger sweep for unblocked-but-undispatched work, and requires `blocked` to name what is blocked *and what remains runnable*. Closes the §5j blind spot structurally rather than in my memory.
 - `2026-08-27 13:15Z` **DEF-1 ledger row corrected to CLOSED** — §3 has said 'implemented' since S4 while the ledger row still read 'open'. Ledger drifted from the body of the same document.
@@ -1043,6 +1090,66 @@ there is a reason they kept both that I am not seeing.
    paths; the agent outbound path does not validate `ThreadID`. A committed test bakes in a malformed
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
+
+## 5ad. 17:41-17:45Z — §2.15 reported complete on a branch that reverts 80,471 lines
+
+`ca-msg-em6` reported §2.15 done: five commits, all ACs satisfied, my five required changes
+implemented, code reviewer APPROVE, security auditor 0 Critical / 0 High, suite green. It also
+asked two questions, and the questions are what saved it — I went to verify their premises and
+checked the base on the way.
+
+**`git merge-base --is-ancestor e2b5c37d origin/scion/ca-msg-em6` → false.** Base is `b7669831`,
+inside their own already-merged DEF-8 work. `git diff --stat` against the integration head: **299
+files, +20,439 / −80,471.** Twenty-three commits reverted, among them the entire `origin/main`
+merge. `pkg/store/entadapter/{role_store,credential_store,decision_audit_store}.go` — other teams'
+files — simply absent. This is the failure the user named explicitly when the project started.
+
+Cause is mundane: I merged their DEF-8 branch into the integration branch, they carried on from
+their own head, and nothing ever re-pointed them. **I named the base in the dispatch and never
+verified it** — not at plan review, not when they asked me a design question, not on the completion
+report. Rules 24 and 26.
+
+### The two escalations were the same bug wearing a costume
+
+Item 1: "Agent 2 removed the `validDMKey` checks at :121 and :606, should we restore the 400?"
+Item 2: "Agent 2's repoint dropped DEF-11's `lookupFailed`/`Fallback`, fix now or follow-up?"
+
+Neither control was ever in their tree. `git grep validDMKey` on their branch hits only
+`handlers_chat_v2.go`; the `handlers_agent_messaging.go` and `handlers_broker_inbound.go` instances
+came from #1319, which they do not have. `lookupFailed` returns **zero** hits on their branch and
+three on the integration branch. **A developer cannot delete code that was never there.** They read
+an honest diff against the wrong reference point and concluded their own sub-agent had stripped two
+safety controls.
+
+**And this is the part I want to keep.** Both were posed as small, reasonable repairs. Had I
+answered them as asked — yes restore the 400, yes re-add the Fallback entry — their agents would
+have hand-written fresh implementations of #1319 and DEF-11 onto a tree missing 23 commits. The
+suite would pass. Both controls would read as present to any reviewer. And the branch would still
+revert 80,471 lines, now with the two most visible symptoms repaired. **The fix would have
+destroyed the evidence for the defect it was reported as.** Rule 25.
+
+Symmetry with §5y worth noting: there, S6 deleted a test line because the code "no longer used
+ThreadID" and buried DEF-15. Here, S6 nearly *added* code because two controls appeared missing.
+Opposite actions, one shape — **a local repair reasoned from an unverified claim about the tree,
+which makes the tree agree with the belief.**
+
+### What the quality gates did and did not do
+
+The code reviewer and security auditor were not careless. Their findings are good; the auditor's M1
+(`handleGroupMessage` at `:1120`/`:1245` still bypassing `DeriveConversationKey` — a section titled
+"one derivation" shipping two) is a real item I have kept open. **All three reviewed the change;
+none reviewed where it started.** More reviewers would not have helped: they share a working tree,
+so they share its blind spot, and the omission is correlated rather than independent. Base
+verification is a different question asked once of the ref, not more eyes on the diff.
+
+Instructed: hold both items, rebase onto `edd4e4bd` (not `e2b5c37d` — DEF-13 landed since), expect
+conflicts in `handlers_agent_messaging.go` and treat them as the substance, re-run every AC
+including the DEF-16 mutation and the golden vectors because green was measured against the wrong
+tree, and report with the `merge-base` and `--stat` output included. Item 1 becomes a genuine
+question only after the rebase, and my position for them to test rather than adopt: `validDMKey`
+guards the legacy `messages.thread_id` sink, `DeriveConversationKey` guards the conversation row,
+and Phase 5's non-fatal contract was written for the latter — it does not automatically extend to a
+control that predates it and protects something else.
 
 ## 5ac. Heartbeat 17:13Z — the new step worked, and immediately proved itself too narrow
 
