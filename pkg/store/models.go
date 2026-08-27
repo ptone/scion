@@ -1696,8 +1696,9 @@ type Message struct {
 	AgentID     string    `json:"agentId"` // The agent involved (sender or recipient)
 	GroupID     string    `json:"groupId,omitempty"`
 	Channel     string    `json:"channel,omitempty"`
-	ThreadID    string    `json:"threadId,omitempty"`
-	Visibility  string    `json:"visibility,omitempty"`
+	ThreadID       string `json:"threadId,omitempty"`
+	ConversationID string `json:"conversationId,omitempty"`
+	Visibility     string `json:"visibility,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 	// DispatchState tracks cross-node delivery of the message to the broker:
 	// pending|dispatched|failed. The message row is its own durable dispatch

@@ -832,6 +832,7 @@ var (
 		{Name: "dispatched_at", Type: field.TypeTime, Nullable: true},
 		{Name: "channel", Type: field.TypeString, Nullable: true, Size: 64},
 		{Name: "thread_id", Type: field.TypeString, Nullable: true, Size: 256},
+		{Name: "conversation_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "visibility", Type: field.TypeString, Nullable: true, Size: 16},
 		{Name: "created", Type: field.TypeTime},
 	}
@@ -854,7 +855,12 @@ var (
 			{
 				Name:    "message_created",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[19]},
+				Columns: []*schema.Column{MessagesColumns[20]},
+			},
+			{
+				Name:    "message_conversation_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[18]},
 			},
 		},
 	}

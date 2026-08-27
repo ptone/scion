@@ -26045,6 +26045,7 @@ type MessageMutation struct {
 	dispatched_at           *time.Time
 	channel                 *string
 	thread_id               *string
+	conversation_id         *uuid.UUID
 	visibility              *string
 	created                 *time.Time
 	clearedFields           map[string]struct{}
@@ -26873,6 +26874,55 @@ func (m *MessageMutation) ResetThreadID() {
 	delete(m.clearedFields, message.FieldThreadID)
 }
 
+// SetConversationID sets the "conversation_id" field.
+func (m *MessageMutation) SetConversationID(u uuid.UUID) {
+	m.conversation_id = &u
+}
+
+// ConversationID returns the value of the "conversation_id" field in the mutation.
+func (m *MessageMutation) ConversationID() (r uuid.UUID, exists bool) {
+	v := m.conversation_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConversationID returns the old "conversation_id" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldConversationID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConversationID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConversationID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConversationID: %w", err)
+	}
+	return oldValue.ConversationID, nil
+}
+
+// ClearConversationID clears the value of the "conversation_id" field.
+func (m *MessageMutation) ClearConversationID() {
+	m.conversation_id = nil
+	m.clearedFields[message.FieldConversationID] = struct{}{}
+}
+
+// ConversationIDCleared returns if the "conversation_id" field was cleared in this mutation.
+func (m *MessageMutation) ConversationIDCleared() bool {
+	_, ok := m.clearedFields[message.FieldConversationID]
+	return ok
+}
+
+// ResetConversationID resets all changes to the "conversation_id" field.
+func (m *MessageMutation) ResetConversationID() {
+	m.conversation_id = nil
+	delete(m.clearedFields, message.FieldConversationID)
+}
+
 // SetVisibility sets the "visibility" field.
 func (m *MessageMutation) SetVisibility(s string) {
 	m.visibility = &s
@@ -26992,7 +27042,7 @@ func (m *MessageMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessageMutation) Fields() []string {
-	fields := make([]string, 0, 19)
+	fields := make([]string, 0, 20)
 	if m.project_id != nil {
 		fields = append(fields, message.FieldProjectID)
 	}
@@ -27044,6 +27094,9 @@ func (m *MessageMutation) Fields() []string {
 	if m.thread_id != nil {
 		fields = append(fields, message.FieldThreadID)
 	}
+	if m.conversation_id != nil {
+		fields = append(fields, message.FieldConversationID)
+	}
 	if m.visibility != nil {
 		fields = append(fields, message.FieldVisibility)
 	}
@@ -27092,6 +27145,8 @@ func (m *MessageMutation) Field(name string) (ent.Value, bool) {
 		return m.Channel()
 	case message.FieldThreadID:
 		return m.ThreadID()
+	case message.FieldConversationID:
+		return m.ConversationID()
 	case message.FieldVisibility:
 		return m.Visibility()
 	case message.FieldCreated:
@@ -27139,6 +27194,8 @@ func (m *MessageMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldChannel(ctx)
 	case message.FieldThreadID:
 		return m.OldThreadID(ctx)
+	case message.FieldConversationID:
+		return m.OldConversationID(ctx)
 	case message.FieldVisibility:
 		return m.OldVisibility(ctx)
 	case message.FieldCreated:
@@ -27271,6 +27328,13 @@ func (m *MessageMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetThreadID(v)
 		return nil
+	case message.FieldConversationID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConversationID(v)
+		return nil
 	case message.FieldVisibility:
 		v, ok := value.(string)
 		if !ok {
@@ -27339,6 +27403,9 @@ func (m *MessageMutation) ClearedFields() []string {
 	if m.FieldCleared(message.FieldThreadID) {
 		fields = append(fields, message.FieldThreadID)
 	}
+	if m.FieldCleared(message.FieldConversationID) {
+		fields = append(fields, message.FieldConversationID)
+	}
 	if m.FieldCleared(message.FieldVisibility) {
 		fields = append(fields, message.FieldVisibility)
 	}
@@ -27379,6 +27446,9 @@ func (m *MessageMutation) ClearField(name string) error {
 		return nil
 	case message.FieldThreadID:
 		m.ClearThreadID()
+		return nil
+	case message.FieldConversationID:
+		m.ClearConversationID()
 		return nil
 	case message.FieldVisibility:
 		m.ClearVisibility()
@@ -27441,6 +27511,9 @@ func (m *MessageMutation) ResetField(name string) error {
 		return nil
 	case message.FieldThreadID:
 		m.ResetThreadID()
+		return nil
+	case message.FieldConversationID:
+		m.ResetConversationID()
 		return nil
 	case message.FieldVisibility:
 		m.ResetVisibility()

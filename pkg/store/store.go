@@ -1283,6 +1283,11 @@ type MessageStore interface {
 	// PurgeOldMessages removes read messages older than readCutoff and
 	// unread messages older than unreadCutoff. Returns count removed.
 	PurgeOldMessages(ctx context.Context, readCutoff time.Time, unreadCutoff time.Time) (int, error)
+
+	// SetMessageConversationID updates the conversation_id on an existing
+	// message. Used by the Phase 4 backfill to link legacy messages to
+	// Conversation records. Returns ErrNotFound if the message doesn't exist.
+	SetMessageConversationID(ctx context.Context, messageID, conversationID string) error
 }
 
 // =============================================================================
