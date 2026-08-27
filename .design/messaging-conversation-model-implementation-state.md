@@ -75,9 +75,9 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 ## 3. Current position
 
-**Active section:** S3 — Envelope
-**Active manager:** `ca-msg-em3` — spawning 2026-08-27 03:35Z
-**Blocked on:** nothing
+**Active section:** S3 — Envelope (**REOPENED — reported complete, rejected on review**)
+**Active manager:** `ca-msg-em3`
+**Blocked on:** em3 fixing E-1 (native chat bypasses the validation choke point). S4 held.
 **Last verified landing on integration branch:** `cd4ee7ed` — **S2 accepted 2026-08-27 03:35Z
 on round 3.** S1 verified 01:40Z at `16294728`.
 
@@ -119,7 +119,7 @@ back into it.
 |---|---|---|---|---|
 | S1 | Foundation — schema, store, resolution | 1, 2, 3 | `ca-msg-em1` | **verified** (`fc523ecd..16294728`) |
 | S2 | Migration — backfill, dual-write | 4, 5 | `ca-msg-em2` | **verified** (`16294728..cd4ee7ed`, 3 rounds) |
-| S3 | Envelope — message type, validation, delivery format | 6, 7, 9 | `ca-msg-em3` | active |
+| S3 | Envelope — message type, validation, delivery format | 6, 7, 9 | `ca-msg-em3` | active (rejected round 1) |
 | S4 | Surfaces — read switch, CLI split, broker edge | 8, 10, 11 | `ca-msg-em4` | pending |
 | S5 | Docs — skill, docs-site, glossary | 12 | `ca-msg-em5` | pending |
 | S6 | Removal — drop legacy fields | 13 | deferred | **post-beta only** |
@@ -233,6 +233,12 @@ would bury the events that matter.
   implementation and tests only. Recorded as D3 (read switch behind a default-off runtime
   flag; divergence counters readable live) and D4 (backfill evidence is synthetic, and
   explicitly weaker than the design asked for). §6 open items closed accordingly.
+- `2026-08-27 05:02Z` em3 reported S3 complete, `cd4ee7ed..d9fc7f51`, all gates passed.
+- `2026-08-27 05:10Z` **S3 rejected.** E-1: native chat bypasses the validation choke point,
+  mutation-verified (choke point forced to fail; all chat tests still passed). Three further
+  server-generated emitters found unvalidated — em3 must validate or document each. Also
+  noted that AC-8's "three inbound paths" is looser than §2.10's "every inbound path"; my
+  wording, and it needs fixing before S5 documents it. See §5e.
 
 ## 5d. S2 rejection history — CLOSED 2026-08-27 03:35Z (accepted on round 3)
 
@@ -269,6 +275,27 @@ code containing a hardcoded comparison result and two competing constructors for
 deterministic key. Both are single-grep findings. Every manager brief from S3 onward must
 require reviewers to check (a) that a comparison actually compares, and (b) that a
 deterministic key has exactly one constructor.
+
+## 5e. S3 rejection — open (2026-08-27 05:10Z)
+
+em3 reported S3 complete (`cd4ee7ed..d9fc7f51`) claiming the validation choke point had
+"no bypass". It has one.
+
+| # | Finding | Evidence | Required fix | State |
+|---|---|---|---|---|
+| E-1 | **Native chat bypasses the validation choke point.** `handlers_chat_v2.go:986` builds a `StructuredMessage`, persists it via `CreateMessage`, and dispatches via `dispatchWithBrokerRetry` — never calling `ValidateLegacyMessage`. The six real call sites cover hub agent-messaging, broker inbound and CLI; native chat is a fourth surface. | **Mutation-verified:** made `ValidateLegacyMessage` return an error unconditionally; `go test ./pkg/hub/ -run 'ChatV2\|Chat'` still passed. Only possible if the path never reaches it. | Validate on the native-chat inbound path before persist and dispatch, plus a test that fails if the call is removed. | open |
+
+**Scope note — my own wording was the weaker one.** AC-8 says "all three inbound paths";
+design §2.10 says "a single choke point invoked on **every** inbound path — the CLI, the
+Hub HTTP handlers, and broker-inbound alike". The §2.10 list is illustrative and native
+chat is a Hub HTTP handler, so it is in scope. Where the AC and §2.10 disagree, §2.10
+governs. **AC-8 should be reworded before S5 documents it.**
+
+**Three further unvalidated emitters**, found while checking E-1. Server-generated, so
+§2.10 does not strictly cover them; I ruled that em3 must either route them through the
+choke point or document the exemption with a reason — but not stay silent:
+`handlers_chat_v2.go:1129` (mention fan-out), `notifications.go:376/431/449`,
+`server.go:2830` (scheduler).
 
 ## 5c. Deferred-item ledger — debt accepted during implementation
 
