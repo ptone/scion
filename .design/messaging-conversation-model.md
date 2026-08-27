@@ -315,6 +315,99 @@ another project is not something the system does (§2.6.1).
 **`--to` inside a DM** may only name one of the two participants. Naming anyone else fails as
 `not-a-participant`; a DM is not a back door to addressing a third party.
 
+#### 2.4.2 Reconciling the two direct-conversation shapes (DEF-8, DEF-10)
+
+*Added 2026-08-27, after the S5 survey. This section describes work that does not exist yet.*
+
+**The defect.** Two code paths create direct conversations, using two different identity keys,
+and neither can see the other's rows.
+
+| | dual-write (`ResolveOrCreateDMConversation`) | resolver (`createDirectConversation`) |
+|---|---|---|
+| key | `external_ref = dm:{sorted(idA,idB)}` | the participant set |
+| `ProjectID` | nil (global) — correct per Q2 | sender's project for `@<agent>`, nil for `@<email>` — **DEF-10** |
+| participants | **none written** | both written |
+| lookup | `UpsertConversationByExternalRef`, one indexed read | `findDirectConversation`: list the sender's conversations, then list participants of each |
+| created by | every legacy send, as a stamp | `scion message @<agent>` / `@<email>` |
+
+The lookups are asymmetric in exactly the way that prevents convergence. `findDirectConversation`
+reaches rows through `conversation_participants`, so it can never see a dual-write row (which has
+none). `UpsertConversationByExternalRef` keys on `external_ref`, so it can never see a resolver
+row (whose ref is `""`, and which the partial unique index excludes). **One principal pair, two
+conversation IDs, indefinitely.** This is what the divergence board will report once traffic runs
+through both paths, and it is the reason the read switch cannot be turned on yet.
+
+**Neither path is individually wrong.** Each is internally consistent and idempotent; there is no
+row-growth bug. The defect is that they were specified in different sections and never required
+to agree on what identifies a DM.
+
+**Decision: converge on `external_ref` as the identity key.** The resolver computes
+`DirectMessageExternalRef(senderID, targetID)`, creates through
+`UpsertConversationByExternalRef`, and then ensures participants. `findDirectConversation` is
+deleted in favour of a single indexed read. All direct conversations become global —
+`ProjectID` nil — which closes DEF-10. `resolveAgentDM` keeps using the ambient project to
+resolve the *agent slug*; it stops writing that project onto the conversation. Those are
+different uses of the same value and conflating them is what produced DEF-10.
+
+**Why this key and not the other.**
+
+| Alternative | Rejected because |
+|---|---|
+| Converge on the participant set: dual-write calls the resolver | Dual-write is on the hot send path and the participant lookup is N+1. Worse, uniqueness would become application-enforced only — the partial unique index excludes `external_ref = ''`, so two concurrent first-sends race into two rows. It trades a DB guarantee for a code convention. |
+| Keep both, add an alias table mapping the IDs | Institutionalises the split and taxes every future reader with a join. This is the "add a layer over the confusion" move; the confusion is cheap to remove now and expensive later. |
+| Stop dual-write from creating DM rows; let the resolver own them | Dual-write exists so that legacy messages carry a `conversation_id` for the read switch to read. Removing it now leaves the switch with nothing. This is what phase 13 does eventually, not what unblocks the switch. |
+
+**Migration.** Ordered, because steps 2 and 3 are not commutative.
+
+1. **Code first, behind no flag.** Resolver computes and sets `external_ref`; sets `ProjectID`
+   nil for all direct conversations; ensures participants after upsert. From this point no new
+   divergent rows are created.
+2. **Backfill participants onto existing `dm:` rows.** See the hazard below.
+3. **Merge existing resolver rows** (`kind = direct AND external_ref = ''`). For each, derive the
+   `dm:` ref from its two participants. If a row with that ref exists: re-stamp messages whose
+   `conversation_id` points at the resolver row, copy any participant the target lacks, soft-delete
+   the resolver row. If no such row exists: set the ref on the row in place.
+4. **Guard.** A migration is not done because it ran. Assert zero rows matching
+   `kind = 'direct' AND external_ref = '' AND deleted_at IS NULL`, and assert every `dm:` row has
+   exactly two participants. Both as permanent tests, not as a one-off query.
+
+**The hazard in step 2, and it is a security one.** `dm:{sorted(idA,idB)}` encodes **principal
+IDs only, not principal kinds** (`pkg/messaging/divergence.go:124`). `ConversationParticipant`
+requires `principal_kind`. So the backfill must look each ID up to decide whether it is a user or
+an agent, and `requireParticipant` — the authorisation check for `conv:<id>` on a DM — will trust
+whatever it writes. **A wrong kind is an access grant to the wrong principal.**
+
+The rule is the one already stated for reference resolution in §2.6, applied to migration: **an
+ambiguous or unresolvable ID is never guessed.** If an ID matches neither table, or both, the row
+is left without participants and recorded for review. A DM with no participants fails closed —
+`requireParticipant` denies everyone, including the two real parties — which is the correct
+outcome for a row we cannot describe. Under-granting is recoverable; over-granting is not.
+
+This also explains why nothing is exploitable today: every `dm:` row has zero participants, so
+`conv:<id>` against one already denies everyone. The system is failing closed, not open. That is
+the only reason the ungated HTTP resolve endpoint is not a live problem.
+
+**Acceptance criteria for this work.**
+
+- **AC-DEF8-1** Two sends to the same agent, one through the legacy path and one through
+  `scion message @<agent>`, resolve to **one** conversation ID. The test asserts the row count,
+  not the return value of either call.
+- **AC-DEF8-2** Every direct conversation has `ProjectID` nil. A permanent test asserts this over
+  rows created by both paths.
+- **AC-DEF8-3** The divergence board shows non-zero matches and zero mismatches for DM traffic
+  across both paths — the condition §"Divergence Monitoring" already requires before the read
+  switch is enabled.
+- **AC-DEF8-4** Post-migration guards from step 4 exist as permanent tests.
+- **AC-DEF8-5** A backfill row whose principal kind cannot be determined produces **no
+  participant** and an audit record. Mutation-verified: make the resolver ambiguous and confirm
+  the named test fails.
+
+**What this does not resolve.** `#<thread>` still cannot resolve (DEF-7 — nothing writes
+`DisplayName`), the addressee table is still never written (DEF-9), and there is still no
+conversation-driven delivery: `conversation_id` remains a stamp on the message row, not a routing
+key. Reconciling the DM shapes makes the read switch safe to evaluate. It does not make
+`conv:<id>` or `#<thread>` usable from the CLI, which is DEF-5 and depends on all three.
+
 ### 2.5 The type taxonomy
 
 Today one enum of eight values mixes intent, lifecycle signal, provenance, and delivery
