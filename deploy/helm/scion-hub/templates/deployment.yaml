@@ -31,9 +31,40 @@ limitations under the License.
    template happens to render - see its definition for why it is not a list.
 */}}
 {{- include "scion-hub.assertNoCredentialsInValues" . }}
+{{- /*
+The three scheduling fields are the same disclosure surface and were missed by
+the pass that guarded podAnnotations and podLabels. nodeSelector, tolerations
+and affinity are free-form operator input, they land in the pod spec verbatim,
+and the pod spec is readable by anyone with pod read access - the identical
+audience, reached by a field nobody would think to look at. Measured before
+writing this: a DSN in any of the three rendered clean while the same string on
+hub.podAnnotations was refused.
+
+The enumeration is the fragile part of this guard, not the matcher. A surface
+added to this template later gets no protection from the calls above, and
+nothing here will say so - the render simply succeeds. If you add a field that
+carries operator-supplied text into the pod spec, add a call beside these.
+*/}}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" (.Values.hub.nodeSelector | default dict) "source" "hub.nodeSelector") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" (.Values.hub.tolerations | default list) "source" "hub.tolerations") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" (.Values.hub.affinity | default dict) "source" "hub.affinity") }}
 {{- $strategy := include "scion-hub.updateStrategyType" . }}
 {{- include "scion-hub.assertExtraEnv" . }}
 {{- include "scion-hub.assertHAUnlanded" . }}
+{{- /*
+Also called from secret-session.yaml, which is where the secret is rendered.
+Repeated here for the reason directly below: this file always renders, and the
+case the assertion exists for - NEITHER source set - is the case in which
+secret-session.yaml produces no object. It still executes its include today, so
+this is redundancy rather than a fix; it is here so that wrapping that file in a
+conditional later cannot silently retire the check. fail is idempotent.
+*/}}
+{{- include "scion-hub.assertSessionSecret" . }}
+{{- /*
+Called here for the same reason assertConfigSource is: the Deployment is the one
+template that always renders, so this is where a guard becomes unconditional.
+*/}}
+{{- include "scion-hub.assertCloudsqlPorts" . }}
 {{- /*
 Called from here, and not only from the settings template, because the settings
 template is skipped entirely when config.existingSecret is set - which is the
@@ -138,9 +169,39 @@ spec:
         entirely under config.existingSecret: the chart renders no file there,
         the checksum would be of nothing, and a constant that never changes is
         worse than an absent one because it looks like coverage.
+
+        🔴 NOT A DIGEST OF THE FILE. It is a digest of a CREDENTIAL-REDACTED
+        PROJECTION of the file, and the difference is the whole point of
+        scion-hub.settingsChecksum - read that helper before changing this line
+        back to the obvious `include ... | sha256sum`.
+
+        The reason: this annotation is on the pod template, which anyone with
+        get on deployments or pods can read, and that is a WIDER audience than
+        the settings Secret's own RBAC. Before phase 2 the digest input carried
+        no credential and hashing the file was correct. Phase 2 puts a password
+        inside server.database.url in that same file, and the rest of a DSN -
+        scheme, user, host, port, database name - is chart-rendered or public.
+        A digest over a mostly-known preimage is a verification oracle for the
+        one unknown part of it: you can confirm a guessed password offline,
+        against a value you are allowed to read, without ever touching the
+        Secret. Redacting the credential component removes the unknown from the
+        preimage and the oracle with it.
+
+        WHAT THIS COSTS, because it is not free and the cost must not be
+        rediscovered by an operator at 3am: with the password out of the digest
+        input, rotating ONLY the password does not move this annotation, so no
+        pod rolls and helm upgrade reports success while the old credential
+        stays live. MEASURED, not predicted - see hack/verify.sh, which asserts
+        that collapse in both directions rather than describing it. Everything
+        that is not a credential still rolls the pods automatically, host, port
+        and database name included. The remedy for the credential-only case is
+        an explicit `kubectl rollout restart`, documented beside the password in
+        values.yaml and PRINTED by NOTES.txt on every install and upgrade that
+        sets one. Delete either of those and you have deleted the behaviour, not
+        the annotation.
         */}}
         {{- if not .Values.config.existingSecret }}
-        checksum/settings: {{ include (print $.Template.BasePath "/secret-settings.yaml") . | sha256sum }}
+        checksum/settings: {{ include "scion-hub.settingsChecksum" . }}
         {{- end }}
         {{- with $podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -155,6 +216,46 @@ spec:
         {{- include "scion-hub.nonRootSecurityContext" . | nindent 8 }}
         seccompProfile:
           type: RuntimeDefault
+      {{- /*
+      THE NATIVE SIDECAR. An initContainers entry with restartPolicy: Always is
+      a sidecar, not an init container: the kubelet starts it before the main
+      containers, does NOT wait for it to exit, and tears it down after they
+      finish. That ordering is the entire reason for it here - the hub opens the
+      database and runs AutoMigrate immediately, so as an ordinary sidecar it
+      races the tunnel and CrashLoopBackOffs until it wins.
+
+      Requires GKE 1.29+. Below that the field is ignored and the entry becomes
+      a genuine init container that never exits, which hangs the pod at startup
+      forever - so cloudsql.nativeSidecar: false exists, and NOTES.txt prints
+      what to expect on that path.
+
+      nativeSidecarGuard refuses that combination at render time. It is invoked
+      HERE, inside the branch it is about, rather than from Chart.yaml's
+      kubeVersion, because the requirement belongs to this branch and not to the
+      chart: a kubeVersion floor is evaluated before values are read, so it also
+      rejected the sub-1.29 clusters the false branch exists to serve. See the
+      note in Chart.yaml.
+
+      This is the call site that binds the guard to the real cluster; the guard
+      itself takes the version strings as arguments so that the branch where it
+      CANNOT read them is reachable from a test. When that branch is taken the
+      include returns a comment rather than nothing, and it lands immediately
+      above the sidecar it did not vet - because a check that silently declined
+      to run reads exactly like a check that passed.
+
+      That comment survives in `helm template` and `helm get manifest` and is
+      STRIPPED by the API server, so it is not what an operator will find with
+      kubectl. It is the forensic copy. NOTES.txt carries the same notice and is
+      the one that gets read at install time.
+      */}}
+      {{- if and .Values.cloudsql.enabled .Values.cloudsql.nativeSidecar }}
+      {{- with (include "scion-hub.nativeSidecarGuard" (dict "major" .Capabilities.KubeVersion.Major "minor" .Capabilities.KubeVersion.Minor "version" .Capabilities.KubeVersion.Version)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      initContainers:
+        {{- include "scion-hub.cloudsqlProxyContainer" . | nindent 8 }}
+          restartPolicy: Always
+      {{- end }}
       containers:
         - name: hub
           image: {{ include "scion-hub.image" . | quote }}
@@ -168,7 +269,46 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "scion-hub.envConfigMapName" . }}
+            {{- /*
+            The session secret, when the chart renders it. envFrom is safe HERE
+            and only here: the chart controls this Secret and it holds exactly
+            one key, whose name is the env var name the hub reads.
+
+            THE EXISTING-SECRET CASE DELIBERATELY DOES NOT USE envFrom, and the
+            asymmetry is load-bearing rather than untidy. envFrom projects EVERY
+            key it finds, so pointing it at a Secret the operator owns would let
+            any key in that Secret become an environment variable in the hub -
+            including SCION_SERVER_BASE_URL, HOME, KUBECONFIG or
+            SCION_REQUIRE_STABLE_SIGNING_KEY. Those four are exactly what
+            scion-hub.assertExtraEnv refuses hub.extraEnv from shadowing, and a
+            later envFrom source overrides an earlier one, so the operator's
+            Secret would win over the ConfigMap. That is a route around the
+            https:// validation on the base URL, whose whole purpose is keeping
+            the session cookie's Secure attribute (design.md 5.4) - a bypass
+            that presents as nothing at all.
+
+            auth.existingSecretKey is itself the evidence this was intended:
+            a per-key selector has no meaning under envFrom, which cannot select
+            a key. So the existing-secret path binds one key by name, below.
+            */}}
+            {{- $auth := .Values.auth | default (dict) }}
+            {{- if not $auth.existingSecret }}
+            - secretRef:
+                name: {{ include "scion-hub.sessionSecretName" . }}
+            {{- end }}
           env:
+            {{- /*
+            The session secret from a Secret the operator manages. Bound by KEY
+            so that nothing else in their Secret reaches the hub's environment -
+            see the envFrom comment above for why that matters.
+            */}}
+            {{- if $auth.existingSecret }}
+            - name: SCION_SERVER_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "scion-hub.sessionSecretName" . }}
+                  key: {{ include "scion-hub.sessionSecretKey" . }}
+            {{- end }}
             {{- /*
             The namespace the hub is running in, which it reads to decide where
             to create agent pods when no namespace is configured. There is no
@@ -271,6 +411,22 @@ spec:
               mountPath: {{ printf "%s/settings.yaml" (include "scion-hub.scionDir" .) | quote }}
               subPath: settings.yaml
               readOnly: true
+        {{- /*
+        THE FALLBACK PLACEMENT, for clusters below 1.29 where restartPolicy on
+        an initContainers entry is ignored. Here the proxy is an ordinary
+        container and there is NO ordering guarantee, so the hub will lose the
+        race to the tunnel some number of times before it wins. That is the
+        crash-loop NOTES.txt warns about, and it is self-healing rather than
+        broken.
+
+        Appended AFTER the hub container, deliberately. Container order does not
+        affect startup on this path - nothing here is ordered - but the hub is
+        this pod's subject and a reader running kubectl describe should meet it
+        first.
+        */}}
+        {{- if and .Values.cloudsql.enabled (not .Values.cloudsql.nativeSidecar) }}
+        {{- include "scion-hub.cloudsqlProxyContainer" . | nindent 8 }}
+        {{- end }}
       volumes:
         - name: scion-home
           emptyDir: {}

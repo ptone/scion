@@ -852,12 +852,15 @@ type V1TelemetrySamplingConfig struct {
 	Rates   map[string]float64 `json:"rates,omitempty" yaml:"rates,omitempty" koanf:"rates"`
 }
 
-// V1CloudRunConfig holds Cloud Run runtime settings.
-type V1CloudRunConfig struct {
-	// Project is the GCP project ID for Cloud Run API calls.
-	Project string `json:"project,omitempty" yaml:"project,omitempty" koanf:"project"`
-	// Region is the GCP region for Cloud Run services (e.g. "us-central1").
-	Region string `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
+// CloudRunConfig holds Cloud Run runtime settings.
+type CloudRunConfig struct {
+	ProjectID      string `json:"project_id,omitempty" koanf:"project_id"`
+	Location       string `json:"location,omitempty" koanf:"location"`
+	ServiceAccount string `json:"service_account,omitempty" koanf:"service_account"`
+	Network        string `json:"network,omitempty" koanf:"network"`
+	Subnetwork     string `json:"subnetwork,omitempty" koanf:"subnetwork"`
+	NFSServer      string `json:"nfs_server,omitempty" koanf:"nfs_server"`
+	NFSExport      string `json:"nfs_export,omitempty" koanf:"nfs_export"`
 }
 
 // V1CloudRunInstancesConfig holds Cloud Run Instances runtime settings.
@@ -868,6 +871,14 @@ type V1CloudRunInstancesConfig struct {
 	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
 	// Region is the GCP region for Cloud Run instances (e.g. "us-central1").
 	Region string `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
+}
+
+// V1CloudRunSandboxConfig holds Cloud Run Sandbox runtime settings.
+// The sandbox runtime runs agents as sandboxes inside a Cloud Run Instance.
+type V1CloudRunSandboxConfig struct {
+	// SandboxBin is the path to the sandbox CLI binary.
+	// Defaults to /usr/local/gcp/bin/sandbox.
+	SandboxBin string `json:"sandbox_bin,omitempty" yaml:"sandbox_bin,omitempty" koanf:"sandbox_bin"`
 }
 
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
@@ -881,9 +892,11 @@ type V1RuntimeConfig struct {
 	GKE               bool              `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
 	ListAllNamespaces bool              `json:"list_all_namespaces,omitempty" yaml:"list_all_namespaces,omitempty" koanf:"list_all_namespaces"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
-	CloudRun *V1CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
+	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
 	CloudRunInstances *V1CloudRunInstancesConfig `json:"cloudrun_instances,omitempty" yaml:"cloudrun_instances,omitempty" koanf:"cloudrun_instances"`
+	// CloudRunSandbox holds Cloud Run Sandbox-specific settings when Type is "cloudrun-sandbox".
+	CloudRunSandbox *V1CloudRunSandboxConfig `json:"cloudrun_sandbox,omitempty" yaml:"cloudrun_sandbox,omitempty" koanf:"cloudrun_sandbox"`
 }
 
 // V1RuntimeDefaultsConfig holds runtime-wide behaviour that is not specific to

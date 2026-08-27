@@ -21,10 +21,23 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=63
+EXPECTED_TOTAL=77   # 63 + 14 from the oauth credential section (Phase 3).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
-BASE=(--set image.repository=r --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
+# auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
+# reason hub.baseUrl is: scion-hub.assertSessionSecret fails the render without it, so every
+# BASE render would return an error string instead of manifests and every check below would
+# accuse the chart of a fault it does not have. The chart will not default it - a generated
+# secret rotates on every helm upgrade, invalidating every session and the JWT signing key.
+BASE=(--set image.repository=r --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid --set auth.sessionSecret=harness-not-a-real-secret)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
+
+# A COMPLETE WEB CLIENT CREDENTIAL, for the rows that need auth.mode=oauth to
+# render at all. Not folded into BASE, because several rows below exist
+# specifically to assert that oauth WITHOUT this is refused - putting it in BASE
+# would make those rows unwriteable, and worse, would make them look written.
+# It replaces --set auth.acknowledgeOAuthUnlanded=true, which is what these rows
+# carried while the credentials had no channel.
+OAUTH_WEB=(--set auth.oauth.web.google.clientId=rg-web-google-id --set auth.oauth.web.google.clientSecret=rg-web-google-secret)
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output
@@ -275,11 +288,33 @@ echo "== the HA-unlanded gate: THREE ROUTES, TRANSCRIBED FROM THE HUB =="
 # the gcs-plus-proxy route switched off. My first matrix did not do this and
 # three of its rows were confounded by pre-existing schema allOf rules doing the
 # refusing instead of this guard.
+# POSTGRES NOW COSTS FOUR MORE VALUES, AND THAT IS THE CLOUD SQL PHASE, NOT A
+# WORKAROUND. --set database.driver=postgres on its own is a hard refusal since
+# the proxy landed: the chart reaches Postgres only through the Cloud SQL Auth
+# Proxy, so a postgres driver with cloudsql.enabled false renders a DSN pointing
+# at a loopback port nothing binds. Every row below that wants to reach an HA
+# route THROUGH postgres has to get past that refusal first, or it measures the
+# Cloud SQL guard while claiming to measure the HA guard - a green row about the
+# wrong subject.
+#
+# MEASURED, and this is why the list is here rather than inline: with these four
+# omitted, r2 and its positive twin both fail with "database.driver is postgres
+# but cloudsql.enabled is false" instead of the HA refusal, and the gate-name arm
+# below reports 0/7 because the message it reads is the Cloud SQL one.
+CLOUDSQL_SET=(
+  --set cloudsql.enabled=true
+  --set cloudsql.instanceConnectionName=my-project:us-central1:db-1
+  --set database.auth=iam
+  --set database.name=scion
+  --set serviceAccount.gcpServiceAccount=hub@my-project.iam.gserviceaccount.com
+)
+
 reject "r1: hub.extraEnv sets K_SERVICE" "hub.extraEnv sets K_SERVICE" \
   --set 'hub.extraEnv[0].name=K_SERVICE' --set 'hub.extraEnv[0].value=svc'
 reject "r2: postgres driver, route 3 held off with oauth" "database.driver is postgres" \
   --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
-  --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true
+  "${CLOUDSQL_SET[@]}" \
+  --set auth.mode=oauth "${OAUTH_WEB[@]}"
 reject "r3: gcs storage with proxy auth" "storage.provider is gcs and auth.mode is proxy" \
   --set storage.provider=gcs --set storage.bucket=b
 
@@ -290,7 +325,8 @@ accept "r1 + acknowledgeHAUnlanded" \
   --set 'hub.extraEnv[0].name=K_SERVICE' --set 'hub.extraEnv[0].value=svc' --set acknowledgeHAUnlanded=true
 accept "r2 + acknowledgeHAUnlanded" \
   --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
-  --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true --set acknowledgeHAUnlanded=true
+  "${CLOUDSQL_SET[@]}" \
+  --set auth.mode=oauth "${OAUTH_WEB[@]}" --set acknowledgeHAUnlanded=true
 accept "r3 + acknowledgeHAUnlanded" \
   --set storage.provider=gcs --set storage.bucket=b --set acknowledgeHAUnlanded=true
 
@@ -304,7 +340,7 @@ accept "r3 + acknowledgeHAUnlanded" \
 accept "K_SERVICE present but with an explicit empty value" \
   --set 'hub.extraEnv[0].name=K_SERVICE' --set 'hub.extraEnv[0].value='
 accept "an unrelated extraEnv name"       --set 'hub.extraEnv[0].name=NOT_K_SERVICE' --set 'hub.extraEnv[0].value=svc'
-accept "sqlite + local storage + oauth"   --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true
+accept "sqlite + local storage + oauth"   --set auth.mode=oauth "${OAUTH_WEB[@]}"
 accept "the chart defaults, no route"
 
 # THE GATE LIST IS PART OF THE CONTRACT, SO IT IS ASSERTED RATHER THAN TRUSTED.
@@ -347,15 +383,15 @@ accept "the chart defaults, no route"
 # are different lists. A single-arm guard cannot see a per-mode error at all.
 #
 # THE PRE-REGISTERED EXTENTS ARE WRITTEN HERE, ABOVE THE RUN, AND NOT READ OFF
-# THE OUTPUT AFTERWARDS: proxy >= 3 gates, oauth == 2 gates, proxy > oauth.
+# THE OUTPUT AFTERWARDS: proxy >= 3 gates, oauth == 1 gate, proxy > oauth.
 # gd-spec-rev's sharpening of gd-em's rule is the reason they are stated rather
 # than inspected - "a positive arm you read after the fact is just another
 # number on the screen". The oauth arm carries the absolute count per ruling
-# (p1) because its two gates are the two phase-owned ones, Cloud SQL and the
-# session secret; if that number moves, a phase boundary moved and a human is
-# supposed to be interrupted. The proxy arm keeps a floor rather than a pin
-# because pinning it is the hand-maintained constant this whole block exists to
-# delete.
+# (p1) because its one gate is the session secret — Cloud SQL landed in P2 and
+# server.database.url is no longer a gate; if that number moves, a phase
+# boundary moved and a human is supposed to be interrupted. The proxy arm keeps
+# a floor rather than a pin because pinning it is the hand-maintained constant
+# this whole block exists to delete.
 _ha_gates="$CHART/hack/ha-gates.txt"
 if [ ! -s "$_ha_gates" ]; then
   echo "HARNESS ERROR: $_ha_gates is missing or empty, so there is no derived gate list to check the refusal against. Regenerate with: go test ./cmd -run TestHelmChartHAGateWalk -update-chart-contract. NOTHING WAS MEASURED."
@@ -479,50 +515,63 @@ EOF
 
   # --- exclusivity: no gate the walk did not derive --------------------------
   executed=$((executed + 1))
-  _ha_enumerated_keys "$_out"; _named="$_ha_named"
-  # THE HARVEST'S OWN EXTENT, ASSERTED AGAINST AN INDEPENDENTLY-DERIVED FLOOR
-  # AND NEVER AGAINST ZERO. Every arm's canon has at least one KEY, so the
-  # refusal must name at least one. If the key regex stops matching - a rename
-  # from server.* to hub.* would do it - the harvest is empty, the empty set is
-  # a subset of every canon, and the exclusivity assertion below passes forever
-  # on every arm. That is the same vacuity the extractor shape guard catches one
-  # level up, and it needs catching at both levels because the anchors can match
-  # while the harvest inside them does not.
-  if [ "$(printf '%s\n' "$_named" | grep -cE .)" -lt 1 ]; then
-    echo "HARNESS ERROR: the ${_label} arm's refusal enumeration was located but no settings key could be harvested out of it. The exclusivity check would compare the empty set against the canon and pass. NOTHING WAS MEASURED."
-    echo "ASSERTIONS_EXECUTED=${executed}"
-    exit 2
-  fi
-  _extra="$(printf '%s\n' "$_named" | grep -E . | comm -23 - <(printf '%s\n' "$_ha_keys" | grep -E . | sort -u) | tr '\n' ' ')"
-  # THE POSITIVE CONTROL, IN THE SAME COMMAND, WITH ITS EXPECTED VALUE WRITTEN
-  # DOWN BEFORE THE RUN: seeding one key the walk cannot have derived must move
-  # the differ's answer by EXACTLY ONE. A comm that silently produced nothing -
-  # unsorted input is enough to do that - would report "no intruders" in the
-  # same words as a clean arm.
-  #
-  # 🔴 [HISTORY 2026-08-17] THE EXPECTED VALUE WAS FIRST WRITTEN AS THE ABSOLUTE
-  # `1`, WHICH IS ONLY CORRECT WHILE THE SUBJECT IS CLEAN. I found that by
-  # planting a real intruder in the oauth branch to check this arm goes red:
-  # it did go red, on the CONTROL, reporting "the differ is not reading one of
-  # its two inputs" about a differ that was working perfectly and had just found
-  # the thing I planted. A CONTROL WHOSE EXPECTED VALUE DEPENDS ON THE SUBJECT
-  # BEING CLEAN REPORTS AN APPARATUS FAULT EVERY TIME THE APPARATUS SUCCEEDS -
-  # and it fails in the direction of exit 2, "nothing was measured", which is
-  # the one outcome that tells a reader to disregard the finding. The delta is
-  # the right expectation because it holds either way.
-  _ctl_before="$(printf '%s\n' "$_extra" | tr ' ' '\n' | grep -cE .)"
-  _ctl_after="$(printf '%s\nserver.zzz.control.probe\n' "$_named" | grep -E . | sort -u | comm -23 - <(printf '%s\n' "$_ha_keys" | grep -E . | sort -u) | grep -cE .)"
-  if [ "$_ctl_after" -ne "$((_ctl_before + 1))" ]; then
-    echo "HARNESS ERROR: the ${_label} exclusivity differ answered ${_ctl_before} on the real corpus and ${_ctl_after} on the same corpus seeded with one key the walk cannot have derived (server.zzz.control.probe). Seeding one intruder must move it by exactly one; it moved by $((_ctl_after - _ctl_before)). The differ is not reading one of its two inputs. NOTHING WAS MEASURED."
-    echo "ASSERTIONS_EXECUTED=${executed}"
-    exit 2
-  fi
-  if [ -z "${_extra// /}" ]; then
-    echo "ok    ${_label}: the HA refusal's enumeration names no gate outside the ${_ha_total} the walk derived"
+  if ! printf '%s' "$_ha_keys" | grep -qE .; then
+    # PROSE-ONLY ARM. After Cloud SQL landed, the oauth arm has only the session
+    # secret — a PROSE gate — and no KEY entries. A key harvest over a refusal
+    # that names no keys returns the empty set, and the empty set is a subset of
+    # every canon, so the exclusivity differ would pass vacuously. But the
+    # COMPLETENESS check above already verified the refusal's content against the
+    # walk, and a PROSE-only arm cannot name a settings key the walk did not
+    # derive, so the exclusivity assertion is satisfied by construction. Report
+    # it and move on rather than sending the key harvester into a corpus it
+    # cannot read.
+    echo "ok    ${_label}: the HA refusal's enumeration has no KEY gates on this arm (PROSE-only); exclusivity is satisfied by construction"
   else
-    echo "FAIL  ${_label}: the HA refusal names gates the hub does not have on this arm:${_extra}"
-    echo "        this is the 1b3c9418 shape - a refusal that is right about the outcome and wrong about the reason, which sends the operator to configure things that were never going to be checked."
-    failed=$((failed + 1))
+    _ha_enumerated_keys "$_out"; _named="$_ha_named"
+    # THE HARVEST'S OWN EXTENT, ASSERTED AGAINST AN INDEPENDENTLY-DERIVED FLOOR
+    # AND NEVER AGAINST ZERO. Every arm's canon has at least one KEY, so the
+    # refusal must name at least one. If the key regex stops matching - a rename
+    # from server.* to hub.* would do it - the harvest is empty, the empty set is
+    # a subset of every canon, and the exclusivity assertion below passes forever
+    # on every arm. That is the same vacuity the extractor shape guard catches one
+    # level up, and it needs catching at both levels because the anchors can match
+    # while the harvest inside them does not.
+    if [ "$(printf '%s\n' "$_named" | grep -cE .)" -lt 1 ]; then
+      echo "HARNESS ERROR: the ${_label} arm's refusal enumeration was located but no settings key could be harvested out of it. The exclusivity check would compare the empty set against the canon and pass. NOTHING WAS MEASURED."
+      echo "ASSERTIONS_EXECUTED=${executed}"
+      exit 2
+    fi
+    _extra="$(printf '%s\n' "$_named" | grep -E . | comm -23 - <(printf '%s\n' "$_ha_keys" | grep -E . | sort -u) | tr '\n' ' ')"
+    # THE POSITIVE CONTROL, IN THE SAME COMMAND, WITH ITS EXPECTED VALUE WRITTEN
+    # DOWN BEFORE THE RUN: seeding one key the walk cannot have derived must move
+    # the differ's answer by EXACTLY ONE. A comm that silently produced nothing -
+    # unsorted input is enough to do that - would report "no intruders" in the
+    # same words as a clean arm.
+    #
+    # 🔴 [HISTORY 2026-08-17] THE EXPECTED VALUE WAS FIRST WRITTEN AS THE ABSOLUTE
+    # `1`, WHICH IS ONLY CORRECT WHILE THE SUBJECT IS CLEAN. I found that by
+    # planting a real intruder in the oauth branch to check this arm goes red:
+    # it did go red, on the CONTROL, reporting "the differ is not reading one of
+    # its two inputs" about a differ that was working perfectly and had just found
+    # the thing I planted. A CONTROL WHOSE EXPECTED VALUE DEPENDS ON THE SUBJECT
+    # BEING CLEAN REPORTS AN APPARATUS FAULT EVERY TIME THE APPARATUS SUCCEEDS -
+    # and it fails in the direction of exit 2, "nothing was measured", which is
+    # the one outcome that tells a reader to disregard the finding. The delta is
+    # the right expectation because it holds either way.
+    _ctl_before="$(printf '%s\n' "$_extra" | tr ' ' '\n' | grep -cE .)"
+    _ctl_after="$(printf '%s\nserver.zzz.control.probe\n' "$_named" | grep -E . | sort -u | comm -23 - <(printf '%s\n' "$_ha_keys" | grep -E . | sort -u) | grep -cE .)"
+    if [ "$_ctl_after" -ne "$((_ctl_before + 1))" ]; then
+      echo "HARNESS ERROR: the ${_label} exclusivity differ answered ${_ctl_before} on the real corpus and ${_ctl_after} on the same corpus seeded with one key the walk cannot have derived (server.zzz.control.probe). Seeding one intruder must move it by exactly one; it moved by $((_ctl_after - _ctl_before)). The differ is not reading one of its two inputs. NOTHING WAS MEASURED."
+      echo "ASSERTIONS_EXECUTED=${executed}"
+      exit 2
+    fi
+    if [ -z "${_extra// /}" ]; then
+      echo "ok    ${_label}: the HA refusal's enumeration names no gate outside the ${_ha_total} the walk derived"
+    else
+      echo "FAIL  ${_label}: the HA refusal names gates the hub does not have on this arm:${_extra}"
+      echo "        this is the 1b3c9418 shape - a refusal that is right about the outcome and wrong about the reason, which sends the operator to configure things that were never going to be checked."
+      failed=$((failed + 1))
+    fi
   fi
 
   # --- the removal condition names exactly the phases the walk attributes ----
@@ -554,11 +603,14 @@ EOF
   printf '%s\n' "$_ha_want" | grep -q  'durable session'        && _rwant="${_rwant}session-secret phase|"
   printf '%s\n' "$_ha_keys" | grep -qE '^server\.auth\.'        && _rwant="${_rwant}ingress/IAP phase|"
   _rwant="$(printf '%s' "$_rwant" | tr '|' '\n' | grep -E . | sort -u)"
-  _rclause="$(printf '%s' "$_out" | tr '\n' ' ' | sed -n 's/.*stops being needed for auth\.mode [a-z]* when \(.*\) have \(both\|all\) landed.*/\1/p')"
+  _rclause="$(printf '%s' "$_out" | tr '\n' ' ' | sed -n 's/.*stops being needed for auth\.mode [a-z]* when \(.*\) ha[sv]e\?\( both\| all\)\? landed.*/\1/p')"
   # THE EXTRACTION'S OWN SHAPE, ASSERTED. An anchor that stops matching yields
   # an empty clause, the empty set names no wrong phase, and the comparison
   # below reports agreement in the same words it would use for a correct
   # sentence.
+  # NOTE: the sed pattern accepts "has landed" (single phase), "have both
+  # landed" (two phases), and "have all landed" (three or more). After Cloud
+  # SQL lands, the oauth arm waits on one phase and uses the singular.
   if [ -z "$_rclause" ] || [ -z "$_rwant" ]; then
     echo "HARNESS ERROR: the ${_label} arm's removal-condition clause cut to '${_rclause}' and its walk-derived phase set to '$(printf '%s' "$_rwant" | tr '\n' ' ')'. Either the refusal no longer says 'stops being needed for auth.mode X when ... have both/all landed', or the walk yielded no phase to attribute. An empty set agrees with every sentence. NOTHING WAS MEASURED."
     echo "ASSERTIONS_EXECUTED=${executed}"
@@ -602,12 +654,14 @@ EOF
 }
 
 _ha_arm "proxy" "===== settings.yaml [audience well-formed" 3 0 \
-  --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b
+  --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
+  "${CLOUDSQL_SET[@]}"
 _ha_proxy_total="$_ha_total"
 
-_ha_arm "oauth" "===== settings-oauth.yaml [audience well-formed" 2 2 \
+_ha_arm "oauth" "===== settings-oauth.yaml [audience well-formed" 1 1 \
   --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
-  --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true
+  "${CLOUDSQL_SET[@]}" \
+  --set auth.mode=oauth "${OAUTH_WEB[@]}"
 _ha_oauth_total="$_ha_total"
 
 # --- the differential itself -------------------------------------------------
@@ -621,6 +675,110 @@ else
   echo "FAIL  the proxy and oauth arms derived ${_ha_proxy_total} and ${_ha_oauth_total} gates. Since 1b3c9418 the hub's IAP gates run only under auth.mode=proxy, so proxy must be the longer list. Equal counts mean the two arms are reading the same canon block and the per-mode branch in scion-hub.assertHAUnlanded is untested."
   failed=$((failed + 1))
 fi
+
+echo "== oauth mode requires a complete web client credential =="
+# THIS SECTION REPLACES auth.acknowledgeOAuthUnlanded, and the replacement is not
+# like-for-like. The acknowledgement asked the operator to CONFIRM the deployment
+# would be unusable; these rows assert the chart REFUSES to render it. An
+# acknowledgement is satisfiable by anyone in a hurry, and the thing it guarded
+# against - a hub that starts, binds, passes /readyz and refuses every login - is
+# not a thing an operator should be able to opt into by typing true.
+#
+# TWO LAYERS, so two rows per case, per this file's convention. The schema layer
+# is what an operator hits; the template layer is what they hit with
+# --skip-schema-validation, and it is the one that must hold, because config.extra
+# reaches the settings document without passing through the schema at all.
+#
+# THE SCHEMA ROWS DISCRIMINATE, and that is asserted rather than assumed: the
+# id-only row demands the message name clientSecret and the secret-only row
+# demands clientId. A schema that listed both halves whatever was missing would
+# satisfy a looser pair of substrings while telling the operator nothing.
+reject "oauth, no credentials, schema layer"  "clientId" \
+  --set auth.mode=oauth
+reject "oauth, clientId only, schema layer"   "clientSecret" \
+  --set auth.mode=oauth --set auth.oauth.web.google.clientId=rg-id
+reject "oauth, clientSecret only, schema layer" "clientId" \
+  --set auth.mode=oauth --set auth.oauth.web.google.clientSecret=rg-sec
+
+reject "oauth, no credentials, template layer" "no complete OAuth web client credential is present" \
+  --skip-schema-validation --set auth.mode=oauth
+reject "oauth, clientId only, template layer"  "google (has client_id, missing client_secret)" \
+  --skip-schema-validation --set auth.mode=oauth --set auth.oauth.web.google.clientId=rg-id
+reject "oauth, clientSecret only, template layer" "google (has client_secret, missing client_id)" \
+  --skip-schema-validation --set auth.mode=oauth --set auth.oauth.web.google.clientSecret=rg-sec
+
+# CLI CREDENTIALS DO NOT SUBSTITUTE FOR WEB ONES, and this row is the reason the
+# guard walks the web subtree specifically instead of asking "is server.oauth
+# non-empty". The hub keys its login check by client type (pkg/hub/oauth.go:194),
+# so a complete cli credential renders, validates, looks like configuration in
+# the Secret, and satisfies no browser login. A guard written on presence rather
+# than on client type passes this input.
+reject "complete cli credential does not satisfy oauth mode" "no complete OAuth web client credential is present" \
+  --set auth.mode=oauth \
+  --set config.extra.server.oauth.cli.google.client_id=rg-cli-id \
+  --set config.extra.server.oauth.cli.google.client_secret=rg-cli-secret
+
+# THE SPELLING GUARD, WHICH IS THE ONE THAT CAUGHT ME. settings.yaml binds
+# client_id/client_secret (V1OAuthProviderConfig, pkg/config/settings_v1.go:635);
+# clientId/clientSecret is the SCION_SERVER_* environment mapper's spelling
+# (pkg/config/hub_config.go:334). Measured both directions in
+# harness/zz_p3_oauth_settings_probe_test.go: snake_case binds, camelCase leaves
+# the field empty with no error from yaml.v3. I wrote the positive case in
+# camelCase and expected it to pass.
+#
+# The first row carries a COMPLETE google credential as well, so the missing- and
+# incomplete-credential guards above cannot be what refuses it. Without that, the
+# row would go green on the wrong refusal and the spelling guard could be deleted
+# without turning anything red.
+reject "camelCase via config.extra, oauth mode" "server.oauth.web.github.clientId" \
+  --set auth.mode=oauth "${OAUTH_WEB[@]}" \
+  --set config.extra.server.oauth.web.github.clientId=rg-camel
+# AND IT IS NOT GATED ON auth.mode. A misspelled credential is inert in proxy
+# mode too - it just is not load-bearing there yet, which is exactly the state in
+# which a wrong spelling gets committed and survives until the mode changes.
+reject "camelCase via config.extra, proxy mode" "server.oauth.web.github.clientId" \
+  --set auth.mode=proxy \
+  --set config.extra.server.oauth.web.github.clientId=rg-camel
+
+accept "oauth with a complete google web credential" --set auth.mode=oauth "${OAUTH_WEB[@]}"
+accept "oauth with a complete github web credential" --set auth.mode=oauth \
+  --set auth.oauth.web.github.clientId=rg-gh-id --set auth.oauth.web.github.clientSecret=rg-gh-secret
+# config.extra IS A FIRST-CLASS WAY TO MEET THE REQUIREMENT, not a bypass of it.
+# The guard reads the rendered document, so an operator who supplies
+# server.oauth.web themselves has supplied it, and a guard that insisted on
+# auth.oauth.web specifically would refuse a correct deployment.
+accept "credentials supplied through config.extra in snake_case" --set auth.mode=oauth \
+  --set config.extra.server.oauth.web.google.client_id=rg-extra-id \
+  --set config.extra.server.oauth.web.google.client_secret=rg-extra-secret
+# WITH AN EXTERNAL SETTINGS SECRET THE CHART RENDERS NO SETTINGS DOCUMENT, so
+# there is nothing to inspect and nothing to refuse. Asserting this keeps the
+# guard from growing into a claim about a file the chart cannot see.
+accept "oauth with no credentials but an external settings Secret" \
+  --set auth.mode=oauth --set config.existingSecret=operator-owned
+
+# THE POSITIVE TWIN OF THE SPELLING GUARD: the chart's own render must land on
+# the side of the guard it enforces. A chart that refused camelCase from
+# config.extra while emitting camelCase itself would pass every row above -
+# the guard runs on the merged document, so it would refuse its own output, and
+# the accept rows would be the ones to fail... unless the guard were ever
+# narrowed to config.extra only. This asserts the emitted spelling directly.
+executed=$((executed + 1))
+_oa="$(render --set auth.mode=oauth "${OAUTH_WEB[@]}")"
+if [ -z "$_oa" ] || ! printf '%s\n' "$_oa" | grep -q '^kind: Secret$'; then
+  echo "FAIL  rendered oauth credentials: no Secret in the output, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_oa" | grep -qE '^ +client(Id|Secret):'; then
+  echo "FAIL  rendered oauth credentials: the chart emits camelCase, which binds nothing in settings.yaml"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_oa" | grep -q '^ *client_id: rg-web-google-id$' \
+  && printf '%s\n' "$_oa" | grep -q '^ *client_secret: rg-web-google-secret$'; then
+  echo "ok    the chart emits client_id/client_secret, the spelling settings.yaml binds"
+else
+  echo "FAIL  rendered oauth credentials: neither spelling reached the settings document"
+  echo "        got: $(printf '%s' "$_oa" | grep -c .) lines, no client_id/client_secret"
+  failed=$((failed + 1))
+fi
+unset _oa
 
 echo "== hub identity is stable across upgrade and independent of the release name =="
 # hub.hubId must be used verbatim and must never be derived from anything Helm

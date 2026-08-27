@@ -249,6 +249,11 @@ hub:
   # selector is immutable, so overriding one breaks the Deployment rather than
   # relabelling it.
   podLabels: {}
+  # Scheduling. These three are checked for credential material on the same
+  # terms as podAnnotations and podLabels above: they are free-form operator
+  # input and they land in the pod spec, which anyone with pod read access can
+  # read. A connection string with a password in it is rejected here rather than
+  # rendered. Ordinary labels, taints and affinity rules are unaffected.
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -434,9 +439,98 @@ database:
   # the thirteen, and the chart already satisfies two of them. Naming a subset
   # of a guard's conditions reads as naming all of them.
   #
-  # The connection URL itself is not a value here yet; it arrives with Cloud
-  # SQL support.
+  # The connection URL is not set here and cannot be. It is DERIVED, from
+  # database.auth, database.user, database.name and the proxy's listen port -
+  # see the cloudsql block below and scion-hub.databaseUrl. Under password auth
+  # it carries the password, so it exists only inside the settings Secret and
+  # never as a value you could accidentally echo.
   driver: sqlite
+
+  # REQUIRED when driver is postgres, and deliberately not given a value here.
+  #
+  # iam       the proxy authenticates as the pod's Google service account and
+  #           the DSN carries NO password at all.
+  # password  a Postgres role and password, rendered into the settings Secret.
+  #
+  # THERE IS NO DEFAULT, AND THE ABSENCE IS THE DECISION. The design (§7.2)
+  # says Phase 2 verifies IAM against a live instance first and that the result
+  # picks the default. That verification HAS NOT HAPPENED - there is no cluster
+  # and no Cloud SQL instance reachable by the principal this chart was built
+  # with, measured as a 403 and recorded in VALIDATION.md. So there is no
+  # verified default to ship, and three reasons not to invent one:
+  #
+  #   - A default nobody verified is a parameter nobody chose. "Untested"
+  #     renders identically to "verified" and no reader can tell them apart.
+  #   - The risk is asymmetric. Defaulting to password when IAM would have
+  #     worked is a silent security regression that nothing would ever surface.
+  #   - Only one option is reversible. A withheld default can be added later
+  #     without breaking any existing install; a wrong default cannot be
+  #     removed later without breaking every existing install.
+  #
+  # When the IAM verification is finally run, this is where its result lands.
+  # Until then the operator chooses explicitly, which is the honest state.
+  #
+  #   auth: iam
+  #
+
+  # The Postgres database and role. Both REQUIRED when driver is postgres.
+  #
+  # Under auth: iam the user is the Google service account with the trailing
+  # ".gserviceaccount.com" REMOVED - Cloud SQL registers the IAM principal
+  # under the truncated form, so "scion-hub@my-project.iam.gserviceaccount.com"
+  # is the role "scion-hub@my-project.iam". Leave user empty and the chart
+  # derives exactly that from serviceAccount.gcpServiceAccount rather than
+  # making you restate it, which is one fewer place for the two to disagree.
+  name: ""
+  user: ""
+
+  # Only under auth: password, and only ever inside the settings Secret.
+  #
+  # It is interpolated into server.database.url in the rendered settings.yaml,
+  # which is a Secret; it reaches no ConfigMap, no pod annotation and no argv.
+  # If you would rather it never passed through Helm values at all, supply the
+  # whole settings file yourself with config.existingSecret.
+  #
+  # 🔴 ROTATING THIS VALUE DOES NOT RESTART THE PODS. AFTER YOU CHANGE IT, RUN:
+  #
+  #     kubectl rollout restart deploy/<release>-scion-hub
+  #
+  # If you skip that step, `helm upgrade` succeeds, the Secret holds the new
+  # password, and every running pod keeps using the OLD one until something
+  # unrelated restarts it. Nothing reports this. NOTES.txt prints the same
+  # instruction on every install and upgrade that sets a password, so you do not
+  # have to remember that this comment exists.
+  #
+  # WHY IT WORKS THIS WAY, because the obvious fix is one someone will try:
+  #
+  # settings.yaml is a subPath mount, and the kubelet never refreshes one - it
+  # is bound at container start and frozen for that container's lifetime. The
+  # chart therefore forces a roll by putting a digest of the settings document
+  # in a pod annotation: change the document, change the digest, change the pod
+  # template, get new pods. That is checksum/settings in deployment.yaml and it
+  # predates this value.
+  #
+  # A pod annotation is readable by anyone with get on deployments or pods,
+  # which is a WIDER audience than this Secret's own RBAC. Everything else in a
+  # DSN - scheme, user, host, port, database name - is chart-rendered or public.
+  # So a digest over the raw document is a digest over a preimage with exactly
+  # one unknown in it, and that is an offline verification oracle for this
+  # password: a reader who can list deployments can confirm a guess without ever
+  # being allowed to read the Secret. The digest is therefore taken over a
+  # projection with the credential component of the URL removed.
+  #
+  # That removal is what costs you the automatic roll, and only for a
+  # credential-only change. Change the host, the port, the database name or
+  # anything else in settings.yaml and the pods still roll by themselves.
+  #
+  # MEASURED, NOT ASSERTED. hack/verify.sh renders two charts differing only in
+  # this value and asserts the digests are EQUAL - the oracle is dead - and then
+  # renders one differing only in database.name and asserts they DIFFER, so the
+  # first result cannot be satisfied by a digest that has stopped changing at
+  # all. It also runs a password containing @ : / and # , which the DSN
+  # percent-encodes, because a projection that redacted by matching the value
+  # rather than by URL structure would be silent for exactly those passwords.
+  password: ""
 
   # Connection pool. Rendered into settings.yaml, and not settable by
   # environment variable here: SCION_SERVER_DATABASE_MAX_OPEN_CONNS is discarded
@@ -446,11 +540,94 @@ database:
   # configuration-intake section of templates/_helpers.tpl.
   #
   # Keep maxOpenConns comfortably above the number of background workers, and
-  # the total across replicas below the Cloud SQL tier's connection limit.
+  # the total across replicas below the Cloud SQL tier's connection limit. The
+  # budget formula, including the part of it this chart cannot know, is printed
+  # by NOTES.txt.
   maxOpenConns: 25
   maxIdleConns: 5
   connMaxLifetime: 30m
   connMaxIdleTime: 5m
+
+# The Cloud SQL Auth Proxy.
+#
+# The hub talks to 127.0.0.1 and the proxy holds a mutually authenticated TLS
+# tunnel to Cloud SQL. cloudsqlconn is not in the hub's go.mod, so the connector
+# cannot be used in-process and the proxy is the only route.
+cloudsql:
+  enabled: false
+
+  # project:region:instance. REQUIRED when enabled - the chart cannot guess it
+  # and there is nothing sensible to default to.
+  instanceConnectionName: ""
+
+  # A NATIVE SIDECAR: an initContainers entry carrying restartPolicy: Always,
+  # which GKE 1.29+ starts before the main container and tears down after it.
+  #
+  # This is not a style preference. The hub opens the database and runs
+  # AutoMigrate immediately at startup. As a plain sidecar the proxy has no
+  # ordering guarantee, so the hub races it and CrashLoopBackOffs until it wins
+  # - self-healing but ugly, and it spends the startup-probe budget on a
+  # sequencing problem rather than on migration.
+  #
+  # Set false only for clusters below 1.29. NOTES.txt then prints the crash-loop
+  # warning, because on that path the first minute of every rollout looks like a
+  # broken install and is not.
+  nativeSidecar: true
+
+  # Connect over the instance's private IP rather than its public IP. Requires
+  # the cluster to be VPC-native and peered to the instance.
+  privateIp: false
+
+  # The loopback port the proxy listens on and the hub connects to. It appears
+  # in the derived DSN, so the two cannot drift apart.
+  port: 5432
+
+  # The proxy's own health-check server. Distinct from the hub's /readyz, and
+  # deliberately not on the hub's port - both processes share one network
+  # namespace, so a collision here is a port conflict inside the pod.
+  #
+  # /startup and /readiness are the proxy's endpoints, not the hub's. Do not
+  # point them at the hub's paths and do not point the hub's probes here.
+  healthCheckPort: 9801
+
+  image:
+    repository: gcr.io/cloud-sql-connectors/cloud-sql-proxy
+
+    # PINNED BY DIGEST, AND THERE IS NO TAG VALUE TO SET.
+    #
+    # image.repository / image.digest for the hub refuse a tag and a digest
+    # together, because two sources for one identity can disagree and the digest
+    # silently wins. The same reasoning applies here, and the proxy has no case
+    # at all for running unpinned - so rather than offer a tag and refuse the
+    # combination, this block simply has no tag. The version below is a comment
+    # precisely so that nothing can mistake it for the authority.
+    #
+    # This is v2.25.2, and the digest was resolved FROM THE REGISTRY rather than
+    # copied from documentation:
+    #
+    #   curl -sSI -H "Accept: application/vnd.oci.image.index.v1+json" \
+    #     https://gcr.io/v2/cloud-sql-connectors/cloud-sql-proxy/manifests/2.25.2
+    #   docker-content-digest: sha256:825d5e4ce70d38bd0006c9eea15a6a2e2983e87b31ac6924d33e2dba56eafc9f
+    #
+    # It is the multi-arch index digest, so it resolves on amd64 and arm64
+    # alike.
+    #
+    # THE IMAGE DECLARES USER 65532 AND THE PROXY DOES NOT RUN AS IT. This pod
+    # sets runAsUser at pod level from hub.securityContext.runAsUser (1000 by
+    # default), and a pod-level runAsUser is inherited by every container and
+    # cannot be unset for one of them - only overridden. So the proxy runs as
+    # 1000. It satisfies runAsNonRoot either way, which is why no per-container
+    # exemption is needed, but the reason is the pod's uid and not the image's.
+    # An earlier draft of this comment said the opposite; it was reading the
+    # image and not the rendered pod. What actually happens at runtime is
+    # UNVERIFIED - see VALIDATION.md section 7.4.
+    digest: sha256:825d5e4ce70d38bd0006c9eea15a6a2e2983e87b31ac6924d33e2dba56eafc9f
+    pullPolicy: IfNotPresent
+
+  # The proxy is small but it is on the hot path for every query. Left empty by
+  # default because Autopilot assigns its own defaults and a guess here would
+  # override them with a worse one.
+  resources: {}
 
 storage:
   # The hub's blob store: task artifacts, uploads, agent output. This is NOT the
@@ -499,52 +676,223 @@ auth:
   # five, which is what the paired ci fixtures actually diff.
   mode: proxy
 
-  # The oauth mode's supporting configuration - the client credentials - is not
-  # rendered by the chart yet; it lands with the session and client secrets.
+  # THE SESSION SECRET. One of the next two is REQUIRED - the render fails if
+  # neither is set, and it fails if both are.
   #
-  # It does not fail loudly. The credentials are wired without validation
-  # (cmd/server_foreground.go:1514-1544), so the hub starts, binds and passes
-  # /readyz, and the failure arrives once per login attempt as "OAuth provider
-  # is not configured" (pkg/hub/web.go:1770-1776) - a deployment that is green
-  # in every Kubernetes signal and that nobody can log in to.
+  # This one value backs BOTH the session cookie encryption key AND the hub's
+  # shared JWT signing keys (resolveSessionSecret,
+  # cmd/server_foreground.go:1452-1463), so every replica must see the same
+  # bytes or they reject each other's tokens.
   #
-  # Set this to true to acknowledge that and render anyway. Both the schema and
-  # the template enforce it, and neither applies under config.existingSecret,
-  # where the chart renders no auth mode at all.
-  acknowledgeOAuthUnlanded: false
+  # WHY THE CHART REFUSES RATHER THAN DEFAULTING OR GENERATING. The hub does not
+  # fail without one: it logs a single warning and derives a per-process key, so
+  # the deployment comes up green and users get logged out whenever the load
+  # balancer moves them - a symptom that reads as a flaky session store, not as
+  # a configuration error. And a generated secret is worse than none: it rotates
+  # on every helm upgrade, invalidating every live session and the shared
+  # signing key at once, and it cannot be rendered reproducibly because lookup
+  # returns empty under helm template, so the golden output would not match the
+  # installed output.
+  #
+  # ROTATING IT LATER NEEDS A RESTART, AND THE CHART WILL NOT TELL YOU. Both
+  # shapes below reach the container through the environment, which the kubelet
+  # resolves once at container start and never refreshes. So a helm upgrade that
+  # changes the session secret updates the Secret, reports success, and leaves
+  # every running replica on the old bytes until something else restarts them.
+  # If you are rotating because the old value leaked, the rotation has not
+  # happened yet at that point. Follow the upgrade with
+  # `kubectl rollout restart deploy/<release>-scion-hub`, and expect it to log
+  # everyone out - that is the rotation working, not a fault.
+  #
+  # There is no checksum/session pod annotation to automate that, and the
+  # omission is deliberate rather than forgotten. The annotation would have to
+  # be a digest over the secret, pod annotations are readable by anyone with pod
+  # read access - a strictly wider audience than the Secret's own RBAC - and a
+  # digest of a low-entropy secret is a secret you can recover offline.
+  #
+  # AND SAY THE UNCOMFORTABLE HALF FIRST, NOT LAST. The chart DOES render a
+  # checksum/settings annotation, and once auth.mode is oauth the document that
+  # annotation covers contains your OAuth client secret. Pod annotations are
+  # readable by anyone with pod read access - the same strictly wider audience
+  # named above, wider than the Secret's own RBAC.
+  #
+  # THAT DIGEST IS TAKEN OVER A REDACTED PROJECTION, NOT OVER THE DOCUMENT.
+  # scion-hub.settingsChecksum replaces every credential leaf in the rendered
+  # settings document with a constant before hashing, so rotating an OAuth
+  # client secret does not move the annotation, and the annotation is therefore
+  # not an offline verification oracle for the credential.
+  # tests/chart-integrity.sh section E9 asserts both halves: the digest is
+  # unchanged by rotating the client secret, AND it still moves when a
+  # non-secret settings field changes. Either half alone is satisfiable by a
+  # broken chart - a deleted annotation passes the first, the old un-redacted
+  # digest passes the second - so both are committed.
+  #
+  # THIS WAS AN ACCEPTED EXPOSURE UNTIL SOMEBODY MEASURED IT, AND THE
+  # MEASUREMENT IS WHY IT IS NOW FIXED. The text that stood here argued the
+  # residual protection was that an attacker must also guess every other field
+  # in the rendered settings.yaml. That argument is false for this chart. The
+  # rest of the document is chart-rendered and predictable from public values,
+  # so the preimage was reconstructed byte for byte and then used to predict the
+  # annotation for three client secrets that had never been rendered - 3 of 3,
+  # at roughly 300,000 candidates per second on one core. Against a
+  # provider-issued secret that is CONFIRMATION of a candidate an attacker
+  # already holds rather than recovery from nothing, including confirmation
+  # against superseded values still sitting in the ReplicaSet revision history.
+  # A lower bar than recovery, and the one that matters.
+  #
+  # WHAT THE ANNOTATION IS STILL FOR. It cannot simply be dropped: settings.yaml
+  # is a subPath mount, frozen for the container's lifetime, so with no pod
+  # annotation that moves, a settings upgrade would report success and change
+  # nothing. Redacting the credential leaves keeps that mechanism working for
+  # every non-credential change - and see auth.oauth below for what you must do
+  # yourself for the credential ones, which is the price of this fix and is not
+  # optional.
+  #
+  # TWO LIMITS, STATED RATHER THAN LEFT TO BE DISCOVERED. First, the projection
+  # redacts BY PATH, so a credential written to a path the helper does not know
+  # about would still be digested; a value-based backstop re-checks the finished
+  # projection for the credentials it just redacted and for any
+  # scheme://user:password@host URL, and fails the render rather than publishing
+  # one. Path to act, value to prove - the two fail in opposite directions and
+  # neither alone is sufficient. Second, because the digest is now taken over a
+  # re-serialised projection rather than over the raw rendered Secret, its value
+  # differs from the pre-fix value for every fixture, so the first upgrade
+  # across this change rolls the pods once. The chart is unreleased, so that
+  # roll costs nothing; it is called out here so it is not read as a regression.
+  #
+  # The session secret is treated differently rather than consistently, and it
+  # has no annotation at all: env is equally unrefreshable, but a restart IS a
+  # documented one-line remedy, and a digest over that one value would have the
+  # least around it to guess. See templates/deployment.yaml for the
+  # checksum/settings reasoning.
+  #
+  # PREFERRED. The name of a Secret you create and manage yourself. The chart
+  # renders no Secret in this shape, and the value never enters this file, your
+  # values overrides, or Helm's release storage - which is the whole reason to
+  # prefer it. Only the named key is bound into the hub's environment, so other
+  # keys in your Secret are not exposed to the hub.
+  existingSecret: ""
+
+  # The key inside auth.existingSecret holding the secret. Defaults to
+  # SCION_SERVER_SESSION_SECRET, which is what the hub reads; set it only if
+  # your Secret already uses a different key name. Meaningless without
+  # auth.existingSecret, and the chart refuses that combination rather than
+  # ignoring it.
+  existingSecretKey: ""
+
+  # The inline alternative: the chart renders secret-session.yaml holding this
+  # value. Convenient, and appropriate when your values file is itself managed
+  # as a secret - but note that this Secret is only as private as the values
+  # file and the Helm release that carry it. Generate with, for example,
+  # `openssl rand -base64 48`.
+  sessionSecret: ""
+
+  # THE OAUTH CLIENT CREDENTIALS. Required when auth.mode is oauth, and the
+  # render fails without them - which is what replaced the acknowledgement key
+  # that used to sit here.
+  #
+  # THE KEY THAT WAS HERE AND WHY IT IS GONE. auth.acknowledgeOAuthUnlanded was
+  # a required opt-in, added when this chart rendered oauth mode but had no
+  # channel for the credentials that mode needs. It asked the operator to
+  # confirm they understood the deployment would come up green and refuse every
+  # login. That was the right shape for a gap, and the wrong shape to keep once
+  # the gap closed: a permanent acknowledgement teaches operators to type true
+  # and move on. The chart now renders the credentials, so the honest guard is
+  # a refusal that names what is missing, not a checkbox.
+  #
+  # RENDERED INTO settings.yaml, WHICH IS A SECRET, NOT A ConfigMap. The client
+  # secret is secret material and never appears in args, in a ConfigMap or in an
+  # annotation. Like auth.sessionSecret, a value set here lives in your values
+  # file and in Helm's release storage; config.existingSecret is the shape where
+  # the whole settings file, credentials included, stays yours.
+  #
+  # WEB ONLY, DELIBERATELY. These are the credentials for the browser login
+  # flow. The hub also models cli and device clients; the chart does not model
+  # them. If you need them, set server.oauth.cli or server.oauth.device through
+  # config.extra.
+  #
+  # ROTATING A CLIENT SECRET REQUIRES A RESTART AND THE CHART WILL NOT DO IT FOR
+  # YOU. THIS IS THE PRICE OF THE checksum/settings REDACTION DESCRIBED UNDER
+  # auth.sessionSecret ABOVE, AND IT IS PAID HERE. settings.yaml reaches the
+  # container as a subPath mount, which the kubelet resolves once at container
+  # start and never refreshes. So a helm upgrade that changes clientId or
+  # clientSecret rewrites the Secret, reports success, and leaves every running
+  # replica using the old credential. The checksum/settings annotation does not
+  # rescue you, because it is now deliberately blind to credential changes:
+  # rotating a client secret is exactly the change that no longer moves it.
+  # Before the redaction the pods rolled by accident, as a side effect of the
+  # credential being inside the digest - and that same side effect was the
+  # verification oracle. The two were one mechanism and they are gone together.
+  #
+  # So after any upgrade that changes a value under auth.oauth:
+  #
+  #   kubectl rollout restart deploy/<release>-scion-hub
+  #
+  # Until you run it the rotation has not happened, and if you are rotating
+  # because the old secret leaked then the leaked secret is still the live one.
+  # FORGETTING IS SILENT IN BOTH DIRECTIONS. Logins keep working on the old
+  # credential, so nothing looks wrong - until the provider revokes it, at which
+  # point every login fails at once and the pods are still green, because a
+  # broken OAuth credential is not something /readyz can see. NOTES.txt prints
+  # this reminder on every install and upgrade that sets OAuth credentials, for
+  # the operator who reads release notes and not values.yaml.
+  #
+  # MIND THE SPELLING IF YOU GO THROUGH config.extra. These chart values are
+  # camelCase and the chart renders them into settings.yaml as client_id and
+  # client_secret, because that is what the settings schema binds
+  # (V1OAuthProviderConfig, pkg/config/settings_v1.go:635). The env-var mapper
+  # for the same values uses the OTHER spelling, clientId/clientSecret
+  # (pkg/config/hub_config.go:334) - so a clientId written into settings.yaml
+  # by hand binds nothing, silently. The chart refuses the camelCase spelling
+  # under server.oauth rather than letting it through.
+  oauth:
+    web:
+      google:
+        clientId: ""
+        clientSecret: ""
+      github:
+        clientId: ""
+        clientSecret: ""
 
   # When true the hub refuses to start rather than fall back to a signing key
   # generated per process. That fallback is fatal across replicas - each pod
   # signs tokens the others reject - and it is silent, so it presents as
   # intermittent logouts rather than as a configuration error.
   #
-  # DEFAULTED false, AND IT WILL BECOME true IN THE SESSION-SECRET PHASE. Not a
-  # judgement that the protection is unwanted - it is that in THIS release
-  # nothing can satisfy it. The hub resolves a stable key from, in order: a
-  # pre-configured key, SharedSigningSecret, a secret backend, then the store
-  # (pkg/hub/server.go:1445). SharedSigningSecret is resolveSessionSecret()
-  # (cmd/server_foreground.go:1556), which reads only --session-secret,
-  # SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET
-  # (cmd/server_foreground.go:1452-1462) - it has no settings-file source at
-  # all, and this chart renders none of the three. On a first boot the store is
-  # empty too. So with true there is no key to find, and pkg/hub/server.go:1634
-  # returns an error that pkg/hub/server.go:1008 makes fatal and
-  # cmd/server_foreground.go:259 turns into log.Fatalf.
+  # DEFAULTED true SINCE THE SESSION-SECRET PHASE. It was false before, and the
+  # history matters because the reason was never "the protection is unwanted":
+  # it was that nothing in the release could satisfy it. The hub resolves a
+  # stable key from, in order, a pre-configured key, SharedSigningSecret, a
+  # secret backend, then the store (pkg/hub/server.go:1445). SharedSigningSecret
+  # is resolveSessionSecret() (cmd/server_foreground.go:1452-1463), which reads
+  # only --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET -
+  # it has no settings-file source at all - and the chart rendered none of the
+  # three. On a first boot the store is empty too. So true meant no key to find:
+  # pkg/hub/server.go:1634 errors, pkg/hub/server.go:1008 makes it fatal, and
+  # cmd/server_foreground.go:259 turns it into log.Fatalf.
   #
-  # MEASURED through the real hub.New, not read: ServerConfig{RequireStableSigningKey:
-  # true} refuses; adding only SharedSigningSecret makes the same call succeed.
-  # The missing session secret is the entire difference. Four of the five ci
-  # permutations rendered "true" and none rendered a secret, so four of five
-  # could not start - including minimal, which the rest of this chart's prose
-  # points at as the safe one.
+  # MEASURED through the real hub.New, not read, at both ends. Before:
+  # ServerConfig{RequireStableSigningKey: true} refuses with "refusing to
+  # generate a new signing key ... provide a SharedSigningSecret or
+  # pre-provision the key"; adding only SharedSigningSecret makes the same call
+  # succeed, so the missing session secret was the entire difference.
   #
-  # The harm the true setting prevents - replicas signing tokens each other
-  # reject - needs a replica set this release cannot start one member of. It
-  # arrives with the secret, so the two should arrive together. A guard that
-  # nothing can satisfy is worse than no guard, because it teaches operators to
-  # turn guards off.
+  # WHAT CHANGED IS NOT THIS LINE - IT IS THAT auth.sessionSecret /
+  # auth.existingSecret ARE NOW REQUIRED. The render fails when neither is set,
+  # so SCION_SERVER_SESSION_SECRET is delivered on every path that renders at
+  # all, and true is satisfiable everywhere rather than nowhere. A guard nothing
+  # can satisfy is worse than no guard, because it teaches operators to turn
+  # guards off; the fix was to make the guard satisfiable, not to keep it off.
   #
-  # tests/chart-integrity.sh asserts the flip: the day the default render gains
-  # a session-secret source, the LANDING limb fails and stays failing until this
-  # line reads true.
-  requireStableSigningKey: false
+  # SET IT false ONLY IF YOU SUPPLY A SIGNING KEY BY A ROUTE THE CHART CANNOT
+  # SEE - a secret backend configured through config.extra, or a key already in
+  # the hub's store from a previous release. Turning it off to make a failing
+  # install start is the wrong move: the failure means the hub found no durable
+  # key, and with the flag off it does not stop, it invents one per process. The
+  # symptom is users being logged out whenever the load balancer moves them.
+  #
+  # tests/chart-integrity.sh section E asserts the pairing in both directions:
+  # true with no session-secret source in the default render fails, and false
+  # while a source is present fails too. Neither the default nor the secret can
+  # be changed without the other.
+  requireStableSigningKey: true

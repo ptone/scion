@@ -15,8 +15,10 @@
 package cmd
 
 import (
+	"context"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,6 +32,35 @@ func TestIsSupportedIAPAudience(t *testing.T) {
 		{
 			name:     "cloud run format",
 			audience: "/projects/123/locations/us-central1/services/my-svc",
+			want:     true,
+		},
+		// Cloud Run Instance audience — the path says "services" even though
+		// the backend is a Cloud Run Instance, not a Service. This is correct:
+		// IAP uses a fixed resource vocabulary ("/services/") for every backend
+		// type, including Instances. It is NOT a bug and NOT a mismatch to
+		// correct.
+		//
+		// Changing "services" to "instances" in the audience would produce an
+		// audience mismatch on every request: the IAP edge would still stamp
+		// the JWT with a "/services/" audience, but the hub would be
+		// configured to expect "/instances/", and every comparison would fail
+		// with a 401 that does not obviously point back to this code.
+		//
+		// Region-scope note: IAP policy binding is at region level
+		// (projects/{PROJECT}/iap_web/cloud_run-{REGION}), not per-instance —
+		// per-instance setIamPolicy returns 404 for Cloud Run Instances. This
+		// is acceptable when the project hosts a single tenant, because a
+		// region-level grant admits the holder to exactly one resource.
+		//
+		// ⚠️ Revisit trigger: if this tier ever hosts more than one tenant in
+		// one project, region scope is immediately wrong and per-resource auth
+		// must come back (see design doc §11.2, §11.1).
+		//
+		// Reference: design doc §11.3 (identity flow), OQ-17 (audience
+		// confirmation), §11.2 (region-scope IAP policy).
+		{
+			name:     "cloud run Instance audience uses services path",
+			audience: "/projects/123456789/locations/us-east4/services/my-instance",
 			want:     true,
 		},
 		{
@@ -175,4 +206,69 @@ func TestValidateHostedHAPreflight(t *testing.T) {
 		assert.Equal(t, "123-abc.apps.googleusercontent.com", cfg.Auth.Transport.OIDCAudience,
 			"preflight should trim the transport audience so downstream token minting uses the canonical value")
 	})
+}
+
+func TestInitWebServer_DevAuth_NonLoopback_Rejected(t *testing.T) {
+	tests := []struct {
+		name        string
+		host        string
+		devAuth     string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:        "dev auth with 0.0.0.0 rejected",
+			host:        "0.0.0.0",
+			devAuth:     "some-token",
+			wantErr:     true,
+			errContains: "dev auth cannot be enabled",
+		},
+		{
+			name:        "dev auth with empty host (defaults to 0.0.0.0) rejected",
+			host:        "",
+			devAuth:     "some-token",
+			wantErr:     true,
+			errContains: "non-loopback address",
+		},
+		{
+			name:        "dev auth with public IP rejected",
+			host:        "192.168.1.1",
+			devAuth:     "some-token",
+			wantErr:     true,
+			errContains: "non-loopback address",
+		},
+		{
+			name:    "dev auth with 127.0.0.1 allowed",
+			host:    "127.0.0.1",
+			devAuth: "some-token",
+			wantErr: false,
+		},
+		{
+			name:    "no dev auth with 0.0.0.0 allowed",
+			host:    "0.0.0.0",
+			devAuth: "",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.GlobalConfig{}
+			cfg.Hub.Host = tt.host
+
+			_, err := initWebServer(context.Background(), cfg, nil, tt.devAuth, false, "", nil, nil)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errContains)
+			} else {
+				// initWebServer may fail for other reasons (e.g., missing deps)
+				// but it should NOT fail with a dev-auth error.
+				if err != nil {
+					assert.NotContains(t, err.Error(), "dev auth cannot be enabled",
+						"should not reject dev auth on loopback host")
+				}
+			}
+		})
+	}
 }

@@ -1464,6 +1464,9 @@ func parseAdminEmails(cfg *config.GlobalConfig) []string {
 	if len(adminEmailList) == 0 && len(cfg.Hub.AdminEmails) > 0 {
 		adminEmailList = cfg.Hub.AdminEmails
 	}
+	// D11-fix: normalize (TrimSpace + ToLower, drop empties) so matchers
+	// compare against the same normalization the user store applies.
+	adminEmailList = config.SanitizeEmailList(adminEmailList)
 	if len(adminEmailList) > 0 {
 		log.Printf("Admin emails configured: %v", adminEmailList)
 	}
@@ -2184,6 +2187,16 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		webHost = "0.0.0.0"
 	}
 
+	// Refuse to start when dev auth is enabled on a non-loopback interface.
+	// Dev auth auto-logs in every request as admin — exposing it on a public
+	// address would create an unauthenticated admin endpoint.
+	if devAuthToken != "" && !hub.IsLoopbackHost(webHost) {
+		return nil, fmt.Errorf(
+			"dev auth cannot be enabled when the server is bound to a non-loopback address (%s). "+
+				"Dev auth auto-logs in all requests as admin and must only be used on localhost. "+
+				"Either bind to 127.0.0.1/::1/localhost (--host 127.0.0.1) or disable dev auth", webHost)
+	}
+
 	// Allow env var overrides for session/OAuth config
 	sessionSecret := resolveSessionSecret()
 	baseURL := webBaseURL
@@ -2253,6 +2266,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		webSrv.SetStore(hubSrv.GetStore())
 		webSrv.SetUserTokenService(hubSrv.GetUserTokenService())
 		webSrv.SetMaintenanceState(hubSrv.GetMaintenanceState())
+		webSrv.SetDemotionSafe(hubSrv.GetDemotionSafe())
 		webSrv.SetAuthzService(hubSrv.GetAuthzService())
 		webSrv.MountHubAPI(hubSrv.Handler(), hubSrv.CleanupResources)
 
@@ -2435,6 +2449,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		WriteTimeout:                  cfg.RuntimeBroker.WriteTimeout,
 		HubEndpoint:                   hubEndpointForRH,
 		ContainerHubEndpoint:          containerHubEndpoint,
+		HubListenPort:                 resolveHubListenPort(cfg),
 		BrokerID:                      brokerID,
 		BrokerName:                    brokerName,
 		CORSEnabled:                   cfg.RuntimeBroker.CORSEnabled,
@@ -2787,7 +2802,7 @@ func resolveCloudRunProjectAndRegion(rtConfig config.V1RuntimeConfig, runtimeTyp
 		if rtConfig.CloudRun == nil {
 			return "", ""
 		}
-		return strings.TrimSpace(rtConfig.CloudRun.Project), strings.TrimSpace(rtConfig.CloudRun.Region)
+		return strings.TrimSpace(rtConfig.CloudRun.ProjectID), strings.TrimSpace(rtConfig.CloudRun.Location)
 	case "cloudrun-instances":
 		if rtConfig.CloudRunInstances == nil {
 			return "", ""
@@ -2821,6 +2836,28 @@ func resolveBrokerName(cfg *config.GlobalConfig, settings *config.Settings, vsBr
 	return brokerName
 }
 
+// resolveHubListenPort returns the port the co-located hub HTTP server is
+// listening on. In combined web+API mode (--enable-web) this is --web-port;
+// in standalone hub mode it is --port. Returns 0 when the hub is not
+// co-located (enableHub false).
+//
+// This is the single source of truth for the hub's listen port. Two callers
+// depend on it: resolveHubEndpointForBroker (which formats it into a
+// localhost URL for the broker's own hub communication) and the broker config's
+// HubListenPort (which cloudrunSandboxHubEndpoint uses to construct the
+// link-local endpoint for sandboxes). Keeping the derivation here rather
+// than duplicating it prevents one caller from drifting when the other is
+// updated — a failure whose symptom is agents that start but never register.
+func resolveHubListenPort(cfg *config.GlobalConfig) int {
+	if !enableHub {
+		return 0
+	}
+	if enableWeb {
+		return webPort
+	}
+	return cfg.Hub.Port
+}
+
 // resolveHubEndpointForBroker determines the Hub endpoint URL for the
 // runtime broker's internal communication (heartbeat, control channel).
 // In co-located mode (enableHub true), this always resolves to localhost
@@ -2828,10 +2865,7 @@ func resolveBrokerName(cfg *config.GlobalConfig, settings *config.Settings, vsBr
 func resolveHubEndpointForBroker(cfg *config.GlobalConfig, settings *config.Settings) string {
 	hubEndpointForRH := cfg.RuntimeBroker.HubEndpoint
 	if hubEndpointForRH == "" && enableHub {
-		port := cfg.Hub.Port
-		if enableWeb {
-			port = webPort
-		}
+		port := resolveHubListenPort(cfg)
 		hubEndpointForRH = fmt.Sprintf("http://localhost:%d", port)
 		if enableDebug {
 			log.Printf("Co-located Hub detected: using %s for heartbeat and template hydration", hubEndpointForRH)
