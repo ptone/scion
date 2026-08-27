@@ -7504,3 +7504,52 @@ a fact, and task #66's "non-goal or gap" question tilts hard toward *gap*.
 - **Both agents to Phase B**, which is the publishable number. ptone asked for default *and* largest.
 - **Standing order to both: write every measurement off the instance as it is taken.** The failure
   destroys the instance and everything on it. `sn-stress-max` already lost an instance to this.
+
+## 07:37 — Phase B workload aligned; docs commit verified and corrected
+
+**Phase B workload was about to diverge, and that would have destroyed the best
+finding of the day.** `sn-stress-max` reported its Phase B load precisely (claude
+harness + 100 MiB alloc + sha256sum CPU loop, per agent). Because it named the
+workload rather than saying "a real task", I could see that `sn-stress-def` had no
+instruction to match it. Ordered both to the identical load. Two ceilings measured
+under two different workloads are not comparable at all, and the cross-size
+comparison is what produced the non-linearity result.
+
+**Reframed Phase B as a BRACKET, not a number.** A sha256sum spin loop is 100% CPU
+per agent. A real Claude agent is mostly blocked on the model API. So Phase B is a
+worst-case CPU-saturating synthetic load and will UNDER-estimate the true ceiling:
+
+| run | load | bound |
+|---|---|---|
+| Phase A | idle | OPTIMISTIC — nobody runs idle agents |
+| Phase B | spin loop | PESSIMISTIC — no real agent burns a core continuously |
+| reality | — | between them |
+
+This is more defensible than a single number and it is honest about what we did
+not measure. My brief asked for "the number we would actually publish" (§3.2) and
+that phrasing was wrong: no synthetic load produces that number. Correction to the
+brief's premise, not to the agents.
+
+The `max` instance has the widest CPU:memory gap, so it is the one that can
+distinguish CPU-bound from memory-bound at load. I deliberately did not predict
+which — three wrong mechanism-guesses today, two from naming a mechanism early.
+
+**Docs commit `9e549ac` verified by reading the diff (+30/−12), not trusted.**
+The durability rewrite is right. Three corrections sent:
+
+1. **Factual error.** It wrote "can run out of memory and be terminated". We
+   searched both instances for `exit_code=137` and found ZERO. The OOM killer is
+   not the mechanism. **A cause is a signature**, so this also broke the
+   no-single-signature constraint I gave it.
+2. **"No way to recover afterward" is wrong, and the truth is worse.** The service
+   self-recovers in ~25-30s into a healthy, responsive, completely empty hub.
+   Nothing looks broken. An outage announces itself; this does not.
+3. **"Start agents incrementally" is not advice we can give.** Every agent in both
+   runs was created one at a time. Incremental creation is the pattern that hit the
+   ceiling, not a defence against it.
+
+**`sn-stress-def` stalled 10 min.** Checked its instance before inferring:
+`ContainerReady`. The box is fine; the agent's own shell is hung — same shape as
+`sn-stress-max` earlier. Told it a hung liveness exec is DATA, and needs a third
+outcome category (timeout) distinct from alive and dead, because a sandbox that is
+neither answering nor gone fits neither.
