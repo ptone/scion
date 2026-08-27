@@ -784,6 +784,60 @@ func TestUnify_GetTopicConversationID(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// DEF-22: CreateTopic must not write a dangling conversation_id
+// ---------------------------------------------------------------------------
+
+func TestUnify_DEF22_NoDanglingConversationID(t *testing.T) {
+	// DEF-22: When ConversationID is set but the conversations table does
+	// not exist, CreateTopic must not write a topic row with a
+	// conversation_id that points to a nonexistent conversation row.
+	//
+	// The correct behavior is to error out: handleCreateThread always sets
+	// ConversationID now, so a missing conversations table indicates a
+	// server initialization problem. Failing explicitly is better than
+	// silently producing a dangling foreign key.
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	db.SetMaxOpenConns(1)
+
+	store := &sqliteWebChatStore{db: db}
+	require.NoError(t, store.Init())
+
+	// Deliberately do NOT create the conversations table.
+	// This simulates hasConversationsTable() returning false.
+
+	ctx := context.Background()
+	topic := WebChatTopic{
+		ID:             "topic-def22",
+		ProjectID:      "proj-1",
+		Name:           "dangling-test",
+		ConversationID: "conv-def22",
+		CreatedBy:      "user-1",
+		CreatedAt:      time.Now().UTC(),
+	}
+
+	err = store.CreateTopic(ctx, topic)
+
+	// The correct behavior is to error when ConversationID is set but
+	// the conversations table does not exist. Either way, there must be
+	// no topic row with a dangling conversation_id.
+	if err == nil {
+		// If CreateTopic succeeded, the topic must NOT have conversation_id set.
+		var convID sql.NullString
+		scanErr := db.QueryRowContext(ctx,
+			`SELECT conversation_id FROM webchat_topic WHERE id = ?`,
+			"topic-def22").Scan(&convID)
+		require.NoError(t, scanErr)
+		require.False(t, convID.Valid && convID.String != "",
+			"topic must not have a dangling conversation_id when conversations table is absent")
+	}
+	// If err != nil, CreateTopic correctly refused to write the dangling row.
+	// That is the expected outcome after the fix.
+}
+
+// ---------------------------------------------------------------------------
 // Legacy path: CreateTopic without ConversationID still works
 // ---------------------------------------------------------------------------
 

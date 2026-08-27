@@ -676,9 +676,7 @@ func (s *sqliteWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic
 		isGeneral = 1
 	}
 
-	hasConvTable := topic.ConversationID != "" && s.hasConversationsTable()
-
-	if topic.ConversationID == "" && !hasConvTable {
+	if topic.ConversationID == "" {
 		// Legacy path: no conversation linkage.
 		const query = `
 INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent, created_by, created_at)
@@ -691,6 +689,15 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
 			return fmt.Errorf("webchat store: create topic: %w", err)
 		}
 		return nil
+	}
+
+	// ConversationID is set — the handler expects an atomic dual-write
+	// (topic + conversation). If the conversations table doesn't exist,
+	// something is wrong with server initialization; fail explicitly
+	// rather than writing a dangling conversation_id (DEF-22).
+	shouldDualWrite := s.hasConversationsTable()
+	if !shouldDualWrite {
+		return fmt.Errorf("webchat store: create topic: conversations table does not exist but conversation_id %q was provided", topic.ConversationID)
 	}
 
 	// Atomic dual-write: topic + conversation in one transaction.
@@ -710,15 +717,13 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
 		return fmt.Errorf("webchat store: create topic: %w", err)
 	}
 
-	if hasConvTable {
-		now := topic.CreatedAt.UTC().Format(time.RFC3339Nano)
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES (?, ?, 'group', 'native', '', '', ?, 'active', ?, ?)`,
-			topic.ConversationID, topic.ProjectID, topic.Name, now, now)
-		if err != nil {
-			return fmt.Errorf("webchat store: create conversation for topic: %w", err)
-		}
+	now := topic.CreatedAt.UTC().Format(time.RFC3339Nano)
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
+		 VALUES (?, ?, 'group', 'native', '', '', ?, 'active', ?, ?)`,
+		topic.ConversationID, topic.ProjectID, topic.Name, now, now)
+	if err != nil {
+		return fmt.Errorf("webchat store: create conversation for topic: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
