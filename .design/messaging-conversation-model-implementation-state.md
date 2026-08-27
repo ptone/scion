@@ -370,14 +370,27 @@ first-parent order), so the tranches follow the build order rather than cutting 
 | **F** | Phase 10 + S8: CLI subcommands, help grammar, deprecations | User-visible | Medium, revertible alone |
 | **G** | Flip `conversation_read_switch` | One setting | Revertible alone |
 
-**Tranche A file set (computed, not recalled):** all `pkg/ent/**` for Conversation /
-ConversationParticipant / MessageAddressee / Message; `pkg/messaging/{backfill,drift,normalize,resolve}.go`
-+ tests; `pkg/store/entadapter/{composite,conversation_store,message_store}.go`;
-`pkg/store/{models,store}.go`. **Excludes `pkg/messaging/conversation.go`** — that arrives with
-Phase 5.
+**Tranche A: superseded by `tranche-a-recipe.md`.** ~~all `pkg/ent/**` ... excludes
+`pkg/messaging/conversation.go`~~ — that file set was **wrong in two ways**, both found by
+performing the cut in a throwaway worktree rather than by reviewing it (19:10Z):
 
-**Sequencing constraint:** tranche A overlaps §2.15 on `backfill.go` and `resolve.go`, so **§2.15
-settles into `messaging-v2` before tranche A is cut.**
+1. **It cannot be cut by file selection at all.** Transplanting generated ent code and the
+   `pkg/store` aggregate files deletes main's P2-A1 admin entities, including three tables in
+   `migrate/schema.go`. Rule 31. Method is now: regenerate generated code; `git apply --3way` the
+   diff for aggregate files (`store/models.go`, `store/store.go`, `entadapter/composite.go`,
+   `messages/types.go`); transplant only feature-specific files.
+2. **The exclusion of `pkg/messaging/conversation.go` was wrong.** `derive_key.go` needs
+   `ConversationUpserter`/`ConversationResult` from it. Tranche A also carries `derive_key.go` and
+   `pkg/messages/dm_key.go`, both omitted above.
+
+Validated off `origin/main` @ `b09e7f49`: build clean, **66 packages ok, EXIT=0**, `pkg/hub` 301.9s.
+Owned by **`ca-msg-em10`** from 19:15Z.
+
+**Sequencing constraint (satisfied):** tranche A overlapped §2.15 on `backfill.go`/`resolve.go`.
+§2.15 merged into `messaging-v2` at `14b3ba7c` before the cut.
+
+**Generalise before cutting B-G:** every tranche must be checked for aggregate files, and the
+review must look specifically at *deletions*. The loud failure in tranche A was luck.
 
 **Tranches are cut as final-state, not as original commits.** Replaying the original phase commits
 would land code that later commits fixed — S6/S7/S8 and §2.15 all repaired defects in phase-1-5
