@@ -248,6 +248,19 @@
     redundancy buys nothing. Base verification cannot be delegated to more eyes on the diff; it is a
     different question, asked once, of the ref.
 
+27. **"Completed" describes an agent's last task, not whether its work has landed.** Issued
+    2026-08-27 18:10Z. The coordinator asked me to retire six idle agents for fleet capacity. Five
+    of them were idle *because I had rejected §2.15 twenty-six minutes earlier* — they are the
+    agents who must re-run every AC after the rebase, and `scion/ca-msg-em6` is unmerged. **An
+    agent idle because its work is merged is done; an agent idle because its manager is blocked
+    upstream is waiting. The roster renders both as "completed".** The safe test is not the phase
+    column but the refs: does the agent own an unmerged branch, and is its section accepted? Only
+    `dev-def11` passed — no branch of its own, and `merge-base --is-ancestor origin/scion/ca-msg-em7
+    origin/scion/messaging-v2` true. Note also the coordinator asked me to "have em7 confirm";
+    em7 had been retired an hour earlier, so the confirming authority did not exist. **When the
+    named authority is gone, verify from refs rather than downgrading to an assumption** — the
+    request degrades silently into "assume it is fine", which is what it was written to prevent.
+
 ## 2. Source documents
 
 | Doc | Path |
