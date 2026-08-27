@@ -59,6 +59,17 @@
    against acceptance criteria, and advance. I do not review implementation approach
    unsolicited, debug, or answer questions a manager should resolve itself. Default state
    is `blocked`.
+13. **The test must observe the effect, not the call.** Rule 10's missing half, issued
+    2026-08-27 09:55Z after S4 round 2. Put it in every manager brief alongside rule 10.
+    F-1, G-1 and G-2 are one defect in three costumes: a mechanism that is present and
+    looks correct, verified by a test that watches the mechanism being *invoked* rather
+    than the outcome the user experiences. F-1 tested that a warning was emitted, not that
+    its advice worked. G-1 tested auth against an identity the caller supplies. G-2 counted
+    resolutions and called it delivery — `server, _, resolves := newConvRefMockHubServer(…)`,
+    the send recorder discarded. Three APPROVE gates and a green suite missed a silent
+    message-drop; the gates checked what they were pointed at. **Point them at effects.**
+    Operationally: a test asserting a message was sent must observe the send, never the
+    resolution that precedes it.
 
 ## 2. Source documents
 
@@ -75,10 +86,10 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 ## 3. Current position
 
-**Active section:** S4 — Surfaces (**REJECTED round 1 — F-1, F-2; em4 fixing via option (a)**)
+**Active section:** S4 — Surfaces (**REJECTED round 2 — G-1, G-2; see §5f**)
 **Active manager:** `ca-msg-em4`
-**Blocked on:** my own verification of DEF-4 at `b92926dd`, then em4's phase 8/10/11
-decomposition. DEF-1, DEF-3 and D3 are all due from this section.
+**Blocked on:** em4's round-3 fix. DEF-1, DEF-3 and D3 are all due from this section;
+DEF-3 and D3 are now satisfied (see §5f), DEF-1 is implemented but bypassable (G-1).
 **Integration branch head:** `b92926dd` (DEF-4, test-only).
 **Last verified landing on integration branch:** `f206a0d9` — **S3 accepted 2026-08-27 06:40Z
 on round 2.** S2 accepted 03:35Z at `cd4ee7ed` (round 3); S1 verified 01:40Z at `16294728`.
@@ -329,7 +340,58 @@ would bury the events that matter.
   explicitly, and **AC-15a** added — a deprecation warning may only name a replacement that
   works in the same build, verified by a test that executes the named replacement.
 
-## 5f. S4 rejection — open (2026-08-27 09:05Z)
+- `2026-08-27 09:55Z` **S4 rejected on round 2** at `24ba54f0`. F-1 fixed for `@<agent>` only;
+  F-2 architecturally resolved. Two new blockers, **both introduced by the round-1 fix**:
+  G-1 (the resolve endpoint trusts a caller-supplied sender identity, making DEF-1's
+  participant check bypassable) and G-2 (`conv:` and `#` resolve, print success, exit 0, and
+  deliver nothing). DEF-3, D3 and D5 are all satisfied on this branch. See §5f round 2.
+  em4 took **option (b)** — ship only what works — on the correct grounds that `conv:`/`#`
+  delivery is an unanswered routing-policy question (**DEF-5**, opened). Three constraints
+  issued: prove `@<email>` delivers or drop it from the warning too (it hard-errors outside an
+  agent container); gate the **CLI**, not the endpoint, which must keep resolving all four
+  grammars for brokers and native chat; apply the delivery-assertion rule to every WS-3 send
+  test. **Rule 13 issued** — see §1.
+
+## 5f. S4 rejection — open (round 1 2026-08-27 09:05Z; round 2 2026-08-27 09:55Z)
+
+### Round 2 rejection (2026-08-27 09:55Z) at `24ba54f0`
+
+em4's architecture is right — CLI → `POST /api/v1/conversations/resolve` → `messaging.Resolve`
+→ `checkPostResolutionAuth`. F-2 is genuinely resolved: `Resolve()` now has a production
+caller. F-1 is fixed for `@<agent>`. Both new findings are defects **inside** that fix.
+
+| # | Finding | Evidence | Required fix |
+|---|---|---|---|
+| G-1 | **The resolve endpoint lets the caller choose who they are.** `handlers_conversations_resolve.go:68–77` reads `sender_principal_kind`/`sender_principal_id` from the **request body** and only falls back to the authenticated identity when they are empty. Nothing checks that the body sender matches the caller. Any authenticated principal can POST `{"reference":"conv:<private-dm>","sender_principal_id":"<a-real-participant>"}` and `requireParticipant` passes against the *claimed* identity. **The round-1 fix made DEF-1 reachable and simultaneously made it optional** — which is worse than dormant-and-correct, because dormant code does not give a false assurance. Latent only because the CLI happens to send `senderID: ""`. | read `handlers_conversations_resolve.go:68–86`; the endpoint's five tests all use a bare `&Server{}` and only reach early returns — **zero coverage of sender identity** | Delete both fields from `conversationResolveRequest` and from `hubclient.ConversationResolveRequest`; sender is the authenticated caller, full stop. Remove the dead `senderKind` computation in `sendMessageViaConversation`. Rule 10: caller authenticates as A, body claims participant B, target is a direct conversation A is not in → assert 403. |
+| G-2 | **`conv:<id>` and `#<thread>` resolve, report success, and deliver nothing.** `sendMessageViaConversation` ends with a `fmt.Printf("Message associated with conversation %s…")` and `return nil` — no send, exit 0. The deprecation warning names all three forms as replacements; two of them eat the user's message silently. **AC-15a violated by the very fix that AC-15a was written for.** | **Verified by mutation, not by reading:** a throwaway test driving `sendMessageViaConversation` against em4's own `newConvRefMockHubServer`, counting POSTs to the agent message endpoint — `conv:…` resolves=1 **SENDS=0**; `#general` resolves=1 **SENDS=0**; `@builder` resolves=1 SENDS=1 | Either (a) deliver for all three forms, or (b) gate the CLI to `RefAgent`/`RefEmail`, hard-error on `conv:`/`#`, and cut them from the warning string. (b) preferred if (a) is not short. **Every test covering a form named in a warning must assert delivery.** |
+
+**G-2 is a test-shape failure, and the shape is nameable.** `TestSendMessageViaConversation_ThreadRef`
+and `_ConvRef` call `server, _, resolves := newConvRefMockHubServer(t, …)` — they **discard the
+send recorder** and assert that resolution was invoked. Proof that the plumbing ran, standing in
+for proof that the message arrived. That discarded return value is exactly what AC-15a exists to
+forbid, and it is why three APPROVE gates and a green suite missed a silent message-drop.
+
+**What round 2 did satisfy** — verified, not taken on report, and not to be re-litigated:
+
+| Item | Evidence |
+|---|---|
+| **D5 cross-grammar auth** | `TestResolve_DirectConv_RejectionGrammarIndependent` — present and correctly shaped |
+| **D5 group semantics** | `TestResolve_GroupConv_AcceptsNonParticipantProjectMember` |
+| **Read switch in the OFF position** | `TestReadSwitch_FlagOFF_AgentMessages_UsesOldPath`, `_FlagOFF_UserInbox_…`, `_ConversationHistory_FlagOFF`, plus `TestReadSwitch_HotReloadToggle` — answers the flag-flip question |
+| **DEF-3: divergence can genuinely disagree** | `TestComputeDivergenceMatch_GenuineDisagreement`, `_ThreadDisagreement`, `_RoutingTypeMismatch`, `TestCheckConversationConsistency_DetectsMismatch` |
+| **Fallback counter** | `IncFallback`/`Fallbacks`, wired to all three fallback paths, exposed as `fallbacks` |
+
+Full suite not re-run: the branch changes again, so it is deferred to round 3 against the
+`b92926dd` baseline.
+
+**The pattern across both rounds is one thing, not two.** F-1, G-1 and G-2 are all cases of a
+mechanism that is present and looks right, verified by a test that observes the mechanism being
+invoked rather than the outcome the user cares about. F-1: a warning naming a replacement,
+untested end-to-end. G-1: an auth check tested against an identity the caller supplies. G-2: a
+delivery path tested by counting resolutions. Rule 10 already says the test must fail when the
+check is removed — the missing half is that **the test must observe the effect, not the call.**
+
+### Round 1 rejection (2026-08-27 09:05Z)
 
 em4 reported S4 complete at `0c94a685` with three APPROVE gates (review, audit, test), ~55
 new test functions, and its own four green full-suite runs. The gates were not wrong about
@@ -451,7 +513,8 @@ conversation. This table is the only thing that carries them.
 |---|---|---|---|---|
 | DEF-1 | **Participant-level auth on `conv:<id>`.** `resolveConvByID` checks the sender's *project* but not whether the sender is a *participant* in that conversation. Raised HIGH by S1 audit. | S1 | **S4** (surface layer, message-send time) | S1 is not wired into any live path, so the gap is not reachable. It becomes reachable the moment S4 switches reads. **S4 is not verifiable without this.** |
 | DEF-2 | **AC-33** — deferred to the envelope validation layer per design. | S1 | **S3** | The validation choke point does not exist until S3 builds it. |
-| DEF-3 | **The phase-5 divergence gate is weaker than the design assumed, and this is my spec gap, not em2's.** `ComputeDivergenceMatch` is now a genuine comparison, but at the call sites both models derive their answer from the same three fields (sender, recipient, thread_id), so a DM or thread pair mismatch is **unreachable in production**. The only divergence reachable today is resolution failure (`no-new-routing`). Note the consequence: this signal **would not have caught B-1**, the duplicate-key bug — dual-write would have returned its own row's ref and scored a match. | S2 | **S4, before the read switch** | Phase 5's new model has no independent source of truth; it constructs the key from the message. Nothing can diverge until something else is authoritative. |
+| DEF-5 | **`conv:<id>` and `#<thread>` have no CLI delivery policy.** Resolving a reference to a conversation does not say *who receives the message*. For `@<agent>` the answer is obvious; for a conversation ID or a thread it is a policy question the design never answered — wake the default agent? fan out to every participant? fan out and wake none? S4 round 2 shipped a stub that resolved and then silently dropped the message (G-2), which is what an unanswered policy question looks like when a developer has to ship anyway. Round 3 takes option (b): the CLI hard-errors on both forms with a non-zero exit, and the warning text names only what works. **The resolve endpoint keeps handling all four grammars** — brokers and native chat need them, and resolution is not the broken part. | S4 | **me, before the section that wires conversation-reference sending for these two forms** | Nothing regresses: neither form works today, and erroring is strictly better than the silent drop it replaces. The risk is not technical but bookkeeping — an unanswered design question is easy to lose once the error message makes the gap look intentional. |
+| DEF-3 **(CLOSED 2026-08-27 09:55Z)** | **The phase-5 divergence gate is weaker than the design assumed, and this is my spec gap, not em2's.** `ComputeDivergenceMatch` is now a genuine comparison, but at the call sites both models derive their answer from the same three fields (sender, recipient, thread_id), so a DM or thread pair mismatch is **unreachable in production**. The only divergence reachable today is resolution failure (`no-new-routing`). Note the consequence: this signal **would not have caught B-1**, the duplicate-key bug — dual-write would have returned its own row's ref and scored a match. **Closed on S4's branch:** `CheckConversationConsistency` compares against the `conversation_id` stored on prior messages of the same logical conversation — the independent source of truth this asked for — with `TestCheckConversationConsistency_DetectsMismatch`, `_GenuineDisagreement`, `_ThreadDisagreement` and `_RoutingTypeMismatch` proving disagreement is reachable. Carries forward with S4's merge, not before. | S2 | **S4, before the read switch** | Phase 5's new model has no independent source of truth; it constructs the key from the message. Nothing can diverge until something else is authoritative. |
 
 | DEF-4 **(CLOSED 2026-08-27 07:55Z at `b92926dd`)** | **The `pkg/hub` test suite is degrading commit over commit on the integration branch.** Full-suite failure counts: `origin/main` **0** (3 runs), `cd4ee7ed` **5**, `d9fc7f51` **18**, `f206a0d9` **17–19**. Failure membership is **non-deterministic** — two consecutive runs at the same commit shared only 2 of ~18. Every failure is SQLite `out of memory (7)` raised at test-store creation (`newTestStore(":memory:")` / `sql.Open("sqlite3", ":memory:")`), with 109 GB free on the host and unaffected by `-parallel 2`. Each test opens its own in-memory DB and runs the full ent migration; the branch adds tables, so per-DB cost has risen. Suspected cause is stores never being closed, so every in-memory DB stays live for the whole package run — but that is a lead, not a diagnosis. | S1/S2 (accumulating) | **S4, as its first task, before any new feature work** | It does not affect shipped behaviour. It does destroy the verification method: my acceptance of every section from here rests on diffing full-suite results, and a suite whose failure set changes run to run cannot support that. It will get worse with S4 and S5. |
 
