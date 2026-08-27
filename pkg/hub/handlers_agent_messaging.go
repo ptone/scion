@@ -839,6 +839,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// If the CLI already resolved a conversation_id (S4 conversation references),
 		// use it directly instead of re-resolving.
 		var convResult *messaging.ConversationResult
+		lookupFailed := false // DEF-11: true only when a pre-resolved conv lookup fails
 		if structuredMsg.ConversationID != "" {
 			storeMsg.ConversationID = structuredMsg.ConversationID
 			convResult = &messaging.ConversationResult{
@@ -849,6 +850,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// ComputeDivergenceMatch gets the real value instead of "".
 			if conv, err := s.store.GetConversation(ctx, structuredMsg.ConversationID); err == nil {
 				convResult.ExternalRef = conv.ExternalRef
+			} else {
+				lookupFailed = true
 			}
 		} else if structuredMsg.ThreadID != "" {
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, structuredMsg.ThreadID, agent.ProjectID)
@@ -872,19 +875,21 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			actualRef = convResult.ExternalRef
 		}
 		// DEF-11: When the CLI pre-resolved a ConversationID but the store
-		// lookup failed (ExternalRef still empty), record a fallback instead
-		// of feeding an empty ref into ComputeDivergenceMatch — that would
-		// produce "routing-type-mismatch: old=… new=" which is the exact
-		// DEF-11 artifact.
-		if actualRef == "" && convID != "" {
+		// lookup failed, record a fallback with a distinct reason instead of
+		// feeding an empty ref into ComputeDivergenceMatch (which would
+		// produce "routing-type-mismatch: old=… new=", the DEF-11 artifact).
+		// The guard is scoped to the pre-resolved branch only — empty
+		// ExternalRefs from thread conversations or unmigrated rows still
+		// flow through ComputeDivergenceMatch as intended.
+		if lookupFailed {
 			messaging.DivergenceMetrics.IncFallback()
-			s.messageLog.Warn("conversation routing check: conv-lookup-failed",
-				"message_id", storeMsg.ID,
-				"old_routing", oldRouting,
-				"new_routing", messaging.NewRoutingStr(convID),
-				"match", false,
-				"reason", "conv-lookup-failed",
-			)
+			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: oldRouting,
+				NewRouting: messaging.NewRoutingStr(convID),
+				Match:      false,
+				Reason:     "conv-lookup-failed",
+			})
 		} else {
 			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
 			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
