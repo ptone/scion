@@ -9260,3 +9260,59 @@ check. *Ask what the signal actually measures.*
 **Standing rule adopted:** after dispatch, confirm phase is `running` **and** `scion look` shows the
 agent has begun the task. Neither alone is sufficient. Total cost today: ~13 minutes on the critical
 path while ptone was waiting.
+
+## §29 — `eb8eb082`: `#1315` MERGEABLE again; the slug adopted
+
+`sn-rival-dev` returned at 15:25. **I verified every claim against the branch rather than accepting
+the report.** All held.
+
+### §29.1 — The gate is clear, and I re-checked it independently
+
+The developer's answer: no generator will overwrite the page. My own verification:
+
+- **Zero `schedule:`/`cron:` triggers across all five workflows** (`build-images`, `build-release`,
+  `chart-ci`, `ci`, `docs`). Checked each file individually.
+- **`GoogleCloudPlatform/scion#1314` was opened by ptone by hand.** Its body: *"Nightly documentation
+  update for Aug 26 changelog — NEW: hub-setup-cloudrun.md"*, cherry-picked from a docs-writer agent
+  run. **"Nightly" is a human habit, not a job.**
+
+**So the risk is real but different from the one I gated on.** Nothing automated will clobber the
+page. But ptone runs the docs-writer *himself*, and the next run can regenerate that path — now
+holding our tutorial. That is exactly why adopting the slug was right: it surfaces as **a reviewable
+diff on a file we own**, not a silent second page. Told him to review that diff before cherry-picking.
+
+### §29.2 — Verification of the merge
+
+| claim | verified |
+|---|---|
+| head `eb8eb082`, upstream `main` is an ancestor | yes (`merge-base --is-ancestor`) |
+| `#1315` MERGEABLE | yes (was CONFLICTING) |
+| `cloud-run.md` gone, `hub-setup-cloudrun.md` present, **486 lines** (was upstream's 36) | yes |
+| `astro.config.mjs` differs from upstream `main` by **zero lines** | yes |
+| upstream frontmatter title kept | yes |
+| `overview.md` differs by one line — upstream's link target, our IAP-naming description | yes |
+
+Load-bearing passages, grepped in the merged file:
+
+| passage | count |
+|---|---|
+| `export PATH="$(go env GOPATH)/bin:$PATH"` (prepend) | 1 |
+| `no_embed_web` build step | 2 |
+| `:::caution[Always specify harnessConfig]` | 1 |
+| troubleshooting `antigravity" not found` | 2 |
+| `:::caution[Temporary workaround]` | 1 |
+| **`make deploy-cloudrun-sandbox`** (the dead command) | **0** |
+| **`persistent network volume`** (the false durability claim) | **0** |
+| unqualified `#1NNN` refs | **0** |
+
+### §29.3 — Not declaring victory
+
+**CI is QUEUED, not green.** `build-docs` is the check that matters: `starlightLinksValidator` is
+enabled and we renamed a published page. **Mergeable is not passing.** Told ptone explicitly that I
+do **not** recommend merging until `build-docs` is green — the §25.3 lesson applied in advance
+instead of in hindsight for once.
+
+### §29.4 — Reported, not fixed (per brief §7)
+
+The merge brought in upstream's `changelog/2026-08-26-changelog.md`, which carries **12 unqualified
+issue/PR references**. Upstream content, out of scope for this branch, logged for the register.
