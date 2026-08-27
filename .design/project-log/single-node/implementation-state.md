@@ -8114,3 +8114,45 @@ one at a time, not batched.
 The two that need a real decision rather than a nod are **D5 and D7** — whether observability is a
 non-goal or a known gap — and **§19/§20**, whether the collision register is a catalogue (unbounded,
 and it grew by two today merely by our filing two issues) or a repair list plus a rule.
+
+## 09:02 — Heartbeat check: everything intact, and one premise of mine was wrong
+
+**Instances.** All seven do-not-delete instances present, plus `sn-step6` and `sn-walk`:
+`e2e-omni`, `e2e-walk-r2`, `iap-demo`, `q2-control`, `sn-adminfix-t`, `sn-adminseed-t`, `sn-ready`.
+Both stress instances confirmed absent. Nothing has been deleted.
+
+**`sn-ready` is healthy** — last log 08:56:32, under five minutes before the check. ptone's instance
+is serving and ready for his return. `e2e-omni` likewise at 08:57:22.
+
+**A false alarm I talked myself out of, then a premise I had wrong.**
+
+`iap-demo` returned no logs in the last hour, and ptone asked specifically that it stay up. Before
+concluding anything I checked a control: **`q2-control` has emitted no logs in 24 hours and is
+perfectly fine.** So silence means idle, not dead. The control killed the concern.
+
+Then I looked at what `iap-demo` actually *is*, and found I had been wrong about it for days:
+
+```
+command: sh
+args: ["-c", "echo \"$APP_CODE\" | base64 -d > /tmp/app.py && python3 /tmp/app.py"]
+```
+
+**It is not a Scion deployment.** It is a small Python app demonstrating IAP — hence the name. It
+emits no Scion logs because there is no Scion in it, and a trivial app nobody is hitting logs
+nothing. There was never anything to diagnose.
+
+I spent four calls reasoning from log silence before spending one on the spec. **That is reasoning
+off a signal instead of inspecting the thing**, which is the failure the heartbeat explicitly warns
+about and the third time it has caught me today — after the ratio "constant" and the `#1307` row
+type. The pattern is consistent: I reach for the instrument I already have rather than the one that
+answers the question.
+
+**Incidental corroboration for D4.** `iap-demo`'s annotations carry
+`run.googleapis.com/invoker-iam-disabled: "true"` and `iap-enabled: "true"`. That is D4's claim —
+the invoker check is off and IAP is the sole perimeter — holding on a *second, unrelated* instance
+that nobody deployed for that purpose. D4 was already evidenced by `sn-docs-dev`'s six-way matrix;
+this is independent support for it.
+
+**Status.** No agents outstanding. Design doc unchanged since D8 was queued at 08:30. ptone has not
+posted since 06:24 and has not answered the 08:11 report — treating him as asleep, accumulating.
+Ten items in `review-queue.md`; D5 and D7 are the two that need him.
