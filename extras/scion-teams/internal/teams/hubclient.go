@@ -56,13 +56,51 @@ func NewHubClient(hubURL, hmacKey, brokerID string, log *slog.Logger) *HubClient
 type inboundPayload struct {
 	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
+
+	// Conversation resolution fields (Phase 11).
+	Surface     string `json:"surface,omitempty"`
+	ExternalRef string `json:"external_ref,omitempty"`
+	ParentRef   string `json:"parent_ref,omitempty"`
+}
+
+// teamsConvFields derives conversation resolution fields from a Teams message.
+// ExternalRef is the reply-to activity ID (for thread replies) or the
+// conversation ID (for top-level messages).  ParentRef is always the
+// conversation ID.
+func teamsConvFields(msg *messages.StructuredMessage) (surface, externalRef, parentRef string) {
+	if msg == nil || msg.Channel != "teams" {
+		return "", "", ""
+	}
+	if msg.Metadata == nil {
+		return "", "", ""
+	}
+	convID := msg.Metadata["teams_conversation_id"]
+	if convID == "" {
+		return "", "", ""
+	}
+	surface = "teams"
+	parentRef = convID
+	if replyTo := msg.Metadata["teams_reply_to_id"]; replyTo != "" {
+		externalRef = replyTo
+	} else {
+		externalRef = convID
+	}
+	return
 }
 
 // DeliverInbound sends a structured message to the hub's inbound endpoint.
 func (c *HubClient) DeliverInbound(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	// Phase 11: Derive conversation resolution fields from the message.
+	// Teams uses the activity ReplyToID or conversation ID as ExternalRef
+	// and the conversation ID as ParentRef.
+	surface, externalRef, parentRef := teamsConvFields(msg)
+
 	payload := inboundPayload{
-		Topic:   topic,
-		Message: msg,
+		Topic:       topic,
+		Message:     msg,
+		Surface:     surface,
+		ExternalRef: externalRef,
+		ParentRef:   parentRef,
 	}
 
 	body, err := json.Marshal(payload)
