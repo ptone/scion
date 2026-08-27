@@ -247,6 +247,15 @@ func buildAddressees(old *messages.StructuredMessage, msgID string) []Addressee 
 	// Handle group[] recipients: parse with the canonical parser and emit
 	// one Addressee per member. If parsing fails, fall through to the
 	// single-principal path so downstream validation catches the error.
+	//
+	// Via is ViaExplicit unconditionally, not the computed `via` from
+	// MapLegacyDeliveryArtifact. group[] is an explicit addressing form —
+	// every member was named by the sender. The single-principal `via`
+	// varies only for TypeMention (→ ViaBodyMention), which the CLI cannot
+	// combine with group[] (it uses TypeGroupSet; mentions fan out as
+	// individual single-recipient messages). A raw API caller sending
+	// TypeMention + group[] would still get ViaExplicit, which is correct:
+	// they explicitly listed the recipients.
 	if messages.IsGroupRecipient(old.Recipient) {
 		members, err := messages.ParseGroupRecipient(old.Recipient)
 		if err == nil {
