@@ -142,17 +142,62 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 ## 3. Current position
 
+> **§3 REWRITTEN 2026-08-27 15:25Z.** The text below this block had drifted badly — it still
+> read "no agents remain under this project but me" while two managers were running and a third
+> agent had just been dispatched. Same drift class as the DEF-1 ledger row (see the DEF-1 entry
+> in §5c): **the document disagreed with itself, and the stale half was the half a recovering
+> reader hits first.** Everything from "DEPLOYED 2026-08-27 12:37Z" down is retained as
+> historical record and is accurate *as of the timestamps it names* — read it as log, not as
+> current position.
+
+**CURRENT POSITION as of 2026-08-27 15:25Z**
+
+**Integration branch head:** `916eae7c` — **S6 merged 15:12Z**, the first section to land since
+`ebf8cc27`. Build clean; `go test ./pkg/hub/... ./pkg/messaging/... ./pkg/messages/...` green
+(`pkg/hub` 224.9s, exit 0) on the merge commit before push.
+
+**S6 CLOSED.** DEF-8/DEF-10: DM convergence onto the shipped kind-encoded key, key-based
+authorization for `kind = 'direct'`, invariant D-1 with a key-derived guard, all direct
+conversations `ProjectID` nil, no DM key derived from a guessed principal kind at any of 6 sites.
+Accepted on round 3 of the mutation-1 test; the mutation result is what settled it, because a
+mutation that flips the outcome proves the test reaches production code.
+
+**Active managers — both alive, both correctly blocked on me:**
+- `ca-msg-em6` — **re-tasked 15:20Z** with the main-sync (below). Owns the colliding hunks.
+- `ca-msg-em7` — DEF-11 complete and approved at `4a7a3844`, **parked awaiting a single rebase**
+  onto the post-sync head. Told explicitly not to rebase yet, so they rebase once rather than
+  twice; the double rebase would be my scheduling error charged to their time.
+- `ca-msg-inject-repro` — developer, dispatched 15:22Z to write **one failing test** reproducing
+  DEF-14. Evidence only, explicitly not a fix, on its own branch, merged nowhere.
+
+**Blocking item: `main` has moved and the integration branch must absorb it.** PR #1319 landed at
+`6268bac` and edits `handlers_agent_messaging.go`, the same file and functions S6 changed. Trial
+merge at 15:10Z showed 13 conflicts — 8 generated `pkg/ent/*` (**regenerate, never hand-merge**),
+real ones in `handlers_agent_messaging.go`, `attachments_agent_test.go`, `server.go`, `store.go`,
+`entadapter/composite.go`. That count is a **measurement with a shelf life** (§5s refinement); S6
+re-runs it rather than working from it. S6 must also re-verify all three mutations after the
+sync: #1319 adds early returns *upstream* of their dual-write, and a new early return can make a
+passing test vacuous without touching the test.
+
+**Runnable now:** nothing of mine. **Blocked:** S7's rebase (on the sync), DEF-9 dispatch (file-
+contested until both merges land), DEF-12 backfill (hard dependency on DEF-8, now landed —
+becomes runnable once the sync is clean). **Open and unspecced:** DEF-13 (help text, fold into an
+existing section), DEF-6, DEF-5 umbrella, and the unification spec nc-arch asked to be shown.
+
+---
+
+**HISTORICAL — accurate as of the timestamps named, superseded by the block above.**
+
 **Active section:** none. **S5 CLOSED 2026-08-27 12:40Z at `55dd6e16` (round 3).**
-S6 (phase 13, Removal) is deferred until after the beta exercise — rule 5.
 **Active manager:** none. **`ca-msg-em5` retired 12:48Z** (`scion stop --rm`, absence from
 `scion list` confirmed) after confirming a clean tree at `55dd6e16` pushed to remote and all
 five sub-agents deleted by name: dev-i1-warnings, dev-i2i3-parsecheck, review-i1i4-fixes,
 audit-i1i4-fixes, dev-j1j2-floors. `ca-msg-em4` retired earlier, all ten of its sub-agents
-confirmed deleted. **No agents remain under this project but me.**
+confirmed deleted.
 **Blocked on:** QA results from the integration hub. The earlier beta escalation (13:20Z) was
 overtaken by events — the user chose to deploy to the **integration** hub rather than the beta
 hub, which is the lower-risk version of the same experiment and does not need the question
-answered first. **Nothing is running; spawn nothing until QA reports back.**
+answered first.
 
 **DEPLOYED 2026-08-27 12:37Z.** `scion/messaging-v2` @ `ebf8cc27` is live on **scion-gteam**
 (`https://gteam.projects.scion-ai.dev`), deployed by `agent:integration2-operator`. Hub healthy,
@@ -1447,6 +1492,8 @@ conversation. This table is the only thing that carries them.
 | DEF-8 | **Agent DMs exist as two disjoint rows.** Dual-write `ResolveOrCreateDMConversation` (`pkg/messaging/conversation.go:65-73`) writes `external_ref="dm:<sorted pair>"`, **`ProjectID` nil**, **zero participants** — it never calls `AddParticipant`. Resolver `createDirectConversation` (`pkg/messaging/resolve.go:497-532`) writes **`external_ref=""`**, **`ProjectID` = sender's project**, **two participants**. Lookup is asymmetric and cannot bridge them: `findDirectConversation` reads the participants table via `GetConversationsForPrincipal` (participant-based, `conversation_store.go`), so it can never see a dual-write row; `UpsertConversationByExternalRef` keys on `external_ref`, so it can never see a resolver row. Same principal pair → two conversation IDs, permanently. **This is what the read switch will diverge on.** | verified 2026-08-27 | **me** to spec reconciliation; then a section to build it. **Gates the beta** — escalated to the user 13:20Z. | Not a regression and not row-growth: each path is internally consistent and idempotent. The harm is that the two views of "the DM with @builder" disagree, which is exactly what the divergence board is for. |
 | DEF-9 | **§2.4's addressee mechanism is unwired.** `AddAddressee` has no caller outside the store interface and the ent adapter — **the `message_addressees` table is never written in production**. `Conversation.DefaultAgentID` is written at three sites (`backfill.go:298`, `handlers_broker_inbound.go:217`, `handlers_agent_messaging.go:666`) and **read by no routing or delivery code**. `messaging.FormatNewDelivery` / `FormatLegacyAsNewDelivery` likewise have no production callers. `ResolveResult.Unresolved` is declared and never populated. | verified 2026-08-27 | **me** to spec, then a section. | §2.4 case 2 (default agent) and case 3 (posted, nobody woken) cannot occur; the `unresolved[]` contract in §2.4.1 and the distinct exit code it specifies have nothing behind them. |
 | DEF-10 | **`@<agent>` DMs are project-scoped, contradicting Q2.** `resolveAgentDM` requires a non-empty `ProjectID` (`resolve.go:317-322`) and `createDirectConversation` sets `conv.ProjectID` whenever the context has one (`resolve.go:505-507`). Q2 and §2.4.1 settle that direct conversations are **global, `ProjectID` nil**. `@<email>` obeys this (it passes an empty project context, `resolve.go:378-382`); `@<agent>` does not. | verified 2026-08-27 | **me**; likely resolved together with DEF-8 | Consequence, not cosmetic: a project-scoped DM row is invisible to a global lookup, which is one of the two mechanisms producing DEF-8. |
+| DEF-13 | **The conversation-reference forms shipped undocumented.** `cmd/message.go:98-114` — the `Long` help text lists only `<agent-name>`, `agent:<name>`, `user:<name>`, `group[...]`, and all three examples are legacy form. No mention of `@<agent>`, `conv:<uuid>` or `#<thread>`, which are the headline feature of this project. The code is present and works (`sendMessageViaConversation` at `:655`, reference parsing at `:141`). Sharpest edge: the deprecation warnings at `:86-91` say "use `@<agent-name>` to message an agent directly" — **pointing at a form the help text never defines**, so a user who follows the advice must guess the syntax. The only written description is my QA walkthrough. | reported by the user 2026-08-27 15:16Z after rebuilding gteam binaries at `ebf8cc27` and finding nothing about conversations in `--help` | **me** to spec; fold into an existing section, do not dispatch alone | Cosmetic in the sense that nothing is broken, load-bearing in the sense that an undiscoverable feature is not shipped. **This is my spec gap, not a section's.** I wrote ACs requiring the deprecation warnings to fire and requiring the new reference forms to work; I wrote none requiring the help text to describe them. Both managers built exactly what I asked. AC to add: `Long` and the examples cover `@`, `conv:` and `#`, including the two that currently error by design, so the error is not a surprise. |
+| DEF-14 | **Message ingress checks DM key format but not membership.** PR #1319 (native chat, merged to `main` at `6268bac` 2026-08-27) added `validDMKey` at `handlers_agent_messaging.go:120`/`:562` and `handlers_broker_inbound.go:98`, rejecting malformed `dm:`-prefixed thread_ids with 400 before dispatch or persistence — this closed the gap I logged as §5p item 2. It does **not** check that the authenticated caller is one of the two principals the key names. `storeMsg.ThreadID` and `.Channel` both come from the request body (`:236`) and go to `CreateMessage`; the read path (`handlers_chat_v2.go:1550` primary list, `:2848` search) gates on `isDMParticipant` and then filters by key **with no project filter**. So agent A in P1 can post `channel='web'`, `thread_id='dm:agent:<B>:user:<V>'` and the row appears inside B↔V's private DM for V, across projects. | found 2026-08-27 15:10Z reviewing #1319; **confirmed by nc-arch on the primary list path**, closing the caveat I raised about having traced only search | **native chat** owns the fix (nc-arch routed it to native-chat-lead and called it worth doing). Mine only as `AC-INGRESS-1`, so my step 1c does not inherit it | Bounded: no read access is gained, and `Sender` is the authenticated agent's honest slug — injection, not impersonation or exfiltration. nc-arch's refinement: attribution is honest but **placement is deceptive**, since V's UI renders the message inside the B conversation. #1319 strictly narrows the hole; the danger is that it *reads* as closing it, and nothing downstream re-checks. **Adding a partial check to an unguarded path can leave it better defended and less likely to be defended further.** Reproduction test dispatched to `ca-msg-inject-repro` at nc-arch's request — a failing cross-project test is what stops #1319 being mistaken for a fix. |
 | DEF-3 **(CLOSED 2026-08-27 09:55Z)** | **The phase-5 divergence gate is weaker than the design assumed, and this is my spec gap, not em2's.** `ComputeDivergenceMatch` is now a genuine comparison, but at the call sites both models derive their answer from the same three fields (sender, recipient, thread_id), so a DM or thread pair mismatch is **unreachable in production**. The only divergence reachable today is resolution failure (`no-new-routing`). Note the consequence: this signal **would not have caught B-1**, the duplicate-key bug — dual-write would have returned its own row's ref and scored a match. **Closed on S4's branch:** `CheckConversationConsistency` compares against the `conversation_id` stored on prior messages of the same logical conversation — the independent source of truth this asked for — with `TestCheckConversationConsistency_DetectsMismatch`, `_GenuineDisagreement`, `_ThreadDisagreement` and `_RoutingTypeMismatch` proving disagreement is reachable. Carries forward with S4's merge, not before. | S2 | **S4, before the read switch** | Phase 5's new model has no independent source of truth; it constructs the key from the message. Nothing can diverge until something else is authoritative. |
 
 | DEF-4 **(CLOSED 2026-08-27 07:55Z at `b92926dd`)** | **The `pkg/hub` test suite is degrading commit over commit on the integration branch.** Full-suite failure counts: `origin/main` **0** (3 runs), `cd4ee7ed` **5**, `d9fc7f51` **18**, `f206a0d9` **17–19**. Failure membership is **non-deterministic** — two consecutive runs at the same commit shared only 2 of ~18. Every failure is SQLite `out of memory (7)` raised at test-store creation (`newTestStore(":memory:")` / `sql.Open("sqlite3", ":memory:")`), with 109 GB free on the host and unaffected by `-parallel 2`. Each test opens its own in-memory DB and runs the full ent migration; the branch adds tables, so per-DB cost has risen. Suspected cause is stores never being closed, so every in-memory DB stays live for the whole package run — but that is a lead, not a diagnosis. | S1/S2 (accumulating) | **S4, as its first task, before any new feature work** | It does not affect shipped behaviour. It does destroy the verification method: my acceptance of every section from here rests on diffing full-suite results, and a suite whose failure set changes run to run cannot support that. It will get worse with S4 and S5. |
