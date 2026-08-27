@@ -5827,3 +5827,95 @@ down a lineage this chain never touches.
 
 `sn-cloudbuild-dev` retired after verification. `sn-review-dev` dispatched against task #58 with §0
 prepended. Still one developer at a time on `scion/sn-tier`.
+
+---
+
+## 2026-08-27 03:25 — #1310 flipped to CONFLICTING. The cause is an upstream revert, not our branch.
+
+Task #59. Measured, not inferred: I ran a real trial merge of `up/main` into `scion/sn-tier` in a
+throwaway clone at `/tmp/mergetest`.
+
+### The surface
+
+```
+ahead 13, behind 2, files 37
+CONFLICT (content): pkg/runtime/factory.go     <- the only conflicted file
+Auto-merging cmd/server_foreground.go
+Auto-merging cmd/server_foreground_test.go
+Auto-merging pkg/config/schemas/settings-v1.schema.json
+Auto-merging pkg/config/settings_v1.go
+```
+
+One conflicted file looks cheap. It is not, and the cheapness is the trap.
+
+### The real finding: PR #1301 reverted two already-merged PRs
+
+`#1301` "Permissions Foundation Phase 1" (merge `23d7003a`, **300 files**) is a long-lived branch
+cut before `#1302` and `#1307` landed. Its conflict resolution took its own side.
+
+**1. `#1307` — a P0 security fix — is reverted.**
+
+It had added `IsLoopbackHost()` and a `log.Fatalf` guard in `pkg/hub/web.go`:
+
+```go
+if cfg.DevAuthToken != "" && !IsLoopbackHost(cfg.Host) {
+    log.Fatalf("dev auth cannot be enabled when the server is bound to a non-loopback address (%s). ...")
+}
+```
+
+| ref | `"non-loopback"` in `pkg/hub/web.go` |
+|---|---|
+| `f22db257` (#1307) | 3 |
+| `f876e27b` (#1309) | 3 |
+| `23d7003a` (#1301, HEAD) | **0** |
+
+`IsLoopbackHost` no longer exists in `pkg/hub`. The only remaining match repo-wide is an unrelated
+same-named test in `pkg/sciontool/portforward/tunnel_test.go`. Dev auth auto-logs in every request
+as admin; the guard that stopped it on a non-loopback bind is gone.
+
+**2. `#1302` — the Cloud Run Instances runtime — is reverted.**
+
+`git diff --stat f876e27b 23d7003a -- pkg/runtime/ cmd/` = 30 files, **+360 −2278**.
+
+Present at `f876e27b`, ABSENT at `23d7003a`: `pkg/runtime/cloudrun/iap_exec.go` (441 lines),
+`cloudrun/logs.go` (243), `cloudrun/logs_test.go`, `cloudrun_doctor.go`, `cloudrun_nfs_linux.go`,
+`cloudrun_nfs_other.go`.
+
+```
+83ee4bd9 / f876e27b:  func NewCloudRunRuntimeFromInstances(cfg) (*CloudRunRuntime, error)   // validates nil/ProjectID/Region
+23d7003a          :  func NewCloudRunRuntimeFromInstances(cfg) *CloudRunRuntime            // stub
+```
+
+`"not yet implemented"` in `cloudrun_runtime.go`: **2 → 13**. `CloudRunRuntime.Run` now returns
+`"cloudrun: Run not yet implemented"`.
+
+### Why CI stayed green
+
+The revert is **self-consistent** — it removed callers and definitions together, so main compiles.
+
+> **A green CI is not evidence that nothing was lost.** It only proves internal consistency. A
+> revert is perfectly self-consistent.
+
+### Why "only one conflict" is the trap
+
+`pkg/runtime/cloudrun_runtime.go` is **not in our 37-file diff**. We never touched it; our copy is
+the merge base's copy. So git takes upstream's side **silently and without a conflict** — installing
+the stub signature — while our conflicted `factory.go` hunk still calls the two-value form.
+
+**Resolving `factory.go` in favour of "ours" produces a tree that does not compile.** This is the
+project's recurring `MERGEABLE is not compiles` hazard, inverted: last time a clean merge produced a
+duplicated `case`; this time a clean merge silently swaps a function signature out from under a
+conflicted caller.
+
+Upstream also added `rt.WorkspaceStorage = vs.Server.WorkspaceStorage` to the `cloudrun-instances`
+arm. A naive "take ours" drops that feature too. Neither side is correct alone.
+
+### Position
+
+**I am not resolving this.** Resolving against a reverted main would bake the revert into our
+branch and make us the commit that re-deleted a security fix. Reported to ptone and the coordinator
+at 03:25. It is ptone's call.
+
+Merge-readiness for #1310 is therefore **withdrawn** until main is sorted. Everything else on the
+branch is green: `Build & Test`, `golangci-lint`, `shellcheck`, `scan-pr`, `check-changes` all
+SUCCESS; all zizmor SKIPPED; only `cla/google` red, which is the known non-blocker.
