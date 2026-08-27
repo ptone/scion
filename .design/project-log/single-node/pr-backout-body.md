@@ -54,16 +54,23 @@ format string out of the script so there is one authoritative copy.
 
 - `go build ./...` — pass
 - `go test ./cmd/...` — pass
-- 26 of the 28 deleted Go tests are ported against the shell functions
+- The deleted Go test file had 28 tests. 22 carry over against the shell functions (several
+  renamed), 4 are new, 26 total. Four of the six that did not carry over are Go-only helpers or are
+  subsumed by the pin tests. Two are a real coverage gap: the step-6 IAP-binding print had two
+  `doesn't panic` tests and now has none. Step 6 is informational and is not a gate.
 - The audience pin was verified to **fail** when the format string in `deploy.sh` is wrong:
   changing `services` to `instances` turned 4 of 5 pin tests red; restoring it turned them green
 - `shellcheck scripts/single-node/deploy.sh` — clean
-- Live walk on a throwaway Cloud Run Instance: deploy, log in through IAP, create a project, start
-  an agent, attach to its terminal, commit to a git remote — TBC
-- Perimeter gate exercised against a correctly-secured Instance and deliberately made to fail — TBC
+- Live walk on a throwaway Cloud Run Instance in a test project: all eight deploy steps, health
+  endpoint, API through IAP, project create, agent create, agent reaches `running` — pass. Instance
+  deleted afterwards.
+- The perimeter gate was exercised against all five response shapes with a stub server, and against
+  two real unauthenticated public URLs, which it correctly rejects as `UNPROTECTED`. On the live
+  deploy it passed from a real unauthenticated probe returning `302` to `accounts.google.com` with
+  `x-goog-iap-generated-response: true`.
 
-Two failures in `go test ./...` (`TestFixtureCoverage`, a `pkg/hub` timeout) reproduce on the base
-commit and are not introduced here.
+Failures in the full `go test ./...` run (`TestFixtureCoverage`, and in one run a `pkg/hub`
+timeout) reproduce on the base commit and are not introduced here.
 
 ## Notes
 

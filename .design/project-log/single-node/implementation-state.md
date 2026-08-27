@@ -9939,3 +9939,71 @@ numbers; live-walk lines still `TBC`. The fully-prefilled compare URL is **5363 
 the `scion message` cap is 2000, so a condensed body variant (2455) and a title-only variant (220)
 are staged alongside it in `compare-url-backout*.txt`. **Nothing goes to ptone until the reviewer
 returns a verdict** — that is what I promised him.
+
+### 35.12 Reviewer verdict: READY — and an arithmetic error two agents shared
+
+`sn-backout-review` returned **READY with non-blocking findings** at 17:23:54Z. Per ptone's 16:36
+correction, **I accepted it without re-running a single one of its checks.**
+
+**Gate 2 — the check the whole review existed for.** It could not be made to lie:
+
+- All five stub-server response shapes behave correctly, including the two PASS cases and the
+  `UNPROTECTED` / wrong-redirect / dead-container FAIL cases.
+- Pointed at two **real** unauthenticated public URLs (`google.com`, `httpbin.org`) it correctly
+  fails them as `UNPROTECTED`.
+- On the live deploy it passed from an actual unauthenticated probe returning `302` to
+  `accounts.google.com` with `x-goog-iap-generated-response: true`.
+- The curl idiom is right: **no `-f`, no `-L`**, explicit status capture, case-insensitive
+  `Location` parse. The exact trap I warned about in the brief was avoided.
+
+**Live walk on `sn-backout-t`:** all eight steps, Gate 1 polling through `403→503→500→302` in ~75s,
+health endpoint, API through IAP, project create, agent create, agent `running`. Instance deleted;
+all nine protected Instances untouched.
+
+**Task #74 closed by measurement, not by reasoning.** The reviewer confirmed no credential can
+reach stdout or stderr through `deploy.sh:477`: the token travels only in the request Authorization
+header, and Google APIs do not echo caller auth headers in error responses. My earlier reading held.
+
+---
+
+**THE ERROR I CAUGHT, AND IT WAS SHARED.**
+
+Both the developer and I stated **"26 of 28 tests ported"**. The reviewer partly caught it (F2,
+naming two missing tests) but did not close the arithmetic. I diffed the function names:
+
+| | |
+|---|---|
+| carried over (several renamed) | **22** |
+| genuinely new | **4** |
+| total in the new files | **26** |
+| **did not carry over** | **6, not 2** |
+
+The six: `TestShortenError`, `TestSanitizeResponse` (approved, Go-only helpers);
+`TestBuildIAPAudience`, `TestBuildInstanceURL` (subsumed by the pin tests, fine);
+`TestPrintProjectIAPBindings_NoBindings`, `_WithIAPBinding` (**a real gap** — nothing now tests the
+step-6 awk formatting).
+
+**The mechanism, which is the part worth keeping: a total that matches is not a set that matches.**
+26 new tests and 26 claimed ports produced a number that reconciled perfectly while the underlying
+sets differed by four. Three parties looked at the number. **None of us looked at the names** until
+I ran one `comm` over two sorted `grep` outputs — about fifteen seconds of work standing between us
+and a false coverage claim in a public PR body.
+
+This is the fourth time today the pattern has repeated: *a wrong conclusion sitting one command away
+from being checked.* The others were `cla/google`, my own "three pinning tests", and the gcloud SDK
+scare.
+
+**Decision on the F2 gap: do not restore the two tests.** They were `doesn't panic` tests over an
+**informational** step that is not a gate, and churn on a branch that has just passed a live review
+costs more than they are worth. **The gap is stated plainly in the PR body instead** — an honest
+disclosure is worth more here than two weak tests.
+
+**Outstanding before the compare URL goes to ptone: the docs-site build.** Nobody has run it. My
+gap, not the developer's — I never asked. `starlightLinksValidator` is enabled, so a dangling
+internal link is a **build failure**, and this change deletes ~126 lines including headings. Sent to
+the developer along with a one-line fix for F1. **The URL is held until that build result lands**,
+and ptone has been told exactly that and why.
+
+**Process note, twice now:** I sent a 2075-character message and then a 2130-character message
+against a 2000 cap, and `scion message` reported "delivered" both times. I resent compactly both
+times. `wc -c` before the send, not after.
