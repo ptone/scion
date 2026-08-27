@@ -146,3 +146,67 @@ sn-stress-def reached the opposite conclusion ("CPU IS the binding constraint") 
 - 68-second agent creation (normal: <1s)
 - 503 error from Cloud Run proxy immediately before crash
 - Instance termination within seconds of the slow creation completing
+
+## Counting Error Verification (from sn-impl-arch reopen)
+
+sn-impl-arch reopened the task after sn-stress-def found uncounted sandboxes (probe-0 and probe-1). The three verification questions and answers:
+
+### Q1: Was ANY sandbox alive during Phase B other than w-1 through w-16?
+
+**YES.** `retest--test-claude` was alive the entire time.
+
+Created at 07:28:13Z as a test agent before the ladder started. Hub DELETE API call at ~07:29Z removed it from hub database but DID NOT kill the sandbox. The broker liveness sweep continued probing it every ~2 minutes with exit_code=0 throughout Phase B (07:30-07:51Z).
+
+Cloud Logging shows **17 unique sandbox names** with exit_code=0 during Phase B:
+- `retest--test-claude` — **UNCOUNTED** (alive throughout, not in w-* enumeration)
+- `retest--w-1` through `retest--w-16` — the ladder agents (counted)
+- `retest--test-generic` — **NOT alive** (zero probe results; generic harness exits immediately)
+
+**Impact:** Phase B CSV n_alive column undercounts by 1 at every step.
+
+### Corrected Phase B ceiling
+
+| Step | Reported n_alive | True n_alive (including test-claude) | Notes |
+|------|-----------------|--------------------------------------|-------|
+| 1-9  | 1-9             | 2-10                                 | +1 at each step |
+| 10   | 9               | 10                                   | w-1 dead, test-claude alive |
+| 11-15| 10-14           | 11-15                                | Stable |
+| 15   | 14              | **15**                               | Last stable step |
+| 16   | 15              | **16**                               | Passed liveness, crashed 1s later |
+
+**Corrected ceiling: 15 alive sandboxes at last stable step (14 w-* + test-claude).**
+**Crash at: 16 alive sandboxes (15 w-* + test-claude).**
+
+### Q2: Was ANY sandbox alive during Phase A other than the counted 51?
+
+**NO.** Phase A count is CLEAN.
+
+Cloud Logging for the 07:09 liveness sweep (07:09:00-07:09:40Z) shows exactly 51 unique sandbox names, ALL prefixed `stress-test--`:
+- `stress-test--stress-test-0` (the initial agent)
+- `stress-test--idle-6` through `stress-test--idle-55` (50 ladder agents)
+- Zero results from any non-`stress-test--` prefix.
+
+No stray sandboxes. The Phase A ceiling of 51 is accurate.
+
+### Q3: Sandbox names
+
+**Phase A (51 names, all verified clean):**
+stress-test--stress-test-0, stress-test--idle-6, stress-test--idle-7, stress-test--idle-8, stress-test--idle-9, stress-test--idle-10 through stress-test--idle-55.
+
+**Phase B (17 names, 1 uncounted):**
+- COUNTED: retest--w-1, retest--w-2, ..., retest--w-16 (16 names)
+- UNCOUNTED: retest--test-claude (alive throughout, hub-deleted but sandbox survived)
+- DEAD: retest--test-generic (not alive during Phase B)
+
+### Corrected cross-size table
+
+| Size | Idle ceiling | Working ceiling (corrected) | Ratio |
+|------|-------------|----------------------------|-------|
+| 4 CPU / 8 GiB | 17 | TBD (pending sn-stress-def correction) | — |
+| 8 CPU / 32 GiB | 51 | 15 (was 14, +1 for test-claude) | 3.4× |
+
+### Branch scion/sn-stress-max
+
+2 commits on main:
+- `f06c3dd` — stress test: sn-stress-max findings (8 CPU / 32 GiB)
+- `5c9ab82` — stress test: add sn-impl-arch correction to final report
