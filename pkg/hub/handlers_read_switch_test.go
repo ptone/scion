@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -490,6 +492,69 @@ func TestBrokerInbound_DualWrite_StampsConversationID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, convResult.ConversationID, msg.ConversationID,
 		"broker inbound message should be stamped with conversation_id")
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: Unparseable sender address must NOT create a conversation
+// ---------------------------------------------------------------------------
+
+func TestDualWrite_UnparseableSenderAddress_NoConversationCreated(t *testing.T) {
+	srv, s, _, agent, _, _, _, _ := readSwitchWorld(t)
+	ctx := context.Background()
+
+	// Create a dedicated user for this test to avoid ambiguity with the
+	// alice+agent DM that readSwitchWorld already creates.
+	bob := &store.User{
+		ID: uuid.NewString(), Email: "bob@rs.test",
+		DisplayName: "Bob", Role: store.UserRoleMember, Status: "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, bob))
+
+	// Sender address with no kind prefix — PrincipalKindFromAddress will fail.
+	senderAddress := "bare-name-no-prefix"
+	senderID := bob.ID // valid UUID, but address has no kind
+
+	// Replicate the kind-safe pattern from handlers_agent_messaging.go:836
+	var convResult *messaging.ConversationResult
+	if senderKind, ok := messages.PrincipalKindFromAddress(senderAddress); ok {
+		convResult = messaging.ResolveOrCreateDMConversation(ctx, s, srv.messageLog,
+			senderKind, senderID, "agent", agent.ID)
+	}
+	// If kind undetermined, convResult stays nil — no conversation created.
+
+	// Stamp message only if conversation was resolved (mirrors handler logic).
+	storeMsg := &store.Message{
+		ID:          uuid.NewString(),
+		ProjectID:   agent.ProjectID,
+		Sender:      senderAddress,
+		SenderID:    senderID,
+		Recipient:   "agent:rs-agent",
+		RecipientID: agent.ID,
+		Msg:         "unparseable sender test",
+		Type:        "instruction",
+		AgentID:     agent.ID,
+		Channel:     "discord",
+		CreatedAt:   time.Now(),
+	}
+	if convResult != nil {
+		storeMsg.ConversationID = convResult.ConversationID
+	}
+	require.NoError(t, s.CreateMessage(ctx, storeMsg))
+
+	// Rule 13: count conversation rows, do not assert on return value.
+	convs, err := s.ListConversations(ctx, store.ConversationFilter{Kind: "direct"}, store.ListOptions{})
+	require.NoError(t, err)
+
+	// Count conversations involving this senderID + agentID pair.
+	var matchCount int
+	for _, conv := range convs.Items {
+		if strings.Contains(conv.ExternalRef, senderID) && strings.Contains(conv.ExternalRef, agent.ID) {
+			matchCount++
+		}
+	}
+	assert.Equal(t, 0, matchCount,
+		"unparseable sender address must NOT create a conversation row")
 }
 
 // ---------------------------------------------------------------------------
