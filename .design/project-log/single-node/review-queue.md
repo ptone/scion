@@ -1045,3 +1045,77 @@ object. Explicit `"template":"default"` → stamped and running.
 
 Effect on the open decision: the `deploy-instance` stopgap is two lines, not one, and closes two
 filed defects rather than one. That is the only thing here that touches a decision you hold.
+
+## §17 — the tier shipped (04:00). Three decisions wait on you; one is structural.
+
+This file was last updated 17:33 yesterday and the project has moved a long way since. Short
+version of what happened while you were away, then the decisions.
+
+**What landed.** `#1310` squash-merged to upstream main at 04:00 as `f99a8189`, 37 files. Main is
+green on two independent signals — CI (`Build & Test`, `golangci-lint`, `shellcheck`) and an
+out-of-band verifier clone that also ran an A/B against bare main to prove its 7 test failures were
+pre-existing and environmental. Verified again at 05:01 and 06:00: head unmoved, all three tier
+files present, CI still green.
+
+**The omni image is published and pinnable.** `us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni`,
+tags `f99a818` and `latest`, both on `sha256:e3eab113…`. First real Cloud Build run of the chain —
+it had only ever been exercised through `local-docker` before. 641s.
+
+**Thirteen tracking issues filed on `ptone/scion`**, `#1287`–`#1299`. Four by-design limits, four
+defects, five correctness/housekeeping. `#1274` and `#1281` were already open and were not
+duplicated.
+
+---
+
+### D1 (STRUCTURAL, and the one I most want your read on) — the fixes need upstream PRs, and only you can open them
+
+All thirteen issues live on the **fork**. That was the right call — issues are fork-only here. But
+every *fix* has to land **upstream**, and agents cannot open upstream PRs. So the register as it
+stands is thirteen items of work that no agent can carry across the finish line without you clicking
+a compare URL for each.
+
+Three of them are genuinely tiny and could be one PR rather than three:
+
+| issue | change |
+|---|---|
+| `#1297` | fully qualify 18 bare issue refs in `.design/hosted/cloud-run-single-node.md` (my bug) |
+| `#1298` | commit an empty `image-build/.gitignore` |
+| `#1299` | `cloudbuild-omni.yaml` timeout `14400s` → `2400s`, plus a provenance comment |
+
+**Ask:** do you want these batched into one housekeeping PR, or kept separate? I lean batched —
+three compare URLs for three one-line changes is a poor use of your attention. But they touch three
+unrelated areas, so if you would rather review them apart, say so and I will keep them apart.
+
+### D2 (carried over from §15/§16, still unresolved) — the `deploy-instance` stopgap for #37/#48
+
+Unchanged and still yours. Two lines in `deploy-instance` (`agent_defaults.default_template` and
+`default_harness_config`) close two filed defects and stop the 502 that quotes a harness nobody
+asked for. The question is the same one as the #44 stopgap: **whether the demo-path deploy command
+should carry stopgaps into upstream at all.**
+
+One thing *has* changed since §16 that is worth knowing: the two *other* deploy-time stopgaps this
+tier carried, for `#1273` and `#1276`, are now obsolete — upstream fixed both — and removing them is
+filed as `#1295`. So if you say no to D2, the tier ends up with zero deploy-time stopgaps, which is
+a cleaner story for upstream than it was yesterday.
+
+### D3 (priority) — what next, if anything
+
+Nothing blocks §1. It was walked end-to-end on 2026-08-25 and the tier is merged. Remaining work,
+in the order I would pick it:
+
+1. **Task #50 — the tutorial and deploy scripts.** The tier is merged but undocumented for an
+   outside operator. This is the largest gap between "shipped" and "usable".
+2. **The open defect register** — #15, #32, #35, #37, #46, #48, #49.
+3. **The three housekeeping PRs** in D1.
+
+I asked you this at 04:21 and did not want to ask twice, so it is recorded here rather than sent.
+
+---
+
+**One correction you should have, because it affects a number I gave you.** I recommended
+`timeout: 14400s` for `cloudbuild-omni.yaml`. The real build is 641s — my figure was 22x reality,
+and the `7200s` I called too low was already 11x. My reasoning was analogy to `cloudbuild-thick.yaml`,
+and when I checked that anchor I found `14400s` appears in three files and **never with a
+justification comment**, while every timeout anyone actually reasoned about carries one and sits far
+lower. I copied an unexamined constant and presented it as analysis. `#1299` fixes it and requires
+the comment, which matters more than the number.
