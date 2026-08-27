@@ -8910,3 +8910,71 @@ register. **A number that cannot be checked is worse than no number** — same p
 **`docs-site/src/content/docs/hosted/user/a2a-bridge.md:81` has the identical missing-clone defect.**
 Outside this tier. Dispatched as an issue filing only, explicitly **not** to be fixed here and
 explicitly **not** to carry the tier label — this PR should not sprawl into unrelated docs.
+
+## §24 — Q2 closed by handoff: `ptone/scion#1316` (2026-08-27 13:50)
+
+**ptone ruled at 13:44**: the #1273 design *"warrants a new detailed issue, and something that I can
+dispatch to an issue owner for its own full process of investigate, architect, remediate outside our
+tier project."*
+
+**That ruling changed the deliverable, not just the destination.** An issue owner outside this
+project has no scratchpad, no tier context and none of the measurement history. So the issue is
+written as a **handoff document, not a bug report** — all three faults with file:line, both
+mechanisms, the four-cell matrix, the phases, both warnings, the rejected stopgap, and the acceptance
+criteria, all in the body. Nothing load-bearing left in my notes.
+
+Filed as **`ptone/scion#1316`**, labels `type:bug`, `area:hub`, `area:configuration`,
+`area:harness`. **No tier label** — product-wide, consistent with the four other product-wide
+defects deliberately left unlabelled this morning.
+
+The phases are presented as **input to the owner's architecture step, not as a mandate.** I designed
+a fix; the owner runs their own cycle and may revise it. Handing over a design as an instruction
+would defeat the point of giving it an owner.
+
+### What the filing developer added that I had not
+
+- **Every file:line independently re-verified** against `3aeb7729` via `git show`. All correct; none
+  needed changing. I asked for a filing and got an audit.
+- **`docs-site/.../cloud-run.md` does not exist on upstream main** — it arrives with
+  `GoogleCloudPlatform/scion#1315`, still open. An owner told to "remove two passages" from it would
+  have gone looking and found nothing. Parenthetical added. **A good catch I had missed entirely.**
+- **The four-cell matrix is the weakest evidence and reads like the strongest.** The caveat was a
+  trailing clause; they promoted it to its own emphasised paragraph. Correct — an owner skimming
+  would have taken it as proof of a single mechanism.
+- **"ptone explicitly rejected it" is meaningless to someone who does not know who ptone is.**
+  Rendered as "has already been explicitly rejected". Keeps the force, drops the unresolvable name.
+  Same treatment for "outside our tier project", dropped for the substantive claim.
+
+### Collision #16, created by the act of filing
+
+**`ptone/scion#1316` collides with `GoogleCloudPlatform/scion#1316` — our own omni build-timeout
+PR**, which I had verified OPEN an hour earlier. Filing the issue created the collision.
+
+**Third time today.** #1310/#1311 this morning, #1314 at 13:35, #1316 now. This is the fourth
+independent confirmation of §19: **both repos are active and share one number space, so every issue
+we file is a future collision.** The register can never be *closed*; only the qualification habit
+protects anything.
+
+The developer also surfaced the best argument for the rule that exists: **`GoogleCloudPlatform/scion#1273`
+is a real merged PR** — *"fix(harness): populate file_secret_files from broker-staged file secrets"* —
+and the commit subject of our own template fix, `fc523ecd`, reads
+`fix: resolve implicit "default" template when no template specified (#1273) (#1305)`. **That bare
+`#1273`, in our own git history, renders as an unrelated file-secrets PR.** It was sitting in the log
+the whole time.
+
+### What this tier still owns
+
+1. **The docs coupling.** `cloud-run.md:247-257` and `:432-436` are **correct until phase 4** and
+   must not be removed early. Stated in the issue body.
+2. **Tasks #37 / #48** stay open, rewritten, pointing at `ptone/scion#1316`.
+3. **`ptone/scion#1273` stays closed.** Do not reopen.
+
+### Two deferred items (batched deliberately)
+
+- `pkg/hub/httpdispatcher` is listed in the issue as implicated **without a file:line** — the only
+  package named without evidence. The evidence exists (`httpdispatcher.go:492-509`
+  `buildCreateRequest`) and I omitted it from the brief. My gap, not theirs.
+- **Collision #16 needs adding to `ptone/scion#1297`.**
+
+Both deferred to one later touch **because an agent is editing #1297 right now** and a concurrent
+edit would clobber it. Batching to avoid a lost update, not from inattention.
