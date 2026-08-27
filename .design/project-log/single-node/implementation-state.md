@@ -8823,3 +8823,50 @@ matters.
 
 **Not manufacturing work while blocked.** Holding for ptone on the CLA and on the #1273 triage
 ruling.
+
+### §23.3 — Fourth pass landed `ea5437f9`; two follow-on claims verified, landing opposite ways
+
+Branch-reference rot fixed. Table row now reads *"`scion` CLI that includes `deploy-instance`"*, and
+the lead-in says the subcommand is **not yet in any published release** — the developer checked
+`gh release list` and found **zero releases on either repo**, so the previous "may not be in earlier
+releases" implied a release that does not exist. Swept the tier docs and scripts for other
+branch-relative phrasing: **none**. Tracking issue filed as `ptone/scion#1314`, labelled, read back.
+
+Docs render confirmed by CI on both `fd30d72c` and `ea5437f9` (`build-docs` SUCCESS). The prior
+pass's flagged gap was a false alarm about local `node_modules`, not a real verification hole.
+
+**The developer raised two further concerns. I verified both rather than relaying them, and they
+resolved in opposite directions.**
+
+**FALSE ALARM — the omni image is publicly pullable.** The claim was that
+`us-docker.pkg.dev/ptone-misc/scion-alt/` is private and beta testers outside ptone's project could
+not pull it. Tested directly with **no credentials**: anonymous registry token granted, manifest
+returns **HTTP 200**. It is public. *(`get-iam-policy` returns PERMISSION_DENIED for my identity,
+but that is my access to the policy, not the public's access to the image — those are different
+questions and conflating them is how this would have become a false alarm.)*
+
+**I nearly relayed this to ptone as a day-one beta blocker.** Telling him his beta programme was
+broken, on an unverified second-hand claim, would have stalled recruitment for nothing. The residual
+point is real but much smaller and already tracked by `ptone/scion#1293`: the image is *public* but
+*personally owned* (`ptone-misc`). Public access and project ownership are different problems.
+
+**REAL — the build block has no `git clone`.** A beta tester arrives at the *published docs site*
+from a web page, not a checkout. `go build ... ./cmd/scion/` has no directory to run in. This is
+**§1 step 0**; if it fails nothing downstream is reachable. Dispatched.
+
+### §23.4 — Collision #15, and it is the most dangerous shape so far
+
+| bare ref | fork | upstream |
+|---|---|---|
+| `#1314` | ISSUE: ship `deploy-instance` in a release (filed today) | PR: *"docs: nightly doc update Aug 27"* |
+
+**Both sides are documentation changes.** A bare `#1314` in a docs file would resolve upstream to a
+plausible-looking docs PR — the exact failure the register exists to prevent. Verified both sides
+against the API.
+
+**The discipline worked without my intervention.** The developer qualified it correctly on their own
+because the brief carried the rule, and they filed the number *and* the qualified reference in the
+same pass. Register update dispatched: fourteen → fifteen.
+
+This is also the second confirmation today of the structural point in §19: **every issue we file is a
+future collision.** We created #1314 ourselves, and it collided within hours.
