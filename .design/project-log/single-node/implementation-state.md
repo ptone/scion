@@ -8572,3 +8572,92 @@ morning. **A blemish I can name and choose to keep is cheaper than a round-trip 
 
 **Three PRs now wait on ptone and nothing waits on me**: the two housekeeping branches and the
 tutorial. All verified to apply to current main. No agents running. Blocked on his three answers.
+
+---
+
+## §21 — Q2 answered: ptone/scion#1273 designed holistically (2026-08-27 13:20)
+
+ptone at 13:03: *"we should address 1273 more holistically - not as a stopgap"*. That answers D2 as
+**no stopgap**. Design written to `design-1273-resolution.md`, committed `9128491c`.
+
+**The issue is closed and that was correct.** Upstream `#1305` (`fc523ecd`) landed the template half.
+**The defect mutated rather than closing** — before `#1305` the dispatched harness name was empty;
+`#1305` made template resolution work, so the default template's harness field now yields a *real*
+name, `antigravity`, that is not registered. Tasks #37 and #48 have been **rewritten, not closed**.
+
+### What the source survey changed about my model
+
+I dispatched a read-only survey against upstream main `3aeb7729` rather than designing from the issue
+body. It corrected me on three material points, and the design would have been wrong without it:
+
+1. **`hydrateHarnessConfig` has no disk fallback and does not mint the error.** I had been carrying
+   the issue's claim that `runtimebroker/handlers.go:992` does the by-name search. It early-returns
+   `("", nil)`. The search is `config.FindHarnessConfigDir` via `agent/provision.go:412-418`; the
+   string is minted at `provision.go:755-758`. **I would have dispatched a fix to the wrong file.**
+2. **There are two mechanisms, not one.** Empty name (faults 1+2) and unresolvable name (seeding did
+   not run). The 4-cell matrix cannot distinguish them. A fix for either alone leaves the other live.
+3. **Adding `antigravity` to a catalog is a no-op.** It is already bundled (`harnesses/embed.go:24`)
+   and already enumerated (`resources/catalog.go`). Absence is a bootstrap *condition*:
+   `GetStorage() == nil`, or `SkipIfAnyExist: true` skipping all seeding when any config exists.
+
+### The finding I did not expect
+
+**The hub and the broker load different config sources.** `hub_config.go:1122-1165`
+`LoadBootstrapKoanf` never reads `embeds/default_settings.yaml`; `settings_v1.go:1071`
+`LoadVersionedSettings` always loads it first. So the hub can hold an empty `DefaultHarnessConfig`
+while every broker in the same deployment holds `"antigravity"`. Two sides of one dispatch disagree
+about what the default is. That is what makes an empty dispatched name possible at all, and no
+amount of work on the error path would have found it.
+
+Also: **the existing tests assert the buggy behaviour is correct.**
+`runtimebroker/hub_connection_test.go:399` and `:423` lock in the silent `("", nil)` path. They must
+change. Recorded in the design as a review signal, not a regression — and as a stop-and-ask trigger
+for any developer who finds themselves deleting an assertion to make a change pass.
+
+### Rejected
+
+**A5 — hard-fail the hub at startup when defaults do not resolve.** This was close, and correctness
+argues for it. Rejected because on this tier a boot failure destroys all state and self-recovers
+empty (§5). It would convert a degraded-but-usable deployment into data loss. **Warn loudly, expose
+on health, do not refuse to boot.**
+
+### Q2/Q3 coupling — verified, not suspected
+
+PR `GoogleCloudPlatform/scion#1315` documents the workaround in **two** places, both naming
+`antigravity`: `cloud-run.md:247-257` (a `:::caution` block) and `:432-436` (troubleshooting).
+Phase 4 makes both stale. **Decision: keep them until Phase 4 and update in the same PR.** They are
+correct until then, and ptone is handing these docs to beta testers now. Removing them early would
+be worse than leaving them.
+
+I found this by grepping the branch, after noticing the coupling while ranking Q3. Recording the
+habit because it is the same miss-shape as the tutorial: **the risk is in work that has already
+landed, not in the questions I am still holding.**
+
+### Phases
+
+| Phase | Content | Risk | Value |
+|---|---|---|---|
+| 1 | Startup validation + seed-skip reporting | Low | **Highest** |
+| 2 | Error message provenance | Low | Diagnosis |
+| 3 | Unify config source — must land alone | **High** | Closes mechanism A |
+| 4 | Explicit outcomes + broker stops inventing (gated) + docs | **Highest** | Closes authority violation |
+
+### Open with ptone
+
+Asked at 13:23: he said larger issues still go through triage — **is this one of those, or do I
+dispatch phases 1-2 now?** Not dispatching until he rules. Product question Q-A (should `antigravity`
+remain the product-wide default) noted as out of scope and non-blocking.
+
+## §22 — PR #1315 review findings dispatched (2026-08-27 13:10)
+
+Coordinator reported CI genuinely green on `GoogleCloudPlatform/scion#1315`, with **4 MEDIUM Gemini
+findings**: IAP clarification and OIDC identity-token clarification in `cloud-run.md`, `deploy.sh`
+binary resolution, `teardown.sh` argument parsing. repo-maintenance flagged the two script findings
+as worth addressing before merge.
+
+Dispatched to a developer with instructions to **read the actual review comments, not my second-hand
+summary**, and to fix *or decline with reasoning* per finding. Brief sets a high bar for declining
+the two script findings — a deploy script that misparses an argument fails in a stranger's GCP
+project — and arms the developer against the one way the doc findings could be wrong: the tier sets
+`invokerIamDisabled: true`, so **IAP is the sole perimeter**, verified by the six-way matrix. If a
+finding contradicts that, the finding is wrong and should be declined citing the matrix.
