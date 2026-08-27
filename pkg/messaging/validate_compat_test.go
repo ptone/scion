@@ -219,6 +219,125 @@ func TestValidateLegacyMessage_MetadataValueTooLong(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// DEF-19: group[] recipient validation
+// ---------------------------------------------------------------------------
+
+// TestValidateLegacyMessage_GroupRecipient_Accepted (AC-19-1) verifies that
+// ValidateLegacyMessage accepts group[] recipients and produces one addressee
+// per member with the correct kind and ID.
+func TestValidateLegacyMessage_GroupRecipient_Accepted(t *testing.T) {
+	tests := []struct {
+		name      string
+		recipient string
+	}{
+		{"prefixed kinds", "group[agent:reviewer,user:alice]"},
+		{"bare agent names", "group[reviewer,deploy-bot]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := validLegacyMessage()
+			msg.Recipient = tc.recipient
+			if err := ValidateLegacyMessage(msg); err != nil {
+				t.Fatalf("ValidateLegacyMessage(%q) returned error: %v", tc.recipient, err)
+			}
+		})
+	}
+}
+
+// TestValidateLegacyMessage_GroupRecipient_Addressees (AC-19-1) verifies that
+// buildAddressees (via MapLegacyEnvelope) produces one addressee per group
+// member with the correct PrincipalKind and PrincipalID.
+func TestValidateLegacyMessage_GroupRecipient_Addressees(t *testing.T) {
+	msg := validLegacyMessage()
+	msg.Recipient = "group[agent:reviewer,user:alice]"
+
+	_, addrs, err := MapLegacyEnvelope(msg)
+	if err != nil {
+		t.Fatalf("MapLegacyEnvelope: %v", err)
+	}
+	if len(addrs) != 2 {
+		t.Fatalf("expected 2 addressees, got %d", len(addrs))
+	}
+	// First member: agent:reviewer
+	if addrs[0].PrincipalKind != "agent" || addrs[0].PrincipalID != "reviewer" {
+		t.Errorf("addrs[0]: got %s:%s, want agent:reviewer", addrs[0].PrincipalKind, addrs[0].PrincipalID)
+	}
+	if addrs[0].Via != ViaExplicit {
+		t.Errorf("addrs[0].Via: got %q, want explicit", addrs[0].Via)
+	}
+	if addrs[0].DeliveryState != DeliveryPending {
+		t.Errorf("addrs[0].DeliveryState: got %q, want pending", addrs[0].DeliveryState)
+	}
+	// Second member: user:alice
+	if addrs[1].PrincipalKind != "user" || addrs[1].PrincipalID != "alice" {
+		t.Errorf("addrs[1]: got %s:%s, want user:alice", addrs[1].PrincipalKind, addrs[1].PrincipalID)
+	}
+}
+
+// TestValidateLegacyMessage_GroupRecipient_BareNames (AC-19-1) verifies that
+// bare agent names in group[] are classified correctly.
+func TestValidateLegacyMessage_GroupRecipient_BareNames(t *testing.T) {
+	msg := validLegacyMessage()
+	msg.Recipient = "group[reviewer,deploy-bot]"
+
+	_, addrs, err := MapLegacyEnvelope(msg)
+	if err != nil {
+		t.Fatalf("MapLegacyEnvelope: %v", err)
+	}
+	if len(addrs) != 2 {
+		t.Fatalf("expected 2 addressees, got %d", len(addrs))
+	}
+	// Bare names default to agent kind.
+	if addrs[0].PrincipalKind != "agent" || addrs[0].PrincipalID != "reviewer" {
+		t.Errorf("addrs[0]: got %s:%s, want agent:reviewer", addrs[0].PrincipalKind, addrs[0].PrincipalID)
+	}
+	if addrs[1].PrincipalKind != "agent" || addrs[1].PrincipalID != "deploy-bot" {
+		t.Errorf("addrs[1]: got %s:%s, want agent:deploy-bot", addrs[1].PrincipalKind, addrs[1].PrincipalID)
+	}
+}
+
+// TestValidateLegacyMessage_GroupRecipient_Malformed (AC-19-3) verifies that
+// malformed group[] recipients are rejected.
+func TestValidateLegacyMessage_GroupRecipient_Malformed(t *testing.T) {
+	malformed := []struct {
+		name      string
+		recipient string
+	}{
+		{"empty group", "group[]"},
+		{"unclosed bracket", "group["},
+		{"bogus kind", "group[bogus:x,agent:y]"},
+		{"only commas", "group[,]"},
+	}
+	for _, tc := range malformed {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := validLegacyMessage()
+			msg.Recipient = tc.recipient
+			if err := ValidateLegacyMessage(msg); err == nil {
+				t.Fatalf("expected error for malformed group recipient %q, got nil", tc.recipient)
+			}
+		})
+	}
+}
+
+// TestValidateLegacyMessage_SingleRecipient_Unchanged (AC-19-4) verifies that
+// single-recipient behavior is unchanged: valid recipients pass, invalid ones fail.
+func TestValidateLegacyMessage_SingleRecipient_Unchanged(t *testing.T) {
+	// Valid single recipient.
+	msg := validLegacyMessage()
+	msg.Recipient = "agent:reviewer"
+	if err := ValidateLegacyMessage(msg); err != nil {
+		t.Fatalf("valid single recipient should pass: %v", err)
+	}
+
+	// Invalid single recipient.
+	msg2 := validLegacyMessage()
+	msg2.Recipient = "bogus:x"
+	if err := ValidateLegacyMessage(msg2); err == nil {
+		t.Fatal("invalid single recipient 'bogus:x' should be rejected")
+	}
+}
+
 func TestValidateLegacyMessage_ChatType(t *testing.T) {
 	msg := validLegacyMessage()
 	msg.Type = "chat"
