@@ -31,6 +31,14 @@
    I verify against the AC list in the design → then I advance.
 7. **Heartbeat:** recurring schedule `ca-msg-impl-heartbeat`, `13,43 * * * *`. On each
    beat: check the active manager is progressing, update §3, act if stalled.
+8. **Report to the user at section boundaries and escalations only.** (User instruction,
+   2026-08-27.) A section landing and verifying is a report. A blocker I cannot resolve is
+   a report. Nothing else is — no progress notes, no interesting findings, no phase-level
+   updates, no acknowledgements. Those go in §5 of this file, not to the user.
+9. **Do not participate in the engineering work.** (Same instruction.) I spawn, review
+   against acceptance criteria, and advance. I do not review implementation approach
+   unsolicited, debug, or answer questions a manager should resolve itself. Default state
+   is `blocked`.
 
 ## 2. Source documents
 
