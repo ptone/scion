@@ -86,13 +86,15 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 ## 3. Current position
 
-**Active section:** S5 — Docs (**not yet started**; S4 accepted and merged 2026-08-27 10:35Z)
-**Active manager:** none — `ca-msg-em4` retiring; `ca-msg-em5` to be spawned
-**Blocked on:** spawning `ca-msg-em5`. S5 must document the build **as it ships** (phase row
-12): the read switch is default-OFF, `conv:<id>` and `#<thread>` are **not available** in the
-CLI (DEF-5), and `@<email>` works only from inside an agent container.
-**Integration branch head:** `e8a0755d` (**S4**, fast-forward from `b92926dd`).
-**Last verified landing on integration branch:** `e8a0755d` — **S4 accepted 2026-08-27 10:35Z
+**Active section:** S5 — Docs (spawned and briefed 2026-08-27 10:45Z)
+**Active manager:** `ca-msg-em5` — `ca-msg-em4` retired, all ten of its sub-agents confirmed
+deleted
+**Blocked on:** em5's workstream decomposition. S5 must document the build **as it ships**
+(phase row 12): the read switch is default-OFF, `conv:<id>` and `#<thread>` are **not
+available** in the CLI (DEF-5), `@<email>` works only from inside an agent container, and
+`@<agent>` is the one reference form a user can rely on today.
+**Integration branch head:** `19681bc1` (**S4** + closeout log, fast-forward from `b92926dd`).
+**Last verified landing on integration branch:** `19681bc1` — **S4 accepted 2026-08-27 10:35Z
 on round 4** (rounds 1–3 rejected: F-1/F-2, G-1/G-2, H-1). S3 accepted 06:40Z at `f206a0d9`
 (round 2); S2 accepted 03:35Z at `cd4ee7ed` (round 3); S1 verified 01:40Z at `16294728`.
 
@@ -375,9 +377,21 @@ would bury the events that matter.
   Scoped to a single tests-only commit; on landing I accept and merge.
 
 - `2026-08-27 10:35Z` **S4 ACCEPTED on round 4 and merged.** `scion/messaging-v2`
-  `b92926dd → e8a0755d`, fast-forward, 14 commits. H-1 closed by my own mutation. em4
-  retiring. **Rule 13 is the lasting output of this section**, and em4's
-  `EmailRef_AgentContext` test is recorded as the model shape for S5/S6.
+  `b92926dd → e8a0755d`, fast-forward, 14 commits. H-1 closed by my own mutation.
+  **Rule 13 is the lasting output of this section**, and em4's `EmailRef_AgentContext` test is
+  recorded as the model shape for S5/S6.
+
+- `2026-08-27 10:45Z` **S4 closed out; S5 spawned.** em4's closeout commit `19681bc1` (the
+  empty-ID guard note and the DEF-5 entry) was pushed to **its own branch only** — correct
+  under the branch contract, but it meant DEF-5 was not where S5 would find it. Merged it
+  myself after checking it was docs-only and a fast-forward; integration head is now
+  `19681bc1`. **Worth noting as a process seam:** "add it to the log on merge" and "merge only
+  what I accept" pull in opposite directions at section close, and the loser is the deferred
+  item — the exact thing §5c exists to stop being lost. Verified the DEF-5 text is present at
+  `.design/project-log/2026-08-27-g1-g2-fix.md:92` before retiring em4. All ten of em4's
+  sub-agents confirmed deleted. `ca-msg-em5` spawned and briefed on phase 12; its governing
+  constraint is documenting the shipped binary rather than the design's end state, with the
+  four availability caveats stated explicitly and rule 13 applied to doc examples.
 
 ## 5f. S4 — CLOSED 2026-08-27 10:35Z (accepted on round 4)
 
