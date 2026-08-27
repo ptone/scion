@@ -362,30 +362,122 @@ different uses of the same value and conflating them is what produced DEF-10.
 1. **Code first, behind no flag.** Resolver computes and sets `external_ref`; sets `ProjectID`
    nil for all direct conversations; ensures participants after upsert. From this point no new
    divergent rows are created.
-2. **Backfill participants onto existing `dm:` rows.** See the hazard below.
-3. **Merge existing resolver rows** (`kind = direct AND external_ref = ''`). For each, derive the
-   `dm:` ref from its two participants. If a row with that ref exists: re-stamp messages whose
-   `conversation_id` points at the resolver row, copy any participant the target lacks, soft-delete
-   the resolver row. If no such row exists: set the ref on the row in place.
+1c. **Key-based DM authorisation.** `requireParticipant` branches on kind. For `kind = 'direct'`
+   it parses `external_ref` and requires the caller's **kind *and* ID** to match a named
+   principal — strictly tighter than shipped `isDMParticipant`, which checks ID only. Parse
+   failure denies. No fallback, no repair. `kind = 'group'` and unknown kinds keep the existing
+   table-based check. **This step is what makes `DMConversationKey` security-critical**, and
+   therefore what promotes the golden vectors from a consistency check to a security control.
+2. **Rebuild the listing index** — backfill participants onto existing `dm:` rows. Per §2.4.2.1
+   this is a *listing* repair, not an access-control operation: a wrong or missing row hides a
+   DM from someone's list, it does not grant or deny. Kind is read from the key and then
+   *verified* against the claimed table (verification, not discovery). Old-format kind-free rows
+   are unparseable and are left participant-less and recorded. All-or-nothing per row: a
+   half-written DM would list asymmetrically. The migration reports the unparseable count —
+   **silence is not zero.**
+3. **Merge resolver rows, then re-key old-format rows.** For each `kind = direct AND
+   external_ref = ''` row, derive the ref from its two participants; if a row with that ref
+   exists, re-stamp its messages, copy any missing participant, soft-delete the duplicate;
+   otherwise set the ref in place. Then re-key surviving kind-free `dm:X:Y` rows to the
+   kind-encoded format by looking both IDs up. Ambiguous rows are left as-is — they stay
+   inaccessible under 1c, which is fail-closed and the correct outcome for a row we cannot
+   describe.
 4. **Guard.** A migration is not done because it ran. Assert zero rows matching
-   `kind = 'direct' AND external_ref = '' AND deleted_at IS NULL`, and assert every `dm:` row has
-   exactly two participants. Both as permanent tests, not as a one-off query.
+   `kind = 'direct' AND external_ref = '' AND deleted_at IS NULL`; assert every `dm:` row has
+   exactly two participants; assert every `dm:` row *carrying* participants has a key
+   `ParseDMKey` accepts. Permanent tests, not one-off queries — **and each carries a floor**, per
+   rule 14, since all three are vacuously true on an empty table.
 
-**The hazard in step 2, and it is a security one.** `dm:{sorted(idA,idB)}` encodes **principal
-IDs only, not principal kinds** (`pkg/messaging/divergence.go:124`). `ConversationParticipant`
-requires `principal_kind`. So the backfill must look each ID up to decide whether it is a user or
-an agent, and `requireParticipant` — the authorisation check for `conv:<id>` on a DM — will trust
-whatever it writes. **A wrong kind is an access grant to the wrong principal.**
+**CORRECTED 2026-08-27 13:40Z. The paragraphs that stood here specced a security migration for a
+hazard that shipped code had already designed out.** They are replaced rather than amended,
+because the conclusion was not merely incomplete — it was pointed the wrong way. The original
+text argued that step 2's participant backfill was security-critical, since `requireParticipant`
+would trust whatever `principal_kind` it wrote, and a wrong kind would be an access grant to the
+wrong principal. Both premises were wrong. What follows is the corrected model, established by
+reading `pkg/hub/handlers_chat_v2.go` on `origin/main` and confirmed by the native-chat architect
+as deliberate design (their §4.1/§4.2), not accident.
 
-The rule is the one already stated for reference resolution in §2.6, applied to migration: **an
-ambiguous or unresolvable ID is never guessed.** If an ID matches neither table, or both, the row
-is left without participants and recorded for review. A DM with no participants fails closed —
-`requireParticipant` denies everyone, including the two real parties — which is the correct
-outcome for a row we cannot describe. Under-granting is recoverable; over-granting is not.
+**2.4.2.1 The key is the authority. Participant tables are a listing index.**
 
-This also explains why nothing is exploitable today: every `dm:` row has zero participants, so
-`conv:<id>` against one already denies everyone. The system is failing closed, not open. That is
-the only reason the ungated HTTP resolve endpoint is not a live problem.
+For a 1:1 direct conversation, the participant set *is* the identity — it is not a fact stored
+alongside the identity, it is the same fact. The shipped key encodes it:
+
+```go
+// pkg/hub/handlers_chat_v2.go:388
+var dmKeyRegexp = regexp.MustCompile(`^dm:(user|agent):[0-9a-f-]{36}:(user|agent):[0-9a-f-]{36}$`)
+
+// pkg/hub/handlers_chat_v2.go:2932 — authorization. Parses the key. Reads no table.
+func isDMParticipant(key, userID string) bool {
+    parts := strings.Split(key, ":")
+    if len(parts) < 5 { return false }
+    return parts[2] == userID || parts[4] == userID
+}
+```
+
+Two consequences follow, and they invert the original section.
+
+**The principal-kind hazard does not exist.** The key is kind-encoded (`dm:agent:X:user:Y`), so
+no backfill ever has to *infer* whether an ID is a user or an agent — the key already says. The
+entire ambiguity analysis was solving a problem created by our own duplicate key format
+(`dm:{sorted(idA,idB)}`, `pkg/messaging/divergence.go:124`), which dropped information the
+shipped format carries. Adopting the shipped format deletes the hazard rather than mitigating it.
+
+**Step 2 is therefore not a security migration.** Since authorisation derives from the key, a
+missing or wrong participant row cannot grant or deny access. It means a DM fails to appear in
+someone's conversation list. That is a correctness bug worth fixing and **not** a security one.
+Under-granting-is-recoverable still governs — ambiguous rows are left participant-less and
+recorded, never guessed — but it now protects a listing, not an ACL.
+
+**The general rule, from the native-chat architect, which decides cases beyond DMs:**
+
+> Chat-owned tables are authoritative only for facts no external authority encodes — names,
+> defaults, watermarks, pins. **Authorisation always derives from the key, or from project
+> membership.** If one of our tables is about to become the authority for an access decision,
+> that is the smell.
+
+**2.4.2.2 The invariant that makes this safe, and the boundary where it stops.**
+
+Key-as-authority holds **only while the participant set is static and fully named by the
+identifier.** The moment membership is dynamic, the key and the ACL disagree and the pattern
+flips from hazard-deleting to hazard. Therefore:
+
+> **INVARIANT D-1. A direct conversation's participant set is immutable for its lifetime.
+> "Add a person" is not a mutation — it is a promotion that creates a different conversation
+> under a different authority.**
+
+This is why native chat deferred group DMs to threads, where authority becomes project
+membership — again an *existing* authority, not a chat-owned table.
+
+**Enforcement (`AddParticipant`, store layer, unbypassable):**
+
+> For `kind = 'direct'`, accept a principal **only if `ParseDMKey(external_ref)` names that exact
+> `(kind, id)` pair member**. Otherwise reject. An unparseable or empty `external_ref` rejects.
+
+Note what this is *not*: it is not "reject once two participants exist." A count-based guard is a
+proxy for the invariant and it leaks — soft-remove B (active count falls to 1), then add C, and
+the count test passes while the membership silently diverges from the key. The key-derived guard
+has no such gap, needs no special case to permit re-add after soft-remove, and cannot be changed
+in meaning by a future refactor of how many participants the creation path writes.
+
+**2.4.2.3 Promotion transfers continuity; it does not break it.**
+
+Correcting my own stated reason, from `PromoteDM` (`webchannel_store.go:1805`): promotion is one
+transaction that inserts the new topic, re-keys the history wholesale
+(`UPDATE messages SET thread_id = <topicID> WHERE thread_id = <dmKey>`), migrates read state, and
+deletes the DM registry rows. **Identity and ACL change together, atomically, and the history
+moves to the new authority.** So the accurate statement is not "continuity is lost" but
+"continuity is transferred."
+
+One consequence is worth designing around rather than discovering. Because keys are
+deterministic, **the same pair's DM key is reborn empty if they message again later.** Promotion
+drains a DM; it does not fork it. This is also the graceful failure shape for the TOCTOU window:
+a reply racing the promotion with the old key lands in the reborn-empty DM — degraded and
+visible, not lost.
+
+**Why nothing is exploitable today.** Every `dm:` row currently has zero participants, so
+`conv:<id>` against one denies everyone. The system is failing closed. That remains the reason
+the ungated HTTP resolve endpoint is not a live problem — but note it is now *belt and braces*
+rather than the load-bearing fact it was, since key-based auth denies independently.
 
 **Acceptance criteria for this work.**
 
@@ -397,10 +489,26 @@ the only reason the ungated HTTP resolve endpoint is not a live problem.
 - **AC-DEF8-3** The divergence board shows non-zero matches and zero mismatches for DM traffic
   across both paths — the condition §"Divergence Monitoring" already requires before the read
   switch is enabled.
-- **AC-DEF8-4** Post-migration guards from step 4 exist as permanent tests.
+- **AC-DEF8-4** Post-migration guards from step 4 exist as permanent tests, each with a floor.
 - **AC-DEF8-5** A backfill row whose principal kind cannot be determined produces **no
   participant** and an audit record. Mutation-verified: make the resolver ambiguous and confirm
   the named test fails.
+- **AC-DEF8-6** Golden vectors pin `DMConversationKey` output for mixed-kind pairs, same-kind
+  pairs, and ordering normalisation, and pin rejection of malformed input. A conformance test
+  asserts every generated key matches shipped `dmKeyRegexp`
+  (`handlers_chat_v2.go:388`). **These are a security control, not a consistency check** — once
+  1c lands, a change to the derivation is a change to the ACL. Mutation-verified.
+- **AC-1C-1** Key-based DM auth: caller named in the key passes; caller whose ID appears but
+  whose **kind** differs is denied; malformed key denied; old-format kind-free key denied; a
+  `kind = 'group'` conversation still takes the table path unchanged.
+- **AC-IMMUTABLE-1** `AddParticipant` enforces invariant D-1 at the store layer: for
+  `kind = 'direct'` it accepts only a principal named by `ParseDMKey(external_ref)`; empty or
+  unparseable refs reject.
+- **AC-IMMUTABLE-2** The discriminating test: soft-remove participant B, then attempt to add C;
+  assert rejection **and** assert the active participant set is exactly `{A}`. Per rule 13 this
+  observes the effect, not the call — and it is the case a count-based guard silently permits.
+- **AC-IMMUTABLE-3** Adding a third principal to a two-participant DM rejects; participant count
+  is still 2 afterwards.
 
 **What this does not resolve.** `#<thread>` still cannot resolve (DEF-7 — nothing writes
 `DisplayName`), the addressee table is still never written (DEF-9), and there is still no
@@ -724,8 +832,28 @@ carries `conversation.id`; theirs has agents echoing `thread_id`.
 | **(i) Minimal** | `#<thread>` resolution reads `webchat_topic.name`, keyed by topic UUID. `Conversation.DisplayName` stays vestigial. | Cheap now. The two entities coexist **permanently**. |
 | **(ii) Structural** | `webchat_topic` rows become — or 1:1-link to, e.g. via `external_ref` — `Conversation` rows; `thread_id` conventions become `conv:` references. | Right end state if messaging-v2 is *the* conversation model. But native chat's design is approved and implementation is in flight. |
 
-**My recommendation: declare (ii) the end state now; sequence the migration after native-chat wave
-2 lands.**
+**DECIDED 2026-08-27 13:28Z (user): (ii).** Native chat is **fully shipped and done** — no pending
+wave. My original recommendation hedged on "sequence after wave 2 lands"; wave 2 had already
+landed, and I had repeated another architect's stale description of their own system instead of
+reading the code (rule 15). `webchat_*` is now a **stable target**, which is the safer thing to
+spec a migration against.
+
+**But the target is narrower than "unify" implies.** Native chat solved the native case, and
+solved it well. messaging-v2's value is the surfaces it never covered — Discord, Slack, Teams,
+Telegram — plus agent-side CLI addressing and one reference grammar across all of them. So:
+**`Conversation` owns conversation identity across surfaces; `webchat_*` remains the native
+projection and keeps its own read-state, prefs and presence.** A promotion of the identity layer,
+not a migration of a working system into an unproven one.
+
+**And do not implement `native` as an external integration.** The `external_ref`/`DriftState`
+pattern exists *because we do not own the other schema* — we cannot add a column to Discord, and
+their threads are renamed and deleted without telling us. We own `webchat_topic`; it cannot drift.
+Copying that pattern here would be cargo-culting a workaround for a constraint we do not have. The
+correct direction is the reverse pointer — `webchat_topic` carries a `conversation_id` — not
+`Conversation` holding an opaque handle to our own table. **Surface-uniform identity;
+surface-specific capability.**
+
+**Superseded recommendation, kept for the record:**
 
 Option (i) institutionalises across two stores and two projects **exactly the defect S6 is
 currently being paid to fix inside one** — two constructs for the same DM that cannot see each

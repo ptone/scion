@@ -98,6 +98,35 @@
     design section that claims a capability exists cites the file and line, or it does not
     make the claim.
 
+16. **A design opens with prior art in this repository, grepped for the design's own core
+    nouns, cited by file and line. Empty is an allowed finding; absent is not.** Issued
+    2026-08-27 13:38Z, and it is the inverse of rule 15 — rule 15 stops me claiming a
+    capability exists; **this one stops me claiming it does not.** That is the failure that
+    actually cost us.
+
+    The prompt was the user asking why the shipped chat layer was never encountered when we
+    wrote the original architecture. I checked instead of reasoning, and the answer was worse
+    than I expected. The DM key format landed `cb7ffa42` **2026-08-13**; native chat shipped
+    with it `68eb1399` **08-15**. My design began **08-23** — ten days later, with the code
+    sitting on `main` the whole time.
+
+    **The excuse I expected to find was vocabulary drift** — that they said "topic" where I
+    said "conversation", so no search could have connected the two. **That is false and the
+    data killed it:** `handlers_chat_v2.go` contains 98 occurrences of "conversation" and
+    exports a type named `ConversationKey`. A grep for my own central noun would have hit it
+    on the first try. **It was never hidden. Nobody looked.**
+
+    So the cause is structural, not a lapse of diligence by any individual. **No role in our
+    pipeline has "existing art" as its deliverable.** The investigator is scoped to *why is
+    this broken* and correctly returns the defect's neighbourhood — the CLI send path. The
+    architect is scoped to *what should this be* and designs from the problem statement.
+    Neither output is *what in this repository already solves this*, so it belonged to nobody
+    and every role did its job correctly while the gap stayed open.
+
+    Contributing factor, smaller but worth naming: the brief said "messaging" and "CLI";
+    native chat reads as a UI feature. **We treated a product-surface boundary as a code
+    boundary.** It is not one — both are the same addressing problem over the same noun.
+
 ## 2. Source documents
 
 | Doc | Path |
@@ -521,6 +550,9 @@ would bury the events that matter.
 - `2026-08-27 13:01Z` Answered the user on DEF-7/DEF-9: DEF-9 needs no input (unbuilt, not undecided; downstream of DEF-5). DEF-7 has one real question, routed to **`nc-arch`** rather than escalated — see §5l.
 - `2026-08-27 13:03Z` **`nc-arch` answered DEF-7 and surfaced a parallel-entity collision.** DEF-7 resolved (build no naming path). **DM key format changed to kind-encoding, eliminating the §2.4.2 security hazard outright.** Shared derivation function owed to `pkg/messages`. See §5m.
 - `2026-08-27 13:06Z` **ESCALATED to user:** unify `Conversation` and `webchat_topic`, or keep both? Recommended declaring unification the end state and sequencing the migration after native-chat wave 2. **This is the one open user question.**
+- `2026-08-27 13:28Z` **DECIDED (user): unification option (ii).** Native chat is fully shipped and done. `webchat_*` is a stable target. Scope narrowed: `Conversation` owns identity across surfaces, `webchat_*` stays the native projection with its own read-state/prefs/presence — a promotion of the identity layer, not a migration of a working system into an unproven one. Design §2.6.3 updated. **The one open user question is now closed.**
+- `2026-08-27 13:27Z` **Possible elimination of S6's step 2.** The shipped hub authorises DMs by *parsing the key* (`isDMParticipant`, `handlers_chat_v2.go:2932`) and treats `webchat_dm` as a **derived index for listing**, rebuilt from the key. §2.4.2 conflated index with authority — which is the only reason its migration was security-critical. S6 asked to assess adopting the split for `kind='direct'`. See §5p.
+- `2026-08-27 13:26Z` **nc-arch confirmed all four items shipped and self-corrected** — they had answered from a design doc gone stale during a standby period. Also found a live defect: `validDMKey` is enforced only on chat-v2 REST paths; the agent outbound path does not validate `ThreadID`, and `attachments_agent_test.go:290` commits a malformed `dm:<userID>+<agentID>` key as expected usage. **They own that filing.** Consequence for us: never assume a stored key is well-formed.
 - `2026-08-27 13:25Z` **CORRECTION: native-chat wave 2 is LANDED on main, not in flight, and the kind-encoded DM key is shipped and regex-validated.** My design duplicated a shipped construct. Second such failure today. Rule 15 added. §5m's framing superseded by **§5o**. Revised recommendation sent to the user; S6 and nc-arch both re-briefed.
 - `2026-08-27 13:15Z` **Heartbeat prompt replaced** — old `1a899567` deleted, new `a80a92ed` (`ca-msg-impl-heartbeat-v2`). Roster check is now **step 1** and an empty roster is the alarm condition; adds a ledger sweep for unblocked-but-undispatched work, and requires `blocked` to name what is blocked *and what remains runnable*. Closes the §5j blind spot structurally rather than in my memory.
 - `2026-08-27 13:15Z` **DEF-1 ledger row corrected to CLOSED** — §3 has said 'implemented' since S4 while the ledger row still read 'open'. Ledger drifted from the body of the same document.
@@ -762,6 +794,99 @@ around a phantom twice.
 **Free conformance test now available to S6:** the shipped `dmKeyRegexp` is an independent oracle.
 Its derivation must produce keys that satisfy the *real* regex — referenced, not copied. A local
 copy would drift, which is the disease itself.
+
+## 5p. Index vs authority — the shipped pattern that may delete S6's riskiest step
+
+Found by reading `origin/main` after the §5o correction, rather than by being told.
+
+| | shipped hub | my §2.4.2 as specced |
+|---|---|---|
+| **Authorization** | `isDMParticipant(key, callerID)` — parses the key, three lines, **never reads a table** (`handlers_chat_v2.go:2932`) | `requireParticipant` reads `conversation_participants` |
+| **Listing** | `webchat_dm`, PK `(participant_id, conversation_key)`, rows **derived from the key** by `registerDMParticipants`, no-op on a malformed key | the same table, the same rows |
+
+> **For a DM, the key already *is* the participant list.** The hub therefore treats participant rows
+> as a **derived index for listing**, never as the **authority for access**. My design conflated the
+> two — and that conflation is the *entire* reason its migration was security-critical. If access is
+> decided by parsing the key, a wrong row degrades from "access granted to the wrong principal" to
+> "a DM appears in the wrong list": recoverable, and rebuildable from the key at any time.
+
+**Second time in one day that shipped code deleted a hazard I was busy mitigating**, and the more
+instructive of the two. §5o was a duplicated *artefact*; this is a duplicated *concept* — I modelled
+DM authorization on the general conversation case (where a participants table genuinely is required,
+because the key does not name participants) without noticing DMs are the case where it is not.
+**Generalising a mechanism across a case that does not need it is how the hazard got manufactured.**
+
+Asked S6 to assess, not ordered: authorise `kind='direct'` from the key; keep the table as an index
+and as the authority for kinds where the key does not name participants. Explicitly invited S6 to
+reject it — it has overruled me twice today and was right both times. Also asked nc-arch whether
+there is a reason they kept both that I am not seeing.
+
+**Two items adopted from nc-arch regardless of the above:**
+1. **"One derivation" needed an asterisk.** Go and the TS client (`web/src/components/pages/chat.ts:2325`
+   `buildDMKey`) cannot share an implementation. The real guarantee is one spec, one exported Go
+   function, and the TS mirror **pinned by shared golden test vectors** consumed by both suites, with
+   server-side validation as the enforcement point. Cross-language convention-agreement is
+   unavoidable; golden vectors make it *checked* convention. In S6's scope.
+2. **Never assume a stored key is well-formed.** `validDMKey` is enforced only on the chat-v2 REST
+   paths; the agent outbound path does not validate `ThreadID`. A committed test bakes in a malformed
+   `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
+   in review.** nc-arch owns the filing.
+
+## 5q. Invariant D-1, and the guard hole I caught in S6's version — 13:30-13:40Z
+
+**nc-arch supplied the boundary condition of the key-as-authority pattern, unprompted.** It is
+the thing I would have shipped without: key-as-authority works **only while the participant set
+is static and fully named by the identifier.** Once membership is dynamic, key and ACL disagree
+and the pattern flips from hazard-deleting to hazard.
+
+> **INVARIANT D-1 — a direct conversation's participant set is immutable for its lifetime.
+> "Add a person" is a promotion that creates a different conversation under a different
+> authority.**
+
+Written into design §2.4.2.2, with enforcement, and issued to S6 as binding.
+
+**I got the *reason* wrong first, and nc-arch corrected it from the code.** I had argued
+membership change → key change → different conversation → **broken continuity**. Wrong verb.
+`PromoteDM` (`webchannel_store.go:1805`) is one transaction: insert the new topic, re-key the
+history wholesale (`UPDATE messages SET thread_id=<topicID> WHERE thread_id=<dmKey>`), migrate
+read state, delete the DM registry rows. **Identity and ACL change together, atomically, and
+history moves to the new authority — continuity is *transferred*, not broken.** With
+deterministic keys the corollary is that the pair's key is **reborn empty** if they DM again:
+promotion drains a DM, it does not fork it. That is also the graceful-degradation shape — a
+reply racing the promotion lands in the reborn-empty DM: visible, not lost.
+
+**The hole in S6's enforcement, which their own proposed test would have passed.** S6 specced
+"reject if active participant count >= 2 and the caller is not an existing participant", with an
+exception permitting re-add after soft-remove. Compose the two: soft-remove B (active count
+falls to **1**), then add C — `count >= 2` is false, so it is **accepted**, and membership now
+says `{A, C}` while the key says `{A, B}`. Exactly the mutation D-1 forbids, reached by
+remove-then-substitute. **And S6's test — add a third party to a 2-participant DM, assert
+rejection — passes against the broken implementation.** The test did not discriminate between
+the guard they meant and the guard they wrote.
+
+**The fix is simpler than the bug:** for `kind='direct'`, `AddParticipant` accepts a principal
+only if `ParseDMKey(external_ref)` names that exact `(kind, id)`. No count, no soft-remove
+special case, no dependence on how many participants the creation path happens to write.
+Initial creation is permitted because both parties are named — which makes visible that it was
+always a *derivation from the key*, never a mutation. **This is the same lesson as rule 13, aimed
+at a guard rather than a test: a count is a proxy for the invariant, and proxies drift.**
+
+**S6 verified my second question properly rather than accepting my reading** — I asked whether
+any live path calls `AddParticipant` on pre-step-3 empty-ref rows, flagging that I had been
+wrong about exactly this class of claim twice that day. They enumerated all five call sites
+(`resolve.go:470` via `resolveAgentDM`/`resolveEmailDM`, `backfill.go:314`, `conversation.go`
+which does not call it at all, `handlers_chat_v2.go:3092` which writes `webchat_dm` not
+`conversation_participants`, and none in `pkg/hub` against `ConversationStore`) and showed all
+are post-upsert with kind-encoded keys. Rejecting empty refs is therefore safe.
+
+**Three observations from nc-arch on `PromoteDM` to improve rather than mirror**, filed as
+theirs-unvetted, for whoever builds group semantics: (1) the endpoint accepts an
+`idempotencyKey` but the check at `:2230` ignores it in favour of a name-based heuristic;
+(2) unique-violation detection is error-string matching (`:2268-2271`) where typed constraint
+errors exist; (3) a TOCTOU window between the in-flight dispatch check and commit — judged
+acceptable because reborn-empty makes the stray reply visible. **Worth mirroring:** the guard
+ordering, especially the in-flight `CountPendingMessages` check that refuses to re-key under an
+agent mid-reply.
 
 ## 5i. S5 — CLOSED 2026-08-27 12:40Z (accepted on round 3, `55dd6e16`)
 
