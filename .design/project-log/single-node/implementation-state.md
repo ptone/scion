@@ -6449,3 +6449,62 @@ one-line fixes that a developer will naturally want to just make. Item 11 in par
 reference bug, and I want it fixed through review rather than quietly by the agent who found the
 brief. I gave it the clean numbers — one file, 13 occurrences — so the issue does not imply a
 corpus-wide cleanup.
+
+### 04:20 — all twelve filed; and the developer corrected my count, correctly
+
+**Batch 3:** `ptone/scion#1295` (delete obsolete stopgaps), `#1296` (retest `#1300` live), `#1297`
+(design doc bare refs), `#1298` (`image-build/.gitignore`). No duplicates. It did not fix items 11
+or 12 despite both being one-line-class edits, which is what I asked for.
+
+**Full register, all on `ptone/scion`:**
+
+| batch | kind | issues |
+|---|---|---|
+| 1 | by-design limits (§2 / §9.1) | `#1287` `#1288` `#1289` `#1290` |
+| 2 | real defects | `#1291` `#1292` `#1293` `#1294` |
+| 3 | correctness / housekeeping | `#1295` `#1296` `#1297` `#1298` |
+
+Plus the two already open and deliberately not duplicated: `ptone/scion#1274`, `#1281`.
+
+#### The developer rejected my number and was right
+
+I briefed item 11 as **13 bare refs**. It counted **18**, said so, and filed 18 on the grounds that
+it could verify its own count. I re-measured:
+
+```
+occurrences: 18
+by value: #1276 x4  #1273 x4  #1275 x2  #1274 x2
+          #1306 #1305 #1304 #1302 #1300 #1281  x1 each
+```
+
+**My 13 was a count of LINES.** `git grep -c` reports matching lines, not matches. Five lines carry
+two refs each: 13 lines, 18 refs. Its `grep -oP` counted occurrences and was the correct tool.
+
+This is the **fourth** wrong-population measurement today, and the worst of them, because in the
+04:12 entry above I wrote the number as *"13 occurrences, not 18"* — I named the correct answer and
+explicitly rejected it.
+
+> **`grep -c` counts lines. It does not count matches.** Whenever a count feeds a claim about
+> quantity rather than presence, use `grep -o | wc -l`.
+
+The pattern across all four today is the same and it is not carelessness about tools — it is that I
+accepted the first number a command produced without asking *what population does this count?*
+
+#### A refinement the count made visible
+
+Splitting the 18 by venue:
+
+- **13 are fork numbers** — `#1273`, `#1274`, `#1275`, `#1276`, `#1281`. These resolve to unrelated
+  upstream PRs. **Wrong.**
+- **5 are upstream numbers** — `#1300`, `#1302`, `#1304`, `#1305`, `#1306`. These resolve correctly.
+  Ambiguous, not wrong. (`#1302` confirmed: 404 in the fork, a PR upstream.)
+
+**That second group is why this survived review.** A reader spot-checking a bare number in that
+table has a fair chance of hitting one that works, and nothing looks broken. Asked the developer to
+add this to `#1297`.
+
+Also asked it to widen `#1297` beyond §9.2: its line list shows line 247, in **§4.4**, carries a
+bare `#1302`. My own scoping of my own bug was too narrow.
+
+Note the coincidence and do not be fooled by it later: the fork-ref count is **also** 13. Chance.
+My 13 was a line count and reconciles with nothing.
