@@ -578,6 +578,15 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
+	// Validate the assembled message through the new envelope choke point.
+	// The structuredMsg is still the primary type during the transition;
+	// ValidateLegacyMessage converts internally and validates both old and
+	// new invariants (Phase 7, AC-8).
+	if err := messaging.ValidateLegacyMessage(structuredMsg); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+
 	// Cap mentions to avoid oversized responses and wasted server resources (R1).
 	if len(req.Mentions) > messages.MaxMentionRecipients {
 		req.Mentions = req.Mentions[:messages.MaxMentionRecipients]

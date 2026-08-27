@@ -1,0 +1,89 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package messaging
+
+import (
+	"fmt"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+)
+
+// ValidateLegacyMessage validates a StructuredMessage by mapping it to the
+// new envelope types and running the new validator. This is the adapter that
+// makes the old envelope go through the new validation choke point.
+//
+// It checks legacy-specific invariants (e.g. thread_id requires channel) that
+// are not represented in the new types, then converts and validates.
+func ValidateLegacyMessage(msg *messages.StructuredMessage) error {
+	if msg == nil {
+		return fmt.Errorf("message must not be nil")
+	}
+
+	// ---- Legacy-specific checks (not representable in new envelope) ----
+
+	// The old type must be from the closed enum.
+	if err := messages.ValidateType(msg.Type); err != nil {
+		return err
+	}
+
+	// thread_id requires channel (the Teams regression check).
+	if msg.ThreadID != "" && msg.Channel == "" {
+		return fmt.Errorf("thread_id requires channel to be set")
+	}
+
+	// Channel format checks.
+	if msg.Channel != "" {
+		if len(msg.Channel) > messages.MaxChannelLength {
+			return fmt.Errorf("channel exceeds maximum length of %d characters", messages.MaxChannelLength)
+		}
+	}
+
+	// Body must not be empty (legacy rule).
+	if msg.Msg == "" {
+		return fmt.Errorf("msg field is required")
+	}
+
+	// Sender must be set (legacy rule).
+	if msg.Sender == "" {
+		return fmt.Errorf("sender is required")
+	}
+
+	// ---- Convert to new types and validate through new choke point ----
+
+	newMsg, addrs, err := MapLegacyEnvelope(msg)
+	if err != nil {
+		return fmt.Errorf("legacy envelope conversion failed: %w", err)
+	}
+
+	// The legacy StructuredMessage does not have a ConversationID; set a
+	// synthetic value so that ValidateMessage's required-field check passes.
+	// The real ConversationID is resolved by the conversation attribution
+	// layer (Phase 4/5), which runs after validation.
+	if newMsg.ConversationID == "" {
+		newMsg.ConversationID = "legacy-pending"
+	}
+
+	if err := ValidateMessage(newMsg); err != nil {
+		return err
+	}
+
+	if len(addrs) > 0 {
+		if err := ValidateAddressees(addrs, newMsg); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}

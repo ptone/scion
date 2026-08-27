@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/spf13/cobra"
 )
@@ -466,6 +467,10 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 
 		msg := buildStructuredMessage(sender, "", message)
 		msg.Broadcasted = true
+		// Validate through the new envelope choke point (Phase 7, AC-8).
+		if err := messaging.ValidateLegacyMessage(msg); err != nil {
+			return fmt.Errorf("message validation failed: %w", err)
+		}
 		bcastResp, err := agentSvc.BroadcastMessage(ctx, msg, interrupt)
 		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to broadcast message via Hub: %w", err))
@@ -539,6 +544,10 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	defer cancel()
 
 	msg := buildStructuredMessage(sender, "agent:"+agentName, message)
+	// Validate through the new envelope choke point (Phase 7, AC-8).
+	if err := messaging.ValidateLegacyMessage(msg); err != nil {
+		return fmt.Errorf("message validation failed: %w", err)
+	}
 	if _, err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake); err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 	}

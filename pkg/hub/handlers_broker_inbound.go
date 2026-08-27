@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -174,6 +175,15 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		}
 		req.Message.Msg = content
 		req.Message.Urgent = true
+	}
+
+	// Validate the inbound message through the new envelope choke point.
+	// This catches malformed payloads from external channels (e.g. the Teams
+	// adapter emitting channel="" with a non-empty ThreadID) before dispatch
+	// (Phase 7, AC-8).
+	if err := messaging.ValidateLegacyMessage(req.Message); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
+		return
 	}
 
 	// Dispatch directly to the agent, bypassing the broker to avoid circular delivery
