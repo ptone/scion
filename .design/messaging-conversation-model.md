@@ -863,6 +863,21 @@ Commit-sized, ordered, each independently reviewable.
   > success. That is findings §1.2a — the defect this design exists to remove — newly caused
   > by the migration guidance. A warning that names an unusable replacement is worse than no
   > warning, because it converts a working invocation into a silently misrouted one.
+  >
+  > **Amended 2026-08-27 after S5 round 1. "Every" means every — enumerate the warnings, do
+  > not verify the instance that prompted the criterion.** I accepted S4 having checked only
+  > the conversation-reference replacements, because those were what F-1 was about. Three
+  > other warnings on the same accepted branch named replacements that do not exist:
+  > `--cc → --to` (no such flag), and `--in`/`--at` → `scion schedule message` (no such
+  > subcommand). **Verification is mechanical, not a reading:** a permanent test resolves
+  > every replacement named in a warning string against the real command tree, and
+  > `cobra.Command.Find` alone is insufficient — it returns the deepest match and leaves the
+  > remainder as args, so `schedule message` resolves happily to `schedule`. The test must
+  > assert the resolved command consumed the intended path.
+  >
+  > **Warning strings are documentation the binary emits at runtime.** Whatever check covers
+  > the docs must cover them too, or the one surface a user cannot avoid reading is the one
+  > surface nothing verifies.
 
 ### Non-regression
 

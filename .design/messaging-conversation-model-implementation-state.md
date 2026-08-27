@@ -401,6 +401,43 @@ would bury the events that matter.
   observing the call, not the effect — so I would be commissioning the defect S4 spent four
   rounds rejecting. (a) is where the F-1 defect goes to live. Ruled **option (c)**, see §5a.
 
+- `2026-08-27 11:10Z` **S5 rejected on round 1** at `eff98a1e`. Four findings — **I-1 is mine**:
+  three deprecation warnings on the *already-accepted* integration branch name replacements
+  that do not exist. See §5g.
+
+## 5g. S5 rejection — open (2026-08-27 11:10Z)
+
+Diff correctly scoped: docs plus one test file, fast-forward from `19681bc1`, no production
+code. The four availability caveats are well documented — SKILL.md states them bluntly
+("NOT available. Will produce a CLI error. Do not use."), which is right for an agent-facing
+file. CLI-reference-as-canonical was the correct call. Parse-check covers **9 of 13** fenced
+examples; the 4 skipped are placeholder forms.
+
+| # | Finding | Evidence | Required fix |
+|---|---|---|---|
+| **I-1** | **Three deprecation warnings name replacements that do not exist** — `--cc → --to` (no such flag), and `--in`/`--at` → `scion schedule message` (schedule has no `message` subcommand; it has list/get/cancel/create/create-recurring/pause/resume/delete/history). **Live on the integration branch I already accepted.** em5 found the `--cc` case in code review and *documented around it* as "replacement pending" — which makes the docs honest and leaves the binary lying. | I enumerated every `emitDeprecationWarning` string and resolved each named replacement against `rootCmd` in a scratch clone: seven resolve, three do not | Name replacements that exist or state none. **Plus a permanent test asserting every replacement named in a warning resolves against `rootCmd`** — mutation-verified. Production change authorised inside a docs section. |
+| **I-2** | **The parse-check has a `Find` blind spot — the same one that hid I-1.** `rootCmd.Find(["schedule","message"])` returns `cmd="schedule", rest=[message], err=<nil>`. Find returns the deepest match and leaves the remainder as args, so a doc containing `scion schedule message` passes today. | ran it | Assert the resolved command consumed the intended path: a leading non-flag token in `rest` matching no subcommand of a command that *has* subcommands must fail. |
+| **I-3** | **Both Rule 10 subtests re-implement the check instead of invoking it.** `catches_bad_command` calls `rootCmd.Find` itself; `catches_deny_listed_pattern` loops over `denyPatterns` itself. Neither runs `TestDocSyntax`'s body. | **Mutation:** replaced the deny-list loop in the main body with `_ = denyPatterns` — `--- PASS: TestDocSyntax/catches_deny_listed_pattern`. **The subtest asserting the deny-list works passed with the deny-list deleted.** | Extract the checking logic into a function returning violations; call it from the main body **and** from the Rule 10 subtests with bad fixtures. One implementation, two callers. |
+| **I-4** | **The divergence Recommendation teaches the exact misreading the fallback counter exists to prevent.** `messaging.md:223` — "Enable the read switch only after … seeing a **clean board** — zero mismatches over sustained traffic." That is satisfied by `matches: 0, mismatches: 0, total: 0, fallbacks: 50000`. `total = matches + mismatches`; fallbacks are excluded. Zero mismatches is what you see when the new model **never ran**, and the read switch fails open, so that is the likely state rather than a hypothetical. | read `admin_messaging_divergence.go:38–46` against the callout | Gate must be: sustained **non-zero matches**, zero mismatches, **and** fallbacks near zero relative to total. High fallbacks means investigate, not proceed. |
+
+**I-1 is my failure, not em5's and not em4's.** When I verified S4's AC-15a compliance I checked
+the conversation-reference replacements because those were what F-1 was about, and never
+enumerated the rest. AC-15a says *every* replacement named in a warning. **I applied my own
+acceptance criterion to the instance that prompted it rather than to its stated scope** — the
+third time this project has been bitten by a requirement read narrowly (AC-8's "three inbound
+paths", phase row 7, now this). The pattern is not managers reading carelessly; it is me
+writing a criterion and then verifying the example instead of the criterion.
+
+**I-3 is H-1 one section later, in the test written to satisfy the rule H-1 produced.** That is
+not carelessness — it is a genuinely slippery failure, which is why the fix I required is
+structural rather than attentional. A subtest holding its own copy of the logic can only ever
+test itself. **Generalisation for S6: shared implementation, two callers — never a
+reimplementation in the test that proves the check.**
+
+**Also generalised: warning strings are documentation the binary emits at runtime.** D6's
+parse-check covers `.md` files and was the right scope for a docs section, but it left the one
+surface where the live defect actually was. The new warning-string test closes that.
+
 ## 5f. S4 — CLOSED 2026-08-27 10:35Z (accepted on round 4)
 
 **Four rounds, five findings, one underlying defect.** F-1 (a warning routing users into the
