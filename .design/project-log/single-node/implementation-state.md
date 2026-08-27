@@ -11035,3 +11035,48 @@ that actually gets executed and the two versions are entirely different scripts.
 correction is itself evidence — usually about their environment rather than about the fact. I nearly
 replied "you are wrong" and stopped there, which would have left the fork/upstream confusion running
 underneath Q2.
+
+---
+
+## §35.31 — Q2 unmeasured, and that is the correct answer
+
+**2026-08-27, 20:13. `sn-hubid-inv` reported Q2 as unmeasured and refused to recommend anything.**
+It upgraded gcloud to 582.0.0, checked out upstream `c13d910b`, confirmed `deploy.sh` at 657 lines,
+and then could not deploy: **the Cloud Run Instances v1 CREATE endpoint returns HTTP 503.** Six
+attempts over fifteen minutes, `us-east4` and `us-central1`, via both gcloud and raw curl. v1 LIST and
+GET work; v2 CREATE works. Same credentials, same project — so the fault is server-side and specific
+to the v1 create path. v1 is the only surface carrying `sandboxLauncher`, so **the tier's one deploy
+command currently returns 503.** Reported to ptone as possibly transient.
+
+Its closing line was *"Q2 cannot be answered honestly."* That is worth more than a guess, and it is
+the direct result of telling it in advance that **an unmeasured Q2 was an acceptable outcome and a
+Q2 measured against the wrong artifact was not.** Naming the acceptable failure in the brief is what
+made the honest answer available; without it the pressure runs entirely toward producing *a* number.
+
+### The option I rejected, which is the part worth keeping
+
+It proposed an ingenious workaround: skip the broken create entirely, borrow an **existing** Instance,
+plant a marker file, force a container restart from the console, and check afterwards.
+
+**Refused. On this tier, "do not delete" and "do not restart" are the same instruction.** All nine
+protected Instances hold their state on ephemeral storage, so a restart destroys precisely what the
+do-not-delete flag exists to protect. For an ephemeral-state Instance **the restart *is* the
+deletion.** `sn-ready` is ptone's live instance and the other eight belong to other tasks.
+
+What makes this more than a policy call: **it is the investigator's own Q1 finding pointed back at its
+experiment.** Q1 established that a restart loses the DB and the signing keys. That is exactly why the
+restart cannot be performed on somebody else's Instance. The proposal treated "borrow, don't create"
+as the conservative choice, when the destructive step was the restart all along — the create was the
+harmless half.
+
+### Cleanup verified, not trusted
+
+Listed both regions myself: `us-east4` holds exactly `e2e-omni`, `e2e-walk-r2`, `iap-demo`,
+`q2-control`, `sn-adminfix-t`, `sn-adminseed-t`, `sn-ready`, `sn-step6`, `sn-walk` — the nine
+protected, nothing more. `us-central1` empty. Consistent with its self-report that it created one v2
+Instance before my correction and deleted it. **It disclosed that unprompted**, which is the behaviour
+I want and the reason the rest of its report is credible.
+
+Task #75 returns to pending with the full Q1 findings and the exact Q2 procedure carried in the task
+description. Re-dispatch trigger: v1 create returning anything other than 503. Nothing here touches
+§1, which was walked on 2026-08-25.
