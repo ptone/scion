@@ -1384,9 +1384,10 @@ WHERE t.last_read_at IS NOT NULL
 	}
 
 	// Carry muted flag from webchat_thread_prefs into webchat_read_state.
-	// For muted, we need to upsert: create the read_state row if it doesn't
-	// exist, or update the muted flag if it does. SQLite INSERT OR REPLACE
-	// would lose other columns, so we do a two-step approach.
+	// Two-step approach (INSERT OR IGNORE then UPDATE): SQLite's INSERT OR REPLACE
+	// would drop other columns on existing rows, so we split into create-if-missing
+	// + set-muted. The Postgres sibling does this in one INSERT...ON CONFLICT DO UPDATE
+	// because its DO UPDATE can target a single column without affecting others.
 	const seedMutedInsert = `
 INSERT OR IGNORE INTO webchat_read_state (user_id, conversation_key, muted)
 SELECT

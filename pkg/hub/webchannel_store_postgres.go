@@ -1035,6 +1035,10 @@ ON CONFLICT (user_id, conversation_key) DO NOTHING
 	}
 
 	// Carry muted flag from webchat_thread_prefs into webchat_read_state.
+	// Single-step INSERT...ON CONFLICT DO UPDATE SET muted = EXCLUDED.muted: Postgres's
+	// ON CONFLICT DO UPDATE can target one column without affecting others, so no
+	// second statement is needed. The SQLite sibling uses a two-step INSERT OR IGNORE +
+	// UPDATE because INSERT OR REPLACE there would drop other columns on existing rows.
 	const seedMuted = `
 INSERT INTO webchat_read_state (user_id, conversation_key, muted)
 SELECT
