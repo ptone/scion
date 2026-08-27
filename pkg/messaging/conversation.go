@@ -16,9 +16,7 @@ package messaging
 
 import (
 	"context"
-	"errors"
 	"log/slog"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -178,47 +176,6 @@ func ResolveOrCreateThreadConversation(
 		o(&cfg)
 	}
 
-	// Phase 4 (close mint): if a topic lookup is available, try to resolve
-	// the threadID as a webchat topic first. If found, return the linked
-	// conversation_id directly instead of minting a new conversation row.
-	if cfg.topicLookup != nil {
-		convID, err := cfg.topicLookup.GetTopicConversationID(ctx, threadID)
-		if err == nil && convID != "" {
-			log.Debug("thread resolved via topic lookup",
-				"thread_id", threadID, "conversation_id", convID)
-			return &ConversationResult{
-				ConversationID: convID,
-			}
-		}
-		// Topic exists but has no conversation_id yet.
-		// For native topics (non-dm threadIDs), return nil — do NOT mint.
-		// For dm:-prefixed threadIDs, fall through to the existing path.
-		if err == nil && convID == "" && !strings.HasPrefix(threadID, "dm:") {
-			log.Debug("topic has no conversation_id, returning unresolved (non-fatal)",
-				"thread_id", threadID)
-			return nil
-		}
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				// Topic genuinely doesn't exist. For native surfaces
-				// (non-dm threadIDs with lookup provided), return nil — do NOT mint.
-				if !strings.HasPrefix(threadID, "dm:") {
-					log.Debug("topic not found, returning unresolved (non-fatal)",
-						"thread_id", threadID)
-					return nil
-				}
-				// dm:-prefixed threadIDs fall through to the existing path.
-			} else {
-				// Infrastructure failure (DB down, timeout, etc.).
-				// Do NOT fall through to upsert — that would mint a
-				// spurious conversation for a topic that might already have one.
-				log.Warn("topic lookup infrastructure error, returning unresolved (non-fatal)",
-					"thread_id", threadID, "error", err)
-				return nil
-			}
-		}
-	}
-
 	extRef, kind, projID, err := DeriveConversationKey(KeyInputs{
 		ThreadID:  threadID,
 		ProjectID: projectID,
@@ -234,7 +191,13 @@ func ResolveOrCreateThreadConversation(
 		return nil
 	}
 
-	return ResolveOrCreateConversationByKey(ctx, cs, log, extRef, kind, projID)
+	// Forward topic lookup to the shared sink so all paths benefit from
+	// the sink-level guard (DEF-20 unify).
+	var keyOpts []ConversationByKeyOption
+	if cfg.topicLookup != nil {
+		keyOpts = append(keyOpts, WithKeyTopicLookup(cfg.topicLookup))
+	}
+	return ResolveOrCreateConversationByKey(ctx, cs, log, extRef, kind, projID, keyOpts...)
 }
 
 // threadConversationConfig holds optional parameters for ResolveOrCreateThreadConversation.

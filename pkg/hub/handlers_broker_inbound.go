@@ -211,34 +211,28 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Surface != "" && req.ExternalRef != "" {
-		conv := &store.Conversation{
-			ProjectID:   &agent.ProjectID,
-			Kind:        "group",
-			Surface:     req.Surface,
-			ExternalRef: req.ExternalRef,
-			ParentRef:   req.ParentRef,
-			DriftState:  "active",
+		var keyOpts []messaging.ConversationByKeyOption
+		keyOpts = append(keyOpts, messaging.WithSurface(req.Surface))
+		if req.ParentRef != "" {
+			keyOpts = append(keyOpts, messaging.WithParentRef(req.ParentRef))
 		}
 		if agent.ID != "" {
-			conv.DefaultAgentID = &agent.ID
+			agentID := agent.ID
+			keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&agentID))
 		}
-		resolved, convErr := s.store.UpsertConversationByExternalRef(r.Context(), conv)
-		if convErr != nil {
-			log.Error("Failed to resolve conversation for broker inbound",
-				"surface", req.Surface, "external_ref", req.ExternalRef, "error", convErr)
-			// Non-fatal: dispatch proceeds without a conversation_id.
-		} else {
-			log.Info("Resolved conversation for broker inbound",
-				"conversation_id", resolved.ID,
-				"surface", req.Surface,
-				"external_ref", req.ExternalRef,
-			)
-			// Attach the resolved conversation_id to the message metadata
-			// so downstream consumers can reference it.
+		if s.webChatStore != nil {
+			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(s.webChatStore))
+		}
+		convResult := messaging.ResolveOrCreateConversationByKey(
+			r.Context(), s.store, log, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
+		if convResult != nil {
 			if req.Message.Metadata == nil {
 				req.Message.Metadata = make(map[string]string)
 			}
-			req.Message.Metadata["conversation_id"] = resolved.ID
+			req.Message.Metadata["conversation_id"] = convResult.ConversationID
+			log.Info("Resolved conversation for broker inbound",
+				"conversation_id", convResult.ConversationID,
+				"surface", req.Surface, "external_ref", req.ExternalRef)
 		}
 	}
 
@@ -323,7 +317,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		var convResult *messaging.ConversationResult
 		if storeMsg.ThreadID != "" {
 			var threadOpts []messaging.ThreadConversationOption
-			if req.Message.Channel == "web" && s.webChatStore != nil {
+			if s.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(s.webChatStore))
 			}
 			convResult = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, s.messageLog, storeMsg.ThreadID, agent.ProjectID, threadOpts...)

@@ -488,12 +488,20 @@ func (m *mockTopicLookupWithError) GetTopicConversationID(_ context.Context, _ s
 
 func TestAC_U3_NoMintForNativeTopicWithoutRow(t *testing.T) {
 	// Scenario: threadID is a topic UUID that does NOT exist in webchat_topic.
-	// With a topic lookup enabled, ResolveOrCreateThreadConversation must
-	// return nil (unresolved) and NOT call the upserter.
-	mock := &mockConversationUpserter{}
+	// With the sink-level guard (DEF-20 unify), store.ErrNotFound means "not a
+	// native topic" and falls through to upsert. This is correct because the
+	// lookup is now injected unconditionally (not just for web channels), so
+	// non-native surface threads (Discord, Telegram) will naturally get
+	// ErrNotFound and should proceed to upsert.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{
+			ID:          "conv-minted",
+			ExternalRef: "thread:proj-1:topic-uuid-nonexistent",
+		},
+	}
 	lookup := &mockTopicLookup{topics: map[string]string{}} // empty = no topics
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
 	// Thread ID that looks like a topic UUID but doesn't exist.
 	got := ResolveOrCreateThreadConversation(
@@ -501,13 +509,16 @@ func TestAC_U3_NoMintForNativeTopicWithoutRow(t *testing.T) {
 		"topic-uuid-nonexistent", "proj-1",
 		WithTopicLookup(lookup))
 
-	// When topic lookup returns store.ErrNotFound for a non-dm threadID,
-	// the function must return nil — no conversation should be minted.
-	if got != nil {
-		t.Errorf("expected nil for non-existent native topic, got %+v", got)
+	// When topic lookup returns store.ErrNotFound, the sink falls through to
+	// upsert — this is the expected behavior for non-native surface threads.
+	if got == nil {
+		t.Fatal("expected non-nil result — ErrNotFound should fall through to upsert")
 	}
-	if mock.lastConv != nil {
-		t.Error("upsert MUST NOT be called — no conversation row should be minted for missing native topic")
+	if got.ConversationID != "conv-minted" {
+		t.Errorf("ConversationID: got %q, want %q", got.ConversationID, "conv-minted")
+	}
+	if mock.lastConv == nil {
+		t.Error("upsert must be called when topic is not found (ErrNotFound)")
 	}
 }
 

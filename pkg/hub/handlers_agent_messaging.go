@@ -281,7 +281,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			"error", deriveErr,
 		)
 	} else {
-		convResult = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID)
+		var keyOpts []messaging.ConversationByKeyOption
+		if s.webChatStore != nil {
+			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(s.webChatStore))
+		}
+		convResult = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
 	}
 	if convResult != nil {
 		storeMsg.ConversationID = convResult.ConversationID
@@ -683,26 +687,25 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 	if req.Surface != "" && req.ExternalRef != "" {
-		conv := &store.Conversation{
-			ProjectID:   &agent.ProjectID,
-			Kind:        "group",
-			Surface:     req.Surface,
-			ExternalRef: req.ExternalRef,
-			ParentRef:   req.ParentRef,
-			DriftState:  "active",
+		var keyOpts []messaging.ConversationByKeyOption
+		keyOpts = append(keyOpts, messaging.WithSurface(req.Surface))
+		if req.ParentRef != "" {
+			keyOpts = append(keyOpts, messaging.WithParentRef(req.ParentRef))
 		}
 		if agent.ID != "" {
-			conv.DefaultAgentID = &agent.ID
+			agentID := agent.ID
+			keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&agentID))
 		}
-		resolved, convErr := s.store.UpsertConversationByExternalRef(ctx, conv)
-		if convErr != nil {
-			s.messageLog.Error("Failed to resolve conversation for agent message",
-				"surface", req.Surface, "external_ref", req.ExternalRef, "error", convErr)
-		} else {
+		if s.webChatStore != nil {
+			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(s.webChatStore))
+		}
+		convResult := messaging.ResolveOrCreateConversationByKey(
+			ctx, s.store, s.messageLog, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
+		if convResult != nil {
 			if structuredMsg.Metadata == nil {
 				structuredMsg.Metadata = make(map[string]string)
 			}
-			structuredMsg.Metadata["conversation_id"] = resolved.ID
+			structuredMsg.Metadata["conversation_id"] = convResult.ConversationID
 		}
 	}
 
@@ -888,7 +891,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					"error", deriveErr,
 				)
 			} else {
-				convResult = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID)
+				var keyOpts []messaging.ConversationByKeyOption
+				if s.webChatStore != nil {
+					keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(s.webChatStore))
+				}
+				convResult = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
 			}
 		}
 		if convResult != nil && storeMsg.ConversationID == "" {

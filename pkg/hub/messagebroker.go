@@ -461,7 +461,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		var convResult *messaging.ConversationResult
 		if msg.ThreadID != "" {
 			var threadOpts []messaging.ThreadConversationOption
-			if msg.Channel == "web" && p.webChatStore != nil {
+			if p.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
 			}
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
@@ -642,7 +642,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		var convResult *messaging.ConversationResult
 		if msg.ThreadID != "" {
 			var threadOpts []messaging.ThreadConversationOption
-			if msg.Channel == "web" && p.webChatStore != nil {
+			if p.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
 			}
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
