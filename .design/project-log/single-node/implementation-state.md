@@ -7736,3 +7736,30 @@ I was not. Both times the named threat crowded out the likelier one.
 **Agent states checked, not assumed:** `sn-stress-def` recovered from its stall and
 is executing. `sn-stress-max` blocked 3 min — told it that if it is waiting on me
 it is not, and to go. `sn-findings-dev` active on the antigravity filing.
+
+## 07:51 — Fourth issue filed; caught the register disagreeing with itself
+
+**`ptone/scion#1306`** filed — agent create without `harnessConfig` fails 502 on
+`antigravity`. The developer independently confirmed all three source facts before
+filing, and found `ptone/scion#1273` (closed) as the prior incarnation, referencing
+it with the distinction drawn. That is the right handling: **same symptom, different
+cause, so a new issue rather than a reopen.**
+
+**Caught a defect in the register itself.** `ptone/scion#1297` says *"Collision
+count: 9"* and its table has **six rows**. I verified the three missing ones against
+both repos rather than assuming: `#1273`, `#1301`, `#1302`. Ordered them added.
+
+**Why that is not a tidy-up.** A register whose count and contents disagree is worse
+than no register, because **the count is the part people quote and the table is the
+part people use**. Anyone checking whether `#1273` was safe to write bare would have
+searched the table, found nothing, and concluded it was safe — and `#1273` is the
+very ref the developer cited in `#1306` today.
+
+**The structural point, recorded in review-queue §19 for ptone.** Four filings
+today, four collisions. Not bad luck: the two repos share a number space and both
+are active, so **every fork issue we file lands on a number upstream will eventually
+use.** The table can never be complete. **The table is therefore not the fix — the
+qualification habit is**, and the table's only closeable job is repairing text
+already written. Asked the developer to tell me if `#1297` currently reads as though
+maintaining the table were the remedy, and explicitly told it **not** to reframe the
+issue itself. That is a call about how the project spends effort, and it is ptone's.

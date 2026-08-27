@@ -1206,3 +1206,34 @@ shared and missed that it is invisible. Here, §5 records that state is ephemera
 loss can be involuntary. Both times I wrote down a true property and did not follow it to what the
 operator would experience. That is worth naming as a pattern rather than logging twice as bad luck —
 **I have been describing the system's properties rather than the operator's day.**
+
+## §19 — The collision register is structural, not incidental (for ptone)
+
+**Filed today:** `ptone/scion#1303`, `#1304`, `#1305`, `#1306`. **All four collide
+with real upstream PRs.** Known collisions are now **nine**.
+
+**Four filings, four collisions. That is not bad luck — it is structural.** The
+fork and upstream share a number space and both are active, so every fork issue we
+file lands on a number upstream will eventually use for a PR. **The collision table
+in `ptone/scion#1297` can therefore never be complete**, and it grows monotonically
+for as long as both repos are active.
+
+The consequence I want a decision on: **the table is not the fix.** The fix is the
+qualification habit — always `ptone/scion#N` or `GoogleCloudPlatform/scion#N`, never
+a bare `#N`. The table's only durable job is **repairing text we have already
+written**, which is a finite and closeable task. If `#1297` reads as though
+maintaining the table were the remedy, it will absorb effort indefinitely and still
+not prevent the next one.
+
+Three of the four new collisions are worse than the earlier ones: **upstream `#1304`,
+`#1305` and `#1306` are cited by number in the design doc and in earlier issue
+bodies.** The same bare number now means two different things inside text we have
+already shipped.
+
+**The finite, closeable piece** is the 18 bare refs in
+`.design/hosted/cloud-run-single-node.md` (my error, tracked as `ptone/scion#1297`),
+which should ride the same upstream doc PR as D4-D7.
+
+**Decision wanted:** should `#1297` be reframed from "register of collisions" to
+"repair the already-written text, and qualify everything from here"? I have not
+reframed it — that is a call about how the project spends effort, not a fact.
