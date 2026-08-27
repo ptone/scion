@@ -5672,3 +5672,87 @@ the deduplication if it cannot be done cleanly.
 One thing neither I nor the audit could verify, flagged for the developer to check: whether Node and
 `npm` exist in the `thick-prep` → `scion-base` lineage that omni's web build depends on. If not, the
 final stage fails regardless of all five fixes.
+
+---
+
+## 2026-08-27 02:58 — Workflow drop landed. #1310 is GREEN. Then the review arrived.
+
+`sn-ciscope-dev` pushed `ee04374d`. **Verified independently, matches its report exactly:**
+
+- 37 files against upstream main, down from 40.
+- **Zero** paths under `.github/`.
+- `Build and Push Omni Image` — **gone from the check list entirely.**
+- `zizmor-output`, `-config`, `-scan`, `-upload` — all **`skipped`**.
+- `Build & Test`, `golangci-lint`, `shellcheck`, `check-changes`, `scan-pr` — all **`success`**.
+- `cla/google` — `failure`, the known non-blocker.
+- `mergeable=true`, state `unstable` (unstable *only* because of `cla/google`).
+
+Both target checks resolved exactly as the brief predicted. Agent retired after verification.
+
+`behind=1`: upstream #1309 (`f876e27b`, Cloud SQL Auth Proxy sidecar / HA phase 2). Checked the
+overlap rather than assuming — **zero shared files**, it is entirely `deploy/helm/**` and our tier is
+Cloud Run. No rebase needed. Recording the check, not just the conclusion, because last time I
+treated a conflict-surface measurement as durable it went stale inside twenty minutes.
+
+### The review surface is now real — but it is a bot, not a human
+
+`reviews=6` on the PR turned out to be **six comments from `gemini-code-assist[bot]`**, all medium
+priority, posted 01:48Z. **No human has reviewed yet.** None of the six blocks merge.
+
+I read all six against the actual branch code and called each one. Full reasoning in task #58 and
+`briefs/sn-review-dev.md`. Summary: **take four, decline two.**
+
+### The find: the bot's own suggested fix contains a bug
+
+**R4** correctly observes that the liveness probe's `time.Sleep(delay)` ignores context
+cancellation. Its replacement:
+
+```go
+select {
+case <-ctx.Done():
+    probeErr = ctx.Err()
+    break          // breaks the SELECT, not the FOR
+case <-time.After(delay):
+}
+probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
+_, probeErr = runSimpleCommand(...)   // runs anyway, and OVERWRITES probeErr
+```
+
+`break` inside a `select` terminates the `select`. So on cancellation it sets `probeErr`, falls
+through, runs the probe regardless, and **overwrites the cancellation error with the probe's
+result.** That is *worse than the `time.Sleep` it replaces*, because it looks like cancellation is
+handled.
+
+There is a second-order trap I flagged too: the block at `:787` reads `probeErr` to decide whether to
+emit "sandbox dead on arrival" diagnostics. **A cancellation is not a dead sandbox.** Whatever
+control flow the developer picks has to keep those two distinguishable.
+
+**Rule going into the brief: do not accept a bot suggestion you have not read.** An automated
+reviewer that is right about the problem can still be wrong about the fix, and its confident tone
+does not vary between the two cases.
+
+### The two declines, and why declining needs written reasoning
+
+- **R3** — expose the hardcoded `/scion` root in config, *"because `/scion` cannot be created without
+  root, making local testing difficult"*. **The premise is wrong and I verified it.** The runtime
+  requires `defaultSandboxBin = "/usr/local/gcp/bin/sandbox"` (line 39) and `os.Stat`s it as an
+  availability check (line 86). That binary exists only inside a Cloud Run Instance, so **the runtime
+  cannot run locally at any `rootDir`**. The bot hedges its own suggestion — *"Assuming RootDir is
+  added to V1CloudRunSandboxConfig"* — i.e. it proposes widening a config schema, which is
+  load-bearing and awkward to remove, to serve a scenario that does not exist.
+- **R6** — precompute parsed IPs before `sort.Slice`. Technically true, practically irrelevant: N is
+  the link-local address count, and the function already returns early for 0 and 1, so this is a
+  two-or-three element sort that runs once at startup. Against that, it is the selection logic from
+  **§1 BLOCKER task #25**. Rewriting hard-won cold-path code for an unmeasurable gain is a bad trade.
+
+Both declines ship with a reply to post on the thread. **An unanswered bot comment reads as an
+unaddressed one**, and a future human reviewer should not have to re-derive why we passed.
+
+### Sequencing
+
+One developer on `scion/sn-tier` at a time. `sn-cloudbuild-dev` dispatched now against task #57
+(the blocking one — ptone's stated condition). `sn-review-dev` brief written and **held**.
+
+Also told the developer, in the brief, that if it thinks either decline is wrong it should **argue
+before implementing**. Silent compliance with a call the implementer believes is bad is how a wrong
+architectural decision gets laundered into the record.
