@@ -377,7 +377,7 @@ func TestDeprecatedFlag_Channel(t *testing.T) {
 		emitDeprecationWarnings(messageCmd)
 	})
 	assert.Contains(t, stderr, "Warning: --channel is deprecated")
-	assert.Contains(t, stderr, "conversation references")
+	assert.Contains(t, stderr, "@<agent-name>")
 }
 
 // TestDeprecatedFlag_ThreadID tests that --thread-id emits a deprecation
@@ -395,7 +395,7 @@ func TestDeprecatedFlag_ThreadID(t *testing.T) {
 		emitDeprecationWarnings(messageCmd)
 	})
 	assert.Contains(t, stderr, "Warning: --thread-id is deprecated")
-	assert.Contains(t, stderr, "conversation references")
+	assert.Contains(t, stderr, "@<agent-name>")
 }
 
 // TestDeprecatedFlag_CC tests that --cc emits a deprecation warning

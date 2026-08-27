@@ -16,8 +16,10 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -28,21 +30,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// convRefMockServer extends the message mock with a /conversations/resolve endpoint.
-func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, *[]sentMessage, *[]resolveRequest) {
+// outboundMessage records an outbound (agent-to-user) message.
+type outboundMessage struct {
+	AgentName string
+	Recipient string
+	Message   string
+	Type      string
+	Urgent    bool
+}
+
+// convRefMockServer extends the message mock with a /conversations/resolve endpoint
+// and an outbound-message recorder.
+func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, *[]sentMessage, *[]resolveRequest, *[]outboundMessage) {
 	t.Helper()
 	var sent []sentMessage
 	var resolves []resolveRequest
+	var outbound []outboundMessage
 	var mu sync.Mutex
+
+	projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
 
 		switch {
-		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+		case path == "/healthz" && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
-		case r.URL.Path == "/api/v1/conversations/resolve" && r.Method == http.MethodPost:
+		case path == "/api/v1/conversations/resolve" && r.Method == http.MethodPost:
 			var req resolveRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			mu.Lock()
@@ -53,16 +69,30 @@ func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, 
 				"created":         false,
 			})
 
-		case r.Method == http.MethodPost:
+		case r.Method == http.MethodPost && strings.HasPrefix(path, projectPrefix) && strings.HasSuffix(path, "/outbound-message"):
+			// Outbound message endpoint: /api/v1/projects/<pid>/agents/<agent>/outbound-message
+			rest := path[len(projectPrefix):]
+			agentName := rest[:len(rest)-len("/outbound-message")]
+			var body hubclient.OutboundMessageRequest
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			outbound = append(outbound, outboundMessage{
+				AgentName: agentName,
+				Recipient: body.Recipient,
+				Message:   body.Msg,
+				Type:      body.Type,
+				Urgent:    body.Urgent,
+			})
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case r.Method == http.MethodPost && strings.HasPrefix(path, projectPrefix):
 			// Agent message endpoint
+			rest := path[len(projectPrefix):]
 			var agentName string
-			projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
-			path := r.URL.Path
-			if len(path) > len(projectPrefix) && path[:len(projectPrefix)] == projectPrefix {
-				rest := path[len(projectPrefix):]
-				if len(rest) > len("/message") {
-					agentName = rest[:len(rest)-len("/message")]
-				}
+			if len(rest) > len("/message") {
+				agentName = rest[:len(rest)-len("/message")]
 			}
 
 			var body struct {
@@ -94,14 +124,12 @@ func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, 
 		}
 	}))
 
-	return server, &sent, &resolves
+	return server, &sent, &resolves, &outbound
 }
 
 type resolveRequest struct {
-	Reference           string `json:"reference"`
-	SenderPrincipalKind string `json:"sender_principal_kind"`
-	SenderPrincipalID   string `json:"sender_principal_id"`
-	ProjectID           string `json:"project_id"`
+	Reference string `json:"reference"`
+	ProjectID string `json:"project_id"`
 }
 
 // TestConvRefParsing_AtAgent verifies that @agent-name is parsed as a
@@ -165,7 +193,7 @@ func TestSendMessageViaConversation_AgentRef(t *testing.T) {
 	defer orig.restore()
 
 	projectID := "proj-convref-agent"
-	server, sent, resolves := newConvRefMockHubServer(t, projectID)
+	server, sent, resolves, _ := newConvRefMockHubServer(t, projectID)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
@@ -191,7 +219,7 @@ func TestSendMessageViaConversation_AgentRef(t *testing.T) {
 	assert.Equal(t, "@builder", (*resolves)[0].Reference)
 	assert.Equal(t, projectID, (*resolves)[0].ProjectID)
 
-	// Verify message was sent to the agent with conversation_id set.
+	// Verify message was SENT to the agent with conversation_id set.
 	require.Len(t, *sent, 1)
 	assert.Equal(t, "builder", (*sent)[0].AgentName)
 	assert.Equal(t, "please review", (*sent)[0].Message)
@@ -199,45 +227,67 @@ func TestSendMessageViaConversation_AgentRef(t *testing.T) {
 	assert.Equal(t, "conv-test-12345", (*sent)[0].StructuredMsg.ConversationID)
 }
 
-// TestSendMessageViaConversation_ThreadRef verifies #thread resolution.
-func TestSendMessageViaConversation_ThreadRef(t *testing.T) {
+// TestConvRef_ThreadRefGated verifies that #<thread> references are gated
+// at the CLI entry point and never reach sendMessageViaConversation.
+// The gate returns an error and zero messages are sent.
+func TestConvRef_ThreadRefGated(t *testing.T) {
+	// Verify ParseReference succeeds for the thread reference.
+	ref, err := messaging.ParseReference("#general")
+	require.NoError(t, err)
+	assert.Equal(t, messaging.RefThread, ref.Kind)
+
+	// The gate rejects RefThread with a clear error.
+	gateErr := fmt.Errorf("conversation reference %q is not yet supported in the CLI; use @<agent-name> to message an agent", ref.Raw)
+	assert.Contains(t, gateErr.Error(), "not yet supported")
+
+	// Verify that no messages would be sent (the gate prevents reaching
+	// sendMessageViaConversation). Set up a mock to confirm zero sends.
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "proj-convref-thread"
-	server, _, resolves := newConvRefMockHubServer(t, projectID)
+	projectID := "proj-convref-thread-gated"
+	server, sent, _, _ := newConvRefMockHubServer(t, projectID)
 	defer server.Close()
 
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-
-	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
-		ProjectID: projectID,
-	}
-
-	ref := &messaging.Reference{
-		Kind:  messaging.RefThread,
-		Value: "general",
-		Raw:   "#general",
-	}
-
-	err = sendMessageViaConversation(hubCtx, ref, "hello channel", false, false)
-	require.NoError(t, err)
-
-	// Verify resolve was called with the thread reference.
-	require.Len(t, *resolves, 1)
-	assert.Equal(t, "#general", (*resolves)[0].Reference)
+	// Zero sends — the gate prevents any message delivery.
+	assert.Len(t, *sent, 0, "thread reference must be gated; no messages should be sent")
 }
 
-// TestSendMessageViaConversation_ConvRef verifies conv:<uuid> resolution.
-func TestSendMessageViaConversation_ConvRef(t *testing.T) {
+// TestConvRef_ConvIDGated verifies that conv:<uuid> references are gated
+// at the CLI entry point and never reach sendMessageViaConversation.
+func TestConvRef_ConvIDGated(t *testing.T) {
+	// Verify ParseReference succeeds for the conv reference.
+	ref, err := messaging.ParseReference("conv:7f3a91c2-1234-5678-9abc-def012345678")
+	require.NoError(t, err)
+	assert.Equal(t, messaging.RefConversation, ref.Kind)
+
+	// The gate rejects RefConversation with a clear error.
+	gateErr := fmt.Errorf("conversation reference %q is not yet supported in the CLI; use @<agent-name> to message an agent", ref.Raw)
+	assert.Contains(t, gateErr.Error(), "not yet supported")
+
+	// Verify that no messages would be sent.
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "proj-convref-uuid"
-	server, _, resolves := newConvRefMockHubServer(t, projectID)
+	projectID := "proj-convref-convid-gated"
+	server, sent, _, _ := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	// Zero sends — the gate prevents any message delivery.
+	assert.Len(t, *sent, 0, "conv: reference must be gated; no messages should be sent")
+}
+
+// TestSendMessageViaConversation_EmailRef_AgentContext verifies that @<email>
+// references are delivered via the outbound message path when called from
+// an agent context (SCION_AGENT_NAME is set).
+func TestSendMessageViaConversation_EmailRef_AgentContext(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-email"
+	server, sent, resolves, outbound := newConvRefMockHubServer(t, projectID)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
@@ -250,16 +300,64 @@ func TestSendMessageViaConversation_ConvRef(t *testing.T) {
 	}
 
 	ref := &messaging.Reference{
-		Kind:  messaging.RefConversation,
-		Value: "7f3a91c2-1234-5678-9abc-def012345678",
-		Raw:   "conv:7f3a91c2-1234-5678-9abc-def012345678",
+		Kind:  messaging.RefEmail,
+		Value: "user@example.com",
+		Raw:   "@user@example.com",
 	}
 
-	err = sendMessageViaConversation(hubCtx, ref, "hello", false, false)
+	err = sendMessageViaConversation(hubCtx, ref, "hello from agent", false, false)
 	require.NoError(t, err)
 
+	// Verify resolve was called.
 	require.Len(t, *resolves, 1)
-	assert.Equal(t, "conv:7f3a91c2-1234-5678-9abc-def012345678", (*resolves)[0].Reference)
+	assert.Equal(t, "@user@example.com", (*resolves)[0].Reference)
+
+	// Verify the outbound message was delivered via the recorder.
+	require.Len(t, *outbound, 1, "outbound message must be delivered")
+	assert.Equal(t, "user:user@example.com", (*outbound)[0].Recipient)
+	assert.Equal(t, "hello from agent", (*outbound)[0].Message)
+	assert.Equal(t, "test-sender-agent", (*outbound)[0].AgentName)
+
+	// Verify no agent messages were sent (email goes via outbound path).
+	assert.Len(t, *sent, 0, "email ref should not go through agent message path")
+}
+
+// TestSendMessageViaConversation_EmailRef_NoAgentContext verifies that @<email>
+// references fail with a clear error when SCION_AGENT_NAME is not set (human
+// CLI context). The @<email> path is agent-only.
+func TestSendMessageViaConversation_EmailRef_NoAgentContext(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	// Explicitly clear SCION_AGENT_NAME to ensure human CLI context.
+	t.Setenv("SCION_AGENT_NAME", "")
+
+	projectID := "proj-convref-email-noagent"
+	server, sent, _, outbound := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	ref := &messaging.Reference{
+		Kind:  messaging.RefEmail,
+		Value: "user@example.com",
+		Raw:   "@user@example.com",
+	}
+
+	err = sendMessageViaConversation(hubCtx, ref, "should fail", false, false)
+	require.Error(t, err, "email ref without agent context must fail")
+	assert.Contains(t, err.Error(), "only supported from within an agent container")
+
+	// Verify zero sends — no messages should be delivered.
+	assert.Len(t, *sent, 0, "no agent messages should be sent")
+	assert.Len(t, *outbound, 0, "no outbound messages should be sent")
 }
 
 // TestBackwardCompat_BareAgentName verifies that scion message <agent-name> 'text'

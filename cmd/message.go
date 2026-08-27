@@ -84,10 +84,10 @@ func emitDeprecationWarnings(cmd *cobra.Command) {
 		emitDeprecationWarning("at", "use 'scion schedule message' instead")
 	}
 	if cmd.Flags().Changed("channel") {
-		emitDeprecationWarning("channel", "use conversation references instead: conv:<id>, @<agent>, #<thread>")
+		emitDeprecationWarning("channel", "use @<agent-name> to message an agent directly")
 	}
 	if cmd.Flags().Changed("thread-id") {
-		emitDeprecationWarning("thread-id", "use conversation references instead: conv:<id>, @<agent>, #<thread>")
+		emitDeprecationWarning("thread-id", "use @<agent-name> to message an agent directly")
 	}
 	if cmd.Flags().Changed("cc") {
 		emitDeprecationWarning("cc", "use --to instead")
@@ -141,6 +141,12 @@ Examples:
 			// Try parsing as an S4 conversation reference first.
 			// This catches conv:<uuid>, @<agent-slug>, @<email>, #<thread>.
 			if ref, err := messaging.ParseReference(recipient); err == nil {
+				// Only @<agent> conversation references are fully supported in the CLI today.
+				// conv:<id> and #<thread> resolve correctly but delivery routing is not yet
+				// implemented -- accepting them would silently drop the message.
+				if ref.Kind == messaging.RefConversation || ref.Kind == messaging.RefThread {
+					return fmt.Errorf("conversation reference %q is not yet supported in the CLI; use @<agent-name> to message an agent", ref.Raw)
+				}
 				convRef = ref
 			} else if messages.IsGroupRecipient(recipient) {
 				parsed, err := messages.ParseGroupRecipient(recipient)
@@ -666,22 +672,9 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Determine sender principal from auth context.
-	senderKind := ""
-	senderID := ""
-	if agentName := os.Getenv("SCION_AGENT_NAME"); agentName != "" {
-		senderKind = "agent"
-		// SenderID will be filled from auth context by the Hub.
-	} else {
-		senderKind = "user"
-		// SenderID will be filled from auth context by the Hub.
-	}
-
 	resolveResp, err := hubCtx.Client.Messages().ResolveConversation(ctx, &hubclient.ConversationResolveRequest{
-		Reference:           ref.Raw,
-		SenderPrincipalKind: senderKind,
-		SenderPrincipalID:   senderID,
-		ProjectID:           projectID,
+		Reference: ref.Raw,
+		ProjectID: projectID,
 	})
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to resolve conversation reference %q: %w", ref.Raw, err))
@@ -742,18 +735,10 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		return nil
 	}
 
-	// For conv:<uuid> and #<thread>, we store the message with conversation_id
-	// but need to determine the delivery target. Use the standard agent message
-	// path if we can determine a target agent.
-	//
-	// For now, conv: and # references log a success with the resolved
-	// conversation. Full routing (wake default agent, etc.) is a follow-up.
-	if !isJSONOutput() {
-		fmt.Printf("Message associated with conversation %s. Conversation reference %q resolved successfully.\n",
-			resolveResp.ConversationID, ref.Raw)
-	}
-
-	return nil
+	// conv:<uuid> and #<thread> are gated at the CLI entry point and never
+	// reach this function. @<agent> and @<email> are handled above and return.
+	// This point is unreachable.
+	return fmt.Errorf("unsupported conversation reference kind: %s", ref.Raw)
 }
 
 func printBroadcastAccepted(resp *hubclient.BroadcastResponse) {

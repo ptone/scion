@@ -35,10 +35,8 @@ type MessageChannel struct {
 
 // ConversationResolveRequest is the request body for resolving a conversation reference.
 type ConversationResolveRequest struct {
-	Reference           string `json:"reference"`
-	SenderPrincipalKind string `json:"sender_principal_kind,omitempty"`
-	SenderPrincipalID   string `json:"sender_principal_id,omitempty"`
-	ProjectID           string `json:"project_id,omitempty"`
+	Reference string `json:"reference"`
+	ProjectID string `json:"project_id,omitempty"`
 }
 
 // ConversationResolveResponse is the response from resolving a conversation reference.

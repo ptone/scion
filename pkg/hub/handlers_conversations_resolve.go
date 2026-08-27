@@ -21,11 +21,13 @@ import (
 )
 
 // conversationResolveRequest is the POST body for /api/v1/conversations/resolve.
+//
+// Security: sender identity is always derived from the authenticated caller.
+// Body-supplied sender fields were removed because they allowed any authenticated
+// principal to impersonate another and bypass participant auth checks (G-1).
 type conversationResolveRequest struct {
-	Reference          string `json:"reference"`
-	SenderPrincipalKind string `json:"sender_principal_kind"`
-	SenderPrincipalID   string `json:"sender_principal_id"`
-	ProjectID          string `json:"project_id"`
+	Reference string `json:"reference"`
+	ProjectID string `json:"project_id"`
 }
 
 // conversationResolveResponse is the response body for /api/v1/conversations/resolve.
@@ -64,21 +66,15 @@ func (s *Server) handleConversationsResolve(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Determine sender identity from the request body or from auth context.
-	senderKind := req.SenderPrincipalKind
-	senderID := req.SenderPrincipalID
-	if senderKind == "" || senderID == "" {
-		if agentIdent != nil {
-			senderKind = "agent"
-			senderID = agentIdent.ID()
-		} else if user != nil {
-			senderKind = "user"
-			senderID = user.ID()
-		}
-	}
-	if senderKind == "" || senderID == "" {
-		ValidationError(w, "sender_principal_kind and sender_principal_id are required", nil)
-		return
+	// Sender identity is always derived from the authenticated caller.
+	senderKind := ""
+	senderID := ""
+	if agentIdent != nil {
+		senderKind = "agent"
+		senderID = agentIdent.ID()
+	} else if user != nil {
+		senderKind = "user"
+		senderID = user.ID()
 	}
 
 	rctx := messaging.ResolveContext{
