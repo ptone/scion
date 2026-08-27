@@ -368,6 +368,8 @@ func (s *DMMigrationService) stepRekeyOldFormat(
 
 	if !ok1 || !ok2 {
 		result.Ambiguous++
+		result.Errors = append(result.Errors,
+			fmt.Sprintf("step3b: ambiguous kind resolution for conversation %s — id1=%s id2=%s (found in neither or both tables)", conv.ID, id1, id2))
 		return
 	}
 

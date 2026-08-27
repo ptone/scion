@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -488,9 +489,18 @@ func ensureParticipant(ctx context.Context, s ResolutionStore, convID, kind, id 
 	if err != nil && errors.Is(err, store.ErrAlreadyExists) {
 		return false // already a participant — not newly created
 	}
-	// err == nil means newly added; other errors are swallowed because the
-	// upsert path should not fail fatally on participant adds.
-	return err == nil
+	if err != nil {
+		// Non-ErrAlreadyExists failure: participant listing gap. Auth is key-derived
+		// so this is visibility, not access, but something that fails quietly and
+		// often becomes normal.
+		slog.WarnContext(ctx, "ensureParticipant: AddParticipant failed (listing gap)",
+			"conversation_id", convID,
+			"principal_kind", kind,
+			"principal_id", id,
+			"error", err)
+		return false
+	}
+	return true // newly added
 }
 
 // ---------------------------------------------------------------------------

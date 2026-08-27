@@ -833,11 +833,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		} else if structuredMsg.ThreadID != "" {
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, structuredMsg.ThreadID, agent.ProjectID)
 		} else if structuredMsg.SenderID != "" && agent.ID != "" {
-			senderKind := "user"
-			if k, ok := messages.PrincipalKindFromAddress(structuredMsg.Sender); ok {
-				senderKind = k
+			if senderKind, ok := messages.PrincipalKindFromAddress(structuredMsg.Sender); ok {
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, senderKind, structuredMsg.SenderID, "agent", agent.ID)
+			} else {
+				s.messageLog.Warn("skipping DM conversation resolution: sender kind undetermined",
+					"sender", structuredMsg.Sender, "sender_id", structuredMsg.SenderID)
 			}
-			convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, senderKind, structuredMsg.SenderID, "agent", agent.ID)
 		}
 		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
@@ -1087,11 +1088,12 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			// Phase 5 dual-write: resolve-or-create conversation for group set message.
 			var convResult *messaging.ConversationResult
 			if agentMsg.SenderID != "" && agent.ID != "" {
-				senderKind := "user"
-				if k, ok := messages.PrincipalKindFromAddress(agentMsg.Sender); ok {
-					senderKind = k
+				if senderKind, ok := messages.PrincipalKindFromAddress(agentMsg.Sender); ok {
+					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, senderKind, agentMsg.SenderID, "agent", agent.ID)
+				} else {
+					s.messageLog.Warn("skipping DM conversation resolution: sender kind undetermined",
+						"sender", agentMsg.Sender, "sender_id", agentMsg.SenderID)
 				}
-				convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, senderKind, agentMsg.SenderID, "agent", agent.ID)
 			}
 			if convResult != nil {
 				storeMsg.ConversationID = convResult.ConversationID
@@ -1211,11 +1213,12 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			// Phase 5 dual-write: resolve-or-create conversation for group set message to user.
 			var convResult *messaging.ConversationResult
 			if userMsg.SenderID != "" && userID != "" {
-				senderKind := "user"
-				if k, ok := messages.PrincipalKindFromAddress(userMsg.Sender); ok {
-					senderKind = k
+				if senderKind, ok := messages.PrincipalKindFromAddress(userMsg.Sender); ok {
+					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, senderKind, userMsg.SenderID, "user", userID)
+				} else {
+					s.messageLog.Warn("skipping DM conversation resolution: sender kind undetermined",
+						"sender", userMsg.Sender, "sender_id", userMsg.SenderID)
 				}
-				convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, senderKind, userMsg.SenderID, "user", userID)
 			}
 			if convResult != nil {
 				storeMsg.ConversationID = convResult.ConversationID

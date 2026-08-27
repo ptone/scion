@@ -177,6 +177,26 @@ func TestResolveOrCreateDMConversation_ReturnsExternalRefFromDB(t *testing.T) {
 	}
 }
 
+func TestResolveOrCreateDMConversation_EmptyKindReturnsNil(t *testing.T) {
+	// Belt-and-suspenders: even if a hub handler accidentally passes an empty
+	// senderKind (the primary defense is to not call this function at all),
+	// ResolveOrCreateDMConversation must reject it via DMConversationKey
+	// validation, returning nil and creating no conversation row.
+	mock := &mockConversationUpserter{}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	got := ResolveOrCreateDMConversation(context.Background(), mock, logger,
+		"", "550e8400-e29b-41d4-a716-446655440000",
+		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+	if got != nil {
+		t.Errorf("expected nil for empty kind, got %+v", got)
+	}
+	if mock.lastConv != nil {
+		t.Error("upsert should not have been called — no conversation row should be created")
+	}
+}
+
 func TestResolveOrCreateDMConversation_InvalidKindReturnsNil(t *testing.T) {
 	mock := &mockConversationUpserter{}
 	var buf bytes.Buffer

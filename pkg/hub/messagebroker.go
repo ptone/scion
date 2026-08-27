@@ -462,15 +462,14 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		if msg.ThreadID != "" {
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
 		} else if msg.SenderID != "" && msg.RecipientID != "" {
-			senderKind := "user"
-			if k, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
-				senderKind = k
+			senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
+			recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
+			if sOK && rOK {
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
+			} else {
+				p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
+					"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
 			}
-			recipientKind := "user"
-			if k, ok := messages.PrincipalKindFromAddress(msg.Recipient); ok {
-				recipientKind = k
-			}
-			convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
@@ -640,11 +639,12 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		if msg.ThreadID != "" {
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
 		} else if msg.SenderID != "" && agent.ID != "" {
-			senderKind := "user"
-			if k, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
-				senderKind = k
+			if senderKind, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
+			} else {
+				p.log.Warn("skipping DM conversation resolution: sender kind undetermined",
+					"sender", msg.Sender, "sender_id", msg.SenderID)
 			}
-			convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
