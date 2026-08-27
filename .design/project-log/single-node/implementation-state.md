@@ -10345,3 +10345,82 @@ not thinking about how the compare link works. Corrected rather than honoured.
 **Not cleared yet, and that is the point.** The change is small, the developer is competent, the
 reviewer already passed the surrounding work, and every instinct says wave it through. The reason
 not to is that the untested half is the half that breaks strangers.
+
+### 35.18 #77 answered live; main moved under us; and the branch is NOT merged
+
+Four things landed inside ten minutes. Recording them separately because they interact.
+
+**1. #77 is answered: B. No second login behind IAP.** `sn-iaplogin-inv` deployed `sn-iaplogin-t3`,
+measured it, deleted it. Unauthenticated → 302 to `accounts.google.com`. Authenticated through IAP,
+browser-shaped → **200 with the SPA HTML, not a login page**, a `scion_sess` cookie, and
+`__SCION_DATA__` carrying `role:"admin"`; `/auth/me` agrees. ptone's design intent holds and the
+page is simply wrong.
+
+**The gap was declared rather than hidden**: the OIDC token was minted directly, not obtained
+through the IAP OAuth browser redirect. The server sees the same assertion header either way. That
+paragraph is *why I believe the rest* — a report that marks its own boundary is worth more than one
+that doesn't have to.
+
+**2. The docs fix is half the size I assumed, and the half I nearly deleted was the true one.**
+Section 2 makes two claims and I had been treating them as a unit:
+
+| Claim | Verdict |
+|---|---|
+| "the Hub presents its own login" | **wrong** — remove |
+| "the deployer is automatically seeded as the first admin" | **correct** — confirmed live, keep |
+
+I was ready to remove both. Tests 2 and 3 split them. Deleting the true half would have removed the
+page's only statement of how the operator gets admin rights — **the exact thing #44 and #45 were
+about**. A confirmation embedded in a refutation is easy to throw away with the refutation.
+
+**Section 2 remains frozen.** I told ptone I would not touch it until he says. He has not said. The
+edit is one sentence and is not dispatched.
+
+**3. A constraint I stated as fact was an unchecked assumption — second time today.** I told the
+reviewer, in a written brief, that the preflight's pass branch could only be stubbed because "we all
+ship 575". The investigator updated to **582 by apt-get** and deployed successfully. So the pass
+branch is testable *for real*. Reviewer redirected mid-review; that is a materially better review,
+and it exists only because the investigator **reported the workaround instead of quietly using it.**
+
+Also flagged to the reviewer, unprompted, so the result is not over-read: **that deploy ran on the
+head BEFORE the preflight commit.** It proves 582 works; it does **not** test the new gate.
+
+#80 downgraded from blocking to friction, with the interim rule that every deploy brief must state
+the 575 problem and the apt-get fix up front — an agent must not discover it from
+`Invalid choice: 'instances'`, because gcloud's advice at that moment is wrong.
+
+**4. Upstream main moved to `b09e7f49`, and ptone thought this branch had merged. It has not.**
+
+Three commits arrived: `#1324` admin permission registry / `hub-admin` role, `#1323` quota schema,
+`#1322` DM key ownership. I had been quoting `98a9d9c2` all day.
+
+Checked by **markers, not by history** — SHAs do not survive our repacks, so ancestry proves nothing:
+
+- `cmd/deploy_instance.go` and its test: **still on main.** The branch deletes them.
+- **`ptone-misc` on five lines of the published page**, lines 142, 145, 174, 184, 362, *including a
+  pinned `sha256` digest.* The private image ptone asked us to stop sharing **is public right now.**
+- The raw agent-create `curl`: still published. The false second-login sentence: still published.
+- `deploy_script_test.go`, `deploy_script_pin_test.go`, `di_check_gcloud_instances`: absent.
+
+What *did* merge, and probably seeded his impression: the `--image-registry` row from #72, and the
+tier itself earlier.
+
+**Two risks checked before reporting.** `scion/sn-backout` still merges onto `b09e7f49` with **zero
+conflicts** — worth confirming unprompted, because `GoogleCloudPlatform/scion#1315` was lost exactly
+this way. And `#1324` touches auth: it adds `authz.go`, `permissions/registry.go`, `seed.go`, but
+**does not touch `web.go`, `handlers_auth.go`, `proxyauth.go` or `server.go`** — so the role
+assignment our just-verified tutorial claim depends on is undisturbed. A clean textual merge would
+not have told me that; the file list did.
+
+**The offer I made him.** Five lines of his private image are public while we hold for a review of a
+48-line preflight. I put the trade to him explicitly rather than deciding it myself: ship now and
+take the preflight separately, or keep holding. **Waiting is a choice with a cost, and the cost here
+is not mine to absorb silently.**
+
+**`dev-entrypoint-diag`, answered for the coordinator** — and the honest answer needed the same
+distinction. Its commit `9badbfd6` is **not an ancestor of main**, which proves nothing after our
+repacks. Its *content* did land: `entrypointLogFile` / `.scion-entrypoint.log` are on main and in
+active use by the DOA probe. `entrypointRCFile` is absent — **deliberately**, with the reasoning
+left in the code: *"No .rc file: `exec` replaces the shell on success … and `sandbox wait` already
+provides the exit code on the host side."* Landed, half superseded by something better, nothing
+outstanding. Still not mine, still no brief.
