@@ -10060,3 +10060,84 @@ steps — but the judgement is recorded here so the cost of being wrong is visib
   work; the developer on my self-contradicting §7b/§7d; the reviewer on my Gate 2 description; and
   my own `comm` on the test accounting that two agents and I had all repeated. The recurring shape
   is unchanged — *a wrong conclusion sitting one command away from being checked.*
+
+### 35.14 ptone's docs review — three findings, and one may not be a docs bug
+
+ptone at 17:40, reviewing the published page. All three confirmed against the file on the branch.
+Tasks **#76**, **#77**, **#78**.
+
+---
+
+**#76 — "The build takes roughly ten minutes" (line 107).** ptone: *"this assumes base images have
+been built and is available."*
+
+I traced the chain before briefing anyone, and **the diagnosis is different from his — in our
+favour.** `cloudbuild-omni.yaml` builds eight images in one run (thick-prep → scion-base → claude →
+codex → opencode → antigravity → grok-build → omni), each in the local daemon feeding the next, and
+`thick-prep/Dockerfile:29` defaults `BASE_IMAGE` to the **public**
+`us-central1-docker.pkg.dev/cloud-workstations-images/predefined/base:latest`.
+
+So **there is no missing prerequisite build.** My first fear on reading his message was that the
+build-your-own steps I had just shipped were dead on arrival for every reader. They are not.
+
+**But he is right that the number cannot stand.** Cloud Build workers are fresh per run, so there is
+no warm cache; a cold run does eight builds including an `npm install` and `npm run build`. Nobody
+measured that from a clean project and I cannot source the ten-minute figure. **Decision: delete the
+number rather than invent a better one.** Describe what the build does and how to watch it. Offered
+ptone a real measured cold build (~1 hour wall time) if he wants the figure.
+
+---
+
+**#77 — the double login. This is the one that matters, and it is a measurement, not an edit.**
+
+Page lines 178–179 tell the reader to expect two logins. ptone: *"the iap auth middleware is
+supposed to allow app level auth to be skipped."*
+
+If the page is accurate, **the docs are describing a defect as if it were the design.** Three
+outcomes, and the brief forbids collapsing the third into the others: (A) real second login →
+product defect; (B) no second login → one-paragraph docs fix; (C) conditional → say on what.
+
+The second sentence gets its own verification: *"The deployer is automatically seeded as the first
+admin."* **Admin seeding on this tier has been claimed and broken twice** — #44 (`SCION_SEED_*` is
+postgres-only, tier runs SQLite) and #45 (browser login paths read a by-value copy of config taken
+once at construction). "Present in config and inert in the path that matters" is exactly #45's
+shape, so the claim is not credible without a measurement.
+
+Dispatched `sn-iaplogin-inv` (investigator template). Brief at
+`briefs/sn-iaplogin-inv.md`. It uses the **new `deploy.sh`**, which gives the rewritten script
+useful extra exercise on a real deploy. Named the trap explicitly: **a curl with a bearer token is
+not a browser** and will report the API reachable while saying nothing about whether a human sees a
+login form.
+
+---
+
+**#78 — raw API calls.** ptone: *"no tutorial should be directing people to be using raw api
+calls."* Four occurrences, and **they are not the same act**:
+
+| Location | Judgement |
+|---|---|
+| `curl POST /api/v1/agents` (217) + prose (211–215) | **Goes.** The page says the web UI is simplest, then teaches the API anyway. |
+| `curl` status probe in troubleshooting (427) | **Keep** (my default, told to ptone). A diagnostic is not a way to drive the product. |
+| `:::note[Identity tokens as an alternative]` (230–243) | Reference material, not a how-to. **The only written record of IAP OAuth client ID discovery**, and defect #64 is that the deploy never outputs it. Must not be lost silently. |
+| `:::caution[Always specify harnessConfig]` | **Stays** until `ptone/scion#1316` phase 4. If it is API-only and the API section goes, it needs **rehoming, not deletion**. |
+
+---
+
+**Re-tasked `sn-backout-dev` rather than spawning a new developer.** It owns the branch and holds
+the page context — this is precisely why I declined to delete it an hour ago. #76 and #78 go on
+**the same branch**, `scion/sn-backout`, because ptone has not opened the PR yet and these are his
+review comments on that change. Section 2 is explicitly off-limits until #77 answers.
+
+**One developer on one file, again.** #76, #77 and #78 all target the same 439-line page. Two
+branches here would conflict — the exact failure that cost time on `GoogleCloudPlatform/scion#1315`.
+
+**Process, third and fourth time today:** I sent 2075, 2130 and 2559-character messages against a
+2000 cap. The `user:` path **rejects** with usage text; the agent path reports "delivered" and I
+still do not know whether it truncates. The 2559 one I split into two parts and resent. `wc -c`
+before the send — I keep writing the message first and measuring after, which is the wrong order.
+
+Also corrected: **`scion create` takes `-t/--type`, not `--template`.** My own note said
+`--template`. One failed invocation, fixed immediately.
+
+Trust prompt appeared on `sn-iaplogin-inv` as expected and was cleared in ~35 seconds. **Fourth for
+four today.** It is the default state after `scion start`, not an anomaly.
