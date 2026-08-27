@@ -11332,3 +11332,54 @@ Dispatched `sn-adcpreflight-dev`. Brief carries the standing traps: do not remov
 (gcloud 582 can disable IAP but cannot enable it), `set -e` is global not function-scoped, no
 `2>/dev/null` on new checks, never print the token, keep the script curl-able with no new external
 commands, and `/workspace` is the fork and has not synced `c13d910b`.
+
+## §35.38 — the same regex mistake, three times in one hour
+
+**2026-08-27, 21:30. `sn-adcpreflight-dev` sat on the trust prompt for four minutes because my own
+check told me it was clear.** I ran:
+
+```bash
+scion look sn-adcpreflight-dev | grep -qi "trust this folder"   # -> no match
+```
+
+The string is never contiguous. The terminal emits
+`[38;5;153mtrust[39m [38;5;153mthis[39m [38;5;153mfolder`, with ANSI colour codes **between the
+words.** The grep was structurally incapable of matching, so it returned "no trust prompt" with total
+confidence, and I believed it because I had asked the right question.
+
+**This is the third instance of one mistake today:**
+
+1. `grep -n "^set "` missed an indented `set -euo pipefail` inside a function (anchor too strict).
+2. `grep -oE "^\s+--[a-z-]+"` on `gcloud --help` reported the IAP flags absent entirely — it cannot
+   match `--[no-]invoker-iam-check` (brackets) and the detail lines carry ANSI bold.
+3. This one.
+
+Each time the pattern was too narrow for text I had not actually looked at, and each time **the false
+negative was indistinguishable from a real negative.** That is the property that makes it dangerous: a
+grep that finds nothing looks identical whether the thing is absent or the pattern is wrong. It is a
+measurement that always succeeds at reporting failure.
+
+**Standing rule, adopted:** before grepping any terminal or `--help` output, **strip ANSI first** —
+`sed -e 's/\x1b\[[0-9;]*m//g'` — and when a negative result is load-bearing, **print the region and
+look at it** rather than trusting the pattern. A negative grep is only evidence if you have seen the
+haystack.
+
+Corrected form now in use:
+
+```bash
+scion look <agent> | sed -e 's/\x1b\[[0-9;]*m//g' | grep -ci "trust this folder"
+```
+
+Also learned: sending `1` selects the trust option but does **not** always submit it — the pane showed
+`❯ 1. Yes, I trust this folder ✔` still awaiting Enter, and cleared on the next poll. Check twice
+before concluding the prompt is stuck.
+
+### Cleanup and state, verified not assumed
+
+`sn-hubid-t` is gone; `us-east4` holds exactly the nine protected Instances (`e2e-omni`,
+`e2e-walk-r2`, `iap-demo`, `q2-control`, `sn-adminfix-t`, `sn-adminseed-t`, `sn-ready`, `sn-step6`,
+`sn-walk`). `sn-hubid-inv2` finished its task and is stopped. `sn-adcpreflight-dev` is running.
+
+**Critical path now:** `#85` — the step-3b credential preflight — is the only thing between the tier
+and a clean §1 run for an operator who is not us. `#75`'s doc edit is queued behind
+`GoogleCloudPlatform/scion#1326`. Nothing else is blocking.
