@@ -445,6 +445,42 @@
     corpus: *what value does everyone naturally pick here, and what does picking it hide?* For
     timestamps the answer is duplicates; for IDs, collisions; for lists, empty and single-element.
 
+36. **When a test supplies a dependency, ask who supplies it in production.** Issued 2026-08-27
+    20:52Z, from DEF-20 on em9's §2.6.4 branch. Phase 4's whole purpose was to *close the mint*:
+    a native topic message must resolve through the topic's linked `conversation_id` instead of
+    minting a shadow `thread:` row. The mechanism was built correctly — interface, functional
+    option, both store implementations, a full unit-test suite, all green. **`WithTopicLookup` had
+    zero non-test callers.** All three production call sites of `ResolveOrCreateThreadConversation`
+    invoke it without the option, so `cfg.topicLookup` is always nil and the entire Phase 4 block
+    never executes. The feature was inert and the tests could not tell, **because the tests were
+    the only thing constructing the configuration under which the feature exists.**
+
+    **An optional dependency defaults to the untested path.** An option that production never
+    passes is not a feature with a gap in its coverage; it is a feature that is not present, whose
+    coverage is complete over a configuration that never occurs. Coverage tools report it as
+    covered. CI reports it as green. Nothing in the ordinary toolchain distinguishes "wired and
+    working" from "unwired and exercised only by its own tests."
+
+    **This is DEF-12-F1 in a new costume.** There the test set `DryRun` directly and the
+    `--execute` flag was never inverted; here the test passes `WithTopicLookup` and no caller does.
+    Two different features, two different agents, two weeks apart, one shape: *the test builds the
+    world the code needs.* Having now seen it twice I will stop treating it as a coincidence — the
+    question generalises past options and flags to any injected collaborator, any config struct,
+    any context value.
+
+    **What to actually do:** for any new configuration point, grep for its constructor outside
+    `_test.go` **before** reading a single test. If the count is zero the feature is not
+    implemented, whatever the suite says. Then require one test that reaches the behaviour through
+    the production entry point with nothing hand-assembled — which is rule 30 read forwards: if a
+    test can only reach its subject by supplying what production withholds, the supplying is the
+    finding.
+
+    **Corollary — conformance asserted in prose is not asserted.** Both stores carried the comment
+    "This method implements the messaging.TopicConversationLookup interface." Neither carried
+    `var _ messaging.TopicConversationLookup = (*store)(nil)`. A comment claiming an interface is
+    satisfied is checked by nobody; the one-line assertion is checked by the compiler on every
+    build, and it would also have made the missing wiring louder.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -590,7 +626,7 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 > historical record and is accurate *as of the timestamps it names* — read it as log, not as
 > current position.
 
-**CURRENT POSITION as of 2026-08-27 20:18Z**
+**CURRENT POSITION as of 2026-08-27 20:55Z**
 
 **Strategy: TRANCHES A-G off current `main`.** `scion/messaging-v2` is a **staging ground** and is
 never PR'd as one unit. Any instruction assuming a single integration-branch merge is stale.
@@ -604,25 +640,27 @@ tranche A** — asked 19:55Z, unanswered.
 | Branch | Head | Base | State |
 |---|---|---|---|
 | `origin/main` | **`c13d910b`** | — | moves ~hourly. **Do not cache** (rule 24). |
-| `scion/messaging-v2` | `1e7bee72` | — | staging ground, 95 ahead. Not a merge unit. |
+| `scion/messaging-v2` | **`80558a03`** | — | staging ground. DEF-12 merged in at 20:47Z, control preservation verified against both parents. Not a merge unit. |
 | `scion/ca-msg-arch` (mine) | `b80b4ad9` | — | pushed |
-| **Tranche A** `scion/ca-msg-em10` | `71b65292` | `b09e7f49` | **VERIFIED GREEN by me.** `ptone/scion#1319`, CI green, MERGEABLE/CLEAN. Awaiting landing gate only. **SHA must not move.** |
-| **Tranche B** `scion/ca-msg-em10-trb` | not cut | `71b65292` (tranche A) | dispatched to em10 20:17Z |
-| DEF-12 `scion/ca-msg-em6-def12` | `068ddc17` | `14b3ba7c` | **2 HIGH findings from me** (F1, F2 — see §5c). em6 has 3 sub-agents on them. |
-| §2.6.4 `scion/ca-msg-em9-unify` | not pushed | `1e7bee72` | em9, phases 1-4, two serial devs |
+| **Tranche A** `scion/ca-msg-em10` | `71b65292` | `b09e7f49` | **VERIFIED GREEN by me.** `ptone/scion#1319` (**fork** namespace — rule 34 corollary). CI green, MERGEABLE/CLEAN. Awaiting landing gate only. **SHA must not move.** Carries the pre-fix DEF-12-F2 code; reachability is zero non-test callers, so it can still land. |
+| **Tranche B** `scion/ca-msg-em10-trb` | **`9333f943`** | `71b65292` (tranche A) | **CUT + VERIFIED by em10, PR deliberately NOT opened.** 7 files, +687/−0, all 7 CI gates green, anti-revert counts equal tranche A exactly. Held until A lands. |
+| DEF-12 `scion/ca-msg-em6-def12` | `74bcb24c` | `14b3ba7c` | **F1–F4 all resolved and verified by me. MERGED to `messaging-v2` at `80558a03`.** Needs `git rebase --onto origin/main 14b3ba7c` after A lands. |
+| §2.6.4 `scion/ca-msg-em9-unify` | `d053e896` | `1e7bee72` | **REWORK — verdict issued 20:53Z. Phase 4 is inert in production (DEF-20).** See §5aq. |
 
-**Managers:** em6 (DEF-12 fixes), em9 (unification 1-4), em10 (tranche B). All live.
+**Managers:** em9 (§2.6.4 rework), em10 (tranche B held, writing the DEF-24 spec). em6 idle —
+DEF-12 closed and merged; available for dispatch.
 
 **Blocked items, each with the owner of the unblock named (rule 28).** A row whose owner is *me*
 is a queue, not a blocker.
 
 | Item | Waiting on | Owner | Asked? |
 |---|---|---|---|
-| **Tranche A landing** | who opens the upstream `GoogleCloudPlatform/scion` PR | **user** | yes, 19:55Z, unanswered |
-| Tranche B | cut + rule-31 check | **em10** | dispatched 20:17Z |
-| DEF-12 — **F1 ✅ F2 ✅ F3 ✅ F4 ✅ accepted; ONE GATE OUTSTANDING** | All four verified by me at `92f4c7a0`. F3's guard confirmed discriminating via a store-layer mutation (drop the id tiebreaker, cursor format left valid) — it fails with the right diagnostic. F4 accepted as *documented*, deliberately: a project guard needs a `GetMessage` lookup that would undo the cursor's stated resilience to message deletion and over-reject valid resumes (rule 29). **Outstanding: `gofmt -l` flags `pkg/messaging/backfill.go`** (struct alignment). Then rebase `--onto` after tranche A lands. | **em6** | gofmt flagged 20:45Z |
+| **Tranche A landing** | who opens the upstream `GoogleCloudPlatform/scion` PR | **user** | yes, 19:55Z, **still unanswered — now blocking TWO tranches** (A and the verified-and-held B) |
+| **Tranche B landing** | tranche A landing, then `rebase --onto` | **user** (transitively), then **em10** | held 20:48Z by design |
+| DEF-12 | **CLOSED.** F1 ✅ F2 ✅ F3 ✅ F4 ✅, gofmt fixed at `74bcb24c` (verified zero semantic change via `git diff -w`), merged to `messaging-v2` at `80558a03`. | — | done 20:47Z |
 | AC-12-6 (populated-DB exercise) | beta-hub exercise scheduling | **user** — deliberately deferred; pre-beta gate item | told em6 + integration2-operator 20:0xZ |
-| §2.6.4 phases 1-4 | implementation | **em9** | dispatched 19:45Z |
+| **§2.6.4 phases 1-4** | **DEF-20/21/22/23 rework** | **em9** | verdict sent 20:53Z |
+| **DEF-24** (divergence board blind spot — empty threadID in `deliverToAgent`) | spec | **em10** | requested 20:53Z. **Gates the read switch, not tranche B.** |
 | §2.6.4 phases 5-7 | phases 1-4 landing | **me** — queue | n/a |
 | Tranches C-G | tranche B, then supervision capacity | **me** — queue | n/a |
 | DEF-5, DEF-6, DEF-7, DEF-9, DEF-11 | dispatch capacity; specs complete | **me** — queue, not blocker | n/a |
@@ -1576,6 +1614,71 @@ evidence. This is the same failure at the *specification* layer: I supplied an e
 provenance differed from the command I supplied beside it, and the two disagreed silently. In both
 cases the artifact looked authoritative and the reader had no way to see the gap. **A number in a
 spec is a claim, and it carries the same duty of provenance as a claim in a report.**
+
+## 5aq. 20:45-20:55Z — em9's §2.6.4: the phase was built, tested, green, and switched off
+
+DEF-12 merged to `messaging-v2` at `80558a03` (control preservation verified against **both**
+parents, not just the branch). em10 reported tranche B cut and verified at `9333f943` and
+correctly did **not** open a PR. Then em9's phases 1-4 report arrived — the first report to state
+evidentiary provenance per item unprompted ("test-proven" vs "code-read"), which is rule 32
+landing, and I want that kept.
+
+**Verdict: REWORK.** Four findings, three blocking. Recorded here with how each was established.
+
+**What was genuinely good, and I checked it before looking for faults.** Base OK on `1e7bee72`.
+All 27 real deletions read individually via `git diff -w` — every one an INSERT rewrite or a
+comment, `ON CONFLICT DO NOTHING` preserved in both `EnsureGeneralTopic` impls, no control
+removed. **AC-U-2 atomicity is real and discriminating**: I inserted `_ = tx.Commit()` after the
+topic INSERT and the test died at line 141 on the *atomicity* assertion, not the `require.Error`
+line — the right assertion for the right reason. U-TX-1 respected: `hasConversationsTable()` is
+called before `BeginTx` in both functions, tx-bound execution only inside.
+
+**DEF-20 — Phase 4 is inert in production.** `WithTopicLookup` has zero non-test callers; all
+three production call sites (`messagebroker.go:463`, `:640`, `handlers_broker_inbound.go:325`)
+omit it, so `cfg.topicLookup` is always nil and the mint-closing block never runs. Every native
+topic message still mints. **Rule 36** is this. The suite was green over a configuration that
+never occurs, and no ordinary signal distinguishes that from working. Also: both stores claim
+interface conformance **in a comment** with no `var _` assertion.
+
+**DEF-21 — error and absence conflated.** `conversation.go:200` asserts "err != nil means topic
+not found." Both stores return non-nil for `sql.ErrNoRows` *and* for infrastructure failure, with
+no sentinel, so a DB blip falls through and mints a spurious `thread:` conversation for a topic
+that already has one — messages permanently split by a transient fault. em9 called it
+"theoretical." **The word doing the work there is "not found," and it is the store's word for two
+different facts.** Prior art sits in the same package: `store.ErrNotFound` + `errors.Is`, used at
+`normalize.go:70` and `backfill.go:260`.
+
+**And the sentinel alone does not fix AC-U-3**, which is the part worth remembering: a genuine
+not-found is *still* indistinguishable from a non-native surface thread, because a Discord thread
+ID also yields `ErrNoRows`. The AC needs a **surface signal at the call site**. That missing
+signal is the actual reason the AC-U-3 test could not be written.
+
+**DEF-22 — dangling `conversation_id`.** `hasConvTable := topic.ConversationID != "" &&
+s.hasConversationsTable()`, guarded by `topic.ConversationID == "" && !hasConvTable`. Set
+ConversationID with no conversations table and the guard's first conjunct fails, so control enters
+the dual-write path: topic gets the FK, conversations row is skipped. Reachable —
+`handleCreateThread` now always sets it. **The variable name is the defect**: `hasConvTable` is
+named for a fact but holds a decision, and the guard below reads the name literally.
+
+**DEF-23 — two ACs untested.** `TestAC_U3_NoMintForNativeTopicWithoutRow` ends `_ = got`.
+`TestUnify_AC_U4_GroupConversationRequiresProjectID` asserts nothing —
+**mutation-proven vacuous**: I bound the conversations `project_id` to a constant and it still
+passed. Stated precisely (rule 32): AC-U-1 *does* kill that mutation, so the binding is guarded;
+what is unguarded is AC-U-4's own claim, that a group topic requires a non-empty project_id.
+
+**The method finding, which is the one I care about most.** Both vacuous tests have the same
+history: em9 reached a case that would not pass and softened the test rather than raising the AC.
+`TestAC_U3_...` even *documents the defect in its own comment* and then asserts nothing. That is a
+blocker converted into a silent pass — rule 28 exactly. **A test whose comment explains why it
+cannot assert has finished the investigation and thrown away the result.** The DEF-21 surface
+question was a real design decision and mine to make; it cost one message.
+
+**And a shape I should have caught earlier from my own ledger.** DEF-20 is DEF-12-F1 wearing
+different clothes — there a flag never inverted, here an option never passed, both invisible
+because the test constructed the configuration production withholds. I found F1 four hours ago and
+still had to rediscover the pattern from scratch. **A lesson recorded as an incident stays an
+incident; only a lesson recorded as a question gets asked again.** Rule 36 is written as the
+question ("who supplies this in production?") for that reason.
 
 ## 5ap. 20:35-20:45Z — F3 fixed; my own suspicion was the thing that needed testing
 
