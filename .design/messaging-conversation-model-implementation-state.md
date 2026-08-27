@@ -1023,6 +1023,30 @@
       supporting fact is worth doing even when you intend to accept their conclusion**; their
       conclusion here stood on its other two arguments regardless.
 
+55. **Comparing two implementations finds divergence. It cannot find shared error — and shared error
+    is the thing that motivated the comparison.** Issued 2026-08-27 22:50Z, correcting my own sweep
+    brief to em6 before their sub-agents got far. I told them "DEF-27 lived here" and then told them
+    to diff the two backends. **Those instructions contradict each other:** DEF-27's SQL was
+    *identical* in both files. A diff-the-pair sweep returns CLEAN on it, and then reports "51 pairs
+    agree," which reads as reassurance.
+
+    - **Two questions per pair, different in kind.** *(1a)* Do they diverge? Mechanical, cheap, run
+      it everywhere — divergence means at least one side is wrong. *(1b)* **Do they agree on
+      something wrong?** Cannot be answered by looking at the sibling, because the sibling is the
+      same mistake. Requires judging each query against its **caller's intent**: what is this being
+      asked, and is the predicate right for *that* question? DEF-27's lookup was asked "is this
+      thread ours" and answered "is this a LIVE topic" — right predicate, wrong question, both
+      backends, perfectly consistent, completely wrong.
+    - **Procedure for 1b:** for each SQL-bearing method, find its callers, write one sentence saying
+      what the caller needs to know, then check the predicate against that sentence. **A method with
+      two callers wanting different things is a finding by itself** — that was DEF-27's root cause,
+      and why the fix was to split the function rather than change the predicate.
+    - **1b is slower and it is the reason the sweep exists — never let it be silently dropped** for
+      the cheap half. Cut its denominator openly instead.
+    - **Turn the rule on your own auditors.** Two sub-agents given the same prompt shape share a
+      blind spot exactly as the two backends did. Give them different framings — one working from
+      the SQL up, one from the caller down. Overlap is corroboration; divergence is the yield.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
