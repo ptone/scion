@@ -5008,4 +5008,4 @@ end to end on 2026-08-25 with all four open.
 added #1281, and recorded that the split-brain was fixed upstream by #1300 with the caveat that I
 verified it **by reading, not by exercising**.
 
-Doc is now 460 lines.
+Doc is now 473 lines. (I first wrote 460 here from memory instead of counting. Corrected.)
