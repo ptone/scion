@@ -180,7 +180,7 @@ func TestDeprecatedFlag_Broadcast(t *testing.T) {
 	restore := resetMessageFlags()
 	defer restore()
 
-	projectID := "grove-depr-bcast"
+	projectID := "proj-depr-bcast"
 	server, sent := newDeprecationTestServer(t, projectID)
 	defer server.Close()
 
@@ -299,7 +299,7 @@ func TestDeprecatedFlag_In(t *testing.T) {
 	restore := resetMessageFlags()
 	defer restore()
 
-	projectID := "grove-depr-in"
+	projectID := "proj-depr-in"
 	server, _ := newDeprecationTestServer(t, projectID)
 	defer server.Close()
 
@@ -335,7 +335,7 @@ func TestDeprecatedFlag_At(t *testing.T) {
 	restore := resetMessageFlags()
 	defer restore()
 
-	projectID := "grove-depr-at"
+	projectID := "proj-depr-at"
 	server, _ := newDeprecationTestServer(t, projectID)
 	defer server.Close()
 
@@ -426,7 +426,7 @@ func TestDeprecatedFlag_BroadcastStillSucceeds(t *testing.T) {
 	restore := resetMessageFlags()
 	defer restore()
 
-	projectID := "grove-depr-bcast-works"
+	projectID := "proj-depr-bcast-works"
 	server, sent := newDeprecationTestServer(t, projectID)
 	defer server.Close()
 
@@ -455,7 +455,7 @@ func TestDeprecatedFlag_NotifyStillSucceeds(t *testing.T) {
 	restore := resetMessageFlags()
 	defer restore()
 
-	projectID := "grove-depr-notify-works"
+	projectID := "proj-depr-notify-works"
 
 	var notifyReceived bool
 	var mu sync.Mutex
@@ -507,7 +507,7 @@ func TestDeprecatedFlag_PlainStillSucceeds(t *testing.T) {
 	restore := resetMessageFlags()
 	defer restore()
 
-	projectID := "grove-depr-plain-works"
+	projectID := "proj-depr-plain-works"
 	server, sent := newDeprecationTestServer(t, projectID)
 	defer server.Close()
 
@@ -538,7 +538,7 @@ func TestDeprecatedFlag_ChannelStillSucceeds(t *testing.T) {
 	restore := resetMessageFlags()
 	defer restore()
 
-	projectID := "grove-depr-channel-works"
+	projectID := "proj-depr-channel-works"
 	server, sent := newDeprecationTestServer(t, projectID)
 	defer server.Close()
 
