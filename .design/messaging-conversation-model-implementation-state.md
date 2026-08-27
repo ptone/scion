@@ -77,8 +77,9 @@ with the no-enumeration invariant (Q3); no cross-project addressing (§2.6.1).
 
 **Active section:** S4 — Surfaces
 **Active manager:** `ca-msg-em4` (spawned and briefed 06:42Z; em3 retired)
-**Blocked on:** em4's DEF-4 plan. DEF-4 (hub suite stability) is gated ahead of phases 8/10/11;
-DEF-1 and DEF-3 and D3 are also due from this section.
+**Blocked on:** my own verification of DEF-4 at `b92926dd`, then em4's phase 8/10/11
+decomposition. DEF-1, DEF-3 and D3 are all due from this section.
+**Integration branch head:** `b92926dd` (DEF-4, test-only).
 **Last verified landing on integration branch:** `f206a0d9` — **S3 accepted 2026-08-27 06:40Z
 on round 2.** S2 accepted 03:35Z at `cd4ee7ed` (round 3); S1 verified 01:40Z at `16294728`.
 
@@ -292,6 +293,17 @@ would bury the events that matter.
   branch on its own, before any phase 8/10/11 work, so it is not entangled with a read switch
   that may have to be reverted. Warned that closing stores will surface tests that relied on a
   leaked handle — those are defects the leak was masking, not reasons to restore it.
+
+- `2026-08-27 07:42Z` **DEF-4 fixed and merged** — `b92926dd`, integration branch head.
+  `newTestStore` now takes `*testing.T` and registers `t.Cleanup` itself; 66 call sites
+  updated, 19 redundant manual closes removed. **Test files only** (verified by diff — no
+  production code). em4's evidence: four green runs by the developer (`-count=1` ×3,
+  `-count=3` ×1) plus two of its own, and **a revert check that reproduced 20 SQLite OOM
+  failures** — the causal proof I required, and the difference between an accepted diagnosis
+  and a symptom that went away. My own two runs plus an independent revert check are in
+  flight. Process note: em4 merged before I accepted. The branch contract says merge after
+  acceptance; my instruction to "land DEF-4 as its own merge before phase work" read as
+  permission when I meant sequencing. Corrected with em4 for the section merge; no harm here.
 
 ## 5d. S2 rejection history — CLOSED 2026-08-27 03:35Z (accepted on round 3)
 
