@@ -1047,6 +1047,34 @@
       blind spot exactly as the two backends did. Give them different framings — one working from
       the SQL up, one from the caller down. Overlap is corroboration; divergence is the yield.
 
+56. **Visibility filtering belongs to the surface that owns visibility, never to the shared identity
+    layer.** Issued 2026-08-27 22:58Z with `nc-arch`, generalizing DEF-27, DEF-28 and the mirror
+    question into one shape. **Corollary: a soft-delete predicate appearing in an identity-layer
+    query is a defect smell** — it means a surface visibility decision has leaked down onto the layer
+    that exists to be stable.
+
+    - **The three instances are the same wrong place at different depths.** DEF-27: `deleted_at IS
+      NULL` hiding a row from *"is this ours"* (`webchannel_store.go:1364`). The proposed mirror:
+      the same predicate hiding a row from *"does this exist"*
+      (`conversation_store.go:391 DeletedAtIsNil()`), which would mint a duplicate identity row for
+      the same `(surface, external_ref)`. **Mirroring `deleted_at` onto the conversation would have
+      re-armed DEF-27 three days after fixing it, one table down, where the fix does not reach.**
+    - **Soft-deletion is not declassification, at any layer.** Deletion is a *visibility* fact owned
+      by the surface (`webchat_topic`, which already hides deleted rows). Identity is *stable*. The
+      instinct to mirror the flag "for consistency" is the instinct to move a visibility decision
+      onto the identity row, and it is always wrong.
+    - **Write the residual as an AC, not a comment** (nc-arch's push, and it is the better half of
+      this entry). I had recorded "if a user-facing listing is ever built it must join
+      `webchat_topic`, not tombstone the conversation" as prose. **A prose residual is rediscovered
+      by exactly the person it warns about** — the one adding `deleted_at` to make a listing behave.
+      As **AC-57-9** it fails review the moment they do. *The residual you fear is a latent instance
+      of the template bug; give it the same tripwire the live one got.* That is what rule 26 is for
+      — the next instance of a template bug is invisible until a test pins the spec independently of
+      the implementation.
+    - **Pin the mechanism, not just the policy.** AC-57-9 asserts `deleted_at IS NULL` on the
+      backfilled row *and* mutates it to prove the duplicate mint. A policy test can be reversed by
+      someone who disagrees with the policy; a mechanism test makes them confront the bug first.
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -4488,3 +4516,49 @@ git checkout -B scion/ca-msg-em<N> origin/scion/messaging-v2
   the pre-switch soak cannot happen. Replaced by: read switch behind a default-off runtime
   flag, divergence counters readable live during the exercise. **The gate was not skipped —
   it was moved and weakened, deliberately, and this is the record of that.**
+
+## 5bi. 22:55-23:00Z — §2.6.4 spec closed out: Q4, two AC refinements, and the mirror ruling
+
+`nc-arch` returned on the phases 5-7 spec. Four outcomes, all folded into
+`phases-5-7-spec.md` and pushed.
+
+**Q4 CLOSED — no non-native surface needs a topic name today.** Phase 6 ships the three named
+accessors and **defers the by-`conversation_id` join entirely**. Specifying it now would mean
+guessing its deleted-row handling, batching and project scoping against an imagined caller — and a
+resolver built to an imagined caller is one the real caller fights. Likely first real caller is
+unified cross-surface search. Implementation phase 4 is struck from the list, not silently dropped.
+
+**Refinement 1 — check-scope must equal remediation-scope.** My AC-57-6 required the phase-7
+precondition to count soft-deleted topics. nc-arch: that is incoherent unless the phase-3 backfill
+*writes* the rows it counts, or the check is perpetually red with no remediation — **worse than not
+checking, because it trains the operator to override it**, and the override then lives in the
+runbook forever. Banked as stated: *any backfill that PREPARES for a constraint must WRITE the same
+row set the constraint will ENFORCE.* New **AC-57-8**, and it is deliberately a **paired** AC —
+AC-57-6 alone proves the check is strict, AC-57-8 alone proves the backfill is broad, only the pair
+proves the two **scopes match**, which is the actual requirement. Real behaviour win too: a
+tombstoned topic then resolves to its dead conversation instead of storing the reply unlinked,
+strictly better than DEF-27's §8 degraded outcome.
+
+**Refinement 2 — the unresolved branch is PERMANENT, not deferred-unreachable.** I had said "don't
+delete it, it only becomes unreachable at the last step." Understated. Unresolved has three causes;
+`NOT NULL` removes only (i) topic-exists-with-empty-`conversation_id`. (ii) infrastructure error and
+(iii) malformed ref are permanent. So the branch never goes away, and sub-case (i) becomes a
+**defensive assertion, never a deletion** — rule 20, the funnel. A re-nullabling migration or a
+topic inserted by a path skipping the dual-write silently re-enables the mint path through the hole
+where the guard used to be. New **AC-57-10** drives (ii) and (iii) live and proves (i) errors loudly.
+
+**The mirror ruling — see rule 56, which this produced.** nc-arch asked, correctly flagging it as
+mine to decide rather than defaulting: should a soft-deleted topic's conversation carry `deleted_at`?
+**No.** `conversation_store.go:391` filters `DeletedAtIsNil()` in the upsert's existing-row lookup,
+so a tombstoned conversation is invisible to "does this exist" and the upsert **mints a duplicate**
+for the same `(surface, external_ref)`. That is DEF-27's exact mechanism on the identity table, and
+the webchat-layer fix does not reach it. Checked the cost rather than assuming it away:
+`ListConversations` already excludes soft-deleted and all three callers are internal
+(`dm_migration.go:153`, `:563`, `resolve.go:444`) — nothing user-facing renders conversations, so
+the leak I was worried about does not exist today.
+
+**What I got wrong, and it is the durable part.** I wrote the residual as prose. nc-arch pushed back:
+a prose residual is rediscovered by exactly the person it warns about. It is now **AC-57-9**, with a
+mutation that pins the *mechanism* — set `deleted_at`, drive the upsert, watch it mint a duplicate —
+so a future disagreer must confront the bug before reversing the policy. Two agents concurring on a
+ruling is cheap; the yield here was them refusing to let the concurrence be the deliverable.

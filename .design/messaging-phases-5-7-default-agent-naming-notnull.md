@@ -147,11 +147,66 @@ and the constraint fails at apply time — or worse, silently drops them on a ta
 > **This is the DEF-27 lesson applied to a migration: soft-deletion is not exclusion.** The backfill
 > and the precondition check must both count tombstoned topics.
 
-**Interaction with DEF-27's §8 decision.** DEF-27 accepted that a tombstoned topic with an empty
-`conversation_id` resolves to *unresolved*, message stored unlinked. Phase 7 makes that state
-impossible **going forward**, but only after backfill covers tombstoned rows. Until then the sink's
-handling must stay. **Do not delete the unresolved branch as "unreachable" in this phase** — it
-becomes unreachable only when the constraint is live, and the constraint is the last step.
+### 5.1 Check-scope must equal remediation-scope (nc-arch, 22:55Z — adopted)
+
+The precondition above is **incoherent unless the phase-3 backfill writes the same rows it counts.**
+A check scoped to all topics against a backfill scoped to live ones is perpetually red with no
+remediation path — which is worse than not checking at all, because it trains the operator to
+override the check. That override is then in the runbook forever.
+
+> **Any backfill that PREPARES for a constraint must WRITE the same row set the constraint will
+> ENFORCE. Check-scope and remediation-scope must be identical — here, all rows including
+> tombstoned.**
+
+Secondary benefit, and it is a real behaviour improvement rather than just constraint hygiene: once
+tombstoned topics carry a `conversation_id`, a post-delete agent reply resolves to the dead
+conversation instead of being stored unlinked. That is strictly better than the degraded outcome
+DEF-27 settled for in its §8.
+
+### 5.2 The unresolved branch is permanent — assert, never delete (nc-arch, 22:55Z — adopted)
+
+My first draft said "do not delete the unresolved branch as unreachable, it only becomes unreachable
+at the last step." That understates it. **Unresolved has three causes, and `NOT NULL` removes only
+one:**
+
+| Cause | Removed by phase 7? |
+|---|---|
+| (i) topic exists, `conversation_id` empty | **yes** |
+| (ii) infrastructure/query error | **no — permanent** |
+| (iii) malformed or unparseable thread ref | **no — permanent** |
+
+So the branch itself is permanently reachable and must never be deleted. Only sub-case (i) goes
+statically unreachable, and it becomes a **defensive assertion or hard error, not a deletion**
+(rule 20, the funnel/sink). A re-nullabling migration, or a topic inserted by a path that skips the
+dual-write, silently re-enables the mint path through the hole where the guard used to be.
+
+### 5.3 Ruling — the conversation row must NOT mirror `deleted_at` (22:57Z)
+
+**Question (nc-arch):** should the backfilled conversation for a soft-deleted topic itself carry
+`deleted_at`? **Answer: no. Do not mirror.** This is the opposite of the intuitive choice, so the
+reasoning is recorded rather than left to be re-litigated.
+
+`UpsertConversationByExternalRef`'s existing-row lookup filters `conversation.DeletedAtIsNil()`
+(`conversation_store.go:391`). A tombstoned conversation is therefore **invisible to the upsert's
+"does this already exist" question, so the upsert mints a second row for the same
+`(surface, external_ref)`.**
+
+That is **DEF-27 exactly** — a hide-deleted predicate answering an is-this-ours / does-this-exist
+question, and answering "no" about a row that exists — reproduced one layer down on the identity
+table. It would be worse than the original, because DEF-27's fix lives at the webchat layer and does
+not reach `conversation_store` at all: we would have fixed the shadow-row bug for topics and re-armed
+it for conversations, with the same wrong predicate, days apart.
+
+> **Visibility filtering belongs to the surface that owns visibility, never to the shared identity
+> layer.** A soft-delete predicate in an identity-layer query is a defect smell: a surface visibility
+> decision has leaked onto the layer that exists to be stable. `webchat_topic` owns native-chat
+> visibility and already hides deleted rows. The conversation row is identity, and **soft-deletion is
+> not declassification** at any layer.
+
+**Cost of this ruling, checked rather than assumed.** Nothing user-facing renders conversations
+directly today: `ListConversations` (`:270`) already excludes soft-deleted rows, and every caller is
+internal — `dm_migration.go:153`, `dm_migration.go:563`, `resolve.go:444`. The residual is pinned by
+**AC-57-9** rather than left as prose.
 
 ---
 
@@ -210,9 +265,13 @@ has been live long enough to trust.
 
 ## 9. Open questions
 
-**Q4 — does any non-native surface need a topic name *today*?** §4.2 specifies the resolver, but if
-nothing calls it yet, phase 6 should ship the accessors and defer the join. I do not know the caller
-set. **Owner: nc-arch or the phase-6 implementer — answer before building the resolver.**
+**Q4 — CLOSED 22:55Z by nc-arch.** No non-native surface needs a topic name today. Phase 6 ships the
+**three named accessors** in §4.2 and **defers the by-`conversation_id` join** entirely.
+
+Specifying the resolver now would mean guessing its deleted-row handling, batching and project
+scoping against an imagined requirement — and a resolver built to an imagined caller is a resolver
+the real caller has to fight. Its likely first real caller is **unified cross-surface search**; bring
+it back when search exists to state what it needs.
 
 **Q5 — CLOSED 22:54Z by me, before dispatch.** I asked whether step 1 of the two-step lookup could
 run without a project, since `GetAgentBySlug` is project-scoped and DM conversations have no
@@ -235,9 +294,12 @@ step 1 with.** If that happens, the answer is to require a UUID for DMs, not to 
    backends, separate tests. No callers yet.
 2. Phase 5 migration in **report-only** mode + AC-U-14 report. No writes.
 3. Phase 5 write path + `ClearTopicDefaultAgent` move. AC-U-7, AC-U-8, AC-U-13.
-4. Phase 6 resolver + `#<thread>` wiring (gated on Q4).
-5. Phase 7 precondition check as a standalone, runnable command.
-6. Phase 7 constraint migration.
+4. ~~Phase 6 resolver~~ — **dropped, Q4 closed.** The three accessors ship in commit 1; the
+   by-`conversation_id` join is deferred until search needs it.
+5. Phase 7 backfill covering **all** topics including tombstoned. AC-57-8.
+6. Phase 7 precondition check as a standalone, runnable command. AC-57-6. Must be commit-separate
+   from 5 so the check can be run against a pre-backfill database and observed to **fail**.
+7. Phase 7 constraint migration + the sub-case (i) assertion. AC-57-9, AC-57-10.
 
 ---
 
@@ -263,6 +325,29 @@ step 1 with.** If that happens, the answer is to require a UUID for DMs, not to 
 - **AC-57-6** Phase 7's precondition check counts **soft-deleted** topics. Test: a tombstoned topic
   with `conversation_id IS NULL` must make the check FAIL. A check that scopes to live rows passes
   and then the constraint blows up at apply time.
+- **AC-57-8** *(check-scope = remediation-scope, §5.1)* The phase-3 backfill **writes** a
+  `conversation_id` for a **soft-deleted** topic that lacks one. Pair it with AC-57-6 and run them in
+  order: backfill, then precondition check, and the check must pass. Running only AC-57-6 proves the
+  check is strict; running only AC-57-8 proves the backfill is broad; **only the pair proves the two
+  scopes match**, which is the actual requirement.
+- **AC-57-9** *(identity layer carries no visibility filter, §5.3)* Two parts, both required:
+  1. After backfill, the conversation linked to a soft-deleted topic has **`deleted_at IS NULL`**.
+     Assert the exact value. This is the tripwire for someone adding a mirror to make a listing
+     behave.
+  2. **Mutation:** set `deleted_at` on that conversation, then drive
+     `UpsertConversationByExternalRef` with the same `(surface, external_ref)`. It must mint a
+     **duplicate** row. That failure is the whole reason for the ruling — the test asserts the
+     mechanism, not just the policy, so the policy cannot be reversed without confronting it.
+  3. Comment at `conversation_store.go:391` stating that the `DeletedAtIsNil()` filter is why
+     identity rows are never tombstoned by surface deletion.
+
+  Any future user-facing conversation listing joins `webchat_topic` and hides tombstoned topics
+  **there**. The visibility filter goes on the surface; it never becomes a `deleted_at` on the
+  conversation row.
+- **AC-57-10** *(§5.2)* The unresolved branch still exists after phase 7, with causes (ii) and (iii)
+  covered by live tests — an induced query error and a malformed thread ref. Sub-case (i) is an
+  assertion or hard error, **not** a deleted branch; a test drives it by re-inserting a topic with a
+  NULL `conversation_id` behind the constraint and confirms it errors loudly rather than minting.
 - **AC-57-7** U-TX-1 holds: a test proves no ambient-pool access inside the topic-create tx. **Must
   use a timeout** — at `MaxOpenConns=1` the failure mode is a hang, not an error, so a test without
   one hangs CI rather than failing it.
