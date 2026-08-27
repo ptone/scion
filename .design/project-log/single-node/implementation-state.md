@@ -4850,3 +4850,45 @@ That is likely optimistic now that it needs a semantic rebase, so I said so rath
 estimate stand.
 
 Our tier remains `CLEAN` and mergeable. The drift has not reached us — it will if we sit long enough.
+
+### 00:15Z — #1300 closes the split-brain, and our branch already has it. Read, not exercised.
+
+Coordinator confirmed the #1307 conflict independently and is relaying the rebase-authorisation
+question to ptone. Nothing there is mine to move. So I took the one item that is genuinely
+unblocked: **#1300 landing changes the status of an open defect in my register.**
+
+**`scion/sn-tier` already contains #1300.** `compare 1d1e4d76...scion/sn-tier` → `ahead=6, behind=0`.
+Not inferred from dates — compared.
+
+**The chain, read end to end on our branch:**
+
+| Step | Where | What |
+|---|---|---|
+| 1 | — | `SCION_SEED_*` → DB snapshot. Previously verified sound, measured 16:05. |
+| 2 | `operational_settings.go:910` | `ApplySnapshot` writes `s.config.AdminEmails`. |
+| 3 | `server.go:2114` | `Server.AdminEmails()` reads it under `RLock`, returns a **defensive copy**. |
+| 4 | `server_foreground.go:2251` | `webSrv.SetAccessSettingsProvider(hubSrv)` — inside `if hubSrv != nil`, **true in hosted mode**. |
+| 5 | `web.go:1579, 1650, 1666, 1696, 1939, 1950, 1987, 2001` | every login path calls the **live** `ws.adminEmails()`. |
+
+Those step-5 line numbers are the same sites I named in task #45. All converted.
+
+**The fix that landed is shape A from my own note** — give `WebServer` an accessor onto live config
+rather than a by-value copy — and it handles the concurrency caveat I flagged (`ws.config` read per
+request with no lock) via RLock plus copy.
+
+**The security-relevant half of #45 is closed too**, which I care about more than the admin-email
+half. `checkUserAuthorized` now reads `ws.userAccessMode()` live at :1650 and :1939. Tightening
+access mode in the admin UI now *does* tighten browser logins. The browser-facing half is no longer
+the more permissive of the two.
+
+**I am deliberately NOT closing #44 on this.** Every line above is *read*, not exercised. D-46 and
+D-39 were both filed off plausible mechanisms and both were wrong — this is precisely that failure
+mode, and reading a fix is even more seductive than reading a bug. Confirmation needs one deploy
+with `SCION_SEED_*` set, one browser login, one check that the user is actually promoted. Recorded
+on the task as the remaining step.
+
+**One nil-safety consequence worth knowing, not a defect on our path.** `ws.adminEmails()` returns
+**nil** when no provider is set (`web.go:574-578`). So any path that builds a `WebServer` *without*
+calling `SetAccessSettingsProvider` now gets an **empty** admin list where it previously got the
+construction-time config value. That is a behaviour change, not a regression for us — our path
+sets it — but it would bite a caller that does not.
