@@ -9415,3 +9415,54 @@ wrong thing for any reader in the wrong repo. `#1317` is the fix. Put to ptone.
    until `ptone/scion#1316` phase 4.
 
 All nine Instances present (stderr visible, impersonation on).
+
+## §32 — ptone: "the docs don't indicate how to configure options... region or the omni image path"
+
+Two answers. The first explains what he saw. The second is a real gap he surfaced anyway.
+
+### §32.1 — He was reading the stale published site
+
+**The docs site had not rebuilt.** The `deploy-docs` run for `#1315` has been **QUEUED on `main`
+since 15:51**; `deploy-docs` only runs on `main` and is gated behind `build-docs`. I fetched the
+live page rather than reasoning about it:
+
+| probe on the live HTML | result |
+|---|---|
+| `deploy-cloudrun-sandbox` | **present** |
+| `persistent network volume` | **present** |
+| `go env GOPATH` | absent |
+
+So he was looking at the generated page from upstream `#1314`. **His complaint is exactly correct
+about that page** — its only command is a `make` target that exists nowhere in the repository
+(`git grep`: zero hits outside the doc; the upstream `Makefile` has no deploy targets), so of course
+it documents no region and no image.
+
+**Note the shape of this.** He reported a docs defect; the defect was real; the cause was a
+publication lag, not the text. **Had I answered "it's covered, look at the page", I would have been
+right about the file and useless about his experience.** Check what the reader sees, not what the
+repository contains.
+
+### §32.2 — The real gap: 9 flags exist, 8 are documented
+
+`cmd/deploy_instance.go` declares **nine** flags: `name`, `project`, `image`, `region`, `cpu`,
+`memory`, `admin-email`, `service-account`, **`image-registry`**.
+
+The merged tutorial documents **eight**. **`--image-registry` appears zero times.**
+
+It is not cosmetic. It sets **`SCION_IMAGE_REGISTRY`, which the broker needs to pull agent images** —
+the mechanism behind tier defect #38, where the one-command deploy came up healthy and **could not
+start a single agent**. Not required (derived from `--image`; the derivation failure message names
+the flag explicitly), so the happy path never touches it.
+
+**Which is exactly why the brief forbids overselling it.** A flag that is an escape hatch must not
+be presented as a decision, or a tutorial whose value is removing decisions gets one back. Capped at
+~6 added lines.
+
+`sn-flagdoc-dev` dispatched on `scion/sn-flagdoc` off current upstream `main`. Task #72.
+
+### §32.3 — The new dispatch rule paid for itself immediately
+
+`sn-flagdoc-dev` came up in phase `created`, needed an explicit `scion start`, and then **sat on the
+workspace trust prompt again** — the §28.7 failure, reproduced first try. Caught it inside 45
+seconds with `scion look` instead of losing eight minutes to a stall notification. **Both failure
+modes are reproducible, not flukes.** The rule stands: phase `running` **and** eyes on the terminal.
