@@ -18,10 +18,21 @@
 
 1. **I do not implement.** I am the architect. I spawn engineering managers, review what
    they land, and keep this file current. I do not write production code.
-2. **Managers run in sequence, not in parallel.** One active manager at a time. Not for
-   workspace-safety reasons (managers have their own clones — see §6), but because the
-   sections build on each other and because parallel branches onto one integration branch
-   produce merge conflicts I would have to adjudicate without having written the code.
+2. **Managers are sequenced by file contention and supervision cost, not by count.**
+   **AMENDED 2026-08-27 16:50Z.** The original rule said "one active manager at a time", and
+   its stated reason was merge conflicts I would have to adjudicate without having written the
+   code. That reason is about *shared files*, but the rule was written as a *headcount cap* —
+   so it kept blocking work that shares no files, and I only noticed when it had queued a
+   user-reported defect behind an unrelated four-hour section. **A rule enforced by a proxy
+   outlives the thing the proxy stood for.**
+
+   The test now: (a) do the sections touch the same files? (b) can I actually supervise both
+   at the quality I hold them to? If either answer is bad, sequence. Parallel dispatch names
+   the disjoint file sets in §3 and tells each manager which paths are not theirs.
+
+   Standing caution against my own amendment: I nearly sent a false rejection earlier the same
+   day while supervising two managers (§5x). **Supervision quality, not file contention, is the
+   binding constraint,** and it degrades quietly.
 3. **Everything lands on `scion/messaging-v2`.** Never `main`. The integration branch is
    the beta-hub testing target.
 4. **I never check out another branch in `/workspace`.** It is shared. Branch refs are
@@ -216,7 +227,14 @@ mutations are not simply breaking the package. **Specificity is the signal, not 
 mutation that fails everything proves only that the code is reachable; a mutation that fails
 exactly one named test proves that test observes exactly that effect.
 
-**ACTIVE SECTION: §2.15, dispatched to `ca-msg-em6` 16:40Z off `e2b5c37d`.** Six phases; 1-2
+**TWO SECTIONS ACTIVE — deliberate, under amended rule 2, file sets disjoint and named:**
+- `ca-msg-em6` — **§2.15** (DEF-15/DEF-16), dispatched 16:40Z off `e2b5c37d`. Owns
+  `pkg/messaging/{conversation,backfill,dm_migration}.go`, `pkg/hub/handlers_agent_messaging.go`,
+  `pkg/hub/attachments_agent_test.go`.
+- `ca-msg-em8` — **DEF-13** (§2.14.2, CLI help text), dispatched 16:52Z off `e2b5c37d`. Owns
+  `cmd/message.go` and its test. Told explicitly which paths are not theirs.
+
+**§2.15 detail, dispatched to `ca-msg-em6` 16:40Z off `e2b5c37d`.** Six phases; 1-2
 touch no handler, 3-5 are serial on `handlers_agent_messaging.go`. Phase 4 repoints
 `backfill.go:195`'s derivation only — **the backfill stays unwired**, DEF-12 gated behind it.
 
@@ -972,6 +990,50 @@ there is a reason they kept both that I am not seeing.
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
 
+## 5z. Heartbeat 16:43Z — a rule that outlived its own reason
+
+**Roster: healthy, and I checked it properly.** `scion list | tail -20` did not show
+`ca-msg-em6` and my first reading was that the section manager had vanished — the §5j alarm
+condition. It had not: the list sorts by uptime and `tail` cut off the newest entry. Re-ran with
+a grep and found it running, active 35s prior. **The near-miss is worth recording because the
+failure mode is symmetric with §5j:** that heartbeat reported healthy through a full stop by
+asking too narrow a question; this one nearly reported a stop that had not happened by using a
+truncating command. Neither is a judgement error. Both are the tool shaping the answer.
+
+**The real finding: rule 2 was blocking work for a reason that did not apply.** It said "one
+active manager at a time", justified by merge conflicts I would have to adjudicate without
+having written the code. That justification is about *shared files*. The rule was written as a
+*headcount cap*. Those coincide right up until two sections are disjoint — and §2.14 (DEF-13,
+`cmd/message.go` help text) shares no file with §2.15 (`pkg/messaging/`,
+`handlers_agent_messaging.go`).
+
+Worse, my own §2.14.6 phase list already said DEF-13 should "land first so the smaller change is
+not queued behind the larger one." **The rule was enforcing exactly the queueing my plan
+existed to prevent, and I would not have noticed without the heartbeat's instruction to ask what
+*specifically* blocks each open item.** "A manager is busy" is not a blocker on a task; it is a
+fact about an agent. The heartbeat says that in as many words and I had been reading past it.
+
+Rule 2 amended: sequence by file contention and supervision cost, not by count. Dispatched
+`ca-msg-em8` on DEF-13 alone, off `e2b5c37d`, with an explicit list of paths that are not theirs.
+
+**Standing caution attached to my own amendment.** Earlier the same day, supervising two
+managers, I nearly sent a false rejection (§5x). Supervision quality is the binding constraint
+and it degrades quietly — unlike a merge conflict, which announces itself. If a third section
+becomes dispatchable I should be slower than this.
+
+**DEF-2 is closed, and closed in a way that will break silently.** Checked it because the
+heartbeat asks for every open ledger row, expecting to strike it out.
+`ValidateCrossProjectAddressees` is real (`validate.go:104`) and wired (`:645`, over
+`mentionAddrs`). But mentions are the only source of addressees *because DEF-9 is open* — the
+addressee table is never written. So AC-33 has full coverage only while another defect persists.
+**A defect whose closure is load-bearing on another defect staying open is not closed.** Whoever
+closes DEF-9 will add addressee sources and will have no reason to read the DEF-2 row. Recorded
+in the row itself, with the seam named (`ValidateMessageAddressees`, zero production callers).
+
+That is the second time today the ledger has been the thing that caught something: DEF-12's
+stale "unblocked" nearly got dispatched onto a bulk defect. **The ledger is not documentation of
+decisions already made. It is the only artifact that re-asks them.**
+
 ## 5y. 16:17-16:25Z — S7 verified by mutation; a defect that hides behind its own fix
 
 Three things landed in the same eight minutes and they interact.
@@ -1721,7 +1783,7 @@ conversation. This table is the only thing that carries them.
 | # | Item | Deferred from | Owed by | Why deferral is safe |
 |---|---|---|---|---|
 | DEF-1 **(CLOSED — ledger row was stale, corrected 2026-08-27 13:15Z)** | **Participant-level auth on `conv:<id>`.** `resolveConvByID` checks the sender's *project* but not whether the sender is a *participant* in that conversation. Raised HIGH by S1 audit. | S1 | **S4** (surface layer, message-send time) | S1 is not wired into any live path, so the gap is not reachable. It becomes reachable the moment S4 switches reads. **S4 is not verifiable without this.** **Closed:** implemented in S4, reachable via `POST /api/v1/conversations/resolve`, no longer bypassable — but exercised in production only through that endpoint and the CLI `@<agent>` path, and **not yet load-bearing for the read switch**, which resolves from server-side inputs. §3 has said 'implemented' since S4 closed while this row still read 'open'. **The ledger drifted from the body of the same document — the exact failure this table exists to prevent.** Heartbeat step 3 now re-reads the ledger every cycle. |
-| DEF-2 | **AC-33** — deferred to the envelope validation layer per design. | S1 | **S3** | The validation choke point does not exist until S3 builds it. |
+| DEF-2 **(CLOSED — but conditionally, verified 2026-08-27 16:48Z)** | **AC-33** — deferred to the envelope validation layer per design. **Verified closed:** `ValidateCrossProjectAddressees` exists at `pkg/messaging/validate.go:104` and has one production caller, `handlers_agent_messaging.go:645`, over `mentionAddrs`. **The condition, and it is the reason this row stays visible instead of being struck out:** mentions are the *only* source of addressees today, because DEF-9 records that the addressee table is never written. So AC-33 covers 100% of addressees only for as long as DEF-9 stays open. **Closing DEF-9 reopens DEF-2's coverage question**, and whoever closes DEF-9 will have no reason to look at this row. `ValidateMessageAddressees` (`:140`), the wrapper that pairs the cross-project check with `ValidateAddressees`, has zero production callers — that is the seam a new addressee source will be wired through. **A closed defect whose closure depends on another defect staying open is not closed; it is load-bearing on a bug.** | S1 | **S3 — delivered.** Re-owned by whoever takes DEF-9. | The validation choke point does not exist until S3 builds it. |
 | DEF-5 | **`conv:<id>` and `#<thread>` have no CLI delivery policy.** Resolving a reference to a conversation does not say *who receives the message*. For `@<agent>` the answer is obvious; for a conversation ID or a thread it is a policy question the design never answered — wake the default agent? fan out to every participant? fan out and wake none? S4 round 2 shipped a stub that resolved and then silently dropped the message (G-2), which is what an unanswered policy question looks like when a developer has to ship anyway. Round 3 takes option (b): the CLI hard-errors on both forms with a non-zero exit, and the warning text names only what works. **The resolve endpoint keeps handling all four grammars** — brokers and native chat need them, and resolution is not the broken part. | S4 | **me, before the section that wires conversation-reference sending for these two forms** | Nothing regresses: neither form works today, and erroring is strictly better than the silent drop it replaces. The risk is not technical but bookkeeping — an unanswered design question is easy to lose once the error message makes the gap look intentional. |
 | DEF-6 **(SPECCED 2026-08-27 15:50Z — design §2.14; the premise below was WRONG, see correction)** | **Scheduled sends cannot address a conversation.** `scion schedule create` takes `--agent <name>`, not a conversation reference (`cmd/schedule.go:783-786`). Design §2.9 claimed the split "fixes by construction" the bug where scheduled messages drop `--channel`/`--thread-id`/`--attach`/`--cc` and are re-authored as `sender=scheduler` (`findings.md` §8). It does not, because there is nowhere on a scheduled event to put a conversation. The fix is real work: a conversation reference on the scheduled event, resolved at fire time rather than at create time (a conversation can be archived or drift between the two), and the original sender preserved. **CORRECTION 15:50Z — two of my claims here were wrong, and both were wrong in the ledger, where they would have been inherited unchecked.** (1) "There is nowhere on a scheduled event to put a conversation" is false: `ScheduledEvent.Payload` is a free-form handler-specific JSON string (`pkg/store/models.go:1835`) and `MessageEventPayload` is an ordinary struct (`pkg/hub/server.go:2761-2767`), so adding a field is additive with no migration. I asserted a storage constraint without reading the storage. (2) Larger: **the mechanism already exists.** `dispatch_agent` resolves `evt.CreatedBy` at fire time and authorizes as that principal, failing closed if the creator is gone, cross-project, or unscoped (`server.go:2855-2875`). The message path simply does not use it. Had I not grepped I would have specced a parallel mechanism next to a working one — the same failure as §5o, from the same cause. Specced as §2.14, paired with DEF-13 as a CLI section. Security consequence now explicit: a scheduled send is a deferred act by its **creator**, so fire-time authorization must be the creator's, not the scheduler's — otherwise it is DEF-14 with a delay and no interactive caller to attribute. | discovered 2026-08-27 while correcting §2.9; the underlying gap predates the project | **me** to spec, then a section to build. Blocks nothing before beta. | The `--in`/`--at` deprecation warnings now name `scion schedule create --in/--at`, which exists and works for the agent case — so the advice is true for the common path. It is incomplete rather than wrong. Do not close phase 13 (Removal) on the strength of the warning alone: AC's precondition is that every named replacement "has shipped and been exercised", and the conversation case has not. |
 | DEF-11 | **The divergence board counts every CLI `@<agent>` send as a mismatch, and the mismatch is an instrumentation artifact.** `cmd/message.go:696` sets `msg.ConversationID` from the resolve endpoint. The Hub sees a supplied ID and skips re-resolution (correct — it should not do the work twice) but hand-builds `ConversationResult` leaving **`ExternalRef` empty** (`handlers_agent_messaging.go:828-832`). `ComputeDivergenceMatch` is then handed `actualExternalRef == ""`, matches neither the `dm:` nor `thread:` branch, and falls through to `routing-type-mismatch` (`divergence.go:176`). The two models agree; the comparator is fed a blank. **The documented read-switch gate requires zero mismatches, so the gate is now unreachable while the new CLI path is in use.** | verified 2026-08-27 while writing the QA walkthrough | **me** to spec; the fix is to read the conversation and populate `ExternalRef` rather than to suppress the counter | I-4 inverted: that finding was a clean board hiding a dead model; this is a dirty board hiding correct behaviour. Note the fix does **not** immediately produce agreement — once `ExternalRef` is real, a resolver-created row still has `external_ref = ''` (DEF-8), so the mismatch becomes *genuine* until DEF-8 lands. That is the right sequence: fix the instrument, then fix what it measures. |
