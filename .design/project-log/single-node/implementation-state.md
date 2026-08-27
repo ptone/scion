@@ -10195,3 +10195,94 @@ away from being checked: `cla/google`; my "three pinning tests"; the gcloud SDK 
 where the reporter surfaced an anomaly instead of working around it.
 
 **Still open with ptone: #77**, the double login. Section 2 untouched. `sn-iaplogin-inv` measuring.
+
+### 35.16 A defect in the change ptone was about to merge, found by an agent doing something else
+
+`sn-iaplogin-inv` was dispatched to answer the IAP double-login question (#77). Its brief told it to
+**use the new `deploy.sh`**, on the reasoning that this "gives it useful extra exercise". That
+incidental instruction is what produced the most important finding of the hour.
+
+**The measurement.** On gcloud **575.0.0**:
+
+```
+==> Step 3a: Creating/updating Cloud Run Instance (gcloud, v1 surface)...
+    gcloud beta run instances deploy sn-iaplogin-t2 --image
+ERROR: (gcloud.beta.run) Invalid choice: 'instances'.
+This command is available in one or more alternate release tracks.  Try:
+  gcloud alpha run instances
+```
+
+At 575.0.0 the `instances` noun is **alpha-only**. The script uses `beta … deploy`. It fails at
+step 3a, after steps 1 and 2 have already run.
+
+**This is not a translation bug.** The deleted Go command had the identical dependency. Nothing
+`sn-backout-dev` did introduced it.
+
+**It nevertheless validates the developer, twice over.** The 582.0.0 prerequisite line it wrote into
+the tutorial is now confirmed by measurement rather than assumed. Earlier today I offered to soften
+the gcloud wording and then withdrew the offer, on the grounds that the wording was already honest
+and churning a branch under live review to trade one honest wording for another is the worse risk.
+That judgement now has evidence behind it. Softening it would have removed the only warning a
+reader gets.
+
+**Why it is still a defect.** The page states the requirement; the **script does not check it**, and
+the error it emits never mentions a version. And gcloud's own advice — `Try: gcloud alpha run
+instances` — **points at a wrong fix**: alpha uses `create` not `deploy`, and has no
+`--sandbox-launcher`, so following it yields an Instance whose scion server crashes on startup.
+
+That is precisely what the investigator did. **An agent holding a brief that named the correct
+script still fell into it.** A stranger on the published page has strictly less context. That single
+fact is what converts this from "a documented prerequisite" into a defect worth a commit.
+
+It is also the tier's most repeated failure shape — #39, #46, #22 are all *an error that does not
+name its cause*. This one adds a second layer: adjacent advice that leads away from the fix.
+
+**The design call, which was mine.** Do **not** parse `gcloud version` and compare against 582.
+
+We know only that the command is *absent* at 575.0.0 and *present* at 582.0.0. **The first good
+version is unmeasured.** Hardcoding 582 would write down a number we cannot support and would
+wrongly reject anyone on 576–581 if the noun exists there. We deleted an unmeasured number from
+this very page an hour ago (#76, the "roughly ten minutes" build claim). Adding a different
+unmeasured number to the script in the same afternoon would be the same error wearing a hat.
+
+So: a **capability probe**, run before step 1 so nothing is half-created. Ask gcloud whether the
+subcommand exists; branch on that. The failure message must name the missing command, state
+honestly what we know (absent 575, present 582), say `gcloud components update`, and — the part
+that carries the value — **warn explicitly against the alpha surface gcloud recommends.**
+
+Dispatched as **#79** to `sn-backout-dev`, on the branch it already owns. One developer, one file,
+one branch: two branches on one page is how `GoogleCloudPlatform/scion#1315` got conflicted, and
+the same discipline applies to the script. ptone told to **hold the merge**; a fresh compare URL
+follows the push.
+
+**#45 is fully closed, and closed for the right reason.** The investigator's first report covered
+only `AdminEmails`. I declined to record closure on it, because if only that half were live then
+#45 was half-open and *the open half was the dangerous one* — consequence 3 was always about
+`UserAccessMode`, which gates who may log in at all. I asked the narrow question. All three
+settings — `AdminEmails`, `AuthorizedDomains`, `UserAccessMode` — now read through the live
+`AccessSettingsProvider` (`SetAccessSettingsProvider` at `server_foreground.go:2264`; accessors at
+`web.go:613-635` onto `server.go:2156-2179`, mutex-protected). Task description rewritten with the
+old text preserved and marked historical, so nobody acts on a stale finding. #44's root cause dies
+with it.
+
+**#80: an environment problem, third occurrence.** The agent container ships gcloud 575.0.0. It has
+now cost `sn-backout-review` and `sn-iaplogin-inv` time, and it means **our own agents cannot
+exercise this tier's primary path.** #79 makes the failure legible for everyone including the
+public reader; it does **not** let an agent on 575 deploy. Those are two different problems and
+must not be conflated into one fix. Raised with ptone; workaround (`gcloud components update`) now
+goes into every brief that asks an agent to deploy, and has been sent to `sn-iaplogin-inv` as its
+route back to the live half of #77.
+
+**The lesson, and it is not the obvious one.** The obvious reading is "lucky catch". The real one:
+this was found because a brief asked an agent to *use the real artifact* for a task that did not
+require it. The cost was one sentence. Nothing in the #73 review — mine, the developer's, or the
+reviewer's — would have found it, because all three of us ran on a machine where it worked. **A
+tool's prerequisites are invisible to everyone who already satisfies them.** Keep spending the
+sentence.
+
+**Six for six today.** `cla/google`; my "three pinning tests"; the earlier gcloud SDK scare; the
+26-of-28 test accounting; the doc citing itself; and now a merge-ready branch that fails on the
+first machine outside our own. Every one sat a single command away from being checked.
+
+**Still frozen: section 2 of the tutorial**, pending ptone's one-line answer on `sn-ready`. I told
+him I would not touch it until he says, and I have not.
