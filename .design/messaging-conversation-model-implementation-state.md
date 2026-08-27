@@ -98,6 +98,11 @@ entries for Conversation / Surface / Addressee / Participant.
 
 Append-only. Newest last. One line per event.
 
+**Logging policy:** only state changes get a line — a section starting or landing, a
+manager spawned or stalled, a decision made, a blocker raised or cleared. A heartbeat that
+finds nothing changed gets **no entry**. Over days of work an unfiltered heartbeat log
+would bury the events that matter.
+
 - `2026-08-27` Integration branch `scion/messaging-v2` created from `origin/main` @ `fc523ecd`, pushed. Working tree untouched.
 - `2026-08-27` State doc created.
 - `2026-08-27` Heartbeat `ca-msg-impl-heartbeat` created, `13,43 * * * *`, id `1a899567`.
