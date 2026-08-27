@@ -11080,3 +11080,95 @@ I want and the reason the rest of its report is credible.
 Task #75 returns to pending with the full Q1 findings and the exact Q2 procedure carried in the task
 description. Re-dispatch trigger: v1 create returning anything other than 503. Nothing here touches
 §1, which was walked on 2026-08-25.
+
+## §35.32 — `deploy.sh` is curl-able but not pipe-able, and a gist is the wrong container
+
+**2026-08-27, 20:55. ptone asked: "should it not be possible to make `./scripts/single-node/deploy.sh`
+something you could curl or have in a gist?"** I tested rather than reasoned, which is what turned a
+plausible yes into a qualified one.
+
+**Self-containment: confirmed.** `grep` for `source`, `.`, `dirname`, sibling filenames returns only
+two hits, both `${BASH_SOURCE[0]}` self-references (line 371 `--help`, line 655 the main guard). No
+sibling-file dependency at all. External commands required: **`awk curl gcloud grep mktemp sed`**.
+**No `git`, no `jq`, no `python3`.**
+
+That last point is the interesting one and I nearly missed it. `git` is on the tutorial's prerequisite
+list **only because the reader has to clone the repo to obtain the script.** Serve the script over
+HTTP and the prerequisite disappears. Curl-ability is not a convenience here; it removes a dependency.
+
+**Fetchability: already true, no work needed.** The upstream repo is public;
+`raw.githubusercontent.com/GoogleCloudPlatform/scion/c13d910b.../scripts/single-node/deploy.sh`
+returns **200** unauthenticated.
+
+### The measured finding: curl-able, NOT pipe-able
+
+```
+=== A: run from a FILE ===
+bash scripts/single-node/deploy.sh --help            -> 46 lines
+=== B: run from a PIPE (the curl | bash shape) ===
+cat scripts/single-node/deploy.sh | bash -s -- --help -> 0 lines
+```
+
+Cause: line 371 implements `--help` by `sed`-ing its own source out of `${BASH_SOURCE[0]}`. A consumed
+pipe cannot be re-read. **It fails silently** — no error, no exit code, just nothing. That is worse
+than a crash, because the operator concludes the script is broken rather than that their invocation
+shape is.
+
+I would not have found this by reading the code. The self-read at line 371 looks harmless in a file,
+and it is; the defect exists only in a delivery mode nobody had tried.
+
+### Why not a gist
+
+A gist forks the artifact. The in-repo copy is covered by shellcheck and 28 Go tests in
+`cmd/deploy_script_test.go`, on this exact file. A gist inherits none of that and drifts silently.
+The choice is not "gist vs repo" but "one tested artifact vs two, of which one is tested."
+A pinned raw URL delivers every benefit of the gist and keeps the CI.
+
+Recommended shape: `curl -fsSL <pinned-sha-url> -o deploy.sh`, read it, then run it. Pin a SHA or a
+tag, never `main`. The read step is not ceremony — this script creates IAM bindings and an IAP OAuth
+client, so an operator should be able to see it before it executes.
+
+Offered ptone an optional fix: make `--help` a heredoc instead of a self-read, which makes
+`curl | bash` work fully. Not dispatched; awaiting his call.
+
+## §35.33 — the 503 does not reproduce, and my "platform outage" reading was wrong
+
+**2026-08-27, 20:57. ptone ran the reproducer and it succeeded.** `gcloud beta run instances deploy
+repro-503 ... --sandbox-launcher` created cleanly as `ptone@google.com`. Then his `list` showed zero
+items and he asked why.
+
+Three findings, in ascending order of importance.
+
+**1. The empty `list` was a client-side error, not a missing resource.** Both of his `list` commands
+omitted `--project`; his `deploy` had it. So `list` queried his default project. With
+`--project ptone-experiments --region us-east4` the instance is plainly there, `CREATED BY
+ptone@google.com`. Nothing was wrong with the platform.
+
+**2. The instance was in a failed state, and that is my fault, mildly.** `describe` reports *"Instance
+failed with non-zero exit code."* I had extracted only the **create invocation** from step 3a as the
+reproducer, without the six environment variables the real deploy sets. Without them the scion server
+exits at startup. The reproducer was correctly scoped — it was testing the API call, not a working
+deploy — but I did not say so when I handed it over, and a red X in the console invites the wrong
+conclusion. **When handing someone a deliberately partial command, say what it is not testing.**
+
+**3. The 503 is not a platform outage.** §35.31 recorded six v1 CREATE failures over fifteen minutes,
+both regions, gcloud and raw curl, and I read that as server-side. ptone's success falsifies the
+general form of that claim. The variable is **identity**: the investigator ran as the impersonated
+`scion-instance-gym@serverless-team-scion` service account; ptone ran as himself.
+
+**Then the deletion refined it again.** ptone asked me to delete `repro-503`. I ran that delete **as
+the impersonated service account and it succeeded.** So that identity can perform v1 LIST, GET **and
+DELETE**. Only CREATE 503s. The hypothesis is therefore narrower than "this identity cannot write" —
+it is operation-specific, or it was transient and has since cleared.
+
+**What this cost.** §35.31 concluded the tier's one deploy command "currently returns 503," which
+sounded like a tier-wide outage and blocked #75. It was true of one identity on one operation. The
+investigator's evidence was sound — six attempts, two regions, two clients, discriminating controls —
+and I still drew too wide a conclusion from it. **Every control it varied was on the request side;
+none was on the caller.** A well-controlled experiment can still hold the decisive variable fixed, and
+the fixed variable is the one you stop seeing.
+
+Dispatched `sn-hubid-inv2` with the discriminating test as its first action: one v1 create as the
+impersonated SA, one-line result before anything else. Q1 marked done in the brief so it is not
+re-derived; the two rejected workarounds (hand-rolled v2 POST, borrow-and-restart) named explicitly as
+out of bounds. Verified afterwards that all nine protected instances survive.
