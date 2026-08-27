@@ -1050,7 +1050,7 @@ func (s *pgWebChatStore) backfillTopicConversations() error {
 	for rows.Next() {
 		var t topicRow
 		if err := rows.Scan(&t.id, &t.projectID, &t.name); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return fmt.Errorf("scan unlinked topic: %w", err)
 		}
 		topics = append(topics, t)
@@ -1058,7 +1058,7 @@ func (s *pgWebChatStore) backfillTopicConversations() error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate unlinked topics: %w", err)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	// Backfill each topic atomically.
 	for _, t := range topics {
