@@ -7417,3 +7417,90 @@ Its body still contains a bare `#1302` and a bare `#1307`, written before the co
 Those are now wrong in the fork. Leaving them for now — the task list is internal and not
 cross-published — but recording that I noticed, because "internal, so it does not matter" is exactly
 the reasoning that put bare refs in the design doc in the first place.
+
+## 2026-08-27 07:24 — BOTH PHASE A CEILINGS MEASURED. The failure mode is total loss.
+
+### The numbers
+
+| size | idle agents alive | breaks at | failure signature |
+|---|---|---|---|
+| 4 CPU / 8 GiB (default) | **17-18** | N=19 | **SIGBUS (signal 7)** ~8s after the create |
+| 8 CPU / 32 GiB (maximum) | **51-52** | N≈53 | broker timeout → Cloud Run "no available instance" → graceful SIGTERM |
+
+Per-agent RSS is tight and consistent across both: **499-528 MiB**, mean ~515.
+
+### THE HEADLINE, and it is the worst of the three cases my brief listed
+
+**At the ceiling the entire instance dies and every agent on it is destroyed, with no warning and no
+error to the caller.**
+
+`sn-stress-def`'s sequence is the one to publish:
+
+```
+create idle-19  -> HTTP 201 SUCCESS, no error
++8 seconds      -> container terminated on signal 7 (SIGBUS)
++32 seconds     -> hub restarts, 200 in 423ms, EMPTY
+                   all 18 agents gone, project IDs regenerated, all state lost
+```
+
+§2 of the brief ranked three outcomes: clean refusal (fine), silent degradation (bad), instance taken
+down with everything on it (very bad). **We got the third, and it is worse than I framed it**, because
+the request that causes it *returns 201*. The operator's last signal before losing everything is a
+success.
+
+**This interacts badly with design doc §5.** §5 says workspaces are lost on *redeploy*. They are also
+lost on *overload*, and those are not comparable propositions: **an operator can plan a redeploy. They
+cannot plan an overload.** §5 as written implies the loss is scheduled. It is not.
+
+Neither instance showed `exit_code=137`. **Not the Linux OOM killer** — at either size, on either
+mechanism. And the two sizes failed by *different* mechanisms, so no single signature can be
+documented as "the" failure.
+
+### THE CURVE IS NOT LINEAR IN MEMORY
+
+4× the memory and 2× the CPU bought **3×** the agents (17 → 51).
+
+Fit a fixed-overhead model and it fails outright: `17c + X = 8192` and `51c + X = 32768` gives
+`c = 723 MiB` and `X = -4096 MiB` — a negative overhead, which is impossible. The model is wrong, so
+something other than memory is binding at the larger size. Agent count scales *between* the CPU ratio
+(2×) and the memory ratio (4×).
+
+**Consequence: no per-GiB rule of thumb can be published, and no operator can extrapolate from one
+size to another.** This is the direct payoff from running two sizes and it would have been invisible
+with one.
+
+### MY THIRD WRONG ASSERTION TODAY, and the one that would have travelled furthest
+
+I told **both** agents that summed RSS is a **lower bound** on instance memory. It is not.
+
+`sn-stress-def`'s ceiling disproves it internally: **17 × 515 MiB = 8.76 GiB on an 8 GiB box, while
+stable.** A lower bound cannot exceed the physical limit.
+
+The reason is that **summed RSS double-counts shared pages** — the claude binary's text is counted
+once per process. So the figure under-counts gVisor sentry overhead and over-counts shared memory
+*simultaneously*. It is neither bound. Corrected to both agents: report it as an **uncalibrated
+proxy**, and say why.
+
+This one matters more than my other two errors today because it was embedded in their *method*, not
+in a conclusion — a wrong conclusion gets checked, a wrong method silently shapes everything measured
+through it. It also nearly produced a nonsense derived figure: `sn-stress-max` computed "82%
+saturation" and called it a match for a 64% figure that was itself taken before the other instance had
+failed. Comparing a ceiling to a not-yet-ceiling.
+
+Also of note: `sn-stress-def` **under-predicted** (15 vs 17-18), in exactly the direction shared pages
+predict.
+
+### Broker location CONFIRMED
+
+`server_dispatcher.go:34` — *"This enables the Hub to dispatch agent creation to a co-located runtime
+broker."* The broker is in the main container and therefore has instance-scoped `/proc/meminfo`
+access. **`getStats` at `handlers.go:1958` is a genuine one-line fix.** Task #65's assessment is now
+a fact, and task #66's "non-goal or gap" question tilts hard toward *gap*.
+
+### Decisions taken
+
+- **Repeatability: UNMEASURED, and it will be reported as such.** A retest costs a 51-agent climb.
+  Refused it rather than let the ceiling be implied stable on a single observation.
+- **Both agents to Phase B**, which is the publishable number. ptone asked for default *and* largest.
+- **Standing order to both: write every measurement off the instance as it is taken.** The failure
+  destroys the instance and everything on it. `sn-stress-max` already lost an instance to this.
