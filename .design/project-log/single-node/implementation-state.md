@@ -11584,3 +11584,18 @@ merges (`GoogleCloudPlatform/scion#1326` and the `hub_id` change), and the branc
 `cmd/deploy_script_test.go`, `docs-site/.../hub-setup-cloudrun.md`, `scripts/single-node/deploy.sh` —
 **do not overlap them**, so no conflict. A rebase is still wanted before handoff: ptone has reacted
 to a stale-looking compare before, and `diverged` reads as stale whether or not it is.
+
+### `sn-adcpreflight-dev` stalled — which here means "finished", and I am keeping it
+
+The stall notification arrived six minutes after its report. That is an idle agent, not a failed one.
+**Its work is safe**: `ptone/scion` branch `fix/adc-preflight` is at `82fe8e8f`, confirmed by API, not
+by the agent's own claim.
+
+**I am not stopping it until the review verdict lands.** If `sn-adcpreflight-rev` returns findings —
+and I seeded two of my own, P5 and P6, so it plausibly will — a developer that still holds the context
+of writing this change is worth far more than the container it idles in. Re-dispatching a fresh
+developer to fix its own work means paying for the whole read-in again, and losing whatever it learned
+that never made it into the report.
+
+**The general rule I want to keep:** an agent that has reported is a *resource*, not a leak. Reap it
+when the work it did is accepted, not when it goes quiet.
