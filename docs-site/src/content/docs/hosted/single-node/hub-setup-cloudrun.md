@@ -242,24 +242,23 @@ Create an agent via the web UI or the API. The web UI is the simplest path — c
 a project, then **New Agent**, pick a harness (e.g. Claude), and start it.
 
 :::note[IAP authentication for API and scripted access]
-If you access the Hub API programmatically (scripts, CI, or `curl`), authenticate
-through IAP with an access token or an OIDC identity token. For identity tokens,
-the audience **must** be the IAP OAuth client ID (not the resource path):
+The deploy configures **browser-session** IAP authentication, which works for the
+web UI and for interactive browser flows. This is the primary access path for
+Section 1.
 
-```bash
-# Discover the auto-generated IAP OAuth client ID
-export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
-gcloud alpha iap oauth-clients list \
-  "projects/$PROJECT_NUMBER/brands/$PROJECT_NUMBER" \
-  --format="value(name)" | sed 's|.*/||'
+For **programmatic** access (scripts, CI, or `curl`), additional setup is required
+that this deploy does not perform. Two options are documented by Google:
 
-# Use it as the audience
-curl -s "$HUB_URL/health" \
-  -H "Authorization: Bearer $(gcloud auth print-identity-token --audiences=CLIENT_ID)"
-```
+- **Custom OAuth 2.0 client** — create a client manually in the Cloud Console
+  (APIs & Services → Credentials), then use its client ID as the OIDC audience.
+  The Google-managed OAuth client that IAP auto-provisions when enabled
+  [does not support programmatic access](https://docs.cloud.google.com/iap/docs/authentication-howto).
+- **Service account signed JWT** — sign a JWT with the Instance URL as the
+  audience, bypassing the OAuth client entirely.
 
-Using the resource path (`/projects/NUMBER/locations/REGION/services/NAME`) as the
-audience will fail with "Invalid JWT audience".
+See [Programmatic authentication with IAP](https://cloud.google.com/iap/docs/authentication-howto)
+for details on both methods. Neither has been verified against Cloud Run
+*Instances* specifically (as distinct from Cloud Run *services*).
 :::
 
 :::caution[Always specify harnessConfig when creating agents via the API]
