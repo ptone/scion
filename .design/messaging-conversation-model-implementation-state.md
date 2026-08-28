@@ -1380,6 +1380,30 @@ em10 and every agent I dispatch hereafter.
       already know why.
 
 
+68. **The highest-risk window for a rule is the hour after I write it, because writing it feels like
+    having solved it.** Issued 2026-08-28 01:40Z. I wrote rule 67 — *"for any question of the form
+    'what does this contain', use three-dot"* — and then, roughly twenty minutes later, ran a
+    per-file `git diff upstream/main origin/scion/ca-msg-em9-unify`. **Two-dot.** It reported
+    `pkg/store/store.go +0/-76` and I read that as em9-unify reverting 76 lines of main, which is the
+    precise hazard the user warned about and precisely the misreading rule 67 exists to prevent.
+
+    - The 76 lines were the **QuotaStore interface (Permissions Phase 2B)** — unrelated upstream work
+      that em9-unify simply predates. Nothing was being reverted. The three-dot view shows em9-unify
+      *adding* those files wholesale (`+542/-0`, `+764/-0`, …) because at its merge base they did not
+      exist.
+    - **This is the second time this exact meta-failure has occurred** (rule 58's addendum: I wrote the
+      parking convention, then failed to apply it to em9 in the same hour). Twice is the pattern, not
+      the coincidence. **A freshly written rule has latency before it becomes reflex, and during that
+      latency I am* more* confident than usual, not less, because the reasoning is vivid.**
+    - **The practical countermeasure, since resolving to remember harder has now failed twice:** put
+      the rule where the command is, not where the reasoning is. Rule 67 belongs in the heartbeat's
+      merge-readiness item as a literal instruction — *use `...` not `..`* — so it is re-read at the
+      moment of use rather than recalled at the moment of need.
+    - **What saved me was not vigilance, it was the absurdity of the result.** "This messaging branch
+      deletes the quota system" is implausible enough to force a second look. **A subtler wrong number
+      would have shipped.** I should not rely on findings being conveniently ridiculous.
+
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -5382,3 +5406,53 @@ twice and looked zero times, while its branch moved `2ba538c0` → `ab47087d`, r
 
 **Open:** em9 has `taskSummary: None` — a genuinely different state from em10's, and the reason
 "the em9/em10 pattern" kept resisting a single remedy. Handling separately.
+
+## 5bs. 01:33-01:45Z — TRANCHE C RECOMPUTE, done by me; em9 taken off it
+
+em9 has **no commits since 22:43** and `taskSummary: None` — a genuinely different state from em10's
+delivery-surface problem, and the reason "the em9/em10 pattern" resisted a single remedy for three
+sweeps. I stopped asking and did the analysis myself; it is merge-order work, which is my gate anyway,
+and it took about ten minutes against three hours of waiting.
+
+**Q1 — which commits are already on main BY CONTENT? `git cherry` cannot answer this.** It reported
+all 103 commits outstanding. **Positive control (rule 61): em10's `7e81d053`, which demonstrably
+merged as tranche A #1331, also reports all 8 outstanding.** So patch-id matching is blind here —
+#1331 was a **squash**, which rewrites every patch-id. Had I trusted the uncontrolled negative I would
+have concluded nothing had landed, which is the opposite of true.
+
+**Answering it by file content instead — 8 files are already byte-identical on main:**
+`go.sum`, `pkg/messages/dm_key.go`, `pkg/messaging/{backfill,drift,drift_test,normalize,normalize_test}.go`,
+`pkg/store/entadapter/message_store.go`.
+
+**Q3 — did tranche A take a piece out of the MIDDLE of the phases 1-4 chain? NO, and the real answer
+is more consequential.** em9-unify's merge base with main is `6268bac4` (#1319) — it branched
+**before** tranche A. Tranche A landed the foundation as a squash **from em10's branch**, while
+em9-unify still carries **its own independent originals of those same files**. So this is not a chain
+with a hole in it; it is **two divergent copies of the same foundation**. That single fact explains
+both earlier mysteries: why patch-id found zero overlap, and why the merge yields **add/add** conflicts
+on `pkg/messages/dm_key_test.go` and `pkg/messaging/backfill_test.go`.
+
+    git merge-tree upstream/main em9-unify  ->  17 conflicts
+      content: pkg/ent/client.go, pkg/ent/migrate/schema.go, pkg/hub/handlers_agent_messaging.go,
+               pkg/messages/types.go, ...
+      add/add: pkg/messages/dm_key_test.go, pkg/messaging/backfill_test.go
+
+**Q2 — the tranche C cut list.** Of 174 non-`pkg/ent` files em9-unify touches:
+
+| Class | Count | Treatment |
+|---|---|---|
+| **A. Exists on main** | **95** | reconcile against main's version; do NOT take em9's wholesale |
+| **B. Absent on main** | **79** | clean add |
+
+Of the 79 clean adds, **44 are `.design/project-log` noise**. The genuinely new code is
+**35 files**: 18 `pkg/messaging`, 8 `pkg/hub`, 8 `cmd`, 1 `hack`.
+
+**RULING: tranche C cannot be cut by rebasing em9-unify.** A rebase would attempt to reapply a second
+copy of the foundation over main's copy — 17 conflicts, resolved by hand, on security-critical
+resolution code. Instead: **start from main and take only the 35 genuinely-new files**, plus a
+file-by-file reconcile of the 95 overlaps, most of which are `pkg/hub` test files likely differing only
+via a shared helper. That is a construction job, not a merge, and it should be specified as such.
+
+**I violated rule 67 while doing this** — ran two-dot per-file diffs and briefly concluded em9-unify
+was reverting 76 lines of `store.go`. It was the QuotaStore interface, unrelated upstream work the
+branch predates. See rule 68. **Twice now I have written a rule and broken it inside the hour.**
