@@ -7586,3 +7586,103 @@ visited, not a decision about which messages belong to conversations. Coverage t
 visitation always has holes shaped like "the files nobody had a reason to open" — and those are
 exactly the integration surfaces this project exists to serve. The countermeasure is an enumeration
 test, not a seventh patch.
+
+---
+
+## §5cv. Heartbeat 2026-08-28 09:43 — tenth dead sweep; B6/B9 are one decision, B11 confirmed, S4 gate list consolidated
+
+Tenth consecutive heartbeat with no movement: `upstream/main` `f4d02461b`, five tips unchanged
+(`em10-trb d767d66c3`, `em9-unify e704b2feb`, `em6-def31 facb332b4`, `em6-ci-guard e93a58e37`,
+`em6-def26 bd5e492c1`), three managers `blocked`, #1338/#1339/#1340 open `UNSTABLE`, tranche B PR
+unopened. Ledger reasons unchanged.
+
+### B6 and B9 are the SAME decision, and fixing them separately breaks one or the other
+
+This supersedes the §5cn instruction to treat B6 as a standalone fix. **They must be one commit by
+one person.**
+
+`conversation.go:104-134` calls `AddParticipant` on **every** resolve, swallowing
+`ErrAlreadyExists`, and the comment defends this as deliberate: registration is "idempotent and
+self-repairing — if one of the two AddParticipant calls fails transiently, the next message in the
+same DM retries it," with an explicit warning not to "fix" the swallowed error.
+
+`conversation_store.go:552-582` shows what that call actually does: it queries for a participant
+with `LeftAtNotNil()` and, if found, **`ClearLeftAt()`** — a deliberate re-join semantic, pinned by
+`TestAddParticipant_DM_ReAddAfterSoftRemove`.
+
+So the same property produces both rows on the ledger. **Running on every resolve is what buys B9's
+self-repair and what causes B6's un-leaving.** Fix B6 by making registration first-create-only and
+B9's self-repair disappears; fix B9 by hard-failing and the non-fatal contract breaks. Each obvious
+local fix re-opens the other row.
+
+**And B9's self-repair argument has a hole worth naming.** It repairs only if there is a *next
+message in the same DM*. A one-message DM — a notification, a one-shot mention, an alert, which
+§5cu just showed are whole unstamped classes — never gets a second resolve, so a transient failure
+there is permanent, and the row lists asymmetrically forever against the standing all-or-nothing
+constraint. The comment argues the failure is transient; it does not argue the repair is guaranteed.
+
+**RULING — split the intent, do not change the shared function's behaviour.** One function is
+serving two callers who want opposite things: an explicit *join/re-join* action (must clear
+`left_at`) and an implicit *listing-index repair* (must not). Therefore:
+
+- `AddParticipant` keeps `ClearLeftAt()` and remains the explicit join path.
+- A new `EnsureParticipant` performs insert-if-absent and **leaves an existing row untouched,
+  including `left_at`**. `ResolveOrCreateDMConversation` calls this one.
+
+B9's self-repair survives (a *missing* row is still created on the next message), B6 is fixed (a
+*left* row stays left), and neither fix re-opens the other.
+
+**The trap, and it is rule 77 for the third time in this project.** The key-derived immutability
+guard — the one that keeps a stranger out of a DM — lives inside `AddParticipant`
+(`conversation_store.go:537-550`). A new `EnsureParticipant` is **a new ingress to the same sink**.
+Written as a bare upsert it silently bypasses D-1 and re-opens the B1 "stranger injected into a DM"
+class at a different door. The guard must be extracted and shared, not re-typed, and a test must
+pin it on **both** functions. B1's brief (§5cm) says the same thing about `mergeConversation`; that
+makes three ingresses to one guard, which is itself the argument for extracting it once.
+
+`TestAddParticipant_DM_ReAddAfterSoftRemove` must be **kept** (explicit re-join still works) and
+joined by a new test asserting `EnsureParticipant` does *not* clear `left_at`. Deleting the old test
+because the new behaviour differs would discard the only proof that explicit re-join survives.
+
+### B11 — confirmed, and the phantom-publish is a class, not an instance
+
+`handlers_agent_messaging.go:817-825`: `CreateMessage` failure is logged and execution continues;
+`persistedMsgID` stays `""`; `s.events.PublishUserMessage(ctx, storeMsg)` fires **unconditionally**;
+the handler then responds `MessageID: "" , Status: "delivered"`. A caller is told its message was
+delivered and given no ID to reference it by, while every eventbus subscriber acts on a `storeMsg.ID`
+that names no row. That is the phantom.
+
+§5cu found the identical pattern in `processMentions`. Two independent occurrences of "guard
+`MarkMessageFailed` with a persistence flag, but publish regardless" means the author understood the
+failure mode and applied the guard to one consequence and not the other, twice. Per rule 90, the fix
+is not two patches: **audit every `PublishUserMessage` call site against its persistence result**,
+and decide the contract once — either publishing an unpersisted message is legal (then nothing
+downstream may treat `MessageID` as a DB key) or it is not (then the publish is guarded everywhere).
+I rule it is **not** legal: `MessageID` is already used as a DB key by `MarkMessageFailed`, so the
+contract is settled by existing behaviour and the publish must be guarded.
+
+### CONSOLIDATED: preconditions of the S4 read-switch
+
+These accumulated across three log sections, which is how a gate gets missed. Single list, and it
+lives here from now on:
+
+| # | Precondition | Source | Why S4 breaks without it |
+|---|---|---|---|
+| S4-P1 | Flip derivation failure from non-fatal to **deny** | B10 ruling, §5bv | Non-fatal is fail-*closed* only while `conversation_id` is not load-bearing. At the switch it becomes fail-open. |
+| S4-P2 | Re-key non-canonical-but-parseable DM keys | B3, §5ct | Those rows are unresolvable; today they fork a conversation, after S4 they are an outage for those two principals. |
+| S4-P3 | Every message-creation path stamps `conversation_id` or is explicitly exempt | B15, §5cu | 7 of 13 unstamped. Web chat, Discord/Telegram inbound and notification DMs all go invisible; S4 silently undoes the F5 fix. |
+| S4-P4 | Divergence gate able to return match for DMs | B4, §5ct | The gate is the *evidence* S4 is safe. It currently cannot produce that evidence for DMs at all. |
+
+S4-P4 is the one to watch: it is not a defect blocking S4 so much as the instrument that is supposed
+to tell us whether S4 is safe. Switching reads while the gate is structurally incapable of reporting
+agreement means switching blind, with a dashboard that has read 100% divergence for weeks and been
+correctly ignored. **The gate must be fixed and then observed being green on real traffic before S4
+is scheduled** — a fixed-but-unobserved gate is worth very little.
+
+### Rule 91 (new)
+
+**When two ledger rows are caused by the same property, fixing them independently re-opens one of
+them.** B6 and B9 are both "registration runs on every resolve", read once as a bug and once as a
+feature. Before writing a fix, ask which other open row shares its mechanism — and if one does, the
+two rows are one commit and one owner. Separate owners will each make the locally correct change and
+the second will silently revert the first.
