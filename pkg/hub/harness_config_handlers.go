@@ -399,7 +399,7 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id str
 	}
 
 	ctx := r.Context()
-	hc, err := s.store.GetHarnessConfig(ctx, id)
+	hc, err := s.resolveHarnessConfigRef(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -411,6 +411,44 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id str
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// resolveHarnessConfigRef looks up a harness config by UUID, then falls back
+// to slug-based resolution (global scope). This mirrors resolveTemplate
+// (handlers_agent_create_helpers.go:37-62) and closes the asymmetry where
+// template GET accepted slugs but harness-config GET did not.
+//
+// Slug fallback is deliberately limited to GET (read) operations. A slug is
+// ambiguous across scopes: a project and the global scope may both define a
+// harness config with the same slug. An ambiguous GET returns whichever wins
+// the precedence order; an ambiguous DELETE or PATCH would destroy or mutate
+// the wrong resource, which is why those operations require UUIDs.
+//
+// Unlike resolveTemplate, this does NOT try project-scoped slug lookup
+// because the GET /api/v1/harness-configs/{ref} endpoint has no project
+// context. Project-scoped resolution happens in populateAgentConfig
+// (handlers_agent_create_helpers.go:253-268) where the project IS known.
+//
+// See ptone/scion#1316 — the store layer is uniform (GetHarnessConfigBySlug
+// exists), but the handler layer only wired UUID lookup. The broker's
+// resourceObjectPath calls this endpoint to resolve hub-managed
+// harness-configs, and a name/slug ref failed with 404 → broker 500.
+func (s *Server) resolveHarnessConfigRef(ctx context.Context, ref string) (*store.HarnessConfig, error) {
+	// Try by UUID first.
+	hc, err := s.store.GetHarnessConfig(ctx, ref)
+	if err != nil && err != store.ErrNotFound {
+		return nil, err
+	}
+	if hc != nil {
+		return hc, nil
+	}
+
+	// Try by slug in global scope.
+	hc, err = s.store.GetHarnessConfigBySlug(ctx, ref, store.HarnessConfigScopeGlobal, "")
+	if err != nil && err != store.ErrNotFound {
+		return nil, err
+	}
+	return hc, err
 }
 
 func (s *Server) harnessConfigImage(hc *store.HarnessConfig) string {
