@@ -102,6 +102,16 @@ again, and this project has produced that defect twice.
    recorded as closing the defect. **Before you write each assertion, say which channel the value
    travels through and confirm the pin observes that channel.** Three sites, three answers.
 
+   **And run the mutation PER LOCATION, with the off-diagonal required green.** This refinement comes
+   from #85's round-5 spot-check and it is the difference between two pins and one pin with a spare.
+   "Nothing else in the suite went red" rules out collateral damage; it does **not** prove each
+   assertion is sensitive to its own channel **and only** its own. Only the matrix does.
+
+   This task has **three** token sites, so the matrix is 3×3: revert site N alone, site N's assertion
+   must go **red**, and the other two must stay **green** — recorded as cells, not as a summary. **If
+   any off-diagonal cell is red, one assertion is riding on another** and you have fewer pins than you
+   think, with no way to tell which. Report the grid.
+
 
 ## Two items bundled in from #85 round 5, both disclosed by the developer and deferred here
 

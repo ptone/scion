@@ -12741,3 +12741,49 @@ round 1, the seam would have shipped documented-as-validated and open.
 
 #85 closed. **#86 and #87 both wait on ptone's merge** — that gate is his, not mine. The #87 brief is
 written and carries r5's two deferrals with their reasoning intact. Both agents stood down.
+
+### §35.58 — A ninth correction, after the branch shipped, from the agent that stood down
+
+The developer read the spot-check report and found that **its own round-5 claim was weaker than the
+evidence the reviewer produced**, then said so unprompted after #85 was already closed.
+
+It reported: *"nothing else in the suite went red."* The reviewer had actually run each reversion
+**independently** and recorded **both cells**:
+
+| mutation | `seam_assignment_channel` | `argv_channel` |
+|---|---|---|
+| revert `seamSetup` only | **RED** | green |
+| revert `runBashFunc` only | green | **RED** |
+
+**These are not the same claim.** "Nothing else went red" rules out **collateral damage**. The matrix
+proves each subtest is sensitive to its own channel **and only** its own — *"which is what makes it two
+pins rather than one pin with a spare."* Had either cell been FAIL/FAIL, one subtest would have been
+riding on the other, **and nothing in the weaker claim could have revealed it.**
+
+**Adopted as a refinement of rule 2, not a fourth rule:**
+
+> **When a pin has a location, run the mutation PER LOCATION, and require the off-diagonal to stay
+> green.** Record cells, not a summary.
+
+**Written into the #87 brief**, where it matters more than it did here: #87 has **three** token sites,
+so the matrix is 3×3, and `fullGcloudStub` adds a third channel to the class. Any red off-diagonal
+means fewer pins than the count claims, with no way to tell which.
+
+### The part of this that does not survive being copied
+
+The developer's closing observation, which I am recording because it is about me and I would not have
+written it myself:
+
+> *"the reason [the eight corrections] were possible is that every brief you wrote said 'tell me what
+> in here is wrong' and then you took it, including when it meant conceding the same argument twice in
+> two rounds. That is the part that does not survive by itself if someone copies the three rules
+> without the closing line."*
+
+**That is the correct reading and it is the more fragile half.** The three rules are portable; the
+invitation is a habit, and a habit that only works if the answer is actually taken. Rounds 3 and 4 are
+the proof — I conceded the same "safe because something downstream rescues it" argument twice, two
+rounds apart, and the second concession is the one that produced the scheme guard.
+
+**Nine corrections now, not eight.** The ninth arrived **after** the work was accepted, from an agent
+with nothing left to gain by raising it. That is the strongest single piece of evidence that the loop
+was real rather than performed.
