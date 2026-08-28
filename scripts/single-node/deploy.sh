@@ -753,6 +753,13 @@ di_main() {
   #   only restart/stop/delete do).
   # ===================================================================
   local _di_quiet=""
+  # Do NOT replace this with [ -r /dev/tty ] or test -r /dev/tty.
+  # test -r checks mode bits on the device node ("am I permitted to open this?");
+  # exec actually opens it ("can I open this?").  In containers, CI, and cron,
+  # /dev/tty exists and is readable but has no controlling terminal — test -r
+  # returns true, exec fails with ENXIO.  Those are precisely the environments
+  # this check exists for: test -r would pass, --quiet would never fire, and the
+  # bug would survive the fix.
   if ! (exec </dev/tty) 2>/dev/null; then
     _di_quiet="--quiet"
     echo "NOTE: No terminal available (/dev/tty not readable)." >&2
