@@ -13153,3 +13153,49 @@ This is the precondition for expanding coverage at all: `logAuthzDenial x8` as a
 
 ### Status
 `upstream/main` still `b14c41414`. #1361 OPEN/MERGEABLE at `5fc82455b`, untouched. dm-tighten `7caa8e00d` awaiting user PR open. GATE-1 open, em10 working. Ledger otherwise unmoved — DEF-18 (4 heartbeats, rule 217 reason unchanged), DEF-32/34 routing (4 heartbeats, awaiting user).
+
+## §5fc — 2026-08-28 — GATE-1 complete and verified; Tier 2 handed to auth-refactor-lead
+
+### `scion/ca-msg-em10-marker-gate-2` @ `1313f62da` — APPROVED
+2 files, +56/-7, stacked on `scion/ca-msg-em10-marker-gate`.
+
+**At-least semantics landed** in `assertRequired`, `assertAudit`, and `assertFuncDef` — `actual < expected`, message "expected ... at least xN, found xM". INFORMATIONAL and COMPOSITE unchanged as ruled. (em10 extended it to `assertFuncDef` beyond my instruction; harmless — more than one definition of the same top-level func is a compile error anyway.)
+
+**Verified behaviourally, not read** (against clean `upstream/main`):
+
+| case | exit | meaning |
+|---|---|---|
+| clean | 0 | baseline |
+| **extra** `ActionAttach` added to `handleBrokerInbound` | **0** | would have been a FALSE FAILURE under equality |
+| real `ActionAttach` check removed | 1 | regression caught |
+| one of four `SenderID` idents renamed | 1 | floor breach caught |
+
+One-sided in the direction of the threat, as ruled (rule 232). The middle row is the whole point of the change and is now a permanent test.
+
+**All six corrected counts independently re-measured with my own AST tool — every one matches em10's corrected figure:**
+
+| file / function | symbol | AST | file grep |
+|---|---|---|---|
+| `handlers_agents_core.go` / `createAgentInProject` | `CanDelegate` | 1 | 5 |
+| `sa_assign_gate.go` / `authorizeSAAssignment` | `ActionAssign` | 3 | 7 |
+| `handlers_runtime_brokers.go` / `getRuntimeBroker` | `logAuthzDenial` | 3 | 9 |
+| `authorize.go` / `authorizeAgentLifecycle` | `logAuthzDenial` | **7** | 18 |
+| `authorize.go` / `authorizeAgentLifecycle` | `ActionAttach` | 8 | 8 |
+| `handlers_broker_inbound.go` / `handleBrokerInbound` | `SenderID` | 4 | 6 |
+
+The grep column shows why rule 231 matters: the two instruments disagree by up to 6x, and agree occasionally by coincidence (`ActionAttach` 8/8), which is exactly what makes grep-derived constants dangerous — they are sometimes right.
+
+**Tier 1 item 1 added:** `handlers_broker_inbound.go` / `handleBrokerInbound` — `ActionAttach ≥1`, `CheckAccess ≥1`, `SenderID ≥4`, `NewAuthenticatedUser ≥1`, `parseDMKeyIDs ≥1`. em10 self-corrected `createAgent` → `createAgentInProject` unprompted.
+
+### Tier 2 — handed to `auth-refactor-lead`, not decided by me
+Sent the full corrected 18-row table with three questions: do you want any of these; if so which; who adds them. Explicitly flagged the cost they are best placed to judge — **a floor still fires on legitimate CONSOLIDATION** (collapsing 7 `logAuthzDenial` calls into 3 shared helpers would breach it), so the `x6`/`x7`/`x8` rows on `authorize.go` are the exposed ones during active refactoring. Told them "not now, come back later" is a good answer that I will record as deferred, not declined.
+
+**NEW RULE 234.** At-least semantics remove the false-failure risk from *addition*, not from *consolidation*. A floor is still a two-sided trap for anyone actively refactoring the guarded function, and only the owning team can price that. State the residual cost when proposing a row to someone else — offering only the upside is how you get an agreement that is withdrawn the first time the gate fires.
+
+### Landing order — do not disturb
+`marker-gate-2` is stacked on `#1361`, which is unmerged. It cannot land alone. em10 instructed **not** to rebase preemptively; once #1361 squash-merges, `git rebase --onto upstream/main origin/scion/ca-msg-em10-marker-gate HEAD` (rule 222). **I signal that moment** — em10 is parked until then.
+
+No compare URL for `marker-gate-2` yet: a compare against main today would include #1361's content and misrepresent the change.
+
+### Status
+`upstream/main` `b14c41414` unchanged. #1361 OPEN/MERGEABLE `5fc82455b`. dm-tighten `7caa8e00d` awaiting user PR open. **GATE-1 closed** (Tier 1 done; Tier 2 externally owned). Unmoved: DEF-18 (5 heartbeats, rule 217), DEF-32/34 routing (5 heartbeats, awaiting user), DEF-5/6/9/10/11/14/16, tranches C–G, tranche H carrier-less.
