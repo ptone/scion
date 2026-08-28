@@ -218,21 +218,28 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 			rtType = defaultRuntimeType
 		}
 
-		if !canBrokerServeRuntime(defaultRuntimeType, rtType) {
-			continue
-		}
-
+		// Resolve the effective type for filtering. The profile's Runtime
+		// field is a key into vs.Runtimes; the actual type may differ
+		// (e.g. key "prod-cluster" with type "kubernetes").
+		resolvedType := rtType
 		var ctx, ns string
 		if vs.Runtimes != nil {
 			if rtCfg, ok := vs.Runtimes[rtType]; ok {
+				if rtCfg.Type != "" {
+					resolvedType = rtCfg.Type
+				}
 				ctx = rtCfg.Context
 				ns = rtCfg.Namespace
 			}
 		}
 
+		if !canBrokerServeRuntime(defaultRuntimeType, resolvedType) {
+			continue
+		}
+
 		profiles = append(profiles, BrokerProfile{
 			Name:      name,
-			Type:      rtType,
+			Type:      resolvedType,
 			Available: true,
 			Context:   ctx,
 			Namespace: ns,

@@ -240,7 +240,7 @@ func TestBuildInfoProfiles_Row5_CloudRunInstancesBroker_BlastRadius(t *testing.T
 // matches its own broker. This is the invariant that makes the seeded
 // template's guarantee work. Tested for multiple broker types.
 func TestBuildInfoProfiles_Row6_EmptyRuntimeProfile_NoChange(t *testing.T) {
-	brokerTypes := []string{"docker", "cloudrun-sandbox", "podman", "cloudrun-instances"}
+	brokerTypes := []string{"docker", "cloudrun-sandbox", "podman", "cloudrun-instances", "kubernetes"}
 
 	for _, brokerType := range brokerTypes {
 		t.Run(brokerType, func(t *testing.T) {
@@ -409,5 +409,133 @@ func TestBuildInfoProfiles_Mutation_AlwaysTrue(t *testing.T) {
 	if len(profiles) != 1 {
 		t.Fatalf("mutation check: expected 1 profile (only default/cloudrun-sandbox), got %d: %v",
 			len(profiles), profileTypes(profiles))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 8: operator-named runtime key whose type differs from the key.
+//
+// An operator writes runtimes.prod-cluster.type: kubernetes with a profile
+// big.runtime: prod-cluster. On a kubernetes broker, the profile must
+// survive the filter because the resolved type IS kubernetes — even though
+// the map key "prod-cluster" does not match. Before the key→type resolution
+// fix, canBrokerServeRuntime compared the broker's type against the raw map
+// key and silently dropped the profile (fail-closed on an unrecognised name).
+// ---------------------------------------------------------------------------
+
+const operatorNamedRuntimeSettings = `schema_version: "1"
+active_profile: big
+profiles:
+    big:
+        runtime: prod-cluster
+    local:
+        runtime: docker
+runtimes:
+    prod-cluster:
+        type: kubernetes
+        context: prod-context
+        namespace: agents
+    docker:
+        type: docker
+`
+
+func TestBuildInfoProfiles_Row8_OperatorNamedRuntime_KeyDiffersFromType(t *testing.T) {
+	srv := profileFilterTestServer(t, operatorNamedRuntimeSettings)
+	profiles := srv.buildInfoProfiles("kubernetes")
+
+	// The "big" profile (runtime key "prod-cluster", resolved type "kubernetes")
+	// must survive on a kubernetes broker. The embedded defaults also add
+	// "remote" (runtime: kubernetes) which survives for the same reason.
+	// "local" (docker) is filtered out: canBrokerServeRuntime("kubernetes",
+	// "docker") is false.
+	byName := make(map[string]BrokerProfile, len(profiles))
+	for _, p := range profiles {
+		byName[p.Name] = p
+	}
+
+	// CRITICAL: "big" must be present — this is the operator-named runtime test.
+	bigP, hasBig := byName["big"]
+	if !hasBig {
+		t.Fatalf("row 8: profile 'big' missing; profiles are: %v", profileTypes(profiles))
+	}
+	// The Type field in BrokerProfile should be the RESOLVED type, not the key.
+	if bigP.Type != "kubernetes" {
+		t.Errorf("row 8: expected resolved type 'kubernetes', got %q", bigP.Type)
+	}
+	// Context should be resolved from the runtime config.
+	if bigP.Context != "prod-context" {
+		t.Errorf("row 8: expected context 'prod-context', got %q", bigP.Context)
+	}
+
+	// "local" (docker) must be filtered out on a kubernetes broker.
+	if _, hasLocal := byName["local"]; hasLocal {
+		t.Error("row 8: profile 'local' (docker) should be filtered out on a kubernetes broker")
+	}
+}
+
+// TestBuildInfoProfiles_Row8_OperatorNamedRuntime_LocalBroker verifies the
+// same operator-named runtime on a local broker. A docker broker should keep
+// all profiles: "big" (prod-cluster → kubernetes), "local" (docker), and
+// "remote" (kubernetes, from embedded defaults).
+func TestBuildInfoProfiles_Row8_OperatorNamedRuntime_LocalBroker(t *testing.T) {
+	srv := profileFilterTestServer(t, operatorNamedRuntimeSettings)
+	profiles := srv.buildInfoProfiles("docker")
+
+	// Local brokers serve everything — all profiles must survive.
+	byName := make(map[string]BrokerProfile, len(profiles))
+	for _, p := range profiles {
+		byName[p.Name] = p
+	}
+
+	if _, hasBig := byName["big"]; !hasBig {
+		t.Errorf("row 8 (local): profile 'big' should be present on docker broker, profiles: %v", profileTypes(profiles))
+	}
+	if _, hasLocal := byName["local"]; !hasLocal {
+		t.Errorf("row 8 (local): profile 'local' should be present on docker broker, profiles: %v", profileTypes(profiles))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 9: empty-runtime profile on a non-local broker.
+//
+// A profile that omits 'runtime:' entirely inherits the broker's default
+// runtime type. This is a common config shape: a profile that overrides
+// only resources (e.g. CPU/memory) while inheriting the broker's runtime.
+// It must survive the filter on EVERY broker type, including non-local.
+// ---------------------------------------------------------------------------
+
+const emptyRuntimeOnlySettings = `schema_version: "1"
+active_profile: resources-only
+profiles:
+    resources-only:
+        runtime: ""
+`
+
+func TestBuildInfoProfiles_Row9_EmptyRuntime_NonLocalBroker(t *testing.T) {
+	brokerTypes := []string{"kubernetes", "cloudrun-sandbox", "cloudrun-instances"}
+
+	for _, brokerType := range brokerTypes {
+		t.Run(brokerType, func(t *testing.T) {
+			srv := profileFilterTestServer(t, emptyRuntimeOnlySettings)
+			profiles := srv.buildInfoProfiles(brokerType)
+
+			// The resources-only profile (runtime: "") inherits the broker's
+			// default runtime type. canBrokerServeRuntime(x, x) is always true.
+			found := false
+			for _, p := range profiles {
+				if p.Name == "resources-only" {
+					found = true
+					if p.Type != brokerType {
+						t.Errorf("row 9 (%s): expected inherited type %q, got %q",
+							brokerType, brokerType, p.Type)
+					}
+					break
+				}
+			}
+			if !found {
+				t.Errorf("row 9 (%s): profile 'resources-only' with empty runtime should survive, but was filtered out. profiles: %v",
+					brokerType, profileTypes(profiles))
+			}
+		})
 	}
 }
