@@ -12692,3 +12692,52 @@ the developer.** Same information, no moving head, reviewer's gates still attrib
 **That is the fix for §35.51 working, and it is worth naming as a rule rather than a one-off: while a
 branch is under review, findings go to the next brief, never to the current developer.** Deferring is
 not dropping, provided the place you defer to is a document someone will actually open.
+
+## §35.57 — #85 SHIPPED. Handed to ptone at `600a0f127`.
+
+**01:08, spot-check APPROVE.** Report: `reviews/adc-preflight-r5.md`.
+
+**Handoff verified before sending, in this order:** head `600a0f127`; **ahead 13 / behind 0** vs
+`GoogleCloudPlatform/scion` main; `status: "ahead"` (no conflict); 4 files; compare URL **HTTP 200**.
+`behind` measured **last**, per §35.49. URL alone to thread `1532864101909528737`; rationale to the
+working thread. Task #85 marked complete.
+
+**The O1 pin met the rule it was built for.** Observed positive on **both** channels **independently**:
+reverting `seamSetup`→`%q` alone reddens the seam subtest with argv green; reverting `runBashFunc`→`%q`
+alone reddens argv with seam green. **Both red on the sentinel, not the exit-code premise** — the
+`$(touch)` ran. `seamSetup` is confirmed the single `shellQuote`'d writer of both seams; no raw
+`_DI_*=%q` remains. Both deferrals to #87 independently judged defensible by the reviewer.
+
+Final gates on gcloud 582: `gofmt`/`vet`/`build` clean, `TestScript` 41 pass / 1 skip / 0 fail,
+38 validator rows, shellcheck 62/62. No Instance created.
+
+### What this task actually produced
+
+Five developer rounds, four review rounds, **eight corrections to me, all right, all taken**:
+
+1. the check I ordered was bypassable with one character (rev2, r2)
+2. a **permitted** host could still retarget the PATCH (rev2, r3)
+3. hoisting makes an unvalidated read *visible*, not impossible (dev2, r3)
+4. the scheme guard I dropped was the argument I had just taken (dev2, r4)
+5. three of ten pins were false — the harness used Go quoting (dev2, r4)
+6. my live-deploy criterion was a binary where a measurement already existed (rev2, r4)
+7. **my O1 pin would have gone green** — a pin has a location, not just an assertion (dev2, r5)
+8. path-uniqueness is the wrong safeguard for a negative assertion (dev2, r5)
+
+**Two real security holes were found and closed, both in a check I ordered added, neither shipped.**
+That is the case for the process, and it is also the case against my unaided judgement: had I accepted
+round 1, the seam would have shipped documented-as-validated and open.
+
+### The three rules, which outlive this task
+
+1. **A red mutation is necessary, not sufficient — read WHY it went red.**
+2. **A pin has a location as well as an assertion.**
+3. **A negative assertion is not a pin until it has been observed positive.**
+
+**None of them is about the defect we set out to fix.** Every round's most valuable output was about
+**how we know a thing is fixed**, not about the fix. That is the transferable result of #85.
+
+### State
+
+#85 closed. **#86 and #87 both wait on ptone's merge** — that gate is his, not mine. The #87 brief is
+written and carries r5's two deferrals with their reasoning intact. Both agents stood down.
