@@ -11852,3 +11852,84 @@ fix; routing is the user's.
   at ingress (preferred — kills the whole class).
 - `PrincipalKindFromAddress` fold audit — **substantively closed**; verdict *inert on
   the key, load-bearing in the DEF-32 chain*. Doc correction pending from em9.
+
+---
+
+## §5en — DEF-32 is a CLASS, not an instance; one fix option withdrawn (2026-08-28)
+
+em9 corrected the finding at `f06906a0` — bypass reclassified live, guard-import
+error acknowledged, full chain documented. Accepted.
+
+### The class
+
+Applied rule 160 (*one instance is not the class*) before letting the user route a
+one-line fix. **24 case-sensitive prefix tests on principal addresses** in `pkg/hub`
+non-test code:
+
+```
+events.go                    744, 761
+handlers_agent_messaging.go  139, 911, 912, 1105, 1466
+handlers_broker_inbound.go   126, 127, 297
+handlers_chat_v2.go          1653, 1966, 1974
+messagebroker.go             437, 518, 535, 536, 716, 748, 791
+webchannel.go                103, 185, 188, 201
+```
+
+Note `handlers_broker_inbound.go:297` — **same file, same `Sender` field, a second
+case-sensitive gate** beyond the one in DEF-32.
+
+### Consequence: I withdrew an option I had already offered
+
+I gave the user two fix shapes: case-insensitive gate, or canonicalise at ingress.
+Patching `:126` alone fixes one gate and leaves 23 in the same shape. **The first
+option is inadequate; withdrawn** (rule 172 — do not let the user pick a dead
+option). Recommended fix is now unambiguous: **canonicalise `Sender`/`Recipient`
+once at ingress**, so no downstream comparison can be fooled by casing.
+
+> **RULE 200.** Before routing a fix, establish whether the defect is an instance or
+> a class. The two have different fixes, and the instance fix is always the cheaper
+> and more tempting one to approve. A recommendation made before this check is a
+> recommendation the evidence may withdraw.
+
+### The rule-198 subset
+
+Four sites combine a prefix test with an empty-field test — the exact shape that
+defeated #1322:
+
+```
+handlers_agent_messaging.go:1466   !HasPrefix(msg.Sender, "agent:") || msg.SenderID == ""
+messagebroker.go:716                HasPrefix(msg.Sender, "agent:") && msg.SenderID == ""
+messagebroker.go:748                same shape
+messagebroker.go:791               !HasPrefix(...) || msg.SenderID == ""
+```
+
+**`716`/`748` sit in the B5/R1 broadcast self-skip region**, which `messaging-v2`
+has already reverted once. Told em9 to flag anything there **separately** — a
+security fix must not arrive tangled with a revert.
+
+### em9 dispatched
+
+Triage all 24 into exactly one of **AUTHZ** (gates a permission check, identity
+resolution, or a field the security layer later trusts — a miss *grants* something)
+/ **ROUTING** (picks a delivery path or display form — a miss misroutes, grants
+nothing) / **INERT** (operand provably server-constructed canonical).
+
+Per AUTHZ site, a one-line consequence in DEF-32 form: *what check is skipped, and
+what value survives that should have been overwritten*. Specific answers required
+on the four rule-198 sites, with explicit instruction **not to assume the
+body-settable `SenderID` finding generalises** — trace each path.
+
+**Asked for the AUTHZ count ahead of the write-up**, because that number is what
+unblocks the user's routing decision.
+
+### Sent to user (1869 runes)
+
+Recommendation correction only; **no new ask**. Routing question stands unchanged,
+hotfix still recommended and now better supported — an ingress canonicalisation is
+self-contained and should not sit behind a refactor.
+
+### Ledger
+
+- **DEF-32 OPEN**, upgraded instance → class. Awaiting routing + AUTHZ count.
+- Fold audit — closed; verdict *inert on the key, contributing factor in DEF-32*.
+- Unchanged with user: #1360 merge, three branch deletions, escalation-1 CI.
