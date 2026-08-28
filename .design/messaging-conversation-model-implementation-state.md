@@ -13291,3 +13291,52 @@ urn:uuid:6ba7b810-...       parse=true roundtrip=false  err=... (shape: urn-pref
 **Rule 238.** Green tests do not prove a test is non-vacuous when several distinct failure paths produce the same observable outcome. Where two branches both return "an error", assert on something that distinguishes them, and verify by probe which branch actually fired. em6's test already did this via the message substring — that is why the defence was cheap.
 
 **Rule 239.** An automated reviewer's failure mode tends to sit in the same category as the code under review. Here a case-normalisation misread landed on a case-normalisation rejection test. When a bot reviews a lexical-invariant test, suspect the bot applied the very normalisation the test forbids. (Companion to rule 220, which was the same shape in the other direction.)
+
+---
+
+## §5ff — heartbeat v6: PR #1259 found; DEF-34 fix ruling CORRECTED (was incomplete)
+
+`upstream/main` unmoved at `b14c41414`. #1361 and #1362 both OPEN/MERGEABLE, awaiting user merge. Roster unchanged, all managers parked.
+
+### Discovery: PR #1259 (stevegeek, external) is half the DEF-34 fix
+`feat/chat-thread-as-recipient` — "make the thread part of reply affinity, not just the channel". Created 08-23, updated 08-27, **CONFLICTING**. Files:
+`handlers_agent_messaging{,_test}.go`, `handlers_broker_inbound.go`, `webchannel{,_store,_store_postgres,_test}.go`.
+
+It replaces `GetLastChannel(...) (string, error)` with `GetLastRoute(...) (channel, threadID string, err error)`, adds a `threadID` param to `RecordChannel`, adds `last_thread_id` to `webchat_conversation_context` (idempotent migration both backends), and in the affinity block sets `req.ThreadID = lastThread` **only when the caller named none**.
+
+It does **not** reference `hasAgentReplyAfter` (grep count 0) and does not touch `handlers_chat_v2.go`. So DEF-34 is not fixed by it — but it is not independent of it either.
+
+### CORRECTION to my standing DEF-34 fix ruling
+My ruling has been "drop the `Channel` filter from `hasAgentReplyAfter`". **That is incomplete.** I had analysed the channel half and never checked the thread half.
+
+Verified on `b14c41414`: the affinity block (`handlers_agent_messaging.go:194-202`) assigns **only** `req.Channel`. The persisted message takes `ThreadID: req.ThreadID` (`:248`, `:291`). So an **untagged agent reply is stored with an empty ThreadID**.
+
+DEF-34 therefore has TWO independent misses in `hasAgentReplyAfter`:
+- **(a) thread miss** — untagged reply has `ThreadID == ""`, so the `ThreadID: threadID` filter never matches, *regardless of channel*.
+- **(b) channel miss** — reply stamped `discord`/etc., so `Channel: "web"` never matches, *regardless of thread*.
+
+Coverage of each candidate fix:
+- **Drop `Channel` filter alone** → fixes only replies the agent explicitly threaded via `--thread-id`. Untagged replies still miss on (a).
+- **#1259 alone** → fixes only untagged replies where the user last spoke on **web**. Non-web last channel still misses on (b).
+- **Both** → closes DEF-34.
+
+**Neither half is sufficient alone.** DEF-34 now carries an external dependency on a stalled third-party PR.
+
+### Collision assessment: #1259 vs em9 tranche C–G (localised, rule 31)
+File-level overlap on 5 of 7 files. **Hunk-level overlap on the affinity API: none.** `git diff upstream/main...em9-unify` over `webchannel_store{,_postgres}.go` contains zero `RecordChannel` / `GetLastChannel` / `GetLastRoute` / `last_channel` / `last_thread` lines, and zero affinity-block lines in `handlers_agent_messaging.go`. em9 is additive there (+1351/-43 across the five). Expect mechanical rebase conflicts, not an interface fight.
+
+**This is why localising mattered.** "5 of 7 files collide" read as a serious conflict; the API surface is actually disjoint.
+
+### Rules
+**Rule 240.** A defect with a compound predicate has one miss per conjunct. Before ruling a fix, enumerate every conjunct in the failing condition and state which the fix removes. I ruled on `Channel` and never examined `ThreadID` in the same struct literal — the second conjunct was three lines from the first.
+
+**Rule 241.** Check the open-PR list for the surface a defect lives on before designing its fix. #1259 has been open since 08-23 doing half this work; my fix ruling predates my ever having looked. A defect's fix is not designed in isolation from the queue.
+
+**Rule 242.** File-level overlap is an alarm, not a finding. Localise to hunks — here 5 colliding files reduced to a disjoint API surface.
+
+### Ledger sweep
+- **DEF-34** — moved: ruling corrected, external dependency identified. Now blocked on the #1259 disposition as well as user routing.
+- **DEF-32** — unmoved 7 heartbeats, awaiting the same routing decision. Independent of #1259.
+- **DEF-18** — unmoved; still no carrier for `pkg/messaging/validate.go`; must not be closed by deleting `projectAgents` (rule 217).
+- **Tier 2 gate rows** — DEFERRED by owner, waiter recorded, no polling.
+- **Tranche H** — blocked on G-1, no carrier. **DEF-5/6/9/10/11/14/16, D–G** held. **DEF-33** latent. **DEF-17 STRUCK. GATE-1 CLOSED.**
