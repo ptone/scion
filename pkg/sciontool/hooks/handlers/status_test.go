@@ -12,6 +12,7 @@ import (
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -839,6 +840,61 @@ func TestStatusHandler_SessionID_HandlePersistsOnSessionStart(t *testing.T) {
 
 	info := readAgentInfoMap(t, statusPath)
 	assert.Equal(t, "sess-from-harness", info["session_id"])
+}
+
+// TestStatusHandler_SessionID_WriteThroughToSummary pins the full defect
+// boundary: the session ID written by the hook process reaches the
+// SessionSummary that will be POSTed to the hub. This is the path that was
+// broken — the hub received an empty session.id and returned 400.
+//
+// The test exercises: SetSessionID → agent-info.json → ConsumeSessionID →
+// Aggregator.Finalize(fallback) → summary.SessionID. StartSession is never
+// called, matching the real two-aggregator split.
+//
+// The value under test flows through the file; it is NOT passed as a
+// literal to Finalize. The assertion reads it from the summary.
+//
+// Named mutation 3 (fallback ignored): Remove the fallback block in
+// Aggregator.Finalize:
+//
+//	if a.sessionID == "" && sessionID != "" {
+//	    a.sessionID = sessionID
+//	}
+//
+// The test reds at:
+//
+//	assert.Equal(t, writtenID, summary.SessionID)
+//
+// because summary.SessionID is "" — the consumed value was passed to
+// Finalize but Finalize ignored it.
+func TestStatusHandler_SessionID_WriteThroughToSummary(t *testing.T) {
+	tmpDir := t.TempDir()
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	h := &StatusHandler{StatusPath: statusPath}
+
+	// Simulate the hook process writing the session ID on session-start.
+	// The value is chosen once here; assertions read it back from the
+	// summary, not from a second copy of the literal.
+	const writtenID = "sess-e2e-pin"
+	err := h.SetSessionID(writtenID)
+	require.NoError(t, err)
+
+	// Simulate the init process: create an aggregator that never received
+	// StartSession (the two-aggregator split).
+	agg := &telemetry.Aggregator{}
+
+	// Consume the session ID from the file — this is the real cross-process
+	// delivery path. The consumed value is what reaches Finalize.
+	consumed, err := h.ConsumeSessionID()
+	require.NoError(t, err)
+
+	// Finalize with the consumed value as the fallback.
+	summary := agg.Finalize(consumed, 0, 0, 0, 0, "")
+
+	// The defect boundary: does the summary carry the session ID?
+	assert.Equal(t, writtenID, summary.SessionID,
+		"session ID must flow from SetSessionID through ConsumeSessionID "+
+			"into Finalize and appear on the summary")
 }
 
 func TestStatusHandler_SetMessage(t *testing.T) {
