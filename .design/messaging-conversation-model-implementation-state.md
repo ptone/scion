@@ -1628,6 +1628,21 @@ em10 and every agent I dispatch hereafter.
       notification — failing closed on display loses user-visible information for no safety gain.
 
 
+79. **A pre-existing test that starts failing is the contract telling you it changed. Update it to
+    the new contract; never delete it and never weaken its assertion.**
+    - From R3 on `f70b23b2` (§5cd-addendum). `TestMessageBrokerProxy_BroadcastSkipsSender` was
+      `ok` on `f99de64d` and FAIL on the R1 tip. It was stale — verified by enumerating the
+      publishers, not by assuming — but staleness is a licence to *update*, never to delete.
+    - Mirror obligation, and the more important half: when a contract tightens from a loose input
+      (the `Sender` slug) to a strict one (`SenderID`), the loose input's failure mode usually
+      goes from WRONG to SILENT. Before R1 a publisher that omitted `SenderID` still self-skipped
+      via the slug; after R1 it silently self-delivers with no error and no log. Adding the strict
+      check is half the fix. The other half is making the now-unsatisfiable case loud, or the next
+      publisher reintroduces the defect with no test and no log to grep.
+    - Corollary on process: em10 did not report the failure, which means the package suite was not
+      run. **"My tests pass" is not "the suite is green."** The acceptance bar for every branch
+      handed to me is the full package, and I have to spend those minutes anyway.
+
 
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
@@ -6143,4 +6158,52 @@ that produced this bug in the first place.
 path, not an authorization path. Rule 29 explicitly scopes "under-granting is recoverable" to
 AUTHORIZATION. Failing closed here means silently dropping a user's DM notification, which is a
 worse outcome than showing a UUID. Still non-blocking for B5.
+
+### §5cd-addendum: R3 — f70b23b2 leaves the pkg/hub suite RED
+
+Full `pkg/hub` suite on clean `f70b23b2`, 297s:
+
+```
+--- FAIL: TestTemplateResource_UATConfinement            (known pre-existing)
+--- FAIL: TestMessageBrokerProxy_BroadcastSkipsSender    NEW — introduced by R1
+    messagebroker_test.go:453: expected 1 message (sender excluded), got 2
+```
+
+Cross-tree control: the test is `ok` on `f99de64d`, FAIL on `f70b23b2`. Not in dispute.
+
+**Cause.** `messagebroker_test.go:445` builds `messages.NewInstruction("agent:sender-agent", ...)` —
+`Sender` set, `SenderID` empty. The old slug comparison skipped; the new `SenderID` comparison
+does not, so the sender receives its own broadcast.
+
+**Stale test or real regression?** Checked before writing to em10. The only publisher on
+`TopicProjectBroadcast` is `PublishBroadcast` (messagebroker.go:242); its only caller is
+`handlers_agent_messaging.go:1342` in `handleProjectBroadcast`, which at `:1261-1270` sets
+`SenderID` unconditionally from auth. Production can no longer emit an agent-sender broadcast with
+an empty `SenderID`. **R1 is production-safe; the test is stale.** Fix = set `SenderID` in the test
+so it constructs what production constructs. NOT delete, NOT weaken to `>= 1`.
+
+**R3b — the durable part.** Under the old code a publisher that forgot `SenderID` still got a
+working self-skip via the slug. Under the new code it silently self-delivers: no error, no log.
+Asked for a warning in both fan-outs when `Broadcasted && strings.HasPrefix(Sender,"agent:") &&
+SenderID == ""`. Do not drop, do not guess from the slug (that guess IS the bug just removed) —
+just make it loud. Precedent for the exact predicate at `messagebroker.go:775`.
+
+**Process finding.** em10 did not mention the failure, i.e. ran their own tests and not the package.
+Restated the acceptance bar: full `pkg/hub` green except `TestTemplateResource_UATConfinement`.
+
+**Outstanding on `ca-msg-em10-trb`:** R2 (pin `fanOutGlobal`), R3 (BLOCKING, stale test),
+R3b (warn on unskippable broadcast), F2 (slug in `NotifyDMReceived`, degraded fallback),
+commit-message correction.
+
+**Upstream:** `upstream/main` moved `f99de64d` -> `f4d02461b`. One commit (#1342), UI only,
+zero `pkg/hub` changes — rebase is trivial and every `f99de64d` control above still holds.
+
+### RULE 79 (new)
+
+**"A pre-existing test that starts failing is the contract telling you it changed. Update it to the
+new contract; never delete it and never weaken its assertion."** And the mirror obligation: when a
+contract tightens from a loose input (slug) to a strict one (ID), the loose input's failure mode
+usually goes from *wrong* to *silent*. Adding the strict check is only half the fix — the other
+half is making the now-unsatisfiable case loud, or the next publisher reintroduces the defect with
+no test and no log. R3/R3b is the worked example.
 
