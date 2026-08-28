@@ -7103,3 +7103,77 @@ CI-visible; the compare URL stands either way. Did not touch the authz A/B/C que
 **Ledger effect:** the CI sqlite-gap row is promoted from housekeeping to a **gate on tranche B's
 regression protection**. It does not block the merge — that remains the user's call — but it now
 blocks "tranche B is protected", which is a different claim from "tranche B is correct".
+
+---
+
+## §5cq. Heartbeat 2026-08-28 07:13 — the CI blind spot is GROWING; my denominator was wrong
+
+### Near-miss: a failed fetch reported as "no movement"
+
+`git fetch upstream` failed with "Failed to connect to github.com port 443". Because the command was
+`fetch upstream && fetch origin`, the `&&` short-circuited and **neither** remote updated — yet every
+subsequent `git rev-parse` answered happily from cache, and `gh pr view` succeeded over the API, so
+the sweep looked completely normal. This is heartbeat item 1's warning ("a lagging mirror answers
+every question plausibly") arriving as a *transient*, which is worse than a permanently stale
+remote because nothing looks wrong. Retried, fetch succeeded, re-read everything: genuinely no
+movement. **Standing change: check the fetch's exit status, never just its output.** Same family as
+rules 81/85/86 — the instrument's silence is not a reading.
+
+### Sizing the escalation I sent last heartbeat
+
+The escalation said B5's tests are dark in CI. It did not say what closing the gap costs. Answers:
+
+**1. The `!no_sqlite` tag on those files is load-bearing, not conventional.** The B5 tests reach
+sqlite three ways — `newTestStore(":memory:")`, `sql.Open("sqlite3", ":memory:")` for
+`NewWebChatStore`, and a direct `mattn/go-sqlite3` import — and **`pkg/hub` contains no Fake/Mock/Stub
+Store whatsoever**. So the tests cannot simply be untagged or relocated; substituting a double means
+building one first.
+
+**2. `make test-fast` is the ONLY test invocation in all of `.github/workflows`.** No second job, no
+nightly, no matrix leg. `make test` (untagged, runs everything) exists in the Makefile at line 62 and
+CI never calls it. My escalation to the user was therefore accurate — there is no other gate that
+would catch a B5 regression.
+
+### CROSS-CHECK AGAINST em9's INVENTORY — and a correction to myself
+
+em9 had already inventoried this repo-wide. Rather than relay my own figures I compared them, and
+**mine were wrong**:
+
+| metric | em9 | me (raw) | resolution |
+|---|---|---|---|
+| total test funcs | 8,472 | 9,888 | **em9 right.** I counted `extras/*` — 1,326 funcs in separate go modules that `./...` from the root never touches. Root-module total 8,562. |
+| % dark | 39.6% | 34% | **em9 right**, my denominator was inflated |
+| tagged files | 220 | 219 | tree divergence, immaterial |
+
+**I did not send a percentage to the user** — the escalation led with the verified `[no tests to run]`
+transcript and its positive control. Rule 80 ("a percentage is an argument, a verified chain is a
+fact; lead with the fact") is why the wrong number never left the building. Had I led with the
+figure I would have had to issue a correction.
+
+### NEW, and beyond em9's snapshot: THE BLIND SPOT IS GROWING
+
+em9 measured the gap once. Measuring it across main's history shows it compounding:
+
+| date | main | dark test files | of which `pkg/hub` |
+|---|---|---|---|
+| 2026-08-23 | `df701e38d` | 188 | 147 |
+| 2026-08-25 | `35bd59f23` | 188 | 147 |
+| 2026-08-26 | `3aeb77296` | 204 | 161 |
+| 2026-08-27 | `f4d02461b` | **219** | **174** |
+
+**+31 dark files in five days, 27 of them in `pkg/hub`** — the package tranche B modifies. Every new
+`pkg/hub` test follows the house convention and therefore lands dark. This matters because it changes
+the shape of option (iii): **"accept the gap" is not a steady state, it is a compounding one**, and
+the cost of closing it rises every day it stays open. It also explains the em9-vs-tranche-B file
+count discrepancy (209 vs 219) — em9-unify's base `6268bac44` simply predates ~10 of them, which is
+one more symptom of how stale that branch is (§5co).
+
+**Held, not sent.** I escalated this topic 30 minutes ago and the user has not replied. This
+strengthens the same case but changes nothing they must decide right now, so it waits — **one
+escalation per topic until answered.** It goes to them if they engage or ask how bad it is, and to
+em9 at dispatch time rather than as an unsolicited ping to a parked agent (item 3).
+
+### Ledger
+
+No rows struck; fifth consecutive sweep with no movement in main, tips, roster, or PR state. All
+reasons unchanged from §5cl. Tranche B PR still unopened.
