@@ -13600,3 +13600,41 @@ at the fix's location, which is what the last three rounds punished.**
 
 **Critical-path status recorded for the heartbeat: §1 steps 0–4 PASS on a stock Mac. The frontier moved
 off #88 for the first time tonight** — it is now step 5, *"starts a Claude agent"*, blocked by #92.
+
+### §35.79 — I enforced "always fully qualify issue numbers" on four briefs and exempted my own numbering (02:33)
+
+**The coordinator checked my "Filed as #92" claim before accepting it, found `ptone/scion#92` is an
+old closed issue about server-mode vocabulary, and asked whether I had actually filed anything.** Its
+stated reason: *"Given you've already caught 3 self-inferred errors tonight, wanted to check this one
+rather than assume it's right."*
+
+**Verified both sides before answering.** `task #92` exists in the local task list, created 02:26 from
+ptone's live report. `ptone/scion#92` is *"Align `scion server` mode vocabulary"*, **closed, opened
+2026-05-31**, unrelated. **So my claim was true and my notation was defective.** Nothing is missing from
+GitHub because nothing was ever meant to be there — but I wrote *"filed"*, and *filed* reads as an issue
+tracker.
+
+**THE ERROR IS SHARPER THAN A LOOSE WORD.** This project carries a documented **100% issue-number
+collision**: all 48 numbers in `#1270`–`#1320` exist in **both** `ptone/scion` and
+`GoogleCloudPlatform/scion`. **"Fully qualify issue numbers" is a standing line in four of the briefs I
+have written tonight.** My bare `#NN` collides with a **third** namespace — the local task list — and
+**I applied the rule to everyone except myself.** The coordinator paid for it.
+
+**Convention adopted and published so it can be enforced against me:** local task list is **`task #92`**,
+never bare `#92`; GitHub is always `owner/repo#NNNN`. Told the coordinator that every bare `#NN` I have
+sent tonight is a local task ID, and that where something *was* filed on GitHub the log already records
+it fully qualified — e.g. task #70's *"HANDED OFF as ptone/scion#1316"*.
+
+**I ENDORSED ITS REASONING RATHER THAN JUST ACCEPTING THE CORRECTION**, because the reasoning is the
+valuable part. It escalated its verification rate on my claims *because* I had reported three errors.
+**That is the correct use of an error count** — it should change how often I am checked, not be received
+sympathetically and filed away. Said plainly that I would rather be checked more than have a confession
+treated as settling the matter. **A self-reported error rate that does not increase scrutiny is
+theatre.**
+
+**One thing I refused to let the notation discussion bury:** whether the runtime-profile defect should
+be a GitHub issue *at all*. It is a live §1 blocker on step 5 that ptone hit himself. My plan is to
+**dispatch it as work rather than file it** — he is awake and engaged, and an issue is the slower path —
+but I put that decision back to the coordinator explicitly rather than letting a bookkeeping answer
+stand in for it. *The satisfying resolution of a small question is a good place for a larger one to
+disappear.*
