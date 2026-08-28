@@ -1,4 +1,104 @@
-# #88 `scion/bash32-portability` — Review (round 1)
+# #88 `scion/bash32-portability` — Review
+
+Round 1 reviewed head **`edfe61f41`**. Branch has since advanced to **`ae6ccefe9`** (two further
+commits); **Round 2 addendum is at the top**, the original round-1 body follows unchanged below.
+
+---
+
+# ROUND 2 — head `ae6ccefe9` (added after branch advanced under review)
+
+Three commits on `1befe923`: `edfe61f4` (fix — **unchanged**), `4827ed05` (differential harness),
+`ae6ccefe` (bash-3.2 regex fixture + `--check`). The harness commit was amended once
+(`12c799e5`→`4827ed05`) after a shellcheck failure.
+
+### Correction to the dispatch (verified, not read)
+The dispatch said `edfe61f41` "is no longer in the branch history." **It is** — it is the base
+commit of the stack, and `git rev-parse edfe61f4` is bit-for-bit
+`edfe61f41770912d7aeb033bcaabdb574cc1edc8`, the exact object I reviewed in round 1. What was
+amended is the harness commit *above* it. Consequence: **round 1's P1/P2/P3/P4, R1 and the nits
+carry forward by content-addressing** — the fix / test / `ci.yml` trees are provably identical, no
+re-read needed. Only the two new commits are new surface.
+
+### New surface — VERDICT: clean (would APPROVE this delta as-is)
+`scripts/dev/shell-differential.sh` (233), `scripts/dev/corpus/url-override-adversarial.tsv` (53),
+`scripts/dev/bash32-regex-probe.sh` (84). None is run by CI's `bash32` job; all three `.sh` are
+caught by the shellcheck job's `find . -name '*.sh'`. This is developer tooling, not shipped
+runtime.
+
+### Stale-verification hunt (architect's "verify-then-edit-then-claim-clean" shape) — CLEAN
+Re-ran shellcheck myself at `ae6ccefe9` (CI form `-x --source-path=SCRIPTDIR`): both new files
+**CLEAN**, full sweep **64/64**. The SC1010 that caused the amend (the bare `done` string on
+line 146, now quoted `'done'` with a comment) is genuinely gone — measured, not read. No other
+commit in the stack carries a claim that postdates a later edit that I can find.
+
+### Dead-exit-code-column claim — VERDICT: CONFIRMED, by measurement AND structure
+dev2 disclosed its harness's first version reported `IDENTICAL` for a candidate in which every
+verdict had changed — `$?` was a constant 0 (sentinel `printf x` was the subshell's last command),
+so the exit column was dead — and that the 2×2 / 48-input numbers it gave earlier came from that
+version, surviving only because the stderr column was live. I tested it three ways:
+- **The harness now guards itself.** Its `--self-test` (run on *every* comparison, not behind a
+  flag) has a **case 2 "verdict-only change"** — same stderr, different exit — that is red iff the
+  exit column is really compared. I ran it: 4/4 pass under bash 5.2. The exact bug now fails the
+  instrument before it can emit a verdict.
+- **Reproduced the numbers with the exit column live.** base(`1befe923`, `${v,,}`) vs shipped
+  sentinel → **IDENTICAL, 22 rows**. base vs plain@scheme → **2**; base vs plain@host → **4** (3
+  verdict flips `1→0` + 1 message-only on the denied host, exit `1→1`, stderr changed); base vs
+  plain@both → **6**. Exactly dev2's 2+4=6, and consistent with round-1 P4 (Go table: 5 verdict
+  flips) and P1 (my own live exit+value harness).
+- **Structural proof it *cannot* be otherwise for this function.** Every `return 1` in
+  `di_validate_override_url` is preceded by an `echo …>&2`; the only silent path is the allowlist
+  `return 0`; return codes are only {0,1}. So reject ⟺ nonzero-exit ⟺ nonempty-stderr are perfectly
+  correlated — **the stderr column alone fully determines the verdict**, and no exit-only /
+  identical-stderr divergence is constructible here. The dead column hid nothing for *this*
+  validator. The numbers survive.
+
+  Caveat kept honest: a dead exit column *would* matter for a function that rejects silently or
+  uses distinct non-zero codes with identical stderr. The salvage is specific to
+  `di_validate_override_url`'s reject⟺stderr correlation; the self-test is what protects the *next*
+  use.
+
+### `bash32-regex-probe.sh` `--check` — validates for real
+Recorded fixture matches the probe output the architect relayed from ptone's real 3.2.57.
+`--check` under bash 5.2 → `IDENTICAL to bash 3.2.57 on all 5 cases` (rc 0 — bash 5 agrees with 3.2
+on these constructs, which is the portability reassurance for deploy.sh's unquoted `=~`). Corrupted
+the fixture in a copy → `--check` correctly reports **DIVERGENT, rc 1**. Not vacuous. Case 5 (the
+quoted-RHS-is-literal trap) is a real pin tied to a real fail-open risk.
+
+### R1 disposition — deletion DISCHARGES it, does not move it (ruling on the architect's proposal)
+Proposed fix: replace the fetch-compile job with `runs-on: macos-15` + `SCION_TEST_BASH=/bin/bash`
+(GitHub's macOS runners ship `Bash 3.2.57(1)-release` natively).
+- **Discharges, not relocates.** R1's subject is that the workflow reaches *outside its pinned
+  supply chain* to fetch source and compile+execute it at job time. A pre-provisioned runner
+  binary is part of the GitHub runner image — the same image already providing the OS, the shell
+  that runs every `run:`, git and the toolchains. The job already trusts that image, unavoidably,
+  for everything. Using its bash extends **no new trust**. Categorically different from
+  fetch+compile. Once the fetch/compile steps are deleted, R1 has no subject (and it takes the
+  Optional log-swallowing item with it).
+- **One correction to the framing:** the right analogue is "the runner image itself," *not*
+  `actions/checkout`. checkout is SHA-pinned; the runner image is pinned only by a moving label
+  GitHub patches — a *less*-pinned dependency than checkout. That is acceptable only because it is
+  unavoidable and already fully trusted, and because of the two conditions below.
+- **Two conditions for the discharge to hold:** (1) pin a **specific** runner version
+  (`macos-15`), never `macos-latest` — a floating alias GitHub can repoint onto an image with a
+  different bash; (2) **keep the canary** — its job is now load-bearing, not belt-and-suspenders:
+  it is the backstop that catches a runner-image bash drift (or `-latest` silently serving bash 5).
+- **Status:** I am ruling on a *proposal*; the `macos-15` job is not in the tree at `ae6ccefe9`,
+  which still contains the fetch/compile job. R1's subject is therefore still present in the
+  current tree. Re-check when the new job lands: `runs-on` pinned (not `-latest`),
+  `SCION_TEST_BASH=/bin/bash`, canary retained and now asserting the version, no fetch/compile
+  remnant.
+
+### Round-2 verdict
+The **new-commit delta (`4827ed05`+`ae6ccefe`) is APPROVE** — clean, and unusually disciplined
+(self-testing harness, in-repo fixture for an un-reobtainable measurement, honest disclosure of its
+own founding bug). The **branch overall stays REQUEST CHANGES** for one reason only: R1's subject is
+still in the tree at `ae6ccefe9`. Its resolution (delete the fetch/compile job → native runner) is
+accepted in principle; verdict flips to APPROVE when that lands with the two conditions above. No
+new findings this round.
+
+---
+
+# ROUND 1 — head `edfe61f41`
 
 Branch `scion/bash32-portability` @ **`edfe61f41`**, cut from `main = 1befe923`, ahead 1 /
 behind 0. Three files: `deploy.sh` (+23), `cmd/deploy_script_test.go` (+145), `ci.yml` (+63).

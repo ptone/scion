@@ -13531,3 +13531,72 @@ returns 200 and served me the runner-images READMEs; `proxy.golang.org` 200; `ft
 asserting it was wrong — containers may differ. **The environment record must say which hosts, not which
 impressions.** "github raw is blocked" is exactly the sentence that later stops someone trying something
 that would have worked.
+
+### §35.77 — rev2 caught me asserting a false fact about my own repository (02:30)
+
+**I told rev2 that `edfe61f41` was "no longer in the branch history." That was FALSE.** It is the base
+commit and never moved. `git merge-base --is-ancestor edfe61f41 4827d361` returns true; I ran it after
+being corrected, which is ten seconds I could have spent before.
+
+**The mechanism of my error is worth more than the error.** I had the amend facts —
+`12c799e5 -> 4827ed05` — and generalised from *a commit was amended* to *your review base is gone.*
+**The amend was ABOVE the base, and that single detail decides the question.** I had the data and drew
+the conclusion without checking the one thing that mattered.
+
+**Third factual error tonight: `mktemp` on macOS, "seven of ten tools bite", and now this. All three
+have the identical shape — I inferred where measuring would have cost under ten seconds.** That is now a
+pattern rather than three incidents, and it is the same pattern I have spent the night correcting in
+other agents. Recording it plainly because a log that only catches other people's errors is a
+promotional document.
+
+**It cost rev2 real work** — it re-verified by content-addressing that its round-1 findings carried
+forward, which it should not have needed to do. **It checked me instead of believing me, and that is the
+only reason my error cost minutes rather than a wasted round.** Said so directly.
+
+**rev2's structural argument on the dead exit column is the strongest artefact of the round.** Not a
+sample — a proof: in `di_validate_override_url` every reject echoes to stderr, only the allowlist path
+returns 0 silently, and codes are `{0,1}`, so **reject ⟺ nonzero ⟺ nonempty-stderr are perfectly
+correlated and no exit-only divergence is CONSTRUCTIBLE.** dev2's earlier numbers survive. **And its
+caveat is the part worth keeping: the salvage is specific to this function; the self-test is what
+protects the next use.** A proof that rescues one result is not a policy.
+
+Its R1 ruling accepted as written, including a distinction I had blurred: **the runner image is a
+*less*-pinned dependency than `actions/checkout`** — acceptable because unavoidable and already trusted,
+**not** because it is equivalent. Two conditions attached and both already met at `4827d361`: pin
+`macos-15` not `macos-latest`, and keep the canary as the drift backstop.
+
+### §35.78 — the design doc does not merely omit; on Kubernetes it CONTRADICTS the shipped tier (02:31)
+
+**Measured for the heartbeat's question 3.** `grep -niE "runtime.?profile|kubernetes|k8s"` on
+`.design/hosted/cloud-run-single-node.md`: **exactly two hits, and BOTH DENY KUBERNETES.**
+
+- line 48 — *"NFS, no Filestore, no Kubernetes."*
+- line 390 — *"Docker, Podman, and Kubernetes paths are untouched."*
+- **`runtime profile` appears ZERO times.**
+
+**And #92 measures that a fresh deploy of this tier defaults its runtime profile to "remote
+(kubernetes)".** The doc says the tier has nothing to do with Kubernetes; the artifact ships pointing at
+it.
+
+**This is a harder finding than last cycle's.** §35.68 was an **omission** — the doc never said what the
+operator's machine must provide. **This is a CONTRADICTION between the design and the artifact, on a
+§1-blocking point.**
+
+**THE DESIGN-LEVEL ROOT CAUSE IS LINE 390 ITSELF, READ AGAINST #92.** *"Kubernetes paths are untouched"*
+is a scoping decision — do not break other runtimes — and it is correct as far as it goes. **What nobody
+wrote down is its consequence: if you leave the other runtime paths untouched, and one of them is the
+DEFAULT, the tier ships defaulting to a runtime it explicitly does not support.** The scoping statement
+and the defaulting behaviour were never reconciled.
+
+**Not a wrong decision — an unexamined one.** Third time in this doc: the operator's environment
+(→ #88), failed-deploy atomicity (→ criterion 12), and now the runtime default (→ #92). **The class is
+"a scoping statement whose consequence was never written down", and it has produced three separate
+defects, two of them §1 blockers.**
+
+Routed into **#86 as Edit 4**, with an explicit dependency: **do not write it until #92 establishes
+where the default is written.** If it is a general hub default rather than a tier default, the doc text
+becomes a cross-tier statement and belongs somewhere else entirely. **Writing it now would be guessing
+at the fix's location, which is what the last three rounds punished.**
+
+**Critical-path status recorded for the heartbeat: §1 steps 0–4 PASS on a stock Mac. The frontier moved
+off #88 for the first time tonight** — it is now step 5, *"starts a Claude agent"*, blocked by #92.
