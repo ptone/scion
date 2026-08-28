@@ -13038,3 +13038,64 @@ The 215-file figure is inherited base: the branch sits on a long-lived integrati
 **NEW RULE 226.** Classifying a branch by its *recent* commits misclassifies its *older* ones. "em9-unify is an audit branch" is true of the tip and false of the middle. When accepting a branch as documentation, state explicitly what happens to any product commits it also carries, or they become invisible — protected from review by the label applied to the branch as a whole.
 
 Roster: em10, em9, em6 all confirmed `blocked` via `scion list`. Parks took.
+
+## §5fa — 2026-08-28 — marker gate coverage gap found ON the known B5 hazard; §5ez addendum corrected
+
+`upstream/main` unchanged at `b14c41414`. #1361 OPEN/MERGEABLE at `5fc82455b`; dm-tighten PR not yet opened. Both waiting on the user — no nagging.
+
+### CORRECTION to the §5ez addendum (rule 226 entry)
+I classified `em9-unify` as "an audit branch that also carries some product commits" and listed DEF-20/DEF-27/F1/F2 as strays to triage. **That was wrong in shape.** Filtering out doc/audit commits leaves **84 product commits** — DM migration, DeriveConversationKey, dual-write, backfill, DEF-8/11/13/15/16/19/20/21/22/23/27, F1/F2. `em9-unify` is not an audit branch with strays; it **is the v2 integration lineage**, and the tranche C–G plan already governs it. `scion/messaging-v2` is NOT an ancestor of it (checked), despite shared lineage via `2724ed106`.
+
+Rule 226 still stands as written, but the *instance* was misdiagnosed. Recording both because the misdiagnosis is the more instructive half: I derived "audit branch" from the tip commits and never filtered the range.
+
+### THE REAL FINDING — the gate does not cover the place the hazard lives
+
+`hack/checksecuritymarkergates/main.go:33-34` guards exactly two files:
+```go
+hamPath := "pkg/hub/handlers_agent_messaging.go"
+hcvPath := "pkg/hub/handlers_chat_v2.go"
+```
+**`pkg/hub/messagebroker.go` is not guarded.** That is where the B5/R1 self-skip lives.
+
+On `upstream/main`, `fanOutToProject` and `fanOutGlobal` both skip by canonical ID:
+```go
+// B5/R1: skip the sender by ID, not by the display-label Sender field.
+if msg.SenderID != "" && msg.SenderID == agent.ID {
+```
+plus an R3b warning when an `agent:`-prefixed Sender arrives with empty `SenderID`.
+
+Measured `SenderID` occurrences in `fanOutToProject` / `fanOutGlobal`:
+
+| branch | fanOutToProject | fanOutGlobal | slug-skip present |
+|---|---|---|---|
+| `upstream/main` | present (5 lines) | present (3 lines) | no |
+| `scion/ca-msg-em9-unify` | **0** | **0** | yes |
+| `scion/messaging-v2` | **0** | **0** | **yes (3)** |
+| `scion/auth-refactor` | 0 | — | no |
+| `scion/auth-refactor-v2` | 0 | — | no |
+
+So my long-standing "messaging-v2 restores slug-based self-skip — DO NOT CARRY" rule is **empirically confirmed**, and the gate built to protect the security markers **does not cover it**.
+
+**RETRACTED: the §5ez downgrade of the branch-deletion decision.** I told the user the three dead branches were no longer load-bearing "because both gate carriers now enforce the security markers." That inference was wrong — the gate's coverage does not extend to the file where those branches carry their revert. Correction sent to the user; the deletion question is a safety question again, not a preference.
+
+**NEW RULE 227.** A gate's *coverage set* is a security claim in its own right and must be justified, not inherited. This file list was never derived from anything — it was two files someone thought of — and it omitted the file holding a hazard I had already written a standing rule about. Ask "what is NOT in the guarded set, and why is that safe?" before treating a gate as protection.
+
+**NEW RULE 228.** Never generalise from "the gate is green" to "the invariant is protected" without checking that the invariant's code is inside the gate's scope. The gap and the hazard were both known to me separately for several segments; nothing connected them until I asked whether the gate would catch a revert I already knew was possible.
+
+**NEW RULE 229.** When a real branch containing the defective code exists, use IT as the positive control instead of a synthetic mutation. It tests the artifact that would actually land, and it cannot drift from the real failure mode the way a hand-written edit can.
+
+### Dispatched to em10 (two parts, deliberately)
+- **Part 1, the instance:** add REQUIRED rows `SenderID in fanOutToProject` and `SenderID in fanOutGlobal` for `pkg/hub/messagebroker.go`. Counts to be measured **with the AST tool, not grep** — `SenderID` also appears in comments and inside a `Warn` string literal, which are not `*ast.Ident` nodes, so grep overcounts. Positive control = overlay `em9-unify`'s `messagebroker.go` onto a clean main tree, expect exit 1 naming both rows.
+- **Part 2, the category:** audit `pkg/hub` for security-critical symbols living outside the guarded files — self-skip by ID, authorization calls, audit logging, key-derivation refusals — and return a table (file, function, symbol, invariant) flagging which are load-bearing. **Not to be added unilaterally; I rule.** This is the half that matters, per the same logic that made go/ast the right call over patching awk: fix the category, not the instance.
+- **Mechanics:** new branch stacked on `scion/ca-msg-em10-marker-gate` so #1361's CI is not reset; after #1361 squash-merges, `git rebase --onto upstream/main origin/scion/ca-msg-em10-marker-gate HEAD` (rule 222).
+
+### Ledger sweep
+- **Nothing struck this heartbeat.** Stated per instruction rather than manufacturing a strike.
+- **DEF-18** — unmoved 3 heartbeats. Reason unchanged: lint-fix is cheaper than correct-fix, so CI would discharge it wrongly (rule 217). Still awaiting a carrier tranche for `pkg/messaging/validate.go`.
+- **Branch deletions** — moved *backwards*, from preference to safety-relevant. See retraction above.
+- **DEF-32/DEF-34 routing** — unmoved 3 heartbeats, still the tranche C blocker, still awaiting the user's hotfix-vs-fold decision.
+- **NEW ROW — GATE-1:** marker gate omits `pkg/hub/messagebroker.go`. Open, assigned em10. Blocks nothing, but must not land silently.
+- Held, unmoved, no new information: DEF-5, DEF-6, DEF-9, DEF-10, DEF-11, DEF-14, DEF-16, tranches D–G. Tranche H still carrier-less, blocked on G-1.
+
+### Roster
+em10 dispatched (Part 1 + Part 2). em6 parked, `7caa8e00d` awaiting user PR open. em9 parked at `47a7c6736`; its 84 product commits are the tranche C–G body, correctly blocked on the DEF-32/34 routing decision, not on me.
