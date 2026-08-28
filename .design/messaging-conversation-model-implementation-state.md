@@ -9185,3 +9185,122 @@ over-granting is not.
 three if their work has landed" is three questions, not one, and batching them is how the one that
 had not landed gets deleted with the two that had. The check here was a single `git log --all
 --author` per name and it changed the answer for one of three.
+
+## §5dp. Heartbeat 2026-08-28 13:43 — BASE MOVED. Both branches re-verified against it.
+
+### The event: `upstream/main` `4b120bd70` -> `19e32902e`
+
+First movement of the session after five consecutive static sweeps. Three PRs landed:
+
+| SHA | PR | Title |
+|---|---|---|
+| `137e17637` | #1346 | feat(hub): UAT scopes for 8 resource types + scope list endpoint (P2-D1) |
+| `31bedbb34` | #1347 | fix(security): project authz on broadcast + ActionAttach on chat dispatch |
+| `19e32902e` | #1348 | feat: role and binding management API with CanDelegate enforcement (P2-C1) |
+
+**#1347 is the broadcast-authz fix I relayed to auth-refactor-lead.** That relay closed.
+
+18 files, +2771/-32. Three of them collide with my open work:
+- `pkg/hub/handlers_agent_messaging.go` (+16) — em10 tranche B
+- `pkg/hub/handlers_chat_v2.go` (+24) — em10 tranche B
+- `pkg/store/store.go` (+16) — em6 #1349
+
+### Merge-readiness re-established (heartbeat item 5)
+
+Textual `git merge-tree --write-tree --messages upstream/main <tip>`: **zero conflicts, both branches.**
+
+Textual cleanliness is not the interesting test here. em10's tranche carries two AST
+enumeration guards over `pkg/hub` — `TestCreateMessageEnumeration` and the
+`PublishUserMessage` site test. Those guards fail if main adds a call site the branch's
+manifest does not list. A clean textual merge would not catch that; the guards are
+*designed* to fire on exactly this event. So the real check is behavioural.
+
+Built two detached trial merges in `/tmp` (never pushed, never in `/workspace`):
+
+- `/tmp/mrg10` = em10 `822c02e58` + `upstream/main` — clean merge, `go build ./...` rc=0,
+  `go test -tags no_sqlite ./pkg/hub -run 'TestCreateMessageEnumeration|TestPublish'` **ok**.
+- `/tmp/mrg6` = em6 `42abb7dff` + `upstream/main` — clean merge, `go build ./...` rc=0,
+  `pkg/messaging` and `pkg/store` **ok**.
+
+Confirmed by reading the additive hunks in the three shared files that #1346–#1348 introduce
+**no new `CreateMessage` or `PublishUserMessage` call sites** — only authz guards
+(`ActionAttach` checks) and four new `store.Store` interface methods for role management.
+That is why the manifests still hold. Eyeballing the hunks and running the guards agree;
+I did both because either alone is weak.
+
+**Conclusion: no rebase required on either branch.** The user's standing caution —
+*"be very careful not to revert other work on main as you have agents rebase on upstream main"* —
+is best served by not rebasing at all when the merge is clean. No rebase instruction issued.
+
+### PR #1349 settled
+
+`mergeStateStatus` went `UNSTABLE` -> `UNKNOWN` -> **`UNSTABLE`**, `mergeable: MERGEABLE`.
+The `UNKNOWN` at the last sweep was GitHub recomputing after the base moved, exactly as
+predicted. Checks on the new merge ref: Build & Test SUCCESS, golangci-lint SUCCESS,
+check-changes SUCCESS, scan-pr SUCCESS, shellcheck SUCCESS, zizmor SKIPPED,
+`cla/google` FAILURE. Rule 104: `cla/google` is scenery on agent-authored branches;
+#1343 merged red on the identical check with the identical author. **#1349 is merge-ready.**
+
+### Rule 112 instantiated on #1349 — noted, deliberately NOT escalated
+
+`pkg/store/entadapter/conversation_store_test.go` carries `//go:build !no_sqlite` at line 15.
+Under `-tags no_sqlite` the package reports **"no test files"**. All five EnsureParticipant
+tests — including `TestEnsureParticipant_DoesNotClearLeftAt`, which is the entire B6 fix, and
+`TestEnsureParticipant_PopulatesCallerStruct`, which is the B9 fix — are invisible to
+`make ci`. Run untagged on the merged tree, all five PASS.
+
+So: #1349's green tick is green about the code it does not test. The tests are real and they
+pass; CI just never looks at them.
+
+**I did not send this to the user.** It is not a new finding — it is a fourth instance of the
+CI SQLite blind spot already on their desk as option (i), and §5cq records the decision not to
+re-raise option (i). Adding "and here is another example" to an unanswered question is nagging
+dressed as information. It goes in the ledger, and if option (i) ever needs re-arguing this is
+the concrete case to lead with: *the CI blind spot hides the test for the security fix in the
+PR you are being asked to merge.*
+
+### em9 — second stall, escalated as a process problem rather than re-asked
+
+em9: `working` at 13:13, `stalled` at 13:43, branch tip unchanged at `e704b2feb`
+(last commit 08-28 03:18, the inventory corrections). `git ls-tree` over its branch finds
+nothing DEF-32-shaped committed. Two requests sent, two unanswered — the second was the
+explicit *"send what you have now, do not restart, do not rewrite."*
+
+A third ask tests the same hypothesis a third time. Instead, two moves in parallel:
+
+1. **Asked the coordinator for a read-only screen peek**, with the instruction to quote
+   literally and to label any inference as its own. The coordinator burned itself on exactly
+   this before (§5dk) and over-corrected toward silence; I framed the request so the useful
+   part of a peek — "is there a finished report sitting unsent?" — survives the caution.
+   Three states to discriminate: (a) finished-but-unsent, (b) mid-work, (c) idle.
+2. **Took DEF-32 off em9's critical path.** Dispatched an independent read-only
+   investigation against a clean `upstream/main` worktree (`/tmp/mainD` at `19e32902e`),
+   scoped to the same three precision requirements I gave em9: which federated identity
+   type reaches the subscription write, what wiring establishes it (call chain, not
+   type-satisfies-interface), and whether federation is config-gated. Rule 114 observed —
+   `/workspace` is docs-only and stale, so the investigation must not read from it.
+
+The peek is about the agent. The investigation is about the world. Rule 115: em9's silence
+is evidence about em9, not about DEF-32, and I should stop treating the two as the same fact.
+
+### Rule 119
+
+**When an agent has failed to answer the same question twice, stop asking and split the
+problem in two: get the answer from somewhere else, and diagnose the agent separately.**
+The third ask is not persistence, it is a refusal to update. Re-asking also silently makes the
+agent a single point of failure for a question that was never actually blocked on it.
+
+### Rule 120
+
+**A clean textual merge is not merge-readiness for a branch whose value is a guard.**
+Enumeration and manifest guards are built to fail when the base grows a new site — the one
+event a conflict check cannot see. Trial-merge into a throwaway detached worktree and *run
+the guard*. The cost is one worktree and one test invocation.
+
+### State after this sweep
+
+- `upstream/main` = `19e32902e` (moved).
+- `ca-msg-em6-b6b7b9` = `42abb7dff` — PR #1349 OPEN, MERGEABLE, awaiting the user's merge.
+- `scion/ca-msg-em10-trb` = `822c02e58` — compare URL with the user, awaiting PR open.
+- `scion/ca-msg-em9-unify` = `e704b2feb` — unchanged; em9 stalled.
+- em6, em10, coordinator blocked; em9 stalled; held briefs still gated on #1349 **merging**.
