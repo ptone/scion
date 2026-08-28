@@ -10299,3 +10299,144 @@ the control must stay green.
   that shows the same shape, in the same session, even when the second delivery is
   otherwise excellent and turned around fast. Waiving it because the agent was
   cooperative is the charitable prior (rule 127) wearing a different hat.
+
+---
+
+## §5dz — two branches cleared for merge; tranche manifest ruled on; the manifest's own blind spot
+
+Date: 2026-08-28 16:00Z.
+
+### 5dz.1 — em10 tranche B ACCEPTED, #1353 cleared
+
+`scion/ca-msg-em10-trb` @ `788e39704`, force-pushed over `822c02e58` (announced, as asked).
+Base contains `31c488018`. Zero files with deletions over 20 lines.
+
+`deliverToUser` now returns on `CreateMessage` failure; `persistOK` is gone entirely, with a
+comment naming `deliverToAgent` as the pattern. All five effects structurally guarded. This is
+the shape fix, not the extra condition.
+
+**Publish count reconciled independently.** 15 grep hits vs em10's 11: one is the interface
+declaration (`events.go:50`); three are arity-4 broker enqueue (`handlers_agent_messaging.go:321`,
+`notifications.go:460`, `messagebroker.go:270`). Eleven arity-2. **The arity filter is principled,
+not convenient** — arity-2 publishes an already-persisted `store.Message`; arity-4 enqueues a
+structured message with no persisted-row precondition. Three `NotifyDMReceived` sites, matching.
+
+**MUTATION m6 (mine, em10 did not run it).** em10's m3 deleted a map entry — that tests
+map→source. m6 tests **source→map**: a new file with a fresh unlisted `NotifyDMReceived` site.
+
+```
+publish_site_enumeration_test.go:284: Found 1 persisted-row effect call site(s) not in guarded list:
+  - m6_newsite.go:m6NotifyNewFeature (line 24)
+```
+
+KILLED by name and line. **That is the direction that actually failed the first time** — the
+original defect was not a missing map entry, it was a real site nobody had enumerated.
+
+First attempt at m6 was a build failure (`nd.chatNotifier` undefined). That is the instrument
+breaking, not a kill; rewrote it as a standalone function taking the notifier as a parameter.
+
+**m1 survives and em10 said so.** The flag version passes both behavioural tests, so the tests
+cannot distinguish the two fixes; the early return wins on structure, not evidence. Reporting
+that plainly rather than dressing it as a kill is the correct call. Accepted.
+
+Residual, non-blocking: the audit log is now correct *as a consequence of* the early return, not
+because a test asserts it. A second exit path would reintroduce it silently.
+
+### 5dz.2 — em6 B2/B1/B14 ACCEPTED, compare URL sent
+
+`scion/ca-msg-em6-b2b1b14` @ `c34f36230`, 9 commits, fourth fix commit not squashed.
+
+New subtest `guard_result_consumed_not_discarded` via a `bodyDiscardsCallResult` AST helper.
+Verified myself: control PASS, m4 KILLED, m5 KILLED — all under `-tags no_sqlite`.
+
+**MUTATION m7 (mine): survives, and that is acceptable.** Replaced `return err` with `_ = err`
+inside the guard's if-body — error checked, then swallowed, no blank identifier on the assignment.
+The enumeration passes. **But em6's rewritten doc comment names this exact gap** ("an
+`if err := ...; err != nil { }` with an empty body would still slip past"). I wrote in the same
+dispatch that the tightening game is unwinnable and that every turn of the screw buys one
+evasion class. Holding em6 to m7 would be moving the goalposts I set one message earlier.
+
+The doc comment now carries all four things asked for, including the expiry condition: *"This
+file should be deleted the day the behavioural tests run in CI."*
+
+Compare URL sent to thread `1532864101909528737`. **Budget note: the body needed four
+successive trims — 3063 → 2380 → 2216 → 2078 → 1953 runes.** URL-encoding roughly triples prose.
+Budget ~600 characters of body for a URL that must fit a 2000-rune message.
+
+### 5dz.3 — Tranche manifest: three rulings
+
+em9 delivered `TRANCHE-MANIFEST.md` on `scion/ca-msg-em9-unify` @ `95ed7b1c`, 32 code rows
+reconciling exactly with my tree-difference. Shaping the deliverable as a committed file rather
+than a report worked — no lost report this round.
+
+**RULING 1 — `broadcast{,_test}.go`, `keys{,_test}.go` → F.** Row 1781 says "CLI subcommands";
+these are CLI subcommands. C's claim exists only because §5ca/§5co computed C by counting adds
+per directory on `ca-msg-em9-unify`, which swept `cmd/` wholesale. **Never a conflict between two
+defensible readings — a counting method producing a number nobody mapped back to files.**
+Consequence: **C's count in §5co is overstated by 4 and C must not be cut from that number.**
+
+**RULING 2 — `handlers_conversations_resolve{,_test}.go` → new tranche H, BLOCKED ON G-1.**
+No existing row covers the resolve endpoint; stretching one is the silent drop with extra steps.
+Blocked rather than merely unassigned because **G-1's required fix is to DELETE
+`sender_principal_kind`/`sender_principal_id` from the request body** — the endpoint lets the
+caller choose who they are and `requireParticipant` then passes against the claimed identity.
+Landing it and fixing after means shipping the vulnerability and chasing it. **The test file is
+marked REPLACE, not CARRY:** its five tests construct a bare `&Server{}` and reach only early
+returns, so there is zero sender-identity coverage. A suite that reaches only early returns is
+worse than none, because it reports coverage it does not have.
+
+**RULING 3 — `cmd/message_convref_test.go` is not an orphan → F, HIGH.** em9 reported zero doc
+references, true of the filename. I read the file: it tests the CLI conversation-reference
+grammar (`TestConvRefParsing_AtAgent/_AtEmail/_HashThread`) and defines `convRefMockServer` with
+an **`outboundMessage` recorder**. That recorder is the point — G-2 went undetected precisely
+because the existing tests discard the send recorder and assert resolution ran as a proxy for
+delivery. **This file carries the instrument G-2's fix needs.** If it drops silently, the fix for
+a HIGH finding loses its harness.
+
+### 5dz.4 — PROMOTED: the manifest is structurally blind to a third of tranche C
+
+em9 filed this as bullet three of three: *"no Phase 11 broker-edge new files exist — all broker
+work is modifications to existing files."*
+
+Tranche C is "Phases 6, 9, 11: envelope types, delivery format, broker edge + 5 adapters".
+Phases 6 and 9 produce new files and map cleanly. **Phase 11 produces none.** A manifest built on
+file existence therefore cannot see a third of tranche C, and the reassurance it offers is
+bounded in a way the document does not state.
+
+The same blindness applies to every modification anywhere. **156 files exist on both
+`messaging-v2` and `upstream/main` with differing content** (excluding docs and `pkg/ent`). Most
+is unrelated drift; some fraction is Phase 11.
+
+Dispatched a scoped modification-side inventory: the five adapters plus `messagebroker.go`,
+`handlers_broker_inbound.go`, `cmd/message.go`. Narrow question — which behavioural changes exist
+on v2, are absent from main, and are named by no tranche. Content comparison, not commit
+identity, because squash-merge destroys identity while preserving content. Plus a paragraph at
+the top of the manifest stating the first table covers new files only.
+
+### 5dz.5 — Calibration note to em9, no rework ordered
+
+18 of 20 positive assignments read HIGH, every one backed by a feature-level phrase; LOW was
+reserved for the four rows where table rows visibly conflicted. **The column is tracking "is
+there a visible contradiction" rather than "how strong is the evidence."** Two claims are merged:
+that a file implements the named feature (near-certain for `envelope.go` under "envelope types"),
+and that the tranche as defined will carry it when cut (not certain at all, since the cut is
+computed from add-counts rather than from the table). Told em9 not to relabel — cosmetic, and the
+rows that matter are the NONE rows and conflicts, which are right — but to apply the distinction
+in the modification table where I will rely on it to triage.
+
+### New standing rules
+
+- **145.** An enumeration guard must be mutated in both directions. Deleting a map entry tests
+  map→source; adding an unlisted call site tests source→map. **The second is the direction real
+  defects arrive from**, and it is the one agents skip.
+- **146.** Do not hold a manager to a limitation they disclosed, when you told them in the same
+  breath that the limitation class is unbounded. A named gap is a different object from a hidden
+  one, and moving the goalposts costs more than the gap.
+- **147.** URL-encoding roughly triples prose. For a compare URL inside a 2000-rune message,
+  budget ~600 characters of body and write it tight the first time.
+- **148.** The interesting question about a file no document mentions is not that it was
+  forgotten — it is what the file does. `message_convref_test.go` looked like an orphan and turned
+  out to carry the test harness for an open HIGH finding.
+- **149.** A completeness audit built on file existence is silent on modifications, and will read
+  as a completeness guarantee unless it says otherwise in its own header. State an inventory's
+  blind spot inside the inventory.
