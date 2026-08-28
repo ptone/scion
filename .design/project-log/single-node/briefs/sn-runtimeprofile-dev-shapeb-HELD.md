@@ -91,6 +91,31 @@ decision.
 | 5 | `cloudrun-instances` (task #94, **unseeded**) | local/docker, remote/kubernetes | remote (**cannot serve it**) | none → synthesised `default` | **YES — the blast radius** |
 | 6 | `cloudrun-sandbox` | **profile with `runtime: ""`** | kept (inherits default type) | kept | **no** |
 
+### UPDATE 2026-08-28 12:39 — the table above is no longer predicted. It is MEASURED.
+
+`sn-row5-spike` measured it by unit test on throwaway branch `scion/spike-row5`
+(`57ac04cc`, `pkg/runtimebroker/spike_row5_test.go`). **Every prediction above was confirmed.** Row 2:
+2 → 1. Row 5: 1 → 1, but the *content* changes from `remote/kubernetes` (unservable by that broker) to a
+synthesised `default/cloudrun-instances` (servable). Row 6 confirmed for four broker types.
+
+**The withdrawal condition did not trigger.** I said "if row 5 measures worse than today, that argues for
+declining". It measured **better**. Shape B stands.
+
+**Two things the spike added that are not in the table above, and you must handle both:**
+
+1. **Row 6 on a `cloudrun-instances` broker also changes: 2 → 1.** An empty-runtime profile correctly
+   inherits and survives, but `remote/kubernetes` is now dropped. Correct behaviour, but it is a visible
+   count change for anyone who declared an empty-runtime profile. **Add it as a seventh row.**
+2. **The spike's dispatch answer is NOT measured and you must not copy it.** Its test genuinely calls
+   `vs.ResolveRuntime("default")` and asserts it errors — that part is real and worth keeping. But the
+   next three lines are `t.Log` narration: *"resolveManagerForOpts returns s.manager"*, *"Dispatch
+   succeeds"*. **`resolveManagerForOpts` is never called.** That is rule 22 — a test that narrates its
+   own correctness is asserting, not measuring.
+
+   **Your job: assert it.** Call `resolveManagerForOpts` and assert *which manager comes back*, for a
+   `cloudrun-instances` broker holding the synthesised profile. Do not restate the trace in a comment.
+   If the manager is not the one the narration claims, that is a finding and you should lead with it.
+
 **Rows 1, 3, 4 and 6 are the load-bearing ones and they are the boring ones.** They are the claim that
 this does not disturb tiers that work today. Rows 2 and 5 are the interesting ones and they will get
 attention on their own.

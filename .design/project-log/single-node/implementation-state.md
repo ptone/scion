@@ -14689,3 +14689,68 @@ Per the process: the developer reported, I accepted the result rather than re-ru
 re-ran was not its measurements but its inferences** — the three facts I checked were ones where a wrong
 value is unrecoverable or security-relevant, and the one thing I overturned was a conclusion, not a
 number. That is the right split, and it is cheaper than a re-review.
+
+## 2026-08-28 12:39Z — row 5 MEASURED. Task #93 is decision-ready and I have recommended (a).
+
+`sn-row5-spike` returned in **four minutes**, branch `scion/spike-row5` @ `57ac04cc`,
+`pkg/runtimebroker/spike_row5_test.go`. **Nine hours of waiting; four minutes of measuring.** That
+arithmetic is the finding, not a footnote.
+
+### The table, no longer predicted
+
+| row | broker | today | Shape B | changed |
+|---|---|---|---|---|
+| 1 | `docker` | 2 | 2 | no |
+| 2 | `cloudrun-sandbox` + seeded profile | 2 (`remote`, `default`) | **1** (`default`) | **the fix** |
+| 3/4 | `kubernetes`, `podman` | — | — | no |
+| 5 | `cloudrun-instances` | 1 — `remote/kubernetes`, **unservable** | 1 — synthesised `default/cloudrun-instances`, **servable** | **better** |
+| 6 | empty `runtime:` | inherits before the filter | same | no |
+
+**Every prediction in the held brief was confirmed**, including row 6 across four broker types. My model
+of the blast radius held, which is the thing I most wanted to know before recommending a change to a
+function shared with two other tiers.
+
+**Row 5's count does not change — its content does.** Both are length 1, so `autoSelectProfile` fires
+either way. Today it auto-selects an option the broker cannot serve; under Shape B it auto-selects one
+that matches. **The withdrawal condition I wrote into the held brief — "if row 5 measures worse than
+today, decline" — did not trigger.**
+
+### RULE 22 AGAIN, in the spike I commissioned to avoid exactly this
+
+I told the spike, in bold, that question 1 (what is in the list) and question 2 (does dispatch succeed)
+were **two distinct measurements** and *"do not collapse them"*. It collapsed them, and reported
+**"Dispatch succeeds"** as a measured result.
+
+Read the test rather than the report. Line 349 genuinely calls `vs.ResolveRuntime("default")` and
+`t.Fatal`s if it does not error — **that half is real, and it is the load-bearing negative fact.** Lines
+356-361 are `t.Log`:
+
+```
+t.Log("Dispatch outcome: ResolveRuntime errors → falls back to s.manager (the broker's own manager)")
+t.Log("RESULT: Dispatch succeeds, but via error-fallback, not a positive match")
+```
+
+**`resolveManagerForOpts` is never called.** The conclusion is printed, not exercised. Second agent in
+one hour to measure the easy half and narrate the hard half — `sn-iaplab-dev` did the same thing with
+the harness claim. **That is now a pattern, not two incidents**, and briefs saying "keep these separate"
+plainly do not prevent it. The counter is to demand the *call*, not the distinction: name the function
+the test must invoke and the value it must assert. Folded that into the held brief.
+
+### Why I recommended anyway, and why that is not the same mistake
+
+**The unmeasured claim is not load-bearing for the decision, and I checked that rather than assuming it.**
+The question is "is Shape B better or worse for the `cloudrun-instances` tier". Today that tier already
+offers an unservable option, so **no answer about the fallback makes Shape B worse than today** — it can
+only make it less good than hoped. The decision is safe on measured facts alone; the fragility is real,
+pre-existing, and owned by task #94 either way.
+
+Sent ptone a decision-ready message recommending **(a) take Shape B**, with the measured rows, an
+explicit statement that the dispatch claim is *narrated, not asserted, and I do not count it*, and the
+row-6 side effect he would be accepting. Both exits offered in one line each.
+
+### Held brief updated so approval costs nothing
+
+Replaced the predicted table with the measured one, added row 6 on `cloudrun-instances` (2 → 1) as a
+seventh row, and made the missing assertion a **requirement**: call `resolveManagerForOpts`, assert which
+manager comes back, do not restate the trace in a comment. If ptone says (a) the work starts from
+measurements rather than from my predictions.
