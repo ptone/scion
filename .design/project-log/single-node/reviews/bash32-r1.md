@@ -1,7 +1,104 @@
 # #88 `scion/bash32-portability` — Review
 
-Round 1 reviewed head **`edfe61f41`**. Branch has since advanced to **`ae6ccefe9`** (two further
-commits); **Round 2 addendum is at the top**, the original round-1 body follows unchanged below.
+Reviewed across four heads as the branch advanced: `edfe61f41` (R1) → `ae6ccefe9` (R2) →
+`4827d361` (R3, APPROVE) → **`3acd42a2` (R4, current — APPROVE STANDS)**. Newest addendum on top;
+earlier rounds follow unchanged.
+
+---
+
+# ROUND 4 — head `3acd42a2` — VERDICT: **APPROVE STANDS**
+
+One commit, `docs(dev): correct a false claim about fetching bash source in CI`. It corrects a
+false environmental assertion in `bash32-regex-probe.sh`'s header — the old text said "CI here
+cannot fetch its source", which dev2 retracted after re-measuring (tarball reachable, sha256
+confirmed) — and reframes why the fixture is kept: the macOS workflow *runs* it, so every job
+re-checks a second real 3.2 against the record. A durable-wrong environmental claim in a file kept
+so nobody re-litigates the question is exactly the right thing to correct. Better justification, no
+behaviour change.
+
+**The question I own: is "comment-only, therefore inert" complete?** Yes — ruled out every
+load-bearing channel by measurement, not reading:
+- **Fixture + `probe()` + `--check` logic byte-for-byte unchanged** — `diff` of everything from
+  `EXPECTED_BASH32=` onward between `4827d361` and `3acd42a2` is empty. The change is entirely
+  header prose above the data.
+- **No `# shellcheck` directive** among the changed lines (a directive is a comment but *is*
+  load-bearing — checked; none added/removed).
+- **`declare -f probe`** extracts only the function body (bash strips comments regardless), and the
+  changed lines are all in the file header above `probe()`. Inert.
+- **Nothing reads the file's text.** The only external consumer is `macos-bash32.yml:119`, which
+  *executes* `--check`; no grep/sed/head/awk over the file anywhere in the repo.
+- Gates at this head: shellcheck CLEAN, `--check` rc 0 (IDENTICAL on bash 5.2).
+
+**Nit-hold: I concur.** `deploy.sh:298`'s "45 inputs" stays unfixed on this branch and routes to
+#90. Confirmed `deploy.sh` is byte-identical `edfe61f4`→`3acd42a2` (empty diff); that identity is
+what lets ptone's Mac run validate the actual shipping artifact, and a comment fix would forfeit it
+for a stale number. Holding it is the right call, not a deferral of a real defect.
+
+Nothing else changed. **APPROVE stands at `3acd42a2`.**
+
+---
+
+# ROUND 3 — head `4827d361` — VERDICT: **APPROVE**
+
+New commit `4827d361` ("ci: test deploy.sh on a real macOS bash 3.2 instead of a hand-built one")
+resolves R1 by **deletion**, exactly as ruled in R2. Re-verified everything myself (the architect
+asked me not to take the two conditions on trust, and after three dispatch facts that turned out
+wrong tonight, that is the right instinct — so I measured).
+
+### R1 — DISCHARGED
+- **`ci.yml` is byte-identical to upstream `1befe923`** (`git diff 1befe923 4827d361 -- ci.yml`
+  is empty). The fetch-compile-execute job is gone from it entirely — no tarball, no `configure`,
+  no `make`, no unverified artifact. R1 has no subject. The Optional log-swallowing item went with
+  it.
+- The gate moved to its own file, **`.github/workflows/macos-bash32.yml`**, using GitHub's
+  macOS runner's native `/bin/bash` (3.2.57). Both `uses:` are SHA-pinned (checkout `d23441a`,
+  setup-go `924ae3a`); `permissions: contents: read`; `persist-credentials: false`. The workflow
+  maintains the SHA-pinning bar and adds no unpinned fetch.
+
+### The two conditions from my R2 ruling — both MET (verified by reading the file)
+1. **`runs-on: macos-15`, not `macos-latest`** (line 78), with an explicit rationale comment
+   naming exactly the failure mode I raised (a moving alias repointed onto a different bash).
+2. **Canary kept and retargeted to `/bin/bash`** (lines 101–111). It also closes my round-1 P3
+   hardening item structurally: the old "missing binary → vacuous ok" hole cannot occur because
+   `/bin/bash` always exists on macOS, and the canary now prints `--version` unconditionally, so
+   the interpreter is visible in the log on success too. Its job is now the load-bearing one:
+   catch the day the pin no longer means bash 3.2.
+
+### New surface — the `diff --label` portability fix (VERIFIED, clean)
+dev2 found both instrument scripts used `diff --label`, which is **GNU diffutils only** — the tools
+certifying macOS portability were themselves not macOS-portable, and under `set -e` a BSD `diff`
+exiting 2 would have turned a clean DIVERGENT verdict into a crash. Fixed in both by writing named
+files into a temp dir and `diff -u file file … || true` so the script owns its exit status. I
+re-ran at this head:
+- shellcheck: both dev scripts clean; **full sweep 64/64**.
+- harness `--self-test`: **4/4** (case 2, the dead-exit-column guard, still fires).
+- divergent run (base vs plain@both): **rc 1**, renders a readable named-file diff — not a crash-2.
+- `bash32-regex-probe.sh --check`: **rc 0** IDENTICAL on bash 5.2; **rc 1** DIVERGENT on a
+  corrupted fixture copy. Still validates for real.
+- Go gates (deploy.sh/test untouched by this commit): gofmt / vet / build / `TestScript` all clean.
+
+### Design notes worth recording (FYI, not defects)
+- The workflow documents its own **KNOWN TRAP**: if this job is ever made a *required* status
+  check, the `paths:` filter will hang PRs that don't touch these paths (a filtered-out job reports
+  nothing, not success). Disclosed in-file with the remedy (merge-queue or always-run stub). Good.
+- The two `paths:` lists are hand-duplicated because GHA doesn't expand YAML anchors — documented,
+  minor sync-drift risk.
+
+### Gates I could NOT run here (disclosed)
+- **actionlint** — not installed in this container. dev2 reports actionlint 1.7.7 clean and
+  observed-positive (rejects an unknown runner label; shellchecks `run:` blocks). I could not
+  independently confirm; low risk given the file parses as valid GHA and I read it in full.
+- **The macOS job itself** — no macOS here; `/bin/bash`-3.2 is unreachable. The suite under real
+  3.2, `--check` against a *second* real 3.2, and the workflow wiring are all first-executed on the
+  first CI run. Inherent, dev2-disclosed. **Watch the first `macOS bash 3.2` run; read the canary
+  line before trusting a green.**
+
+### Round-3 verdict: **APPROVE**
+R1 discharged by deletion with both conditions met; the new workflow and the `diff --label` fix are
+clean and verified; every prior blocking item is resolved. The only remaining item is a **Nit**:
+`deploy.sh:298` still says "45 inputs" (unchanged; deploy.sh not touched this round) while the test
+says 48 and the committed corpus is 22 — reconcile the number, non-blocking. Forward the Nit for a
+cleanup pass; it does not gate merge.
 
 ---
 

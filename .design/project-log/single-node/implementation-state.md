@@ -13638,3 +13638,105 @@ be a GitHub issue *at all*. It is a live §1 blocker on step 5 that ptone hit hi
 but I put that decision back to the coordinator explicitly rather than letting a bookkeeping answer
 stand in for it. *The satisfying resolution of a small question is a good place for a larger one to
 disappear.*
+
+### §35.80 — RETRACTED: the "egress allowlist" finding. There is no egress allowlist.
+
+**This retracts a claim recorded in the #80-class environment record and repeated by me to ptone as fact.**
+
+`sn-adcpreflight-dev2` re-measured and found its own egress finding false:
+
+- `mirrors.kernel.org/.../bash-3.2.57.tar.gz` returns **200 in 3.7s**. It had recorded `000`.
+- `github.com/bminor/bash` 404 is a **genuine** GitHub 404 — that repository does not exist. It is not a block.
+- **There is no egress allowlist.** The claim was built from two timeouts and one nonexistent repo, and none of the three was retried.
+- `bash-3.2.57.tar.gz` is obtainable. Three independent mirrors (nexcess, OCF Berkeley, RWTH Aachen) agree on
+  sha256 `3fa9daf85ebf35068f090ce51283ddeeb3c75eb5bc70b1a4a7cb05868bfe06a4`.
+
+**Consequence: rev2's Required (a verified digest) was satisfiable all along, and real bash 3.2 could have been
+built and tested last night rather than deferred.**
+
+**MY SHARE, AND IT IS THE LARGER ONE.** I did not merely inherit this. I wrote it into this log, and at 02:04 I
+told ptone *"our containers cannot obtain one — the egress allowlist blocks the bash source mirrors"* as the
+**reason** he had to run the validation himself. **I gave an unverified claim from a subordinate my own authority
+and passed it to the maintainer as measured fact.** Corrected to him at 02:40.
+
+The specific defect in my practice: **I verify agents' claims when they are about code and accept their claims
+about the environment on trust.** There is no justification for the split — an environment claim is *cheaper* to
+check, and this one was two curl commands.
+
+**THE DECISION DOES NOT CHANGE, AND THE DISTINCTION IS THE POINT.** The macOS runner remains correct on grounds
+that never involved reachability: no artifact to verify at all rather than one verified by digest; real BSD
+`sed`/`grep`/`awk`; real arm64; the platform the bug actually came from. The tarball route's only surviving
+advantage is runner cost. **The tarball is not reopened. The reasoning was corrected, not the decision** — which
+is the cleanest example this project has produced of a right answer reached by a wrong argument, and exactly what
+rule 7 exists to catch.
+
+**THE FALSE CLAIM WAS ALSO IN THE REPO, AND THAT IS THE WORSE HALF.** `scripts/dev/bash32-regex-probe.sh`
+justified its fixture with *"CI here cannot fetch its source"* — in the very file kept so nobody re-litigates the
+question. Corrected in `3acd42a2`. **A wrong environmental claim in a keep-forever file is the durable kind of
+wrong: it does not fail, it forecloses.** The replacement is better than the original, not merely less wrong —
+the workflow does not replace the fixture, it **runs** it, so every macOS job checks a second real 3.2 against
+the record on different hardware. *One laptop is an anecdote; a laptop plus a runner that keeps agreeing is a pin.*
+
+**New rules, both from dev2:**
+
+15. **A REACHABILITY FAILURE IS A MEASUREMENT UNTIL IT IS REPEATED, AND A DIAGNOSIS ONLY AFTER.** Identical
+    discipline to the red mutation: a `000` is necessary, not sufficient — read *why* it went red.
+16. **A WRONG ENVIRONMENT CLAIM IS MORE EXPENSIVE THAN A WRONG CODE CLAIM.** Code gets re-run; environment claims
+    get quoted, and they close off options for everyone downstream.
+17. **Measure per-host reachability with a DEFAULT `curl` invocation.** `mirrors.kernel.org` returns 200 by
+    default and fails under **both** `curl -4` and `curl -6`. There is an interception layer in this container
+    that nobody has characterised; explicit address-family results are not trustworthy here. dev2 was right to
+    record this as uncharacterised rather than explain it away.
+
+### §35.81 — task #88: APPROVED at `3acd42a2`. Ready for ptone's upstream PR.
+
+`sn-adcpreflight-rev2`: **APPROVE**, R1 discharged, no Critical, no Required. Both of its conditions met by
+reading the file: `runs-on: macos-15` (not the moving `macos-latest` alias) and the canary kept, retargeted to
+`/bin/bash` — which also structurally closes its round-1 hardening item, since the missing-binary vacuity I
+introduced cannot occur when `/bin/bash` always exists.
+
+**THE BRANCH MOVED UNDER AN APPROVING REVIEWER FOR THE SECOND TIME TONIGHT.** rev2 approved `4827d361`; dev2 had
+pushed `3acd42a2` a minute earlier. The first occurrence was my direct fault (I told dev2 to land mid-review);
+this one was a correctness fix dev2 initiated itself, which I do not want to discourage. **The problem is
+structural and mine to solve.** Protocol adopted: *while a review is in flight, the developer tells me the moment
+it pushes and names the file; I re-point the reviewer and scope the re-read to the delta.* I supplied my own
+measurement of the delta and asked rev2 to **falsify** it rather than re-review the branch.
+
+Delta measured before saying anything about it: one commit, one file, every changed line a `#` comment above
+`EXPECTED_BASH32`; `deploy.sh` 0 files changed; `--check` rc=0 `IDENTICAL` at the new head. rev2 confirmed
+inertness across every channel including two I had not named — **shellcheck directives (a directive is a comment
+but *is* load-bearing) and the grep channel** (nothing reads the file's text; `macos-bash32.yml:119` executes it).
+
+**NIT HELD DELIBERATELY, NOT DEFERRED BY NEGLECT.** `deploy.sh:298` says "45 inputs" against the test's 48 and a
+22-row corpus. Routed to task #90, which already opens that file. **The reason is load-bearing: `deploy.sh` is
+byte-identical from `edfe61f4` to `3acd42a2` (empty diff, confirmed by rev2), and I told ptone so explicitly, so
+his Mac run validates the shipping artifact. Trading that property for a stale number in a comment is a bad
+trade.** dev2 instructed not to touch `deploy.sh` again on this branch for any reason.
+
+Standing: actionlint and the macOS job are both **first-executed on the first CI run**. Read the canary line
+before trusting a green.
+
+### §35.82 — task #92 dispatched: the runtime-profile default. Now the live §1 blocker.
+
+`sn-runtimeprofile-dev` started; brief at `briefs/sn-runtimeprofile-dev-r1.md`.
+
+**Two observations in ptone's one sentence, and I have deliberately not fused them:** (1) the default runtime
+profile is `remote (kubernetes)`; (2) the antigravity harness crashed on launch. (2) being downstream of (1) is
+plausible and unestablished. Task #92 is (1); (2) is to be reported as a separate finding.
+
+**The architectural gate, made explicit in the brief and required before any fix commit: is the wrong default
+tier-specific or the GLOBAL product default?** The design doc's own non-goal at `:390` is *"Docker, Podman, and
+Kubernetes paths are untouched."* If the default is global, fixing it **violates that non-goal** and becomes a
+product decision that is ptone's, not ours. Developer instructed to stop and escalate rather than decide it
+implicitly.
+
+**Suspected same family as open tasks #37 and #48** — both are "hosted mode leaves a field unset and something
+downstream substitutes a wrong value." Three symptoms of one cause is different work from three point fixes.
+Developer told to check, and told not to merge the tasks on its own authority.
+
+Surface handed over so it is not re-derived: `web/.../agent-create.ts:1243-1260` (the control ptone saw, marked
+*conditional: broker has profiles*), `web/.../admin-server-config.ts:2778` (*"Default runtime profile for
+agents"*), `pkg/config/settings.go:160` and `settings_v1.go:122` (`ResolveRuntime`, and what it does with an
+empty name), `pkg/runtimebroker/server.go:1034-1079`. Four candidate mechanisms offered with the caveat that
+**(b) and (d) are defaults by accident, (a) and (c) are defaults by decision** — and with rule 11 attached:
+**a priority list is also a blind-spot list.**
