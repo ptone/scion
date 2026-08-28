@@ -49,34 +49,55 @@ by every change in this tranche:
    skips conversation resolution — the message still delivers via the legacy
    path.
 
-4. **Marker count gates:** After implementation, the following per-file
-   counts must be preserved exactly. Each gate enumerates the specific
-   call sites it protects — a reviewer checks the sites, not just the
-   number.
+4. **Marker gates:** Each gate is split into REQUIRED (calls and
+   definitions — the check runs or exists) and INFORMATIONAL (doc-comment
+   mentions — prose, not behavior). A missing REQUIRED site means the
+   check no longer runs or no longer exists; that is the revert. A missing
+   INFORMATIONAL site means someone edited prose; that is evidence of
+   nothing.
 
-   **authenticatedSender — 6 in handlers_agent_messaging.go:**
-   1. Line 787: `handleAgentMessage` DM resolution — derives sender for `ResolveOrCreateDMConversation`
-   2. Line 1054: `handleGroupMessage` agent-set — derives sender for per-agent DM resolution
-   3. Line 1177: `handleGroupMessage` user-set — derives sender for per-user DM resolution
-   4. Line 1322: `handleProjectBroadcast` — derives sender for broadcast self-skip
-   5. Line 1635: Doc comment on function definition
-   6. Line 1643: Function definition (`func authenticatedSender`)
+   The split matters most for `validateDefaultAgent`: under a flat count
+   of 6, deleting both call sites while leaving the three comments and
+   the definition scores 4 of 6 — a near-miss that reads like drift.
+   Under the split it scores 1 of 3 REQUIRED, which reads like what it is.
 
-   **validateDefaultAgent — 6 in handlers_chat_v2.go:**
-   1. Line 450: Doc comment ("single source of truth — DEF-31")
-   2. Line 455: Call in `handleCreateThread` — validates default agent on topic creation
-   3. Line 594: Doc comment in `handleTopicPatch`
-   4. Line 598: Call in `handleTopicPatch` — validates default agent on topic update
-   5. Line 678: Doc comment on function definition
-   6. Line 685: Function definition (`func validateDefaultAgent`)
+   **authenticatedSender in handlers_agent_messaging.go:**
 
-   **ActionAttach — 1 in handlers_agent_messaging.go:**
-   1. Line 1276: `handleProjectBroadcast` — user callers need ActionAttach on project to broadcast. Without it, any authenticated user can broadcast to any project.
+   REQUIRED (5 — gate FAILS if any is missing):
+   1. Line 787: Call in `handleAgentMessage` — derives sender for `ResolveOrCreateDMConversation`
+   2. Line 1054: Call in `handleGroupMessage` agent-set — derives sender for per-agent DM resolution
+   3. Line 1177: Call in `handleGroupMessage` user-set — derives sender for per-user DM resolution
+   4. Line 1322: Call in `handleProjectBroadcast` — derives sender for broadcast self-skip
+   5. Line 1643: Function definition (`func authenticatedSender`)
 
-   **ActionAttach — 3 in handlers_chat_v2.go:**
-   1. Line 1120: `s.authorize(w, r, agentResource(primaryAgent), ActionAttach)` — authorization on primary agent before dispatch in `sendAgentRouted`. Without it, format validation is the only gate and format validation is not authorization.
-   2. Line 1214: `s.authzService.CheckAccess(ctx, user, agentResource(mentionAgent), ActionAttach)` — per-mention authorization in `sendAgentRouted` fan-out. Without it, mentions dispatch unconditionally to agents the user may not be authorized to interact with.
-   3. Line 1216: `logAuthzDenial(r, user, agentResource(mentionAgent), ActionAttach, decision.Reason)` — denial audit logging for the line 1214 check.
+   INFORMATIONAL (1 — gate REPORTS if missing, does not fail):
+   6. Line 1635: Doc comment on function definition
+
+   **validateDefaultAgent in handlers_chat_v2.go:**
+
+   REQUIRED (3 — gate FAILS if any is missing):
+   1. Line 455: Call in `handleCreateThread` — validates default agent on topic creation
+   2. Line 598: Call in `handleTopicPatch` — validates default agent on topic update
+   3. Line 685: Function definition (`func validateDefaultAgent`)
+
+   INFORMATIONAL (3 — gate REPORTS if missing, does not fail):
+   4. Line 450: Doc comment ("single source of truth — DEF-31")
+   5. Line 594: Doc comment in `handleTopicPatch`
+   6. Line 678: Doc comment on function definition
+
+   **ActionAttach in handlers_agent_messaging.go:**
+
+   REQUIRED (1 — gate FAILS if missing):
+   1. Line 1276: Call in `handleProjectBroadcast` — user callers need ActionAttach on project to broadcast. Without it, any authenticated user can broadcast to any project.
+
+   **ActionAttach in handlers_chat_v2.go:**
+
+   REQUIRED (2 — gate FAILS if any is missing):
+   1. Line 1120: `s.authorize` call on primary agent before dispatch in `sendAgentRouted`. Without it, format validation is the only gate and format validation is not authorization.
+   2. Line 1214: `s.authzService.CheckAccess` per-mention authorization in `sendAgentRouted` fan-out. Without it, mentions dispatch unconditionally to agents the user may not be authorized to interact with.
+
+   INFORMATIONAL (1 — gate REPORTS if missing, does not fail):
+   3. Line 1216: `logAuthzDenial` audit logging for the line 1214 check. Removing this does not break authorization but eliminates the audit trail for mention denials.
 
 ### What already exists on main
 
@@ -98,7 +119,7 @@ The developer should be aware of what is already implemented:
 - **DivergenceMetrics** — global singleton with Matches/Mismatches/Fallbacks
   counters.
 - **authenticatedSender** — in handlers_agent_messaging.go (4 call sites +
-  function + comment = 6 references).
+  1 definition = 5 REQUIRED; 1 doc comment = INFORMATIONAL).
 - **parseDMKeyIDs / isDMParticipant** — in handlers_chat_v2.go. DM ownership
   validation.
 - **validateDefaultAgent** — in handlers_chat_v2.go. DEF-31 default agent
@@ -307,10 +328,10 @@ for DM key derivation, never `structuredMsg.SenderID` or `structuredMsg.Sender`.
 The DEF-11 pre-resolved path is the ONE exception — it skips key derivation
 entirely because the ConversationID is already resolved.
 
-**Gate:** The 6 enumerated sites in the preamble (§Security invariants,
-item 4) must all be present after implementation. New code must not introduce
-additional references (the existing sites already cover all key-derivation
-paths). If a new dual-write site is added, it must route through an existing
+**Gate:** All 5 REQUIRED sites in the preamble (§Security invariants, item 4)
+must be present after implementation. New code must not introduce additional
+call sites (the existing 4 calls already cover all key-derivation paths).
+If a new dual-write site is added, it must route through an existing
 `authenticatedSender` call site, not add a new one.
 
 #### ActionAttach (#1347)
@@ -319,7 +340,7 @@ paths). If a new dual-write site is added, it must route through an existing
   on the project to broadcast. Without this check, any authenticated user
   can broadcast to any project. MUST REMAIN.
 
-**Gate:** The 1 enumerated site in the preamble must be present.
+**Gate:** The 1 REQUIRED site in the preamble must be present.
 
 #### DM ownership (#1322)
 
@@ -363,8 +384,8 @@ based checks. No additional DM ownership logic is needed — the
 | AC-C7 | Surface+ExternalRef on MessageRequest resolves or creates conversation | Unit test: POST with Surface+ExternalRef; verify conversation exists in store with correct fields |
 | AC-C8 | ExternalRef without Surface returns 400 | Unit test: POST with ExternalRef but no Surface; verify 400 |
 | AC-C9 | Cross-project mentions are rejected | Unit test: create agents in different projects, POST with cross-project mention; verify 400 |
-| AC-C10 | All 6 `authenticatedSender` sites present (see preamble §4 for enumeration) | Verify each of the 4 call sites (lines 787, 1054, 1177, 1322) + definition + doc comment are present |
-| AC-C11 | `ActionAttach` on project broadcast present (line 1276) | `grep -n ActionAttach pkg/hub/handlers_agent_messaging.go` shows the broadcast authorization site |
+| AC-C10 | All 5 REQUIRED `authenticatedSender` sites present | Verify 4 call sites (787, 1054, 1177, 1322) + definition (1643) are present. Doc comment (1635) is INFORMATIONAL. |
+| AC-C11 | `ActionAttach` REQUIRED site on project broadcast present (line 1276) | `grep -n ActionAttach pkg/hub/handlers_agent_messaging.go` shows the broadcast authorization call |
 | AC-C12 | `CheckConversationConsistency` called at 4 dual-write sites | `grep -c CheckConversationConsistency pkg/hub/handlers_agent_messaging.go` ≥ 4 |
 
 ---
@@ -693,11 +714,12 @@ The file currently has 6 references to `validateDefaultAgent`:
 - **Line 678:** Doc comment on function definition.
 - **Line 685:** Function definition.
 
-**Gate:** The 6 enumerated sites in the preamble (§Security invariants,
-item 4) must all be present after implementation. Without `validateDefaultAgent`,
-`handleCreateThread` and `handleTopicPatch` accept any string as
-`defaultAgent` — including UUIDs naming agents in other projects or deleted
-agents, breaking tenant isolation.
+**Gate:** All 3 REQUIRED sites in the preamble (§Security invariants, item 4)
+must be present after implementation. The 3 INFORMATIONAL (doc comment)
+sites should be preserved but their absence does not fail the gate.
+Without `validateDefaultAgent`, `handleCreateThread` and `handleTopicPatch`
+accept any string as `defaultAgent` — including UUIDs naming agents in other
+projects or deleted agents, breaking tenant isolation.
 
 #### ActionAttach (#1347)
 
@@ -717,7 +739,9 @@ distinct authorization decision:
   would not break authorization but would eliminate the audit trail for
   mention denials.
 
-**Gate:** The 3 enumerated sites in the preamble must all be present.
+**Gate:** Both REQUIRED sites (lines 1120, 1214) in the preamble must be
+present. The INFORMATIONAL site (line 1216, audit logging) should be
+preserved but its absence does not fail the gate.
 
 #### parseDMKeyIDs / isDMParticipant (#1322)
 
@@ -769,8 +793,8 @@ needs, where a parse failure should fall back to legacy, not fail the request).
 | AC-V3 | Read-switch ON with missing conversation falls back to legacy + increments Fallback | Unit test: set switch ON with no conversation; verify legacy filter used and `DivergenceMetrics.Fallbacks()` incremented |
 | AC-V4 | ValidateLegacyMessage in sendAgentRouted rejects invalid messages | Unit test: send message with empty Msg and no attachments; verify 400 |
 | AC-V5 | Attachment-only messages get synthetic body and pass validation | Unit test: send message with empty Msg but with attachments; verify 200 and persisted Msg = "[attachment]" |
-| AC-V6 | All 6 `validateDefaultAgent` sites present (see preamble §4) | Verify definition (line 685), 2 call sites (lines 455, 598), and 3 doc comments (lines 450, 594, 678) |
-| AC-V7 | All 3 `ActionAttach` sites present (see preamble §4) | Verify primary agent check (line 1120), per-mention check (line 1214), and denial log (line 1216) |
+| AC-V6 | All 3 REQUIRED `validateDefaultAgent` sites present | Verify 2 call sites (455, 598) + definition (685). 3 doc comments (450, 594, 678) are INFORMATIONAL. |
+| AC-V7 | Both REQUIRED `ActionAttach` sites present | Verify primary agent check (1120) + per-mention check (1214). Audit log (1216) is INFORMATIONAL. |
 | AC-V8 | `parseDMKeyIDs` still present | `grep -n parseDMKeyIDs pkg/hub/handlers_chat_v2.go` shows function definition |
 | AC-V9 | `isDMParticipant` still present with `parts[1]=="user"` kind-label gate | `grep -A5 isDMParticipant pkg/hub/handlers_chat_v2.go` shows kind-label check is intact |
 | AC-V10 | Read-switch thread path resolves via topic lookup | Unit test: create thread conversation + topic; verify ConversationID filter used |
