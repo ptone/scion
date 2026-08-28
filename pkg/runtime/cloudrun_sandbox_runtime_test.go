@@ -1403,10 +1403,15 @@ func TestRelocateToScion_AlreadySymlink(t *testing.T) {
 // occupies the name.  Before the fix, unconditional RemoveAll(src)
 // destroyed .config/agent-info.json.
 //
+// This arrangement cannot occur in production — a regular file never
+// appears at this path.  It exists to pin the survival invariant
+// independently of the ENOTEMPTY path, which is the real production
+// failure mode and is covered by
+// TestRelocateToScion_CopyFallbackOnRenameFailure.
+//
 // This is NOT an EXDEV substitute — both src and dst are on the same
-// filesystem (same t.TempDir parent).  The test exercises the
-// both-paths-fail branch; EXDEV would only trigger on cross-device
-// mounts, which t.TempDir cannot produce portably.
+// filesystem (same t.TempDir parent).  EXDEV would only trigger on
+// cross-device mounts, which t.TempDir cannot produce portably.
 func TestRelocateToScion_BothRenameAndCopyFail_PreservesSource(t *testing.T) {
 	base := t.TempDir()
 	src := filepath.Join(base, "src")
@@ -1438,8 +1443,11 @@ func TestRelocateToScion_BothRenameAndCopyFail_PreservesSource(t *testing.T) {
 	err := relocateToScion(src, dst)
 
 	// Must return an error: .config/ could not be moved.
+	// t.Errorf (not t.Fatal) so the survival assertion below is always
+	// reachable — the test is named PreservesSource and the survival
+	// check must run even when the error check fails.
 	if err == nil {
-		t.Fatal("relocateToScion() returned nil; expected an error because " +
+		t.Errorf("relocateToScion() returned nil; expected an error because " +
 			".config/ could be neither renamed nor copied")
 	}
 
