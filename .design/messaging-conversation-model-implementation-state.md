@@ -6741,3 +6741,62 @@ This is the third near-miss of one shape in two sessions: a `-run` selector matc
 `ok` (rule 81), `--name-status` reporting DIFFERS on line order alone (rule 85), and now a red check
 that does not block. **A signal's colour is not its authority. Confirm the instrument gates the
 claim before you act on it — in both directions.**
+
+---
+
+## §5cl. Heartbeat sweep 2026-08-28 04:43 — DEF-26 opened; merge order proven unconstrained
+
+`upstream/main` still `f4d02461b`. No manager branch tip moved. Roster: em10, em9, em6 all
+`activity = blocked` — the em10 park from §5ck held. All three waits terminate at the user
+(em10 → tranche B PR; em9 → CI sqlite-gap decision; em6 → PR merges). **No peer-waits, so no
+circular wait is possible** (rule 63); I answered that from the topology rather than pinging three
+parked agents, per item 9.
+
+### LEDGER: DEF-26 struck forward
+
+**PR #1340 is open** — `ptone:scion/ca-msg-em6-def26`, "test(messaging): rename misleading
+convergence test (DEF-26)", one file (`pkg/messaging/resolve_test.go`), `MERGEABLE / UNSTABLE`.
+The user opened the compare URL I sent. Row moves from *URL sent* to *PR open, awaiting merge*.
+**Not reported to the user** — they performed the action themselves; telling them it happened is
+exactly the FYI traffic that is banned.
+
+Tranche B's PR is **not** yet open. #1338 and #1339 remain open and unmerged. All are `UNSTABLE`
+for the `cla/google` reason established in §5ck, which is not a gate.
+
+### New foreign PR in flight: #1341
+
+`ptone:scion/pf-p2-msgfix`, "fix: restore messaging UI visibility after permission refactor". Not
+one of my managers' branches — it belongs to the pf-p2 permission-refactor track. The title lands
+squarely in our subject area, so it warranted a look, but its four files are all `web/src/**`
+frontend components. No interaction with tranche B. Flagged here because it will change messaging UI
+visibility behaviour on main, which is relevant when the beta exercise is eventually scheduled —
+the beta will exercise a UI that this PR, not tranche B, most recently touched.
+
+### Merge order is unconstrained
+
+Tranche B's 16 files against every open PR in flight, `comm` positively controlled (tranche B vs
+itself = 16 lines):
+
+| PR | branch | files | overlap with tranche B |
+|---|---|---|---|
+| #1338 | `ca-msg-em6-def31` | 3 | EMPTY |
+| #1339 | `ca-msg-em6-ci-guard` | 4 | EMPTY |
+| #1340 | `ca-msg-em6-def26` | 1 | EMPTY |
+| #1341 | `pf-p2-msgfix` | 4 | EMPTY |
+
+**Consequence: these five can merge in any order without a rebase.** Worth having established
+before the user starts merging, because the alternative is discovering a sequencing constraint
+halfway through a merge run and having to go back to a parked manager (rule 84 — do the
+merge-readiness work before anyone needs to ask for it).
+
+### Rows not moved in two heartbeats, with reasons (item 8)
+
+- **#1338 / #1339** — open, mergeable, green apart from the non-gating CLA check. Pure user latency.
+  Already escalated in the tranche B section-boundary report; not re-escalated.
+- **CI sqlite-gap (i)/(ii)/(iii)** — with the user; em9 parked behind it. Not pressed.
+- **Messaging-authz A/B/C** — user said "I need to think about this one a bit more". Not pressed.
+- **DEF-5, DEF-6, DEF-9, DEF-10, DEF-11, DEF-14, DEF-16, DEF-17/18 gate sweep, tranches C–G** — all
+  gated behind tranche B landing. Nothing to do until it does.
+- **AC-DEF15-4 / AC-DEF16-1** — blocked on `ae33715e`, unchanged.
+- **AC-12-6 / beta exercise** — awaiting user scheduling; the user asked for this to be a tightly
+  scheduled exercise with a DB snapshot to hand, so it does not move on my initiative.
