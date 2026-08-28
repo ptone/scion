@@ -999,6 +999,166 @@ func TestScriptIAMMemberPrefix_ServiceAccount(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Instance SA resolution tests
+// ---------------------------------------------------------------------------
+
+func TestScriptResolveInstanceSA_Explicit(t *testing.T) {
+	stdout, _, exitCode := runBashFunc(t, "di_resolve_instance_sa",
+		"custom-sa@my-project.iam.gserviceaccount.com", "123456789")
+	require.Equal(t, 0, exitCode)
+	assert.Equal(t, "custom-sa@my-project.iam.gserviceaccount.com",
+		strings.TrimSpace(stdout),
+		"when --service-account is provided, it must be used verbatim")
+}
+
+func TestScriptResolveInstanceSA_Default(t *testing.T) {
+	stdout, _, exitCode := runBashFunc(t, "di_resolve_instance_sa", "", "123456789")
+	require.Equal(t, 0, exitCode)
+	assert.Equal(t, "123456789-compute@developer.gserviceaccount.com",
+		strings.TrimSpace(stdout),
+		"when --service-account is omitted, must return the Compute Engine default SA")
+}
+
+// ---------------------------------------------------------------------------
+// Step 5b: Instance SA IAM grant tests (di_main level)
+//
+// These tests run di_main through the ENTIRE flow to reach Step 5b, proving
+// that the grant is actually executed. Steps 4 and 7 (di_wait_for_iap,
+// di_assert_perimeter) are overridden — they are already tested independently
+// and use curl to the real instance URL, which cannot be stubbed without
+// also breaking the preflight/PATCH stubs that use curl to the test server.
+// ---------------------------------------------------------------------------
+
+// step5bGcloudStub builds a gcloud mock for the full di_main flow. It records
+// every invocation to argvLog and handles all steps through Step 5b.
+//
+// grantBehavior controls the projects add-iam-policy-binding response:
+//   - "succeed": returns 0
+//   - "fail":    returns 1 with an error message on stderr
+func step5bGcloudStub(argvLog string, grantBehavior string) string {
+	return fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  case "$*" in
+    "beta run instances --help")
+      return 0 ;;
+    "config get account")
+      printf '%%s\n' "operator@example.com" ;;
+    "projects describe "*)
+      printf '%%s\n' "123456789" ;;
+    "auth application-default print-access-token")
+      printf '%%s\n' "ya29.fake-test-token" ;;
+    "beta run instances deploy "*)
+      return 0 ;;
+    "iap web add-iam-policy-binding "*)
+      return 0 ;;
+    "projects add-iam-policy-binding "*)
+      if [[ %q == "fail" ]]; then
+        echo "ERROR: (gcloud.projects.add-iam-policy-binding) User does not have permission" >&2
+        return 1
+      fi
+      return 0 ;;
+    "iap web get-iam-policy "*)
+      return 0 ;;
+    "projects get-iam-policy "*)
+      return 0 ;;
+    *)
+      echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+      return 1 ;;
+  esac
+}`, argvLog, grantBehavior)
+}
+
+// step5bSetup builds the full bash prelude for a di_main test that reaches
+// Step 5b. It includes the gcloud stub, both URL seams, and overrides for
+// di_wait_for_iap and di_assert_perimeter (which use curl to the instance
+// URL and cannot be stubbed via the URL seams).
+func step5bSetup(gcloudStub, serverURL string) string {
+	return fmt.Sprintf("%s\n_DI_API_BASE=%s\n_DI_TOKENINFO_URL=%s\n"+
+		"di_wait_for_iap() { return 0; }\n"+
+		"di_assert_perimeter() { return 0; }",
+		gcloudStub, shellQuote(serverURL), shellQuote(stubTokeninfoURL(serverURL)))
+}
+
+func TestScriptStep5bGrantSucceeds(t *testing.T) {
+	// Stub server handles preflight tokeninfo + API GET, and the Step 3b PATCH.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("access_token") != "" {
+			_, _ = io.WriteString(w, `{"email":"operator@example.com"}`)
+			return
+		}
+		if r.Method == http.MethodPatch {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(server.Close)
+
+	argvLog := filepath.Join(t.TempDir(), "gcloud-argv.log")
+	setup := step5bSetup(step5bGcloudStub(argvLog, "succeed"), server.URL)
+
+	stdout, stderr, exitCode := runBashFuncWithSetup(t, setup, "di_main",
+		"--name", "test-name", "--project", "test-project",
+		"--image", "ghcr.io/example/scion-omni:latest", "--region", "us-east4")
+
+	require.Equal(t, 0, exitCode,
+		"di_main must complete successfully when the grant succeeds; stderr: %s", stderr)
+
+	argv := readGcloudArgvLog(t, argvLog)
+	assert.Contains(t, argv, "projects add-iam-policy-binding",
+		"Step 5b must call gcloud projects add-iam-policy-binding")
+	assert.Contains(t, argv, "roles/logging.viewer",
+		"Step 5b must grant roles/logging.viewer")
+	assert.Contains(t, argv, "123456789-compute@developer.gserviceaccount.com",
+		"Step 5b must grant to the resolved instance SA")
+
+	assert.Contains(t, stdout, "Granted roles/logging.viewer",
+		"success message must confirm the grant")
+	assert.Contains(t, stdout, "Deploy Complete",
+		"deploy must complete")
+	assert.NotContains(t, stderr, "WARNING",
+		"no warning on success")
+}
+
+func TestScriptStep5bGrantFailsNonFatally(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("access_token") != "" {
+			_, _ = io.WriteString(w, `{"email":"operator@example.com"}`)
+			return
+		}
+		if r.Method == http.MethodPatch {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(server.Close)
+
+	argvLog := filepath.Join(t.TempDir(), "gcloud-argv.log")
+	setup := step5bSetup(step5bGcloudStub(argvLog, "fail"), server.URL)
+
+	stdout, stderr, exitCode := runBashFuncWithSetup(t, setup, "di_main",
+		"--name", "test-name", "--project", "test-project",
+		"--image", "ghcr.io/example/scion-omni:latest", "--region", "us-east4")
+
+	require.Equal(t, 0, exitCode,
+		"di_main must complete successfully even when the grant FAILS — "+
+			"a missing logging.viewer must not abort the deploy; stderr: %s", stderr)
+
+	assert.Contains(t, stdout, "Deploy Complete",
+		"deploy must complete even when the grant fails")
+	assert.Contains(t, stderr, "WARNING",
+		"grant failure must emit a WARNING")
+	assert.Contains(t, stderr, "roles/logging.viewer",
+		"warning must name the role that failed")
+	assert.Contains(t, stderr, "gcloud projects add-iam-policy-binding",
+		"warning must include the manual grant command so the operator "+
+			"can paste it rather than construct it")
+}
+
+// ---------------------------------------------------------------------------
 // Validate project number tests
 // ---------------------------------------------------------------------------
 
