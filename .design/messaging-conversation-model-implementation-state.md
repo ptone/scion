@@ -11537,3 +11537,133 @@ reasoning about and would assume is guarded.
   decision. Escalation 2 (tranche C–G manifests) queued, unsent — deliberately, to
   hold the one-at-a-time discipline.
 - Tranche C dispatch remains blocked on the branch-deletion decision.
+
+---
+
+## §5ek — em10 gate: AUDIT category added after a dropped site; em9 unparked; dev-agent cleanup (2026-08-28)
+
+### em10 delivered `4d6325dce` — two of three corrections correct, one regression
+
+**Correct:** assertion unit moved from absolute line numbers to enclosing function
+name (rule 192 discharged). Composite gate on `handleProjectBroadcast` added,
+stated as an invariant rather than a count (rule 193 discharged).
+
+**Regression: `ActionAttach` in `sendAgentRouted` reported x2. It is x3.**
+
+Dropped site: `logAuthzDenial(r, user, agentResource(mentionAgent), ActionAttach,
+decision.Reason)` at `handlers_chat_v2.go:1216`.
+
+**This was my fault before em10's.** Rule 189 as I wrote it — *"a symbol count
+conflates a check with logging about a check; gates must enumerate call sites"* —
+reads as licence to discard the logging. It means *distinguish*, not *discard*.
+Rule 182 applied: said so plainly before the correction.
+
+**Why the dropped site is the worst one to drop.** Main's comment above the block:
+
+```
+// Check attach permission on each mentioned agent -- skip silently
+// rather than returning 403 since the user may have attach on some
+// mentioned agents but not others.
+```
+
+That path **denies silently by design**. No 403. The mention is dropped and the
+request otherwise succeeds. `logAuthzDenial` is therefore not commentary about the
+check — it is the **only observable that the denial occurred**. Delete it and an
+authorization denial becomes undetectable: mention vanishes, agent never attaches,
+nothing records why.
+
+Verified against v2:
+
+```
+logAuthzDenial in handlers_chat_v2.go:   upstream/main = 1,   messaging-v2 = 0
+```
+
+**v2 reverts it, and the gate as pushed at `4d6325dce` PASSES on that revert** —
+the same failure mode as the aggregate-count defect em10 already fixed once.
+
+> **RULE 194.** On a path that fails loudly, the log is secondary to the check. On a
+> path that **denies silently by design**, the log carries the entire evidentiary
+> weight, and dropping it from a gate is worse than dropping a noisy check. Gate
+> category **AUDIT**: calls whose absence removes the only record of a security
+> decision. HARD FAIL, same weight as REQUIRED; separate only so the report can say
+> *"the check still runs but the denial is now unrecorded"* — a different defect
+> from *"the check is gone."*
+
+> **RULE 189 (corrected).** A symbol count conflates a check with logging about a
+> check. Gates must enumerate call sites **and classify them**, never discard a
+> class.
+
+Instructed em10 to sweep the other two in-scope files for the same shape — *any
+authorization decision whose denial branch does not return an error status to the
+caller* — and explicitly warned against assuming `chat_v2` is the only instance
+(rule 160 restated: one instance is not the class).
+
+### em9 UNPARKED — `PrincipalKindFromAddress` fold audit
+
+The defect em6 filed was real, small, load-bearing, and unowned — rule 185's exact
+profile. Assigned to idle em9.
+
+The fold on `upstream/main`, `pkg/messages/dm_key.go:75`:
+
+```go
+func PrincipalKindFromAddress(address string) (string, bool) {
+	idx := strings.IndexByte(address, ':')
+	if idx < 0 { return "", false }
+	kind := strings.ToLower(address[:idx])   // the fold
+	if validDMKinds[kind] { return kind, true }
+	return "", false
+}
+```
+
+`"USER:alice"` is accepted and returns `"user"`. The folded kind flows into
+`DMConversationKey`, which after em6's tightening rejects a non-canonical kind but
+**never sees one** (rule 168).
+
+Four production call sites, enumerated by me:
+
+```
+pkg/hub/handlers_agent_messaging.go:1578   mentionMsg.Sender
+pkg/hub/handlers_broker_inbound.go:276     req.Message.Sender
+pkg/hub/messagebroker.go:465               msg.Recipient
+pkg/hub/messagebroker.go:839               msg.Sender
+```
+
+Asked for **provenance chains, not opinions** — for each site, can the address
+carry a non-canonical kind originating outside the trust boundary? Plus one
+consequence question: the fold makes two distinct address strings derive the *same*
+key, and the key IS the ACL — is that aliasing that matters, or inert because only
+two kinds exist? **Withheld my own view to get an independent answer first.**
+Audit only; no code changes. "Inert" is an acceptable result if stated confidently.
+
+**Feeds tranche C:** two of the four call sites are tranche C files, and em10 is
+writing that spec now. If the fold matters the spec must say so *before*
+re-derivation, not after.
+
+### Rule-151 sweep vs. new main
+
+`upstream/main` advanced to `3c7e14e41` (#1354, #1355 — P2 series). Touched
+`pkg/hub/permission_registry_test.go` and `pkg/hub/scoped_admin_test.go`. Checked
+mechanically: `messaging-v2` modifies **neither**. **Risk set unchanged at 18.**
+
+Gate line numbers survived only because those commits missed the two gate files —
+**luck, not design**, which is what prompted rule 192.
+
+### Dev-agent cleanup (coordinator hygiene note)
+
+Six completed dev agents removed with `-b` (`--preserve-branch`): `dev-b2b1b14`,
+`dev-b2b1b14-fixes`, `dev-dm-tighten`, `dev-pr1360-fixes`, `dev-slog-fix`,
+`dev-m5-fix`.
+
+**Verified landed BEFORE deleting**, not after: both `origin/scion/ca-msg-em6-dm-tighten`
+(`bc01ac08d`) and `origin/scion/ca-msg-em6-b2b1b14` (`7e3afb3d5`) present on origin,
+and `--is-ancestor 7e3afb3d5 <tighten>` → YES, so nothing orphaned. **Re-verified
+after deletion:** both branch tips intact, PR #1360 head still `7e3afb3d5`, still OPEN.
+
+### State
+
+- `upstream/main` = `3c7e14e41`.
+- em6 — parked, `bc01ac08` accepted, held pending #1360.
+- em9 — unparked, fold audit.
+- em10 — active, AUDIT-category revision.
+- Still with the user: three branch deletions, #1360 merge, escalation-1 CI decision.
+  Escalation 2 deliberately still queued to hold one-at-a-time discipline.
