@@ -17,16 +17,17 @@
 #
 # This script implements the complete deploy flow:
 #   1. Resolves the deploying operator's identity
-#   2. Resolves the GCP project number
+#   2. Resolves the GCP project number and instance service account
 #   3a. Creates or updates the Cloud Run Instance via gcloud (v1 surface,
 #       required because sandboxLauncher is a v1-only field)
 #   3b. Enables IAP via REST v2 PATCH (iapEnabled + invokerIamDisabled are
 #       v2-only fields)
 #   4. Waits for IAP enforcement to become active (30-75s)
 #   5. Binds the IAP access policy for the operator
+#   5b. Grants required IAM roles to the instance service account
 #   6. Prints effective access (project-level and region-level)
 #   7. Asserts the IAP perimeter is enforcing (fails loudly if not)
-#   8. Prints the Instance URL
+#   8. Prints the Instance URL and post-deploy instructions
 #
 # The script is idempotent: re-running converges without duplication.
 # iapEnabled and invokerIamDisabled are sent on EVERY write to prevent
@@ -180,6 +181,20 @@ di_build_iap_patch_url() {
 # Invariant: invokerIamDisabled: true is NEVER sent without iapEnabled: true.
 di_iap_patch_body() {
   echo '{"iapEnabled":true,"invokerIamDisabled":true}'
+}
+
+# di_resolve_instance_sa prints the service account email for the Cloud Run
+# Instance. If --service-account was provided, uses that directly. Otherwise,
+# returns the Compute Engine default SA for the project.
+# Arguments: explicit_sa project_number
+di_resolve_instance_sa() {
+  local explicit_sa="$1"
+  local project_number="$2"
+  if [[ -n "$explicit_sa" ]]; then
+    printf '%s\n' "$explicit_sa"
+  else
+    printf '%s\n' "${project_number}-compute@developer.gserviceaccount.com"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -756,6 +771,11 @@ di_main() {
   fi
   echo "    Project: $DI_PROJECT (number: $project_number)"
 
+  # Resolve the instance service account for IAM grants later.
+  local instance_sa
+  instance_sa="$(di_resolve_instance_sa "$DI_SERVICE_ACCOUNT" "$project_number")"
+  echo "    Instance SA: $instance_sa"
+
   # Compute the IAP audience and instance URL.
   local iap_audience
   iap_audience="$(di_build_iap_audience "$project_number" "$DI_REGION" "$DI_NAME")"
@@ -920,6 +940,49 @@ di_main() {
   fi
 
   # ===================================================================
+  # Step 5b: Grant instance SA project-level IAM roles
+  #
+  # The hub auto-detects GCP features via the metadata server. These
+  # grants ensure the features that are enabled by default actually work.
+  #
+  # DELIBERATELY NOT GRANTED — roles that the hub can use but that are
+  # not granted by default, with the reason for each:
+  #
+  #   roles/iam.serviceAccountTokenCreator — needed for GCP agent identity
+  #     (hub impersonates target SAs via IAM Credentials API at
+  #     pkg/hub/gcp_token_iam.go). Not granted here because a project-level
+  #     binding lets the hub SA impersonate ANY SA in the project. The
+  #     least-privilege shape is a per-target-SA binding, which requires
+  #     the target SA to exist; see the post-deploy instructions below.
+  #     Operators who do not need GCP identity for agents can skip it.
+  #
+  #   roles/iam.serviceAccountAdmin — needed for SA minting (hub creates
+  #     per-agent SAs via IAM Admin API at pkg/hub/gcp_iam_admin.go).
+  #     Not granted because Create, Delete, and SetIamPolicy on service
+  #     accounts is effectively "can grant itself anything in the project".
+  #     SA minting is an advanced, opt-in capability. Grant manually:
+  #       gcloud projects add-iam-policy-binding PROJECT \
+  #         --member="serviceAccount:INSTANCE_SA" \
+  #         --role=roles/iam.serviceAccountAdmin
+  #
+  #   roles/monitoring.viewer — needed for the metrics dashboard (hub reads
+  #     Cloud Monitoring time series at pkg/hub/metrics_dashboard.go). Not
+  #     granted because the single-node tier's telemetry instruments are
+  #     not yet active; granting read access to a dashboard with no data
+  #     buys nothing. Revisit when telemetry is enabled. Grant manually:
+  #       gcloud projects add-iam-policy-binding PROJECT \
+  #         --member="serviceAccount:INSTANCE_SA" \
+  #         --role=roles/monitoring.viewer
+  # ===================================================================
+  echo "==> Step 5b: Granting instance SA permissions..."
+
+  gcloud projects add-iam-policy-binding "${DI_PROJECT}" \
+    --member="serviceAccount:${instance_sa}" \
+    --role=roles/logging.viewer \
+    --quiet > /dev/null
+  echo "    Granted roles/logging.viewer to ${instance_sa}"
+
+  # ===================================================================
   # Step 6: Read back and print effective access
   # Both project-level and region-level, because project-level grants
   # inherit invisibly.
@@ -981,6 +1044,19 @@ di_main() {
   echo "Admin email:  $admin_email"
   echo ""
   echo "Open the URL in a browser to log in. The deployer is seeded as admin."
+  echo ""
+  echo "=== Optional: Enable GCP identity for agents ==="
+  echo ""
+  echo "To let agents use GCP service account identity, grant the hub's"
+  echo "instance SA tokenCreator on each target SA you want agents to use:"
+  echo ""
+  echo "  gcloud iam service-accounts add-iam-policy-binding \\"
+  echo "    TARGET_SA@${DI_PROJECT}.iam.gserviceaccount.com \\"
+  echo "    --member=serviceAccount:${instance_sa} \\"
+  echo "    --role=roles/iam.serviceAccountTokenCreator"
+  echo ""
+  echo "Replace TARGET_SA with the service account name. Run once per target SA."
+  echo "Skip this if you do not need GCP identity for agents."
 }
 
 # ---------------------------------------------------------------------------

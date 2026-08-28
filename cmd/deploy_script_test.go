@@ -999,6 +999,27 @@ func TestScriptIAMMemberPrefix_ServiceAccount(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Instance SA resolution tests
+// ---------------------------------------------------------------------------
+
+func TestScriptResolveInstanceSA_Explicit(t *testing.T) {
+	stdout, _, exitCode := runBashFunc(t, "di_resolve_instance_sa",
+		"custom-sa@my-project.iam.gserviceaccount.com", "123456789")
+	require.Equal(t, 0, exitCode)
+	assert.Equal(t, "custom-sa@my-project.iam.gserviceaccount.com",
+		strings.TrimSpace(stdout),
+		"when --service-account is provided, it must be used verbatim")
+}
+
+func TestScriptResolveInstanceSA_Default(t *testing.T) {
+	stdout, _, exitCode := runBashFunc(t, "di_resolve_instance_sa", "", "123456789")
+	require.Equal(t, 0, exitCode)
+	assert.Equal(t, "123456789-compute@developer.gserviceaccount.com",
+		strings.TrimSpace(stdout),
+		"when --service-account is omitted, must return the Compute Engine default SA")
+}
+
+// ---------------------------------------------------------------------------
 // Validate project number tests
 // ---------------------------------------------------------------------------
 
