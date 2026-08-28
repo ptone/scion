@@ -13199,3 +13199,56 @@ No compare URL for `marker-gate-2` yet: a compare against main today would inclu
 
 ### Status
 `upstream/main` `b14c41414` unchanged. #1361 OPEN/MERGEABLE `5fc82455b`. dm-tighten `7caa8e00d` awaiting user PR open. **GATE-1 closed** (Tier 1 done; Tier 2 externally owned). Unmoved: DEF-18 (5 heartbeats, rule 217), DEF-32/34 routing (5 heartbeats, awaiting user), DEF-5/6/9/10/11/14/16, tranches C–G, tranche H carrier-less.
+
+---
+
+## §5fd — heartbeat 19:43Z: DEF-34/DEF-32 re-verified live; Tier 2 gate ruling received
+
+### External state: unmoved
+- `upstream/main` = `b14c41414` (#1360). Unchanged.
+- PR #1361 (`ca-msg-em10-marker-gate` @ `5fc82455b`) — still OPEN, MERGEABLE, all CI green. Awaiting user merge.
+- dm-tighten (`ca-msg-em6-dm-tighten` @ `7caa8e00d`) — PR still not opened by user.
+- em10 / em9 / em6 all parked. (em10 taskSummary chronically stale at "Starting tranche C specification" — known habit, not a signal.)
+
+### DEF-34 re-verified against current main (rule 212)
+Original diagnosis predated #1359 and #1360, both of which touched this area. Re-checked on `b14c41414`:
+
+- `pkg/hub/handlers_chat_v2.go:1635-1640` — `hasAgentReplyAfter` still filters `Channel: "web"`. Unchanged, same line numbers.
+- **Callers confirmed (new this pass — I had not previously verified the consumer side):**
+  - `:1491` — edit path. Failure yields `409 AGENT_REPLIED`.
+  - `:1591` — delete path. Same.
+  So the guard is a *mutation gate*, not a display concern. A false negative permits edit/delete of a message an agent has already replied to.
+- **Producer side confirmed at `handlers_agent_messaging.go:194-202`:**
+  `s.webChatStore.GetLastChannel(ctx, recipientID, agent.ProjectID, agent.ID)` — keyed `(user, project, agent)`, **thread-agnostic**, and returns whatever channel the user last spoke from *anywhere*. `webchannel.go:139` records `"web"` only for the web spoke.
+
+**The mismatch is now proven on both halves, not inferred from one.** Producer stamps a per-(user,project,agent) channel; consumer filters per-(channel,thread). Reachable by ordinary multi-channel use: user posts on web → speaks to the same agent on Discord → agent's untagged reply is stamped `discord` → this filter misses it → edit/delete permitted when it should be refused.
+
+**Standing fix ruling unchanged:** drop the `Channel` filter from the guard. Widens the match set; fails closed. Do NOT default `Channel` on the agent path — empty means fan-out-to-all-spokes, and forcing a value there changes routing, not just this guard.
+
+### DEF-32 re-verified
+`handlers_agent_messaging.go:1276` — `if !s.authorize(w, r, projectResource(project), ActionAttach)`. Still the sole `ActionAttach` site in that file outside the marker-gated `handleProjectBroadcast`. Live, unchanged.
+
+### Tier 2 gate rows — ruling from auth-refactor-lead (received 19:43:46Z)
+Answer to all three questions:
+1. **Yes**, gates on the auth-refactor files are wanted.
+2. **DEFER the high-count `authorize.go` rows** (`ActionAttach` x8, `logAuthzDenial` x7/x6). Phase 2 still merging (3 PRs pending); `authorize.go` will keep shifting through RoutePolicy audit and a possible messaging-authz redesign. Those floors would fire on legitimate consolidation.
+3. **Timing: not now. Record as DEFERRED**, not declined. auth-refactor-lead will re-measure at the new baseline after E1 #1357, D2 #1358, B5F1a #1359 land *and* after ptone's messaging-authz design decisions land, then hand back the full row set including high-count rows if stable. **They will message me** — I do not poll.
+
+Wanted once stable (low-count structural, 8 functions):
+`authorizeWithMessage` (CheckAccess x1, logAuthzDenial x1); `handleAgentPTY` (authorizeAgentLifecycle x1); `handleAgentAction` (ActionAttach x1, CheckAccess x1); `performAgentDelete` (CheckAccess x1); `createAgentInProject` (logAuthzDenial x1, CanDelegate x1); `authorizePassthroughIdentity` (logAuthzDenial x4, ActionDispatch x4); `authorizeSAAssignment` (logAuthzDenial x2, ActionAssign x3); `getRuntimeBroker` / `handleBrokerHeartbeat` / `getBrokerProjects` (logAuthzDenial x3 each).
+
+**This vindicates the at-least ruling and rule 233.** The reason for deferral is precisely "these floors would fire on legitimate consolidation" — i.e. the consolidation cost I disclosed when handing the table over is the *actual* basis of their decision. Had I added these unilaterally with strict equality, the gate would have been overridden by another team within a few PRs, eroding every other row in it.
+
+**Rule 235.** A deferral obtained by disclosing a cost is a better outcome than an approval obtained by omitting it. The owning team's "not yet" preserves the gate; my "yes" would have spent it.
+
+**Rule 236.** When a cross-team dependency ends in "I will message you," the correct state is a recorded waiter with no polling and no expiry — not a follow-up task. Record who owes what, and on what trigger, so a future compaction does not convert it into an action item I chase.
+
+### Ledger sweep (why unmoved rows have not moved)
+- **DEF-32 / DEF-34** — both now re-verified live; blocked solely on the user's routing decision (standalone hotfix vs. fold into tranche C). 6 heartbeats. I recommend hotfix: both are small, both are mutation-path, and tranche C has no landing date.
+- **DEF-18** — blocked on a carrier for `pkg/messaging/validate.go`; must NOT be resolved by deleting `projectAgents` (rule 217).
+- **Tier 2 gate rows** — DEFERRED by owner, waiter recorded, no action.
+- **Tranche H** — blocked on G-1, no carrier.
+- **DEF-5/6/9/10/11/14/16, tranches D–G** — held, unchanged.
+- **DEF-33** latent. **DEF-17 STRUCK. GATE-1 CLOSED.**
+
+No user report this heartbeat: no section boundary, no escalation.
