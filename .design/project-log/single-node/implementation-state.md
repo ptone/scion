@@ -15048,3 +15048,65 @@ could become wrong later, read them harder than the findings.
 
 `sn-bash32-rev4` held until that commit is green — the same rule 30 condition I applied to the initgate
 pair, applied to myself when it is mildly inconvenient.
+
+### §35.77 — I read CI through a filter that hid the failing check, and retired an agent on it (13:50)
+
+`#1352` came back red again: **`Build & Test` → Format Check → `gofmt` exit 1** on
+`pkg/config/init_test.go`. Verified myself before dispatching. The whole diff:
+
+```
+-}
+\ No newline at end of file
++}
+```
+
+`dd1e5d00` removed the unused `truncate()` helper from the **end** of the file and took the file's
+trailing newline with it. `golangci-lint` passed; `gofmt` did not. **Two Go linters, two verdicts, and
+the one that caught it is not the one anybody thinks of as "the linter."**
+
+#### How I missed it, which is the part worth keeping
+
+I have been reading CI with `gh pr checks NNNN | awk '{print $1"\t"$2}'`. The output is **tab**-separated
+and `awk` splits on **any** whitespace, so a check named `Build & Test` printed as:
+
+```
+Build	&
+```
+
+I read that as a truncation artefact and moved on. **The status column for that check was never on my
+screen.** It has appeared as `Build	&` in every CI check I ran today — including the one on which I
+declared #1352 green and released `sn-initgate-dev`. The same defect hid a second check,
+`deploy.sh under macOS /bin/bash`, which rendered as `deploy.sh	under`.
+
+Both hidden checks are exactly the ones whose names contain spaces, and **one of the two is the macOS
+canary this entire bash-3.2 campaign exists to build.** I built an instrument to certify macOS behaviour
+and then used a reporting pipeline that could not display its verdict.
+
+> **RULE 33: A SUMMARY THAT REFORMATS ITS INPUT CAN DELETE THE ROW THAT MATTERS, AND IT DELETES IT
+> SILENTLY.** Field-slicing a status table drops any row whose fields do not match the assumed shape —
+> and the rows most likely to have an unusual shape are the composite, human-named jobs, which are
+> usually the aggregate ones. **Read the full table, or cut on the actual delimiter (`cut -f1,2`).
+> Never eyeball a column-sliced view and call it green.**
+
+This is rule 22 turned on my own tooling. I have spent this project rejecting instruments that report
+success without measuring it; I was running one.
+
+#### Consequence, stated plainly
+
+**Rule 30 was correct and I misapplied it.** I released `sn-initgate-dev` on "CI-green" that was really
+"every check I could see is green," and the gofmt failure landed on its commit ninety seconds later. The
+fix now needs a fresh agent (`sn-gofmt-fix`, dispatched) with cold context, which is the precise cost
+rule 30 exists to avoid. **A rule enforced through a broken instrument is not enforced.**
+
+I re-read #1350 unsliced before releasing anyone else. **`Build & Test` is PENDING there too** — so both
+`sn-bash32-rev3` and `sn-bash32-rev4` stay held. Under my sliced view I would have released both.
+
+#### Where #1350 actually stands
+
+`1d72d23e` — the stderr-clean precondition comment landed above the snippet list, stating the
+requirement, the mechanism, the silent-wrong-row consequence, and the remedy. The no-op SC2016 disable is
+gone; the rationale survives consolidated at `:87–89`, with per-line disables on only the six snippet
+lines that need them plus the banner. `shellcheck` and `golangci-lint` pass; **`deploy.sh under macOS
+/bin/bash` passes** — the canary is live and green. `Build & Test` outstanding.
+
+Upstream, unrelated to my branches: #1346/#1347/#1348 merged 13:35–13:37Z, fork resynced to `19e32902`.
