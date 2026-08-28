@@ -1643,6 +1643,25 @@ em10 and every agent I dispatch hereafter.
       run. **"My tests pass" is not "the suite is green."** The acceptance bar for every branch
       handed to me is the full package, and I have to spend those minutes anyway.
 
+80. **A test-count percentage is an argument; a verified chain from the CI invocation to a
+    currently-failing test is a fact. Lead with the fact.**
+    - From the CI sqlite-gap escalation (§5cf). "39.6% of tests never compile" invites a debate
+      about denominators — em9's denominator *was* challenged and *did* survive, but only after I
+      spent the time recounting. `ci.yml:104 -> make test-fast -> -tags no_sqlite ->
+      authz_agent_baseline_test.go:15 -> TestTemplateResource_UATConfinement, which fails on main
+      today` cannot be argued with. Size the blast radius second.
+    - **Corollary (extends rule 61).** When a finding's evidence is an ABSENCE — nothing ran, no
+      grep hits, empty diff — the positive control is not a nicety, it IS the claim. Absence always
+      has two explanations, and only the control eliminates the boring one. Here:
+      `-run '^TestAuthorize'` printing `ok` proves nothing until an UNTAGGED test in the SAME
+      package is shown to still run under the SAME flags.
+    - **Corollary: read the stated rationale in the source before theorising about it.** em9 wrote
+      a plausible CGO/`mattn/go-sqlite3` history for the build tag. `Makefile:67`, two lines above
+      the command, says "lower memory usage". That one word inverts the risk of the recommended
+      remedy: if the tag exists because the untagged suite exhausts the runner, adding a second
+      full-suite CI job may OOM rather than cost 5-8 minutes. A cost estimate that assumes wall
+      clock is the only cost is not an estimate.
+
 
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
@@ -6207,3 +6226,98 @@ usually goes from *wrong* to *silent*. Adding the strict check is only half the 
 half is making the now-unsatisfiable case loud, or the next publisher reintroduces the defect with
 no test and no log. R3/R3b is the worked example.
 
+---
+
+## §5cf. HEARTBEAT v6 sweep — 2026-08-28 03:15Z
+
+**upstream/main:** `f4d02461b` (was `f99de64d`). One commit, #1342, UI only, zero `pkg/hub`.
+All `f99de64d` controls in §5cd / §5cd-addendum remain valid.
+
+**Branch tips (fresh fetch):**
+
+| branch | tip | state |
+|---|---|---|
+| `ca-msg-em6-def31` | `facb332b4` | PR #1338 OPEN, unmoved |
+| `ca-msg-em6-ci-guard` | `e93a58e37` | PR #1339 OPEN, unmoved |
+| `ca-msg-em6-def26` | `bd5e492c1` | compare URL sent, not yet opened |
+| `ca-msg-em10-trb` | `f70b23b2b` | RED (R3); em10 working R2/R3/R3b/F2 |
+| `ca-msg-em9-unify` | `9f57a550f` | **MOVED** — CI gap inventory delivered |
+
+**Roster:** em10 executing, em9 **stalled**, em6 blocked (parked, correct), arch executing.
+
+**em9 was finished-but-unsent** — the exact failure mode heartbeat item 3 names. Pushed `9f57a550`
+and stalled without messaging. Found by checking branch tips, not by report. `taskSummary` was
+empty; branch movement was the only signal. **Asking is the slowest instrument.**
+
+### CI SQLITE GAP — verified, escalated to user
+
+em9's `ci-sqlite-gap-inventory.md`. I recounted everything on `f99de64d` rather than accept it:
+
+| metric | mine | em9 |
+|---|---|---|
+| files with `//go:build !no_sqlite` | 218 | 220 |
+| test funcs inside tagged files | 3357 | 3358 |
+| root-module test funcs (`extras/` excluded) | 8519 | 8472 |
+| share CI never compiles | **39.4%** | 39.6% |
+
+Excluding `extras/` is correct and I checked why before accepting it: every `extras/*` has its own
+`go.mod`, so they are separate modules and never in `./...` of the root module.
+
+**Positive control added (rule 61) — em9's doc lacked it.** `ok ... [no tests to run]` only proves
+the *tag* is responsible if an untagged test in the *same package* still runs under the same flags:
+
+```
+go test -tags no_sqlite ./pkg/hub/ -run '^TestMaintenanceState_Defaults$'  -> === RUN / --- PASS
+go test -tags no_sqlite ./pkg/hub/ -run '^TestAuthorize'                   -> ok, nothing ran
+```
+
+Difference between "these tests do not run" and "this package does not run". Load-bearing.
+
+**The finding is the chain, not the percentage.** Every link verified by me:
+
+```
+.github/workflows/ci.yml:104  ->  make test-fast
+Makefile:69                   ->  go test -tags no_sqlite ./...
+pkg/hub/authz_agent_baseline_test.go:15  ->  //go:build !no_sqlite
+   contains TestTemplateResource_UATConfinement  ->  never compiled
+   and that test FAILS on bare upstream/main today
+```
+
+A currently-failing authorization test that CI structurally cannot observe. 36 tagged files /
+440+ functions are authz: delegation ceilings, credential revocation, cross-project denial,
+DM injection.
+
+**Correction to em9's §4: the tag's stated rationale is MEMORY, not CGO.** `Makefile:67` —
+"test-fast: Run tests without SQLite (lower memory usage)". em9 speculated CGO/`mattn/go-sqlite3`.
+This cuts against em9's own option (i): if the tag exists because the untagged suite exhausts the
+runner, a second full-suite job may OOM rather than merely add 5-8 minutes. The ~1 day estimate
+assumes wall clock is the only cost. **Peak RSS must be measured before option (i) is costed.**
+
+Escalated to user (1882 runes) with options (i)/(ii)/(iii) and my read: **(i), gated on measuring
+peak RSS first** — the only option that converts the dark 39% into signal this week, and (ii) cannot
+be scoped until you can see what actually fails. Told the user this is outside the messaging
+refactor and theirs to place. em9 parked, remediation NOT started.
+
+### RULE 80 (new)
+
+**"A test-count percentage is an argument; a verified chain from the CI invocation to a
+currently-failing test is a fact. Lead with the fact."** 39.6% invites a methodology debate about
+denominators — and em9's denominator *was* challenged and *did* survive, but only after I spent the
+time. `ci.yml:104 -> make test-fast -> -tags no_sqlite -> file:15 -> a test that fails on main
+today` cannot be argued with. Corollary: when a finding's evidence is an ABSENCE (nothing ran, no
+hits, empty diff), the positive control is not a nicety — it is the whole claim, because absence has
+two explanations and the control eliminates one. Second corollary: **read the stated rationale in
+the source before theorising about it.** em9 wrote a plausible CGO history; the Makefile comment two
+lines above the command said "memory", and that one word changes the cost of the recommended option.
+
+### Ledger sweep
+
+- **DEF-31 (#1338), CI-guard (#1339)** — unmoved two heartbeats. Awaiting user to open/merge. Not agent-blocked.
+- **DEF-26** — compare URL sent, unmoved. Same.
+- **Tranche B (em10)** — active, red, R2/R3/R3b/F2 outstanding.
+- **Tranche C** — still blocked on #1338/#1339/DEF-26 + tranche B.
+- **Held, no movement, no owner free:** DEF-5, DEF-6, DEF-9, DEF-10, DEF-11, DEF-14, DEF-16,
+  DEF-17/18 gate sweep, tranches D-G. **AC-DEF15-4 / AC-DEF16-1** still blocked on `ae33715e`.
+  **AC-12-6 / beta exercise** awaiting user scheduling.
+- **Messaging-authz A/B/C** — user deliberating ("I need to think about this one a bit more").
+  Do not press.
