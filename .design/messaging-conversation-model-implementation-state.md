@@ -1685,6 +1685,21 @@ em10 and every agent I dispatch hereafter.
     - Corollary to rule 77 ("the diff is the author's map of the problem, not the problem"): when
       the author was handed the map by me, a defect in the map is mine to sign.
 
+83. **A probe that proved a bug does not automatically pin its fix. Re-verify the probe against the
+    fix's mutation, because the fix may have changed WHY the probe passes.**
+    - From F6 (§5ch). My clobber probe detected the F2 regression while resolution preferred `Slug`.
+      The fix also switched to preferring `Name`; the unconditional path then wrote back the same
+      string the caller supplied, and the probe went green for a reason unrelated to the guard it
+      was meant to protect. I mutated the guard expecting my own probe to fail. It passed.
+    - **A regression probe earns its place as a permanent test only if it still fails when the
+      specific sub-fix it guards is reverted.** When a fix has two interacting halves, one half can
+      mask the other's absence — and the masking is invisible in a green run.
+    - **Corollary: pin the CONTRACT, not the SYMPTOM.** "A caller-supplied label is never
+      overwritten" survives; "the slug is not shown" rotted the moment the resolution's preferred
+      field changed. Symptom tests decay silently whenever the symptom's surface moves.
+    - Corollary to rule 82: before handing a colleague a test design, verify it in BOTH directions
+      yourself — passes unmutated, fails mutated. I shipped v1 without doing that and it was wrong.
+
 
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
@@ -6438,4 +6453,88 @@ finding would have been both false and corrosive: a manager who is charged for t
 errors stops implementing instructions literally, and literal implementation is what makes review
 possible. Corollary to rule 77's "the diff is the author's map of the problem": when the author was
 handed the map by me, a defect in the map is mine.
+
+---
+
+## §5ch. B5 re-review of `c3a59bd4` + heartbeat sweep — 2026-08-28 03:53Z
+
+**upstream/main:** `f4d02461b`, unchanged. **Branch tips:** em6 x3 unmoved (`facb332b4`,
+`e93a58e37`, `bd5e492c1`); `ca-msg-em10-trb` = `c3a59bd4c`; `ca-msg-em9-unify` = `e704b2feb` (moved).
+
+### Mutation matrix — 10/11 KILLED
+
+Selector confirmed FIRST (11 `=== RUN` lines) before trusting any result — rule 81 applied.
+
+| # | mutation | test killed |
+|---|---|---|
+| a | `handleProjectBroadcast` override | `B5F1a` |
+| b | `Broadcasted = true` force | `B5F1b`, `B5F1` |
+| c | handler self-skip -> slug | `B5F1c` |
+| R1p | `fanOutToProject` self-skip | `R1` |
+| R1g | `fanOutGlobal` self-skip | `R2` |
+| orig | `handleAgentMessage` override | `B5` |
+| f2 | resolution block deleted | `ResolvesAgentSlug...` |
+| f3name | prefer `Slug` instead of `Name` | `ResolvesAgentSlug...` |
+| f4 | both `Warn` blocks deleted | `R3b` |
+| f5 | `Broadcasted` conjunct restored | `R3b` |
+| **f3guard** | `SenderName == SenderID` guard removed | **SURVIVED** |
+
+f4 and f5 are both caught by the single R3b test — free coverage, because em10 did not set
+`Broadcasted` in it.
+
+**F3 confirmed fixed by re-running the probe**, not by reading the diff:
+`caller passed SenderName="Friendly Display Name"; notification emitted "Friendly Display Name"`
+(was `"ugly-slug-42"` on `ee84914b`).
+
+### F6 — the survivor, and MY probe failed to pin it
+
+Mutated `f3guard`, expected my own clobber probe to fail. **It passed.** The two halves of F3
+interact: with `Name` preferred over `Slug`, the unconditional path resolves to `agent.Name`, and my
+probe's caller passed `agent.Name`. The overwrite still happens — it just writes back the same
+string.
+
+So Name-preference *masks* the clobber for the ham:357 caller. What the guard is still worth today:
+
+- `ham:357` — caller passes `agent.Name`, resolution returns `agent.Name`: **no observable difference**
+- `chat_v2:1293` — user sender, so unconditional runs `GetAgent(userID)` on every user-to-user DM
+  notification; fails and falls back, invisible, but a **wasted query on the busiest notification path**
+
+Guard is load-bearing for **cost** and for the day a caller passes a label that is not `agent.Name`.
+Rule 78: fix right, coverage absent, unreachability a property of today's callers. **Non-blocking.**
+
+**v2 probe written and verified in BOTH directions** before handing it over (rule 82 — I own
+predicates I specify). Caller label distinct from both Name and Slug:
+`agent Name="Agent Real Name" Slug="agent-slug"`, `caller SenderName="Caller Chosen Label"` ->
+unmutated PASS, `f3guard` mutated FAIL (emitted `"Agent Real Name"`).
+Saved at `repro/f2_clobber_probe_v2_test.go`. Told em10 to lift it and drop the scaffolding: it pins
+the real contract — "a caller-supplied label is never overwritten" — not "the slug is not shown".
+
+**VERDICT: B5 approved on substance.** Every security sub-fix is pinned by a test that fails when
+that sub-fix alone is reverted; the self-delivery regression is gone; the display regression from
+last round is fixed and verified. F6 is the only item before my merge gate. Told em10 NOT to rebase
+yet.
+
+### em9 — `e704b2feb` accepted; SECOND silent push
+
+All four corrections landed: §1 leads with the chain, §2 denominator note, §3a positive control with
+both halves, §4 memory-not-CGO with peak RSS flagged as an unresolved cost against option (i).
+One nit passed on (not worth a push alone): §1 cites `authz_agent_baseline_test.go:1` for the build
+tag; it is at line 15, and a reader who opens line 1 finds the licence header and starts doubting
+the whole chain.
+
+**Process: em9 pushed and parked without messaging, for the second time.** Found again by diffing
+branch tips during the sweep. Both times the work was finished and good; both times it sat unread.
+Told em9 to confirm parked in one line and stop.
+
+### RULE 83 (new)
+
+**"A probe that proved a bug does not automatically pin its fix. Re-verify the probe against the
+fix's mutation, because the fix may have changed why the probe passes."** From F6 (§5ch). My probe
+detected the clobber when resolution preferred `Slug`; once the fix ALSO switched to preferring
+`Name`, the unconditional path began writing back the same string the caller supplied, and the probe
+went green for a reason unrelated to the guard it was meant to protect. **A regression probe earns
+its place as a permanent test only if it still fails when the specific sub-fix it guards is
+reverted** — and when a fix has two interacting halves, one half can mask the other's absence.
+Corollary: pin the CONTRACT ("a caller-supplied label is never overwritten"), not the SYMPTOM
+("the slug is not shown"); symptom tests rot the moment the symptom's surface changes.
 
