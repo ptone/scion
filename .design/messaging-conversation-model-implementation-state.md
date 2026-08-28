@@ -4984,3 +4984,53 @@ arrive with its beneficiary.**
 mechanical questions — routing those through me makes me a bottleneck for nothing. Only a downstream
 dependency in tranche C's commit sequence would change the plan. Branch pushed and green comes back to
 me; **I produce the compare URL, em6 does not open the PR.**
+
+## 5bo. 00:13-00:16Z — main at `53ec098f`; the "blocked" signal has failed a second time
+
+**`upstream/main` = `53ec098f`** (gained #1333, integrations/hooks admin permission checks). Touches
+`pkg/hub` admin handlers only — **no aggregate files, no messaging surface**. Tranche B still conflicts
+with main, as expected with A in front of it.
+
+**Note on rule 60:** `origin/main` and `upstream/main` are equal right now — the fork has synced. **That
+equality is transient and is not a reason to relax the rule.** A mirror that is currently correct is
+still a mirror. Keep verifying `upstream/main`.
+
+**Heartbeat instruction now partially stale, flagged as the heartbeat itself invites:** items 3, 6 and 7
+all say "against current `origin/main`." Per rule 60 that should read `upstream/main`. Following it
+literally would have me base-checking against a ref that lags by up to two commits, which is exactly
+the error of 23:45Z.
+
+### The real finding: my own fix has failed twice
+
+**All three managers are blocked with no reports delivered**, for the second time tonight. em6 blocked
+~23:53 (dispatched 23:51), em10 ~00:00, em9 ~00:08. No branch has moved: `em9-unify` `25fad0a2`,
+`em10` `7e81d053`, `em10-trb` `2ba538c0`, and **no CI-guard branch exists**.
+
+I added "send the report BEFORE you block" to the standing instruction at 23:47Z precisely to prevent
+this. **It did not work.** Chasing them individually again would treat the symptom for the third time.
+
+**The structural error is mine and it is now clear.** Rules 57/58 made `blocked` the trusted signal so
+a parked agent would not be nudged. But `scion list` shows only *"blocked, N minutes ago"* — **the
+reason string is not visible to me.** So I promoted a signal whose payload I cannot read, and in doing
+so collapsed three different states into one indistinguishable rendering:
+
+| Actual state | Renders as |
+|---|---|
+| Waiting on me for a decision | `blocked` |
+| Waiting on a peer (possible circular wait) | `blocked` |
+| Finished, report never sent | `blocked` |
+
+> **I removed one ambiguity by creating a coarser one.** "Parked vs stalled" is now legible; "waiting
+> on me vs waiting on a peer vs silently done" is not. A signal is only as good as the resolution of
+> the thing reading it, and I never checked what `scion list` actually renders before making the signal
+> load-bearing.
+
+**Aggravating factor, and it is self-inflicted:** at 23:51Z I told em6 to coordinate with em9 *directly*
+to avoid being a bottleneck. That was right in principle, but it created a peer-wait I cannot observe.
+em6 may be blocked on em9 while em9 is blocked on something else entirely, and from my side the two are
+identical to "both done."
+
+**Action:** sent all three a single forced-choice question — waiting on me / waiting on a peer /
+finished-but-unsent — with an explicit instruction not to restart work or write a status essay. Cheap,
+and it returns the one datum the tooling cannot give me. Awaiting the three answers before changing the
+protocol again; **a third fix invented without data would be the same mistake a third time.**
