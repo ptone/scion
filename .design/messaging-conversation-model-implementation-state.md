@@ -7232,3 +7232,73 @@ need re-running on a real runner.
 
 **In flight at park time**, collecting next sweep. Deliberately not polled with `sleep` — local
 build waits are permitted but the heartbeat is the natural collection point.
+
+---
+
+## §5cs. Heartbeat 2026-08-28 08:13 — RSS MEASURED: 3.52 GB / 7 GB. Option (i) recommended.
+
+Seventh dead sweep (fetch exits 0/0, `f4d02461b`, tips unchanged, three managers `blocked`,
+#1338/#1339/#1340 open, tranche B PR unopened, no ledger rows struck).
+
+### RESULT — the unknown that gated CI option (i) is closed
+
+`upstream/main`, `GOMAXPROCS=2 go test -p 2 -timeout 40m ./...`, 100 ms tree-RSS poller:
+
+| metric | measured | runner allowance |
+|---|---|---|
+| **peak RSS** | **3.52 GB** (3600 MB) | 7 GB |
+| wall clock | ~6 min, dominated by `pkg/hub` at 298 s | — |
+| packages | 66 ok, 91 no-test-files, 3 failed | — |
+
+**Memory is not a blocker: roughly 2× headroom.** The tag's original OOM rationale (`71275d56`) does
+not hold for the *test suite* at runner parallelism. The ~6 min wall clock independently corroborates
+em9's "~5–8 minutes" estimate, which is a useful cross-check on the rest of their costing.
+
+### The third failure was MY INSTRUMENT, not a defect — caught before reporting
+
+em9's inventory predicted exactly two pre-existing failures. I got three, and the extra one —
+`TestCloudRunSandboxRuntime_Run_BuildsCommand` in `pkg/runtime` — looked like em9 having undercounted.
+It was not:
+
+- `pkg/runtime` carries **no** build tag, so CI already compiles and runs it — meaning if it were
+  genuinely failing, CI would already be red on main. It is not.
+- Re-run in isolation **under CI's exact flags**: `--- PASS`.
+- The actual error is `TempDir RemoveAll cleanup: unlinkat … directory not empty` — a cleanup race
+  under full-suite concurrent load.
+
+**em9's count of two stands.** This is the §5ck/rule-85 pattern for the third time: an apparent
+discrepancy with someone else's work that dissolves on inspection. The discipline that keeps paying
+is *investigate before escalating*, because the cheap reading and the true reading disagree often
+enough that reporting the cheap one would have cost em9 a round trip to disprove — and would have
+impugned a document that was right.
+
+**But the flake is evidence for a real risk:** the untagged job may surface parallelism races the
+tagged suite never triggers. That is an argument *for* `continue-on-error: true`, i.e. exactly the
+shape em9 proposed — my data strengthens a specific design choice of theirs rather than contradicting
+it.
+
+### Recommendation sent to the user (1803 runes)
+
+Option (i), non-blocking, ~1 day: visibility into 3,358 dark functions including every B5 security
+test, with no production change and no tag removal. Option (ii) is 3–5 days across 176 files.
+Option (iii) is not a steady state — 188 → 219 dark files in five days, 27 of the 31 in `pkg/hub`
+(§5cq). Caveat carried explicitly: measured on a 32-core host with parallelism pinned to 2, so
+allocator behaviour differs from a real runner; at half the limit the margin absorbs that, and I said
+so rather than presenting 3.52 GB as dispositive.
+
+**On sending a second message about a topic already escalated.** §5cq committed to "one escalation per
+topic until answered", and this is the boundary case. I judged it a *completion* of the first
+escalation rather than a repetition: the first said "there is a gap and here is the decision it
+affects"; this supplies the missing input that turns that decision from open-ended into
+approve/reject. The rule exists to protect the user's attention, and the asymmetry is plain — sending
+costs one message, withholding costs a wake-up-and-ask-me-to-measure round trip of several hours.
+**Re-arguing is nagging; supplying the missing fact is not.**
+
+### RULE 88 (new)
+
+**"When you are idle and a decision you escalated has an unresolved unknown, go measure it."** A
+coordinator waiting on a human is not blocked from reducing what the human has to weigh. em9 costed
+the measurement at ~2 hours and flagged that nobody had done it; it took one heartbeat. Standing
+practice: before parking on "awaiting user", check whether any pending decision has an empirical gap
+you could close, and close it — but carry the caveats into the recommendation rather than laundering
+a local measurement as a production one.
