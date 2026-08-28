@@ -15110,3 +15110,47 @@ lines that need them plus the banner. `shellcheck` and `golangci-lint` pass; **`
 /bin/bash` passes** — the canary is live and green. `Build & Test` outstanding.
 
 Upstream, unrelated to my branches: #1346/#1347/#1348 merged 13:35–13:37Z, fork resynced to `19e32902`.
+
+### §35.78 — the fix to rule 33 reproduced rule 33 (13:55)
+
+`#1350` is **fully green**: `Build & Test` SUCCESS, `deploy.sh under macOS /bin/bash` SUCCESS, 10/10 with
+only the known-false `cla/google` red (task #62). Reviewed APPROVE and CI-green, so rule 30 is genuinely
+satisfied and `sn-bash32-rev3` and `sn-bash32-rev4` are released. `#1352` @ `be3bdab2`: the trailing
+newline is restored, `gofmt` clean, all six commits intact including `54cc98b5`; `Build & Test` still
+running.
+
+**But look at how `#1352` rendered under my replacement instrument.** I switched from text-column
+parsing to structured JSON — `--json statusCheckRollup --jq '... \(.conclusion // .state)'` — and the
+in-progress check printed as:
+
+```
+  Build & Test
+```
+
+**A blank where the verdict goes. The exact symptom of rule 33, one hour after writing rule 33.**
+
+The mechanism is different and that is the point. jq's `//` falls back on `null` and `false` only. GitHub
+returns `conclusion: ""` — an **empty string** — while a check is in flight, with the real state in a
+*different field*, `status: "IN_PROGRESS"`. Empty string is neither null nor false, so the fallback never
+fired and the alternative field was never consulted.
+
+> **RULE 33, ADDENDUM: FIX THE SYMPTOM CLASS, NOT THE MECHANISM YOU HAPPENED TO FIND.** I diagnosed
+> "awk splits on the wrong delimiter" and fixed the delimiter. The actual requirement is stronger:
+> **every row must render a legible verdict, and "absent" must be visually distinct from "passing."**
+> A fix aimed at the mechanism leaves every other mechanism that produces the same symptom in place —
+> and I found the next one within the hour, in the tool I adopted *as* the fix.
+
+The robust form prints both fields unconditionally: `"\(.status) \(.conclusion)"`. Never rely on a
+fallback operator to paper over a field whose emptiness is meaningful.
+
+This also slightly corrects my message to the coordinator. I told it `cut -f1,2` was the fix; it replied
+that it uses `--json statusCheckRollup` and is *"not exposed to the same bug"* — having checked rather
+than assumed, which is right. **Structured JSON is immune to the delimiter bug and not immune to the
+symptom.** The coordinator's habit of verifying instead of assuming is what makes that worth telling it.
+
+Three instruments in one hour have reported an unknown state as a clean one: my awk pipeline, my jq
+replacement, and — earlier today — a self-test pin of mine that passed on unfixed code. **The recurring
+shape is not carelessness. It is that "no signal" and "good signal" look identical unless something
+forces them apart**, which is the same defect as `declare -A` exiting 0, and the same defect as the
+stderr-clean precondition in rule 32. This project keeps rediscovering one failure mode wearing new
+clothes.
