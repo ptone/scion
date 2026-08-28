@@ -2450,9 +2450,18 @@ func (s *Server) resolveHarnessConfigForEnvGather(req CreateAgentRequest, settin
 		profileName = req.Config.Profile
 	}
 
+	// When the hub is the authority for harness-config defaults (hosted
+	// mode), suppress the broker's own settings-based fallback for the same
+	// reason as ProvisionAgent: the hub already resolved what it wanted to
+	// resolve. See ptone/scion#1316 phase 4.
+	hcSettings := settings
+	if req.Config != nil && req.Config.HubIsHarnessConfigAuthority {
+		hcSettings = nil
+	}
+
 	res, err := config.ResolveHarnessConfigName(config.HarnessConfigInputs{
 		CLIFlag:     cliFlag,
-		Settings:    settings,
+		Settings:    hcSettings,
 		ProfileName: profileName,
 	})
 	if err != nil {

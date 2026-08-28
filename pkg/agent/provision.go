@@ -348,6 +348,9 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
 	}
+	if opts.HubIsHarnessConfigAuthority {
+		ctx = api.ContextWithHubHarnessConfigAuthority(ctx)
+	}
 	// Inject harness auth override into inline config so it is applied
 	// before harness Provision() runs (which reads auth_selectedType to
 	// decide which env vars to inject into scion-agent.json).
@@ -735,11 +738,24 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		finalScionCfg = config.MergeScionConfig(finalScionCfg, inlineCfg)
 	}
 
-	// 2b. Resolve harness-config name (unified resolution chain)
+	// 2b. Resolve harness-config name (unified resolution chain).
+	//
+	// When the hub is the authority for harness-config defaults (hosted mode),
+	// suppress the broker's own settings-based fallback (rungs 6-7 of the
+	// resolution chain). The hub already had its chance to stamp a default
+	// via applyHubAgentDefaults — what it provided (or didn't) is intentional.
+	// Passing the broker's Settings here would let the broker silently
+	// substitute its own compiled-in default_settings.yaml default, which is
+	// the authority violation ptone/scion#1316 identifies. In workstation
+	// mode the flag is unset and the full chain runs as before.
+	hcSettings := settings
+	if api.IsHubHarnessConfigAuthority(ctx) {
+		hcSettings = nil
+	}
 	hcResolution, err := config.ResolveHarnessConfigName(config.HarnessConfigInputs{
 		CLIFlag:     harnessConfig,
 		TemplateCfg: finalScionCfg,
-		Settings:    settings,
+		Settings:    hcSettings,
 		ProfileName: profileName,
 	})
 	if err != nil {

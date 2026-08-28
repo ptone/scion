@@ -612,6 +612,18 @@ type RemoteAgentConfig struct {
 	// application at the broker's LOW-precedence defaults tier — deliberately
 	// not folded into InlineConfig, which is a top-of-chain slot.
 	HubAgentDefaults *RemoteHubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+
+	// HubIsHarnessConfigAuthority tells the broker that the hub is the
+	// authority for harness-config defaults (hosted mode). When true, the
+	// broker must NOT fall back to its own settings chain (rungs 6-7 of
+	// ResolveHarnessConfigName) to invent a harness-config name the hub did
+	// not provide. Without this, an empty HarnessConfig from the hub would
+	// be silently replaced by the broker's compiled-in default_settings.yaml
+	// default, which is the authority violation ptone/scion#1316 identifies.
+	//
+	// Version skew is safe: a broker that predates this field ignores the
+	// unknown JSON key and continues inventing — exactly today's behaviour.
+	HubIsHarnessConfigAuthority bool `json:"hubIsHarnessConfigAuthority,omitempty"`
 }
 
 // RemoteHubAgentDefaults carries the four limit/resource operational
@@ -2620,6 +2632,13 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// takes s.mu; it returns the zero value in file mode, where the wire field
 	// is then omitted and broker behaviour is unchanged.
 	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
+
+	// In hosted mode (!s.workstation), the hub is the authority for
+	// harness-config defaults. Tell the broker to not fall back to its own
+	// settings chain — the hub already had its chance to stamp a default
+	// (via applyHubAgentDefaults) and what it provided (or didn't) is
+	// intentional. See ptone/scion#1316 phase 4.
+	dispatcher.SetHubIsHarnessConfigAuthority(!s.workstation)
 
 	// Set image registry so bare image names are rewritten before dispatch
 	dispatcher.SetImageRegistry(s.resolveImageRegistry())

@@ -443,6 +443,14 @@ type CreateAgentConfig struct {
 	// top-of-chain slot. Nil when the hub sent none: local dispatch, a
 	// file-mode hub, or a hub that predates the field. See design §3.2.3.
 	HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+
+	// HubIsHarnessConfigAuthority tells this broker that the hub is the
+	// authority for harness-config defaults (hosted mode). When true, the
+	// broker must NOT fall back to its own settings chain (rungs 6-7 of
+	// config.ResolveHarnessConfigName) to invent a harness-config name.
+	// False or absent (version skew) preserves today's behaviour. See
+	// ptone/scion#1316 phase 4.
+	HubIsHarnessConfigAuthority bool `json:"hubIsHarnessConfigAuthority,omitempty"`
 }
 
 // GCPIdentityConfig holds GCP identity configuration passed from Hub to Broker.

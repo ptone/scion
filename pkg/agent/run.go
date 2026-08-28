@@ -146,6 +146,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
 	}
+	if opts.HubIsHarnessConfigAuthority {
+		ctx = api.ContextWithHubHarnessConfigAuthority(ctx)
+	}
 
 	// Build inline config for GetAgent by merging the dispatch InlineConfig
 	// (which carries volumes, env, image, etc. from templates/harness configs)

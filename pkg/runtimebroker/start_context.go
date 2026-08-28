@@ -451,6 +451,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		opts.Branch = in.Config.Branch
 		opts.SharedWorkspace = in.Config.SharedWorkspace
 		opts.ProjectPreStartHookScript = in.Config.ProjectPreStartHookScript
+		opts.HubIsHarnessConfigAuthority = in.Config.HubIsHarnessConfigAuthority
 	}
 
 	if in.InlineConfig != nil {

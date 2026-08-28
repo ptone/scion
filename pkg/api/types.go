@@ -824,6 +824,22 @@ func IsBrokerModeFromContext(ctx context.Context) bool {
 	return v
 }
 
+type hubHarnessConfigAuthorityContextKey struct{}
+
+// ContextWithHubHarnessConfigAuthority marks the context to indicate that the
+// hub is the authority for harness-config defaults. Provisioning reads this
+// to suppress the broker's own settings-based fallback.
+func ContextWithHubHarnessConfigAuthority(ctx context.Context) context.Context {
+	return context.WithValue(ctx, hubHarnessConfigAuthorityContextKey{}, true)
+}
+
+// IsHubHarnessConfigAuthority returns true if the hub is the harness-config
+// authority for this provisioning context.
+func IsHubHarnessConfigAuthority(ctx context.Context) bool {
+	v, _ := ctx.Value(hubHarnessConfigAuthorityContextKey{}).(bool)
+	return v
+}
+
 type harnessConfigPathContextKey struct{}
 
 // ContextWithHarnessConfigPath records a pre-resolved local directory for the
@@ -924,6 +940,14 @@ type StartOptions struct {
 	// time. If non-empty, the broker writes it to pre-start.d/30-project-custom
 	// before the agent container starts.
 	ProjectPreStartHookScript string
+
+	// HubIsHarnessConfigAuthority tells provisioning that the hub is the
+	// authority for harness-config defaults. When true AND BrokerMode is true,
+	// ResolveHarnessConfigName skips the broker's own settings-based fallback
+	// (rungs 6-7: profile default and settings default). This prevents the
+	// broker from inventing a harness-config name the hub did not provide.
+	// See ptone/scion#1316 phase 4.
+	HubIsHarnessConfigAuthority bool
 }
 
 type StatusEvent struct {

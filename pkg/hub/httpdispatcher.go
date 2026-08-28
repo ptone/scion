@@ -174,6 +174,13 @@ type HTTPAgentDispatcher struct {
 	// accessor reads under its lock. Nil = no hub defaults (local dispatcher,
 	// tests) and the wire field is omitted.
 	hubAgentDefaultsProvider func() opsettings.AgentDefaultsSettings
+
+	// hubIsHarnessConfigAuthority is true when the hub is the authority for
+	// harness-config defaults — i.e., hosted mode (!s.workstation). When set,
+	// the dispatch config carries a flag telling the broker to NOT fall back
+	// to its own settings chain for harness-config resolution. This closes
+	// the authority violation identified in ptone/scion#1316 fault "downstream."
+	hubIsHarnessConfigAuthority bool
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -297,6 +304,15 @@ func (d *HTTPAgentDispatcher) SetHarnessConfigRepairer(fn func(ctx context.Conte
 // without a restart. Mirrors SetHarnessConfigRepairer.
 func (d *HTTPAgentDispatcher) SetHubAgentDefaultsProvider(fn func() opsettings.AgentDefaultsSettings) {
 	d.hubAgentDefaultsProvider = fn
+}
+
+// SetHubIsHarnessConfigAuthority marks this hub as the authority for
+// harness-config defaults. When true, dispatched configs carry a flag
+// telling the broker to skip its own settings-based harness-config
+// fallback (rungs 6-7 of ResolveHarnessConfigName). Set to true in
+// hosted mode (!s.workstation). See ptone/scion#1316 phase 4.
+func (d *HTTPAgentDispatcher) SetHubIsHarnessConfigAuthority(v bool) {
+	d.hubIsHarnessConfigAuthority = v
 }
 
 // SetImageRegistry sets the image registry prefix for rewriting bare image
@@ -505,7 +521,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			GitClone:                  gitClone,
 			SharedWorkspace:           projectInfo.sharedWorkspace,
 			GCPIdentity:               remoteGCPIdentity,
-			ProjectPreStartHookScript: agent.AppliedConfig.ProjectPreStartHookScript,
+			ProjectPreStartHookScript:   agent.AppliedConfig.ProjectPreStartHookScript,
+			HubIsHarnessConfigAuthority: d.hubIsHarnessConfigAuthority,
 		}
 
 		// Hub operational agent_defaults (limits/resources only) travel in

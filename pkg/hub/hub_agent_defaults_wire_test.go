@@ -362,3 +362,87 @@ func TestRemoteHubAgentDefaults_NilWhenEmpty(t *testing.T) {
 		t.Errorf("want MaxTurns 50 on the wire, got %+v", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4: HubIsHarnessConfigAuthority flag on the dispatch wire
+// ---------------------------------------------------------------------------
+
+// TestDispatch_HubIsHarnessConfigAuthority_HostedMode verifies that when the
+// hub is in hosted mode (!s.workstation), the dispatched config carries
+// HubIsHarnessConfigAuthority: true. This tells the broker to NOT fall back
+// to its own settings chain for harness-config resolution.
+func TestDispatch_HubIsHarnessConfigAuthority_HostedMode(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{
+		store:       createTestStore(t),
+		maintenance: NewMaintenanceState(false, ""),
+		workstation: false, // hosted mode
+	}
+	d := srv.CreateAuthenticatedDispatcher()
+
+	req, err := d.buildCreateRequest(ctx, hubDefaultsDispatchAgent(), "test")
+	if err != nil {
+		t.Fatalf("buildCreateRequest: %v", err)
+	}
+	if req.Config == nil {
+		t.Fatal("dispatch config is nil")
+	}
+	if !req.Config.HubIsHarnessConfigAuthority {
+		t.Error("hosted mode: dispatch must carry HubIsHarnessConfigAuthority=true " +
+			"so the broker does not invent harness-config names")
+	}
+}
+
+// TestDispatch_HubIsHarnessConfigAuthority_WorkstationMode verifies that when
+// the hub is in workstation mode, the dispatched config does NOT carry the
+// authority flag. The broker's settings chain is the correct fallback in
+// workstation mode.
+func TestDispatch_HubIsHarnessConfigAuthority_WorkstationMode(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{
+		store:       createTestStore(t),
+		maintenance: NewMaintenanceState(false, ""),
+		workstation: true, // workstation mode
+	}
+	d := srv.CreateAuthenticatedDispatcher()
+
+	req, err := d.buildCreateRequest(ctx, hubDefaultsDispatchAgent(), "test")
+	if err != nil {
+		t.Fatalf("buildCreateRequest: %v", err)
+	}
+	if req.Config == nil {
+		t.Fatal("dispatch config is nil")
+	}
+	if req.Config.HubIsHarnessConfigAuthority {
+		t.Error("workstation mode: dispatch must NOT carry HubIsHarnessConfigAuthority=true " +
+			"— the broker's settings chain is the correct fallback")
+	}
+}
+
+// TestDispatch_HubIsHarnessConfigAuthority_WireRoundTrip verifies that the
+// flag survives JSON round-tripping between the hub's RemoteAgentConfig and
+// the broker's CreateAgentConfig. A renamed JSON tag on either side would
+// silently drop the flag.
+func TestDispatch_HubIsHarnessConfigAuthority_WireRoundTrip(t *testing.T) {
+	sent := &RemoteAgentConfig{
+		HarnessConfig:               "antigravity",
+		HubIsHarnessConfigAuthority: true,
+	}
+	blob, err := json.Marshal(sent)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// Verify the field is present in the JSON
+	if !strings.Contains(string(blob), `"hubIsHarnessConfigAuthority":true`) {
+		t.Errorf("JSON does not contain the flag: %s", blob)
+	}
+
+	var got runtimebroker.CreateAgentConfig
+	if err := json.Unmarshal(blob, &got); err != nil {
+		t.Fatalf("unmarshal into broker type: %v", err)
+	}
+	if !got.HubIsHarnessConfigAuthority {
+		t.Error("flag did not survive round-trip from hub RemoteAgentConfig to broker CreateAgentConfig")
+	}
+}
