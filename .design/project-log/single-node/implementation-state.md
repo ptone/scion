@@ -12324,3 +12324,43 @@ a follow-up, *"that is defensible and it is your call."* **Declined.**
 **Round 4 is five lines and one sentence.** The reviewer applied all three Required to the real script,
 ran the full suite, shellcheck and 36 measured inputs with zero regressions, then reverted and
 committed nothing. Correct behaviour, and it means the fixes are known-good before the developer starts.
+
+## §35.49 — Heartbeat 00:00. A real Q3 answer: §6.1 has no failure criterion. (00:03)
+
+**1. Agents.** `sn-adcpreflight-dev2` active 7 seconds ago, working round 4. `sn-adcpreflight-rev2`
+correctly blocked. No stalls.
+
+**2. Critical path.** #85, round 4 — five lines and one sentence, all pre-validated by the reviewer.
+
+**3. Design doc.** **Found a second gap, folded into #86 as edit 2.**
+
+The eleven §6.1 acceptance criteria do not contain the property #85 exists to establish: **the deploy
+creates nothing until it has proven it can complete.**
+
+Criterion 8 is the near miss — *"Redeploy, and confirm the documented durability behaviour (§5) —
+workspaces gone, no surprise partial state."* **That is about a successful redeploy. It says nothing
+about what a failed deploy leaves behind.**
+
+And a failed deploy leaving a mess is precisely what happened to ptone: step 3a created the Instance,
+step 3b died on `ACCESS_TOKEN_TYPE_UNSUPPORTED`, and he was left with an Instance running, IAP never
+enabled, and no rollback. **The most expensive defect on this tier is covered by no acceptance
+criterion, which is a large part of why nobody was looking for it.**
+
+Proposed criterion 12, phrased to be checkable rather than aspirational:
+
+> A deploy that cannot complete creates nothing. Break the credential the REST PATCH needs, run the
+> deploy, and confirm it exits non-zero and that `gcloud beta run instances list` shows no new Instance.
+
+**This is now measured, not aspirational** — round 1 verified it two ways, by reading the call order and
+by breaking ADC and finding a clean project afterwards. The doc must specify
+`GOOGLE_APPLICATION_CREDENTIALS=/nonexistent` and **not** the `CLOUDSDK_CONFIG`-empty-dir variant I
+originally suggested: that one also breaks `config get-value account`, so the script dies at step 1
+*above* the code under test and the criterion passes for the wrong reason.
+
+**The general observation, which may deserve a line of its own in the doc:** criteria 1–8 are all
+success walks. **An acceptance set that enumerates successes and never enumerates failure states will
+not notice a half-completed operation** — and a half-completed operation is the worst thing a deploy
+tool can produce, because the operator cannot tell whether to re-run it or clean up first.
+
+**ptone:** messaged at 23:23 with the plain version, no reply, nothing outstanding that only he can
+unblock. Not interrupting. Next contact is the compare URL.
