@@ -246,3 +246,69 @@ func TestCreateAgent_EmptyIdentity_NothingToHydrate(t *testing.T) {
 	assert.NotEmpty(t, fixedAgent.AppliedConfig.HarnessConfigHash,
 		"fixed state: embedded default → harness config hash stamped")
 }
+
+// ---------------------------------------------------------------------------
+// Settings reload must not zero the hosted-mode seed
+// ---------------------------------------------------------------------------
+
+// TestReloadSettings_HostedMode_PreservesAgentDefaults verifies that a
+// settings reload in hosted SQLite mode does not zero out the agent
+// defaults seeded at startup. BuildLayer1SnapshotFromFile produces zeros
+// for DefaultTemplate and DefaultHarnessConfig (it reads GlobalConfig,
+// which does not carry them). Without the overlay in reloadSettings, every
+// admin settings save would silently re-introduce the #1316 defect.
+//
+// The scenario: hosted-mode hub has agent defaults seeded at startup.
+// An admin saves settings (triggers reloadSettings). After the reload,
+// agent defaults must still be populated.
+func TestReloadSettings_HostedMode_PreservesAgentDefaults(t *testing.T) {
+	embTmpl, embHC := config.EmbeddedAgentDefaults()
+	require.NotEmpty(t, embTmpl)
+	require.NotEmpty(t, embHC)
+
+	srv, _ := testServer(t)
+	// Mark as hosted mode (not workstation).
+	srv.workstation = false
+
+	// Simulate the startup seed.
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{
+		DefaultTemplate:      embTmpl,
+		DefaultHarnessConfig: embHC,
+	})
+
+	// Verify seed is in place.
+	before := srv.hubAgentDefaults()
+	require.Equal(t, embTmpl, before.DefaultTemplate, "pre-reload: template must be seeded")
+	require.Equal(t, embHC, before.DefaultHarnessConfig, "pre-reload: harness config must be seeded")
+
+	// Trigger a settings reload — this calls BuildLayer1SnapshotFromFile
+	// (which produces zeros for agent defaults) then ApplySnapshot.
+	srv.reloadSettings()
+
+	// Agent defaults must survive the reload.
+	after := srv.hubAgentDefaults()
+	assert.Equal(t, embTmpl, after.DefaultTemplate,
+		"post-reload: template must survive settings reload in hosted mode")
+	assert.Equal(t, embHC, after.DefaultHarnessConfig,
+		"post-reload: harness config must survive settings reload in hosted mode")
+}
+
+// TestReloadSettings_WorkstationMode_AgentDefaultsStayZero verifies that
+// a settings reload in workstation mode keeps agent defaults at zero.
+// The counterpart to the hosted-mode test above — the overlay must NOT
+// fire in workstation mode.
+func TestReloadSettings_WorkstationMode_AgentDefaultsStayZero(t *testing.T) {
+	srv, _ := testServer(t)
+	// Mark as workstation mode.
+	srv.workstation = true
+
+	// No seed — workstation mode never gets one.
+	require.Equal(t, opsettings.AgentDefaultsSettings{}, srv.hubAgentDefaults(),
+		"workstation precondition: no agent defaults")
+
+	srv.reloadSettings()
+
+	after := srv.hubAgentDefaults()
+	assert.Equal(t, opsettings.AgentDefaultsSettings{}, after,
+		"workstation mode: agent defaults must stay zero after reload")
+}

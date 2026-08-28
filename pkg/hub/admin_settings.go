@@ -401,6 +401,20 @@ func (s *Server) reloadSettings() map[string]interface{} {
 	}
 
 	snap := BuildLayer1SnapshotFromFile(gc)
+	// In hosted mode, overlay the embedded agent defaults onto the snapshot
+	// before applying it. BuildLayer1SnapshotFromFile produces zeros for
+	// these fields (it reads GlobalConfig, which does not carry them), but
+	// initHubServer seeded them from the embedded default_settings.yaml at
+	// startup. Without this overlay, every settings reload would zero out
+	// the seed and silently re-introduce the #1316 defect.
+	//
+	// In workstation mode (s.workstation == true), the snapshot stays zero
+	// and the co-located broker resolves defaults through its own chain.
+	if !s.workstation {
+		defaultTemplate, defaultHarnessConfig := config.EmbeddedAgentDefaults()
+		snap.DefaultTemplate = defaultTemplate
+		snap.DefaultHarnessConfig = defaultHarnessConfig
+	}
 	results = ApplySnapshot(s, snap)
 
 	// Log level is a Layer-0 setting (per design §3.1) — only applied in
