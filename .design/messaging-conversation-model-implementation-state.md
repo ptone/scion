@@ -1662,6 +1662,29 @@ em10 and every agent I dispatch hereafter.
       full-suite CI job may OOM rather than cost 5-8 minutes. A cost estimate that assumes wall
       clock is the only cost is not an estimate.
 
+81. **A `-run` selector that matches nothing prints `ok`. Confirm the selector selects before you
+    trust the result of a mutation, a skip, or a filter.**
+    - From my false "SURVIVED" on the f2 mutation (§5cg). Selector was `TestNotifyDMReceived|F2`;
+      the tests are `TestChatNotifier_DMReceived_*`. Nothing matched, `go test` printed `ok`, and I
+      was one message away from sending em10 a fabricated finding.
+    - This is rule 61 specialised to test selection, and it is the THIRD disguise the same failure
+      has worn in this project: a probe that returned early before reaching the sink (§5cb), a CI
+      build tag that compiled the tests out (§5cf), and a regex that matched no test names (§5cg).
+      All three print a green `ok`. **`ok` means "nothing failed", never "something ran".**
+    - **Any green that constitutes evidence must be paired with a run proving the machinery was
+      engaged.** `-v` showing `=== RUN` for the intended names is the cheapest form and costs one
+      command.
+
+82. **When you specify a predicate for someone else, you own its defects — and you must say so by
+    name when you find them.**
+    - F5 (§5cg): I gave em10 the R3b predicate with a `msg.Broadcasted &&` conjunct that should not
+      be there, and em10 implemented it faithfully. Logging that as an em10 finding would have been
+      false and, worse, corrosive: **a manager who gets charged for the reviewer's errors stops
+      implementing instructions literally, and literal implementation is what makes review
+      possible.**
+    - Corollary to rule 77 ("the diff is the author's map of the problem, not the problem"): when
+      the author was handed the map by me, a defect in the map is mine to sign.
+
 
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
@@ -6321,3 +6344,98 @@ lines above the command said "memory", and that one word changes the cost of the
   **AC-12-6 / beta exercise** awaiting user scheduling.
 - **Messaging-authz A/B/C** — user deliberating ("I need to think about this one a bit more").
   Do not press.
+
+---
+
+## §5cg. B5 re-review of `ee84914b` (ca-msg-em10-trb) — 2026-08-28 03:29Z
+
+Diff `f70b23b2..ee84914b`: 5 files, +213/−1. Source changes only in `messagebroker.go` (+16,
+R3b warnings) and `notifications.go` (+15, F2 slug resolution).
+
+### Mutation matrix — 7/7 KILLED
+
+| # | Sub-fix reverted | Test that failed |
+|---|---|---|
+| a | `handleProjectBroadcast` override | `TestBroadcast_B5F1a` |
+| b | `Broadcasted = true` force | `TestBroadcast_B5F1b` |
+| c | handler self-skip -> slug | `TestBroadcast_B5F1c` |
+| R1p | `fanOutToProject` self-skip -> slug | `TestBroadcast_R1_...` |
+| R1g | `fanOutGlobal` self-skip -> slug | `TestBroker_R2_...` **(last round's survivor — now killed)** |
+| orig | `handleAgentMessage` override | `TestAgentMessage_B5_...` |
+| f2 | slug-resolution block removed | `TestChatNotifier_DMReceived_ResolvesAgentSlugFromSenderID` |
+
+R3 verified: `TestMessageBrokerProxy_BroadcastSkipsSender` passes, fixed by setting `SenderID` to
+match production rather than by weakening the assertion. Correct remedy per rule 79.
+
+### MY ERROR — a false "SURVIVED" on mutation f2, caught by control
+
+First f2 run reported SURVIVED. It had not survived. My `-run` selector was
+`TestNotifyDMReceived|F2`; em10's tests are `TestChatNotifier_DMReceived_*`, so the pattern matched
+nothing and `go test` printed `ok`. **I was one message away from sending a fabricated finding.**
+Re-ran with a positive control (`-run 'TestChatNotifier_DMReceived_' -v` showing `=== RUN` for both)
+before mutating. **Rule 61 for the second time this project, and the second time it was my own
+green result that lied.** Same shape as the CI `no_sqlite` gap: `ok` means "nothing failed", never
+"something ran".
+
+### F3 (BLOCKING) — F2's unconditional overwrite clobbers a better caller-supplied label
+
+Enumerated all three callers of the sink rather than reading the diff (rule 77 standing check):
+
+| caller | sender kind | `SenderName` passed |
+|---|---|---|
+| `messagebroker.go:535` | agent | raw UUID — **F2's intended target** |
+| `handlers_chat_v2.go:1293` | **user** | a user display label |
+| `handlers_agent_messaging.go:357` | agent | `agent.Name`, falling back to `agent.Slug` |
+
+F2 resolves unconditionally on `msg.SenderID != ""`, so:
+
+- **ham:357** — the caller deliberately prefers `Name`; F2 discards it and forces `Slug`.
+  **Proven, not argued.** Probe `repro/f2_clobber_probe_test.go`, agent Name "Friendly Display
+  Name" / Slug "ugly-slug-42":
+  `caller passed SenderName="Friendly Display Name"; notification emitted SenderName="ugly-slug-42"`
+  A display regression introduced by this commit.
+- **chat_v2:1293** — sender is a USER, so `GetAgent(ctx, userID)` now runs on every user-to-user DM
+  notification. Fails and falls back, so harmless, but it is a pointless store lookup on the
+  busiest notification path — the very path the deferral was meant to protect.
+
+Fix is one line and strictly better on all three axes:
+`if msg.SenderID != "" && msg.SenderName == msg.SenderID {`
+Broker path resolves (TrimPrefix of `"agent:"+UUID` == `SenderID`); user path never looks up;
+ham:357 keeps `Name`. Self-correcting for pre-B5 messages where `Sender` was `"agent:"+slug`
+(SenderName is already a slug, so != SenderID, so no lookup and no clobber). Both F2 tests set
+`SenderName == SenderID` and keep passing unchanged. Also asked: prefer `Name` then `Slug` when
+resolving, matching ham:353-357, or the same agent renders differently by path.
+
+### F4 (non-blocking) — R3b is untested
+
+The warning is correct (right predicate, right placement, does not drop, does not guess from slug),
+but both `Warn` blocks can be deleted with nothing failing. The warning is the safety net for a
+future publisher that omits `SenderID`; if the net silently disappears we are back to the silent
+self-delivery it exists to prevent. A `slog` handler over a `bytes.Buffer` plus one assertion.
+
+### F5 — MY ERROR in the predicate I specified; em10 implemented it faithfully
+
+I wrote "when `msg.Broadcasted` is set and ...". Drop the `Broadcasted` conjunct. Inside
+`fanOutToProject`/`fanOutGlobal` the message IS a broadcast by construction — those functions are
+only reachable from the broadcast subscriptions. Requiring the flag means a publisher who forgets
+`Broadcasted` also loses the warning, and "forgot to set a field" is precisely the class R3b guards.
+
+### RULE 81 (new)
+
+**"A `-run` selector that matches nothing prints `ok`. Confirm the selector selects before you
+trust the result of a mutation, a skip, or a filter."** From my false-SURVIVED on f2 (§5cg). This is
+rule 61 specialised to test selection, and it is the third distinct disguise the same failure has
+worn in this project: a probe that returned early before reaching the sink (§5cb), a CI build tag
+that compiled the tests out (§5cf), and now a regex that matched no test names. All three print a
+green `ok`. **Any green that constitutes evidence must be paired with a run that proves the
+machinery was engaged** — `-v` showing `=== RUN` for the intended names is the cheapest form.
+
+### RULE 82 (new)
+
+**"When you specify a predicate for someone else, you own its defects — and you must say so by
+name when you find them."** F5 was my conjunct, implemented faithfully. Logging it as an em10
+finding would have been both false and corrosive: a manager who is charged for the reviewer's
+errors stops implementing instructions literally, and literal implementation is what makes review
+possible. Corollary to rule 77's "the diff is the author's map of the problem": when the author was
+handed the map by me, a defect in the map is mine.
+
