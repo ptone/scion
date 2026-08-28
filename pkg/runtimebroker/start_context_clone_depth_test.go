@@ -52,3 +52,38 @@ func TestCloneDepth_Row5_DepthZeroNoEnvVar(t *testing.T) {
 		t.Logf("CONFIRMED: Depth: 0 → no SCION_GIT_DEPTH emitted (defers to in-container default)")
 	}
 }
+
+// Task #49 R1: Depth: -1 through start_context.go → SCION_GIT_DEPTH="-1".
+// The sentinel must survive the guard so init.go can distinguish full clone
+// from the shallow default. Without this, -1 is silently dropped and the
+// operator's clone-depth label is ignored.
+func TestCloneDepth_DepthNegOneForwarded(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-fullclone",
+		ProjectPath: "/some/path",
+		Config: &CreateAgentConfig{
+			GitClone: &api.GitCloneConfig{
+				URL:   "https://github.com/org/repo.git",
+				Depth: -1,
+			},
+		},
+		HTTPRequest: r,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	val, present := sc.Opts.Env["SCION_GIT_DEPTH"]
+	if !present {
+		t.Fatal("Depth: -1 should emit SCION_GIT_DEPTH, but it was absent — sentinel dropped by guard")
+	}
+	if val != "-1" {
+		t.Errorf("SCION_GIT_DEPTH = %q, want \"-1\"", val)
+	}
+	t.Logf("CONFIRMED: Depth: -1 → SCION_GIT_DEPTH=\"-1\" forwarded")
+}

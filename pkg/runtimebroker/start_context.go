@@ -546,7 +546,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if gc.Branch != "" {
 			env["SCION_GIT_BRANCH"] = gc.Branch
 		}
-		if gc.Depth > 0 {
+		// Forward depth when it carries a meaningful value.
+		// Positive = shallow-N, -1 = full clone (no --depth flag).
+		// 0 = unset (omitempty drops it on the wire), so we skip it
+		// and let the consumer default to shallow-1.
+		if gc.Depth != 0 {
 			env["SCION_GIT_DEPTH"] = strconv.Itoa(gc.Depth)
 		}
 		if in.Config.Branch != "" {

@@ -7,12 +7,16 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // hubEnvVars lists the environment variables used by the Hub client.
@@ -1003,3 +1007,158 @@ func TestResolveIsSharedGitWorkspace(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Task #49 R1 — full-clone via CRS path can push to a second remote
+// ---------------------------------------------------------------------------
+
+// TestFullClone_CRSPath_CanPushToFork pins that a full clone (depth -1)
+// through init.go's gitCloneWorkspace produces a clone that can push to a
+// second remote (fork). This is the behaviour the scion.dev/clone-depth
+// label promises the operator.
+//
+// The depth value arrives through the same serialization chain production
+// uses: GitCloneConfig{Depth: -1} → JSON round-trip → strconv.Itoa →
+// SCION_GIT_DEPTH env var → consumed by gitCloneWorkspace. The test does
+// not hand-write "-1" as both input and expectation.
+//
+// This test drives init.go's gitCloneWorkspace (the Cloud Run sandbox
+// path), not provision.go's (the host-side path). The two implementations
+// diverge — see task #46 investigation.
+func TestFullClone_CRSPath_CanPushToFork(t *testing.T) {
+	// Scrub Hub env vars so gitCloneWorkspace does not talk to a real hub.
+	for _, v := range hubEnvVars {
+		t.Setenv(v, "")
+	}
+
+	// --- Derive depth from the production serialization chain ---
+	// The label parser sets GitCloneConfig.Depth = -1. That struct is
+	// marshalled to JSON (wire), unmarshalled on the consumer, and
+	// start_context reads gc.Depth to set SCION_GIT_DEPTH.
+	wire, err := json.Marshal(api.GitCloneConfig{
+		URL:   "placeholder",
+		Depth: -1,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var gc api.GitCloneConfig
+	if err := json.Unmarshal(wire, &gc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// This is the env var value start_context.go would produce.
+	depthEnvValue := strconv.Itoa(gc.Depth)
+
+	// --- Create a "remote" bare repo with multiple commits ---
+	originDir := filepath.Join(t.TempDir(), "origin.git")
+	runGitCmd(t, "", "init", "--bare", "-b", "main", originDir)
+
+	// Populate it with commits via a temporary working copy.
+	workDir := filepath.Join(t.TempDir(), "work")
+	runGitCmd(t, "", "clone", originDir, workDir)
+	runGitCmd(t, workDir, "checkout", "-b", "main")
+	for i := 1; i <= 3; i++ {
+		writeTestFile(t, filepath.Join(workDir, "file"+strconv.Itoa(i)+".txt"), "commit "+strconv.Itoa(i))
+		runGitCmd(t, workDir, "add", ".")
+		runGitCmd(t, workDir, "commit", "-m", "commit "+strconv.Itoa(i))
+	}
+	runGitCmd(t, workDir, "push", "-u", "origin", "main")
+
+	// --- Clone via init.go's gitCloneWorkspace ---
+	cloneDir := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(cloneDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	agentHome := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(agentHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("SCION_GIT_CLONE_URL", "file://"+originDir)
+	t.Setenv("SCION_GIT_BRANCH", "main")
+	t.Setenv("SCION_GIT_DEPTH", depthEnvValue)
+	t.Setenv("SCION_WORKSPACE_PATH", cloneDir)
+	t.Setenv("SCION_AGENT_BRANCH", "") // No agent branch — clone the project default
+	t.Setenv("SCION_AGENT_NAME", "test-fullclone")
+
+	if err := gitCloneWorkspace(0, 0, agentHome); err != nil {
+		t.Fatalf("gitCloneWorkspace: %v", err)
+	}
+
+	// --- Verify: full clone (not shallow) ---
+	out, err := exec.Command("git", "-C", cloneDir, "rev-parse", "--is-shallow-repository").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	isShallow := strings.TrimSpace(string(out))
+	if isShallow != "false" {
+		t.Fatalf("expected full clone (not shallow), got is-shallow=%s", isShallow)
+	}
+
+	// --- Verify: all commits present ---
+	out, err = exec.Command("git", "-C", cloneDir, "rev-list", "--count", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-list: %v", err)
+	}
+	commitCount := strings.TrimSpace(string(out))
+	if commitCount != "3" {
+		t.Errorf("expected 3 commits in full clone, got %s", commitCount)
+	}
+
+	// --- THE PIN: push to a second remote (fork) ---
+	// gitCloneWorkspace creates a branch scion/<agentName> and checks it out.
+	// The push must go from the current HEAD to the fork — this is the
+	// production flow where the agent pushes its work branch to a fork.
+	forkDir := filepath.Join(t.TempDir(), "fork.git")
+	runGitCmd(t, "", "init", "--bare", forkDir)
+	runGitCmd(t, cloneDir, "remote", "add", "fork", forkDir)
+
+	// Make a new commit to push.
+	writeTestFile(t, filepath.Join(cloneDir, "new.txt"), "from full clone")
+	runGitCmd(t, cloneDir, "add", "new.txt")
+	runGitCmd(t, cloneDir, "commit", "-m", "test push from full clone")
+
+	// Push HEAD (the agent branch) to the fork.
+	cmd := exec.Command("git", "-C", cloneDir, "push", "fork", "HEAD")
+	pushOutput, pushErr := cmd.CombinedOutput()
+	if pushErr != nil {
+		t.Fatalf("PUSH TO FORK FAILED — full clone should be able to push to a second remote:\n%s", pushOutput)
+	}
+
+	// Positive assertion: the fork received all commits (3 original + 1 new).
+	// Use HEAD ref name from the clone to count on the fork.
+	branchOut, _ := exec.Command("git", "-C", cloneDir, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	branch := strings.TrimSpace(string(branchOut))
+	forkOut, err := exec.Command("git", "-C", forkDir, "rev-list", "--count", branch).Output()
+	if err != nil {
+		t.Fatalf("rev-list on fork: %v", err)
+	}
+	forkCount := strings.TrimSpace(string(forkOut))
+	if forkCount != "4" {
+		t.Errorf("expected 4 commits in fork after push (3 original + 1 new), got %s", forkCount)
+	}
+
+	t.Logf("CONFIRMED: full clone (depth -1 via CRS path) can push to fork (%s commits on %s)", forkCount, branch)
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+func runGitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@test",
+		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@test",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+// writeTestFile is declared in harness_test.go (same package).

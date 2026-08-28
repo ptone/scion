@@ -769,7 +769,12 @@ func (s ResolvedSecret) MarshalJSON() ([]byte, error) {
 type GitCloneConfig struct {
 	URL    string `json:"url"`              // HTTPS clone URL (without credentials)
 	Branch string `json:"branch,omitempty"` // Branch to clone (default: main)
-	Depth  int    `json:"depth,omitempty"`  // Clone depth (default: 1; -1 = full clone, 0 = unset → defaults to 1)
+	// Clone depth: positive = shallow-N, -1 = full clone, 0 = unset (defaults to 1).
+	// The sentinel is -1 (not 0) because omitempty drops the zero value on the
+	// wire, making 0 unrepresentable in JSON. Any design that assigns meaning
+	// to 0 (e.g. "0 = full clone") fights the serialization: the value the
+	// caller intended is silently removed before it reaches the consumer.
+	Depth int `json:"depth,omitempty"`
 }
 
 type gitCloneContextKey struct{}
