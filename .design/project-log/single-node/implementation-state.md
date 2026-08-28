@@ -12671,3 +12671,24 @@ hit it and misattribute it to their own work.** Workaround: re-run under a priva
 Two messages tonight went over the 2000-character cap and reported "delivered" anyway. **I do not know
 whether they truncated**, so I resent the tails rather than assume. `wc -c` before sending is a rule I
 have written down and did not follow.
+
+### §35.56 — Heartbeat 01:00. Short, because only one thing is new.
+
+**1. Progressing?** Measured. `sn-adcpreflight-rev2` **executing, 33 seconds ago** — spot-check in
+flight, dispatched 00:57. `sn-adcpreflight-dev2` idle by design. No r5 artifact yet, correct at four
+minutes.
+
+**2. Blocker.** The spot-check of the O1 pin and the rebase. Unchanged.
+
+**3. Design doc.** Nothing has merged since the 00:30 check and upstream is still `ce9a7993`. No new
+drift. #86 remains the only known drift, still held behind #85.
+
+**The one new fact, and it is about my own process.** The branch is **still `600a0f127`** — the freeze
+held this round. Last round it did not, because I dispatched a review and sent the developer a work
+item in the same window (§35.51). This round the developer handed me two live findings mid-review
+(`fullGcloudStub`, the O2 schemeless label) and **I routed them into the #87 brief instead of back to
+the developer.** Same information, no moving head, reviewer's gates still attributable to one SHA.
+
+**That is the fix for §35.51 working, and it is worth naming as a rule rather than a one-off: while a
+branch is under review, findings go to the next brief, never to the current developer.** Deferring is
+not dropping, provided the place you defer to is a document someone will actually open.
