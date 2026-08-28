@@ -7968,3 +7968,109 @@ not the constraint. Use `grep -l`. Generalised: when a fact has no fixed locatio
 location-based instrument is measuring something else and will answer confidently. Corollary, and
 the one that cost me: **when someone's citation is off by a fixed offset, ask whether the offset is
 the finding.** A systematically wrong line number is a broken instrument wearing a typo's clothes.
+
+---
+
+## §5da. 2026-08-28 10:40–10:55Z — SECTION BOUNDARY: tranche B PR opened (#1343), reviewed; em6's three PRs merged
+
+### State change
+
+`upstream/main`: `f4d02461b` → **`b88fece2f`** after ~12 hours static. Four commits landed:
+
+| Commit | PR | What |
+|---|---|---|
+| `310126977` | #1338 | DEF-31 defaultAgent + scope resolver validation |
+| `ef90b53bf` | #1339 | CI guard on direct conversation/participant writes |
+| `7c5a64ae9` | #1340 | DEF-26 misleading convergence test rename |
+| `b88fece2f` | #1341 | messaging UI visibility after permission refactor (NOT mine) |
+
+**Three ledger rows struck: DEF-31, DEF-26, CI-guard.** em6 is now clear and has been given
+closure and an explicit park command.
+
+#1341 is someone else's and touches `web/` only (4 files, 8 lines) — **no Go overlap with tranche
+B**. Checked rather than assumed, because a commit titled "after permission refactor" landing on
+messaging during my merge window is exactly the shape of thing that collides.
+
+The user opened tranche B as **PR #1343** on `scion/ca-msg-em10-trb` @ `144d9d884`.
+
+### The near-miss worth recording: my gates were tested against a base that no longer existed
+
+#1343's CI ran and went green at ~10:37. **#1339 — a new CI gate that guards precisely the tables
+tranche B writes — merged at 10:38.** The PR's green tick was earned against a gate set that did
+not yet include the gate most likely to catch it.
+
+This is rule 92 with the roles reversed. Rule 92 says run the gate set against the exact commit you
+are asking someone to merge. The unstated half is that **the gate set is not a constant** — it can
+move under a commit that is already green, and GitHub will keep displaying the stale tick.
+
+Measured rather than reasoned: rebased tranche B onto `b88fece2f` (clean, 9 commits, no conflicts)
+at `1874c4f83` and ran the real gates:
+
+```
+./hack/check-conversation-upsert-guard.sh  -> "no violations"
+gofmt -l .                                 -> (clean)
+make check-authz-guards                    -> "analysed 1874c4f83, no violations"
+make compat-literals                       -> clean
+```
+
+All `UpsertConversationByExternalRef` callers confine to `pkg/messaging` + `pkg/store`. **Tranche B
+passes the new guard.** The outcome is benign; the reasoning that would have skipped the check was
+not. I nearly did skip it — I had already grepped the callers and satisfied myself before running
+the script.
+
+### Reviewer feedback on #1343 — gemini-code-assist, 7 comments, 3 classes
+
+**Class 1 — `divergence.go:150`, high. This IS B4**, which §5ct/§5cu already briefed. The reviewer
+found it independently. Confirmed **LIVE at 6 non-test call sites** (`messagebroker.go:485,658`;
+`handlers_agent_messaging.go:271,802,1053,1174`), so today every DM logs a false mismatch.
+
+I applied the reviewer's suggested patch **verbatim** and measured it against the three causes
+§5ct identified. Probe: `repro/b4_reviewerfix_probe_test.go`.
+
+| Class | Reviewer's patch |
+|---|---|
+| (a+b) kind prefixes + sort basis | `false` → **`true`** — FIXED |
+| (c) DM carrying a `thread_id` | `false` → `false` — **unchanged** |
+| (d) non-canonical raw IDs | `false` → `false` — only the reason string changes |
+
+**The §5ct prediction — "the obvious fix turns a 100% false-positive rate into ~50%" — is now
+measured, not predicted.** It closes one of three.
+
+On (c) I reversed my own framing on inspection. `OldRoutingFromMessage` returns `"thread:"+threadID`
+whenever `threadID` is non-empty, so a DM with a thread_id never enters the DM branch. My brief had
+this filed as a defect. **It is probably not one** — the old model genuinely did route those by
+thread while the new model routes by DM key, so `routing-type-mismatch` is the *correct* signal.
+Patching it into agreement would erase a real divergence during the exact observation window the
+logging exists to produce. Handed to em10 as *"rule on it explicitly and record the ruling"*, not as
+a fix.
+
+On (d) I explicitly declined to claim it occurs in production. Labelled latent; told em10 not to
+chase it.
+
+**Class 2 — the fixture, which is the part that matters.** `divergence_test.go` builds
+`actualExternalRef` with the legacy `directMessageExternalRef` helper, so the fixture agrees in
+exactly the way production cannot. That is how a detector that is wrong on every DM has a green
+suite. Instructed: **first commit changes the fixture and watches the suite go RED** (rule 65); if
+it stays green, stop and report, because the fix would be unverified.
+
+**Class 3 — `dm_migration.go` (309, 387 high; 195, 237, 374, 439 medium).** All six genuine: transient
+DB errors read as "not found" or "ambiguous". But **`DMMigrationService` has ZERO non-test callers** —
+it is not wired to any CLI or startup path. Dormant code cannot regress production, so these do
+**not** hold #1343. Folded into the B3/B4 brief as S4 preconditions.
+
+Carried into that brief: `309/387` are **fail-OPEN on a transient error** — a connection blip is read
+as "not found" and the row is re-keyed in place. That contradicts the standing rule that on the
+derivation path an error denies. Whatever the fix, a transient error must ABORT the row.
+
+### PR #1343 status
+
+`mergeable=MERGEABLE`, `mergeStateStatus=UNSTABLE`. Build & Test, golangci-lint, shellcheck, scan-pr,
+check-changes all **pass** — the gofmt failure I caught in §5cw is confirmed fixed. Only `cla/google`
+fails; UNSTABLE means it is not a required check, but flagged to the user as a pre-merge item.
+
+### Rule 96 (new)
+
+**A green check is a claim about a gate set at a point in time, not about the commit.** When main
+moves, re-run the gates — especially the ones that *arrived* with the move. A newly landed gate has
+never run against any open branch, so every open PR's tick predates it. Corollary: having already
+convinced yourself by grep is the strongest predictor that you are about to skip the real check.
