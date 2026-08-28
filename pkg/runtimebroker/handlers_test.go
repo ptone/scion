@@ -3202,13 +3202,14 @@ func TestCreateAgentStartFailure_CleansUpFiles(t *testing.T) {
 // return that profile. Before the fix, the workstation defaults (local/docker,
 // remote/kubernetes) were seeded; buildInfoProfiles filtered out docker
 // (local-only) and returned only remote/kubernetes — which cannot work on
-// this tier. With the fix, the "default" profile survives alongside
-// "remote" (from embedded defaults merge), and autoSelectProfile does NOT
-// fire (length > 1), so "Use broker default" is shown — which resolves to
-// active_profile "default" → cloudrun-sandbox.
+// this tier.
 //
-// The assertion is on the PROFILE LIST contents, not just the selected value.
-// The bug was a list of length one containing the WRONG entry.
+// With Shape A (task #92), the "default" profile is seeded. With Shape B
+// (task #93), canBrokerServeRuntime replaces the negative filter: a
+// cloudrun-sandbox broker serves only cloudrun-sandbox profiles, so both
+// local/docker and remote/kubernetes are excluded. The result is exactly
+// one profile — default/cloudrun-sandbox — which autoSelectProfile selects
+// directly.
 func TestBuildInfoProfiles_CloudRunSandbox_Task92(t *testing.T) {
 	tmpDir := t.TempDir()
 	origHome := os.Getenv("HOME")
@@ -3218,9 +3219,9 @@ func TestBuildInfoProfiles_CloudRunSandbox_Task92(t *testing.T) {
 	// Seed settings matching the fixed Cloud Run sandbox template:
 	// active_profile=default, profiles.default.runtime=cloudrun-sandbox
 	// LoadEffectiveSettings also merges the embedded defaults, which add
-	// profiles.local (docker) and profiles.remote (kubernetes). The filter
-	// in buildInfoProfiles then drops local (local-only) but keeps both
-	// default and remote.
+	// profiles.local (docker) and profiles.remote (kubernetes). Shape B's
+	// canBrokerServeRuntime drops both local and remote, keeping only
+	// default/cloudrun-sandbox.
 	scionDir := filepath.Join(tmpDir, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
 		t.Fatal(err)
@@ -3272,24 +3273,40 @@ profiles:
 		t.Error("profile 'local' (docker) should be filtered out on a cloudrun-sandbox broker")
 	}
 
-	// The profile list must have length > 1 so that autoSelectProfile does
-	// NOT fire. "remote" (from embedded defaults merge) is expected alongside
-	// "default". With length > 1, the UI shows "Use broker default" which
-	// resolves to active_profile "default" → cloudrun-sandbox → works.
-	if len(profiles) < 2 {
-		t.Errorf("expected >= 2 profiles (so autoSelectProfile does not fire), got %d", len(profiles))
+	// SHAPE B ASSERTION: remote/kubernetes is excluded by canBrokerServeRuntime.
+	// The profile list has exactly one entry: default/cloudrun-sandbox.
+	//
+	// length==1 is acceptable here because the single profile IS servable by
+	// this broker. The UI's autoSelectProfile fires at length===1 and
+	// pre-selects the profile in a visible dropdown — the operator sees
+	// "default (cloudrun-sandbox)" already chosen, which is the correct
+	// outcome. The old >= 2 guard was protecting against autoSelect firing on
+	// a non-servable profile (remote/kubernetes), not against autoSelect
+	// firing at all. Shape B eliminates the non-servable profile, so the
+	// guard's real invariant is satisfied.
+	if _, hasRemote := byName["remote"]; hasRemote {
+		t.Error("profile 'remote' (kubernetes) should be filtered out on a cloudrun-sandbox broker (Shape B)")
+	}
+	if len(profiles) != 1 {
+		names := make([]string, len(profiles))
+		for i, p := range profiles {
+			names[i] = fmt.Sprintf("%s(%s)", p.Name, p.Type)
+		}
+		t.Errorf("expected exactly 1 profile (default/cloudrun-sandbox), got %d: %v", len(profiles), names)
 	}
 }
 
-// TestBuildInfoProfiles_OldWorkstationDefaults_Task92_Regression is the RED
-// counterpart of the pin test. When the WORKSTATION defaults are seeded
-// (local/docker + remote/kubernetes) and the broker runtime is cloudrun-sandbox,
-// buildInfoProfiles returns only remote/kubernetes — which is the bug.
+// TestBuildInfoProfiles_OldWorkstationDefaults_ShapeB_Fallback documents what
+// happens when old workstation defaults (local/docker + remote/kubernetes, no
+// seeded cloudrun-sandbox profile) face a cloudrun-sandbox broker under
+// Shape B. Before Shape B, remote/kubernetes leaked through — the bug.
+// After Shape B, canBrokerServeRuntime drops both docker and kubernetes;
+// the len(profiles)==0 fallback fires and synthesises default/cloudrun-sandbox.
 //
-// This test documents the defective state so the pin test's GREEN is meaningful.
-// If someone re-introduces the old defaults for Cloud Run sandbox, this test
-// shows what would happen: the UI would see only "remote (kubernetes)".
-func TestBuildInfoProfiles_OldWorkstationDefaults_Task92_Regression(t *testing.T) {
+// Renamed from TestBuildInfoProfiles_OldWorkstationDefaults_Task92_Regression:
+// it no longer documents a regression — it documents the corrected fallback
+// path after Shape B replaced the filter.
+func TestBuildInfoProfiles_OldWorkstationDefaults_ShapeB_Fallback(t *testing.T) {
 	tmpDir := t.TempDir()
 	origHome := os.Getenv("HOME")
 	_ = os.Setenv("HOME", tmpDir)
@@ -3320,38 +3337,32 @@ profiles:
 	srv := &Server{}
 	profiles := srv.buildInfoProfiles("cloudrun-sandbox")
 
-	// Document the bug: docker is filtered out (local-only), only kubernetes
-	// remains. This is the defect — the profile list contains only an entry
-	// that cannot work on this tier.
+	// Shape B: canBrokerServeRuntime drops both docker and kubernetes on a
+	// cloudrun-sandbox broker. The filter loop produces an empty list; the
+	// len(profiles)==0 fallback fires and synthesises default/cloudrun-sandbox.
 	if len(profiles) != 1 {
-		t.Fatalf("expected 1 profile (regression confirms filter), got %d", len(profiles))
+		t.Fatalf("expected 1 profile (synthesised default from fallback), got %d", len(profiles))
 	}
-	if profiles[0].Name != "remote" || profiles[0].Type != "kubernetes" {
-		t.Errorf("regression: expected remote/kubernetes, got %s/%s", profiles[0].Name, profiles[0].Type)
+	if profiles[0].Name != "default" || profiles[0].Type != "cloudrun-sandbox" {
+		t.Errorf("expected default/cloudrun-sandbox (synthesised), got %s/%s", profiles[0].Name, profiles[0].Type)
 	}
-	// This is the symptom: the ONLY available profile is kubernetes, which
-	// cannot work on Cloud Run sandbox. autoSelectProfile() in the UI would
-	// auto-select it because profiles.length === 1.
 }
 
-// TestBuildInfoProfiles_FallbackFires_Task92 verifies the architect's Shape B
-// claim by execution: when ALL profiles are dropped by buildInfoProfiles
-// (both local/docker and remote/kubernetes filtered out), the existing
-// len(profiles)==0 fallback fires and returns exactly one synthetic profile
-// {Name: "default", Type: defaultRuntimeType, Available: true}.
+// TestBuildInfoProfiles_FallbackFires_Task92 verifies Shape B's filter by
+// execution across three facts.
 //
-// With defaultRuntimeType="cloudrun-sandbox", this means the fallback produces
-// the correct profile for the single-node tier. autoSelectProfile in the UI
-// fires (length == 1), and the profile resolves to cloudrun-sandbox.
+// FACT 1: On a cloudrun-sandbox broker with workstation defaults (local/docker
+// + remote/kubernetes), Shape B's canBrokerServeRuntime drops BOTH profiles.
+// The len(profiles)==0 fallback fires and synthesises default/cloudrun-sandbox.
+// (Before Shape B, remote/kubernetes leaked through — the bug.)
 //
-// This test also verifies the workstation case (docker broker) is unaffected
-// by the filter: when the broker IS local, the filter condition
-// !isLocalOnlyRuntime(defaultRuntimeType) is false, so NO profiles are
-// dropped — kubernetes remains available as a legitimate product feature.
+// FACT 2: isLocalOnlyRuntime predicate values — load-bearing for the filter.
 //
-// These three facts were measured by a verification instrument that was
-// deleted under a stop order (architect 03:08). This committed pin restores
-// them as reproducible evidence.
+// FACT 3: On a docker (workstation) broker, canBrokerServeRuntime returns true
+// for all profiles (local brokers serve everything), so nothing is dropped.
+//
+// SUPPLEMENTARY: When ALL profiles are local-only and the broker is
+// cloudrun-sandbox, the fallback fires correctly.
 func TestBuildInfoProfiles_FallbackFires_Task92(t *testing.T) {
 	tmpDir := t.TempDir()
 	origHome := os.Getenv("HOME")
@@ -3383,22 +3394,25 @@ profiles:
 
 	srv := &Server{}
 
-	// === FACT 1: Current filter behavior on cloudrun-sandbox broker ===
-	// With workstation defaults, only remote/kubernetes survives the filter.
-	// local/docker is dropped because isLocalOnlyRuntime("docker")=true and
-	// the broker is non-local (!isLocalOnlyRuntime("cloudrun-sandbox")=true).
+	// === FACT 1: Shape B filter on cloudrun-sandbox broker ===
+	// With workstation defaults, canBrokerServeRuntime("cloudrun-sandbox", "docker")
+	// and canBrokerServeRuntime("cloudrun-sandbox", "kubernetes") both return false.
+	// The filter loop produces an empty list; the len(profiles)==0 fallback fires
+	// and synthesises default/cloudrun-sandbox.
 	profiles := srv.buildInfoProfiles("cloudrun-sandbox")
 	if len(profiles) != 1 {
-		t.Fatalf("FACT 1: expected 1 profile (remote/kubernetes only), got %d", len(profiles))
+		t.Fatalf("FACT 1: expected 1 profile (synthesised default), got %d", len(profiles))
 	}
-	if profiles[0].Name != "remote" || profiles[0].Type != "kubernetes" {
-		t.Errorf("FACT 1: expected remote/kubernetes, got %s/%s", profiles[0].Name, profiles[0].Type)
+	if profiles[0].Name != "default" || profiles[0].Type != "cloudrun-sandbox" {
+		t.Errorf("FACT 1: expected default/cloudrun-sandbox (synthesised), got %s/%s", profiles[0].Name, profiles[0].Type)
 	}
 
 	// === FACT 2: Filter predicate analysis ===
-	// isLocalOnlyRuntime("kubernetes") is false — this is WHY kubernetes
-	// survives the filter. The filter asks "is this local-only?" when it
-	// should ask "can this broker serve this runtime?".
+	// isLocalOnlyRuntime("kubernetes") is false — under the old negative
+	// filter, this is WHY kubernetes leaked through. Shape B's
+	// canBrokerServeRuntime now asks the right question: "can the broker
+	// serve this runtime?" These predicate values are still load-bearing
+	// for the local-broker path in canBrokerServeRuntime.
 	if isLocalOnlyRuntime("kubernetes") {
 		t.Fatal("FACT 2: isLocalOnlyRuntime('kubernetes') should be false — this is load-bearing")
 	}
@@ -3468,5 +3482,76 @@ profiles:
 	}
 	if fallbackProfiles[0].Type != "cloudrun-sandbox" {
 		t.Errorf("FALLBACK: expected type 'cloudrun-sandbox', got %q", fallbackProfiles[0].Type)
+	}
+}
+
+// TestBuildInfoProfiles_AutoSelectNeverNonServable asserts the real invariant
+// that the old >= 2 guard in TestBuildInfoProfiles_CloudRunSandbox_Task92 was
+// protecting: autoSelectProfile (UI-side, fires at length === 1) must never
+// auto-select a profile whose type the broker cannot serve.
+//
+// This test exercises every non-local broker type against settings that
+// include profiles the broker cannot serve. For each case, if the returned
+// list has exactly one profile, that profile's type MUST equal the broker
+// type — because canBrokerServeRuntime only passes same-type profiles for
+// non-local brokers.
+func TestBuildInfoProfiles_AutoSelectNeverNonServable(t *testing.T) {
+	brokerTypes := []string{"cloudrun-sandbox", "cloudrun-instances", "kubernetes"}
+
+	for _, brokerType := range brokerTypes {
+		t.Run(brokerType, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			origHome := os.Getenv("HOME")
+			_ = os.Setenv("HOME", tmpDir)
+			defer func() { _ = os.Setenv("HOME", origHome) }()
+
+			// Seed settings with profiles of EVERY type: local/docker,
+			// remote/kubernetes, and a same-type profile. The filter should
+			// exclude everything except the same-type profile.
+			scionDir := filepath.Join(tmpDir, ".scion")
+			if err := os.MkdirAll(scionDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			settingsYAML := fmt.Sprintf(`schema_version: "1"
+active_profile: match
+runtimes:
+  docker:
+    type: docker
+  kubernetes:
+    type: kubernetes
+  %s:
+    type: %s
+profiles:
+  local:
+    runtime: docker
+  remote:
+    runtime: kubernetes
+  match:
+    runtime: %s
+`, brokerType, brokerType, brokerType)
+			if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			srv := &Server{}
+			profiles := srv.buildInfoProfiles(brokerType)
+
+			// If the list has exactly one profile (the autoSelect trigger),
+			// it MUST be servable by this broker.
+			if len(profiles) == 1 {
+				if !canBrokerServeRuntime(brokerType, profiles[0].Type) {
+					t.Errorf("autoSelect would fire on non-servable profile: "+
+						"broker=%s, profile=%s/%s", brokerType, profiles[0].Name, profiles[0].Type)
+				}
+			}
+
+			// Regardless of count, every profile in the list must be servable.
+			for _, p := range profiles {
+				if !canBrokerServeRuntime(brokerType, p.Type) {
+					t.Errorf("non-servable profile in list: broker=%s, profile=%s/%s",
+						brokerType, p.Name, p.Type)
+				}
+			}
+		})
 	}
 }

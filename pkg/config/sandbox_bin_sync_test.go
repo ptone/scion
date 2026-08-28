@@ -33,8 +33,8 @@ import (
 // This test asserts runtime.DefaultSandboxBin against the hardcoded literal.
 // config's unexported defaultSandboxBin is NOT pinned by the InitMachine
 // tests (they mock the sandboxBinExists seam, making them path-independent).
-// The internal assertion below is the only thing that catches config-side
-// drift. (O5)
+// The internal assertion in init_test.go (TestDefaultSandboxBin_MatchesLiteral)
+// is the only thing that catches config-side drift. (O5)
 func TestSandboxBinConstantSync_Task92(t *testing.T) {
 	// This is the path hardcoded in both pkg/config/init.go (unexported
 	// defaultSandboxBin) and pkg/runtime/cloudrun_sandbox_runtime.go
