@@ -13403,3 +13403,49 @@ stdin is not a TTY. **Decide it; do not fix it by accident.**
 ON THE MACHINE THAT BROKE.** Step 2 sits ~450 lines past line 286. Both bash-4 sites executed under
 3.2.57. #88 is confirmed on hardware, by the maintainer, not by our CI — which is fortunate, because our
 CI for it does not exist yet and the version I specified was the wrong design.
+
+### §35.74 — dev2's blocker on the macOS rewrite, and a cost premise that was wrong (02:20)
+
+**Raised on discovery, before starting — which is the behaviour I asked for and did not get earlier in
+the night.** It also **verified my runner-image claim independently** rather than taking it from my
+message: fetched the `actions/runner-images` READMEs itself, four for four on `Bash 3.2.57(1)-release`.
+**I am the architect and it still checked me.** That is the correct default and it cost it two minutes.
+
+**THE BLOCKER IS REAL AND IT IS THE SAME SHAPE AS THE WHOLE NIGHT.** Items 1 and 2 — does the suite pass
+on macOS, does `--check` hold against the runner's `/bin/bash` — **cannot be measured from a Linux
+container.** `ci.yml` triggers on `push: [main]` and `pull_request`, so pushing a feature branch fires
+nothing. And `workflow_dispatch` is unavailable by design: GitHub only exposes it once the workflow is
+on the **default branch**, so it cannot help a feature branch. Anything dev2 told me about those items
+without a run would be **a reading**, which is the thing I have refused all night.
+
+**I REFUSED OPTION (c) — land it unmeasured — explicitly.** dev2 had already labelled that as the
+position it flagged as wrong in its own previous report. *Having spent the night insisting nobody else
+ship an unrun gate, I am not going to make my own developer ship one.*
+
+**ONE PREMISE IN ITS COST ARGUMENT WAS WRONG AND IT FLIPPED THE ANSWER.** It costed option (a) — a PR
+within `ptone/scion` — at *"~10x Linux billing"* for macOS minutes. **Checked the API: both
+`ptone/scion` and `GoogleCloudPlatform/scion` are PUBLIC (`private: false`). GitHub-hosted runners,
+macOS included, are free on public repos.** The 10x figure is a private-repo number. The real remaining
+cost is **concurrency and queue latency, not money**. So (a) went from expensive to nearly free.
+
+**(a) is my recommendation but it is ptone's to authorise.** It creates a PR in his repo and PRs have
+been his gate all night; a fork-internal PR is arguably outside "ptone opens the upstream PR", and dev2
+was right to spot the ambiguity and ask rather than assume. **Holding the request until his deploy
+re-run reports — I will not split his attention mid-run** — and then sending **(a) and (b) as ONE
+decision**, because they are one question. *One thing at a time means one question, not one option.*
+
+**(a) and (b) are not substitutes and I said so.** His Mac answers items 1 and 2 — real macOS, real 3.2,
+does the suite pass and does the fixture hold against a second real interpreter. **(a) additionally
+answers whether the WORKFLOW works**: runner label, `setup-go` on macOS, job wiring. A green (b) tells
+us nothing about the YAML.
+
+**PATHS FINDING ACCEPTED, AND IT RETIRES AN EARLIER PROBLEM.** `paths:` is workflow-level in GitHub
+Actions; there is no job-level filter; and reaching for a third-party filter action to get one **would
+add supply-chain surface in the same round a reviewer blocked us for supply-chain surface.** Separate
+workflow file it is. **Unlisted benefit: our change now leaves `ci.yml` untouched, so the `#1339`
+collision surface I audited an hour ago stops existing.** A constraint that deleted a coordination item.
+
+**Told it to put its own trap in the YAML, not just the report:** a paths-filtered job later marked as a
+**required check will hang every PR that does not touch those paths.** The person who marks it required
+will be reading the workflow file. **Same argument as the fixture — if it is not in the repo it is a
+rumour.**
