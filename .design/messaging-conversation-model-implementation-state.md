@@ -13340,3 +13340,54 @@ File-level overlap on 5 of 7 files. **Hunk-level overlap on the affinity API: no
 - **DEF-18** — unmoved; still no carrier for `pkg/messaging/validate.go`; must not be closed by deleting `projectAgents` (rule 217).
 - **Tier 2 gate rows** — DEFERRED by owner, waiter recorded, no polling.
 - **Tranche H** — blocked on G-1, no carrier. **DEF-5/6/9/10/11/14/16, D–G** held. **DEF-33** latent. **DEF-17 STRUCK. GATE-1 CLOSED.**
+
+---
+
+## §5fg — heartbeat: TWO SELF-CAUGHT ERRORS. DEF-32 was mislabelled in §5fd and misreported to the user.
+
+`upstream/main` unmoved at `b14c41414`. #1361, #1362 both OPEN/MERGEABLE. All four manager branch tips unmoved. Nothing external has moved.
+
+### (1) Conjunct (a) of DEF-34 — now PROVEN, not read (rule 219)
+I sent the user a correction based on *reading* the affinity block. Proved it properly:
+
+- `grep 'req\.ThreadID[[:space:]]*=[^=]' handlers_agent_messaging.go` → **zero hits**. Nothing ever assigns `req.ThreadID`; its only source is the JSON decode.
+- **Positive control (rule 61):** the identical pattern against `req.Channel` DOES hit — `:200 req.Channel = lastCh`. So the empty result is a real negative, not a broken pattern.
+- **Independent control:** #1259's diff *adds* `+ req.ThreadID = lastThread`. An external PR adding the line is proof the line is absent today.
+
+Conjunct (a) holds. The §5ff correction stands.
+
+**Also found: the affinity block has ZERO test coverage on main.** `GetLastChannel` has exactly one production caller (`:195`) and no test references at all. That is how the producer half of DEF-34 went unnoticed, and it means any fix must bring its own tests rather than lean on a suite.
+
+### (2) ERROR — §5fd "re-verified DEF-32" against a line that is not DEF-32
+In §5fd, and again in §5ff's ledger, I recorded:
+> DEF-32 re-verified — `handlers_agent_messaging.go:1276` — `if !s.authorize(w, r, projectResource(project), ActionAttach)`.
+
+**That is not DEF-32.** Per my own §5dh (line 11268/11504), `:1276` is the `handleProjectBroadcast` **marker-gate row for #1347** — already gate-covered, entirely unrelated.
+
+**DEF-32 is:** federated identity IDs are not UUIDs on live DM paths. Three sites pass `user.ID()` straight into `ResolveOrCreateDMConversation`. Re-verified live on `b14c41414` at **shifted** line numbers — `handlers_chat_v2.go:1146, :1259, :1363` (was :1141/:1235/:1339). For a `FederatedUserIdentity`, `user.ID()` is `issuerURL:subject`, which cannot parse as a UUID, so user-side DM stamping silently no-ops.
+
+### (3) ERROR — consequence: I misinformed the user
+In §5ff's escalation I wrote: *"DEF-32 is unaffected and can still go as a standalone hotfix."* **Wrong on the merits.** DEF-32 is not a small hotfix. It is a *class* defect whose severity is conditional on federation reachability, and if reachable it is an **S4 read-switch blocker** — the read-switch would make federated users' DMs invisible. Correcting to the user this heartbeat.
+
+**How the error happened:** I re-verified a *line number I had cached* rather than re-deriving the defect from its definition. `:1276` was sitting in my working set from the marker-gate work, and "DEF-32" and "an ActionAttach line I recently looked at" fused. Two heartbeats of "re-verified, live, unchanged" reports were confirming the wrong thing — and confirming it *successfully* each time, which is why nothing flagged it.
+
+**Rule 243.** Re-verification must start from the defect's DEFINITION, not from its cached line number. A line number is a pointer that rots twice over: the file moves under it, and *your memory of what it pointed at* drifts. Re-derive the site from the description, then compare to the cached pointer — if they disagree, the pointer is wrong, not the description. Here the real sites had also moved (+5/+24/+24 lines), so even the right pointer would have been stale.
+
+**Rule 244.** A verification that keeps succeeding is not thereby trustworthy. "Live, unchanged" returned true twice against the wrong line. A check that can only ever return "still there" has no power to detect that it is pointed at the wrong thing — pair every re-verification with a check that the target still matches its description.
+
+### (4) DEF-32's real blocker is an AGENT question, not a user decision
+Requirement (2) of the reachability analysis — the handler-to-subscription-write call chain — was recorded at line 9341 as **"Partial … the half I most need and the half I do not have,"** and the answer I did have came from reading em9's scratch screen, explicitly logged as *"good enough to stop DEF-32 blocking my planning and not good enough to write into a design as settled."* It was never upgraded.
+
+So DEF-32 has been sitting behind an unanswered question to a **parked agent** while I reported it to the user as awaiting *their* routing decision. Exactly the failure the heartbeat warns about: a blocked agent with no branch movement and no report.
+
+**Action:** unparked em9 with a tightly scoped, read-only, forced-shape question — the concrete call chain with file:line at three hops, the decisive one being whether `FederationAuthenticator` resolves to an `AuthenticatedUser` (store UUID) before handlers see it. Explicitly told it not to resume tranche work, that type-satisfies-interface is not reachability, that "not determinable statically" is a valid answer, and given the literal re-park command (rules 57/58).
+
+### (5) Interaction: #1362 improves DEF-32 observability
+Once em6's dm-tighten lands, a federated `issuerURL:subject` hitting `DMConversationKey` produces a *distinct, named* error rather than a generic parse miss. It does not fix DEF-32 — the call still no-ops — but it puts the failure on the divergence board with a readable message.
+
+### Ledger sweep
+- **DEF-32** — mislabel corrected, sites re-derived and re-verified live, real blocker identified, em9 dispatched. **Moved.**
+- **DEF-34** — conjunct (a) proven; still needs #1259 + the filter change together.
+- **DEF-18** — unmoved; no carrier for `pkg/messaging/validate.go`; not to be closed by deleting `projectAgents` (rule 217).
+- **DEF-33** — latent; note it is also a `hasAgentReplyAfter` defect (fail-open on casing miss), so it should be fixed in the same pass as DEF-34, not separately.
+- Tier 2 gate rows DEFERRED (owner-triggered). Tranche H blocked on G-1. DEF-5/6/9/10/11/14/16, D–G held. DEF-17 STRUCK. GATE-1 CLOSED.
