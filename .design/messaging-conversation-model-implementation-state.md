@@ -9304,3 +9304,87 @@ the guard*. The cost is one worktree and one test invocation.
 - `scion/ca-msg-em10-trb` = `822c02e58` — compare URL with the user, awaiting PR open.
 - `scion/ca-msg-em9-unify` = `e704b2feb` — unchanged; em9 stalled.
 - em6, em10, coordinator blocked; em9 stalled; held briefs still gated on #1349 **merging**.
+
+## §5dq. em9's DEF-32 conclusion, recovered by screen peek — VERBATIM, before it compacts
+
+The coordinator peeked em9 within ten minutes of my asking, quoted literally, and labelled
+its inference separately. State (a) — **finished and unsent** — is confirmed as far as a
+single static frame can confirm it.
+
+**Preserving the quote here because em9 is at "7% until auto-compact" and a compacted
+summary of its own findings would be a lossy copy of the citations.** Screen was cut off at
+the top; the first line begins mid-sentence.
+
+> '(auth.go:215).
+>   - server.go:1421 — FederationAuthenticator is only created when
+>   srv.config.Federation.Enabled is true and
+>   len(srv.config.Federation.TrustedIssuers) > 0.
+>   - The specific trigger is a trusted issuer with issuer_type: "user" in the
+>   federation config. issuer_type: "hub" produces FederatedAgentIdentity,
+>   issuer_type: "service_account" produces FederatedServiceIdentity — neither
+>   satisfies UserIdentity.
+>
+>   Conclusion: This is an S4 blocker for deployments that configure federation
+>   with issuer_type: "user" (e.g., Firebase Auth, Google Sign-In). Deployments
+>   without federation, or with only hub/service_account issuers, are not
+>   affected.'
+
+Below it: `✻ Cooked for 23s`, an empty input prompt, cursor idle.
+
+### What this answers, and what it does not
+
+Against the three precision requirements I set:
+
+| Requirement | Answered? |
+|---|---|
+| (1) Which type — `FederatedUserIdentity` or `FederatedServiceIdentity`? | **Yes.** Neither `FederatedAgentIdentity` (hub) nor `FederatedServiceIdentity` (service_account) satisfies `UserIdentity`. Only `issuer_type: "user"` produces the reaching identity. My earlier framing of the pair was the wrong pair — there are three types, not two. |
+| (2) What wiring establishes reachability? | **Partial.** `server.go:1421` is construction-site gating, and `auth.go:215` is cited but the sentence containing it is off-screen. The handler-to-subscription-write call chain is not visible in the fragment. This is the half I most need and the half I do not have. |
+| (3) Is federation config-gated? | **Yes, and precisely.** Gate is at *server construction*, not route registration and not per-request: `FederationAuthenticator` is only built when `Federation.Enabled` **and** `len(TrustedIssuers) > 0`. Off by default follows from `Enabled` defaulting false, though the fragment does not show the default itself. |
+
+So the peek recovered roughly two and a half of three. **Treat this as provisional until
+cross-checked** — it is a photograph of another agent's screen, not a report it stands behind,
+and rule 115 says an agent's scratch state is evidence about the agent. It is good enough to
+stop DEF-32 blocking my planning and not good enough to write into a design as settled.
+
+### The independent cross-check is already running
+
+I dispatched a read-only investigation of the same three questions against `/tmp/mainD`
+(clean `upstream/main` at `19e32902e`) *before* the peek arrived. That was luck in sequencing
+rather than design, but the effect is the right one: I now get an answer derived from source
+independently of em9, against the same questions. Where the two agree, DEF-32 is settled.
+Where they disagree, I have found something more interesting than either.
+
+### Scope revision to DEF-32 — it narrowed
+
+Previously recorded as: *federated users may have no canonical store identity at all*, and
+therefore *DEF-32 blocks the S4-P4 divergence-gate observation before S4.*
+
+If em9's conclusion holds, DEF-32 is **deployment-conditional**, not universal. It bites only
+where federation is enabled AND at least one trusted issuer is typed `user`. A hub with
+federation off — which is every deployment we currently run, including the beta hub — never
+reaches the non-UUID path at all.
+
+That materially changes sequencing, and in our favour: **DEF-32 does not block the S4-P4
+divergence-gate observation on the beta hub**, because the beta hub cannot produce the input
+that triggers it. It remains a hard S4 blocker for the general case. It does not become a
+non-issue; it becomes a gate on *declaring S4 done*, not a gate on *observing S4 behaviour*.
+
+I am not striking or downgrading the ledger row on the strength of a screenshot. Pending the
+cross-check.
+
+### Rule 121
+
+**A quoted screen is evidence; a paraphrased screen is a rumour. Ask for the quote and the
+observer's inference as two separate things.** The coordinator's "reads as finished, but I
+cannot rule out mid-work from one static frame" was worth as much as the quote, because it
+was calibrated rather than confident. The failure mode in §5dk was not that it inferred — it
+was that the inference travelled without its label. Having corrected that once, the risk is
+over-correction into silence, and I said so explicitly rather than only praising the fix.
+
+### Rule 122
+
+**Context exhaustion in another agent is a deadline, not a status.** "7% until auto-compact"
+converted a stalled agent from a coordination annoyance into a race against losing citations
+that exist nowhere else. When a peek surfaces a compaction warning, the durable copy goes into
+the ledger in the same action — not after the next reply, not after verification. Verification
+can happen to a preserved quote; it cannot happen to a lost one.
