@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -542,7 +543,29 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// --- Git clone mode ---
 	if !worktreeProvisioned && in.Config != nil && in.Config.GitClone != nil {
 		gc := in.Config.GitClone
-		env["SCION_GIT_CLONE_URL"] = gc.URL
+		// Strip any embedded credentials from the clone URL before it
+		// enters the env map. On the sandbox tier the env map becomes
+		// --env argv, which Google's sandbox binary logs verbatim to
+		// Cloud Logging with 30-day retention (#127). Credentials
+		// extracted here are delivered via GITHUB_TOKEN, which
+		// buildAuthenticatedURL (sciontool init) already uses to
+		// reconstruct the authenticated URL in-container.
+		cloneURL, extractedPassword := stripGitCloneCredentials(gc.URL)
+		env["SCION_GIT_CLONE_URL"] = cloneURL
+		if extractedPassword != "" && env["GITHUB_TOKEN"] == "" {
+			env["GITHUB_TOKEN"] = extractedPassword
+			s.agentLifecycleLog.Warn("credentials stripped from git clone URL and "+
+				"injected as GITHUB_TOKEN; configure GITHUB_TOKEN separately to "+
+				"avoid embedding credentials in clone URLs",
+				"agent_id", in.AgentID)
+		} else if extractedPassword != "" {
+			// GITHUB_TOKEN already set (from secrets, GitHub App, etc.) —
+			// the extracted credential is redundant. Drop it rather than
+			// overwriting the authoritative token.
+			s.agentLifecycleLog.Warn("credentials stripped from git clone URL; "+
+				"existing GITHUB_TOKEN takes precedence",
+				"agent_id", in.AgentID)
+		}
 		if gc.Branch != "" {
 			env["SCION_GIT_BRANCH"] = gc.Branch
 		}
@@ -560,7 +583,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		opts.GitClone = gc
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("Git clone mode enabled", "agent_id", in.AgentID,
-				"cloneURL", gc.URL, "branch", gc.Branch, "depth", gc.Depth)
+				"cloneURL", cloneURL, "branch", gc.Branch, "depth", gc.Depth)
 		}
 	}
 
@@ -924,4 +947,51 @@ func withHubAgentDefaults(ctx context.Context, cfg *CreateAgentConfig) context.C
 		return ctx
 	}
 	return api.ContextWithHubAgentDefaults(ctx, cfg.HubAgentDefaults)
+}
+
+// stripGitCloneCredentials removes embedded userinfo from a git clone URL
+// and returns the clean URL and the extracted password (if any). The password
+// is the credential-bearing part: for "https://user:token@host/repo" it
+// returns "https://host/repo" and "token"; for "https://token@host/repo" it
+// returns "https://host/repo" and "token".
+//
+// URLs without a scheme are prefixed with https:// before parsing.
+// Non-URL strings and parse failures return the input unchanged with an
+// empty password — the caller treats them as credential-free.
+func stripGitCloneCredentials(rawURL string) (cleanURL, password string) {
+	if rawURL == "" {
+		return "", ""
+	}
+
+	// Ensure the URL has a scheme so url.Parse treats it as absolute.
+	normalized := rawURL
+	if !strings.Contains(normalized, "://") {
+		normalized = "https://" + normalized
+	}
+
+	parsed, err := url.Parse(normalized)
+	if err != nil || parsed.Host == "" {
+		// Not a parseable URL — return as-is; nothing to strip.
+		return rawURL, ""
+	}
+
+	if parsed.User == nil {
+		return rawURL, ""
+	}
+
+	// Extract the password. url.UserPassword sets both user and password;
+	// url.User sets only the username (used for token-only URLs like
+	// "https://x-access-token:TOKEN@..."). Accept either field as the
+	// credential.
+	pw, hasPw := parsed.User.Password()
+	if hasPw && pw != "" {
+		password = pw
+	} else if parsed.User.Username() != "" {
+		// Token-only URL: "https://TOKEN@host/..." — the username IS
+		// the credential.
+		password = parsed.User.Username()
+	}
+
+	parsed.User = nil
+	return parsed.String(), password
 }
