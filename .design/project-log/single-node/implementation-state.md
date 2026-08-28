@@ -14317,3 +14317,38 @@ tier and degrades another.
 
 **Standing state: blocked on ptone for four items, all of which only he can move** — upstream PRs for
 tasks #88, #92 and #86, and the task #93 (a)/(b) decision. Said once, queued, not repeated.
+
+### §35.95 — Ptone awake after 8h. Four items delivered. A misrouted instruction declined, not absorbed.
+
+10:36Z. Ptone messaged me directly — the first contact since 03:23 — about **chat permissions and an
+authz audit of the message broker service**, referring to "what the msg-refactor is relaying to you".
+
+**I DECLINED IT AS PROBABLY MISROUTED, AND I CHECKED BEFORE SAYING SO.** Rule 16: a wrong environment
+claim costs more than a wrong code claim, and "this is not my work" is exactly that kind of claim.
+Measured rather than recalled: my three branches touch **14 files**, enumerated, and **none** is in
+messaging, chat or authz code. Nothing has been relayed to me by any msg-refactor agent. `ca-msg-arch`
+is active and its name and area fit.
+
+**Declining is the risky direction and that is why it needed evidence.** Absorbing a misrouted task
+would have been the comfortable move — it looks responsive, and an idle agent is tempted by work. It
+would also have put an architect with no context on a **security** audit while the agent that does have
+context sat idle. Said plainly that I will not start the audit until he confirms, and asked to be told
+if I am wrong.
+
+**Relayed it to `ca-msg-arch` as a heads-up, explicitly not a dispatch**, with my reasoning and the
+caveat that their ownership is my **inference, not a measurement**. Cheap insurance against the
+instruction dying in my queue while he waits. I have no authority to dispatch them and said so.
+
+**DELIVERED THE FOUR QUEUED ITEMS IN ONE MESSAGE.** Three branches needing upstream PRs
+(`0b51f831`, `dc729e2`, `f6c10558`), each with its head, plus the single task #93 decision. Included the
+merge facts he would otherwise have to derive: all three merge clean into current `main`, and branches 1
+and 2 **share no files**, so merge order is free.
+
+**Told him the new measurement narrows the decision, and framed it as a correction to my own earlier
+framing.** At 03:23 I put (a) to him as a change to shared code affecting every tier. The blast-radius
+table I built at 04:05 shows it changes behaviour **only on non-local brokers** — ours and
+`cloudrun-instances` — with workstation, kubernetes and podman unchanged. **That is a materially easier
+decision than the one I originally asked him to make.** He complained that my messages "often reverse
+themselves"; the fix for that is not to hide the update but to label it as one and say which way it cuts.
+
+Still blocked on him for all four. Nothing else is actionable.
