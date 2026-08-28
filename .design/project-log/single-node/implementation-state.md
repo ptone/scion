@@ -14905,3 +14905,84 @@ r4's two non-blocking nits are parked in the held Shape B brief (items 2 and 3) 
 permanent: a third seeding test for env-set + seam-FALSE (the Cloud Run *service* case, currently
 **safe-by-reading only**), and a dead `truncate()` helper. **Safe-by-reading is exactly what that third
 test replaces**, and I would rather it rode along than be argued about.
+
+### §35.75 — a parked nit became a CI blocker, and I nearly deleted the agents that could fix it (13:35)
+
+Two messages arrived from the coordinator four minutes apart. The first asked me to delete eight
+completed agents to free broker slots. The second reported CI red on the branches of two of them.
+
+**Had I acted on the first message when it arrived, I would have deleted the authors of the two red
+branches sixty seconds before learning they were red.** The fixes would then have needed fresh agents,
+fresh briefs, and cold context. Instead both authors fixed their own breakage from warm context: 3
+minutes for `sn-bash32-rev3`, 2 for `sn-initgate-dev`.
+
+> **RULE 30: A COMPLETION SIGNAL PRECEDES THE VERDICT.** CI runs *after* an agent reports done. Retiring
+> at "completed" retires the author before the work has been judged. An agent is retirable when its
+> branch is **CI-green and reviewed** — not when it says it finished. "Completed" means the agent
+> stopped, which is a fact about the agent, not about the work.
+
+The coordinator accepted this formulation and is recording it in `coordinator-conventions.md`. It also
+owned the sequencing: the two prompts went out with no coordination between them.
+
+**One of the two failures was a nit I had deliberately parked.** r4 flagged the dead `truncate()` helper
+as non-blocking; I filed it in the held Shape B brief on the reasoning that a commit carrying one word
+costs more review attention than the error costs a reader. That reasoning was sound and the outcome
+still went wrong, because **I priced the nit against human attention and the linter does not read like a
+human.** Dead code is free to a reader and fatal to `golangci-lint`. The parking decision needs a
+second question: *is there a machine that treats this as an error?* If yes, it is not a nit.
+
+#### The trap in the SC1010 failure, which is the more interesting half
+
+`sn-bash32-rev3`'s fix for finding #1350 added `export SHELL_DIFFERENTIAL_SELFTEST=done` at `:90`.
+Unquoted. `shellcheck` parses bare `done` as the loop keyword.
+
+**Line 148 of that same file already carried this comment:** *"'done' is quoted so shellcheck does not
+read it as the loop keyword (SC1010)."* The file contained a written warning about the exact trap, fifty
+lines from where the new line went in, and the new line walked into it anyway. This is **rule 23** (an
+edit that inserts into a list must read the items on both sides of the insertion point) generalised past
+lists: the neighbouring code had already paid for this mistake and left a receipt. The developer's own
+report put it better than my brief did — *"I should have read the comments before writing next to them."*
+
+I asked for the quoting **plus a stated reason**, not just the quoting, because a fix that turns CI green
+by changing the sentinel value would disable the guard while looking correct. That check is now item 5 of
+the review brief.
+
+#### The undercount, and why it is a reporting-format defect rather than a mistake
+
+The relayed failure named three SC2016 lines: 84, 87, 90. **There were six.** The developer found 81–83
+unprompted while running the linter rather than the line list. The coordinator then re-checked its own
+source and confirmed: its `tail -30` on the job log had truncated the earlier three.
+
+> **RULE 31: A RELAYED FAILURE LIST IS A SAMPLE PRESENTED AS AN INVENTORY.** A partial list of lint hits
+> is indistinguishable from a complete one at the receiving end, and it invites a fix scoped to exactly
+> the named lines — which lands still-red. **Brief the rule the tool enforces and tell the developer to
+> run the tool. Never brief the line numbers as the work.**
+
+This one cuts at me too: I passed the three-line list into my message to the developer without asking
+whether it was exhaustive. The developer's own scepticism is the only reason the branch is green. The
+coordinator has adopted `shellcheck exit 1, see log at <url>` as its relay format.
+
+#### State after the round
+
+| Branch | Head | Was | Now |
+|---|---|---|---|
+| `scion/bash32-portability` | `4788de9e` | shellcheck exit 1 | **shellcheck PASS**, golangci-lint pending |
+| `scion/task-92-runtime-profile-fix` | `dd1e5d00` | golangci-lint (unused `truncate`) | pending re-run |
+| `scion/design-operator-prereqs` | `747e1cf2` | — | **10/10 green, merge-ready** (ptone's gate) |
+
+Both heads verified by `git ls-remote`, matching both self-reports exactly. `cla/google` red on #1352 is
+the known false blocker (task #62 — five PRs have merged with it red).
+
+**Fleet:** released 6 (`sn-adcpreflight-rev`, `-rev2`, `sn-row5-spike`, `sn-runtimeprofile-dev`,
+`sn-adcpreflight-dev`, `sn-hubid-inv2`), all verified landed on remote first — the adcpreflight work
+merged upstream as **#1335** and **#1306**. Held 4: the two CI authors, `sn-initgate-rev` (its review
+surface changed under it), and `sn-iaplab-dev` (**sole context holder for the live `sn-harness-lab` IAP
+lab**; tasks #37/#48 open; do not delete).
+
+**`scion delete` takes the git branch with the worktree by default.** I used `--preserve-branch` on all
+six as free insurance and only afterwards learned from the coordinator that it was load-bearing —
+`sn-runtimeprofile-dev` is bound to `scion/task-92-runtime-profile-fix`, which is a live PR branch.
+`scion list` cannot show you beforehand whether it matters. **Always pass `-b`.**
+
+`sn-bash32-rev4` dispatched to review the now-four-commit #1350 delta — closing the process gap I opened
+by adjudicating those findings closed without ever putting the fix through review.

@@ -169,9 +169,13 @@ how nits usually survive.
    *service* case, i.e. the multi-node tier. r4 confirmed the predicate is safe in that direction by
    reading the conjunction, and approved without it. **Safe-by-reading is what the third test replaces.**
    Assert the workstation template is seeded, not the cloudrun one.
-3. Dead code in the task #97 delta: a `truncate()` helper is defined and never called. Delete it.
+3. ~~Dead code in the task #97 delta: a `truncate()` helper is defined and never called. Delete it.~~
+   **DONE — `dd1e5d00`, 2026-08-28 13:32. Do not redo it.** It did not wait for this brief because
+   `golangci-lint` failed the branch on it. See §35.75: I parked it as non-blocking after r4 raised it,
+   priced against a *reader's* attention, and missed that a machine treats dead code as an error. **When
+   parking a nit, ask whether some tool in CI treats it as a failure. If one does, it is not a nit.**
 
-Items 2 and 3 come from `reviews/task92-r4-e858e917.md` (APPROVE, both non-blocking).
+Item 2 comes from `reviews/task92-r4-e858e917.md` (APPROVE, non-blocking).
 
 ## Constraints
 
