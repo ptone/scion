@@ -13022,3 +13022,19 @@ Post-fix re-verification (rule 213 — re-test what the change could *disturb*, 
 - **em10** — `5fc82455b`, cleared, told to park. Answered **D** ("done but not pushed") to the forced-choice probe — the finished-but-unsent failure mode, caught by `scion list --format json` showing a *stale* taskSummary ("Starting tranche C specification") while the branch tip had not moved. The forced choice worked where an open status ping would have invited a restart.
 - **em6** — `7caa8e00d`, verified, compare URL sent.
 - **em9** — parked at `47a7c6736`; **base is now stale** against `b14c41414`, will need the same `--onto` treatment if its stack parent landed via squash. Not yet checked.
+
+### §5ez addendum — em9-unify checked; it is NOT a landing candidate
+
+Checked rather than left as "not yet checked". `origin/scion/ca-msg-em9-unify` @ `47a7c6736`, merge-base `6268bac44`, **124 commits**, three-dot vs `b14c41414` = **215 files, +51539/-10735**.
+
+**Do not read that as scope creep (rules 209/214).** em9's recent commits are audit and documentation output — the DEF-32/DEF-34 findings, the TRANCHE-MANIFEST v2–v5 series, the CI SQLite gap inventory. That is exactly what I accepted at `47a7c6736`. **Accepting the audit was never a queue-for-merge**, and the log should not be read that way.
+
+The 215-file figure is inherited base: the branch sits on a long-lived integration base, not on main.
+
+**What this does mean, and it is not nothing:** the branch also carries genuine *product* commits mixed in among the audit ones — DEF-20 (topic lookup guard into the shared sink), DEF-27 (soft-deleted topic mint guard + sink-level tests), F1/F2 (refuse malformed `thread:` refs, harden the conversation-minting guard against `INSERT OR IGNORE` and case variants). Those are product fixes sitting on a stale base inside a branch nobody is treating as a landing candidate.
+
+**Action required (not yet dispatched):** determine which of those product commits are already in main via earlier tranches and which are genuinely unlanded. The unlanded ones must be cherry-picked onto `b14c41414` as their own tranche — they must not ride in on an audit branch, and they must not be forgotten because the branch they live on was classified as documentation.
+
+**NEW RULE 226.** Classifying a branch by its *recent* commits misclassifies its *older* ones. "em9-unify is an audit branch" is true of the tip and false of the middle. When accepting a branch as documentation, state explicitly what happens to any product commits it also carries, or they become invisible — protected from review by the label applied to the branch as a whole.
+
+Roster: em10, em9, em6 all confirmed `blocked` via `scion list`. Parks took.
