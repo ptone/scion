@@ -8144,3 +8144,79 @@ defend or concede. Neither reflex is right when the disagreement is not about th
 `upstream/main` = `b88fece2f`. Tranche B = `377a70e38` (PR #1343, tracks branch name — picked up
 automatically, no rebase needed). Rebase-onto-new-main dry run at `1874c4f83` passed the full gate
 set including #1339's new guard. em6 and em10 parked; em9 parked pending option (i).
+
+---
+
+## §5dc. 2026-08-28 11:14Z — heartbeat: tranche B green and merge-ready; rule 96 sharpened by measurement
+
+### PR #1343 fully green on `377a70e38`
+
+```
+Build & Test    pass 4m13s
+golangci-lint   pass 2m39s
+shellcheck / scan-pr / check-changes  pass
+cla/google      FAIL   (not required; mergeable=MERGEABLE, state=UNSTABLE)
+```
+
+### Rule 96 was right in substance and wrong in its test — corrected by measurement
+
+§5da's rule 96 said *"a newly landed gate has never run against any open branch, so every open PR's
+tick predates it."* I went to confirm that #1343's new green actually exercised #1339's guard rather
+than assume it, and the assumption I was about to make was the opposite one — that because the
+branch does not contain the guard, the run could not have used it.
+
+Measured three ways:
+
+```
+git show 377a70e38:.github/workflows/ci.yml | grep -c conversation-upsert-guard   -> 0
+git show upstream/main:.github/workflows/ci.yml | grep -c ...                     -> 1
+git merge-base --is-ancestor ef90b53bf 377a70e38                                  -> NOT an ancestor
+```
+
+…and yet the job's step list shows **step 14 "Check Conversation Upsert Guard" — success**.
+
+The branch cannot supply that step, so GitHub ran the **merge ref** (`refs/pull/N/merge`, the default
+for the `pull_request` event): head merged into the base *at run time*. The green therefore genuinely
+includes the new gate, and my separate local rebase check at `1874c4f83` was belt-and-braces rather
+than the only evidence.
+
+**Rule 96 revised.** The correct test is not *"does the branch contain the gate"* — it never will,
+and that framing would condemn every PR forever. It is **"did this run start after the gate
+landed"**. A tick is a claim about head-merged-into-base-at-run-time. It goes stale when the base
+moves, and it self-heals on any re-run. Concretely: #1343's 10:37 tick was genuinely stale (base
+lacked the guard); em10's 10:49 push triggered a re-run that picked the guard up for free.
+
+This also means the fleet-wide warning I sent the user needed narrowing, which I did in the same
+message rather than leaving the broader version standing: only PRs whose *last run* predates 10:38
+need attention.
+
+### Rule 98 (new)
+
+**When you catch yourself about to assume in either direction, the step list is cheap.** I nearly
+concluded "guard absent from branch, therefore untested" — the mirror image of the error rule 96 was
+written to prevent, and it would have sent em10 on a pointless rebase. `gh api .../actions/jobs/<id>
+--jq '.steps[]'` answers "what actually ran" in one call. Prefer the artifact's own record of itself
+over any inference from git topology.
+
+### Ledger sweep
+
+**Struck this cycle:** DEF-31 (#1338), CI-guard (#1339), DEF-26 (#1340).
+
+**Held, with reasons (all unmoved by design, not by neglect):**
+
+| Row | Why it has not moved |
+|---|---|
+| B1/B2/B14, B3/B4-migration, B6+B9, B7, B11/B12/B13/B15 | Briefs written; deliberately undispatched until B lands (§5cm) |
+| Tranche C | Re-cut ruling written (§5co); blocked on B |
+| em9 option (i) | Blocked on user decision; **not** to be re-raised (§5cq) |
+| Messaging-authz A/B/C | User: *"I need to think about this one a bit more"* |
+| DEF-5, 6, 9, 10, 11, 14, 16, 17/18 | All downstream of B / the S4 read-switch |
+| AC-DEF15-4, AC-DEF16-1 | Blocked on `ae33715e` |
+| AC-12-6 / beta exercise | Awaiting user scheduling |
+
+**Roster:** em6, em9, em10 all `blocked`. Park *reasons* are not exposed by `scion list --format
+json` (no `statusMessage` field surfaced), so "blocked" is the strongest verification available —
+noted as an instrument limit rather than treated as full confirmation of rules 57/58.
+
+**State:** `upstream/main` = `b88fece2f`. Tranche B = `377a70e38`, green, merge-ready, awaiting user.
+My branch = `d57312543` + this entry. All worktrees pruned; only `/workspace` remains.
