@@ -10440,3 +10440,302 @@ in the modification table where I will rely on it to triage.
 - **149.** A completeness audit built on file existence is silent on modifications, and will read
   as a completeness guarantee unless it says otherwise in its own header. State an inventory's
   blind spot inside the inventory.
+
+---
+
+## §5ea. 2026-08-28 16:15 — TRANCHE B MERGED; TWO CONFIRMED SECURITY REVERTS LATENT IN messaging-v2; §5co's GATE IS THE WRONG SHAPE
+
+### Section boundary: #1353 merged
+
+`4cec136f5 fix(hub): tranche B - conversation stamping, publish guards, AST enumeration (#1353)`,
+merged 2026-08-28 12:10 -0400. Tranche B is complete on main. Confirmed independently by the
+coordinator, who read the HIGH fix diff and reached the same conclusion I did: the `persistOK`
+bool was replaced by an early return on `CreateMessage` failure, covering everything downstream
+including the W6 notification block, matching `deliverToAgent`'s existing pattern.
+
+S4-P3 is restored. em10 unparked.
+
+### em6 / PR #1360 — dispatched, no user decision needed
+
+gofmt blocker on `dm_guard_enumeration_test.go` (em6's own new file) plus three Gemini mediums.
+I ruled on the first before dispatch because the reviewer's implied fix violates a standing rule:
+
+> "dm_key.go principalKind/principalID not normalized for case sensitivity"
+
+**The observation is real; the fix is forbidden.** Never normalise a DM key on the derivation
+path — a differing round-trip is an error, never a rewrite. Lowercasing "User" to "user" invents a
+key the caller never validated, and the key IS the ACL. Instruction to em6 is **reject, not fold**:
+exact-match `user`/`agent` for kind, canonical lowercase-hyphenated for the UUID, errors on both,
+golden vectors for the rejected forms. Textual UUIDs being case-insensitive by spec makes this a
+real hazard rather than a theoretical one — two callers holding the same UUID in different case
+derive two different DM keys, giving one DM two ACLs.
+
+Also asked em6 to check whether any live caller currently feeds non-lowercase input, before
+tightening. Nil-check mediums 2 and 3 accepted in scope, with an explicit instruction not to expand
+into the filed file-wide sweep.
+
+### THE FINDING: messaging-v2 silently reverts two security fixes
+
+em9's REVERT-RISK column — which I requested this cycle after em9 spotted the first instance by
+noticing — produced a second hit within minutes. Both verified by me against source, not accepted
+on report (rule 123).
+
+**Revert 1 — B5/R1, `pkg/hub/messagebroker.go`:**
+
+| marker | v2 | main |
+|---|---|---|
+| `msg.Sender == "agent:"+agent.Slug` (slug-based self-skip) | 2 (`:717`, `:740`) | 0 |
+| `msg.SenderID == agent.ID` (id-based self-skip) | 0 | 2 |
+
+Main carries its own explanation at `:725`: *"Sender is a display label that may be in UUID form
+after the B5 auth-derivation override; SenderID is the canonical identity."* Post-B5 the Sender
+field can hold a UUID, so `"agent:"+slug` never matches and the self-skip stops firing entirely.
+Main also added an R3b warning for the empty-SenderID case that v2 has no equivalent of — carrying
+the hunk deletes the guard and its alarm together.
+
+**Revert 2 — #1322, `pkg/hub/handlers_broker_inbound.go`:**
+
+| marker | v2 | main |
+|---|---|---|
+| `req.Message.SenderID = senderUser.ID` | 0 | 1 (`:145`) |
+| `parseDMKeyIDs` | 0 | 1 (`:165`) |
+| `"DM thread_id does not match"` | 0 | 1 (`:170`) |
+| `GetUserByEmail` | 2 (`:137`, `:288`) | 1 (`:128`) |
+
+`b453a6858 fix(security): validate DM key ownership at message ingress — prevent cross-project
+injection (#1322)`, dated 08-27 13:16:49 -0400. Merge-base `6268bac44` dated 08-27 11:05:44 -0400
+— **same timezone, checked, because a TZ mismatch would flip the conclusion and look plausible
+doing it.** `git merge-base --is-ancestor b453a6858 6268bac44` → NO. Positive control
+(`--is-ancestor <mb> upstream/main`) → passed.
+
+The second `GetUserByEmail` on v2 at `:288` is the late fallback #1322 deliberately removed when it
+moved SenderID caching earlier. v2 does not merely lack the fix; it actively contains the shape the
+fix replaced.
+
+**Severity is not equal and must never again be listed as two equal bullets.** B5 failing is a
+nuisance — an agent receives its own broadcast. #1322 failing is a confidentiality breach — a broker
+plugin injects messages into a DM between arbitrary participants via a crafted ThreadID.
+
+### §5co's ACCEPTANCE GATE IS THE WRONG SHAPE — my error, corrected
+
+§5co built a mechanical gate for tranche C: three greps over `pkg/hub/*.go` that must return 7, 2,
+and 4. It is a good gate and it would **not** have caught #1322. It enumerates *B5's markers*
+because B5 was the instance in front of me when I wrote it. The actual category is "any change main
+landed after the fork," and no marker list derived from one fix spans it.
+
+This is my own rule 136 landing on my own gate: an enumeration guard is only as good as the boundary
+of the category it enumerates.
+
+**Replacement gate — mechanical, complete, and not dependent on anyone noticing:**
+
+    MB=$(git merge-base upstream/main <branch>)
+    git diff --name-only --diff-filter=M $MB <branch> > /tmp/mods.txt
+    git diff --name-only $MB upstream/main | sort > /tmp/main_post.txt
+    sort /tmp/mods.txt | comm -12 - /tmp/main_post.txt
+    # for each survivor: git log $MB..upstream/main -- <file>
+    # non-empty => candidate revert; read the commits, decide explicitly
+
+### THE WIDER MEASUREMENT — worse than the two findings
+
+Run against tranche C, excluding `pkg/ent/`, `.design/`, docs and `go.sum`: **19 code files**, across
+roughly **20 upstream PRs**.
+
+| file | post-fork commits on main |
+|---|---|
+| `pkg/hub/route_metadata.go` | 9 (P2 series) |
+| `pkg/hub/route_classification_test.go` | 6 (P2 series) |
+| `pkg/hub/server.go` | 5 (P2 series) |
+| `pkg/hub/handlers_agent_messaging.go` | 4 (#1353, #1347, #1343, **#1322**) |
+| `pkg/hub/handlers_chat_v2.go` | 4 (#1353, #1347, #1338, **#1322**) |
+| `pkg/store/store.go` | 4 (#1349, #1348, #1331, #1323) |
+| `pkg/store/models.go` | 3 |
+| `pkg/hub/handlers_broker_inbound.go` | 2 (#1353, **#1322**) |
+| `pkg/hub/messagebroker.go` | 2 (#1353, #1343) |
+| `pkg/hub/messagebroker_test.go` | 2 |
+| `pkg/store/entadapter/composite.go` | 2 |
+| 8 others | 1 each |
+
+Four security fixes (#1322, #1338, #1343, #1347) **plus the entire auth-refactor P2 series**
+(#1323, #1324, #1327, #1328, #1331, #1332, #1333, #1334, #1336, #1346, #1348, #1349).
+
+`handlers_agent_messaging.go` and `handlers_chat_v2.go` each carry #1322 *and* #1347 and were **not**
+in em9's original sweep scope. They are the highest-probability location for revert number three.
+
+**The P2 files are a different flavour of the same hazard and are in some ways worse: that is the
+auth-refactor team's work. Reverting another team's authz changes is worse than reverting our own,
+because nobody on our side will recognise the loss.** This is squarely the user's standing caution.
+
+### em9's atomicity claim — load-bearing, sent back for precision
+
+em9 reports the three #1322 hunks and the Phase 11 hunks are a single atomic unit, i.e. the revert
+is not separable from the feature. If true, "exclude the bad hunks" stops being an available
+remedy and the re-derive option gets much stronger. Because it is now load-bearing in a decision
+the user is making, I sent it back with a forced choice — (a) literally interleaved in the same
+functions, or (b) separable in principle but Phase 11 depends on the SenderID caching #1322 moved
+— rather than inferring which was meant.
+
+### ESCALATION SENT (user, 1785 runes)
+
+Recommendation: **stop treating `messaging-v2` as a source branch; treat it as a specification.**
+Read what C intends, re-implement on current main, delete the branch. A rebase means one manager
+resolving conflicts across four security fixes and ten authz PRs they did not author — which is
+where silent reverts come from. Awaiting the call: re-derive, or rebase with a per-PR survival gate.
+
+### DISPATCHES
+
+- **em10** (unparked): classify the same 19 files MECHANICAL / SUBSTANTIVE / STALE, with
+  re-derivation cost and confidence per file. **The number that matters is the SUBSTANTIVE count** —
+  the whole decision turns on it. Explicitly a measurement, not an implementation. Positive control
+  required, since "mostly MECHANICAL" is exactly what a broken instrument returns.
+- **em9**: extend REVERT-RISK to the same 19 files, starting with the two carrying #1322/#1347.
+- Deliberate duplication: two independent readers, two different questions.
+
+### NEW STANDING RULES
+
+**150.** A branch predating a security fix silently reverts it when its modifications are carried
+wholesale. The tell is *inverted* from a normal revert — the OLD form is present and the NEW form
+absent, which hunk-level review reads as "no change to security code." Detect by counting markers
+in **both** directions across both trees, never by reading the diff.
+
+**151.** The general form of "did this branch revert something" is mechanical and complete: for
+every file the branch modifies, list main's commits touching that file since the merge-base;
+non-empty is a candidate. Noticing is neither mechanical nor complete. When an agent finds one
+instance by noticing, do not accept the instance — convert it into the sweep.
+
+**152.** A completeness claim inherits the boundary of the scope it was computed over, and reads as
+universal unless the boundary is stated in the same sentence. "0 SUSPECTED, all others NONE" over
+16 of 19 files is a clean bill of health for the 16 and silence on the 3 that mattered most.
+
+**153.** A gate built from one instance enumerates that instance's markers, not the category. Check
+any gate you wrote against the *next* instance of the same class before trusting it. §5co's gate
+was sound and would have missed #1322 completely.
+
+**154.** When a branch's feature hunks and its revert hunks are atomic, the revert is not separable
+from the feature, and "exclude the bad hunks" stops being an available remedy. Establish atomicity
+explicitly before offering exclusion as an option.
+
+**155.** Two readers on the same files is not duplication when one is asked about safety and the
+other about cost. Cost framing colours safety answers — an expensive fix looks more like a
+refactor. Keep the readers from seeing each other's output.
+
+**156.** When a reviewer's observation is correct but the implied fix violates a standing rule, rule
+on it before dispatch and say why in the same message. An agent handed "reviewer says X" will
+implement X, and a security rule broken by an accepted review comment is indistinguishable from one
+broken by carelessness.
+
+---
+
+## §5eb. 2026-08-28 16:17 — dm_key.go NORMALISES ON THE DERIVATION PATH; em9's #1322 REMEDY
+
+### em6 found the defect the reviewer was circling
+
+Gemini flagged "principalKind/principalID not normalized for case sensitivity" on #1360. em6
+audited before coding and found the reviewer had spotted a symptom, not the defect:
+
+**`pkg/messages/dm_key.go:41-42` — `DMConversationKey` calls `strings.ToLower()` on BOTH kind
+arguments.** There is a deliberate test, `dm_key_test.go:72
+TestDMConversationKey_CaseNormalisation`, asserting `"USER"` and `"AGENT"` produce the same key as
+lowercase. Pre-existing; not introduced by this tranche.
+
+This violates the standing rule directly: **never normalise a DM key on the derivation path.**
+
+`CheckDMParticipantKey` already does exact comparison with no fold — which is correct, and which
+creates a live inconsistency: **the deriver accepts what the guard rejects.**
+
+### Why the inconsistency is worse than either half
+
+Today it fails closed — `DMConversationKey("USER", id)` yields a key containing `user`, and
+`CheckDMParticipantKey("USER", …)` then mismatches and denies. No hole.
+
+The hazard is in how the inconsistency gets *resolved* later. Someone arriving without context sees
+a permissive deriver beside a strict checker and reconciles them. There are two directions and only
+one turns a red test green: **adding `ToLower` to the checker.** The loosening direction is the path
+of least resistance, and it converts a fail-closed accident into a real hole.
+
+So a strict guard next to a permissive deriver does not merely fail to fix the problem — it builds a
+ramp toward a worse one. **Ruled: fix both, together, in this tranche.**
+
+### em6's caller audit (the thing that makes it safe)
+
+- `resolve.go` — literal `"user"` / `"agent"`
+- `conversation.go` — pass-through from resolve.go
+- `dm_migration.go` — kinds from existing DB rows
+- `derive_key.go` — kinds parsed from existing DM keys
+- `backfill.go` — `parsePrincipal` extracts from `user:` / `agent:` labels, no fold
+- ent schema `conversation_participant.go:46-47` constrains `PrincipalKind` to enum `("user","agent")`
+
+No live caller feeds non-lowercase. Tightening breaks nothing.
+
+### Two conditions I attached
+
+**1. Invert the test, do not delete it.** `TestDMConversationKey_CaseNormalisation` encodes a
+decision — "we thought about case and chose to fold." Deleting it erases the evidence that the
+question was ever asked, and the next person re-derives the same wrong answer with nothing in the
+history to warn them. Rename to `TestDMConversationKey_RejectsNonCanonicalKind`, same inputs,
+assertion flipped to error, with a body comment naming the previous behaviour. The diff then reads
+as a *reversed decision* rather than a *removed test*.
+
+**2. Prove the tightening cannot orphan stored data.** If any persisted key holds a non-lowercase
+kind, tightening makes that row unparseable, parse failure denies, and a live DM goes dark with no
+recovery — because repair on the derivation path is also forbidden. The safety argument is
+available (every key was produced by `DMConversationKey`; it has always folded; therefore no stored
+key has an uppercase kind) but it has exactly **one load-bearing premise: that `DMConversationKey`
+is the only writer of DM keys.** em6 must enumerate every site constructing a `dm:` string — not
+merely every caller of `DMConversationKey` — including test fixtures, seeders, and any migration
+that concatenates. Controlled search required. **If a second writer exists, stop and escalate; do
+not tighten around it.**
+
+### em9's #1322 remedy — atomicity answered (b), with a resolution
+
+Not interleaved. The ownership check (main `:160-173`) sits between the permission check and the
+agent running-phase check, reading `ThreadID` and `req.Message.SenderID`. Phase 11 resolution (v2
+`:204-241`) sits after the running-phase check, reading `req.Surface` and `req.ExternalRef`.
+
+The coupling is indirect: #1322 added early SenderID caching at `:144` which the ownership check
+consumes at `:167`; v2 removed that caching and re-added a late `GetUserByEmail` fallback at
+`:285-289` because Phase 5 dual-write needs `senderUserID` at `:326-327` and Phase 11 did not exist
+when #1322 was written.
+
+**Remedy: keep both.** #1322's early caching + ownership check, then Phase 11 resolution after it.
+They protect different things — ThreadID-based DM participant identity vs Surface/ExternalRef
+conversation routing — so they compose rather than compete. The late `GetUserByEmail` fallback
+becomes redundant and drops out. Instructed em9 to record this as a RESOLUTION column entry in the
+manifest, since it is the implementer's instruction if the user picks rebase.
+
+### Does this weaken the re-derive recommendation? No — it sharpens the cost case.
+
+One revert is demonstrably fixable. But the recommendation never rested on unfixability; it rested
+on **who is doing the adjudicating and how many times.** em9 needed a focused analysis holding two
+PRs' intentions simultaneously to resolve *one file*. Nineteen files, ~20 PRs. The honest summary of
+a sweep that finds everything resolvable is still "twenty-two separate acts of careful
+adjudication," not "all resolvable."
+
+**Held, not sent.** The user has an open question from me and the recommendation is unchanged; a
+second message before they reply makes the target look like it is moving. If they choose rebase,
+this remedy is ready and goes out with the dispatch.
+
+### Roster note
+
+em10 emitted a `COMPLETED` state-change reading "tranche B merged, starting tranche C measurement".
+Wrong signal for starting work, but it is proceeding. Folding the correction into next contact
+rather than spending a message — this is the fourth taskSummary/state nit from em10 and they are
+individually cosmetic.
+
+### NEW STANDING RULES
+
+**157.** An inconsistency between a permissive producer and a strict validator will eventually be
+resolved by **loosening the validator**, because that is the change that makes a failing test pass.
+Never ship the strict half alone and plan to fix the permissive half later; the pair is one change.
+
+**158.** Do not delete a test that encodes a decision you are reversing — invert it, keep the name
+descriptive of the new answer, and say in the body what the old behaviour was. A deleted test leaves
+no evidence the question was ever asked; an inverted one shows the decision was made twice.
+
+**159.** Before tightening a derivation function, prove the tightening cannot orphan stored data.
+The safety argument is always "everything stored came through this function", and its single
+load-bearing premise is always "this function is the only writer." Enumerate writers by output
+shape, not by callers of the function — a seeder that concatenates the string never calls it.
+
+**160.** A demonstration that one instance of a systemic problem is fixable is not evidence the
+class is cheap. Report resolvability per instance; the aggregate cost is the count, not the
+difficulty of the easiest case.
