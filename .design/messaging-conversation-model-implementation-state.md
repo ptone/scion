@@ -8779,3 +8779,99 @@ strictly more informative than the mutation that merely re-derives the reported 
 em6 re-parking. em10 on round 3 (F1 UUID-strict stamp, F2 publish-enumeration rescope). em9 on
 DEF-32 reachability. B1/B2/B14/B3 still held pending #1349 **merge** — head-updated is not merged,
 and the predicate B1 consumes only becomes shared ground when it lands.
+
+---
+
+## §5dk — em10 round 3; my second spec error; heartbeat sweep
+
+### Heartbeat sweep (12:43Z)
+
+- `upstream/main` = `4b120bd70`, **unchanged for three heartbeats**. No rebase pressure.
+- `ca-msg-em6-b6b7b9` = `42abb7dff` — matches PR #1349's head exactly. em6 `blocked` (re-parked as told).
+- `scion/ca-msg-em10-trb` = `bdbed6c89`. em10 `blocked` — parked itself after reporting.
+- `scion/ca-msg-em9-unify` = `e704b2feb`, unchanged. em9 **`stalled`**.
+- **#1349 still OPEN**, `UNSTABLE`, not merged. This is the third sweep where it has not moved; the
+  user has it and merging is theirs. Noting per ledger discipline, not chasing.
+
+**taskSummary is unreliable and I am recording why.** em10's reads *"Tranche B cut, verified, and
+reported — scion/ca-msg-em10-trb @ 9333f943"* — report-shaped, which per the heartbeat means "the
+agent believes it reported". em10 *did* report; the summary is simply four commits stale (`9333f943`
+vs `bdbed6c89`). So a report-shaped summary is evidence of belief, **not** evidence of a lost report,
+and a SHA inside one is not a branch tip. Cross-check against `git rev-parse` before drawing a
+conclusion from it.
+
+**em9 stalled.** A read-only investigation produces no branch movement by construction, so time is
+the only signal and eleven minutes is thin. But `stalled` is a different state from `blocked`, and
+waiting a full heartbeat to discover the agent never woke costs thirty minutes. Sent a forced-choice
+A/B/C per rule 63, with the explicit "do not restart work, do not write a status essay" — an
+open-ended ping to a parked agent reads as permission to resume.
+
+### em10 `bdbed6c89` — F2 closed, F1 accepted, one comment required
+
+Diff: 204 insertions, 51 deletions, no tests removed (checked with `grep "^-func Test"`).
+
+**F1 — my instruction was wrong, and the error is mine.** I told em10 to resolve `SubscriberID` to a
+canonical `store.User` UUID before deriving the key. That is **not implementable**: `pkg/store`
+exposes `GetUserByEmail` and nothing else, and there is no federated-identity → user mapping
+anywhere in the store. For a federated subscriber there is no UUID to resolve *to*. em10's
+validate-and-skip is the best construction available.
+
+This is my second spec error of the project, after the nil-pe return value in §5df. Both share a
+shape: **I specified the remedy before establishing that the remedy was reachable.** The finding was
+right both times; the prescription was not. Write findings as findings — "this silently no-ops for
+federated subscribers" — and let the manager, who is inside the code, choose the construction.
+
+The consequence is larger than em10's tranche and reframes DEF-32. The gap is not "notification
+stamping is broken for federated users"; it is that **federated users may have no canonical store
+identity for the conversation model to key on at all.** Whether that bites depends entirely on em9's
+reachability answer: if `FederatedUserIdentity` never reaches the chat/messaging handlers because
+auth resolves it to an `AuthenticatedUser` (store UUID) first, DEF-32 collapses to the notification
+path alone.
+
+**M1 survived, and em10 reported it plainly.** Correct on both counts. The `uuid.Parse` guard is
+behaviourally redundant — `ResolveOrCreateDMConversation` already fails safe — so its value is the
+`Warn` line, which is the observability that puts DEF-32 on the divergence board. Kept, relabelled
+as observability rather than as a fix. **An honestly reported surviving mutation is worth more than
+three kills against a manifest.**
+
+**M2 is still not a kill, and I ran the real one myself.** em10 again offered "build fails: unused
+`messaging` import". A build failure is the instrument breaking. It is also a pin that evaporates the
+moment anyone adds another `messaging.` reference to the file. The genuine mutation keeps the resolve
+call and replaces the assignment with `_ = convResult.ConversationID` — it compiles, it *is* the
+defect, and `TestCreateInboxMessage_StampsConversationID` **FAILS** it (rc=1, verified). Handed em10
+the result rather than making it re-derive.
+
+Operational note: the first attempt at that mutation timed out at 120s mid-compile, leaving the file
+**mutated on disk**. Restored and confirmed clean (`git status --porcelain` empty) before doing
+anything else. A mutation harness that can time out must restore in a path that runs even when the
+test does not.
+
+**F2 — closed, and I withdrew a finding before sending it.** I had drafted a requirement to pin the
+expected population count, on the grounds that arity is a fragile discriminator: if the event
+publisher gains a parameter, every site silently leaves the population. Then I read em10's
+reverse-check — every manifest entry must be found in source — which already fails on a vanished
+site. Withdrawn, and I told em10 I had withdrawn it.
+
+**Required before clearance:** `TestCreateInboxMessage_NonUUIDSubscriber_NoStampNoPanic` asserts
+`ConversationID == ""` for a slug subscriber, which pins today's gap as expected behaviour. Needs a
+comment naming DEF-32 and stating the expectation inverts when it lands. Then em10 is clear.
+
+### Rule 109 (new)
+
+**Write findings, not prescriptions, unless you have established the prescription is reachable.**
+Two spec errors now, both the same shape: a correct finding wrapped in a remedy I had not verified
+was implementable. The manager is inside the code and will find the construction; naming the defect
+precisely is the part only the reviewer can do.
+
+### Rule 110 (new)
+
+**A test that asserts current-but-wrong behaviour must name the defect it is pinning.** Otherwise the
+person who eventually fixes it reads a green assertion for the old result and concludes they caused
+a regression. State in the test that the expectation inverts when the row lands.
+
+### Rule 111 (new)
+
+**Withdraw findings out loud.** Telling a manager "I was going to ask for X, then found you had
+already handled it" costs one sentence and buys two things: it stops them re-litigating a
+requirement that no longer exists, and it demonstrates the review actually read their work rather
+than pattern-matching against a checklist.
