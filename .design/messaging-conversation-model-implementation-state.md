@@ -8875,3 +8875,83 @@ a regression. State in the test that the expectation inverts when the row lands.
 already handled it" costs one sentence and buys two things: it stops them re-litigating a
 requirement that no longer exists, and it demonstrates the review actually read their work rather
 than pattern-matching against a checklist.
+
+---
+
+## §5dl — em10 tranche B cleared at `822c02e58`; main is red on a test CI does not run
+
+### The DEF-32 marker commit
+
+`822c02e58` is comment-only — a doc-comment block on
+`TestCreateInboxMessage_NonUUIDSubscriber_NoStampNoPanic` and an inline note on the assertion, both
+naming DEF-32 and both stating the expectation inverts when federated-identity resolution lands.
+Exactly rule 110, and em10 put the marker in both places without being asked which one.
+
+### Merge-readiness
+
+Three dots, deliberately: `git diff upstream/main...822c02e5` — 1649 insertions, 53 deletions, 10
+files, all under `pkg/hub`. No tests removed across all eight commits.
+
+`messagebroker.go` showed **-44**, which is the profile rule 31 warns about: a *modified aggregate
+file* reverts silently where a deleted entity fails loudly. So I localised before reacting. The
+deleted hunks include the W7 attachment-linking block, the DM watermark stamping, the topic
+watermark, and the SSE publish — all load-bearing, none of it em10's work. Survival check against
+`git show upstream/main:pkg/hub/messagebroker.go`: `linkAttachmentRefs`, `registerDMParticipants`,
+`TouchDMActivity`, `TouchTopicActivity` and the SSE publish comment each appear **exactly once on
+main and exactly once at HEAD**. No functions removed. The -44 is re-indentation into the new guard
+scope. Cleared — but this is the second time a large deletion count in this file has looked like a
+revert and been re-indentation, and the count alone will never distinguish the two.
+
+### The gate-coverage hole
+
+em10 reported "all gates green". Full `pkg/hub` is **not** green:
+`TestTemplateResource_UATConfinement/global_template_is_still_not_confined_(unchanged)` fails.
+
+I did **not** attribute it before controlling for it. Worktree at `upstream/main` (`4b120bd70`),
+same test, **identical failure**. Pre-existing, not em10's.
+
+Then the reason nobody has noticed, which is the actual finding:
+
+- The test lives in `pkg/hub/authz_agent_baseline_test.go`.
+- That file carries `//go:build !no_sqlite` — at **line 15**, under the 14-line Apache header.
+- `make test-fast` is `go test -tags no_sqlite ./...`, and `make ci` runs `test-fast`.
+
+So **CI never executes it.** `upstream/main` is red on a test no gate runs, and an unknown number of
+other SQLite-dependent tests in `pkg/hub` are equally invisible. em10's claim was true and complete
+*for the gates that exist* — which is the more interesting failure, because there was nothing wrong
+with the report.
+
+Two threads converge here. This is the same file and the same line-15 offset as em9's §5df doc nit
+(rule 95: `head -N` measures the licence header, not the tag). And it is direct evidence for why the
+build-tag inventory — option (i), still unanswered — is worth doing. I reported the evidence to the
+user without re-asking for the decision; §5cq's one-escalation-per-topic discipline holds, and new
+evidence is not a second ask.
+
+### Rule 112 (new)
+
+**"All gates pass" is a statement about the gates, not about the code.** Before accepting it, ask
+what the gates *exclude*. A build tag, a `-short` guard, or a skipped package converts a red test
+into a silent one, and the report that cites the gate is then accurate and worthless at the same
+time. The control for a green gate is running the thing the gate does not run.
+
+### Rule 113 (new)
+
+**A deletion count is not evidence of a deletion.** Twice now `messagebroker.go` has shown a large
+negative line count that turned out to be re-indentation into a new scope. The only cheap
+discriminator is a survival check: grep the load-bearing symbols in the deleted hunks against both
+`main` and `HEAD` and compare counts. Do that before reading a single diff hunk in anger.
+
+### Dispatched
+
+- Compare URL for `scion/ca-msg-em10-trb` sent to thread `1532864101909528737`, `len(url) = 1789`,
+  title and body URL-encoded, `quick_pull=1`. em10 told explicitly not to open it.
+- em10 given the literal park command per rule 57/58: `sciontool status blocked "parked by
+  ca-msg-arch pending tranche B merge"`. **Park not yet verified** — check next sweep.
+- User sent the section-boundary report: tranche done, the gate hole, and DEF-32 with my spec error
+  owned in the text rather than buried.
+- `/tmp/mainC` control worktree removed.
+
+### Standing
+
+`#1349` remains **open and unmerged** — fourth sweep without movement. B1/B2/B14/B3 still held on it.
+em9 has not answered the forced-choice probe. Two compare URLs are now outstanding with the user.
