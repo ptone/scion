@@ -70,6 +70,33 @@ Key design decisions:
 
 Guesses for implementer to validate: 64KB buffer cap (estimated, not profiled), 10/10 backoff step counts (estimated from init burst timing), 8s retry window (generous bound, may be shortened after instrumentation).
 
+### 8. Operator Log Viewer — Route Analysis
+
+**Question**: Does any operator-facing route surface `.scion-entrypoint.log`?
+
+**Answer**: NO. No endpoint on any runtime serves `.scion-entrypoint.log`.
+
+- `/api/v1/agents/{id}/logs` → runtimebroker/handlers.go:1904-1937 tries agent.log from filesystem, but `if found.ProjectPath != ""` at line 1924 is always false on sandbox tier (cloudrun List() at line 921-984 does NOT set ProjectPath, unlike docker.go:222). Falls back to `rt.GetLogs()` → tmux capture-pane → requires LIVE sandbox.
+- `/api/v1/agents/{id}/cloud-logs` → logquery.go:126-159, pure Cloud Logging API query via logadmin.Client. No sandbox dependency. Works for dead agents.
+- The web UI log viewer (agent-log-viewer.ts:262) picks cloud-logs mode when `cloudLogging=true`, broker mode otherwise.
+
+### 9. Cloud-Logs Filter vs PR 1325 Tailer
+
+**Question**: Would PR 1325's tailer lines (written to host stdout, captured by Cloud Run to Cloud Logging) appear in the Logs tab?
+
+**Answer**: NO. Two predicates block them.
+
+The filter built by BuildLogFilter (logquery.go:164-240) for /cloud-logs:
+
+1. **logName whitelist** (line 175-177): Only `scion-server`, `scion-agents`, `scion-messages`. Tailer stdout arrives as `run.googleapis.com/stdout`. FAILS.
+2. **labels.hub** (line 204-206): Always added because ResolveHubName() (hub_config.go:164-173) always returns non-empty. Tailer emits no `hub` label. FAILS.
+3. labels.agent_id (line 187): Tailer emits this. PASSES.
+4. labels.project_id (line 190): Tailer emits this. PASSES.
+
+**Label promotion assumption**: The tailer writes `logging.googleapis.com/labels` to stdout JSON, expecting Cloud Run to promote those labels to Cloud Logging entry labels. This is INFERENCE with documentation support (Cloud Run docs reference special fields list which includes this key; Java example shows it), but no single authoritative statement confirms it for Cloud Run services. Open risk.
+
+**Filter semantics**: Missing labels cause comparisons to fail silently (Cloud Logging query language docs). Adding stdout logName to whitelist is safe — unlabeled entries are rejected by label predicates.
+
 ## Files Referenced
 - `pkg/runtime/docker.go:51-67` — secret injection entry point
 - `pkg/runtime/common.go:42-56,861-929` — telemetry credential and secret serialization
