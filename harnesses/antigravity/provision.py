@@ -132,8 +132,6 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     method = resolved.method
 
-    has_token = False
-    is_adc = False
     env_overlay: dict[str, str] = {}
 
     if method == "vertex-ai":
@@ -144,7 +142,6 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
             raise scion_harness.ProvisionError(
                 f"vertex-ai auth requires AGY CLI >= 1.1.10, found {ver_str}"
             )
-        is_adc = True
         env_overlay["AGY_ADC_AUTH"] = "true"
 
         # Resolve GOOGLE_APPLICATION_CREDENTIALS from staged file secret or env.
@@ -210,7 +207,6 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
             raise scion_harness.ProvisionError(
                 "AGY_TOKEN must contain refresh_token"
             )
-        has_token = True
 
     # vertex-ai is enterprise/GCP mode. oauth-token is also enterprise when
     # GOOGLE_CLOUD_PROJECT is present (wrapper script handles GCP settings).
@@ -244,7 +240,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     else:
         ctx.info(f"model={model} thinking_level=unset (using AGY default)")
 
-    _generate_wrapper_script(ctx.home, has_token, is_enterprise, is_adc=is_adc, thinking_tier=thinking_tier)
+    _generate_wrapper_script(ctx.home, is_enterprise, auth_method=method, thinking_tier=thinking_tier)
     ctx.write_outputs(resolved, env=env_overlay)
     _copy_instructions(ctx.bundle_dir, ctx.home, instructions_file)
     _generate_hooks_json(ctx.home)
@@ -341,27 +337,33 @@ def _generate_hooks_json(home: str) -> None:
 
 
 def _generate_wrapper_script(
-    home: str, has_token: bool, is_enterprise: bool,
-    is_adc: bool = False,
+    home: str, is_enterprise: bool,
+    auth_method: str = "none",
     thinking_tier: str | None = None,
 ) -> None:
-    """Generate agy-wrapper.sh that inits keyring and execs AGY.
+    """Generate agy-wrapper.sh that execs AGY with auth-method-appropriate setup.
 
-    The keyring daemons must run in the same process tree as AGY so they
-    stay alive for the duration of the session. A provisioner-started daemon
-    dies when the provisioner exits, so we bootstrap inline here.
+    The keyring block (DBUS + gnome-keyring-daemon + secret-tool) is generated
+    ONLY for oauth-token auth, which is the only method that stores credentials
+    in gnome-keyring. All other methods skip it entirely:
 
-    Token injection always includes an env-var fallback because the
-    provisioner runs before scion-env is sourced — AGY_TOKEN may
-    only be available in the child process environment, not during provisioning.
+    - api-key: agy reads GEMINI_API_KEY from the environment. No keyring.
+    - vertex-ai: agy uses GOOGLE_APPLICATION_CREDENTIALS (ADC). No keyring.
+    - none: no credentials to store. No keyring.
 
-    GCP/enterprise settings are also patched here at runtime for the same
-    reason — GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION and AGY_USE_GCP
-    are only available in the child environment.
+    This gate is on the auth METHOD, not on binary presence. api-key never
+    needed a keyring on any image, in any environment, ever.
 
-    When is_adc=True (vertex-ai auth), keyring/DBUS init and token injection
-    are skipped because ADC auth uses GOOGLE_APPLICATION_CREDENTIALS instead
-    of the keyring-based OAuth flow. GCP settings patching still runs.
+    GCP/enterprise settings are patched at runtime for all methods because
+    GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION and AGY_USE_GCP are only
+    available in the child environment, not during provisioning.
+
+    When oauth-token is selected and required keyring binaries are absent,
+    the wrapper fails with a named error identifying the missing binary.
+    It does NOT fall back to writing the token to disk — per #108, on
+    single-node tiers a deleted agent's HOME survives and is inherited by the
+    next agent with the same slug. A plaintext refresh token on disk would be
+    a credential leak to the next tenant. A loud failure is better.
     """
     secret_path = os.path.join(
         home, ".scion", "harness", "secrets", "AGY_TOKEN"
@@ -392,28 +394,54 @@ def _generate_wrapper_script(
         # the wrapper does not keep running in enterprise/GCP mode.
         os.remove(enterprise_marker)
 
-    # Build keyring/token injection block — skipped for ADC auth since ADC
-    # uses GOOGLE_APPLICATION_CREDENTIALS, not the keyring-based OAuth flow.
-    if is_adc:
-        keyring_block = """
-# ADC auth: skip keyring/DBUS init and token injection.
-# ADC uses GOOGLE_APPLICATION_CREDENTIALS, not the keyring-based OAuth flow.
-echo "agy-wrapper: ADC auth mode — skipping keyring initialization" >&2
-
-# Export AGY_ADC_AUTH for the AGY process. Belt-and-suspenders: env_overlay
-# sets this via env.json, but we also export it here as a backup so the
-# variable is guaranteed present even if env.json injection is skipped.
-export AGY_ADC_AUTH=true
-"""
-    else:
+    # Build auth-method-specific block.
+    #
+    # Only oauth-token needs the keyring. api-key uses env vars, vertex-ai
+    # uses ADC, and "none" has no credentials to store. The previous code
+    # gated on is_adc (vertex-ai only) and ran the keyring block for all
+    # other methods — including api-key and none — causing exit 127 when
+    # gnome-keyring-daemon was absent, even with a working GEMINI_API_KEY
+    # sitting in the environment (#109).
+    if auth_method == "oauth-token":
+        # #124: Every binary call must be checked explicitly and fail with a
+        # named error. No eval-masking (eval of missing command output returns
+        # 0), no stream-discarding on fatal commands.
         keyring_block = f"""
-# Initialize DBUS session bus
-eval $(dbus-launch --sh-syntax)
+# oauth-token auth: initialize DBUS + gnome-keyring for token storage.
+# Keyring binaries (dbus-launch, gnome-keyring-daemon, secret-tool) are
+# required for this auth method. If absent, fail with a clear message
+# rather than silently dying at exit 127 (#124).
+
+# Verify required binaries before calling them.
+for _bin in dbus-launch gnome-keyring-daemon secret-tool; do
+    if ! command -v "$_bin" >/dev/null 2>&1; then
+        echo "agy-wrapper: FATAL: oauth-token auth requires '$_bin' but it is not installed." >&2
+        echo "agy-wrapper: Install packages: dbus-x11, gnome-keyring, libsecret-tools" >&2
+        echo "agy-wrapper: Alternatively, use api-key auth (GEMINI_API_KEY) which does not require keyring." >&2
+        exit 1
+    fi
+done
+
+# Initialize DBUS session bus.
+_dbus_output=$(dbus-launch --sh-syntax 2>&1) || {{
+    echo "agy-wrapper: FATAL: dbus-launch failed: $_dbus_output" >&2
+    exit 1
+}}
+eval "$_dbus_output"
 export DBUS_SESSION_BUS_ADDRESS
 
-# Unlock and start gnome-keyring
-eval $(echo "test" | gnome-keyring-daemon --unlock 2>/dev/null)
-gnome-keyring-daemon --start --components=secrets,pkcs11,ssh > /dev/null 2>&1
+# Unlock gnome-keyring. The unlock password "test" is intentional — the
+# keyring lives only for this process tree's lifetime.
+_unlock_output=$(echo "test" | gnome-keyring-daemon --unlock 2>&1) || {{
+    echo "agy-wrapper: WARNING: gnome-keyring-daemon --unlock failed: $_unlock_output" >&2
+}}
+eval "$_unlock_output"
+
+# Start gnome-keyring components.
+_start_output=$(gnome-keyring-daemon --start --components=secrets,pkcs11,ssh 2>&1) || {{
+    echo "agy-wrapper: FATAL: gnome-keyring-daemon --start failed: $_start_output" >&2
+    exit 1
+}}
 
 echo "agy-wrapper: keyring initialized (DBUS=$DBUS_SESSION_BUS_ADDRESS)" >&2
 
@@ -425,25 +453,44 @@ if [ -f "{secret_path}" ]; then
     secret-tool store \\
         --label="Password for antigravity on gemini" \\
         service gemini username antigravity \\
-        < "{secret_path}" 2>/dev/null \\
+        < "{secret_path}" \\
         && echo "agy-wrapper: token injected into keyring (from staging file)" >&2 \\
-        || echo "agy-wrapper: WARNING: failed to inject token" >&2
+        || echo "agy-wrapper: WARNING: failed to inject token from staging file" >&2
 elif [ -f "{oauth_token_path}" ]; then
     secret-tool store \\
         --label="Password for antigravity on gemini" \\
         service gemini username antigravity \\
-        < "{oauth_token_path}" 2>/dev/null \\
+        < "{oauth_token_path}" \\
         && echo "agy-wrapper: token injected into keyring (from target path)" >&2 \\
-        || echo "agy-wrapper: WARNING: failed to inject token" >&2
+        || echo "agy-wrapper: WARNING: failed to inject token from target path" >&2
 elif [ -n "${{AGY_TOKEN:-}}" ]; then
     printf '%s' "$AGY_TOKEN" | secret-tool store \\
         --label="Password for antigravity on gemini" \\
-        service gemini username antigravity 2>/dev/null \\
+        service gemini username antigravity \\
         && echo "agy-wrapper: token injected into keyring (from env)" >&2 \\
-        || echo "agy-wrapper: WARNING: failed to inject token" >&2
+        || echo "agy-wrapper: WARNING: failed to inject token from env" >&2
 else
     echo "agy-wrapper: no token available, AGY will prompt for login" >&2
 fi
+"""
+    elif auth_method == "vertex-ai":
+        keyring_block = """
+# vertex-ai auth: uses GOOGLE_APPLICATION_CREDENTIALS (ADC), not the keyring.
+echo "agy-wrapper: ADC auth mode — skipping keyring initialization" >&2
+
+# Export AGY_ADC_AUTH for the AGY process. Belt-and-suspenders: env_overlay
+# sets this via env.json, but we also export it here as a backup so the
+# variable is guaranteed present even if env.json injection is skipped.
+export AGY_ADC_AUTH=true
+"""
+    else:
+        # api-key and none: no keyring needed. api-key reads GEMINI_API_KEY
+        # from the environment; none has no credentials to store.
+        keyring_block = f"""
+# Auth method: {auth_method}. No keyring initialization needed.
+# api-key: agy reads GEMINI_API_KEY from the environment.
+# none: no credentials configured; agy will prompt for login.
+echo "agy-wrapper: auth={auth_method}, skipping keyring initialization" >&2
 """
 
     script = f"""#!/bin/bash
