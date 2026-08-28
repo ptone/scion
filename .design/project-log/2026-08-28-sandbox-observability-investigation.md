@@ -97,6 +97,24 @@ The filter built by BuildLogFilter (logquery.go:164-240) for /cloud-logs:
 
 **Filter semantics**: Missing labels cause comparisons to fail silently (Cloud Logging query language docs). Adding stdout logName to whitelist is safe — unlabeled entries are rejected by label predicates.
 
+### 10. CloudHandler vs GCPHandler — Which Is Active?
+
+**Decision code**: server_foreground.go:740-773, initServerLogging().
+
+**CloudHandler requires**: (1) cloud_logging enabled via SCION_CLOUD_LOGGING env var or settings, (2) GCP project ID via SCION_GCP_PROJECT_ID or GOOGLE_CLOUD_PROJECT env var (logging resolveProjectID() at cloud_handler.go:381-388 reads ONLY env vars, does NOT query metadata server), (3) gcplog.NewClient success (needs ADC).
+
+**Deploy script provides**: NEITHER the cloud_logging flag NOR the project ID env var (deploy.sh:166). Cloud Run does NOT auto-set GOOGLE_CLOUD_PROJECT. Embedded defaults do not enable cloud_logging.
+
+**Critical gap**: logging.resolveProjectID() differs from hub.ResolveGCPProjectID() — the latter (gcp_iam_admin.go:178-187) falls back to metadata.ProjectIDWithContext, the former does not.
+
+**IAM gap**: Hub SA has roles/logging.viewer (deploy.sh:222), not roles/logging.logWriter. Even if CloudHandler is constructed, writes fail, circuit breaker opens permanently (resilient_cloud_handler.go:185-194), and on Cloud Run GCPHandler was already suppressed (otel.go:108) — complete logging black hole.
+
+**Same gap kills logQueryService**: server.go:1460 uses logging.ResolveProjectID() — same env-var-only resolver. If project ID env var is unset, logQueryService is nil, Logs tab uses broker mode.
+
+**If CloudHandler active**: Tailer could emit through it (client exposed at resilient_cloud_handler.go:220, can create logger with logID=scion-agents). Labels set directly on Entry — no promotion needed, Q2 risk eliminated. Door is open.
+
+**Five-row summary**: Every combination of project ID / cloud_logging / IAM produces an empty Logs tab for dead sandbox agents EXCEPT the one where all three are provided — which deploy.sh does not do.
+
 ## Files Referenced
 - `pkg/runtime/docker.go:51-67` — secret injection entry point
 - `pkg/runtime/common.go:42-56,861-929` — telemetry credential and secret serialization
