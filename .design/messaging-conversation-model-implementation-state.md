@@ -9036,3 +9036,91 @@ finished-but-unsent report is the failure mode here, and "be more thorough" is h
 finished-but-unsent twice. Coordinator asked to keep em9 on its do-not-nudge hold.
 
 `#1349` still open. em10's compare URL still unopened. Both with the user.
+
+---
+
+## §5dn — Heartbeat 13:13Z: DEF-11 struck; the divergence board and DEF-32 are the same problem
+
+### Sweep
+
+- `upstream/main` = `4b120bd70`, unchanged across four heartbeats.
+- `ca-msg-em6-b6b7b9` = `42abb7dff` (= #1349 head). em6 `blocked` — park verified.
+- `scion/ca-msg-em10-trb` = `822c02e58`. em10 `blocked` — park verified. Its `taskSummary` still
+  reads `@ 9333f943`, eight commits stale, consistent with §5dk: `taskSummary` records belief, not
+  state.
+- `scion/ca-msg-em9-unify` = `e704b2feb`, unchanged — expected, the task is read-only.
+- **em9 is `working`**, not stalled. It woke on my request and is composing. No further nudge: per
+  heartbeat item 3 an open-ended ping to a working agent reads as permission to expand, and "be more
+  thorough" is precisely how a finished-but-unsent report becomes unsent twice.
+- Open PRs: **#1349 only**. em10's compare URL has not been opened. Both merge decisions sit with
+  the user; neither is mine to chase beyond having sent them.
+
+### Ledger sweep — DEF-11 STRUCK
+
+The heartbeat says to expect to strike one out, so I went looking properly rather than restating the
+held list.
+
+**DEF-11** recorded that the divergence board counts every CLI `@<agent>` send as a mismatch: the Hub
+saw a client-supplied `ConversationID`, skipped re-resolution (correct), but hand-built a
+`ConversationResult` leaving `ExternalRef` empty at `handlers_agent_messaging.go:828-832`.
+`ComputeDivergenceMatch` was then handed `actualExternalRef == ""`, matched neither the `dm:` nor
+`thread:` branch, and fell through to `routing-type-mismatch`. The models agreed; the comparator was
+fed a blank.
+
+That mechanism **no longer exists.** There is no `ConversationResult{` literal anywhere in `pkg/hub`
+on `upstream/main`, and no `ConversationID != ""` skip path in `handlers_agent_messaging.go`.
+
+Absence is not a fix, so I took the positive control: **all six live `ComputeDivergenceMatch` call
+sites** — `handlers_agent_messaging.go:271, 802, 1069, 1192` and `messagebroker.go:483, 658` — now
+read `actualRef = convResult.ExternalRef` from a genuine `ConversationResult` under
+`if convResult != nil`. The instrument is correctly wired at every site. **DEF-11 struck**,
+presumably carried by tranche B's refactor rather than by anyone fixing it deliberately.
+
+### The finding the strike produced
+
+Striking DEF-11 exposed the guard it was hiding behind. Every one of those six sites reads:
+
+```
+if convResult != nil {
+    convID    = convResult.ConversationID
+    actualRef = convResult.ExternalRef
+}
+match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+```
+
+When `convResult` is **nil**, `actualRef` stays `""` — and an empty `actualExternalRef` is exactly
+the input that produced DEF-11's false `routing-type-mismatch`. The blank no longer arrives from a
+hand-built struct; it arrives from a failed resolve.
+
+So **DEF-32 dirties the divergence board directly.** Every message whose sender ID is not a UUID
+resolves to nil and books a mismatch. My own DEF-11 note anticipated the shape of this — *"once
+`ExternalRef` is real, a resolver-created row still has `external_ref = ''` (DEF-8), so the mismatch
+becomes genuine until DEF-8 lands"* — but attributed it to DEF-8 alone. DEF-32 is a second source of
+the same blank, and unlike DEF-8 it is unbounded: it fires on every message from an affected
+principal, forever, not once per unbackfilled row.
+
+This changes DEF-32's cost. I had it as "federated users' DMs go invisible **at** S4". It is also
+"the S4-P4 divergence gate can never read zero **before** S4". The gate requires zero mismatches, so
+DEF-32 does not merely wait at the read-switch — it blocks the observation that licenses the
+read-switch. Still conditional on em9's reachability answer, but if that answer is yes, DEF-32 is
+upstream of S4 rather than concurrent with it.
+
+### Held rows, and why they have not moved
+
+DEF-5, DEF-6, DEF-9, DEF-10, DEF-14, DEF-16, DEF-17/18 gate sweep, tranches C–G: unmoved for more
+than two heartbeats, all for one reason — they are downstream of the S4 read-switch, and S4's
+preconditions are S4-P1 (flip to deny, open), S4-P2 (re-key non-canonical, in the held brief),
+S4-P3 (stamping, code-done at `822c02e5`, awaiting merge) and S4-P4 (divergence gate, code-done and
+now **provably unobservable** while DEF-32 stands). Not stalled; correctly sequenced.
+
+B1/B2/B14/B3 remain held on #1349's merge. Fifth sweep. The reason is unchanged and still good: B1
+consumes em6's shared D-1 predicate, and starting before it lands forks the guard the extraction
+exists to unify.
+
+### Rule 116 (new)
+
+**When you strike a row, look at what it was standing in front of.** DEF-11 was a false-mismatch bug;
+removing it revealed that the same blank input still arrives by a different route, from a nil
+resolve rather than a hand-built struct. A defect that masks a second defect with identical symptoms
+will make the second one look like a regression the day the first is fixed. The strike is the moment
+to check, because that is when you have the mechanism paged in.
