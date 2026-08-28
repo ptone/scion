@@ -2509,7 +2509,7 @@ type AgentCredential struct {
 	RevokedBy          *string    `json:"revoked_by,omitempty"`
 	RevokeReason       *string    `json:"revoke_reason,omitempty"`
 	LastSeenAt         *time.Time `json:"last_seen_at,omitempty"`
-	EntitledSecretKeys []string   `json:"entitled_secret_keys,omitempty"`
+	EntitledSecretKeys []string   `json:"entitled_secret_keys"`
 }
 
 // MarshalJSON implements custom marshaling to support legacy groveId field.
