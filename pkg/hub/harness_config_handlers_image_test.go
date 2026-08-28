@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
@@ -45,7 +46,10 @@ func TestIsNodeBoundBroker(t *testing.T) {
 	}{
 		{"docker", []store.BrokerProfile{{Type: "docker"}}, true},
 		{"podman", []store.BrokerProfile{{Type: "podman"}}, true},
-		{"apple", []store.BrokerProfile{{Type: "apple"}}, true},
+		// Apple-container: the profile type comes from AppleContainerRuntime.Name(),
+		// NOT a hand-written literal. This row breaks if either the map or Name()
+		// drifts — the contract that task #103 fixes ("apple" was dead code).
+		{"apple_container", []store.BrokerProfile{{Type: runtime.NewAppleContainerRuntime().Name()}}, true},
 		{"kubernetes", []store.BrokerProfile{{Type: "kubernetes"}}, false},
 		{"cloudrun", []store.BrokerProfile{{Type: "cloudrun"}}, false},
 		{"mixed_with_docker", []store.BrokerProfile{{Type: "kubernetes"}, {Type: "docker"}}, true},

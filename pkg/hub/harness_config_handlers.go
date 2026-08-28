@@ -39,9 +39,9 @@ type imageManager interface {
 }
 
 var nodeBoundProfileTypes = map[string]bool{
-	"docker": true,
-	"podman": true,
-	"apple":  true,
+	"docker":    true,
+	"podman":    true,
+	"container": true,
 }
 
 func isNodeBoundBroker(broker *store.RuntimeBroker) bool {
