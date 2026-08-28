@@ -11667,3 +11667,89 @@ after deletion:** both branch tips intact, PR #1360 head still `7e3afb3d5`, stil
 - em10 — active, AUDIT-category revision.
 - Still with the user: three branch deletions, #1360 merge, escalation-1 CI decision.
   Escalation 2 deliberately still queued to hold one-at-a-time discipline.
+
+---
+
+## §5el — em10 tranche C spec ACCEPTED at `0b6770a6c`; AUDIT population fully enumerated (2026-08-28)
+
+### Delivered
+
+Three-tier gate taxonomy: **REQUIRED** (check runs/exists, hard fail), **AUDIT**
+(absence removes the only record of a security decision, hard fail, reported
+distinctly), **INFORMATIONAL** (doc comments, reports only). `logAuthzDenial`
+promoted INFORMATIONAL → AUDIT.
+
+em10's sweep criterion — *does the denial branch return an error status to the
+caller* — is the correct discriminator. Their result: 1 AUDIT site across the 4
+SUBSTANTIVE files. **They stated the boundary explicitly** ("across all 4
+SUBSTANTIVE files"), satisfying rule 152 unprompted.
+
+### I ran the control rather than accepting (rule 61)
+
+Two reasons. First, "zero silent-denial paths in three of four files" is a negative
+result, and em10 found the one positive **only because I pointed at it** — the
+sweep had not been shown capable of finding one unaided. Second, boundary: em10
+swept the **4-file re-derivation set**, but the gate's proper scope is the **18-file
+revert-risk set**. Different populations; the larger one is where a revert lands.
+
+`logAuthzDenial` across all of `pkg/hub` on `upstream/main` = **38 sites in 8 files**:
+
+```
+authorize.go              18      handlers_runtime_brokers.go  9
+passthrough_gate.go        4      route_metadata.go            2
+sa_assign_gate.go          2      handlers_agents_core.go      1
+handlers_chat_v2.go        1      handlers_groups.go           1
+```
+
+Intersected with the 18-file revert-risk set → **exactly two files**. Every other
+risk-set file has zero denial logging, so the population is **enumerated, not
+sampled**:
+
+```
+handlers_chat_v2.go    main=1  v2=0   DIVERGES
+route_metadata.go      main=2  v2=0   DIVERGES
+```
+
+### `route_metadata.go` looked like a second AUDIT site and is not
+
+```go
+:982   logAuthzDenial(... "non-user identity");  Forbidden(w);  return
+:994   logAuthzDenial(... decision.Reason);      Forbidden(w);  return
+```
+
+**Both LOUD** — each immediately followed by `Forbidden(w)` and a return. Deleting
+the log still leaves the caller holding a 403; the denial stays observable. By
+em10's own criterion these are correctly excluded.
+
+They *are* reverted on v2, but that is the **P2 route-classification revert already
+catalogued** in em9's manifest, and `route_metadata.go` is not in tranche C's
+output — so it needs no gate row.
+
+**Conclusion, stronger than what em10 sent:** across the FULL 18-file revert-risk
+set there is **exactly one AUDIT site**, and it is the one they named. Their claim
+survived an extension of its boundary.
+
+> **RULE 195.** A "zero found" sweep must be validated against a positive the sweeper
+> located by independent means. If the only known positive was handed to them, the
+> method has never been shown to return a hit and the negative result is unproven.
+> Told em10 to construct the control themselves next time.
+
+> **RULE 196.** When accepting a subordinate's bounded claim, test it *outside* its
+> stated boundary before accepting. Surviving an extension is a materially stronger
+> result than being accepted within scope — and when it does not survive, the
+> boundary was the defect.
+
+### Ledger movement
+
+- **Tranche C spec — CLEARED from my side.** First substantive strike in three
+  heartbeats. Blocked only on the user's branch-deletion decision. em10 explicitly
+  told **not** to start implementation, and parked.
+- AUDIT-site question — **CLOSED**, population fully enumerated over the risk set.
+
+### State
+
+- `upstream/main` = `3c7e14e41`. PR #1360 OPEN @ `7e3afb3d5`.
+- em6 parked (`bc01ac08`, held pending #1360); em9 active (fold audit);
+  em10 parked (spec accepted `0b6770a6c`).
+- With the user, unchanged: three branch deletions, #1360 merge, escalation-1 CI
+  decision. Escalation 2 still queued by design.
