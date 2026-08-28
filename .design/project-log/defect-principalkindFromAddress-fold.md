@@ -338,18 +338,57 @@ An explicit fail-closed comment sits eight lines above a fail-open path
 in the same function. The comment creates confidence that the function
 fails closed, when it only covers the error branch.
 
-**End-to-end confirmation:** handleBrokerInbound persists
-`req.Message.Sender` verbatim. The :126 gate only inspects for `"user:"`
-prefix. A broker plugin sending `Sender = "Agent:bot"` (capital A)
-passes through :126 completely unexamined — the if-block is skipped, no
-other validation rejects or canonicalizes the Sender, and the message is
-persisted with `Sender = "Agent:bot"`. When a user later edits their own
-message in the same thread, `hasAgentReplyAfter` queries the DB, finds
-the `"Agent:bot"` row, `HasPrefix("agent:")` misses, and the function
-returns false — edit permitted, immutability bypassed.
+**Casing exploit — latent fail-open, exploitability unproven.**
+handleBrokerInbound persists `req.Message.Sender` verbatim. The :126
+gate only inspects for `"user:"` prefix — `"Agent:bot"` (capital A)
+passes through :126 unexamined, and the message is persisted with
+`Sender = "Agent:bot"`. When a user later calls edit/delete,
+`HasPrefix("agent:")` misses, and the function returns false.
 
-*Miss consequence:* Agent-reply immutability check bypassed; user can
-edit/delete message that should be locked after agent reply.
+However, adding a non-canonical message does not remove a canonical one.
+`hasAgentReplyAfter` returns true as soon as it finds ANY message
+matching `HasPrefix("agent:")`. Canonical agent replies are server-
+constructed (handlers_agent_messaging.go:239 `"agent:" + agent.Slug`,
+notifications.go:486 same pattern) — never caller-supplied. A genuine
+agent reply through the normal path is canonical and matches. The casing
+exploit requires a thread in which ALL agent replies were persisted via
+the verbatim-Sender broker inbound path and none through the canonical
+server-constructed path. No such thread has been demonstrated.
+
+**Channel filter hole (independent of DEF-32, potentially larger).**
+The function's filter pins `Channel: "web"` (line 1636):
+
+    filter := store.MessageFilter{
+        Channel:  "web",
+        ThreadID: threadID,
+        After:    after,
+    }
+
+An agent reply persisted with any other Channel value is invisible to
+this guard regardless of Sender casing. Two paths can write non-web
+Channel into a web-chat thread:
+
+1. **handleAgentOutboundMessage** (handlers_agent_messaging.go:247):
+   `Channel: req.Channel` — from agent runtime HTTP response body. The
+   hub does not force or default Channel. If the runtime omits the
+   `"channel"` field or sets it to anything other than `"web"`, the reply
+   is persisted with Channel != `"web"` and is invisible to the guard.
+
+2. **handleBrokerInbound** (handlers_broker_inbound.go:258):
+   `Channel: req.Message.Channel` — from broker plugin body. A broker
+   plugin sending an agent reply with Channel = `"slack"` or `"discord"`
+   to the same ThreadID as the web-chat conversation would be invisible
+   to the guard.
+
+Practical exploitability depends on whether agent runtimes reliably echo
+`Channel = "web"` on responses to web-chat messages. The hub code does
+not enforce this — `handleAgentOutboundMessage` passes `req.Channel`
+through with no validation or defaulting. No malicious actor is required;
+a runtime that simply omits Channel on its response body is sufficient.
+
+*Miss consequence (casing):* Latent fail-open on agent-reply immutability.
+*Miss consequence (channel filter):* Agent-reply immutability bypassed
+when agent replies through non-web channel or runtime omits Channel.
 
 ### ROUTING sites (5)
 
