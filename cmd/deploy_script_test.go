@@ -1862,3 +1862,105 @@ func TestScriptGcloudQuietWhenNoTTY(t *testing.T) {
 	// Verify the --help path is NOT affected by the --quiet logic
 	_ = stdout
 }
+
+// ---------------------------------------------------------------------------
+// Deploy failure: image attribution (Task #39)
+// ---------------------------------------------------------------------------
+
+// TestScriptDeployFailureNamesImage verifies that when `gcloud beta run
+// instances deploy` fails, the script names the image it asked for and
+// preserves gcloud's own stderr verbatim.
+//
+// Without this fix, gcloud exits non-zero under set -e and Scion says nothing
+// at all.  The launcher's stderr names a cache mirror instead of the requested
+// image, and the operator cannot tell what was requested vs. what was pulled.
+//
+// Fixture constraint: the image name must arrive through the production
+// variable path (--image → DI_IMAGE → $DI_IMAGE in the error handler).  The
+// test uses a distinctive image that differs from all other tests to avoid
+// false matches.
+//
+// Token safety: the error handler prints $DI_IMAGE, which is gcloud_args[6].
+// Indices 0-6 contain no tokens; the ADC token lives only in auth_config_file
+// and _di_adc_token, never in gcloud_args.
+func TestScriptDeployFailureNamesImage(t *testing.T) {
+	server, _ := newPreflightStub(t,
+		`{"email":"operator@example.com"}`,
+		http.StatusOK, `{}`)
+	argvLog := gcloudArgvLog(t)
+
+	// A distinctive image that no other test uses.  It flows through di_main's
+	// flag parser into DI_IMAGE and must appear in the error handler's output
+	// via the same production variable path.
+	testImage := "us-docker.pkg.dev/my-project/my-repo/scion-omni:v3.7.1"
+
+	// The gcloud stub simulates a deploy failure: it prints a fake launcher
+	// error to stderr (mimicking the cache-mirror confusion) and exits 1.
+	// The fake error must be PRESERVED in the output — additive attribution,
+	// not replacement.
+	gcloudStub := fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  local _a="$*"; _a="${_a#--quiet }"
+  case "$_a" in
+    "beta run instances --help")
+      return 0 ;;
+    "config get account")
+      printf '%%s\n' "operator@example.com" ;;
+    "projects describe "*)
+      printf '%%s\n' "123456789" ;;
+    "auth application-default print-access-token")
+      printf '%%s\n' "ya29.fake-test-token" ;;
+    "beta run instances deploy "*)
+      echo "ERROR: (gcloud.beta.run.instances.deploy) Image not found: us-docker-mirror.example/my-project/my-repo/scion-omni:v3.7.1" >&2
+      return 1 ;;
+    *)
+      echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+      return 1 ;;
+  esac
+}`, argvLog)
+
+	stdout, stderr, exitCode := runBashFuncWithSetup(t,
+		preflightSetup(gcloudStub, server.URL),
+		"di_main",
+		"--name", "test-name",
+		"--project", "test-project",
+		"--image", testImage,
+		"--region", "us-east4")
+
+	// PREMISE: the script must fail.
+	require.NotEqual(t, 0, exitCode,
+		"di_main must fail when gcloud deploy fails; stderr: %s", stderr)
+
+	// 1. The failure handler must fire — not a bare set -e abort.
+	assert.Contains(t, stderr, "gcloud beta run instances deploy' failed",
+		"the failure handler must fire with an explicit error message, not "+
+			"a bare set -e abort that says nothing")
+
+	// 2. The requested image must be named.  testImage arrived through
+	//    --image → DI_IMAGE → $DI_IMAGE, the same path production uses.
+	assert.Contains(t, stderr, "Requested image: "+testImage,
+		"the error must name the image Scion requested, so the operator can "+
+			"compare it against whatever the launcher's error names")
+
+	// 3. The cache-mirror explanation must be present.
+	assert.Contains(t, stderr, "pull-through cache",
+		"the error must explain that a differing image name means a cache mirror "+
+			"was used — that is the whole attribution")
+
+	// 4. gcloud's own stderr must be preserved — additive, not replacement.
+	assert.Contains(t, stderr, "us-docker-mirror.example",
+		"gcloud's own stderr must be preserved verbatim: the launcher's text is "+
+			"the only evidence of what actually happened, and suppressing it would "+
+			"lose the cache-mirror hostname that proves the diagnosis")
+
+	// 5. The echo line (stdout) must show the image value.  The original
+	//    :0:6 stopped at "--image"; the fix extends to :0:7 to include the
+	//    image coordinate.
+	assert.Contains(t, stdout, testImage,
+		"the command echo must include the image value (gcloud_args[*]:0:7), "+
+			"not stop at --image (the old :0:6)")
+
+	// 6. "Instance deployed successfully" must NOT appear on failure.
+	assert.NotContains(t, stdout, "Instance deployed successfully",
+		"the success message must not be printed when the deploy fails")
+}

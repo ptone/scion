@@ -926,9 +926,24 @@ di_main() {
     gcloud_args+=(--cpu "$DI_CPU")
   fi
 
-  echo "    gcloud ${gcloud_args[*]:0:6}"
+  # Print the command with the image value visible.  The original :0:6 stopped
+  # at "--image", omitting the image coordinate (index 6).  On failure the
+  # launcher's stderr names a cache mirror, and without Scion's own image name
+  # on screen the operator cannot tell what was requested vs. what was pulled.
+  # Indices 0-6 contain no tokens (audit: the ADC token lives only in
+  # auth_config_file and _di_adc_token, never in gcloud_args).
+  echo "    gcloud ${gcloud_args[*]:0:7} ..."
   # shellcheck disable=SC2086
-  gcloud $_di_quiet "${gcloud_args[@]}"
+  gcloud $_di_quiet "${gcloud_args[@]}" || {
+    echo "" >&2
+    echo "Error: 'gcloud beta run instances deploy' failed." >&2
+    echo "    Requested image: $DI_IMAGE" >&2
+    echo "" >&2
+    echo "The gcloud output above is the deploy error.  If it references an image" >&2
+    echo "name that differs from the one shown here, the deploy was attempted" >&2
+    echo "through a pull-through cache." >&2
+    return 1
+  }
   echo "    Instance deployed successfully."
 
   # ===================================================================
