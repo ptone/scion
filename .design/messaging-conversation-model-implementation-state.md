@@ -11416,3 +11416,124 @@ site can.
 
 **190.** Printing a length check in the same command that sends is a log, not a gate. If a limit
 matters, compute it in one invocation and send in the next.
+
+---
+
+## §5ej — em6 tightening accepted; em10 gate verified, split, and de-pinned (2026-08-28)
+
+### em6 — `scion/ca-msg-em6-dm-tighten` @ `bc01ac08` ACCEPTED
+
+Verified by me against the branch, not taken from the report:
+
+- No `slog` in `dm_key.go`. Pure function is silent again (rule 179).
+- No `strings.ToLower` inside `DMConversationKey`. Only surviving fold in the file
+  is `PrincipalKindFromAddress:108` — the separately-filed defect.
+- `tokenA := kindA + ":" + idA` — original input, not `uA.String()`. The function
+  now *cannot* rewrite its input; the code states the invariant rather than a
+  comment asserting it (rule 181).
+- Shape is carried in the error value: `"dm key: non-canonical UUID for %s (shape: %s)"`
+  (rule 180). Callers already log it — `conversation.go:83`, `:178`, `:226`, `:260` —
+  with assertions at `conversation_test.go:240` and `:561`.
+- Doc comment carries the `PrincipalKindFromAddress` note.
+- Defect filed at `.design/project-log/defect-principalkindFromAddress-fold.md`.
+
+Told em6 plainly that the observability requirement was my error (rules 178/182),
+and that their unprompted self-correction on the Postgres `uuid` premise — all four
+columns are TEXT, not `uuid` — was the most useful single act on the workstream.
+
+Instructed: add to the filed defect that the audit it needs is a caller enumeration
+of **`PrincipalKindFromAddress`**, not of `DMConversationKey`. Different call sets;
+conflating them is how the fold survived this pass (rule 159 restated).
+
+Branch HELD pending #1360 merge. Told em6 not to rebase pre-emptively and not to
+push further — if #1360's head changes I want to discover it, since a silently
+re-parented branch is how a base goes stale unnoticed (rule 175).
+
+### em10 — gate VERIFIED, then two corrections
+
+**Verified.** Re-ran both greps against `upstream/main`. All twelve line numbers
+correct as reported. Cross-file aggregate gone. The gate now catches the #1347
+revert that the previous version certified (rules 187/188/189 discharged).
+
+**Correction 1 — split REQUIRED from INFORMATIONAL.** The six sites per symbol are
+not six of the same thing:
+
+| symbol | calls | definition | doc-comment |
+|---|---|---|---|
+| `authenticatedSender` | 4 | 1 | 1 |
+| `validateDefaultAgent` | 2 | 1 | 3 |
+
+A missing **call** means the check no longer runs. A missing **definition** means it
+no longer exists. A missing **comment** is evidence of nothing. A flat count cannot
+distinguish them, so a failure asserts a number is wrong instead of naming the defect.
+
+`validateDefaultAgent` is three-fifths prose: deleting *both* calls and leaving the
+comments scores 4/6 under a flat count — reads like drift. Under the split it scores
+1/3 REQUIRED — reads like what it is.
+
+> **RULE 191.** A gate must weight its sites by what their absence proves. Calls and
+> definitions are load-bearing; doc-comment mentions are not. Folding them into one
+> count means a failure cannot name the defect. And a gate that fails on a comment
+> reword gets overridden without reading by the third occurrence.
+
+**Correction 2 — de-pin from line numbers.** Main moved mid-verification: `3c7e14e41`
+(#1355) and `520824bdf` (#1354), the P2 series. Neither touched the two gate files,
+so the numbers held — **by luck, not design**.
+
+> **RULE 192.** A gate pinned to absolute line numbers has an expiry date, and it
+> expires on the day it matters: when someone lands a large branch over those files.
+> Assert *symbol occurs N times within named enclosing function*. Function names
+> survive line drift; a rename is a reviewable event, not silent noise.
+
+Enclosing-function map, resolved by me against `upstream/main`:
+
+```
+authenticatedSender  (handlers_agent_messaging.go)
+  handleAgentMessage        x1   (:787)
+  handleGroupMessage        x2   (:1054, :1177)
+  handleProjectBroadcast    x1   (:1322)
+  func authenticatedSender  x1   (:1643) definition
+
+validateDefaultAgent (handlers_chat_v2.go)
+  handleCreateThread        x1   (:455)
+  handleTopicPatch          x1   (:598)
+  func validateDefaultAgent x1   (:685) definition
+
+ActionAttach
+  handlers_chat_v2.go          sendAgentRouted        x3  (:1120, :1214, :1216)
+  handlers_agent_messaging.go  handleProjectBroadcast x1  (:1276)
+```
+
+**The finding the flat list hid.** `handleProjectBroadcast` appears **twice, in two
+files**, carrying two independent security checks — `authenticatedSender` identity
+derivation and the `ActionAttach` authorization check. `messaging-v2` reverts **both**.
+It is the highest-value anchor in the gate: one function whose regression costs
+sender-identity derivation and project authorization simultaneously.
+
+It is also the exact code behind the user's open `project:agent:lifecycle` question.
+A false green there lets a revert through in the one area the user is actively
+reasoning about and would assume is guarded.
+
+> **RULE 193.** When one function carries two independent checks that a rejected
+> branch reverts together, give it its own named gate row asserting both — redundant
+> with the per-symbol rows by construction. A row that states an invariant beats one
+> that counts, because its failure names the thing that broke.
+
+### Rule-151 sweep against the new main commits
+
+`#1354`/`#1355` touched `pkg/hub/permission_registry_test.go` and
+`pkg/hub/scoped_admin_test.go`. Checked mechanically rather than assumed:
+`messaging-v2` modifies **neither** (0 files each vs merge-base `6268bac44`).
+
+**Tranche C revert-risk set unchanged at 18 code files.**
+
+### State
+
+- `upstream/main` = `3c7e14e41` (was `4cec136f5`).
+- **PR #1360** — `scion/ca-msg-em6-b2b1b14` @ `7e3afb3d5`, OPEN / MERGEABLE, head
+  unchanged. With the user.
+- Still awaiting user: three branch deletions (`scion/messaging-v2`,
+  `scion/auth-refactor`, `scion/auth-refactor-v2`); #1360 merge; escalation-1 CI
+  decision. Escalation 2 (tranche C–G manifests) queued, unsent — deliberately, to
+  hold the one-at-a-time discipline.
+- Tranche C dispatch remains blocked on the branch-deletion decision.
