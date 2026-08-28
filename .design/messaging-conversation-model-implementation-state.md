@@ -7177,3 +7177,58 @@ em9 at dispatch time rather than as an unsolicited ping to a parked agent (item 
 
 No rows struck; fifth consecutive sweep with no movement in main, tips, roster, or PR state. All
 reasons unchanged from §5cl. Tranche B PR still unopened.
+
+---
+
+## §5cr. Heartbeat 2026-08-28 07:43 — measuring the one unknown that gates the CI decision
+
+Sixth dead sweep. Fetch exit codes explicitly checked this time (`upstream=0`, `origin=0`) per the
+standing change from §5cq — not just the output. `upstream/main` `f4d02461b`, five tips unchanged,
+three managers `blocked`, #1338/#1339/#1340 open, tranche B PR unopened. No rows struck; reasons
+unchanged. The user is most likely asleep (≈00:43 US Pacific), which argues for durable output over
+anything that spends their attention.
+
+### Why measurement beats another brief
+
+I have written four design artifacts in the last four sweeps. A fifth would be lower value than
+closing the **single unresolved unknown in the decision already sitting with the user**.
+
+em9's inventory costs the three options well, and option (i) — add a non-blocking `full-test-suite`
+job — is gated on exactly one thing, in em9's own words: *"Unresolved: peak RSS on the CI runner…
+Before this option can be relied on, someone must measure peak RSS of `go test ./...` (without
+`-tags no_sqlite`) and compare it to the runner's memory limit. Cost to resolve: ~2 hours."*
+
+Nobody has measured it. I am idle and have a machine. So the user's decision can stop being "choose
+among three options, one of which has an open unknown" and become "here is the number, here is the
+recommendation, approve or reject."
+
+Note also what em9's §4 establishes and corrects: **the tag is about memory, not CGO.** It came in
+via `71275d56`, "resolve spurious go vet OOM by gating sqlite driver". The driver is
+`modernc.org/sqlite` (pure Go, memory-hungry at compile time), not `mattn/go-sqlite3`. This is the
+correction em9 made after I let a CGO rationale stand unchallenged — the memory framing is what
+makes the RSS number decisive rather than merely interesting.
+
+### Method, and its limits
+
+Running on `upstream/main` (the baseline CI would actually run), in a detached worktree at
+`/tmp/rss`:
+
+    GOMAXPROCS=2  go test -p 2 -timeout 40m ./...
+
+with a 100 ms poller summing RSS across the whole descendant process tree and tracking the maximum.
+
+- `GOMAXPROCS=2` and `-p 2` mimic an `ubuntu-latest` runner's **2 vCPU**, which is what governs how
+  many compile and test processes are resident at once — the quantity that decides an OOM.
+- Peak *concurrent tree total* is the right statistic. `getrusage(RUSAGE_CHILDREN).ru_maxrss` would
+  have given the largest single child, which is not what OOMs a runner; `/usr/bin/time` is not
+  installed here anyway.
+- Target to beat: **7 GB**, the `ubuntu-latest` allowance.
+
+**Honest caveats, to be carried into any recommendation:** this host has 32 cores and 125 GB, so
+page-cache and allocator behaviour differ from a constrained runner, and a local number is
+indicative rather than dispositive. It is nonetheless exactly the experiment em9 proposed, and a
+result comfortably under or comfortably over 7 GB is decisive either way; only a near-miss would
+need re-running on a real runner.
+
+**In flight at park time**, collecting next sweep. Deliberately not polled with `sleep` — local
+build waits are permitted but the heartbeat is the natural collection point.
