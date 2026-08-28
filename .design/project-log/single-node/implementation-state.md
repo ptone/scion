@@ -13184,3 +13184,53 @@ probe returns**, so the floor is measured rather than assumed: a named supported
 the `bash32` CI job enforces it, and #89's audit result as the measured basis. Also flagged for §6.1:
 **the criteria enumerate cloud-side successes and never enumerate the operator's environment** — the
 same shape as criterion 12's gap.
+
+### §35.69 — ptone's Mac answered the probe. Four for four, and one question we could not have closed (02:04)
+
+**Real hardware: Darwin 25.6.0 arm64, `GNU bash, version 3.2.57(1)-release` on BOTH PATH bash and
+`/bin/bash`.** Raw output archived in the message thread. The round trip from "we have no macOS" to
+"measured on macOS" cost **one paste and fourteen minutes**, which retroactively justifies the last
+requirement in the #89 brief: *end the reading audit with one paste-able diagnostic.*
+
+| Probe row | Result | Predicted by |
+|---|---|---|
+| `${x,,}` | **UNSUPPORTED** | #88 — the live error |
+| `--help` sed | **PARSE ERROR** `bad flag in substitute command: '}'` | #89, CONFIRMED row |
+| bare `mktemp` | **OK** (`/var/folders/.../tmp.4hr4vZ0zBu`) | #89 — **falsified MY suspect** |
+| `grep` / `awk` | BSD grep 2.6.0-FreeBSD / awk 20200816; BSD `sed` prints no version | #89 |
+| `=~` unquoted ×4 | all four hosts correct | unknown to everyone |
+| `=~` quoted RHS | **literal, NO match** | #88 — trap real |
+
+**NO ROW DEFIED PREDICTION. The #89 reading audit went four for four against hardware.** I told rev2
+exactly what that earns and what it does not: **it earns trust in that audit and in its labelling
+discipline, not a general licence to read instead of measure.** The reason the reading held is that
+every row was marked CONFIRMED or CANDIDATE with its route named — which turned the probe into a *cheap
+test of a stated claim* instead of an open-ended hunt. **The label is what made the reading checkable.**
+That mechanism is the keeper; the score is not.
+
+**THE ROW THAT MATTERS MOST IS THE ONE NOBODY HERE COULD HAVE PRODUCED.** dev2's first #88 message
+listed four items and said of the fourth: *"the `=~`/`BASH_REMATCH` question — I CANNOT answer it here,
+and I will not guess."* My brief called it out too: *"I do not know whether that line behaves identically
+on 3.2, and neither does anyone else on this project."* It is now answered on real 3.2: unquoted RHS
+returns the correct host for `example.com:443`, `example.com`, `[::1]` and `[::1]:8080`; **a quoted RHS
+matches literally and fails, so the 3.2 trap is REAL and our code simply does not step in it** —
+unquoted at all five sites (70, 86, 297, 309, 444).
+
+**I did not accept the four rows as they read.** Sent dev2 one small job: run the identical block under
+bash 5 and diff byte-for-byte. *"These look right" is a reading; "these are the same bytes as bash 5" is
+a measurement* — and only the second closes the SEMANTICS half of dev2's own COVERAGE/SEMANTICS split.
+Required the 3.2 output be committed as a fixture or comment: **it cost a human's laptop to obtain and
+we cannot obtain it again on demand.**
+
+**#90 is now CONFIRMED ON HARDWARE rather than inferred.** `deploy.sh --help` is broken on every Mac.
+Explicitly told dev2 **not** to start it and **not** to add it to the branch mid-review — the branch is
+under review and a second defect landing under a reviewer is how a review becomes worthless.
+
+**Asked ptone to run the fix branch on his Mac IN PARALLEL with the review, not after**, stating the
+reason: the review judges security semantics, the run judges whether it works, and **his Mac is the only
+bash 3.2 this project can reach** — egress blocks the bash source mirrors. Two possible replies, both
+useful: the first line that fails, or it deploys.
+
+**My prediction record tonight: `mktemp` wrong, "seven of ten tools bite" wrong. Both were recalled
+rather than measured, and both were caught by someone I dispatched to falsify me.** That is the process
+working, and it is the second night in a row it has worked in that direction.
