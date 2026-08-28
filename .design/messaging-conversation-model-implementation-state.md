@@ -12899,3 +12899,50 @@ skipped by a conditional does not.
 
 Nothing in this entry is a section boundary or an escalation, so nothing goes to
 the user. #1361 being green is FYI and the user can see it.
+
+## §5ey — PR #1361 review feedback reconciled; bot patch tested and rejected
+
+**Trigger.** User: "I see unaddressed feedback on https://github.com/GoogleCloudPlatform/scion/pull/1361".
+
+**What the feedback was.** `gemini-code-assist[bot]`, inline on `hack/check-security-marker-gates.sh:151`. Two findings: (1) `gsub(sym, "&", line)` is unanchored substring matching; (2) the comment skip only handles whole-line comments, so a trailing comment still contributes its symbol occurrences. The bot supplied a concrete awk patch: `sub("//.*$", "", line)` to strip trailing comments, then whole-word matching via `gsub(/[^a-zA-Z0-9_]/, " ", temp); split(temp, words, " ")` and exact string compare.
+
+**Timing.** My escalation to the user and their message crossed. I had already confirmed both findings empirically against clean `upstream/main` (§5ex) before reading the PR comment. Independent arrival at the same two defects; no re-derivation cost.
+
+**Coverage delta.** The bot found 2 of 3. It did not flag that brace arithmetic at `:137-139` runs *before* the comment skip at `:142`, so a brace inside a comment desynchronises `depth`. That is the third hole and it produces false *failures* (stray `}` → early `done=1` → `found x0`) and false *passes* (stray `{` → scan runs into the next function).
+
+**The bot's patch was tested, not read.** Applied to a copy (`/tmp/gt6/hack/g.sh`) over a detached worktree at `upstream/main`.
+
+- On clean main: **exit 0**. Passes.
+- Incidentally it *does* close hole 3 as a side effect, since stripping `//`-to-EOL also empties whole-line comments before the brace count.
+- **But it opens a fourth hole, of the same class.** `sub("//.*$", "", line)` cannot distinguish a comment introducer from `//` inside a string literal. Test: inserted one realistic benign line at the top of `handleProjectBroadcast`:
+
+```go
+if strings.HasPrefix(r.Header.Get("Origin"), "https://") {
+```
+
+  The patch strips `//") {`, removing the **opening brace**. `depth` never increments, `depth <= 0` fires on the first body line, `done=1`, and both guarded rows report `found x0`.
+
+  | script | result on that one line |
+  |---|---|
+  | shipped (`55728b3bd`) | **exit 0** — correct |
+  | bot-patched | **exit 1**, three FAIL rows incl. the composite — false failure |
+
+**Ruling: patch rejected, `go/ast` rewrite stands.**
+
+Rationale, in the order it carries weight:
+
+1. The patch trades two false passes for a false failure on ordinary code. Per **rule 191**, a gate that fails on benign edits gets overridden unread — so this is not a lateral move, it is worse. A hole is silent; a crying-wolf gate destroys the gate's authority and takes the *other* rows down with it.
+2. The failure is not incidental to this particular patch. It is the recurring shape: a regex guessing at Go lexical structure keeps colliding with string literals. Each fix relocates the collision.
+3. `go/ast` removes the whole class rather than the instance. Function scope is a `*ast.FuncDecl` boundary, identifier identity is `Ident.Name` equality, and comments are not `Ident` nodes at all — so holes 1, 2, 3 and 4 close *together*, by construction, instead of trading against each other.
+
+**NEW RULE 219.** A proposed fix must be executed, not read. The bot's patch is correct about both defects it names and still ships a third. Reading a patch tests your model of the patch; running it tests the patch.
+
+**NEW RULE 220.** A fix that strips `//` to end-of-line reintroduces the string-literal problem it was written to solve. More generally: when a fix for a lexical-confusion bug is written in the same language-blind mechanism that caused it, expect the bug to reappear one token class over. The tell is that the fix's own predicate is as approximate as the one it replaces.
+
+**NEW RULE 221.** Prefer the direction of error that is loud over the one that is silent — *except* where the loud one is routinely overridden. Once a gate is known to fire spuriously, its false failures convert into false passes by human action. False-failure-prone and false-negative-prone are not opposite risks for a CI gate; the first decays into the second.
+
+**Corollary to 208.** The bot volunteered the boundary of what it checked by naming exactly two defects. Extending that boundary — rather than accepting the patch on the strength of its correct diagnosis — is what surfaced holes 3 and 4. A correct diagnosis is not evidence of a correct remedy.
+
+**State.** User told: do not merge #1361. em10 remains dispatched on the `go/ast` rewrite, on `scion/ca-msg-em10-marker-gate` so the PR updates in place; branch still at `55728b3bd`, rewrite not yet pushed. On delivery I re-run the **full** matrix including substitution tests (the §5ex blind spot) plus the new string-literal case (a) `https://` inside a guarded function must PASS.
+
+**Added to em10's acceptance criteria as (h):** a guarded function containing a string literal with `//` in it must still pass. This case is now permanent — it is the regression test for the patch I rejected.
