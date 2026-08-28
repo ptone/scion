@@ -5456,3 +5456,47 @@ via a shared helper. That is a construction job, not a merge, and it should be s
 **I violated rule 67 while doing this** — ran two-dot per-file diffs and briefly concluded em9-unify
 was reverting 76 lines of `store.go`. It was the QuotaStore interface, unrelated upstream work the
 branch predates. See rule 68. **Twice now I have written a rule and broken it inside the hour.**
+
+## 5bt. 01:33-01:50Z — CI GUARD approved and sent; em6 applied rule 65 unprompted
+
+**Compare URL sent** for `scion/ca-msg-em6-ci-guard` @ `2391c553`, based on current main `ce9a7993`.
+4 files, **+187/-3** (three-dot — rule 67 applied at the command this time, not recalled after).
+
+**em6 applied rule 65 to itself before sending**, without being asked again: ran the guard on clean
+main (exit 0), planted an `AddParticipant` probe (exit 1), removed it (clean). **That is the process
+change I asked for after the second severity misrating, arriving one branch later.** Worth recording
+as a success, not just the failures.
+
+**I verified independently anyway, by planting probes rather than reading the script:**
+
+| Probe | Expected | Got |
+|---|---|---|
+| `AddParticipant` outside allowed pkgs | exit 1 | **exit 1** — the blind spot I proved earlier is closed |
+| `UpsertConversationByExternalRef` outside | exit 1 | **exit 1** |
+| Raw `INSERT INTO conversations` in `webchannel_store.go` | exit 1 | **exit 1** — exemption genuinely removed |
+| **Paired positive:** legal calls inside `pkg/messaging` | **exit 0** | **exit 0** |
+| Baseline restored | exit 0 | exit 0, tree clean |
+
+**The paired positive is the one that matters.** A guard that refuses everything passes the first three
+probes and is worse than no guard, because it gets disabled the first time it blocks legitimate work.
+
+**Highest-risk element was the exemption REMOVAL, not the additions.** Dropping the `webchannel_store*.go`
+raw-SQL carve-out can only fail as a *false positive on existing code*. Probe 3 confirms it bites when
+it should; the clean baseline confirms it does not bite what is already there. This closes the
+"an exemption should arrive with its beneficiary" finding — the carve-out had been pre-authorising code
+that did not exist.
+
+**Wiring verified by `make -n` dry-run, not by reading the diff.** Reaches both `ci` and `ci-full`;
+GitHub Actions step present; **executable bit `100755`** — which the `./hack/...` invocation requires
+and which a diff review would not have surfaced. *A control that is not invoked is decoration.*
+
+**Framing check passed with nuance intact.** The script does not claim an authorization bypass. It
+states the precise rule-62 severity: the `default` branch for unknown kinds falls back to
+`requireParticipant`, so the guard protects listing-index integrity **and, indirectly, access control
+for kinds nobody has cased yet**. The header is also candid that the guard is textual and
+line-oriented and that a green gate proves only the absence of enumerated patterns. **A control that
+documents its own blind spots is stronger than one that implies completeness.**
+
+em9 credited in the commit body. **Two compare URLs delivered this hour** (DEF-31, CI guard); both
+carry the standing note that CI will be red on the pre-existing `TestTemplateResource_UATConfinement`
+failure on main.
