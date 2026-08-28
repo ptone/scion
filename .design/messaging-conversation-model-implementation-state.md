@@ -1700,6 +1700,18 @@ em10 and every agent I dispatch hereafter.
     - Corollary to rule 82: before handing a colleague a test design, verify it in BOTH directions
       yourself — passes unmutated, fails mutated. I shipped v1 without doing that and it was wrong.
 
+84. **Do the merge-readiness work before you ask the branch owner to do anything, then hand them one
+    instruction.**
+    - From tranche B landing prep (§5ci). I ran the 3-dot diff, the rule-31 overlap check with its
+      positive control, the trial rebase, the pre/post diff-fidelity comparison, and vet/build —
+      then asked em10 for a single rebase-and-force-with-lease.
+    - Asking "is this rebasable?" spends a round trip to learn something determinable in two
+      minutes, and invites the owner to re-litigate findings already verified. **"Asking is the
+      slowest instrument" applies to merge mechanics, not only to agent status.**
+    - Corollary: when you hand over the instruction, include the evidence you already gathered, so
+      the owner executes rather than re-checks. Corollary 2: specify `--force-with-lease`, never
+      `--force`, in a shared-ref workspace.
+
 
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
@@ -6537,4 +6549,66 @@ its place as a permanent test only if it still fails when the specific sub-fix i
 reverted** — and when a fix has two interacting halves, one half can mask the other's absence.
 Corollary: pin the CONTRACT ("a caller-supplied label is never overwritten"), not the SYMPTOM
 ("the slug is not shown"); symptom tests rot the moment the symptom's surface changes.
+
+---
+
+## §5ci. B5 APPROVED — `2d69633f`, tranche B merge-ready — 2026-08-28 04:07Z
+
+### f3guard spot-check — 11/11
+
+```
+unmutated        -> DoesNotClobberCallerLabel PASS (all 3 DMReceived tests PASS)
+f3guard mutated  -> DoesNotClobberCallerLabel FAIL
+```
+
+Last survivor killed. `c3a59bd4..2d69633f` verified test-only: 1 file, +56, zero non-test files.
+
+**Full `pkg/hub` on clean `2d69633f`: 349s, only `TestTemplateResource_UATConfinement`** — which also
+fails on bare `f99de64d` and is itself one of the tests CI has never compiled (§5cf). Nothing em10
+introduced.
+
+### Review arc — six pushes
+
+| SHA | content |
+|---|---|
+| `9241f86f` | B5 `handleAgentMessage` override |
+| `24b97149` | F1 broadcast ingress + `Broadcasted` force |
+| `f70b23b2` | R1 self-skip by `SenderID` |
+| `ee84914b` | R2 `fanOutGlobal` test, R3 stale test, R3b warning, F2 slug display |
+| `c3a59bd4` | F3 guard, F4 warning test, F5 predicate |
+| `2d69633f` | F6 clobber pin |
+
+Every security sub-fix is pinned by a test that fails when that sub-fix alone is reverted.
+
+### Merge-readiness (heartbeat item 5) — run by me, before asking em10 for anything
+
+- **3-dot** `upstream/main...ca-msg-em10-trb`: 16 files, **+3566/−44**. Deletions localised, no
+  aggregate-file churn (rule 31 clear).
+- **Rule 31 overlap check:** intersected tranche B's 16 files against the **126** files main touched
+  in its last 8 commits. **Empty.** *Controlled the `comm` invocation first* against a set known to
+  overlap, so the empty result is a result and not a broken command (rule 61 / heartbeat item 6).
+  Tranche B cannot silently revert recent main work.
+- **Trial rebase onto `f4d02461b`** in scratch worktree `/tmp/trbreb`: all 8 commits replayed, zero
+  conflicts, rebased tip `98afb510d`. **Post-rebase 2-dot `--name-status` is byte-identical to the
+  pre-rebase 3-dot** — the rebase drops nothing. `go vet` exit 0, `go build ./...` exit 0.
+  Worktree removed after verification.
+
+### Asked em10 for exactly one thing
+
+`git rebase upstream/main` + `git push --force-with-lease`, report the new tip, then park. Explicitly
+told them not to merge and not to open a PR — the compare URL is mine to send and the user opens it.
+
+Also told them, for the record: **F5 was my defect**, and the F6 lesson (a probe that proved a bug
+does not automatically pin the fix — see rule 83).
+
+### RULE 84 (new)
+
+**"Do the merge-readiness work before you ask the branch owner to do anything, then hand them one
+instruction."** I ran the 3-dot diff, the rule-31 overlap check, the trial rebase, the diff-fidelity
+comparison, and vet/build — then asked em10 for a single rebase-and-push. The alternative, asking
+"is this rebasable?", spends a round trip to learn something I can determine myself in two minutes,
+and invites the owner to re-litigate findings I have already verified. **Asking is the slowest
+instrument** (heartbeat item 9) applies to merge mechanics, not just to agent status. Corollary: when
+you do hand over the instruction, include the evidence you already gathered, so the owner executes
+rather than re-checks.
 
