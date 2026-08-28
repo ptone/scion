@@ -347,6 +347,10 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 // relocateToScion moves the contents of src to dst and replaces src with
 // a symlink to dst. If src does not exist or is already a symlink, this
 // is a no-op.
+//
+// Invariant: never delete what was not successfully moved. If an entry
+// cannot be moved (rename fails) and cannot be copied (copy fails), it
+// stays at src, the RemoveAll is skipped, and an error is returned.
 func relocateToScion(src, dst string) error {
 	info, err := os.Lstat(src)
 	if err != nil {
@@ -367,17 +371,51 @@ func relocateToScion(src, dst string) error {
 	}
 
 	// Move each entry from src to dst (atomic on same filesystem).
+	// On rename failure, fall back to a recursive copy. Track which
+	// entries were successfully moved so we never delete what we did
+	// not move.
+	var failedEntries []string
 	for _, entry := range entries {
 		srcPath := filepath.Join(src, entry.Name())
 		dstPath := filepath.Join(dst, entry.Name())
 		if err := os.Rename(srcPath, dstPath); err != nil {
-			// Cross-filesystem: fall back to not relocating this entry.
-			runtimeLog.Debug("could not rename to /scion, skipping",
+			// Rename failed (e.g. EXDEV on cross-filesystem). Try a
+			// recursive copy, then remove the source copy only on success.
+			runtimeLog.Debug("rename failed, attempting copy fallback",
 				"src", srcPath, "dst", dstPath, "error", err)
+			if copyErr := copyEntryRecursive(srcPath, dstPath); copyErr != nil {
+				runtimeLog.Warn("could not move or copy entry to /scion",
+					"src", srcPath, "dst", dstPath,
+					"renameError", err, "copyError", copyErr)
+				failedEntries = append(failedEntries, entry.Name())
+				continue
+			}
+			// Copy succeeded — remove the source copy.
+			if rmErr := os.RemoveAll(srcPath); rmErr != nil {
+				runtimeLog.Debug("copy succeeded but could not remove source",
+					"src", srcPath, "error", rmErr)
+				// Not fatal: the entry is at dst, the source is orphaned
+				// but not lost. Continue.
+			}
 		}
 	}
 
-	// Replace original directory with symlink so broker readback works.
+	if len(failedEntries) > 0 {
+		// Do NOT RemoveAll or Symlink — entries that could not be moved
+		// still live at src and deleting src would destroy them.  The
+		// consequence is that the home is NOT relocated: src stays as a
+		// real directory (not a symlink to dst), so agent home writes go
+		// to the container overlay instead of /scion and are invisible
+		// through the broker's bind mount.  That degrades broker readback
+		// but preserves the agent's data.
+		return fmt.Errorf("relocateToScion: %d entries could not be moved from %s to %s: %v; "+
+			"home is NOT relocated — agent writes will go to the overlay, not /scion, "+
+			"and will be invisible to broker readback",
+			len(failedEntries), src, dst, failedEntries)
+	}
+
+	// All entries moved successfully. Replace original directory with
+	// symlink so broker readback works.
 	if err := os.RemoveAll(src); err != nil {
 		return fmt.Errorf("remove original dir %s: %w", src, err)
 	}
@@ -386,6 +424,54 @@ func relocateToScion(src, dst string) error {
 	}
 	if err := os.Symlink(dst, src); err != nil {
 		return fmt.Errorf("symlink %s -> %s: %w", src, dst, err)
+	}
+	return nil
+}
+
+// copyEntryRecursive copies a file or directory tree from src to dst,
+// preserving permissions. Unlike copyDirContents, this handles
+// subdirectories recursively and returns errors instead of swallowing them.
+func copyEntryRecursive(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+
+	if info.IsDir() {
+		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dst, err)
+		}
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			return fmt.Errorf("readdir %s: %w", src, err)
+		}
+		for _, entry := range entries {
+			if err := copyEntryRecursive(
+				filepath.Join(src, entry.Name()),
+				filepath.Join(dst, entry.Name()),
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Symlink: recreate rather than follow.
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(src)
+		if err != nil {
+			return fmt.Errorf("readlink %s: %w", src, err)
+		}
+		return os.Symlink(target, dst)
+	}
+
+	// Regular file: read and write.
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", src, err)
+	}
+	if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("write %s: %w", dst, err)
 	}
 	return nil
 }

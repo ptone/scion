@@ -1393,6 +1393,139 @@ func TestRelocateToScion_AlreadySymlink(t *testing.T) {
 	}
 }
 
+// TestRelocateToScion_BothRenameAndCopyFail_PreservesSource pins the
+// survival invariant: when an entry can be neither renamed nor copied,
+// relocateToScion must leave it at src, not destroy it.
+//
+// Failure mode: src/.config/ is a directory.  dst/.config is a regular
+// FILE (not a directory).  os.Rename fails ("not a directory").
+// copyEntryRecursive → MkdirAll also fails because a regular file
+// occupies the name.  Before the fix, unconditional RemoveAll(src)
+// destroyed .config/agent-info.json.
+//
+// This is NOT an EXDEV substitute — both src and dst are on the same
+// filesystem (same t.TempDir parent).  The test exercises the
+// both-paths-fail branch; EXDEV would only trigger on cross-device
+// mounts, which t.TempDir cannot produce portably.
+func TestRelocateToScion_BothRenameAndCopyFail_PreservesSource(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	dst := filepath.Join(base, "dst")
+	_ = os.MkdirAll(dst, 0755)
+
+	// Source: a directory tree with real content.
+	configDir := filepath.Join(src, ".config")
+	_ = os.MkdirAll(configDir, 0755)
+	_ = os.WriteFile(filepath.Join(configDir, "agent-info.json"),
+		[]byte(`{"new":true}`), 0644)
+
+	// A loose file that will move successfully (file-over-file rename
+	// succeeds).  This exercises the partial-migration path: some entries
+	// move, one does not.  Before the fix the result was half-migrated +
+	// source destroyed — worse than either full migration or no migration.
+	//
+	// The fix's partial-migration mode: loose files move, directories that
+	// can't be moved stay at src.  RemoveAll is suppressed, src is not
+	// replaced with a symlink, and an error names the consequence.
+	_ = os.WriteFile(filepath.Join(src, "loose.txt"), []byte("loose"), 0644)
+
+	// dst has a regular FILE named .config (not a directory).
+	// os.Rename(src/.config/ [dir], dst/.config [file]) fails.
+	// copyEntryRecursive → MkdirAll(dst/.config) also fails because a
+	// regular file already occupies that name.
+	_ = os.WriteFile(filepath.Join(dst, ".config"), []byte("blocker"), 0644)
+
+	err := relocateToScion(src, dst)
+
+	// Must return an error: .config/ could not be moved.
+	if err == nil {
+		t.Fatal("relocateToScion() returned nil; expected an error because " +
+			".config/ could be neither renamed nor copied")
+	}
+
+	// THE BUG ASSERTION: source .config/agent-info.json must survive.
+	// Before the fix, RemoveAll(src) destroyed it.
+	data, readErr := os.ReadFile(filepath.Join(src, ".config", "agent-info.json"))
+	if readErr != nil {
+		t.Fatalf("source .config/agent-info.json was destroyed: %v\n"+
+			"This is the data-loss bug: RemoveAll(src) deleted entries that "+
+			"could not be moved", readErr)
+	}
+	if string(data) != `{"new":true}` {
+		t.Errorf("source .config/agent-info.json content = %q, want %q",
+			string(data), `{"new":true}`)
+	}
+
+	// src must still be a directory, NOT a symlink.
+	info, statErr := os.Lstat(src)
+	if statErr != nil {
+		t.Fatalf("src was removed entirely: %v", statErr)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Error("src was replaced with a symlink despite failed entries")
+	}
+
+	// The loose file should have moved to dst (file-over-file succeeds).
+	if _, err := os.Stat(filepath.Join(dst, "loose.txt")); err != nil {
+		t.Errorf("loose.txt should have moved to dst: %v", err)
+	}
+}
+
+// TestRelocateToScion_CopyFallbackOnRenameFailure verifies that when
+// os.Rename fails for a directory entry (ENOTEMPTY: dst has an existing
+// non-empty subdirectory with the same name), the copy fallback succeeds
+// and the overall relocation completes.
+//
+// This is the ENOTEMPTY path that fires on second agent start with the
+// same slug: sandbox delete kills gVisor but does NOT remove
+// /scion/agents/<slug>/home, so when the second start calls
+// relocateToScion, dst already has a non-empty .config/ directory.
+func TestRelocateToScion_CopyFallbackOnRenameFailure(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	dst := filepath.Join(base, "dst")
+
+	// Source: .config/ directory with new content.
+	srcConfig := filepath.Join(src, ".config")
+	_ = os.MkdirAll(srcConfig, 0755)
+	_ = os.WriteFile(filepath.Join(srcConfig, "agent-info.json"),
+		[]byte(`{"new":true}`), 0644)
+
+	// Destination: .config/ directory with OLD content (non-empty).
+	// os.Rename(src/.config, dst/.config) will fail with ENOTEMPTY.
+	dstConfig := filepath.Join(dst, ".config")
+	_ = os.MkdirAll(dstConfig, 0755)
+	_ = os.WriteFile(filepath.Join(dstConfig, "old-file.txt"),
+		[]byte("stale"), 0644)
+
+	err := relocateToScion(src, dst)
+	if err != nil {
+		t.Fatalf("relocateToScion() = %v, want nil (copy fallback should succeed)", err)
+	}
+
+	// New content must be at dst (copied via fallback).
+	data, readErr := os.ReadFile(filepath.Join(dst, ".config", "agent-info.json"))
+	if readErr != nil {
+		t.Fatalf("dst .config/agent-info.json not found after copy fallback: %v", readErr)
+	}
+	if string(data) != `{"new":true}` {
+		t.Errorf("dst .config/agent-info.json = %q, want %q", string(data), `{"new":true}`)
+	}
+
+	// src must now be a symlink pointing at dst (full relocation succeeded).
+	info, statErr := os.Lstat(src)
+	if statErr != nil {
+		t.Fatalf("src does not exist after relocation: %v", statErr)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("src should be a symlink after successful relocation, but it is not")
+	}
+	target, _ := os.Readlink(src)
+	if target != dst {
+		t.Errorf("src symlink target = %q, want %q", target, dst)
+	}
+}
+
 // -----------------------------------------------------------------------
 // waitForSandboxLiveness tests
 // -----------------------------------------------------------------------
