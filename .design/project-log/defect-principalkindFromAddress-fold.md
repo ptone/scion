@@ -355,7 +355,7 @@ exploit requires a thread in which ALL agent replies were persisted via
 the verbatim-Sender broker inbound path and none through the canonical
 server-constructed path. No such thread has been demonstrated.
 
-**DEF-34: Asymmetric Channel invariant (independent of DEF-32).**
+**DEF-34: Asymmetric Channel invariant (independent of DEF-32, confirmed).**
 
 The function's filter pins `Channel: "web"` (line 1636):
 
@@ -380,49 +380,102 @@ filters on it as though both sides were enforced:
           }
       }
 
-- **Agent → user (handlers_agent_messaging.go:247):** Channel is
-  `req.Channel` — from the agent runtime's response body, with no
-  defaulting and no validation:
+- **Agent → user (handlers_agent_messaging.go:188-202, 207, 247):**
+  Channel goes through a conditional inference, not a default. When the
+  runtime omits Channel (req.Channel == ""), reply affinity runs:
 
-      Channel: req.Channel,
-
-  Furthermore, empty Channel skips channel-registration validation
-  entirely (handlers_agent_messaging.go:207):
-
-      if req.Channel != "" {
-          // ... validate against registered channels ...
+      if req.Channel == "" && recipientID != "" && s.webChatStore != nil && s.GetMessageBrokerProxy() != nil {
+          if lastCh, err := s.webChatStore.GetLastChannel(ctx, recipientID, agent.ProjectID, agent.ID); err != nil {
+              // Non-fatal: fall through to fan-out-to-all behavior.
+          } else if lastCh != "" {
+              req.Channel = lastCh
+          }
       }
 
-  When `req.Channel` is `""`, the entire validation block is skipped.
-  Empty Channel is a fully supported value that is invisible to the
-  guard.
+  `GetLastChannel` is keyed `(userID, projectID, agentID)` — it is
+  **thread-agnostic** (webchannel_store.go:62). But the guard's
+  MessageFilter is keyed `(channel, threadID)` — **per-thread**. Producer
+  key and consumer key disagree.
 
-The defect is the asymmetry: the hub tags the user's message as
-Channel = `"web"` and guarantees nothing about the agent's reply.
-`hasAgentReplyAfter` filters on `Channel = "web"` — a field the hub
-forces for one participant and not the other.
+  If no affinity row exists, lastCh = "" → req.Channel stays "" →
+  Channel validation at :207 is skipped (gates on `req.Channel != ""`)
+  → reply persisted with Channel = "". Empty Channel is documented
+  intended behaviour: "leave channel empty so the message fans out to
+  all spokes" (:193 comment). An intended sentinel value that the guard
+  cannot see.
 
-Two paths can write non-web Channel into a web-chat thread:
+  **Rule 206.** When one site writes a field and another reads it as a
+  precondition, the two must agree on the field's key. Producer keyed
+  (user, project, agent) and consumer keyed (channel, thread) disagree
+  the first time a user is active on two channels, and the disagreement
+  presents as a guard that passes.
 
-1. **handleAgentOutboundMessage** (handlers_agent_messaging.go:247):
-   Agent runtime omits `"channel"` from its response body → Channel =
-   `""` → both validation (line 207) and defaulting are skipped → reply
-   persisted with Channel = `""`, invisible to the guard. No malicious
-   actor required — a runtime that simply omits Channel is sufficient.
+  **Rule 207.** An intended sentinel is still a blind spot. That a value
+  is supported is an argument for handling it, not evidence that it is
+  handled.
 
-2. **handleBrokerInbound** (handlers_broker_inbound.go:258):
-   `Channel: req.Message.Channel` — broker plugin body. An agent reply
-   with Channel = `"slack"` or `"discord"` to the same ThreadID is
-   invisible to the guard.
+**Affinity writers** (two, both confirmed):
 
-Practical exploitability depends on whether agent runtimes reliably echo
-`Channel = "web"` on responses to web-chat messages — a behaviour the
-hub does not enforce.
+1. webchannel.go:139 — inside `webChannelBus.Publish`, writes `"web"`:
+
+       b.store.RecordChannel(ctx, userID, projectID, agentID, "web", ...)
+
+2. handlers_broker_inbound.go:299 — writes the inbound spoke's channel:
+
+       s.webChatStore.RecordChannel(r.Context(), senderUserID, agent.ProjectID, agent.ID, req.Message.Channel, now)
+
+handlers_chat_v2.go calls neither.
+
+**Three routes to bypass, ranked by strength:**
+
+**(b) Cross-channel affinity — strongest, ordinary multi-channel use.**
+No attacker, no misbehaving runtime:
+
+1. User posts in web thread W → affinity = "web"
+   (webchannel.go:139, keyed (user, project, agent))
+2. Same user says anything to the same agent from Discord →
+   affinity = "discord" (handlers_broker_inbound.go:299, same key,
+   overwrites)
+3. Agent sends untagged reply in W → :195 `GetLastChannel` returns
+   "discord" → :200 stamps req.Channel = "discord" → persisted
+4. User edits/deletes their message in W → guard filters
+   Channel="web", misses the "discord" reply, **permits the edit**
+
+**(a) No affinity row — documented intended behaviour.**
+Agent sends first untagged reply before user has spoken on any channel
+(or affinity row expired/absent) → GetLastChannel returns "" → lastCh
+= "" → req.Channel stays "" → Channel = "" persisted. Empty Channel is
+the documented fan-out-to-all-spokes sentinel (:193 comment). Guard
+filters Channel="web", misses it.
+
+**(c) Runtime sets non-web explicitly — weakest, needs cooperating
+client.**
+Agent runtime sets `"channel": "slack"` (or any non-"web" value) in its
+response body → passes channel-registration validation at :207 if
+registered → persisted with that Channel → invisible to guard.
+
+**Fix ruling.** The guard's question is "has the agent replied in this
+thread?" Channel is not part of that question. The correct fix is to
+drop `Channel: "web"` from the MessageFilter in `hasAgentReplyAfter`.
+Defaulting Channel on the agent path is wrong on its own terms — empty
+Channel is load-bearing, it means fan-out-to-all-spokes. Forcing "web"
+would break fan-out to repair a guard. Removing the Channel filter
+widens the match set, so it fails closed: messages that were previously
+invisible become visible, which only causes the guard to return true
+(deny edit/delete) in cases it was incorrectly permitting.
+
+**Adjacent note: pagination termination.** `hasAgentReplyAfter`'s loop
+terminates on `result.NextCursor == "" || len(result.Items) < pageSize`
+(line 1658). A short page that still carries a cursor ends the scan and
+returns false (fail-open). Removing the Channel filter changes page
+occupancy (more messages per page), so this termination condition should
+be reviewed when the filter is removed. Not part of DEF-34, but worth
+recording before anyone modifies this loop.
 
 *Miss consequence (casing):* Latent fail-open on agent-reply immutability.
 *Miss consequence (DEF-34, channel asymmetry):* Agent-reply immutability
-bypassed when agent reply Channel != `"web"`, which the hub permits on
-the agent-to-user path.
+bypassed through ordinary multi-channel use. Confirmed exploitable, no
+malicious actor required.
 
 ### ROUTING sites (5)
 
