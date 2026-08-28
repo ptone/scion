@@ -10739,3 +10739,116 @@ shape, not by callers of the function — a seeder that concatenates the string 
 **160.** A demonstration that one instance of a systemic problem is fixable is not evidence the
 class is cheap. Report resolvability per instance; the aggregate cost is the count, not the
 difficulty of the easiest case.
+
+---
+
+## §5ec. 2026-08-28 16:20 — SOLE-WRITER PREMISE FALSE: FOUR SQL WRITERS BYPASS DMConversationKey
+
+### em6's enumeration collapsed the premise — as intended
+
+I asked em6 to enumerate every site constructing a `dm:` string **by output shape, not by callers**
+(rule 159). That distinction is what found these; a caller-graph search would have returned clean.
+
+| # | site | mechanism |
+|---|---|---|
+| 1 | `webchannel_store_postgres.go:947-964` `migrateThreadIDs` | SQL `'dm:agent:' \|\| sender_id \|\| ':user:' \|\| recipient_id` → `messages.thread_id` |
+| 2 | `webchannel_store_postgres.go:992` `seedFromWave1` | SQL `'dm:agent:' \|\| t.agent_id \|\| ':user:' \|\| t.user_id` → `webchat_dm.conversation_key` |
+| 3 | `webchannel_store.go:1296-1314` | SQLite variant of #1 |
+| 4 | `webchannel_store.go:1344` | SQLite variant of #2 |
+| 5 | `divergence.go:120` `directMessageExternalRef` | unexported, legacy-format, test-comparison only, never writes — **not a concern** |
+
+**Four real writers, none of which call `DMConversationKey`.**
+
+### THE PREMISE WAS NOT PROVEN — IT WAS RELOCATED
+
+em6's replacement safety argument: the SQL writers hardcode lowercase kinds, and their UUIDs come
+from columns populated by `uuid.NewString()`, therefore all stored keys are canonical.
+
+That is **the same argument one level down.** It rests on a new sole-writer premise — that
+`uuid.NewString()` is the only populator of `agent_id`/`user_id`/`sender_id`/`recipient_id` — and
+that premise is unaudited. The verification burden did not shrink; it changed address. The tell is
+that the argument has the identical shape to the one that just failed.
+
+Two soft spots sent back: (a) confirm the four columns are actually declared `uuid` and not
+`text`/`varchar`, since the Postgres normalisation claim evaporates otherwise; (b) the SQLite half
+is admittedly weaker — "stores whatever was inserted" is honest, "ent uses uuid.NewString()" is
+unverified.
+
+### THE LARGER PROBLEM — the tightening only covers one path in five
+
+**Tightening `DMConversationKey` enforces nothing on four writers that never call it.** After the
+change, "every stored DM key is canonical" holds on one path out of five; the other four go on
+concatenating SQL unvalidated.
+
+This reframes em6's question. They asked whether *old* data is safe. The sharper question is whether
+`migrateThreadIDs` and `seedFromWave1` are **still executable**. If they can fire again they are a
+live bypass of the validation being added, and the tightening is partly theatre. Asked; if the
+answer is yes, it becomes its own work item and I take it — em6 is not to tighten around it.
+
+### MY ERROR, CORRECTED WITHIN THE SAME CYCLE
+
+I told em6 the SQL writers' hardcoded agent-first ordering was an unwritten coincidence. **It is
+written down.** `dm_key.go` doc comment: *"Because `agent:` < `user:` lexically, mixed pairs always
+render as dm:agent:<aid>:user:<uid>. Same-kind pairs sort by UUID."* Intentional and documented. I
+overstated it and said so. What survives is narrower and still worth doing: documented is not
+tested, and a doc comment does not fail a build when someone changes the sort — so the cross-writer
+agreement test stands, with the alarm removed.
+
+### WHAT THE CORRECTION TURNED UP: A SECOND NORMALISATION
+
+Reading the source to check my own claim found what em6's report omitted:
+
+    uA, err := uuid.Parse(idA)
+    tokenA := kindA + ":" + uA.String()
+
+`uuid.Parse` accepts braced, `urn:uuid:`, and unhyphenated forms; `.String()` renders all of them
+canonical. **The deriver silently canonicalises UUIDs across several input shapes, not merely
+case.** So the deriver/checker disagreement is materially wider than em6 scoped it — one defect
+wearing two hats, to be fixed in one change.
+
+Flagged the pushback I expect and pre-empted it: braced and canonical UUIDs genuinely *are* the same
+identity, so folding them is not wrong the way folding `"USER"` is wrong. Rejection is still
+required — not because the fold computes a wrong answer, but because **the deriver and checker must
+agree, and rejection is the only place they can agree without loosening the checker.**
+
+### Good news on implementation cost
+
+    kindA = strings.ToLower(kindA)
+    if !validDMKinds[kindA] { return "", fmt.Errorf(...) }
+
+The rejection machinery already exists. The kind half is deleting two lines and letting
+`validDMKinds` see unmodified input — no new error paths. The UUID half needs parse-then-compare:
+parse to validate, compare `uA.String()` to the original, error on mismatch. **Parse to validate,
+never to rewrite.**
+
+### Not escalated
+
+No user decision required; em6 can carry it. Their open question to me is answered. Becomes an
+escalation only if the migrations turn out to be re-runnable.
+
+### NEW STANDING RULES
+
+**161.** When a premise is disproven and an agent offers a replacement, check whether the new
+argument has the same *shape* as the failed one. "X is the only writer" failing, replaced by "Y is
+the only populator", is not progress — the burden was relocated, not discharged. Each relocation
+feels like an answer because a specific question got answered.
+
+**162.** Tightening a validator enforces nothing on writers that do not call it. Before accepting a
+tightening as a fix, count the paths it covers against the paths that exist, and establish whether
+the uncovered ones are still executable. A validator on one path in five buys a guarantee about that
+path and nothing else.
+
+**163.** When you assert something about source in an instruction, read the source in the same
+cycle. I told an agent a property was undocumented when the doc comment states it plainly. Correct
+your own error to the agent immediately and unambiguously — an uncorrected overstatement becomes a
+requirement they build against.
+
+**164.** Checking your own claim is a high-yield search. Verifying the sort-order assertion is what
+surfaced the `uuid.Parse`/`.String()` normalisation, which neither the reviewer nor the agent had
+found. The control frequently produces the real finding (rule 61), and that applies to controls on
+your own statements.
+
+**165.** Normalisation that is semantically harmless is still forbidden on the derivation path when
+a strict checker sits downstream. The argument for rejection is not that the fold is wrong; it is
+that producer and validator must agree, and agreement by loosening the validator is the failure mode
+(rule 157).
