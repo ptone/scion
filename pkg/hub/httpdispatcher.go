@@ -1613,7 +1613,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 // map suitable for passing to DispatchFinalizeEnv.
 //
 // This is the second pass of the two-pass env-gather resolution: the first
-// pass (resolveEnvFromStorage + resolveSecrets) skips as_needed entries, then
+// pass (resolveEnvFromStorage + resolveAgentSecrets) skips as_needed entries, then
 // the broker reports which keys are still needed, and this function checks
 // whether any of those keys can be satisfied by as_needed entries.
 //
@@ -2293,6 +2293,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 // DispatchAgentResetAuth injects a fresh auth token into a running agent without
 // restarting it. It generates a new token and sends it to the broker's reset-auth
 // endpoint, which writes it into the container and signals the agent process.
+//
+// ResetAuth is operator-initiated, so entitled keys are RE-RESOLVED from the
+// secret backend rather than copied from the old credential. An operator resets
+// auth precisely because something changed; copying stale entitlement forward
+// would preserve an answer computed under conditions that no longer hold.
 func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent *store.Agent) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
@@ -2303,12 +2308,28 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 		return err
 	}
 
+	// Resolve entitled keys BEFORE token generation so they can be recorded
+	// on the new credential immediately after.
+	_, entitledKeys, resolveErr := d.resolveAgentSecrets(ctx, agent)
+	if resolveErr != nil {
+		if d.debug {
+			d.log.Warn("DispatchAgentResetAuth: failed to resolve secrets for entitlement",
+				"agent_id", agent.ID, "error", resolveErr)
+		}
+		// Continue — entitledKeys stays nil; recordEntitledKeys will not be
+		// called, and the credential row keeps NULL (fail-closed).
+	}
+
 	var token string
 	if d.tokenGenerator != nil {
 		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, _, err = d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		var jtiHash string
+		token, jtiHash, err = d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
 		if err != nil {
 			return fmt.Errorf("DispatchAgentResetAuth: failed to generate agent token: %w", err)
+		}
+		if token != "" && resolveErr == nil {
+			d.recordEntitledKeys(ctx, jtiHash, agent.ID, entitledKeys)
 		}
 	}
 	if token == "" {
@@ -2739,12 +2760,4 @@ func (d *HTTPAgentDispatcher) resolveAgentSecrets(ctx context.Context, agent *st
 			"injection_names", names)
 	}
 	return forInjection, entitledKeys, nil
-}
-
-// resolveSecrets is the legacy wrapper for resolveAgentSecrets that returns
-// only the injection list. Call sites that need the entitled key set should
-// call resolveAgentSecrets directly.
-func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.Agent) ([]ResolvedSecret, error) {
-	forInjection, _, err := d.resolveAgentSecrets(ctx, agent)
-	return forInjection, err
 }

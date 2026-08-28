@@ -148,7 +148,7 @@ func TestBuildEnvSources_InjectionMode(t *testing.T) {
 	}
 }
 
-// TestResolveSecrets_InjectionMode verifies that resolveSecrets skips secrets
+// TestResolveSecrets_InjectionMode verifies that resolveAgentSecrets skips secrets
 // with InjectionMode == "as_needed" and includes secrets with InjectionMode ==
 // "always" or "" (empty/unset).
 func TestResolveSecrets_InjectionMode(t *testing.T) {
@@ -205,9 +205,9 @@ func TestResolveSecrets_InjectionMode(t *testing.T) {
 		},
 	})
 
-	resolved, err := d.resolveSecrets(ctx, agent)
+	resolved, _, err := d.resolveAgentSecrets(ctx, agent)
 	if err != nil {
-		t.Fatalf("resolveSecrets: %v", err)
+		t.Fatalf("resolveAgentSecrets: %v", err)
 	}
 
 	// Build a lookup for easy assertions.
