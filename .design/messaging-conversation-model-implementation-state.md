@@ -6877,3 +6877,78 @@ divergent copies and is exactly the outcome the fix exists to prevent.
 **Not dispatched yet, deliberately.** Tranche B's first cut is unmerged; starting migration work now
 would build on a base that is about to move and buy a rebase for no schedule gain. This dispatches
 when the PR lands.
+
+---
+
+## §5cn. Heartbeat 2026-08-28 05:43 — second dead sweep; B6/B7 brief, and B7 is NOT fixed by tranche B
+
+No movement again: `upstream/main` `f4d02461b`, five branch tips unchanged, three managers `blocked`,
+#1338/#1339/#1340 open and unmerged, tranche B PR still unopened. Ledger reasons unchanged from
+§5cl/§5cm; nothing to strike.
+
+**No user message sent.** I weighed one — the user opened #1340 (an older URL) but not tranche B (the
+newest), and delivery has failed silently in this project before, which is why they issued the
+"correct channel and thread flags" correction. But the mundane explanation fits: DEF-26's URL was
+sent well before tranche B's, and acting oldest-first is ordinary queue behaviour, not evidence of a
+lost message. Asking "did you get it?" ninety minutes in is twitchy, and it would spend the user's
+attention on my anxiety rather than on a decision. Re-checked at the next sweep instead.
+
+### FINDING — tranche B does not fix B7, and the commit subject reads as though it does
+
+Commit `222086d4c` is titled "fix(hub): pass ParticipantAdder to ResolveOrCreateDMConversation". It
+changes **six call sites** to pass `(s.store, s.store)` / `(p.store, p.store)` and adds **no nil
+guard on the parameter**. So it fixes the callers that exist today and leaves the sink exactly as
+dangerous as it was. Rule 77's shape once more, and rule 77's corollary bites too: the subject line
+will read to a future maintainer as "B7 handled."
+
+This is not a defect *in* tranche B — passing the store is correct and necessary, and I am **not**
+reopening the branch for it. It is a scope fact that must be carried forward so B7 is not marked
+done by its commit title. Recorded here because the ledger, not the commit log, is what I trust.
+
+### BRIEF — sub-tranche B6/B7, ready to dispatch
+
+**These are two defects on one line.** `pkg/messaging/conversation.go:122`, `pa.AddParticipant(...)`,
+reached on *every* resolve. B7 is "what if `pa` is nil"; B6 is "what if the row already exists and
+the user had left". Grouping them is not convenience — a fix to either that does not consider the
+other will be rewritten.
+
+**B7 — nil `ParticipantAdder` panics in an eventbus goroutine, killing the process rather than
+returning a 500.** The signature is `cs ConversationUpserter, pa ParticipantAdder` — adjacent,
+both interfaces, both satisfied by the same concrete `s.store`, so a transposition compiles clean.
+
+Frame the fix this way, because it is not defensive programming: **the function's own docstring
+says "On any error the function returns nil and logs the failure. Callers MUST NOT treat a nil
+return as fatal." There is exactly one input for which it is maximally fatal.** A nil-`pa` guard
+that logs and returns nil is the function *honouring the contract it already publishes*. That
+framing also settles the inevitable "callers all pass a real store, so this is unreachable" —
+rule 78: reachability is a property of today's call graph, not of the code, and the guard is
+testable by calling the sink directly at its own layer with a nil `pa`. No plumbing required.
+
+**B6 — participant registration on every resolve clears `left_at`, so leaving a DM is undone by the
+next message.** The obvious fix (special-case `left_at` in the upsert) is right but under-motivated,
+and the motivation matters because it determines what the fix may *not* do:
+
+**INVARIANT D-1 says a direct conversation's participant set is immutable for its lifetime.** If
+membership cannot change, then `left_at` on a `direct` row **cannot be a membership fact** — there
+is no such thing as leaving a DM. It is a *listing* state: "hide this from my list." And the
+participant table is a listing index, never the authority (standing invariant). So B6 is not a
+membership bug at all: **it is the index silently overwriting a user's own listing preference,
+because a write path that should be add-if-absent is behaving as upsert-and-revive.**
+
+Consequences the implementer must respect:
+- Resolve must **never** clear `left_at` on an existing row. Add-if-absent only.
+- The fix must **not** be built as an un-leave permission check, and must not touch S6's D-1 guard.
+  Under that guard a departed DM participant is still named in the key, so the guard *permits* the
+  re-add — correctly, since membership never changed. The guard is not the wrong layer for this;
+  it is simply not this layer's question.
+- Do not "fix" this by deleting `left_at` for direct rows. It is load-bearing for listing, and a
+  user who hid a conversation is entitled to have it stay hidden.
+
+**Acceptance:** B7 pinned by a direct-call test passing nil `pa` and asserting *return nil, no
+panic* — a test that merely asserts no panic would pass against a guard that returns garbage.
+B6 pinned by resolve-after-leave asserting `left_at` is **unchanged**, pinning the exact timestamp
+rather than non-null (rule 52 — read-tracking and presence take exact values, not bounds). Each
+must fail when its own fix alone is reverted, with the selector positively controlled (rule 81).
+
+**Not dispatched.** Same reason as B1/B2/B14: tranche B is unmerged and this would build on a
+moving base.
