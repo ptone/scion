@@ -754,7 +754,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectPath, templatePaths...)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("failed to find harness-config %q: %w", harnessConfigName, err)
+		return "", "", nil, fmt.Errorf("failed to find harness-config %q (resolved from %s): %w",
+			harnessConfigName, hcResolution.Source, err)
 	}
 	util.Debugf("ProvisionAgent: harness-config loaded from disk: path=%s harness=%q image=%q",
 		hcDir.Path, hcDir.Config.Harness, hcDir.Config.Image)

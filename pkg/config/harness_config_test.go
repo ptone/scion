@@ -15,8 +15,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -725,5 +727,68 @@ func TestMapEmbedFileToHarnessConfigPath_RootSupportFiles(t *testing.T) {
 		if got := mapEmbedFileToHarnessConfigPath(targetDir, homeDir, ".tool", input); got != want {
 			t.Errorf("mapEmbedFileToHarnessConfigPath(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+// TestFindHarnessConfigDir_ErrorIncludesAvailableAlternatives verifies that
+// the not-found error lists the harness configs that ARE available on disk.
+// This is the error-message provenance requirement from ptone/scion#1316 AC 4.
+func TestFindHarnessConfigDir_ErrorIncludesAvailableAlternatives(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// Setup two available harness configs on disk
+	for _, name := range []string{"claude", "opencode"} {
+		dir := filepath.Join(tmpDir, DotScion, harnessConfigsDirName, name)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		cfg := fmt.Sprintf("harness: %s\nimage: %s:latest\nuser: scion\n", name, name)
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Look for a config that doesn't exist
+	_, err := FindHarnessConfigDir("antigravity", "")
+	if err == nil {
+		t.Fatal("expected error for nonexistent harness-config")
+	}
+
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "antigravity") {
+		t.Errorf("error should name the missing config; got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "available on disk") {
+		t.Errorf("error should include 'available on disk'; got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "claude") {
+		t.Errorf("error should list available config 'claude'; got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "opencode") {
+		t.Errorf("error should list available config 'opencode'; got: %s", errMsg)
+	}
+}
+
+// TestFindHarnessConfigDir_ErrorNoAlternatives verifies the error when no
+// harness configs are available on disk at all.
+func TestFindHarnessConfigDir_ErrorNoAlternatives(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	_, err := FindHarnessConfigDir("antigravity", "")
+	if err == nil {
+		t.Fatal("expected error for nonexistent harness-config")
+	}
+
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "no harness-configs found on disk") {
+		t.Errorf("error should note no configs on disk; got: %s", errMsg)
 	}
 }

@@ -146,7 +146,13 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 		}, nil
 	}
 
-	return nil, fmt.Errorf("harness-config %q not found", name)
+	// List what IS available so the operator knows what to choose.
+	available := listAvailableHarnessConfigNames(projectPath)
+	if len(available) > 0 {
+		return nil, fmt.Errorf("harness-config %q not found (available on disk: %s)",
+			name, strings.Join(available, ", "))
+	}
+	return nil, fmt.Errorf("harness-config %q not found (no harness-configs found on disk)", name)
 }
 
 // ListHarnessConfigDirs lists all available harness-configs.
@@ -175,6 +181,20 @@ func ListHarnessConfigDirs(projectPath string) ([]*HarnessConfigDir, error) {
 	})
 
 	return result, nil
+}
+
+// listAvailableHarnessConfigNames returns the names of all harness-config
+// directories that can be found on disk (global + project), for error messages.
+func listAvailableHarnessConfigNames(projectPath string) []string {
+	dirs, err := ListHarnessConfigDirs(projectPath)
+	if err != nil || len(dirs) == 0 {
+		return nil
+	}
+	names := make([]string, len(dirs))
+	for i, d := range dirs {
+		names[i] = d.Name
+	}
+	return names
 }
 
 // loadHarnessConfigsFromDir loads all harness-config directories from a parent dir.
