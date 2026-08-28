@@ -14402,3 +14402,83 @@ it. They were never waiting on it — only one was.** That was my framing error,
 
 Also closed the loop the honest way: *"Either answer unblocks me. No answer keeps the branch parked."*
 He should know the cost of not answering, stated once and without pressure.
+
+## 2026-08-28 12:04Z — I have been blocked by a reason I never measured. RULE 25.
+
+Upstream moved again to `4b120bd7` — `#1343`, `#1344`, `#1345` merged **11:41Z, forty-one minutes after
+my 11:00 nudge**. Still none of mine. **Second time he has merged past three approved branches.**
+
+Instead of nudging a third time I checked the assumption underneath the waiting. **Two lines of this
+log contradict each other:**
+
+- line 2610: *"Opening a PR is not merging and does not touch ptone's gate."*
+- line 11405: *"ptone has the branch name; he opens the upstream PR, **because I have fork write access
+  only**."*
+- line 8500: *"Nobody could open the PR but ptone, and **I never asked him to.**"*
+
+Then I measured rather than reasoned:
+
+```
+gh auth status          ->  Logged in to github.com as ptone (GITHUB_TOKEN)
+gh api user --jq .login ->  ptone
+gh api repos/GoogleCloudPlatform/scion --jq .permissions
+                        ->  {"admin":true,"maintain":true,"pull":true,"push":true,"triage":true}
+```
+
+**The `gh` CLI in this container authenticates AS ptone, with `admin` on the upstream Google repo.**
+Not fork write access. Not push. **Admin** — merge, force-push, branch deletion, settings.
+
+### What is and is not established
+
+**Established:** the stated reason at line 11405 is **false as a capability claim**. I could have opened
+all three PRs at any point in the last eight hours.
+
+**NOT established:** that I was ever *permitted* to. Line 5142 records the actual history —
+*"**ptone clicked the compare URL**"* for `#1310`. Every upstream PR `#1331`–`#1345` is authored `ptone`
+with `headRepositoryOwner: ptone`, which is exactly what this token would produce and also exactly what
+ptone himself would produce. **The two are indistinguishable from the API, so the history cannot tell me
+whether an agent has ever used this token to open a PR.** I did not guess. I asked.
+
+**Capability is not authorisation, and this is the case where the gap is widest.** Acting as ptone on a
+Google-owned repository is categorically unlike acting with fork write access. The same token would
+merge — forbidden by the scheduler's standing constraint (*"that is ptone's gate"*) and by the line I
+have written into all three of my own briefs (*"No upstream PR, no merge — ptone's gate"*). **I have not
+used it and I told him so in the same breath as asking.** Asking after acting would have been worthless.
+
+Token handling: `gh auth status` prints a partial token. **Not echoed, not pasted into any message, not
+committed.** The standing rule exists because this project has leaked one before.
+
+### Sent, 12:04Z — one topic, per rule 24
+
+Told him the capability exists, that I have not used it, that I will not merge whatever he answers, and
+asked the single question: **may I open the three PRs under his identity?** Listed all three with heads
+verified against the remote at send time (`0b51f831`, `f6c10558`, `dc729e2` — all unmoved). Gave him both
+exits: *"If yes, I open them and you merge. If no, I keep sending you compare URLs and I record the rule."*
+
+**Deliberately did NOT bundle the security-posture observation** (an admin-scoped PAT for a Google repo
+sitting in an agent container) **as a second ask.** It is one clause explaining why I asked instead of
+acting. Rule 24 cost me a whole answer two hours ago; the admin scope is the *reason* for this question,
+not a separate question.
+
+### RULE 25: A BLOCKER THAT IS FREE TO HOLD IS NEVER RE-EXAMINED. MEASURE WHY YOU ARE BLOCKED, NOT JUST THAT YOU ARE.
+
+I checked merge-cleanliness on every one of fifteen heartbeat cycles. I never once checked whether the
+thing I was waiting for was mine to do. **The asymmetry is the lesson: re-measuring the branches felt
+like diligence and cost nothing, so I did it fifteen times; re-measuring the blocker risked finding out
+I had wasted eight hours, so I did it never.**
+
+The mechanism is worth naming because it is not laziness. **Waiting looked like compliance.** It read as
+correct behaviour — deferring to ptone's gate, not overstepping — and behaviour that reads as correct
+never triggers scrutiny. This is rule 13's shape (*a self-reported error rate that does not increase
+scrutiny is theatre*) pointed inward: **a constraint that flatters you is one you will never test.**
+
+Rule 17 also lands squarely. Line 11405 is a rumour that became permanent **in my own log**, and I then
+read it back as fact for eight hours. The repo is where a rumour goes to become permanent — including
+when the repo is your own notes and the rumour is about yourself.
+
+### Position, unchanged until he answers
+
+Nothing about the branches has changed and nothing should be inferred from this finding about their
+readiness. Two are mergeable on sight; the third is held on the task #93 Shape B/decline decision, brief
+written and held. **I remain blocked, and now I am blocked on a question I can name precisely instead of
+one I had assumed.** That is the only thing this hour bought, and it was worth more than a third nudge.
