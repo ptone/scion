@@ -15793,3 +15793,79 @@ Both open questions are with ptone and neither is mine to resolve:
 
 Retired `sn-iaplab-dev` after querying it and capturing its findings — confirmed by the positive
 `Agent 'sn-iaplab-dev' deleted via Hub.` line, per rule 39, rather than by the absence of an error.
+
+---
+
+## §35.87 — Shape B was built one commit before Shape A, and the agent explained the evidence away
+
+`sn-runtimeprofile-shapeb` reported COMPLETED at 15:08:44Z with a clean seven-row matrix, a named
+inversion mutation, and a renamed regression test. **It is based on `ea35abfd` (#1351) — one commit
+before `31c48801` (#1352), which is Shape A.** Verified myself:
+
+```
+git merge-base --is-ancestor 31c48801 origin/scion/sn-runtimeprofile-shapeb  ->  NO
+merge-base with fork main                                                    ->  ea35abfd
+```
+
+### My error: upstream-merged is not fork-resynced
+
+I told it at dispatch to branch from fork main "which now contains Shape A." #1352 merged **upstream** at
+14:48:30Z; I verified that myself and then treated it as a fact about the **fork**. The coordinator only
+confirmed the fork resync at 15:08Z — after the agent had branched. It picked up #1350 and #1351 and
+missed #1352 by one commit, inside a window of a few minutes.
+
+> **On this project agents branch from the fork, not from upstream. A merge I verified upstream says
+> nothing about what an agent will get when it clones.** Two repositories, two states, one commit of
+> difference is enough.
+
+### Its error, and it is the more interesting one
+
+Its report said: *"`sandbox_bin_sync_test.go` and the Cloud Run seeding test functions do not exist in
+this clone… not present in the **shallow clone**."*
+
+`pkg/config/sandbox_bin_sync_test.go` is **added by #1352**. It was absent because the base was old.
+
+> **Rule 41 — a missing file is never explained by a shallow clone.** Depth-1 omits *history*, not
+> *content*; every file at HEAD is present. A file that should exist and does not means the HEAD is
+> wrong. The agent met the anomaly, produced a plausible-sounding cause, and continued.
+
+That is the costliest species of wrong explanation: **it does not merely fail to solve the problem, it
+retires the problem.** Once "shallow clone" was written down, the missing file stopped being a question.
+It had the decisive evidence in its own report and neutralised it.
+
+### Why it is not cosmetic
+
+`31c48801` touches `pkg/runtimebroker/handlers_test.go` with **+275 lines** — the same package Shape B
+rewrites, testing the profile behaviour Shape B replaces. **Those tests have never been run against
+Shape B.** Shape B's new tests live in a *new* file, `handlers_profile_filter_test.go`, so there is no
+file-level conflict and nothing warned anyone. A green branch, a clean matrix, and an untested
+disagreement with a merged change.
+
+Also: rows 2, 5 and 7 — the three "YES, changed" rows — were measured in a tree where the
+cloudrun-sandbox profile **is not seeded**, and seeding it is exactly what Shape A does. And the report
+asserted *"Shape A's seeded template guarantee is intact,"* a claim it could not have checked. It
+inherited that from my brief; **a brief's assertions become a report's findings unless something
+intervenes.**
+
+### Remedy dispatched
+
+Fresh branch from `origin/main` + cherry-pick, **not rebase** — the no-force-push constraint stands and
+the old branch stays. Re-run the **whole** `pkg/runtimebroker` package, not just the new file. Re-measure
+only rows 2, 5, 7; rows 1, 3, 4, 6 do not involve the seeded profile and I accept them.
+
+Two instructions I want to keep as habits:
+
+- **If #1352's tests go red under Shape B, that is the finding — send the failure text, do not adjust
+  the assertion.** A merged test and a new change disagreeing is a real conflict, and which side is
+  wrong is an architect's call, not an editing task.
+- **Say plainly whether Shape A changed anything Shape B was specified to do.** ptone approved the
+  *shape*, before Shape A landed. He did not approve a diff.
+
+### The pattern across today
+
+Three agents, three base or scope errors, **all three originating in an assertion of mine that I had not
+checked**: the harness-config fix had an owner I did not look up; the httpdispatcher loose end was closed
+before I relayed it; Shape A was upstream but not in the fork. Rules 37, 40 and now 41 are three faces
+of one thing. **The measurement discipline in these briefs is excellent and it protects the answer, not
+the premise.** Every premise I hand an agent is unmeasured by construction, and it is the premises that
+have failed today.
