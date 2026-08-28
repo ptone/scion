@@ -11057,3 +11057,90 @@ inheriting unearned confidence.
 **174.** A subordinate correcting your arithmetic mid-delivery is the system working. Fix it
 everywhere you stated it — my "19 files" had propagated into two dispatches and a log section
 before em10 caught it.
+
+---
+
+## §5ef. 2026-08-28 16:30 — #1360 VERIFIED MERGE-READY; TIGHTENING MOVED OFF THE BRANCH
+
+### Instrument error, caught by a stale-branch smell
+
+Coordinator reported #1360 merge-ready having read the two nil guards. Before accepting that I went
+to check whether em6's dm_key tightening had already landed on the same branch — because if it had,
+the coordinator's verification would cover only part of what would merge.
+
+My fetch pattern `scion/ca-msg-em6*` matched **`origin/scion/ca-msg-em6`**, a stale branch of **215
+files / +48,348 / −10,700** with commits about DEF-25/DEF-26 fixture renames. Not the PR branch.
+Guessing at branch names from a prefix is not an instrument. **Ask GitHub what the PR head is:**
+
+    gh pr view 1360 --repo GoogleCloudPlatform/scion --json headRefName,headRefOid,...
+
+→ `scion/ca-msg-em6-b2b1b14` @ `7e3afb3d5`.
+
+(Separately noted: a 215-file, 48k-insertion `origin/scion/ca-msg-em6` is another v2-scale branch
+sitting in the namespace. Not today's problem; logged so it is not rediscovered cold.)
+
+### What #1360 actually contains
+
+8 files, **+770 / −115**. OPEN, MERGEABLE. All checks SUCCESS except `cla/google` FAILURE, which is
+expected on agent-authored branches and not required (rule 104).
+
+| file | Δ |
+|---|---|
+| `pkg/messages/dm_key.go` | +20 |
+| `pkg/messages/dm_key_test.go` | +37 |
+| `pkg/messaging/dm_migration.go` | +117/− |
+| `pkg/messaging/dm_migration_test.go` | +346 |
+| `pkg/store/entadapter/conversation_store.go` | +13 |
+| `pkg/store/entadapter/dm_guard_enumeration_test.go` | +212 |
+| 2 × `.design/project-log/*.md` | +140 |
+
+**The +20 in `dm_key.go` is the `CheckDMParticipantKey` extraction into `pkg/messages`, NOT the
+tightening.** `strings.ToLower` remains at `:41`, `:42`, `:80`.
+
+### THE QUESTION THAT DECIDED IT — does #1360 change the asymmetry?
+
+This determines whether it may merge before the tightening exists, so I read the extracted function
+rather than inferring from the line count:
+
+    if (principalKind != kindA || principalID != idA) &&
+       (principalKind != kindB || principalID != idB) {
+
+**Exact comparison, no fold.** That is main's pre-existing strict behaviour *relocated*, not new
+strictness. `DMConversationKey`'s fold is untouched.
+
+So the permissive-deriver/strict-checker mismatch is **unchanged** by #1360 — neither created nor
+worsened. Rule 157 says the pair is one change, and it still is: nothing merged in between makes
+anything worse, so the tightening can land on top as a focused follow-up. **#1360 cleared to merge
+at `7e3afb3d5`.**
+
+### THE HAZARD I ACTED ON: an approval attaches to a diff, not to a branch
+
+em6's developer is working *right now* and was told to land the tightening on the #1360 branch —
+my instruction, from before the coordinator's review existed.
+
+If they push, the PR auto-updates, the head moves, and the coordinator's verification silently
+attaches to a diff nobody has read **while still displaying as approved**. A PR does not visibly
+un-approve itself when its contents change. Nobody would catch it.
+
+Instructed em6: **do not land the tightening on `scion/ca-msg-em6-b2b1b14`.** New branch, off main
+or off the #1360 head if the extraction is a dependency; report which before the developer pushes.
+
+### Not escalated to the user
+
+#1360 is already an open PR — no compare URL needed, and its readiness rides with the next section
+boundary rather than spending a message four minutes after a 1998-rune escalation.
+
+### NEW STANDING RULES
+
+**175.** Ask the forge what a PR's head is; never infer it from a branch-name prefix. A glob matched
+a stale 215-file branch that would have answered every question I asked it, plausibly and wrongly.
+`gh pr view --json headRefName,headRefOid` is the instrument.
+
+**176.** An approval is a statement about a specific diff, not about a branch. A branch that keeps
+moving under an open approval converts a real review into a rubber stamp, and nothing in the UI
+signals it. When a review lands, freeze the branch or move the pending work elsewhere.
+
+**177.** Before merging half of a coupled pair, establish whether the half being merged *changes*
+the asymmetry or merely relocates existing behaviour. Rule 157 forbids shipping the strict half
+alone; it does not forbid shipping a refactor that leaves the mismatch exactly as it was. Read the
+comparison operator, do not infer from the diffstat.
