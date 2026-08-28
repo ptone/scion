@@ -13252,3 +13252,42 @@ Wanted once stable (low-count structural, 8 functions):
 - **DEF-33** latent. **DEF-17 STRUCK. GATE-1 CLOSED.**
 
 No user report this heartbeat: no section boundary, no escalation.
+
+---
+
+## §5fe — PR #1362 (dm-tighten) opened; Gemini's 2 findings rejected on evidence
+
+User opened the dm-tighten PR: **#1362**, `scion/ca-msg-em6-dm-tighten` @ `7caa8e00d`, OPEN, MERGEABLE, Build & Test / golangci-lint / shellcheck / scan-pr / check-changes all PASS (cla/google expected-fail, rule 104).
+
+### The dispute
+gemini-code-assist filed 2 medium findings, at `dm_key_test.go:300` and `:388`. Both say the "mixed-case UUID" test case actually uses a fully canonical lowercase UUID, so `DMConversationKey` will succeed, so the rejection test will FAIL. Both supply a suggested replacement.
+
+**coordinator flagged the discrepancy before acting** — read the diff, saw uppercase `00C04FD430C8`, and asked me to check rather than relaying the finding to em6. Correct call, and the reason this cost one probe instead of a needless force-push.
+
+### Verification (rule 219 — executed, not read)
+**(1) The quote is wrong.** Gemini quotes `6ba7b810-9dad-11d1-80b4-00c04fd430c8`. The file has `6ba7b810-9dad-11d1-80b4-00C04FD430C8` at both :297 and :388. Gemini silently lowercased the string whose case is the entire subject of the test. Two findings, one misquote.
+
+**(2) The prediction is falsified.** Gemini predicts a failing test. All 5 subtests of `TestDMConversationKey_RejectsNonCanonicalUUID` pass, all 3 `reject/` golden-vector subtests pass, Build & Test green.
+
+**(3) Not vacuous either.** Green alone would not settle it — parse-failure and canonicality-failure both yield an error, so the test could pass for the wrong reason. Direct probe of every form:
+
+```
+6ba7b810-...-00C04FD430C8   parse=true roundtrip=false  err=non-canonical UUID for user (shape: uppercase-hex)
+6BA7B810-...-00C04FD430C8   parse=true roundtrip=false  err=... (shape: uppercase-hex)
+{6ba7b810-...c8}            parse=true roundtrip=false  err=... (shape: braced)
+6ba7b8109dad11d180b400c...  parse=true roundtrip=false  err=... (shape: unhyphenated)
+urn:uuid:6ba7b810-...       parse=true roundtrip=false  err=... (shape: urn-prefixed)
+6ba7b810-...-00c04fd430c8   parse=true roundtrip=true   err=<nil>
+```
+`uuid.Parse` **accepts** every non-canonical form — precisely the hazard the fix closes. The test asserts on the substring "non-canonical UUID", which the parse-error branch ("invalid UUID for %s") does not contain, so the assertion genuinely discriminates between the two rejection paths. This test is well built.
+
+**(4) The suggestion is inert.** Gemini's `6bA7b810-9daD-11d1-80b4-00c04fd430c8` produces the identical error and identical shape classification. Applying it would invalidate a green CI run for zero behaviour change.
+
+**RULING: both findings rejected. No changes to the branch. #1362 clear to merge at `7caa8e00d`.**
+
+### Rules
+**Rule 237.** A review comment that quotes the code back at you is quoting the reviewer's *reading*, not the file. Verify the quote against the file before evaluating the argument built on it. An argument can be internally valid and still worthless because its premise was misread.
+
+**Rule 238.** Green tests do not prove a test is non-vacuous when several distinct failure paths produce the same observable outcome. Where two branches both return "an error", assert on something that distinguishes them, and verify by probe which branch actually fired. em6's test already did this via the message substring — that is why the defence was cheap.
+
+**Rule 239.** An automated reviewer's failure mode tends to sit in the same category as the code under review. Here a case-normalisation misread landed on a case-normalisation rejection test. When a bot reviews a lexical-invariant test, suspect the bot applied the very normalisation the test forbids. (Companion to rule 220, which was the same shape in the other direction.)
