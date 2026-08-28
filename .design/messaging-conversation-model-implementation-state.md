@@ -9762,3 +9762,13 @@ that makes it observable.** "Park" is unobservable and an agent can honestly bel
 complied. `sciontool status blocked "..."` is observable in `scion list`. This is the same
 defect as rule 126 in a different channel, and I made it twice against my own written rule —
 which suggests the rule needs to be a habit at dispatch time, not a check at review time.
+
+**§5du addendum — park verified.** em9 emitted the literal command within two minutes and
+confirmed. `scion list --format json` now shows em6, em9, em10 and coordinator all `blocked`.
+Verification did not need to wait for the next sweep after all.
+
+Worth noting *why* it was instant: em9 failed twice at things it had to compose itself (write a
+report and send it; park and emit the park), and succeeded immediately at a string it was told
+to run verbatim. That is not an agent that ignores instructions — it is an agent that loses
+work at every boundary it has to construct the crossing for. Rule 130 is the right response and
+this is the evidence for it: **hand over the exact command, not the intent.**
