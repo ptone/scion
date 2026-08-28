@@ -985,10 +985,16 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// Agent defaults (hub operational agent_defaults section).
 	//
 	// Written unconditionally from the snapshot rather than only-if-non-empty,
-	// so that clearing a value in the DB clears it here too. In file mode
-	// BuildLayer1SnapshotFromFile produces zero agent-defaults fields, so this
-	// assignment writes zeros unless initHubServer pre-seeded AgentDefaults
-	// on the ServerConfig (which it does in hosted mode — ptone/scion#1316).
+	// so that clearing a value in the DB clears it here too.
+	//
+	// In file mode, BuildLayer1SnapshotFromFile produces zero agent-defaults
+	// fields, so this assignment writes zeros. In hosted file/SQLite mode,
+	// the single production caller (reloadSettings, admin_settings.go:403)
+	// overlays the embedded agent defaults onto the snapshot BEFORE calling
+	// ApplySnapshot, so snap.DefaultTemplate and snap.DefaultHarnessConfig
+	// arrive non-zero here and the hosted-mode seed survives. The overlay
+	// is the protection — NOT initHubServer's pre-seed of s.config, which
+	// this function does not read. See ptone/scion#1316.
 	newDefaults := opsettings.AgentDefaultsSettings{
 		DefaultTemplate:      snap.DefaultTemplate,
 		DefaultHarnessConfig: snap.DefaultHarnessConfig,
