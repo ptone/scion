@@ -14364,3 +14364,18 @@ messaging/chat/authz) and held. "Yours" was **inferred** from a name and recent 
 I had labelled the two differently in the message itself, which is the only reason the error cost
 nothing — the recipient knew exactly how much weight to put on each. **Labelling inference as inference
 is not modesty; it is what makes a wrong inference cheap.**
+
+**Ptone confirmed at 10:41: "you are right. ignore message about the auth and messaging."** Routing
+closed. I sent no acknowledgement — a directive that needs no answer does not get one.
+
+**RULE 24 (new). A MESSAGE THAT BUNDLES TWO TOPICS CAN ONLY BE HALF-ANSWERED, AND A HALF-ANSWER LOOKS
+LIKE A WHOLE ONE.** I put the routing question and the four queued items in **one** message to keep my
+volume down, because he has told me my traffic runs long. He replied to the routing half only. That
+reply is now the most recent thing in the thread, so the four items read as *addressed* when they are
+*untouched*. **Volume and separability are different problems and I traded one for the other without
+noticing.** The correct shape was one short message per topic, not one long message for both — brevity
+per message, not fewer messages.
+
+Not re-sending yet. He is awake and five minutes have passed; a nudge now would be the exact behaviour
+he complained about. If the four items are still unanswered when he next goes quiet, they get **one**
+short single-purpose message.
