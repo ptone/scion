@@ -13234,3 +13234,54 @@ useful: the first line that fails, or it deploys.
 **My prediction record tonight: `mktemp` wrong, "seven of ten tools bite" wrong. Both were recalled
 rather than measured, and both were caught by someone I dispatched to falsify me.** That is the process
 working, and it is the second night in a row it has worked in that direction.
+
+### §35.70 — the ci.yml coordination I took off dev2, and what it turned up (02:10)
+
+**I took this item off dev2 explicitly** (*"the shared-infrastructure coordination is mine to handle, not
+yours"*), so it is mine to actually do rather than to have promised. Done. Three results.
+
+**1. THE COORDINATION QUESTION IS CLEAN.** Swept all open upstream PRs for `.github/workflows/ci.yml`.
+One hit: **`GoogleCloudPlatform/scion#1339`** (`ci: guard direct writes to conversation and participant
+tables`, from the `ca-msg-em6` team). It adds **+3/-0 at line ~100, inside an existing job**; ours
+appends a **new job at 182+**. No textual overlap. Merges clean either order. **Nothing for anyone to
+do** — but two teams editing one workflow file unobserved is how a green branch becomes a conflicted one
+overnight, and #60 already cost us a day to that exact shape.
+
+**2. THE CANARY DOES NOT SEPARATE bash-3.2 FROM NOTHING-AT-ALL.** The gate reads:
+
+```
+if "$BASH32" -c 'x=ABC; echo "${x,,}"' >/dev/null 2>&1; then FAIL; fi
+echo "canary ok"
+```
+
+**A missing or non-executable binary fails that command too, so the canary prints "ok".** It separates
+bash 5 from bash 3.2 — the case it was designed for, and my case. It does not separate bash 3.2 from an
+absent interpreter.
+
+**As written I do not believe it is exploitable:** the build step ends with
+`/tmp/bash32/bash --version | head -1` under `set -euo pipefail`, which fails first. **And that is
+exactly the problem — the canary is protected by a DIFFERENT STEP, not by itself.** Which is dev2's own
+item-1 shape, arriving for the **fourth time tonight** and this time *inside the gate itself*: safe
+because curl won't parse it → safe because dict carries no auth header → safe because the expansion
+happened not to strip → **safe because an unrelated step happens to run first.**
+
+**The irony is exact and worth keeping.** Two hours ago I wrote the rule *an instrument must validate
+itself on the interpreter it runs under*. **The canary is mine, and it does not validate itself — it
+validates the interpreter and relies on a neighbour to validate its own preconditions.** dev2 caught the
+same class in `@Z` and fixed it; I shipped it in the very check I added to catch it.
+
+**Sent to rev2 as an INPUT to its open priority item 3, explicitly not as a verdict.** Its item asks what
+makes the canary green while running bash 5; mine asks what makes it green while running nothing.
+Adjacent, not identical. **I am not adjudicating behind a reviewer I dispatched** — that is the process
+correction I was given, and this is the first case where following it costs me the satisfaction of
+closing my own finding.
+
+**3. Two smaller ci.yml items, mine, on the record.** (a) The bash tarball is fetched with **no
+checksum**, then **compiled and executed**. Every `uses:` in this file is SHA-pinned — *the one artifact
+we build and run is the only thing not pinned.* (b) `configure` and `make` redirect to `/tmp` logs that
+are never printed, so a build failure shows an exit code and no output. Same family as the standing
+"no `2>/dev/null` on checks" rule.
+
+**One inference I killed before it spread:** dev2 measured `ftp.gnu.org` unreachable **from our
+container**. GitHub runners are a different network. **The job is not dead on that account**, and anyone
+reading the report without that sentence would conclude it is.
