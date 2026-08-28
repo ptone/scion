@@ -13449,3 +13449,85 @@ collision surface I audited an hour ago stops existing.** A constraint that dele
 **required check will hang every PR that does not touch those paths.** The person who marks it required
 will be reading the workflow file. **Same argument as the fixture — if it is not in the repo it is a
 rumour.**
+
+### §35.75 — §1 STEPS 0–4 PASS ON A STOCK MAC. The blocker is cleared on the machine that broke (02:26)
+
+**ptone, verbatim: *"good news, it script ran, instance deployed, IAP worked."*** Deploy, `run.app` URL,
+IAP, login — on macOS, bash 3.2.57, from `scion/bash32-portability`. **Verified by the maintainer on the
+platform that broke, not by our CI**, which is fortunate because the CI for it still has never run.
+
+**AN IMPORTANT PRECISION I VOLUNTEERED RATHER THAN LET HIM ASSUME.** He ran `edfe61f41`; head is now
+`4827d361`. **The `deploy.sh` change is byte-identical across those commits** — everything since is tests
+and CI. So his run validates the shipping artifact exactly. Had that not been true I would have had to
+tell him his validation was stale, and it is better to be the one who raises that.
+
+**He asked to land it: *"I suppose first we need to land the fixed up script."*** One review round is
+still open — rev2's REQUEST CHANGES was against the old tree and its Required is now dissolved rather
+than fixed. Told him plainly it is minutes, not hours, rather than implying it was ready.
+
+**Collapsed the (a)/(b) decision instead of asking it.** His intent to open a PR makes option (a) — a
+fork-internal PR to force a CI run — largely redundant: the workflow gets its first run in his PR
+anyway, and a red job there is a normal, cheap outcome. **So I asked only for (b)**, one command on the
+machine he is already sitting at. *A decision that answers itself when circumstances change should be
+withdrawn, not asked.*
+
+**Repeated the canary instruction, which I had committed to and nearly lost in the traffic:** if the
+macOS job is green first time, **read the canary line anyway** — an unrun gate passing first time is the
+suspicious outcome.
+
+**TWO NEW FINDINGS FROM HIM, NEITHER BUNDLED INTO #88.**
+
+**#92 — the fresh deploy defaults the runtime profile to "remote (kubernetes)", which is non-functional
+on this tier.** I filed it as a **§1 defect, not a nit**, and the reason is the failure's *position*:
+§1.3 ends *"...and starts a Claude agent."* A green deploy, a working URL, a working login and a dead
+agent is **the most expensive place to fail**, because every signal the operator has says success. Filed
+with four things explicitly NOT established — where the default is written, whether the tier has a
+correct profile to name, whether this is tier-specific or a general hub default (which **decides where
+the fix goes**, since changing a general default for our benefit would break other tiers), and whether
+the operator has any working alternative to pick. **Do not fix past the evidence.**
+
+**Flagged #92 as probably the same family as #37/#48**: hosted mode inheriting a default that only makes
+sense elsewhere. Third instance would make it a class, and the mechanism may already be written down.
+
+**The antigravity harness crashed on launch.** Recorded next to #92 and **explicitly not assumed to share
+its cause.** It may be a consequence of the wrong runtime profile or wholly independent, and merging two
+symptoms before establishing one mechanism is how this project produced #31 (two causes, one bug report)
+and #85's first wrong verdict.
+
+### §35.76 — the instrument was not portable to the platform it certifies (02:25)
+
+**dev2, on the macOS rewrite: both new scripts used `diff --label`, which is GNU diffutils. macOS ships
+BSD diff.** It could not test whether BSD accepts it — **which is precisely why it had to go.** *The tool
+whose job is proving macOS portability must not itself gamble on a GNU-only flag.*
+
+**The failure would not have looked like what it was.** All three divergence cases run that `diff`;
+unsupported flag → exit 2 → `set -e` promotes 2 → `check()` expects 1 → **the self-test fails on macOS
+for a reason unrelated to what it tests.** The self-test added *yesterday* so the instrument would
+validate itself would have gone red on its first real macOS run and sent the next person hunting the
+wrong bug.
+
+**THE COROLLARY, AND IT IS A NEW RULE:** the existing rule was *an instrument must validate itself on the
+interpreter it runs under.* **AN INSTRUMENT MUST ALSO BE PORTABLE TO THE PLATFORM IT CERTIFIES.**
+Self-validation is worthless if the instrument cannot run there at all.
+
+Two pieces of method worth keeping: **`|| true` so the exit status is OURS** — `diff` returns 1 for
+"differs" and 2 for "trouble", and under `set -e` a clean DIVERGENT verdict could read as a crash, the
+same confusion class as a pin that fires because the run aborted. And **CI steps ordered
+instruments-first**: canary, probe `--check`, harness self-test, *then* the suite, so a broken instrument
+fails as itself.
+
+**`ci.yml` is now byte-identical to upstream main** — the job moved to its own workflow file. dev2's
+earlier disclosure about editing shared infrastructure is **retired, not mitigated**, and my `#1339`
+collision audit is retired with it. A constraint that deleted two coordination items.
+
+**Its prediction is on the record BEFORE the run**, which is the only thing that makes a prediction worth
+anything: `CheckGcloudInstances_FailureMessage` will SKIP or branch differently on ptone's Mac, where
+gcloud is installed. If the run contradicts it, that is a finding.
+
+**ONE CORRECTION I ISSUED, on the #80-class environment record.** dev2 wrote that the Go module proxy is
+reachable *"even though ftp.gnu.org and github raw are not."* **I measured: `raw.githubusercontent.com`
+returns 200 and served me the runner-images READMEs; `proxy.golang.org` 200; `ftp.gnu.org` 000; and
+`github.com/bminor/bash` 404, which is a third thing again.** Asked it to re-measure rather than
+asserting it was wrong — containers may differ. **The environment record must say which hosts, not which
+impressions.** "github raw is blocked" is exactly the sentence that later stops someone trying something
+that would have worked.
