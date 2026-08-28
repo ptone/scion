@@ -14826,3 +14826,39 @@ precisely what the profile-layer defect made unreachable). And the table now sep
 `scion start` cost me a third parse-failure-as-output: the agent name is a **positional first argument**,
 not `--name`. Same costume as `--template` earlier. All three PRs verified OPEN and MERGEABLE after the
 push.
+
+### §35.73 — task #97 delivered in 8 minutes; now with a reviewer (13:12)
+
+`sn-initgate-dev` pushed `e858e917` on `scion/task-92-runtime-profile-fix`. **Verified on the remote
+before believing it**: two files (`init.go` +8/-1, `init_test.go` +189), additive, `dc729e2` and
+`54cc98b` both intact. The report matched the tree.
+
+**The developer answered the survey question honestly and it downgraded its own change.** Three
+`InitMachine` callers; every production Cloud Run path already passes `SkipRuntimeCheck: true`, so this
+is **defence in depth, not a live break**, and it said so in the commit message. That is the opposite of
+the pattern I have been correcting all morning — two agents measured the easy half and narrated the hard
+half; this one measured the hard half and let it shrink the claim.
+
+**It also found something my brief got wrong.** I required a byte-for-byte comparison of the seeded file
+against `embeds/default_settings_cloudrun_sandbox.yaml`. That is impossible: **`ensureBrokerID()` mutates
+the file after seeding.** It substituted parsed-YAML assertions on `active_profile`, the profile set, the
+runtime type, and the absence of workstation profiles. I did not check the file's post-seed lifecycle
+before writing the requirement.
+
+**Dispatched `sn-initgate-rev` on the delta only** (process: architect briefs, developer implements,
+reviewer reviews, architect accepts the verdict). Four named checks, two of which are mine to be wrong
+about:
+
+1. **Env set + seam FALSE — a Cloud Run *service*, the multi-node tier — is not covered by either test.**
+   My reading is the predicate is an unchanged two-condition conjunction, so that case still takes the
+   else branch. **Seeding the cloudrun template on a tier that cannot use it would be worse than the bug
+   being fixed**, so this gets confirmed rather than agreed with.
+2. **"Normally" is doing load-bearing work** in the `system_handlers.go:514` row — *"normally finds
+   settings already seeded."* If there is an ordering where `/api/system/init` runs first (first boot,
+   race, wiped `~/.scion`), it IS a live break and the commit message understates it.
+3. Is the parsed-YAML substitution equivalent in strength to the byte comparison it replaced?
+4. Re-run the mutation and read why it went red.
+
+Point 3 is the general worry: **when a required assertion turns out to be impossible, the replacement is
+chosen by the person under time pressure and is never re-derived from the original reason.** The reason
+here was "seeding the wrong template also returns no error." The substitute has to still catch that.
