@@ -9124,3 +9124,64 @@ removing it revealed that the same blank input still arrives by a different rout
 resolve rather than a hand-built struct. A defect that masks a second defect with identical symptoms
 will make the second one look like a regression the day the first is fixed. The strike is the moment
 to check, because that is when you have the mechanism paged in.
+
+---
+
+## §5do — Fleet hygiene: two deleted, one kept, and a default that can take a branch with it
+
+Coordinator asked for `dev-b6b7b9`, `dev-tranche-b-cut` and `review-tranche-b` to be deleted —
+fleet at 44 against a ~46–48 ceiling — conditioned on *"if their work is confirmed landed"*.
+
+That condition is checkable, so I checked it per-agent rather than batch-approving.
+
+`git log --all --author=<name>`:
+
+| agent | commits | disposition |
+|---|---|---|
+| `dev-tranche-b-cut` | 0 | deleted |
+| `review-tranche-b` | 0 | deleted (a reviewer; producing no commits is expected) |
+| `dev-b6b7b9` | **1** — `efb70e04a` | **kept** |
+
+`efb70e04a` is the substance of **PR #1349, open and unmerged**. So for that agent "confirmed
+landed" is simply false, and it was the coordinator's own condition.
+
+The honest counter-argument, which I put in the reply rather than suppressing: the code is safe
+either way, because the branch is pushed to `origin`. What deletion costs is the author's context if
+#1349 draws another review round — and that risk is low, since em6 is alive and authored the last
+fix (`42abb7dff`) itself. But a low risk against a stated condition that is plainly unmet is not a
+trade worth making for one container out of 44. It goes the moment #1349 merges.
+
+### The hazard: `--preserve-branch` implies the default does not
+
+`scion delete --help`: *"Stop and remove one or more agent containers and their associated files and
+**worktrees**"*, with a `-b, --preserve-branch` flag.
+
+The existence of that flag is the finding. A flag named *preserve* implies the default **destroys**,
+and the thing destroyed is a git branch. If `dev-b6b7b9` had been associated with
+`ca-msg-em6-b6b7b9`, a routine hygiene deletion could have deleted the head of an open PR.
+
+Worse, it cannot be checked in advance: `scion list --format json` exposes **no** branch or worktree
+field for any agent — I looked specifically, and `branch` and `worktree` are both absent from the
+record entirely. So the blast radius of a deletion is not observable before you take it.
+
+Passed `--preserve-branch` on both, then verified after rather than trusting the flag:
+`origin/ca-msg-em6-b6b7b9` = `42abb7dff`, `origin/scion/ca-msg-em10-trb` = `822c02e58`, #1349 still
+`OPEN` on the right head. Fleet 44 → 42.
+
+Recommended `--preserve-branch` as the coordinator's default for hygiene deletions. A stale branch
+costs a line of output; a deleted one that mattered costs a tranche.
+
+### Rule 117 (new)
+
+**A flag named `--preserve-X` is a warning that the default destroys X.** Read the destructive
+command's help before the first use in a session, not after something goes wrong, and prefer the
+preserving form whenever the cost of preserving is bounded and the cost of destroying is not. This
+is the operational form of the standing constraint that under-granting is recoverable and
+over-granting is not.
+
+### Rule 118 (new)
+
+**When someone conditions a destructive request on a fact, verify the fact per-item.** "Delete these
+three if their work has landed" is three questions, not one, and batching them is how the one that
+had not landed gets deleted with the two that had. The check here was a single `git log --all
+--author` per name and it changed the answer for one of three.
