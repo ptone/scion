@@ -703,9 +703,10 @@ func TestFormatCloneError(t *testing.T) {
 		if strings.Contains(strings.ToLower(msg), "require authentication") {
 			t.Errorf("network error should not blame authentication, got: %v", err)
 		}
-		// Must contain network-relevant guidance.
-		if !strings.Contains(msg, "network") && !strings.Contains(msg, "Network") {
-			t.Errorf("network error should mention network in guidance, got: %v", err)
+		// Must contain the network guidance — pin the true advice, not
+		// just the absence of the false one.
+		if !strings.Contains(msg, "A network error occurred") {
+			t.Errorf("network error should contain network guidance, got: %v", err)
 		}
 		// Must preserve the original stderr.
 		if !strings.Contains(msg, "Could not resolve host") {
@@ -714,12 +715,17 @@ func TestFormatCloneError(t *testing.T) {
 		t.Logf("CONFIRMED: DNS failure without token → %v", err)
 	})
 
-	// Auth error with no token: the token note should still appear.
+	// Auth error with no token: the token note AND the auth guidance
+	// should both appear. Asserting only the token note would not notice
+	// the guidance vanishing.
 	t.Run("auth error no token mentions token", func(t *testing.T) {
 		err := formatCloneError("fatal: Authentication failed for 'https://github.com/org/repo.git/'", "")
 		msg := err.Error()
-		if !strings.Contains(msg, "GITHUB_TOKEN") {
-			t.Errorf("auth error with no token should mention GITHUB_TOKEN, got: %v", err)
+		if !strings.Contains(msg, "no GITHUB_TOKEN secret configured") {
+			t.Errorf("auth error with no token should mention missing GITHUB_TOKEN, got: %v", err)
+		}
+		if !strings.Contains(msg, "repository read access") {
+			t.Errorf("auth error should contain auth guidance, got: %v", err)
 		}
 		if !strings.Contains(msg, "fatal: Authentication failed") {
 			t.Errorf("expected original stderr in error, got: %v", err)
