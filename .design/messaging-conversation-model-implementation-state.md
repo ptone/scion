@@ -13706,3 +13706,49 @@ Sent to thread `1532864101909528737`, title and body URL-encoded inline, `quick_
 
 ### Ledger
 Open: #1362 merge, marker-gate-2 merge (URL sent), #1259/DEF-34 (external, stalled since Aug 27), DEF-32 identity-linking, DEF-33/34/35 spec, DEF-18 (em9-unify), Tier 2 DEFERRED, tranche H on G-1, DEF-5/6/9/10/11/14/16 and D-G held. Awaiting ptone on posting the #1362 rejection rationale.
+
+---
+
+## §5fo — HEARTBEAT. Nothing external moved. LEDGER SWEEP: **DEF-11 STRUCK**, DEF-9 narrowed, heartbeat's held-list found stale.
+
+`upstream/main` still `42eb91b0f`. All six tips unmoved. #1362 MERGEABLE/green; #1259 still CONFLICTING, last updated 2026-08-27T03:51Z. Marker-gate-2 compare URL sent but no PR opened yet. Every open item is user-gated, so I spent the heartbeat on instruction 8.
+
+### The heartbeat's held list is STALE — two rows on it were already struck
+It names DEF-14 and DEF-16 as held. Both were struck in an earlier sweep (§ at doc lines 9798 and 9806) and re-confirmed today by reading those entries:
+- **DEF-16 — STRUCK.** Both ingress handlers are validate -> write on current main.
+- **DEF-14 — STRUCK**, by a different mechanism than the one it named.
+Carrying struck rows in a recurring prompt is how a closed defect gets re-investigated every cycle. Noting it so the list can be trimmed, not silently ignoring the instruction.
+
+### DEF-11 — **STRUCK**. Re-derived from definition, not from its cached line numbers (rule 243).
+Filed as: the CLI sets `msg.ConversationID` from the resolve endpoint (`cmd/message.go:696`); the Hub sees a supplied ID, skips re-resolution, and hand-builds a `ConversationResult` with an **empty `ExternalRef`** (`handlers_agent_messaging.go:828-832`); `ComputeDivergenceMatch` receives `actualExternalRef == ""`, matches neither branch, and falls through to `routing-type-mismatch` — so every CLI `@<agent>` send counted as a divergence and the read-switch gate (zero mismatches) was unreachable.
+
+Every link in that chain is now absent:
+1. **`ConversationID` appears ZERO times in all of `cmd/`.** The CLI no longer supplies one. *Control:* `cmd/message.go` exists (37KB, 16 funcs) and `ThreadID` matches 6× in it — the grep is live, so the empty result is a real negative (rule 61).
+2. **No `req.ConversationID` and no skip logic** in `handlers_agent_messaging.go`. The request struct has no such field.
+3. **No hand-built `ConversationResult`** in the handler. *Control:* the pattern `ConversationResult{` matches 5 production sites in `pkg/messaging/`, so the grep discriminates.
+4. **All four divergence sites** (`:271`, `:802`, `:1069`, `:1192`) derive `actualRef` from a real `convResult` returned by `ResolveOrCreate*`, which carries the `ExternalRef` **read back from the DB**.
+
+**Checked the second cause before striking (rule 240).** DEF-11's own text warned the fix would not produce agreement while resolver-created rows still had `external_ref = ''` (DEF-8 residue). That is also gone: the inline upsert at `resolve.go:363-366` sets `ExternalRef: extRef` from `DMConversationKey`, with `// No ProjectID — DMs are global, fixing DEF-10`.
+
+**What I am NOT claiming:** that the divergence board is empty in production. I verified the *instrument* no longer manufactures false mismatches; I have not observed the board. The read-switch gate's reachability is now an empirical question rather than a structural impossibility — a real change of status, but not the same as "clean".
+
+Note the mechanism differs from the specced fix. I specced "read the conversation and populate `ExternalRef`". What actually happened is better: the CLI stopped supplying an ID at all, so resolution always runs and the blank is unreachable rather than merely filled. Second time a row has been fixed by a route other than the one I specced (DEF-14 was the first).
+
+### DEF-9 — STILL OPEN, but narrowed. One of its three sub-claims is struck.
+- `AddAddressee`: interface decl (`store.go:1658`) + ent adapter impl (`conversation_store.go:797`), **0 production callers**. STANDS. *Control:* `EnsureParticipant` returns production hits with the same grep shape.
+- `ResolveResult.Unresolved`: declared (`resolve.go:118`) with its `UnresolvedRef` type, **never populated**. STANDS.
+- `FormatNewDelivery` / `FormatLegacyAsNewDelivery`: **zero hits in the entire tree, including tests — the functions have been deleted.** Sub-claim struck: this is no longer uncalled code, it is absent code. The §2.4 formatting contract now has nothing behind it *at all*, which is a cleaner state to build from than dead code that looks live.
+
+### Rows not moved, with reasons (instruction 8)
+- **DEF-5** (no CLI delivery policy for `conv:`/`#thread`) — S4-scoped, mine, unbuilt not undecided. Cannot move before the read-switch.
+- **DEF-6** (scheduled sends cannot address a conversation) — specced as §2.14; needs a build section, blocks nothing before beta.
+- **DEF-10** — half-struck; `ProjectID` omission fixed and cited by name in the code. Remainder bounded to `"no-shared-project"`.
+- **DEF-34** — externally blocked on #1259, stalled 2 days. Second consecutive heartbeat with no movement.
+- **Tranches C-G** — behind em9-unify, which is behind the two open merges.
+
+### Rule
+**Rule 262.** A recurring prompt that lists open work becomes a source of stale truth. Re-derive the list from the ledger each sweep rather than trusting the prompt, and when they disagree say so — otherwise closed rows get re-investigated forever and genuinely open ones inherit false credibility from sitting in the same list.
+
+### Ledger
+Struck this heartbeat: **DEF-11**; DEF-9's `FormatNewDelivery` sub-claim. Confirmed already-struck: DEF-14, DEF-16.
+Open: #1362 merge, marker-gate-2 merge (URL sent, no PR yet), DEF-32 identity-linking, DEF-34/#1259 (external), DEF-33/35 spec, DEF-18 (em9-unify), DEF-5, DEF-6, DEF-9 (narrowed), DEF-10 (half), Tier 2 DEFERRED, tranche H on G-1, tranches C-G held. Awaiting ptone on posting the #1362 rationale.
