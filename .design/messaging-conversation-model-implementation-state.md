@@ -7302,3 +7302,155 @@ the measurement at ~2 hours and flagged that nobody had done it; it took one hea
 practice: before parking on "awaiting user", check whether any pending decision has an empirical gap
 you could close, and close it — but carry the caveats into the recommendation rather than laundering
 a local measurement as a production one.
+
+---
+
+## §5ct. Heartbeat 2026-08-28 08:43 — eighth dead sweep; B3/B4 brief, and BOTH findings are understated
+
+Zero movement for the eighth consecutive heartbeat. `upstream/main` `f4d02461b` (its tip commit is
+`#1342`, merged 2026-08-27 22:31 — nothing has landed in ~10h). All five manager branch tips
+unchanged: `em10-trb d767d66c3`, `em9-unify e704b2feb`, `em6-def31 facb332b4`, `em6-ci-guard
+e93a58e37`, `em6-def26 bd5e492c1`. Three managers `blocked`. #1338/#1339/#1340 open, all `UNSTABLE`
+(mergeable, per rule 86). `gh pr list --head scion/ca-msg-em10-trb --state all` → `[]`: **the
+tranche B PR has still not been opened.** Nothing to strike from the ledger; every held row's reason
+is unchanged from §5cl.
+
+**Two false alarms filtered before they cost anything.**
+
+1. The branch-tip loop reported all five manager branches `MISSING`. They are not missing — the
+   remote refs carry a `scion/` prefix I had dropped. Rule 85 again, in its cheapest possible form:
+   `MISSING` did not mean deleted, it meant I asked with the wrong ref name. Re-queried with the
+   prefix; all five present and unchanged.
+2. A stale artifact from the 03:48 mutation run showed `f3guard` **SURVIVED** — apparently
+   contradicting the 11/11 on which I approved B5. It does not. §5ch recorded exactly that 10/11,
+   and §5ci line 6557 records the f3guard spot-check that closed it to 11/11 once the probe actually
+   exercised the guard. **I read the ledger instead of re-deriving from the artifact**, which is the
+   whole reason the ledger is authoritative. An out-of-date intermediate file is not a new finding.
+
+### Idle-window work (rule 88): B3/B4 brief — both findings verified and both are worse than recorded
+
+Probes saved: `repro/b3_noncanonical_probe_test.go`, `repro/b4_divergence_probe_test.go`. Both were
+run against the tranche B tip in a throwaway `/tmp/b34` worktree (now removed), and **both carry a
+positive control**, because a probe whose value is that everything fails is worthless until you show
+the function can succeed (rule 61/81).
+
+#### B3 — the classifier uses "parses" as a proxy for "is canonical". It is not one.
+
+`dm_migration.go:130 classifyConversation` routes on `ParseDMKey(external_ref) == nil` →
+`convClassKindEncoded`, i.e. *already migrated, leave alone*. Only a **parse failure** reaches
+`stepRekeyOldFormat`. So any key that parses but is not the canonical rendering is classified as
+healthy and **keeps its non-canonical `external_ref` forever.**
+
+Measured — control first, then the defects:
+
+| form | key shape | result |
+|---|---|---|
+| **canonical (control)** | `dm:agent:<a>:user:<u>` | **PARSE_OK CANONICAL** |
+| uppercase UUID | `…:user:2222-…-AAAAAAAAAAAA` | PARSE_OK **NOT_CANONICAL** |
+| unhyphenated UUID | `dm:agent:1111…1111` (32 hex) | PARSE_OK **NOT_CANONICAL** |
+| wrong token order | `dm:user:<u>:agent:<a>` | PARSE_OK **NOT_CANONICAL** |
+| braced UUID | `dm:agent:{1111-…}:user:<u>` | PARSE_OK **NOT_CANONICAL** |
+
+**Four forms, not the three the ledger recorded.** `uuid.Parse` is liberal — it accepts uppercase,
+unhyphenated and braced renderings — while `DMConversationKey` normalises through `uuid.String()`.
+Every divergence between those two liberalities is a silently-unmigrated row.
+
+**A fifth class, and this one is counted as a success-adjacent statistic rather than a failure.**
+Uppercase *kind* (`dm:Agent:…`) does **not** parse (`ParseDMKey` looks up `validDMKinds` without
+lowercasing, unlike `DMConversationKey` which lowercases first). So it is classified
+`convClassOldFormat` and handed to `stepRekeyOldFormat` — which assumes the legacy two-segment shape
+`dm:<id1>:<id2>`, does `SplitN(body, ":", 2)`, gets `["Agent", "<uuid>:user:<uuid>"]`, fails
+`isValidUUID("Agent")`, and increments **`result.Unparseable`** with no error string appended. The
+row is skipped and the operator sees a counter, not a defect.
+
+**Why this is a gate item and not cosmetics.** A `direct` conversation's `external_ref` **is** its
+ACL (DEF-29). `DeriveConversationKey` case 1 *correctly* refuses a non-canonical `dm:` key — rule 70,
+differ means error, never rewrite. Correct, and it means these rows are **permanently unresolvable**:
+every subsequent message derives the canonical key, resolves a *different* row, and the conversation
+**forks** — history splits in two while the old row's participant list keeps advertising a
+conversation nobody writes to. Fail-closed on authorization, yes; silently bifurcated on data. And
+the migration is the one sanctioned exception licensed to fix exactly this, which is why it skipping
+them is the defect rather than a conservative choice.
+
+**Therefore B3 is a required precondition of the S4 read-switch**, alongside B10's flip-to-deny.
+Record it on the gate list. Once `conversation_id` is load-bearing, an unresolvable direct row is
+not a fork, it is an outage for those two principals.
+
+**Instruction to the manager:** classify on **round-trip**, not on parse. `ParseDMKey` then
+`DMConversationKey`; if the re-derivation differs from the stored string, the row is
+`convClassNonCanonical` and must be re-keyed through the merge-or-rekey path. **Watch for the wrong
+fix:** do not make `ParseDMKey` stricter. It is on the authorization path, and tightening it there
+converts four classes of stale-but-harmless row into four classes of denial for users who have done
+nothing wrong. The liberality belongs where it is; the *classifier* is what must stop trusting it.
+Golden vectors for all four forms plus the uppercase-kind fifth, and the canonical control.
+
+#### B4 — the DM divergence gate cannot return match, in three distinct ways
+
+Measured, control last:
+
+| case | match | reason |
+|---|---|---|
+| DM, no thread_id | **false** | `dm-routing-mismatch: old=1111…:2222… new=agent:1111…:user:2222…` |
+| DM, sort-skewed pair | **false** | `dm-routing-mismatch: old=0000…:1111… new=agent:1111…:user:0000…` |
+| DM carried in thread_id | **false** | `routing-type-mismatch: old=thread:dm:agent:… new=dm:agent:…` |
+| **thread (control)** | **true** | `thread-routing-agreement` |
+
+The control matters: the function is not simply dead. Threads agree. **It is DMs, and only DMs, that
+are structurally incapable of agreement** — so the gate reports 100% divergence on the exact traffic
+class the migration exists to serve, and a reader watching that counter concludes the new model is
+catastrophically broken when the comparison is what is broken. Rule 73 explains the green suite.
+
+The ledger recorded one cause. There are three:
+
+1. **Token format.** `OldRoutingFromMessage` emits raw sorted IDs; `external_ref` carries
+   `<kind>:<uuid>` tokens. Never equal.
+2. **Sort basis — and this is the trap.** Old sorts on raw UUIDs; canonical sorts on the composite
+   `kind:uuid`, and since `"agent:" < "user:"` a mixed pair **always** renders agent-first
+   regardless of UUID. The sort-skew row above is the proof: strip the kind tokens and the two
+   sides *still* disagree, because they are ordered on different keys. **The obvious fix — strip
+   `agent:`/`user:` from the new side and compare sorted raw pairs — converts a 100% false-positive
+   rate into roughly 50%.** That is strictly worse: 100% is obviously instrumentation, 50% looks
+   like a real and terrifying production signal. Say this to the manager explicitly; it is the fix
+   a competent engineer reaches for first.
+3. **DMs carried in `thread_id`.** `DeriveConversationKey` case 1 exists precisely because a `dm:`
+   key can arrive in `ThreadID`. When it does, `OldRoutingFromMessage` sees `threadID != ""` and
+   returns early with `thread:dm:…`, so the comparison never reaches the DM branch at all and
+   reports `routing-type-mismatch`. **This class is not in the ledger's description of B4.**
+
+**Instruction:** compare on a canonicalised basis — put the old side through `DMConversationKey`
+using the message's principal kinds and compare *keys*, and make `OldRoutingFromMessage` detect a
+`dm:` prefix in `threadID` and classify it as DM rather than thread.
+
+**The tautology hazard, and the line to hold.** `ComputeDivergenceMatch`'s docstring makes a promise
+worth keeping: `actualExternalRef` comes from the database, not from reconstructing inputs. Deriving
+the expected key in the comparator edges toward the tautology that promise guards against. The line:
+the old side must be rebuilt from the **message row's own stored sender/recipient/kind columns, read
+back from the DB**, never from the in-memory `KeyInputs` the resolve step just used. That keeps the
+gate testing what it is for — *did we resolve the right row* (wrong row, stale key, upsert
+collision) — while leaving derivation itself to the golden vectors, which is where it belongs. A
+comparator fed from the same in-memory struct that wrote the row tests nothing and will be green
+forever.
+
+**Open question for the manager, not for me:** `OldRoutingFromMessage` takes no kinds, so fixing (1)
+and (2) requires the principal kinds at the call site. If the message row does not persist them,
+this needs threading and the sub-tranche grows. Answer this with a schema read **before** starting,
+and report back if the kinds are not available — that changes the shape of the fix, not just its
+size.
+
+**Acceptance for B3/B4:** each pinned by a test that fails when that fix **alone** is reverted (rule
+65/78), mutation-verified with a positive control (rule 81), and — rule 87 — **the mutation run must
+name its build tags, and must be performed under `-tags no_sqlite` as well as default**, since
+`pkg/messaging` is currently untagged but `pkg/hub` is not and this sub-tranche may touch both. B4
+additionally requires a test asserting a **true** match on a real DM pair; a suite that only asserts
+mismatches passes against a comparator that is still incapable of agreeing.
+
+**Not dispatched.** Same reasoning as §5cm/§5cn: tranche B's first cut is unmerged and this builds
+directly on `dm_migration.go` and `divergence.go`, both of which it changes. Dispatches when the PR
+lands.
+
+### Rule 89 (new)
+
+**A classifier that routes on "does it parse" is asserting that the parser and the canonical
+constructor have identical liberality. Prove that, or route on round-trip.** Parsers are written to
+be permissive and constructors to be strict; the gap between them is invisible in review because
+both functions are individually correct. B3 is that gap, and it is four forms wide.
