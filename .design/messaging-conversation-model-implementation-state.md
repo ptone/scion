@@ -7035,3 +7035,71 @@ escalation the moment a C branch is proposed for landing.
 
 **Consequence for scheduling:** C cannot be dispatched until B lands, and now for a second and
 stronger reason than "avoid a rebase" — C's re-cut baseline does not exist until B is on main.
+
+---
+
+## §5cp. Heartbeat 2026-08-28 06:43 — MY APPROVAL WAS INCOMPLETE: B5's tests are invisible to CI
+
+Fourth dead sweep (main, tips, roster, PRs all unchanged; tranche B PR still unopened). Nothing owed
+by me to the user; both open questions sit with them. Used the window to audit my own tranche B
+approval and found a hole in it.
+
+### The finding
+
+I approved B5 on **11/11 mutations killed** — run with **default build tags**. CI runs
+`make test-fast` → `go test -tags no_sqlite ./...`. I never asked whether CI executes those tests.
+It does not. On the tranche B tip `d767d66c3`:
+
+    $ go test -tags no_sqlite ./pkg/hub/ -run '<the three B5 tests>' -v
+    testing: warning: no tests to run
+    ok   .../pkg/hub  0.128s [no tests to run]
+
+    # POSITIVE CONTROL, same tree, default tags:
+    === RUN   TestChatNotifier_DMReceived_ResolvesAgentSlugFromSenderID   --- PASS
+    === RUN   TestBroadcast_B5F1_SpoofedSenderDoesNotDeriveConversationKey --- PASS
+    === RUN   TestBroker_R3b_WarnOnEmptySenderID                          --- PASS
+    ok   .../pkg/hub  3.479s
+
+Cause: `chat_notifications_test.go`, `handlers_agent_messaging_test.go` and `messagebroker_test.go`
+each carry `//go:build !no_sqlite`, and those three files hold **every** test pinning B5 — the
+auth-derived DM key, the broadcast ingress hardening, the `SenderID` self-skip. `pkg/messaging`'s
+three test files are untagged and do run (9 tests under CI flags), so the migration/divergence side
+is covered.
+
+**Consequence: tranche B lands green having never executed a single one of its security tests, and
+the fix can be reverted later with CI still green.** That is rule 65's condition — delete the fix,
+suite stays green — lifted from the suite level to the CI level.
+
+This does not make tranche B wrong. Code and tests are both good. They simply buy no CI regression
+protection.
+
+### Why I missed it, stated plainly
+
+§5cf already established that the `no_sqlite` tag compiles files out and the job still passes; I
+wrote that finding myself. I then approved a branch without applying it to that branch's own tests.
+**Knowing a failure mode is not the same as checking for it** — the check has to be attached to the
+approval, not to the memory. Rule 81 said pair every evidentiary green with `-v` showing `=== RUN`;
+I did that for the mutations and not for CI's invocation of them, which is the one that governs
+after I stop looking.
+
+### RULE 87 (new)
+
+**"Test the fix under the configuration that will run it, not the one you happen to be in."** A
+mutation score is only as good as the tag set, GOOS, and invocation that produced it. Before signing
+off any branch, run its own tests the way CI runs them and confirm `=== RUN` appears for the tests
+you are relying on. Standing addition to the approval checklist: **mutation evidence must name the
+build tags it was gathered under**, and if those differ from CI's, the branch is unprotected
+regardless of the score.
+
+### Escalated to the user (1466 runes, thread 1541161053118005308)
+
+Sent because it is a genuine escalation, not FYI: it is a defect in the safety net for work they are
+about to merge, and it **changes the character of a decision already in front of them** — the CI
+sqlite-gap options read as coverage hygiene, and are in fact the reason a security fix would land
+unprotected. I supplied the fact that moves the stakes and explicitly did **not** re-argue the three
+options, which would have been pressing. Offered the choice to hold tranche B until its tests are
+CI-visible; the compare URL stands either way. Did not touch the authz A/B/C question.
+
+**Ledger effect:** the CI sqlite-gap row is promoted from housekeeping to a **gate on tranche B's
+regression protection**. It does not block the merge — that remains the user's call — but it now
+blocks "tranche B is protected", which is a different claim from "tranche B is correct".
