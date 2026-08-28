@@ -7454,3 +7454,135 @@ lands.
 constructor have identical liberality. Prove that, or route on round-trip.** Parsers are written to
 be permissive and constructors to be strict; the gap between them is invisible in review because
 both functions are individually correct. B3 is that gap, and it is four forms wide.
+
+---
+
+## §5cu. Heartbeat 2026-08-28 09:13 — ninth dead sweep; B8 strikes, B4's green suite explained, and a NEW finding B15
+
+State unchanged for the ninth consecutive heartbeat: `upstream/main` `f4d02461b`, all five manager
+tips identical (`em10-trb d767d66c3`, `em9-unify e704b2feb`, `em6-def31 facb332b4`, `em6-ci-guard
+e93a58e37`, `em6-def26 bd5e492c1`), three managers `blocked`, #1338/#1339/#1340 open and `UNSTABLE`,
+tranche B PR still unopened. Ledger reasons unchanged.
+
+Idle-window work (rule 88) went to the last two tranche B sub-tranches. It produced one strike, one
+root-cause, one correction to my own suspicion, and one finding that is bigger than the row it came
+from.
+
+### NEGATIVE RESULT (with its control): the suspected B5 residue in the broker path does NOT exist
+
+`messagebroker.go:465-466` and `:640` derive the principal **kind** from
+`PrincipalKindFromAddress(msg.Sender)` — from the *display label*, while the ID comes from
+`msg.SenderID`. Against the standing rule that `Sender` is a label and `SenderID` is the identity,
+and given that the kind is half of the DM key and the key is the ACL, this reads as B5 surviving in
+the broker. A forged `Sender: "user:…"` on an agent-authenticated request would key
+`dm:user:<agentUUID>:…` — a different conversation from the one the handler stamped.
+
+**It does not hold, and I checked before writing it down.** At `handlers_agent_messaging.go:548-559`
+and `:1260-1271`, **`Sender` and `SenderID` are overwritten together from the authenticated
+identity** before anything is published, so the label reaching the broker is server-stamped and its
+kind is trustworthy. On `handlers_broker_inbound.go:126-144` the `user:` branch resolves the email
+to a `SenderID` from the DB, so kind and ID are consistent by construction; the non-`user:` branches
+are HMAC-trusted infrastructure by explicit design.
+
+**Control for the negative:** the `\.Sender = ` grep that found nothing incriminating is the same
+grep that surfaced the known B5 stamping sites at 548-559 and 1260-1271. The instrument demonstrably
+hits when there is something to hit, so its silence elsewhere is evidence rather than absence of
+evidence (rule 61). Recorded so the next reviewer does not re-derive this — the code *looks* wrong
+at the point of use and is correct only because of a stamp 100 lines upstream in another file. That
+distance is worth a comment at `messagebroker.go:640` and I will ask for one.
+
+### B8 — STRIKE. Already mitigated, and mitigated well.
+
+"Two key-construction paths" is closed. `directMessageExternalRef` is unexported, documented as the
+legacy pre-DEF-8 shape, and **has zero non-test callers** — and `key_consolidation_test.go` pins
+that with **AC-DEF15-1**, an architectural test asserting the helper stays confined to
+`divergence.go`. That is the right kind of fix: not a cleanup that decays, but a test that fails
+when the second path comes back. **B8 struck from the tranche B ledger.**
+
+### B4 — the mechanism behind the green suite, which is the place to start the fix
+
+§5bv recorded "green suite explained by rule 73" without the mechanism. It is this:
+`divergence_test.go:177,213,245` build the *expected production value* with
+`actualExternalRef := directMessageExternalRef("sender", "recip")` → `dm:recip:sender` — the
+**legacy two-segment format**. `OldRoutingFromMessage` emits `sender-recipient:recip:sender`. Strip
+the prefixes and both sides read `recip:sender`, so the comparison matches. **The tests are green
+because the fixture builds a key production no longer writes.** Production writes
+`DMConversationKey`'s kind-encoded form, which §5ct measured as incapable of matching.
+
+**So the first commit of the B4 fix is to change the fixture to `DMConversationKey` and watch the
+suite go red.** That converts B4 from a claim into a failing test before a line of production code
+moves, and it means the eventual green is meaningful. A fix landed against the current fixture would
+be unfalsifiable. This is rule 73's canonical shape: the test agreed with the code because both were
+asked the same wrong question.
+
+### B12 — the two broker resolve sites disagree with each other
+
+`messagebroker.go:465` derives **both** kinds via `PrincipalKindFromAddress` (sender *and*
+recipient). `messagebroker.go:640` (`deliverToAgent`) derives the sender kind the same way but
+**hardcodes the recipient kind as `"agent"`**, and additionally skips resolution entirely when
+`msg.Broadcasted`. Two sites, one sink, two different rules for constructing the same ACL. Rule 77:
+this is the sibling-ingress shape again, and the instruction matches B1's — **one shared resolve
+helper, both sites routed through it**, not two hand-maintained copies that already differ.
+
+### B13 — confirmed, and it carries a second defect
+
+`processMentions` (`handlers_agent_messaging.go:1462-1580`) builds its `storeMsg` with **no
+`ConversationID` and no resolve call** — grepped the whole function body: zero occurrences. Mention
+messages are permanently unconversationed.
+
+Second defect in the same function: `s.events.PublishUserMessage(ctx, storeMsg)` at `:1538` runs
+**unconditionally, including when `CreateMessage` returned an error**. The author knew persistence
+could fail — `MarkMessageFailed` at `:1568` is guarded by `if persisted`. So a message that does not
+exist in the store is published to the eventbus under a `storeMsg.ID` referencing no row, and every
+subscriber (delivery, chat notifications, divergence logging) acts on a phantom. Guard the publish
+with `persisted` too, or hoist the check.
+
+### B15 — NEW FINDING. Seven of thirteen message-creation paths never stamp `conversation_id`.
+
+Enumerated every non-test `CreateMessage` call site against every `ConversationID` assignment in
+`pkg/hub`. **13 creators, 6 stamped, 7 unstamped:**
+
+| unstamped site | message class |
+|---|---|
+| `handlers_agent_messaging.go:1406` | agent → agent |
+| `handlers_agent_messaging.go:1537` | mentions (= B13) |
+| `handlers_broker_inbound.go:269` | **Discord / Telegram inbound** |
+| `handlers_chat_v2.go:1071` | web chat |
+| `handlers_chat_v2.go:1153` | web chat mentions |
+| `handlers_chat_v2.go:1246` | web chat DM / thread |
+| `notifications.go:495` | agent → user notification DM |
+
+Every one carries a real sender and recipient identity — they are exactly the shape that should own
+a conversation. B13 is not one handler that was missed; it is **one visible instance of a class**,
+and the ledger recorded the instance.
+
+**Why this is a gate item, and the sharpest form of the argument.** Today an absent
+`conversation_id` is benign — dual-write, old model still authoritative. At the S4 read-switch it
+means **invisible**. That is fail-closed, which is the right direction, but it is an outage for web
+chat, integrations and notifications simultaneously. And
+`handlers_broker_inbound.go:243-246` states in its own comment that it exists as the **F5 fix** so
+that "messages from external channels (Discord, Telegram) appear in the web chat — both live and
+after a refresh." **S4 would silently undo F5.** A regression with a paper trail in the comment of
+the very code that regresses is the cheapest possible thing to prevent and the most embarrassing to
+ship.
+
+**B15 is a required precondition of the S4 read-switch**, joining B3 (§5ct) and B10's flip-to-deny.
+Added to the gate list. The deliverable is not seven patches: it is **an enumeration test** — walk
+every `CreateMessage` call site and assert each either stamps a `conversation_id` or appears on an
+explicit, justified exemption list (broadcasts are the one known legitimate exemption). Seven
+patches decay the moment someone writes the fourteenth handler; the enumeration test does not.
+
+Note also `server.go:2906` sets `SenderID = "SCHEDULER"`, which is not a UUID, so
+`DMConversationKey` refuses it and scheduler-originated messages can never carry a conversation.
+That is correct fail-closed behaviour on the derivation path and must **not** be "fixed" by minting
+a synthetic UUID — but it does mean the scheduler needs a decision on the exemption list rather than
+an accident.
+
+### Rule 90 (new)
+
+**When a defect is found in one handler, enumerate the handlers before writing the fix.** The
+dual-write was added per-handler as each was touched, so its coverage records the order the code was
+visited, not a decision about which messages belong to conversations. Coverage that accumulated by
+visitation always has holes shaped like "the files nobody had a reason to open" — and those are
+exactly the integration surfaces this project exists to serve. The countermeasure is an enumeration
+test, not a seventh patch.
