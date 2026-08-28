@@ -976,11 +976,19 @@ di_main() {
   # ===================================================================
   echo "==> Step 5b: Granting instance SA permissions..."
 
-  gcloud projects add-iam-policy-binding "${DI_PROJECT}" \
+  if gcloud projects add-iam-policy-binding "${DI_PROJECT}" \
     --member="serviceAccount:${instance_sa}" \
     --role=roles/logging.viewer \
-    --quiet > /dev/null
-  echo "    Granted roles/logging.viewer to ${instance_sa}"
+    --quiet > /dev/null 2>&1; then
+    echo "    Granted roles/logging.viewer to ${instance_sa}"
+  else
+    echo "    WARNING: could not grant roles/logging.viewer to ${instance_sa}" >&2
+    echo "    The hub's log viewer UI will not work until this role is granted." >&2
+    echo "    The deploy is otherwise complete. To grant manually:" >&2
+    echo "      gcloud projects add-iam-policy-binding ${DI_PROJECT} \\" >&2
+    echo "        --member=serviceAccount:${instance_sa} \\" >&2
+    echo "        --role=roles/logging.viewer" >&2
+  fi
 
   # ===================================================================
   # Step 6: Read back and print effective access
