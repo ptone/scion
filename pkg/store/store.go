@@ -1788,8 +1788,14 @@ type AgentCredentialStore interface {
 	// UpdateAgentCredentialEntitledKeys records the set of secret key names
 	// this session is entitled to fetch. Called by the dispatcher after secret
 	// resolution, using the JTI hash of the token that was just generated.
-	// Returns ErrNotFound if the credential doesn't exist.
-	UpdateAgentCredentialEntitledKeys(ctx context.Context, jtiHash string, keys []string) error
+	//
+	// agentID scopes the update: the credential must belong to the given agent.
+	// This prevents a hash-computation bug from silently writing entitlement
+	// onto a different agent's credential — the mismatch produces ErrNotFound
+	// rather than a cross-agent entitlement grant.
+	//
+	// Returns ErrNotFound if no credential matches (jtiHash, agentID).
+	UpdateAgentCredentialEntitledKeys(ctx context.Context, jtiHash string, agentID string, keys []string) error
 }
 
 // =============================================================================

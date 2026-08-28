@@ -149,11 +149,17 @@ func (s *AgentCredentialStore) PurgeExpiredAgentCredentials(ctx context.Context,
 }
 
 // UpdateAgentCredentialEntitledKeys records the set of secret key names
-// this session is entitled to fetch. Looks up by JTI hash (the token's
-// identity) and sets the entitled_secret_keys JSON column.
-func (s *AgentCredentialStore) UpdateAgentCredentialEntitledKeys(ctx context.Context, jtiHash string, keys []string) error {
+// this session is entitled to fetch. Looks up by (JTI hash, agent ID)
+// and sets the entitled_secret_keys JSON column.
+//
+// The agent ID scoping prevents a hash-computation bug from silently
+// writing entitlement onto a different agent's credential.
+func (s *AgentCredentialStore) UpdateAgentCredentialEntitledKeys(ctx context.Context, jtiHash string, agentID string, keys []string) error {
 	n, err := s.client.AgentCredential.Update().
-		Where(agentcredential.TokenJtiHashEQ(jtiHash)).
+		Where(
+			agentcredential.TokenJtiHashEQ(jtiHash),
+			agentcredential.AgentIDEQ(agentID),
+		).
 		SetEntitledSecretKeys(keys).
 		Save(ctx)
 	if err != nil {

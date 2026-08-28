@@ -57,7 +57,7 @@ func TestUpdateAgentCredentialEntitledKeys(t *testing.T) {
 		cred := createTestCredential(t, s, "jti-hash-set-keys")
 
 		keys := []string{"API_KEY", "DB_PASSWORD", "GEMINI_API_KEY"}
-		err := s.UpdateAgentCredentialEntitledKeys(ctx, cred.TokenJTIHash, keys)
+		err := s.UpdateAgentCredentialEntitledKeys(ctx, cred.TokenJTIHash, cred.AgentID, keys)
 		require.NoError(t, err)
 
 		// Read back and verify
@@ -69,7 +69,7 @@ func TestUpdateAgentCredentialEntitledKeys(t *testing.T) {
 	t.Run("set empty keys (entitled to zero secrets)", func(t *testing.T) {
 		cred := createTestCredential(t, s, "jti-hash-empty-keys")
 
-		err := s.UpdateAgentCredentialEntitledKeys(ctx, cred.TokenJTIHash, []string{})
+		err := s.UpdateAgentCredentialEntitledKeys(ctx, cred.TokenJTIHash, cred.AgentID, []string{})
 		require.NoError(t, err)
 
 		got, err := s.GetAgentCredentialByJTIHash(ctx, cred.TokenJTIHash)
@@ -88,20 +88,33 @@ func TestUpdateAgentCredentialEntitledKeys(t *testing.T) {
 		assert.Nil(t, got.EntitledSecretKeys, "newly created credential should have nil (NULL) entitled keys")
 	})
 
-	t.Run("not found returns ErrNotFound", func(t *testing.T) {
-		err := s.UpdateAgentCredentialEntitledKeys(ctx, "nonexistent-jti-hash", []string{"KEY"})
+	t.Run("not found returns ErrNotFound for unknown hash", func(t *testing.T) {
+		err := s.UpdateAgentCredentialEntitledKeys(ctx, "nonexistent-jti-hash", "agent-1", []string{"KEY"})
 		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("not found returns ErrNotFound for wrong agent (cross-agent guard)", func(t *testing.T) {
+		cred := createTestCredential(t, s, "jti-hash-cross-agent")
+
+		// Try to update with a different agent ID — must fail
+		err := s.UpdateAgentCredentialEntitledKeys(ctx, cred.TokenJTIHash, "wrong-agent-id", []string{"KEY"})
+		assert.ErrorIs(t, err, store.ErrNotFound, "update with wrong agent ID must return ErrNotFound")
+
+		// Verify the credential was not modified
+		got, err := s.GetAgentCredentialByJTIHash(ctx, cred.TokenJTIHash)
+		require.NoError(t, err)
+		assert.Nil(t, got.EntitledSecretKeys, "credential must remain NULL after failed cross-agent update")
 	})
 
 	t.Run("overwrite existing keys", func(t *testing.T) {
 		cred := createTestCredential(t, s, "jti-hash-overwrite")
 
 		// Set initial keys
-		err := s.UpdateAgentCredentialEntitledKeys(ctx, cred.TokenJTIHash, []string{"KEY_A", "KEY_B"})
+		err := s.UpdateAgentCredentialEntitledKeys(ctx, cred.TokenJTIHash, cred.AgentID, []string{"KEY_A", "KEY_B"})
 		require.NoError(t, err)
 
 		// Overwrite with different set
-		err = s.UpdateAgentCredentialEntitledKeys(ctx, cred.TokenJTIHash, []string{"KEY_C"})
+		err = s.UpdateAgentCredentialEntitledKeys(ctx, cred.TokenJTIHash, cred.AgentID, []string{"KEY_C"})
 		require.NoError(t, err)
 
 		got, err := s.GetAgentCredentialByJTIHash(ctx, cred.TokenJTIHash)
@@ -118,7 +131,7 @@ func TestEntitledSecretKeysRoundTrip(t *testing.T) {
 	cred := createTestCredential(t, s, "jti-hash-roundtrip")
 
 	keys := []string{"SECRET_1", "SECRET_2", "SECRET_3"}
-	err := s.UpdateAgentCredentialEntitledKeys(ctx, cred.TokenJTIHash, keys)
+	err := s.UpdateAgentCredentialEntitledKeys(ctx, cred.TokenJTIHash, cred.AgentID, keys)
 	require.NoError(t, err)
 
 	got, err := s.GetAgentCredentialByJTIHash(ctx, cred.TokenJTIHash)
