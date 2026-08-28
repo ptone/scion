@@ -14754,3 +14754,75 @@ Replaced the predicted table with the measured one, added row 6 on `cloudrun-ins
 seventh row, and made the missing assertion a **requirement**: call `resolveManagerForOpts`, assert which
 manager comes back, do not restate the trace in a comment. If ptone says (a) the work starts from
 measurements rather than from my predictions.
+
+### §35.72 — the four review findings adjudicated; two were not what the report said (13:05)
+
+Coordinator relayed four MEDIUM findings on the three now-open upstream PRs. **I adjudicated all four
+before acting on any of them.** Two came back different from the report, which is the argument for
+adjudicating rather than relaying.
+
+| # | Finding | Verdict after adjudication |
+|---|---|---|
+| #1350 | `SHELL_DIFFERENTIAL_SELFTEST` not exported | **Real but narrower.** Redundancy, not incorrectness. |
+| #1351 | `printf -v` listed unsupported on 3.2.57 | **Real, and a symptom of something larger.** |
+| #1351 | "§1 step 5" is a broken reference | **Real.** Target verified as §10 step 5. |
+| #1352 | `init.go` does not short-circuit on the Cloud Run env | **Real as reported.** |
+
+**#1350 is narrower than reported.** The report says nested invocations "miss the env var". The guard at
+`shell-differential.sh:146` sits *after* the `--self-test` block, which exits at `:131`; the prefix
+assignment at `:148` puts the variable in the child's **environment**, and environment variables reach
+grandchildren without `export`. So the four-argument entry point is already correct. The gap is only the
+**direct** `--self-test` invocation: `check()` at `:107` spawns four-argument runs, each hits `:146`,
+each launches a whole extra self-test. It terminates and **no verdict changes**. Pin: the banner count
+must be 1; it is 5.
+
+**#1351's `printf -v` is the interesting one, because the defect is mine and it is a mechanism, not a
+typo.** The reviewer is right that `printf -v` arrived in bash 3.1. Checking it, I found the bigger
+problem: **`scripts/dev/bash32-regex-probe.sh` exercises none of those ten constructs.** What was
+measured on the Darwin hardware was the *version string*. The feature list beside it was written from
+release history and placed under a column headed **"Measured"**.
+
+**That is rule 4 and rule 22 in my own document, and I did not catch it in four review rounds.** A list
+of things a shell cannot do is the easiest claim to write from memory and the hardest to notice is
+unverified — **every entry is a prohibition, so nobody ever trips over it.** A wrong prohibition is
+silent by construction. That is a new instance of a known class and it deserves its own rule.
+
+**RULE 28: AN UNVERIFIED PROHIBITION IS INVISIBLE. A CLAIM THAT SOMETHING CANNOT BE DONE IS NEVER
+FALSIFIED BY USE, ONLY BY MEASUREMENT.** Positive claims get exercised by the people relying on them;
+negative ones just quietly narrow what everyone builds.
+
+I **did not** correct the row from my own recollection, having spent the last hour overturning two
+agents for exactly that. `raw.githubusercontent` is blocked here, Savannah times out, and our `gh` token
+is an installation token that 404s outside the org — so I could not cite the changelog. But the branch
+now has a **`macos-15` runner** (`.github/workflows/macos-bash32.yml:122`) with native bash 3.2.57, so
+the honest answer is to measure it. Dispatched.
+
+**The trap I named in that brief, because it would have produced a clean fake pass:** several of these
+constructs are **parse** errors in 3.2, not runtime errors, and a parse error kills the whole script
+before line one. Probe them in one script and you measure a single parse failure and report it as nine
+confirmations — output indistinguishable from the expected result. One subprocess per construct, plus a
+control that must succeed.
+
+**#1352 is real as reported, and the reason is worth stating precisely.** `init.go:588` is
+`if opt.SkipRuntimeCheck && isCloudRunSandboxEnvironment()`. `isCloudRunSandboxEnvironment()` is a **fact
+about the machine**; `SkipRuntimeCheck` is a **caller preference**. Gating the fact behind the preference
+means a caller on an Instance who asks for runtime detection gets `DetectLocalRuntime()`, which cannot
+succeed there, and a hard error with no seeded template — the exact task #92 failure. Whether it is
+reachable in production is unknown to me, so the brief requires a caller survey as an *answer*, not an
+assumption.
+
+**Dispatched two developers** (correction #1: dispatch, do not do it myself): `sn-bash32-rev3` (task #96)
+and `sn-initgate-dev` (task #97). Both briefs **name the call to make and the value to assert** — the
+countermeasure adopted after two agents in one hour measured the easy half and narrated the hard half.
+For #97 that is spelled out: *read the seeded file off disk and assert its content equals the cloudrun
+template; do not assert absence of error, because seeding the wrong template also returns no error.*
+
+**My own two findings are fixed and pushed**: `27338af1` on `scion/design-operator-prereqs`, PR #1351
+head confirmed. `§1 step 5` → `§10 step 5` (§1 is Overview with 1.1–1.3 and no numbered steps; §1.3
+itself points at §10; step 5 there is *"Start a Claude agent and see it reach a running state"*, which is
+precisely what the profile-layer defect made unreachable). And the table now separates **executed** from
+**derived**, rather than silently correcting one entry and leaving the laundering in place.
+
+`scion start` cost me a third parse-failure-as-output: the agent name is a **positional first argument**,
+not `--name`. Same costume as `--template` earlier. All three PRs verified OPEN and MERGEABLE after the
+push.
