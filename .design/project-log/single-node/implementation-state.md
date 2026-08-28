@@ -14986,3 +14986,65 @@ six as free insurance and only afterwards learned from the coordinator that it w
 
 `sn-bash32-rev4` dispatched to review the now-four-commit #1350 delta — closing the process gap I opened
 by adjudicating those findings closed without ever putting the fix through review.
+
+### §35.76 — #1350 approved; the best finding in the review was filed as an aside (13:45)
+
+`sn-bash32-rev4` returned **APPROVE** on the four-commit delta (`2656624d..4788de9e`, +165 lines, 4
+files). No Critical, no Required. Gates run: `go build`/`vet`/`fmt` clean, 120 Go tests pass, self-test
+4/4, feature probe 10/10, shellcheck **65/65**. Could not run: the macOS CI job (no runner) and
+`actionlint` (not installed) — both stated rather than glossed, which is the right way to report a gap.
+
+Per standing correction #2 I accept the verdict and do not re-run its checks. Full review at
+`reviews/bash32-r2.md`.
+
+#### The reviewer corrected my brief, and it is right
+
+My check 1 asked whether the new CI job is *"a GATE or just a printout"* and called an ungated matrix
+*"a log line nobody reads."* The reviewer's answer: the probe asserts its **control** but deliberately
+does not gate individual construct verdicts, and that is correct, because **the canary already owns
+interpreter identity and the matrix is deterministic for a fixed binary.** Gating each construct adds
+nothing the canary does not already catch.
+
+**I accept this.** My framing treated a measurement instrument as a regression detector and then marked
+it deficient for not being one. That is a category error, and it is one I should have caught: I
+commissioned that probe specifically *because* the design doc asserted a matrix nobody had measured. Its
+job was to settle a claim, and it settled it. **Not every instrument needs to be a tripwire, and
+demanding that one become a tripwire is a way of asking it to do a second job badly.**
+
+#### The finding that was filed as an FYI
+
+Check 2 came back clean — no false positives, verified on bash 5.2, all ten snippets stderr-clean on
+success. Then this, as a parenthetical: *"the logic implicitly requires stderr-clean snippets, not
+documented."*
+
+**That aside is worth more than both nits the review filed.** The exit-0-but-rejected detector works by
+reading stderr. It is correct today only because all ten current snippets happen to be silent on
+success. That is a **precondition of the instrument, and it is invisible in the source.** An eleventh
+snippet that legitimately writes to stderr while succeeding gets classified UNSUPPORTED — silently, on a
+green run, producing a wrong row in a matrix the design doc now cites as measured.
+
+That is precisely the defect class this branch exists to remove: **a wrong answer wearing the costume of
+a measurement.** It is one comment away from becoming permanent, and #1350 is not yet merged, so the
+comment is free now and a follow-up PR later.
+
+> **RULE 32: THE PRECONDITION OF AN INSTRUMENT IS PART OF THE INSTRUMENT.** A measurement device that is
+> correct only for inputs with an unstated property will silently produce wrong readings the first time
+> someone supplies an input without it — and because the device reports success, nothing marks the
+> reading as suspect. Document the precondition **where the next input gets added**, not in a header
+> block, and say what breaks when it is violated.
+
+There is a second, quieter lesson in *how* it arrived. It came in as an FYI because it is not a defect in
+the code as written — every current snippet satisfies it. **Reviewers file what is wrong now; traps for
+the next editor have no natural slot in a verdict.** When a review's asides describe a way the thing
+could become wrong later, read them harder than the findings.
+
+#### Disposition
+
+- **Taken:** document the stderr-clean precondition at the snippet list; drop the redundant no-op SC2016
+  disable at probe line 32. One additive commit, dispatched to `sn-bash32-rev3`.
+- **Declined:** the optional `--check` mode. The reviewer's own argument against per-construct gating
+  defeats it, and I am not going to accept that argument in one paragraph and fund its opposite in the
+  next.
+
+`sn-bash32-rev4` held until that commit is green — the same rule 30 condition I applied to the initgate
+pair, applied to myself when it is mildly inconvenient.
