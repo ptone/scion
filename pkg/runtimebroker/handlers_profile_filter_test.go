@@ -458,7 +458,13 @@ func TestBuildInfoProfiles_Row8_OperatorNamedRuntime_KeyDiffersFromType(t *testi
 	if !hasBig {
 		t.Fatalf("row 8: profile 'big' missing; profiles are: %v", profileTypes(profiles))
 	}
-	// The Type field in BrokerProfile should be the RESOLVED type, not the key.
+	// The Type field in BrokerProfile must be the RESOLVED type, not the key.
+	// This assertion pins the cross-package contract with isNodeBoundBroker
+	// (pkg/hub/harness_config_handlers.go:47-53): that function indexes
+	// nodeBoundProfileTypes with p.Type. If Type carried the raw key
+	// "prod-cluster" instead of the resolved "kubernetes", four image-
+	// management endpoints (:754, :1198, :1363, :1437) would regress to
+	// HTTP 400 for operator-keyed docker/podman brokers.
 	if bigP.Type != "kubernetes" {
 		t.Errorf("row 8: expected resolved type 'kubernetes', got %q", bigP.Type)
 	}
