@@ -2,7 +2,7 @@
 
 **Filed by:** ca-msg-em9  
 **Date:** 2026-08-28  
-**Updated:** 2026-08-28 (v3 — DEF-32 class audit added)  
+**Updated:** 2026-08-28 (v4 — false premise corrected, SSE impact added, :1653 sharpened)  
 **Origin:** em6 finding during DMConversationKey tightening audit  
 **Status:** Audit complete — live authorization bypass confirmed — no code changes made  
 
@@ -145,6 +145,17 @@ and does not run here.
 **Root cause:** The case-sensitive `HasPrefix("user:")` gate at line 126.
 The fold in `PrincipalKindFromAddress` is a contributing factor that
 enables the worst outcome (DM resolution with forged identity).
+
+**Aggravating factor — live-push via EventPublisher.** The forged message
+is not merely persisted. After `CreateMessage` succeeds,
+`s.events.PublishUserMessage` at line 291 publishes it to the
+EventPublisher bus (`p.events`), which carries hub Event structs to
+web/SSE consumers and other subscribers. Because
+`storeMsg.AgentID = agent.ID` (line 258), the forged message is sinked
+to `agent.<agentID>.message` — live-pushed to every subscriber on the
+target agent's stream, carrying the victim's (attacker-chosen) SenderID.
+The forgery is visible in real-time to all connected clients watching
+that agent's conversation feed.
 
 **Existing broker plugins:** The Slack broker plugin constructs Sender as
 `"agent:" + slug` using lowercase string literals with case-sensitive
@@ -307,24 +318,48 @@ address :127 or canonicalize before both.
 prefix casing mismatches.
 
 **handlers_chat_v2.go:1653** — `HasPrefix(msg.Sender, "agent:")`
-In `hasAgentReply`. Reads stored messages from DB to determine if an
-agent has replied in the conversation. Gates edit/delete permission on
-user's own message (immutability after agent reply). Data from DB — a
-non-canonical agent Sender stored via handleBrokerInbound (which persists
-`req.Message.Sender` as-is) would cause this check to miss.
+In `hasAgentReplyAfter` (:1635). Reads stored messages from DB to
+determine if an agent has replied in the conversation after a given
+timestamp. Called from the edit handler (:1491) and delete handler
+(:1591). Gates edit/delete permission on user's own message (immutability
+after agent reply).
+
+The function's author explicitly reasoned about failure and chose
+fail-closed on the error path:
+
+    if err != nil || result == nil {
+        return true // fail-closed: deny edit/delete when we can't verify
+    }
+
+But the casing miss is not an error. The query succeeds, returns rows,
+and `HasPrefix(msg.Sender, "agent:")` simply does not match `"Agent:bot"`.
+The loop completes normally and the function returns `false` — fail-OPEN.
+An explicit fail-closed comment sits eight lines above a fail-open path
+in the same function. The comment creates confidence that the function
+fails closed, when it only covers the error branch.
+
+**End-to-end confirmation:** handleBrokerInbound persists
+`req.Message.Sender` verbatim. The :126 gate only inspects for `"user:"`
+prefix. A broker plugin sending `Sender = "Agent:bot"` (capital A)
+passes through :126 completely unexamined — the if-block is skipped, no
+other validation rejects or canonicalizes the Sender, and the message is
+persisted with `Sender = "Agent:bot"`. When a user later edits their own
+message in the same thread, `hasAgentReplyAfter` queries the DB, finds
+the `"Agent:bot"` row, `HasPrefix("agent:")` misses, and the function
+returns false — edit permitted, immutability bypassed.
+
 *Miss consequence:* Agent-reply immutability check bypassed; user can
-edit/delete message that should be locked. Second-order effect: requires
-a non-canonical Sender to have been stored by a prior broker inbound
-request (same DEF-32 root cause persisting bad data).
+edit/delete message that should be locked after agent reply.
 
 ### ROUTING sites (5)
 
 **events.go:761** — `!HasPrefix(msg.ThreadID, "agent:")`
-In `PublishUserMessage` (SSE sink). Tests ThreadID to distinguish legacy
-agent-slug keys from UUID topic threads. ThreadID from broker inbound
-path is body-supplied. Miss causes message to be published to shared-
-space chat SSE subject when it should not be. No privilege granted.
-*Miss consequence:* Message appears in wrong SSE channel.
+In `PublishUserMessage` (EventPublisher). Tests ThreadID to distinguish
+legacy agent-slug keys from UUID topic threads. ThreadID from broker
+inbound path is body-supplied. Miss causes message to be published to
+the shared-space chat event subject when it should not be. No privilege
+granted.
+*Miss consequence:* Message appears in wrong event subject.
 
 **handlers_agent_messaging.go:139** — `TrimPrefix(recipient, "user:")`
 In recipient resolution for handleAgentMessage. If recipient is
@@ -355,9 +390,9 @@ All operands are provably server-constructed canonical. No external path
 can supply a non-canonical prefix to any of these sites.
 
 **events.go:744** — `HasPrefix(msg.Recipient, "user:")`
-In PublishUserMessage (SSE sink). Recipient is always server-constructed:
-"agent:" + slug from handleBrokerInbound, or "user:" + name from
-handleAgentOutboundMessage. No external path sets Recipient.
+In PublishUserMessage (EventPublisher). Recipient is always server-
+constructed: "agent:" + slug from handleBrokerInbound, or "user:" + name
+from handleAgentOutboundMessage. No external path sets Recipient.
 
 **handlers_agent_messaging.go:911** — `HasPrefix(structuredMsg.Sender, "agent:")`
 **handlers_agent_messaging.go:912** — `HasPrefix(structuredMsg.Recipient, "agent:")`
@@ -375,68 +410,94 @@ overwrites body value. If prefix missed: DELIVERY_FAILED notification
 not sent (silent failure, no privilege).
 
 **messagebroker.go:437** — `HasPrefix(msg.Sender, "agent:")`
-In deliverToUser, sets AgentID on stored message. msg from eventbus;
-all publishers B5-force fields. handleBrokerInbound uses s.events (SSE)
-not bp (eventbus) — never reaches this path.
+In deliverToUser, sets AgentID on stored message. msg arrives via
+`p.bus` (the StructuredMessage bus). handleBrokerInbound never publishes
+to `p.bus` — it publishes only to `p.events` (EventPublisher), which
+carries a different type on different subjects. No path from broker
+inbound reaches deliverToUser. All `p.bus` publishers B5-force fields.
 
 **messagebroker.go:518** — `!HasPrefix(storeMsg.ThreadID, "agent:")`
-In deliverToUser, thread watermark routing. ThreadID from eventbus msg,
-server-constructed on all publishing paths.
+In deliverToUser, thread watermark routing. msg from `p.bus`
+(StructuredMessage bus); all publishers B5-force fields. No broker
+inbound path.
 
 **messagebroker.go:535** — `HasPrefix(storeMsg.Sender, "agent:")`
 **messagebroker.go:536** — `TrimPrefix(storeMsg.Sender, "agent:")`
-DM notification block in deliverToUser. Sender from eventbus, B5-forced.
+DM notification block in deliverToUser. msg from `p.bus`, B5-forced.
+No broker inbound path.
 
 **messagebroker.go:716** — `HasPrefix(msg.Sender, "agent:") && msg.SenderID == ""`
-R3b diagnostic warning in fanOutToProject. msg from eventbus broadcast
-subscription; published by PublishBroadcast from B5-forced HTTP handler.
-SenderID auth-derived, NOT body-settable. If prefix missed: warning
-suppressed. Self-skip at :726 (ID-based) works independently.
+R3b diagnostic warning in fanOutToProject. Invoked at :383 inside a
+`p.bus.Subscribe` handler. msg is `*messages.StructuredMessage` from the
+StructuredMessage bus. handleBrokerInbound never publishes to `p.bus`
+(only to `p.events`). All `p.bus` publishers B5-force fields. SenderID
+auth-derived, NOT body-settable. If prefix missed: warning suppressed.
+Self-skip at :726 (ID-based) works independently.
 **B5/R1 self-skip note:** This is broadcast self-skip territory. The R3b
 warning is cosmetic. The actual self-skip logic (`msg.SenderID != "" &&
 msg.SenderID == agent.ID`) does not depend on the prefix test and is
 safe regardless.
 
 **messagebroker.go:748** — `HasPrefix(msg.Sender, "agent:") && msg.SenderID == ""`
-R3b warning in fanOutGlobal. Same analysis as :716. SenderID auth-
-derived, NOT body-settable.
+R3b warning in fanOutGlobal. Same analysis as :716. msg from `p.bus`,
+B5-forced. SenderID auth-derived, NOT body-settable.
 
 **messagebroker.go:791** — `!HasPrefix(msg.Sender, "agent:") || msg.SenderID == ""`
 `publishDeliveryFailed` in MessageBrokerProxy. Called from deliverToAgent
-on dispatch failure. msg from eventbus agent subscriptions; all
-publishers (PublishMessage from HTTP handlers, fanOutToProject/Global
-iteration) B5-force fields. handleBrokerInbound dispatches directly to
-runtime, does NOT publish through eventbus. SenderID auth-derived, NOT
-body-settable. If prefix missed: DELIVERY_FAILED not sent (silent
-failure, no privilege).
+on dispatch failure. msg is `*messages.StructuredMessage` from `p.bus`
+agent topic subscriptions. handleBrokerInbound never publishes to
+`p.bus` — it publishes only to `p.events` (EventPublisher, different
+type, different subjects). All `p.bus` publishers (PublishMessage from
+HTTP handlers, fanOutToProject/Global iteration) B5-force fields.
+SenderID auth-derived, NOT body-settable. If prefix missed:
+DELIVERY_FAILED not sent (silent failure, no privilege).
 
 **webchannel.go:103** — `!HasPrefix(msg.ThreadID, "agent:")`
-Thread watermark routing in web channel spoke. msg from eventbus,
-server-constructed.
+Thread watermark routing in web channel spoke. The web spoke is
+registered as an observer on the FanOutEventBus and receives
+`*messages.StructuredMessage` via `p.bus`. handleBrokerInbound never
+publishes to `p.bus`. All `p.bus` publishers B5-force fields.
 
 **webchannel.go:185** — `HasPrefix(msg.Sender, "agent:")`
 **webchannel.go:188** — `TrimPrefix(msg.Sender, "agent:")`
 In identityFromTopic, TopicKindUser case. Sets agentID from agent sender.
-msg from eventbus, server-constructed.
+msg from `p.bus`, server-constructed on all publishing paths.
 
 **webchannel.go:201** — `HasPrefix(msg.Sender, "user:")`
 In identityFromTopic, TopicKindAgent case. Sets userID from user sender.
-msg from eventbus, server-constructed.
+msg from `p.bus`, server-constructed on all publishing paths.
 
 ---
 
 ## Why the INERT count is high
 
-16 of 24 sites (67%) are INERT because the B5 auth-derivation override
-(handlers_agent_messaging.go:540-559) canonicalizes Sender and SenderID
-at the HTTP handler entry point, and these canonical values propagate
-through the eventbus to all downstream consumers. The broker inbound path
-(handleBrokerInbound) is the only HTTP handler that does NOT B5-force
-Sender — it trusts the HMAC-authenticated broker plugin's field content.
-Furthermore, handleBrokerInbound dispatches directly to the agent runtime
-and publishes via `s.events` (SSE), not through the eventbus. This means
-the eventbus paths never carry broker-originated messages, isolating the
-external trust boundary to a narrow set of code.
+16 of 24 sites (67%) are INERT because of a two-bus architecture:
+
+- `MessageBrokerProxy.bus` (`eventbus.EventBus`) carries
+  `*messages.StructuredMessage` — the broker-delivery pipeline.
+  fanOutToProject, deliverToUser, deliverToAgent, and all 16 INERT sites
+  hang off `p.bus` subscribers.
+
+- `MessageBrokerProxy.events` (`EventPublisher`) carries hub Event
+  structs (e.g., `UserMessageEvent`) — in-process fan-out to web/SSE
+  consumers and other subscribers.
+
+The B5 auth-derivation override (handlers_agent_messaging.go:540-559)
+canonicalizes Sender and SenderID at the HTTP handler entry point, and
+these canonical values propagate through `p.bus` to all downstream
+consumers.
+
+handleBrokerInbound is the only HTTP handler that does NOT B5-force
+Sender. It contains zero `p.bus` references and exactly one publish:
+`s.events.PublishUserMessage` at line 291. It publishes to `p.events`
+(EventPublisher), never to `p.bus` (StructuredMessage bus). The two
+buses carry different types on different subjects. No `p.bus` subscriber
+receives messages from handleBrokerInbound.
+
+This is why the forged message reaches EventPublisher subscribers (web
+clients see the forgery live-pushed to `agent.<agentID>.message`) but
+does not reach the 16 INERT sites that consume `*messages.StructuredMessage`
+off `p.bus`.
 
 The 3 AUTHZ + 5 ROUTING sites that are not INERT all either:
 1. Directly process broker inbound request fields (:126, :127, :297), or
