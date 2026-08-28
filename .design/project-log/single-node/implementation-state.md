@@ -13049,3 +13049,58 @@ observation, on every run.
 **The `=~` question is routed to ptone, not guessed.** He has the Mac. Added a probe to rev2's #89
 one-paste diagnostic that prints what the real line does to a real value on his shell — not just his
 version string. An open question becomes a measured one inside a round trip already planned.
+
+### §35.66 — #89 macOS audit COMPLETE: two loud breaks, ZERO silent ones, and two corrections to me (01:54)
+
+Report: `reviews/macos-portability-r1.md`. Reading audit, labelled as such, every row CONFIRMED or
+CANDIDATE with the route named. Probe sent to ptone as an attachment at 01:57
+(`macos-probe.sh`). **Accepted; I did not re-run it.**
+
+**THE HEADLINE IS AN ABSENCE, AND IT IS THE ANSWER TO THE QUESTION I ACTUALLY ASKED.** *"No
+silent-misbehaviour finding anywhere."* The credential-handling and resource-mutating paths are
+POSIX-clean — every `sed`, `grep`, `awk`, `tr`, `head`, `mktemp` call in the deploy/preflight path uses
+only the GNU∩BSD common subset. I ranked silent misbehaviour above loud breakage because **a loud break
+costs ptone a minute; a silent one costs him a wrong verdict on a credential check and he would never
+know to look.** The reviewer ranked by consequence as asked and then reported the absence as crisply as
+a presence. **Absence is harder to report well than presence.**
+
+**macOS exposure is exactly two loud breaks:**
+
+1. **bash 3.2 `${var,,}` — TWO sites (286 *and* 294).** Owned by #88.
+2. **The `--help` `sed` extractor at ~637.** macOS `sed` requires a newline before the terminating `}`
+   (macOS-14 man page), **and** `\?` is not a BRE quantifier on BSD, so it emits empty even if it
+   parses. **Breaks `--help` only** — no deploy, credential or resource path touches it.
+
+Everything else FINE and confirmed by reading against the POSIX subset: `grep -i`, `head -1`/`-c`,
+`tr -d '[:space:]'`/`'\r'`, the awk policy parse, arrays under `set -u`, and `teardown.sh` entirely.
+Absent by grep: `date`, `readlink`, `realpath`, `base64`, `xargs`, `stat`, `sort`, `timeout`,
+`mapfile`, `declare -A`, `${var^^}`, `coproc`, `echo -e`.
+
+**Row 3 answers dev2's open `=~` question by reading, pending the probe: the RHS is UNQUOTED at all
+five sites (70, 86, 297, 309, 444), so the bash-3.2 quoted-RHS trap does not apply as written.** The
+probe measures it rather than leaving it read.
+
+**TWO CORRECTIONS TO ME, BOTH ACCEPTED.**
+
+1. **My top suspect was wrong.** Bare `mktemp` **works** on macOS — it defaults to `-t tmp` (macOS-14
+   man page). The reviewer's framing is the valuable part: *I recalled BSD behaviour, and macOS is not
+   it.* **That is the measure-do-not-read rule running in reverse** — I read from memory and asserted it
+   as the thing to check first.
+2. **"Seven of ten tools bite" overstates it.** They *differ*; `deploy.sh` uses their common subset
+   except in `--help`. **The difference surface is wide, the bite surface is two.** My framing implied
+   seven live hazards and would have sent someone hunting five that do not exist.
+
+**One correction I had to correct back, only to keep the record straight.** Row 3 of "what is wrong"
+says dev2 was pointed at 286 only. It was not — the #88 brief tables **both** 286 and 294 with their
+separate commits, and the correction message named both. The reviewer inferred from ptone's error text,
+which names only 286; a reasonable inference from what it could see. **No gap to close.**
+
+**Routing decision: the `--help` sed fix is NOT going into #88.** Filed as **#90**, bundled with the
+**pre-existing deferred `--help` heredoc fix for the `curl | bash` case**. Two reasons: #88 is blocking
+and has been kept deliberately tight all night, and both items rewrite the same `--help` mechanism — so
+separately means editing it twice. **#90 carries the #88 standard: the differential is byte-identical
+`--help` OUTPUT, not merely "it parses".**
+
+**Coverage truth, recorded plainly:** beyond the bash-3.2 parse point, **zero GNU-userland calls in
+this script have ever executed on macOS** — ptone's run died at 286. The audit is their only BSD
+coverage until the probe comes back. That is why the labels matter and why the probe exists.
