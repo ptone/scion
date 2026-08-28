@@ -13786,3 +13786,50 @@ Note what this does NOT change: DEF-32 remains a design gap. Failing safe means 
 ### Ledger
 Struck: **#1362 / the non-canonical-derivation row.** Landed to date: #1338 (DEF-31), #1343 (B5), #1347, #1360, #1361 (marker gate), #1362.
 Open: marker-gate-2 (URL sent 22:5xZ, **PR not yet opened** — verified valid against new main), DEF-32 identity-linking, DEF-34/#1259 (external, stalled since Aug 27), DEF-33/35 spec, DEF-18 (em9-unify), DEF-5, DEF-6, DEF-9 (narrowed), DEF-10 (half), Tier 2 DEFERRED, tranche H on G-1, tranches C-G held. Awaiting ptone on posting the #1362 rationale — now moot for merging, but the thread still shows two unresolved findings.
+
+---
+
+## §5fq — ESCALATION. em9-unify cannot land as one unit, and a careless merge of it silently reverts #1362 with GREEN CI. The marker gate has a hole at the derivation function.
+
+Nothing external moved (`upstream/main` `87a867b77`, all tips static, marker-gate-2 PR still unopened, #1259 untouched since Aug 27 — **third** heartbeat, external and stalled). So I assessed the largest remaining chunk: `scion/ca-msg-em9-unify`, the tranche C-G body.
+
+### My own ledger was badly wrong about its size
+Recorded as "84 product commits, +1351/-43". Actual, measured three-dot against `87a867b77`:
+**168 commits, 215 files, +51,539 / -10,735.** Off by 2x on commits and by more than an order of magnitude on lines. I had been carrying a number from an early sample and treating it as the branch's size ever since.
+
+Merge-base is **`6268bac44` (#1319)** — the branch was cut *before* #1338, #1343 (B5), #1347, #1360, #1361 and #1362. Six landings of security work sit between its base and main.
+
+### Deletion check (rule 31) — passes, and correctly predicted
+The -10,735 localises overwhelmingly to `pkg/ent/mutation.go` (-10,483) and `pkg/ent/client.go` (-40): ent regeneration churn, exactly the benign case rule 31 anticipates. The guarded handler files are additive against the old base (`handlers_agent_messaging.go +281 -0`, `handlers_broker_inbound.go +89 -0`, `messagebroker.go +83 -0`, `handlers_chat_v2.go +56 -4`). **This is reassuring and it is not sufficient** — a three-dot diff is measured from the merge-base, so it says what em9 added to the OLD tree. It cannot say whether main's newer work survives the merge. Those are different questions and the additive shape answers only the first.
+
+### The real test: merge it and run the instruments
+- **Honest merge: 31 conflicting files**, including every guarded handler (`handlers_agent_messaging.go`, `handlers_chat_v2.go`, `messagebroker.go`, `handlers_broker_inbound.go`), **`pkg/messages/dm_key.go` (landed one hour ago as #1362)**, `derive_key.go`, `conversation.go`, plus `.github/workflows/ci.yml`, `Makefile`, and `hack/check-conversation-upsert-guard.sh`. Six of the 31 are security fixtures.
+- **Careless merge (`-X theirs`, simulating a resolver who favours the feature branch): `merge_exit=0`, ZERO conflicts remaining.** Git reports total success.
+
+Running the instruments on that "successful" merge:
+- **Marker gate FIRES**: all four `authenticatedSender` sites `found x0`, `ActionAttach` in `sendAgentRouted` down 3 -> 2, and the COMPOSITE anchor trips. B5 and part of #1347 are gone. **The gate did its job on a real branch we intend to land — not a synthetic overlay.**
+- **#1362 is ALSO reverted, and the gate does NOT cover it.** Probe: uppercase, mixed-case and braced UUIDs are all **accepted again**, and normalised — `6BA7B810-...` silently becomes `dm:agent:550e8400-...:user:6ba7b810-...`. That is the precise hazard the standing rule names: *a derivation that normalises can be talked into producing someone else's key*, and *a wrong key is worse than no key, since the key IS the ACL*.
+- **#1362's own tests are deleted by the same merge** (`grep -c` for `RejectsNonCanonicalUUID` / `non-canonical UUID` in `dm_key_test.go` = **0**).
+- **CI GOES GREEN.** `go test -tags no_sqlite ./pkg/messages/ ./pkg/messaging/` -> `ok`, `ok`.
+
+**The tests that protect #1362 are removed by the same merge that reverts it, so they cannot witness their own deletion.** Green CI is not evidence here; it is the symptom.
+
+### The gap, stated precisely
+The marker gate guards **handler symbols** in four `pkg/hub/` files. `pkg/messages/dm_key.go` is not covered, and marker-gate-2 does not close this — its new rows are `messagebroker.go` and `handlers_broker_inbound.go`. So our defence covers B5, DEF-31 and #1347, and has a hole exactly where the newest and most security-critical landing sits.
+
+Caveat I will not paper over: `-X theirs` is a **proxy for carelessness, not a prediction**. A careful human or agent resolving 31 files may preserve everything. What the experiment establishes is that the bad outcome is *reachable and invisible to CI* — not that it is likely. That is enough to act on, and I will say so in those terms rather than claiming the merge will fail.
+
+### Recommendation (for ptone, not yet actioned)
+1. **Do not rebase em9-unify yet.** Extend the marker gate to cover the derivation function first — a guard is worth most immediately *before* a large risky merge, not after.
+2. Land marker-gate-2 (already verified against `87a867b77`).
+3. Then slice em9-unify. 168 commits over a 6-PR-stale base is not a reviewable or safely-resolvable unit, and "land it incrementally and safely" was the standing instruction.
+
+### Rules
+**Rule 264.** A three-dot diff describes what a branch adds to its merge-base, so an additive shape says nothing about whether newer work on main survives the merge. To learn that you must actually merge and run the instruments. Additive-looking diffs on a stale base are the most reassuring wrong answer available.
+
+**Rule 265.** When a change and the tests that protect it live in the same commit range, a merge that reverts the change can delete its own detector. Green CI after such a merge is not evidence of safety — the suite lost the ability to fail. Protect security-critical behaviour with something outside the deletable unit: a gate row, a golden vector in a separate package, or an assertion the merge cannot silently drop.
+
+**Rule 266.** Ledger figures decay. I carried "+1351/-43" for many heartbeats against a branch that was 40x larger. Re-measure size before reasoning about landability, because every judgement about reviewability and slicing is downstream of that number.
+
+### Ledger
+Open: **em9-unify BLOCKED** (this entry), marker-gate-2 (verified, PR unopened), DEF-32 identity-linking, DEF-34/#1259 (external, stalled 3 heartbeats), DEF-18 (carrier em9-unify — now behind this blocker), DEF-33/35 spec, DEF-5, DEF-6, DEF-9 (narrowed), DEF-10 (half), Tier 2 DEFERRED, tranche H on G-1, tranches C-G behind em9-unify.
