@@ -63,6 +63,13 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 	// New work events (prompt-submit, agent-start, session-start): always
 	// update activity unconditionally — clears any sticky state.
 	if isNewWorkEvent(event.Name) {
+		// On session-start, persist the harness session ID to agent-info.json
+		// so the supervisor process can read it for metrics reporting.
+		if event.Name == hooks.EventSessionStart && event.Data.SessionID != "" {
+			if err := h.SetSessionID(event.Data.SessionID); err != nil {
+				return fmt.Errorf("persisting session ID: %w", err)
+			}
+		}
 		return h.UpdateActivity(result.activity, "")
 	}
 
@@ -174,6 +181,46 @@ func (h *StatusHandler) SetMessage(message string) error {
 	}
 
 	return h.writeAgentInfoLocked(info)
+}
+
+// SetSessionID writes the harness session ID to agent-info.json so the
+// long-lived supervisor (init.go) can read it when reporting session metrics.
+// The hook process and the supervisor are separate OS processes sharing this
+// file; this is the cross-process delivery path for the session ID.
+func (h *StatusHandler) SetSessionID(sessionID string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	info := h.readAgentInfoMap()
+	if sessionID != "" {
+		info["session_id"] = sessionID
+	}
+	return h.writeAgentInfoLocked(info)
+}
+
+// ConsumeSessionID reads the harness session ID from agent-info.json and
+// clears it in the same operation. The consume pattern ensures the session
+// ID cannot outlive the session it describes: without it, a subsequent
+// session whose start event is lost would inherit the previous session's
+// ID, attributing its metrics to the wrong session — a well-formed
+// correlation key pointing at the wrong thing.
+//
+// If the read-modify-write races with a concurrent writer and the clear
+// is lost, the worst case is a 400 from the hub (session.id is required)
+// because the next session will read an ID that was meant to be consumed.
+// That degrades in the safe direction — a loud alarm, not silent
+// mis-attribution. This property does not depend on timing.
+func (h *StatusHandler) ConsumeSessionID() (string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	info := h.readAgentInfoMap()
+	sid, _ := info["session_id"].(string)
+	delete(info, "session_id")
+	if err := h.writeAgentInfoLocked(info); err != nil {
+		return sid, fmt.Errorf("clearing session_id: %w", err)
+	}
+	return sid, nil
 }
 
 // updateActivityIfNotSticky updates the activity only if the current activity is not

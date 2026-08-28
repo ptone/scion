@@ -111,9 +111,17 @@ func (m *LifecycleManager) RunPreStop() error {
 
 // RunSessionEnd executes session-end lifecycle hooks.
 // Called on graceful shutdown before child termination.
-func (m *LifecycleManager) RunSessionEnd() error {
+//
+// sessionID is the consumed session ID from agent-info.json. It is
+// carried on the event so that downstream handlers (notably the
+// telemetry aggregator) can attribute metrics to the correct session
+// even though their aggregator never received a StartSession call.
+func (m *LifecycleManager) RunSessionEnd(sessionID string) error {
 	event := &Event{
 		Name: EventSessionEnd,
+		Data: EventData{
+			SessionID: sessionID,
+		},
 	}
 	return m.runHooks(event)
 }

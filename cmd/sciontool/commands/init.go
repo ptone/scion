@@ -929,9 +929,19 @@ waitLoop:
 		svcShutdownCancel()
 	}
 
+	// Consume the session ID from agent-info.json before running
+	// session-end hooks. The hook process wrote it on session-start;
+	// we read-and-clear so it cannot outlive the session it describes.
+	// If the field is absent (hook race or first startup), sessionID
+	// is empty and the hub's 400 validation catches it.
+	sessionID, err := statusHandler.ConsumeSessionID()
+	if err != nil {
+		log.Error("Failed to consume session ID: %v", err)
+	}
+
 	// Run session-end hooks (graceful shutdown)
 	log.Info("Running session-end hooks...")
-	if err := lifecycleManager.RunSessionEnd(); err != nil {
+	if err := lifecycleManager.RunSessionEnd(sessionID); err != nil {
 		log.Error("Session-end hooks failed: %v", err)
 	}
 

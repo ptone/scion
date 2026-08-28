@@ -143,9 +143,19 @@ func (a *Aggregator) RecordTurn() {
 // counts from the session-end event. If the session-end event provides token
 // totals they override the running accumulation (they represent the harness's
 // authoritative totals).
-func (a *Aggregator) Finalize(inputTokens, outputTokens, cachedTokens, reasoningTokens int64, errMsg string) SessionSummary {
+//
+// sessionID is a fallback: if StartSession was never called (the session-start
+// event was delivered to a different process's aggregator), this value is used
+// instead. The caller should supply the session ID from the event data or from
+// the shared agent-info.json file. An empty fallback leaves a.sessionID as-is.
+func (a *Aggregator) Finalize(sessionID string, inputTokens, outputTokens, cachedTokens, reasoningTokens int64, errMsg string) SessionSummary {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	// Use the fallback session ID if StartSession was never called.
+	if a.sessionID == "" && sessionID != "" {
+		a.sessionID = sessionID
+	}
 
 	status := "completed"
 	if errMsg != "" {

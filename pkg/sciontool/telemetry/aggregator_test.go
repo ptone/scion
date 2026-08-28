@@ -43,7 +43,7 @@ func TestAggregator_BasicFlow(t *testing.T) {
 	a.RecordTurn()
 	a.RecordTurn()
 
-	summary := a.Finalize(0, 0, 0, 0, "")
+	summary := a.Finalize("", 0, 0, 0, 0, "")
 
 	if summary.SessionID != "session-abc" {
 		t.Errorf("expected session ID session-abc, got %s", summary.SessionID)
@@ -102,7 +102,7 @@ func TestAggregator_FinalizeWithSessionEndTokens(t *testing.T) {
 	a.RecordModelEnd(1000, 200, 500, 0)
 
 	// Finalize with authoritative session-end totals
-	summary := a.Finalize(5000, 1200, 3000, 0, "")
+	summary := a.Finalize("", 5000, 1200, 3000, 0, "")
 
 	// Session-end totals should override
 	if summary.TokensInput != 5000 {
@@ -124,7 +124,7 @@ func TestAggregator_FinalizeWithError(t *testing.T) {
 	}
 
 	a.StartSession("session-err")
-	summary := a.Finalize(0, 0, 0, 0, "session crashed")
+	summary := a.Finalize("", 0, 0, 0, 0, "session crashed")
 
 	if summary.Status != "error" {
 		t.Errorf("expected status error, got %s", summary.Status)
@@ -144,7 +144,7 @@ func TestAggregator_StartSessionResets(t *testing.T) {
 
 	// Start a new session — should reset
 	a.StartSession("session-2")
-	summary := a.Finalize(0, 0, 0, 0, "")
+	summary := a.Finalize("", 0, 0, 0, 0, "")
 
 	if summary.SessionID != "session-2" {
 		t.Errorf("expected session-2, got %s", summary.SessionID)
@@ -170,7 +170,7 @@ func TestAggregator_ReasoningTokens(t *testing.T) {
 	a.RecordModelEnd(100, 50, 0, 200)
 	a.RecordModelEnd(100, 50, 0, 300)
 
-	summary := a.Finalize(0, 0, 0, 0, "")
+	summary := a.Finalize("", 0, 0, 0, 0, "")
 
 	if summary.TokensReasoning != 500 {
 		t.Errorf("expected 500 reasoning tokens, got %d", summary.TokensReasoning)
@@ -193,7 +193,7 @@ func TestAggregator_FinalizeGroupGateOverride(t *testing.T) {
 	a.RecordModelEnd(1000, 200, 500, 100)
 
 	// Session-end reports totals with 0 cached — the 0 should override 500.
-	summary := a.Finalize(5000, 1200, 0, 0, "")
+	summary := a.Finalize("", 5000, 1200, 0, 0, "")
 
 	if summary.TokensInput != 5000 {
 		t.Errorf("expected 5000 input tokens, got %d", summary.TokensInput)
@@ -247,7 +247,7 @@ func TestAggregator_Concurrent(t *testing.T) {
 
 	wg.Wait()
 
-	summary := a.Finalize(0, 0, 0, 0, "")
+	summary := a.Finalize("", 0, 0, 0, 0, "")
 
 	expectedToolCalls := goroutines * opsPerGoroutine
 	if rf, ok := summary.ToolCalls["read_file"]; !ok {
@@ -274,5 +274,64 @@ func TestAggregator_Concurrent(t *testing.T) {
 	}
 	if summary.TokensReasoning != expectedReasoning {
 		t.Errorf("expected %d reasoning tokens, got %d", expectedReasoning, summary.TokensReasoning)
+	}
+}
+
+func TestAggregator_FinalizeWithFallbackSessionID(t *testing.T) {
+	// Simulates the init-process aggregator: StartSession was never called
+	// because session-start was delivered to a different (hook) process.
+	// The fallback session ID comes from agent-info.json via the consume
+	// pattern in the caller.
+	a := &Aggregator{
+		agentID:   "agent-1",
+		projectID: "project-1",
+		model:     "claude-4",
+		toolCalls: make(map[string]*ToolCallStats),
+	}
+
+	// No StartSession call — simulates the two-aggregator split.
+	a.RecordModelEnd(1000, 200, 500, 0)
+	a.RecordTurn()
+
+	summary := a.Finalize("session-from-file", 0, 0, 0, 0, "")
+
+	if summary.SessionID != "session-from-file" {
+		t.Errorf("expected fallback session ID 'session-from-file', got %q", summary.SessionID)
+	}
+}
+
+func TestAggregator_FinalizeWithEmptyFallbackSessionID(t *testing.T) {
+	// When both StartSession and the fallback are empty, the session ID
+	// must remain empty. The hub will reject this with 400 — that is the
+	// intended alarm, not something to paper over with a synthetic value.
+	a := &Aggregator{
+		agentID:   "agent-1",
+		projectID: "project-1",
+		toolCalls: make(map[string]*ToolCallStats),
+	}
+
+	summary := a.Finalize("", 0, 0, 0, 0, "")
+
+	if summary.SessionID != "" {
+		t.Errorf("expected empty session ID, got %q", summary.SessionID)
+	}
+}
+
+func TestAggregator_FinalizeIgnoresFallbackWhenStartSessionCalled(t *testing.T) {
+	// When StartSession was called (same-process case), the fallback is
+	// ignored. This ensures the authoritative source (the session-start
+	// event) takes precedence.
+	a := &Aggregator{
+		agentID:   "agent-1",
+		projectID: "project-1",
+		toolCalls: make(map[string]*ToolCallStats),
+	}
+
+	a.StartSession("session-from-event")
+
+	summary := a.Finalize("stale-session-from-file", 0, 0, 0, 0, "")
+
+	if summary.SessionID != "session-from-event" {
+		t.Errorf("expected authoritative session ID 'session-from-event', got %q", summary.SessionID)
 	}
 }

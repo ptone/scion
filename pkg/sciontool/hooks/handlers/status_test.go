@@ -741,6 +741,106 @@ func readAgentInfoMap(t *testing.T, path string) map[string]interface{} {
 	return info
 }
 
+// TestStatusHandler_SessionID_CrossProcessRoundTrip tests the full cross-process
+// round trip for session ID delivery: the hook process writes the session ID to
+// agent-info.json on session-start, and the supervisor process consumes (reads
+// and clears) it on session-end.
+//
+// Two sessions run in sequence in the same agent home. Session 2's start does
+// NOT write a session ID (simulating a lost hook event). The test asserts that
+// session 2's end does NOT inherit session 1's ID.
+//
+// Named mutation 1 (missing write): Remove SetSessionID on session-start.
+// Session 1's ConsumeSessionID returns "". The hub rejects the report with 400
+// (session.id is required). This test reds at the session1ID assertion.
+//
+// Named mutation 2 (missing clear): Replace ConsumeSessionID with ReadSessionID
+// (read without clearing). Session 2's ConsumeSessionID returns "session-1" —
+// session 2's metrics are attributed to session 1. This test reds at the
+// session2ID assertion ("expected empty session ID for session 2").
+func TestStatusHandler_SessionID_CrossProcessRoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	h := &StatusHandler{StatusPath: statusPath}
+
+	// Seed the file with provisioning-like content (full overwrite, no
+	// session_id field — simulates provision.go:1341 os.WriteFile).
+	initial := map[string]interface{}{
+		"name":     "agent-1",
+		"template": "my-template",
+		"phase":    "created",
+	}
+	data, err := json.Marshal(initial)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(statusPath, data, 0644))
+
+	// --- Session 1 ---
+
+	// Hook process writes session ID on session-start.
+	err = h.SetSessionID("session-1")
+	require.NoError(t, err)
+
+	// Verify it landed in the file alongside provisioning fields.
+	info := readAgentInfoMap(t, statusPath)
+	assert.Equal(t, "session-1", info["session_id"], "session_id should be written to agent-info.json")
+	assert.Equal(t, "my-template", info["template"], "provisioning fields should be preserved")
+
+	// Supervisor process consumes session ID on session-end.
+	session1ID, err := h.ConsumeSessionID()
+	require.NoError(t, err)
+	assert.Equal(t, "session-1", session1ID, "ConsumeSessionID should return the written session ID")
+
+	// Verify the field was cleared.
+	info = readAgentInfoMap(t, statusPath)
+	_, hasSessionID := info["session_id"]
+	assert.False(t, hasSessionID, "session_id should be cleared after consume")
+	assert.Equal(t, "my-template", info["template"], "provisioning fields should survive consume")
+
+	// --- Session 2 (session-start hook lost) ---
+
+	// No SetSessionID call — simulates a lost session-start event.
+
+	// Supervisor process consumes session ID on session-end.
+	session2ID, err := h.ConsumeSessionID()
+	require.NoError(t, err)
+	assert.Equal(t, "", session2ID, "expected empty session ID for session 2 (start event was lost)")
+}
+
+// TestStatusHandler_SessionID_SetEmpty verifies that SetSessionID with an empty
+// string is a no-op — it does not write an empty session_id key.
+func TestStatusHandler_SessionID_SetEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	h := &StatusHandler{StatusPath: statusPath}
+
+	// Write an initial file.
+	require.NoError(t, os.WriteFile(statusPath, []byte(`{"name":"agent-1"}`), 0644))
+
+	err := h.SetSessionID("")
+	require.NoError(t, err)
+
+	info := readAgentInfoMap(t, statusPath)
+	_, hasSessionID := info["session_id"]
+	assert.False(t, hasSessionID, "empty session ID should not be written")
+}
+
+// TestStatusHandler_SessionID_HandlePersistsOnSessionStart verifies that the
+// Handle method persists the session ID on session-start events.
+func TestStatusHandler_SessionID_HandlePersistsOnSessionStart(t *testing.T) {
+	tmpDir := t.TempDir()
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	h := &StatusHandler{StatusPath: statusPath}
+
+	err := h.Handle(&hooks.Event{
+		Name: hooks.EventSessionStart,
+		Data: hooks.EventData{SessionID: "sess-from-harness"},
+	})
+	require.NoError(t, err)
+
+	info := readAgentInfoMap(t, statusPath)
+	assert.Equal(t, "sess-from-harness", info["session_id"])
+}
+
 func TestStatusHandler_SetMessage(t *testing.T) {
 	tmpDir := t.TempDir()
 	statusPath := filepath.Join(tmpDir, "agent-info.json")

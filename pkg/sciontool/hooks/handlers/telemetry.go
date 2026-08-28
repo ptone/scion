@@ -699,6 +699,7 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 
 	case hooks.EventSessionEnd:
 		summary := h.aggregator.Finalize(
+			event.Data.SessionID,
 			event.Data.InputTokens,
 			event.Data.OutputTokens,
 			event.Data.CachedTokens,
