@@ -33,10 +33,14 @@ import (
 // handing callers the live pointer would let a downstream merge mutate the
 // server's config out from under the lock.
 //
-// In file mode this always returns the zero value: BuildLayer1SnapshotFromFile
-// deliberately leaves the agent-defaults fields empty (design §3.2.4), so
-// callers that gate on "non-empty" never fire in file mode. That is what keeps
-// file-mode dispatch byte-identical to the pre-change behaviour.
+// In workstation mode (file/SQLite, non-hosted) this returns the zero value:
+// initHubServer does not populate AgentDefaults, so callers that gate on
+// "non-empty" never fire and the co-located broker applies its own
+// settings.yaml defaults at the bottom of its chain (design §3.2.4).
+//
+// In hosted file/SQLite mode (single-node), initHubServer seeds
+// AgentDefaults from the embedded default_settings.yaml so the hub can
+// stamp HarnessConfigID/Hash for broker hydration (ptone/scion#1316).
 func (s *Server) hubAgentDefaults() opsettings.AgentDefaultsSettings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

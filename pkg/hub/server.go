@@ -173,12 +173,14 @@ type ServerConfig struct {
 	// directly from a request path (see operational_settings.go, the
 	// propagation goroutine writes it concurrently with request handling).
 	//
-	// In file mode this stays at its zero value: BuildLayer1SnapshotFromFile
-	// deliberately leaves the agent-defaults fields empty because a co-located
-	// broker reads the same settings.yaml and applies them itself at the
-	// BOTTOM of its own chain. Populating them hub-side as well would promote
-	// them to the hub tier and silently outrank broker profile resources and
-	// template limits. See the design's §3.2.4 and alternative A7.
+	// In workstation mode (file/SQLite, non-hosted) this stays at its zero
+	// value because a co-located broker reads settings.yaml and applies
+	// defaults at the BOTTOM of its own chain; populating them hub-side
+	// would outrank broker profiles (design §3.2.4, alternative A7).
+	//
+	// In hosted file/SQLite mode (single-node), initHubServer seeds this
+	// from the embedded default_settings.yaml so the hub can stamp
+	// HarnessConfigID/Hash for broker hydration (ptone/scion#1316).
 	AgentDefaults opsettings.AgentDefaultsSettings
 	// MaxSubscriptionsPerUser is the maximum number of notification subscriptions
 	// allowed per subscriber. Zero means unlimited (default).

@@ -24,16 +24,21 @@ import "github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 // default_harness_config are resolved hub-side (they need ID/hash stamping) and
 // travel on the AppliedConfig ladder instead — see design §3.2.2.
 //
-// 🔴 The nil-when-empty return is load-bearing for file-mode parity.
-// BuildLayer1SnapshotFromFile deliberately leaves the agent-defaults fields
-// zero (design §3.2.4), because in file mode a co-located broker reads the same
-// settings.yaml and applies these values itself at the BOTTOM of its own chain.
-// Sending them from the hub as well would promote them from that bottom tier to
-// the hub tier and silently outrank broker profile resources and template
-// limits in deployments that have always behaved the other way. Because the
-// snapshot is empty in file mode, this returns nil there, the wire field is
-// omitted, and the broker-side rung never fires — no file-mode branch needed
-// anywhere. That is rejected alternative A7.
+// 🔴 The nil-when-empty return is load-bearing for workstation-mode parity.
+// In workstation mode (file/SQLite, non-hosted), AgentDefaults stays zero
+// because a co-located broker reads settings.yaml and applies these values
+// at the BOTTOM of its own chain; promoting them to the hub tier would
+// silently outrank broker profiles (design §3.2.4, rejected alternative A7).
+// Because defaults are zero, this returns nil, the wire field is omitted,
+// and the broker-side rung never fires.
+//
+// In hosted file/SQLite mode (single-node), initHubServer seeds
+// DefaultTemplate and DefaultHarnessConfig from the embedded
+// default_settings.yaml (ptone/scion#1316). Those two fields are resolved
+// hub-side (ID/hash stamping) and travel on AppliedConfig, NOT here. The
+// four limit/resource fields in this struct remain zero in hosted file mode,
+// so this still returns nil there — the hosted-mode fix does not change the
+// wire payload.
 func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings) *RemoteHubAgentDefaults {
 	if d.DefaultMaxTurns == 0 && d.DefaultMaxModelCalls == 0 &&
 		d.DefaultMaxDuration == "" && d.DefaultResources == nil {

@@ -1658,6 +1658,27 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		NativeChatEnabled: cfg.NativeChat.EnabledSetting(),
 	}
 
+	// In hosted mode, populate agent defaults from the embedded
+	// default_settings.yaml so the hub can stamp HarnessConfigID/Hash on
+	// dispatched agents. Without this, the hub creates agents with an empty
+	// harness-config name, and the broker's resourceObjectPath call to
+	// hydrate the config fails with 404 → 500 (ptone/scion#1316, fault 1).
+	//
+	// In workstation mode these stay zero: the co-located broker resolves
+	// defaults through its own settings.yaml chain (which it reads from
+	// disk), and promoting the embedded values to the hub tier would
+	// outrank the user's profile/settings defaults (design §3.2.4).
+	//
+	// In postgres mode, initOperationalSettings overwrites AgentDefaults
+	// from the DB (via ApplySnapshot), so this seed is a harmless fallback.
+	if hostedMode {
+		defaultTemplate, defaultHarnessConfig := config.EmbeddedAgentDefaults()
+		hubCfg.AgentDefaults = opsettings.AgentDefaultsSettings{
+			DefaultTemplate:      defaultTemplate,
+			DefaultHarnessConfig: defaultHarnessConfig,
+		}
+	}
+
 	// In hosted mode every replica must share the same session secret for
 	// cookies and JWT signing keys to work across the load balancer. Running
 	// without one means each replica generates its own ephemeral key, which
