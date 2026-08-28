@@ -14180,3 +14180,29 @@ assertions are, and they are reviewed as though they were decoration.
 
 **Landable on:** delete `RevertGuard`, correct the O5 comment, add the one-line assertion, drop the
 `CONFIRMED` logs. One more additive commit, then a scoped confirm by rev2 — not a re-read.
+
+### §35.92 — Close-out delta pushed; scoped confirm requested
+
+03:42. `1c22442` -> `dc729e2`, one additive commit, 4 files, **+19/-67** (net removal).
+
+**Scope verified independently before re-pointing the reviewer**, as now standard: `handlers.go`
+untouched (Shape B still held), `RevertGuard` **0 occurrences**, `CONFIRMED` **0 occurrences**. Matches
+the developer's report exactly. Third consecutive delta where the announcement and the tree agreed.
+
+Contents: `RevertGuard` deleted; `TestDefaultSandboxBin_MatchesLiteral` added as the internal
+config-side pin; the false comment in `sandbox_bin_sync_test.go` corrected to name the test that
+actually pins; `init.go`'s comment updated to name both pins; four narration logs dropped.
+
+**Asked rev2 for a scoped confirm, not a re-read**, and framed the central item as the cheapest possible
+measurement: **re-run its own `/bogus` mutation.** That mutation is what exposed the hole — the full
+`pkg/config` suite stayed green with a deliberately wrong constant — so the same mutation going red is
+the exact and complete proof that the hole is closed. **If it stays green, the new test's name is the
+fourth false claim of the night.**
+
+Also asked it to confirm the narration was removed **without the measurement going with it** — the
+assertions beside the deleted `t.Log` lines must be unchanged. Removing a false CONFIRMED and the real
+`Errorf` in one edit would be a silent regression of exactly the kind rule 22 is about.
+
+**Pattern worth keeping:** the best confirmation of a fix is frequently *the reviewer's own original
+mutation re-run*, not a fresh test. It is cheaper, it is already known to discriminate, and it cannot be
+gamed by the fix having been written to satisfy a described criterion rather than a real one.
