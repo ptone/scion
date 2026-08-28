@@ -1,3 +1,84 @@
+# task #92 — DELTA Review (R2) — `54cc98b` → `1c22442`
+
+Additive commit `1c22442` (parent = `54cc98b5`, verified). 6 files, +348/−8, matches the briefed list;
+`pkg/runtimebroker/handlers.go` untouched (Shape B still withheld — verified). Everything below is
+**measured**, mutations reverted, tree clean.
+
+## R2 Verdict: **REQUEST CHANGES** — one blocking item (a false guard). R1 is discharged.
+
+### LEAD — O4 `RevertGuard` is a false guard. Your suspicion is correct, by measurement.
+Simulated a reverted fix (disabled the template branch in `init.go`, seam kept) and reran both:
+
+| Test | Under reverted fix |
+|---|---|
+| `TestInitMachine_CloudRunSandbox_EffectiveSettings_Task92` (R1) | **RED** — `ActiveProfile="local" want "default"`; `ResolveRuntime("")="docker" want "cloudrun-sandbox"` |
+| `TestInitMachine_CloudRunSandbox_RevertGuard_Task92` (O4) | **STILL GREEN** |
+
+`RevertGuard` sets `CLOUD_RUN_INSTANCE=""` **and** `sandboxBinExists=false` — a **non-Cloud-Run**
+environment, where the fix branch is a no-op whether present or reverted, so its `docker` assertion
+holds unconditionally. Its comment ("simulates what happens if the fix is reverted") and its
+`t.Log("CONFIRMED: without the fix, empty selection resolves to docker — the bug")` are **false**: it
+does not exercise the reverted fix, and it has never been observed red under the condition it names
+(Rule 4: a negative assertion is not a pin until observed positive; Rule 12: an instrument that only
+passes is not proven). This **reintroduces the exact O4 defect** — a guard that survives the revert it
+claims to catch. It also duplicates `..._WithoutSandboxBin_FallsBack` and `..._NonCloudRun_...`, which
+already assert docker/local in non-sandbox envs.
+
+It cannot be salvaged into a real revert guard by tweaking assertions: with detection off, fix-present
+and fix-reverted are indistinguishable. The genuine revert guard is R1's `EffectiveSettings` test,
+which asserts the *positive* fixed outcome with detection *on* and goes red on revert (measured above).
+
+**Required:** delete `TestInitMachine_CloudRunSandbox_RevertGuard_Task92` (or at minimum strip its
+name/comment/`t.Log` of every revert-guard claim). This is a cheap fix and it does **not** re-open a
+coverage hole — the substantive protection (R1) is present and working. The block is narrowly that a
+test actively claims protection it does not provide, which is the anti-pattern this project is trying
+to stop.
+
+### R1 — DISCHARGED.
+`TestInitMachine_CloudRunSandbox_EffectiveSettings_Task92` runs **real** `InitMachine` (sandbox env) →
+**real** `LoadEffectiveSettings` → asserts the post-merge effective state: `ActiveProfile=="default"`
+**and** `ResolveRuntime("")=="cloudrun-sandbox"` — the koanf scalar-overwrite I measured in R1. Verified
+RED under reverted fix (above). This is exactly the end-to-end pin R1 demanded. (Immaterial: it passes
+`LoadEffectiveSettings(globalDir)` where `buildInfoProfiles` uses `("")`; identical here because
+`projectPath==globalDir` short-circuits the project-tier load. Not a finding.)
+
+### O3 — sufficient (concur with your lean).
+`SeedsCorrectProfile` now splits its comment into LOAD-BEARING vs SEED-LAYER-ONLY assertions, and R1's
+`EffectiveSettings` test independently *enforces* the determining state. Comment-as-documentation is
+fine because enforcement lives in R1, not the comment. No split needed.
+
+### O5 — right shape, but the sync test's comment makes a false claim (measured).
+Exporting `runtime.DefaultSandboxBin` + an external-package equality test is what I meant. But it guards
+only **one** direction. Measured: changing config's `defaultSandboxBin` to `/bogus/drifted/path` leaves
+the **entire `pkg/config` suite green** — because the `InitMachine` pin tests mock the `sandboxBinExists`
+seam (path-independent), config's constant is pinned by nothing. The sync-test comment's claim "if
+init.go's copy changes, the InitMachine pin tests fail" is **untrue**. *Fix (Optional, ~1 line):* add an
+internal assertion in package `config`: `if defaultSandboxBin != "/usr/local/gcp/bin/sandbox" { … }`.
+Non-blocking, but correct the false comment.
+
+### handlers_test.go restoration — FAITHFUL, by measurement (not memory).
+`TestBuildInfoProfiles_FallbackFires_Task92` re-executes the three facts + the len==0 fallback. All pass;
+each is load-bearing under mutation:
+- fallback `Name: "default"→"fallback"` → FALLBACK assertion RED.
+- local-only filter neutered (`if false`) → FACT 1 RED (`got 2`).
+- FACT 2 is a direct call to `isLocalOnlyRuntime` (docker=true, kubernetes=false) — measured, not asserted from memory.
+
+Cosmetic (non-blocking, also in RevertGuard): the `t.Log("...CONFIRMED")` lines print even after a failing
+`t.Errorf` (Errorf doesn't halt), so a log scan shows "CONFIRMED" on a failing run. Harmless to the
+verdict; worth tidying if the file is touched again.
+
+### R2 gates
+`go build`/`go vet` on `pkg/config` + `pkg/runtime` + `pkg/runtimebroker`: clean. Full `go test` on all
+three: green. Mutations this round (all reverted, tree clean): fix-disabled → R1 red / RevertGuard green;
+config const bogus → pkg/config green (O5 gap); fallback name → FALLBACK red; filter neutered → FACT 1
+red. Not run: full-repo `go test ./...` (sparse) and frontend TS build (browser harness excluded by you).
+
+**R2 bottom line:** delete/strip the false `RevertGuard` test and the delta is landable — R1 is
+genuinely discharged, O3 sufficient, the restored instrument faithful, O5 non-blocking (fix the false
+comment). Your instinct not to trust that last clause by reading was correct.
+
+---
+
 # task #92 — `scion/task-92-runtime-profile-fix` @ `54cc98b` — Review (R1)
 
 ## Executive Summary

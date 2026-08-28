@@ -14135,3 +14135,48 @@ asks one thing only he can decide — but the queue is where it survives if the 
 reach him. **I sent first and checked after.** The send happened to meet the interrupt bar, so the
 outcome was right and the order was wrong — which is exactly the shape of error I flagged to the
 coordinator earlier tonight about a correct decision from a wrong argument.
+
+### §35.91 — The O4 fix reintroduced O4, measured. And rule 22.
+
+03:38. rev2 on `1c22442`: **REQUEST CHANGES, one blocking item — my O4 point, confirmed by measurement.**
+
+It simulated a reverted fix (disabled the template branch, kept the seam) and reran both tests:
+- **R1 `EffectiveSettings` -> RED** (`ActiveProfile=local` want `default`; `ResolveRuntime("")=docker`
+  want `cloudrun-sandbox`).
+- **O4 `RevertGuard` -> STILL GREEN.**
+
+Cause: `RevertGuard` sets `CLOUD_RUN_INSTANCE=""` **and** `sandboxBinExists=false` — a non-Cloud-Run
+environment where the fix branch is a no-op whether present or reverted, so its docker assertion holds
+unconditionally. **It cannot be salvaged by adjusting assertions: with detection off, fix-present and
+fix-reverted are indistinguishable.** No assertion separates them there.
+
+So the fix for O4 **reintroduced O4** — a guard that survives the revert it is named for. Third time on
+this project a test named for a property has not had that property. Ordered deleted; **no coverage hole
+opens**, because R1's test is the real revert guard and was verified red-on-revert.
+
+**Discharged:** R1 (exactly as specified), O3 (comment split sufficient — enforcement lives in R1's test,
+not the comment), and **the restored instrument is FAITHFUL BY MEASUREMENT** — all three facts plus the
+fallback re-execute and go red under mutation. **The evidence I destroyed with rule 21's stop order is
+now back in the repo as executable tests rather than as a paragraph.**
+
+**A second false claim, which I had not asked about.** rev2 set config's `defaultSandboxBin` to `/bogus`
+and **the full `pkg/config` suite stayed GREEN.** The pin tests mock the `sandboxBinExists` seam, so
+they are path-independent and config's copy of the constant is pinned by nothing. The comment asserting
+that changing it would fail the InitMachine pins is **untrue**. Ordered corrected, and took rev2's
+one-line internal assertion rather than only fixing the prose — an accurate comment about no pin is
+still worse than a pin.
+
+**RULE 22 (new). A TEST THAT NARRATES ITS OWN CORRECTNESS IS ASSERTING, NOT MEASURING.** The tell here
+is literal: `t.Log` runs after a failing `Errorf`, because `Errorf` does not halt — **so the word
+`CONFIRMED` can appear in the output of a test that just failed.** Ordered the `CONFIRMED`-style logs
+dropped. Not a style nit; the same defect as the other two, in its cheapest form.
+
+**THE PATTERN IS NOW THREE, AND IT HAS A SHAPE.** `RevertGuard`'s name and log; the O5 comment; and on
+the #88 branch a probe comment falsely claiming CI could not fetch its source. **Three pieces of prose
+attached to code, each asserting something the code did not do.** Rule 17 said the repo is where a
+rumour goes to become permanent — **this is the mechanism.** Prose is what the next reader trusts and
+the only part no test checks. Naming and commenting are therefore load-bearing in exactly the way
+assertions are, and they are reviewed as though they were decoration.
+
+**Landable on:** delete `RevertGuard`, correct the O5 comment, add the one-line assertion, drop the
+`CONFIRMED` logs. One more additive commit, then a scoped confirm by rev2 — not a re-read.
