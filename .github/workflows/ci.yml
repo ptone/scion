@@ -127,6 +127,58 @@ jobs:
         with:
           args: '--new-from-merge-base=origin/main'
 
+  full-test-suite:
+    name: "Full Test Suite (informational, includes SQLite)"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run full test suite (including SQLite tests)
+        run: |
+          echo "::notice::This job runs ALL tests including those behind //go:build !no_sqlite."
+          echo "::notice::It is informational only — failures here do NOT block the pipeline."
+          echo ""
+          go test -json -timeout 30m -count=1 ./... > test-results.json 2>&1 || true
+
+      - name: Summarise results
+        if: always()
+        run: |
+          if [ ! -s test-results.json ]; then
+            echo "::warning::test-results.json is empty — the test run may have failed to start."
+            exit 0
+          fi
+
+          total_pass=$(grep -c '"Test":.*"Action":"pass"' test-results.json || true)
+          total_fail=$(grep -c '"Test":.*"Action":"fail"' test-results.json || true)
+          total_skip=$(grep -c '"Test":.*"Action":"skip"' test-results.json || true)
+
+          echo "## Full Test Suite Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Result | Count |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Pass | ${total_pass} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Fail | ${total_fail} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Skip | ${total_skip} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$total_fail" -gt 0 ]; then
+            echo "### Failing Tests" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            jq -r 'select(.Action == "fail" and .Test != null and .Test != "") | "\(.Package) / \(.Test)"' test-results.json \
+              | sort -u >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-latest
