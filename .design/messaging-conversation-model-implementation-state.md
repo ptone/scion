@@ -11933,3 +11933,100 @@ self-contained and should not sit behind a refactor.
 - **DEF-32 OPEN**, upgraded instance → class. Awaiting routing + AUTHZ count.
 - Fold audit — closed; verdict *inert on the key, contributing factor in DEF-32*.
 - Unchanged with user: #1360 merge, three branch deletions, escalation-1 CI.
+
+---
+
+## §5eo — DEF-32 class triage: AUTHZ 3 / ROUTING 5 / INERT 16; a fail-open beside a fail-closed comment (2026-08-28)
+
+### em9's triage
+
+`AUTHZ 3`, `ROUTING 5`, `INERT 16` over the 24 sites. AUTHZ set:
+
+- `handlers_broker_inbound.go:126` — the DEF-32 gate itself
+- `handlers_broker_inbound.go:127` — `TrimPrefix` inside the same if-block, dependent
+- `handlers_chat_v2.go:1653` — **new second-order finding**, see below
+
+### Their KEY FINDING contained a false premise — and I verified rather than assume
+
+em9 wrote: *"handleBrokerInbound dispatches directly to the agent runtime — it does
+NOT publish through the eventbus."* The **entire INERT verdict for the four
+priority sites rested on this.**
+
+`handlers_broker_inbound.go:291`:
+
+```go
+s.events.PublishUserMessage(r.Context(), storeMsg)
+```
+
+**It does publish.** Same class of error as their v1: a load-bearing negative
+asserted without a grep behind it (rules 61 / 164).
+
+**Conclusion survives, for a different reason.** Traced it: `events.go:717`
+`PublishUserMessage` builds a `UserMessageEvent` and sinks to
+`user.<id>.message`, `project.<id>.user.message`, `agent.<agentID>.message` — SSE
+fan-out subjects carrying an *event struct*. The four sites consume
+`*messages.StructuredMessage` off the **broker-delivery** pipeline. Different type,
+different subjects. The forged message enters the eventbus but not that pipeline.
+
+> **RULE 201.** "Right answer, wrong reason" must still be corrected. The stated
+> reason is what the next reader reuses, and a premise asserting a boundary that
+> does not exist will be load-bearing for someone else's conclusion later.
+
+**The correction extends DEF-32's impact.** `msg.AgentID` is set, so the forged
+message is sinked to `agent.<agentID>.message`: **live-pushed to every SSE
+subscriber on that agent's stream, carrying the victim's `SenderID`.** Not merely
+persisted. em9's false premise was concealing a genuine aggravating factor — the
+usual cost of an unverified negative.
+
+### `chat_v2:1653` — correct, and sharper than pitched
+
+`hasAgentReplyAfter` (`:1635`), called from `:1491` (edit) and `:1591` (delete):
+
+```go
+result, err := s.ListMessages(ctx, filter, opts)
+if err != nil || result == nil {
+    return true // fail-closed: deny edit/delete when we can't verify
+}
+for _, msg := range result.Items {
+    if strings.HasPrefix(msg.Sender, "agent:") {
+        return true
+    }
+}
+...
+return false
+```
+
+The author **explicitly reasoned about failure** and chose fail-closed on the error
+branch. But a casing miss **is not an error** — the query succeeds, rows return,
+`HasPrefix` simply does not match, the loop completes, and it returns `false`:
+**fail-OPEN**. An explicit fail-closed comment sits eight lines above a fail-open
+path *in the same function*.
+
+Consequence: a message an agent has already replied to becomes editable/deletable —
+the immutability guarantee silently lapses.
+
+> **RULE 202.** An explicit fail-closed on the error branch manufactures confidence
+> that the *function* fails closed. It covers only the branch it is written on.
+> Reviewers read the comment and stop. Audit the non-error exits separately.
+
+**Narrowing before escalation:** the exploit needs an **agent's** reply persisted
+non-canonically, not the attacker's own message. Broker inbound persists `Sender`
+verbatim and its `:126` gate only inspects `"user:"` — so `"Agent:bot"` passes
+through unexamined. **Told em9 to confirm end-to-end before I raise it**, to avoid
+overstating to the user.
+
+### Heartbeat checks
+
+- `upstream/main` = `3c7e14e41`, **unchanged** since §5el.
+- PR #1360 OPEN @ `7e3afb3d5`, head unchanged.
+- em6 parked (pending #1360); em10 parked (spec accepted `0b6770a6c`); em9 active.
+
+### Ledger
+
+- **DEF-32 OPEN** — class confirmed, AUTHZ count now known (3). Awaiting user routing.
+- **DEF-33 NEW (provisional)** — `hasAgentReplyAfter` fail-open on casing miss.
+  Held pending em9's end-to-end reachability confirmation; **not yet raised to the
+  user** deliberately.
+- Rows unmoved two heartbeats: DEF-5/6/9/10 and tranches D–G — all gated behind
+  tranche C, which is gated on the user's branch-deletion decision. Not stalled;
+  blocked on one upstream input.
