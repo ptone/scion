@@ -10102,3 +10102,112 @@ recorded. CI: independently confirmed on their side.
 - **138.** A plan that assigns work by feature prose rather than by file manifest cannot
   be audited for completeness. The absence of a file from every tranche is
   indistinguishable from its absence from the plan.
+
+---
+
+## §5dx — heartbeat sweep: ledger frozen behind S4; v2 file set recomputed; em9 dispatched
+
+Date: 2026-08-28 15:45Z. `upstream/main` = `31c488018`; `origin/main` = `31c488018` (mirror
+caught up this sweep — do not rely on that, it lags unpredictably).
+
+### 5dx.1 — Roster
+
+| agent | activity | note |
+|---|---|---|
+| ca-msg-em10 | **working** | woke on the §5dw.2 persistOK dispatch |
+| ca-msg-em6 | blocked | branch tip `6a3304223` @ 15:18, before my 15:35 dispatch — not yet woken |
+| ca-msg-em9 | blocked -> dispatched | answered forced-choice **A** (waiting on me) within one minute |
+
+em9's answer was one letter and one sentence, exactly as asked. No peer-wait anywhere in the
+roster; no circular wait. em6 not re-pinged — em10 received its dispatch in the same minute and
+woke, which proves delivery is healthy on this hub right now, so a second ping would only invite
+a status essay (rule 127: test the cheap hypothesis, and "not scheduled yet" is cheaper than
+"delivery broken").
+
+em10's `taskSummary` still reads `9333f943`, the orphan. Branch tip is `822c02e58`. Left alone;
+taskSummary records belief, not state.
+
+### 5dx.2 — Ledger sweep: nothing struck, and the reason is structural
+
+Re-verified against `31c488018`, not against the commit each row was filed on (rule 131).
+
+- **DEF-9 — CONFIRMED, unmoved.** `AddAddressee`: **0** non-test call sites. Positive control
+  `AddParticipant`: **4** (`backfill.go:320`, `dm_migration.go:208`, `dm_migration.go:481`,
+  `resolve.go:482`). Was 5 last count; `entadapter/conversation.go:122` no longer matches. The
+  control is what makes the zero meaningful.
+- **DEF-10 — still open, and now precisely bounded.** `"no-shared-project"` appears at
+  `resolve.go:339` and `resolve.go:434` on current main. **:339 is `resolveAgentDM` and is the
+  defect** — DMs are global, and the function's own doc comment at :333 says the project is used
+  "ONLY to resolve the agent slug" while the guard three lines below hard-requires it. **:434 is
+  `resolveThread` and is CORRECT** — threads are project-scoped. The same string, once wrong and
+  once right, in one file. That contrast is a built-in positive control for any future sweep and
+  should be cited rather than re-derived.
+- **DEF-5, DEF-6** — mine to spec, gated on S4. Unmoved by design, not by neglect.
+- **DEF-17/18 gate sweep, tranches C–G** — downstream of S4.
+
+**The sweep's actual finding is that the ledger cannot move, because S4 cannot move.** All four
+S4 preconditions are now blocked or regressed:
+
+| precondition | state |
+|---|---|
+| S4-P1 flip derivation failures to deny | OPEN |
+| S4-P2 re-key non-canonical | held brief, undispatched |
+| S4-P3 conversation stamping | **REGRESSED today** — was "in #1353 awaiting merge"; #1353 reopened per §5dw.2 |
+| S4-P4 divergence gate | code-done, UNOBSERVABLE while DEF-32 stands (auth's, acked, no ETA) |
+
+Two of the four are outside my control (P4 depends on auth-refactor-lead; P3 depends on em10's
+turnaround). Per-row explanations for the frozen ledger are noise; this table is the explanation.
+Not escalated — escalation 1 is with the user and escalation 2 is queued behind it.
+
+### 5dx.3 — v2 file set recomputed; my earlier instrument was wrong
+
+I nearly handed em9 a 75-file list. **`git diff --diff-filter=A upstream/main...origin/scion/messaging-v2`
+returns 75 files and is the wrong question.** The merge-base is `6268bac44` (08-27 11:05), which
+predates every tranche landing, so the three-dot diff answers "what did v2 add since the fork
+point" — and 43 of those 75 have since landed on main by other routes, including `dm_key.go`,
+`dm_migration.go`, `conversation_store.go` and the entire `pkg/ent` regeneration.
+
+Correct instrument is a set difference over trees:
+
+```
+git ls-tree -r --name-only origin/scion/messaging-v2 | sort > /tmp/v2_all.txt
+git ls-tree -r --name-only upstream/main            | sort > /tmp/main_all.txt
+comm -23 /tmp/v2_all.txt /tmp/main_all.txt
+```
+
+**Answer: 32 files.** Positive control passes — `pkg/messages/dm_key.go`,
+`pkg/messaging/dm_migration.go`, `pkg/store/entadapter/conversation_store.go` are each correctly
+ABSENT from the output. The earlier §5dv figure of "33" was right in substance; the boundary case
+is `cmd/deploy_instance{,_test}.go`, which are in the 32 as revert hazards.
+
+This is the two-dot/three-dot trap wearing a third costume. First it was a stale base, then a
+stale commit (rule 129), now a stale merge-base under a filename filter. The invariant across all
+three: **a stale reference point makes a diff answer a question nobody asked, and the answer is
+always plausible.**
+
+### 5dx.4 — em9 dispatched: TRANCHE-MANIFEST
+
+Deliverable `/scion-volumes/scratchpad/projects/ca-msg-arch/TRANCHE-MANIFEST.md`, one row per
+file: `file | tranche | basis | confidence | notes`. Basis must be a design-doc line number or a
+quoted phrase, never inference. `NONE` is a first-class answer and several are expected.
+
+Deliberately shaped so the artifact is a **committed file, not a report** — em9 has lost three
+reports to writing them into its own transcript. Structural fix beats another reminder.
+
+Handed it the four things already known (C's three contradictory definitions; the suspected C/F
+overlap on `broadcast.go`+`keys.go`; the `server_backfill*` cluster as sharpest drop risk;
+`deploy_instance*` as a do-not-carry revert hazard) with instructions to verify rather than
+rediscover, plus the wrong-instrument warning above with its control.
+
+### New standing rules
+
+- **139.** A stale reference point makes a diff answer a question nobody asked, and the answer is
+  always plausible. Before any `A...B` or `A..B`, state what the merge-base is and how old it is.
+  For "what exists here and not there", do not diff at all — difference the trees with `ls-tree`
+  and `comm`, and control the result against a file known to exist on both sides.
+- **140.** When a ledger stops moving, the useful output is not a per-row excuse but the
+  dependency that froze all of them at once. Publish the blocking table, and mark which entries
+  are outside your control.
+- **141.** When an agent has a repeated report-delivery failure, do not send another reminder —
+  reshape the task so the deliverable is a committed artifact. A report can be lost to context
+  exhaustion; a pushed file cannot.
