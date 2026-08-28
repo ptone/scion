@@ -604,11 +604,27 @@ func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http
 
 	// Attempt to verify impersonation via the GCP token generator
 	if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
-		// Persist the failure status
+		// Persist the failure status so that the assign gate
+		// (handlers_agents_core.go, createAgentInProject) refuses to create
+		// new agents with this SA. If we cannot persist the failure, the
+		// database still reads Verified=true and the gate stays open — so a
+		// persistence failure here is a security-relevant event, not an
+		// ignorable cleanup error.
 		sa.Verified = false
 		sa.VerificationStatus = store.GCPVerificationFailed
 		sa.VerificationError = err.Error()
-		_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
+		if updateErr := s.store.UpdateGCPServiceAccount(r.Context(), sa); updateErr != nil {
+			slog.Error("verification failed AND the failure could not be persisted — "+
+				"the service account may still appear verified in the database",
+				"sa_id", sa.ID, "sa_email", sa.Email,
+				"verify_error", err.Error(), "persist_error", updateErr.Error())
+			writeError(w, http.StatusInternalServerError, "gcp_verification_persist_failed",
+				"Verification failed but the failure could not be recorded; "+
+					"the service account may still appear as verified. "+
+					"Retry verification or check the service account status manually. "+
+					"Verification error: "+err.Error(), nil)
+			return
+		}
 
 		details := map[string]interface{}{
 			"hubServiceAccountEmail": s.gcpTokenGenerator.ServiceAccountEmail(),
@@ -625,7 +641,14 @@ func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http
 	sa.VerificationError = ""
 
 	if err := s.store.UpdateGCPServiceAccount(r.Context(), sa); err != nil {
-		writeErrorFromErr(w, err, "")
+		slog.Error("verification succeeded but the success could not be persisted — "+
+			"the service account will still appear unverified in the database",
+			"sa_id", sa.ID, "sa_email", sa.Email,
+			"persist_error", err.Error())
+		writeError(w, http.StatusInternalServerError, "gcp_verification_persist_failed",
+			"Verification succeeded but the result could not be recorded; "+
+				"the service account may still appear as unverified. "+
+				"Retry verification to persist the result.", nil)
 		return
 	}
 
