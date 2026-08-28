@@ -1499,7 +1499,7 @@ func TestWaitForSandboxLiveness_AllFail(t *testing.T) {
 func TestReadAgentInfoCause_PresentAndParseable(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agent-info.json")
-	data := `{"phase":"error","detail":{"message":"git clone failed (no GITHUB_TOKEN secret configured): fatal: could not resolve host"}}`
+	data := `{"phase":"error","detail":{"message":"git clone failed (A network error occurred. Check connectivity and try again.): fatal: could not resolve host"}}`
 	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1629,7 +1629,7 @@ esac
 	slug := sanitizeSandboxName(cfg.Name)
 	agentHome := filepath.Join(rootDir, "agents", slug, "home")
 	_ = os.MkdirAll(agentHome, 0755)
-	agentInfo := `{"phase":"error","detail":{"message":"git clone failed (no GITHUB_TOKEN secret configured — the repository may require authentication): fatal: unable to access 'https://github.com/org/repo.git/': Could not resolve host: github.com"}}`
+	agentInfo := `{"phase":"error","detail":{"message":"git clone failed (A network error occurred. Check connectivity and try again.): fatal: unable to access 'https://github.com/org/repo.git/': Could not resolve host: github.com"}}`
 	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), []byte(agentInfo), 0644); err != nil {
 		t.Fatal(err)
 	}
