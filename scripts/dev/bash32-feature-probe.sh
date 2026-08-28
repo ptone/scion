@@ -103,3 +103,38 @@ probe '[[ -v ]]'     'x=1; [[ -v x ]]'
 probe 'wait -n'      'sleep 0 & wait -n'
 # shellcheck disable=SC2016
 probe 'coproc'       'coproc cat; echo hi >&${COPROC[1]}; exec {COPROC[1]}>&-; read -r line <&${COPROC[0]}; [ "$line" = hi ]'
+
+echo ""
+
+# --- External tool probes ---
+# These measure capabilities of grep, awk, and sed as shipped by the platform.
+# Unlike the bash constructs above, these are NOT bash version-specific — they
+# depend on which implementation the OS ships.
+#
+# The design doc carried two prohibition rows with Measured = "—":
+#   - BSD grep → No -P
+#   - BWK awk  → No gensub
+# Both were derived from version strings, never exercised.
+
+# grep -P (Perl-compatible regex). BSD grep on macOS does not support it;
+# GNU grep does.  The snippet must be stderr-clean on success.
+probe 'grep -P'      'echo "hello" | grep -P "hel+" >/dev/null'
+
+# awk gensub. BWK awk (macOS default) does not have gensub; gawk does.
+# gensub(regex, replacement, how [, target]) is a gawk extension.
+# The snippet tests that gensub is recognized as a function and produces
+# the correct substitution.
+# shellcheck disable=SC2016
+probe 'awk gensub'   'echo "hello" | awk "{ print gensub(/l/, \"L\", \"g\") }" | grep -q "heLLo"'
+
+# sed --help (GNU-style long option).  BSD sed rejects this; GNU sed accepts.
+# This is already asserted in the design doc as "Rejects the GNU-style --help
+# extractor", but that assertion was based on a parse failure with a specific
+# sed expression, not a direct measurement of long option support.
+probe 'sed --help'   'sed --help >/dev/null 2>&1'
+
+# sed \? (GNU BRE optional match).  BSD sed treats \? as a literal ?.
+# The snippet tests whether \? is interpreted as optional (GNU) or literal (BSD).
+# If \? is optional: 'ab' matches 'ab\?c' → outputs 'abc' via substitution → grep -q abc succeeds
+# If \? is literal: 'ab' does not match 'ab\?c' → no substitution → grep -q abc fails
+probe 'sed BRE \\?'  'echo "ab" | sed "s/ab\\?/abc/" | grep -q "abc"'
