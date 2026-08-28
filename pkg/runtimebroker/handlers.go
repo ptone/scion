@@ -178,6 +178,22 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 	return false
 }
 
+// canBrokerServeRuntime reports whether a broker running brokerType can dispatch
+// an agent to a profile declaring profileType.
+//
+// A non-local broker serves only its own runtime type: it has no mechanism to
+// reach any other. A local broker is the exception — it may dispatch to remote
+// runtimes as a client.
+func canBrokerServeRuntime(brokerType, profileType string) bool {
+	if brokerType == profileType {
+		return true
+	}
+	if isLocalOnlyRuntime(brokerType) {
+		return true
+	}
+	return false
+}
+
 // buildInfoProfiles enumerates configured profiles from effective settings.
 // Falls back to a single "default" profile when no profiles are configured.
 func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
@@ -202,7 +218,7 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 			rtType = defaultRuntimeType
 		}
 
-		if !isLocalOnlyRuntime(defaultRuntimeType) && isLocalOnlyRuntime(rtType) {
+		if !canBrokerServeRuntime(defaultRuntimeType, rtType) {
 			continue
 		}
 
