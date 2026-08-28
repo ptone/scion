@@ -262,20 +262,6 @@ Using the resource path (`/projects/NUMBER/locations/REGION/services/NAME`) as t
 audience will fail with "Invalid JWT audience".
 :::
 
-:::caution[Always specify harnessConfig when creating agents via the API]
-An API agent create that omits `harnessConfig` will fail with a 502 and an error
-naming a harness the operator never chose:
-
-```
-failed to find harness-config "antigravity": harness-config "antigravity" not found
-```
-
-This is the product-wide default harness resolving to a name that is not registered
-on the running hub. The error gives no indication that specifying `harnessConfig`
-is the fix. Always pass `template` and `harnessConfig` explicitly. The web UI
-enforces harness selection and is not affected.
-:::
-
 ### Attach to the agent's terminal
 
 Once the agent reaches a running state, click **Attach** in the web UI to open a
@@ -447,10 +433,3 @@ curl -s -o /dev/null -w "%{http_code}" "https://INSTANCE_URL"
 ```
 
 Re-run the deploy command — it is idempotent and will re-enable IAP.
-
-### Agent create returns 502: `harness-config "antigravity" not found`
-
-If creating an agent without `harnessConfig` returns a 502 with `failed to find
-harness-config "antigravity"`, the fix is to specify `harnessConfig` explicitly
-(e.g. `"harnessConfig": "claude"`). See the note in
-[Section 3](#3-create-a-project-and-start-an-agent).
