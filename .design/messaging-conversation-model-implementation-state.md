@@ -12946,3 +12946,79 @@ Rationale, in the order it carries weight:
 **State.** User told: do not merge #1361. em10 remains dispatched on the `go/ast` rewrite, on `scion/ca-msg-em10-marker-gate` so the PR updates in place; branch still at `55728b3bd`, rewrite not yet pushed. On delivery I re-run the **full** matrix including substitution tests (the §5ex blind spot) plus the new string-literal case (a) `https://` inside a guarded function must PASS.
 
 **Added to em10's acceptance criteria as (h):** a guarded function containing a string literal with `//` in it must still pass. This case is now permanent — it is the regression test for the patch I rejected.
+
+## §5ez — 2026-08-28 — #1360 landed; marker gate go/ast rewrite cleared; dm-tighten ready
+
+**MAIN MOVED.** `upstream/main` = **`b14c41414`** (was `905756af7`, before that `3c7e14e41`). Five commits: #1355, #1356, #1358, #1359 (B5F1a attacker project membership for the #1347 authz gate), **#1360 (em6's B2/B1/B14 shared DM participant predicate)**.
+
+### #1360 landed — verified, not assumed
+Squash-merged, so `origin/scion/ca-msg-em6-b2b1b14` is **NOT an ancestor** of main. Ancestry checks are therefore blind here (rule 6). Verified by **blob hash per file** instead (rule 215): all 8 files IDENTICAL between branch and main. Nothing dropped by the squash.
+
+### dm-tighten — the squash-merge rebase trap
+`git rebase upstream/main` on the stacked branch **fails**: it replays already-landed commits and conflicts at `c56f0a987` (CheckDMParticipantKey extraction). Resolving those conflicts would be wrong — the content is already in main.
+
+Correct recipe, proven end-to-end before being handed over:
+```
+git rebase --onto upstream/main origin/scion/ca-msg-em6-b2b1b14 HEAD
+```
+Replays only the 3 genuinely-unlanded commits. Result `7caa8e00d`, base `b14c41414`, **exactly 2 files** (`pkg/messages/dm_key.go`, `dm_key_test.go`), +151/-28. If it shows 8 files the rebase replayed landed work.
+
+**NEW RULE 222.** After a squash-merge, a stacked branch must be rebased with `--onto <newbase> <old-stack-parent>`, never plain `rebase <newbase>`. Plain rebase re-applies landed commits and presents as a conflict that invites you to "resolve" work that is already in main. The conflict is the *symptom of correctness*, not a problem to fix.
+
+### dm-tighten verification (mine, independent)
+- Normalisation audit on derivation path: clean. Only `strings.ToLower` at `dm_key.go:108`, inside `PrincipalKindFromAddress`, which `DMConversationKey` does **not** call.
+- **Sharpening em6's claim:** "off the derivation path" is true of the function body but understates it. `PrincipalKindFromAddress` has 4 non-test callers — `messagebroker.go:465`, `messagebroker.go:839`, `handlers_broker_inbound.go:276`, `handlers_agent_messaging.go:1578` — and their output **feeds** `DMConversationKey`. So the ToLower is **upstream-of-derivation**, not off-derivation: `USER:<uuid>` is lowercased to `user:<uuid>` *before* the rejection can see it, so the normalisation masks a rejection rather than being absent. Consequence: the key is not a pure function of the raw address. **Keep tracked; do not let this be closed as "not on the path."**
+- **Positive controls (rule 65).** First attempt was **inconclusive** — replacing the comparisons with `false` left `uA`/`uB` unused, so the package failed to *build*. A build failure proves nothing about test coverage. Redone with `if false && uA.String() != idA`, which compiles:
+  - canonicality rejection disabled → suite **FAILS** (`non-canonical UUID "urn:uuid:..." must be rejected`)
+  - kind validation disabled → suite **FAILS** (`non-canonical input must be rejected`)
+  Tests genuinely cover the fix.
+
+**NEW RULE 223.** A positive control that fails to compile is not a negative result, it is a void experiment. When neutering code to test whether tests catch its removal, neuter the *predicate* (`if false && cond`) rather than deleting the expression, so the surrounding code still uses its variables.
+
+Compare URL sent to thread `1532864101909528737` (body compressed — encoding pushed the first attempt to 2416 runes).
+
+### Marker gate — go/ast rewrite CLEARED, PR #1361 @ `5fc82455b`
+Sequence: `94f75b8f1` (rewrite) → `b728496eb` (rebased onto `b14c41414`, artifacts hash-identical) → `5fc82455b` (wrapper fixes).
+
+Scope 4 files, +360/-2, **no product files**. `hack/checksecuritymarkergates/main.go` (251 lines, go/ast) plus a thin wrapper. em10's `go run` reasoning is correct and worth keeping: `go run` collapses all non-zero exits to 1, destroying the exit-1/exit-2 distinction; wrapper does `go build -o $tmpbin` then `exec`.
+
+**My independent verification against current main** (not em10's authoring base):
+
+| case | old awk gate | go/ast gate |
+|---|---|---|
+| clean main | 0 | **0** |
+| substitution `ActionAttach`→`ActionAttachment` | **0 (BLIND)** | **1** |
+| deletion-equiv `ActionAttach`→`ActionFoo` | 1 | **1** |
+| (a) trailing comment, check removed | **0 (BLIND)** | **1** |
+| (e) comment containing `}` | **1 (FALSE FAIL)** | **0** |
+| (h) string literal containing `//` | 0 | **0** (bot patch: **1, false fail**) |
+| missing guarded file | 2 | **2** |
+| unparseable file | — | **2** (fail-closed, bonus) |
+
+All four holes closed simultaneously, none traded against another.
+
+### The shellcheck blocker was TWO defects, and only one was reported
+- **Reported:** SC2164, `cd "$(dirname "$0")/.."` with no `|| exit`.
+- **Unreported, found by chasing it:** the rewrite had **silently dropped `set -euo pipefail`** (present at `:62` in the old script, absent entirely in the new wrapper).
+
+Why the pair matters: without `set -e`, a failed `cd` leaves the script running in the invoking directory. Today `go build ./hack/checksecuritymarkergates` fails there, so exit 2 happens *by luck*. Invoked from a **different scion checkout**, the build succeeds and the gate reports "all gates pass" **for a codebase nobody asked about**. A security gate that can silently validate the wrong tree is worse than no gate. Fixed as `cd ... || exit 2` — exit 2 because "nothing was analysed" is the script's own documented contract, so lint-fix and correct-fix coincide (contrast DEF-18, rule 217).
+
+**NEW RULE 224.** A lint failure is a pointer, not a specification. Read the diff around it for what the linter cannot see. Here SC2164 sat two lines from a deleted `set -euo pipefail` that no tool reported.
+
+**NEW RULE 225.** A rewrite silently drops the safety lines of the thing it replaces, because attention is on the new mechanism. When replacing a script, diff the *preamble* against the original explicitly — `set` flags, traps, `umask`, `IFS` — as a separate step from reviewing the logic.
+
+Post-fix re-verification (rule 213 — re-test what the change could *disturb*, not what was authored): `main.go` byte-identical to the already-verified version, so only the wrapper moved; re-ran the exit-code contract: 0 clean / 1 substitution / 2 missing file / 0 from non-repo cwd. Intact.
+
+**CI green on `5fc82455b`:** shellcheck PASS, golangci-lint PASS, Build & Test PASS. `cla/google` FAIL (expected, not required, rule 104). **Step enumeration (rule 218): step 15 "Check Security Marker Gates" = success**, same `set +e`/`exit $rc` shape as the authz guard, so success entails execution.
+
+### Ledger sweep
+- **DEF-17 — STRUCK** (prior segment).
+- **DEF-18 — OPEN, re-homed** to whichever tranche lands `pkg/messaging/validate.go`. Unmoved two heartbeats. Reason it cannot be swept: the lint-satisfying fix (delete `projectAgents`) is *cheaper* than the correct fix (use it to name offending agents), so CI would discharge it wrongly and invisibly (rule 217).
+- **Branch-deletion decision — DOWNGRADED from blocker to preference.** Both merged/mergeable gate carriers now enforce the security markers in CI, so the three dead branches (`scion/messaging-v2`, `scion/auth-refactor`, `scion/auth-refactor-v2`) are no longer load-bearing. User told they can be decided on their own merits. **This removes one of the five open user decisions.**
+- **DEF-32 / DEF-34 routing — still the real blocker for tranche C.** Recommendation remains a standalone hotfix.
+- Held, unmoved, no new information: DEF-5, DEF-6, DEF-9, DEF-10, DEF-11, DEF-14, DEF-16, tranches D–G. Tranche H still without a carrier, blocked on G-1.
+
+### Roster
+- **em10** — `5fc82455b`, cleared, told to park. Answered **D** ("done but not pushed") to the forced-choice probe — the finished-but-unsent failure mode, caught by `scion list --format json` showing a *stale* taskSummary ("Starting tranche C specification") while the branch tip had not moved. The forced choice worked where an open status ping would have invited a restart.
+- **em6** — `7caa8e00d`, verified, compare URL sent.
+- **em9** — parked at `47a7c6736`; **base is now stale** against `b14c41414`, will need the same `--onto` treatment if its stack parent landed via squash. Not yet checked.
