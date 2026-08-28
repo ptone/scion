@@ -1573,6 +1573,40 @@ em10 and every agent I dispatch hereafter.
       messaging defects this project was chartered to fix. **The unifying question is: "what would
       make this instrument silently return the answer I want?"**
 
+77. **A security fix scoped by *function* rather than by *ingress class* leaves the sibling
+    ingresses open — and the commit message then reads as a claim that they are closed.** Issued
+    2026-08-28 from the B5 review of `9241f86f`. em10 fixed `handleAgentMessage` correctly and
+    thoroughly: unconditional auth override, an `authenticatedSender(ctx)` helper at all three
+    dual-write sites, a test I mutation-verified three ways. It is a good fix. But
+    `handleProjectBroadcast` — a sibling ingress **in the same file, 700 lines down** — still
+    carried the conditional backfill `if req.StructuredMessage.Sender == "" { ... }`, and reached
+    the same DM-minting sink through the bus:
+    `:1324 PublishBroadcast` → `fanOutToProject` → `deliverToAgent:641` →
+    `if !msg.Broadcasted { ResolveOrCreateDMConversation(senderKind, msg.SenderID, ...) }`.
+    Nothing sets `Broadcasted` on the *structured* message server-side — the only writers are
+    client-side in `cmd/message.go` — so a client that sends `broadcasted:false` with a forged
+    `sender_id` mints a DM conversation under the victim's identity **for every running agent in
+    the project**. Wider blast radius than the path that was fixed.
+    - Proven by probe, not argued: `TestProbe_B5_BroadcastIngressStillAcceptsSpoofedSender` FAILS
+      on the fix tip. Saved at `repro/b5_broadcast_probe_test.go`.
+    - **Rule 72 said "grep for the sink, not for the guard." I did — and the sink grep is what
+      found this.** The lesson is not new; the lesson is that rule 72 has to be applied to *other
+      people's* fixes at review time, not only to my own analysis. A review that reads the diff
+      reads only the ingresses the author already thought of.
+    - **Standing check for every security fix I review:** enumerate every call site of the *sink*,
+      then for each one name the ingress that feeds it and state whether the fix covers it.
+      The diff is the author's map of the problem, not the problem.
+    - Corollary on the commit message. em10's said "Broker sites transitively fixed: the bus
+      envelope now carries auth-derived fields from the publish side." True of the publishers it
+      changed, false of `PublishBroadcast` — the one that mattered. **An overstated security
+      commit message is worse than an understated one, because the next reader greps the log
+      before they grep the code.**
+    - My first run of this probe PASSED — `deliverToAgent` returns early on a nil dispatcher and
+      on empty `RuntimeBrokerID`, both before the dual-write. Rule 61 again, and it would have
+      produced a false all-clear on a live security hole. **The probe now carries its own
+      positive control.**
+
+
 
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
@@ -5883,3 +5917,60 @@ mode I am cleaning up was caused by starting early.**
 Spec also carries forward: three-dot only (67), localise deletions (31), and **rule 76 — `pkg/hub`
 tests do not run in CI, so green CI is not evidence for anything in the conflict set; the hand
 mutation runs are the only verification.**
+
+---
+
+### §5cb — B5 security review of `9241f86f` (2026-08-28 02:25Z) — CHANGES REQUESTED
+
+em10 pushed B5 alone as instructed: `scion/ca-msg-em10-trb` @ `9241f86f`, 2 files, +182/−43.
+Reviewed it on its own because it is the security fix.
+
+**Mutation results against `TestAgentMessage_B5_SpoofedSenderDoesNotDeriveConversationKey`:**
+
+| mutation | what was reverted | result | reading |
+|---|---|---|---|
+| MA | override **and** all 3 per-site guards | **FAIL** | the test is a genuine defect detector |
+| MB | override only, site guards kept | **FAIL** | the test pins payload-sanitisation independently |
+| MC | 3 site guards only, override kept | PASS | the site guards are *redundant given the override* |
+
+MC passing is expected and acceptable — the per-site `authenticatedSender(ctx)` calls are
+defence in depth. But it is worth stating: **no test pins the depth.** Deleting the override
+alone is caught; deleting one per-site guard alone is not.
+
+**Cleared concerns (checked before approving, not assumed):**
+- *Integration-relay regression from the unconditional override* — **does not exist.** Every
+  `extras/` surface (Discord, Slack, Telegram, Teams) posts to the broker-**inbound** handler,
+  not `/agents/{id}/message`. That handler is untouched by the diff, resolves `SenderID` through
+  its own upstream permission check, and performs **no DM dual-write** at all. Verified by
+  grepping all `SenderID` producers outside `pkg/hub`.
+- *Second ingress into `handleGroupMessage`* — none. Sole caller is
+  `handlers_agent_messaging.go:607`, after the override. Sites 2 and 3 inherit a sanitised msg.
+
+**F1 — BLOCKING. B5 is incomplete; see rule 77.** `handleProjectBroadcast:1257` retains the
+conditional backfill and reaches the same DM sink via `PublishBroadcast` → `fanOutToProject`
+→ `deliverToAgent:641`. Probe `TestProbe_B5_BroadcastIngressStillAcceptsSpoofedSender` FAILS on
+the fix tip, minting `dm:agent:<agentID>:user:<victimID>`. One forged DM **per running agent in
+the project**, per request. Related, same root: `:1284`/`:1301` decide broadcast targeting by
+comparing the *client-supplied* `Sender` against agent slugs.
+Required in the same commit: (a) unconditional auth-derivation in `handleProjectBroadcast`;
+(b) force `Broadcasted = true` server-side — the client must not declare whether its own message
+is a broadcast. Each with a test that fails without it.
+
+**F2 — non-blocking, display.** Override sets `Sender = "agent:" + agentIdent.ID()` always;
+convention elsewhere is `"agent:" + agent.Slug`. `messagebroker.go:534` feeds
+`TrimPrefix(Sender,"agent:")` to `NotifyDMReceived` as a human-readable name → agent-originated
+DM notifications now render a raw UUID. Keep the ID for the key, resolve the slug for display.
+
+**F3 — informational.** `handlers_agent_messaging_test.go` carries `//go:build !no_sqlite`.
+`go test -tags no_sqlite ./pkg/hub/ -run TestAgentMessage_B5` → `ok ... [no tests to run]`.
+**The B5 security test does not execute in CI.** Rule 76, now landing on a security control —
+this is the concrete cost of the gap em9 is inventorying, and it moves that workstream from
+hygiene to prerequisite.
+
+**Rule 73 check:** the test builds expected keys with `messages.DMConversationKey`, the same
+generator production uses. Correct here — it is testing the *inputs* to the key, not the key
+function, and the golden vectors cover the function. No action.
+
+**Ledger:** B5 stays open pending F1. Upstream moved `1befe9237` → `f99de64df` (#1336, #1337 —
+neither ours). PRs #1338/#1339 still open; DEF-26 URL still out. Branch tips unchanged:
+em6-def31 `facb332b`, em6-ci-guard `e93a58e3`, em6-def26 `bd5e492c`, em9-unify `25fad0a2`.
