@@ -6952,3 +6952,86 @@ must fail when its own fix alone is reverted, with the selector positively contr
 
 **Not dispatched.** Same reason as B1/B2/B14: tranche B is unmerged and this would build on a
 moving base.
+
+---
+
+## §5co. Heartbeat 2026-08-28 06:13 — TRANCHE C EXCLUSION LIST, and the collision is worse than §5bw recorded
+
+Third dead sweep: `upstream/main` `f4d02461b`, five tips unchanged, three managers `blocked`,
+#1338/#1339/#1340 open, tranche B PR unopened.
+
+### Delivery question closed by control, not by asking
+
+I said in §5cn I would revisit whether the tranche B URL had been delivered. `scion message` is
+send-only — there is no inbox, history, or thread-read subcommand — so delivery cannot be queried.
+But a **positive control exists**: the DEF-26 compare URL went to the *same thread*
+(`1532864101909528737`) by the same command shape, and the user opened it as PR #1340. The channel
+demonstrably delivers. No message spent, question answered. Rule 61 applies well outside git.
+
+### THE TRANCHE C COLLISION — quantified, and materially worse than recorded
+
+§5bw recorded this as "em9-unify adds all five of tranche B's files as new, plus the CI guard
+script." The real numbers, three-dot against `upstream/main`, `comm` positively controlled
+(C ∩ C = 213):
+
+- tranche C (`ca-msg-em9-unify`): **213 files**, merge-base `6268bac44` — far behind main.
+- **C ∩ B = 15 of tranche B's 16 files.** Not five.
+- C ∩ CI-guard = 3 of 4. C ∩ DEF-31 = 1. C ∩ DEF-26 = 1.
+- The single tranche B file *not* in C is `pkg/hub/notifications.go` — which carries the F2/F3
+  slug-resolution fix. It is safe by accident, not by design.
+
+**The split that matters (rule 31: a new entity fails loudly; a MODIFIED aggregate file reverts
+silently):**
+
+| collision | files | failure mode |
+|---|---|---|
+| **A/A** | 5 × `.design/project-log/*.md`, 5 × `pkg/messaging/*` (`divergence{,_test}.go`, `dm_migration{,_test}.go`, `key_consolidation_test.go`) | **LOUD** — git conflicts |
+| **M/M** | `pkg/hub/handlers_agent_messaging.go`, `pkg/hub/messagebroker.go`, plus `chat_notifications_test.go`, `handlers_agent_messaging_test.go`, `messagebroker_test.go` | **SILENT** |
+
+**`handlers_agent_messaging.go` and `messagebroker.go` are the two files that carry the entire B5
+security fix.** And tranche C's tree does not contain B5 at all:
+
+| marker (`pkg/hub/*.go`) | tranche B | tranche C | main |
+|---|---|---|---|
+| `authenticatedSender` | 7 | **0** | 0 |
+| `msg.SenderID == agent.ID` self-skip | 2 | **0** | 0 |
+| `self-skip not possible` warning | 4 | **0** | 0 |
+
+The zeros are the claim, so the sevens and fours are the control that proves the grep works. C was
+cut before B5 existed and modifies both files that hold it. **A clean merge of C after B silently
+reverts a security fix** — the exact shape rule 31 describes, with the worst possible payload.
+
+### RULING — tranche C is RE-CUT, not merged
+
+"Exclude these files" is unworkable for the M/M set, because tranche C legitimately needs to change
+`messagebroker.go` too. So the instruction is not an exclusion list applied at merge time; it is a
+re-cut:
+
+1. **The 10 A/A files: C drops its own copies outright and takes B's.** Same filenames, but B's
+   versions are reviewed and mutation-tested (11/11) and C's are older. C must not "merge" them.
+2. **The 5 M/M files: C rebases onto post-B `main` and re-applies its changes on top of B's
+   versions**, resolving every conflict in favour of preserving B5. Never the reverse direction.
+3. **CI-guard's 3 files** (`.github/workflows/ci.yml`, `Makefile`,
+   `hack/check-conversation-upsert-guard.sh`) — C takes the landed versions.
+4. **DEF-31's `pkg/hub/handlers_chat_v2.go` and DEF-26's `pkg/messaging/resolve_test.go`** — same.
+
+### The acceptance gate is mechanical, so it cannot be argued with
+
+After the re-cut, on the tranche C branch, these three greps over `pkg/hub/*.go` **must** return the
+same counts they return on post-B `main` — 7, 2, and 4 respectively:
+
+    git grep -c 'authenticatedSender'      <C-tip> -- 'pkg/hub/*.go'
+    git grep -c 'self-skip not possible'   <C-tip> -- 'pkg/hub/*.go'
+    git grep -c 'msg.SenderID == agent.ID' <C-tip> -- 'pkg/hub/*.go'
+
+Any count **below** the post-B baseline is a reverted security fix and blocks the branch. This is
+rule 31's "empty diff over the files main changed most recently", made specific enough that a
+developer can run it and a reviewer can verify it without re-deriving the argument. It also
+survives rebase, unlike a diff comparison against a fixed SHA.
+
+**Not escalated to the user.** Tranche C has no PR and is not dispatched, so there is nothing they
+could merge by mistake today; enforcing this is my gate, not their decision. It becomes an
+escalation the moment a C branch is proposed for landing.
+
+**Consequence for scheduling:** C cannot be dispatched until B lands, and now for a second and
+stronger reason than "avoid a rebase" — C's re-cut baseline does not exist until B is on main.
