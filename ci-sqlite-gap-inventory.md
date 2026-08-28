@@ -6,7 +6,26 @@
 
 ---
 
-## 1. Files Carrying `//go:build !no_sqlite`
+## 1. The Finding
+
+A currently-failing authorization test that CI structurally cannot observe:
+
+```
+ci.yml:104                                    →  make test-fast
+Makefile:69                                   →  go test -tags no_sqlite ./...
+pkg/hub/authz_agent_baseline_test.go:1        →  //go:build !no_sqlite
+                                              →  TestTemplateResource_UATConfinement never compiles
+                                              →  and that test FAILS on bare upstream/main today
+```
+
+This is not a hypothetical gap. The test exists, it asserts on an
+authorization invariant (UAT confinement for global templates), it fails
+right now on main, and CI has never seen the failure because the build
+tag compiles the file out of the binary. The 3,358 test functions
+described below are the blast radius — the size of the surface that
+shares this structural blindness.
+
+### File Inventory
 
 **220 test files** across 6 packages.
 
@@ -169,6 +188,13 @@ files entirely. The remaining 5,114 functions run and produce the green
 check mark. The 3,358 excluded functions are not skipped — they do not exist
 in the compiled binary.
 
+**Denominator note:** The total (8,472) counts only the root module
+(`go test ./...`). The `extras/` directories (`scion-slack`, `scion-discord`,
+`scion-teams`, `scion-telegram`, `scion-a2a-bridge`, `scion-chat-app`) each
+have their own `go.mod` and are separate modules — they are never included
+in `./...` from the repo root, so they are correctly excluded from both the
+numerator and denominator.
+
 ---
 
 ## 3. Security / Authorization Tests — Zero CI Enforcement
@@ -192,6 +218,30 @@ ok   github.com/GoogleCloudPlatform/scion/pkg/hub  0.109s [no tests to run]
 ```
 
 All three report PASS with zero assertions executed.
+
+### 3a. Positive Control — the package still runs, these tests do not
+
+The `[no tests to run]` output above only proves the build tag is responsible
+if an _untagged_ test in the same package still runs under the same flags.
+This confirms the package is not broken — only the tagged files are excluded:
+
+```
+$ go test -tags no_sqlite ./pkg/hub/ -run '^TestMaintenanceState_Defaults$' -count=1 -v
+=== RUN   TestMaintenanceState_Defaults
+--- PASS: TestMaintenanceState_Defaults (0.00s)
+PASS
+ok   github.com/GoogleCloudPlatform/scion/pkg/hub  0.107s
+
+$ go test -tags no_sqlite ./pkg/hub/ -run '^TestAuthorize_IdentityKinds$' -count=1 -v
+testing: warning: no tests to run
+PASS
+ok   github.com/GoogleCloudPlatform/scion/pkg/hub  0.107s [no tests to run]
+```
+
+`TestMaintenanceState_Defaults` lives in an untagged file and runs normally.
+`TestAuthorize_IdentityKinds` lives in `authorize_test.go` (tagged
+`!no_sqlite`) and does not exist in the binary. Same package, same flags,
+same runner — the only difference is the build tag on the source file.
 
 ### Tier 1 — Direct Security Controls (files whose primary purpose is enforcing a security invariant)
 
@@ -249,8 +299,25 @@ All three report PASS with zero assertions executed.
 
 ## 4. Why the Tag Exists
 
-The `no_sqlite` build tag exists because the test harness uses in-memory
-SQLite as its database backend. The chain:
+**Stated rationale: memory.** The Makefile comment on the target CI actually
+calls is explicit:
+
+```makefile
+## test-fast: Run tests without SQLite (lower memory usage)
+test-fast:
+    @go test -tags no_sqlite ./...
+```
+
+The tag was introduced in commit `71275d56` ("fix: resolve spurious go vet
+OOM by gating sqlite driver with no_sqlite tag"). The commit message says the
+pure-Go SQLite driver (`modernc.org/sqlite`) is memory-intensive, and the tag
+lets resource-constrained environments skip it. This was never about CGO —
+`modernc.org/sqlite` has been the driver since it was first added, and
+`mattn/go-sqlite3` (which does require CGO) appears in `go.mod` as a
+transitive dependency but was never imported by the driver file (`git log
+--follow pkg/ent/entc/driver_sqlite.go` confirms this).
+
+**The mechanical chain:**
 
 1. `pkg/hub/handlers_test.go` defines `testServer(t)` which calls
    `newTestStore(":memory:")` — an in-memory SQLite database.
@@ -267,18 +334,12 @@ SQLite as its database backend. The chain:
 (`CGO_ENABLED=0` in `Makefile` and `build-release.yml`). The SQLite driver
 is purely a test convenience: fast, in-process, no external dependency.
 
-**Does the reason still hold?** Partially.
-
-- The original rationale was likely CGO avoidance in CI. But `modernc.org/sqlite`
-  is pure Go — it does not require CGO. The build succeeds without CGO.
-- The tag may have been introduced when the project used `mattn/go-sqlite3`
-  (which does require CGO). The module still appears in `go.mod` but the
-  driver import uses `modernc.org/sqlite`.
-- Running the full suite locally on `f99de64d` with `CGO_ENABLED=0` succeeds
-  (as verified: `go test -timeout 30m ./...` passes with only 2 unrelated
-  failures).
-- The tag is now a historical artifact that became load-bearing: 220 test
-  files expect it, so removing it is a mechanical but high-touch change.
+**Does the reason still hold?** The memory concern is real and unmeasured.
+The `modernc.org/sqlite` driver generates Go code from C, producing large
+intermediate representations during compilation. Running 176 test files that
+each spin up in-memory SQLite databases may push peak RSS above what a
+GitHub Actions runner provides. This has not been measured (see option (i)
+below).
 
 ---
 
@@ -286,18 +347,34 @@ is purely a test convenience: fast, in-process, no external dependency.
 
 ### Option (i): Run the untagged suite in CI as a second job
 
-**Cost:** ~1 day of work.
+**Cost:** ~1 day of work + one unresolved unknown.
 
 - Add a `full-test-suite` job to `.github/workflows/ci.yml` with
   `continue-on-error: true` (non-blocking, informational).
 - Job runs `go test -json -timeout 30m ./...`, parses results, writes summary.
-- No code changes, no tag removal, no risk to existing pipeline.
+- No code changes to production or test files, no tag removal.
 - Immediate visibility into 3,358 functions that are currently dark.
 - Two pre-existing failures would surface immediately:
   - `TestFixtureCoverage` (stale table count assertion, trivial fix)
   - `TestTemplateResource_UATConfinement` (authz policy regression, needs investigation)
-- Wall-clock CI time increase: ~5-8 minutes (pkg/hub alone takes ~5 min).
-  Runs in parallel with existing jobs, so may not extend total pipeline time.
+
+**Unresolved: peak RSS on the CI runner.** The tag exists because of memory,
+not CGO (see §4). The `modernc.org/sqlite` driver is memory-intensive during
+compilation and test execution. GitHub Actions `ubuntu-latest` runners
+provide 7 GB RAM. Running the full untagged suite may OOM the runner —
+this is the exact scenario the tag was introduced to prevent. Before this
+option can be relied on, someone must measure peak RSS of `go test ./...`
+(without `-tags no_sqlite`) and compare it to the runner's memory limit.
+
+**Cost to resolve:** ~2 hours. Run the untagged suite on a runner (or
+locally under `ulimit -v` / `cgexec`) and record peak RSS. If it fits in
+7 GB, option (i) is viable as stated. If it does not, the job would need
+`-p 1` (serial package testing) or package sharding, which increases
+wall-clock time and complexity.
+
+Wall-clock CI time increase (if memory is not a constraint): ~5-8 minutes
+(pkg/hub alone takes ~5 min). Runs in parallel with existing jobs, so may
+not extend total pipeline time.
 
 ### Option (ii): Drop the tag where it is unnecessary
 
