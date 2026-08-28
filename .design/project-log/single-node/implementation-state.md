@@ -13104,3 +13104,83 @@ separately means editing it twice. **#90 carries the #88 standard: the different
 **Coverage truth, recorded plainly:** beyond the bash-3.2 parse point, **zero GNU-userland calls in
 this script have ever executed on macOS** — ptone's run died at 286. The audit is their only BSD
 coverage until the probe comes back. That is why the labels matter and why the probe exists.
+
+### §35.67 — #88 fix pushed, and the instrument that had to validate itself (02:00)
+
+**Branch `scion/bash32-portability`, head `edfe61f41` on `ptone/scion`, cut from `1befe923`, ahead 1 /
+behind 0. Verified independently on the API before acting.** Report: `bash32-r1-dev-report.md`. Gates:
+`TestScript` 43/0/0, 44 validator rows, shellcheck 62/62, differential byte-identical on 48 inputs.
+**Dispatched to `sn-adcpreflight-rev2` for a review round rather than handed to ptone** — it is a
+portability change that alters a security-relevant function on code **already merged to main**.
+
+**THE PER-SITE MATRIX CAME BACK WITH A BETTER PROOF THAN I ASKED FOR.** I asked for off-diagonal green;
+the numbers are **2 + 4 = 6 exactly** (286-plain diverges on 2 inputs, 294-plain on 4, both-plain on 6).
+**Green off-diagonal shows no masking. The sum additionally shows no double-counting** — so the sites
+are *provably independent*, not merely not-obviously-coupled. New preferred form for multi-site
+mutations. I called the scheme site before it was measured: `https\n://` and `HTTPS\n://` both flip
+REJECT→ALLOW under the plain form.
+
+**And a control I did not ask for: the CR row must stay GREEN under both mutations.** That pins that the
+sentinel fix strips newlines *only* and did not over-reach. **Most people pin that the fix works; this
+pins its blast radius.**
+
+**THE BEST ITEM IN THE REPORT CLOSES A HOLE IN MY OWN CANARY.** My canary validates the **interpreter**
+(is this really 3.2?). It cannot validate the **instrument**. dev2 noticed after writing the report that
+`${v@Z}` — the construct the whole coverage argument rests on — **is itself bash 4.4+**. Its argument
+requires `@Z` to be a *runtime* error, which it measured on bash 5 and **cannot** measure on 3.2. If 3.2
+rejects it at **parse** time, `source` dies immediately, every subtest reports `bad substitution`
+without executing anything, and **the coverage gate inside the portability gate is a decoration that
+passes hardest exactly where it matters most.** A gate inside a gate, both vacuous, both green.
+
+**It had this written as a DISCLOSURE and changed it to a FIX.** The negative control now lives *inside*
+the test: poison a line a clean URL never reaches, require silence, then require that same line to fire
+when a URL does reach it. On any interpreter where `@Z` is a parse error the control goes **RED** rather
+than the suite going vacuously green. **The test validates its own instrument on whatever bash it runs
+under.**
+
+**Two rules from this:**
+- **An instrument must validate itself on the interpreter it runs under, not on the one you developed it
+  on.**
+- **A disclosure is not a fix.** Flagging a broken instrument honestly would have left it broken. *(Its
+  own words: "Flagging that would have left it broken.")*
+
+**THE DEEPEST FINDING OF THE NIGHT IS ITS OWN ITEM 1, AND IT IS NOT ABOUT BASH.** Its round-5 claim
+that "the class is closed" was closed only against **inputs it thought of**. Trailing whitespace was
+never in the table, and **R2 survived only because `${v,,}` happens to strip nothing.** *The protection
+was incidental to an implementation detail, not established by the check.* **Third instance of one
+shape:** safe because curl will not parse it → safe because `dict://` carries no auth header → safe
+because the expansion happened not to strip. **Every time, the check took the credit and something else
+was doing the work.**
+
+**Decisions I made on its four "what is wrong" items.** (1) `ci.yml` is shared infrastructure — its
+judgement that my brief assigned it in substance was correct, and flagging it anyway was right; **the
+coordination is mine, not its**. (2) The canary has never run on real 3.2 — **I am telling ptone to read
+the canary line even when the job is green, because GREEN FIRST TIME IS THE SUSPICIOUS OUTCOME.**
+(3) `nocasematch` ruled out before starting: global state reaching the shape regex and the allowlist,
+and **it fails OPEN**. (4) **The differential harness — LANDED, on my call, as its own commit.**
+
+**Why I took the harness immediately rather than deferring it.** It was time-critical in the literal
+sense: it existed only in `/tmp` on a container I may reap. It is the instrument that caught a security
+regression the 38-row table **could not see**, and it already has two known consumers (#89's fix
+candidates, #90's `--help` output differential). **If it is not in the repo it is not knowledge, it is a
+rumour** — which is the argument I have made all night about briefs, applied to a tool.
+
+### §35.68 — design-doc sync gap found by the heartbeat's own question 3 (02:02)
+
+**Measured, not assumed.** Grepped `.design/hosted/cloud-run-single-node.md` for `bash`, `macos`,
+`shell`, `laptop`, `local machine`, `operator machine`, `prerequisit`: **zero hits.** The only `gcloud`
+mention is line 306, on an unrelated flag.
+
+**§1.3 says "An operator with a GCP project runs one deploy command" — and the doc specifies everything
+the CLOUD side must provide and NOTHING about the machine that command runs on.**
+
+**That omission is the direct cause of #88.** Nobody wrote down that the deploy executes in the
+operator's shell, so nobody ever asked *which shell* — and `${var,,}` reached `main`. The doc is not
+merely silent; **it is silent about the single most-used surface of the tier.**
+
+Added as **Edit 3 to #86**, which now carries three edits in one commit. To be written **after ptone's
+probe returns**, so the floor is measured rather than assumed: a named supported-operator-environment
+(minimum bash, GNU∩BSD-common-subset userland), the consequence that `deploy.sh` targets that floor and
+the `bash32` CI job enforces it, and #89's audit result as the measured basis. Also flagged for §6.1:
+**the criteria enumerate cloud-side successes and never enumerate the operator's environment** — the
+same shape as criterion 12's gap.
