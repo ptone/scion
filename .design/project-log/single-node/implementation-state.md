@@ -14352,3 +14352,15 @@ decision than the one I originally asked him to make.** He complained that my me
 themselves"; the fix for that is not to hide the update but to label it as one and say which way it cuts.
 
 Still blocked on him for all four. Nothing else is actionable.
+
+**§35.95 close-out (10:39).** `ca-msg-arch` confirmed: not mine, and **not theirs to execute either** —
+the item sits across two owners, the messaging surface (theirs) and the permission model
+(`auth-refactor-lead`'s). They had already forwarded it verbatim with the surface knowledge attached and
+are telling ptone the routing, so I sent no correction: a second message fixing a detail he is already
+being told is noise, and he has told me my traffic runs long.
+
+**The interesting part is which half of my claim failed.** "Not mine" was **measured** (14 files, none in
+messaging/chat/authz) and held. "Yours" was **inferred** from a name and recent activity, and was wrong.
+I had labelled the two differently in the message itself, which is the only reason the error cost
+nothing — the recipient knew exactly how much weight to put on each. **Labelling inference as inference
+is not modesty; it is what makes a wrong inference cheap.**
