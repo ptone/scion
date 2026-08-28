@@ -6612,3 +6612,60 @@ instrument** (heartbeat item 9) applies to merge mechanics, not just to agent st
 you do hand over the instruction, include the evidence you already gathered, so the owner executes
 rather than re-checks.
 
+
+---
+
+## §5cj. Tranche B rebase verified; compare URL sent
+
+em10 pushed `d767d66c3` on `scion/ca-msg-em10-trb`. Verified, not taken on trust:
+
+- **merge-base == `f4d02461b`** — the rebase actually happened; the branch is not merged-from-main.
+- **8 commits** in `upstream/main..origin/scion/ca-msg-em10-trb`, matching the trial rebase count.
+- **Patch content byte-identical.** `git diff upstream/main...2d69633f` (pre-rebase 3-dot, old tip)
+  and `git diff upstream/main..d767d66c` (post-rebase 2-dot) both hash to `5f77020bf7e051e9682e`.
+  **Positive control:** the same hash computed against `…trb~1` gives `56d8256a8330b30d4be4`, so the
+  hash does discriminate. (Rule 61/80: an identity claim needs a control proving non-identity is
+  detectable.)
+- `--shortstat` still 16 files, +3566/−44 — matches the pre-rebase measurement exactly.
+- `--name-status` differed **only in line order** (five `pkg/messaging/*` paths moved position);
+  identical as sets. Ordering is a listing artifact, not a content difference — and the patch hash
+  above settles it independently. Worth noting: had I compared only `--name-status` line-by-line and
+  stopped at "DIFFERS", I would have raised a false alarm on em10.
+- Byte-identical patch against the same base means an identical tree, so the earlier `go vet` /
+  `go build` exit-0 results on the trial rebase carry over without re-running.
+- `upstream/main` had not moved (`f4d02461b`), so the rule-31 overlap check stands unchanged: empty.
+
+**Compare URL sent** to Discord thread `1532864101909528737`, `len(url) = 1467` (cap 2000), with
+`quick_pull=1` and **both** title and body URL-encoded into the query string — the two standing user
+corrections ("DEF-31 compare URL had no title or desc in the URL"; "same with CI guard compare URL").
+Body kept free of backticks and fences to hold the encoding budget.
+
+**Section boundary reported** to thread `1541161053118005308`, 1480 runes. Stated accurately that
+this is the tranche B *first cut* (Phase 5 dual-write + B5), not all of tranche B; named the five
+review defects including the one that was mine; re-raised the one live blocker (PRs #1338/#1339 and
+the DEF-26 URL unopened, which gates tranche C); explicitly did **not** press the two decisions
+parked with the user.
+
+### Branch state at this point
+
+- `upstream/main` = `f4d02461b`
+- `ca-msg-em10-trb` = **`d767d66c3`** (rebased, verified, URL sent, awaiting user to open the PR)
+- `ca-msg-em6-def31` = `facb332b4` (PR #1338, open, unmoved)
+- `ca-msg-em6-ci-guard` = `e93a58e37` (PR #1339, open, unmoved)
+- `ca-msg-em6-def26` = `bd5e492c1` (compare URL sent, unmoved)
+- `ca-msg-em9-unify` = `e704b2feb` (parked pending the CI sqlite-gap decision)
+
+### Next, when tranche B lands
+
+Remaining tranche B: B1/B2/B14 (migration), B6/B7, B3/B4/B8/B9, B11/B12/B13. Re-run the rule-31
+overlap check against the then-current `main` before cutting the next manager's branch — the check
+above is only valid while `main` sits at `f4d02461b`.
+
+### RULE 85 (new)
+
+**"When a cheap comparison says DIFFERS, find the comparison that says why before you report it."**
+`--name-status` disagreed on line order and nothing else; the content hash proved equality. A
+summary view can differ from itself for reasons that have no bearing on the claim. Escalating the
+summary's disagreement would have cost em10 a round trip to disprove something that was never wrong.
+Symmetric to rule 81: **`ok` never means "something ran", and `DIFFERS` never means "something
+changed"** — in both directions, confirm the instrument is measuring the thing you are claiming.
