@@ -1541,6 +1541,80 @@ func TestScriptCheckGcloudInstances_FailureMessage(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// --help: literal text, no sed extractor, works in piped mode
+// ---------------------------------------------------------------------------
+
+// TestScriptHelpWorksDirect verifies --help works when the script is
+// executed directly (./deploy.sh --help).
+func TestScriptHelpWorksDirect(t *testing.T) {
+	stdout, stderr, exitCode := runBashFunc(t, "di_main", "--help")
+	assert.Equal(t, 0, exitCode, "--help must succeed; stderr: %s", stderr)
+	assert.Contains(t, stdout, "--name",
+		"help text must document --name flag")
+	assert.Contains(t, stdout, "--project",
+		"help text must document --project flag")
+	assert.Contains(t, stdout, "--image",
+		"help text must document --image flag")
+	assert.Contains(t, stdout, "--region",
+		"help text must document --region flag")
+	assert.Contains(t, stdout, "deploy.sh",
+		"help text must identify the script")
+}
+
+// TestScriptHelpWorksInPipedMode simulates `curl ... | bash -s -- --help`
+// and verifies the help text is printed.  This exercises:
+//   - the main guard handling BASH_SOURCE[0] being empty
+//   - the literal help text (not the sed extractor, which reads BASH_SOURCE[0])
+//   - the /dev/tty stdin redirect (or graceful fallback)
+func TestScriptHelpWorksInPipedMode(t *testing.T) {
+	scriptContent, err := os.ReadFile(deployScriptPath(t))
+	require.NoError(t, err)
+
+	cmd := exec.Command(testBash(), "-s", "--", "--help")
+	cmd.Stdin = strings.NewReader(string(scriptContent))
+	cmd.Env = scrubbedEnv()
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("failed to run piped bash: %v", err)
+		}
+	}
+
+	assert.Equal(t, 0, exitCode,
+		"piped --help must succeed; stderr: %s", stderr.String())
+	assert.Contains(t, stdout.String(), "--name",
+		"piped help text must document --name flag")
+	assert.Contains(t, stdout.String(), "--project",
+		"piped help text must document --project flag")
+	assert.Contains(t, stdout.String(), "--image",
+		"piped help text must document --image flag")
+}
+
+// TestScriptSourceHasNoSideEffects verifies that sourcing the script
+// does not call di_main or produce output.  This is the sourcing contract.
+func TestScriptSourceHasNoSideEffects(t *testing.T) {
+	scriptPath := deployScriptPath(t)
+	bashCmd := fmt.Sprintf("source %q && echo SOURCE_OK", scriptPath)
+	cmd := exec.Command(testBash(), "-c", bashCmd)
+	cmd.Env = scrubbedEnv()
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	require.NoError(t, err, "sourcing must succeed; stderr: %s", stderr.String())
+	assert.Equal(t, "SOURCE_OK\n", stdout.String(),
+		"sourcing must produce no output other than the echo we added")
+}
+
+// ---------------------------------------------------------------------------
 // Stderr-suppression pin: gcloud stderr must not be redirected to /dev/null
 // ---------------------------------------------------------------------------
 

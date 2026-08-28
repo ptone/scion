@@ -677,7 +677,31 @@ di_main() {
       --cpu)            DI_CPU="$2"; shift 2 ;;
       --image-registry) DI_IMAGE_REGISTRY="$2"; shift 2 ;;
       --help|-h)
-        sed -n '/^# deploy\.sh/,/^[^#]/{ /^#/s/^# \?//p }' "${BASH_SOURCE[0]}"
+        # Literal help text.  A previous version extracted this from the
+        # comment block with sed, but BSD sed (macOS) cannot parse the
+        # GNU-sed construct that was used (\? for optional match, inline
+        # { } grouping).  A literal string is boring, obviously correct on
+        # every platform, and cannot drift into a parse error.
+        echo "deploy.sh — deploy a single-node Scion Hub on a Cloud Run Instance with IAP."
+        echo ""
+        echo "Usage:"
+        echo "  ./deploy.sh --name NAME --project PROJECT --image IMAGE [options]"
+        echo "  curl -sSL <url>/deploy.sh | bash -s -- --name NAME --project PROJECT --image IMAGE"
+        echo ""
+        echo "Required:"
+        echo "  --name        Instance name (e.g. my-scion-hub)"
+        echo "  --project     GCP project ID"
+        echo "  --image       Container image (tag or digest)"
+        echo ""
+        echo "Optional:"
+        echo "  --region          GCP region (default: us-east4)"
+        echo "  --admin-email     Admin email override (default: deployer's gcloud account)"
+        echo "  --service-account GCP service account for the instance"
+        echo "  --memory          Memory limit (default: 8Gi)"
+        echo "  --cpu             CPU limit (default: 4)"
+        echo "  --image-registry  Override image registry (default: derived from --image)"
+        echo ""
+        echo "The script is idempotent: re-running converges without duplication."
         return 0
         ;;
       *)
@@ -1023,9 +1047,29 @@ di_main() {
 }
 
 # ---------------------------------------------------------------------------
-# Main guard: only run when executed directly, not when sourced.
+# Main guard: run when executed directly or piped, not when sourced.
 # Sourcing this file has NO side effects.
+#
+# Three modes:
+#   ./deploy.sh --name …        : BASH_SOURCE[0] == $0, both are the script path
+#   source deploy.sh             : BASH_SOURCE[0] != $0, sourcing — do nothing
+#   curl … | bash -s -- --name …: BASH_SOURCE[0] is empty, $0 is "bash"
+#
+# The piped case needs stdin redirected from /dev/tty: stdin IS the script
+# stream, and any command that reads it (gcloud prompts) would consume
+# script content.  If /dev/tty is not available (non-interactive CI),
+# the deploy proceeds but gcloud prompts that need stdin will fail fast
+# instead of silently consuming the script.
 # ---------------------------------------------------------------------------
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  di_main "$@"
+elif [[ -z "${BASH_SOURCE[0]}" ]]; then
+  # Try to redirect stdin from /dev/tty.  The device node may exist but not
+  # be openable (containers without a controlling terminal); the subshell
+  # test suppresses the error.  Without this, gcloud prompts that need stdin
+  # would consume script content; with it, they reach the operator's terminal.
+  if (exec </dev/tty) 2>/dev/null; then
+    exec </dev/tty
+  fi
   di_main "$@"
 fi
