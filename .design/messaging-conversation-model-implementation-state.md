@@ -11753,3 +11753,102 @@ survived an extension of its boundary.
   em10 parked (spec accepted `0b6770a6c`).
 - With the user, unchanged: three branch deletions, #1360 merge, escalation-1 CI
   decision. Escalation 2 still queued by design.
+
+---
+
+## §5em — DEF-32: live authorization bypass on `upstream/main` via case-sensitive sender gate (2026-08-28)
+
+**Severity: HIGH. Live on `upstream/main` today. Not introduced by this workstream.**
+Found by em9 while auditing the `PrincipalKindFromAddress` fold; full chain traced
+and verified by me against source.
+
+### The gate
+
+`pkg/hub/handlers_broker_inbound.go:126`:
+
+```go
+if strings.HasPrefix(req.Message.Sender, "user:") {
+```
+
+Case-sensitive. `"User:victim@x.com"` skips the block entirely. The block does
+**three** things, not one:
+
+1. `GetUserByEmail` — resolves the sender
+2. `s.authzService.CheckAccess(..., ActionAttach)` — **the per-user authorization check**
+3. `req.Message.SenderID = senderUser.ID` — **overwrites the caller-supplied ID**
+
+### Why the ID overwrite is the load-bearing part
+
+`pkg/messages/types.go:131`:
+
+```go
+SenderID string `json:"sender_id,omitempty"`
+```
+
+**`SenderID` is decoded straight from the request body.** Skipping the block leaves
+the caller's own value in place.
+
+### Full chain
+
+1. Broker-HMAC caller POSTs `sender: "User:victim@x"`, `sender_id: <victim-uuid>`,
+   `thread_id: "dm:agent:<agent-uuid>:user:<victim-uuid>"`.
+2. `validDMKey` at `:97` passes — it checks **format**, and the forged key is well-formed.
+3. `:126` gate misses on the capital U. **No `ActionAttach` check. No SenderID overwrite.**
+4. `:163` #1322 DM-ownership check compares `dmUserID` (from thread_id) against
+   `senderID` (from body). **Both attacker-supplied — they match, it passes.**
+5. `:241` `senderUserID := req.Message.SenderID`, under the comment:
+   *"The sender user ID was resolved and cached in req.Message.SenderID during the
+   upstream permission check."* **That comment asserts exactly the invariant the
+   gate fails to guarantee, and reads as reassurance.**
+6. `:276` `PrincipalKindFromAddress("User:victim@x")` — **the fold** returns
+   `("user", true)`. Without it: `("", false)`, and DM resolution is skipped.
+7. `:251` `storeMsg.SenderID = senderUserID` → message persisted into the victim's
+   DM conversation, attributed to the victim.
+
+**Net: skips per-user authz and forges DM attribution. The exact class #1322 was
+written to stop, reopened by one capital letter.**
+
+**Severity caveat:** requires broker HMAC, so the caller is "trusted
+infrastructure." But the `user:` block exists *precisely because* brokers relay for
+users who are **not** individually trusted. A buggy or compromised plugin suffices.
+
+**The fold's role:** necessary link in the worst version, not root cause. Removing
+it shrinks blast radius; it does **not** close the bypass. **Root cause is the gate.**
+
+### em9's error, and its shape
+
+em9's provenance answer was correct (3 internal, 1 external, site 2 external). Their
+*consequence* answer — "inert, gated by a nil-guard" — was wrong on two counts:
+
+- The nil-guard is `messagebroker.go:835`, which is **call site 4**. The dangerous
+  site is **site 2**, `handlers_broker_inbound.go`. Guard imported across call paths;
+  it does not run there.
+- The guard tests `SenderID == ""`. Since `SenderID` is body-settable, **empty is the
+  one case the attacker controls and will never produce.**
+
+> **RULE 197.** A safety argument carried across call sites is invalid unless the
+> guard sits on the path being cleared. Write the guard's file:line beside the site
+> it protects — em9 had both numbers in one message and they were different functions.
+
+> **RULE 198.** A guard keyed on a field's *empty* state protects nothing when that
+> field is attacker-settable. Emptiness is the attacker's choice, not a constraint.
+
+> **RULE 199.** A comment asserting an invariant is evidence the invariant is
+> believed, never that it holds. `:239` is the clearest statement of this bug in the
+> file and is phrased as reassurance. Grep for comments asserting upstream
+> guarantees, then verify each against its guard.
+
+### Escalated
+
+Sent to user at 1947 runes with a routing question: **(a)** standalone hotfix PR now,
+or **(b)** fold into tranche C (still branch-deletion-blocked). **Recommended (a)** —
+independent of the refactor, should not wait on it. em9 told **not** to write the
+fix; routing is the user's.
+
+### Ledger
+
+- **DEF-32 OPEN** — case-sensitive sender gate, `handlers_broker_inbound.go:126`.
+  Awaiting routing. Fix candidates: case-insensitive gate, or canonicalise `Sender`
+  at ingress (preferred — kills the whole class).
+- `PrincipalKindFromAddress` fold audit — **substantively closed**; verdict *inert on
+  the key, load-bearing in the DEF-32 chain*. Doc correction pending from em9.
