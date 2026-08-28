@@ -13740,3 +13740,133 @@ agents"*), `pkg/config/settings.go:160` and `settings_v1.go:122` (`ResolveRuntim
 empty name), `pkg/runtimebroker/server.go:1034-1079`. Four candidate mechanisms offered with the caveat that
 **(b) and (d) are defaults by accident, (a) and (c) are defaults by decision** — and with rule 11 attached:
 **a priority list is also a blind-spot list.**
+
+### §35.83 — task #86: three of four design-doc edits landed. The root cause of #88 is now written down.
+
+Branch `scion/design-operator-prereqs` @ `f0d85d39`, cut off `main` `f99de64d`, pushed to `ptone/scion`.
+Awaiting ptone to open it upstream. 102 insertions, 2 deletions, one file.
+
+**A near-miss worth recording, because it is the shared-plain hazard in its purest form.** I read §4.3,
+§6.1 and §10 out of `/workspace` and was about to edit on that basis. The `/workspace` copy is **24,817
+bytes; the copy on `main` is 29,728.** Different file. §4.3 alone had grown from 37 lines to 76 —
+including the entire `hub_id` reversal and the gcloud-version material, which I would have cheerfully
+contradicted. **Caught only because I happened to `ls -la` the clone after cutting the branch.** The
+rule I already hold — *do not assume a file is unchanged between reading it and writing it* — I had been
+applying to concurrent writes and not to **the copy I read being the wrong copy in the first place.**
+Re-read from the branch under edit, and re-verified the "zero mentions of bash/macOS/prerequisite" claim
+there rather than carrying it over.
+
+**Edit 1 — new §4.6, "The deploy runs on the operator's machine, and that machine is not ours."** This is
+the root-cause fix for #88 and it is deliberately framed as a *load-bearing design decision* rather than
+a prerequisites list, because that is what it is: it constrains every line of the deploy script
+permanently and is expensive to reverse once operators depend on it. The decision recorded is **stock
+macOS and mainstream Linux, with no prerequisite installation step** — justified directly from §1.3,
+since *"install a newer bash first"* is a second command and §1.3 says one. The measured table is from
+ptone's Darwin 25.6.0 arm64 machine, and it includes the **negative** result (bare `mktemp` works, and
+was not the hazard the audit predicted) as well as the positives. Carries the rule *a portability fix is
+a semantics change until proven otherwise*, with the trailing-newline REJECT→ALLOW example, and the
+reasoning for a pinned native macOS runner over a hand-built interpreter.
+
+**Edit 2 — §6.1 atomicity.** The existing "Verified 2026-08-27" paragraph is true and covers only the
+**steady state**. The deploy is not atomic: Instance created first, IAP applied afterwards by a separate
+PATCH. Two windows follow, and the verification closes neither. **I stated the requirement and marked it
+NOT YET MEASURED rather than asserting the window exists** — I know the ordering, I have not measured
+whether the Instance is routable in the interval, and "it probably isn't serving yet" is an assumption.
+The phrasing that matters: **fail closed here means fail to a state with no Instance, not fail to an
+Instance with no perimeter.**
+
+**Edit 3 — §4.3, third tooling consequence.** Where the deploy leaves `gcloud` and speaks REST directly
+it inherits a **narrower credential contract**; the IAP PATCH returned `401 ACCESS_TOKEN_TYPE_UNSUPPORTED`
+for credentials the `gcloud` step immediately prior had accepted. Placed in §4.3 rather than §6 because
+it is **structurally the same argument the section already makes about `K_SERVICE`**: a signal that
+answers a nearby question is not one that answers yours. Putting it beside its own general form is worth
+more than filing it by topic.
+
+**Edit 4 — §10 criteria 12 and 13**, with an explicit note that **both are negative criteria** and
+therefore satisfiable by a check that never ran. Criterion 12 says to induce the failure rather than read
+the ordering; criterion 13 says to read the interpreter version the CI job prints before trusting a green.
+
+**REMAINING EDIT, CORRECTLY BLOCKED ON #92 — and editing surfaced a layering insight that sharpens it.**
+The Kubernetes contradiction (§1.2 G4 *"no Kubernetes"*, §8.1 *"Docker, Podman, and Kubernetes paths are
+untouched"*, versus an operator whose default profile is `remote (kubernetes)`) cannot be written until
+#92 says where the default lives. **The insight: §4.3 reasons about runtime selection at the AUTODETECT
+layer, while the operator-facing default lives in a settings/profile layer the document never mentions
+at all.** So the doc can be entirely correct at its own layer and the operator still gets kubernetes —
+which means the eventual edit is probably not a correction to §4.3 but a **new** subsection about a layer
+the design has never described. That is a better diagnosis than "the doc contradicts itself," and it came
+out of reading the file properly rather than from the defect report.
+
+**Blocked-on relationships recorded in the task list rather than left in my head:** #87, #90 and #91 all
+edit `deploy.sh`, which is frozen on `scion/bash32-portability` until #88 merges. #86 blocked on #92.
+This is why no `deploy.sh` work has been dispatched despite three open defects against it — the freeze is
+protecting ptone's byte-identical validation, and that is worth more than parallelism tonight.
+
+### §35.84 — bash 3.2 semantics MEASURED at last. And a structural limit on the per-site mutation matrix.
+
+`sn-adcpreflight-dev2` built bash 3.2.57 locally (x86_64 Linux, `3.2.57(2)-release`) once the egress
+retraction showed it was possible. **This is the measurement the whole task has been unable to make since
+01:45.** Head `0b51f831`.
+
+| Instrument | Result under REAL bash 3.2 |
+|---|---|
+| Canary | GREEN — rejects `${x,,}` with `bad substitution`. The interpreter is genuinely 3.2. |
+| `probe --check` | **IDENTICAL 5/5** |
+| Harness self-test | 4/4, **with the outer script also run under 3.2** |
+| Go suite | **43 PASS / 0 FAIL / 0 SKIP** — identical to bash 5 |
+| Real differential | Pre-fix baseline dies `${scheme,,}: bad substitution` on all 22 corpus rows; shipped fix gives correct verdicts |
+
+**Two of these close open items rather than merely passing.**
+
+- **Disclosure #5 is closed by measurement rather than by argument.** `${v@Z}` on real 3.2 is a *runtime*
+  error and `bash -n` parses it clean — identical to bash 5. So the `@Z` coverage instrument is valid on
+  the interpreter it makes claims about. **`TestScriptLowercasingIsReachedByTheSuite` was the one thing on
+  the branch asserting a property of an interpreter nobody had ever run.** Now someone has. This is rule 8
+  discharged (*an instrument must validate itself on the interpreter it runs under*).
+- **ptone's laptop capture is corroborated on different architecture and different OS.** arm64 Darwin and
+  x86_64 Linux agreeing byte-for-byte on all five cases. **One laptop was an anecdote; two independent
+  platforms agreeing is a pin.**
+
+**THE FINDING THAT MATTERS MOST IS A NEGATIVE ONE, AND dev2 FLAGGED IT RATHER THAN BURYING IT.**
+
+Per-site 2×2, classified by cause: bash 5.2 real-failures A=0 B=0 AB=0 (off-diagonal green); bash 3.2
+A=5 B=5 AB=5; unmutated control 0 on both. **Sites A and B produce IDENTICAL failing test sets.**
+
+That is not a blunt harness — **it is the defect's shape.** A `bad substitution` aborts the whole function
+for every input, so the two sites are **indistinguishable at suite level**. Contrast the trailing-newline
+defect, which was *input-dependent* and therefore additive: 2 + 4 = 6 exactly, which is what proved those
+two pins independent.
+
+18. **NEW RULE — THE PER-LOCATION MUTATION MATRIX ONLY SEPARATES LOCATIONS WHEN THE DEFECT IS
+    INPUT-DEPENDENT.** For a defect that aborts the enclosing unit, every site produces the same failure
+    set, and off-diagonal green is *unobtainable in principle* — not because the pins are weak but because
+    the sites are not separable **at that observation layer**. Rule 9's arithmetic (2+4=6) is a test of
+    independence that **only some defect shapes admit**. When the arithmetic cannot be run, say so and
+    name the instrument that does discriminate, rather than reporting a matrix that looks degenerate.
+
+    Consequence here, stated plainly: **the Go suite cannot tell you which site is fixed, only that some
+    site is broken.** The `@Z` reachability test is the only instrument on the branch that distinguishes
+    them — which is why closing disclosure #5 matters far more than its size suggests.
+
+**The new push protocol worked on its first use.** dev2 announced `0b51f831` as a PUSH NOTICE naming the
+file, the scope (comment-only, `.github/workflows/macos-bash32.yml`), and the evidence that nothing
+executable moved (actionlint clean, same 6-step job, `runs-on` and both `paths` lists unchanged,
+`deploy.sh` identical, `ci.yml` still byte-identical to upstream). **That is exactly the fix for the
+move-under-the-reviewer problem, and it cost one paragraph.**
+
+**Second-order care worth recording: dev2 re-fetched and re-hashed the tarball before committing the
+digest rather than trusting its own earlier note.** Its reasoning — *"a mistyped digest in a comment is
+worse than no digest, because it makes a future person believe a good tarball is compromised"* — is the
+same asymmetry as this project's error-text rule (*a message asserting a WRONG cause is more expensive
+than one asserting none*). Digest confirmed: `3fa9daf85ebf35068f090ce51283ddeeb3c75eb5bc70b1a4a7cb05868bfe06a4`.
+
+**A datum that partly explains the retracted egress finding without excusing it:** same host, same default
+invocation, **32.8s this time against 3.7s earlier**. Reachable, but with highly variable latency. So the
+original `000` was plausibly a genuine timeout rather than a fabrication — which makes rule 15 (*a
+reachability failure is a measurement until it is repeated*) **more** apt, not less: high variance is
+precisely the condition under which a single sample must not become a diagnosis.
+
+**WHAT THIS DOES NOT CLOSE, recorded in dev2's words so it cannot be quoted otherwise:** macOS is bash 3.2
+**plus** BSD userland; a Linux build isolates the shell half only. It proves a shell-level failure exists;
+it cannot prove macOS passes. **Task #90 (`--help` dying on BSD `sed`) is the standing counterexample that
+the userland half breaks independently.** The `macos-15` job on real Apple hardware remains the only thing
+that closes it.
