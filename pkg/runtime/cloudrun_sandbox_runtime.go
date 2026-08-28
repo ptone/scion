@@ -311,6 +311,14 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 		}
 	}
 
+	// Cross-tenant check (S3b): before relocation, verify that any
+	// surviving destination home belongs to the same project as the
+	// incoming agent.  When project_id differs (or cannot be read),
+	// wipe the destination to prevent credential inheritance.
+	if cfg.HomeDir != "" {
+		wipeCrossTenantHome(cfg.HomeDir, p.agentHome)
+	}
+
 	// Relocate agent home to /scion and symlink back for broker readback.
 	// The broker provisions agent-info.json etc. at config.HomeDir. The
 	// symlink ensures the broker reads from the /scion copy where sandbox
@@ -342,6 +350,62 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 	}
 
 	return p, nil
+}
+
+// wipeCrossTenantHome compares the project_id in the incoming agent's
+// agent-info.json (srcHome) with the project_id in any surviving
+// destination agent-info.json (dstHome).  If they differ, or if either
+// file is absent/unparseable while the destination is non-empty, the
+// destination contents are wiped.  This prevents credential inheritance
+// when a different project's agent reuses the same slug.
+func wipeCrossTenantHome(srcHome, dstHome string) {
+	incomingProjectID := readProjectIDFromAgentInfo(srcHome)
+
+	dstEntries, err := os.ReadDir(dstHome)
+	if err != nil || len(dstEntries) == 0 {
+		// Destination does not exist or is empty — nothing to protect.
+		return
+	}
+
+	dstProjectID := readProjectIDFromAgentInfo(dstHome)
+
+	if dstProjectID != "" && incomingProjectID != "" && dstProjectID == incomingProjectID {
+		// Same project — preserve (this is the restart-preservation feature).
+		runtimeLog.Debug("destination home belongs to same project, preserving",
+			"dstHome", dstHome, "projectId", dstProjectID)
+		return
+	}
+
+	// Mismatch, absent, or unparseable — wipe.
+	reason := "project_id mismatch"
+	if dstProjectID == "" {
+		reason = "destination agent-info.json absent or unparseable"
+	} else if incomingProjectID == "" {
+		reason = "incoming agent-info.json absent or unparseable"
+	}
+	runtimeLog.Warn("wiping cross-tenant destination home",
+		"dstHome", dstHome, "reason", reason,
+		"incomingProjectId", incomingProjectID, "dstProjectId", dstProjectID)
+
+	for _, entry := range dstEntries {
+		_ = os.RemoveAll(filepath.Join(dstHome, entry.Name()))
+	}
+}
+
+// readProjectIDFromAgentInfo reads the projectId field from
+// agent-info.json in the given home directory.  Returns "" on any error.
+func readProjectIDFromAgentInfo(homeDir string) string {
+	data, err := os.ReadFile(filepath.Join(homeDir, "agent-info.json"))
+	if err != nil {
+		return ""
+	}
+	var info struct {
+		ProjectID string `json:"projectId"`
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		return ""
+	}
+	return info.ProjectID
 }
 
 // relocateToScion moves the contents of src to dst and replaces src with

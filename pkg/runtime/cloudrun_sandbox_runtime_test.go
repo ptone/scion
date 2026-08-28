@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -1390,6 +1391,184 @@ func TestRelocateToScion_AlreadySymlink(t *testing.T) {
 	link, _ := os.Readlink(src)
 	if link != target {
 		t.Errorf("symlink target changed to %q, want %q", link, target)
+	}
+}
+
+// -----------------------------------------------------------------------
+// wipeCrossTenantHome / S3(b) tenant-check tests
+// -----------------------------------------------------------------------
+
+// writeAgentInfo writes a minimal agent-info.json with the given projectId
+// into dir.  The content is realistic: it mirrors the structure produced by
+// provision.go:1341.  The projectId is the value under test — the rest is
+// filler that a real provisioning path would also write.
+func writeAgentInfo(t *testing.T, dir, projectID, agentName string) {
+	t.Helper()
+	info := map[string]interface{}{
+		"name":      agentName,
+		"projectId": projectID,
+		"phase":     "created",
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("marshal agent-info.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent-info.json"), data, 0644); err != nil {
+		t.Fatalf("write agent-info.json: %v", err)
+	}
+}
+
+// TestWipeCrossTenantHome_DifferentProject pins the cross-tenant
+// inheritance fix: an agent in project B, starting where an agent in
+// project A ran, cannot read project A's credential file.
+//
+// The credential file is a sentinel under .scion/harness/secrets/ — the
+// same path that stageEnvSecretFiles writes real API keys to (see
+// container_script_harness.go:752).  The value is an obviously-fake
+// placeholder, never a real credential.
+func TestWipeCrossTenantHome_DifferentProject(t *testing.T) {
+	base := t.TempDir()
+	srcHome := filepath.Join(base, "incoming")
+	dstHome := filepath.Join(base, "destination")
+	_ = os.MkdirAll(srcHome, 0755)
+	_ = os.MkdirAll(dstHome, 0755)
+
+	// Destination: agent A's leftover from project "proj-alpha-uuid".
+	// Includes a credential file that must NOT be readable by agent B.
+	writeAgentInfo(t, dstHome, "proj-alpha-uuid", "my-agent")
+	secretsDir := filepath.Join(dstHome, ".scion", "harness", "secrets")
+	_ = os.MkdirAll(secretsDir, 0700)
+	_ = os.WriteFile(filepath.Join(secretsDir, "ANTHROPIC_API_KEY"),
+		[]byte("FAKE-KEY-SENTINEL-not-a-real-credential"), 0600)
+
+	// Incoming: agent B from project "proj-beta-uuid".
+	// Write agent-info.json via the same structure the broker writes.
+	writeAgentInfo(t, srcHome, "proj-beta-uuid", "my-agent")
+	// Also write agent B's own content so we can assert it survives
+	// relocation (positive assertion — not just "foreign file gone").
+	_ = os.WriteFile(filepath.Join(srcHome, "agent-info.json-written-check"),
+		[]byte("agent-b-marker"), 0644)
+
+	wipeCrossTenantHome(srcHome, dstHome)
+
+	// THE PIN: agent A's credential file must be gone.
+	if _, err := os.Stat(filepath.Join(secretsDir, "ANTHROPIC_API_KEY")); !os.IsNotExist(err) {
+		t.Fatal("cross-tenant credential file survived: " +
+			".scion/harness/secrets/ANTHROPIC_API_KEY should have been wiped " +
+			"when destination project_id differs from incoming project_id")
+	}
+
+	// The destination directory itself must still exist (prepareScionLayout
+	// created it and the wipe preserves the container).
+	if _, err := os.Stat(dstHome); err != nil {
+		t.Fatalf("dstHome directory was removed entirely: %v", err)
+	}
+
+	// agent-info.json at the destination must also be gone (it belongs to
+	// the foreign project).
+	if _, err := os.Stat(filepath.Join(dstHome, "agent-info.json")); !os.IsNotExist(err) {
+		t.Error("foreign agent-info.json survived the wipe")
+	}
+}
+
+// TestWipeCrossTenantHome_SameProject pins the restart-preservation
+// feature: same project, same slug, different agent UUID — home IS
+// preserved.  Without this test the fix is indistinguishable from
+// "wipe always" and nobody will notice when it regresses.
+func TestWipeCrossTenantHome_SameProject(t *testing.T) {
+	base := t.TempDir()
+	srcHome := filepath.Join(base, "incoming")
+	dstHome := filepath.Join(base, "destination")
+	_ = os.MkdirAll(srcHome, 0755)
+	_ = os.MkdirAll(dstHome, 0755)
+
+	projectID := "proj-same-uuid"
+
+	// Destination: previous agent in the SAME project.
+	writeAgentInfo(t, dstHome, projectID, "my-agent")
+	// Write a state file that represents same-project continuity content.
+	_ = os.MkdirAll(filepath.Join(dstHome, ".claude"), 0755)
+	_ = os.WriteFile(filepath.Join(dstHome, ".claude", "settings.json"),
+		[]byte(`{"continuity":"preserved"}`), 0644)
+
+	// Incoming: new agent in the same project (e.g. delete-then-recreate).
+	writeAgentInfo(t, srcHome, projectID, "my-agent")
+
+	wipeCrossTenantHome(srcHome, dstHome)
+
+	// THE PIN: same-project content must survive.
+	data, err := os.ReadFile(filepath.Join(dstHome, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("same-project continuity content was destroyed: %v\n"+
+			"This is a regression: the wipe should only fire on project_id "+
+			"mismatch, not on same-project recreate", err)
+	}
+	if string(data) != `{"continuity":"preserved"}` {
+		t.Errorf("continuity content = %q, want %q",
+			string(data), `{"continuity":"preserved"}`)
+	}
+
+	// agent-info.json must also survive.
+	if _, err := os.Stat(filepath.Join(dstHome, "agent-info.json")); err != nil {
+		t.Errorf("destination agent-info.json was removed on same-project match: %v", err)
+	}
+}
+
+// TestWipeCrossTenantHome_AbsentAgentInfo_FailClosed verifies that when
+// the destination has content but NO agent-info.json, the content is
+// wiped (fail closed).  An absent identity file means we cannot confirm
+// the tenant — better to lose caches than to hand credentials to the
+// wrong project.
+func TestWipeCrossTenantHome_AbsentAgentInfo_FailClosed(t *testing.T) {
+	base := t.TempDir()
+	srcHome := filepath.Join(base, "incoming")
+	dstHome := filepath.Join(base, "destination")
+	_ = os.MkdirAll(srcHome, 0755)
+	_ = os.MkdirAll(dstHome, 0755)
+
+	// Incoming has a valid agent-info.json.
+	writeAgentInfo(t, srcHome, "proj-beta-uuid", "my-agent")
+
+	// Destination has content but NO agent-info.json.
+	secretsDir := filepath.Join(dstHome, ".scion", "harness", "secrets")
+	_ = os.MkdirAll(secretsDir, 0700)
+	_ = os.WriteFile(filepath.Join(secretsDir, "CLAUDE_AUTH"),
+		[]byte("FAKE-AUTH-SENTINEL-not-a-real-credential"), 0600)
+
+	wipeCrossTenantHome(srcHome, dstHome)
+
+	if _, err := os.Stat(filepath.Join(secretsDir, "CLAUDE_AUTH")); !os.IsNotExist(err) {
+		t.Fatal("fail-closed violated: destination content with absent " +
+			"agent-info.json was NOT wiped")
+	}
+}
+
+// TestWipeCrossTenantHome_UnparseableAgentInfo_FailClosed verifies that
+// when the destination's agent-info.json is corrupt/unparseable, the
+// content is wiped (fail closed).
+func TestWipeCrossTenantHome_UnparseableAgentInfo_FailClosed(t *testing.T) {
+	base := t.TempDir()
+	srcHome := filepath.Join(base, "incoming")
+	dstHome := filepath.Join(base, "destination")
+	_ = os.MkdirAll(srcHome, 0755)
+	_ = os.MkdirAll(dstHome, 0755)
+
+	// Incoming has a valid agent-info.json.
+	writeAgentInfo(t, srcHome, "proj-beta-uuid", "my-agent")
+
+	// Destination has an unparseable agent-info.json and content.
+	_ = os.WriteFile(filepath.Join(dstHome, "agent-info.json"),
+		[]byte("this is not json{{{"), 0644)
+	secretsDir := filepath.Join(dstHome, ".scion", "harness", "secrets")
+	_ = os.MkdirAll(secretsDir, 0700)
+	_ = os.WriteFile(filepath.Join(secretsDir, "ANTHROPIC_API_KEY"),
+		[]byte("FAKE-KEY-SENTINEL-not-a-real-credential"), 0600)
+
+	wipeCrossTenantHome(srcHome, dstHome)
+
+	if _, err := os.Stat(filepath.Join(secretsDir, "ANTHROPIC_API_KEY")); !os.IsNotExist(err) {
+		t.Fatal("fail-closed violated: destination content with unparseable " +
+			"agent-info.json was NOT wiped")
 	}
 }
 
