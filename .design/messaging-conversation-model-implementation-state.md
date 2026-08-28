@@ -11325,3 +11325,94 @@ ones defend themselves by being conspicuous.
 mechanism and a sample they can verify themselves — not a summary. Then ask whether the same test
 should run across their own surface, because a method that found one instance rarely found the only
 one.
+
+---
+
+## §5ei. 2026-08-28 16:38 — em10 SPEC DELIVERED WITH A DEFECTIVE GATE; THREE BRANCHES PROPOSED FOR DELETION
+
+### auth-refactor-lead's reply — the generalisation paid inside a minute
+
+1. **No P2 work on `messaging-v2`; nothing to salvage.** All Phase 2 went to main incrementally on
+   short-lived branches — *deliberately*, because a long-lived Phase 1 branch had already caused
+   this exact failure once. They read the mechanism correctly: the exposure is the **absence** of P2
+   from v2's copies of shared files, not the presence of P2 work on it.
+2. **They agree v2 should be abandoned and deleted.** Their words: "the 60 silent revert hunks
+   confirm the branch is toxic."
+3. **My ask to run the same test across their own branches produced two more:**
+   `scion/auth-refactor` (pre-Phase-1, the branch that caused the original incident) and
+   `scion/auth-refactor-v2` (merged as #1312). Both superseded, both recommended for deletion by
+   them. All other `pf-*` branches short-lived, none forking before P2.
+
+Rule 186 justified: the method found one instance because it was pointed there, not because that was
+the only one.
+
+### em10's spec (`63e8fb2d6`) — strong, with one defect in the worst possible place
+
+Good, and worth naming: the composability sections are what I asked for and did not fully specify.
+*"Orthogonal to #1322 — DM ownership stays, SenderID caching stays"* is right, and **"does NOT use
+`authenticatedSender` because it is the HMAC auth path"** only comes from reading the code rather
+than pattern-matching the file list. Flagging the 4 new `pkg/messaging` functions as em6 territory
+and `ConversationReadSwitch` as a new operational setting were correct escalations rather than
+absorptions.
+
+**THE DEFECT — the acceptance gate is arithmetically wrong.**
+
+| | |
+|---|---|
+| `handlers_agent_messaging.go` ActionAttach | **1** (em10 said 1 — correct) |
+| `handlers_chat_v2.go` ActionAttach | **3** (em10 said 3 — correct) |
+| em10's gate | **"ActionAttach: 3 (1+2 across files)"** |
+
+Per-file numbers right, aggregate wrong: 1+3=4, written as 1+2=3. Verified per file against
+`upstream/main`.
+
+**The consequence is not tidiness. A gate set to 3 passes when one of chat_v2's three is deleted —
+and em9's manifest lists exactly that as a confirmed v2 revert ("#1347: per-mention ActionAttach
+check deleted entirely"). The gate as written certifies the specific revert it exists to catch.**
+
+### Two design lessons extracted for em10
+
+**No cross-file aggregates.** A bare `ActionAttach` count over `pkg/hub` returns **20** non-test hits
+— constant defs in `authz.go`, logging in `authorize.go`, the permissions registry, `pty_handlers.go`
+— all unrelated to tranche C. The per-file framing was already correct; the aggregate added nothing
+and introduced the error.
+
+**A string count is a proxy for the thing that matters.** chat_v2's three occurrences are two
+authorization *decisions* (`:1120` authorize, `:1214` CheckAccess) and one *logging* call (`:1216`
+logAuthzDenial). The count cannot distinguish a check from a log line about a check. It works here
+by luck. Instructed: enumerate expected call sites by file, line and what each guards —
+*"handlers_chat_v2.go:1120 — ActionAttach on the primary agent before dispatch"* is checkable by a
+reviewer and cannot be accidentally satisfied. Same treatment for `authenticatedSender` 6 and
+`validateDefaultAgent` 6, since six occurrences could be one definition plus five calls or something
+else entirely, and the gate should say which.
+
+### My own delivery error
+
+First send of the section-boundary report was **2037 runes** and the CLI rejected it, printing usage
+text. Caught because I print `len()` before every send (rule 147) — but I printed it *and sent in the
+same command*, so the check did not gate the send. Trimmed to 1990 and resent. **Print-then-send in
+one invocation is not a check; it is a log.**
+
+### Sent to user (1990) — three branches proposed for deletion
+
+`scion/messaging-v2`, `scion/auth-refactor`, `scion/auth-refactor-v2`. Each looks mergeable and each
+silently reverts work. **Deletion is the durable fix; a warning in my notes protects nobody who has
+not read them.** Re-flagged #1360 merge-ready at `7e3afb3d5`.
+
+### NEW STANDING RULES
+
+**187.** A gate with a wrong count is worse than no gate: it certifies the revert it was built to
+catch, and it does so with the authority of having been checked. Verify every number in an
+acceptance gate against source before accepting the gate, even when the surrounding analysis is
+excellent.
+
+**188.** Never aggregate a marker count across files. The aggregate adds no information the per-file
+counts lack, cannot be checked without re-deriving the split, and is where the arithmetic error
+lands. em10's per-file figures were both right; only the sum was wrong.
+
+**189.** A symbol count conflates a check with logging about a check, a definition with a call. Gates
+must enumerate call sites with what each one guards, not totals. A number cannot be reviewed; a named
+site can.
+
+**190.** Printing a length check in the same command that sends is a log, not a gate. If a limit
+matters, compute it in one invocation and send in the next.
