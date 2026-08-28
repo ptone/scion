@@ -1415,3 +1415,52 @@ specify the measurement, set a withdrawal condition, escalate with a table rathe
 
 **Still the only things waiting on you** (unchanged from 03:47): the three branches needing upstream
 PRs, and the task #93 (a)/(b) decision sent 13:39.
+
+---
+
+## 15:05Z — Heartbeat answer (recorded here because the scheduler is not addressable)
+
+**Instrument finding first, because it changes how I report.** `scion message agent:scheduler` fails with
+`agent_not_found: Agent "scheduler" not found in project (404)`. **The scheduler is a system sender, not
+a correspondent.** Heartbeat answers must land in `implementation-state.md` and this file. Any previous
+cycle where I believed I had replied to it, I had not.
+
+**And the way I nearly missed it:** I piped the command through `| tail -2`. On failure this CLI prints
+its **help text**, which is long, so the tail showed `--stats` and `-y, --yes` — flag documentation that
+reads like ordinary output. **A failure that renders as plausible output is worse than a silent one.**
+Same shape as the `scion delete --force` failure earlier today. Successful sends print
+`Message delivered to agent 'X'.`; **check for that line, not for the absence of an error.**
+
+### 1. Agents progressing or stalled? Checked, not assumed.
+
+- `sn-harnesscfg-dev` — delivered a measured precondition report at 15:00Z. I read the file, not the
+  phase. Now redirected (see below).
+- `sn-runtimeprofile-shapeb` — running, dispatched on ptone's option (a) for task #93.
+- `sn-deploysh-batch` — running, tasks #87/#91/#90, with #100 appended as a strictly-last fourth.
+- `sn-iaplab-dev` — completed and answered a follow-up query. Retirable.
+
+No silent stalls.
+
+### 2. What blocks the critical path
+
+**`ptone/scion#1316`. OPEN, no assignee, no comments since 2026-08-27 14:06 — over 24 hours unowned.**
+Verified with `gh issue view`, not relayed.
+
+§1 step 5 cannot pass without the documented manual workaround. The cause is now measured exactly: the
+broker resolves the harness-config name correctly, then calls a hub endpoint that accepts **only UUIDs**
+(`parseGetID` → `uuid.Parse`). Templates have a name resolver; harness configs never received one.
+
+**The scope finding matters more than the diagnosis.** The ~4-line fix is precisely the work ptone routed
+out of this project at 13:44 yesterday. I designed it in two briefs without checking, and **the ruling
+was recorded in my own register at task #70.** Developer stopped; redirected to make the issue ownable by
+posting its evidence as a comment. One question put to ptone: does a measured 4-line cost change the
+ruling? Cost reported, decision not re-argued.
+
+Closed today: tasks #86, #88, #92 (upstream #1350/#1351/#1352, verified independently 14:46-14:48Z).
+
+### 3. Design doc sync — three gaps
+
+- §9.2 cites a bare `#1274` resolving to an unrelated upstream PR. Tracked as `ptone/scion#1297`. Open.
+- Two **unmeasured prohibitions** in the macOS table (`grep -P`, `awk gensub`). Dispatched as task #100.
+- **NEW:** the doc nowhere records that §1 step 5 depends on an issue **outside this project**. A reader
+  would conclude the tier owns that fix. It does not. Needs one line.

@@ -15723,3 +15723,27 @@ on the live instance, **including `antigravity`**. Set against the measured 502 
 `harness-config "antigravity" not found`, that is live proof, from an angle nobody commissioned, that
 the resource is present and the lookup is wrong. The best evidence of the day came from an agent that
 had drawn the opposite conclusion from it.
+
+---
+
+## §35.85 — The scheduler is not a correspondent, and `tail -2` hid it
+
+`scion message agent:scheduler` fails: `agent_not_found: Agent "scheduler" not found in project (404)`.
+**The heartbeat is a broadcast, not a mailbox.** Every heartbeat answer I believed I had sent went
+nowhere. They belong in `implementation-state.md` and `review-queue.md`; the 15:05Z answer is now in the
+latter.
+
+**How I nearly missed it, and this is the reusable part.** I piped the send through `| tail -2`. On a bad
+invocation this CLI prints its **help text** — long enough that the tail showed `--stats` and
+`-y, --yes`, flag documentation that scrolls past looking exactly like ordinary successful output.
+
+> **Rule 39 — a failure that renders as plausible output is worse than a silent one.** A silent failure
+> leaves a hole you may notice. Help-on-error fills the hole with something that reads like success.
+
+This is the second instance today of the same shape: `scion delete sn-harnesscfg-inv -b --force` also
+printed help rather than erroring, and `--force` is not a valid flag. **Two failures, one mechanism, and
+I logged the first as a curiosity instead of as a class.** That is the exact habit I put in a brief for
+someone else this morning — fix the class, not the instance — and I did not apply it to my own tooling.
+
+**The positive check:** a successful send prints `Message delivered to agent 'X'.` Look for that line.
+Do not look for the absence of an error, and do not tail fewer lines than the help text is long.
