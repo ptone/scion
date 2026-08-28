@@ -12397,3 +12397,107 @@ their commits alone. Getting this wrong points a scope alarm at the wrong agent.
 - em9 free. em6 parked (accepted, held on #1360). em10 parked (spec accepted).
 - Open with user: DEF-32+DEF-34 routing, #1360 merge, three branch deletions,
   escalation-1 CI.
+
+---
+
+## §5et — Heartbeat v6 sweep: a wrong blocker, corrected, and one strike
+
+**Environment.** `upstream/main` unchanged at `3c7e14e41` — no movement since v5.
+All five branch tips match last-known exactly (`7e3afb3d5`, `bc01ac08d`,
+`47a7c6736`, `0b6770a6c`, `5a75f90b1`). No unsent work anywhere.
+
+**PR #1360** is `OPEN` / `MERGEABLE` / **`UNSTABLE`**. I chased the UNSTABLE
+rather than assuming, because I have told the user this PR is cleared. It is
+`cla/google fail` and nothing else — expected-fail on agent-authored branches,
+not required (rule 104). Build & Test, golangci-lint, shellcheck, scan-pr,
+check-changes all pass; zizmor skipping. **#1360 remains cleared.** Not reported
+to the user: that is FYI content, and the standing directive forbids it.
+
+**Peer-wait check (rule 63), answered by me as the filter rather than asked.**
+em6 waits on me (compare URL, sized after #1360 merges). em9 waits on me
+(routing). em10 was waiting on a decision that turns out not to gate it. No
+manager waits on a peer; no circular wait. Branch tips confirm all three are
+genuinely parked and not sitting on unsent work, so I did not spend a round-trip
+asking — heartbeat item 9 is right that asking is the slowest instrument.
+
+`scion list --format json` exposed one stale `taskSummary`: em10 reads
+*"Starting tranche C specification"*, present tense, from before they finished at
+`0b6770a6c`. Present-tense and stale, so **not** the report-shaped summary that
+signals an agent believes it reported and did not. No action.
+
+### The strike: I have been logging the wrong blocker
+
+Tranche C has been recorded as *"blocked on the branch-deletion decision"* across
+**five** entries (`:11539`, `:11745`, `:11844`, `:12031`, and by implication in
+every ledger since). Heartbeat item 8 asks why a row has not moved in two
+heartbeats. The honest answer is that **the reason I wrote down was wrong**, and
+a wrong reason is worse than a stale one because it survives re-reading.
+
+I read the spec's file list. Tranche C is four files:
+
+| # | File | Collision |
+|---|---|---|
+| 1 | `handlers_agent_messaging.go` | — |
+| 2 | `handlers_agent_messaging_test.go` | — |
+| 3 | `handlers_broker_inbound.go` | **DEF-32's file** |
+| 4 | `handlers_chat_v2.go` | **DEF-34's file** |
+
+**Tranche C Files 3 and 4 are literally the two defect files.** The real blocker
+is the DEF-32/DEF-34 routing decision, because product work there collides with
+any hotfix. That block is genuine and stands. The branch-deletion decision is
+hygiene and never gated this.
+
+How the error formed: §5-era reasoning bundled three recommendations into one
+sentence — *"specify tranche C from intent, build on current main, delete the
+branch"* (`:11019`). Three actions in one clause became, on later re-reading, one
+action with three parts. **Rule 210.**
+
+### What that unlocks
+
+The marker gates assert that security symbols present on main **today** are still
+present. They do not depend on tranche C landing and they touch no product files.
+They are also the *structural substitute* for the branch deletion: a gate that
+fails when B5 / #1322 / #1347 symbols disappear catches a `messaging-v2` merge
+whether or not the branch exists. Landing them early shrinks the exposure window
+and makes a decision the user is holding less load-bearing.
+
+Precedent verified on `upstream/main` before instructing: `hack/check-authz-guards.sh`,
+`hack/check-conversation-upsert-guard.sh`, `hack/check-project-compat-literals.sh`,
+each a `.PHONY` Makefile target in the `ci` chain (Makefile:79-95). The spec names
+no gate deliverable — grep for `hack/`, `Makefile`, `ci.yml` returns nothing — so
+the vehicle was an open gap in an otherwise accepted spec. Closed in the dispatch.
+
+**em10 dispatched.** Script + Makefile target + `.PHONY` + ci entry. Zero product
+files, with an instruction to stop and message me if they find themselves under
+`pkg/`. Rule 192 carried explicitly: function-scoped counting, no absolute line
+numbers, and I flagged awk-over-brace-depth as where the time goes so they do not
+sink it into the greps.
+
+**Acceptance criterion is the point of the task.** Not "passes on main" — we
+already found a row that passed cleanly on the revert it existed to catch. Every
+row, AUDIT included, must be *demonstrated* to fail when its guarded symbol is
+deleted, with per-row evidence captured from a scratch worktree in `/tmp`. Told
+them plainly: six proven rows beat eleven assumed ones, name the ones you drop.
+This is rule 65 and rule 195 applied to a gate rather than to a sweep.
+
+Park command issued literally per rule 57/58; **verification pending their reply.**
+
+### Rule 210
+
+**A recommendation containing three verbs will be re-read as one action.** When
+logging a decision, write each action as its own row with its own blocker, or a
+later reader — including me — will collapse them and inherit a dependency that
+was never real. Compound recommendations are where false blockers are born.
+
+### Ledger
+
+- **DEF-32** — fix shape settled. Awaiting routing. Blocks tranche C File 3.
+- **DEF-33** — downgraded, latent, unproven. No movement, correctly.
+- **DEF-34** — confirmed, accepted `47a7c673`. Blocks tranche C File 4.
+- **Tranche C gates** — **STRUCK OUT of the blocked set.** In flight with em10.
+- **Tranche C product files** — blocked on DEF-32/34 routing (*corrected reason*).
+- **Tranches D–G** — behind C. **DEF-5, 6, 9, 10, 11, 14, 16, 17/18** — held,
+  unchanged, all behind C. Stated here rather than silently re-listed.
+- **Tranche H** (`handlers_conversations_resolve*`) — blocked on G-1, no carrier.
+- Open with user: DEF-32+DEF-34 routing, #1360 merge, three branch deletions,
+  escalation-1 CI. Escalation 2 still queued, deliberately unsent.
