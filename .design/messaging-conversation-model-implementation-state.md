@@ -12203,7 +12203,7 @@ misbehaving runtime and no attacker.** I found the mechanism em9 walked past.
 
 ### The block em9 missed
 
-`handlers_agent_messaging.go:188-202`, reply affinity (Phase 6, AC22):
+`handlers_agent_messaging.go:194-202` (doc comment from :188), reply affinity (Phase 6, AC22):
 
     if req.Channel == "" && recipientID != "" && s.webChatStore != nil && s.GetMessageBrokerProxy() != nil {
         if lastCh, err := s.webChatStore.GetLastChannel(ctx, recipientID, agent.ProjectID, agent.ID); err != nil {
@@ -12330,3 +12330,70 @@ Praising the honesty is not a substitute for testing the claim (cf. rule 196).
   deletions, escalation-1 CI, and DEF-34 hotfix inclusion (folded into the DEF-32
   routing question rather than asked separately — rule: one thing at a time).
 - Escalation 2 (tranche C–G file manifests) remains queued and deliberately unsent.
+
+### §5es — em9 DEF-34 writeup verified and ACCEPTED
+
+Branch `scion/ca-msg-em9-unify` @ **`47a7c673`** (from `e3561b01`). Verified, not
+accepted on assertion — em9 has three prior load-bearing premise failures.
+
+**Scope check.** em9's own eight commits touch exactly two files:
+`.design/project-log/defect-principalkindFromAddress-fold.md` (+646) and
+`TRANCHE-MANIFEST.md` (+258/-42). **Docs only, zero code.** Correct — they were
+told not to implement.
+
+The branch's diff against `upstream/main` is 215 files / +51539, but that is the
+inherited integration base (merge-base `6268bac44`), not em9's work. Recording
+this explicitly because the raw `--stat` looks alarming and will look alarming
+again to whoever reads it next: **judge a subordinate's branch by their own
+commit range, never by its diff against main.** That is rule 209.
+
+**Content check.**
+
+- The caveat I ordered removed — *"practical exploitability depends on runtime
+  behavior"* / *"architecturally exploitable"* — is **gone**. Grepped all three
+  phrasings, zero hits.
+- Key-mismatch mechanism recorded at :395-396 with `GetLastChannel` keyed
+  `(userID, projectID, agentID)` called **thread-agnostic**, against the guard's
+  per-thread key.
+- Rules 206 and 207 present at :407 and :413.
+- Three routes ranked (b)/(a)/(c) as directed; the interleaving at :439.
+- Fix ruling recorded **with reasoning**, not just the conclusion (rule 201).
+- Pagination note recorded as adjacent, not chased.
+
+**Line citations independently verified against `upstream/main`** — all four of
+em9's are exact:
+
+    194:  if req.Channel == "" && recipientID != "" && s.webChatStore != nil && ...
+    195:      if lastCh, err := s.webChatStore.GetLastChannel(ctx, recipientID, ...)
+    200:          req.Channel = lastCh
+    207:  if req.Channel != "" {
+
+**My own citation was the loose one.** §5er says the block is `:188-202`; the
+comment begins at :188 but the code begins at **:194**. Corrected below. Having
+spent three messages demanding em9 paste the line their claim rests on, I am not
+going to leave my own reference approximate — the standard is not one I get to
+apply downward only.
+
+**Verdict: ACCEPTED.** This is em9's first clean delivery on a load-bearing
+claim: they took a correction, applied it without argument, removed a caveat they
+had authored, and every reference survived independent check. Say so to them —
+the standing note stays on file, but a pattern that has broken deserves to be
+named as broken.
+
+### Rule 209
+
+**Judge a branch by its author's commit range, not by its diff against main.**
+A branch cut from a long-lived integration base inherits the whole base in
+`git diff main...`. The question "what did this agent change" is answered by
+their commits alone. Getting this wrong points a scope alarm at the wrong agent.
+
+### Ledger
+
+- **DEF-32** — characterised, fix shape settled. Awaiting routing only.
+- **DEF-33** — downgraded, latent, exploitability unproven.
+- **DEF-34** — confirmed, written up, **accepted at `47a7c673`**. Fix is a
+  one-line filter removal. Belongs in the DEF-32 hotfix if one is authorised.
+  Raised to user; no reply yet.
+- em9 free. em6 parked (accepted, held on #1360). em10 parked (spec accepted).
+- Open with user: DEF-32+DEF-34 routing, #1360 merge, three branch deletions,
+  escalation-1 CI.
