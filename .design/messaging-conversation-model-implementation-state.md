@@ -5974,3 +5974,76 @@ function, and the golden vectors cover the function. No action.
 **Ledger:** B5 stays open pending F1. Upstream moved `1befe9237` → `f99de64df` (#1336, #1337 —
 neither ours). PRs #1338/#1339 still open; DEF-26 URL still out. Branch tips unchanged:
 em6-def31 `facb332b`, em6-ci-guard `e93a58e3`, em6-def26 `bd5e492c`, em9-unify `25fad0a2`.
+
+---
+
+### §5cc — B5/F1 re-review of `24b97149` + two escalations (2026-08-28 02:45Z)
+
+**em10 pushed the F1 fix.** Three sub-fixes in `handleProjectBroadcast`: (a) unconditional
+auth-derived sender override; (b) `req.StructuredMessage.Broadcasted = true` forced server-side;
+(c) self-skip rewritten from slug-string comparison to `agent.ID == authID`. All placed before
+the targeting loops as specified. Both new tests pass; my original F1 probe no longer reproduces.
+
+**Mutation results — reverted each sub-fix independently:**
+
+| mutation | reverted | result |
+|---|---|---|
+| A | (a) override → conditional | tests **PASS** |
+| B | (b) `Broadcasted` force | tests **FAIL** |
+| C | (c) self-skip → Sender comparison | tests **PASS** |
+
+**The tests pin (b) and only (b).** (a) and (b) defend different things — (b) stops the DM mint,
+(a) stops a forged `SenderID` being persisted on every broadcast row and flowing to any other
+`SenderID` reader. If (b) is ever relaxed (and someone will argue broadcasts should be
+conversation-scoped), (a) is the sole remaining defence with nothing testing it. Returned to em10:
+one test per sub-fix, each failing when that sub-fix alone is reverted.
+
+**R1 — REGRESSION. F2 was not display-only; I graded it wrong.** The override makes `Sender` the
+UUID form, and the broadcast fan-out still skips the sender by **slug**:
+`messagebroker.go:713` (`fanOutToProject`) and `:736` (`fanOutGlobal`). A UUID never equals a slug,
+so the skip stops matching and **the broadcasting agent is delivered its own broadcast**. em10's
+handler-side (c) does not cover it: with a proxy present the skip is re-derived inside the fan-out.
+
+Proven with a control — same probe, same inputs, client supplying the slug-form `Sender` agents
+actually send today:
+
+| tree | peer | self |
+|---|---|---|
+| upstream/main `f99de64d` | 1 | **0** |
+| `24b97149` | 1 | **1** |
+
+Probe: `repro/b5_selfskip_probe_test.go`. Not cosmetic — a broadcast is an interrupt, and for any
+agent that reacts to broadcasts it is a loop.
+
+**Class fix, not the two lines.** I enumerated all 16 `Sender` reads in `pkg/`. Exactly two do
+identity *equality* against a slug (`:713`, `:736`); the rest are prefix checks for kind, which
+stay correct in UUID form. Fix is `if msg.SenderID != "" && msg.SenderID == agent.ID { continue }`.
+**Standing rule: `Sender` is a display label. Every routing or identity-equality decision uses
+`SenderID`.** This is the third instance in B5 alone of an identity decision made by
+string-matching a display field.
+
+**ESCALATED to the user — hub-scoped broadcast authz hole, pre-existing on bare main.**
+`/api/v1/projects/` is `RoutePolicy` and declares `Permission: "project.read"`, but `routeGuard`'s
+`RoutePolicy` case is an **unconditional pass-through** — the declared permission is never
+evaluated; enforcement is delegated to the handler by design. `handleProjectBroadcast` gates agent
+callers (scope + same project) and applies **no membership check to user callers**. Probe through
+the real guard chain as registered at `server.go:3711`: a hub member with no binding to the target
+project gets **202** and **1 message delivered** to a running agent there. Broadcast is an
+interrupt, so this is arbitrary instruction injection into another project's agents.
+Probe: `repro/probe_broadcast_crossproject_test.go`. **The declared `Permission` is the trap — for
+every `RoutePolicy` route that field is documentation, not enforcement.** I verified only the
+broadcast handler; the inventory of other `RoutePolicy` handlers is unanswered.
+
+**Messaging-authz question from the user (agent could not reply, lacked `project:agent:lifecycle`).**
+Diagnosed on `f99de64d`: `handlers_projects_core.go:2404` puts `AgentActionMessage` in the same
+authz bucket as Start/Stop/Suspend/Restart/Exec → `authorizeAgentLifecycle`, which requires
+`ScopeAgentLifecycle`, granted **only** by `AgentRoleFull` (`agentrole.go:56-65`). Two gates in
+order: `HasScope` (caller's token, target-independent) then project equality — the caller failed
+gate 1, so gate 2 never ran, which is why the error read ambiguously. **There is no messaging
+scope at all**; `project:agent:notify` is notification subscriptions only. Already inconsistent:
+agent→user replies go via `AgentActionOutboundMessage`, outside that switch, with only a
+self-identity check. Not caused by recent authz work — #1337 only added a deprecation comment to
+`requireAdmin`. Design options A/B/C put to the user; **user is deliberating, no decision yet.**
+
+**Ledger:** B5 still open (R1 + two untested sub-fixes). em6 stalled after parking, re-parked with
+the literal command. em9 has not answered the option-B forced choice. `upstream/main` = `f99de64d`.
