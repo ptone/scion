@@ -2,7 +2,7 @@
 
 **Filed by:** ca-msg-em9  
 **Date:** 2026-08-28  
-**Updated:** 2026-08-28 (v2 — corrected after architect review)  
+**Updated:** 2026-08-28 (v3 — DEF-32 class audit added)  
 **Origin:** em6 finding during DMConversationKey tightening audit  
 **Status:** Audit complete — live authorization bypass confirmed — no code changes made  
 
@@ -264,3 +264,196 @@ ahead of the refactor.
 3. **Do not rely on the SenderID nil-guard at site 4** as defense for
    site 2. It is on a different call path and tests a condition the
    attacker controls.
+
+---
+
+## DEF-32 class audit: all 24 case-sensitive prefix tests in pkg/hub
+
+DEF-32 is a class, not an instance. There are 24 case-sensitive prefix
+tests on principal addresses in pkg/hub non-test code. This section
+triages each into one of three buckets:
+
+- **AUTHZ** — the comparison gates a permission check, identity
+  resolution, or a field the security layer later trusts. A miss grants
+  something.
+- **ROUTING** — the comparison picks a delivery path or display form. A
+  miss misroutes or mislabels, but grants nothing.
+- **INERT** — operand is provably server-constructed canonical; no
+  external path can supply a non-canonical prefix.
+
+### Bucket counts
+
+| Bucket  | Count | Sites |
+|---------|-------|-------|
+| AUTHZ   | 3     | handlers_broker_inbound.go:126, :127; handlers_chat_v2.go:1653 |
+| ROUTING | 5     | events.go:761; handlers_agent_messaging.go:139; handlers_broker_inbound.go:297; handlers_chat_v2.go:1966, :1974 |
+| INERT   | 16    | events.go:744; handlers_agent_messaging.go:911, :912, :1105, :1466; messagebroker.go:437, :518, :535, :536, :716, :748, :791; webchannel.go:103, :185, :188, :201 |
+| **Total** | **24** | |
+
+### AUTHZ sites (3)
+
+**handlers_broker_inbound.go:126** — `HasPrefix(req.Message.Sender, "user:")`
+Gate for ActionAttach permission check, user resolution, SenderID
+overwrite. EXTERNAL: Sender from broker plugin JSON body.
+*Miss consequence:* ActionAttach check skipped; body-supplied sender_id
+survives as if server-resolved. This is the DEF-32 root cause.
+
+**handlers_broker_inbound.go:127** — `TrimPrefix(req.Message.Sender, "user:")`
+Inside the :126 if-block. Extracts email from Sender for user lookup.
+Dependent on :126 — only reachable when :126 passes, so not independently
+exploitable. However, any fix that makes :126 case-insensitive must also
+address :127 or canonicalize before both.
+*Miss consequence:* Part of the :126 gate; email extraction fails if
+prefix casing mismatches.
+
+**handlers_chat_v2.go:1653** — `HasPrefix(msg.Sender, "agent:")`
+In `hasAgentReply`. Reads stored messages from DB to determine if an
+agent has replied in the conversation. Gates edit/delete permission on
+user's own message (immutability after agent reply). Data from DB — a
+non-canonical agent Sender stored via handleBrokerInbound (which persists
+`req.Message.Sender` as-is) would cause this check to miss.
+*Miss consequence:* Agent-reply immutability check bypassed; user can
+edit/delete message that should be locked. Second-order effect: requires
+a non-canonical Sender to have been stored by a prior broker inbound
+request (same DEF-32 root cause persisting bad data).
+
+### ROUTING sites (5)
+
+**events.go:761** — `!HasPrefix(msg.ThreadID, "agent:")`
+In `PublishUserMessage` (SSE sink). Tests ThreadID to distinguish legacy
+agent-slug keys from UUID topic threads. ThreadID from broker inbound
+path is body-supplied. Miss causes message to be published to shared-
+space chat SSE subject when it should not be. No privilege granted.
+*Miss consequence:* Message appears in wrong SSE channel.
+
+**handlers_agent_messaging.go:139** — `TrimPrefix(recipient, "user:")`
+In recipient resolution for handleAgentMessage. If recipient is
+`"User:alice"`, TrimPrefix does not strip, email/name lookup fails,
+resolution fails. No privilege granted — denial, not bypass.
+*Miss consequence:* Recipient resolution failure; message not deliverable.
+
+**handlers_broker_inbound.go:297** — `HasPrefix(req.Message.Sender, "user:")`
+Gates reply-affinity recording (RecordChannel) and thread watermark
+updates. Miss means reply-affinity not recorded for non-canonical sender.
+Agent's next untagged reply may route to wrong channel. No privilege
+granted.
+*Miss consequence:* Routing quality degrades; agent reply may go to wrong
+channel.
+
+**handlers_chat_v2.go:1966** — `HasPrefix(m.Sender, "agent:") && HasPrefix(m.Recipient, "agent:")`
+Inter-agent message filter (first merge loop). Reads from DB. If a non-
+canonical agent Sender/Recipient was stored, message is filtered out of
+inter-agent list. No privilege granted — information hidden, not exposed.
+*Miss consequence:* Inter-agent messages not displayed.
+
+**handlers_chat_v2.go:1974** — same shape as :1966
+Second merge loop, same filter. Same analysis, same consequence.
+
+### INERT sites (16)
+
+All operands are provably server-constructed canonical. No external path
+can supply a non-canonical prefix to any of these sites.
+
+**events.go:744** — `HasPrefix(msg.Recipient, "user:")`
+In PublishUserMessage (SSE sink). Recipient is always server-constructed:
+"agent:" + slug from handleBrokerInbound, or "user:" + name from
+handleAgentOutboundMessage. No external path sets Recipient.
+
+**handlers_agent_messaging.go:911** — `HasPrefix(structuredMsg.Sender, "agent:")`
+**handlers_agent_messaging.go:912** — `HasPrefix(structuredMsg.Recipient, "agent:")`
+Agent-to-agent observer publishing gate. Both operands B5-forced
+(Sender auth-derived, Recipient from URL path agent resolution).
+
+**handlers_agent_messaging.go:1105** — `HasPrefix(agentMsg.Sender, "agent:")`
+Group message observer publishing gate. Sender B5-forced.
+
+**handlers_agent_messaging.go:1466** — `!HasPrefix(msg.Sender, "agent:") || msg.SenderID == ""`
+`publishBroadcastDeliveryFailed`. Called from handleProjectBroadcast
+(HTTP handler path). Sender and SenderID both B5-forced from auth
+context. SenderID NOT body-settable — B5 override at lines 548-559
+overwrites body value. If prefix missed: DELIVERY_FAILED notification
+not sent (silent failure, no privilege).
+
+**messagebroker.go:437** — `HasPrefix(msg.Sender, "agent:")`
+In deliverToUser, sets AgentID on stored message. msg from eventbus;
+all publishers B5-force fields. handleBrokerInbound uses s.events (SSE)
+not bp (eventbus) — never reaches this path.
+
+**messagebroker.go:518** — `!HasPrefix(storeMsg.ThreadID, "agent:")`
+In deliverToUser, thread watermark routing. ThreadID from eventbus msg,
+server-constructed on all publishing paths.
+
+**messagebroker.go:535** — `HasPrefix(storeMsg.Sender, "agent:")`
+**messagebroker.go:536** — `TrimPrefix(storeMsg.Sender, "agent:")`
+DM notification block in deliverToUser. Sender from eventbus, B5-forced.
+
+**messagebroker.go:716** — `HasPrefix(msg.Sender, "agent:") && msg.SenderID == ""`
+R3b diagnostic warning in fanOutToProject. msg from eventbus broadcast
+subscription; published by PublishBroadcast from B5-forced HTTP handler.
+SenderID auth-derived, NOT body-settable. If prefix missed: warning
+suppressed. Self-skip at :726 (ID-based) works independently.
+**B5/R1 self-skip note:** This is broadcast self-skip territory. The R3b
+warning is cosmetic. The actual self-skip logic (`msg.SenderID != "" &&
+msg.SenderID == agent.ID`) does not depend on the prefix test and is
+safe regardless.
+
+**messagebroker.go:748** — `HasPrefix(msg.Sender, "agent:") && msg.SenderID == ""`
+R3b warning in fanOutGlobal. Same analysis as :716. SenderID auth-
+derived, NOT body-settable.
+
+**messagebroker.go:791** — `!HasPrefix(msg.Sender, "agent:") || msg.SenderID == ""`
+`publishDeliveryFailed` in MessageBrokerProxy. Called from deliverToAgent
+on dispatch failure. msg from eventbus agent subscriptions; all
+publishers (PublishMessage from HTTP handlers, fanOutToProject/Global
+iteration) B5-force fields. handleBrokerInbound dispatches directly to
+runtime, does NOT publish through eventbus. SenderID auth-derived, NOT
+body-settable. If prefix missed: DELIVERY_FAILED not sent (silent
+failure, no privilege).
+
+**webchannel.go:103** — `!HasPrefix(msg.ThreadID, "agent:")`
+Thread watermark routing in web channel spoke. msg from eventbus,
+server-constructed.
+
+**webchannel.go:185** — `HasPrefix(msg.Sender, "agent:")`
+**webchannel.go:188** — `TrimPrefix(msg.Sender, "agent:")`
+In identityFromTopic, TopicKindUser case. Sets agentID from agent sender.
+msg from eventbus, server-constructed.
+
+**webchannel.go:201** — `HasPrefix(msg.Sender, "user:")`
+In identityFromTopic, TopicKindAgent case. Sets userID from user sender.
+msg from eventbus, server-constructed.
+
+---
+
+## Why the INERT count is high
+
+16 of 24 sites (67%) are INERT because the B5 auth-derivation override
+(handlers_agent_messaging.go:540-559) canonicalizes Sender and SenderID
+at the HTTP handler entry point, and these canonical values propagate
+through the eventbus to all downstream consumers. The broker inbound path
+(handleBrokerInbound) is the only HTTP handler that does NOT B5-force
+Sender — it trusts the HMAC-authenticated broker plugin's field content.
+Furthermore, handleBrokerInbound dispatches directly to the agent runtime
+and publishes via `s.events` (SSE), not through the eventbus. This means
+the eventbus paths never carry broker-originated messages, isolating the
+external trust boundary to a narrow set of code.
+
+The 3 AUTHZ + 5 ROUTING sites that are not INERT all either:
+1. Directly process broker inbound request fields (:126, :127, :297), or
+2. Read from the DB where broker inbound may have stored non-canonical
+   values (:1653, :1966, :1974), or
+3. Receive ThreadID from a path that includes broker inbound (:761), or
+4. Process user-supplied recipient strings (:139).
+
+## Fix shape implications
+
+If DEF-32 were a single instance (1 AUTHZ site), patching
+handlers_broker_inbound.go:126 case-insensitively would suffice.
+
+With 3 AUTHZ sites (2 at the gate + 1 second-order via DB), plus 5
+ROUTING sites that degrade on non-canonical input, the correct fix moves
+upstream: **canonicalize Sender (and Recipient if present) once at
+broker inbound ingress** before any downstream comparison can be fooled
+by casing. This closes all 8 non-INERT sites with one normalization
+point, and prevents future case-sensitive comparisons from becoming new
+instances of the class.
