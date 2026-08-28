@@ -7686,3 +7686,65 @@ them.** B6 and B9 are both "registration runs on every resolve", read once as a 
 feature. Before writing a fix, ask which other open row shares its mechanism — and if one does, the
 two rows are one commit and one owner. Separate owners will each make the locally correct change and
 the second will silently revert the first.
+
+---
+
+## §5cw. Heartbeat 2026-08-28 10:13 — TRANCHE B FAILS CI'S FORMAT GATE. Caught before the PR opened.
+
+Eleventh consecutive dead sweep on every observable: `upstream/main` `f4d02461b`, five tips
+unchanged, three managers `blocked`, #1338/#1339/#1340 open `UNSTABLE`, tranche B PR unopened.
+
+Rather than log a twelfth empty entry, I ran the **actual CI gates** against the tranche B tip, with
+`upstream/main` as a matched control in a second worktree. This is the first time I have done that
+on `d767d66c3` specifically: §5cj verified the rebase by patch-id and a prior run covered `go vet` +
+`build`, but the *gate set CI runs* had never been executed against the rebased tip.
+
+| gate | `ciA` = main `f4d02461b` | `ciB` = trb `d767d66c3` |
+|---|---|---|
+| `fmt-check` | **rc=0** | **rc=2 — FAIL** |
+| `compat-literals` | rc=0 | rc=0 |
+| `check-authz-guards` | rc=0 | rc=0 |
+| `test-fast` | rc=0 | rc=0 |
+| `build` | rc=0 | rc=0 |
+
+**The control is what makes this actionable.** main passes `fmt-check`; tranche B does not.
+Therefore the defect is introduced by the branch, not inherited — no time spent wondering whether
+main was already red.
+
+**And per rule 86, a failing local target is not a gate until you prove CI runs it.** It does:
+`.github/workflows/ci.yml:67` runs `UNFORMATTED=$(gofmt -l .)` and raises `::error::`. This is a
+distinct job from the `make test-fast` job at `:104`. Tranche B would have gone red within a minute
+of the user opening the PR — on the largest, most-reviewed branch in the project.
+
+The defect is one line, in `pkg/hub/handlers_agent_messaging_test.go:906`:
+
+    -  t.Errorf("peer-agent received no messages — forged Sender caused it to be "+
+    +  t.Errorf("peer-agent received no messages — forged Sender caused it to be " +
+
+**An irony worth recording, because it sharpens §5cp/§5cq.** That file is one of the B5 security
+test files carrying `//go:build !no_sqlite`. Under CI's `-tags no_sqlite` its tests are compiled out
+entirely — `test-fast` is rc=0 on this branch **while containing a file CI simultaneously rejects**.
+`gofmt -l .` does not honour build tags. So the only CI feedback the tranche B security suite
+produces today is *whether it is formatted*. 3,358 dark test functions, and the single signal
+reaching the dashboard is whitespace. That is the CI blind spot stated in one sentence, and it is
+the sentence to use if option (i) needs re-arguing.
+
+**Dispatched to em10, narrowly.** em10 owns the branch and managers push their own work; I do not
+implement and I do not push to another agent's branch. The message gave the exact diff, the exact
+five steps, an explicit "do not rebase, do not amend, do not fix anything else you notice", and the
+literal re-park command per rules 57/58. I also told it the CI tag gap is my problem and not its
+own, so it does not go and try to solve it.
+
+**No user message.** The user directive is section boundaries and escalations only. This is neither
+— it is routine engineering, caught and dispatched inside one heartbeat. It becomes an escalation
+only if em10 does not land it; the compare URL already sent tracks the branch name, so it stays
+valid once the tip moves.
+
+### Rule 92 (new)
+
+**Run the gate set, not a proxy for it, against the exact commit you are asking someone to merge.**
+I had `go vet`, `build`, a full default-tag test run and a patch-id rebase proof on tranche B, and
+every one of them was green — while the branch failed CI. Four green signals, none of them the
+signal CI computes. Adjacent evidence accumulates into false confidence precisely because each piece
+is individually valid. Cheap rule: before sending a compare URL, run the workflow's own commands
+against the branch tip, with main as a control.
