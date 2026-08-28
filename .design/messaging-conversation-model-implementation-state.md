@@ -8476,3 +8476,73 @@ first and the stamped set second.
 **Never accept a truncated gate stream as a pass.** `head -N` on test output makes "no FAIL seen"
 unfalsifiable. Either grep for the packages you care about by name and assert they appear, or do not
 truncate. Same class as the `head -5` build-tag trap (rule 95) — a window narrower than the question.
+
+---
+
+## §5dg — Heartbeat sweep; PR #1349 open; the CLA red herring
+
+Sweep at the 12:13Z heartbeat (completed late — the heartbeat arrived mid-review of em10 and its
+items were deferred, not dropped).
+
+### Roster and refs
+
+- `upstream/main` = `4b120bd70` — **unchanged** since tranche B merged. No rebase pressure on any
+  manager branch.
+- `ca-msg-em6-b6b7b9` = `efb70e04a` (no `scion/` prefix — rule 62 still bites).
+- `scion/ca-msg-em10-trb` = `ca52d6f6f` (unchanged; em10 is `working` on the blocking fix).
+- `scion/ca-msg-em9-unify` = `e704b2feb` (unchanged; em9 still parked pending option (i)).
+- Activity: em6 `blocked`, em9 `blocked`, em10 `working`. **em6's park is verified** — the §5df
+  open item is closed. Note the standing caveat: `scion list` shows the `blocked` state but not the
+  `statusMessage`, so the park *reason* remains unverifiable. State is what I can assert.
+
+### PR #1349 is open
+
+The user opened em6's B6/B7/B9 PR from the compare URL: **#1349**, head `efb70e04a`,
+`mergeStateStatus = UNSTABLE`. Per the established reading, `UNSTABLE` = mergeable, with a failing
+check that is not required. `BLOCKED` would be the bad one. So the PR is merge-ready from GitHub's
+point of view and I take no action; merging is the user's gate, not mine.
+
+### The CLA red herring — a near-escalation, closed by positive control
+
+The check rollup showed two things that both *look* like problems and are not:
+
+1. **`Build & Test` with an empty conclusion.** My jq filter excluded `null` conclusions but the
+   field came back as empty string, so it printed as though it had failed. It had not: `status =
+   IN_PROGRESS`. A check that has not finished is not a check that failed. This is the same shape as
+   rule 97 — a red/green claim without the *status* alongside the *conclusion* is not a claim.
+
+2. **`cla/google FAILURE`.** The tempting story: em6's single commit is authored by
+   `Scion Agent (dev-b6b7b9) <agent@scion.dev>`, which is not a CLA-covered identity, therefore the
+   PR cannot merge and I must escalate that every agent-authored branch is going to jam at the CLA
+   gate. That story is coherent, mechanically plausible, and wrong.
+
+   The control that settled it: **the already-merged PR.** #1343 — tranche B, merged as `b3562fb19`
+   — carries the *identical* `cla/google FAILURE` against the *identical* `agent@scion.dev` author,
+   and merged anyway. The check is non-required; it is expected-red for every branch this fleet
+   produces.
+
+   The `b3562fb19` commit shows `Preston Holmes <ptone@google.com>` as author while the PR's head
+   commit shows `agent@scion.dev` — authorship is rewritten at squash-merge time. That is *why* the
+   red CLA never blocks: the thing the CLA gate objects to does not survive into `main`.
+
+### Rule 104 (new)
+
+**Before escalating a red check on a new PR, look at whether the last merged PR carried the same
+red check.** A recurring non-required failure is scenery, not signal. The cheapest positive control
+for "is this red meaningful" is a PR that was red the same way and merged regardless. Same discipline
+as §5df's notifications.go negative result: check the control *before* the escalation, because the
+compelling narrative arrives first and the disconfirming fact costs one command.
+
+Corollary, narrower and worth pinning so nobody re-derives it: **`cla/google` is expected-FAILURE on
+agent-authored branches in this repo and is not required.** Do not have a manager "fix" it by
+re-authoring commits.
+
+### Not dispatched, deliberately
+
+B1/B2/B14/B3 + the six reviewer migration findings remain held. The §5dd reasoning is unchanged and
+still governs: B1 consumes em6's shared D-1 predicate, and starting it before #1349 lands would fork
+the very guard the extraction exists to unify. #1349 being *open* is not #1349 being *merged*.
+
+No report to the user this cycle. There is no section boundary: em6's section closes on merge, not
+on PR-open, and the user opened the PR so they already know its state. em10's block is mine to
+work, not an escalation.
