@@ -12785,3 +12785,117 @@ the correct move is to shorten whichever nobody will read again.
 - Tranches D–G, DEF-5/6/9/10/11/14/16/17/18 — held behind C.
 - Open with user: **marker-gate PR (new)**, DEF-32+DEF-34 routing, #1360 merge,
   three branch deletions, escalation-1 CI.
+
+---
+
+## §5ex — Heartbeat v7: gate live in CI; DEF-17 discharged, DEF-18 re-homed
+
+**Environment.** `upstream/main` advanced `3c7e14e41` → **`905756af7`** (#1356,
+quota admin page, P2 series). Diff over `pkg/hub`, `Makefile`, `.github/`, `hack/`
+is **empty** — no overlap with the gate. Re-ran the gate against the new tree
+anyway (rule 212): **exit 0**.
+
+**The user opened PR #1361** for the marker gate. First unit from this effort to
+reach review.
+
+### The gate is now proven in the enforcement environment
+
+`Build & Test` passed in 4m23s. **A green job does not prove the step ran** —
+that is precisely the defect I found in §5eu, and believing the job was
+sufficient would have been the same error one cycle later. I pulled the job's
+step list:
+
+    13 success  Check Authorization Guards
+    14 success  Check Conversation Upsert Guard
+    15 success  Check Security Marker Gates      <-- ours
+    16 success  Run Tests
+
+**Step 15 ran and succeeded**, correctly positioned. The proof is airtight
+because of the step's own shape: `set +e; ./hack/…; rc=$?; case; exit "$rc"`. A
+missing or unexecutable script yields rc=127, hits the `*` branch, and exits
+non-zero. **Success therefore entails the script executed and returned 0.** There
+is no path to a green step without a real run.
+
+Also noted: `zizmor-*` now **passes** rather than `skipping` as on #1360 — the PR
+touches a workflow file, so the workflow-security scanner actually engaged. A
+check that changes from `skipping` to `pass` is a check that was never testing us
+before.
+
+**#1361** is green but for `cla/google` (rule 104, not required). **#1360**
+re-verified after main moved: still `MERGEABLE`, `UNSTABLE` from cla alone.
+
+### Ledger sweep — one struck, one re-homed, one confirmed
+
+**Confirmed genuinely blocked (not a false blocker).** I re-tested
+`scion/ca-msg-em6-dm-tighten` against the §5et failure mode. `b2b1b14` **is** an
+ancestor: it is truly stacked on #1360, three-dot shows 8 files / +921, and it
+cannot go before #1360 merges. Hold is legitimate. Having found one invented
+dependency, I checked the others rather than assuming this one was sound too.
+
+**DEF-17 — STRUCK.** It was *"the integration branch fails three CI gates that
+main passes"*: Format Check, `compat-literals` (11 `grove-*` literals), and
+`golangci-lint`. Two independent reasons it is discharged:
+
+1. Its subject, `scion/messaging-v2`, is **abandoned as a source**. The row
+   existed because *"the branch's entire purpose is to merge."* That purpose is
+   gone.
+2. More durably: **all three gates now run in CI on every PR** — steps 9, 12 and
+   the `golangci-lint` job, all confirmed green on #1361. The two offending files
+   (`cmd/broadcast_test.go`, `cmd/message_deprecation_test.go`) are absent from
+   main and will arrive with a later tranche; when they do, `compat-literals`
+   fails that PR automatically.
+
+I nearly struck this on reason 1 alone, which would have been wrong — the branch
+dies but **the files carrying the violations travel into future tranches.** The
+strike is sound only because enforcement moved from my memory into CI. DEF-17's
+own lesson was *"checking a gate you have not read is checking your memory of
+it"*; it is fitting that it closes by ceasing to depend on memory at all.
+
+**DEF-18 — RE-HOMED, and explicitly NOT struck by the same argument.**
+`pkg/messaging/validate.go` **does not exist on `upstream/main`** — verified. So
+DEF-18 is not a live defect; it is unlanded code, and it must ride with whichever
+tranche lands that file. Owner changes from *"me, gate sweep"* to *"the tranche
+that lands validate.go."*
+
+It would be tempting to discharge it the way I just discharged DEF-17, since
+`golangci-lint` flags the `ineffassign` and CI will therefore force *a* fix.
+**That reasoning is a trap, and this is the interesting finding of the sweep.**
+DEF-18 is that `projectAgents` is declared `// for error reporting`, appended at
+three sites, and never read — so AC-33's cross-project refusal cannot name what
+it refused. The **lint-satisfying fix is to delete the variable.** That is
+cheaper than the correct fix, fully silences CI, and **permanently discards the
+diagnosability the comment promised.** Automated enforcement here actively
+selects the wrong resolution. DEF-18 must stay on the ledger *because* CI will
+otherwise resolve it, wrongly and invisibly.
+
+### Rule 217
+
+**A defect whose CI-enforced fix is cheaper than its correct fix must stay
+tracked.** Enforcement discharges a ledger row only when the enforced fix and the
+correct fix coincide. Lint says a variable is unused; the correct repair is to
+*use* it. Where the cheap fix silences the signal and destroys the intent,
+automation is not a substitute for the row — it is the reason the row is urgent.
+
+### Rule 218
+
+**A green CI job is not evidence a step ran.** Enumerate the job's steps and find
+yours by name. Then check whether the step's own shape makes success entail
+execution — `set +e` / capture / `exit "$rc"` does; a bare `run:` that can be
+skipped by a conditional does not.
+
+### Ledger
+
+- **Marker gate** — **PR #1361 open, green but for cla, step 15 proven live in
+  CI.** Awaiting user merge.
+- **DEF-17** — **STRUCK.** Enforcement moved to CI.
+- **DEF-18** — re-homed to the validate.go tranche; deliberately not struck.
+- **#1360** — re-verified MERGEABLE after main moved. Awaiting user.
+- **dm-tighten** — hold confirmed legitimate, genuinely stacked on #1360.
+- **DEF-32 / DEF-34** — awaiting routing. **DEF-33** — latent, no movement.
+- em10's earlier product work — unlanded, behind routing.
+- Tranches D–G, DEF-5/6/9/10/11/14/16 — held behind C.
+- Open with user: #1361 merge, #1360 merge, DEF-32+DEF-34 routing, three branch
+  deletions, escalation-1 CI.
+
+Nothing in this entry is a section boundary or an escalation, so nothing goes to
+the user. #1361 being green is FYI and the user can see it.
