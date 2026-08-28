@@ -11144,3 +11144,87 @@ signals it. When a review lands, freeze the branch or move the pending work else
 the asymmetry or merely relocates existing behaviour. Rule 157 forbids shipping the strict half
 alone; it does not forbid shipping a refactor that leaves the mismatch exactly as it was. Read the
 comparison operator, do not infer from the diffstat.
+
+---
+
+## §5eg. 2026-08-28 16:33 — BRANCH SPLIT VERIFIED; TIGHTENING REVIEWED; MY OBSERVABILITY INSTRUCTION WAS REDUNDANT
+
+### Force-push recovery — verified, not accepted on report
+
+em6's developer pushed the tightening to the PR branch before my redirect landed. em6 recovered by
+cutting `scion/ca-msg-em6-dm-tighten` at `fcdff78a` and force-pushing
+`scion/ca-msg-em6-b2b1b14` back to `7e3afb3d5`.
+
+A force-push on a branch under an open approval is precisely the operation that loses work silently,
+so I verified rather than accepting:
+
+| check | result |
+|---|---|
+| GitHub's view of #1360 head | `7e3afb3d5` MERGEABLE OPEN — matches the verified state |
+| `origin/scion/ca-msg-em6-dm-tighten` | `fcdff78a` |
+| `--is-ancestor 7e3afb3d5 <tighten>` | **YES** — nothing orphaned |
+| commits beyond #1360 | 2 (`4b32c5e2b` tightening, `fcdff78ad` tests) |
+| tightening-only diff | `dm_key.go` +49/−, `dm_key_test.go` +135/− |
+
+Clean recovery from a race em6 did not cause. Asking GitHub for the head rather than trusting the
+report is rule 175 paying for itself twice in ten minutes.
+
+### The tightening is correct — the parts worth naming
+
+- `ToLower` gone; `validDMKinds` now sees unmodified input. Minimal change, existing error path.
+- **Parse-then-compare, not parse-then-substitute.** `uA.String() != idA` → error.
+- **`tokenA := kindA + ":" + idA` uses the ORIGINAL input, not `uA.String()`.** They are provably
+  equal at that point so it is behaviourally identical — which is exactly why it matters: it states
+  in code that this function never rewrites its input. Flagged to em6 to defend it against a
+  reviewer who "simplifies" it back.
+- Doc comment carries the `PrincipalKindFromAddress` upstream-mask note as instructed.
+
+### MY BAD INSTRUCTION: the observability I demanded already existed
+
+I required WARN-level logging on the rejection path (§5ed, rule 166) **without checking whether it
+was already there.** It was:
+
+    pkg/messaging/conversation.go:83
+      log.Warn("skipping conversation resolution: invalid DM key inputs (non-fatal)", …, "error", err)
+
+with a **test pinning it** at `conversation_test.go:240`. All nine production call sites of
+`DMConversationKey` live in `pkg/messaging` and log this error through a logger carrying request
+context.
+
+So em6's `slog.Warn` calls are not merely redundant — they are **worse than what they duplicate**:
+
+1. **Global default logger.** No request or conversation context; strictly less information than the
+   caller-side log that already fires.
+2. **A pure derivation function acquires side effects.** `pkg/messages` is a derivation library;
+   coupling it to `slog` global state means every test exercising key derivation emits noise.
+3. **Flood vector.** `DMConversationKey` sits on the per-message path with remote-influenced inputs.
+   A broken or hostile client retrying with a malformed ID produces one WARN per attempt, unbounded,
+   from a library that cannot sample or rate-limit because it has no context to do it with. Harmless
+   until an incident is buried under it.
+
+**Instructed:** delete both `slog.Warn` calls and the import; keep `describeNonCanonicalUUID` but
+move the shape **into the error** — `fmt.Errorf("dm key: non-canonical UUID for %s (shape: %s)", …)`
+— so the caller logs it once, with context, through the already-tested path.
+
+### NEW STANDING RULES
+
+**178.** Before requiring observability, check whether the call sites already log the error. Nine
+callers in one package all logging the same wrapped error is the normal case, not the exception, and
+a library-level log added on top is duplication in the layer least able to contextualise it.
+
+**179.** A pure function on a hot path must not log. It has no request context, no ability to sample,
+and its inputs are often remote-influenced — which makes an unbounded per-call WARN a
+remote-triggerable log-volume vector. Return the diagnostic in the error and let the caller decide.
+
+**180.** Diagnostics belong in the error value, not in a log line, when the function is a library.
+The error already crosses the layer boundary; a log line does not, and cannot be enriched by
+anything upstream.
+
+**181.** Code that is behaviourally identical to a simpler form can still be worth keeping when it
+states an invariant. `kindA + ":" + idA` where `idA == uA.String()` is provably equivalent to using
+the canonical form, and is the difference between a function that validates and one that rewrites.
+Say so in review, or the next refactor collapses it.
+
+**182.** When your own instruction caused an agent's defect, say so plainly in the review before
+the correction. em6 implemented exactly what I asked for; the fault was the requirement, and a
+review that does not say so teaches them to distrust their own execution.
