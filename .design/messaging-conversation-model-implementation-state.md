@@ -5851,3 +5851,35 @@ it is the only verification that exists.
 had been repeating for hours and had stopped testing. I was wrong about the *conclusion* ("a broken
 test needing an owner") while being right about the *observation* (it fails). **Being right about
 your own surface is exactly what makes this class of error survive.**
+
+### §5ca — Tranche C spec written; C is BLOCKED, and correctly so (2026-08-28 02:12Z)
+
+`/scion-volumes/scratchpad/projects/ca-msg-arch/tranche-c-construction-spec.md` (mirrored to
+`.design/`, pushed `c75bd7f4`). **This is the item I flagged as "mine" in two consecutive reports
+without doing it.** Done now; it took ~10 minutes, which is roughly what it took to defer it twice.
+
+Computed against `1befe923`, excluding `pkg/ent`:
+
+- **7 files to EXCLUDE.** `em9-unify` *adds* them; they already exist on main or in flight, and its
+  copies are **older**. Porting any silently reverts a fix currently in review — `divergence.go`,
+  `dm_migration.go` and their tests (tranche B), `resolve_test.go` (DEF-26), and the guard script
+  (PR#1339). **The dangerous shape: an "add" that overwrites a newer file does not look like a
+  revert in review.** This is exactly the user's standing warning about reverting main.
+- **5 CONFLICT files** touched by C *and* in flight: `handlers_agent_messaging.go` (+281/−0),
+  `messagebroker.go` (+83/−0), `handlers_chat_v2.go` (+56/−4), `Makefile`, `ci.yml`.
+  **`handlers_agent_messaging.go` is the hazard — it is where the B5 client-supplied-sender security
+  fix lands.** If C is applied over an unfixed copy, or the reconcile takes C's side, **the security
+  fix vanishes with no deletion visible in the diff.** Spec requires re-running B5's test after
+  reconciling and confirming it still fails without the fix.
+- **44 safe adds** (24 `pkg/messaging`, 8 `pkg/hub`, 8 `cmd`, 2 `pkg/store`, 2 `pkg/messages`) plus
+  **74 C-only modifies** (44 in `pkg/hub`) plus 44 `.design/` files that are noise.
+
+**Ruling: C stays BLOCKED until PR#1338, PR#1339, DEF-26 and tranche B land.** The conflict set
+cannot be reconciled against a main that does not yet contain them. Staging the 44 safe adds early
+was tempting and I rejected it: it creates a long-lived branch that goes stale, which is the exact
+condition that produced em9-unify's divergent-foundation problem in the first place. **The failure
+mode I am cleaning up was caused by starting early.**
+
+Spec also carries forward: three-dot only (67), localise deletions (31), and **rule 76 — `pkg/hub`
+tests do not run in CI, so green CI is not evidence for anything in the conflict set; the hand
+mutation runs are the only verification.**
