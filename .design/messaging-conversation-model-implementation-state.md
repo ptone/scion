@@ -13099,3 +13099,57 @@ So my long-standing "messaging-v2 restores slug-based self-skip — DO NOT CARRY
 
 ### Roster
 em10 dispatched (Part 1 + Part 2). em6 parked, `7caa8e00d` awaiting user PR open. em9 parked at `47a7c6736`; its 84 product commits are the tranche C–G body, correctly blocked on the DEF-32/34 routing decision, not on me.
+
+## §5fb — 2026-08-28 — GATE-1 Part 1 approved; Part 2 measured with grep; at-least ruling
+
+### Part 1 — APPROVED. `scion/ca-msg-em10-marker-gate-2` @ `df2d4d39d`
+Correctly stacked on `scion/ca-msg-em10-marker-gate`, 2 files, +25/-1. Two new REQUIRED rows: `SenderID` in `fanOutToProject` and in `fanOutGlobal`; `messagebroker.go` added as third guarded file with exit-2 precheck.
+
+Verified independently against clean `upstream/main`, not read from em10's matrix:
+
+| case | exit |
+|---|---|
+| clean main | 0 |
+| overlay `em9-unify`'s `messagebroker.go` | **1**, naming exactly the two new rows |
+| restore | 0 |
+| `messagebroker.go` absent | 2 |
+
+The real-artifact positive control (rule 229) worked as intended and is now the standard for this gate.
+
+### Part 2 — every count in the audit table is a GREP count
+Spot-checked `handlers_broker_inbound.go` before ruling:
+
+| symbol | grep lines | AST idents | em10 reported |
+|---|---|---|---|
+| `ActionAttach` | 2 | **1** | 2 |
+| `SenderID` | 6 | **4** | 6 |
+| `CheckAccess` | 1 | 1 | 1 |
+
+Exact match to grep. `handlers_broker_inbound.go:123` is a **comment** mentioning `ActionAttach`; the only identifier is at `:148`. Tier 1 item 1 overstates `ActionAttach` by 100%.
+
+**em10 measured Part 1 with the AST and reverted to grep for Part 2 — in the same assignment, against an explicit written instruction not to use grep.** This is em10's fourth count error (previously: `ActionAttach: 3` when it was 4; dropped `logAuthzDenial:1216`; `grep -c || echo 0` emitting `0\n0`).
+
+**NEW RULE 230.** An instruction is absorbed where it is *demonstrated* and dropped where it is merely *stated*. Part 1 came with a worked positive control and was done right; Part 2 came with the same instruction in prose and was done with grep. When an instruction must hold across several sub-tasks, attach the demonstration to each, or expect it to decay after the first.
+
+**NEW RULE 231.** Any measurement that will become a gate constant must be produced by the gate's own instrument. A number obtained by a different tool than the one that will later enforce it is not a measurement of the same quantity — grep counts lines including comments; the AST counts identifier nodes. They are different questions with coincidentally similar answers.
+
+### DESIGN RULING — at-least, not exact
+`assertRequired` uses `actual != expected`. **Strict equality makes every row a two-sided trap when the threat is one-sided.** Removing a check is a regression; adding one is not. Under equality a legitimate additional authorization call fails the gate → override → authority gone (rule 221: false-failure-prone decays into false-negative-prone).
+
+Ruled: `assertRequired` and `assertAudit` become **fail when `actual < expected`**, message "expected at least N, found M". INFORMATIONAL and COMPOSITE unchanged. All deletion rows still fail, since deletions drop below the floor.
+
+This is the precondition for expanding coverage at all: `logAuthzDenial x8` as an exact count encodes an accident of today's structure; as a floor it flags only the dangerous direction.
+
+**NEW RULE 232.** Gate assertions should be one-sided in the direction of the threat. Before pinning a count, ask what the *opposite* deviation means — if more occurrences are harmless or good, equality is a self-inflicted false-failure generator, and its brittleness will be paid for in overrides.
+
+### SCOPE RULING — do not gate other teams' files
+- **APPROVED (ours):** Tier 1 item 1, `handlers_broker_inbound.go` / `handleBrokerInbound` — the biggest genuine gap, a parallel entry point to an already-guarded file carrying the same B5 and #1347 patterns. To be added **with corrected AST counts**.
+- **HELD (not ours):** `authorize.go`, `pty_handlers.go`, `handlers_agents_core.go`, `passthrough_gate.go`, `sa_assign_gate.go`, `handlers_runtime_brokers.go` — these belong to the auth refactor. Corrected table requested; **I coordinate with auth-refactor-lead before any of it lands.** A gate over another team's code, added without their knowledge, is overridden the first time it fires during their work and teaches them the gate is noise.
+- **DECLINED:** the `logAuthzDenial` function-*definition* row. Deleting a definition breaks the build loudly; gate rows are not spent on failures that already announce themselves.
+- **DEFERRED:** Tier 2 item 8, `handlers_messages.go` `SenderID x1` — ours, but a single occurrence guarding "stream visibility" is too weak an invariant to justify a row. em10 invited to argue.
+- **Tier 3 exclusions accepted in full** — struct definitions, outbound paths, consumers, framework calls correctly out. That reasoning was sound.
+
+**NEW RULE 233.** Gate coverage must respect code ownership. Technical justification for a row is necessary but not sufficient; a row over a file another team is actively refactoring will be overridden, and each override erodes every other row in the same gate. Coordinate first, or leave the row out.
+
+### Status
+`upstream/main` still `b14c41414`. #1361 OPEN/MERGEABLE at `5fc82455b`, untouched. dm-tighten `7caa8e00d` awaiting user PR open. GATE-1 open, em10 working. Ledger otherwise unmoved — DEF-18 (4 heartbeats, rule 217 reason unchanged), DEF-32/34 routing (4 heartbeats, awaiting user).
