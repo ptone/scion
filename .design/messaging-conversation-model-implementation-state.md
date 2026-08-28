@@ -13666,3 +13666,43 @@ Worktree `/tmp/gate1` restored clean after every control.
 
 ### Ledger
 Struck: **#1361 / GATE-1 fully closed and verified in production CI.** Open: #1362 merge, #1259/DEF-34 (external, stalled), DEF-32 identity-linking, marker-gate-2 compare URL (in flight), DEF-33/34/35 spec, DEF-18 (em9-unify), Tier 2 DEFERRED, tranche H on G-1, DEF-5/6/9/10/11/14/16 and D-G held. Awaiting ptone on whether to post the #1362 rejection rationale to the PR.
+
+---
+
+## §5fn — marker-gate-2 verified and compare URL sent. The at-least relaxation is safe; I proved it rather than reasoned it.
+
+em10 reported the rebase at `e28e8c999`. Every claim independently re-verified before the URL went out.
+
+### Report vs. reality — all claims held
+| em10 claim | verified |
+|---|---|
+| HEAD `e28e8c999`, base `42eb91b0f` | yes; `merge-base --is-ancestor upstream/main HEAD` = true, so genuinely rebased, not stale-based |
+| 2 commits | yes (`0cf86fd89`, `e28e8c999`) |
+| 2 files, +80/-7, three-dot | yes, both under `hack/` |
+| no deletions of #1361 content | yes — the `-7` are edits inside the gate's own source, not removals of landed work |
+| gate exit 0 | yes |
+| `make test-fast` passes | yes, exit 0, my own run on a clean worktree (needed >2min; first attempt hit the default Bash timeout at 143 and had to be re-run with an extended one) |
+
+### The real risk here was NOT a revert
+This branch **modifies the guard itself**. Rule 31's deletion check is aimed at the wrong hazard for a diff like this: the danger is a **weakened instrument**, which shows up as *green*, not as deletions. The load-bearing change is in `assertRequired`/`assertFuncDef`/`assertAudit`: **`actual != expected` -> `actual < expected`**.
+
+Analysis: the relaxation only stops failing on **additions**. Any removal still drops the count below the floor and still fails. And reverts remove symbols — they never add them. So the relaxation cannot blind the gate to the class of regression it exists to catch. It also removes the spurious-failure mode my own header comment warned about ("a gate that fails on a doc-comment reword gets overridden without reading by the third occurrence"), which is a *security* improvement, not just ergonomics. Error text was updated to say "at least" — the message matches the new semantics (rule 252 satisfied: the comment/spec and the behaviour agree).
+
+**But I did not stop at the argument.** Re-ran the full battery against the modified gate:
+- **New `fanOut` rows fire on the actual threat:** messaging-v2's `messagebroker.go` -> `SenderID found x0 of 3` in BOTH `fanOutToProject` and `fanOutGlobal`. This is the precise B5/R1 slug-based self-skip revert I flagged long ago as "DO NOT CARRY" — it is now mechanically blocked.
+- **New broker-inbound rows fire:** messaging-v2's `handlers_broker_inbound.go` -> `SenderID x2 of 4`, `parseDMKeyIDs x0 of 1`.
+- **Old rows survive the refactor:** messaging-v2 overlay of the two original handler files trips **11 rows**.
+- **Missing guarded file -> exit 2** (the two new files were correctly added to the existence precheck), so a rename cannot masquerade as a green guard.
+
+Worktrees `/tmp/gate1` and `/tmp/gate2` removed after restoring clean.
+
+### Compare URL
+Sent to thread `1532864101909528737`, title and body URL-encoded inline, `quick_pull=1`, 860-char URL, message 1994 runes.
+
+### Rule
+**Rule 260.** When the diff under review is the verification tool itself, the standard deletion/revert checks are aimed at the wrong failure. A weakened instrument reports green. Re-run the tool's full control battery against the modified tool — including the specific regression it was built to catch — because a guard's diff can only be judged by its behaviour, never by its text.
+
+**Rule 261.** Relaxing an exact-count assertion to a floor is safe precisely when the threat model is *removal*. State that link explicitly: the safety comes from reverts subtracting symbols, not from the floor being conservative. If a threat could ever pass by *adding* a symbol, the same relaxation would be a hole.
+
+### Ledger
+Open: #1362 merge, marker-gate-2 merge (URL sent), #1259/DEF-34 (external, stalled since Aug 27), DEF-32 identity-linking, DEF-33/34/35 spec, DEF-18 (em9-unify), Tier 2 DEFERRED, tranche H on G-1, DEF-5/6/9/10/11/14/16 and D-G held. Awaiting ptone on posting the #1362 rejection rationale.
