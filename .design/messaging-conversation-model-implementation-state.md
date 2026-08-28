@@ -9908,3 +9908,36 @@ code under test. A test failing at its assertion is a signal about the subject; 
 at its setup is a silent loss of coverage wearing a failure's clothing, and fixing the fixture
 to make it green again is only correct if the repaired fixture still exercises the original
 threat.
+
+### §5dv addendum — dev-b6b7b9 released; em6 already spawned
+
+Coordinator nudged that `dev-b6b7b9` was still listed 23 minutes after #1349 merged. It had
+indeed fallen off my list amid the em9 and B5F1a threads. Released, **branch preserved**.
+
+Verified before destroying rather than trusting my own earlier commitment. I had promised to
+delete this "once #1349 merges" — a destructive act conditioned on a fact, which rule 118 says
+to verify per item. Diffed `efb70e04a`'s three source files against `upstream/main`:
+**zero lines present in the commit and absent from main.** Symbol counts equal or higher
+(`EnsureParticipant` 43 → 47, the four extra being em6's B9 read-back fix and the test I
+required after it). Fully superseded.
+
+**Still passed `--preserve-branch`, for a reason worth recording precisely.** I verified the
+*content* of `efb70e04a` is on main. I could not verify the *branch* contains only
+`efb70e04a`, because dev-b6b7b9's branch was never pushed to origin — there is no ref to
+fetch. **The thing I checked and the thing the delete would destroy were not the same object.**
+A confident argument about one does not license a destructive default on the other.
+
+Related, and the reason for the fussiness: earlier today em10's `taskSummary` named a SHA that
+was not an ancestor of its branch, and the first diff showed 14,802 deletions including whole
+files. Orphaned refs manufacture false alarms, which is a real argument *for* pruning them —
+but not for pruning ones you cannot see.
+
+Also observed: `dev-b2b1b14` is already `working`. em6 acknowledged and spawned within minutes
+of the 14:57Z dispatch.
+
+### Rule 133
+
+**A destructive default acting on something you cannot inspect calls for the safety flag, not a
+better argument.** Verification has a subject, and the subject has to be the object being
+destroyed. I verified a commit and was about to destroy a branch; those coincide only if the
+branch has nothing else on it, which is exactly what an unpushed branch will not tell you.
