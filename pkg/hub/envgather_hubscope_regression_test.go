@@ -150,7 +150,7 @@ func TestBuildEnvGatherResponse_HubScopeEnvVarWarning(t *testing.T) {
 // TestResolveSecrets_HubScope_AsNeeded_Filtered is a regression test for #721.
 //
 // Hub-scope secrets with injection_mode=as_needed are correctly filtered out by
-// resolveSecrets. This test documents the current behavior — the filtering
+// resolveAgentSecrets. This test documents the current behavior — the filtering
 // itself is correct. The bug is that the env-gather cross-check doesn't detect
 // that the filtered secret exists when it should have been available.
 func TestResolveSecrets_HubScope_AsNeeded_Filtered(t *testing.T) {
@@ -198,9 +198,9 @@ func TestResolveSecrets_HubScope_AsNeeded_Filtered(t *testing.T) {
 		},
 	})
 
-	resolved, err := d.resolveSecrets(ctx, agent)
+	resolved, _, err := d.resolveAgentSecrets(ctx, agent)
 	if err != nil {
-		t.Fatalf("resolveSecrets: %v", err)
+		t.Fatalf("resolveAgentSecrets: %v", err)
 	}
 
 	byName := make(map[string]ResolvedSecret, len(resolved))

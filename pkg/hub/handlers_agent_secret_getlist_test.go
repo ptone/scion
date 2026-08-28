@@ -61,7 +61,7 @@ func setupAgentSecretGetTest(t *testing.T) (*Server, store.Store, string, string
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, nil, nil)
+	agentToken, _, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestAgentGetSecret_NoSecretBackend(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, nil, nil)
+	agentToken, _, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}

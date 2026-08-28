@@ -160,7 +160,7 @@ func NewAgentTokenService(config AgentTokenConfig) (*AgentTokenService, error) {
 }
 
 // GenerateAgentToken generates a JWT for an agent with the specified scopes.
-func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes []AgentTokenScope, ancestry []string) (string, error) {
+func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes []AgentTokenScope, ancestry []string) (string, string, error) {
 	now := time.Now()
 
 	// Default to status update scope if none provided
@@ -169,6 +169,7 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes
 	}
 
 	jti := generateTokenID()
+	jtiH := hashJTI(jti)
 	expiry := now.Add(s.config.TokenDuration)
 	claims := AgentTokenClaims{
 		Claims: jwt.Claims{
@@ -187,7 +188,7 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes
 
 	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()
 	if err != nil {
-		return "", fmt.Errorf("failed to sign token: %w", err)
+		return "", "", fmt.Errorf("failed to sign token: %w", err)
 	}
 
 	// Record credential if recorder is configured (best-effort)
@@ -195,7 +196,7 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes
 		cred := &store.AgentCredential{
 			AgentID:      agentID,
 			ProjectID:    projectID,
-			TokenJTIHash: hashJTI(jti),
+			TokenJTIHash: jtiH,
 			IssuedAt:     now,
 			ExpiresAt:    expiry,
 		}
@@ -205,7 +206,7 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes
 		}
 	}
 
-	return token, nil
+	return token, jtiH, nil
 }
 
 // ValidateAgentToken validates a JWT and returns the claims if valid.

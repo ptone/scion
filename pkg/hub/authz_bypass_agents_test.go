@@ -211,7 +211,7 @@ func (f *bypassAgentsFixture) token(t *testing.T, scopes ...AgentTokenScope) str
 	svc := f.srv.GetAgentTokenService()
 	require.NotNil(t, svc)
 	allScopes := append([]AgentTokenScope{ScopeProjectRead}, scopes...)
-	tok, err := svc.GenerateAgentToken(f.caller.ID, f.caller.ProjectID, allScopes, nil)
+	tok, _, err := svc.GenerateAgentToken(f.caller.ID, f.caller.ProjectID, allScopes, nil)
 	require.NoError(t, err)
 	return tok
 }

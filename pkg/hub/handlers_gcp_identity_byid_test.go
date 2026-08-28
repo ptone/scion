@@ -476,7 +476,7 @@ func TestGCPSA_FlatByID_NoIdentity_HubAndUserAreIndistinguishable(t *testing.T) 
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
+	agentToken, _, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
 	require.NoError(t, err)
 
 	hubSA := mkSA(t, s, "sa-flat-noid-hub", "hubwide@p.iam.gserviceaccount.com",
@@ -563,7 +563,7 @@ func TestGCPSA_NestedByID_NoIdentity_TheFourRowsAreIndistinguishable(t *testing.
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
+	agentToken, _, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
 	require.NoError(t, err)
 
 	hubSA := mkSA(t, s, "sa-nested-45-hub", "hub45@p.iam.gserviceaccount.com",
@@ -647,7 +647,7 @@ func TestGCPSA_FlatByID_NoIdentity_DeleteIsAlsoIndistinguishable(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
+	agentToken, _, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
 	require.NoError(t, err)
 
 	hubSA := mkSA(t, s, "sa-flat-del-hub", "hubdel@p.iam.gserviceaccount.com",

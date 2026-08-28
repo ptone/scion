@@ -2773,7 +2773,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 	}
 
 	agentRole, additionalScopes := agentRoleAndScopes(agent)
-	newToken, err := s.GenerateAgentToken(
+	newToken, _, err := s.GenerateAgentToken(
 		agent.ID, agent.ProjectID, agentIdent.Ancestry(),
 		agentRole, additionalScopes,
 	)

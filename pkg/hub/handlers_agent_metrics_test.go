@@ -63,7 +63,7 @@ func TestHandleAgentMetrics_SelfAuth(t *testing.T) {
 	require.NotNil(t, tokenSvc)
 
 	// Agent token with only ScopeAgentStatusUpdate (default scope).
-	token1, err := tokenSvc.GenerateAgentToken(agent1.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	token1, _, err := tokenSvc.GenerateAgentToken(agent1.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	require.NoError(t, err)
 
 	payload := metricsPayloadRequest{
@@ -132,7 +132,7 @@ func TestHandleAgentMetrics_Validation(t *testing.T) {
 	tokenSvc := srv.GetAgentTokenService()
 	require.NotNil(t, tokenSvc)
 
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	token, _, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	require.NoError(t, err)
 
 	sendMetrics := func(t *testing.T, payload metricsPayloadRequest) *httptest.ResponseRecorder {
@@ -210,7 +210,7 @@ func TestHandleAgentMetrics_HappyPath(t *testing.T) {
 	tokenSvc := srv.GetAgentTokenService()
 	require.NotNil(t, tokenSvc)
 
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	token, _, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	require.NoError(t, err)
 
 	payload := metricsPayloadRequest{

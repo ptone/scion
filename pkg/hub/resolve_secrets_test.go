@@ -101,9 +101,9 @@ func TestResolveSecrets(t *testing.T) {
 		ProjectID: tid("project-1"),
 	}
 
-	resolved, err := dispatcher.resolveSecrets(ctx, agent)
+	resolved, _, err := dispatcher.resolveAgentSecrets(ctx, agent)
 	if err != nil {
-		t.Fatalf("resolveSecrets failed: %v", err)
+		t.Fatalf("resolveAgentSecrets failed: %v", err)
 	}
 
 	// Build a map for easier assertions
@@ -219,9 +219,9 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 		ProjectID: tid("project-1"),
 	}
 
-	resolved, err := dispatcher.resolveSecrets(ctx, agent)
+	resolved, _, err := dispatcher.resolveAgentSecrets(ctx, agent)
 	if err != nil {
-		t.Fatalf("resolveSecrets with backend failed: %v", err)
+		t.Fatalf("resolveAgentSecrets with backend failed: %v", err)
 	}
 
 	byName := make(map[string]ResolvedSecret)
@@ -269,9 +269,9 @@ func TestResolveSecrets_NoOwner(t *testing.T) {
 		Name: "test-agent",
 	}
 
-	resolved, err := dispatcher.resolveSecrets(ctx, agent)
+	resolved, _, err := dispatcher.resolveAgentSecrets(ctx, agent)
 	if err != nil {
-		t.Fatalf("resolveSecrets failed: %v", err)
+		t.Fatalf("resolveAgentSecrets failed: %v", err)
 	}
 
 	if len(resolved) != 0 {
@@ -356,9 +356,9 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		ProjectID: tid("project-1"),
 	}
 
-	resolved, err := dispatcher.resolveSecrets(ctx, agent)
+	resolved, _, err := dispatcher.resolveAgentSecrets(ctx, agent)
 	if err != nil {
-		t.Fatalf("resolveSecrets failed: %v", err)
+		t.Fatalf("resolveAgentSecrets failed: %v", err)
 	}
 
 	byName := make(map[string]ResolvedSecret)
@@ -423,9 +423,9 @@ func TestResolveSecrets_NoBackend(t *testing.T) {
 		ProjectID: tid("project-1"),
 	}
 
-	resolved, err := dispatcher.resolveSecrets(ctx, agent)
+	resolved, _, err := dispatcher.resolveAgentSecrets(ctx, agent)
 	if err != nil {
-		t.Fatalf("resolveSecrets failed: %v", err)
+		t.Fatalf("resolveAgentSecrets failed: %v", err)
 	}
 	if resolved != nil {
 		t.Errorf("expected nil resolved secrets when no backend, got %d", len(resolved))

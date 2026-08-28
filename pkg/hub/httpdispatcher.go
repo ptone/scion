@@ -119,7 +119,11 @@ func (d *HTTPAgentDispatcher) GetClient() RuntimeBrokerClient {
 
 // AgentTokenGenerator generates JWT tokens for agents.
 type AgentTokenGenerator interface {
-	GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error)
+	// GenerateAgentToken generates a signed JWT for the given agent and returns
+	// both the token string and the SHA-256 hash of the token's JTI claim.
+	// The JTI hash is the key used to look up the corresponding AgentCredential
+	// row (e.g. for recording entitled secret keys after secret resolution).
+	GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (token string, jtiHash string, err error)
 }
 
 // GitHubAppTokenMinter mints GitHub App installation tokens for projects.
@@ -442,9 +446,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	}
 
 	// Generate agent token if token generator is available
+	var createTokenJTIHash string
 	if d.tokenGenerator != nil {
 		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		token, jtiHash, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("Failed to generate agent token", "error", err)
@@ -452,6 +457,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			// Continue without token - agent will operate in unauthenticated mode
 		} else {
 			req.AgentToken = token
+			createTokenJTIHash = jtiHash
 			if d.debug {
 				d.log.Debug("Generated agent token", "length", len(token))
 			}
@@ -645,31 +651,40 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 
 	// Resolve type-aware secrets from all applicable scopes
 	if !noAuth {
-		resolvedSecrets, err := d.resolveSecrets(ctx, agent)
+		resolvedSecrets, entitledKeys, err := d.resolveAgentSecrets(ctx, agent)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("Failed to resolve secrets", "agent_id", agent.ID, "error", err)
 			}
 			// Continue without secrets rather than failing agent creation
-		} else if len(resolvedSecrets) > 0 {
-			req.ResolvedSecrets = resolvedSecrets
-			if d.debug {
-				d.log.Debug("Resolved secrets for agent", "count", len(resolvedSecrets))
+		} else {
+			// Record entitled secret keys on the credential (best-effort).
+			// This must use the same resolution that produces the injection
+			// list — resolveAgentSecrets is the single source of truth.
+			if createTokenJTIHash != "" {
+				d.recordEntitledKeys(ctx, createTokenJTIHash, agent.ID, entitledKeys)
 			}
 
-			// Inject environment-type secrets into ResolvedEnv so the broker
-			// receives them as plain env vars for auth resolution. This mirrors
-			// DispatchAgentStart which merges env-type secrets into resolvedEnv
-			// before dispatching. Without this, the broker's auth pipeline
-			// relies solely on buildAuthEnvOverlay in run.go, which may not
-			// see secrets if they are only in ResolvedSecrets.
-			if req.ResolvedEnv == nil {
-				req.ResolvedEnv = make(map[string]string)
-			}
-			for _, s := range resolvedSecrets {
-				if (s.Type == "environment" || s.Type == "") && s.Target != "" {
-					if existing, exists := req.ResolvedEnv[s.Target]; !exists || existing == "" {
-						req.ResolvedEnv[s.Target] = s.Value
+			if len(resolvedSecrets) > 0 {
+				req.ResolvedSecrets = resolvedSecrets
+				if d.debug {
+					d.log.Debug("Resolved secrets for agent", "count", len(resolvedSecrets))
+				}
+
+				// Inject environment-type secrets into ResolvedEnv so the broker
+				// receives them as plain env vars for auth resolution. This mirrors
+				// DispatchAgentStart which merges env-type secrets into resolvedEnv
+				// before dispatching. Without this, the broker's auth pipeline
+				// relies solely on buildAuthEnvOverlay in run.go, which may not
+				// see secrets if they are only in ResolvedSecrets.
+				if req.ResolvedEnv == nil {
+					req.ResolvedEnv = make(map[string]string)
+				}
+				for _, s := range resolvedSecrets {
+					if (s.Type == "environment" || s.Type == "") && s.Target != "" {
+						if existing, exists := req.ResolvedEnv[s.Target]; !exists || existing == "" {
+							req.ResolvedEnv[s.Target] = s.Value
+						}
 					}
 				}
 			}
@@ -1598,7 +1613,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 // map suitable for passing to DispatchFinalizeEnv.
 //
 // This is the second pass of the two-pass env-gather resolution: the first
-// pass (resolveEnvFromStorage + resolveSecrets) skips as_needed entries, then
+// pass (resolveEnvFromStorage + resolveAgentSecrets) skips as_needed entries, then
 // the broker reports which keys are still needed, and this function checks
 // whether any of those keys can be satisfied by as_needed entries.
 //
@@ -1859,12 +1874,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	}
 
 	// Resolve type-aware secrets and inject environment-type secrets
-	resolvedSecrets, err := d.resolveSecrets(ctx, agent)
+	var startEntitledKeys []string
+	resolvedSecrets, startEntitledKeysRes, err := d.resolveAgentSecrets(ctx, agent)
 	if err != nil {
 		if d.debug {
 			d.log.Warn("DispatchAgentStart: failed to resolve secrets", "error", err)
 		}
 	} else {
+		startEntitledKeys = startEntitledKeysRes
 		for _, s := range resolvedSecrets {
 			if (s.Type == "environment" || s.Type == "") && s.Target != "" {
 				if existing, exists := resolvedEnv[s.Target]; !exists || existing == "" {
@@ -1947,13 +1964,17 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// Generate a fresh agent token for Hub authentication
 	if d.tokenGenerator != nil {
 		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		token, jtiHash, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("DispatchAgentStart: failed to generate agent token", "error", err)
 			}
 		} else if token != "" {
 			resolvedEnv["SCION_AUTH_TOKEN"] = token
+			// Record entitled secret keys on the credential (best-effort).
+			if startEntitledKeys != nil {
+				d.recordEntitledKeys(ctx, jtiHash, agent.ID, startEntitledKeys)
+			}
 		}
 	}
 
@@ -2124,12 +2145,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 
 	// Resolve type-aware secrets and inject environment-type secrets —
 	// same as DispatchAgentStart.
-	resolvedSecrets, secretErr := d.resolveSecrets(ctx, agent)
+	var restartEntitledKeys []string
+	resolvedSecrets, restartEntitledKeysRes, secretErr := d.resolveAgentSecrets(ctx, agent)
 	if secretErr != nil {
 		if d.debug {
 			d.log.Warn("DispatchAgentRestart: failed to resolve secrets", "error", secretErr)
 		}
 	} else {
+		restartEntitledKeys = restartEntitledKeysRes
 		for _, s := range resolvedSecrets {
 			if (s.Type == "environment" || s.Type == "") && s.Target != "" {
 				if existing, exists := resolvedEnv[s.Target]; !exists || existing == "" {
@@ -2193,13 +2216,17 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 
 	if d.tokenGenerator != nil {
 		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		token, jtiHash, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("DispatchAgentRestart: failed to generate agent token", "error", err)
 			}
 		} else if token != "" {
 			resolvedEnv["SCION_AUTH_TOKEN"] = token
+			// Record entitled secret keys on the credential (best-effort).
+			if restartEntitledKeys != nil {
+				d.recordEntitledKeys(ctx, jtiHash, agent.ID, restartEntitledKeys)
+			}
 		}
 	}
 
@@ -2266,6 +2293,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 // DispatchAgentResetAuth injects a fresh auth token into a running agent without
 // restarting it. It generates a new token and sends it to the broker's reset-auth
 // endpoint, which writes it into the container and signals the agent process.
+//
+// ResetAuth is operator-initiated, so entitled keys are RE-RESOLVED from the
+// secret backend rather than copied from the old credential. An operator resets
+// auth precisely because something changed; copying stale entitlement forward
+// would preserve an answer computed under conditions that no longer hold.
 func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent *store.Agent) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
@@ -2276,12 +2308,34 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 		return err
 	}
 
+	// Resolve entitled keys BEFORE token generation so they can be recorded
+	// on the new credential immediately after.
+	_, entitledKeys, resolveErr := d.resolveAgentSecrets(ctx, agent)
+	if resolveErr != nil {
+		// Reset-auth is a recovery path: an operator invokes it precisely
+		// when something is wrong. Failing the reset outright would leave
+		// the agent with a revoked or expired token and no way to recover
+		// without a full restart — worse than proceeding with degraded
+		// entitlement. So we continue: the credential row keeps NULL
+		// (entitled_secret_keys never recorded), and the secrets endpoint
+		// will fail closed on fetch ("no entitlement record").
+		d.log.Error("DispatchAgentResetAuth: secret resolution failed; "+
+			"this agent will not be able to fetch secrets until it is restarted",
+			"agent_id", agent.ID,
+			"error", resolveErr,
+		)
+	}
+
 	var token string
 	if d.tokenGenerator != nil {
 		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err = d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		var jtiHash string
+		token, jtiHash, err = d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
 		if err != nil {
 			return fmt.Errorf("DispatchAgentResetAuth: failed to generate agent token: %w", err)
+		}
+		if token != "" && resolveErr == nil {
+			d.recordEntitledKeys(ctx, jtiHash, agent.ID, entitledKeys)
 		}
 	}
 	if token == "" {
@@ -2595,22 +2649,55 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 	return nil
 }
 
-// resolveSecrets queries secrets from all applicable scopes and merges them
-// into a flat list. Higher scopes override lower:
+// recordEntitledKeys records the entitled secret key set on the credential
+// identified by jtiHash. Best-effort: logs on failure but does not propagate
+// the error, because agent start must not fail due to entitlement bookkeeping.
+func (d *HTTPAgentDispatcher) recordEntitledKeys(ctx context.Context, jtiHash, agentID string, keys []string) {
+	if err := d.store.UpdateAgentCredentialEntitledKeys(ctx, jtiHash, agentID, keys); err != nil {
+		d.log.Warn("recordEntitledKeys: failed to record entitled secret keys",
+			"agent_id", agentID,
+			"jti_hash_prefix", jtiHash[:min(8, len(jtiHash))],
+			"key_count", len(keys),
+			"error", err,
+		)
+	} else if d.debug {
+		d.log.Debug("recordEntitledKeys: recorded entitled secret keys",
+			"agent_id", agentID,
+			"key_count", len(keys),
+		)
+	}
+}
+
+// resolveAgentSecrets queries secrets from all applicable scopes and merges
+// them into a flat list for injection, plus the full set of entitled secret
+// key names. Higher scopes override lower:
 //
 //	runtime_broker  <  hub  <  project  <  user
 //
 // This matches envScopePrecedence (see above). The divergence previously
 // tracked in issue #624 was corrected in PR #1227.
-func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.Agent) ([]ResolvedSecret, error) {
+//
+// Returns:
+//   - forInjection: secrets filtered for first-pass injection (as_needed
+//     env-type secrets excluded — those are handled by the two-pass flow).
+//   - entitledKeys: ALL secret key names from the backend resolution,
+//     regardless of injection mode. This is the full set of secrets
+//     this agent is entitled to fetch via the secrets endpoint.
+//     The injection mode governs timing, not entitlement.
+//
+// This function is the single source of truth for entitled-set computation.
+// The dispatcher records entitledKeys on the AgentCredential at start time;
+// the secrets endpoint reads it back. Both paths use this function rather
+// than computing entitlement independently. (#127)
+func (d *HTTPAgentDispatcher) resolveAgentSecrets(ctx context.Context, agent *store.Agent) (forInjection []ResolvedSecret, entitledKeys []string, err error) {
 	if d.secretBackend == nil {
 		if d.debug {
-			d.log.Debug("resolveSecrets: secretBackend is nil, skipping secret resolution")
+			d.log.Debug("resolveAgentSecrets: secretBackend is nil, skipping secret resolution")
 		}
-		return nil, nil
+		return nil, nil, nil
 	}
 	if d.debug {
-		d.log.Debug("resolveSecrets: querying secret backend",
+		d.log.Debug("resolveAgentSecrets: querying secret backend",
 			"ownerID", agent.OwnerID,
 			"project_id", agent.ProjectID,
 			"brokerID", agent.RuntimeBrokerID,
@@ -2643,10 +2730,16 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 
 	resolved, err := d.secretBackend.Resolve(ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	result := make([]ResolvedSecret, 0, len(resolved))
+
+	// Collect the full entitled key set from ALL resolved secrets, then
+	// filter for first-pass injection.
+	entitledKeys = make([]string, 0, len(resolved))
+	forInjection = make([]ResolvedSecret, 0, len(resolved))
 	for _, sv := range resolved {
+		entitledKeys = append(entitledKeys, sv.Name)
+
 		// Only skip as_needed environment-type secrets (handled by the
 		// two-pass env-gather flow). File-type and variable-type secrets
 		// should always be placed regardless of injection mode — the
@@ -2654,7 +2747,7 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 		if sv.InjectionMode == store.InjectionModeAsNeeded && (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") {
 			continue
 		}
-		result = append(result, ResolvedSecret{
+		forInjection = append(forInjection, ResolvedSecret{
 			Name:   sv.Name,
 			Type:   sv.SecretType,
 			Target: sv.Target,
@@ -2664,11 +2757,13 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 		})
 	}
 	if d.debug {
-		names := make([]string, len(result))
-		for i, r := range result {
+		names := make([]string, len(forInjection))
+		for i, r := range forInjection {
 			names[i] = r.Name
 		}
-		d.log.Debug("resolveSecrets: resolved secrets", "count", len(result), "names", names)
+		d.log.Debug("resolveAgentSecrets: resolved secrets",
+			"injection_count", len(forInjection), "entitled_count", len(entitledKeys),
+			"injection_names", names)
 	}
-	return result, nil
+	return forInjection, entitledKeys, nil
 }

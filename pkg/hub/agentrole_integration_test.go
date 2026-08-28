@@ -237,7 +237,7 @@ func TestCreateAgent_AdminGetsFull(t *testing.T) {
 func doAgentCallerRequest(t *testing.T, srv *Server, parentAgentID, projectID string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 
-	token, err := srv.GenerateAgentToken(parentAgentID, projectID, nil, AgentRoleFull, nil)
+	token, _, err := srv.GenerateAgentToken(parentAgentID, projectID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
 
 	bodyBytes, err := json.Marshal(body)
@@ -432,7 +432,7 @@ func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
 		"agentRoleAndScopes should not produce additional scopes from HubAccessScopes")
 
 	// Generate a token and verify scopes match the baseline role, not template scopes
-	token, err := srv.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, role, additionalScopes)
+	token, _, err := srv.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, role, additionalScopes)
 	require.NoError(t, err)
 
 	claims, err := srv.agentTokenService.ValidateAgentToken(token)
@@ -917,7 +917,7 @@ func doAgentReadRequest(t *testing.T, srv *Server, agentID, projectID, path stri
 	tokenSvc := srv.GetAgentTokenService()
 	require.NotNil(t, tokenSvc)
 
-	token, err := tokenSvc.GenerateAgentToken(agentID, projectID, scopes, nil)
+	token, _, err := tokenSvc.GenerateAgentToken(agentID, projectID, scopes, nil)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, path, nil)

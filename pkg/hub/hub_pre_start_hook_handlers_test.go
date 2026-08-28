@@ -585,7 +585,7 @@ func TestHubPreStartHooks_List_AgentTokenRejected(t *testing.T) {
 
 	createHubHook(t, srv, "Baseline", "baseline", "#!/bin/sh\necho baseline\n")
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(
+	agentToken, _, err := srv.agentTokenService.GenerateAgentToken(
 		"agent-hub-psh", tid("project-hub-psh"), []AgentTokenScope{ScopeAgentStatusUpdate}, nil,
 	)
 	require.NoError(t, err)
@@ -599,7 +599,7 @@ func TestHubPreStartHooks_Get_AgentTokenRejected(t *testing.T) {
 
 	hook := createHubHook(t, srv, "Baseline", "baseline", "#!/bin/sh\necho baseline\n")
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(
+	agentToken, _, err := srv.agentTokenService.GenerateAgentToken(
 		"agent-hub-psh", tid("project-hub-psh"), []AgentTokenScope{ScopeAgentStatusUpdate}, nil,
 	)
 	require.NoError(t, err)

@@ -679,7 +679,7 @@ func TestServer_GenerateAgentToken_DevAuthAutoGrantsScopes(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	// Generate token without any additional scopes — role=baseline, dev-auth upgrades to full
-	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline, nil)
+	token, _, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline, nil)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}
@@ -727,7 +727,7 @@ func TestServer_GenerateAgentToken_DevAuthDeduplicatesScopes(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	// Generate token with explicit scopes that overlap with auto-granted ones
-	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline,
+	token, _, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline,
 		[]AgentTokenScope{ScopeAgentCreate, ScopeAgentLifecycle, ScopeProjectSecretRead})
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
@@ -777,7 +777,7 @@ func TestServer_GenerateAgentToken_NoDevAuthDoesNotAutoGrant(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
-	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline, nil)
+	token, _, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline, nil)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}
@@ -822,7 +822,7 @@ func TestServer_GenerateAgentToken_RoleBaseline(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
-	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline, nil)
+	token, _, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline, nil)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}
@@ -870,7 +870,7 @@ func TestServer_GenerateAgentToken_RoleFull(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
-	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleFull, nil)
+	token, _, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleFull, nil)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}
@@ -915,7 +915,7 @@ func TestServer_GenerateAgentToken_RoleReadOnly(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
-	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleReadOnly, nil)
+	token, _, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleReadOnly, nil)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}
@@ -959,7 +959,7 @@ func TestServer_GenerateAgentToken_DevAuthUpgradesRole(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	// Even with readonly role, dev-auth mode should upgrade to full
-	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleReadOnly, nil)
+	token, _, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleReadOnly, nil)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}

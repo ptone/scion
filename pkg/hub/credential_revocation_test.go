@@ -90,7 +90,7 @@ func TestNewlyIssuedTokensPersisted(t *testing.T) {
 	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
 
 	// Generate a token using the server method (which wires credential recording)
-	token, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	token, _, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, token)
 
@@ -118,7 +118,7 @@ func TestRevokedTokenDeniedBeforeExpiry(t *testing.T) {
 	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
 
 	// Generate token
-	token, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	token, _, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
 
 	// Extract JTI and find credential
@@ -151,7 +151,7 @@ func TestDeletedAgentTokenDenied(t *testing.T) {
 	createCredTestAgent(t, s, agentID, project.ID, user.ID)
 
 	// Generate token
-	token, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	token, _, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
 
 	// Delete the agent via the API (which triggers credential revocation)
@@ -186,7 +186,7 @@ func TestSuspendedAgentTokenDenied(t *testing.T) {
 	agent := createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
 
 	// Generate token
-	token, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	token, _, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
 
 	// Suspend the agent directly (not via HTTP since that needs broker dispatch)
@@ -213,7 +213,7 @@ func TestRefreshFromRevokedTokenFails(t *testing.T) {
 	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
 
 	// Generate token with refresh scope
-	token, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	token, _, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
 
 	// Extract JTI and revoke
@@ -254,7 +254,7 @@ func TestCompatibilityWindowAcceptsLegacyTokens(t *testing.T) {
 	require.NoError(t, err)
 	// Do NOT set credential recorder — simulates legacy behavior
 
-	legacyToken, err := legacyService.GenerateAgentToken(
+	legacyToken, _, err := legacyService.GenerateAgentToken(
 		agentID, project.ID,
 		ScopesForRole(AgentRoleFull),
 		nil,
@@ -287,7 +287,7 @@ func TestCompatibilityWindowRefreshMigratesLegacyToken(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	legacyToken, err := legacyService.GenerateAgentToken(
+	legacyToken, _, err := legacyService.GenerateAgentToken(
 		agentID, project.ID,
 		ScopesForRole(AgentRoleFull),
 		nil,
@@ -329,7 +329,7 @@ func TestTokenRefreshRevokesOldCredential(t *testing.T) {
 	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
 
 	// Generate initial token (will be recorded)
-	token, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	token, _, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
 
 	// Get the original credential
@@ -364,9 +364,9 @@ func TestRevokeOnAgentDelete(t *testing.T) {
 	createCredTestAgent(t, s, agentID, project.ID, user.ID)
 
 	// Generate two tokens for the same agent
-	token1, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	token1, _, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
-	token2, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	token2, _, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
 
 	// Extract JTI hashes
@@ -406,7 +406,7 @@ func TestRevokeOnAgentSuspend(t *testing.T) {
 	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
 
 	// Generate a token
-	token, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	token, _, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
 
 	claims, _ := srv.agentTokenService.ValidateAgentToken(token)
@@ -490,7 +490,7 @@ func TestCredentialRecorderNilSafe(t *testing.T) {
 	require.NoError(t, err)
 	// Do NOT set credential recorder
 
-	token, err := service.GenerateAgentToken("agent-1", "project-1", nil, nil)
+	token, _, err := service.GenerateAgentToken("agent-1", "project-1", nil, nil)
 	require.NoError(t, err)
 	assert.NotEmpty(t, token)
 

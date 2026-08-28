@@ -852,7 +852,7 @@ func TestResolveAsNeededForKeys_NilAlternatives(t *testing.T) {
 	}
 }
 
-// --- resolveSecrets tests: file-type and variable-type secrets pass through ---
+// --- resolveAgentSecrets tests: file-type and variable-type secrets pass through ---
 
 func TestResolveSecrets_FileTypePassesThroughAsNeeded(t *testing.T) {
 	ctx := context.Background()
@@ -919,9 +919,9 @@ func TestResolveSecrets_FileTypePassesThroughAsNeeded(t *testing.T) {
 		ProjectID: "project-file-test",
 	}
 
-	result, err := d.resolveSecrets(ctx, agent)
+	result, _, err := d.resolveAgentSecrets(ctx, agent)
 	if err != nil {
-		t.Fatalf("resolveSecrets: %v", err)
+		t.Fatalf("resolveAgentSecrets: %v", err)
 	}
 
 	// Build lookup by name for easier assertions.
@@ -932,7 +932,7 @@ func TestResolveSecrets_FileTypePassesThroughAsNeeded(t *testing.T) {
 
 	// File-type secret with as_needed should pass through.
 	if rs, ok := byName["AGY_TOKEN"]; !ok {
-		t.Error("expected AGY_TOKEN (file-type, as_needed) to pass through resolveSecrets")
+		t.Error("expected AGY_TOKEN (file-type, as_needed) to pass through resolveAgentSecrets")
 	} else {
 		if rs.Type != store.SecretTypeFile {
 			t.Errorf("AGY_TOKEN type = %q, want %q", rs.Type, store.SecretTypeFile)
@@ -947,17 +947,17 @@ func TestResolveSecrets_FileTypePassesThroughAsNeeded(t *testing.T) {
 
 	// Variable-type secret with as_needed should also pass through.
 	if _, ok := byName["VAR_SECRET"]; !ok {
-		t.Error("expected VAR_SECRET (variable-type, as_needed) to pass through resolveSecrets")
+		t.Error("expected VAR_SECRET (variable-type, as_needed) to pass through resolveAgentSecrets")
 	}
 
 	// Environment-type secret with as_needed should be filtered out
 	// (handled by the two-pass env-gather flow instead).
 	if _, ok := byName["ENV_SECRET"]; ok {
-		t.Error("ENV_SECRET (environment-type, as_needed) should be filtered by resolveSecrets")
+		t.Error("ENV_SECRET (environment-type, as_needed) should be filtered by resolveAgentSecrets")
 	}
 
 	// Environment-type secret with always should pass through.
 	if _, ok := byName["ALWAYS_ENV"]; !ok {
-		t.Error("expected ALWAYS_ENV (environment-type, always) to pass through resolveSecrets")
+		t.Error("expected ALWAYS_ENV (environment-type, always) to pass through resolveAgentSecrets")
 	}
 }

@@ -474,7 +474,7 @@ func createPortForwardAgent(t *testing.T, srv *Server, s store.Store) (*store.Ag
 
 	tokenSvc := srv.GetAgentTokenService()
 	require.NotNil(t, tokenSvc)
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentPortForward}, nil)
+	token, _, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentPortForward}, nil)
 	require.NoError(t, err)
 	return agent, token
 }
