@@ -8955,3 +8955,84 @@ discriminator is a survival check: grep the load-bearing symbols in the deleted 
 
 `#1349` remains **open and unmerged** — fourth sweep without movement. B1/B2/B14/B3 still held on it.
 em9 has not answered the forced-choice probe. Two compare URLs are now outstanding with the user.
+
+---
+
+## §5dm — DEF-32 "confirmed" second-hand; not escalating on a peeked buffer
+
+Coordinator reported that em9 appears to have finished the DEF-32 reachability analysis, that the
+tail of its buffer reads *"S4 blocker confirmed"*, and relayed a mechanism: `user.ID()` on
+`FederatedServiceIdentity` is non-UUID, flows into `structuredMsg.SenderID`, then into
+`DMConversationKey` via `messaging/resolve.go`, where `uuid.Parse` fails and the DM conversation is
+silently not created.
+
+### Near-miss: I nearly corrected a correct citation using a stale tree
+
+My first instinct was to check `pkg/messaging/resolve.go`. In `/workspace` there is no
+`pkg/messaging` **at all**, and I was one step from replying that the coordinator had cited a file
+that does not exist.
+
+It exists on `upstream/main` — seventeen files, `resolve.go` among them. The directory is absent from
+my tree because `scion/ca-msg-arch` is docs-only and sits **behind** `upstream/main`; I have never
+rebased it because it carries nothing but this document.
+
+The same trap fired twice more in the same minute: `grep -n` in `/workspace` gave me
+`handlers_agent_messaging.go:499` for the `SenderID = user.ID()` assignment, and `sed` on
+`upstream/main` showed something else entirely at that line. The real assignment is at **551** on a
+main-based tree. I had been reading line numbers off a stale checkout and would have cited them to
+em9 as authoritative.
+
+### Rule 114 (new)
+
+**A docs-only branch is not an oracle for source questions.** If your working tree exists to hold a
+document, it is by construction stale with respect to code, and every path, line number and
+"file does not exist" it reports is suspect. Ask `upstream/main` directly (`git show
+upstream/main:<path>`, `git ls-tree upstream/main`) or use a worktree you know is based on it. The
+tell is subtle because a stale tree answers plausibly rather than erroring — same failure family as
+the lagging `origin` mirror in the heartbeat's item 1.
+
+### Not escalating, and why
+
+The user hears about DEF-32 when **em9 asserts it**, not when a peek at em9's buffer suggests it.
+The distance between "the tail of its context reads X" and "em9 reports X" is exactly the gap this
+project has been bitten in before, and it costs nothing to close: I asked em9 for what it has, as it
+stands, unmodified.
+
+The relay also blurred something load-bearing. *"user.ID() on FederatedServiceIdentity"* conflates
+two distinct types — `FederatedServiceIdentity` (`federation_identity_ext.go:60`) and
+`FederatedUserIdentity` (`:109`). `GetUserIdentityFromContext` returns a `UserIdentity`, so a
+**service** identity arriving at that call site is a materially different and larger finding than a
+**user** identity doing so. Asked em9 which it actually traced.
+
+### What I hold as certain, and what is still open
+
+Certain, verified myself on a main-based tree:
+
+- `FederatedUserIdentity.ID()` returns `issuerURL + ":" + subject`.
+- `handlers_agent_messaging.go:551` sets `structuredMsg.SenderID = user.ID()`, guarded by
+  `GetUserIdentityFromContext` at `:550`.
+- `DMConversationKey` requires `uuid.Parse` to succeed on both parties.
+
+So the **mechanism was never the open question.** The only open link is **reachability**: the
+middleware wiring that actually places a federated identity into the request context as the value
+`GetUserIdentityFromContext` returns. Type-satisfies-interface is not reachability. I told em9 that
+*"structurally possible but I could not find the wiring"* is a useful answer I will accept as one —
+because the alternative is an agent manufacturing confidence to satisfy the question it was asked.
+
+The third thing I asked for is whether federation is config-gated, which decides whether DEF-32
+blocks S4 for **every** deployment or only federated ones. That is the difference between an
+architecture change and a deployment note.
+
+### Rule 115 (new)
+
+**An agent's scratch state is evidence about the agent, not about the world.** Read it to decide
+whether to prompt, never to decide what is true. Escalate on assertions, because an assertion has an
+author who can be asked "how do you know" — a buffer tail cannot.
+
+### Standing
+
+em9 told to send what it has and explicitly *not* to restart or expand the investigation — a
+finished-but-unsent report is the failure mode here, and "be more thorough" is how it becomes
+finished-but-unsent twice. Coordinator asked to keep em9 on its do-not-nudge hold.
+
+`#1349` still open. em10's compare URL still unopened. Both with the user.
