@@ -13555,3 +13555,47 @@ Under *"under-granting is recoverable; over-granting is not"*, the error should 
 - **DEF-32** — escalated §5fh, awaiting identity-linking decision before S4.
 - Tier 2 DEFERRED (owner-triggered, no polling). Tranche H blocked on G-1, no carrier. DEF-5/6/9/10/11/14/16 and D–G held behind tranche C. DEF-17 STRUCK. GATE-1 CLOSED.
 - **Everything now open is either (a) awaiting a user decision, or (b) riding a tranche that awaits one.** No row is blocked on an agent, and none on me.
+
+---
+
+## §5fk — CORRECTION: federation is HOT-RELOADABLE at runtime. DEF-32's mitigation is weaker than I reported.
+
+Nothing external moved (main `b14c41414`, ~3h static; #1361/#1362 OPEN/MERGEABLE; tips unmoved).
+
+Chased a discrepancy I had created myself. In §5fh I told the user federation was gated at **server construction** (`server.go:1405`, `if cfg.Federation.Enabled`). But `auth.go:210` reads it as `cfg.FederationAuth.Load()` — an `atomic.Pointer`. A construction-only value does not need an atomic pointer. That mismatch was the tell.
+
+### Verified: federation can be enabled and disabled at RUNTIME
+
+- `server.go:875` — `federationAuth atomic.Pointer[FederationAuthenticator]`.
+- `server.go:1431` — `srv.federationAuth.Store(fa)` at construction (what I found before).
+- **`operational_settings.go:1062`** — `s.federationAuth.Store(nil)` when disabled: *"This ensures disabling federation at runtime actually takes effect."*
+- **`operational_settings.go:1097`** — `s.federationAuth.Store(newAuth)` when enabled, logging **"Federation authenticator hot-reloaded"**.
+- Both live in `ApplySnapshot` (`:872`), reached from **`admin_settings.go:376` → `s.reloadSettings()`** — an **admin API action, not a deploy**.
+
+So federation is **admin-toggleable live, with no restart**. Admin-gating is appropriate and is not itself a finding. The finding is the *class of gate*.
+
+### What I got wrong, and why it matters
+§5fh said: *"federation is off by default, and the authenticator is only built when explicitly enabled with trusted issuers. Bites only deployments that turn it on."*
+
+Each clause is literally true, but together they imply a **deploy-time** gate — something you decide when you stand the hub up. It is a **runtime** gate. The practical difference:
+
+- **What I implied:** DEF-32 exposure is fixed at deploy; a hub that starts without federation cannot acquire the defect while running.
+- **What is true:** an admin can enable federation on a running hub, and from that moment federated users' DMs begin accruing **unstamped**, silently, with no restart, no deploy, and no signal. Reads still work (old routing), so nothing looks wrong — until the S4 flip, when exactly those messages go invisible.
+
+**DEF-32's blast radius is therefore a function of an admin toggle, not of deployment topology.** The "off by default" mitigation still holds for the *default*, but it is not a structural guarantee about a running system.
+
+### Direct relevance to the beta exercise
+The user's plan: *"the beta hub will be the real test, but I want to run that as a tightly scheduled exercise so I can be around to direct recoveries — and we may be using a DB snapshot to restore."*
+
+Federation being hot-toggleable means it can be flipped **mid-exercise**, and doing so starts accruing DEF-32 debt immediately and invisibly. Worth knowing before, not during. This also part-answers the beta precondition I parked long ago (*"can federation be toggled at runtime?"*) — **yes, via the admin settings API.** The other half (does the beta hub run legacy trusted-proxy auth) is still unanswered.
+
+### Rules
+**Rule 253.** An `atomic.Pointer` around a value you believe is set once is a contradiction to investigate, not a style choice. Concurrency primitives are evidence about the intended lifecycle: if a value were construction-only, a plain field would do. The type argued against my conclusion and I noticed it only on a second pass.
+
+**Rule 254.** "Off by default" and "cannot be turned on while running" are different claims, and reporting the first invites the reader to assume the second. When stating a mitigation, name the *class* of gate — default, deploy-time, or runtime — because that is what determines whether the mitigation is a property of the system or a property of the current moment.
+
+**Rule 255.** Finding the enabling site is not the same as finding all the enabling sites. `server.go:1405` was a true answer to "where is federation switched on" and a misleading answer to "when can federation be switched on". Grep for **writes to the state**, not for the construction site.
+
+### Ledger
+- **DEF-32** — mitigation corrected (runtime, not deploy-time); escalation to user this heartbeat. Substance unchanged: still a design gap, still an S4 blocker, still needs identity linking.
+- DEF-33/34/35 spec complete (§5fi), DEF-34 needs #1259. DEF-18 verified unlanded, carrier em9-unify (§5fj). Tier 2 DEFERRED. Tranche H blocked on G-1. DEF-5/6/9/10/11/14/16, D–G held. DEF-17 STRUCK. GATE-1 CLOSED.
