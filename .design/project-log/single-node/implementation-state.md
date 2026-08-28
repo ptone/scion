@@ -14379,3 +14379,26 @@ per message, not fewer messages.
 Not re-sending yet. He is awake and five minutes have passed; a nudge now would be the exact behaviour
 he complained about. If the four items are still unanswered when he next goes quiet, they get **one**
 short single-purpose message.
+
+### §35.96 — Upstream moved past my branches while he was awake. One single-purpose nudge sent.
+
+11:00. Upstream `main` `f4d02461` -> `b88fece2`: `#1338`, `#1339`, `#1340`, `#1341`. **None of them mine.**
+All messaging and permission work. He is awake, he is in the merge queue, and he went past three
+approved branches — which is the concrete evidence that rule 24 was right: the bundled message got its
+routing half answered and its merge half buried.
+
+**Re-measured before writing to him**, because a nudge carrying stale facts is worse than no nudge:
+- `scion/bash32-portability` @ `0b51f831` — 6 ahead / 7 behind, **clean**.
+- `scion/task-92-runtime-profile-fix` @ `dc729e2` — 3 ahead / 5 behind, **clean**.
+- `scion/design-operator-prereqs` @ `f6c10558` — 2 ahead / 5 behind, **clean**.
+
+Still disjoint from upstream's direction. The decay I flagged at 04:05 has not arrived.
+
+**Sent ONE message on ONE topic — what to do with my branches — per rule 24.** The improvement over the
+03:23 and 10:36 sends is that it is **actionable without a decision**: two branches say *merge at any
+time*, the third says *hold only if you want to decide task #93 first*, and the decision is scoped to
+that one branch. **Previously I asked him for a decision and left three branches implicitly waiting on
+it. They were never waiting on it — only one was.** That was my framing error, not his reading error.
+
+Also closed the loop the honest way: *"Either answer unblocks me. No answer keeps the branch parked."*
+He should know the cost of not answering, stated once and without pressure.
