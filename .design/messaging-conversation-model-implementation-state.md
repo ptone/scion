@@ -6669,3 +6669,75 @@ summary view can differ from itself for reasons that have no bearing on the clai
 summary's disagreement would have cost em10 a round trip to disprove something that was never wrong.
 Symmetric to rule 81: **`ok` never means "something ran", and `DIFFERS` never means "something
 changed"** — in both directions, confirm the instrument is measuring the thing you are claiming.
+
+---
+
+## §5ck. Heartbeat sweep 2026-08-28 — em6 PR stall diagnosed as user latency, not a gate
+
+`upstream/main` unchanged at `f4d02461b`. No manager branch moved. Roster: em9 and em6 blocked (both
+on the user, both reasons known to me — not pinged; item 9, asking is the slowest instrument, and
+item 3, an open-ended ping to a parked agent reads as permission to resume).
+
+### em10 park had not taken — rule 57/58 violation, mine
+
+Roster showed `activity = working` despite em10 messaging "Parking now." I had told them to "stay
+parked" in prose instead of handing them the literal command. Fixed by sending the exact string
+`sciontool status blocked "parked by ca-msg-arch pending user opening the tranche B PR"` with "do not
+restart work, do not write a status report" attached. **Verified it took**: em10 now `blocked`.
+This is the second time in this project I have written the park convention and not applied it.
+The prose form "stay parked" is not a park — only the emitted status is.
+
+### The em6 PR stall: a near-miss escalation
+
+PRs #1338/#1339 have not moved in multiple heartbeats. Investigating merge-readiness rather than
+asking (rule 84) turned up `mergeStateStatus: UNSTABLE` and **`cla/google` FAIL on both**, with every
+substantive check (Build & Test, golangci-lint, shellcheck, scan-pr, zizmor) passing. Every agent
+branch is authored `Scion Agent (…) <agent@scion.dev>`; every commit on `main` is authored
+`Preston Holmes <ptone@google.com>`. That reads like a root cause, and it would have implicated
+tranche B too, whose 8 commits carry the same author.
+
+**It is not a blocker.** Two controls settled it:
+
+1. **`UNSTABLE` ≠ `BLOCKED`.** GitHub reports `UNSTABLE` when a PR is mergeable and the failing
+   checks are *not required*; a failing required check yields `BLOCKED`. Both PRs report
+   `mergeable: MERGEABLE`.
+2. **Positive control against work known to have landed** (rule 61). Landed commits such as
+   `f4d02461b` and `f99de64df` carry `Co-authored-by: Scion Agent (…) <agent@scion.dev>` and the
+   `* …` / `---------` squash format. Agent-authored branches have been squash-merged through this
+   exact CLA failure before; the squash rewrites authorship to the merging user.
+
+So the em6 stall is user latency, already escalated in the tranche B section-boundary report. **No
+second user message sent** — re-reporting a known blocker is the FYI traffic the user banned. And
+tranche B needs no author rewrite; the compare URL already sent stands as-is.
+
+### em6 branches are clean to merge — no rebase needed
+
+All three are behind main but textually mergeable, and the rule-31 overlap is empty in every case
+(`comm` positively controlled, self-overlap = 3 lines):
+
+| branch | ahead | behind | files touched | main moved since base | overlap |
+|---|---|---|---|---|---|
+| `ca-msg-em6-def31` | 4 | 5 | 3 | 42 | EMPTY |
+| `ca-msg-em6-ci-guard` | 3 | 4 | 4 | 21 | EMPTY |
+| `ca-msg-em6-def26` | 1 | 3 | 1 | 17 | EMPTY |
+
+### Ledger sweep
+
+Nothing struck out this heartbeat. Tranche B first cut advanced (rebased, verified, URL sent, §5cj).
+Everything else is downstream of user action: #1338/#1339/DEF-26 unopened-or-unmerged; the CI
+sqlite-gap option (i)/(ii)/(iii); the messaging-authz A/B/C decision; AC-12-6 and the beta exercise
+awaiting scheduling. Held rows DEF-5/6/9/10/11/14/16 and DEF-17/18 gate sweep, and tranches C–G, are
+all gated behind tranche B landing — that is the reason they have not moved, restated as item 8
+requires.
+
+### RULE 86 (new)
+
+**"A failing external check is not a gate until you prove it gates."** Before escalating red CI on
+someone else's PR, read the mergeability state — `UNSTABLE` means failing-but-not-required,
+`BLOCKED` means failing-and-required — and find a merged PR that failed the same check. The second
+is the rule-61 positive control, and here it also explained the mechanism (squash rewrites
+authorship, which is *why* the CLA failure is tolerated) rather than merely licensing the conclusion.
+This is the third near-miss of one shape in two sessions: a `-run` selector matching nothing printing
+`ok` (rule 81), `--name-status` reporting DIFFERS on line order alone (rule 85), and now a red check
+that does not block. **A signal's colour is not its authority. Confirm the instrument gates the
+claim before you act on it — in both directions.**
