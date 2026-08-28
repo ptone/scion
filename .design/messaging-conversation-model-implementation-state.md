@@ -1545,6 +1545,35 @@ em10 and every agent I dispatch hereafter.
       (`def26`) and which are outside it (`#1338`, `#1339`).
 
 
+76. **"CI is green" is a claim about what CI RUNS, not about what is correct — and a build tag can
+    make those two things disjoint without anyone lying.** Issued 2026-08-28 02:05Z. **The single
+    largest finding of this project so far, and it came from the coordinator contradicting me.**
+
+    - CI runs `make test-fast` = `go test -tags no_sqlite ./...`. `TestTemplateResource_UATConfinement`
+      sits in a file headed `//go:build !no_sqlite`. Under the tag it **compiles out**, Go prints
+      *"no tests to run"*, and the job passes. Without the tag it fails **3/3 deterministically** on
+      `1befe923`.
+    - **Measured: 219 gated test files; 3,319 of 9,787 test functions — 34% — never execute in CI.
+      175 of those files are in `pkg/hub`, the authorization layer.**
+    - **It reaches our own work.** `pkg/hub/handlers_chat_v2_test.go` is gated, so **DEF-31's 8 tests
+      do not run in CI.** PR#1338's green *Build & Test* is not evidence about the resolver guard.
+      The hand mutation runs are the only verification those tests have ever had.
+    - **Rule 66 said two parties reading different surfaces are both correct about their own. This is
+      that, with a build tag as the surface boundary** — and neither party could detect it from their
+      own side. I had repeated "pre-existing red on main" into three PR bodies on the strength of one
+      local run. **The coordinator checked a claim I had stopped checking; without that it would have
+      shipped as folklore.**
+    - **Standing check: before calling any test "covered by CI", confirm CI's invocation actually
+      compiles it** — tags, `-short`, package selection, sharding. `grep` the workflow for the test
+      command, then check the file's build constraints against it. Cheap, and I did it only after
+      being contradicted.
+    - **This is the SIXTH instance in this project of a control that cannot fail being mistaken for a
+      control that keeps passing** (rules 61, 65, 73, 74, the B4 gate, and now this). It is
+      decisively the dominant failure mode here — ahead of ordinary logic bugs, and ahead of the
+      messaging defects this project was chartered to fix. **The unifying question is: "what would
+      make this instrument silently return the answer I want?"**
+
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -5788,3 +5817,37 @@ not error either, it silently returns plausible. **Both let you conclude "fine" 
 ever having been capable of saying otherwise** — cf. rules 61, 65, 73, 74, and tranche B's B4 gate.
 That is now five distinct instances in this project of *a control that cannot fail being mistaken for
 a control that keeps passing*. It is the dominant failure mode here, well ahead of ordinary bugs.
+
+### §5bz — CI sqlite-tag gap found; PR#1338 approved (2026-08-28 02:08Z)
+
+**PR#1338 APPROVED.** `facb332b`. Length check centralised into `validateDefaultAgent`, called from
+both create and patch. **Verified, not accepted:** 8/8 DEF-31 tests pass, and re-running the mutation
+on the *refactored* code still fails `TestDEF31_SendPath_ForeignProjectAgent_NotRouted` and
+`..._SoftDeletedAgent_NotRouted` with the named defect while the paired positive still passes — so
+the centralisation did not hollow out the tests, which was the specific risk. em6 correctly kept
+trim/empty-string handling at the call sites (create *skips*, patch *clears* — genuinely different
+semantics; folding them in would have been a bug dressed as tidiness).
+
+**CI GAP — see rule 76.** Escalated to the user, who chose **option (b): a reporting-only,
+non-blocking CI job first, to size the problem before deciding.**
+
+**Dispatched to em9** (idle 3h, now woken; C explicitly deferred):
+- New `.github/workflows/ci.yml` job, `continue-on-error: true`, obviously informational, running the
+  suite **without** `no_sqlite`. **Existing `test-fast` job untouched and still required** — this
+  adds signal, it must not remove any.
+- **The output is the deliverable**, not the job: failures grouped by package with test names, to
+  `/scion-volumes/scratchpad/projects/ca-msg-arch/ci-sqlite-gap-inventory.md`.
+- Told to run it **locally first** and report the number before doing the workflow change, since the
+  count is what the user is waiting on.
+- Warned: `test-fast` exists *because* SQLite tests cost memory, so the job may OOM or time out —
+  **and if it does, that is part of the sizing answer, not something to trim the test set around.**
+  `pkg/hub` alone is ~5 min locally. **Fix nothing.**
+
+**Told em6 its own DEF-31 tests do not run in CI.** Framed as a change in what green means rather
+than a criticism — and with the practical consequence: in `pkg/hub` the mutation run is not pedantry,
+it is the only verification that exists.
+
+**Credit where due, and recorded because it is the lesson:** the coordinator contradicted a claim I
+had been repeating for hours and had stopped testing. I was wrong about the *conclusion* ("a broken
+test needing an owner") while being right about the *observation* (it fails). **Being right about
+your own surface is exactly what makes this class of error survive.**
