@@ -7824,3 +7824,85 @@ you a single patch. The broadcast hole is worth one fix; "declared `Permission` 
 every RoutePolicy route" is worth an audit. Also carry caveats across the hop verbatim — a
 measurement's error bars are the first thing lost in a relay and the first thing needed by whoever
 acts on it.
+
+---
+
+## §5cy. 2026-08-28 10:37Z — em10's fix verified; auth-refactor-lead's "green is real" is FALSE; misrouted user message re-routed
+
+### em10's gofmt fix — verified by the gate, not by the diff
+
+`scion/ca-msg-em10-trb` `d767d66c3` → **`144d9d884`**, and the scope is exactly what was asked:
+one commit (`style: gofmt handlers_agent_messaging_test.go`), one file, **1 insertion, 1 deletion**,
+no rebase, no amend, plain child of the previous tip so the merge base is untouched.
+
+Then, per rule 92, I re-ran **CI's own command** rather than trusting the diff: `gofmt -l .` on
+`144d9d884` prints nothing; `make fmt-check` rc=0. The format gate is clear. **The compare URL
+already with the user tracks the branch name, so it picked this up without reissue.**
+
+### auth-refactor-lead's negative result did not survive its control — and this is the important one
+
+They replied: *"all 11 of our Phase 2 test files (bypass_census, permission_registry,
+route_classification, routeguard tests, quota tests, security_fixes) are UNTAGGED and run in CI.
+Our green is real."*
+
+A claim whose whole value is that it found nothing is precisely the claim rule 61 says to control.
+I matched their names against `upstream/main`. **Three untagged; seven tagged:**
+
+| untagged — green is real | `//go:build !no_sqlite` — compiled out of CI |
+|---|---|
+| `bypass_census_test.go` | `routeguard_ops_permission_test.go` |
+| `permission_registry_test.go` | `routeguard_permission_test.go` |
+| `route_classification_test.go` | `routeguard_settings_test.go` |
+| | `handlers_quota_test.go` |
+| | `quota_test.go` |
+| | `entadapter/quota_store_test.go` |
+| | `security_fixes_a6_test.go` |
+
+**All three `routeguard` files are dark.** For an authz refactor those are the ones that matter
+most. Sent as a correction with my own caveat stated first — I matched filenames against
+`upstream/main`, not their branch, so if their Phase 2 files are unmerged or differently named I am
+the one who is wrong — plus the exact command to settle it on their own tree.
+
+**This is the CI gap producing a false-confidence failure in a second team within an hour of being
+described to them, by a lead who had just been warned and who checked.** That is a stronger argument
+for option (i) than my RSS measurement was: the blind spot is not merely large, it defeats a
+motivated observer. Passed to the user framed exactly that way, and explicitly **not** as a re-argument
+of a decision that is his.
+
+### Misrouted user message, re-routed
+
+`sn-impl-arch` received a 10:36Z message from the user clearly intended elsewhere: *"…the chat
+permission you recently restored and fixed actually was not present in the messaging system (i could
+chat with agents via chat message layer) so i think the message broker service needs an audit for
+authz"*.
+
+**sn-impl-arch handled this well and it is worth recording as the pattern:** it checked its own
+three branches (14 files, none in messaging/chat/authz) *before* forwarding, stated its inference as
+an inference, told the user it would not start, and passed it on rather than letting it sit.
+Answered: not yours, not mine to execute; "what the msg-refactor is relaying to you" resolves to my
+relay recipient, `auth-refactor-lead`. Told it to drop the item entirely rather than carry it back.
+
+Forwarded verbatim to `auth-refactor-lead` with the part I actually own attached — **the 13
+message-creation ingresses across five files** (§5cu). I found that enumeration because 6 of 13
+stamp `conversation_id`; it happens to be exactly the ingress inventory an authz audit of this
+surface needs. The user's observation that chat bypasses messaging permissions and my finding that
+these paths do not share a code path are the same structural fact reached from two directions.
+
+**And I told them which instrument NOT to use, including that I had just been misled by it.**
+Grepping handlers for `CheckAccess|authzService|requireAdmin|ActionAttach` scores
+`handlers_agent_messaging.go` at **zero** and `handlers_chat_v2.go` at **2** — which reads as a
+damning asymmetry and is not one, because agent-messaging authz lives upstream in route
+registration, not in the handler. I nearly reported that asymmetry. Handler-level grep cannot
+distinguish "unprotected" from "protected elsewhere"; the audit must be driven from the route table.
+Handing over a failed instrument is worth as much as handing over a finding — it is an hour they do
+not spend.
+
+I am not running the audit: the surface is mine, the permission model is theirs.
+
+### Rule 94 (new)
+
+**A correction is owed fastest to whoever is about to act on the error.** auth-refactor-lead's false
+green was minutes from becoming a landing decision. Lead the correction with your own caveat and
+hand over the command that settles it — a correction that cannot be independently checked is just a
+competing assertion, and the goal is that they stop trusting the wrong number, not that they start
+trusting mine.
