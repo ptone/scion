@@ -4,8 +4,8 @@
 and absent from `upstream/main`. It is silent on modifications to files that exist on both
 trees. A file-existence table cannot see Phase 11 (broker edge), which lands entirely as
 modifications, nor any other behavioural change that modifies an existing file. Table 2
-(modifications) covers the broker-edge scope and hub/CLI files that Phase 11 touches;
-it is not exhaustive across all 156 modified files.
+(modifications) covers all 18 files that v2 modifies AND that main changed post-fork
+(per architect's extension scope). All 18 have been swept for revert risk.
 
 Files on `origin/scion/messaging-v2` (`91c9e314`) absent from `upstream/main` (`31c48801`),
 mapped to tranches C–G per the tranche table at IMPLEMENTATION-STATE.md line 1772 (rows 1776–1782).
@@ -160,18 +160,38 @@ compared to v2's version of the same lines. CONFIRMED = v2 demonstrably predates
 and would undo it. NONE = no post-fork commits touch this file, or the post-fork changes
 are in areas v2 does not modify.
 
-**Post-fork commits found (4 files, 5 distinct commits):**
-- `pkg/hub/handlers_broker_inbound.go`: `b453a685` (#1322, "validate DM key ownership at
-  message ingress — prevent cross-project injection", 2026-08-27 13:16Z)
-- `pkg/hub/messagebroker.go`: `b3562fb1` (#1343, tranche B, 2026-08-28 07:40Z)
-- `pkg/hub/handlers_agent_messaging.go`: `31bedbb3` (#1347, project authz + ActionAttach,
-  2026-08-28 09:37Z), `b3562fb1` (#1343, tranche B / B5 security, 2026-08-28 07:40Z),
-  `b453a685` (#1322, DM key ownership, 2026-08-27 13:16Z). Merge-base commit `6268bac4`
-  (#1319) also touches file but its changes are IN v2's base — not a revert candidate.
-- `pkg/hub/handlers_chat_v2.go`: `31bedbb3` (#1347, ActionAttach for chat, 2026-08-28 09:37Z),
-  `31012697` (#1338, DEF-31 defaultAgent validation, 2026-08-28 06:37Z),
-  `b453a685` (#1322, DM key ownership, 2026-08-27 13:16Z)
-- No post-fork commits: all 13 extras adapter files, `cmd/message.go`
+**Post-fork commits found (16 files, 15 distinct commits):**
+
+*Security/correctness PRs (4 commits):*
+- `b453a685` (#1322, DM key ownership, 2026-08-27 13:16Z) → `handlers_broker_inbound.go`,
+  `handlers_agent_messaging.go`, `handlers_chat_v2.go`
+- `b3562fb1` (#1343, tranche B / B5 security, 2026-08-28 07:40Z) → `messagebroker.go`,
+  `handlers_agent_messaging.go`, `messagebroker_test.go`, `chat_notifications_test.go`,
+  `handlers_agent_messaging_test.go`
+- `31012697` (#1338, DEF-31 defaultAgent, 2026-08-28 06:37Z) → `handlers_chat_v2.go`
+- `31bedbb3` (#1347, ActionAttach + project authz, 2026-08-28 09:37Z) →
+  `handlers_agent_messaging.go`, `handlers_chat_v2.go`
+- `e8c7c40a` (#1349, B6/B7/B9 EnsureParticipant, post-fork) → `store.go`
+
+*P2 feature PRs (10 commits):*
+- `392e5e14` (P2-B1 #1323) → `server.go`, `store.go`, `models.go`, `composite.go`
+- `b09e7f49` (P2-A1 #1324) → `route_metadata.go`, `models.go`
+- `943241ad` (P2-A2 #1327) → `route_metadata.go`, `route_classification_test.go`
+- `78323b5b` (P2-B2 #1328) → `server.go`
+- `cca1f87d` (P2-A3 #1329) → `route_metadata.go`
+- `9668909c` (#1331 conv model) → `store.go`, `models.go`, `composite.go`,
+  `message_store.go`, `types.go`
+- `c600df51` (P2-A4 #1332) → `route_metadata.go`, `route_classification_test.go`,
+  `admin_maintenance_test.go`
+- `53ec098f` (P2-A5 #1333) → `route_metadata.go`
+- `ce9a7993` (P2-A6 #1334) → `route_metadata.go`, `route_classification_test.go`,
+  `handlers_policies_test.go`, `skill_registry_handlers_test.go`
+- `680193b8` (P2-B3 #1336) → `server.go`, `route_metadata.go`, `route_classification_test.go`
+- `137e1763` (P2-D1 #1346) → `server.go`, `route_metadata.go`, `route_classification_test.go`
+- `19e32902` (P2-C1 #1348) → `server.go`, `route_metadata.go`, `route_classification_test.go`,
+  `store.go`
+
+*No post-fork commits:* all 13 extras adapter files, `cmd/message.go`
 
 ### Extras adapters (Phase 11 — all absent from main, all tranche C)
 
@@ -291,6 +311,123 @@ logic — v2 simply omits the security controls that main added.
 | `…/handlers_chat_v2.go` — Phase 8 read-switch in `handleConversationHistory` | +35/−3: adds conversation resolution via `ResolveDMConversationForRead` / `ResolveThreadConversationForRead` gated by `ConversationReadSwitch` | NO | E | HIGH | NONE | Phase 8 read-switch (line 1780). Purely additive new v2 functionality. No post-fork code in this area. |
 | `…/handlers_chat_v2.go` — `messaging` import addition | +1: adds `"pkg/messaging"` to import block | NO | (dependency) | HIGH | NONE | Required by Phase 7/8 code. Not independently meaningful. |
 
+### P2 authorization system files (Permissions Phase 2)
+
+The P2 series (PRs #1323–#1348) built a permissions/quota/role system on main after the fork.
+v2 predates the entire P2 series and has none of it. All removals below are feature reverts —
+v2 does not replace the P2 functionality with anything, it simply lacks it.
+
+**Independent restoration unit: P2 authorization pipeline.** The routeGuard `Decide` path
+(route_metadata.go), 45 per-route Permission/Resource/Action metadata entries, and the route
+registrations (server.go) form one interconnected unit. Restoring fine-grained admin
+permissions requires all three together.
+
+**Independent restoration unit: P2 quota subsystem.** QuotaStore interface (store.go),
+quota models (models.go), QuotaStore embed (composite.go), QuotaService (server.go), route
+registrations, and limit seeding are one unit.
+
+**Independent restoration unit: P2 role management.** RoleStore extensions
+(UpdateRoleDefinition, DeleteRoleDefinition, ListAllRoleBindings, CountAllRoleBindings in
+store.go), SystemRoleHubAdmin constant (models.go), and role management routes
+(server.go + route_metadata.go) form one unit.
+
+Post-fork commits on these files:
+- `server.go`: #1348 (P2-C1), #1346 (P2-D1), #1336 (P2-B3), #1328 (P2-B2), #1323 (P2-B1)
+- `route_metadata.go`: #1348, #1346, #1336, #1334 (P2-A6), #1333 (P2-A5), #1332 (P2-A4),
+  #1329 (P2-A3), #1327 (P2-A2), #1324 (P2-A1)
+- `route_classification_test.go`: #1348, #1346, #1336, #1334, #1332, #1327
+
+| file | v2 delta | on main? | tranche | confidence | revert-risk | notes |
+|---|---|---|---|---|---|---|
+| `pkg/hub/server.go` — QuotaService field removal | −4: removes `quotaService *QuotaService` struct field | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-B2 (#1328).** v2 has no quota enforcement. |
+| `pkg/hub/server.go` — QuotaService init removal | −5: removes `QuotaService` initialization in `New()` | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-B2 (#1328).** |
+| `pkg/hub/server.go` — seedLimitDefinitions removal | −4: removes `seedLimitDefinitions(ctx, s)` call | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-B1 (#1323).** |
+| `pkg/hub/server.go` — auth/scopes endpoint removal | −1: removes `/api/v1/auth/scopes` route registration | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-D1 (#1346).** UAT scope enumeration endpoint. |
+| `pkg/hub/server.go` — quota routes removal | −7: removes 6 quota/usage route registrations (limits, entitlements, usage) | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-B3 (#1336).** |
+| `pkg/hub/server.go` — role management routes removal | −6: removes 5 role/binding/permissions route registrations | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-C1 (#1348).** |
+| `pkg/hub/server.go` — messaging divergence route addition | +1: adds `/api/v1/admin/messaging/divergence` | NO | E | HIGH | NONE | Phase 8 divergence board (line 1780). v2 addition. |
+| `pkg/hub/server.go` — conversations resolve route addition | +3: adds `/api/v1/conversations/resolve` | NO | H | HIGH | NONE | v2 addition. Part of tranche H (resolve endpoint). |
+| `pkg/hub/route_metadata.go` — P2 Permission metadata removal | −45 Permission/Resource/Action fields across ~30 admin routes | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-A1 through P2-A6 (#1324–#1334).** Without Permission metadata, all RouteHubAdmin routes fall back to `requireAdmin` bypass — coarser authorization. |
+| `pkg/hub/route_metadata.go` — routeGuard Decide path removal | −40: removes entire Decide-based permission evaluation from RouteHubAdmin case | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-A1 (#1324).** The structural backbone of fine-grained admin permissions. Without it, the per-route Permission metadata has no consumer. |
+| `pkg/hub/route_metadata.go` — skill-registries classification change | RouteHubAdmin→RoutePolicy, Permission `skill.register`→`skill.read` | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-A5/A6.** Changes authorization model for skill registry endpoints. |
+| `pkg/hub/route_metadata.go` — policy route Permission removal | −2 Permission fields from `/api/v1/policies` and `/api/v1/policies/` | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-A6 (#1334).** Policy routes lose fine-grained permission checks. |
+| `pkg/hub/route_metadata.go` — auth/scopes route metadata removal | −4: removes `/api/v1/auth/scopes` entry | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-D1 (#1346).** |
+| `pkg/hub/route_metadata.go` — quota/role route metadata removal | −55: removes all quota and role management route metadata entries | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-B3/C1 (#1336/#1348).** |
+| `pkg/hub/route_metadata.go` — conversations resolve route addition | +4: adds `/api/v1/conversations/resolve` metadata | NO | H | HIGH | NONE | v2 addition. |
+| `pkg/hub/route_classification_test.go` — P2 route expectations removal | −14: removes quota, role, scopes, usage test entries | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-B3/C1/D1.** Test expectations match pre-P2 route set. |
+| `pkg/hub/route_classification_test.go` — skill-registry classification change | `hub-admin:skill-registry` → `policy:skill-registry` | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-A5/A6.** Matches route_metadata classification change. |
+| `pkg/hub/route_classification_test.go` — routeGuard test simplification | −10/+6: removes Decide-path test comments, changes test routes from permission-gated to admin-only | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-A1.** Tests match pre-P2 authorization model. |
+| `pkg/hub/route_classification_test.go` — hub-admin UAT test removal | −30: removes `TestHubAdminRoutesRejectScopedAdminUAT` function, replaces `allHubAdminRoutes` with simpler inline loop | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-D1 (#1346).** Test verified scoped-admin tokens are rejected by hub-admin routes. |
+| `pkg/hub/route_classification_test.go` — v2 route additions | +2: adds messaging divergence and conversations resolve test entries | NO | E, H | HIGH | NONE | v2 additions. |
+
+### Store interface and model files
+
+Post-fork commits:
+- `store.go`: #1349 (B6/B7/B9 EnsureParticipant), #1348 (P2-C1 role management), #1331
+  (conversation model), #1323 (P2-B1 quota)
+- `models.go`: #1331 (conversation model), #1324 (P2-A1 hub-admin role), #1323 (P2-B1 quota)
+- `composite.go`: #1331 (conversation model), #1323 (P2-B1 quota)
+- `message_store.go`: #1331 (conversation model) — v2 diff is ONLY additions
+- `types.go`: #1331 (conversation model) — v2 diff is cosmetic alignment only
+
+| file | v2 delta | on main? | tranche | confidence | revert-risk | notes |
+|---|---|---|---|---|---|---|
+| `pkg/store/store.go` — QuotaStore removal | −3: removes `QuotaStore` from Store interface | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-B1 (#1323).** Part of quota subsystem unit. |
+| `pkg/store/store.go` — ErrQuotaExceeded removal | −1: removes `ErrQuotaExceeded` sentinel error | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-B1 (#1323).** |
+| `pkg/store/store.go` — QuotaStore interface deletion | −72: removes entire `QuotaStore` interface (LimitDefinition CRUD, EntitlementBinding CRUD, UsageReservation management) | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-B2 (#1328).** |
+| `pkg/store/store.go` — RoleStore method removal | −16: removes `UpdateRoleDefinition`, `DeleteRoleDefinition`, `ListAllRoleBindings`, `CountAllRoleBindings` | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-C1 (#1348).** Role management CRUD extensions. |
+| `pkg/store/store.go` — EnsureParticipant removal | −5: removes `EnsureParticipant` from ConversationStore interface | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS #1349 (B6/B7/B9).** Idempotent participant-add. v2 has only `AddParticipant` (which fails on duplicates). |
+| `pkg/store/store.go` — CountUnbackfilledMessages addition | +5: adds `CountUnbackfilledMessages` to MessageStore interface | NO | UNCLAIMED | HIGH | NONE | v2 addition — DEF-12 backfill support. Purely additive, no post-fork code in this area. |
+| `pkg/store/models.go` — SystemRoleHubAdmin removal | −1: removes `SystemRoleHubAdmin = "hub-admin"` constant | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-A1 (#1324).** Part of P2 role system. |
+| `pkg/store/models.go` — quota models deletion | −64: removes `LimitDefinition`, `EntitlementBinding`, `UsageReservation` structs and related constants | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-B1 (#1323).** Part of quota subsystem unit. |
+| `pkg/store/models.go` — cosmetic alignment | ±38: struct field alignment differences in Message, MessageFilter, Conversation | NO | (cosmetic) | HIGH | NONE | Not functional. gofmt alignment difference. |
+| `pkg/store/entadapter/composite.go` — QuotaStore embed removal | −2: removes `*QuotaStore` embed and initialization | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-B1 (#1323).** Part of quota subsystem unit. |
+| `pkg/store/entadapter/message_store.go` — CountUnbackfilledMessages addition | +19: adds `CountUnbackfilledMessages` implementation | NO | UNCLAIMED | HIGH | NONE | v2 addition — DEF-12 backfill. Purely additive, #1331 did not change the same area. |
+| `pkg/messages/types.go` — cosmetic alignment | ±18: struct field alignment in StructuredMessage | NO | (cosmetic) | HIGH | NONE | Not functional. Same fields, different tab alignment. |
+
+### B5 test files (#1343)
+
+Post-fork commit: `b3562fb1` (#1343, tranche B / B5 security, 2026-08-28 07:40Z).
+All three files contain tests added by #1343 that v2 does not have.
+
+**Coupled to authenticatedSender restoration unit.** If the B5 production code is restored,
+these tests must also be restored — they verify the security invariants. If v2's test code
+is carried instead, the tests will fail against restored B5 production code.
+
+| file | v2 delta | on main? | tranche | confidence | revert-risk | notes |
+|---|---|---|---|---|---|---|
+| `pkg/hub/messagebroker_test.go` — B5 SenderID test setup | −4: removes `senderAgent` capture and `msg.SenderID = senderAgent.ID` in `TestMessageBrokerProxy_BroadcastSkipsSender` | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS B5 (#1343) test.** v2's test uses Sender slug for self-skip (pre-B5 pattern). Coupled to `messagebroker.go` B5 revert. |
+| `pkg/hub/messagebroker_test.go` — newTestStore signature | `newTestStore(":memory:")` → `newTestStore(t, ":memory:")` | NO | (infrastructure) | LOW | NONE | v2 test helper API change. |
+| `pkg/hub/chat_notifications_test.go` — B5 notification tests deletion | −150: removes 3 tests: `TestChatNotifier_DMReceived_ResolvesAgentSlugFromSenderID` (B5/F2), `_DoesNotClobberCallerLabel` (B5/F3/F6), `_FallsBackOnLookupFailure` (B5/F2 fallback) | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS B5 (#1343) tests.** These verify notification display name resolution after B5's auth-derivation override produces UUID-form Sender fields. |
+| `pkg/hub/chat_notifications_test.go` — newTestStore + cleanup | −2/+1: signature change + removes explicit `t.Cleanup` | NO | (infrastructure) | LOW | NONE | v2 test helper API change. |
+| `pkg/hub/handlers_agent_messaging_test.go` — B5 security tests deletion | −805: removes 8 test functions: `_B5_SpoofedSenderDoesNotDeriveConversationKey`, `_B5F1_SpoofedSender...`, `_B5F1b_BroadcastedForcedTrue...`, `_R1_BroadcastingAgent...`, `_B5F1a_SenderOverride...`, `_B5F1c_SelfSkipUsesAuth...`, `_R2_FanOutGlobalSelfSkip...`, `_R3b_WarnOnEmptySenderID` | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS B5 (#1343) tests.** The most critical test coverage: 8 tests verifying spoofed-sender prevention, forced-Broadcasted, self-skip-by-ID, and empty-SenderID warnings. Without these tests, a future regression in B5 protections has no safety net. |
+| `pkg/hub/handlers_agent_messaging_test.go` — v2 test additions | +~300: adds 5 tests: `TestDEF11_PreResolvedConversation_*` (4), `TestDEF19_GroupRecipient_FullHandlerPath` | NO | UNCLAIMED | HIGH | NONE | v2 test code for DEF-11 and DEF-19. These test v2-only functionality. |
+| `pkg/hub/handlers_agent_messaging_test.go` — test infrastructure changes | ±50: import changes (removes slog/eventbus/require, adds fmt/sort/messaging), adds `testDirectMessageExternalRef` helper, `newTestStore` signature change | NO | (infrastructure) | MEDIUM | NONE | v2 test helper changes. The `testDirectMessageExternalRef` replicates legacy DM key format for divergence tests. |
+
+### P2-A authorization test files
+
+Post-fork commits: `c600df51` (P2-A4 #1332) for admin_maintenance_test.go,
+`ce9a7993` (P2-A6 #1334) for handlers_policies_test.go and skill_registry_handlers_test.go.
+
+All three files have the same pattern: P2-A converted inline `requireAdmin` checks to
+routeGuard permission-based checks. The PR removed inline admin tests and replaced them with
+routeGuard-level tests (in separate test files like `TestRouteGuardOpsPermissions`). v2
+predates P2-A and still has inline admin checks, so it restores the inline tests.
+
+**Coupled to P2 authorization pipeline restoration unit.** If P2-A is restored, these test
+reverts are correct (the inline checks don't exist in production code). If P2-A is NOT
+restored, these tests correctly verify the inline admin checks that v2 uses.
+
+| file | v2 delta | on main? | tranche | confidence | revert-risk | notes |
+|---|---|---|---|---|---|---|
+| `pkg/hub/admin_maintenance_test.go` — inline admin tests restored | +60/−20: restores `TestListMaintenanceOperations_NonAdmin`, `TestExecuteMigration_NonAdmin`, `TestExecuteOperation_NonAdmin`, `TestCheckForUpdates_NonAdmin`, `TestHandleAdminRestart_Forbidden`. P2-A4 removed these (authorization moved to routeGuard). | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-A4 (#1332) test changes.** v2's handlers still have inline `requireAdmin` checks, so these tests are correct for v2. |
+| `pkg/hub/admin_maintenance_test.go` — newTestStore signature | `newTestStore(":memory:")` → `newTestStore(t, ":memory:")` | NO | (infrastructure) | LOW | NONE | v2 test helper API change. |
+| `pkg/hub/handlers_policies_test.go` — simplified test server | −8/+6: removes `authzService` init, `seedRoleDefinitions`, creates bare `&Server{store: s}` | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-A6 (#1334).** v2's policy endpoints use inline admin checks, not Decide-based permission checks. |
+| `pkg/hub/handlers_policies_test.go` — inline admin tests expanded | +30/−5: adds GET listPolicies, GET getPolicy, listPolicyBindings, addPolicyBinding test cases. Changes scope from write-only to all operations. | NO | UNCLAIMED | HIGH | NONE | v2's test coverage is broader for inline admin checks. Not a revert — expanded coverage. |
+| `pkg/hub/handlers_policies_test.go` — routeGuard test deletion | −60: removes `TestPolicyRouteGuard_SuperAdminOnlyAccess` (verified hub-admin denied, super-admin allowed via Permission-based route guard) | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-A6 (#1334).** Test verified Decide-based permission enforcement. |
+| `pkg/hub/skill_registry_handlers_test.go` — simplified test server | −5/+5: removes `seedRoleDefinitions`, creates bare `&Server{store: s}` | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-A6 (#1334).** Same pattern as policies test. |
+| `pkg/hub/skill_registry_handlers_test.go` — routeGuard test replaced with inline test | −70/+20: removes `TestSkillRegistryRouteGuard_PermissionBased` (hub-admin binding + skill.register permission), adds `TestSkillRegistryCRUD_NonAdminRejected` (simpler inline admin check) | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **REVERTS P2-A6 (#1334).** v2 tests inline admin model; P2-A6 tested routeGuard permission model. |
+
 ---
 
 ## Table 2 summary
@@ -299,48 +436,85 @@ logic — v2 simply omits the security controls that main added.
 |---|---|---|---|
 | **C** | 13 adapter files + 2 hunks in `handlers_broker_inbound.go` + 1 hunk in `handlers_agent_messaging.go` | 0 | Phase 11 broker edge — **the entire Phase 11 footprint is here, invisible to Table 1** |
 | **D** | 6 hunks (`handlers_broker_inbound.go` + `cmd/message.go` + 3× `handlers_agent_messaging.go`) | 0 | Phase 7 validation wired to broker-inbound, CLI, agent-message, and broadcast paths |
-| **E** | 1 hunk in `handlers_chat_v2.go` | 0 | Phase 8 read-switch |
+| **E** | 2 hunks (`handlers_chat_v2.go` + `server.go`) | 0 | Phase 8 read-switch + divergence board route |
+| **H** | 2 hunks (`server.go` + `route_metadata.go`) | 0 | Conversations resolve route + metadata |
 | **F** | 5 hunks in `cmd/message.go` | 0 | Phase 10 + S8: deprecation system, help text, conversation references, flag hiding |
-| **UNCLAIMED** | 18 hunks across 4 files | **7** | handlers_broker_inbound.go (3: #1322), handlers_agent_messaging.go (9: #1322×2, #1347×1, DEF-3×3, AC-33×1, DeriveKey×1, DEF-11×1), handlers_chat_v2.go (6: #1338×4, #1347×2), messagebroker.go (2: sig fix, DEF-3). Seven hunks are security reverts; eleven are forward changes (DEF-3, AC-33, DeriveKey, DEF-11, Phase 5 refactoring). |
-| **DO NOT CARRY** | 10 hunks across `messagebroker.go` (1) and `handlers_agent_messaging.go` (9) | **10** | B5 security reverts (conditional auth override, forced Broadcasted removal, authenticatedSender deletion, slug-based self-skip, untrusted DM key derivation in group message paths). |
+| **UNCLAIMED** | 22 hunks across 6 files | **7** | handlers_broker_inbound.go (3), handlers_agent_messaging.go (9), handlers_chat_v2.go (6), messagebroker.go (2), store.go (1: CountUnbackfilledMessages), message_store.go (1: CountUnbackfilledMessages). Seven hunks are security reverts; fifteen are forward changes. |
+| **DO NOT CARRY** | 53 hunks across 13 files | **53** | See "By PR reverted" below. |
+| **(cosmetic)** | 3 hunks across `models.go` (1) + `types.go` (1) + test infrastructure changes | 0 | Alignment/whitespace differences. Not functional. |
+| **(infrastructure)** | 5 hunks across test files | 0 | `newTestStore` signature changes. v2 test helper API. |
 
-**Total CONFIRMED revert-risk hunks: 22** across 4 files:
-- `messagebroker.go`: 1 (B5 self-skip)
-- `handlers_broker_inbound.go`: 3 (#1322 DM ownership — RESOLUTION documented)
-- `handlers_agent_messaging.go`: 10 (B5×7, #1322×2, #1347×1) — **highest density**
-- `handlers_chat_v2.go`: 8 (#1347×2, #1338×4, #1322×2)
+**Total CONFIRMED revert-risk hunks: 60** across 16 files.
 
-**By PR reverted:**
-- **#1343 (B5 security)**: 8 hunks across `messagebroker.go` (1) + `handlers_agent_messaging.go` (7)
-- **#1322 (DM ownership)**: 7 hunks across `handlers_broker_inbound.go` (3) + `handlers_agent_messaging.go` (2) + `handlers_chat_v2.go` (2)
-- **#1347 (ActionAttach)**: 3 hunks across `handlers_agent_messaging.go` (1) + `handlers_chat_v2.go` (2)
-- **#1338 (DEF-31)**: 4 hunks in `handlers_chat_v2.go`
+**By PR reverted (security/correctness):**
+- **#1343 (B5 security)**: 8 production hunks + 12 test hunks = 20 total
+  - Production: `messagebroker.go` (1), `handlers_agent_messaging.go` (7)
+  - Tests: `messagebroker_test.go` (1), `chat_notifications_test.go` (1), `handlers_agent_messaging_test.go` (1 — covering 8 deleted test functions)
+- **#1322 (DM ownership)**: 7 production hunks
+  - `handlers_broker_inbound.go` (3), `handlers_agent_messaging.go` (2), `handlers_chat_v2.go` (2)
+- **#1347 (ActionAttach)**: 3 production hunks
+  - `handlers_agent_messaging.go` (1), `handlers_chat_v2.go` (2)
+- **#1338 (DEF-31 defaultAgent)**: 4 production hunks in `handlers_chat_v2.go`
+- **#1349 (B6/B7/B9 EnsureParticipant)**: 1 hunk in `store.go`
+
+**By PR reverted (P2 feature system):**
+- **P2-A1 through A6 (#1324–#1334)**: 45 Permission metadata fields + routeGuard Decide path + classification changes + 5 test files = ~12 hunks
+- **P2-B1 through B3 (#1323–#1336)**: QuotaStore interface + models + routes + service + seeding = ~8 hunks
+- **P2-C1 (#1348)**: RoleStore extensions + role routes = ~3 hunks
+- **P2-D1 (#1346)**: auth/scopes endpoint + route metadata + test = ~3 hunks
+
+**Independent restoration units (not hunks):**
+
+| Unit | PR(s) | Files | Hunks | Complexity |
+|---|---|---|---|---|
+| **1. authenticatedSender** | B5 (#1343) | 2 (`handlers_agent_messaging.go`, `messagebroker.go`) | 8 production + 12 test | HIGH — restore function + rewire 7 call sites + restore 8 test functions |
+| **2. parseDMKeyIDs + DM ownership checks** | #1322 | 3 (`handlers_chat_v2.go`, `handlers_agent_messaging.go`, `handlers_broker_inbound.go`) | 5 | MEDIUM — restore function + 4 callers across 3 files |
+| **3. isDMParticipant kind-label** | #1322 | 1 (`handlers_chat_v2.go`) | 1 | LOW — one-line change |
+| **4. validateDefaultAgent** | #1338 | 1 (`handlers_chat_v2.go`) | 4 | LOW — restore function + 3 call sites, all in one file |
+| **5. ActionAttach checks** | #1347 | 2 (`handlers_agent_messaging.go`, `handlers_chat_v2.go`) | 3 | LOW — 3 independent authz calls |
+| **6. EnsureParticipant** | #1349 | 1 (`store.go`) | 1 | LOW — interface method |
+| **7. P2 authorization pipeline** | P2-A1–A6 | 5 (`route_metadata.go`, `route_classification_test.go`, `admin_maintenance_test.go`, `handlers_policies_test.go`, `skill_registry_handlers_test.go`) | ~12 | HIGH — routeGuard Decide path + 45 Permission fields + 5 test file reverts |
+| **8. P2 quota subsystem** | P2-B1–B3 | 4 (`store.go`, `models.go`, `composite.go`, `server.go`) | ~8 | HIGH — full feature (interface + models + implementation + routes + seeding) |
+| **9. P2 role management** | P2-C1 | 2 (`store.go`, `server.go`) | ~3 | MEDIUM — CRUD extensions + route registration |
+| **10. P2 UAT scopes** | P2-D1 | 2 (`server.go`, `route_metadata.go`) | ~3 | LOW — one endpoint + metadata |
 
 ## Key findings from Table 2
 
 1. **Phase 11 is entirely modifications.** 13 adapter files + 2 hunks in `handlers_broker_inbound.go` + 1 hunk in `handlers_agent_messaging.go` = the complete Phase 11 footprint. Table 1 has zero Phase 11 rows. Any manifest that counts only new files undercounts tranche C by its entire third phase.
 
-2. **Four security PRs are reverted by v2, not one.** The extension sweep found 22 CONFIRMED revert-risk hunks across 4 files, reverting 4 distinct PRs:
-   - **B5 (#1343)**: 8 hunks — unconditional auth override → conditional backfill, `authenticatedSender` deletion, forced-Broadcasted removal, slug-based self-skip. The conditional backfill is the root cause: every downstream use of SenderID inherits a potentially spoofed value. The `authenticatedSender` deletion is the structural enabler.
-   - **#1322**: 7 hunks — DM ownership checks removed from broker-inbound, agent-outbound, and agent-inbound paths; `parseDMKeyIDs` and `isDMParticipant` kind-label check deleted from chat-v2. The ownership checks and the utility functions they depend on form a single removal surface.
-   - **#1347**: 3 hunks — project authz (broadcast), ActionAttach (primary agent), ActionAttach (mentioned agents). All three are clean deletions — v2 simply lacks the authorization checks.
-   - **#1338 (DEF-31)**: 4 hunks — `validateDefaultAgent` function and its three call sites deleted. Correctness/isolation fix rather than security, but allows cross-project agent binding via UUID.
+2. **v2 reverts 6 distinct PR families, not one.** The full sweep found 60 CONFIRMED revert-risk hunks across 16 files. These fall into two categories:
+   - **Security/correctness reverts** (5 PRs, 24 production hunks + 12 test hunks): B5 (#1343), #1322 (DM ownership), #1347 (ActionAttach), #1338 (DEF-31 defaultAgent), #1349 (EnsureParticipant).
+   - **P2 feature reverts** (10 PRs, 24 hunks): The entire Permissions Phase 2 system — authorization pipeline (P2-A1–A6), quota subsystem (P2-B1–B3), role management (P2-C1), UAT scopes (P2-D1).
 
-3. **`handlers_agent_messaging.go` is the densest revert file.** 10 CONFIRMED hunks in one file, spanning all three security PRs. v2 adds significant Phase 11 functionality here (conversation resolution, DEF-3, DEF-11, AC-33), but every addition is interleaved with security control removals. A hunk-level decomposition is essential — the file cannot be carried or rejected as a unit.
+3. **10 independent restoration units, not 60 independent fixes.** The hunk count overstates the work. The authenticatedSender unit (1 function + 7 call sites + 8 test functions) is one act of restoration, not 20. The P2 quota subsystem (interface + models + store + routes + seeding) is one feature, not 8 hunks. See the restoration unit table for the actual work breakdown.
 
-4. **The #1322 revert is coupled to Phase 11 but resolvable.** In `handlers_broker_inbound.go`, the DM ownership check (ThreadID-based participant identity) and Phase 11 resolution (Surface/ExternalRef routing) protect different things. They are orthogonal and composable: keep #1322's early SenderID caching and ownership check, add Phase 11 resolution after it. The late `GetUserByEmail` fallback drops out as redundant. This remedy is documented in RESOLUTION notes on the affected rows.
+4. **The authenticatedSender unit is the structural root of B5.** All 8 B5 production hunks + 12 B5 test hunks stem from the deletion of one function. The function existed as the single point for deriving trusted sender identity. Without it, all call sites fall back to client-supplied SenderID — the pre-B5 vulnerability. Restoring B5 means restoring the function, rewiring 7 call sites, and restoring 8 test functions. This is one coordinated change, not a list of small fixes.
 
-5. **The B5 reverts are structurally coupled.** All 8 B5 hunks stem from the `authenticatedSender` function deletion. Without that function, all call sites fall back to client-supplied or conditionally-backfilled SenderID. Fixing B5 requires restoring `authenticatedSender` (or equivalent) AND changing all call sites back to unconditional auth derivation. This is not a one-hunk fix — it is a coordinated change across `handleAgentMessage`, `handleProjectBroadcast`, `handleGroupMessage`, and the broadcast self-skip logic.
+5. **The #1322 revert is coupled to Phase 11 but resolvable.** The DM ownership check (ThreadID-based participant identity) and Phase 11 resolution (Surface/ExternalRef routing) protect different things. They are orthogonal and composable: keep #1322's early SenderID caching and ownership check, add Phase 11 resolution after it. The late `GetUserByEmail` fallback drops out as redundant. Remedy documented in RESOLUTION notes on affected rows.
 
-6. **Resolvability is per-file, not general.** The `handlers_broker_inbound.go` #1322 reverts have a documented resolution (finding 4 above). The `handlers_agent_messaging.go` B5 reverts require restoring a function and rewiring 7 call sites — feasible but non-trivial. The `handlers_chat_v2.go` #1347 reverts are clean deletions where the fix is to keep the deleted code — simple individually but must be verified against v2's `ValidateLegacyMessage` replacement. Each file's resolvability stands on its own evidence.
+6. **The P2 series is a complete feature revert, not a security patch revert.** v2 predates the entire Permissions Phase 2 by design — P2 was not part of the messaging v2 scope. Carrying v2 would delete the P2 authorization pipeline, quota system, role management, and UAT scopes. The authorization impact is nuanced: without P2, RouteHubAdmin routes fall back to `requireAdmin` (coarser but not weaker — non-admin hub-admin-role users lose access entirely rather than getting scoped access).
 
-7. **`handlers_broker_inbound.go` spans four phases in one file.** Phase 11 (C), Phase 7 (D), Phase 5 dual-write (UNCLAIMED), and #1322 revert (CONFIRMED). A per-file tranche assignment is impossible; the file must be decomposed per hunk when cutting any tranche that touches it.
+7. **Test coverage for security fixes is deleted.** v2 removes 8 B5 test functions from `handlers_agent_messaging_test.go` (805 lines), 3 B5 tests from `chat_notifications_test.go` (150 lines), and 1 B5 test setup from `messagebroker_test.go`. These tests verify spoofed-sender prevention, forced-Broadcasted, self-skip-by-ID, and empty-SenderID warnings. The tranche C prohibition list must include preserving this test coverage — it is the safety net against future B5 regressions.
 
-8. **Multi-phase files now total 4.** `handlers_broker_inbound.go` (4 phases), `handlers_agent_messaging.go` (C+D+UNCLAIMED+DO-NOT-CARRY), `handlers_chat_v2.go` (E+UNCLAIMED), `cmd/message.go` (D+F). All require hunk-level decomposition.
+8. **Multi-phase files total 6.** `handlers_broker_inbound.go` (4 phases), `handlers_agent_messaging.go` (C+D+UNCLAIMED+DO-NOT-CARRY), `handlers_chat_v2.go` (E+UNCLAIMED+DO-NOT-CARRY), `server.go` (E+H+DO-NOT-CARRY), `route_metadata.go` (H+DO-NOT-CARRY), `cmd/message.go` (D+F). All require hunk-level decomposition.
 
-9. **Two forward changes have no tranche.** The `ResolveOrCreateDMConversation` signature fix and DEF-3 `CheckConversationConsistency` additions in `messagebroker.go` are absent from main, are not reverts (purely additive or a later refinement), and are claimed by no tranche. Both are Phase 5 territory that tranche B did not carry.
+9. **Two cosmetic-only files.** `models.go` and `types.go` show struct field alignment differences that are not functional. These are gofmt artifacts and do not affect behaviour.
 
-10. **22 CONFIRMED revert-risk hunks represent 22 separate acts of careful adjudication.** Each must be resolved with full understanding of both the security fix it reverts and the v2 functionality that replaces or removes it. The fact that individual reverts are resolvable does not reduce the total cost — it means the cost is bounded but real.
+10. **Completeness accounting.** 18 files with post-fork commits were identified (architect-corrected count). All 18 have been swept. Of these, 16 have at least one CONFIRMED revert-risk hunk. Two have NONE (`message_store.go` — only v2 additions; `types.go` — cosmetic only).
+
+11. **The prohibition list (for tranche C spec).** Since messaging-v2 is abandoned as a source branch, every CONFIRMED hunk above becomes a prohibition in the tranche C specification: "this implementation must not remove X." The full list of things tranche C must not remove:
+    - `authenticatedSender` function and all 7 call sites
+    - `parseDMKeyIDs` function and all DM ownership checks (4 callers, 3 files)
+    - `isDMParticipant` kind-label tightening
+    - `validateDefaultAgent` function and 3 call sites
+    - All 3 `ActionAttach` authorization checks (#1347)
+    - `EnsureParticipant` store method (#1349)
+    - `Broadcasted = true` server-side forcing
+    - B5 test coverage (8 test functions in handlers_agent_messaging_test.go, 3 in chat_notifications_test.go, 1 setup in messagebroker_test.go)
+    - P2 authorization pipeline (routeGuard Decide path + 45 Permission metadata entries)
+    - P2 quota subsystem (QuotaStore + models + routes + seeding)
+    - P2 role management (RoleStore extensions + routes)
+    - P2 UAT scopes (auth/scopes endpoint)
 
 ---
 
