@@ -8658,3 +8658,68 @@ divergence counters.
 
 Not escalated to the user: conditional on an unmeasured fact, with no S4 switch imminent. It gets
 escalated if em9 confirms reachability.
+
+---
+
+## §5di — #1349 reviewer findings: one real regression, one inherited absence
+
+Coordinator relayed two MEDIUM reviewer findings on PR #1349 (`efb70e04a`). I verified both in
+`/tmp/em6b` rather than relaying them — the §5db precedent (coordinator over-claimed a severity)
+makes independent verification cheap insurance.
+
+Confirmed the branch tip and the PR head are both `efb70e04a`. The worktree showed `504f30f40`
+because of a stale local checkout; `origin` is authoritative and unmoved. Worth noting because a
+worktree HEAD is not a branch tip and I have conflated them before.
+
+### Finding 1 — read-back on the existing-row path: REAL, and em6's
+
+`AddParticipant` populates `p.ID` and `p.JoinedAt` on **both** paths — the update path and the create
+path. `EnsureParticipant` populates them on the create path only: it returns early at
+`if existing != nil { return nil }`, leaving the caller's struct with a zero `ID` and zero `JoinedAt`.
+
+The defect is not the missing values in themselves; nothing reads them back today. It is
+**divergent post-conditions between two sibling methods with near-identical signatures.** A caller
+swapping `AddParticipant` for `EnsureParticipant` loses `p.ID` exactly in the steady state, because
+after the first message the row always exists. Green gates guarantee nothing here; the cost is paid
+by whoever writes the next caller, at a distance from the change that caused it.
+
+Dispatched to em6 as an **additive commit on the existing branch** — #1349 updates in place, so no
+force-push and no new compare URL. The user does not need to re-open anything.
+
+The instruction carries an explicit hazard warning: this is a **read-back, not an upsert.** The
+tempting "fix" is to turn the early return into an update, which would touch `left_at` and undo the
+entire point of B6. Copying DB state into the caller's struct is the whole change. Required test
+pins all three: returns nil, `left_at` unchanged in the DB, `p.ID`/`p.JoinedAt` match the existing
+row — plus a mutation deleting the two population lines.
+
+### Finding 2 — missing nil check on `p`: REAL but inherited, deliberately not fixed here
+
+`EnsureParticipant` dereferences `p.ConversationID` with no nil guard. So does `AddParticipant`,
+which is already merged. Every method in that file assumes a non-nil literal, and all live callers
+pass one.
+
+Declined for this PR, and the reason matters more than the verdict: **patching only the new method
+would falsely signal that `EnsureParticipant` is nil-safe while its sibling is not.** A partial
+safety property is worse than a uniformly absent one, because the next reader infers a guarantee
+from the presence of the check and does not re-verify the sibling. Same family as rule 102 — the
+misleading affordance costs more than the missing one. Tracked as a file-wide sweep in a later
+tranche.
+
+Neither finding blocks the merge. #1349 stays open and the em6 commit lands on it first.
+
+### Rule 107 (new)
+
+**Do not add a safety check to one of a pair of sibling methods.** Uniform absence is a convention a
+reader can learn; asymmetric presence is a guarantee a reader will infer and be wrong about. Either
+sweep the file or file the row — never patch the half you happen to be touching.
+
+### Also dispatched this cycle
+
+em9 unparked with the DEF-32 reachability question (read-only, conflicts with nothing, and does not
+touch option (i)). Scoped to one question: is `FederatedUserIdentity` reachable as the caller
+identity on the chat and agent-messaging paths, grounded in the middleware wiring rather than
+inferred from type names. Asked for an early yes if the answer is yes, because it changes what I
+escalate.
+
+Coordinator informed of both rulings and given the DEF-32 context, with the escalation condition
+stated explicitly: I escalate if em9 confirms reachability, not before.
