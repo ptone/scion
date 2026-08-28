@@ -1278,6 +1278,44 @@ em10 and every agent I dispatch hereafter.
       second look at the data, and second looks are where the interesting things are.
 
 
+65. **A reviewer may not downgrade a missing-test finding to FYI without first attempting the
+    mutation.** Issued 2026-08-28 00:55Z. em6's review of DEF-31 found the right thing —
+    *"integration test for send-time resolver guard independently of `validateDefaultAgent`"* — and
+    filed it **non-blocking FYI**. It is blocking, and the proof is mechanical: delete the guard, run
+    the suite.
+
+    - **Demonstrated, not argued.** I removed the resolver scoping block from
+      `handlers_chat_v2.go` and ran the DEF-31 suite against the mutated source, on **both** branch
+      tips (`f5a187a3` and `09e6f14d`): **11 assertions, all green**, including
+      `TestDEF31_MutationTest_LookupScoping` passing while the scoping it is named after was absent
+      from the file. Positive-controlled with `-v` to prove the tests ran rather than skipped.
+    - **The decision rule, which removes the judgement call entirely:** if the fix can be deleted and
+      the suite stays green, the missing test is blocking *by definition*. There is nothing left to
+      weigh. The check cost one edit and one `go test` — **cheaper than the conversation about whether
+      it matters.**
+    - **Why "all required tests pass" was true and not evidence.** Every DEF-31 test asserted on
+      `validateDefaultAgent`, the *ingress helper*. The mutation test's own comment gives it away:
+      *"validateDefaultAgent uses the same two-step lookup as the resolver."* It tests a **parallel
+      implementation** and infers the original. This is the AC-U-13 shape I caught in my own spec,
+      inverted: there I warned against fidelity to a defective source; here it is confidence borrowed
+      from a correct copy. **Both are the same error — asserting on something that is not the thing
+      that runs.**
+    - **`TestDEF31_Rebinding_AfterSoftDelete` is the sharpest case, because it built the right fixture
+      and walked away from it.** It writes a stale binding directly via `wcs.UpdateTopic`, bypassing
+      ingress — precisely the pre-existing-bad-row scenario — then comments *"we're testing the
+      resolver's defence too"* and calls `validateDefaultAgent` a third time. **A comment claiming
+      coverage is not coverage, and it is worse than silence: it tells the next reader to stop looking.**
+    - **Why FYI was wrong rather than merely conservative:** DEF-31 is **pre-existing on main**. Rows
+      already carry foreign-project and soft-deleted UUIDs in `default_agent`. Ingress validation
+      cannot reach a single one of them — they were written before the validator existed. The resolver
+      fix is the *only* thing protecting that population, and it was the one piece with no test.
+      **The downgrade landed exactly on the fix that protects existing data.**
+    - **Second severity misrating from the same manager on the same branch** (rule 62 was the first:
+      the `AddParticipant` guard justified as an authorization bypass). Different error, same shape —
+      **finding correct, rating wrong, rating decides the outcome.** Two instances is a process
+      problem, not two mistakes; I asked em6 to change how review runs, not just to fix this instance.
+
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -5165,3 +5203,63 @@ how it becomes permanent. Rewrote it instead. v6 changes:
 
 **A heartbeat is the instruction set that survives my own compaction.** A stale line in it is not a
 cosmetic problem; it is a wrong instruction issued to a future me with no memory of why it is wrong.
+
+## 5bq. 00:43-01:00Z — HEARTBEAT v6 run 1: DEF-31 reviewed and REJECTED for a compare URL
+
+**`upstream/main` moved to `ce9a7993`** (#1334, P2-A6 resource admin handlers). **`origin/main` still
+`53ec098f`** — the fork lags again, exactly as v6 item 1 now warns. Rule 60 is not a historical note;
+it re-fires every time main advances.
+
+**em6 delivered DEF-31 on `scion/ca-msg-em6-def31`,** two commits, base `53ec098f`:
+
+    f5a187a3  fix: validate defaultAgent field and scope resolver fallback (DEF-31)
+    09e6f14d  fix: unify validateDefaultAgent error messages to avoid leaking deletion state
+
+**The production change is correct on both doors** and I want that on the record separately from the
+rejection, because the rejection is entirely about tests:
+
+- Resolver `:990` — after the `GetAgent` fallback, rejects `ProjectID != projectID` or non-zero
+  `DeletedAt`. Correctly leaves `GetAgent`'s global signature alone and scopes at the **call site**,
+  as instructed; other callers depend on it.
+- Ingress — `validateDefaultAgent` at both `handleCreateThread` and `handleTopicPatch`.
+- `09e6f14d` is a **good unprompted catch by their reviewer**: the distinct *"has been deleted"* vs
+  *"not found"* messages were an existence oracle. Unified. Keep it.
+
+**Checks that CLEARED:**
+
+| Check | Result |
+|---|---|
+| Overlap with #1334 | **none** — `comm -12` empty, positive-controlled by self-intersect = 24 |
+| `merge-tree` vs `ce9a7993` | **clean** |
+| `Agent.DeletedAt` type | value `time.Time`, **`.IsZero()` cannot nil-panic** |
+| Rule 59 sibling sweep | **closed** — both request structs have exactly two fields, `Name` and `DefaultAgent`, both now validated. No unwarned siblings. |
+
+**BLOCKING FINDING — the load-bearing fix has zero coverage.** I deleted the resolver scoping block
+and ran the suite against the mutated source, on **both tips**:
+
+    ok  github.com/GoogleCloudPlatform/scion/pkg/hub  0.583s   (f5a187a3)
+    ok  github.com/GoogleCloudPlatform/scion/pkg/hub  0.588s   (09e6f14d)
+    11 assertions, 0 failures, including TestDEF31_MutationTest_LookupScoping
+
+Positive-controlled with `-v`: the tests genuinely ran. **em6's claim "all 5 required tests pass" is
+true and is not evidence, because they also all pass with the fix deleted.** Rule 65.
+
+**Their own reviewer found it and downgraded it** — *"integration test for send-time resolver guard
+independently of validateDefaultAgent → noted as FYI, non-blocking."* This is the **second severity
+misrating from em6 on this branch** (rule 62 was the first). I asked for a process change, not an
+instance fix: **no missing-test finding may be downgraded to FYI until the mutation has been
+attempted.**
+
+**Non-blocking item I found:** whitespace-only `defaultAgent` diverges between endpoints. CreateThread
+trims *inside* the `!= ""` check, so `"   "` survives to validation and 400s with a confusing
+`defaultAgent "" not found`; TopicPatch trims *first*, so `"   "` reads as a clear and 200s. Same input,
+opposite outcomes. Told them to make both behave as PATCH does.
+
+**No compare URL sent.** The user authorised one *"when clean"* and it is not clean. Sending it would
+have converted my gate into a rubber stamp on the first branch that reached it.
+
+**em9 and em10 both parked WITHOUT answering the 00:16Z forced choice**, and neither branch moved
+(`25fad0a2`, `2ba538c0`). Re-pinged both at 00:47Z with the A/B/C/D form and their outstanding items
+restated. **The forced-choice diagnostic worked on 1 of 3 — that is data about the diagnostic, not
+just about the agents,** and it is the second signal in two hours that my read on manager state is
+worse than I assume. Still holding the reporting-protocol rewrite until em9 and em10 answer.
