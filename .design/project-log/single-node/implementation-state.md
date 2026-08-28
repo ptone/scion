@@ -14099,3 +14099,39 @@ reachable, but only as the distinct **cloudrun-instances** tier (`factory.go:96-
 correct the shared filter — which also changes the multi-node cloudrun tier — or leave the broken
 kubernetes option in the menu. Recommended (a). Also re-raised task #88's upstream PR, and repeated the
 egress retraction I owed him in plain terms.
+
+### §35.90 — Delta landed and re-reviewed; one claim in the developer's report does not survive reading
+
+03:31. Branch `scion/task-92-runtime-profile-fix` moved `54cc98b` -> `1c22442`, **one additive commit**,
+6 files, +348/-8. **The protocol ran in the right order for the first time:** rev2's verdict landed,
+*then* the branch moved, and rev2 was idle throughout. No reviewer was under it.
+
+**I verified the delta's shape myself before re-pointing the reviewer** — file list matches the
+developer's report exactly, and `pkg/runtimebroker/handlers.go` **is not touched**, so Shape B was
+correctly withheld. Checked that specifically rather than trusting the sentence that said so.
+
+**THE CLAIM I DO NOT BELIEVE.** The developer describes its O4 fix as a test that *"runs InitMachine
+WITHOUT sandbox detection, asserts `ResolveRuntime("")=="docker"` — fails when the fix is reverted."*
+**Reverting the fix makes InitMachine yield docker in BOTH environments.** A test asserting docker in
+the no-sandbox environment then still gets docker and **still passes**.
+
+If that reading is right, **the fix for O4 reintroduces O4** — a guard that survives the revert it
+claims to catch — and the real revert guard is R1, which asserts cloudrun-sandbox *with* detection.
+
+I did not open the file and said so. Routed it to rev2 to **measure, not adjudicate**: revert the fix,
+run the RevertGuard test, and if it stays green O4 is not discharged. **Rule 4** — a negative assertion
+is not a pin until it has been observed positive. This is the third time on this project that a test
+named for a property has not had that property.
+
+**Also asked rev2 to verify the restored instrument is FAITHFUL, not merely present.** The three Shape B
+facts were re-created after I caused the original to be deleted; facts re-asserted from memory are
+precisely what rules 17 and 21 exist to stop.
+
+**Queued the ptone decision in `review-queue.md`** rather than sending a second message. No reply in
+eight minutes and no reliable way to test whether he is awake. The 03:23 send was still correct — it
+asks one thing only he can decide — but the queue is where it survives if the message is missed.
+
+**Recorded against myself:** the scheduler says check whether ptone is awake *before* choosing how to
+reach him. **I sent first and checked after.** The send happened to meet the interrupt bar, so the
+outcome was right and the order was wrong — which is exactly the shape of error I flagged to the
+coordinator earlier tonight about a correct decision from a wrong argument.

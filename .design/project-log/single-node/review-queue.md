@@ -1324,3 +1324,40 @@ Nothing downstream depends on this — no ratio was published, and the tutorial 
 counts and the create-latency rule. I am flagging it because you read the earlier claim.
 
 **Nothing here is a decision for you.** D5 and D7 remain the two that are.
+
+---
+
+## OPEN DECISION FOR PTONE — task #92 / #93, the shared profile filter
+
+Raised 03:23 by message. Queued here in case that message was missed. **This is the only item in the
+project currently waiting on ptone that is a genuine product decision rather than a merge action.**
+
+**Context.** A fresh single-node deploy pre-selects runtime profile `remote (kubernetes)`, which cannot
+run an agent on this tier. §1 step 5 is blocked. Root cause: `GetRuntime` substitutes docker ->
+cloudrun-sandbox at the runtime layer and never writes it back to the profile layer; `buildInfoProfiles`
+then drops the correct profile and keeps the wrong one, and the UI auto-selects it because it is the
+only one left.
+
+**The fix already built and reviewed (Shape A) makes the DEFAULT correct.** rev2 verified it by
+execution, including the mechanism that carries it: koanf loads embedded defaults first and the seeded
+template after, so the scalar `active_profile` is overwritten while the `profiles` map merges.
+
+**What it does NOT do: remove the broken option from the menu.** An operator who selects
+`remote (kubernetes)` still gets a dead agent.
+
+**THE DECISION.** Removing it means correcting a shared predicate in `buildInfoProfiles` —
+`isLocalOnlyRuntime` is a negative predicate standing in for a positive one, so kubernetes survives
+because it is *not local-only*, not because it works here. The replacement asks "can this broker serve
+this profile" instead.
+
+- **(a) Correct the filter.** Single-node shows one correct option and auto-selects it. **Also changes
+  the multi-node Cloud Run tier**, which shows the same broken kubernetes option today, and fixes task
+  #94 (cloudrun-instances) as a side effect.
+- **(b) Leave it.** Only the single-node default becomes correct. The wrong option stays selectable on
+  both tiers.
+
+**Architect recommends (a).** Not started, and will not be started without an answer — it touches a tier
+this project does not own.
+
+**Cost of waiting:** none to §1. Shape A lands independently and unblocks the operator path. (b) is
+survivable; it just leaves a foot-gun in the UI.
