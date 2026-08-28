@@ -49,11 +49,34 @@ by every change in this tranche:
    skips conversation resolution — the message still delivers via the legacy
    path.
 
-4. **Marker count gates:** After implementation, the following counts on
-   main must be preserved exactly:
-   - `authenticatedSender` — 6 references in handlers_agent_messaging.go
-   - `validateDefaultAgent` — 6 references in handlers_chat_v2.go
-   - `ActionAttach` authorization checks — 3 total (1 in handlers_agent_messaging.go, 2 in handlers_chat_v2.go)
+4. **Marker count gates:** After implementation, the following per-file
+   counts must be preserved exactly. Each gate enumerates the specific
+   call sites it protects — a reviewer checks the sites, not just the
+   number.
+
+   **authenticatedSender — 6 in handlers_agent_messaging.go:**
+   1. Line 787: `handleAgentMessage` DM resolution — derives sender for `ResolveOrCreateDMConversation`
+   2. Line 1054: `handleGroupMessage` agent-set — derives sender for per-agent DM resolution
+   3. Line 1177: `handleGroupMessage` user-set — derives sender for per-user DM resolution
+   4. Line 1322: `handleProjectBroadcast` — derives sender for broadcast self-skip
+   5. Line 1635: Doc comment on function definition
+   6. Line 1643: Function definition (`func authenticatedSender`)
+
+   **validateDefaultAgent — 6 in handlers_chat_v2.go:**
+   1. Line 450: Doc comment ("single source of truth — DEF-31")
+   2. Line 455: Call in `handleCreateThread` — validates default agent on topic creation
+   3. Line 594: Doc comment in `handleTopicPatch`
+   4. Line 598: Call in `handleTopicPatch` — validates default agent on topic update
+   5. Line 678: Doc comment on function definition
+   6. Line 685: Function definition (`func validateDefaultAgent`)
+
+   **ActionAttach — 1 in handlers_agent_messaging.go:**
+   1. Line 1276: `handleProjectBroadcast` — user callers need ActionAttach on project to broadcast. Without it, any authenticated user can broadcast to any project.
+
+   **ActionAttach — 3 in handlers_chat_v2.go:**
+   1. Line 1120: `s.authorize(w, r, agentResource(primaryAgent), ActionAttach)` — authorization on primary agent before dispatch in `sendAgentRouted`. Without it, format validation is the only gate and format validation is not authorization.
+   2. Line 1214: `s.authzService.CheckAccess(ctx, user, agentResource(mentionAgent), ActionAttach)` — per-mention authorization in `sendAgentRouted` fan-out. Without it, mentions dispatch unconditionally to agents the user may not be authorized to interact with.
+   3. Line 1216: `logAuthzDenial(r, user, agentResource(mentionAgent), ActionAttach, decision.Reason)` — denial audit logging for the line 1214 check.
 
 ### What already exists on main
 
@@ -284,19 +307,19 @@ for DM key derivation, never `structuredMsg.SenderID` or `structuredMsg.Sender`.
 The DEF-11 pre-resolved path is the ONE exception — it skips key derivation
 entirely because the ConversationID is already resolved.
 
-**Gate:** After implementation, `grep -c authenticatedSender handlers_agent_messaging.go`
-must return exactly 6. New code must not introduce additional references
-(the existing sites already cover all key-derivation paths). If a new
-dual-write site is added, it must route through an existing
+**Gate:** The 6 enumerated sites in the preamble (§Security invariants,
+item 4) must all be present after implementation. New code must not introduce
+additional references (the existing sites already cover all key-derivation
+paths). If a new dual-write site is added, it must route through an existing
 `authenticatedSender` call site, not add a new one.
 
 #### ActionAttach (#1347)
 
 - **Line 1276:** `handleProjectBroadcast` — user callers need `ActionAttach`
-  on the project to broadcast. MUST REMAIN.
+  on the project to broadcast. Without this check, any authenticated user
+  can broadcast to any project. MUST REMAIN.
 
-**Gate:** After implementation, `grep -c ActionAttach handlers_agent_messaging.go`
-must return exactly 1.
+**Gate:** The 1 enumerated site in the preamble must be present.
 
 #### DM ownership (#1322)
 
@@ -340,8 +363,8 @@ based checks. No additional DM ownership logic is needed — the
 | AC-C7 | Surface+ExternalRef on MessageRequest resolves or creates conversation | Unit test: POST with Surface+ExternalRef; verify conversation exists in store with correct fields |
 | AC-C8 | ExternalRef without Surface returns 400 | Unit test: POST with ExternalRef but no Surface; verify 400 |
 | AC-C9 | Cross-project mentions are rejected | Unit test: create agents in different projects, POST with cross-project mention; verify 400 |
-| AC-C10 | `authenticatedSender` count remains 6 | `grep -c authenticatedSender pkg/hub/handlers_agent_messaging.go` = 6 |
-| AC-C11 | `ActionAttach` count remains 1 in this file | `grep -c ActionAttach pkg/hub/handlers_agent_messaging.go` = 1 |
+| AC-C10 | All 6 `authenticatedSender` sites present (see preamble §4 for enumeration) | Verify each of the 4 call sites (lines 787, 1054, 1177, 1322) + definition + doc comment are present |
+| AC-C11 | `ActionAttach` on project broadcast present (line 1276) | `grep -n ActionAttach pkg/hub/handlers_agent_messaging.go` shows the broadcast authorization site |
 | AC-C12 | `CheckConversationConsistency` called at 4 dual-write sites | `grep -c CheckConversationConsistency pkg/hub/handlers_agent_messaging.go` ≥ 4 |
 
 ---
@@ -670,21 +693,31 @@ The file currently has 6 references to `validateDefaultAgent`:
 - **Line 678:** Doc comment on function definition.
 - **Line 685:** Function definition.
 
-**Gate:** After implementation, `grep -c validateDefaultAgent handlers_chat_v2.go`
-must return exactly 6.
+**Gate:** The 6 enumerated sites in the preamble (§Security invariants,
+item 4) must all be present after implementation. Without `validateDefaultAgent`,
+`handleCreateThread` and `handleTopicPatch` accept any string as
+`defaultAgent` — including UUIDs naming agents in other projects or deleted
+agents, breaking tenant isolation.
 
 #### ActionAttach (#1347)
 
-The file currently has 3 references to `ActionAttach`:
-- **Line 1120:** `s.authorize(w, r, agentResource(primaryAgent), ActionAttach)` —
-  primary agent authorization in `sendAgentRouted`.
-- **Line 1214:** `s.authzService.CheckAccess(ctx, user, agentResource(mentionAgent), ActionAttach)` —
-  mention agent authorization in `sendAgentRouted`.
-- **Line 1216:** `logAuthzDenial(r, user, agentResource(mentionAgent), ActionAttach, decision.Reason)` —
-  denial logging for mention authorization.
+The file currently has 3 references to `ActionAttach`, each guarding a
+distinct authorization decision:
 
-**Gate:** After implementation, `grep -c ActionAttach handlers_chat_v2.go`
-must return exactly 3.
+- **Line 1120:** `s.authorize(w, r, agentResource(primaryAgent), ActionAttach)` —
+  hard authorization check on the primary agent before dispatch in
+  `sendAgentRouted`. Without it, the only gate is format validation, and
+  format validation is not authorization.
+- **Line 1214:** `s.authzService.CheckAccess(ctx, user, agentResource(mentionAgent), ActionAttach)` —
+  per-mention soft authorization check in `sendAgentRouted` fan-out. Without
+  it, mentions dispatch unconditionally to agents the user may not be
+  authorized to interact with.
+- **Line 1216:** `logAuthzDenial(r, user, agentResource(mentionAgent), ActionAttach, decision.Reason)` —
+  denial audit logging for the line 1214 check. Removing this line alone
+  would not break authorization but would eliminate the audit trail for
+  mention denials.
+
+**Gate:** The 3 enumerated sites in the preamble must all be present.
 
 #### parseDMKeyIDs / isDMParticipant (#1322)
 
@@ -707,6 +740,17 @@ needs, where a parse failure should fall back to legacy, not fail the request).
 3. **Must NOT delete `isDMParticipant` kind-label check or `parseDMKeyIDs`.**
    These are #1322's DM ownership guards. V2 omitted them.
 
+   **Specific detail on isDMParticipant (architect flag — standing
+   prohibition):** Main's `isDMParticipant` checks `parts[1] == "user"`
+   before matching a userID against the key — it only recognizes the `user`
+   kind-label at the expected position. V2 removed this check and matches
+   the userID against ANY slot in the key, which means any principal whose
+   ID appears anywhere in a DM key string passes the participation check.
+   This is exactly the loosening that is forbidden on this project. The
+   `parts[1] == "user"` gate is small (one conditional) and load-bearing
+   (it prevents cross-kind impersonation in DM access checks). Do not
+   weaken it.
+
 4. **Must NOT make the read-switch fallback path a hard error.** When a
    conversation cannot be resolved for reads, fall back to legacy
    Channel+ThreadID query. Never return an empty result or 500 because the
@@ -725,10 +769,10 @@ needs, where a parse failure should fall back to legacy, not fail the request).
 | AC-V3 | Read-switch ON with missing conversation falls back to legacy + increments Fallback | Unit test: set switch ON with no conversation; verify legacy filter used and `DivergenceMetrics.Fallbacks()` incremented |
 | AC-V4 | ValidateLegacyMessage in sendAgentRouted rejects invalid messages | Unit test: send message with empty Msg and no attachments; verify 400 |
 | AC-V5 | Attachment-only messages get synthetic body and pass validation | Unit test: send message with empty Msg but with attachments; verify 200 and persisted Msg = "[attachment]" |
-| AC-V6 | `validateDefaultAgent` count remains 6 | `grep -c validateDefaultAgent pkg/hub/handlers_chat_v2.go` = 6 |
-| AC-V7 | `ActionAttach` count remains 3 | `grep -c ActionAttach pkg/hub/handlers_chat_v2.go` = 3 |
-| AC-V8 | `parseDMKeyIDs` still present | `grep -c parseDMKeyIDs pkg/hub/handlers_chat_v2.go` ≥ 1 |
-| AC-V9 | `isDMParticipant` still present | `grep -c isDMParticipant pkg/hub/handlers_chat_v2.go` ≥ 1 |
+| AC-V6 | All 6 `validateDefaultAgent` sites present (see preamble §4) | Verify definition (line 685), 2 call sites (lines 455, 598), and 3 doc comments (lines 450, 594, 678) |
+| AC-V7 | All 3 `ActionAttach` sites present (see preamble §4) | Verify primary agent check (line 1120), per-mention check (line 1214), and denial log (line 1216) |
+| AC-V8 | `parseDMKeyIDs` still present | `grep -n parseDMKeyIDs pkg/hub/handlers_chat_v2.go` shows function definition |
+| AC-V9 | `isDMParticipant` still present with `parts[1]=="user"` kind-label gate | `grep -A5 isDMParticipant pkg/hub/handlers_chat_v2.go` shows kind-label check is intact |
 | AC-V10 | Read-switch thread path resolves via topic lookup | Unit test: create thread conversation + topic; verify ConversationID filter used |
 
 ---
@@ -766,16 +810,66 @@ This ordering prevents orphaned conversation rows from rejected messages.
 
 ---
 
-## Marker count summary
+## Restoration unit summary
 
-| Marker | File | Required count | Purpose |
-|--------|------|----------------|---------|
-| `authenticatedSender` | handlers_agent_messaging.go | 6 | G-1 security — sender from auth context |
-| `validateDefaultAgent` | handlers_chat_v2.go | 6 | DEF-31 — default agent validation |
-| `ActionAttach` | handlers_agent_messaging.go | 1 | #1347 — broadcast authorization |
-| `ActionAttach` | handlers_chat_v2.go | 3 | #1347 — agent attach authorization |
-| `parseDMKeyIDs` | handlers_chat_v2.go | ≥ 1 | #1322 — DM key parsing |
-| `isDMParticipant` | handlers_chat_v2.go | ≥ 1 | #1322 — DM participation check |
+The following security fixtures must survive tranche C unchanged. Each is
+an independent restoration unit from em9's manifest (TRANCHE-MANIFEST.md v5,
+SHA eeb564cb). The units are ordered by complexity within this spec's scope.
+For the full 10-unit list (including P2 units outside these 4 files), see the
+manifest.
+
+### Unit 1: authenticatedSender (B5, #1343) — HIGH
+
+Single point for deriving trusted sender identity. Without it, all DM key
+derivation uses client-supplied SenderID — the pre-B5 vulnerability.
+
+**6 sites in handlers_agent_messaging.go** (see preamble §4 for enumeration):
+4 call sites (lines 787, 1054, 1177, 1322) + doc comment (line 1635) +
+function definition (line 1643). All must move together; removing any call
+site means the corresponding DM key derivation falls back to spoofable
+payload fields.
+
+### Unit 2: parseDMKeyIDs + DM ownership checks (#1322) — MEDIUM
+
+1 function (`parseDMKeyIDs` in handlers_chat_v2.go) + 4 callers across 3
+files (handlers_broker_inbound.go, handlers_agent_messaging.go ×2,
+handlers_chat_v2.go). Resolution: keep #1322 ownership check, add Phase 11
+resolution after it — they protect different things (ThreadID participant
+identity vs Surface/ExternalRef routing).
+
+### Unit 3: isDMParticipant kind-label tightening (#1322) — LOW, LOAD-BEARING
+
+1 hunk in handlers_chat_v2.go. Main checks `parts[1] == "user"` before
+matching; v2 matches any slot. **Standing prohibition:** the always-fail
+behaviour on non-UUID principals is fail-closed by accident. v2's any-slot
+match is the loosening that is forbidden on this project. Small and
+load-bearing.
+
+### Unit 4: validateDefaultAgent (#1338, DEF-31) — LOW, LOAD-BEARING
+
+1 function + 3 call sites, all in handlers_chat_v2.go. Without it,
+`handleCreateThread` and `handleTopicPatch` accept any string as
+`defaultAgent` — including UUIDs naming agents in other projects or deleted
+agents, breaking tenant isolation.
+
+### Unit 5: ActionAttach checks (#1347) — LOW, LOAD-BEARING
+
+3 independent authorization calls across 2 files:
+- (a) Project authz in `handleProjectBroadcast` (handlers_agent_messaging.go
+  line 1276) — any authenticated user can broadcast to any project without it.
+- (b) Primary agent ActionAttach in `sendAgentRouted` (handlers_chat_v2.go
+  line 1120) — format validation is not authorization.
+- (c) Per-mention ActionAttach in `sendAgentRouted` fan-out
+  (handlers_chat_v2.go line 1214) — mentions dispatch unconditionally without
+  it.
+
+### Unit 6: EnsureParticipant (#1349, B6/B7/B9)
+
+1 interface method in store.go `ConversationStore`. Idempotent participant-add
+that v2 lacks (v2 only has `AddParticipant` which fails on duplicates).
+Outside the 4 SUBSTANTIVE files but load-bearing for any code that calls
+conversation resolution — the resolution functions on main use
+`EnsureParticipant`, not `AddParticipant`.
 
 ---
 
