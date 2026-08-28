@@ -9772,3 +9772,139 @@ report and send it; park and emit the park), and succeeded immediately at a stri
 to run verbatim. That is not an agent that ignores instructions — it is an agent that loses
 work at every boundary it has to construct the crossing for. Rule 130 is the right response and
 this is the evidence for it: **hand over the exact command, not the intent.**
+
+## §5dv. 14:43 sweep — #1349 MERGED. Two ledger strikes. A B5 security test found red on main.
+
+The busiest sweep of the project. Four things landed inside twenty minutes.
+
+### 1. PR #1349 merged — verified by content, not by the merge button
+
+Coordinator reported the merge at 14:44Z. Confirmed independently on `upstream/main`:
+`checkDMParticipantKey` at `pkg/store/entadapter/conversation_store.go:525`, routed through
+**both** `AddParticipant` (`:544`) and `EnsureParticipant` (`:635`). `ParticipantEnsurer`
+appears 5× in `pkg/messaging/conversation.go`. Squash merge `e8c7c40a9`, 8 files, +581/-50.
+
+Main has since moved twice more — `19e32902e` → `31c488018` (#1350 macOS bash, #1351 docs,
+#1352 cloudrun seed). None touch messaging.
+
+### 2. Ledger walk — TWO STRIKES, one shape-change, one confirmed
+
+The heartbeat has told me three sweeps running to walk the rows "expecting to strike one out",
+and three sweeps running I answered "all downstream of #1349" from memory. That was a
+reasonable summary the first time and a lazy one by the third: **rows filed weeks ago against
+SHAs that have since moved are not "unmoved", they are unexamined.** Walked all four properly
+against a clean `upstream/main` worktree.
+
+**DEF-16 — STRUCK (FIXED).** Filed as: the two ingress handlers perform dual-write and
+validation in *opposite* orders, so a request rejected by validation still leaves a conversation
+row behind. On current main both handlers are **validate → write**.
+`handleAgentOutboundMessage` first resolves at `:256`, with ten rejecting validations all
+*before* it (`:64` Forbidden, `:122` invalid DM key, `:184` DM key doesn't match sender, …) and
+nothing after `:256` returning 4xx. `handleAgentMessage` first resolves at `:783`, validations
+at `:529`/`:589`/`:596`/`:631`/`:689-723`. The asymmetry the defect names is gone.
+
+**DEF-14 — STRUCK (FIXED), by a different mechanism than the one it pointed at.** Filed as:
+`validDMKey` checks key *format* but never that the authenticated sender is named in the key.
+`validDMKey` still fires at all three sites and still only 400s on malformed keys — but a
+separate membership check now sits downstream in **all three** ingress paths using
+`parseDMKeyIDs`: `handlers_agent_messaging.go:182-187` and `:623-634` (the latter explicitly
+comparing against the *authenticated* user, not the client-supplied `SenderID`), and
+`handlers_broker_inbound.go:163-171`. The gap closed; the fix did not arrive where the defect
+predicted it would.
+
+Related and worth pinning: `isDMParticipant` is **not** reachable from either ingress file. Its
+eight callers are all in `handlers_chat_v2.go` (`:797, :1658, :1842, :2083, :2240, :2754, :2935`,
+def at `:3021`). It guards chat-v2 only. My §5dr note treating it as a general membership gate
+was too broad.
+
+**DEF-10 — CHANGED SHAPE, half struck.** `createDirectConversation` **no longer exists anywhere
+in the tree**; the creation path is an inline upsert at `resolve.go:362-369` that omits
+`ProjectID` and cites the defect by name: `// No ProjectID — DMs are global, fixing DEF-10`.
+Same at `:406`/`:413` for email DMs. **But `resolveAgentDM` still hard-requires a project**
+(`resolve.go:336-341`, `return ... Reason: "no-shared-project"`). Note the doc comment at
+`:332-334` now claims the project is used "ONLY to resolve the agent slug" — the comment
+describes an intent the guard does not implement. **A comment that has drifted from its guard is
+worse than no comment: it will be read as a spec by the next person to touch it.** Row stays
+open, narrowed to the one guard.
+
+**DEF-9 — STILL TRUE, and now properly controlled.** `AddAddressee`: interface decl
+(`store.go:1653`), ent adapter (`conversation_store.go:707`), 6 test references,
+**0 production callers**. `ListAddressees` likewise — `message_addressees` is neither written
+nor read in production. `DefaultAgentID` write sites **shrank 3 → 1** (only `backfill.go:304`
+survives; the two `pkg/hub` sites are gone), read sites in routing/delivery **0**.
+
+The positive controls are what make those zeros trustworthy (heartbeat item 6). Identical
+methodology against `AddParticipant` finds **5** production callers (`dm_migration.go:208,:481`,
+`backfill.go:320`, `resolve.go:482`, `conversation.go:122`); against `ExternalRef` it reaches
+deep into routing and delivery. The instrument finds callers when callers exist. **The control
+also produced a finding rather than merely validating one** — `DefaultAgentID` shrinking from
+three write sites to one means the field is being quietly abandoned, which is a different and
+more interesting fact than "it has no readers."
+
+### 3. A B5 security test is RED on main, and CI cannot see it
+
+Ran the **untagged** `pkg/hub` suite on em10's merged tree — the thing CI never does. Two
+failures: the known `TestTemplateResource_UATConfinement`, and a new one,
+`TestBroadcast_B5F1a_SenderOverrideStoresAuthIdentity`.
+
+Attribution, by control rather than by inference:
+
+| tree | result |
+|---|---|
+| em10 branch merged with main | FAIL |
+| clean `upstream/main` `19e32902e` | **FAIL** |
+| `137e17637` — the commit *before* #1347 | **PASS** |
+
+So it is not em10's, and it is #1347 ("add project authz to broadcast"). Second control:
+all four sibling B5 tests pass, and #1347's **own** authz tests pass
+(`TestBroadcast_UserWithoutProjectMembership`, `TestBroadcast_UserWithProjectAttach`). Exactly
+one test broke.
+
+**Diagnosis: fixture rot, not a production regression.** B5F1a builds an "attacker" user with
+*no project membership*, has them POST a broadcast spoofing a victim's `SenderID`, and asserts
+the *stored* row carries the attacker's ID. #1347 now 403s that caller before `broadcastDirect`
+runs, so the test dies at `no messages stored for agent — broadcastDirect did not run`
+(`handlers_agent_messaging_test.go:799,807`). **The security fix made the test's precondition
+unreachable.**
+
+The cost is not the red tick. It is that the B5 sender-override protection has **lost its
+dedicated test** while appearing merely to be failing. The repaired fixture should grant the
+attacker project attach — an *authorised member spoofing someone else*, which is both the real
+threat model and a stronger test than the original.
+
+This is heartbeat rule 65 arriving from an unexpected direction. The documented form is "delete
+the fix and the suite stays green." This is: **the guard in front of the fix got stronger, and
+the test can no longer reach the fix at all.** Coverage was destroyed by an improvement.
+
+Escalated to the user (1694 runes) with the attribution, the diagnosis, the clearances for
+#1349 and em10, and exactly one question: relay to auth-refactor-lead or own it here.
+
+**Deliberately not re-opened:** the CI question. §5cq holds. I said so in the message —
+"this is the concrete case, not a new ask" — because the temptation to re-litigate an
+unanswered decision while holding fresh evidence for it is exactly how a standing agreement
+gets eroded. The evidence goes in the report; the ask does not come back.
+
+### 4. Sub-tranche B2/B1/B14 dispatched to em6
+
+Held since §5cm, gated on #1349 *merging* rather than opening. Dispatched with the full brief
+by reference (scratchpad path, not pasted) plus three additions the brief lacked: the exact
+name and location of the now-merged shared predicate so B1 routes through it instead of copying
+it; the `isDMParticipant` booby trap with the standing ruling attached; and an explicit warning
+that CI will not check their work, naming the two pre-existing main failures so a third is
+identifiable as theirs. Park command issued literally, per rule 130.
+
+### Rule 131
+
+**A defect filed against a commit is a claim about that commit, and decays into a rumour as
+main moves.** Re-verify held rows against current main before reporting them as held — two of
+four had been fixed, and one was fixed by a mechanism the filing did not predict, which means
+even a correct-sounding "still open" would have been wrong about *why*.
+
+### Rule 132
+
+**A test that fails because a guard in front of it got stronger has not merely broken — it has
+stopped testing its subject.** Triage every red test by asking whether it still *reaches* the
+code under test. A test failing at its assertion is a signal about the subject; a test failing
+at its setup is a silent loss of coverage wearing a failure's clothing, and fixing the fixture
+to make it green again is only correct if the repaired fixture still exercises the original
+threat.
