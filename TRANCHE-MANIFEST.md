@@ -31,6 +31,11 @@ redefines C as "§2.6.4 phases 1–4 + the DEF-20/21/22/23 chain + DEF-27". §5c
 "8 cmd" adds). The three definitions are never reconciled. This manifest uses the **line 1778
 definition** (phase-level) as the authoritative source, and flags conflicts below.
 
+**Label disambiguation.** Table 1 uses NONE to mean "no tranche claims this file." Table 2
+uses UNCLAIMED to mean "this change is absent from main but no tranche names it." Both indicate
+a gap in the tranche plan, but Table 1 NONE is about whole files and Table 2 UNCLAIMED is about
+individual hunks within a file that may have other hunks correctly assigned.
+
 ---
 
 ## Table 1 — New files (32 code + 1 non-code + 44 docs)
@@ -147,78 +152,106 @@ Instrument: `git diff upstream/main origin/scion/messaging-v2 -- <file>`, conten
 against `upstream/main` @ `31c48801`. Tranche B landed as `b3562fb1` (#1343).
 Changes are decomposed per behavioural hunk where a file spans multiple phases.
 
+**REVERT-RISK method.** For each file, ran
+`git log --since=2026-08-27T11:05:00 --format='%h %s' upstream/main -- <file>`.
+Merge-base is `6268bac4` (2026-08-27 11:05Z). Any commit main gained after that timestamp
+on a file v2 also modifies is a revert candidate. Each such commit was read and its hunks
+compared to v2's version of the same lines. CONFIRMED = v2 demonstrably predates the change
+and would undo it. NONE = no post-fork commits touch this file, or the post-fork changes
+are in areas v2 does not modify.
+
+**Post-fork commits found (2 files, 3 commits):**
+- `pkg/hub/handlers_broker_inbound.go`: `b453a685` (#1322, "validate DM key ownership at
+  message ingress — prevent cross-project injection", 2026-08-27 13:16Z)
+- `pkg/hub/messagebroker.go`: `b3562fb1` (#1343, tranche B, 2026-08-28 07:40Z)
+- No post-fork commits: all 13 extras adapter files, `cmd/message.go`
+
 ### Extras adapters (Phase 11 — all absent from main, all tranche C)
 
-| file | v2 delta | on main? | tranche | confidence | notes |
-|---|---|---|---|---|---|
-| `extras/scion-discord/internal/discord/broker.go` | +28: adds `Surface`/`ExternalRef`/`ParentRef` to `inboundPayload`; derives fields from `discord_guild_id` metadata in `deliverInbound` | NO | C | HIGH | Phase 11 broker edge. Comment says "Phase 11" explicitly. |
-| `extras/scion-discord/internal/discord/broker_test.go` | +85: `TestDeliverInbound_ConversationFields` | NO | C | HIGH | Phase 11 test |
-| `extras/scion-slack/internal/slack/broker.go` | +36: same pattern — `channelID:threadTS` as `ExternalRef`, channel as `ParentRef` | NO | C | HIGH | Phase 11 broker edge |
-| `extras/scion-slack/internal/slack/broker_test.go` | +118: `TestDeliverInbound_ConversationFields` | NO | C | HIGH | Phase 11 test |
-| `extras/scion-teams/internal/teams/hubclient.go` | +42: adds `teamsConvFields()` helper + wires into `DeliverInbound` | NO | C | HIGH | Phase 11 broker edge |
-| `extras/scion-teams/internal/teams/hubclient_test.go` | +149: `TestTeamsConvFields` | NO | C | HIGH | Phase 11 test |
-| `extras/scion-telegram/internal/telegram/telegram.go` | +38: adds `telegramConvFields()` helper + wires into v1 `deliverInbound` | NO | C | HIGH | Phase 11 broker edge |
-| `extras/scion-telegram/internal/telegram/broker_v2.go` | +18: wires `telegramConvFields` into v2 `deliverInbound` and `deliverInboundWithFeedback` | NO | C | HIGH | Phase 11 broker edge |
-| `extras/scion-telegram/internal/telegram/telegram_test.go` | +129: `TestTelegramConvFields` | NO | C | HIGH | Phase 11 test |
-| `extras/scion-chat-app/internal/chatapp/commands.go` | +33: adds `gchatConvFields()` helper; three call sites switch from `SendStructuredMessage` to `SendStructuredMessageWithConv` | NO | C | HIGH | Phase 11 broker edge |
-| `extras/scion-chat-app/internal/chatapp/commands_test.go` | +52: `TestGchatConvFields` | NO | C | HIGH | Phase 11 test |
-| `extras/scion-chat-app/internal/chatapp/commands_new_test.go` | +6: adds `SendStructuredMessageWithConv` stub to `stubAgentService` | NO | C | HIGH | Phase 11 test support |
-| `extras/scion-chat-app/internal/chatapp/sendqueue_test.go` | +4: minor test adjustment | NO | C | LOW | Small change; possibly unrelated drift |
+| file | v2 delta | on main? | tranche | confidence | revert-risk | notes |
+|---|---|---|---|---|---|---|
+| `extras/scion-discord/internal/discord/broker.go` | +28: adds `Surface`/`ExternalRef`/`ParentRef` to `inboundPayload`; derives fields from `discord_guild_id` metadata in `deliverInbound` | NO | C | HIGH | NONE | Phase 11 broker edge. Comment says "Phase 11" explicitly. Zero post-fork commits. |
+| `extras/scion-discord/internal/discord/broker_test.go` | +85: `TestDeliverInbound_ConversationFields` | NO | C | HIGH | NONE | Phase 11 test. Zero post-fork commits. |
+| `extras/scion-slack/internal/slack/broker.go` | +36: same pattern — `channelID:threadTS` as `ExternalRef`, channel as `ParentRef` | NO | C | HIGH | NONE | Zero post-fork commits. |
+| `extras/scion-slack/internal/slack/broker_test.go` | +118: `TestDeliverInbound_ConversationFields` | NO | C | HIGH | NONE | Zero post-fork commits. |
+| `extras/scion-teams/internal/teams/hubclient.go` | +42: adds `teamsConvFields()` helper + wires into `DeliverInbound` | NO | C | HIGH | NONE | Zero post-fork commits. |
+| `extras/scion-teams/internal/teams/hubclient_test.go` | +149: `TestTeamsConvFields` | NO | C | HIGH | NONE | Zero post-fork commits. |
+| `extras/scion-telegram/internal/telegram/telegram.go` | +38: adds `telegramConvFields()` helper + wires into v1 `deliverInbound` | NO | C | HIGH | NONE | Zero post-fork commits. |
+| `extras/scion-telegram/internal/telegram/broker_v2.go` | +18: wires `telegramConvFields` into v2 `deliverInbound` and `deliverInboundWithFeedback` | NO | C | HIGH | NONE | Zero post-fork commits. |
+| `extras/scion-telegram/internal/telegram/telegram_test.go` | +129: `TestTelegramConvFields` | NO | C | HIGH | NONE | Zero post-fork commits. |
+| `extras/scion-chat-app/internal/chatapp/commands.go` | +33: adds `gchatConvFields()` helper; three call sites switch from `SendStructuredMessage` to `SendStructuredMessageWithConv` | NO | C | HIGH | NONE | Zero post-fork commits. |
+| `extras/scion-chat-app/internal/chatapp/commands_test.go` | +52: `TestGchatConvFields` | NO | C | HIGH | NONE | Zero post-fork commits. |
+| `extras/scion-chat-app/internal/chatapp/commands_new_test.go` | +6: adds `SendStructuredMessageWithConv` stub to `stubAgentService` | NO | C | HIGH | NONE | Zero post-fork commits. |
+| `extras/scion-chat-app/internal/chatapp/sendqueue_test.go` | +4: minor test adjustment | NO | C | LOW | NONE | Zero post-fork commits. Small change; possibly unrelated drift. |
 
 ### Hub inbound handler (multi-phase — decomposed)
 
-| file | v2 delta | on main? | tranche | confidence | notes |
-|---|---|---|---|---|---|
-| `pkg/hub/handlers_broker_inbound.go` — Phase 11 fields | +9: adds `Surface`/`ExternalRef`/`ParentRef` to `inboundMessageRequest` struct | NO | C | HIGH | Phase 11 broker-edge request schema |
-| `pkg/hub/handlers_broker_inbound.go` — Phase 11 resolution | +50: broker-edge conversation resolution block (`UpsertConversationByExternalRef`, attaches `conversation_id` to message metadata) | NO | C | MEDIUM | Phase 11 core logic. Confidence MEDIUM: depends on `store.UpsertConversationByExternalRef` and `store.Conversation` shape which may drift. |
-| `pkg/hub/handlers_broker_inbound.go` — Phase 7 validation | +4: `messaging.ValidateLegacyMessage(req.Message)` call before dispatch | NO | D | HIGH | Phase 7 choke point wired to broker inbound path (AC-8) |
-| `pkg/hub/handlers_broker_inbound.go` — Phase 5 dual-write | +31: `ResolveOrCreate{Thread,DM}Conversation` + divergence logging + `CheckConversationConsistency` | NO | NONE | MEDIUM | Phase 5 dual-write for broker-inbound. Tranche B landed Phase 5 dual-write for `messagebroker.go` but NOT for `handlers_broker_inbound.go`. **No tranche claims this hunk.** |
-| `pkg/hub/handlers_broker_inbound.go` — SenderID refactor | −4/+9: removes SenderID caching at permission-check time; adds late-resolution by email lookup | NO | NONE | LOW | Coupled to Phase 5/11 refactoring. No explicit tranche. May be prerequisite for Phase 11 resolution (which needs senderUserID resolved differently). |
-| `pkg/hub/handlers_broker_inbound.go` — DM ownership check removal | −14: deletes `parseDMKeyIDs` / DM ownership check block | NO | NONE | MEDIUM | The old DM ownership check is superseded by conversation-based routing. Removing it without replacing the authorization model is a risk if Phase 11 resolution is not also present. **Should not be carried independently of the Phase 11 block.** |
+Post-fork commit: `b453a685` (#1322, 2026-08-27 13:16Z) — "validate DM key ownership at
+message ingress — prevent cross-project injection." Added SenderID caching at the permission
+check, added `parseDMKeyIDs` DM ownership check, and removed the late SenderID-by-email
+resolution. v2 predates this commit and reverses all three changes.
+
+| file | v2 delta | on main? | tranche | confidence | revert-risk | notes |
+|---|---|---|---|---|---|---|
+| `…/handlers_broker_inbound.go` — Phase 11 fields | +9: adds `Surface`/`ExternalRef`/`ParentRef` to `inboundMessageRequest` struct | NO | C | HIGH | NONE | Phase 11 broker-edge request schema. #1322 did not touch this area. |
+| `…/handlers_broker_inbound.go` — Phase 11 resolution | +50: broker-edge conversation resolution block (`UpsertConversationByExternalRef`, attaches `conversation_id` to message metadata) | NO | C | MEDIUM | NONE | Phase 11 core logic. #1322 did not touch this area. Confidence MEDIUM: depends on store shapes that may drift. |
+| `…/handlers_broker_inbound.go` — Phase 7 validation | +4: `messaging.ValidateLegacyMessage(req.Message)` call before dispatch | NO | D | HIGH | NONE | Phase 7 choke point wired to broker inbound path (AC-8). #1322 did not touch this area. |
+| `…/handlers_broker_inbound.go` — Phase 5 dual-write | +31: `ResolveOrCreate{Thread,DM}Conversation` + divergence logging + `CheckConversationConsistency` | NO | UNCLAIMED | MEDIUM | NONE | Phase 5 dual-write for broker-inbound. Tranche B landed Phase 5 dual-write for `messagebroker.go` but NOT for this file. No tranche claims this hunk. #1322 did not touch this area. |
+| `…/handlers_broker_inbound.go` — SenderID caching removal | −4: removes `req.Message.SenderID = senderUser.ID` and its comment, added by #1322 at lines 142–145 on main | NO | UNCLAIMED | LOW | **CONFIRMED** | **REVERTS #1322.** #1322 added this caching so the downstream DM ownership check could use it. v2 predates #1322 and has no equivalent. Removing the caching without removing the ownership check would break the check; v2 removes both — see next row. |
+| `…/handlers_broker_inbound.go` — DM ownership check removal | −14: deletes the `parseDMKeyIDs` / DM ownership check block (lines 160–173 on main) | NO | UNCLAIMED | LOW | **CONFIRMED** | **REVERTS #1322 — SECURITY.** #1322 added this check to prevent cross-project DM injection: a broker plugin supplying a crafted `ThreadID` like `dm:agent:<victimAgent>:user:<attacker>` could inject messages into a DM the sender does not belong to. The check validates that the agent ID and user ID in the DM key match the actual resolved agent and the authenticated sender. v2 has no equivalent — zero grep hits for `parseDMKeyIDs` or `"DM thread_id does not match"`. v2's Phase 11 conversation resolution provides a *different* authorization model (conversation-based rather than ThreadID-based), but carrying the removal without the Phase 11 block leaves the endpoint unprotected. **Must not be carried independently.** Main has not removed this check by any other route. |
+| `…/handlers_broker_inbound.go` — late SenderID resolution | −4/+9: re-adds `GetUserByEmail` fallback for empty SenderID (lines 283–289 on v2) that #1322 removed | NO | UNCLAIMED | LOW | **CONFIRMED** | **REVERTS #1322.** #1322 moved SenderID resolution earlier (into the permission check) and removed this fallback. v2 re-adds it because v2 predates #1322 and never had the early caching. Carrying this hunk alone is not dangerous, but it signals the #1322 revert since all three hunks are coupled. |
 
 ### Message broker (multi-phase — decomposed)
 
-| file | v2 delta | on main? | tranche | confidence | notes |
-|---|---|---|---|---|---|
-| `pkg/hub/messagebroker.go` — signature fix | −2/+2: `ResolveOrCreateDMConversation` drops duplicate `p.store` parameter (v2: `p.store, p.log`; main: `p.store, p.store, p.log`) | NO | NONE | MEDIUM | Later Phase 5 refinement. Tranche B landed with the double-store signature. No tranche claims this fix. May require coordinated change in `pkg/messaging/conversation.go` function signature. |
-| `pkg/hub/messagebroker.go` — DEF-3 consistency | +4: adds `CheckConversationConsistency` calls in `deliverToUser` and `deliverToAgent` | NO | NONE | HIGH | DEF-3 independent consistency check. Not carried by tranche B. No tranche claims it. |
-| `pkg/hub/messagebroker.go` — B5 REVERT | −27/+4: removes B5/R1 `msg.SenderID == agent.ID` self-skip, R3b empty-SenderID warnings; replaces with pre-B5 `msg.Sender == "agent:"+agent.Slug` | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **SECURITY REGRESSION.** v2 predates B5 (#1343). Carrying this hunk silently reverts the broadcast ingress hardening that tranche B landed. §5co (line 6991–7001) documents this exact collision with zero-count proof. |
+Post-fork commit: `b3562fb1` (#1343, tranche B, 2026-08-28 07:40Z).
+
+| file | v2 delta | on main? | tranche | confidence | revert-risk | notes |
+|---|---|---|---|---|---|---|
+| `…/messagebroker.go` — signature fix | −2/+2: `ResolveOrCreateDMConversation` drops duplicate `p.store` parameter (v2: `p.store, p.log`; main: `p.store, p.store, p.log`) | NO | UNCLAIMED | MEDIUM | NONE | Later Phase 5 refinement. #1343 landed the double-store signature. v2's version is a forward fix, not a revert — main never had the single-store version. May require coordinated change in function signature. |
+| `…/messagebroker.go` — DEF-3 consistency | +4: adds `CheckConversationConsistency` calls in `deliverToUser` and `deliverToAgent` | NO | UNCLAIMED | HIGH | NONE | DEF-3 independent consistency check. Not on main at all — purely additive, no revert possible. |
+| `…/messagebroker.go` — B5 REVERT | −27/+4: removes B5/R1 `msg.SenderID == agent.ID` self-skip, R3b empty-SenderID warnings; replaces with pre-B5 `msg.Sender == "agent:"+agent.Slug` | **YES — v2 is OLDER** | **DO NOT CARRY** | HIGH | **CONFIRMED** | **SECURITY REGRESSION.** v2 predates B5 (#1343). Post-B5 the Sender field can hold a UUID, so `"agent:"+agent.Slug` never matches and the self-skip stops firing — the sending agent receives its own broadcast. Main's explanation at :725: "Sender is a display label that may be in UUID form after the B5 auth-derivation override." Carrying this hunk deletes both the guard and the alarm (#1343 also added R3b warnings for empty SenderID). §5co (line 6991–7001) documents this collision with zero-count proof. |
 
 ### CLI message command (multi-phase — decomposed)
 
-| file | v2 delta | on main? | tranche | confidence | notes |
-|---|---|---|---|---|---|
-| `cmd/message.go` — deprecation system | +35: `emitDeprecationWarning`, `deprecationReplacements` table, `emitDeprecationWarnings` | NO | F | HIGH | Phase 10 + S8 deprecations (line 1781). DEF-25/I-1 fix territory. |
-| `cmd/message.go` — help text update | +6: adds `@<agent>`, `@<email>`, `conv:<uuid>`, `#<thread>` to `Long` help | NO | F | HIGH | S8/DEF-13: "Long now documents @, conv:, #" (line 5089) |
-| `cmd/message.go` — conversation reference parsing | +20: `messaging.ParseReference` integration, `RefConversation`/`RefThread` gate | NO | F | HIGH | Phase 10 CLI split — new reference forms |
-| `cmd/message.go` — `sendMessageViaConversation` | +80: full function: resolve via Hub, send via standard agent path with `conversation_id` | NO | F | HIGH | Phase 10 CLI delivery for `@<agent>`, `@<email>` |
-| `cmd/message.go` — flag deprecation + hiding | +25: `MarkHidden` on 10 flags, help-string rewording | NO | F | HIGH | Phase 10 + S8 deprecation UX |
-| `cmd/message.go` — Phase 7 validation | +8: `ValidateLegacyMessage` calls on broadcast and direct-send paths | NO | D | MEDIUM | Phase 7 choke point wired to CLI. Confidence MEDIUM: the CLI validation depends on `pkg/messaging` types that tranche D's new files define — carrying the calls without the types fails to compile. |
-| `cmd/message.go` — visibility flag | +3: `--visibility` flag and `msg.Visibility` assignment | NO | NONE | LOW | No phase reference found. May be Phase 10 CLI work or an independent enhancement. |
+Zero post-fork commits on main for `cmd/message.go`.
+
+| file | v2 delta | on main? | tranche | confidence | revert-risk | notes |
+|---|---|---|---|---|---|---|
+| `cmd/message.go` — deprecation system | +35: `emitDeprecationWarning`, `deprecationReplacements` table, `emitDeprecationWarnings` | NO | F | HIGH | NONE | Phase 10 + S8 deprecations (line 1781). DEF-25/I-1 fix territory. |
+| `cmd/message.go` — help text update | +6: adds `@<agent>`, `@<email>`, `conv:<uuid>`, `#<thread>` to `Long` help | NO | F | HIGH | NONE | S8/DEF-13: "Long now documents @, conv:, #" (line 5089). |
+| `cmd/message.go` — conversation reference parsing | +20: `messaging.ParseReference` integration, `RefConversation`/`RefThread` gate | NO | F | HIGH | NONE | Phase 10 CLI split — new reference forms. |
+| `cmd/message.go` — `sendMessageViaConversation` | +80: full function: resolve via Hub, send via standard agent path with `conversation_id` | NO | F | HIGH | NONE | Phase 10 CLI delivery for `@<agent>`, `@<email>`. |
+| `cmd/message.go` — flag deprecation + hiding | +25: `MarkHidden` on 10 flags, help-string rewording | NO | F | HIGH | NONE | Phase 10 + S8 deprecation UX. |
+| `cmd/message.go` — Phase 7 validation | +8: `ValidateLegacyMessage` calls on broadcast and direct-send paths | NO | D | MEDIUM | NONE | Phase 7 choke point wired to CLI. Confidence MEDIUM: depends on `pkg/messaging` types that tranche D's new files define — carrying the calls without the types fails to compile. |
+| `cmd/message.go` — visibility flag | +3: `--visibility` flag and `msg.Visibility` assignment | NO | UNCLAIMED | LOW | NONE | No phase reference found. May be Phase 10 CLI work or an independent enhancement. |
 
 ---
 
 ## Table 2 summary
 
-| Tranche | Modified hunks | Notes |
-|---|---|---|
-| **C** | 13 files (5 adapters × {prod,test} + telegram bonus + chat-app stubs) + 3 hunks in `handlers_broker_inbound.go` | Phase 11 broker edge — **the entire Phase 11 footprint is here, invisible to Table 1** |
-| **D** | 2 hunks (`handlers_broker_inbound.go` + `cmd/message.go`) | Phase 7 validation wired to broker-inbound and CLI paths |
-| **F** | 5 hunks in `cmd/message.go` | Phase 10 + S8: deprecation system, help text, conversation references, flag hiding |
-| **NONE** | 6 hunks across `handlers_broker_inbound.go` (3) and `messagebroker.go` (3) | Phase 5 residuals not carried by tranche B (signature fix, DEF-3 consistency, SenderID refactor, DM ownership removal) |
-| **DO NOT CARRY** | 1 hunk in `messagebroker.go` | **B5 security revert.** v2 predates B5; carrying the fanOut hunks silently reverts broadcast ingress hardening. |
+| Tranche | Modified hunks | Revert-risk count | Notes |
+|---|---|---|---|
+| **C** | 13 files + 2 hunks in `handlers_broker_inbound.go` | 0 | Phase 11 broker edge — **the entire Phase 11 footprint is here, invisible to Table 1** |
+| **D** | 2 hunks (`handlers_broker_inbound.go` + `cmd/message.go`) | 0 | Phase 7 validation wired to broker-inbound and CLI paths |
+| **F** | 5 hunks in `cmd/message.go` | 0 | Phase 10 + S8: deprecation system, help text, conversation references, flag hiding |
+| **UNCLAIMED** | 5 hunks across `handlers_broker_inbound.go` (3) and `messagebroker.go` (2) | **3** | Three hunks CONFIRMED revert of #1322 (DM ownership / cross-project injection). Two hunks are forward changes (signature fix, DEF-3). |
+| **DO NOT CARRY** | 1 hunk in `messagebroker.go` | **1** | B5 security revert (#1343). |
+
+**Total CONFIRMED revert-risk hunks: 4** (1 in `messagebroker.go` B5, 3 in `handlers_broker_inbound.go` #1322).
 
 ## Key findings from Table 2
 
-1. **Phase 11 is entirely modifications.** 13 adapter files + 3 hunks in `handlers_broker_inbound.go` = the complete Phase 11 footprint. Table 1 has zero Phase 11 rows. Any manifest that counts only new files undercounts tranche C by its entire third phase.
+1. **Phase 11 is entirely modifications.** 13 adapter files + 2 hunks in `handlers_broker_inbound.go` = the complete Phase 11 footprint. Table 1 has zero Phase 11 rows. Any manifest that counts only new files undercounts tranche C by its entire third phase.
 
-2. **`messagebroker.go` carries a B5 security revert.** The `fanOutToProject` and `fanOutGlobal` hunks replace B5/R1's `msg.SenderID == agent.ID` self-skip with the pre-B5 `msg.Sender == "agent:"+agent.Slug`. This is the exact collision §5co (line 6991–7001) documented. **These hunks must never be carried from v2.**
+2. **Two security fixes are reverted by v2, not one.** `messagebroker.go` reverts B5 (#1343, broadcast ingress hardening). `handlers_broker_inbound.go` reverts #1322 (DM key ownership validation, cross-project injection prevention). Both are the same shape: v2 predates a security fix that main gained after the fork. The #1322 revert is the more dangerous of the two: B5's self-skip failure causes an agent to see its own broadcast (nuisance), while #1322's ownership check failure allows cross-project DM injection (data-integrity/confidentiality).
 
-3. **Six hunks have no tranche.** Three in `handlers_broker_inbound.go` (Phase 5 dual-write, SenderID refactor, DM ownership removal) and three in `messagebroker.go` (signature fix, DEF-3 consistency, B5 revert). Excluding the B5 revert, five behavioural changes exist on v2, are absent from main, and are named by no tranche.
+3. **The #1322 revert is coupled to Phase 11.** v2 removes the DM ownership check because Phase 11 conversation-based routing replaces ThreadID-based DM ownership. But carrying the removal without Phase 11 leaves the endpoint unprotected. The three #1322 hunks and the Phase 11 hunks in `handlers_broker_inbound.go` are a single atomic unit: carry all or none. Carrying Phase 11 without the #1322 removal might also be safe (double protection), but carrying the removal without Phase 11 is a vulnerability.
 
-4. **`handlers_broker_inbound.go` spans four phases in one file.** Phase 11 (C), Phase 7 (D), Phase 5 dual-write (NONE), and SenderID/DM-ownership refactoring (NONE). A per-file tranche assignment is impossible; the file must be decomposed per hunk when cutting any tranche that touches it.
+4. **`handlers_broker_inbound.go` spans four phases in one file.** Phase 11 (C), Phase 7 (D), Phase 5 dual-write (UNCLAIMED), and #1322 revert (CONFIRMED). A per-file tranche assignment is impossible; the file must be decomposed per hunk when cutting any tranche that touches it.
 
 5. **`cmd/message.go` spans two phases.** Phase 10/S8 (F) and Phase 7 (D). The Phase 7 `ValidateLegacyMessage` calls depend on `pkg/messaging` types that tranche D's new files define — carrying F without D's types would fail to compile.
+
+6. **Two forward changes have no tranche.** The `ResolveOrCreateDMConversation` signature fix and DEF-3 `CheckConversationConsistency` additions in `messagebroker.go` are absent from main, are not reverts (purely additive or a later refinement), and are claimed by no tranche. Both are Phase 5 territory that tranche B did not carry.
 
 ---
 
