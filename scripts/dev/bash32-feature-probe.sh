@@ -138,3 +138,16 @@ probe 'sed --help'   'sed --help >/dev/null 2>&1'
 # If \? is optional: 'ab' matches 'ab\?c' → outputs 'abc' via substitution → grep -q abc succeeds
 # If \? is literal: 'ab' does not match 'ab\?c' → no substitution → grep -q abc fails
 probe 'sed BRE \\?'  'echo "ab" | sed "s/ab\\?/abc/" | grep -q "abc"'
+
+echo ""
+
+# --- set -u interaction with empty arrays ---
+# On bash 3.2, "${arr[@]}" with an empty array under set -u is an unbound
+# variable error: bash treats an empty array as unset.  Bash 4.4+ fixed this.
+# deploy.sh uses set -euo pipefail, so this is load-bearing: an unguarded
+# empty-array expansion would abort the script on macOS.
+#
+# The safe alternative is a plain string expanded unquoted ($flag instead of
+# "${arr[@]}"), which produces zero words when empty and one when set.
+# shellcheck disable=SC2016
+probe 'set -u empty ${arr[@]}'  'set -u; arr=(); echo "${arr[@]}"'

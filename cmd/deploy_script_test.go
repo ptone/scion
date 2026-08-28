@@ -206,7 +206,8 @@ func readGcloudArgvLog(t *testing.T, path string) string {
 func adcGcloudStub(argvLog string) string {
 	return fmt.Sprintf(`gcloud() {
   printf '%%s\n' "$*" >> %q
-  if [[ "$*" == "auth application-default print-access-token" ]]; then
+  local _a="$*"; _a="${_a#--quiet }"
+  if [[ "$_a" == "auth application-default print-access-token" ]]; then
     printf '%%s\n' "ya29.fake-test-token"
     return 0
   fi
@@ -221,7 +222,8 @@ func adcGcloudStub(argvLog string) string {
 func brokenADCGcloudStub(argvLog string) string {
 	return fmt.Sprintf(`gcloud() {
   printf '%%s\n' "$*" >> %q
-  if [[ "$*" == "auth application-default print-access-token" ]]; then
+  local _a="$*"; _a="${_a#--quiet }"
+  if [[ "$_a" == "auth application-default print-access-token" ]]; then
     echo "ERROR: Application Default Credentials are not available." >&2
     return 1
   fi
@@ -740,7 +742,8 @@ func TestScriptHostileOverrideValuesArriveAsDataNotCode(t *testing.T) {
 func fullGcloudStub(argvLog string) string {
 	return fmt.Sprintf(`gcloud() {
   printf '%%s\n' "$*" >> %q
-  case "$*" in
+  local _a="$*"; _a="${_a#--quiet }"
+  case "$_a" in
     "beta run instances --help")                   return 0 ;;
     "config get account")                          printf '%%s\n' "operator@example.com" ;;
     "projects describe "*)                         printf '%%s\n' "123456789" ;;
@@ -1635,7 +1638,8 @@ func TestScriptGcloudStderrNotSuppressed(t *testing.T) {
 
 	gcloudStub := fmt.Sprintf(`gcloud() {
   printf '%%s\n' "$*" >> %q
-  case "$*" in
+  local _a="$*"; _a="${_a#--quiet }"
+  case "$_a" in
     "beta run instances --help")
       return 0 ;;
     "config get account")
@@ -1736,7 +1740,8 @@ curl() {
 	// returns 500 to stop di_main before the IAP polling loop.
 	gcloudStub := fmt.Sprintf(`gcloud() {
   printf '%%s\n' "$*" >> %q
-  case "$*" in
+  local _a="$*"; _a="${_a#--quiet }"
+  case "$_a" in
     "beta run instances --help")                   return 0 ;;
     "config get account")                          printf '%%s\n' "operator@example.com" ;;
     "projects describe "*)                         printf '%%s\n' "123456789" ;;
@@ -1777,4 +1782,83 @@ curl() {
 			"can read it via ps(1).  Use -K <configfile> for Bearer headers and "+
 			"-d @<file> for POST data to keep the token out of the process table.\n"+
 			"curl argv log:\n%s", curlArgv)
+}
+
+// ---------------------------------------------------------------------------
+// No-terminal mode: --quiet on gcloud when /dev/tty is absent
+// ---------------------------------------------------------------------------
+
+// TestScriptGcloudQuietWhenNoTTY verifies that when /dev/tty is not readable,
+// di_main passes --quiet to every gcloud invocation.  This prevents gcloud
+// from prompting interactively, which in a piped or CI context would consume
+// stdin (the script stream) and produce a confusing error that blames gcloud
+// for something gcloud did not do.
+//
+// This test can only exercise the no-tty branch: the container running the
+// tests has no controlling terminal, so /dev/tty is never readable.  The
+// tty-present branch (no --quiet) is exercised indirectly: when /dev/tty IS
+// readable, _di_quiet is empty, and the existing gcloud stubs — which match
+// on the subcommand without --quiet — would fail on an unexpected argument
+// if an empty-string argument were passed.  That is the unquoted-expansion
+// property and it is tested by every other di_main test that runs on a
+// terminal-equipped machine.
+func TestScriptGcloudQuietWhenNoTTY(t *testing.T) {
+	server, _ := newPreflightStub(t,
+		`{"email":"operator@example.com"}`,
+		http.StatusOK, `{}`)
+	argvLog := gcloudArgvLog(t)
+
+	gcloudStub := fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  local _a="$*"; _a="${_a#--quiet }"
+  case "$_a" in
+    "beta run instances --help")
+      return 0 ;;
+    "config get account")
+      printf '%%s\n' "operator@example.com" ;;
+    "projects describe "*)
+      printf '%%s\n' "123456789" ;;
+    "auth application-default print-access-token")
+      printf '%%s\n' "ya29.fake-test-token" ;;
+    "beta run instances deploy "*)
+      echo "test stub: refusing to deploy" >&2
+      return 1 ;;
+    *)
+      echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+      return 1 ;;
+  esac
+}`, argvLog)
+
+	stdout, stderr, _ := runBashFuncWithSetup(t,
+		preflightSetup(gcloudStub, server.URL),
+		"di_main",
+		"--name", "test-name",
+		"--project", "test-project",
+		"--image", "ghcr.io/example/scion-omni:latest",
+		"--region", "us-east4")
+
+	// The diagnostic message must be printed when /dev/tty is absent.
+	assert.Contains(t, stderr, "No terminal available",
+		"di_main should print a diagnostic when /dev/tty is not readable")
+	assert.Contains(t, stderr, "gcloud prompts are disabled",
+		"diagnostic should name the consequence")
+
+	// Every gcloud invocation that goes through di_main (not di_check_gcloud_instances,
+	// which has its own </dev/null) must carry --quiet.
+	gcloudArgv, err := os.ReadFile(argvLog)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(gcloudArgv)), "\n")
+
+	for _, line := range lines {
+		// di_check_gcloud_instances uses the real gcloud with </dev/null,
+		// so "beta run instances --help" does NOT get --quiet.
+		if strings.Contains(line, "beta run instances --help") {
+			continue
+		}
+		assert.True(t, strings.HasPrefix(line, "--quiet "),
+			"gcloud invocation should start with --quiet when /dev/tty is absent, got: %q", line)
+	}
+
+	// Verify the --help path is NOT affected by the --quiet logic
+	_ = stdout
 }

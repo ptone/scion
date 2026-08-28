@@ -217,7 +217,8 @@ func TestScriptPreflightRunsBeforeInstanceCreation(t *testing.T) {
 
 	gcloudStub := fmt.Sprintf(`gcloud() {
   printf '%%s\n' "$*" >> %q
-  case "$*" in
+  local _a="$*"; _a="${_a#--quiet }"
+  case "$_a" in
     "beta run instances --help")
       return 0 ;;
     "config get account")
@@ -306,7 +307,8 @@ func TestScriptStep3bReusesPreflightToken(t *testing.T) {
 	// under `set -e`, where a bare failing AND-list would kill the shell.
 	gcloudStub := fmt.Sprintf(`gcloud() {
   printf '%%s\n' "$*" >> %q
-  case "$*" in
+  local _a="$*"; _a="${_a#--quiet }"
+  case "$_a" in
     "beta run instances --help")
       return 0 ;;
     "config get account")

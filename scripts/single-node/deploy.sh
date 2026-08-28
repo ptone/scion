@@ -353,8 +353,10 @@ di_validate_override_url() {
 #
 # The two endpoints are PARAMETERS, already resolved and validated by di_main.
 # This function reads no environment variables: its behaviour is fully
-# determined by its arguments. Both URLs are echoed as they are used, so a
-# redirected endpoint is never invisible in the output.
+# determined by its arguments plus one dynamic-scope local: _di_quiet (set by
+# di_main, same mechanism as _di_adc_token in the reverse direction).
+# Both URLs are echoed as they are used, so a redirected endpoint is never
+# invisible in the output.
 #
 # Arguments: gcloud_account region project api_base tokeninfo_url
 # Returns 0 on success, 1 on failure.
@@ -372,7 +374,13 @@ di_preflight_rest_credential() {
   adc_stderr_file="$(mktemp)"
 
   local tok
-  tok="$(gcloud auth application-default print-access-token 2>"$adc_stderr_file" | tr -d '[:space:]')" || {
+  # _di_quiet is set by di_main (bash dynamic scope, same mechanism as
+  # _di_adc_token).  ${_di_quiet-} handles direct calls (testing) where the
+  # variable is unset — under set -u, the - suffix provides an empty default.
+  # Intentionally unquoted: expands to zero words when empty, one word (--quiet)
+  # when set.  Quoting would pass an empty argument to gcloud.
+  # shellcheck disable=SC2086
+  tok="$(gcloud ${_di_quiet-} auth application-default print-access-token 2>"$adc_stderr_file" | tr -d '[:space:]')" || {
     echo "Error: 'gcloud auth application-default print-access-token' failed." >&2
     echo "stderr from gcloud:" >&2
     cat "$adc_stderr_file" >&2
@@ -728,6 +736,33 @@ di_main() {
   fi
 
   # ===================================================================
+  # Detect whether interactive prompts can reach the operator.
+  #
+  # /dev/tty is readable whenever the process has a controlling terminal,
+  # regardless of what stdin is.  When it is absent — piped execution
+  # without a terminal, cron, CI, containers — gcloud prompts would read
+  # garbage and fail confusingly (task #91 class).  Pass --quiet so gcloud
+  # errors immediately instead of prompting.
+  #
+  # --quiet behaviour, verified against gcloud SDK 575.0.0 source:
+  #   PromptContinue(default=D, ...) returns D when disable_prompts is set.
+  #   The framework-level API-enablement handler uses enable_by_default=False,
+  #   so --quiet causes an error, NOT a silent enablement — no billable
+  #   project-scoped side effect.  No command used by this script has a
+  #   confirmation prompt with default=True (instances deploy has none;
+  #   only restart/stop/delete do).
+  # ===================================================================
+  local _di_quiet=""
+  if ! (exec </dev/tty) 2>/dev/null; then
+    _di_quiet="--quiet"
+    echo "NOTE: No terminal available (/dev/tty not readable)." >&2
+    echo "      gcloud prompts are disabled (--quiet).  If authentication or" >&2
+    echo "      API enablement is needed, gcloud will error instead of prompting." >&2
+    echo "      If you ran this via 'curl ... | bash', that is why." >&2
+    echo "      To allow prompts, download the script and run it directly." >&2
+  fi
+
+  # ===================================================================
   # Resolve the TEST-ONLY endpoint seams — ONCE, HERE, before anything else.
   #
   # _DI_API_BASE and _DI_TOKENINFO_URL are read in exactly one place each
@@ -775,7 +810,9 @@ di_main() {
   # the prompt while gcloud reads stdin, so the deploy appears to freeze.
   # The noise this redirect was suppressing: "Your active configuration is: [default]"
   # and similar informational messages.  Those are useful diagnostics.
-  operator_email="$(gcloud config get account | tr -d '[:space:]')" || {
+  # Intentionally unquoted: $_di_quiet expands to zero words when empty.
+  # shellcheck disable=SC2086
+  operator_email="$(gcloud $_di_quiet config get account | tr -d '[:space:]')" || {
     echo "Error: 'gcloud config get account' failed — is gcloud configured and authenticated?" >&2
     return 1
   }
@@ -806,7 +843,8 @@ di_main() {
   # The noise: "WARNING: This command is using service account impersonation."
   # That warning is useful; hiding it also hides the consent/auth prompts that
   # made Step 2 the highest-severity stall in the deploy.
-  project_number="$(gcloud projects describe "$DI_PROJECT" --format='value(projectNumber)' | tr -d '[:space:]')" || {
+  # shellcheck disable=SC2086
+  project_number="$(gcloud $_di_quiet projects describe "$DI_PROJECT" --format='value(projectNumber)' | tr -d '[:space:]')" || {
     echo "Error: 'gcloud projects describe $DI_PROJECT' failed — check that the project exists and you have access" >&2
     return 1
   }
@@ -882,7 +920,8 @@ di_main() {
   fi
 
   echo "    gcloud ${gcloud_args[*]:0:6}"
-  gcloud "${gcloud_args[@]}"
+  # shellcheck disable=SC2086
+  gcloud $_di_quiet "${gcloud_args[@]}"
   echo "    Instance deployed successfully."
 
   # ===================================================================
@@ -967,7 +1006,8 @@ di_main() {
 
   local member_prefix
   member_prefix="$(di_iam_member_prefix "$operator_email")"
-  gcloud iap web add-iam-policy-binding \
+  # shellcheck disable=SC2086
+  gcloud $_di_quiet iap web add-iam-policy-binding \
     "--project=${DI_PROJECT}" \
     "--region=${DI_REGION}" \
     --resource-type=cloud-run \
@@ -979,7 +1019,8 @@ di_main() {
   if [[ -n "$DI_ADMIN_EMAIL" ]] && [[ "$DI_ADMIN_EMAIL" != "$operator_email" ]]; then
     local admin_member_prefix
     admin_member_prefix="$(di_iam_member_prefix "$DI_ADMIN_EMAIL")"
-    gcloud iap web add-iam-policy-binding \
+    # shellcheck disable=SC2086
+    gcloud $_di_quiet iap web add-iam-policy-binding \
       "--project=${DI_PROJECT}" \
       "--region=${DI_REGION}" \
       --resource-type=cloud-run \
@@ -997,7 +1038,8 @@ di_main() {
 
   echo "    --- Region-level IAP bindings ---"
   local region_policy
-  region_policy="$(gcloud iap web get-iam-policy \
+  # shellcheck disable=SC2086
+  region_policy="$(gcloud $_di_quiet iap web get-iam-policy \
     "--project=${DI_PROJECT}" \
     "--region=${DI_REGION}" \
     --resource-type=cloud-run)" || true
@@ -1009,7 +1051,8 @@ di_main() {
 
   echo "    --- Project-level IAP bindings (inherited) ---"
   local project_policy
-  project_policy="$(gcloud projects get-iam-policy "$DI_PROJECT" \
+  # shellcheck disable=SC2086
+  project_policy="$(gcloud $_di_quiet projects get-iam-policy "$DI_PROJECT" \
     --format=yaml)" || true
   if [[ -n "$project_policy" ]]; then
     echo "$project_policy" | awk '
