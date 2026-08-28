@@ -10942,3 +10942,118 @@ rejection that cannot fire is not a rejection.
 **169.** "Noted so it doesn't surprise later" is not a filing. If a finding changes the meaning of
 work being shipped, it gets a tracked item with the reason it matters attached, or it will be
 rediscovered from scratch by someone without the context that made it visible.
+
+---
+
+## §5ee. 2026-08-28 16:27 — 22 CONFIRMED REVERTS, SUBSTANTIVE=4: messaging-v2 ABANDONED AS A SOURCE
+
+### MY ERROR: the file count is 18, not 19
+
+em10 caught it. My risk set was 21 lines including 2 `docs-site/` files and `go.sum`; 21 − 3 = **18
+code files**. I stated 19 to em10, to em9, and in §5ea. Corrected to both agents. em9's extension
+scope is 16 beyond the two already swept, 13 remaining.
+
+A subordinate correcting the coordinator's arithmetic, unprompted, in the middle of delivering their
+own result, is the roster working properly.
+
+### em9 v4 (`70bc6f97`) — 18 new confirmed reverts, total 22, 13 files still unswept
+
+**`handlers_agent_messaging.go` — 10 confirmed (highest density):**
+- **B5 (#1343): 7 hunks** — unconditional auth override → conditional backfill in
+  `handleAgentMessage`/`handleProjectBroadcast`; forced `Broadcasted=true` removal;
+  **`authenticatedSender` function deleted**; slug-based self-skip ×2 in broadcast targeting;
+  **untrusted SenderID in group-message DM key derivation ×2** (this one engages AC-INGRESS-1
+  directly)
+- **#1322: 2 hunks** — DM ownership checks removed from `handleAgentOutboundMessage` and
+  `handleAgentMessage`; Phase 11 resolution replaces them and **does not validate DM key participant
+  ownership**
+- **#1347: 1 hunk** — project authz removed from `handleProjectBroadcast`; **any authenticated user
+  can broadcast to any project**
+
+**`handlers_chat_v2.go` — 8 confirmed:**
+- **#1338 / DEF-31: 4 hunks** — `validateDefaultAgent` + 3 call sites deleted. **Cross-project agent
+  binding via UUID.**
+- **#1347: 2 hunks** — `ActionAttach` on primary agent replaced with `ValidateLegacyMessage`
+  (**format ≠ authorization**), per-mention `ActionAttach` deleted entirely
+- **#1322: 2 hunks** — **`isDMParticipant` kind-label tightening reverted to any-slot match**, and
+  `parseDMKeyIDs` deleted
+
+That `isDMParticipant` revert is a direct hit on a standing prohibition: *do NOT make
+`isDMParticipant` tolerant of non-UUID principals — its always-fail behaviour is fail-closed BY
+ACCIDENT and loosening it converts a coincidence into a hole.* v2 does exactly the forbidden thing.
+
+### MY VERIFICATION (rule 123 — spot-checked before escalating)
+
+| symbol | main | v2 |
+|---|---|---|
+| `authenticatedSender` (handlers_agent_messaging.go) | 6 | **0** |
+| `validateDefaultAgent` (handlers_chat_v2.go) | 6 | **0** |
+| `ActionAttach` (handlers_chat_v2.go) | 3 | **0** |
+| `isDMParticipant` (handlers_chat_v2.go) | 9 | 9 ← **positive control** |
+
+Three of three confirmed. **I could not verify the `handleProjectBroadcast` authz hunk — my grep
+terms missed on both sides, meaning my search was wrong, not em9's finding.** Relayed to the user
+attributed to em9 rather than as verified. Being precise about verified-vs-relayed is the same
+discipline I enforce on managers; it does not stop applying to me.
+
+### em10 (`8a4c1daf8`, `docs/tranche-c-measurement.md`) — SUBSTANTIVE = 4
+
+| file | content | lines |
+|---|---|---|
+| `handlers_agent_messaging.go` | ValidateLegacyMessage integration, DEF-11 pre-resolved ConversationID, Phase 11 surface resolution | ~80 |
+| `handlers_agent_messaging_test.go` | DEF-11 regression suite (3), DEF-19 handler test, divergence metric assertions | ~350 |
+| `handlers_broker_inbound.go` | Phase 11 broker edge resolution, ValidateLegacyMessage, divergence logging | ~70 |
+| `handlers_chat_v2.go` | Phase 8 read-switch, conversation-first reads with DM/thread detection | ~50 |
+
+6 MECHANICAL, 8 STALE. **Total re-derivation ≈ 580 lines.** Positive control supplied unprompted.
+
+### THE DECISION
+
+**580 lines of fresh implementation against 22+ coordinated security restorations by someone who
+authored none of them.** Not close. Compounded by em9's structural finding: the eight B5 hunks all
+descend from **one** deletion, so restoration is the function plus seven call sites as a single
+coordinated change — **cherry-picking safe hunks is not available.**
+
+**Escalated (1998 runes). I withdrew the choice I had offered the user** rather than making them
+weigh an option I no longer believed in. Recommendation: abandon `messaging-v2` as a source, specify
+tranche C from intent, build on current main, **delete the branch** so it cannot be merged later by
+someone without this context.
+
+### DISPATCHES
+
+**em10 → write the tranche C specification.** The instruction that matters: *a developer must be
+able to implement from it without ever opening v2.* If the spec is written by describing v2's diff,
+we have laundered v2 through a document and will reintroduce its reverts with a clean history that
+hides them. **v2 is evidence of intent, not a statement of intent.** Required per file: what it must
+do and why; **how it composes with the security fixes v2 never had** (em9 already did this for
+`handlers_broker_inbound.go`; `handlers_agent_messaging.go` is the hard one — B5 + #1322 + #1347
+simultaneously); an explicit **must-not** list naming each revert; and acceptance criteria including
+the marker counts 6/6/3 as a mechanical gate.
+
+**em9 → continue, with the purpose changed.** The sweep no longer decides rebase-vs-re-derive; that
+is decided. It is now **the prohibition list** in em10's spec. Completeness matters more than it did
+an hour ago, and a hunk skipped as minor is a guard nobody thinks to preserve. Also asked for the
+count of independent **restoration units**, not hunks.
+
+### NEW STANDING RULES
+
+**170.** A hunk count is the wrong unit for a revert. "22 hunks" sounds like a long list of small
+fixes; "one deletion with seven dependent call sites, times N" is a different object and only the
+second is true. Ask for independent restoration *units* before sizing the work.
+
+**171.** Re-deriving from a rejected branch launders it unless the specification is written from
+intent. If the spec can only be understood beside the old diff, it is a transcription and will
+carry the old defects forward under a clean history. Test every line: could a developer implement
+this without seeing the source branch?
+
+**172.** When new evidence removes an option you offered the user, withdraw the question rather than
+letting them choose between a real option and a dead one. Presenting a decision you have already
+resolved wastes their attention and invites them to pick the answer you now know is wrong.
+
+**173.** State plainly which findings you verified and which you are relaying. I escalated four
+security claims and had verified three; saying so cost one sentence and keeps the fourth from
+inheriting unearned confidence.
+
+**174.** A subordinate correcting your arithmetic mid-delivery is the system working. Fix it
+everywhere you stated it — my "19 files" had propagated into two dispatches and a log section
+before em10 caught it.
