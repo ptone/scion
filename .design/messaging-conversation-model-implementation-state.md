@@ -11228,3 +11228,100 @@ Say so in review, or the next refactor collapses it.
 **182.** When your own instruction caused an agent's defect, say so plainly in the review before
 the correction. em6 implemented exactly what I asked for; the fault was the requirement, and a
 review that does not say so teaches them to distrust their own execution.
+
+---
+
+## §5eh. 2026-08-28 16:36 — SWEEP COMPLETE: 60 HUNKS / 10 RESTORATION UNITS; P2 EXPOSURE RELAYED
+
+### Final result — `scion/ca-msg-em9-unify` @ `eeb564cb`, TRANCHE-MANIFEST v5
+
+**60 CONFIRMED revert hunks across 16 of 18 files.** Two NONE: `message_store.go` (v2 additions
+only), `types.go` (cosmetic alignment).
+
+- Security/correctness: **36** (24 production, 12 test) across 5 PRs
+- P2 feature system: **24** across 10 PRs (A1–A6, B1–B3, C1, D1)
+
+### THE FIGURE THAT MATTERS IS 10, NOT 60
+
+| # | unit | shape | cx |
+|---|---|---|---|
+| 1 | `authenticatedSender` (B5) | 1 fn + 7 call sites + 8 test fns | **HIGH** |
+| 2 | `parseDMKeyIDs` + DM ownership (#1322) | 1 fn + 4 callers / 3 files | MED |
+| 3 | `isDMParticipant` kind-label (#1322) | 1 hunk | LOW |
+| 4 | `validateDefaultAgent` (#1338) | 1 fn + 3 call sites | LOW |
+| 5 | `ActionAttach` checks (#1347) | 3 independent authz calls | LOW |
+| 6 | `EnsureParticipant` (#1349) | 1 interface method | LOW |
+| 7 | P2 authz pipeline (A1–A6) | routeGuard Decide + 45 Permission fields + 5 test files | **HIGH** |
+| 8 | P2 quota subsystem (B1–B3) | full feature stack | **HIGH** |
+| 9 | P2 role management (C1) | CRUD + routes | MED |
+| 10 | P2 UAT scopes (D1) | 1 endpoint + metadata | LOW |
+
+A hunk count invites the reader to picture sixty small edits. Unit 1 alone — one function, seven
+call sites and eight tests that must move together or the result is worse than either end state —
+is not a hunk, it is a project. **Four HIGH units is what settles the decision.**
+
+### MY SPOT-CHECK GAP, CLOSED AND VERIFIED
+
+I told the user I had not verified the `handleProjectBroadcast` authz claim. em9 supplied the
+symbol; I verified with a control:
+
+    main  handlers_agent_messaging.go:1276   if !s.authorize(w, r, projectResource(project), ActionAttach)
+    v2    same file                          0 occurrences of projectResource
+    control: projectResource in 17 pkg/hub files on main, 16 on v2
+
+Symbol exists broadly on both trees, so its absence in that one file is real. **My miss was
+searching `ResourceProject` and `CheckProjectAccess` — I guessed at the naming convention instead
+of finding the call.** Guessing at a symbol name is the same error class as guessing at a branch
+name (rule 175); both produce a confident empty result.
+
+Incidental find in the same region — main `:1253-1262` carries the agent-path checks
+`ScopeAgentLifecycle` + same-project enforcement. **That is the code behind the user's earlier
+`project:agent:lifecycle` quandary.** Noted for when that question is picked back up.
+
+### P2 EXPOSURE RELAYED TO auth-refactor-lead
+
+24 hunks / 4 units / 2 HIGH of their Phase 2 sit under this branch. Messaged directly with the
+mechanism, the verified sample counts, my recommendation, and the manifest reference.
+
+Two asks made of them: (a) **run the same test across their own team's branches** — if v2 has this
+exposure, any long-lived branch forked before P2 landed has it and nobody has looked; (b) object now
+if there is P2-relevant work on v2 worth salvaging, since the branch is proposed for deletion.
+
+**em9's method generalises past the thing they were pointed at. That is the most valuable outcome of
+the sweep and it was not in the brief.**
+
+### HANDOFF
+
+Independence constraint between em9 and em10 **lifted** — it existed so the safety read would not be
+coloured by the cost read, and both are complete. em9 hands the manifest and the 10 units to em10
+directly; em10 writes the spec, em9 answers detail questions and does not write it for them.
+
+Flagged to em9 for em10's attention: **the four LOW units are the ones most likely to be quietly
+dropped from a specification, precisely because they are small.** `isDMParticipant` especially — its
+always-fail behaviour on non-UUID principals is fail-closed *by accident*, and v2's any-slot match
+is exactly the loosening under standing prohibition.
+
+### Not escalated
+
+Recommendation to the user is unchanged (abandon v2) and they have not yet replied. 60-vs-22 does
+not alter the ask, so it rides with the next boundary rather than spending a message. The P2
+dimension was actionable, so it went to auth-refactor-lead as an action, not as a report.
+
+### NEW STANDING RULES
+
+**183.** Report restoration *units*, not hunks. Sixty hunks reads as sixty small edits; ten units of
+which four are HIGH reads as what it is. Ask for the unit count explicitly — an agent will default
+to the hunk count because it is what the diff gives them.
+
+**184.** Guessing a symbol name produces a confident empty result, exactly as guessing a branch name
+does. Find the call site, then grep the symbol you found. I missed a live authz check by searching
+`ResourceProject` when the helper is `projectResource`.
+
+**185.** Small and load-bearing is the combination that gets dropped from a specification. When
+handing a prohibition list downstream, name the LOW-complexity items as the at-risk ones — the HIGH
+ones defend themselves by being conspicuous.
+
+**186.** When a finding implicates another team, tell that team directly and immediately, with the
+mechanism and a sample they can verify themselves — not a summary. Then ask whether the same test
+should run across their own surface, because a method that found one instance rarely found the only
+one.
