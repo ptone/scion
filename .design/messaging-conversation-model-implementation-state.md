@@ -13752,3 +13752,37 @@ Note the mechanism differs from the specced fix. I specced "read the conversatio
 ### Ledger
 Struck this heartbeat: **DEF-11**; DEF-9's `FormatNewDelivery` sub-claim. Confirmed already-struck: DEF-14, DEF-16.
 Open: #1362 merge, marker-gate-2 merge (URL sent, no PR yet), DEF-32 identity-linking, DEF-34/#1259 (external), DEF-33/35 spec, DEF-18 (em9-unify), DEF-5, DEF-6, DEF-9 (narrowed), DEF-10 (half), Tier 2 DEFERRED, tranche H on G-1, tranches C-G held. Awaiting ptone on posting the #1362 rationale.
+
+---
+
+## §5fp — SECTION BOUNDARY: #1362 MERGED (`87a867b77`). DM key derivation now refuses non-canonical input on main.
+
+ptone merged at 23:17:49Z. `upstream/main` `42eb91b0f` -> **`87a867b77`**, one commit: `fix(messages): reject non-canonical kind and UUID in DMConversationKey (#1362)`.
+
+This is the row that makes the derivation function a real security control rather than a best-effort formatter: the key IS the ACL, so a derivation that normalises is a derivation that can be talked into producing someone else's key. It now refuses.
+
+### Consequence check on marker-gate-2 — it survives the new main, no rebase needed
+`scion/ca-msg-em10-marker-gate-2` (`e28e8c999`) was cut against `42eb91b0f`, so #1362 put it one commit behind. Verified rather than assumed:
+- Merged it into `87a867b77`: clean, ort strategy, **0 conflicts**, still exactly the 2 `hack/` files at +80/-7.
+- **Gate on the merged result: exit 0, all gates pass.**
+- **`make test-fast` on the merged result: exit 0.**
+Disjoint surfaces (#1362 is `pkg/messages/`, marker-gate-2 is `hack/`), which is why it is clean — but disjointness was the hypothesis, not the finding. The compare URL already sent remains valid; no re-cut required.
+
+### DEF-32 fail-safe re-verified against the CHANGED derivation code
+I told ptone that DEF-32 "currently fails safe — derivation refuses rather than coerces." #1362 rewrote exactly the function that claim rests on, so the claim needed re-testing, not re-asserting. A statement about behaviour expires when the code under it changes.
+
+Probe on `87a867b77` (`zz_def32_probe_test.go`, run then deleted; worktree verified clean): fed a realistic `FederatedUserIdentity.ID()` value — `https://accounts.example.com:subject-12345` — paired with a canonical agent UUID.
+
+Result: **refused**, `dm key: invalid UUID for user: invalid UUID length: 42`. No key produced. **Fail-safe confirmed on the new code**; the statement I gave ptone still holds, and now holds for a stricter reason than before.
+
+Note what this does NOT change: DEF-32 remains a design gap. Failing safe means federated users silently get **no** conversation key, which is correct-but-broken — it is precisely the condition that makes their DMs vanish at the S4 read-switch. Stricter derivation makes the failure cleaner and louder, not absent. The `(issuer, subject) -> user_id` link decision is still required before S4.
+
+### Dispatched
+**em6 released.** Told it the merge SHA, and gave it the Gemini post-mortem in a form it can reuse: the finding was rejected on evidence (the reviewer lowercased the string whose case was the subject of the test), and two transferable habits — assert on error *text* in rejection tests so the intended branch is provably the one that fired, and check build tags before treating green CI as evidence. Re-parked with the literal string.
+
+### Rule
+**Rule 263.** A verified claim about behaviour has a dependency on the code it was verified against, and merging that code silently invalidates it. When a PR lands on a function underpinning something you have already told someone, re-run the probe rather than re-asserting the conclusion — especially when the change was in the *stricter* direction, because "it got safer" is the intuition most likely to stop you from checking.
+
+### Ledger
+Struck: **#1362 / the non-canonical-derivation row.** Landed to date: #1338 (DEF-31), #1343 (B5), #1347, #1360, #1361 (marker gate), #1362.
+Open: marker-gate-2 (URL sent 22:5xZ, **PR not yet opened** — verified valid against new main), DEF-32 identity-linking, DEF-34/#1259 (external, stalled since Aug 27), DEF-33/35 spec, DEF-18 (em9-unify), DEF-5, DEF-6, DEF-9 (narrowed), DEF-10 (half), Tier 2 DEFERRED, tranche H on G-1, tranches C-G held. Awaiting ptone on posting the #1362 rationale — now moot for merging, but the thread still shows two unresolved findings.
