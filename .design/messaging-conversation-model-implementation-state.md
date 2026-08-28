@@ -10852,3 +10852,93 @@ your own statements.
 a strict checker sits downstream. The argument for rejection is not that the fold is wrong; it is
 that producer and validator must agree, and agreement by loosening the validator is the failure mode
 (rule 157).
+
+---
+
+## §5ed. 2026-08-28 16:25 — ALL FOUR COLUMNS ARE TEXT; TIGHTENING CLEARED TO PROCEED
+
+### em6 checked a premise they had already used, and led with its failure
+
+> "PostgreSQL uuid normalisation does NOT apply to these columns. My earlier argument was wrong —
+> I assumed uuid type without checking."
+
+Reinforced explicitly. This is the behaviour that makes a manager's reports usable.
+
+### Findings
+
+| item | result |
+|---|---|
+| `messages.sender_id` / `recipient_id` | **TEXT** — ent `field.String()`; schema comment `message.go:31-32`: *"kept as plain strings (they hold heterogeneous principal identifiers)"* |
+| `webchat_thread.agent_id` / `user_id` | **TEXT NOT NULL**, raw DDL `webchannel_store_postgres.go:41-43`, not ent-managed |
+| `webchat_dm.conversation_key` | **TEXT NOT NULL**, `:106` |
+| SQLite population | caller-supplied lookup results via `message_store.go:130-132`; `TouchThread()` takes strings from chat handlers. Chain is "whatever the auth/lookup layer returns" → DB rows → `uuid.NewString()` at registration. **Longer and weaker than claimed.** |
+| `migrateThreadIDs` / `seedFromWave1` | **one-shot.** `migrationCompleted()` gate; `markMigrationCompleted()` writes `webchat_migrations`; run from `Init()`. No reset outside manual DB intervention. **Not a live bypass** — closes §5ec's theatre concern. |
+| sort order | documented `dm_key.go:38-39` **and tested** — `dm_key_test.go:55` prefix assert plus golden vectors `:198-269` |
+| second normalisation | confirmed: `uuid.Parse` accepts braced/urn/unhyphenated/uppercase, `.String()` canonicalises all |
+
+### THE ARGUMENT THAT CLEARED IT — the tightening surfaces an existing failure, it does not create one
+
+em6 was stuck treating the tightening as introducing availability risk against unauditable data. It
+does not, and the reasoning is worth pinning:
+
+The exposure is a stored principal ID in non-canonical form, read from a TEXT column, passed to
+`DMConversationKey`. **Today** the deriver canonicalises it, and `CheckDMParticipantKey` then
+compares the *original* non-canonical id against the *canonical* form embedded in the key. Exact
+comparison. Mismatch. Deny.
+
+**That DM is already dark**, at the authorization layer, silently, with a mismatch no operator can
+read. The tightening relocates the failure earlier and makes it legible. There is no new failure
+case. **Cleared to proceed.**
+
+### RULING: instrument rather than keep searching for certainty
+
+Static analysis is exhausted on what those TEXT columns contain; the remaining unknown is empirical
+and only production answers it. Required: WARN-level log on the rejection path, distinct and
+greppable, recording the offending value's **shape** — length, and whether braced / unhyphenated /
+uppercased — **never the value itself.** If it fires in the beta we learn immediately with
+attribution instead of debugging a dark DM from the far end.
+
+### `PrincipalKindFromAddress` — em6 filed it as a note; it is not one
+
+`dm_key.go:80` also folds. em6 flagged it "so it doesn't surprise later." It sits **upstream of the
+function being tightened, on a live path**: `messagebroker.go` calls it on `msg.Sender`, hands
+`senderKind` to DM resolution and thence to `DMConversationKey`. Because it folds first,
+**the tightening cannot fire on that path.** The upstream fold masks it.
+
+Why it still stays out of #1360 — and this is a real scope call, not an oversight: the function
+returns `("", false)` for unknown kinds, and the caller then logs *"sender kind undetermined"* and
+**skips DM resolution entirely**. Removing the fold converts "resolve the DM" into "silently skip
+the DM" for any non-lowercase address. That is a worse failure mode than the one being fixed and
+needs its own caller audit; it does not belong bolted onto a PR that is already red.
+
+**Ruled:** out of #1360; **filed as a tracked defect** with the reason recorded as *"sits upstream of
+the tightened deriver and masks its rejection"* — that is what makes it more than cosmetic. Plus one
+line in the tightened doc comment noting the upstream fold, so the next reader does not conclude the
+rejection is universal.
+
+### Agreement test narrowed
+
+Golden vectors already pin `DMConversationKey`'s own output, which is **not** the same assertion as
+"the SQL concatenation pattern agrees with `DMConversationKey`." Kept, narrowed to agent+user (no
+SQL writer produces user+user), with a doc comment stating it exists because four SQL writers build
+this key without calling the function.
+
+### NEW STANDING RULES
+
+**166.** When static analysis is exhausted and the remaining unknown is empirical, stop searching
+for certainty and instrument the failure path. The correct hedge for an unauditable premise is to
+make being wrong loud and attributable, not to keep auditing. Log the offending value's *shape* —
+never the value.
+
+**167.** A tightening that merely relocates an existing silent failure to an earlier, legible point
+carries no new risk, however unauditable the data. Establish which of the two it is — new failure
+or relocated failure — before treating unaudited data as a blocker. The question is answered by
+asking what the downstream strict checker does with the un-tightened input today.
+
+**168.** A fold upstream of a validator masks that validator. Before accepting "the tightening is
+done", walk backwards from the tightened function to find normalisation on the calling path — a
+rejection that cannot fire is not a rejection.
+
+**169.** "Noted so it doesn't surprise later" is not a filing. If a finding changes the meaning of
+work being shipped, it gets a tracked item with the reason it matters attached, or it will be
+rediscovered from scratch by someone without the context that made it visible.
