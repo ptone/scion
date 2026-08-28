@@ -8220,3 +8220,86 @@ noted as an instrument limit rather than treated as full confirmation of rules 5
 
 **State:** `upstream/main` = `b88fece2f`. Tranche B = `377a70e38`, green, merge-ready, awaiting user.
 My branch = `d57312543` + this entry. All worktrees pruned; only `/workspace` remains.
+
+---
+
+## §5dd. 2026-08-28 11:41Z — SECTION BOUNDARY: TRANCHE B MERGED. Two sub-tranches dispatched.
+
+### Merged and verified intact
+
+PR #1343 merged at 11:40:21Z as squash **`b3562fb19`**. `upstream/main`: `b88fece2f` →
+**`4b120bd70`** (also picked up #1344 changelog and #1345 nightly docs, neither mine).
+
+Squash merge means patch-id and `git cherry` are blind (rule 61), so I verified by **content**:
+
+```
+git diff --name-only b88fece2f...377a70e38          -> 16 files
+git diff upstream/main 377a70e38 -- <those 16>      -> EMPTY
+```
+
+**And the empty result got its positive control**, because an empty diff is exactly the shape that
+lies when the file list is empty or the command is malformed:
+
+```
+git diff b88fece2f 377a70e38 -- <those 16>          -> non-empty (AC-DEF15-1 hunk visible)
+```
+
+The command works and the file list is real. **Tranche B landed intact.**
+
+### Dispatch: two sub-tranches, disjoint file sets, no peer-wait
+
+The sequencing constraint is **not** ledger order. It is that the D-1 guard must be extracted
+**once, where it lives** (`conversation_store.go:537-550`), before `mergeConversation` consumes it.
+That inverts §5cm's implied ordering — B1 was written first but must go *second*, because it is a
+consumer of the extraction, not its author.
+
+| Owner | Rows | Files |
+|---|---|---|
+| **em6** | B6, B7, B9 + extract shared D-1 predicate | `pkg/messaging/conversation.go`, `pkg/store/entadapter/conversation_store.go` |
+| **em10** | B11, B12, B13, B15 | `pkg/hub/*` |
+
+**Disjoint on purpose.** Both told explicitly not to reach across, and to tell me instead if they
+find they need to. Both woke and are `working`.
+
+I considered giving em6 the whole cluster (B1/B2/B14 too, since B1 and B2 are both
+`mergeConversation`). Rejected: it would have created a single serialised critical path with em10
+idle, and the migration rows genuinely cannot start until the predicate exists. Splitting by *layer*
+rather than by *ledger row* gave two independent work fronts and zero peer-waits — which is the
+outcome rule 63 wants, achieved by scheduling rather than by authorising a wait.
+
+**Held, deliberately:** B1/B2/B14/B3 + the six reviewer findings. B1 consumes em6's predicate;
+starting now would fork the very guard the extraction exists to unify. Dispatches when em6 lands.
+Tranche C after that.
+
+### Ledger sweep
+
+**Struck this cycle:** tranche B in full — B5/F1–F5, DEF-8 dual-write, broadcast ingress hardening,
+B4 (S4-P4 now satisfied in code, though see below), B8 (struck earlier as no-op).
+
+**S4 precondition table updated:**
+
+| # | Precondition | Status |
+|---|---|---|
+| S4-P1 | flip derivation failure to deny | OPEN — not started, correctly (B10 ruling: not yet) |
+| S4-P2 | re-key non-canonical-but-parseable DM keys | OPEN — in the held migration brief |
+| S4-P3 | every creation path stamps or is exempt | **DISPATCHED to em10 (B15)** |
+| S4-P4 | divergence gate can report DM agreement | **CODE DONE**, but *not yet observed green on real traffic* |
+
+S4-P4 deserves its caveat repeated rather than being ticked: §5cv ruled that a fixed-but-unobserved
+gate is worth very little, and the fix landed under an hour ago. It is not satisfied until real
+traffic shows agreement. Recording it as CODE DONE, not DONE.
+
+**Held with reasons (unmoved by design):** DEF-5, 6, 9, 10, 11, 14, 16, 17/18 — all downstream of
+S4. AC-DEF15-4 / AC-DEF16-1 blocked on `ae33715e`. AC-12-6 / beta awaiting user scheduling.
+Messaging-authz A/B/C — user is thinking. **em9 / option (i) — still unanswered; em9 is now the only
+idle manager.** Flagged to the user as a one-line resource fact, explicitly *not* re-arguing the
+case (§5cq discipline holds).
+
+### Rule 99 (new)
+
+**Dispatch order is set by the dependency graph, not by the order the briefs were written.** B1 was
+briefed before B6/B9 and reads like the natural first move, but it *consumes* an artifact B6/B9
+produces. Briefs written at different times encode the ordering of my understanding, not of the
+work. Re-derive the order at dispatch time — and prefer splitting by layer over splitting by ledger
+row, because layer splits produce disjoint file sets and ledger splits produce merge conflicts
+between agents who were each locally correct.
