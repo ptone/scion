@@ -244,11 +244,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if err != nil {
 				slog.Warn("lifecycle: could not look up assigned GCP service account",
 					"agent_id", id, "sa_id", gcpID.ServiceAccountID, "error", err)
-				ValidationError(w, "assigned GCP service account is not available; re-verify or re-assign it before starting", nil)
+				ValidationError(w, fmt.Sprintf(
+					"assigned GCP service account %s is not available; "+
+						"re-verify or re-assign it before starting",
+					gcpID.ServiceAccountID), nil)
 				return
 			}
 			if !sa.Verified {
-				ValidationError(w, "GCP service account is not verified; verify it before starting the agent", nil)
+				ValidationError(w, fmt.Sprintf(
+					"GCP service account %s is not verified; "+
+						"verify it before starting the agent",
+					sa.Email), nil)
 				return
 			}
 		}

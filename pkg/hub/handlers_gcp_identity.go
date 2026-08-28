@@ -641,7 +641,14 @@ func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http
 	sa.VerificationError = ""
 
 	if err := s.store.UpdateGCPServiceAccount(r.Context(), sa); err != nil {
-		writeErrorFromErr(w, err, "")
+		slog.Error("verification succeeded but the success could not be persisted — "+
+			"the service account will still appear unverified in the database",
+			"sa_id", sa.ID, "sa_email", sa.Email,
+			"persist_error", err.Error())
+		writeError(w, http.StatusInternalServerError, "gcp_verification_persist_failed",
+			"Verification succeeded but the result could not be recorded; "+
+				"the service account may still appear as unverified. "+
+				"Retry verification to persist the result.", nil)
 		return
 	}
 

@@ -1329,3 +1329,64 @@ func TestVerification_PersistFailure_DoesNotReportCleanFailure(t *testing.T) {
 			"this is the security-relevant assertion: the database state "+
 			"did not match the API response")
 }
+
+// TestVerification_SuccessPersistFailure_DoesNotReportCleanSuccess verifies
+// that when the verification probe succeeds but the persistence of that
+// success fails, the endpoint returns 500 / gcp_verification_persist_failed
+// rather than 200. Without this, the operator sees "Verified ✓" but the
+// database still reads Verified=false, and the lifecycle handler (Defect 2
+// fix) will reject start/restart with an opaque "not verified" error.
+func TestVerification_SuccessPersistFailure_DoesNotReportCleanSuccess(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := createTestProjectForSA(t, srv, s)
+
+	// Register the SA with a failing token generator so auto-verify fails
+	// and the SA starts as Verified=false.
+	srv.SetGCPTokenGenerator(&mockGCPTokenGeneratorVerifyFail{
+		email:     "hub@test.iam.gserviceaccount.com",
+		verifyErr: fmt.Errorf("IAM policy not yet propagated"),
+	})
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID),
+		map[string]string{
+			"email":     "agent@my-project.iam.gserviceaccount.com",
+			"projectId": "my-project",
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var created store.GCPServiceAccount
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+	require.False(t, created.Verified, "precondition: SA should be unverified after failed auto-verify")
+
+	// Now the IAM policy propagates — the probe will succeed. But the store
+	// update will fail, simulating a transient DB error.
+	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub@test.iam.gserviceaccount.com"})
+	srv.store = &failingGCPSAUpdateStore{
+		Store:     s,
+		updateErr: fmt.Errorf("database is locked"),
+	}
+
+	rec = doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s/verify", projectID, created.ID), nil)
+
+	// Must NOT be 200 — that would tell the operator verification succeeded
+	// when the result was never persisted.
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"when the success cannot be persisted, the status must be 500, not 200")
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, "gcp_verification_persist_failed", errResp.Error.Code,
+		"error code must distinguish a persist failure from a clean success")
+	assert.Contains(t, errResp.Error.Message, "could not be recorded",
+		"the message must tell the operator the success was not persisted")
+
+	// The SA must still be Verified=false in the real store, proving the
+	// persist failure was real and the operator's view is not stale.
+	srv.store = s // restore real store
+	stored, err := s.GetGCPServiceAccount(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.Verified,
+		"SA must still be Verified=false because the update failed — "+
+			"this is the interaction assertion: the Defect 2 lifecycle "+
+			"check would reject start for this SA, and the operator must "+
+			"know that from the verify response, not discover it later")
+}
