@@ -12702,3 +12702,86 @@ reads as clearance for the latter unless both are run.
 - Tranches D–G, DEF-5/6/9/10/11/14/16/17/18 — held behind C.
 - Open with user: DEF-32+DEF-34 routing, #1360 merge, three branch deletions,
   escalation-1 CI.
+
+---
+
+## §5ew — SECTION BOUNDARY: first landable unit shipped for review
+
+`scion/ca-msg-em10-marker-gate` @ **`55728b3bd`**, base `3c7e14e41`. Compare URL
+sent to the user on thread `1532864101909528737` at 1899 runes.
+
+### Independent verification before sizing the URL
+
+| Check | Result |
+|---|---|
+| Tip matches claim | `55728b3bd8268dd…` ✓ |
+| `upstream/main` is an ancestor | **YES** — merge-base `3c7e14e41` |
+| Three-dot stat | **exactly 3 files**, +358/-2 |
+| Two-dot vs three-dot | **identical** — independent confirmation the base is not stale |
+| Gate on shipping tree | exit 0, via script and via `make` target |
+
+**The check that mattered most: content identity.** A clean cherry-pick is not
+proof that the *bytes* I tested are the bytes shipping — the two branches have
+different bases, and `ci.yml` or `Makefile` could have picked up context from
+either. I sha256'd all three files across both branches:
+
+    hack/check-security-marker-gates.sh   39f69042c14f6bbc…   IDENTICAL
+    .github/workflows/ci.yml                                  IDENTICAL
+    Makefile                                                  IDENTICAL
+
+Byte-identical, so the six-test matrix from §5ev **transfers** rather than
+needing a re-run. Had any differed, the tests would have been about a different
+artifact than the one under review. **Rule 215.**
+
+Two-dot equalling three-dot here is worth noting as a *positive* use of the
+comparison I have twice misread destructively: when the base is current the two
+agree, so their agreement is a cheap confirmation of freshness. The dangerous
+case is precisely when they diverge.
+
+### The URL
+
+Title and body both URL-encoded and carried **in** the URL, per the correction
+the user issued twice (DEF-31 and the CI guard both went out bare). Encoding
+roughly triples prose, so the composition was: rich body inside the URL (durable,
+what reviewers read), minimal prose outside it (ephemeral). First assembly came
+to 2133 runes against the 2000 cap; the instinct to trim the *body* was wrong —
+the body is the artifact that survives, the chat prose is not. Trimmed the prose
+instead and landed at 1899. **Rule 216.**
+
+### What this is
+
+The first thing from this entire effort to reach a reviewable state. It is
+deliberately the *guard* rather than a feature: it protects B5 / #1322 / #1347
+from silent reversion, which is the risk the whole tranche sequence has been
+managing, and it does so with zero product files — so it can land while the
+DEF-32/DEF-34 routing question is still open.
+
+It also partly discharges a decision the user has been holding. The three
+branch deletions were proposed so `messaging-v2` could not later be merged and
+revert the security work. **A gate that fails when those symbols disappear
+catches that merge whether or not the branch exists.** The deletions remain good
+hygiene; they are no longer the only protection.
+
+### Rule 215
+
+**A clean cherry-pick proves the patch applied, not that the artifact is
+unchanged.** When tests were run against branch A and branch B is what ships,
+hash the files. Different bases can silently alter context lines, and the tests
+then describe an artifact nobody is reviewing.
+
+### Rule 216
+
+**Under a message cap, trim the ephemeral half.** A compare URL carries a durable
+PR body and a disposable chat note. The reflex is to shorten whichever is longer;
+the correct move is to shorten whichever nobody will read again.
+
+### Ledger
+
+- **Marker gate — STRUCK. Awaiting user to open the PR.** First strike on this
+  board in many heartbeats.
+- **DEF-32 / DEF-34** — unchanged, awaiting routing.
+- **DEF-33** — downgraded, latent, no movement, correctly.
+- em10's earlier product work — unlanded, behind routing. Tracked since §5ev.
+- Tranches D–G, DEF-5/6/9/10/11/14/16/17/18 — held behind C.
+- Open with user: **marker-gate PR (new)**, DEF-32+DEF-34 routing, #1360 merge,
+  three branch deletions, escalation-1 CI.
