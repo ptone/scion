@@ -12364,3 +12364,82 @@ tool can produce, because the operator cannot tell whether to re-run it or clean
 
 **ptone:** messaged at 23:23 with the plain version, no reply, nothing outstanding that only he can
 unblock. Not interrupting. Next contact is the compare URL.
+
+## §35.50 — R4 in. The developer found that three of the reviewer's ten rows were false pins. (00:14)
+
+Verified before reading the claims: `df3b204dd`, `ahead 11 / behind 0`, 4 files, rebased onto upstream
+`53ec098f5` — which matches the current upstream tip. Round-4 review dispatched (`briefs/sn-adcpreflight-rev4.md`).
+
+### The finding, and it is the best thing produced on this task
+
+`runBashFunc` built its bash command with `fmt.Sprintf("%q", …)`. **`%q` is *Go* quoting.** A real tab
+arrives at bash as the two characters `\` and `t` — which the backslash strip already handles. So the
+row **passes green for the wrong reason.**
+
+Measured: with `%q` restored, m13 goes red on **only 7 of 10**. Tab, newline and carriage return stay
+green. With a proper `shellQuote`, 10 of 10.
+
+**What makes this valuable is not that it is a bug in a test. It is that the developer distrusted the
+CHANNEL after everyone had agreed on the CONTENT.** The reviewer measured those fixes against the
+function, in bash, called directly, and its verdicts were right. I read the verdicts and treated the
+pins as validated. **Neither of us was looking at the Go-to-bash boundary, and that boundary was lossy
+for exactly the three inputs the rows were about.**
+
+> **Standing rule: "the reviewer already ran it" answers a different question from "the pin will
+> detect it."**
+
+The consequence, and it is how I scoped round 4's review: **this round reviews the harness, not the
+rules. If `shellQuote` is wrong in another way, all 39 validator rows are theatre** — a table of inputs
+that never reach bash as written. I asked for that proven **by observation** (echo the received string
+back and compare), not by reading `shellQuote`, and for the other Go↔bash boundaries to be checked
+too: the argv log, the stub scripts, `cmd.Env`, the counter file.
+
+### I was wrong to drop the scheme guard
+
+The developer took the reviewer's Optional 2, which I had left out, and told me why:
+
+> `dict://x.googleapis.com` is safe only because curl carries no `Authorization` header on that
+> protocol, **which is the exact sentence R2 exists to condemn.**
+
+**That is my own R2 argument aimed at a place I had not pointed it.** I took "safety supplied by a
+downstream component is not safety" for `%2f` and then declined it for `dict://`, in the same function,
+in the same round. Kept. Pinned by m14.
+
+**Second time tonight the developer has handed my own argument back at a target I missed.** The first
+was "host allowlist, not URL allowlist."
+
+### The pattern behind both of my misses, named by the developer
+
+> Both times the load-bearing thing was a sentence about **what kind of rule this is**, and both times
+> it arrived as prose and was triaged as prose.
+
+**Adopted as a habit: when a sentence describes the rule's scope, it becomes a table row before it
+becomes a comment.** The `?`/`#` guard and the scheme guard are both, in the end, a sentence I had read
+and filed under documentation.
+
+### Other decisions
+
+- **R5 confirmed** — the developer read the pair correctly. Demoting the exit-code assertion to
+  `require` and labelling it the premise beats deleting it: **the premise is worth stating, it just is
+  not evidence.**
+- **m9's red set moved** and now fires on two ALLOW rows only (uppercase, double-userinfo), because the
+  new guards give the correct verdict on the reject rows it used to catch. **Deleting those two as
+  redundant would make the path-strip regression undetectable.** I asked for a comment on them —
+  *"this mutation only catches two rows that look redundant"* is precisely how a real pin gets deleted
+  by someone being helpful.
+- **The live-deploy decision is delegated to the reviewer, with the criterion stated.** The guards now
+  run on the *resolved* default before everything, so if the shape regex or scheme guard is wrong about
+  `https://${region}-run.googleapis.com`, **no operator can deploy at all** — total failure of the
+  tier's only entry point. If a test already exercises `di_main` with no overrides through the
+  validator, name it and skip the deploy; if nothing does, that gap is itself a finding and I want a
+  live run.
+- **Asked the reviewer to try to build a second R1 payload.** The developer claims the `?`/`#` guard
+  closes the class because dot-segment normalisation removes preceding segments and never a trailing
+  one, and that it could not construct another. The reviewer built the first one; that is the one place
+  this round where adversarial reading beats any test.
+
+### Count reconciliation, since I got it wrong once
+
+`TestScript` is **41/0/0** in the developer's container (no gcloud, so
+`CheckGcloudInstances_FailureMessage` **passes**) and **40/0/1** in the reviewer's (gcloud 582, so it
+**skips**). Same suite, different runner. Neither number is the branch's property.
