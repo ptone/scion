@@ -8546,3 +8546,115 @@ the very guard the extraction exists to unify. #1349 being *open* is not #1349 b
 No report to the user this cycle. There is no section boundary: em6's section closes on merge, not
 on PR-open, and the user opened the PR so they already know its state. em10's block is mine to
 work, not an escalation.
+
+---
+
+## §5dh — em10 round 2: two blocking findings, and a new ledger row (DEF-32)
+
+em10 reported `b0a76814a` on `scion/ca-msg-em10-trb`, two additive commits on `ca52d6f6`,
+claiming both §5df findings addressed. Verified in `/tmp/em10b`. Branch contains `upstream/main`,
+does **not** contain em6's `efb70e04a` — so it carries the pre-merge signature
+`ResolveOrCreateDMConversation(ctx, cs ConversationUpserter, pa ParticipantAdder, ...)`. em6 changes
+`pa ParticipantAdder` to `pe ParticipantEnsurer`. Both are satisfied by `nd.store`, so em10's new
+call site is **source-compatible across the merge** — no conflict, no re-work needed. Checked
+because a cross-branch signature change is exactly the thing that detonates at merge time.
+
+### What em10 got right
+
+The stamping itself is placed correctly (before `CreateMessage`, guarded by `if convResult != nil`,
+matching the eleven existing sites). The hardcoded `"user"` kind is **correct by construction**:
+`createInboxMessage` has exactly one caller, `notifications.go:328`, inside
+`case store.SubscriberTypeUser`. I checked rather than assumed, because `SubscriberType` is genuinely
+`"agent"|"user"` and a hardcoded kind is normally a smell.
+
+### F1 (BLOCKING) — a stamp that may never fire
+
+`messages.DMConversationKey` is **UUID-strict**: it runs `uuid.Parse` on both IDs and errors out
+otherwise. em10 fed it `sub.SubscriberID`, a field whose own struct comment reads
+*"Slug or ID of the subscriber"*. That polymorphism is not theoretical:
+
+- `handlers_agents_core.go:465` sets it to `creatorAgent.Slug` — a literal slug (agent branch only,
+  so not reachable here, but it establishes the field's contract).
+- `FederatedUserIdentity.ID()` returns `issuerURL + ":" + subject`. **Never** a UUID.
+- `handlers_notifications.go:459,648` set it from `caller.ID`, which can be that federated value.
+
+When it isn't a UUID the chain is: `DMConversationKey` errors → `ResolveOrCreateDMConversation` logs
+and returns nil → `convResult == nil` → `ConversationID` never set. The message persists **unstamped**
+— which is the precise defect I blocked on in §5df, relocated rather than fixed, and now wearing a
+stamp that looks like a fix.
+
+**Nothing in em10's work would detect this.** The enumeration test asserts the site is *listed*.
+Mutation M2 ("remove createInboxMessage from the stamped set") kills for exactly that reason: it
+tests the bookkeeping. All three reported mutations (M2, M3, M5) are bookkeeping mutations. Not one
+of them perturbs whether the stamp *fires*.
+
+Why it survived review-by-gates: `NewAuthenticatedUser` is constructed from `store.User.ID` at all
+ten of its call sites, and `store.User.ID` is a UUID primary key. So the common path works. **A
+defect that is invisible on the common path and only bites one identity backend is the kind gates
+never catch and reviewers wave through.**
+
+Instruction to em10: resolve `SubscriberID` to the canonical `store.User` UUID before deriving the
+key; on failure log and leave unstamped (the non-fatal contract still governs — do **not** make this
+reject). Then a behavioural test asserting non-empty `ConversationID` for a resolvable subscriber,
+and one asserting no-stamp-no-panic for an unresolvable one. *Mutate the resolution step, not the
+list entry.*
+
+### F2 (BLOCKING) — the publish enumeration conflates two different methods
+
+`isPublishUserMessageCall` matches on **name only**. There are two unrelated methods so named:
+
+- `eventBuilder.PublishUserMessage(ctx, msg *store.Message)` — the SSE publish the B11/B13 guard is
+  actually about.
+- `MessageBrokerProxy.PublishUserMessage(ctx, projectID, userID string, msg *messages.StructuredMessage)`
+  — broker delivery, entirely unrelated.
+
+The walker swept up both, inflating the population to 14, and all three "exemptions" are the second
+kind. Those exemptions hide no defect *today*. The problem is that they are keyed `file:function`,
+so **they waive the function, not the call.** Any genuine event publish later added inside
+`dispatchToBroker`, `PublishToGroup`, or `handleAgentOutboundMessage`'s broker path is pre-exempted
+and invisible to the guard that exists to catch it.
+
+Instruction: discriminate by receiver or arity so the broker sites leave the population entirely
+rather than being exempted. Target zero exemptions.
+
+Also asked: the report lists M2, M3, M5. **What were M1 and M4?** A mutation set with holes in its
+own numbering is a report about a larger experiment than the one disclosed. Same instinct as §5df's
+deleted-test omission.
+
+### Rule 105 (new)
+
+**An enumeration test proves a site is listed. It does not prove the site works.** These are
+different assertions and only the first is cheap. Whenever a guard is an enumeration, ask separately
+for the behavioural test and for a mutation that perturbs the *mechanism* rather than the *manifest*.
+A manifest mutation always kills — that is what manifests do — so its kill carries almost no
+information.
+
+### Rule 106 (new)
+
+**Exemptions keyed by function name waive the function, not the call.** Any future call added to an
+exempted function inherits the waiver silently. Prefer excluding non-applicable calls from the
+*population* (by receiver, arity, or type) over admitting them and exempting them. Zero exemptions is
+a design target, not a nicety — see rule 102 on why the exempt set is the highest-privilege construct
+in an enumeration test.
+
+### DEF-32 (new ledger row) — federated identity IDs are not UUIDs, on live DM paths
+
+Discovered while chasing F1, and **wider than em10's tranche**. Already-merged sites pass
+`user.ID()` straight into `ResolveOrCreateDMConversation`:
+`handlers_chat_v2.go:1141`, `:1235`, `:1339`. For `AuthenticatedUser` that is a store UUID and all is
+well. For `FederatedUserIdentity` it is `issuerURL:subject`, which cannot parse as a UUID — so on a
+federated deployment **user-side DM stamping silently no-ops across the board**, not just in
+notifications.
+
+Severity is conditional on reachability: is `FederatedUserIdentity` actually reachable as the caller
+identity on the chat and messaging paths, or is federation confined to service-to-service? I have
+**not** established that, and I am not going to assert it. Dispatching the reachability question to
+em9 (idle, read-only, conflicts with nothing).
+
+If reachable, DEF-32 is an S4 blocker: the read-switch would make federated users' DMs invisible.
+It also strengthens the case that S4-P4 must be *observed green on real traffic* rather than merely
+implemented — a UUID-strictness failure of this kind is invisible in unit tests and loud in the
+divergence counters.
+
+Not escalated to the user: conditional on an unmeasured fact, with no S4 switch imminent. It gets
+escalated if em9 confirms reachability.
