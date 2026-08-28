@@ -8723,3 +8723,59 @@ escalate.
 
 Coordinator informed of both rulings and given the DEF-32 context, with the escalation condition
 stated explicitly: I escalate if em9 confirms reachability, not before.
+
+---
+
+## §5dj — em6 cleared at `42abb7dff`; #1349 ready
+
+em6 returned `42abb7dff`, additive on `efb70e04a`. Verified independently rather than accepting the
+report.
+
+### Diff hygiene
+
+`git diff efb70e04a 42abb7dff --stat`: 68 insertions, **zero deletions**, across two files. The
+non-test change is exactly four lines inside the `if existing != nil` block — two population lines
+and two comment lines — with `return nil` intact and no write to the row. Ran
+`git diff | grep "^-func Test"` explicitly: **no tests removed.** That check is now reflexive after
+§5df, where em6 deleted a test while reporting which tests it had kept.
+
+### The test
+
+`TestEnsureParticipant_PopulatesCallerStruct` uses the soft-removed row — the B6-critical case, not
+the easy one. It asserts **preconditions** (`p.ID` empty and `p.JoinedAt` zero before the call,
+`left_at` non-nil in the DB) before asserting post-conditions. Preconditions in a read-back test are
+what stop it passing vacuously, and em6 included them unprompted.
+
+### Mutations — two, one of them mine
+
+- **M-A** (em6's, reproduced): delete the two population lines → **FAIL**. Confirms their report.
+- **M-B** (mine): insert `existing.Update().ClearLeftAt().Save(ctx)` on the existing path → **FAIL**.
+
+M-B is the one that mattered. M-A only proves assertion (c) is live; it says nothing about (b). I
+warned em6 explicitly that the tempting "fix" here is to convert the early return into an upsert,
+which would clear `left_at` and undo B6 entirely. M-B *is* that mistake, injected deliberately, and
+the test kills it. So assertion (b) genuinely defends the invariant rather than decorating it.
+
+Tree restored clean afterwards (empty `git diff --stat`), verified rather than assumed.
+
+Gates: `entadapter` ok, `messaging` ok, `gofmt` clean.
+
+### PR state
+
+`#1349` head moved `efb70e04a` → `42abb7dff` **in place**, still `UNSTABLE` (mergeable; the red is
+`cla/google`, which per rule 104 is scenery on agent-authored branches). No new compare URL was
+needed and none was sent — the additive-commit route preserved the user's open PR, which was the
+whole point of choosing it over an amend.
+
+### Rule 108 (new)
+
+**When you warn a manager about a specific wrong fix, make that wrong fix one of your mutations.**
+The warning proves you anticipated the failure mode; the mutation proves the test would have caught
+it had the warning gone unread. A hazard you can name is a mutation you can write, and it is
+strictly more informative than the mutation that merely re-derives the reported change.
+
+### Standing
+
+em6 re-parking. em10 on round 3 (F1 UUID-strict stamp, F2 publish-enumeration rescope). em9 on
+DEF-32 reachability. B1/B2/B14/B3 still held pending #1349 **merge** — head-updated is not merged,
+and the predicate B1 consumes only becomes shared ground when it lands.
