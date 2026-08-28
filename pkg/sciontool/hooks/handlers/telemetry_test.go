@@ -785,6 +785,37 @@ func TestTelemetryHandler_UnpairedModelEnd(t *testing.T) {
 	}
 }
 
+// TestTelemetryHandler_SessionEndPassesSessionIDToFinalize pins the call site
+// in telemetry.go that passes event.Data.SessionID into Aggregator.Finalize.
+// StartSession is never called, matching the two-aggregator split where
+// session-start fires in the hook process and session-end fires in init.
+//
+// Named mutation 4 (argument dropped): Remove the event.Data.SessionID
+// argument from the Finalize call in updateAggregator (telemetry.go:702),
+// replacing it with "". The test reds at the summary.SessionID assertion
+// because the consumed value never reaches the aggregator.
+func TestTelemetryHandler_SessionEndPassesSessionIDToFinalize(t *testing.T) {
+	h := NewTelemetryHandler(nil, nil, nil)
+
+	// Capture the summary via the OnSessionEnd callback.
+	var got telemetry.SessionSummary
+	h.OnSessionEnd = func(s telemetry.SessionSummary) { got = s }
+
+	// Drive a session-end event carrying a session ID but no prior
+	// session-start — the init process never receives session-start.
+	if err := h.Handle(&hooks.Event{
+		Name: hooks.EventSessionEnd,
+		Data: hooks.EventData{SessionID: "sess-from-lifecycle"},
+	}); err != nil {
+		t.Fatalf("Handle session-end error: %v", err)
+	}
+
+	if got.SessionID != "sess-from-lifecycle" {
+		t.Errorf("expected summary.SessionID = %q, got %q",
+			"sess-from-lifecycle", got.SessionID)
+	}
+}
+
 func TestTelemetryHandler_NoTokenMetricsWhenZero(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
