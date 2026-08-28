@@ -13599,3 +13599,35 @@ Federation being hot-toggleable means it can be flipped **mid-exercise**, and do
 ### Ledger
 - **DEF-32** — mitigation corrected (runtime, not deploy-time); escalation to user this heartbeat. Substance unchanged: still a design gap, still an S4 blocker, still needs identity linking.
 - DEF-33/34/35 spec complete (§5fi), DEF-34 needs #1259. DEF-18 verified unlanded, carrier em9-unify (§5fj). Tier 2 DEFERRED. Tranche H blocked on G-1. DEF-5/6/9/10/11/14/16, D–G held. DEF-17 STRUCK. GATE-1 CLOSED.
+
+---
+
+## §5fl — ptone asked whether #1362's reviewer feedback was considered. Re-verified from scratch; rejection CONFIRMED, but the silence was a process miss.
+
+Did NOT answer from the cached §5f-era finding (rule 243: re-verify from the defect's definition, not memory). Re-derived everything.
+
+### Evidence, re-established
+- PR #1362 OPEN/MERGEABLE at `7caa8e00d`. Two inline comments, both `gemini-code-assist[bot]`, both medium, `pkg/messages/dm_key_test.go` lines 300 and 388.
+- Both make the same claim: the case named "mixed-case UUID" holds a canonical lowercase UUID, so `DMConversationKey` succeeds, so the rejection test fails.
+- **File at head ends `00C04FD430C8`. Gemini quoted `00c04fd430c8`.** It lowercased the string whose case IS the subject of the test.
+- **Probe (`zz_probe_test.go`, run then deleted; `/tmp/em6b` verified clean at `7caa8e00d`):**
+  - lowercase (Gemini's string) -> ACCEPTED. Its reasoning is sound *for that string*.
+  - `...00C04FD430C8` (real string) -> REJECTED: `dm key: non-canonical UUID for user (shape: uppercase-hex)`.
+- Prediction falsified: tests pass locally and CI Build & Test is green at this SHA.
+- **Non-vacuity checked two ways (rule 238):** (1) file has NO build tag — plain `package messages` — so `-tags no_sqlite` compiles and runs it; green is not the usual CI blind spot. (2) `TestDMConversationKey_RejectsNonCanonicalUUID` asserts `err.Error()` contains "non-canonical UUID", not merely `require.Error`. That discriminates the branch.
+- Gemini's suggested replacement is also mixed-case -> rejected identically, same error text. Pure diff churn.
+
+### The actual miss
+The finding was right; the handling was not. I recorded the rejection in the state doc and told the coordinator, and **left the PR thread silent**. From ptone's side that is indistinguishable from ignoring it — and it is the second time (#1361 drew the same "unaddressed feedback" note). A rejection that lives only in my scratchpad does not exist to anyone deciding whether to merge.
+
+Offered to post the rationale to the PR; awaiting his call rather than acting, since commenting on PRs touches his review surface.
+
+### Rules
+**Rule 256.** Rejecting review feedback is only half the work; the rejection has to land where the reviewer's claim is displayed. Evidence recorded in a private doc leaves the PR showing unresolved findings, and the merge decision is made by someone reading the PR, not the doc.
+
+**Rule 257.** When a reviewer's argument is sound but its premise is a misquote, say both. "Gemini is wrong" invites re-litigation; "Gemini's logic holds for the string it quoted, which is not the string in the file" closes it and shows the check was real.
+
+**Rule 258.** For a test asserting a rejection, prove non-vacuity twice: that the test is actually compiled and run under the CI tag set, and that the assertion discriminates the intended failure branch from the others. Either alone can be satisfied by a test that proves nothing.
+
+### Ledger unchanged
+#1361 `5fc82455b` and #1362 `7caa8e00d` green, awaiting ptone's merge. DEF-34/#1259 sequencing and DEF-32 identity-linking still open. DEF-33/34/35 spec complete. DEF-18 carrier em9-unify. Tier 2 DEFERRED. Tranche H blocked on G-1. DEF-17 STRUCK. GATE-1 CLOSED.
