@@ -14862,3 +14862,46 @@ about:
 Point 3 is the general worry: **when a required assertion turns out to be impossible, the replacement is
 chosen by the person under time pressure and is never re-derived from the original reason.** The reason
 here was "seeding the wrong template also returns no error." The substitute has to still catch that.
+
+### §35.74 — all four findings closed; and I authored a fake-green pin (13:20)
+
+Both agents delivered inside 20 minutes. **Tasks #96 and #97 complete; all four coordinator findings on
+the three open PRs are closed.** `e858e917` APPROVED by `sn-initgate-rev` (r4). Doc corrected from the
+measurement in `747e1cf2`; PR #1351 head verified (`gh` lagged one call behind `ls-remote` — the remote
+is authoritative).
+
+**RULE 29: A VALUE NAMED BY SOMEONE WHO HAS NOT RUN IT IS A HYPOTHESIS WEARING THE COSTUME OF A
+SPECIFICATION.**
+
+I told `sn-bash32-rev3`: *"`grep -c '^self-test:'` must equal 1. It is 5 today. That is the pin."*
+**The visible count is 1 both before and after the fix.** `check()` redirects its children with
+`> /dev/null 2>&1`, and the guard at `:148` captures nested output via `$(...)`. My pin would have
+passed on the unfixed code. **I specified a fake-green pin while running a campaign against fake-green
+pins**, and I did it in the same breath as the countermeasure I adopted this morning — *name the call
+and the value*. Naming a value I had not run did not make the brief more rigorous; **it laundered a
+guess into a requirement, and it arrived with architect authority attached, which makes it less likely
+to be questioned, not more.**
+
+The agent caught it and built the right instrument: a sideband marker file appended on every banner
+execution, mutation-tested both directions (export removed → 5, restored → 1).
+
+**What saved it was the "tell me what in here is wrong" clause.** That is twice today — the same clause
+caught my impossible byte-comparison requirement in the task #97 brief (`ensureBrokerID()` mutates the
+seeded file after seeding, so the comparison I demanded cannot exist). **Two of my last three briefs
+contained a defective requirement, and both were caught by the one paragraph that invites contradiction
+rather than by any of the paragraphs that specify rigour.** The corrective is not to specify harder. It
+is to mark predicted values AS predicted.
+
+**The measurement itself paid for the whole detour.** Nine of ten constructs unsupported, `printf -v`
+supported. But `declare -A` is the find, and "unsupported" understates it: on 3.2.57 it **exits 0**,
+prints `declare: -A: invalid option`, and creates an **indexed** array. A later `m[key]=value` evaluates
+`key` as arithmetic, gets **0**, and every key collides on `m[0]` — **with no error at the point of
+use.** A probe keyed on exit status calls that supported, which is precisely what the first version of
+the probe did. Commit `8848621c` exists to catch the exit-0-but-rejected class. That is the same shape
+as the `${host,,}` → `tr` trailing-newline defect this branch already carries: **the portable
+substitute that silently returns a different answer.**
+
+r4's two non-blocking nits are parked in the held Shape B brief (items 2 and 3) so they cannot become
+permanent: a third seeding test for env-set + seam-FALSE (the Cloud Run *service* case, currently
+**safe-by-reading only**), and a dead `truncate()` helper. **Safe-by-reading is exactly what that third
+test replaces**, and I would rather it rode along than be argued about.

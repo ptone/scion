@@ -158,11 +158,20 @@ the equality clause, not the local-only clause, but the fact that something is e
 
 ## Also in this commit (and the reason it is in this one)
 
-`pkg/config/sandbox_bin_sync_test.go` says **"the internal assertion below"** for an assertion that lives
-in `init_test.go`, not below in that file. rev2 raised it as a non-blocking micro-nit at close-out and I
-held it deliberately: a fourth commit carrying one word costs more review attention than the error costs
-a reader. **It is recorded here so it cannot quietly become permanent** — which is how nits usually
-survive. Fix the wording to name the file.
+Three non-blocking nits are parked here. Each was raised at close-out of a review that otherwise
+approved, and each was held deliberately: a commit carrying one word costs more review attention than
+the error costs a reader. **They are recorded here so they cannot quietly become permanent** — which is
+how nits usually survive.
+
+1. `pkg/config/sandbox_bin_sync_test.go` says **"the internal assertion below"** for an assertion that
+   lives in `init_test.go`, not below in that file. (rev2.) Fix the wording to name the file.
+2. **Add the third seeding test: `CLOUD_RUN_INSTANCE` set, `sandboxBinExists` FALSE** — the Cloud Run
+   *service* case, i.e. the multi-node tier. r4 confirmed the predicate is safe in that direction by
+   reading the conjunction, and approved without it. **Safe-by-reading is what the third test replaces.**
+   Assert the workstation template is seeded, not the cloudrun one.
+3. Dead code in the task #97 delta: a `truncate()` helper is defined and never called. Delete it.
+
+Items 2 and 3 come from `reviews/task92-r4-e858e917.md` (APPROVE, both non-blocking).
 
 ## Constraints
 
