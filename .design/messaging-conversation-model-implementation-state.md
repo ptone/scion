@@ -7748,3 +7748,79 @@ every one of them was green — while the branch failed CI. Four green signals, 
 signal CI computes. Adjacent evidence accumulates into false confidence precisely because each piece
 is individually valid. Cheap rule: before sending a compare URL, run the workflow's own commands
 against the branch tip, with main as a control.
+
+---
+
+## §5cx. 2026-08-28 10:34Z — USER DIRECTIVE: relayed broadcast authz hole + CI disconnect to auth-refactor-lead
+
+User: *"can you relay the broadcast authz error and the CI disconnect to the auth-refactor-lead"*.
+Done, one message to `auth-refactor-lead` (roster-confirmed; note `agent-authz-lead` and `auth-lead`
+also exist — I used the name the user gave, not the nearest match).
+
+**Before relaying I re-read both from the ledger rather than from memory.** A relay is a lossy hop
+by nature, and a garbled security claim costs the receiving agent more than silence would. §5cc
+carried both items verbatim; every figure below came from there or from §5cq/§5cs.
+
+### What I sent, and the framing choices
+
+**Item 1 — cross-project broadcast hole.** Led with "pre-existing on bare main, NOT caused by the
+messaging refactor", because the first question any lead asks about an inbound security report is
+whether it is the reporter's own mess. Gave the RoutePolicy pass-through root cause, the
+agent-callers-gated/user-callers-not asymmetry in `handleProjectBroadcast`, the 202 + 1-delivered
+result **through the real guard chain as registered at `server.go:3711`** (said explicitly, because
+"I proved it against a stub" and "I proved it against the wired chain" are different claims), and
+the runnable probe path.
+
+**The emphasis was deliberate: the trap, not the bug.** For every `RoutePolicy` route the declared
+`Permission` field is documentation, not enforcement — it reads exactly like a control while doing
+nothing. I verified only the broadcast handler, said so plainly, and told them **the inventory of
+every other `RoutePolicy` handler is the real deliverable and the broadcast fix is one row in it.**
+Handing over one defect invites one patch; handing over the class invites the audit.
+
+**Item 2 — CI disconnect.** Led with the *mechanism* and not the percentage, per the §5cf/§5cq
+lesson that "39.6% of tests never compile" invites a methodology argument while
+`[no tests to run]` + job PASSES cannot be argued with. Then the scale, and the growth.
+
+Two things I added specifically for them rather than reusing my user-facing framing:
+- **`authz_agent_baseline_test.go` carries the tag.** Their own suite's green is partial. That
+  converts the item from an interesting statistic into something that affects their landing
+  decisions this week.
+- **Today's demonstration**: tranche B returns rc=0 on `test-fast` while `gofmt -l .` rejects a file
+  in it (§5cw). One branch, two CI jobs, opposite answers, because gofmt ignores build tags and the
+  test job honours them.
+
+Passed the RSS numbers **with the 32-core caveat intact** — laundering a local measurement into a
+second-hand "3.52 GB is fine" is exactly how a caveat dies in transit. Told them option (i) sits
+with the user, so they neither duplicate it nor re-open it, and asked them to send any view **to the
+user rather than to me**, since it is his call and I have already had my one turn on it.
+
+### The judgement call: the third item
+
+I included the messaging-authz A/B/C diagnosis (`AgentActionMessage` bucketed into
+`authorizeAgentLifecycle`; no messaging scope exists) **explicitly marked NOT actionable**, with a
+direct instruction not to start on it and not to press the user, since the decision is open by his
+choice.
+
+Withholding it entirely was the tempting option and I think it was wrong: an authz lead reading the
+broadcast report will plausibly walk into `handlers_projects_core.go` and re-derive a diagnosis that
+already exists. Sending it without the guard rail was the other failure — a diagnosis handed to a
+lead reads as a work item. **The cost of a re-derivation is hours; the cost of an unwanted decision
+being pre-empted is the user's authority over his own open question.** So: send the finding, fence
+the decision.
+
+Confirmed back to the user on thread `1541161053118005308`, 1873 runes.
+
+**Cap discipline, logged because it bit me:** my first draft was 2022 runes. `scion message`
+**rejected it and printed the CLI help text** — it did not truncate, and it did not fail loudly in a
+way I would have noticed if I had not been reading the output. Trimmed to 1873 and it sent. The
+2000-rune cap is enforced, and its failure mode looks like a usage error rather than a delivery
+error. Check for `Message sent` in the output, never assume.
+
+### Rule 93 (new)
+
+**When relaying, re-read the source; and relay the class, not the instance.** Two failure modes in
+one hop: paraphrasing from memory corrupts the technical claim, and forwarding a single defect gets
+you a single patch. The broadcast hole is worth one fix; "declared `Permission` is documentation on
+every RoutePolicy route" is worth an audit. Also carry caveats across the hop verbatim — a
+measurement's error bars are the first thing lost in a relay and the first thing needed by whoever
+acts on it.
