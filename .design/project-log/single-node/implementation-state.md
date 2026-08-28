@@ -15747,3 +15747,49 @@ someone else this morning — fix the class, not the instance — and I did not 
 
 **The positive check:** a successful send prints `Message delivered to agent 'X'.` Look for that line.
 Do not look for the absence of an error, and do not tail fewer lines than the help text is long.
+
+---
+
+## §35.86 — #1316 made ownable; and my own register handed the developer a stale instruction
+
+`sn-harnesscfg-dev` posted the evidence comment at 15:04:52Z:
+`github.com/ptone/scion/issues/1316#issuecomment-5454164921`, 7835 chars. **Verified independently with
+`gh issue view`**, not taken from the report. The issue that had sat unassigned and uncommented for 24
+hours now carries the eight-hop `parseGetID` chain, the hub-404/broker-500 seam, the `resolveTemplate`
+asymmetry as root cause, the triple-guard answer, the `LocalStorage` finding, a pointer to the 14-test
+harness at `dd06037`, and the slug-precedence question **posed as a question**.
+
+**That last part matters.** The developer had the evidence to answer the precedence question and did not.
+An unresolved design call, clearly labelled as unresolved, is worth more to a new owner than a confident
+guess — because the guess is indistinguishable from a decision once it is written down.
+
+### My register was stale and I relayed it as an instruction
+
+Task #70 recorded a "loose end": that the issue named `httpdispatcher` without a file:line. **It had
+already been closed at filing time** — the body carries `pkg/hub/httpdispatcher.go:492-509`,
+`buildCreateRequest`, at body lines 205-206, and even corrects the path form, noting that
+httpdispatcher is a **file** inside `pkg/hub`, not a package. I not only relayed the closed item, I
+relayed it with the wrong path, `pkg/hub/httpdispatcher/httpdispatcher.go`, as though it were a package.
+
+**The developer checked the issue rather than complying, found it present, and declined to duplicate.**
+That is the fourth thing today it has refused to execute because I had it wrong. Two of the four came
+from the "tell me what is wrong in this brief" paragraph; **this one it caught without being invited
+to**, which is the better failure mode.
+
+> **Rule 40 — an instruction is a hypothesis about the world, and the executing agent is closer to the
+> world than the author.** A register entry is a snapshot of what was true when it was written. Reading
+> it aloud does not refresh it. **The staleness that bit me on the coordinator's merge relay this
+> morning was in my own notes by the afternoon** — and I had already written the lesson down.
+
+### Where things stand
+
+Both open questions are with ptone and neither is mine to resolve:
+
+1. Does a measured ~4-line cost change the 13:44 ruling that resource-name resolution lives outside this
+   tier? `sn-harnesscfg-dev` held **warm** rather than retired, so a reversal costs no restart.
+2. Whether to replace `sn-harness-lab`, which runs an image 41 commits stale. My recommendation stands:
+   not until #1316 lands, because a rebuild buys a newer instance that still cannot start an agent from
+   the default path, at the cost of the state he has.
+
+Retired `sn-iaplab-dev` after querying it and capturing its findings — confirmed by the positive
+`Agent 'sn-iaplab-dev' deleted via Hub.` line, per rule 39, rather than by the absence of an error.
