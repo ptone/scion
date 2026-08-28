@@ -8074,3 +8074,73 @@ fails; UNSTABLE means it is not a required check, but flagged to the user as a p
 moves, re-run the gates — especially the ones that *arrived* with the move. A newly landed gate has
 never run against any open branch, so every open PR's tick predates it. Corollary: having already
 convinced yourself by grep is the strongest predictor that you are about to skip the real check.
+
+---
+
+## §5db. 2026-08-28 10:49–11:00Z — B4 fixed and independently verified; coordinator's severity call corrected
+
+### em10 delivered B4 in the sequence I asked for
+
+Two commits on `scion/ca-msg-em10-trb`: `aa4b565e6` (fixture) then `377a70e38` (fix). Tip was
+`144d9d884`.
+
+**I did not take the report on trust, and the control is the whole point.** Checked out
+`aa4b565e6` — the fixture commit *alone* — and ran the suite:
+
+```
+--- FAIL: TestComputeDivergenceMatch_DMAgreement
+```
+
+It genuinely goes RED. That is the positive control (rule 65) proving the test actually covers the
+path; without it, `377a70e38`'s green would be unverified and indistinguishable from a test that
+never exercised the code. Then on `377a70e38`: full `pkg/messaging` green, and my own probe
+re-run against em10's real implementation:
+
+| Class | Result |
+|---|---|
+| (a+b) kind prefix + sort basis | `true` — dm-routing-agreement — **FIXED** |
+| (c) DM with `thread_id` | `false` — routing-type-mismatch — **correct signal, as ruled** |
+| (d) non-canonical raw IDs | `false` — **latent, as ruled** |
+
+Matches em10's report exactly. It also recorded both rulings as code comments, which is what I
+asked for — the (c) ruling in particular needed to survive in the source, because the next person to
+read that mismatch will assume it is a bug.
+
+### Coordinator escalated the same review with the severity inverted
+
+Coordinator relayed the same 3 high / 4 medium and asked me to **prioritise the DB-error-swallowing
+findings "given the corruption risk."**
+
+Corrected, caveat-first (rule 94), because the exposure claim is wrong even though the defect claim
+is right: **`DMMigrationService` has zero non-test callers.** A DB hiccup cannot cause a spurious
+re-key because nothing invokes the re-key. Handed over the settling command rather than asserting:
+
+```
+grep -rn "NewDMMigrationService" --include="*.go" . | grep -v _test.go
+```
+
+Prioritising dormant code over a defect live at 6 call sites would have been backwards. The
+migration findings stay folded into the B3/B4 brief as S4 preconditions.
+
+### The CI disagreement was not a disagreement
+
+Coordinator: *"CI itself is also not actually green yet … Build & Test still pending."* I had
+measured PASS in 3m56s. **Both true, different commits** — em10 pushed `377a70e38` at 10:49, so CI
+legitimately re-entered pending. Said so explicitly rather than defending the earlier measurement.
+
+This is the third time this week two agents have reported contradictory facts about the same
+artifact and both were right because neither pinned the commit. Rule 92 has been about *which gates*;
+the missing half is *which SHA*.
+
+### Rule 97 (new)
+
+**A green/red claim without a SHA is not a claim.** Two correct observers of a moving branch will
+contradict each other indefinitely. When reporting or receiving CI state, pin the commit — and when
+someone contradicts your measurement, check whether they measured a different commit before you
+defend or concede. Neither reflex is right when the disagreement is not about the fact.
+
+### Standing state
+
+`upstream/main` = `b88fece2f`. Tranche B = `377a70e38` (PR #1343, tracks branch name — picked up
+automatically, no rebase needed). Rebase-onto-new-main dry run at `1874c4f83` passed the full gate
+set including #1339's new guard. em6 and em10 parked; em9 parked pending option (i).
