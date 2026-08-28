@@ -1376,3 +1376,42 @@ convenience.
 All three are on `ptone/scion` and need upstream PRs opened. Tasks #87, #90 and #91 are blocked behind
 #88's merge because they all edit `deploy.sh`, which is frozen while that branch is the shipping
 artifact.
+
+---
+
+## 14:35 — Tasks #37/#48 (§1 step 5 blocker) — diagnosis settled, fix in measurement. **No decision needed from you yet.**
+
+Filed here rather than sent, because nothing in it is uniquely yours today. One row of the measurement
+now running could change that; if it does, you get one message with a table, not a discussion.
+
+**The defect.** A fresh hosted deploy cannot start an agent. The hub sends a bare, empty harness-config
+name with no ID or hash; the broker falls to its lowest rung, invents `antigravity`, and looks for it
+**on disk** — where hosted mode deliberately never puts it. 502.
+
+**The name was never wrong. The identity was missing.** `antigravity` IS in the Hub's store on a fresh
+deploy. Once the hub stamps ID and hash, the broker hydrates from the store and never touches disk.
+
+**Three of five candidate fixes are dead**, all for one reason: `LoadBootstrapKoanf` has a single
+non-test caller, behind a postgres-only gate. This tier is SQLite. That also reconciles two of my own
+completed tasks that looked contradictory — #44 ("SCION_SEED_* is postgres-only") and #45 ("the chain is
+sound end to end"). Both are true. The chain is sound and nothing invokes it.
+
+**The surviving fix is one line** — `default_harness_config: antigravity` on the bundled default
+template. I chose `antigravity` rather than `claude` on purpose: it is what the broker already resolves
+to today, so this stamps identity rather than changing anybody's default. A different name would be a
+product change to every tier smuggled in as a bug fix.
+
+**The one thing that could reach you.** The bundled default template is shared by every tier. There is
+an accepted consequence in the code that a hub-resolved harness config arrives at the broker at CLIFlag
+rank, outranking a broker *profile* setting. If a template-supplied name lands the same way, this fix
+silently overrides every workstation user who set a profile-level harness config. **That is a
+withdrawal condition, not a caveat** — the developer measures it before implementing and stops if it
+moves. If it moves, it is your call, and you get the measured table.
+
+**Pattern worth your attention, because it is the second today.** Task #93 and this one are both tier
+fixes that land in shared ground with an unmeasured cross-tier cost. Not a coincidence: this tier is
+late, so the seams it needs were built assuming it did not exist. I am handling both identically —
+specify the measurement, set a withdrawal condition, escalate with a table rather than a worry.
+
+**Still the only things waiting on you** (unchanged from 03:47): the three branches needing upstream
+PRs, and the task #93 (a)/(b) decision sent 13:39.
