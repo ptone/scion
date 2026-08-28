@@ -12844,3 +12844,49 @@ not a reason to hoard the agent.** It no longer does: history-dependent referenc
 round 3 drew") are replaced with self-contained statements, and the header now declares the standard and
 invites the reader to report any part that fails it. Pushed at `b065ed61`. **So keeping dev2 is about
 the promise and the pairing, not about context I failed to write down.**
+
+### §35.61 — the #1335 bot MEDIUM is NOT A DEFECT, and my correct prior was an incomplete proof (01:42)
+
+Report: `reviews/adc-preflight-pr1335-bot-medium.md`. **Verdict accepted as written; I did not re-run
+its checks** (ptone's standing correction: brief them, accept their results, that is the process).
+
+**The bot is refuted on measurement, not on reading.** `grep '"email"'` needs the literal closing
+quote; `"email_verified"` has `_` in that position. An `email_verified`-only response extracts
+**empty**, empty fails the `[[ -n "$adc_email" ]]` guard at 397, and the mismatch branch is never
+entered. **There is no path from the bot's mechanism to a false warning.** Cases E and F.
+
+**The greedy `.*` — the question the bot did not ask and the one that actually carried the risk — is
+also closed.** The sed anchors on the *last* `"email":"` on the line (proved by case H). Forging a
+second one needs either a second real email field (the endpoint emits one) or an attacker value
+containing `"email":"` — but any attacker string is a JSON **value**, so its quotes arrive escaped as
+`\"email\":\"`, and the backslash breaks the anchor. Case G: the injection is ignored and the real
+email is extracted. Field order irrelevant (A/B, C/D); pretty vs minified irrelevant (both routes land
+correct).
+
+**One measurement limit, disclosed rather than papered over:** the sandbox is SA-only, so no **user**
+token could be minted and no real both-fields response was obtained. The reviewer's argument for why
+this does not weaken the result is the right one — it measured the **real wire format** (Google returns
+**pretty-printed, one field per line**), then proved extraction correct in *every* layout, so the exact
+real layout cannot matter.
+
+**THE CORRECTION, AND IT IS THE VALUABLE PART OF THIS ROUND.** My prior was **right in its conclusion
+and incomplete as a proof**. "grep will not match because of the closing quote" fully covers
+**pretty** JSON. It does **not** cover **minified** JSON, where the line carrying the real `email`
+*does* match grep and also carries `email_verified` — there correctness rests on the **sed anchor**,
+not on grep at all. I had sensed the shape ("the real question is the greedy `.*`") without seeing that
+it was load-bearing for a case my stated reason did not reach.
+
+**This is #85 R1's lesson recurring against me in a new form:** there the conclusion survived and the
+reason did not, and the reason is what gets carried into the next decision. Here I would have answered
+the bot correctly and shipped an argument with a hole in it — and the next person to touch this line
+would have inherited the hole, not the answer. **A correct verdict reached by an incomplete proof is a
+liability with a good outcome.** Adding to the pin rules as a companion to rule 2 ("read WHY it went
+red"): **state the reason your verdict depends on, then check the reason covers every input shape the
+verdict claims.**
+
+**Writing the prior into the brief was not a mistake.** The reviewer says plainly it did not bias the
+test, and it is what made the gap in my reasoning visible and correctable. Had I kept it to myself I
+would have received a bare "not a defect" and never learned my argument was short.
+
+**No fix, no pin, branch untouched, no Instance created.** The reviewer explicitly declined to
+manufacture a pin, which the brief asked for and which is the right restraint on an open PR.
