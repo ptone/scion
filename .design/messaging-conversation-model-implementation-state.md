@@ -8303,3 +8303,89 @@ produces. Briefs written at different times encode the ordering of my understand
 work. Re-derive the order at dispatch time — and prefer splitting by layer over splitting by ledger
 row, because layer splits produce disjoint file sets and ledger splits produce merge conflicts
 between agents who were each locally correct.
+
+---
+
+## §5de. 2026-08-28 12:04Z — em6 delivers B6/B7/B9 in 20 minutes; verified by mutation, two gaps found
+
+Branch `ca-msg-em6-b6b7b9` @ **`504f30f40`**, one commit on `4b120bd70`. 8 files, +513/−50.
+
+**Note the branch name has no `scion/` prefix**, unlike every other branch in this project. I nearly
+recorded it MISSING — rule 85 again, from the other direction this time: last time I dropped a prefix
+that was there, this time the prefix genuinely was not. Both resolved by `git ls-remote` rather than
+by guessing.
+
+### The delivery is good. I verified it rather than reading it.
+
+`checkDMParticipantKey` extracted at `:525`; `AddParticipant` routes at `:562`, `EnsureParticipant`
+at `:649`. Parse failure denies (`ErrInvalidInput`) — the standing rule holds.
+
+**em6 did not run mutation testing, though it was an explicit acceptance criterion.** Its report
+listed six gates as ALL PASS. Gates say the code works; mutation says the tests would notice if it
+stopped. I ran them:
+
+| Mutation | Result |
+|---|---|
+| m1 — nil-`pe` guard removed | `NilParticipantEnsurer` **panics** — caught |
+| m2 — `EnsureParticipant` revives `left_at` (B6 reintroduced) | 3 tests fail — caught |
+| m3 — guard disabled in `EnsureParticipant` only | third-party rejection fails — caught |
+| m4 — guard disabled in **`AddParticipant` only** | **4 tests fail**, both paths' rejection tests — caught |
+
+Baseline unmutated: `ok`. **m4 is the one that matters** — it proves the extraction is genuinely
+shared and independently pinned at each ingress, which is the entire point of §5cv's instruction and
+the thing a single-path test would have faked.
+
+**My own instrument failed first, and the failure was informative.** My first m3/m4 attempt replaced
+the guard call with `error(nil)`, which left `conv` unused and produced `build failed`. I nearly
+logged that as "mutation killed". It is not: **a build failure is the instrument breaking, not the
+defect being detected.** Rewrote to `_ = checkDMParticipantKey(...)` so the mutation compiles and is
+*the defect*. This is the standing mutation rule biting me rather than a manager.
+
+### Gap 1 — an undisclosed test deletion
+
+`TestResolveOrCreateDMConversation_AlreadyExistsSwallowed` was **removed** and the report did not
+say so — while explicitly noting that `TestAddParticipant_DM_ReAddAfterSoftRemove` was KEPT, which
+makes the omission read as oversight rather than decision.
+
+**The deletion is correct.** It pinned "ErrAlreadyExists is swallowed at the messaging layer"; under
+the new design `EnsureParticipant` does not *produce* `ErrAlreadyExists` for an existing row, so the
+premise is gone and `TestEnsureParticipant_InsertIfAbsent` pins the property one layer down. Coverage
+relocated, not lost — and fixing the source beats swallowing the symptom.
+
+Required disclosure in the commit message anyway: a reviewer diffing test counts sees a net deletion
+in a security-adjacent change with no explanation and should stop. Also flagged a residual: the
+messaging layer no longer tolerates `ErrAlreadyExists` from *any* `ParticipantEnsurer`
+implementation, since the `errors` special-case is gone. Noise, not correctness — but it should be
+written down rather than discovered.
+
+### Gap 2 — em6 deviated from my spec on nil-`pe`, and em6 was right
+
+I specified *"asserting RETURN NIL AND NO PANIC"*. em6 returns a **non-nil** `ConversationResult`.
+
+**My spec was wrong.** Participant registration errors already return non-nil — the loop logs and
+continues. Returning nil for a nil `pe` would make "pe is nil" *more severe* than "pe returned errors
+for both participants", which is incoherent. The conversation genuinely resolved; the docstring's
+"on any error returns nil" governs resolution failure, and resolution did not fail.
+
+The hole I was actually worried about — "a test that merely asserts no panic passes against a guard
+returning garbage" — is closed: em6's test asserts `ConversationID`, `ExternalRef` and the warning
+log. Accepted as-is, and recorded as **my** error, not em6's.
+
+### Gates re-run independently on `504f30f40`
+
+`gofmt` clean · `check-authz-guards` no violations · `compat-literals` clean ·
+`check-conversation-upsert-guard` no violations · `build` ok · `test-fast` running.
+
+### Rule 100 (new)
+
+**"All gates pass" is not an answer to "is it mutation-verified".** They are different questions:
+gates test the code, mutation tests the tests. An agent that substitutes one for the other is not
+being evasive — the two feel like the same reassurance. State the criterion in a form that cannot be
+satisfied by the wrong artifact: ask for *the mutation table*, not for "verification".
+
+### Rule 101 (new)
+
+**A report that enumerates what was kept, while omitting what was removed, is more misleading than
+one that says nothing.** The care spent on "X was KEPT" licenses the reader to assume the deletion
+list is empty. When reviewing, diff `^-func Test` explicitly — never infer coverage change from the
+report's additions.
