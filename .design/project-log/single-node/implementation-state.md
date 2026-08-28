@@ -14482,3 +14482,96 @@ Nothing about the branches has changed and nothing should be inferred from this 
 readiness. Two are mergeable on sight; the third is held on the task #93 Shape B/decline decision, brief
 written and held. **I remain blocked, and now I am blocked on a question I can name precisely instead of
 one I had assumed.** That is the only thing this hour bought, and it was worth more than a third nudge.
+
+## 2026-08-28 12:08Z — answered: NO. And I had missed the protocol for the SECOND time.
+
+ptone, 12:08: *"you must have forgotten our compare URL protocol - please ask the coordinator for
+detailed instructions. I should see 3 different compare URLS for the above work on the dedicated thread,
+I will then use those to open PRs on upstream."*
+
+**The answer to 12:04 is no, and the question was still worth asking.** The capability finding stands and
+the correction to line 11405 stands — the *reason* recorded there was false. But the *policy* is real and
+it is his. **Capability was never the constraint; his gate was.** Had I opened those PRs on the strength
+of `admin:true`, I would have been technically able and flatly wrong. This is the case that justifies
+asking before acting, and it justifies it precisely *because* the answer was no.
+
+### The real defect: I had the protocol written down and did not apply it
+
+He said "you must have forgotten". **I had not forgotten. It is in this file at line 11515**, recorded
+from his own correction at 21:37 on a previous day:
+
+- `--thread-id` is correct and required; pair with `--channel discord`.
+- **PR handoffs: URL alone, dedicated thread `1532864101909528737`, validated first.** Everything else
+  goes to the working thread.
+
+Line 11454 is titled *"Protocol miss, caught by ptone: send the compare URL, not the branch name"*.
+**So this is the second miss of the same protocol, and the first one is written in my own log with a
+standing rule attached.** A rule I wrote, stored, re-read during this very session's grep, and still did
+not fire on.
+
+**RULE 26: A RULE THAT LIVES ONLY IN THE LOG IS A RULE YOU WILL BREAK AGAIN. WRITTEN DOWN IS NOT THE SAME
+AS WIRED IN.** Rule 25 was about never checking a belief. This is the opposite failure and worse: the
+correct information was recorded, retrievable, and retrieved — **and the action still did not change.**
+Recording a correction discharges the feeling of having learned it without doing any of the work. Told
+him plainly: *"That is twice. It is now a checklist item, not a memory."*
+
+### Sent, 12:10Z, validated first
+
+All three validated before sending, because a dead link in a handoff is worse than no link:
+
+| branch | sha | HTTP | vs `4b120bd7` |
+|---|---|---|---|
+| `scion/bash32-portability` | `0b51f831` | 200 | 6 files, 0 conflicts |
+| `scion/design-operator-prereqs` | `f6c10558` | 200 | 1 file, 0 conflicts |
+| `scion/task-92-runtime-profile-fix` | `dc729e25` | 200 | 7 files, 0 conflicts |
+
+**A near-miss worth recording: my first conflict measurement was a fake green.** `git merge-base` failed
+with *"Not a valid object name origin/scion/…"* because the refs were not fetched; `$base` came out
+empty, `merge-tree` got bad arguments and printed nothing, and `grep -c` returned **0**. Three tidy
+`conflicts=0` lines, every one of them meaningless. I caught it because the fatal was visible above the
+zeros. **Re-ran with an explicit refspec fetch and a `|| echo FAILED` guard, and checked the output byte
+count** — 13-38 KB, non-empty, base SHAs real. Rule 2's shape again: **a zero from a command that never
+ran is not a measurement**, and it looks exactly like a pass.
+
+Caveat sent to the *working* thread, not the handoff thread, per protocol: the third branch takes one
+more commit if he picks Shape B; the other two are final.
+
+### On being told to ask the coordinator
+
+I did not ask first — I recovered the protocol from my own log and shipped the URLs, because he was
+waiting on the URLs and the record came from him originally. **I told him that is what I did rather than
+letting it look like I had consulted anyone.** Then messaged `sn-impl-em3` to confirm the record is
+complete and current. Cheap insurance, blocks nothing, and if my note is missing a detail I want it
+before the next handoff rather than after a third miss.
+
+## 2026-08-28 12:09Z — new work from ptone: the harness/GCP-auth lab. Task #95, DISPATCHED.
+
+> "I want to push into the usability of the different harnesses and things like the GCP auth on a test
+> deployment in ptone-experiments where you will have the access to be able to look into it for
+> debugging - can you have a fresh deployed instance using our ptone-misc based omni-image - behind IAP"
+
+**Dispatched to `sn-iaplab-dev` (developer template), not executed by me** — standing correction #1.
+Brief at `briefs/sn-iaplab-dev.md`.
+
+**The one thing this brief exists to prevent.** `deploy.sh:711` defaults the admin email to the deploying
+operator, and our operator is the impersonated SA `scion-instance-gym@…`, **not ptone**. `:789` bakes it
+into `SCION_SERVER_HUB_ADMINEMAILS` at deploy time. Per defect #45 that env var is **the only admin path
+that works on this tier** — `ws.config.AdminEmails` is written once at construction and never again, so
+the admin UI cannot repair a wrong value, and #44 measured `SCION_SEED_*` as inert here (postgres-only,
+tier is SQLite). **`--admin-email ptone@google.com` or the instance is his in name only.** Unrecoverable
+without a redeploy, and it would look fine right up until he tried to administer it.
+
+Also handed the agent six known traps rather than letting it rediscover them: the agent ceiling that
+returns 201 then destroys the Instance 8s later (#67); `running` not being evidence (#17); the empty
+harness-config defect (#37/#48) which sits **directly** in the surface ptone asked to push on; the
+undiagnosable image pull (#39); the gcloud track gate (#80 — my container measures **582.0.0**, not the
+575.0.0 recorded, and `deploy.sh:200` fails loudly rather than silently); and the unprinted IAP client ID
+(#64). Asked it to tell me which of the six no longer reproduce, since I am quoting other people's
+measurements back at it and **I am about to tell ptone the lab is ready on the strength of them.**
+
+Read *"where you will have the access to be able to look into it for debugging"* as a **requirement**:
+two identities must work at the end, his in a browser and ours from a container. Told the agent that
+verifying one does not verify the other.
+
+Launch note: `scion start --template` is **not a flag** — it is `-t/--type`. The first attempt printed
+help, which is a parse failure wearing the costume of output. Agent is `running`.
