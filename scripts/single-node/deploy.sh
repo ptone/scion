@@ -775,6 +775,12 @@ di_main() {
   local instance_sa
   instance_sa="$(di_resolve_instance_sa "$DI_SERVICE_ACCOUNT" "$project_number")"
   echo "    Instance SA: $instance_sa"
+  if [[ -z "$DI_SERVICE_ACCOUNT" ]]; then
+    echo "    Note: using the Compute Engine default service account." >&2
+    echo "    This identity commonly holds broad project permissions (e.g. Editor)." >&2
+    echo "    The hub and every agent on the instance run as this SA." >&2
+    echo "    Use --service-account to specify a scoped identity instead." >&2
+  fi
 
   # Compute the IAP audience and instance URL.
   local iap_audience
