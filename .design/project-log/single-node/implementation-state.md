@@ -12493,3 +12493,32 @@ permanently stale without any warning. `git ls-remote` reads the remote. The rej
 measurement; the tracking ref was the assumption. Same shape as `behind` having a shelf life
 (§35.49) — and same shape as the reason I verify every developer SHA against the API rather than
 against a local clone.
+
+### §35.52 — Heartbeat 00:30. Three answers, each measured.
+
+**1. Progressing or stalled?** Measured with `scion list`, not assumed.
+`sn-adcpreflight-rev2` — **last activity 13 seconds ago**, round 4 in flight, dispatched 00:12.
+`sn-adcpreflight-dev2` — completed 18 minutes ago, idle **by design**; nothing is owed by it.
+No review artifact on disk yet, which is correct at 18 minutes: r3 took 21.
+
+Note the distinction this project has been burned on: **`phase: running` is not evidence of work**
+(defect #17 is exactly that lie). `LAST ACTIVITY` is the column that carries signal, and it is the one
+I read.
+
+**2. What blocks the critical path?** One thing: the round-4 verdict on `fix/adc-preflight`
+(`93ae24526`). Nothing else in the register blocks §1. #86 and #87 are both **deliberately** held
+behind #85 because they touch the same frozen file — that is sequencing, not blockage.
+
+**3. Is the design doc in sync?** Checked directly rather than assumed. `.design/hosted/
+cloud-run-single-node.md` on upstream main **makes no claim about the `_DI_*` seams or their
+validation** — grepped for `_DI_`, `override`, `validat`; the only hits are unrelated (`invalidates`).
+So rounds 2–4's security work introduces **no new drift** into the design doc. The "three documents say
+this seam is validated" problem from round 2 lived in `deploy.sh` comments and the tutorial, not here.
+
+The two known drifts remain exactly #86, unchanged: §4.3's credential consequence, and §6.1 having no
+failed-deploy atomicity criterion. Both held until #85 merges.
+
+**One standing item I keep re-noting and will now stop.** `sn-impl-em3` has been blocked for a day. It
+is mine, it holds nothing, and it blocks nothing. **Decision: leave it running.** Reclaiming it later is
+cheaper than re-provisioning, and repeating "em3 is idle" every cycle is noise pretending to be
+oversight.
