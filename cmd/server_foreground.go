@@ -1671,13 +1671,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	//
 	// In postgres mode, initOperationalSettings overwrites AgentDefaults
 	// from the DB (via ApplySnapshot), so this seed is a harmless fallback.
-	if hostedMode {
-		defaultTemplate, defaultHarnessConfig := config.EmbeddedAgentDefaults()
-		hubCfg.AgentDefaults = opsettings.AgentDefaultsSettings{
-			DefaultTemplate:      defaultTemplate,
-			DefaultHarnessConfig: defaultHarnessConfig,
-		}
-	}
+	hubCfg.AgentDefaults = hub.HostedAgentDefaults(hostedMode)
 
 	// In hosted mode every replica must share the same session secret for
 	// cookies and JWT signing keys to work across the load balancer. Running

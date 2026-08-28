@@ -830,12 +830,23 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 // startup, not on reload). In postgres mode, the full koanf-based Snapshot()
 // populates all fields. See the Layer1Snapshot type comment for details.
 //
-// Agent-defaults fields (DefaultTemplate, DefaultHarnessConfig) also remain
-// zero here. In hosted mode, initHubServer seeds them on the ServerConfig
-// directly from the embedded default_settings.yaml before hub.New() is
-// called — so they are populated before the first request, but NOT through
-// this snapshot path. In workstation mode they stay zero intentionally
-// (design §3.2.4). See ptone/scion#1316 for the hosted-mode rationale.
+// Agent-defaults fields (DefaultTemplate, DefaultHarnessConfig) remain zero
+// here deliberately. This function reads GlobalConfig, which does not carry
+// them, and its name ("FromFile") documents that contract.
+//
+// OBLIGATION FOR CALLERS: any hosted-mode caller that pairs this function
+// with ApplySnapshot MUST overlay config.EmbeddedAgentDefaults() onto the
+// returned snapshot before passing it to ApplySnapshot. Without the overlay,
+// ApplySnapshot writes zeros unconditionally and zeroes the hosted-mode
+// agent-defaults seed — silently reintroducing ptone/scion#1316.
+//
+// The worked example is reloadSettings (admin_settings.go), which performs
+// exactly this overlay. Today that is the single production caller. If you
+// add a second, copy the overlay or extract it — do not call ApplySnapshot
+// on a raw BuildLayer1SnapshotFromFile result in hosted mode.
+//
+// In workstation mode agent defaults stay zero intentionally (design §3.2.4)
+// and no overlay is needed.
 func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap := Layer1Snapshot{
 		AdminEmails:        gc.Hub.AdminEmails,

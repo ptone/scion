@@ -312,3 +312,32 @@ func TestReloadSettings_WorkstationMode_AgentDefaultsStayZero(t *testing.T) {
 	assert.Equal(t, opsettings.AgentDefaultsSettings{}, after,
 		"workstation mode: agent defaults must stay zero after reload")
 }
+
+// ---------------------------------------------------------------------------
+// HostedAgentDefaults: pure-function pinning tests
+// ---------------------------------------------------------------------------
+
+// TestHostedAgentDefaults_HostedTrue verifies that HostedAgentDefaults returns
+// the embedded defaults when hosted is true. This pins the startup seed: without
+// this test, the hostedMode gate in initHubServer could be deleted and nothing
+// would go red — the reload tests pin the overlay and the seam tests pin the
+// stamping, but nothing pinned the seed itself.
+func TestHostedAgentDefaults_HostedTrue(t *testing.T) {
+	embTmpl, embHC := config.EmbeddedAgentDefaults()
+	require.NotEmpty(t, embTmpl, "embedded default_template must be non-empty")
+	require.NotEmpty(t, embHC, "embedded default_harness_config must be non-empty")
+
+	got := HostedAgentDefaults(true)
+	assert.Equal(t, embTmpl, got.DefaultTemplate,
+		"hosted=true: must return embedded default_template")
+	assert.Equal(t, embHC, got.DefaultHarnessConfig,
+		"hosted=true: must return embedded default_harness_config")
+}
+
+// TestHostedAgentDefaults_HostedFalse verifies that HostedAgentDefaults returns
+// the zero value when hosted is false (workstation mode).
+func TestHostedAgentDefaults_HostedFalse(t *testing.T) {
+	got := HostedAgentDefaults(false)
+	assert.Equal(t, opsettings.AgentDefaultsSettings{}, got,
+		"hosted=false: must return zero AgentDefaultsSettings")
+}

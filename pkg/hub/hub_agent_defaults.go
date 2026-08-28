@@ -18,9 +18,32 @@ import (
 	"context"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// HostedAgentDefaults returns the agent-defaults seed for a hub that is (or is
+// not) running in hosted mode. When hosted is true it returns the embedded
+// defaults from default_settings.yaml; when false it returns the zero value,
+// because workstation mode must not promote hub-tier defaults above the
+// co-located broker's own settings.yaml chain (design §3.2.4).
+//
+// This is a pure function so that the startup seed can be pinned by a unit
+// test. Without it, the central executable line of the ptone/scion#1316 fix
+// (the hostedMode gate in initHubServer) could be deleted and no test would
+// go red — the reload tests pin the overlay, the seam tests pin the stamping,
+// but nothing pinned the seed itself. See hosted_agent_defaults_test.go.
+func HostedAgentDefaults(hosted bool) opsettings.AgentDefaultsSettings {
+	if !hosted {
+		return opsettings.AgentDefaultsSettings{}
+	}
+	defaultTemplate, defaultHarnessConfig := config.EmbeddedAgentDefaults()
+	return opsettings.AgentDefaultsSettings{
+		DefaultTemplate:      defaultTemplate,
+		DefaultHarnessConfig: defaultHarnessConfig,
+	}
+}
 
 // hubAgentDefaults returns the hub's operational agent_defaults section.
 //
