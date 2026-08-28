@@ -281,7 +281,7 @@ func TestScriptStep3bReusesPreflightToken(t *testing.T) {
 	patchCount := 0
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("access_token") != "" {
+		if r.URL.Path == "/tokeninfo" || r.URL.Query().Get("access_token") != "" {
 			_, _ = io.WriteString(w, `{"email":"operator@example.com"}`)
 			return
 		}

@@ -231,15 +231,18 @@ func brokenADCGcloudStub(argvLog string) string {
 }
 
 // newPreflightStub serves both endpoints the preflight talks to: tokeninfo
-// (identified by the access_token query parameter) and the Cloud Run v2
-// instances API. The returned counter records how many requests arrived, so a
-// test can assert that nothing was sent at all.
+// (identified by the /tokeninfo path or access_token query parameter) and the
+// Cloud Run v2 instances API. The returned counter records how many requests
+// arrived, so a test can assert that nothing was sent at all.
+//
+// The path check covers the POST+body form (token in -d @file, not in the URL);
+// the query-param check covers the legacy GET+query form for backward compat.
 func newPreflightStub(t *testing.T, tokeninfoJSON string, apiStatus int, apiBody string) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
 	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		if r.URL.Query().Get("access_token") != "" {
+		if r.URL.Path == "/tokeninfo" || r.URL.Query().Get("access_token") != "" {
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, tokeninfoJSON)
 			return
@@ -1535,4 +1538,109 @@ func TestScriptCheckGcloudInstances_FailureMessage(t *testing.T) {
 	assert.Contains(t, stderr, "gcloud components update")
 	assert.Contains(t, stderr, "DO NOT use 'gcloud alpha run instances'")
 	assert.Contains(t, stderr, "--sandbox-launcher")
+}
+
+// ---------------------------------------------------------------------------
+// Token-in-argv pin: the access token must never appear in curl's process argv
+// ---------------------------------------------------------------------------
+
+// TestScriptTokenNotInCurlArgv pins the property that the ADC access token
+// never appears in curl's argv.  A live token on the command line is readable
+// by any local user via ps(1), leaks into shell history, and appears in
+// set -x traces.
+//
+// The test wraps curl with a function that records every invocation's argv to
+// a sideband file (the $* expansion — exactly what ps shows), then calls the
+// real curl binary so the stub servers still answer.  After the full
+// preflight + step 3b flow, the argv log is grepped for the fake token value.
+//
+// Three sites carried the token in argv in the original code:
+//   - tokeninfo: the token was a URL query parameter (visible in ps as the URL arg)
+//   - API validation GET: -H "Authorization: Bearer <token>"
+//   - step 3b PATCH: -H "Authorization: Bearer <token>"
+//
+// The fix uses -K <configfile> for Bearer headers and -d @<file> for the
+// tokeninfo POST, keeping the token out of the process table entirely.
+func TestScriptTokenNotInCurlArgv(t *testing.T) {
+	// The stub answers with 500 for the PATCH so di_main aborts at step 3b
+	// rather than polling for IAP enforcement for three minutes.
+	var patchSeen atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tokeninfo" || r.URL.Query().Get("access_token") != "" {
+			_, _ = io.WriteString(w, `{"email":"operator@example.com"}`)
+			return
+		}
+		if r.Method == http.MethodPatch {
+			patchSeen.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"stub"}`)
+			return
+		}
+		// API validation GET
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(server.Close)
+
+	tmp := t.TempDir()
+	argvLog := filepath.Join(tmp, "gcloud-argv.log")
+	curlArgvLog := filepath.Join(tmp, "curl-argv.log")
+
+	// A curl wrapper that records argv then calls the real binary.
+	// `command -v curl` resolves the path to the external binary before
+	// the function shadows the name.  NEVER log the token value itself —
+	// this test is about a token leak, and creating one in the test output
+	// would be the same class of defect.
+	curlWrapper := fmt.Sprintf(`
+_di_real_curl="$(command -v curl)"
+curl() {
+    printf '%%s\n' "$*" >> %q
+    "$_di_real_curl" "$@"
+}`, curlArgvLog)
+
+	// fullGcloudStub refuses the deploy (step 3a), so di_main would never
+	// reach step 3b.  This stub lets step 3a succeed; the PATCH server
+	// returns 500 to stop di_main before the IAP polling loop.
+	gcloudStub := fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  case "$*" in
+    "beta run instances --help")                   return 0 ;;
+    "config get account")                          printf '%%s\n' "operator@example.com" ;;
+    "projects describe "*)                         printf '%%s\n' "123456789" ;;
+    "auth application-default print-access-token") printf '%%s\n' "ya29.fake-test-token" ;;
+    "beta run instances deploy "*)                 return 0 ;;
+    *)
+      echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+      return 1 ;;
+  esac
+}`, argvLog)
+	setup := preflightSetup(gcloudStub+"\n"+curlWrapper, server.URL)
+
+	_, stderr, exitCode := runBashFuncWithSetup(t, setup,
+		"di_main",
+		"--name", "test-name",
+		"--project", "test-project",
+		"--image", "ghcr.io/example/scion-omni:latest",
+		"--region", "us-east4")
+
+	// di_main should fail at the PATCH (server returns 500), but it must
+	// have reached the PATCH — otherwise the test cannot see site 3.
+	require.NotEqual(t, 0, exitCode,
+		"di_main should fail at the stubbed PATCH; stderr: %s", stderr)
+	require.Equal(t, int32(1), patchSeen.Load(),
+		"di_main must reach the step 3b PATCH so this test covers all three "+
+			"token-in-argv sites; stderr: %s", stderr)
+
+	curlArgvData, err := os.ReadFile(curlArgvLog)
+	require.NoError(t, err,
+		"the curl wrapper was never invoked — it may not be intercepting curl "+
+			"calls; stderr: %s", stderr)
+	curlArgv := string(curlArgvData)
+
+	// The gcloud stub returns "ya29.fake-test-token" as the access token.
+	// This value MUST NOT appear anywhere in curl's argv.
+	assert.NotContains(t, curlArgv, "ya29.fake-test-token",
+		"the access token appears in curl's process argv, where any local user "+
+			"can read it via ps(1).  Use -K <configfile> for Bearer headers and "+
+			"-d @<file> for POST data to keep the token out of the process table.\n"+
+			"curl argv log:\n%s", curlArgv)
 }

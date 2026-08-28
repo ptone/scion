@@ -397,10 +397,29 @@ di_preflight_rest_credential() {
 
   echo "    ADC token minted (${#tok} chars, prefix: ${tok:0:4}...)"
 
+  # --- Keep the token out of curl's argv ---
+  # A live access token on the command line is readable by any local user via
+  # ps(1), leaks into shell history, and appears in set -x traces.  Three sites
+  # originally carried the token in curl's argv: two -H "Authorization: Bearer …"
+  # headers and one URL query parameter (?access_token=…).
+  #
+  # FIX: -K <configfile> hides the Bearer header from the process table;
+  # -d @<file> POSTs the tokeninfo query to avoid placing it in the URL.
+  # Google's tokeninfo endpoint accepts POST with access_token as form data.
+  #
+  # None of the three sites requires the token in a URL.  The tokeninfo endpoint
+  # accepts the token via POST body, and the other two are standard Bearer auth.
+  local auth_config_file tokeninfo_data_file
+  auth_config_file="$(mktemp)"
+  tokeninfo_data_file="$(mktemp)"
+  printf '%s\n' "header = \"Authorization: Bearer ${tok}\"" > "$auth_config_file"
+  printf '%s' "access_token=${tok}" > "$tokeninfo_data_file"
+
   # --- Resolve ADC identity via tokeninfo ---
   echo "    Resolving ADC identity via $tokeninfo_url"
   local tokeninfo_resp
-  tokeninfo_resp="$(curl -s "${tokeninfo_url}?access_token=${tok}" 2>&1)" || true
+  tokeninfo_resp="$(curl -s -d @"$tokeninfo_data_file" "${tokeninfo_url}" 2>&1)" || true
+  rm -f "$tokeninfo_data_file"
 
   # tokeninfo does not always carry "email": a service-account token scoped
   # only to cloud-platform returns azp/aud/scope and no email. azp is a
@@ -444,10 +463,10 @@ di_preflight_rest_credential() {
   resp_file="$(mktemp)"
   local http_code
   http_code="$(curl -s -o "$resp_file" -w "%{http_code}" \
-    -H "Authorization: Bearer ${tok}" \
+    -K "$auth_config_file" \
     "$list_url")" || {
     echo "Error: could not connect to $list_url — check network connectivity" >&2
-    rm -f "$resp_file"
+    rm -f "$resp_file" "$auth_config_file"
     return 1
   }
 
@@ -462,7 +481,7 @@ di_preflight_rest_credential() {
   # pins the stub, not the script.
   if [[ ! "$http_code" =~ ^[0-9]+$ ]]; then
     echo "Error: curl returned no HTTP status for GET $list_url — treating as a failure" >&2
-    rm -f "$resp_file"
+    rm -f "$resp_file" "$auth_config_file"
     return 1
   fi
 
@@ -470,7 +489,7 @@ di_preflight_rest_credential() {
     echo "Error: ADC credential check failed — GET $list_url returned HTTP $http_code:" >&2
     head -c 500 "$resp_file" >&2
     echo >&2
-    rm -f "$resp_file"
+    rm -f "$resp_file" "$auth_config_file"
     echo "" >&2
     echo "The ADC token was rejected by the Cloud Run v2 API before any resources were created." >&2
     if [[ "$http_code" == "403" ]]; then
@@ -492,7 +511,7 @@ di_preflight_rest_credential() {
     fi
     return 1
   fi
-  rm -f "$resp_file"
+  rm -f "$resp_file" "$auth_config_file"
   echo "    ADC credential validated successfully."
 
   # Store token for step 3b (bash dynamic scope — the caller declares
@@ -858,12 +877,18 @@ di_main() {
 
   local patch_resp_file
   patch_resp_file="$(mktemp)"
+
+  # Keep the token out of curl's argv — same rationale as the preflight.
+  local auth_config_file
+  auth_config_file="$(mktemp)"
+  printf '%s\n' "header = \"Authorization: Bearer ${access_token}\"" > "$auth_config_file"
+
   # shellcheck disable=SC2064
-  trap "rm -f '$patch_resp_file'" RETURN
+  trap "rm -f '$patch_resp_file' '$auth_config_file'" RETURN
   local http_code
   http_code="$(curl -s -o "$patch_resp_file" -w "%{http_code}" \
     -X PATCH \
-    -H "Authorization: Bearer ${access_token}" \
+    -K "$auth_config_file" \
     -H "Content-Type: application/json" \
     -d "$(di_iap_patch_body)" \
     "$patch_url")" || {
