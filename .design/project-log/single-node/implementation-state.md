@@ -12573,3 +12573,29 @@ round costs less than it looks.
 line widens what ptone has to trust. A scope limit is cheaper to state now than to enforce later.
 
 ptone updated on the working thread: APPROVE, one 15-minute round, URL to follow on the handoff thread.
+
+### §35.54 — Took the reviewer's spot-check offer, on purpose rather than by default
+
+The reviewer offered to spot-check the O1 pin and the rebase as one fast item. **Taken.**
+
+I had written that I would only come back to it "if the developer's O1 pin looks wrong to me." That
+sentence was the wrong instinct and I am recording why. **Reading the pin and forming my own verdict on
+it is the reviewer's job**, and doing it myself is exactly the behaviour ptone corrected me for:
+*"stop doing work redundant to the code reviewer role. brief them. accept their results. this is the
+process."* Four rounds have produced a better branch than my judgement would have. The offer costs
+minutes; my re-derivation costs the same minutes and is worth less.
+
+**The reviewer converged on the same pin shape independently** — `$(touch SENTINEL)` plus
+`NoFileExists` — and named the property better than I did:
+
+> **"that is what proves the string reached the validator as DATA, NOT AS CODE."**
+
+Mine described the mechanism. **Its describes the property, and the property is what survives a
+refactor** — a test named after its mechanism gets deleted when the mechanism changes. Forwarded to
+the developer verbatim with the instruction to name the test after that sentence.
+
+**One trap I added for both of them:** the sentinel path must be one nothing else in the suite creates,
+removes, or cleans up between setup and assertion. A sentinel another test tidies away yields a green
+that means nothing. **That is the accidental-pass class the reviewer found in m5/m8 and the developer
+found in its own work** — third instance, so it is now a thing to check by default rather than to
+rediscover.
