@@ -54,11 +54,25 @@ by every change in this tranche:
    line numbers are documentation to help a human find the site, not the
    assertion unit.
 
-   Gates are split into REQUIRED (calls and definitions — the check runs
-   or exists) and INFORMATIONAL (doc-comment mentions — prose, not
-   behavior). A missing REQUIRED site means the check no longer runs or
-   no longer exists; that is the revert. A missing INFORMATIONAL site
-   means someone edited prose; that is evidence of nothing.
+   Gates are split into three categories:
+
+   - **REQUIRED** — calls and definitions. The check runs or exists. A
+     missing REQUIRED site means the check no longer runs or no longer
+     exists; that is the revert. Gate **HARD FAILS**.
+
+   - **AUDIT** — calls whose absence removes the only record of a
+     security decision. Distinguished from REQUIRED so the failure report
+     can say "the check still runs but the denial is now unrecorded,"
+     which is a different defect from "the check is gone." Gate **HARD
+     FAILS** (same weight as REQUIRED). The key insight: on a path that
+     fails loudly (returns 403), the log is secondary to the check. On a
+     path that fails silently by design (denial drops the mention and
+     continues), the log carries the entire evidentiary weight. Dropping
+     it makes an authorization denial undetectable.
+
+   - **INFORMATIONAL** — doc-comment mentions. Prose, not behavior. A
+     missing INFORMATIONAL site means someone edited prose; that is
+     evidence of nothing. Gate **REPORTS** but does not fail.
 
    The split matters most for `validateDefaultAgent`: under a flat count
    of 6, deleting both call sites while leaving the three comments and
@@ -111,10 +125,11 @@ by every change in this tranche:
    | `sendAgentRouted` | ×1 | `s.authorize` on primary agent before dispatch. Without it, format validation is the only gate and format validation is not authorization. | ~1120 |
    | `sendAgentRouted` | ×1 | `CheckAccess` per-mention authorization in fan-out. Without it, mentions dispatch unconditionally to agents the user may not be authorized to interact with. | ~1214 |
 
-   INFORMATIONAL (1 — gate REPORTS if missing, does not fail):
-   - `logAuthzDenial` audit logging in `sendAgentRouted` (~1216). Removing
-     this does not break authorization but eliminates the audit trail for
-     mention denials.
+   AUDIT (1 — gate HARD FAILS if missing):
+
+   | Enclosing function | Count | What it guards | Ref line |
+   |--------------------|-------|----------------|----------|
+   | `sendAgentRouted` | ×1 | `logAuthzDenial` for per-mention ActionAttach denial. This path denies SILENTLY BY DESIGN (drops the mention, continues the request, returns 200). There is no 403. `logAuthzDenial` is the ONLY observable that the denial happened. Without it, an authorization denial becomes undetectable: the mention vanishes, the agent is never attached, and nothing records why. v2 reverts this (main=1, v2=0). | ~1216 |
 
    **COMPOSITE GATE — handleProjectBroadcast (handlers_agent_messaging.go):**
 
@@ -752,21 +767,22 @@ projects or deleted agents, breaking tenant isolation.
 
 #### ActionAttach (#1347)
 
-The file has 2 REQUIRED + 1 INFORMATIONAL `ActionAttach` sites (see
-preamble §4):
+The file has 2 REQUIRED + 1 AUDIT `ActionAttach` sites (see preamble §4):
 
 - `sendAgentRouted` ×1 REQUIRED — `s.authorize` on primary agent before
   dispatch. Without it, the only gate is format validation, and format
-  validation is not authorization.
+  validation is not authorization. Denial is LOUD (returns 403).
 - `sendAgentRouted` ×1 REQUIRED — `CheckAccess` per-mention authorization
   in fan-out. Without it, mentions dispatch unconditionally to agents the
-  user may not be authorized to interact with.
-- `sendAgentRouted` ×1 INFORMATIONAL — `logAuthzDenial` audit logging for
-  the per-mention check. Removing this does not break authorization but
-  eliminates the audit trail for mention denials.
+  user may not be authorized to interact with. Denial is SILENT (drops
+  mention, continues request).
+- `sendAgentRouted` ×1 AUDIT — `logAuthzDenial` for the per-mention
+  denial. Because the mention denial path is silent by design (no 403,
+  the mention is simply dropped), this log is the ONLY observable that
+  an authorization denial occurred. v2 deletes it (main=1, v2=0).
 
-**Gate:** Both REQUIRED sites (in `sendAgentRouted`) must be present. Assert
-by function name and call target (`s.authorize` vs `CheckAccess`).
+**Gate:** Both REQUIRED sites and the AUDIT site must be present. All three
+are in `sendAgentRouted`. Assert by function name and call target.
 
 #### parseDMKeyIDs / isDMParticipant (#1322)
 
@@ -819,7 +835,7 @@ needs, where a parse failure should fall back to legacy, not fail the request).
 | AC-V4 | ValidateLegacyMessage in sendAgentRouted rejects invalid messages | Unit test: send message with empty Msg and no attachments; verify 400 |
 | AC-V5 | Attachment-only messages get synthetic body and pass validation | Unit test: send message with empty Msg but with attachments; verify 200 and persisted Msg = "[attachment]" |
 | AC-V6 | All 3 REQUIRED `validateDefaultAgent` sites present | `validateDefaultAgent` in `handleCreateThread` ×1, `handleTopicPatch` ×1, plus `func validateDefaultAgent` definition |
-| AC-V7 | Both REQUIRED `ActionAttach` sites in `sendAgentRouted` present | `sendAgentRouted` contains `s.authorize(..., ActionAttach)` and `CheckAccess(..., ActionAttach)` |
+| AC-V7 | All 3 `ActionAttach` sites in `sendAgentRouted` present (2 REQUIRED + 1 AUDIT) | `sendAgentRouted` contains `s.authorize(..., ActionAttach)`, `CheckAccess(..., ActionAttach)`, and `logAuthzDenial(..., ActionAttach, ...)` |
 | AC-V8 | `parseDMKeyIDs` still present | `func parseDMKeyIDs` definition exists in handlers_chat_v2.go |
 | AC-V9 | `isDMParticipant` still present with `parts[1]=="user"` kind-label gate | `isDMParticipant` checks kind-label position before matching userID |
 | AC-V10 | Read-switch thread path resolves via topic lookup | Unit test: create thread conversation + topic; verify ConversationID filter used |
