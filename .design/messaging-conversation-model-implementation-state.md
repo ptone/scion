@@ -12187,3 +12187,130 @@ the claim; absent that line, the word is *"plausible"*.
   em9's channel-writer enumeration. **Not raised to user.**
 - Unchanged with user: DEF-32 routing, #1360 merge, three branch deletions,
   escalation-1 CI.
+
+---
+
+## §5er — DEF-34 confirmed and upgraded: the key mismatch, not the runtime
+
+em9 parked at `e3561b01` having answered the empty-`Channel` question correctly
+(`handlers_agent_messaging.go:207` — `if req.Channel != ""` gates validation, so
+empty skips it) and having reframed DEF-34 as an asymmetric invariant. Their
+framing was honest: *"architecturally exploitable, practical exploitability
+depends on runtime behavior."*
+
+**That caveat is no longer needed. DEF-34 is reachable by ordinary use, with no
+misbehaving runtime and no attacker.** I found the mechanism em9 walked past.
+
+### The block em9 missed
+
+`handlers_agent_messaging.go:188-202`, reply affinity (Phase 6, AC22):
+
+    if req.Channel == "" && recipientID != "" && s.webChatStore != nil && s.GetMessageBrokerProxy() != nil {
+        if lastCh, err := s.webChatStore.GetLastChannel(ctx, recipientID, agent.ProjectID, agent.ID); err != nil {
+            s.messageLog.Error("Failed to look up reply affinity", ...)
+            // Non-fatal: fall through to fan-out-to-all behavior.
+        } else if lastCh != "" {
+            req.Channel = lastCh
+        }
+    }
+
+So the agent path is **not** "no default and no forcing" — the shape I was about
+to send the user. It has a *conditional inference*. And the inference is what
+breaks the guard.
+
+### The load-bearing mismatch
+
+Two keys, verified:
+
+| Site | Keyed on |
+|---|---|
+| `webchannel_store.go:62` `GetLastChannel(userID, projectID, agentID)` | **(user, project, agent)** — thread-agnostic |
+| `handlers_chat_v2.go:1636-1640` `MessageFilter{Channel:"web", ThreadID: threadID}` (the `Channel` literal is line **1637**) | **(channel, thread)** |
+
+The channel stamped on an agent's reply in thread *T* is derived from the user's
+last channel across **every thread** that user has with that agent in that
+project. The guard that consumes the stamp is per-thread. **The producer's key
+and the consumer's key do not agree**, so the stamp is not a property of the
+thread it is attached to.
+
+Affinity writers, both confirmed:
+
+- `webchannel.go:139` — inside `webChannelBus.Publish`, records `"web"`.
+- `handlers_broker_inbound.go:299` — records the inbound spoke's channel
+  (`"discord"`, `"slack"`, …).
+
+`handlers_chat_v2.go` calls neither; the web tag arrives via the spoke.
+
+### The plain interleaving
+
+1. User posts in web thread *W* → affinity = `web`.
+2. Same user says anything to the same agent from Discord → affinity = `discord`.
+3. Agent sends an untagged reply in *W* → `:200` stamps it `discord`.
+4. User edits or deletes their message in *W*.
+   `hasAgentReplyAfter` filters `Channel: "web"`, does not see the agent reply,
+   **permits the edit/delete.**
+
+No attacker. No non-conforming runtime. The hub wrote the wrong tag itself.
+
+### Three routes, ranked
+
+- **(b) cross-channel affinity** — above. Strongest: ordinary multi-channel use.
+- **(a) no affinity row** → `lastCh == ""` → `Channel` stays empty → invisible.
+  This is *documented intended behaviour*: *"If no row exists, leave channel
+  empty so the message fans out to all spokes."* An intended value the guard
+  cannot see.
+- **(c) runtime sets a non-web channel explicitly** — em9's original route.
+  Real but the weakest, since it needs a cooperating client.
+
+### Ruling on the fix
+
+em9 offered two: default `Channel` on the agent path, or drop the filter from the
+guard. **Drop the filter.** Defaulting is wrong on its own terms — empty
+`Channel` is load-bearing on the agent path, it *means* "fan out to all spokes"
+(`:190-202` comment). Forcing `"web"` would break fan-out to fix a guard.
+
+The guard's question is *"has the agent replied in this thread?"* Channel is not
+part of that question. A reply is a reply whichever spoke carried it. Removing
+`Channel: "web"` from the `MessageFilter` widens the match set, so it fails
+**closed** — more denials, never fewer. One line, conservative direction.
+
+### Rule 206
+
+**When one site writes a field and another reads it as a precondition, the two
+must agree on the field's key.** A producer keyed on (user, project, agent) and a
+consumer keyed on (channel, thread) will disagree the first time a user is
+active on two channels — and the disagreement presents as a guard that passes.
+Check the keys, not just the values.
+
+### Rule 207
+
+**An intended sentinel is still a blind spot.** `Channel == ""` is documented,
+deliberate, and correct for fan-out. It is also invisible to a filter on
+`Channel == "web"`. That a value is *supported* is an argument for handling it,
+not evidence that it is handled.
+
+### Rule 208
+
+**When a subordinate volunteers the boundary of what they verified, extend the
+boundary yourself before relaying the caveat.** em9's *"depends on runtime
+behavior"* was the right disclosure and I said so. It was also wrong in the
+direction that mattered: the defect does not depend on runtime behaviour at all.
+Praising the honesty is not a substitute for testing the claim (cf. rule 196).
+
+### Actions
+
+- `/tmp/esc4.txt` (1927 runes, unsent) is **inaccurate as drafted** — it asserts
+  the agent path has "no default and no forcing." Must be rewritten around the
+  key mismatch before it goes out.
+- em9 must **unpark**: they reframed DEF-34 on an incomplete picture.
+
+### Ledger
+
+- **DEF-32** — characterised, fix shape settled. Awaiting routing only.
+- **DEF-33** — downgraded, latent, exploitability unproven. Not escalated.
+- **DEF-34** — **upgraded from provisional to confirmed.** Mechanism is the
+  producer/consumer key mismatch, not runtime behaviour. Fix: drop the `Channel`
+  filter from `hasAgentReplyAfter`. Belongs in the DEF-32 hotfix if one is
+  authorised. **Being raised to user now.**
+- Unchanged with user: DEF-32 routing, #1360 merge, three branch deletions,
+  escalation-1 CI.
