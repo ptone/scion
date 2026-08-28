@@ -753,10 +753,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		hcSettings = nil
 	}
 	hcResolution, err := config.ResolveHarnessConfigName(config.HarnessConfigInputs{
-		CLIFlag:     harnessConfig,
-		TemplateCfg: finalScionCfg,
-		Settings:    hcSettings,
-		ProfileName: profileName,
+		CLIFlag:        harnessConfig,
+		TemplateCfg:    finalScionCfg,
+		Settings:       hcSettings,
+		ProfileName:    profileName,
+		HubIsAuthority: api.IsHubHarnessConfigAuthority(ctx),
 	})
 	if err != nil {
 		return "", "", nil, err

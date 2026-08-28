@@ -2097,6 +2097,13 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 			"projectPath", req.ProjectPath,
 		)
 	}
+	if harnessConfigName == "" {
+		s.envSecretLog.Warn("env-gather: no harness-config resolved, skipping harness-specific environment pre-population",
+			"agent", req.Name,
+			"hasTemplate", req.Config != nil && req.Config.Template != "",
+			"hubIsAuthority", req.Config != nil && req.Config.HubIsHarnessConfigAuthority,
+		)
+	}
 	if harnessConfigName != "" {
 		var harnessType, authType string
 		// authMeta is the declarative auth block from the resolved harness-
@@ -2459,10 +2466,12 @@ func (s *Server) resolveHarnessConfigForEnvGather(req CreateAgentRequest, settin
 		hcSettings = nil
 	}
 
+	hubAuth := req.Config != nil && req.Config.HubIsHarnessConfigAuthority
 	res, err := config.ResolveHarnessConfigName(config.HarnessConfigInputs{
-		CLIFlag:     cliFlag,
-		Settings:    hcSettings,
-		ProfileName: profileName,
+		CLIFlag:        cliFlag,
+		Settings:       hcSettings,
+		ProfileName:    profileName,
+		HubIsAuthority: hubAuth,
 	})
 	if err != nil {
 		return ""

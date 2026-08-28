@@ -34,6 +34,13 @@ type HarnessConfigInputs struct {
 	TemplateCfg  *api.ScionConfig // merged template config
 	Settings     *VersionedSettings
 	ProfileName  string
+
+	// HubIsAuthority indicates the hub is the authority for harness-config
+	// defaults. When true, the error message omits remedies that rely on
+	// the broker's settings chain (--harness-config CLI flag, settings
+	// default_harness_config) because those channels are suppressed or
+	// unreachable on the hosted tier. See ptone/scion#1316 phase 4.
+	HubIsAuthority bool
 }
 
 // ResolveHarnessConfigName determines which harness-config to use for an agent.
@@ -89,6 +96,9 @@ func ResolveHarnessConfigName(inputs HarnessConfigInputs) (*HarnessConfigResolut
 		return resolved(inputs.Settings.DefaultHarnessConfig, "settings-default"), nil
 	}
 
+	if inputs.HubIsAuthority {
+		return nil, fmt.Errorf("no harness-config resolved. Set default_harness_config in the agent template")
+	}
 	return nil, fmt.Errorf("no harness-config resolved. Specify --harness-config, set default_harness_config in the template, or set default_harness_config in settings")
 }
 

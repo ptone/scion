@@ -52,10 +52,20 @@ func TestHubAuthority_SettingsDefaultSuppressed(t *testing.T) {
 
 	// With the flag: settings is nil → resolution fails → broker does not invent
 	_, err = config.ResolveHarnessConfigName(config.HarnessConfigInputs{
-		Settings: nil,
+		Settings:       nil,
+		HubIsAuthority: true,
 	})
 	require.Error(t, err,
 		"with hub authority (nil settings): resolution must fail, not invent a name")
+	// Hosted error must not recommend --harness-config (no CLI) or settings
+	// (suppressed). It must recommend the template — the only channel
+	// the hosted operator can use.
+	assert.Contains(t, err.Error(), "template",
+		"hosted error must recommend the template channel")
+	assert.NotContains(t, err.Error(), "--harness-config",
+		"hosted error must not recommend --harness-config (no CLI on hosted tier)")
+	assert.NotContains(t, err.Error(), "in settings",
+		"hosted error must not recommend settings (suppressed by hub authority)")
 }
 
 // TestHubAuthority_ProfileDefaultSuppressed verifies that when the hub is the
@@ -79,8 +89,9 @@ func TestHubAuthority_ProfileDefaultSuppressed(t *testing.T) {
 
 	// With the flag: settings is nil → profile default does not fire
 	_, err = config.ResolveHarnessConfigName(config.HarnessConfigInputs{
-		Settings:    nil,
-		ProfileName: "dev",
+		Settings:       nil,
+		ProfileName:    "dev",
+		HubIsAuthority: true,
 	})
 	require.Error(t, err,
 		"with hub authority (nil settings): profile default must not fire")
@@ -140,4 +151,34 @@ func TestHubAuthority_ContextFlag(t *testing.T) {
 	ctx = api.ContextWithHubHarnessConfigAuthority(ctx)
 	assert.True(t, api.IsHubHarnessConfigAuthority(ctx),
 		"after setting: flag must be true")
+}
+
+// TestHubAuthority_ErrorMessageHostedVsWorkstation verifies that the error
+// message from ResolveHarnessConfigName names only actionable remedies for
+// each tier: hosted omits --harness-config and settings; workstation names
+// all three channels.
+func TestHubAuthority_ErrorMessageHostedVsWorkstation(t *testing.T) {
+	// Workstation error: all three channels are real
+	_, err := config.ResolveHarnessConfigName(config.HarnessConfigInputs{
+		HubIsAuthority: false,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--harness-config",
+		"workstation error must mention --harness-config")
+	assert.Contains(t, err.Error(), "in the template",
+		"workstation error must mention template")
+	assert.Contains(t, err.Error(), "in settings",
+		"workstation error must mention settings")
+
+	// Hosted error: only the template channel works
+	_, err = config.ResolveHarnessConfigName(config.HarnessConfigInputs{
+		HubIsAuthority: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "template",
+		"hosted error must mention template")
+	assert.NotContains(t, err.Error(), "--harness-config",
+		"hosted error must not mention --harness-config")
+	assert.NotContains(t, err.Error(), "in settings",
+		"hosted error must not mention settings")
 }
