@@ -15207,3 +15207,144 @@ heartbeat question, not by me.
 **Not messaging ptone.** He has an unanswered decision and three merges. Stacking a low-severity doc
 observation on top would bury the decision I actually need, and it would reverse the "three PRs green"
 report he already has. It goes in the log and the task list, which is what they are for.
+
+---
+
+## §35.80 — Adjudicating the tasks #37/#48 investigation: the fix site was wrong, and the reason was in the repo
+
+**Rule 34 (new): when a value is missing, look for the slot before you build one.** A subsystem that
+already has a designed, documented, empty slot for the value you need is telling you something
+different from a subsystem that has no slot at all. In the first case the question is *"why is it
+empty here?"*, and the answer is usually written down. In the second case you are free to design. I
+briefed this as the second and it was the first.
+
+### What the investigation got right, and I am not re-opening
+
+`sn-harnesscfg-inv` traced the empty harness-config name hop by hop, and I confirmed the load-bearing
+citations myself rather than relaying them:
+
+- The default template has **no `harness` field at all** — absence, not empty. (This corrected my brief,
+  which asserted `harness: ""`. Same outcome today; different code path
+  — `detectHarnessFromContent` at `template_file_handlers.go:128-131` vs `:122-127` — and the
+  distinction bites if someone later adds `default_harness_config` to the template without `harness`.)
+- `LoadBootstrapKoanf` (`pkg/config/hub_config.go:1122`) **never loads `embeds/default_settings.yaml`.**
+  I confirmed this by enumerating all five sources it does load. It is a *negative* claim, which rule 28
+  says use never falsifies, so enumeration was the right instrument.
+- The broker's rung 7 of `ResolveHarnessConfigName` returns `Settings.DefaultHarnessConfig`, which is
+  `antigravity` from **its own** embedded `default_settings.yaml:32`.
+- Two **additional empty-name origins beyond the browser**, which I had explicitly invited and which
+  widen the fix's required coverage: the CLI (`cmd/create.go:229`, `HarnessConfig: harnessConfigFlag`,
+  defaulting `""`) and the scheduler (`server.go:3231-3239`, same template-fallback logic).
+
+**The asymmetry, stated once:** the broker loads `embeds/default_settings.yaml`; the hub does not. Two
+components in one process disagree about defaults because only one of them reads the defaults file.
+
+### The open question I closed by reading, not by touching ptone's lab
+
+Open question 1 asked whether `BootstrapBundledResources` actually seeds `antigravity` on a fresh
+hosted deployment, and proposed a live `GET /api/v1/harness-configs`. It did not need one:
+
+- `SkipIfAnyExist: true` sets `skipHarnessConfigs` only when
+  `ListHarnessConfigs(Active, Limit: 1)` returns a row. On a **fresh** deploy — which is §1's entire
+  scenario — there are none, so seeding proceeds.
+- `resources/catalog.go:73-99` builds one harness-config resource per **directory** in `harnesses.FS`.
+- `harnesses/embed.go:24` embeds `all:antigravity/*`.
+
+**Therefore `antigravity` IS in the store on a fresh hosted deploy. It is only missing from disk**
+(hosted mode skips `~/.scion` materialization, `cmd/server_foreground.go:111-117`). That is the whole
+defect in one line: *the resource exists; the broker was looking in the wrong place, because it was
+handed a bare name with no identity.*
+
+This also settles why the fix works, which is the point I **nearly overturned the recommendation on**.
+I assumed a hub-side default would still route through `FindHarnessConfigDir("antigravity")` and fail
+identically. It does not: with an ID and hash stamped from the store, resolution bypasses the disk
+lookup entirely. The note had already said so and I had not read far enough. *Reading three paragraphs
+further was cheaper than the message I almost sent.*
+
+**Residual, and it is real:** on a **non-fresh** deploy `SkipIfAnyExist: true` skips *all* harness-config
+seeding, so a hub whose store holds some other config but not `antigravity` gets a default naming
+something absent. Whichever fix wins must degrade legibly there.
+
+### Why I did not dispatch the recommended fix
+
+The note recommended adding `embeds/default_settings.yaml` as the first layer of `LoadBootstrapKoanf`,
+mirroring `LoadVersionedSettings` at `settings_v1.go:1074-1077`. Three problems, ascending:
+
+1. **Wrong keyspace, and it fails silently.** `default_harness_config` is a **top-level** key in that
+   file (`:32`). `LoadBootstrapKoanf` carries its own warning: *"All layers use snake_case keys matching
+   the opsettings registry (e.g. `server.hub.admin_emails`, not `hub.adminEmails`). This ensures
+   `ExtractSectionFromKoanf` can find values from any layer."* The merge would load the key at a path
+   nothing reads. **No error, no warning, no effect** — this project's signature defect shape, proposed
+   as the cure for an instance of itself.
+2. **No new source was needed.** Layer 1 is already a hand-written confmap of coded defaults carrying a
+   comment that it is *"a manually maintained subset of GlobalConfig defaults"* which must be extended
+   when new defaulted keys appear. If the answer is "seed a default", that is one line in the right
+   keyspace.
+3. **The slot exists and its emptiness is deliberate.** `hub/server.go:166-181` documents
+   `AgentDefaults opsettings.AgentDefaultsSettings` with koanf key `default_harness_config`.
+   `hub_agent_defaults.go:96-151` is `applyHubAgentDefaults`, which stamps it **only-if-empty**, sited
+   between `applyProjectDefaults` and `populateAgentConfig` under a 30-line comment beginning
+   *"PLACEMENT IS THE WHOLE POINT."*
+
+Two by-design exclusions govern this, both quoted in the round-2 brief:
+
+- `server.go:173-180` — file mode leaves the agent-defaults fields empty on purpose, *"because a
+  co-located broker reads the same settings.yaml and applies them itself at the BOTTOM of its own
+  chain. Populating them hub-side as well would promote them to the hub tier and silently outrank
+  broker profile resources and template limits."*
+- `server.go:616-625` — `default_harness_config` is absent from the hub→broker wire struct on purpose,
+  *"the hub must resolve those itself so it can stamp TemplateID/TemplateHash and
+  HarnessConfigID/HarnessConfigHash, and they therefore ride the existing AppliedConfig ladder
+  instead."*
+
+**Read together, the intended design is exactly the behaviour we want.** The tier is not broken because
+the design is wrong; it is broken because on this tier the value never arrives in `AgentDefaults`. That
+reframing changes the fix from "add a config source" to "supply the slot", and it is only visible if you
+find the slot first.
+
+**Rule 19 therefore applies to any fix here** — it reverses a documented decision, so the *reason* gets
+tested harder than the fix. The stated reason has a precondition: *a co-located broker reads the same
+settings.yaml.* My reading is that this fails in hosted mode — there is no `~/.scion/settings.yaml`, and
+the broker falls back to its **embedded** copy instead. But that is my reading, it is the load-bearing
+one, and I sent it back to be checked rather than adopted. **If the precondition does hold, the fix
+shape dies, and I would rather learn that from the investigator than from a reviewer.**
+
+### What I asked for instead of a recommendation
+
+Not a winner — **priced candidates**, because the interesting content is blast radius, not preference:
+
+| | Fix | Blast radius |
+|---|---|---|
+| A | One line in `LoadBootstrapKoanf`'s layer-1 confmap, right keyspace | Every DB-mode hub |
+| B | Give the bundled default template a `default_harness_config` | Template rank (beneath project and request — arguably the most correct rank); template is shared across tiers |
+| C | Deploy-time `SCION_SEED_*` only | Zero shared-code change; **entirely contingent on the #44/#45 contradiction below** |
+| D | Fail loudly when `hcName == ""` reaches `populateAgentConfig` | Does **not** fix §1; makes it diagnosable. Complementary, not alternative |
+| E | Broker rung 7 stops returning names it cannot resolve | Complementary |
+
+For A, B, C I want the precedence rank named, because `applyHubAgentDefaults` carries an explicit
+**"ACCEPTED CONSEQUENCE"** note that a hub-resolved harness config reaches the broker at CLIFlag rank and
+outranks the broker's own profile and settings defaults. *A hub-wide floor that outranks a template is
+the precise inversion that whole workstream existed to remove.* If A re-introduces it, A is not one line.
+
+**A contradiction in my own log that C depends on, and which I will not resolve by preference:** task #44
+records *"SCION_SEED_* is postgres-only, tier runs SQLite"* as **measured broken**; task #45 records the
+koanf chain as *"sound end to end … measured 16:05"* with the real fault downstream in the WebServer
+split-brain. Those do not obviously agree. Two of my own completed tasks disagree about whether a
+mechanism works, and I noticed only because a fix depended on it. **A completed task is not a settled
+fact; it is a settled fact *as of* its measurement, and two of them can rot into a contradiction with
+nothing to flag it.**
+
+I also declined to guess the env-var spelling for `agent_defaults.default_harness_config`, per **rule 29**
+— a value named by someone who has not run it is a hypothesis in the costume of a specification.
+
+### Process note
+
+Round 2 went to the **warm** investigator (`sn-harnesscfg-inv`, completed 6 minutes earlier, container
+still up) rather than a fresh agent. Same reasoning as this morning's two red branches: a completed
+signal is not a retired agent (rule 20), and warm context is the cheapest input available. The brief
+appends to the existing note rather than rewriting it — round 1's trace is correct and I want it
+preserved as written, not silently absorbed into a revision.
+
+**And the brief asks again what it got wrong.** Round 1's version of that paragraph earned its place
+twice over: it caught the absent-vs-empty error in my own brief and surfaced the two non-browser
+origins I had not thought to ask about.
