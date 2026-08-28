@@ -15154,3 +15154,56 @@ shape is not carelessness. It is that "no signal" and "good signal" look identic
 forces them apart**, which is the same defect as `declare -A` exiting 0, and the same defect as the
 stderr-clean precondition in rule 32. This project keeps rediscovering one failure mode wearing new
 clothes.
+
+### §35.79 — heartbeat answers, and I audited the class after fixing the instance (14:02)
+
+**Q1 — agents progressing or stalled?** One active: `sn-harnesscfg-inv`, dispatched 14:00, code-only
+trace of the empty harness-config (tasks #37/#48). `sn-iaplab-dev` held, idle by design. Everything else
+released — 11 agents retired today, all verified landed on remote before deletion, all with `-b`.
+
+**Q2 — what blocks the critical path?** Split, and the split is the useful part:
+
+- **Gated on ptone:** #1350, #1351, #1352 are all green and mergeable and wait on his gate. Tasks
+  #87/#90/#91 all edit `deploy.sh` and are frozen until #1350 lands. Task #88 needs his (a)/(b) call.
+  Task #93 needs decision 1 of 2, sent 13:39, unanswered.
+- **Not gated on ptone:** tasks #37/#48 — §1 **step 5**, starting an agent. Now in flight. It had stalled
+  for a reason worth restating: settling it live means creating an agent with an empty harness-config,
+  and defect #67 destroys the entire Instance ~8s after a `201`. The only suitable instance is
+  `sn-harness-lab`, which ptone is about to use. **The blocker was risk, not need**, and a code trace
+  removes the risk rather than accepting it.
+
+**Q3 — is the design doc in sync with what has been measured?** I fixed the `printf -v` laundering
+today, then asked the question I should have asked first: **does that table have other rows with the
+same defect?** It has two.
+
+| Row | Measured column | Consequence column |
+|---|---|---|
+| BSD `grep` 2.6.0-FreeBSD | `—` | **"No `-P`"** |
+| `awk` 20200816 (BWK) | `—` | **"Not `gawk`; no `gensub`"** |
+
+Both consequences are **prohibitions derived from a version string**, and rule 28 says a prohibition is
+the one claim never falsified by use — nobody trips over a rule telling them they cannot do something,
+so a wrong entry quietly narrows what every future `deploy.sh` author writes.
+
+**But this is incompleteness, not laundering, and the difference is real.** The `printf -v` row had
+**false content in a column headed "Measured."** These two rows honestly print `—`, so a reader can see
+that no feature measurement was taken; the version strings themselves *were* measured. I am recording
+the distinction rather than flattening it, because inflating a lesser defect to match a greater one is
+its own species of false precision — and I have spent the day objecting to exactly that.
+
+**Deliberately not fixing it now.** #1350 and #1351 are green, reviewed, merge-ready, and waiting on
+ptone. Churning three merge-ready PRs for a low-severity doc improvement is a bad trade, and the fix
+gets *cheaper* after they merge: #1350 ships `bash32-feature-probe.sh` and the now-green
+`deploy.sh under macOS /bin/bash` job, so measuring `grep -P` and `awk gensub` becomes a small extension
+of existing infrastructure instead of new infrastructure. Filed as **task #100, blocked by task #86.**
+
+**The meta-point, since it is the third time today.** I fixed the `printf -v` instance this morning and
+did not sweep the table it lived in. I fixed the awk delimiter bug and did not ask what else could blank
+a verdict — and the replacement reproduced the symptom within the hour. **Fixing the instance you tripped
+over is the default behaviour, and it is not enough; the question "what else has this shape?" has to be
+asked deliberately every time, because nothing in the situation prompts it.** Today it was prompted by a
+heartbeat question, not by me.
+
+**Not messaging ptone.** He has an unanswered decision and three merges. Stacking a low-severity doc
+observation on top would bury the decision I actually need, and it would reverse the "three PRs green"
+report he already has. It goes in the log and the task list, which is what they are for.
