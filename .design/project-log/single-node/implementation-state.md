@@ -14246,3 +14246,74 @@ line numbers from a heading grep and could have inserted criterion 14 without ev
 POINT.** Structured prose has continuations that a line number does not reveal. This sat on a branch
 awaiting ptone's PR for over an hour, and the one reader it was written for is the one who would have
 hit it.
+
+### §35.94 — Heartbeat check: nothing decayed, and the Shape B brief written ahead of the decision
+
+04:05. Cycle check against the scheduler's three questions. **No new defect, no new dispatch.**
+
+**1. Agents.** Mine are quiesced correctly, not stalled. `sn-runtimeprofile-dev` completed 18 min ago,
+`sn-adcpreflight-rev2` 19 min ago, `sn-adcpreflight-dev2` blocked 1 hr — all three are waiting on ptone,
+not on me. **Kept all three alive deliberately:** #92 may still need Shape B and its delta review, and
+context is the expensive thing to rebuild. Applied rule 20 rather than trusting the signals: verified
+against the tree, and all four branch heads are byte-identical to what I pushed at 03:47.
+
+**2. Critical path — MEASURED, and it has not decayed.** Upstream `main` moved three commits since
+`1befe923` (`#1336`, `#1337`, `#1342`). So I checked the thing that actually threatens an unmerged
+approved branch:
+- `scion/bash32-portability` @ `0b51f831` — 6 ahead, 3 behind, **merges clean**.
+- `scion/task-92-runtime-profile-fix` @ `dc729e2` — 3 ahead, 1 behind, **merges clean**.
+- **Against each other: zero conflicts, zero overlapping files.** Merge order is free; ptone can take
+  them in either order without sequencing advice from me.
+
+Worth stating because it is a **decaying** measurement, not a permanent one: both branches are disjoint
+from upstream's current direction (permission checks, quota API, web UI) and that is why they are clean.
+That is luck about timing, not a property of the branches. **Re-measure each cycle they stay unmerged.**
+
+**3. Design doc in sync.** Yes — edit 4 landed at `f6c10558` and no measurement has been taken since.
+
+**Ptone is very likely asleep, and this time I checked before deciding how to reach him** — which is the
+order I got wrong at 03:23. Route: his own merge timestamps. Last merge `f4d02461` at 22:31 EDT; it is
+now 00:05 EDT. 94 minutes silent at midnight local, and no reply to the 03:23 send. **Labelled as
+inference, not measurement** — merge activity is a proxy for wakefulness and rule 16 says a wrong
+environment claim is more expensive than a wrong code claim. It is good enough to decide *not* to send a
+second message, which is the only decision it is carrying. Everything stays in `review-queue.md`.
+
+**WROTE THE SHAPE B BRIEF NOW, HELD UNSENT** —
+`briefs/sn-runtimeprofile-dev-shapeb-HELD.md`. Not manufactured work and not a dispatch: it converts
+ptone's reply latency into zero additional latency, since I had already told the developer verbatim that
+approval would be followed by a re-brief with the predicate, the invariant comment and the held nit.
+Writing it now also forced the blast-radius table to exist **before** the decision rather than after,
+which is the only order in which it can inform the decision.
+
+**The table is the substance, and building it changed what I would tell ptone.** Six broker/profile
+rows. Rows 1, 3, 4 (workstation docker, multi-node kubernetes, podman) are **unchanged** under Shape B —
+the local-only clause reproduces today's behaviour exactly wherever the broker is local. So the shared
+function's blast radius is **narrower than "it touches every tier"**: it is exactly the tiers whose
+broker is non-local, which is ours and `cloudrun-instances`. That is a materially easier decision than
+the one I put to him, and I will say so when he replies rather than sending a correction now.
+
+**Row 6 is the one I nearly left out and it is the reversal test.** `rtType == ""` inherits
+`defaultRuntimeType` *before* the filter runs. My whole reason for accepting Shape B on top of Shape A is
+"on this tier the list is never empty, so the error-path fallback is never reached." Row 6 is that
+reason's foundation. **Rule 19: the reversal reason gets tested harder than the fix.**
+
+**Pre-authorised the assertion edit, in writing, with the reason.**
+`TestBuildInfoProfiles_OldWorkstationDefaults_Task92_Regression` documents the defective state and *must*
+go red under Shape B. This project's standing rule makes "editing an assertion to make a change pass" a
+stop-and-ask trigger. Left unanswered the developer either stalls or edits quietly — and the log already
+records this exact trap at `hub_connection_test.go:399`, where existing tests assert the buggy behaviour
+is correct. So the brief authorises the edit, **requires the rename** (a test named `Regression` that no
+longer documents one is the same false-prose defect that cost this branch three rounds), and requires the
+commit message to say a passing test's expectation was changed and why.
+
+**Named the one mutation that proves the predicate:** make `canBrokerServeRuntime` return `true`
+unconditionally and confirm row 2 goes red. Not the equality clause, not the local-only clause — the
+proof that anything is excluded at all.
+
+**And gave the brief a withdrawal condition.** If row 5 (`cloudrun-instances`) measures *worse* than
+today rather than merely different, that outranks every other finding and argues for declining Shape B.
+Better to withdraw a change to a shared function after measuring it than to ship one that improves one
+tier and degrades another.
+
+**Standing state: blocked on ptone for four items, all of which only he can move** — upstream PRs for
+tasks #88, #92 and #86, and the task #93 (a)/(b) decision. Said once, queued, not repeated.
