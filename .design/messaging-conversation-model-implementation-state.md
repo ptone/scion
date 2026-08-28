@@ -13631,3 +13631,38 @@ Offered to post the rationale to the PR; awaiting his call rather than acting, s
 
 ### Ledger unchanged
 #1361 `5fc82455b` and #1362 `7caa8e00d` green, awaiting ptone's merge. DEF-34/#1259 sequencing and DEF-32 identity-linking still open. DEF-33/34/35 spec complete. DEF-18 carrier em9-unify. Tier 2 DEFERRED. Tranche H blocked on G-1. DEF-17 STRUCK. GATE-1 CLOSED.
+
+---
+
+## §5fm — HEARTBEAT v6. SECTION BOUNDARY: #1361 MERGED. Marker gate is live on main and verified non-vacuous.
+
+`upstream/main` moved for the first time in ~4h: **`b14c41414` -> `42eb91b0f`**, a single commit —
+`ci: add security marker gate for B5 / #1322 / #1347 handler symbols (#1361)`. Merged 22:34:05Z.
+
+### The gate is live AND wired AND non-vacuous — all three checked separately
+Landing a guard proves nothing on its own. Three independent failure modes; I tested each.
+
+1. **Wired into CI, not dead code.** `.github/workflows/ci.yml:113` invokes `./hack/check-security-marker-gates.sh` directly, matching the pattern of the two existing guards at `:93` and `:104`. This mattered: `ci.yml` does NOT run `make ci`, so a `Makefile` row alone (`:172`) would have been inert. Both exist; the CI one is what counts.
+2. **Exit codes discriminate.** Baseline on `42eb91b0f`: exit 0, "all gates pass". Then:
+   - renamed one `authenticatedSender` call -> **exit 1**, `FAIL [REQUIRED] ... found x0`
+   - renamed the `logAuthzDenial` call -> **exit 1**, `FAIL [AUDIT] ...` (correctly labelled AUDIT, not REQUIRED)
+   - introduced a syntax error -> **exit 2**, `ABORT ... Nothing was analysed. This is a syntax error, not a guard failure.`
+   The 1-vs-2 split survives contact. That distinction was the whole reason the script execs a compiled binary instead of using `go run`.
+3. **It catches the actual threat.** Overlaid `scion/messaging-v2`'s versions of both guarded files onto main and ran the gate: **all 10 rows fire** — every `authenticatedSender` site plus its definition, both `validateDefaultAgent` sites plus its definition, both `ActionAttach` groups, and the `logAuthzDenial` AUDIT row. The B5 revert that motivated this guard is now un-mergeable without a loud, itemised failure naming each lost control.
+
+Worktree `/tmp/gate1` restored clean after every control.
+
+### Other state — nothing else moved
+- **#1362** OPEN/MERGEABLE at `7caa8e00d`, green. Awaiting ptone.
+- **#1259** OPEN, **still CONFLICTING**, head `e1e0c2ffbed3`, last updated **2026-08-27T03:51Z** — untouched for over a day. DEF-34 remains blocked on a stalled third-party PR. Two heartbeats with no movement; recorded per instruction 8.
+- All other tips unmoved: em9-unify `47a7c6736`, tranche-c-measurement `d670b139c`, messaging-v2 `91c9e3146`.
+- Roster: no manager reports pending. em10's `taskSummary` reads "Starting tranche C specification" — stale present-tense, not a disguised report (instruction 9 check).
+
+### Dispatched
+**em10 unparked** with the exact rebase command (`git rebase --onto upstream/main origin/scion/ca-msg-em10-marker-gate HEAD`), a warning that #1361 squash-merged so parent content lives in `42eb91b0f` under different ancestry, a mandatory three-dot pre-push verification, the guard re-run, and a literal re-park string. Awaiting its single report.
+
+### Rule
+**Rule 259.** A newly landed guard needs three separate proofs, and passing is none of them: that CI actually invokes it, that it can fail, and that it fails on the specific regression it was written to stop. The first is where guards usually die silently — a Makefile target nothing calls.
+
+### Ledger
+Struck: **#1361 / GATE-1 fully closed and verified in production CI.** Open: #1362 merge, #1259/DEF-34 (external, stalled), DEF-32 identity-linking, marker-gate-2 compare URL (in flight), DEF-33/34/35 spec, DEF-18 (em9-unify), Tier 2 DEFERRED, tranche H on G-1, DEF-5/6/9/10/11/14/16 and D-G held. Awaiting ptone on whether to post the #1362 rejection rationale to the PR.
