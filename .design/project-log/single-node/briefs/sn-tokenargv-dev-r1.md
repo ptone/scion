@@ -2,13 +2,19 @@
 
 Author: sn-impl-arch (architect). Date: 2026-08-28. Task #87.
 
-**DO NOT DISPATCH THIS YET.** It edits `scripts/single-node/deploy.sh`, which is frozen under review on
-`fix/adc-preflight` (task #85). This brief goes out **after #85 merges**, rebased onto the merged file.
-Line numbers below are from `origin/fix/adc-preflight` at `93ae24526` and **will move**; find the sites
-by content, not by number.
+**DO NOT DISPATCH THIS YET.** It edits `scripts/single-node/deploy.sh`, which sits on
+`fix/adc-preflight` (task #85) — **approved and handed to ptone at `600a0f127`, awaiting his merge.**
+This brief goes out **after #85 merges**, against the merged file. Line numbers below were read on that
+branch and **will move**; **find the sites by content, not by number.**
 
 **This is pre-existing, not a #85 regression.** Two of the three sites predate the branch. I split it
 out deliberately so #85 could be judged on its own change.
+
+**Written to be executable by someone who was not on #85.** Everything you need is here or named by
+path; you should not have to reconstruct five rounds of history. Background, if you want it and only if
+you want it: `reviews/adc-preflight-r{1..5}.md` and `implementation-state.md` §35.43–§35.58. **If any
+part of this brief is not actionable without that history, that is a defect in the brief — tell me and
+I will fix it rather than send you reading.**
 
 ---
 
@@ -78,16 +84,18 @@ Either way, report what you measured.
 
 ## Pin
 
-**The harness already records argv** — the argv log used by m5/m8 in `deploy_script_test.go`. That is
-the natural pin and it is a strong one, because it observes the real thing rather than the source text.
+**The harness already records argv** — `deploy_script_test.go` writes an argv log that existing tests
+assert against. That is the natural pin, and a strong one, because it observes the real invocation
+rather than the source text.
 
 - Assert the minted token string **never appears in the recorded argv**, per site.
 - Prefer one assertion per site with a name that says which site, so a mutation goes red **by name**.
 
 **Mutation test each site independently.** Revert site N to the `-H` / query-string form; that site's
 assertion must go red and the other two must stay green. **Read why it went red, not just that it did**
-— an argv assertion that fires because the run aborted earlier is the m5/m8 weak-pin class all over
-again, and this project has produced that defect twice.
+— an argv assertion that fires because the run aborted *before reaching the curl* has distinguished
+clean from mutated **by accident**, not by observing the thing it names. That exact defect has been
+found twice on this file, once by the reviewer and once by the developer in its own work.
 
 **Two rules from #85 round 5 apply directly here, and the first one bites hard on this task.**
 
@@ -131,8 +139,10 @@ you are in the file.
 
 **B2 — the scheme guard's error mislabels the schemeless case.** With no `://` in the value, `$scheme`
 becomes the whole string, so the message reads `got 'evil.example'` as if that were a scheme. True and
-useful, **imprecise, and not misleading about cause** — which is the line round 3 drew for error text,
-and why it did not justify reopening an approved branch. Fix it here.
+useful, **imprecise, and not misleading about cause.** That distinction is the standing rule for error
+text on this script: **a message that asserts a WRONG cause is more expensive than one that asserts
+none**, because an operator acts on it. Imprecise-but-honest falls on the acceptable side, which is why
+it did not justify reopening an approved branch. Fix it here.
 
 **Both are optional relative to #87's actual subject.** If they would grow this change, say so and
 leave them; do not let them displace the token work.
