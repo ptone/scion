@@ -364,6 +364,17 @@ def _generate_wrapper_script(
     single-node tiers a deleted agent's HOME survives and is inherited by the
     next agent with the same slug. A plaintext refresh token on disk would be
     a credential leak to the next tenant. A loud failure is better.
+
+    CREDENTIAL PERSISTENCE NOTE: when the keyring block DOES run (oauth-token
+    with binaries present), secret-tool store writes the refresh token to an
+    on-disk keyring at ~/.local/share/keyrings/login.keyring, encrypted with
+    the unlock password (currently the literal "test"). The gnome-keyring
+    DAEMON is ephemeral (dies with the process tree), but the keyring FILES
+    persist on disk after the daemon exits. On any tier where #108 applies
+    (agent HOME inherited by next tenant), this is a credential stored on
+    disk protected only by a known password. This PR does not address that
+    exposure — it only ensures the keyring block is not reached for auth
+    methods that do not need it.
     """
     secret_path = os.path.join(
         home, ".scion", "harness", "secrets", "AGY_TOKEN"
