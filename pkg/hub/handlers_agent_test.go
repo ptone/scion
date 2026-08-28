@@ -5511,3 +5511,189 @@ func TestStopAllAgents_SetsExitCodeZero(t *testing.T) {
 		assert.Equal(t, 0, *updated.ExitCode, "agent %s ExitCode should be 0 for clean stop", id)
 	}
 }
+
+// TestAgentLifecycle_Start_UnverifiedSA verifies that starting an agent whose
+// assigned GCP service account is not verified returns a validation error.
+// This is the lifecycle-path counterpart of the check in createAgentInProject
+// (handlers_agents_core.go:770) and updateAgent (:2245).
+func TestAgentLifecycle_Start_UnverifiedSA(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("project-lifecycle-sa"),
+		Name: "Lifecycle SA Project",
+		Slug: "lifecycle-sa-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("broker-lifecycle-sa"),
+		Name:   "Lifecycle SA Broker",
+		Slug:   "lifecycle-sa-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	// Create a GCP SA that is NOT verified.
+	sa := &store.GCPServiceAccount{
+		ID:                 tid("sa-lifecycle-unverified"),
+		Scope:              store.ScopeProject,
+		ScopeID:            project.ID,
+		Email:              "unverified@proj.iam.gserviceaccount.com",
+		ProjectID:          "gcp-proj",
+		Verified:           false,
+		VerificationStatus: store.GCPVerificationFailed,
+		CreatedAt:          time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+	// Create an agent with the unverified SA assigned. We write directly to
+	// the store rather than going through the HTTP handler because the
+	// handler would reject the unverified SA. This simulates an agent that
+	// was created when the SA was verified and later had its SA unverified.
+	agent := &store.Agent{
+		ID:              tid("agent-lifecycle-unverified-sa"),
+		Slug:            "agent-lifecycle-unverified-sa",
+		Name:            "Agent Unverified SA",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseStopped),
+		AppliedConfig: &store.AgentAppliedConfig{
+			GCPIdentity: &store.GCPIdentityConfig{
+				MetadataMode:        store.GCPMetadataModeAssign,
+				ServiceAccountID:    sa.ID,
+				ServiceAccountEmail: sa.Email,
+			},
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Start must be rejected because the SA is not verified.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+	assert.Contains(t, errResp.Error.Message, "not verified")
+
+	// Restart must also be rejected.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+	assert.Contains(t, errResp.Error.Message, "not verified")
+
+	// Stop must still succeed — you must always be able to stop an agent.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "stop must succeed even with unverified SA: %s", rec.Body.String())
+}
+
+// TestAgentLifecycle_Start_VerifiedSA verifies that starting an agent whose
+// GCP SA is verified proceeds normally (no false positive from the new check).
+func TestAgentLifecycle_Start_VerifiedSA(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("project-lifecycle-sa-ok"),
+		Name: "Lifecycle SA OK Project",
+		Slug: "lifecycle-sa-ok-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("broker-lifecycle-sa-ok"),
+		Name:   "Lifecycle SA OK Broker",
+		Slug:   "lifecycle-sa-ok-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	sa := &store.GCPServiceAccount{
+		ID:                 tid("sa-lifecycle-verified"),
+		Scope:              store.ScopeProject,
+		ScopeID:            project.ID,
+		Email:              "verified@proj.iam.gserviceaccount.com",
+		ProjectID:          "gcp-proj",
+		Verified:           true,
+		VerificationStatus: store.GCPVerificationVerified,
+		CreatedAt:          time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+	agent := &store.Agent{
+		ID:              tid("agent-lifecycle-verified-sa"),
+		Slug:            "agent-lifecycle-verified-sa",
+		Name:            "Agent Verified SA",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseStopped),
+		AppliedConfig: &store.AgentAppliedConfig{
+			GCPIdentity: &store.GCPIdentityConfig{
+				MetadataMode:        store.GCPMetadataModeAssign,
+				ServiceAccountID:    sa.ID,
+				ServiceAccountEmail: sa.Email,
+			},
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Start should pass the SA check (it will fail later because there's no
+	// actual dispatcher, but it must NOT fail with a validation error about
+	// the SA).
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	// The response may be 200 (no dispatcher) or something else, but it
+	// must NOT be 400 with a "not verified" message.
+	if rec.Code == http.StatusBadRequest {
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.NotContains(t, errResp.Error.Message, "not verified",
+			"a verified SA must not be rejected by the lifecycle check")
+	}
+}
+
+// TestAgentLifecycle_Start_NoGCPIdentity verifies that starting an agent
+// without any GCP identity assigned proceeds normally (no nil-pointer panic
+// or false validation error from the SA check).
+func TestAgentLifecycle_Start_NoGCPIdentity(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("project-lifecycle-no-gcp"),
+		Name: "Lifecycle No GCP Project",
+		Slug: "lifecycle-no-gcp-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("broker-lifecycle-no-gcp"),
+		Name:   "Lifecycle No GCP Broker",
+		Slug:   "lifecycle-no-gcp-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID:              tid("agent-lifecycle-no-gcp"),
+		Slug:            "agent-lifecycle-no-gcp",
+		Name:            "Agent No GCP",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseStopped),
+		// No GCPIdentity in AppliedConfig
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Start must not panic or return a SA-related error.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	if rec.Code == http.StatusBadRequest {
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.NotContains(t, errResp.Error.Message, "verified",
+			"an agent without GCP identity must not hit the SA check")
+		assert.NotContains(t, errResp.Error.Message, "service account",
+			"an agent without GCP identity must not hit the SA check")
+	}
+}
