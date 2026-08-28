@@ -305,7 +305,7 @@ func gitCloneWorkspace(ctx context.Context, in ProvisionInput) error {
 	runClone := func() ([]byte, error) {
 		args := []string{"clone"}
 
-		// Set depth (default: 1 for shallow clone, 0 = full).
+		// Set depth (default: 1 for shallow clone, -1 = full/no --depth flag).
 		depth := gc.Depth
 		if depth == 0 {
 			depth = 1

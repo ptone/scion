@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -126,9 +127,9 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, harnessConfig string
 // template-derived fields after the initial config block has been set up.
 // It populates GitClone config from project labels for git-anchored projects, and
 // sets template ID, hash, and hub access scopes from the resolved template.
-func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
+func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) error {
 	if agent.AppliedConfig == nil {
-		return
+		return nil
 	}
 
 	// Populate GitClone config for git-anchored projects (per-agent clone mode).
@@ -139,10 +140,20 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		if defaultBranch == "" {
 			defaultBranch = "main"
 		}
+
+		depth := 1
+		if depthStr := project.Labels["scion.dev/clone-depth"]; depthStr != "" {
+			d, err := strconv.Atoi(depthStr)
+			if err != nil || d == 0 || d < -1 {
+				return fmt.Errorf("project label scion.dev/clone-depth=%q is invalid: must be a positive integer (shallow depth) or -1 (full clone)", depthStr)
+			}
+			depth = d
+		}
+
 		agent.AppliedConfig.GitClone = &api.GitCloneConfig{
 			URL:    cloneURL,
 			Branch: defaultBranch,
-			Depth:  1,
+			Depth:  depth,
 		}
 	}
 
@@ -468,6 +479,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// Merge injected skills from hub/user/project scopes into InlineConfig.Skills
 	// so the provisioner's existing Step 3b handles them.
 	s.mergeInjectedSkills(ctx, agent, project)
+	return nil
 }
 
 // mergeInjectedSkills fetches injected-skills refs from hub, user, and project

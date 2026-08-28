@@ -3250,7 +3250,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			ctx = withHubDefaultHarnessConfig(ctx)
 		}
 
-		s.populateAgentConfig(ctx, agent, project, nil)
+		if err := s.populateAgentConfig(ctx, agent, project, nil); err != nil {
+			return fmt.Errorf("failed to populate agent config for %q: %w", slug, err)
+		}
 
 		if err := s.store.CreateAgent(ctx, agent); err != nil {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)

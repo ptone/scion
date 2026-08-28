@@ -1152,7 +1152,10 @@ func (s *Server) createAgentInProject(
 		ctx = withHubDefaultHarnessConfig(ctx)
 	}
 
-	s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
+	if err := s.populateAgentConfig(ctx, agent, project, resolvedTemplate); err != nil {
+		BadRequest(w, err.Error())
+		return
+	}
 
 	// Quota enforcement: check agent-per-project limit before creation.
 	if s.quotaService != nil {

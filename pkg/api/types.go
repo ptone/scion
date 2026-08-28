@@ -769,7 +769,7 @@ func (s ResolvedSecret) MarshalJSON() ([]byte, error) {
 type GitCloneConfig struct {
 	URL    string `json:"url"`              // HTTPS clone URL (without credentials)
 	Branch string `json:"branch,omitempty"` // Branch to clone (default: main)
-	Depth  int    `json:"depth,omitempty"`  // Clone depth (default: 1, 0 = full)
+	Depth  int    `json:"depth,omitempty"`  // Clone depth (default: 1; -1 = full clone, 0 = unset → defaults to 1)
 }
 
 type gitCloneContextKey struct{}
