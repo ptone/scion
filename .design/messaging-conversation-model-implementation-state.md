@@ -9941,3 +9941,164 @@ of the 14:57Z dispatch.
 better argument.** Verification has a subject, and the subject has to be the object being
 destroyed. I verified a commit and was about to destroy a branch; those coincide only if the
 branch has nothing else on it, which is exactly what an unpushed branch will not tell you.
+
+---
+
+## §5dw — CI-dark security guards; #1353 reopened; em6 verified with three corrections; v2 reconciliation
+
+Date: 2026-08-28. upstream/main = `31c488018`.
+
+### 5dw.1 — MUTATION m4: invariant D-1 is invisible to CI (NEW, escalation-grade)
+
+Authored independently of em6 (rule 108: I warned em6 against writing a second copy
+of the predicate, so I owed an independent mutation).
+
+**m4** — sever the delegation in `pkg/store/entadapter/conversation_store.go:525`:
+replace the body of `checkDMParticipantKey` with `return nil`. This fully disables
+invariant D-1. Any stranger may be added to any direct conversation. It is *the*
+defect, not a break.
+
+Worktree `/tmp/em6m` @ `6a3304223` (em6's branch tip).
+
+```
+go test -tags no_sqlite ./pkg/store/entadapter/... ./pkg/messaging/... ./pkg/messages/...
+  ?   pkg/store/entadapter   [no test files]
+  ok  pkg/messaging
+  ok  pkg/messages
+=> m4 SURVIVES. Clean green.
+
+go test -run 'Participant' ./pkg/store/entadapter/...
+  FAIL TestAddParticipant_DM_SoftRemoveThenSubstitute        (:1150)
+  FAIL TestAddParticipant_DM_ThirdPartyRejection             (:1186)
+  FAIL TestAddParticipant_DM_EmptyExternalRefRejection_BypassCreate (:1252)
+  FAIL TestEnsureParticipant_DM_ThirdPartyRejection          (:1498)
+=> m4 KILLED four times.
+```
+
+`pkg/store/entadapter/conversation_store_test.go:14` carries `//go:build !no_sqlite`.
+`make ci` -> `make test-fast` -> `go test -tags no_sqlite ./...`. **The entadapter
+package contributes ZERO tests to CI.** The four tests that catch total removal of
+D-1 have never executed in the pipeline — not on em6's branch, and not on #1349 when
+the guard first merged.
+
+Independent corroboration: auth-refactor-lead reports **8 of 11 of their Phase 2 test
+files are dark the same way**. This is systemic, not a messaging artefact.
+
+Mitigation dispatched to em6 (narrow): an untagged `go/ast` enumeration test in package
+`entadapter` asserting the delegation exists, modelled on em10's
+`pkg/hub/create_message_enumeration_test.go`. Explicitly framed as a tripwire for m4,
+NOT as coverage — it would not have caught em6's own m2.
+
+**Systemic fix is NOT dispatched.** It is outside every tranche and needs a user
+decision. Raised as escalation 1.
+
+### 5dw.2 — #1353 REOPENED before merge (coordinator finding, verified by me)
+
+`pkg/hub/messagebroker.go` on `scion/ca-msg-em10-trb` @ `822c02e58`, `deliverToUser`:
+
+```
+:492  persistOK := true
+:493  if err := p.store.CreateMessage(...); err != nil { ...; persistOK = false }
+:501  if persistOK { attachment links; watermarks; PublishUserMessage }
+:536  if p.chatNotifier != nil && ... { go NotifyDMReceived(...) }        <-- OUTSIDE
+:555  if p.messageLog != nil { messageLog.Info("user message delivered") } <-- OUTSIDE
+```
+
+Confirmed verbatim. A failed `CreateMessage` still fires a DM push for a message that
+does not exist, and still writes "delivered" to the audit log.
+
+**The sibling is the tell.** `deliverToAgent:667` handles the identical condition with
+a hard `return`. Two functions, one file, two shapes for one condition — and the
+flag-based one is the one that leaks. Rule 107 in the wild: both the coordinator and I
+read `if persistOK {` and had to go line-by-line to find where its coverage stopped.
+
+Dispatched preference: make `deliverToUser` match `deliverToAgent` (`return`), deleting
+the flag rather than extending it. Named `&& persistOK` at :536 as the wrong fix and
+made it mutation m1 (rule 108).
+
+**Sharper sub-finding:** `pkg/hub/publish_site_enumeration_test.go:58` lists
+`"messagebroker.go:deliverToUser": "Publish inside if persistOK block"`. The PR shipped
+an enumeration guard that inspected the exact function containing the defect and passed
+— because it enumerates PUBLISH sites and the leak is a NOTIFY site. **The guard's
+subject boundary was drawn one category short of the hazard.** The precondition "the row
+must exist" governs all five externally visible effects (publish, notify, watermark,
+attachment link, audit); the enumeration encodes one.
+
+#1353 does not merge until this closes.
+
+### 5dw.3 — em6 B2/B1/B14 ACCEPTED with three corrections
+
+Structure verified correct across all three ingresses. Corrections dispatched:
+
+1. The m4 tripwire (5dw.1).
+2. **`dm_migration.go:209` asymmetry is CORRECT — comment, do not add the check.**
+   At `:184`, `kindA,idA,kindB,idB := messages.ParseDMKey(conv.ExternalRef)`; `:209`
+   adds exactly those to exactly that conv. A guard would re-parse the same string and
+   compare its output to itself. Tautology. Adding it would falsely signal untrusted
+   input. Contrast `:439` in `mergeConversation`, where principals are foreign and the
+   check is load-bearing. Asked for two lines of comment at `:209`.
+3. **`TestGuardA_Migration_EmptyRefDirectRowsSkipped` (`dm_migration_test.go:703`) does
+   not name DEF-29.** Zero occurrences of "DEF-" in the file. It now asserts
+   `emptyRefCount == 2` with message "empty-ref rows must be left keyless per B14
+   ruling". Read cold, that reads as *keyless direct rows are an acceptable steady
+   state*. They are not — a keyless direct row has no ACL at all. B14 ("the migration
+   must not fabricate a key") is correct and not reopened, but "the migration must not
+   fix this" is not "this is fine". Source says it properly at `dm_migration.go:268-270`;
+   the test does not. Rule 110 applied to all four renames.
+
+### 5dw.4 — Tranche C–G reconciliation (Explore agent result)
+
+C–G are defined in exactly one place: a 7-row table at design-doc line 1772, rows
+1776–1782. **Definitions are phase-level prose. No tranche C–G has a file manifest.**
+
+Of the 33 `messaging-v2` files absent from main:
+- **24 claimed feature-level only** (C: envelope/delivery ×8; D: validate ×6;
+  E: read-switch/divergence ×3; F: cmd broadcast/keys/help ×6). Exactly ONE
+  file-level claim exists in the whole document: `cmd/message_deprecation_test.go`
+  at line 3250 ("DEF-25's file rides tranche F").
+- **4 mentioned, unassigned:** `cmd/server_backfill.go` (DEF-12, no tranche letter);
+  `pkg/hub/handlers_conversations_resolve.go` (line 4930, live G-1 HIGH finding,
+  sits in the E/F seam claimed by neither); `cmd/deploy_instance{,_test}.go`
+  (correctly unclaimed — main deleted them in #1325, revert hazard).
+- **5 never mentioned at all:** `cmd/server_backfill_test.go`,
+  `cmd/server_backfill_volume_test.go`, `cmd/server_foreground_backfill_test.go`,
+  `cmd/message_convref_test.go`, `pkg/hub/handlers_conversations_resolve_test.go`.
+
+**C is self-contradictory.** Line 1778 defines it as "Phases 6, 9, 11". Line 5323
+redefines it as "§2.6.4 phases 1-4 + the DEF-20/21/22/23 chain + DEF-27". §5ca/§5co then
+compute it entirely from `ca-msg-em9-unify` as unnamed counts ("44 safe adds"). The two
+definitions are never reconciled, and the `8 cmd` adds inside C's count include
+`broadcast.go` and `keys.go` — **tranche F content sitting inside tranche C's count with
+neither tranche naming it.**
+
+Highest silent-drop risk: the `server_backfill*` cluster (4 files) — the only cluster
+whose feature has no tranche row at all. Then `handlers_conversations_resolve{,_test}.go`.
+
+Raised as escalation 2.
+
+### 5dw.5 — auth relay closed
+
+Relayed DEF-32, B5F1a and the CI blind spot to `auth-refactor-lead` on user instruction.
+Acknowledged same minute. B5F1a: confirmed theirs, fix dispatched to their EM (grant the
+attacker minimum project membership to clear #1347's gate, keep the sender-override
+assertion). DEF-32: accepted as in-domain, pre-existing; both my scope corrections
+recorded. CI: independently confirmed on their side.
+
+### New standing rules
+
+- **134.** A mutation that is killed only by tests CI does not run demonstrates that a
+  guard is *testable*, not that it is *defended*. Before accepting a mutation report,
+  check the build tags on the killing tests against what the pipeline actually executes.
+- **135.** When a guard's behavioural coverage is dark, an untagged AST tripwire is worth
+  having — but it must state in its own doc comment that it is a tripwire, which
+  mutations it would NOT catch, and where the real coverage lives.
+- **136.** An enumeration guard is only as good as the boundary of the category it
+  enumerates. When one is present and the defect slipped past, suspect the category
+  definition before suspecting the scanner.
+- **137.** Justified asymmetry is still a cost. When a missing guard is correct because
+  its input is derived rather than foreign, the fix is a comment naming the provenance,
+  never a tautological check — a redundant check misinforms a reader about the trust
+  level of the input.
+- **138.** A plan that assigns work by feature prose rather than by file manifest cannot
+  be audited for completeness. The absence of a file from every tranche is
+  indistinguishable from its absence from the plan.
