@@ -552,6 +552,11 @@ di_assert_perimeter() {
   local headers_file
   headers_file="$(mktemp)"
 
+  # 2>/dev/null is SAFE on curl — curl never prompts interactively, and the
+  # HTTP status code is already captured for diagnostics.  The redirect
+  # suppresses TLS handshake noise and DNS warnings during the perimeter
+  # assertion.  This is NOT the same class as 2>/dev/null on gcloud; see
+  # the comment in Step 1 for the rule on gcloud commands.
   local status_code
   status_code="$(curl -s -o /dev/null -D "$headers_file" -w "%{http_code}" \
     --max-time 15 \
@@ -735,7 +740,12 @@ di_main() {
   # ===================================================================
   echo "==> Step 1: Resolving deployer identity..."
   local operator_email
-  operator_email="$(gcloud config get account 2>/dev/null | tr -d '[:space:]')" || {
+  # NEVER redirect gcloud stderr to /dev/null.  gcloud can prompt the operator
+  # interactively (authorize, select project, enable API) — 2>/dev/null hides
+  # the prompt while gcloud reads stdin, so the deploy appears to freeze.
+  # The noise this redirect was suppressing: "Your active configuration is: [default]"
+  # and similar informational messages.  Those are useful diagnostics.
+  operator_email="$(gcloud config get account | tr -d '[:space:]')" || {
     echo "Error: 'gcloud config get account' failed — is gcloud configured and authenticated?" >&2
     return 1
   }
@@ -762,7 +772,11 @@ di_main() {
   # ===================================================================
   echo "==> Step 2: Resolving project number..."
   local project_number
-  project_number="$(gcloud projects describe "$DI_PROJECT" --format='value(projectNumber)' 2>/dev/null | tr -d '[:space:]')" || {
+  # NEVER redirect gcloud stderr to /dev/null — same rule as Step 1.
+  # The noise: "WARNING: This command is using service account impersonation."
+  # That warning is useful; hiding it also hides the consent/auth prompts that
+  # made Step 2 the highest-severity stall in the deploy.
+  project_number="$(gcloud projects describe "$DI_PROJECT" --format='value(projectNumber)' | tr -d '[:space:]')" || {
     echo "Error: 'gcloud projects describe $DI_PROJECT' failed — check that the project exists and you have access" >&2
     return 1
   }
@@ -956,7 +970,7 @@ di_main() {
   region_policy="$(gcloud iap web get-iam-policy \
     "--project=${DI_PROJECT}" \
     "--region=${DI_REGION}" \
-    --resource-type=cloud-run 2>/dev/null)" || true
+    --resource-type=cloud-run)" || true
   if [[ -n "$region_policy" ]]; then
     while IFS= read -r line; do echo "    $line"; done <<< "$region_policy"
   else
@@ -966,7 +980,7 @@ di_main() {
   echo "    --- Project-level IAP bindings (inherited) ---"
   local project_policy
   project_policy="$(gcloud projects get-iam-policy "$DI_PROJECT" \
-    --format=yaml 2>/dev/null)" || true
+    --format=yaml)" || true
   if [[ -n "$project_policy" ]]; then
     echo "$project_policy" | awk '
       /^- members:/ || /^- role:/ { flush() }

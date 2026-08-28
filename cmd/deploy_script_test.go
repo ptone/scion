@@ -1541,6 +1541,66 @@ func TestScriptCheckGcloudInstances_FailureMessage(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Stderr-suppression pin: gcloud stderr must not be redirected to /dev/null
+// ---------------------------------------------------------------------------
+
+// TestScriptGcloudStderrNotSuppressed pins the rule that gcloud's stderr must
+// reach the operator's terminal.  2>/dev/null on a gcloud call hides
+// interactive prompts — including authorization and consent screens — making
+// the deploy appear to freeze with no visible cause and no next step.
+//
+// The gcloud stub outputs a WARNING on stderr during "projects describe"
+// (Step 2), simulating the impersonation warning that is the most common noise
+// these redirects were suppressing.  With 2>/dev/null the warning was
+// invisible; without it, it must appear in the captured stderr.
+func TestScriptGcloudStderrNotSuppressed(t *testing.T) {
+	server, _ := newPreflightStub(t,
+		`{"email":"operator@example.com"}`,
+		http.StatusOK, `{}`)
+	argvLog := gcloudArgvLog(t)
+
+	gcloudStub := fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  case "$*" in
+    "beta run instances --help")
+      return 0 ;;
+    "config get account")
+      echo "WARNING: test config noise" >&2
+      printf '%%s\n' "operator@example.com" ;;
+    "projects describe "*)
+      echo "WARNING: This command is using service account impersonation." >&2
+      printf '%%s\n' "123456789" ;;
+    "auth application-default print-access-token")
+      printf '%%s\n' "ya29.fake-test-token" ;;
+    "beta run instances deploy "*)
+      echo "test stub: refusing to deploy" >&2
+      return 1 ;;
+    *)
+      echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+      return 1 ;;
+  esac
+}`, argvLog)
+
+	_, stderr, _ := runBashFuncWithSetup(t,
+		preflightSetup(gcloudStub, server.URL),
+		"di_main",
+		"--name", "test-name",
+		"--project", "test-project",
+		"--image", "ghcr.io/example/scion-omni:latest",
+		"--region", "us-east4")
+
+	// Step 2 (projects describe) warning must be visible
+	assert.Contains(t, stderr, "service account impersonation",
+		"gcloud stderr must not be suppressed with 2>/dev/null — a redirect "+
+			"that hides stderr also hides interactive prompts, causing the "+
+			"deploy to appear to freeze with no visible cause and no next step")
+
+	// Step 1 (config get account) warning must also be visible
+	assert.Contains(t, stderr, "test config noise",
+		"gcloud config get account stderr must also reach the operator")
+}
+
+// ---------------------------------------------------------------------------
 // Token-in-argv pin: the access token must never appear in curl's process argv
 // ---------------------------------------------------------------------------
 
