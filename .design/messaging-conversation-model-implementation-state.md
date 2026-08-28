@@ -6800,3 +6800,80 @@ merge-readiness work before anyone needs to ask for it).
 - **AC-DEF15-4 / AC-DEF16-1** — blocked on `ae33715e`, unchanged.
 - **AC-12-6 / beta exercise** — awaiting user scheduling; the user asked for this to be a tightly
   scheduled exercise with a DB snapshot to hand, so it does not move on my initiative.
+
+---
+
+## §5cm. Heartbeat 2026-08-28 05:13 — no movement; next sub-tranche brief written ahead of dispatch
+
+Zero movement anywhere: `upstream/main` `f4d02461b`, all five manager branch tips unchanged, all
+three managers `blocked`, #1338/#1339/#1340 open and unmerged, and **no PR yet opened from
+`ca-msg-em10-trb`** (`gh pr list --head` returns `[]`). Nothing to strike from the ledger; every
+held row's reason is unchanged from §5cl. Rather than log an empty sweep, I spent the window on the
+critical path: the brief for the sub-tranche that dispatches the moment tranche B lands.
+
+### BRIEF — sub-tranche B1/B2/B14 (migration), ready to dispatch
+
+Ordering within the sub-tranche: **B2, then B1, then B14.** B2 is a data-loss bug and its fix is
+self-contained; B1 changes a guard that B2's fix runs underneath; B14 is a design ruling that
+should not be rushed in behind two mechanical fixes.
+
+**B2 — merge soft-deletes the old row even when message re-stamping failed.** `Run()` returns nil
+and the success counter increments, so the operator sees a clean migration over destroyed data.
+Probe on hand: `repro/trb_dm_migration_probe_test.go::TestProbeA_MergeDeletesOldRowDespiteRestampFailure`.
+The fix is atomicity, not error-reporting: the soft-delete and the re-stamp must succeed or fail
+together, and a partial merge must leave the old row *intact and un-deleted*. Note the standing
+all-or-nothing-per-row constraint — a half-migrated DM lists asymmetrically. **Watch for the wrong
+fix:** logging the re-stamp error and continuing to delete is not a fix, and neither is deleting and
+then attempting a repair. Under-migrating is recoverable; deleting the source is not.
+
+**B1 — `mergeConversation` copies old-row participants onto the target without filtering against
+the target's key**, injecting a stranger into a DM keyed for two other people. Probe:
+`…::TestProbeB_MergeInjectsForeignParticipant`.
+
+The load-bearing point, and the reason this must not be fixed locally: **S6 already built exactly
+this guard for `AddParticipant`** (§5h) — for `kind='direct'`, admit a principal only if
+`ParseDMKey(external_ref)` names that exact `(kind, id)`; derivation from the key, never a count,
+never a copy. `mergeConversation` is a **second ingress to the same sink** that bypasses it. This is
+rule 77 in its original shape: a guard scoped by function leaves the sibling ingress open.
+
+Therefore the instruction is **not** "add a filter to `mergeConversation`" but **"extract S6's
+key-derivation check into one shared predicate and route both ingresses through it."** Two copies
+will drift, and DEF-31 is the in-project proof: it existed *because* create and patch validated
+differently. A second copy of the D-1 guard is the same defect with a longer fuse. Rule 78 applies
+to the tests: pin the predicate at **both** call sites, including any that is currently unreachable —
+call the sink directly at its own layer rather than pleading that plumbing is needed.
+
+**B14 — the empty-ref migration derives the ACL from the listing index. This is a design ruling,
+and I am making it here so it is not re-litigated in review.**
+
+A `direct` conversation's `external_ref` **is** its access-control basis (DEF-29): a keyless direct
+row has no ACL at all. The participant table is a **listing index, never the authority**. Migrating
+an empty-ref row by reading its participants and synthesising a key from them therefore **inverts
+the direction of authority** — it promotes the index to the ACL, which is strictly looser than what
+it replaces and is precisely the regression the standing invariant forbids.
+
+**RULING: an empty-ref `direct` row must be left keyless and participant-less. It is not repaired
+from the index, and it is not deleted.** It fails closed, stays visible to operators, and waits for
+a decision made with more information than the migration has.
+
+This does **not** contradict "the migration is the ONE sanctioned exception" to never normalising a
+DM key. That exception licenses **re-keying a malformed-but-parseable key**, where the two
+principals are already named in the data and normalisation only changes their encoding. It does not
+license **inventing a key that was never there.** The distinction is whether the identities come
+from the key or from somewhere else; if they come from the index, it is not normalisation, it is
+fabrication of an ACL. Write this sentence into the commit message — the two cases look alike in a
+diff and the next reader will need it.
+
+Staging rows `adf13f87` / `f003ad87` are the live DEF-29 reproduction and **must not be deleted**;
+they are the natural fixture for B14's test. Expect 2 rows from Query 1 and 1 from Query 2 — a
+*change* in those counts is the signal.
+
+**Acceptance for the sub-tranche:** each of B2, B1, B14 pinned by a test that fails when that fix
+**alone** is reverted (rule 65/78), verified by mutation with a positive control confirming the
+selector actually selects (rule 81). B1 additionally requires a test proving the *shared* predicate
+governs both ingresses — a test that only exercises `mergeConversation` would pass against two
+divergent copies and is exactly the outcome the fix exists to prevent.
+
+**Not dispatched yet, deliberately.** Tranche B's first cut is unmerged; starting migration work now
+would build on a base that is about to move and buy a rebase for no schedule gain. This dispatches
+when the PR lands.
