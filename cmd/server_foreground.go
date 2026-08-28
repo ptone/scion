@@ -1895,6 +1895,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		}
 	}
 
+	// Validate that configured defaults resolve against the store.
+	// Runs after bootstrap and operational settings init so that both the
+	// store contents and the hub's effective AgentDefaults are final.
+	// Pure diagnostic — logs errors but does not block startup.
+	hubSrv.ValidateStartupDefaults(ctx, hostedMode)
+
 	return hubSrv, nil
 }
 
