@@ -1508,6 +1508,43 @@ em10 and every agent I dispatch hereafter.
       gate, because it authorises nothing while looking like diligence.
 
 
+74. **A positive control proves the instrument works WHERE YOU RAN IT. For anything that ships to
+    other people's machines, "where you ran it" is a variable I had silently treated as a constant.**
+    Issued 2026-08-28 01:55Z. Found by the coordinator's PR review, not by me.
+
+    - I validated `check-conversation-upsert-guard.sh` with four planted probes — three violations
+      exiting 1 and a paired positive exiting 0 — and reported it **proven rather than reviewed**
+      (§5bt). The probes were real and they passed. On GNU grep. In this container.
+    - The script uses `\|`, `\b`, `\+`, `\?` — **all GNU BRE extensions, none POSIX.** On BSD/macOS
+      grep they degrade to *literals*, match nothing, and the guard **exits 0**. I demonstrated the
+      degradation: passing pattern 1 as a fixed string yields 0 hits where the BRE yields 107.
+    - **This is the worst failure shape a guard can have: it does not error, it passes.** And the
+      more a team trusts it, the less anyone looks. A guard that silently never fires is strictly
+      worse than no guard, which is the same shape as B4's unopenable gate — **two instances in one
+      night of a control that cannot fail being mistaken for a control that keeps passing.**
+    - **Rule 61 said negative results need positive controls. The unstated assumption was a single
+      environment.** The upgrade: for any check that runs on machines I do not control, the control
+      must cover the *portability surface* too — or the tool must be pinned. **Ask "what would make
+      this instrument silently return the answer I want?"**
+    - Verified ERE rewrites hit-count-identical (107/107, 11/11, 0/0) before handing them over, so
+      em6 gets a mechanical change rather than a redesign. **Required the paired positive be re-run
+      after the rewrite**, because the three violation probes would also "pass" a guard degraded to
+      matching nothing — only hit-count parity proves the patterns still bite.
+
+75. **A freeze rule stated too broadly gets ignored rather than negotiated.** Issued 2026-08-28
+    02:00Z, correcting rule 71 within the hour — but this time deliberately, not by failure.
+
+    - Rule 71 told managers a branch freezes permanently once its compare URL is sent. **The real
+      hazard only exists between URL-sent and PR-opened**, because in that window a push is invisible
+      to everybody: the URL tracks HEAD and my review was of a SHA. **Once the PR is open, pushes are
+      normal review flow and are visible as commits in the PR.**
+    - Left unrefined, the rule would have told em6 not to push the grep fix to its own open PR — the
+      rule would have blocked the correct action. **An over-broad safety rule does not fail safe; it
+      fails by being overridden, and once overridden its narrow correct core goes with it.**
+    - Corrected to em6 explicitly, naming which of its branches is currently inside the window
+      (`def26`) and which are outside it (`#1338`, `#1339`).
+
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -5683,3 +5720,40 @@ Every fix needs a test that fails without it. Invited pushback with evidence.
   biggest risk in C.
 - em9 still idle (`25fad0a2`, 3h). Not yet dispatched — C cannot be specified until the exclusion
   list above is written out file by file.
+
+### §5bx — PRs #1338/#1339 open; DEF-26 approved and URL sent (2026-08-28 02:00Z)
+
+**PRs open (user opened from my compare URLs):**
+- **#1338** DEF-31 defaultAgent validation. 1 MEDIUM: centralize the duplicated length check into one
+  shared function. Dispatched. Framing given to em6: **DEF-31 existed *because* create and patch
+  validated differently — two copies of a validation rule drift, and the drift is the bug.** Also
+  warned not to let the refactor reintroduce a helpful error message; the unified text deliberately
+  does not distinguish absent from deleted, so the endpoint is not an existence oracle.
+- **#1339** CI guard. **1 HIGH: GNU-only grep syntax → silent pass on BSD/macOS.** See rule 74. I
+  verified the finding and supplied hit-count-verified ERE replacements. **Ordered #1339 before
+  #1338.**
+
+**DEF-26 approved.** `scion/ca-msg-em6-def26` @ `bd5e492c`, 1 file, +6/-12, cut fresh from
+`1befe923`. Compare URL sent (1619 runes, with title and body). Verified independently rather than
+accepting the report: old name 0 hits tree-wide, `AC-DEF8-1` badge 0 hits, the 2 remaining
+`AC_DEF8_1` references both belong to the genuine cross-path test, and both tests pass.
+
+The rename was substantively right, not cosmetic: the old name claimed two-path convergence while the
+body called `Resolve` twice on **one** path, and the old comment conceded this in a NOTE four lines
+down. **The name is what wins when someone scans a file for coverage**, so a test named for a
+guarantee it does not provide is worse than an absent test — the same family as B4 and rule 74.
+
+**Branch/PR state:**
+
+| Branch | SHA | State |
+|---|---|---|
+| `ca-msg-em6-def31` | `8922f590` | PR **#1338** open, 1 MEDIUM in flight |
+| `ca-msg-em6-ci-guard` | `25efd47b4` | PR **#1339** open, 1 HIGH in flight |
+| `ca-msg-em6-def26` | `bd5e492c` | URL sent, **inside the freeze window** (rule 75) |
+| `ca-msg-em10-trb` | `ab47087d` | 14 findings; B5 security fix first, isolated |
+| `ca-msg-em9-unify` | `25fad0a2` | idle 3h; C blocked on writing the B/guard exclusion list |
+
+**Still open:** main red on `TestTemplateResource_UATConfinement` (needs an owner outside this
+project — has not moved in two heartbeats because I have not assigned it, which is my call to make
+and I keep deferring it). AC-DEF15-4 / AC-DEF16-1 blocked on `ae33715e`. Tranche C unspecified.
+Held ledger: DEF-5, DEF-6, DEF-9, DEF-10, DEF-11, DEF-14, DEF-16, DEF-17/18 gate sweep, tranches C–G.
