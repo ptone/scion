@@ -405,7 +405,10 @@ di_preflight_rest_credential() {
   #
   # FIX: -K <configfile> hides the Bearer header from the process table;
   # -d @<file> POSTs the tokeninfo query to avoid placing it in the URL.
-  # Google's tokeninfo endpoint accepts POST with access_token as form data.
+  # Measured: POST to the tokeninfo endpoint with access_token as form data
+  # returns HTTP 400 {"error":"invalid_token"} for a bad token — i.e. the body
+  # is parsed.  A 405 would mean the method is rejected; 400 invalid_token
+  # confirms POST is a supported method.
   #
   # None of the three sites requires the token in a URL.  The tokeninfo endpoint
   # accepts the token via POST body, and the other two are standard Bearer auth.
@@ -415,11 +418,14 @@ di_preflight_rest_credential() {
   printf '%s\n' "header = \"Authorization: Bearer ${tok}\"" > "$auth_config_file"
   printf '%s' "access_token=${tok}" > "$tokeninfo_data_file"
 
+  # Clean up temp files containing credential material on every exit path.
+  # shellcheck disable=SC2064
+  trap "rm -f '$auth_config_file' '$tokeninfo_data_file'" RETURN
+
   # --- Resolve ADC identity via tokeninfo ---
   echo "    Resolving ADC identity via $tokeninfo_url"
   local tokeninfo_resp
   tokeninfo_resp="$(curl -s -d @"$tokeninfo_data_file" "${tokeninfo_url}" 2>&1)" || true
-  rm -f "$tokeninfo_data_file"
 
   # tokeninfo does not always carry "email": a service-account token scoped
   # only to cloud-platform returns azp/aud/scope and no email. azp is a
@@ -466,7 +472,7 @@ di_preflight_rest_credential() {
     -K "$auth_config_file" \
     "$list_url")" || {
     echo "Error: could not connect to $list_url — check network connectivity" >&2
-    rm -f "$resp_file" "$auth_config_file"
+    rm -f "$resp_file"
     return 1
   }
 
@@ -481,7 +487,7 @@ di_preflight_rest_credential() {
   # pins the stub, not the script.
   if [[ ! "$http_code" =~ ^[0-9]+$ ]]; then
     echo "Error: curl returned no HTTP status for GET $list_url — treating as a failure" >&2
-    rm -f "$resp_file" "$auth_config_file"
+    rm -f "$resp_file"
     return 1
   fi
 
@@ -489,7 +495,7 @@ di_preflight_rest_credential() {
     echo "Error: ADC credential check failed — GET $list_url returned HTTP $http_code:" >&2
     head -c 500 "$resp_file" >&2
     echo >&2
-    rm -f "$resp_file" "$auth_config_file"
+    rm -f "$resp_file"
     echo "" >&2
     echo "The ADC token was rejected by the Cloud Run v2 API before any resources were created." >&2
     if [[ "$http_code" == "403" ]]; then
@@ -511,7 +517,7 @@ di_preflight_rest_credential() {
     fi
     return 1
   fi
-  rm -f "$resp_file" "$auth_config_file"
+  rm -f "$resp_file"
   echo "    ADC credential validated successfully."
 
   # Store token for step 3b (bash dynamic scope — the caller declares
@@ -1058,8 +1064,9 @@ di_main() {
 # The piped case needs stdin redirected from /dev/tty: stdin IS the script
 # stream, and any command that reads it (gcloud prompts) would consume
 # script content.  If /dev/tty is not available (non-interactive CI),
-# the deploy proceeds but gcloud prompts that need stdin will fail fast
-# instead of silently consuming the script.
+# the deploy proceeds but gcloud prompts that need stdin will see EOF or
+# garbage and fail — under set -e this aborts the script with a visible
+# error from gcloud, not a silent hang.
 # ---------------------------------------------------------------------------
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   di_main "$@"

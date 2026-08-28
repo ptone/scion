@@ -367,9 +367,9 @@ What that commits us to, measured on an arm64 Darwin 25.6.0 machine on 2026-08-2
 |---|---|---|
 | `bash` 3.2.57(1) | Both `/bin/bash` and the `PATH` bash | No `${v,,}`/`${v^^}`, no `mapfile`/`readarray`, no `local -n`, no `[[ -v ]]`, no `wait -n`, no `coproc`. **`declare -A` is worse than absent — see below.** `printf -v` *is* available |
 | `=~` quoted right-hand side | Trap confirmed present | From 3.2 on, quoting the pattern makes it match **literally**. The RHS must stay unquoted, and this is a security-relevant line — it feeds a host-shape assertion |
-| BSD `sed` | Rejects the GNU-style `--help` extractor; also probed (`sed --help`, `sed BRE \?`) | Assume BSD `sed`; no GNU-only addressing or BRE extensions (`\?`) |
-| BSD `grep` 2.6.0-FreeBSD | Probed (`grep -P`); CI runner confirms | No `-P` (PCRE not linked) |
-| `awk` 20200816 (BWK) | Probed (`awk gensub`); CI runner confirms | Not `gawk`; no `gensub` |
+| BSD `sed` | Rejects the GNU-style `--help` extractor; probed on macOS CI runner (`sed --help`, `sed BRE \?`) | Assume BSD `sed`; no GNU-only addressing or BRE extensions (`\?`) |
+| BSD `grep` 2.6.0-FreeBSD | Probed (`grep -P`); macOS CI runner confirms | No `-P` (PCRE not linked) |
+| `awk` 20200816 (BWK) | Probed (`awk gensub`); macOS CI runner confirms. Also absent from mawk (stock Linux `awk`) | Not `gawk`; no `gensub` |
 | `mktemp` with no template | Works | Not the portability hazard it was assumed to be |
 
 **Row one is now measured, one construct per subprocess, on a native `macos-15` runner**
