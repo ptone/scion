@@ -12030,3 +12030,72 @@ overstating to the user.
 - Rows unmoved two heartbeats: DEF-5/6/9/10 and tranches D–G — all gated behind
   tranche C, which is gated on the user's branch-deletion decision. Not stalled;
   blocked on one upstream input.
+
+---
+
+## §5ep — the two-bus boundary: three formulations before one was falsifiable (2026-08-28)
+
+em9 pushed the full 24-site triage at `d18da190` (v3 of the defect file) **before my
+§5eo correction landed**, so v3 still carried the false premise — restated as
+*"dispatches directly to runtime + SSE, never through the eventbus."*
+
+### Three formulations, only the third correct
+
+**em9's:** *"never through the eventbus."* **False.** `events.go:325` documents
+`eventBuilder` handing `(subject, event)` to a sink the backend wires to *"in-process
+fan-out for ChannelEventPublisher, Postgres NOTIFY for PostgresEventPublisher."*
+`ChannelEventPublisher` is documented as an in-process publisher using **NATS-style
+subject matching** and exposes `Subscribe(patterns...)`. That is an event bus.
+Calling it SSE names one consumer and mistakes it for the mechanism.
+
+**Mine (§5eo):** *"SSE fan-out subjects."* **Also imprecise — same error, opposite
+direction.** I corrected em9's terminology using terminology that was equally loose.
+Recorded here rather than quietly fixed.
+
+**Accurate — there are TWO buses, which is the whole point:**
+
+```
+MessageBrokerProxy.bus     eventbus.EventBus   carries *messages.StructuredMessage
+MessageBrokerProxy.events  EventPublisher      carries hub Event structs
+```
+
+- `fanOutToProject` is invoked at `messagebroker.go:383` **inside a `p.bus.Subscribe`
+  handler** with callback `func(ctx, topic, msg *messages.StructuredMessage)`. All
+  four priority sites hang off `p.bus`.
+- `handlers_broker_inbound.go` contains **zero `.bus.` references** and exactly one
+  publish: `s.events.PublishUserMessage` at `:291`.
+- `p.events.Subscribe` at `messagebroker.go:95` takes only agent-lifecycle subjects
+  (`project.>.agent.created/status/deleted`) — **not** `.message`.
+
+So the four sites are unreachable from broker inbound **not because no bus is
+touched, but because the wrong one is.**
+
+> **RULE 203.** Prefer the formulation that is falsifiable by grep. *"Never publishes
+> to `p.bus`"* can be checked in one command; *"never through the eventbus"* and
+> *"SSE subjects"* cannot, which is exactly why both survived being wrong. When a
+> boundary claim is load-bearing, state it as a symbol a reader can search for.
+
+**Impact extension stands:** `PublishUserMessage` sinks to `agent.<agentID>.message`,
+whose subscribers are web/SSE consumers — so the forged message carrying the
+victim's `SenderID` is **live-pushed**, not merely persisted.
+
+### Verdicts
+
+- em9's **fix-shape conclusion accepted**: 8 non-INERT sites; one ingress
+  canonicalisation of `Sender`/`Recipient` closes all 8.
+- Four priority sites **INERT confirmed** — by my own trace, not by their argument.
+- em9 parked pending DEF-32 routing; told explicitly not to start the fix.
+
+### Sent to user (1918 runes)
+
+AUTHZ 3 / ROUTING 5 / INERT 16; non-INERT 8; recommended single ingress
+canonicalisation. DEF-33 **flagged, not escalated** — reachability unconfirmed, and
+said so plainly rather than inflating it. Disclosed that the two-bus reason took
+three attempts across two agents. No new ask; routing question unchanged.
+
+### Ledger
+
+- **DEF-32** — class fully characterised. Fix shape settled. **Awaiting routing only.**
+- **DEF-33** — provisional, pending em9's end-to-end reachability confirmation.
+- Fold audit — **CLOSED**. Verdict: inert on the key, contributing factor in DEF-32.
+- Unchanged with user: #1360 merge, three branch deletions, escalation-1 CI decision.
