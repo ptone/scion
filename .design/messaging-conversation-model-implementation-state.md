@@ -13391,3 +13391,49 @@ Once em6's dm-tighten lands, a federated `issuerURL:subject` hitting `DMConversa
 - **DEF-18** — unmoved; no carrier for `pkg/messaging/validate.go`; not to be closed by deleting `projectAgents` (rule 217).
 - **DEF-33** — latent; note it is also a `hasAgentReplyAfter` defect (fail-open on casing miss), so it should be fixed in the same pass as DEF-34, not separately.
 - Tier 2 gate rows DEFERRED (owner-triggered). Tranche H blocked on G-1. DEF-5/6/9/10/11/14/16, D–G held. DEF-17 STRUCK. GATE-1 CLOSED.
+
+---
+
+## §5fh — DEF-32 REACHABILITY CONFIRMED. Escalation condition met. It is a design gap, not a patch.
+
+em9 answered the scoped question and **re-parked as instructed**. I independently verified every hop on `b14c41414` rather than relaying (rule 115 — an agent's report is evidence, and I had said I would not treat this as settled).
+
+### Verification, hop by hop — em9's report is CORRECT in full
+
+| Hop | Claim | Verified |
+|---|---|---|
+| 1 | Federation token read from `X-Scion-Federation-Token`, `fedAuth.Authenticate()`, then `ctx = contextWithIdentity(ctx, identity)` | **Yes** — `auth.go:207/218/227`. Stored directly. |
+| 2 (decisive) | No resolution to a store user | **Yes** — `federation_auth.go:253` → `extractUserClaims` → `NewFederatedUserIdentity(claims.Issuer, claims.Subject, ...)`. A grep for `store.` / `GetUserBy` / `uuid.` / `Resolve` across the file returns only JWKS-URL and audience resolution. **No store lookup, no UUID resolution.** |
+| 3 | Chat v2 routes are inside the auth middleware | **Yes** — `server.go:3879-3888`, every v2 route including `/chat/conversations/`, `/chat/dms`, `/chat/topics/` is wrapped in `s.guarded(...)`. |
+| 4 | `ID()` is not a UUID | **Yes** — `federation_identity_ext.go:132`: `return f.issuerURL + ":" + f.subject`. |
+
+**DEF-32 is REACHABLE.** A `*FederatedUserIdentity` arrives at the three DM-stamping sites as-is.
+
+**Severity gate:** `config.FederationConfig.Enabled` is a plain `bool` with no default tag → zero value **false**, and the authenticator is only constructed under `if cfg.Federation.Enabled` (`server.go:1405`). So this is live **only on deployments that explicitly enable federation with trusted issuers**, not on the default configuration.
+
+### The finding that changes the shape of the fix
+**No federated-identity → store-user mapping exists anywhere.** Grep for `GetUserBy(Issuer|Subject|Federat)`, `federated_user_id`, `LinkFederated` across `pkg/store/` and `pkg/hub/` → zero hits. Control: `GetUserByEmail` *is* found, so the pattern works.
+
+This confirms the §5dh reframing (line 8824) in its strong form: **federated users have no canonical store identity for the conversation model to key on at all.** DEF-32 is therefore not "stamping is broken" and cannot be fixed by patching the three call sites. There is no correct value to pass them.
+
+### The system is currently failing SAFE, and that matters
+`DMConversationKey` **refuses** the non-UUID rather than coercing it, so no wrong key is ever written. Per the standing rule — *a wrong key is worse than no key, since the key IS the ACL* — the key function is behaving exactly as designed. **The defect is upstream of derivation, not in it.** No ACL is currently mis-assigned; DMs are simply left unstamped.
+
+Consequence today (dual-write, reads still on old routing): **no visible symptom.** Consequence at the S4 read-switch: those messages have no `conversation_id`, so federated users' DMs become invisible. The debt accrues silently and surfaces all at once at the flip. **DEF-32 is a hard S4 precondition.**
+
+### Security hazard in the obvious fix — flag before anyone reaches for it
+The tempting repair is to resolve federated identity → store user **by email**, since `FederatedUserIdentity` carries an email claim and `GetUserByEmail` already exists. **This must not be adopted casually.** It promotes the issuer's `email` claim into an authentication assertion: any trusted issuer able to mint an arbitrary email claim could thereby obtain another user's store identity, and with it that user's DM ACLs. Email is also mutable and collides across issuers.
+
+Under *"under-granting is recoverable; over-granting is not,"* an explicit `(issuer, subject) → user_id` link table, populated by a deliberate account-linking act, is the shape to prefer. Auto-linking on first sight of a matching email is the shape to refuse.
+
+### Rules
+**Rule 245.** When a defect's fix requires a value that does not exist anywhere in the system, it is a design gap, not a bug. Stop specifying the patch and escalate the missing concept. Three call sites "passing the wrong ID" concealed that there is no right ID to pass.
+
+**Rule 246.** A component that refuses bad input is not the defect even when it is where the failure is observed. Derivation refusing a non-UUID is the safety property working; the gap is that the caller has nothing valid to offer. Fixing the refusal would convert a safe no-op into a wrong ACL.
+
+**Rule 247.** Identity-resolution shortcuts convert an upstream claim into an authentication assertion. Before mapping external identity to internal identity on any claim, ask what an issuer could assert to become someone else.
+
+### Ledger
+- **DEF-32 — reachability CONFIRMED and verified independently. Escalated to user this heartbeat** (escalation condition from §5dh met). Reclassified: S4 blocker, design gap, needs an identity-linking decision. **Struck from "awaiting routing" — it was never a routing question.**
+- **DEF-34** — needs #1259 + filter change together; awaiting user sequencing.
+- DEF-18 unmoved (no carrier, rule 217). DEF-33 latent, to be fixed in the same pass as DEF-34. Tier 2 DEFERRED. Tranche H blocked on G-1. DEF-5/6/9/10/11/14/16, D–G held.
