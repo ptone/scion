@@ -12522,3 +12522,54 @@ failed-deploy atomicity criterion. Both held until #85 merges.
 is mine, it holds nothing, and it blocks nothing. **Decision: leave it running.** Reclaiming it later is
 cheaper than re-provisioning, and repeating "em3 is idle" every cycle is noise pretending to be
 oversight.
+
+## §35.53 — Round 4: APPROVE. And why I am taking an Optional the reviewer graded correctly.
+
+**00:35, `93ae24526`.** Report: `reviews/adc-preflight-r4.md`. Verified independently before reading it:
+**ahead 12 / behind 0** against `ptone/main`, 4 files. The reviewer re-pointed itself to the new head
+and confirmed the +1 commit is comment-only — my reading, checked rather than taken.
+
+**The sweep.** All 38 rows and 25 adversarial bytes arrive at bash **byte-identical, by observation**;
+NUL fails loud. All 14 mutations red for the property named. **The reviewer built the original bypass
+and could not build a second** — suffix is the only `?`, and dot-segments cannot delete a trailing
+suffix, so the class is closed. The third `exec.Command` site is safe for the real body, measured —
+the developer's judgement was right, **and it was right to ask that it be checked rather than taken.**
+
+**Four corrections to my brief, all accepted:** 38 rows not 39 (the table was right, my gate number was
+wrong); the scheme guard's error does not name the scheme; ahead 12 not 13; and my §3 live-deploy
+criterion was too strict. That last one is the instructive one — **the real default string is already a
+committed allow row against the exact guard**, so the deploy would only re-establish what two tests
+pin. I wrote a binary where a measurement already existed.
+
+### The decision of the round: taking Optional 1
+
+The `_DI_*` seam assignments are `%q` into a bash **double-quoted** context — lossy for tab and
+backslash, and they **execute `$(...)` and backticks**. The reviewer graded it **Optional**, correctly,
+on the ground that every value routed through it today is metacharacter-free. **I am overriding the
+grade, not disputing it**, for two reasons:
+
+1. **That table's entire purpose is hostile strings.** The next person who adds a command-substitution
+   row to prove the validator rejects it will instead **execute it during setup**, and the row will
+   look like it passed. That is not a hypothetical class; it is the obvious next row.
+2. **"Safe because today's values happen to be harmless" is the third instance tonight of one
+   argument.** R2 was "safe because curl refuses to parse it." R4's scheme guard was "safe because
+   `dict://` carries no auth header" — which I *dropped* and the developer took anyway. I have accepted
+   this shape twice and been shown wrong twice. Refusing it a third time, in the same file, one commit
+   after fixing the first instance, is not defensible.
+
+**I added a requirement the reviewer did not ask for: O1 must carry a pin.** A command-substitution
+reject row asserting both that the validator rejects it **and** that a sentinel was not created. The
+finding came from measurement; without a pin it re-opens on the next refactor. That is this project's
+most-repeated lesson and it applies to the fix for the lesson.
+
+### Round 5 dispatched — scope-limited on purpose
+
+Three items: O1 with its pin, O2 (one string), and a rebase onto `ce9a7993`
+(`GoogleCloudPlatform/scion#1334`). **I checked the overlap myself: 24 files, all `pkg/hub/**` plus one
+design log, zero contact with our four.** The rebase was needed regardless — `behind 1` — so the extra
+round costs less than it looks.
+
+**Explicitly told the developer to take nothing else on.** The branch is already approved; every extra
+line widens what ptone has to trust. A scope limit is cheaper to state now than to enforce later.
+
+ptone updated on the working thread: APPROVE, one 15-minute round, URL to follow on the handoff thread.
