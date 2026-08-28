@@ -118,6 +118,12 @@ func (_c *AgentCredentialCreate) SetNillableLastSeenAt(v *time.Time) *AgentCrede
 	return _c
 }
 
+// SetEntitledSecretKeys sets the "entitled_secret_keys" field.
+func (_c *AgentCredentialCreate) SetEntitledSecretKeys(v []string) *AgentCredentialCreate {
+	_c.mutation.SetEntitledSecretKeys(v)
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentCredentialCreate) SetID(v uuid.UUID) *AgentCredentialCreate {
 	_c.mutation.SetID(v)
@@ -280,6 +286,10 @@ func (_c *AgentCredentialCreate) createSpec() (*AgentCredential, *sqlgraph.Creat
 	if value, ok := _c.mutation.LastSeenAt(); ok {
 		_spec.SetField(agentcredential.FieldLastSeenAt, field.TypeTime, value)
 		_node.LastSeenAt = &value
+	}
+	if value, ok := _c.mutation.EntitledSecretKeys(); ok {
+		_spec.SetField(agentcredential.FieldEntitledSecretKeys, field.TypeJSON, value)
+		_node.EntitledSecretKeys = value
 	}
 	return _node, _spec
 }
@@ -450,6 +460,24 @@ func (u *AgentCredentialUpsert) UpdateLastSeenAt() *AgentCredentialUpsert {
 // ClearLastSeenAt clears the value of the "last_seen_at" field.
 func (u *AgentCredentialUpsert) ClearLastSeenAt() *AgentCredentialUpsert {
 	u.SetNull(agentcredential.FieldLastSeenAt)
+	return u
+}
+
+// SetEntitledSecretKeys sets the "entitled_secret_keys" field.
+func (u *AgentCredentialUpsert) SetEntitledSecretKeys(v []string) *AgentCredentialUpsert {
+	u.Set(agentcredential.FieldEntitledSecretKeys, v)
+	return u
+}
+
+// UpdateEntitledSecretKeys sets the "entitled_secret_keys" field to the value that was provided on create.
+func (u *AgentCredentialUpsert) UpdateEntitledSecretKeys() *AgentCredentialUpsert {
+	u.SetExcluded(agentcredential.FieldEntitledSecretKeys)
+	return u
+}
+
+// ClearEntitledSecretKeys clears the value of the "entitled_secret_keys" field.
+func (u *AgentCredentialUpsert) ClearEntitledSecretKeys() *AgentCredentialUpsert {
+	u.SetNull(agentcredential.FieldEntitledSecretKeys)
 	return u
 }
 
@@ -641,6 +669,27 @@ func (u *AgentCredentialUpsertOne) UpdateLastSeenAt() *AgentCredentialUpsertOne 
 func (u *AgentCredentialUpsertOne) ClearLastSeenAt() *AgentCredentialUpsertOne {
 	return u.Update(func(s *AgentCredentialUpsert) {
 		s.ClearLastSeenAt()
+	})
+}
+
+// SetEntitledSecretKeys sets the "entitled_secret_keys" field.
+func (u *AgentCredentialUpsertOne) SetEntitledSecretKeys(v []string) *AgentCredentialUpsertOne {
+	return u.Update(func(s *AgentCredentialUpsert) {
+		s.SetEntitledSecretKeys(v)
+	})
+}
+
+// UpdateEntitledSecretKeys sets the "entitled_secret_keys" field to the value that was provided on create.
+func (u *AgentCredentialUpsertOne) UpdateEntitledSecretKeys() *AgentCredentialUpsertOne {
+	return u.Update(func(s *AgentCredentialUpsert) {
+		s.UpdateEntitledSecretKeys()
+	})
+}
+
+// ClearEntitledSecretKeys clears the value of the "entitled_secret_keys" field.
+func (u *AgentCredentialUpsertOne) ClearEntitledSecretKeys() *AgentCredentialUpsertOne {
+	return u.Update(func(s *AgentCredentialUpsert) {
+		s.ClearEntitledSecretKeys()
 	})
 }
 
@@ -999,6 +1048,27 @@ func (u *AgentCredentialUpsertBulk) UpdateLastSeenAt() *AgentCredentialUpsertBul
 func (u *AgentCredentialUpsertBulk) ClearLastSeenAt() *AgentCredentialUpsertBulk {
 	return u.Update(func(s *AgentCredentialUpsert) {
 		s.ClearLastSeenAt()
+	})
+}
+
+// SetEntitledSecretKeys sets the "entitled_secret_keys" field.
+func (u *AgentCredentialUpsertBulk) SetEntitledSecretKeys(v []string) *AgentCredentialUpsertBulk {
+	return u.Update(func(s *AgentCredentialUpsert) {
+		s.SetEntitledSecretKeys(v)
+	})
+}
+
+// UpdateEntitledSecretKeys sets the "entitled_secret_keys" field to the value that was provided on create.
+func (u *AgentCredentialUpsertBulk) UpdateEntitledSecretKeys() *AgentCredentialUpsertBulk {
+	return u.Update(func(s *AgentCredentialUpsert) {
+		s.UpdateEntitledSecretKeys()
+	})
+}
+
+// ClearEntitledSecretKeys clears the value of the "entitled_secret_keys" field.
+func (u *AgentCredentialUpsertBulk) ClearEntitledSecretKeys() *AgentCredentialUpsertBulk {
+	return u.Update(func(s *AgentCredentialUpsert) {
+		s.ClearEntitledSecretKeys()
 	})
 }
 

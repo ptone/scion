@@ -36,16 +36,17 @@ func NewAgentCredentialStore(client *ent.Client) *AgentCredentialStore {
 // entAgentCredentialToStore converts an Ent AgentCredential entity to a store model.
 func entAgentCredentialToStore(ac *ent.AgentCredential) *store.AgentCredential {
 	return &store.AgentCredential{
-		ID:           ac.ID.String(),
-		AgentID:      ac.AgentID,
-		ProjectID:    ac.ProjectID,
-		TokenJTIHash: ac.TokenJtiHash,
-		IssuedAt:     ac.IssuedAt,
-		ExpiresAt:    ac.ExpiresAt,
-		RevokedAt:    ac.RevokedAt,
-		RevokedBy:    ac.RevokedBy,
-		RevokeReason: ac.RevokeReason,
-		LastSeenAt:   ac.LastSeenAt,
+		ID:                 ac.ID.String(),
+		AgentID:            ac.AgentID,
+		ProjectID:          ac.ProjectID,
+		TokenJTIHash:       ac.TokenJtiHash,
+		IssuedAt:           ac.IssuedAt,
+		ExpiresAt:          ac.ExpiresAt,
+		RevokedAt:          ac.RevokedAt,
+		RevokedBy:          ac.RevokedBy,
+		RevokeReason:       ac.RevokeReason,
+		LastSeenAt:         ac.LastSeenAt,
+		EntitledSecretKeys: ac.EntitledSecretKeys,
 	}
 }
 
@@ -145,4 +146,21 @@ func (s *AgentCredentialStore) PurgeExpiredAgentCredentials(ctx context.Context,
 		return 0, mapError(err)
 	}
 	return n, nil
+}
+
+// UpdateAgentCredentialEntitledKeys records the set of secret key names
+// this session is entitled to fetch. Looks up by JTI hash (the token's
+// identity) and sets the entitled_secret_keys JSON column.
+func (s *AgentCredentialStore) UpdateAgentCredentialEntitledKeys(ctx context.Context, jtiHash string, keys []string) error {
+	n, err := s.client.AgentCredential.Update().
+		Where(agentcredential.TokenJtiHashEQ(jtiHash)).
+		SetEntitledSecretKeys(keys).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }

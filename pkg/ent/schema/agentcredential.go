@@ -57,6 +57,27 @@ func (AgentCredential) Fields() []ent.Field {
 		field.Time("last_seen_at").
 			Optional().
 			Nillable(),
+		// EntitledSecretKeys records the set of secret key names this
+		// session is entitled to fetch via POST /api/v1/agent/secrets.
+		// Computed at start time by the dispatcher's secret resolution
+		// and stored here so the endpoint can enforce entitlement without
+		// re-deriving it. The field is session-scoped: each lifecycle
+		// event (start/restart) mints a fresh token and records a fresh
+		// entitled set on the new credential.
+		//
+		// NULL means no entitlement was ever recorded (pre-migration
+		// credential, or a start that failed between token generation
+		// and secret resolution). The endpoint must fail closed on NULL
+		// with a loud log — it is a server-side bookkeeping failure.
+		//
+		// [] (empty JSON array) means the agent is entitled to zero
+		// secrets — a valid state, distinct from NULL.
+		//
+		// On token refresh, the entitled keys are copied from the old
+		// credential to the new one (the entitlement was computed at
+		// start time and does not change within a session).
+		field.JSON("entitled_secret_keys", []string{}).
+			Optional(),
 	}
 }
 

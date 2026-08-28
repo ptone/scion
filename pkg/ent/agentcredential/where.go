@@ -625,6 +625,16 @@ func LastSeenAtNotNil() predicate.AgentCredential {
 	return predicate.AgentCredential(sql.FieldNotNull(FieldLastSeenAt))
 }
 
+// EntitledSecretKeysIsNil applies the IsNil predicate on the "entitled_secret_keys" field.
+func EntitledSecretKeysIsNil() predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldIsNull(FieldEntitledSecretKeys))
+}
+
+// EntitledSecretKeysNotNil applies the NotNil predicate on the "entitled_secret_keys" field.
+func EntitledSecretKeysNotNil() predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldNotNull(FieldEntitledSecretKeys))
+}
+
 // And groups predicates with the AND operator between them.
 func And(predicates ...predicate.AgentCredential) predicate.AgentCredential {
 	return predicate.AgentCredential(sql.AndPredicates(predicates...))

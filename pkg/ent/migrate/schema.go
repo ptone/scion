@@ -124,6 +124,7 @@ var (
 		{Name: "revoked_by", Type: field.TypeString, Nullable: true},
 		{Name: "revoke_reason", Type: field.TypeString, Nullable: true},
 		{Name: "last_seen_at", Type: field.TypeTime, Nullable: true},
+		{Name: "entitled_secret_keys", Type: field.TypeJSON, Nullable: true},
 	}
 	// AgentCredentialsTable holds the schema information for the "agent_credentials" table.
 	AgentCredentialsTable = &schema.Table{

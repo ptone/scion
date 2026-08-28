@@ -1784,6 +1784,12 @@ type AgentCredentialStore interface {
 	// PurgeExpiredAgentCredentials removes expired credentials older than cutoff.
 	// Returns the number of credentials purged.
 	PurgeExpiredAgentCredentials(ctx context.Context, cutoff time.Time) (int, error)
+
+	// UpdateAgentCredentialEntitledKeys records the set of secret key names
+	// this session is entitled to fetch. Called by the dispatcher after secret
+	// resolution, using the JTI hash of the token that was just generated.
+	// Returns ErrNotFound if the credential doesn't exist.
+	UpdateAgentCredentialEntitledKeys(ctx context.Context, jtiHash string, keys []string) error
 }
 
 // =============================================================================

@@ -10,6 +10,7 @@ import (
 
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"entgo.io/ent/dialect/sql/sqljson"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
@@ -164,6 +165,24 @@ func (_u *AgentCredentialUpdate) ClearLastSeenAt() *AgentCredentialUpdate {
 	return _u
 }
 
+// SetEntitledSecretKeys sets the "entitled_secret_keys" field.
+func (_u *AgentCredentialUpdate) SetEntitledSecretKeys(v []string) *AgentCredentialUpdate {
+	_u.mutation.SetEntitledSecretKeys(v)
+	return _u
+}
+
+// AppendEntitledSecretKeys appends value to the "entitled_secret_keys" field.
+func (_u *AgentCredentialUpdate) AppendEntitledSecretKeys(v []string) *AgentCredentialUpdate {
+	_u.mutation.AppendEntitledSecretKeys(v)
+	return _u
+}
+
+// ClearEntitledSecretKeys clears the value of the "entitled_secret_keys" field.
+func (_u *AgentCredentialUpdate) ClearEntitledSecretKeys() *AgentCredentialUpdate {
+	_u.mutation.ClearEntitledSecretKeys()
+	return _u
+}
+
 // Mutation returns the AgentCredentialMutation object of the builder.
 func (_u *AgentCredentialUpdate) Mutation() *AgentCredentialMutation {
 	return _u.mutation
@@ -263,6 +282,17 @@ func (_u *AgentCredentialUpdate) sqlSave(ctx context.Context) (_node int, err er
 	}
 	if _u.mutation.LastSeenAtCleared() {
 		_spec.ClearField(agentcredential.FieldLastSeenAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.EntitledSecretKeys(); ok {
+		_spec.SetField(agentcredential.FieldEntitledSecretKeys, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedEntitledSecretKeys(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agentcredential.FieldEntitledSecretKeys, value)
+		})
+	}
+	if _u.mutation.EntitledSecretKeysCleared() {
+		_spec.ClearField(agentcredential.FieldEntitledSecretKeys, field.TypeJSON)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -420,6 +450,24 @@ func (_u *AgentCredentialUpdateOne) ClearLastSeenAt() *AgentCredentialUpdateOne 
 	return _u
 }
 
+// SetEntitledSecretKeys sets the "entitled_secret_keys" field.
+func (_u *AgentCredentialUpdateOne) SetEntitledSecretKeys(v []string) *AgentCredentialUpdateOne {
+	_u.mutation.SetEntitledSecretKeys(v)
+	return _u
+}
+
+// AppendEntitledSecretKeys appends value to the "entitled_secret_keys" field.
+func (_u *AgentCredentialUpdateOne) AppendEntitledSecretKeys(v []string) *AgentCredentialUpdateOne {
+	_u.mutation.AppendEntitledSecretKeys(v)
+	return _u
+}
+
+// ClearEntitledSecretKeys clears the value of the "entitled_secret_keys" field.
+func (_u *AgentCredentialUpdateOne) ClearEntitledSecretKeys() *AgentCredentialUpdateOne {
+	_u.mutation.ClearEntitledSecretKeys()
+	return _u
+}
+
 // Mutation returns the AgentCredentialMutation object of the builder.
 func (_u *AgentCredentialUpdateOne) Mutation() *AgentCredentialMutation {
 	return _u.mutation
@@ -549,6 +597,17 @@ func (_u *AgentCredentialUpdateOne) sqlSave(ctx context.Context) (_node *AgentCr
 	}
 	if _u.mutation.LastSeenAtCleared() {
 		_spec.ClearField(agentcredential.FieldLastSeenAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.EntitledSecretKeys(); ok {
+		_spec.SetField(agentcredential.FieldEntitledSecretKeys, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedEntitledSecretKeys(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agentcredential.FieldEntitledSecretKeys, value)
+		})
+	}
+	if _u.mutation.EntitledSecretKeysCleared() {
+		_spec.ClearField(agentcredential.FieldEntitledSecretKeys, field.TypeJSON)
 	}
 	_node = &AgentCredential{config: _u.config}
 	_spec.Assign = _node.assignValues

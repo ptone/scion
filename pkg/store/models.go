@@ -2499,16 +2499,17 @@ const (
 
 // AgentCredential represents a tracked agent JWT token credential.
 type AgentCredential struct {
-	ID           string     `json:"id"`
-	AgentID      string     `json:"agent_id"`
-	ProjectID    string     `json:"project_id"`
-	TokenJTIHash string     `json:"token_jti_hash"`
-	IssuedAt     time.Time  `json:"issued_at"`
-	ExpiresAt    time.Time  `json:"expires_at"`
-	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
-	RevokedBy    *string    `json:"revoked_by,omitempty"`
-	RevokeReason *string    `json:"revoke_reason,omitempty"`
-	LastSeenAt   *time.Time `json:"last_seen_at,omitempty"`
+	ID                 string     `json:"id"`
+	AgentID            string     `json:"agent_id"`
+	ProjectID          string     `json:"project_id"`
+	TokenJTIHash       string     `json:"token_jti_hash"`
+	IssuedAt           time.Time  `json:"issued_at"`
+	ExpiresAt          time.Time  `json:"expires_at"`
+	RevokedAt          *time.Time `json:"revoked_at,omitempty"`
+	RevokedBy          *string    `json:"revoked_by,omitempty"`
+	RevokeReason       *string    `json:"revoke_reason,omitempty"`
+	LastSeenAt         *time.Time `json:"last_seen_at,omitempty"`
+	EntitledSecretKeys []string   `json:"entitled_secret_keys,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to support legacy groveId field.
