@@ -424,9 +424,11 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id str
 // the precedence order; an ambiguous DELETE or PATCH would destroy or mutate
 // the wrong resource, which is why those operations require UUIDs.
 //
-// Unlike resolveTemplate, this does NOT try project-scoped slug lookup
-// because the GET /api/v1/harness-configs/{ref} endpoint has no project
-// context. Project-scoped resolution happens in populateAgentConfig
+// resolveTemplate has a three-step ladder: UUID → project-scoped slug →
+// global slug. The project-scoped step is absent here because this
+// endpoint has no project in scope — there is no project ID in the URL,
+// query parameters, or request context to resolve against. Project-scoped
+// harness-config resolution happens in populateAgentConfig
 // (handlers_agent_create_helpers.go:253-268) where the project IS known.
 //
 // See ptone/scion#1316 — the store layer is uniform (GetHarnessConfigBySlug
