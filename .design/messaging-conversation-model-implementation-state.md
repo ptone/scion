@@ -1229,6 +1229,54 @@ em10 and every agent I dispatch hereafter.
       rationale is a trap primed for whoever touches it next** (rule 53: name the trap the obvious fix
       falls into).
 
+63. **Delegating a question to a peer delegates the WAIT to me, invisibly. A peer-wait I authorise but
+    cannot observe is an outage I have scheduled for later.** Issued 2026-08-28 00:19Z. At 23:51Z I
+    told em6 to put three questions to em9 directly, to avoid being a bottleneck. The intent was right.
+    The result was em6 idle for 25 minutes while em9, heads-down on a task I had dispatched at 23:45Z,
+    never saw the message as urgent. Neither agent was stalled. Neither was wrong. The wait existed
+    only in the gap between them, and that gap is exactly where I have no instrumentation.
+
+    - **The two-of-three test, which I should run at delegation time and did not:** of em6's three
+      questions, I had *already ruled* on two of them at 23:51Z — the same message in which I told them
+      to go ask em9. I dispatched a wait for answers I had personally given minutes earlier. The third
+      I settled from `git log` in under two minutes. **Nothing in that exchange needed em9 at all.**
+    - **Before authorising a peer-wait, answer it yourself first.** Not as a courtesy — as a filter.
+      The questions that survive my own attempt are the only ones worth spending a peer's context on,
+      and they are usually one, not three. Bundling the answerable with the unanswerable converts a
+      cheap question into a blocking one, because the asker waits on the whole bundle.
+    - **If a peer-wait must exist, it needs a deadline and a fallback owner, both stated up front:**
+      *"ask em9; if no answer in 15 minutes, come back to me and I will rule."* Without that, the
+      asker's only options are to wait forever or to guess, and a well-behaved agent waits.
+    - **Relationship to rules 57/58:** those made a park *observable*. This one is about a state that
+      is observable and still useless — `scion list` showed em6 `blocked` the whole time, exactly as
+      designed. **Correct signal, correct rendering, zero information.** The lesson generalises past
+      tooling: a status vocabulary that cannot distinguish "waiting on you" from "waiting on someone
+      who is waiting" will let circular waits sit indefinitely while every participant looks healthy.
+    - **The diagnostic that worked, and why:** a forced-choice A/B/C with an explicit instruction not
+      to restart work or write a status essay. Open-ended "status?" to a parked agent reads as
+      permission to resume (rule 57). The forced choice returns the one datum the tooling cannot
+      supply while costing the agent nothing and tempting it into nothing.
+
+64. **Commit archaeology is not always separable, and reconstructing it can cost more than it is
+    worth.** Issued 2026-08-28 00:18Z. Extracting the CI guard for a standalone PR looked like a
+    cherry-pick of three commits. It was not: `bcca1892` *("fix(messaging): refuse malformed thread:
+    refs")* carries **+102 lines of the guard script alongside three `pkg/messaging` files.** One of
+    the four commits touching the guard is not a guard commit.
+
+    - **Ruling: squash to final state, do not replay history.** The guard is a shell script plus
+      Makefile/CI wiring. Its development sequence has no value to a reviewer, and replaying it would
+      require a hand-edited partial cherry-pick — a manual step, on a security control, for zero gain.
+    - **The general test: does the reviewer need the history, or only the artifact?** For a behavioural
+      change threaded through a system, the sequence is the argument and must be preserved. For a
+      self-contained artifact, the final state *is* the change and the history is noise. Replaying
+      history you don't need is how a clean add becomes a conflict.
+    - **This was only visible because of rule 61.** The first query — commits after the guard trio
+      touching the guard's files — returned empty, which is the answer I wanted. The positive control
+      run over a wider range returned four commits, proving the filter live; and it was in *that*
+      output, not the one I was looking for, that the entanglement appeared. **The positive control
+      did not merely validate the negative result, it produced the actual finding.** A control is a
+      second look at the data, and second looks are where the interesting things are.
+
 
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
@@ -5034,3 +5082,86 @@ identical to "both done."
 finished-but-unsent — with an explicit instruction not to restart work or write a status essay. Cheap,
 and it returns the one datum the tooling cannot give me. Awaiting the three answers before changing the
 protocol again; **a third fix invented without data would be the same mistake a third time.**
+
+## 5bp. 00:16-00:20Z — deadlock broken, DEF-31 authorised and dispatched
+
+**em6 answered the A/B/C at 00:14:50Z and confirmed the prediction exactly:** *"B. Waiting on em9 for
+answers to three coordination questions (sent 23:52Z) before cutting the CI guard PR. em9 has not
+responded."* The forced-choice diagnostic paid for itself in one reply.
+
+**I broke it myself rather than waiting for em9.** Of em6's three questions:
+
+| # | Question | Who could answer | Actual cost |
+|---|---|---|---|
+| 3 | Who cuts the PR? | **me, already ruled 23:51Z** | zero |
+| 2 | Objection to the `AddParticipant` extension? | **me — it is my directive** | zero |
+| 1 | Downstream commits depending on guard sequence? | git log | **2 minutes** |
+
+Two of three were answers I had given *in the same 23:51Z message* that told em6 to go ask em9. See
+rule 63. em9 was told to disregard the queued questions entirely and stay on tranche C.
+
+**The git check, and what the positive control turned up.** First query — commits in
+`0361d80d..em9-unify` touching `hack/`, `Makefile`, `.github/workflows/ci.yml` — returned **empty**.
+Per rule 61 an empty result is worthless without proof the instrument can produce a positive, so I
+re-ran the identical filter over `6268bac4..em9-unify`. Four commits:
+
+    29cf09be  ci: add guard forbidding UpsertConversationByExternalRef …   guard only
+    bcca1892  fix(messaging): refuse malformed thread: refs (F1, F2)       guard +102 AND 3 messaging files
+    1aefd1e0  fix(ci): harden guard to catch INSERT OR IGNORE …            guard only
+    0361d80d  docs(ci): document guard limitations                        guard only
+
+Filter is live, so the empty result stands: **no downstream dependency.** But the control run produced
+the *better* finding — `bcca1892` is a messaging fix carrying a third of the guard's growth, so the
+guard is **not cleanly cherry-pickable**. Ruled: squash to final state as one commit on a fresh branch
+off `upstream/main`. Verified the script and its wiring are **absent from `upstream/main`** → clean add,
+no conflict. Rule 64.
+
+**Severity correction issued before it could reach a PR body.** em6 justified the `AddParticipant`
+guard extension as an *authorization bypass*. Corrected per rule 62: the participant table is a listing
+index, not the access authority; filed as a bypass, the obvious fix is to make it authoritative, which
+is strictly looser than key-derived auth and would be a regression logged as a hardening. Also flagged
+their warrant scope gap — they tested only `pkg/messaging` imports, but `ConversationStore` is on the
+`Store` interface and reachable from all of `pkg/hub`.
+
+**DEF-31 AUTHORISED by the user at 00:15:36Z:** *"have em6 dispatch the fix. dev and review on its own
+branch. then you send compare url when clean."* Dispatched to em6 at 00:18Z as **priority over the CI
+guard PR**. Scope given:
+
+- **(a) lookup — load-bearing.** Scope the step-2 `GetAgent` UUID fallback by project and skip
+  soft-deleted. Explicitly told them **not** to change `GetAgent`'s global behaviour in this PR; other
+  callers depend on it. Call-site constraint or scoped variant.
+- **(b) ingress.** Validate `defaultAgent` at `:451` and the UpdateTopic path, matching the rigor of
+  the `name` sibling beside it.
+- **Neither alone suffices:** ingress-only leaves already-stored bad values live; lookup-only leaves
+  the API silently accepting garbage.
+- **Rule 59 applied forward:** told them to enumerate the *remaining* fields on both structs before
+  closing, since this is the same one-field-validated-neighbour-not shape.
+- Tests: foreign-project UUID, soft-deleted UUID, the **rebinding** case, paired positives (legit slug
+  and legit same-project UUID still bind), and a mutation that must reproduce **the defect** — an
+  assertion naming the wrong-project bind, not a panic, not a compile error.
+
+**Reporting protocol:** still holding the change pending em9's and em10's A/B/C answers. em6's datum
+alone is one data point and it happens to confirm my hypothesis, which is precisely when I should be
+most suspicious of acting on it. A third fix invented without data would be the same mistake a third
+time.
+
+**Heartbeat v5 retired, v6 active (`903281ba`, `13,43 * * * *`).** I had flagged items 3/6/7 as stale
+for the second time and was about to carry them forward a third; carrying a known-stale instruction is
+how it becomes permanent. Rewrote it instead. v6 changes:
+
+- **Item 1 is now "MAIN IS `upstream/main`, NOT `origin/main`"** with the fetch command inline, and
+  every later item defined in terms of it (rule 60). This was the stale text in items 3, 6 and 7.
+- **New item 3, PEER-WAITS** (rule 63): ask each blocked manager whether it waits on me, on a peer, or
+  is finished-but-unsent; forced-choice, with the "do not restart work" instruction attached. Names
+  the failure directly: *circular waits render as three healthy blocked agents.*
+- **New item 4, PARKS MUST BE EMITTED** (rules 57/58) — the literal `sciontool status blocked` string,
+  and *verify it took*, with the note that I have already made that exact mistake once.
+- **New item 6, POSITIVE CONTROLS** (rule 61), including the observation from §5bp that the control
+  often produces the finding rather than merely validating the negative.
+- **Item 5 keeps the deletion-check nuance** (rule 31): localise deletions before reacting; a modified
+  aggregate file reverts silently where a new entity fails loudly.
+- **Item 7 pins the exact `scion message` invocation and both thread IDs**, since a report sent without
+  the channel/thread flags is invisible to the user — the original defect this whole project is about.
+
+**A heartbeat is the instruction set that survives my own compaction.** A stale line in it is not a
+cosmetic problem; it is a wrong instruction issued to a future me with no memory of why it is wrong.
