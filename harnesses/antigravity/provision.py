@@ -442,11 +442,14 @@ eval "$_dbus_output"
 export DBUS_SESSION_BUS_ADDRESS
 
 # Unlock gnome-keyring. The unlock password "test" is intentional — the
-# keyring lives only for this process tree's lifetime.
-_unlock_output=$(echo "test" | gnome-keyring-daemon --unlock 2>&1) || {{
+# daemon is ephemeral (dies with this process tree), but the keyring STORE
+# persists on disk at ~/.local/share/keyrings/. On tiers where agent HOME
+# is inherited by the next tenant (#108), this is a credential exposure.
+if _unlock_output=$(echo "test" | gnome-keyring-daemon --unlock 2>&1); then
+    eval "$_unlock_output"
+else
     echo "agy-wrapper: WARNING: gnome-keyring-daemon --unlock failed: $_unlock_output" >&2
-}}
-eval "$_unlock_output"
+fi
 
 # Start gnome-keyring components.
 _start_output=$(gnome-keyring-daemon --start --components=secrets,pkcs11,ssh 2>&1) || {{
