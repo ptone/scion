@@ -13502,3 +13502,56 @@ Three edits inside `hasAgentReplyAfter` — drop `Channel`, switch to `SenderID 
 - **DEF-32** — escalated §5fh; awaiting the identity-linking decision before S4.
 - **DEF-18** unmoved: still no carrier for `pkg/messaging/validate.go`; not to be closed by deleting `projectAgents` (rule 217).
 - Tier 2 DEFERRED (owner-triggered). Tranche H blocked on G-1. DEF-5/6/9/10/11/14/16, D–G held. DEF-17 STRUCK. GATE-1 CLOSED.
+
+---
+
+## §5fj — DEF-18 verified unlanded (not stalled), carrier identified, fix spec written
+
+Nothing external moved: main `b14c41414` (static ~2.5h), #1361/#1362 OPEN/MERGEABLE, all five tips unmoved.
+
+Took DEF-18 — the row longest un-examined — and re-derived it from its definition rather than from my cached summary (rule 243, the discipline that caught the DEF-32 mislabel).
+
+### Classification VERIFIED, not inherited
+My ledger has carried "DEF-18 is unlanded code, not a live defect" since §5ex. **Checked rather than assumed:** `pkg/messaging/validate.go` **does not exist on `upstream/main`** at all. It exists only on `origin/scion/ca-msg-em9-unify` and `origin/scion/messaging-v2` (4 occurrences of `projectAgents` each). So the classification is correct and DEF-18 is genuinely **blocked on a carrier, not stalled**.
+
+**Carrier is now named, and the note upgraded.** I had it as "re-homed to whichever tranche lands validate.go" — vague. The file is on **em9-unify**, which is the tranche C–G lineage (84 product commits, §5fa). So DEF-18's carrier is em9-unify, and it lands when tranche C–G lands. Not an open search.
+
+**One correction to my own record:** the appends are at `:122`, `:126`, `:132` — my ledger said `:122`, `:127`, `:132`. Line drift in my note, not in the code.
+
+### The defect, confirmed verbatim on em9-unify
+`ValidateCrossProjectAddressees` declares `var projectAgents []string // for error reporting` (`:110`), appends at three sites, and **never reads it**. The refusal at `:127-130` is a concatenated constant:
+```go
+if agent.ProjectID != projectID {
+    projectAgents = append(projectAgents, a.PrincipalID)   // :126 — appended, then discarded
+    return fmt.Errorf(
+        "message addresses agents in multiple projects; " +
+            "a single message may only target agents within one project",
+    )
+}
+```
+AC-33 correctly refuses; it simply cannot say **what** it refused. Diagnosability defect in a security control — and a refusal nobody can diagnose gets worked around rather than investigated.
+
+### Fix spec
+At the refusal point the function holds everything needed: `projectAgents` = agents already accepted into `projectID`; `a.PrincipalID` = the offender; `agent.ProjectID` = its project.
+
+1. **Delete the `:126` append.** It adds the offender to the *accepted* list, conflating the two sets right before reporting them. The other two appends (`:122`, `:132`) are correct and stay.
+2. **Wire the values into the error.** `fmt.Errorf` then carries real verbs, so the *"`fmt.Errorf` with no format verbs, should be `errors.New`"* half of DEF-18 dissolves rather than needing a separate fix.
+3. **Rule 217 holds:** do NOT resolve this by deleting `projectAgents`. That silences `ineffassign` while destroying the stated intent. The comment is the specification; the lint is only the symptom.
+
+### Disclosure boundary — name the addressees, NOT the project IDs
+The obvious rich error names the offending agent, its project, the established project, and the accepted agents. **The agent IDs are safe** — the caller supplied them as addressees, so echoing them discloses nothing new.
+
+**The project IDs are not.** `agent.ProjectID` tells the caller the project membership of an agent they named, which they may not have known. The refusal already implies "this addressee is elsewhere"; naming the actual project adds information the caller did not have and did not prove entitlement to.
+
+Under *"under-granting is recoverable; over-granting is not"*, the error should name **which addressees** were rejected and that they are in a different project, without naming **which** project. Diagnosability is preserved — an operator with store access resolves the project trivially — while a caller probing agent IDs learns nothing about project topology.
+
+**Rule 251.** When enriching an error in a security control, classify each value by whether the caller already supplied it. Echoing the caller's own input is free; adding server-side facts about that input is disclosure. A cross-boundary refusal is exactly where an attacker probes, because the refusal itself confirms the boundary.
+
+**Rule 252.** A comment stating intent (`// for error reporting`) is a specification with no test behind it. Where a linter flags the unused result of such a comment, the fix is to satisfy the comment, never to delete it — deleting converts an unimplemented intent into a silently abandoned one, and removes the only remaining evidence it existed.
+
+### Ledger
+- **DEF-18** — classification VERIFIED (absent from main), carrier NAMED (em9-unify / tranche C–G), fix spec written with a disclosure boundary. **Moved.** Not strikeable: real, unlanded, rides with its tranche.
+- **DEF-33/34/35** — consolidated fix spec complete (§5fi); DEF-34 needs #1259.
+- **DEF-32** — escalated §5fh, awaiting identity-linking decision before S4.
+- Tier 2 DEFERRED (owner-triggered, no polling). Tranche H blocked on G-1, no carrier. DEF-5/6/9/10/11/14/16 and D–G held behind tranche C. DEF-17 STRUCK. GATE-1 CLOSED.
+- **Everything now open is either (a) awaiting a user decision, or (b) riding a tranche that awaits one.** No row is blocked on an agent, and none on me.
