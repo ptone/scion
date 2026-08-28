@@ -237,3 +237,134 @@ head `edfe61f41` matches local. Tree clean.
 
 No live deploy. No Instance touched. No upstream PR, no merge. `=~`/`BASH_REMATCH` on 3.2 is
 **unanswered by me, deliberately**.
+
+---
+
+# Addendum — harness landed, semantics closed
+
+Branch `scion/bash32-portability`, head **`ae6ccefe9`**, pushed to `ptone/scion`. Three commits.
+
+## 1. The harness is committed — and it was broken when I first ran it
+
+`4827ed05` — `scripts/dev/shell-differential.sh` + `scripts/dev/corpus/url-override-adversarial.tsv`.
+Its own commit, as instructed, revertable alone. The message names what it is FOR: proving a
+portability change is byte-identical, not proving a test passes.
+
+**The finding is about the instrument, not the fix.** The first working version printed
+
+> `IDENTICAL: 22 input(s), same exit code and same stderr bytes.`
+
+for a candidate in which **every verdict had changed**. The sentinel `printf x` was the last command
+in the capture substitution, so `$?` was a constant `0`. Half the comparison was dead and the
+sentence asserting otherwise was **false**. I proved it rather than asserting it: I rebuilt the buggy
+form and ran it against a candidate whose only change is `return 1` → `return 3` at all four sites.
+
+| tool | verdict on a candidate with every exit code changed |
+|---|---|
+| buggy capture | **`IDENTICAL: … same exit code and same stderr bytes`** |
+| shipped | **`DIVERGENT`** |
+
+I had already reported the 2×2 and the 48-input result to you **using this tool**. Those numbers
+survive — the stderr column was live and the message text differs on every affected row — but they
+were, at the time I sent them, resting on a comparison that was half dead and I did not know it.
+
+### So it validates itself, on every run
+
+A check behind a flag is a check nobody runs, and the property is interpreter-dependent —
+`SCION_TEST_BASH` points this tool at other shells on purpose, so "it worked on the bash I developed
+on" is not evidence about the bash it is running on now. The self-test runs before every comparison,
+silent on success, and on failure **refuses to emit a verdict** rather than emitting a doubtful one.
+
+Four cases, each **observed positive** by reintroducing its own defect, off-diagonal green:
+
+| mutation | 1 identical | 2 verdict-only | 3 stderr bytes | 4 input fidelity |
+|---|---|---|---|---|
+| none | ok | ok | ok | ok |
+| `$?` masked (the real bug) | ok | **FAIL** | ok | ok |
+| capture loses trailing newlines | ok | ok | **FAIL** | ok |
+| corpus sentinel removed | ok | ok | ok | **FAIL** |
+
+Case 1 is not filler: without it, a tool that always reports DIVERGENT passes 2–4.
+
+One correction I made mid-measurement, recorded because it changed a result: case 4 was initially
+keyed on the exit status alone, so the `$?`-masked mutant reddened it too and the grid was not
+diagonal. It could not distinguish an input-path defect from case 2's. It now moves **both** columns,
+which is why the table above is clean.
+
+All three broken instruments now **refuse to compare** on a normal 4-argument run.
+
+## 2. `=~` / `BASH_REMATCH` — semantics closed, measured
+
+`ae6ccefe` — `scripts/dev/bash32-regex-probe.sh`, a fixture, not a comment. Your four rows plus the
+quoted-RHS trap are recorded **verbatim** in the file with provenance and date, and `--check` diffs
+the running interpreter against them.
+
+**bash 5.2.15(1) is byte-identical to bash 3.2.57 on all five cases.** The semantics half of #88 is
+closed.
+
+Observed positive twice, because "IDENTICAL" from a fresh comparator is just a print statement until
+it has been seen to fail:
+
+| perturbation | result |
+|---|---|
+| one expected row altered | **DIVERGENT**, diff names the row |
+| port-stripping pattern **quoted** — the exact tidy-up this guards | **DIVERGENT**: two rows silently lose their port strip |
+
+The second is the hazard in one line. Quoting the pattern does not error; it stops matching, the port
+survives into the host, and the failure is **open**. That is why case 5 is in the fixture rather than
+in a comment: five unquoted sites are one cleanup away from four.
+
+## 3. What in here is wrong
+
+1. **I committed a file that failed shellcheck, and my commit message said it was clean.** I ran the
+   63-file loop, then added the auto-self-test block, then committed **without re-running**. The
+   added line tripped SC1010 (`SHELL_DIFFERENTIAL_SELFTEST=done` — shellcheck reads `done` as the
+   loop keyword). I caught it only because the probe file made me run the loop again. Amended
+   (`12c799e5` → `4827ed05`, force-with-lease against the exact SHA) so the branch does not carry a
+   commit whose message states a verification that did not hold — but the amend is the remedy, not
+   the finding. **The finding is that I re-verified, then edited, then trusted the earlier
+   verification.** Same shape as the bug in §1: a green result quoted after the thing it described
+   had changed.
+2. **`shellcheck` is not installed in this container.** It is `/tmp/shellcheck`, fetched by me, and
+   shell state does not persist between my commands — so a bare `shellcheck` in the CI loop reported
+   **63/63 failures**, which reads exactly like a catastrophic regression. Same class as the GOCACHE
+   incident (#80): an environment fault wearing the costume of a code fault. The tell is that
+   everything fails, including files nobody touched.
+3. **The 3.2 probe still has never run on 3.2 *by me*.** The fixture records ptone's output faithfully
+   and I verified bash 5 agrees with it. If his capture was lossy, I have faithfully recorded a lossy
+   thing. I judged re-asking a human to re-run it not worth it — flagging the judgement.
+4. **Nothing wires the probe into CI.** `--check` is a hand-run. The `bash32` job is the natural home
+   and one line does it, but that is another shared-infrastructure edit on a branch already in
+   review, so I stopped. Recommendation, not an action taken.
+5. **The harness self-test costs ~4 subshells per comparison.** Deliberate. Say if you want it
+   opt-out; I would rather argue against that than build it unasked.
+
+## Gates
+
+SDK state: **no gcloud in this container**, so `TestScriptCheckGcloudInstances_FailureMessage`
+passes rather than skips.
+
+| gate | result |
+|---|---|
+| `gofmt -l ./cmd` | clean |
+| `go vet ./cmd/` | clean |
+| `go build ./...` | clean |
+| `go test ./cmd/ -count=1` | **ok**, 7.8s |
+| shellcheck 0.9.0, `-x --source-path=SCRIPTDIR` | **64/64 clean** |
+| harness self-test | 4/4, and each observed positive |
+| differential, shipped vs `1befe923` | **IDENTICAL**, exit code + stderr bytes |
+| naive candidate | **DIVERGENT**, 6 rows, exit-code column now live |
+| `=~` probe, bash 5.2.15 vs 3.2.57 | **IDENTICAL**, 5/5 |
+
+**`ahead 3 / behind 2`** vs `GoogleCloudPlatform/scion` main, **measured last**. Upstream moved to
+`f99de64d` (#1336, #1337) while I worked. **The drift is disjoint from my branch** — those commits
+touch `pkg/hub/*` and `.design/project-log/*` only, zero overlap with my three files — so there is no
+conflict, and I did **not** rebase because you did not ask and rev2 is about to read this SHA. Say
+the word if you want it rebased before review.
+
+Published head `ae6ccefe9` matches local. Tree clean.
+
+## Not done
+
+No live deploy. No Instance touched. No upstream PR, no merge. **#90 (`--help` / BSD sed) not
+started and not added to this branch**, per your instruction. #87 not started.

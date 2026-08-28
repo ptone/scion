@@ -13285,3 +13285,86 @@ are never printed, so a build failure shows an exit code and no output. Same fam
 **One inference I killed before it spread:** dev2 measured `ftp.gnu.org` unreachable **from our
 container**. GitHub runners are a different network. **The job is not dead on that account**, and anyone
 reading the report without that sentence would conclude it is.
+
+### §35.71 — the instrument was lying, the branch moved under the reviewer, and the CI job should not exist (02:16)
+
+Four things landed inside ninety seconds. Recording them separately because they are separate lessons.
+
+**1. THE HARNESS REPORTED "IDENTICAL: 22 inputs, same exit code and same stderr bytes" FOR A CANDIDATE
+IN WHICH EVERY VERDICT HAD CHANGED.** dev2's `printf x` sentinel was last in the capture substitution,
+so `$?` was a constant 0 and **half the comparison was dead while the reassuring sentence was false.**
+Proved rather than asserted: rebuilt the buggy form against a candidate differing only by
+`return 1 -> return 3`; buggy says IDENTICAL, shipped says DIVERGENT.
+
+**And it told me that the 2×2 and the 48-input result IT HAD ALREADY SENT ME were produced with that
+version.** It believes they survive because the stderr column was live. **I did not verify that and I
+will not — I routed it to rev2.** Adjudicating a developer's self-disclosure behind the reviewer I
+dispatched is the exact redundancy I was corrected for.
+
+The harness now self-tests on **every** run, not behind a flag, and **refuses to emit a verdict** on
+failure rather than emitting a doubtful one. Four cases, each observed positive, off-diagonal green —
+and case 1 (clean → all ok) is load-bearing: without it **a tool that always says DIVERGENT passes cases
+2–4.** *An instrument that only fails correctly is not yet correct.*
+
+**2. THE BRANCH MOVED UNDER THE REVIEWER AND THAT IS MY FAULT.** rev2 was dispatched at `edfe61f41`;
+head is now `ae6ccefe9`, three commits, **one of them amended away** (`12c799e5 -> 4827ed05`). Its review
+came back stamped `@ edfe61f41` — **against a tree that no longer exists.** I told dev2 to land the
+harness while rev2 was already reading and did not think about what that does to a review. Re-pointed it
+and scoped the re-read to the delta rather than making it start over. **Declined the rebase dev2
+offered** (ahead 3 / behind 2, drift disjoint) precisely so the SHAs stop moving under it.
+
+**3. dev2's own item (a) is the shape of the night, for the third time and from a third direction.** It
+ran shellcheck, then edited the file, then committed a message asserting it was clean. SC1010. Its
+words: *"I verified, then edited, then trusted the earlier verification."* That is its harness bug (a
+green result quoted after the thing it described changed) and my merge error (PR state read at 01:34,
+acted on at 01:44) **in a third costume.** The rule already exists — *a reading has a shelf life* — and
+tonight it has been broken by two different agents and by me.
+
+**4. THE CI JOB SHOULD NOT EXIST, AND I FOUND THAT BY QUESTIONING THE PREMISE OF THE BLOCKER.** rev2's
+one Required was mine: the bash-3.2.57 tarball is fetched with **no integrity check, then compiled and
+executed**, in a file where every `uses:` is SHA-pinned. Its fix was a sha256 pin, and it **rightly
+refused to invent a digest it could not verify.**
+
+**Measured instead of pinning: GitHub's macOS runners ship `Bash 3.2.57(1)-release` natively** —
+confirmed against `actions/runner-images` for macos-14, macos-15, macos-15-arm64 and macos-26-arm64,
+**all four, fetched not recalled.** So `runs-on: macos-15` with `SCION_TEST_BASH=/bin/bash`. No curl, no
+tarball, no configure, no make, no swallowed logs. **R1 is not fixed; it stops having a subject.**
+
+**It is also strictly the better test.** Ubuntu-plus-hand-built-3.2 was always a **proxy** for macOS.
+This is macOS — real BSD `sed`/`grep`/`awk`, real arm64, ptone's actual platform — and it covers #90's
+class for free. **dev2's `SCION_TEST_BASH` seam is what makes this two lines instead of a rewrite.**
+Pinned `macos-15`, not `macos-latest`: the label drifts by design, and **the canary stays** because it
+is now the only thing that would catch a future `-latest` silently testing bash 5.
+
+**I own the reversal. dev2 built exactly what I specified and my specification was the weaker design.**
+
+**THE RULE, FROM rev2's CORRECTION TO MY BRIEF.** My four review priorities scoped CI to interpreter
+**authenticity**. The one Required lived in artifact **integrity** — an axis I never named. It surfaced
+only because I sent a third input from *outside my own priority list*. **A PRIORITY LIST IS ALSO A
+BLIND-SPOT LIST**, and the proof is that the only blocker of the round came from outside mine.
+
+### §35.72 — #91 filed: a hang with no cause, caused by our own suppressed stderr (02:15)
+
+**ptone, live, on the fix branch: *"seems to be stalling at `==> Step 2: Resolving project number...`"***
+
+**First and most important: THE §1 BLOCKER IS CLEARED ON REAL HARDWARE.** Step 2 is ~450 lines past line
+286. Both bash-4 sites executed on his 3.2. **#88's fix works on the machine that broke.**
+
+The stall is new and separate. Line 746:
+`gcloud projects describe "$DI_PROJECT" --format='value(projectNumber)' 2>/dev/null`
+
+**The suppression is a defect independent of whatever gcloud is doing.** If gcloud prompts — reauth,
+component install — the prompt goes to stderr, is discarded, and it looks exactly like a hang. **And
+this file states the rule against it in its own text at line 370:** *"Capture stderr so we can print it
+on failure (never suppress with 2>/dev/null)."* **We wrote the rule and then broke it eight lines-worth
+of times, and tonight it cost a live diagnosis.**
+
+Filed as **#91** with triage rather than a blanket sweep: 539/589 (curl probes where `000` is designed),
+611 (`rm -f`) and 934/944 (informational, `|| true`) are probably fine; **719 and 746 are the gcloud
+calls and are the suspects.** Required shape: capture to a temp file and print on failure, per the
+pattern the file already uses. **Deliberately raised as a separate question: should a step that can
+block on a prompt run with stdin closed so it FAILS instead of hanging?** A hang is the worst outcome for
+a one-command deploy — but I want that decided, not fixed by accident.
+
+Sent ptone the two-line diagnostic (echo the var, re-run the gcloud call **without** the redirect). Not
+on the bash32 branch; that branch stays tight.
