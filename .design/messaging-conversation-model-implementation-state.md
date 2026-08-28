@@ -1316,6 +1316,70 @@ em10 and every agent I dispatch hereafter.
       problem, not two mistakes; I asked em6 to change how review runs, not just to fix this instance.
 
 
+66. **An agent that writes its report to a status surface believes it has reported. The supervisor
+    reading a different surface believes it has gone silent. Both are correct about their own
+    surface.** Issued 2026-08-28 01:15Z. em10 had been logged by me as unresponsive for over an hour.
+    It was not. `scion list --format json` exposes a `taskSummary` field the table view hides, and
+    em10's read:
+
+        "Tranche B cut, verified, and reported — scion/ca-msg-em10-trb @ 9333f943"
+
+    It had done the work, pushed it, rebased onto current main, and parked correctly. **Nothing was
+    ever delivered to me**, because `taskSummary` is written by `sciontool status` and is visible to
+    the monitor, not to my inbox. Only `scion message` reaches me.
+
+    - **This project exists because Scion has two agent messaging surfaces and an agent can write to
+      the wrong one and believe it has communicated. We reproduced the exact defect, between
+      supervisor and manager, while building the fix for it.** That is now the strongest single
+      argument in the design: the failure is not hypothetical and not a novice error — it caught two
+      agents who had spent the night thinking about precisely this bug.
+    - **Detection heuristic, worth propagating:** a `taskSummary` that reads like a *report* rather
+      than a *state* — past tense, naming a SHA or a deliverable — is a strong signal the agent thinks
+      it has told someone something and has not. (Handed to the coordinator, who has since recorded it
+      and shared it with two other EM-chain leads; it is systemic, not local to this project.)
+    - **What I got wrong, beyond the tooling:** I asked twice and looked zero times. em10's branch had
+      moved from `2ba538c0` to `ab47087d` and was rebased onto current main the whole time. **Branch
+      state is an observable fact about an agent; asking is not the only instrument and it is the
+      slowest one.** Two rounds of a carefully-worded forced-choice question lost to a single
+      `git fetch`.
+    - **Corollary on blame direction:** I told the coordinator its nudges were competing with my pings
+      and muddying attribution. That was a plausible theory about someone else's behaviour, and it was
+      wrong — em10 was parked legitimately throughout. **When a theory of a failure requires another
+      party to be misbehaving, verify that part first**; it is the part I am least motivated to check.
+    - **Also: em9 and em10 were never one pattern.** em10 had a delivery-surface problem; em9 has no
+      `taskSummary` at all, which is a different state entirely. Three occurrences of "the em9/em10
+      pattern" was three occurrences of *at least two* patterns, and treating them as one is why the
+      remedy kept missing.
+
+67. **A branch based one commit behind main can look exactly like a revert of main. The appearance is
+    an artifact of the diff you chose, not a property of the branch.** Issued 2026-08-28 01:29Z. Before
+    releasing the DEF-31 compare URL I ran the scope check and it came back alarming:
+
+        git diff --stat ce9a7993..em6-def31   ->  27 files, 1024 insertions, 806 DELETIONS
+                                                  security_fixes_a6_test.go  deleted (194 lines)
+
+    That reads as reverting #1334, which is the precise hazard the user warned about. It is not.
+    `em6-def31` bases on `53ec098f`, one behind `ce9a7993`, so the **two-dot** diff reports "undo
+    #1334, then apply DEF-31." The **three-dot** diff — merge-base to tip, which is what GitHub
+    compare and PRs actually use — is the truth:
+
+        git diff --stat ce9a7993...em6-def31  ->  3 files, 724 insertions, 1 deletion
+
+    - **Rule: for any question of the form "what does this PR contain," use three-dot. Two-dot answers
+      a different question** — "what would I get by resetting main to this branch" — which nobody
+      asked and which is terrifying by construction whenever the base is stale.
+    - **Do not resolve this by demanding a rebase.** Rebasing to silence a confusing diff invalidates
+      every SHA I just mutation-tested and buys nothing; the PR content was already provably correct.
+      **Fix the measurement, not the artifact.**
+    - **This is rule 60's shape again in a new place.** There the danger was a lagging ref that
+      answered plausibly; here it is a lagging *base* that makes a correct branch look destructive.
+      Both are cases where the tool answers confidently and the question was subtly not the one I
+      meant to ask.
+    - I stated the artifact explicitly in the compare-URL message rather than quietly omitting it,
+      because the next person to run `git diff main..branch` will see the scary number and should
+      already know why.
+
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -5263,3 +5327,58 @@ have converted my gate into a rubber stamp on the first branch that reached it.
 restated. **The forced-choice diagnostic worked on 1 of 3 — that is data about the diagnostic, not
 just about the agents,** and it is the second signal in two hours that my read on manager state is
 worse than I assume. Still holding the reporting-protocol rewrite until em9 and em10 answer.
+
+## 5br. 01:06-01:32Z — DEF-31 LANDED to compare URL; em10 found; main is red
+
+**DEF-31 APPROVED and compare URL sent** to thread 1532864101909528737.
+`scion/ca-msg-em6-def31` @ `8922f590`, three commits, PR content **3 files / +724 / -1**.
+
+**Round 2 verification — I re-ran the mutation myself rather than accept "verified by developer,"
+which is the exact claim that failed in round 1:**
+
+| Step | Result |
+|---|---|
+| Unmutated baseline | 8 tests green, incl. 3 new `TestDEF31_SendPath_*` |
+| Guard **deleted** | `SendPath_ForeignProjectAgent_NotRouted` **FAIL**, `SendPath_SoftDeletedAgent_NotRouted` **FAIL** |
+| Failure text | `RESOLVER GUARD FAILURE: message was routed to foreign-project agent <uuid> (type=instruction)` |
+| Paired positive under mutation | `SendPath_ValidAgent_StillRoutes` **PASS** — the guard is not just refusing everything |
+| Restored | all green |
+
+**The mutation is now the defect, not merely a break.** Round 1's was not, and the difference is
+entirely that these assert through `handleConversationSend` instead of through `validateDefaultAgent`.
+
+**MAIN IS RED, and it is not ours.** Full `pkg/hub` on the branch fails exactly one test:
+
+    TestTemplateResource_UATConfinement/global_template_is_still_not_confined_(unchanged)
+    pkg/hub/authz_agent_baseline_test.go:568
+
+I ran the **full suite on bare `upstream/main` (`ce9a7993`) as a control** and got the *identical*
+failure set — one test, the same one, with zero messaging code present. em10 independently found and
+controlled the same failure and attributed it to #1332 or later. **Two independent agents, two
+independent controls, same conclusion.** Flagged to the user as a separate item; it is a P2-A-series
+regression, not messaging.
+
+**Rule 67 caught a near-miss on release.** The two-dot scope check read *27 files, 806 deletions,
+`security_fixes_a6_test.go` deleted* — i.e. reverting #1334, the exact hazard the user warned about.
+Three-dot showed the truth: 3 files. I documented the artifact in the compare-URL message instead of
+omitting it, and declined to demand a cosmetic rebase that would have invalidated the SHAs I had just
+mutation-tested.
+
+**em10 WAS NEVER STUCK — rule 66.** `scion list --format json` (tip from the coordinator, the single
+most useful thing handed to me tonight) exposes `taskSummary`, hidden by the table view. em10's said
+*"Tranche B cut, verified, and reported."* It had reported — into a surface I do not read. I asked
+twice and looked zero times, while its branch moved `2ba538c0` → `ab47087d`, rebased onto current main.
+
+**Tranche B is ready and strong** (em10's report, now delivered properly):
+
+- Rebased onto `ce9a7993`. **0 deletions**, 12 files, 2493 insertions — pure additions.
+- Aggregate files all CLEAN vs main: `models.go`, `store.go`, `composite.go`, `pkg/messages/types.go`,
+  `ent/migrate/schema.go`. Rule 31 satisfied with the localisation done properly.
+- **AC-B-9 scope: EMPTY** diff over `cmd/`, `scripts/`, `extras/`.
+- AC-B-8 build: `pkg/messaging` ok, `entadapter` ok, `pkg/hub` ok modulo the pre-existing failure.
+- Deferred tranche-A ACs: `23f7c820` handler fixes and AC-DEF15-1 **IN B and passing**; AC-DEF15-4 and
+  AC-DEF16-1 **BLOCKED on `ae33715e`** — needs resolution, carried forward.
+- DisplayName: **still declined**; #1331 merged so no longer blocking.
+
+**Open:** em9 has `taskSummary: None` — a genuinely different state from em10's, and the reason
+"the em9/em10 pattern" kept resisting a single remedy. Handling separately.
