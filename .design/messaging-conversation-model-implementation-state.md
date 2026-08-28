@@ -5757,3 +5757,34 @@ guarantee it does not provide is worse than an absent test — the same family a
 project — has not moved in two heartbeats because I have not assigned it, which is my call to make
 and I keep deferring it). AC-DEF15-4 / AC-DEF16-1 blocked on `ae33715e`. Tranche C unspecified.
 Held ledger: DEF-5, DEF-6, DEF-9, DEF-10, DEF-11, DEF-14, DEF-16, DEF-17/18 gate sweep, tranches C–G.
+
+### §5by — PR#1339 grep portability FIXED and verified (2026-08-28 02:05Z)
+
+`e93a58e3` on `scion/ca-msg-em6-ci-guard`. All three patterns GNU BRE → POSIX ERE (`grep -rEn`),
+portability comments added above each. `\b` dropped entirely rather than ported — non-portable even
+under `-E`; BSD spells it `[[:<:]]`/`[[:>:]]`. `(Bulk)?([^a-zA-Z]|$)` gets the same result with no
+extension.
+
+**Verified by me, not accepted:** baseline exit 0; three planted violations each exit 1; paired
+positive inside `pkg/messaging` exit 0; and old-vs-new patterns on the **same checkout** at
+**104/104, 11/11, 0/0**. Closed the loop with the coordinator, who raised it.
+
+**Methodology correction issued to em6 — the answer was right, the reasoning could not have known
+it.** em6 reported: *"104 with test files (delta from architect's 107 is code churn between counts —
+close enough to confirm parity)."* That compares em6's count on the ci-guard tree against **my count
+on the tranche B worktree** — two different trees; my 107 included em10's unmerged files, which
+contain `AddParticipant` calls.
+
+**"Close enough" is the tell.** A rewrite that silently dropped three genuine matches produces the
+identical 104-vs-107 gap and the identical explanation. **The reasoning could not distinguish the
+healthy case from the broken one, so it was not evidence in either direction** — em6 simply happened
+to be in the healthy case. Correct form: old and new patterns, same checkout, **exact** equality;
+when proving equivalence the only acceptable delta is zero, and a non-zero delta is the finding
+rather than the noise.
+
+**This is the same family as the bug being fixed, which is why it is worth logging rather than just
+correcting.** GNU syntax on BSD does not error, it silently returns clean. A cross-tree count does
+not error either, it silently returns plausible. **Both let you conclude "fine" without the check
+ever having been capable of saying otherwise** — cf. rules 61, 65, 73, 74, and tranche B's B4 gate.
+That is now five distinct instances in this project of *a control that cannot fail being mistaken for
+a control that keeps passing*. It is the dominant failure mode here, well ahead of ordinary bugs.
