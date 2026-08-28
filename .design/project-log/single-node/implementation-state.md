@@ -13870,3 +13870,76 @@ precisely the condition under which a single sample must not become a diagnosis.
 it cannot prove macOS passes. **Task #90 (`--help` dying on BSD `sed`) is the standing counterexample that
 the userland half breaks independently.** The `macos-15` job on real Apple hardware remains the only thing
 that closes it.
+
+### §35.85 — task #92 root-caused. The wrong default is not WRITTEN anywhere; it is what survives a filter.
+
+`sn-runtimeprofile-dev` reported mechanism before code, as instructed, and **falsified my candidate list in
+exactly the way I warned it might.**
+
+**THE ANSWER TO THE ARCHITECTURAL GATE: TIER-SPECIFIC. The global default needs no change and the design
+doc's non-goal holds.** `pkg/config/embeds/default_settings.yaml` ships `active_profile: local`,
+`local.runtime: container` (→ docker on Linux), `remote.runtime: kubernetes` — **which is correct for
+workstations.** Nothing anywhere says "default to remote (kubernetes)."
+
+**The five-stage chain that manufactures it:**
+
+1. `deploy.sh` sets `SCION_SERVER_MODE=hosted` and `SCION_IMAGE_REGISTRY` and **no profile configuration
+   at all** — no active profile, no profiles, no settings template.
+2. `InitMachine` (`pkg/config/init.go:578-586`) runs with `SkipRuntimeCheck=true` (because
+   `hostedMode=true`, `server_foreground.go:107`) and **hardcodes `detectedRuntime='docker'`**, seeding
+   the workstation defaults.
+3. `GetRuntime('','')` resolves `local` → docker, but `factory.go:132` sees `CLOUD_RUN_INSTANCE` set and
+   `SandboxLauncherAvailable()` true, so the **actual** runtime is `cloudrun-sandbox`.
+4. **THE PRIMARY MECHANISM.** `buildInfoProfiles` (`pkg/runtimebroker/handlers.go:183-233`) drops the
+   `local` profile at line 206 — `isLocalOnlyRuntime('docker') && !isLocalOnlyRuntime('cloudrun-sandbox')`
+   → `continue`. The `remote`/kubernetes profile is **kept**. One profile survives, and it is the wrong one.
+5. `autoSelectProfile` (`agent-create.ts:607-613`) fires because `profiles.length === 1`.
+
+**MY LIST WAS A CATEGORY SHORT, NOT AN ENTRY SHORT.** Candidates (a)-(d) all asked *where does the wrong
+value come from*. The mechanism is **value elimination**: the correct profile is filtered out and the
+wrong one is what remains. The developer said plainly that my list caused it to look at the filtering
+logic **last**. **This is the second time tonight a priority list I wrote steered an agent away from the
+axis the defect lived on** (rule 11), and the first time I have seen the failure mode be a missing
+*category* rather than a missing item. My mechanism (b) was also misdescribed: `autoSelectProfile` keys on
+**count**, not on ordering — which turns out to be load-bearing.
+
+**I REJECTED BOTH PROPOSED FIXES, FOR ONE REASON THAT APPLIES TO BOTH.** Synthesizing a
+`cloudrun-sandbox` profile in `buildInfoProfiles` (its option A), or seeding one in `InitMachine` (option
+B), **adds a right answer without removing the wrong one.** By the developer's own stage-5 finding,
+`autoSelectProfile` then **stops firing** — the length is no longer 1 — so the operator gets no selection
+and a choice between a profile that works and one that cannot, with nothing distinguishing them.
+**Fixing a wrong default by adding a second option is not fixing the default.**
+
+**THE DEEPER DEFECT, NAMED BUT DELIBERATELY NOT FIXED: `isLocalOnlyRuntime` IS A NEGATIVE PREDICATE
+STANDING IN FOR A POSITIVE ONE.** The `remote` profile survives not because kubernetes *works here* but
+because kubernetes *is not local-only*. The code needs to ask *can this broker serve this profile*; it
+asks *is this profile local-only*. **Same error shape as §4.3's `K_SERVICE` argument — a signal that
+answers a nearby question is not one that answers yours.** Left alone on purpose: the predicate is shared
+with tiers where a local broker legitimately offers a remote profile, so changing it is a product
+decision, not ours.
+
+**THE FIX I DIRECTED — and the developer had already found it without recognising it as the answer.**
+`scripts/cloudrun/hub-settings-template.yaml` gives the **sibling** Cloud Run tier `active_profile:
+default` with `profiles.default.runtime: cloudrun`. **Single-node has no such template and is the odd one
+out.** Matching the sibling supplies the right profile *and* declines to define a kubernetes profile at
+all, so exactly one profile exists, `autoSelectProfile` fires as designed, and the shared filtering logic
+is never touched. Tier-scoped, zero blast radius, and it follows an in-repo precedent rather than
+inventing a mechanism.
+
+**OPEN CONSTRAINT HANDED BACK AS A MEASUREMENT, NOT A GUESS:** `deploy.sh` is frozen, so the developer
+must report **which delivery routes exist that do not modify it** — baked into the omni image, or seeded
+by `InitMachine` on detecting hosted-mode-on-Cloud-Run. If the only correct route runs through
+`deploy.sh`, it stops and I sequence it behind #88 rather than have it fight the freeze.
+
+**#37/#48: recommendation ACCEPTED, do not merge.** Genuinely different root causes — *config source
+disagreement between hub and broker* (the hub's `LoadBootstrapKoanf` does not read
+`embeds/default_settings.yaml`, the broker's `LoadVersionedSettings` does) versus *profile filtering plus
+missing tier-specific config*. Siblings in the "hosted defaults" family, different fixes.
+
+**Consequence for task #86 edit 4 (the design-doc Kubernetes contradiction): the gate is now DISCHARGED,
+and the answer is better than expected.** The doc does not contradict itself. **§4.3 reasons about runtime
+selection at the autodetect layer and is correct there** — stage 3 does pick `cloudrun-sandbox`. The
+operator-facing profile list is a **different layer the document has never described**, and the wrong
+default is produced there by filtering. So edit 4 is not a correction to §4.3; it is a **new subsection
+about a layer the design omits entirely.** Holding until the delivery route is confirmed, so the doc
+describes what actually shipped.
