@@ -12501,3 +12501,109 @@ was never real. Compound recommendations are where false blockers are born.
 - **Tranche H** (`handlers_conversations_resolve*`) — blocked on G-1, no carrier.
 - Open with user: DEF-32+DEF-34 routing, #1360 merge, three branch deletions,
   escalation-1 CI. Escalation 2 still queued, deliberately unsent.
+
+---
+
+## §5eu — Marker gate verified by five tests; the control found the real defect
+
+em10 delivered `1968fc968`: `hack/check-security-marker-gates.sh` (+315) and
+`Makefile` (+8/-2). **Zero product files** — scope honoured exactly.
+
+They self-reported a bug found during their own evidence run: `grep -c ... || echo 0`
+emits `0\n0`, because `grep -c` prints `0` *and* exits non-zero, so the fallback
+fires too. Fixed by capturing to a variable. Volunteered, unprompted — the em6
+pattern, and worth the same credit.
+
+### What I ran, in a worktree off clean `upstream/main`
+
+Their 12-row evidence table is a positive-control set, which is the right shape.
+I did not take it on report. Rule 196: test a bounded claim *outside* its boundary.
+
+| # | Test | Result |
+|---|---|---|
+| 1 | Unmodified `upstream/main` | **pass, exit 0** |
+| 2 | Delete `handlers_chat_v2.go:1216` | rows 9 **and** 10 fire |
+| 3 | Reword `authenticatedSender` doc comment | **NOTICE only**, exit 0 |
+| 4 | **Move call out of `handleAgentMessage` into a decoy function** | **fires** |
+| 5 | Rename `handleAgentMessage` | fires, fail-closed |
+
+**Test 1 matters more than it looks.** A gate never run against an unmodified
+tree is a coin flip; em10's branch carries the 215-file integration base, so
+their `pkg/hub` is not main's. The gate had to be proven against the tree it
+protects, not the tree it was written on.
+
+**Test 2 is the closure of em10's own original hole.** Line 1216 carries both
+the third `ActionAttach` and the AUDIT `logAuthzDenial`. The gate they first
+pushed passed cleanly on the revert it existed to catch. Both rows now fire.
+
+**Test 4 is the decisive one.** I moved the `authenticatedSender` call out of
+`handleAgentMessage` into a new `decoyHelper`, leaving the **file-wide count
+unchanged at 5**. The gate still fired. The counting is genuinely function-scoped
+(rule 192), not file-wide wearing a costume. A file-wide gate would have passed
+this and no one would ever have known.
+
+**Test 3 confirms rule 191** — comment rewords cannot fail the build.
+**Test 5** confirms a missing enclosing function fails closed rather than going
+vacuously green.
+
+Five tests, no false pass. The script is sound.
+
+### The defect the control found — and it is mine
+
+I instructed em10 to follow the precedent as *"a `.PHONY` Makefile target in the
+ci chain (Makefile:79-95)."* They did precisely that. **I described half of a
+two-part precedent.**
+
+`.github/workflows/ci.yml` **does not run `make ci`.** It enumerates its steps
+and invokes the guard scripts directly:
+
+    :93   ./hack/check-authz-guards.sh
+    :104  ./hack/check-conversation-upsert-guard.sh
+
+em10's commit touches no `.github` files. **So the gate runs on a developer's
+`make ci` and never once in GitHub Actions** — decorative in the only place that
+enforces anything. Same defect class as escalation-1 (invariant D-1 has never run
+in CI) and as the `no_sqlite` test gap: a check that exists and never runs. I
+handed it to them.
+
+This is my second incomplete-instruction failure with em10 (the first was rule
+189's phrasing inviting a gate hole). Both times they implemented what I said
+correctly. Recorded as a pattern in me, not in them.
+
+### Second fix requested
+
+The script's `count=$(grep -c ...) || count=0` means a **missing or renamed file**
+yields count 0 and reports a violation. Fail-closed, correct — but it reports
+*"ActionAttach missing from sendAgentRouted"* when the truth is *"someone moved
+the file."* That misreads as a security revert and costs an afternoon. Asked for
+a file-existence precheck exiting **2**, discriminated in the workflow step per
+the shape at `ci.yml:87-102`, whose own comment explains that `make` collapses
+exit 1 and exit 2 into 2 and that they mean opposite things.
+
+Also told them to re-run the per-row evidence after adding the exit path, since a
+new exit path can shift `rc`.
+
+### Rule 211
+
+**When citing a precedent, cite every place it lives.** "Follow
+`check-authz-guards.sh`" is a Makefile target *and* a workflow step *and* an
+exit-code contract. Naming one part gets that part built and the rest silently
+omitted — and the omission is invisible precisely because the part you named is
+present and correct.
+
+### Rule 212
+
+**A gate must be proven against the tree it protects, not the tree it was
+authored on.** A branch cut from a stale integration base has different content
+under the very paths the gate inspects. Green on the author's branch is not
+evidence.
+
+### Ledger
+
+- **Tranche C gates** — in flight, one correction cycle out. Script proven sound
+  by five independent tests; CI wiring incomplete.
+- **DEF-32 / DEF-34** — unchanged, awaiting routing. Block tranche C Files 3/4.
+- **DEF-33** — downgraded, latent. No movement, correctly.
+- Tranches D–G, DEF-5/6/9/10/11/14/16/17/18 — held behind C.
+- Open with user: DEF-32+DEF-34 routing, #1360 merge, three branch deletions,
+  escalation-1 CI.
