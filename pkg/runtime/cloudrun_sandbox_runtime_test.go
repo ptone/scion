@@ -1092,6 +1092,15 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
+	// Cancel the watch/tailer goroutines so temp files are released.
+	t.Cleanup(func() {
+		rt.watchMu.Lock()
+		if cancel, ok := rt.watchCancels[id]; ok {
+			cancel()
+		}
+		rt.watchMu.Unlock()
+		time.Sleep(100 * time.Millisecond) // let goroutines exit
+	})
 	if id != "test-agent" {
 		t.Errorf("Run() returned id = %q, want %q", id, "test-agent")
 	}
