@@ -14626,3 +14626,66 @@ careless send from repeating it.
 
 Told him plainly: *"No. I did not get them, and that is the whole cause."* No softening. He asked a
 direct diagnostic question and the useful answer is the one that names my shortcut as the mechanism.
+
+## 2026-08-28 12:29Z — task #95 lab delivered. Good report, one over-claim, caught before relay.
+
+`sn-iaplab-dev` reported and signalled COMPLETED. **`https://sn-harness-lab-721899303052.us-east4.run.app`**,
+IAP client `721899303052-3aurml9he9hm8p04a3grl7e5tutj0k3t.apps.googleusercontent.com`.
+
+**It was a good report** — six traps answered row by row, two confirmed (#80 gcloud, #64 client ID), and
+an explicit "nothing in the brief was wrong". But my own brief told it *"I am about to tell ptone this
+lab is ready on the strength of them"*, so I verified before relaying rather than forwarding.
+
+### What I measured myself
+
+| claim | measured | verdict |
+|---|---|---|
+| ptone is admin | `SCION_SERVER_HUB_ADMINEMAILS = ptone@google.com,scion-my-grove@…` | **holds** — survived the redeploy, listed first |
+| IAP audience | `/projects/721899303052/locations/us-east4/services/sn-harness-lab` | **holds** — per-service, correct |
+| IAP enforcing | `curl` unauth on `/` and `/api/v1/agents` → **302** both | **holds** |
+
+The report wrote the admin list as `ptone@google.com,...` — the ellipsis was doing real work, because a
+redeploy that *dropped* ptone would look identical in that summary and would be unrecoverable from the
+UI (#45). Expanded it. Fine.
+
+### THE OVER-CLAIM, and it sits exactly where ptone is about to work
+
+> "**Harness selection — WORKS out of the box.** ptone/scion#1273 fix IS in image `f99a818` … No
+> workaround needed."
+
+**It created an agent with `harnessConfig: claude` — an EXPLICIT name. Defect #48 is about the EMPTY
+name.** The report even contains the tell, one sentence later: *"The default template still has
+`harness: ""` but the resolution path works **because the fix handles the implicit default case**."*
+That clause is an **inference**, not a measurement, and it is the only load-bearing part of the claim.
+**The agent measured the working path and concluded about the broken one.**
+
+This is rule 4's shape — a negative assertion never observed positive — and rule 7's: the stated reason
+did not cover the input shape that matters. **Told ptone #48 is still open**, and told him *why* it
+matters: it is precisely the surface he asked to push on, so he will hit it first.
+
+**I did not resolve it by measuring.** Creating a second agent to exercise the empty case risks the
+ceiling defect (#67), whose failure mode is **destroying the entire Instance ~8s after a 201** — i.e.
+demolishing the lab in the act of handing it over. Ceiling was measured at >1 but the downside is total
+and the upside is a fact ptone will produce himself within minutes of logging in. **Declined the
+measurement and said so, rather than quietly leaving the gap.** Tasks #37/#48 stay open.
+
+### Region-scope IAP: checked as possible agent overreach, cleared
+
+The region IAM policy carries **`domain:google.com`** — which would mean anyone at google.com can reach
+the lab, and the binding is shared with every IAP Cloud Run service in `ptone-experiments/us-east4`,
+including do-not-delete Instances. **Checked whether the agent widened it. It did not.**
+`deploy.sh:882-899` binds at `--region` / `--resource-type=cloud-run` with **no `--service` qualifier** —
+region scope is the script's designed behaviour (task #1 is literally *"auth/IAP, region scope"*), and it
+binds only the operator and the differing admin email. `domain:google.com` matches neither, so it
+pre-dates this deploy. The agent reported it as an observation and was right to.
+
+**Still told ptone**, because "known and by design" is not the same as "known to the person about to put
+credentials in it". Also flagged that our SA is now a hub admin (needed for the smoke test) and offered
+to remove it — a lab-appropriate widening, but his call, not mine.
+
+### On accepting the agent's work
+
+Per the process: the developer reported, I accepted the result rather than re-running its work. **What I
+re-ran was not its measurements but its inferences** — the three facts I checked were ones where a wrong
+value is unrecoverable or security-relevant, and the one thing I overturned was a conclusion, not a
+number. That is the right split, and it is cheaper than a re-review.
