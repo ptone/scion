@@ -15348,3 +15348,103 @@ preserved as written, not silently absorbed into a revision.
 **And the brief asks again what it got wrong.** Round 1's version of that paragraph earned its place
 twice over: it caught the absent-vs-empty error in my own brief and surfaced the two non-browser
 origins I had not thought to ask about.
+
+---
+
+## §35.81 — Round 2 settles tasks #37/#48: three of five fix shapes are dead, and two "contradictory" tasks were both right
+
+**Rule 35 (new): two measurements that appear to contradict each other may be measuring different
+things — one the mechanism, the other whether the mechanism runs.** Before calling it a contradiction,
+ask what each one actually exercised. I flagged tasks #44 and #45 as rotted into disagreement in §35.80.
+They never disagreed.
+
+### The reconciliation, which I got wrong six hours ago and again this morning
+
+- Task #44: *"SCION_SEED_* is postgres-only, tier runs SQLite"* — **correct.**
+- Task #45: *"the SCION_SEED_* chain is sound end to end … measured 16:05"* — **also correct.**
+
+`LoadBootstrapKoanf` has exactly **one** non-test caller: `cmd/server_foreground.go:1914`, inside
+`initOperationalSettings`, which is called only under `if strings.EqualFold(cfg.Database.Driver,
+"postgres")` at `:1888`. The comment is explicit: *"Gated on postgres: in SQLite/workstation mode the
+legacy file path is used unchanged."*
+
+**The chain is sound and the chain is never invoked.** #45 measured the pipe; #44 measured whether
+anything flows into it. I verified the gate myself — it is a negative claim about a path (rule 28), so I
+enumerated the callers rather than trusting the assertion.
+
+### What this kills
+
+| | Fix | Verdict |
+|---|---|---|
+| A | One line in `LoadBootstrapKoanf`'s coded defaults | **Postgres-only. Does nothing for this tier.** Still worth doing so the two backends stop diverging, but it is not the §1 fix and it reverses a by-design decision, so it needs ptone. Deferred. |
+| B | `default_harness_config` on the bundled default template | **The only shape that works on SQLite.** Dispatched for measurement. |
+| C | Deploy-time `SCION_SEED_*` | **Dead.** Same dead root as A. Candidate deleted, not deferred. |
+| D | Fail loudly on unresolvable name | **In scope with B**, for the row-7 residual. |
+| E | Broker rung 7 stops inventing unresolvable names | Complementary. Deferred. |
+
+**I asked for candidates priced rather than a winner, and the pricing eliminated three.** Had I asked
+for a recommendation I would have got B with a rationale, and I would not have learned that A and C were
+dead — which is the part that reconciled #44/#45 and will stop me proposing `SCION_SEED_*` again.
+
+### Where I was wrong, and the better diagnosis that replaced me
+
+I asserted in the round-2 brief that the by-design justification fails in hosted mode *because there is
+no shared `settings.yaml`*. **That is false.** `InitGlobal`/`InitMachine` runs unconditionally at
+`cmd/server_foreground.go:106-110` when the global dir is absent — hosted mode only passes
+`SkipRuntimeCheck: true`. I had misread `:111-117`: that branch skips the **refresh of templates and
+harness-configs on an already-existing dir**, not the creation of `settings.yaml`. The comment even says
+so — the bypass is specifically about harness-config materialization.
+
+The correct reason is sharper than mine: **the shared `settings.yaml` exists and the broker does read
+`default_harness_config: antigravity` from it. What changed in hosted mode is the RESOLUTION PATH — the
+harness-configs moved from disk into the Hub's store, while the broker's fallback still resolves by
+disk.** So the name was never wrong; the *identity* was missing. The hub must participate not to supply
+a better name but to stamp `HarnessConfigID`/`HarnessConfigHash` so the broker hydrates from the store
+instead of searching a directory that hosted mode deliberately never creates.
+
+**That reframing is worth more than the fix.** "The hub does not load the defaults file" invites you to
+make the hub load the defaults file — which is where I started, and which is postgres-only. "The
+resolution path moved from disk to store" tells you the fix is about identity, and immediately explains
+why `antigravity` was both the right name and unresolvable.
+
+### The last lever, found by elimination
+
+I checked whether the tier could set this without touching shared ground. It cannot. `InitMachine` seeds
+settings.yaml from `getDefaultSettingsYAMLForRuntime(detectedRuntime)`, and hosted mode forces
+`detectedRuntime = "docker"` — **that is task #94**, arriving here from a different direction. And it
+would not have helped: settings.yaml feeds the *broker*, which already has the right name. **The
+template is the only lever that reaches the hub on SQLite.** Same conclusion as the investigator's, by a
+route that also tells us no narrower variant exists — which is the thing I actually needed to know
+before accepting a shared-ground change.
+
+### What I dispatched, and why it is a measurement rather than a fix
+
+`sn-harnesscfg-dev`, brief at `briefs/sn-harnesscfg-dev.md`. The edit is one YAML line in
+`resources/templates/default/scion-agent.yaml` — the **single** bundled template. The work is the seven
+adversarial rows, written before the edit (rule 6).
+
+**Row 4 is a withdrawal condition.** `applyHubAgentDefaults` carries an "ACCEPTED CONSEQUENCE" note that
+a hub-resolved harness config reaches the broker at **CLIFlag rank** and outranks the broker's own
+profile (rank 6) and settings (rank 7) defaults. If a template-supplied name lands the same way, B
+silently overrides every workstation user who configured a profile-level harness config and uses the
+default template — the exact inversion the `RemoteHubAgentDefaults` workstream exists to remove. **If
+row 4 moves, the developer stops and it escalates to ptone as a product decision.**
+
+I also fixed the name choice deliberately: **`antigravity`, not `claude`**, because `antigravity` is
+what the broker already resolves to at rung 7. Any other name makes this a product change to every
+tier's default agent smuggled in as a bug fix. *This change is about stamping identity, not changing
+defaults* — and if that sentence is not in the commit message, the next reader will assume otherwise.
+
+**This is the second time today a tier fix has landed in shared ground with an unmeasured cross-tier
+cost** (task #93 Shape B is the first, still with ptone). That is now a pattern and not a coincidence:
+this tier is late, so the seams it needs were built assuming it did not exist. I am handling both the
+same way — specify the measurement that decides it, set a withdrawal condition, and escalate with a
+table rather than a worry.
+
+### Accepted without re-deriving
+
+`default_harness_auth` is absent from koanf extraction and registry paths and can arrive only via the
+admin DB API, but it does **not** block the fix: the 502 comes from `FindHarnessConfigDir` failing
+*before* auth resolution, and antigravity drops to a shell. **I accepted this reasoning and flagged in
+the brief that it is reasoned, not measured** — if row 1 goes green and the agent still will not
+usefully start, I want that back even though it is outside the fix.
