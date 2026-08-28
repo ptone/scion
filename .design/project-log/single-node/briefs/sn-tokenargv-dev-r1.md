@@ -89,6 +89,44 @@ assertion must go red and the other two must stay green. **Read why it went red,
 — an argv assertion that fires because the run aborted earlier is the m5/m8 weak-pin class all over
 again, and this project has produced that defect twice.
 
+**Two rules from #85 round 5 apply directly here, and the first one bites hard on this task.**
+
+1. **A NEGATIVE ASSERTION IS NOT A PIN UNTIL IT HAS BEEN OBSERVED POSITIVE.** *"The token does not
+   appear in the argv log"* passes when the token is absent **and** when the log was never written, the
+   path was wrong, or the run died before the call. Those are indistinguishable from the assertion
+   alone. **Only the mutation separates them** — under the reverted site the token must actually
+   **appear**. Do not report this pin as green until you have watched it go red with the token present.
+
+2. **A pin has a location as well as an assertion.** Round 5's brief — mine — told the developer to add
+   a table row that could not reach the channel it was meant to pin; it would have gone green and been
+   recorded as closing the defect. **Before you write each assertion, say which channel the value
+   travels through and confirm the pin observes that channel.** Three sites, three answers.
+
+
+## Two items bundled in from #85 round 5, both disclosed by the developer and deferred here
+
+Neither is a #87 defect. They are in this brief because **it is the next thing that opens these files**,
+and deferring is not dropping only if it is written somewhere that gets read.
+
+**B1 — `fullGcloudStub` is a third instance of the `%q`-into-a-bash-double-quoted-context class.**
+Rounds 4 and 5 fixed the other two (`runBashFunc`'s argv channel, then `seamSetup`). This one is safe
+**only because `t.TempDir()` happens to be metacharacter-free** — the exact sentence the rest of this
+project condemns.
+
+**It was correctly left out of #85 and I want the reason preserved, not just the item.** The
+discriminator that forced O1 in round 5 does not apply: `fullGcloudStub` builds a **test-constructed
+path**, can never receive a table row, and **fails loud rather than green**. The O1 argument was "the
+next hostile row executes and looks like it passed"; that cannot happen here. One line. Take it while
+you are in the file.
+
+**B2 — the scheme guard's error mislabels the schemeless case.** With no `://` in the value, `$scheme`
+becomes the whole string, so the message reads `got 'evil.example'` as if that were a scheme. True and
+useful, **imprecise, and not misleading about cause** — which is the line round 3 drew for error text,
+and why it did not justify reopening an approved branch. Fix it here.
+
+**Both are optional relative to #87's actual subject.** If they would grow this change, say so and
+leave them; do not let them displace the token work.
+
 ## Gates
 
 `gofmt`, `vet`, `build`, full `cmd`, `TestScript`, shellcheck via the CI loop. Report the `TestScript`
