@@ -12099,3 +12099,91 @@ three attempts across two agents. No new ask; routing question unchanged.
 - **DEF-33** — provisional, pending em9's end-to-end reachability confirmation.
 - Fold audit — **CLOSED**. Verdict: inert on the key, contributing factor in DEF-32.
 - Unchanged with user: #1360 merge, three branch deletions, escalation-1 CI decision.
+
+---
+
+## §5eq — DEF-33 "confirmed" rejected; the channel filter is the larger hole (2026-08-28)
+
+em9 pushed v4 at `de3a03ef`. Items 1, 2, 4 (two-bus premise, aggravating factor,
+architecture doc) **accepted and closed**. Item 3 — *"end-to-end confirmed"* on
+DEF-33 — **rejected**.
+
+### Why the confirmation does not hold
+
+em9's chain: broker inbound only inspects `"user:"` → `"Agent:bot"` passes → `Sender`
+persisted verbatim → `hasAgentReplyAfter` misses → edit/delete allowed.
+
+**Every step is true and the chain still proves nothing**, because it establishes
+that an attacker can **ADD** a non-canonical agent-looking message. That is the
+wrong direction. The guard returns `true` (denies) on finding **any** message
+matching `HasPrefix("agent:")`. Exploitation requires **no canonical agent message
+in scope**, and adding a non-canonical one does not remove a canonical one.
+
+Canonical writers are **server-constructed**:
+
+```
+handlers_agent_messaging.go:239   Sender: "agent:" + agent.Slug
+notifications.go:486              Sender: "agent:" + agent.Slug
+```
+
+Not caller-supplied. A genuine agent reply through the normal path is canonical,
+matches, and the guard holds. The chain needs a thread whose agent messages are
+persisted **only** through the verbatim-`Sender` path; no such thread has been shown.
+
+**Correct status: latent fail-open, exploitability unproven.** Did **not** reverse
+the "unconfirmed" I already gave the user — an escalation retracted for a bad
+confirmation costs more than the delay.
+
+> **RULE 204.** A chain proving an attacker can ADD a matching record does not prove
+> they can prevent one. For a guard that denies on *any* match, exploitation requires
+> **absence**, and absence is a much stronger claim than presence. Check which
+> direction the guard's quantifier runs before accepting a chain.
+
+### The larger finding, surfaced by checking the smaller one
+
+```go
+filter := store.MessageFilter{
+    Channel:  "web",
+    ThreadID: threadID,
+    After:    after,
+}
+```
+
+**`Channel` is pinned to `"web"`.** The guard considers only web-channel messages. An
+agent reply persisted on any other channel is invisible to it — **not because of
+casing, because of the channel filter. No attacker required.**
+
+Scenario to test: user posts in web chat → agent replies through an integration, so
+the reply lands with `channel: "discord"` → guard filters to `"web"`, sees nothing,
+returns `false` → user edits or deletes a message the agent has already replied to
+and acted on.
+
+Independent of DEF-32 entirely, and larger than the casing issue **if it holds**. It
+may not — possibly every reply in a web thread is necessarily `channel: "web"`.
+
+**em9 dispatched:** enumerate every writer persisting a message with an agent
+`Sender`, list the `Channel` value each sets, and determine whether any can write a
+non-web `Channel` into a thread a web client can later call edit/delete on.
+
+> **RULE 205.** When a guard's query carries a filter the caller did not ask for, the
+> filter is part of the guard's semantics. `Channel: "web"` silently narrows *what
+> counts as a reply* — a scope restriction hiding inside a lookup.
+
+### Standing note issued to em9
+
+**Third load-bearing premise not to survive checking** — the guard import (§5em), the
+eventbus (§5ep), now this. **The finding underneath each was real every time**, which
+is why they remain on the work. The pattern: stating the mechanism from what they
+expect the code to do rather than from what they have just read. Instruction: before
+writing *"confirmed"*, grep the specific line the claim rests on and paste it beside
+the claim; absent that line, the word is *"plausible"*.
+
+### Ledger
+
+- **DEF-32** — characterised, fix shape settled. Awaiting routing only.
+- **DEF-33** — **downgraded** to latent fail-open, exploitability unproven. Not escalated.
+- **DEF-34 NEW (provisional)** — `hasAgentReplyAfter` `Channel: "web"` filter may
+  render cross-channel agent replies invisible to the edit/delete guard. Pending
+  em9's channel-writer enumeration. **Not raised to user.**
+- Unchanged with user: DEF-32 routing, #1360 merge, three branch deletions,
+  escalation-1 CI.
