@@ -50,6 +50,19 @@ func TestIsNodeBoundBroker(t *testing.T) {
 		{"cloudrun", []store.BrokerProfile{{Type: "cloudrun"}}, false},
 		{"mixed_with_docker", []store.BrokerProfile{{Type: "kubernetes"}, {Type: "docker"}}, true},
 		{"empty", nil, false},
+		// Operator-keyed runtime: the profile's runtime map key is
+		// "my-docker" but its resolved type is "docker". Shape B's
+		// buildInfoProfiles resolves the key to its type before
+		// populating BrokerProfile.Type, so isNodeBoundBroker sees
+		// "docker" and correctly identifies this as node-bound.
+		// Without key→type resolution, Type would carry the raw key
+		// "my-docker", nodeBoundProfileTypes["my-docker"] would miss,
+		// and image pull/remove/exists would return HTTP 400.
+		{"operator_keyed_docker", []store.BrokerProfile{{Name: "custom", Type: "docker"}}, true},
+		// Same scenario with the raw key — this is what would happen
+		// WITHOUT key→type resolution. The broker is really docker
+		// but the unresolved key is not in nodeBoundProfileTypes.
+		{"unresolved_operator_key", []store.BrokerProfile{{Name: "custom", Type: "my-docker"}}, false},
 	}
 
 	for _, tc := range tests {
