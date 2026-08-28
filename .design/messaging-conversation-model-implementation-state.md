@@ -12314,3 +12314,19 @@ Praising the honesty is not a substitute for testing the claim (cf. rule 196).
   authorised. **Being raised to user now.**
 - Unchanged with user: DEF-32 routing, #1360 merge, three branch deletions,
   escalation-1 CI.
+
+### §5er addendum — dispatched
+
+- **em9 unparked** with the reply-affinity correction, the key-mismatch mechanism,
+  the fix ruling (drop the filter, with reasoning per rule 201), rules 206/207,
+  and an adjacent note: `hasAgentReplyAfter`'s loop terminates on
+  `len(result.Items) < pageSize`, so a short page carrying a cursor ends the scan
+  and returns false. Record-only, not to chase. Told explicitly not to implement.
+- **User escalation sent** (1995 runes, discord/1541161053118005308) framing DEF-34
+  as scope input for the DEF-32 routing decision, severity explicitly placed
+  *below* DEF-32 — conversation integrity, not authorization bypass. Attribution
+  to em9 preserved.
+- Open with user now **five**: DEF-32 routing, PR #1360 merge, three branch
+  deletions, escalation-1 CI, and DEF-34 hotfix inclusion (folded into the DEF-32
+  routing question rather than asked separately — rule: one thing at a time).
+- Escalation 2 (tranche C–G file manifests) remains queued and deliberately unsent.
