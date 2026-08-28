@@ -358,6 +358,13 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 // file is absent/unparseable while the destination is non-empty, the
 // destination contents are wiped.  This prevents credential inheritance
 // when a different project's agent reuses the same slug.
+//
+// On the Cloud Run hosted tier, project_id is always a Hub UUID
+// (non-empty, non-nil).  The empty and nil-UUID paths are therefore
+// unreachable today.  They are checked anyway because the cost is one
+// condition and the failure mode is silent cross-tenant credential
+// inheritance — a property worth defending even against callers that
+// do not yet exist.
 func wipeCrossTenantHome(srcHome, dstHome string) {
 	incomingProjectID := readProjectIDFromAgentInfo(srcHome)
 
@@ -392,8 +399,16 @@ func wipeCrossTenantHome(srcHome, dstHome string) {
 	}
 }
 
+// nilUUID is the zero-value UUID.  A required UUID column that was never
+// explicitly set serialises to this value, which is syntactically valid
+// but semantically meaningless.  Treating it as a tenant identifier
+// would let two unrelated agents with uninitialised project_id fields
+// share credentials.
+const nilUUID = "00000000-0000-0000-0000-000000000000"
+
 // readProjectIDFromAgentInfo reads the projectId field from
-// agent-info.json in the given home directory.  Returns "" on any error.
+// agent-info.json in the given home directory.  Returns "" if the file
+// is absent, unparseable, empty, or contains the nil UUID.
 func readProjectIDFromAgentInfo(homeDir string) string {
 	data, err := os.ReadFile(filepath.Join(homeDir, "agent-info.json"))
 	if err != nil {
@@ -403,6 +418,9 @@ func readProjectIDFromAgentInfo(homeDir string) string {
 		ProjectID string `json:"projectId"`
 	}
 	if err := json.Unmarshal(data, &info); err != nil {
+		return ""
+	}
+	if info.ProjectID == "" || info.ProjectID == nilUUID {
 		return ""
 	}
 	return info.ProjectID

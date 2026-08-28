@@ -1572,6 +1572,42 @@ func TestWipeCrossTenantHome_UnparseableAgentInfo_FailClosed(t *testing.T) {
 	}
 }
 
+// TestWipeCrossTenantHome_NilUUID_FailClosed verifies that two homes
+// whose agent-info.json both carry the nil UUID ("00000000-…-000000000000")
+// do NOT match as "same project".  A required UUID column that was never
+// explicitly set serialises to the nil value; treating it as a valid
+// tenant identifier would let unrelated agents share credentials.
+//
+// Named mutation: change nilUUID constant to an impossible value so the
+// nil-UUID normalisation no longer fires → this test must red.
+func TestWipeCrossTenantHome_NilUUID_FailClosed(t *testing.T) {
+	base := t.TempDir()
+	srcHome := filepath.Join(base, "incoming")
+	dstHome := filepath.Join(base, "destination")
+	_ = os.MkdirAll(srcHome, 0755)
+	_ = os.MkdirAll(dstHome, 0755)
+
+	nilUUID := "00000000-0000-0000-0000-000000000000"
+
+	// Both homes carry the nil UUID.
+	writeAgentInfo(t, srcHome, nilUUID, "agent-a")
+	writeAgentInfo(t, dstHome, nilUUID, "agent-b")
+
+	// Destination has a credential file that must be wiped.
+	secretsDir := filepath.Join(dstHome, ".scion", "harness", "secrets")
+	_ = os.MkdirAll(secretsDir, 0700)
+	_ = os.WriteFile(filepath.Join(secretsDir, "ANTHROPIC_API_KEY"),
+		[]byte("FAKE-KEY-SENTINEL-not-a-real-credential"), 0600)
+
+	wipeCrossTenantHome(srcHome, dstHome)
+
+	if _, err := os.Stat(filepath.Join(secretsDir, "ANTHROPIC_API_KEY")); !os.IsNotExist(err) {
+		t.Fatal("fail-closed violated: two homes with nil UUID " +
+			"(00000000-0000-0000-0000-000000000000) were treated as same-project; " +
+			"destination credentials survived when they should have been wiped")
+	}
+}
+
 // -----------------------------------------------------------------------
 // waitForSandboxLiveness tests
 // -----------------------------------------------------------------------
