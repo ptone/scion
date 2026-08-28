@@ -14206,3 +14206,43 @@ assertions beside the deleted `t.Log` lines must be unchanged. Removing a false 
 **Pattern worth keeping:** the best confirmation of a fix is frequently *the reviewer's own original
 mutation re-run*, not a fresh test. It is cheaper, it is already known to discriminate, and it cannot be
 gamed by the fix having been written to satisfy a described criterion rather than a real one.
+
+### §35.93 — Task #92 APPROVED. Design doc edit 4 landed. And I found damage I had done to §10.
+
+03:44. rev2: **APPROVE at `dc729e2`.** Verdict taken as final; nothing re-run.
+
+**The confirming measurement was the right one.** rev2 re-ran its own `/bogus` mutation on config's
+`defaultSandboxBin` — **GREEN in R2, RED now.** The hole is closed and the test's name is truthful. All
+four items confirmed by measurement; `RevertGuard`'s deletion opens no hole (R1 re-measured red under
+revert); narration removed with assertions intact.
+
+**Task #92's code is done in three rounds, and all three found the same class of defect** — the code
+right, the thing *attached* to the code wrong. Pins on the seed file rather than effective settings; a
+`RevertGuard` that survived its revert; a comment claiming a pin that did not exist. Said so to the
+developer directly, as a pattern rather than a scolding, because it found and fixed it faster each round.
+
+**Held rev2's micro-nit deliberately and said why** — `sandbox_bin_sync_test.go` says "the internal
+assertion below" for an assertion in another file. One word; a fourth commit carrying one word costs
+more review attention than the error costs a reader. Folded into the next commit on the branch, and
+recorded so it cannot quietly become permanent. Told the developer the reasoning so it can hold me to it.
+
+**DESIGN DOC EDIT 4 LANDED** — `scion/design-operator-prereqs` @ `f6c10558`. New **§4.7 "The profile
+layer never learns what the runtime layer decided."** It documents the layer the design never described,
+and frames it as **the same error §4.3 already warns about, one layer up**: `isLocalOnlyRuntime` is a
+negative predicate standing in for a positive one, right by coincidence on a workstation and wrong on
+every hosted tier. Records the koanf asymmetry the fix depends on as **measured**, and names the
+deferred predicate fix as a product decision about other tiers rather than a defect within this one.
+Cross-referenced from the end of §4.3. New acceptance criterion 14, and the negative-criteria caution
+now covers all three.
+
+**AND I FOUND DAMAGE I HAD DONE.** Acceptance criterion 11 was **severed by my own earlier edit**:
+inserting criteria 12 and 13 split it, stranding its second half ("**Verified — run.** The chained build
+produces the omni image…") at the end of the closing paragraph, where it read as a non-sequitur.
+Repaired.
+
+**I only found it because I read the section before editing it, and I nearly did not** — I had the
+line numbers from a heading grep and could have inserted criterion 14 without ever looking at 11.
+**Rule 23 (new): AN EDIT THAT INSERTS INTO A LIST MUST READ THE ITEMS ON BOTH SIDES OF THE INSERTION
+POINT.** Structured prose has continuations that a line number does not reveal. This sat on a branch
+awaiting ptone's PR for over an hour, and the one reader it was written for is the one who would have
+hit it.

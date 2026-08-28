@@ -1361,3 +1361,18 @@ this project does not own.
 
 **Cost of waiting:** none to §1. Shape A lands independently and unblocks the operator path. (b) is
 survivable; it just leaves a foot-gun in the UI.
+
+**UPDATE 03:47 — the code half is finished and approved.** Task #92 is APPROVED at `dc729e2` on
+`scion/task-92-runtime-profile-fix` (ptone/scion), three review rounds, all findings measured rather
+than argued. **The decision above is now the only thing standing between this and a closed task.**
+Nothing is blocked waiting on the answer — Shape A lands independently — so (a) or (b) at your
+convenience.
+
+**Two branches now wait on you for the same action, and it is the project's critical path:**
+- `scion/bash32-portability` @ `0b51f831` — task #88, §1 blocker, macOS bash 3.2. Approved.
+- `scion/task-92-runtime-profile-fix` @ `dc729e2` — task #92, §1 blocker, runtime profile. Approved.
+- `scion/design-operator-prereqs` @ `f6c10558` — design doc, §4.6/§4.7/§6.1/§10 edits.
+
+All three are on `ptone/scion` and need upstream PRs opened. Tasks #87, #90 and #91 are blocked behind
+#88's merge because they all edit `deploy.sh`, which is frozen while that branch is the shipping
+artifact.

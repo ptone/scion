@@ -1,3 +1,28 @@
+# task #92 — CLOSE-OUT (R3) — `1c22442` → `dc729e2` — **APPROVE**
+
+Scoped confirm only (4 files, +19/−67; parent `1c22442` verified; `handlers.go` untouched — Shape B
+still held). All four points measured, tree clean @ `dc729e2`:
+
+1. **RevertGuard deleted** (0 occurrences). R1's `EffectiveSettings` remains the genuine guard —
+   re-measured RED under reverted fix (`ActiveProfile=local`, `ResolveRuntime("")=docker`). No hole.
+2. **O5 hole closed (the load-bearing check).** `TestDefaultSandboxBin_MatchesLiteral` added; re-ran the
+   `/bogus` mutation on config's `defaultSandboxBin` → now **RED** (was green in R2). The test name is
+   truthful.
+3. **Comments now accurate.** init.go: `TestDefaultSandboxBin_MatchesLiteral` pins the config copy,
+   `TestSandboxBinConstantSync_Task92` pins the runtime copy — both true, each measured red on its own
+   side. sandbox_bin_sync_test.go now correctly states config's const is path-independent under the
+   mocked seam and the internal assertion is what catches config-side drift. (Micro-nit, non-blocking:
+   that comment says "the internal assertion below" but the assertion lives in init_test.go, not below
+   in this file — substantively true, trivial cross-file wording.)
+4. **Narration removed without losing measurement.** The 4 `CONFIRMED` t.Log lines are gone; the
+   assertions they sat beside are unchanged (diff is t.Log-only) and `FallbackFires` stays green.
+
+Gates: full `pkg/config` + `pkg/runtimebroker` suites green; both new O5 tests pass; all mutations
+reverted, nothing committed/pushed. **APPROVE at `dc729e2`.** Remaining wait is ptone's product call on
+the shared filter — not a code matter.
+
+---
+
 # task #92 — DELTA Review (R2) — `54cc98b` → `1c22442`
 
 Additive commit `1c22442` (parent = `54cc98b5`, verified). 6 files, +348/−8, matches the briefed list;
