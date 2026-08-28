@@ -12960,3 +12960,92 @@ machine outranks our audit.**
 
 **The promise to dev2 was kept and stated, not reversed.** #88 goes ahead of #87 in priority; the
 first-refusal offer on #87 with rev2 as the pair still holds. Said so explicitly in the dispatch.
+
+### §35.64 — #88: the obvious portability fix is a SECURITY REGRESSION, measured (01:49)
+
+**dev2's finding, and the best catch of the night.** The natural bash-3.2 replacement for
+`host="${host,,}"` is `host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"`. **Command
+substitution strips trailing newlines** — and the lowercasing happens *before* the positive host-shape
+assertion, so the stripping precedes the check that would have caught it.
+
+**Three verdicts flip from REJECT to ALLOW**, measured on a differential harness (real function at HEAD
+vs each candidate, all 40 extracted table values plus 5 adversarial trailing-whitespace rows, comparing
+exit code **and exact stderr bytes** via `od -c`):
+
+```
+https://oauth2.googleapis.com\n        REJECT "does not name a host" -> ALLOW (exit 0)
+https://oauth2.googleapis.com\n\n\n    REJECT -> ALLOW
+https://OAUTH2.GOOGLEAPIS.COM\n        REJECT -> ALLOW
+```
+
+**This reopens exactly the class R2 closed in round 4.** A trailing newline in an endpoint URL is
+request-smuggling shape, and the entire argument for the shape assertion was that we do not let curl be
+the thing that saves us. **A portability fix would have quietly undone a security fix, on `main`, in the
+same file, three days later, under a commit message about macOS.**
+
+**The 38-row table cannot see it — it goes FULLY GREEN on the naive fix.** No row carries trailing
+whitespace. Fourth instance of the same sentence: *mutation testing proves your tests detect the defects
+you thought of, and says nothing about the ones you did not.*
+
+**Shipping form** — byte-identical to the original on all 45 inputs, exit code and stderr both:
+
+```bash
+host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]'; printf x)"
+host="${host%x}"
+```
+
+**Approved, with the pin rows, and I ruled them IN SCOPE without hesitation.** The sentinel form is
+uglier than the naive one, so someone *will* simplify it back, and the table as it stands would let
+them. Same shape as the m9 allow rows; comment them the same way.
+
+**TWO NEW RULES, and they are the transferable output.**
+
+1. **A PORTABILITY FIX IS A SEMANTICS CHANGE UNTIL PROVEN OTHERWISE.** It arrives labelled "same
+   behaviour, older shell", so no reviewer reads it as touching the rules. Routed to rev2 as a standing
+   requirement for every row of the #89 audit: do not stop at "GNU does X, BSD does Y" — add **what the
+   obvious fix would be, and whether that fix changes behaviour on any input the current tests do not
+   cover.** That third column is where the risk lives.
+2. **WRITE THE ADVERSARIAL ROWS BEFORE CHOOSING THE IMPLEMENTATION.** dev2 caught this only because it
+   added them first. *If you write the fix and then test it, you test the fix you wrote.*
+
+**Asked back:** run the differential **per site** — 286 as well as 294, byte-identical each separately,
+off-diagonal green. Command substitution strips trailing newlines at 286 too, and a scheme comparison
+that silently accepts `https\n` is the same defect wearing the other hat. Also asked whether the
+differential harness should live in the repo, since #89's fixes need the same instrument. Noted
+`shopt -s nocasematch` as considered — explicitly told dev2 **not** to go explore it.
+
+### §35.65 — #88: no bash 3.2 obtainable in-container; the gate splits in two (01:49)
+
+**Environment finding, same class as #80.** Egress is allowlisted: `ftp.gnu.org` and
+`mirrors.kernel.org` time out (000), `github.com/bminor/bash` returns **404** while
+`github.com/GoogleCloudPlatform/scion` returns 200 — the proxy permits certain repos only. `apt` has
+5.2 only. **Building bash 3.2 is not hard; obtaining the source is impossible here.**
+
+**dev2's decomposition is better than my brief and I adopted it.** I asked ONE question; it is two:
+
+- **COVERAGE** — does the suite actually *execute* lines 286 and 294? This is the half that decides
+  whether the gate is real, and it is answerable here **today**.
+- **SEMANTICS** — does 3.2 behave identically (the `=~`/`BASH_REMATCH` question)? No workaround reaches
+  it.
+
+**I had those fused**, which is why my brief made the whole task look blocked on a tarball.
+
+**The instrument: `${x@Z}` on bash 5.2.** Measured — `bash -n` parses it clean, and it fails at
+**runtime** with the identical `bad substitution`. **Not a simulation of 3.2: a construct that fails in
+the same CLASS at the same MOMENT**, which is all the coverage question needs. Told dev2 to say so in
+the report so nobody later reads it as "we tested on 3.2".
+
+**My addition — a CANARY, which turns "UNVERIFIED BY ME" into SELF-VERIFYING.** dev2 rightly refused to
+ship a CI job it had never seen execute. So before the 3.2 job runs the suite, it runs
+`"$SCION_TEST_BASH" -c 'x=ABC; echo ${x,,}'` against the interpreter it is about to use. **That must
+fail**; if it succeeds the job fails loudly with "interpreter is not bash 3.2".
+
+**The failure it defends against is the likely one:** not a bad test, but the build **silently falling
+back to system bash**, so the job runs bash 5 under a 3.2 label and stays green forever. **And it is
+round 5's rule applied to a CI job** — the 3.2 job asserts a *negative* (no bash-4 construct fails), and
+**a negative assertion is not a pin until it has been observed positive.** The canary is that positive
+observation, on every run.
+
+**The `=~` question is routed to ptone, not guessed.** He has the Mac. Added a probe to rev2's #89
+one-paste diagnostic that prints what the real line does to a real value on his shell — not just his
+version string. An open question becomes a measured one inside a round trip already planned.
