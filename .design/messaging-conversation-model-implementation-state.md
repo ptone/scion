@@ -13437,3 +13437,68 @@ Under *"under-granting is recoverable; over-granting is not,"* an explicit `(iss
 - **DEF-32 — reachability CONFIRMED and verified independently. Escalated to user this heartbeat** (escalation condition from §5dh met). Reclassified: S4 blocker, design gap, needs an identity-linking decision. **Struck from "awaiting routing" — it was never a routing question.**
 - **DEF-34** — needs #1259 + filter change together; awaiting user sequencing.
 - DEF-18 unmoved (no carrier, rule 217). DEF-33 latent, to be fixed in the same pass as DEF-34. Tier 2 DEFERRED. Tranche H blocked on G-1. DEF-5/6/9/10/11/14/16, D–G held.
+
+---
+
+## §5fi — `hasAgentReplyAfter` fully characterised: 4 defects, 3 non-defects. Consolidated fix spec.
+
+Nothing external moved (main `b14c41414`; #1361/#1362 OPEN/MERGEABLE; #1259 OPEN/CONFLICTING; all four tips unmoved). Spent the heartbeat closing out the one function that now owns two ledger rows.
+
+DEF-33 and DEF-34 are both defects in `hasAgentReplyAfter`, and I had never characterised it as a whole — only reacted to findings as they surfaced. Applying rule 240 (one miss per conjunct) to the entire function.
+
+The guard denies edit/delete (`returns true`) if any agent message exists in scope. Every failure mode below is **fail-OPEN**: returns `false`, permitting edit/delete of a message an agent has already answered.
+
+### DEFECTS — 4
+
+**(1) Channel conjunct — LIVE. [DEF-34b]**
+`Channel: "web"` excludes any agent reply stamped `discord`/`telegram`/etc.
+*Fix:* drop the `Channel` filter. Widens the match set; fails closed.
+
+**(2) ThreadID conjunct — LIVE. [DEF-34a]**
+Untagged agent replies persist with empty `ThreadID` (proven §5fg: zero assignments to `req.ThreadID`), so `ThreadID: threadID` never matches.
+*Fix:* requires **PR #1259**, which records `last_thread_id` and restores it on untagged replies. Not fixable inside this function.
+
+**(3) Sender matched on the DISPLAY LABEL — LATENT. [DEF-33]**
+`strings.HasPrefix(msg.Sender, "agent:")` tests the display label. Non-canonical casing (`"Agent:bot"`) misses. Latent because exploitation requires the *absence* of a canonical agent message (rule 204), and both canonical writers are server-constructed.
+
+But it is also a **B5/R1 violation** — *`Sender` is a display label; `SenderID` is the canonical identity* — and that inconsistency is worth fixing on principle, not just on exploitability.
+
+*Fix, verified against both writers:* `msg.SenderID != "" && msg.SenderID == msg.AgentID`.
+- `handlers_agent_messaging.go:240-247` → `SenderID: agent.ID`, `AgentID: agent.ID`. Equal.
+- `notifications.go:486-492` → `SenderID: agent.ID`, `AgentID: agent.ID`. Equal.
+- User-sent messages set `SenderID: user.ID()` (`handlers_chat_v2.go:1054, :1347, :1418`) while `AgentID` is the agent involved — **unequal, so no false positive.**
+
+`AgentID` alone is insufficient: it is documented as *"the agent involved (sender **or** recipient)"*, so it is set on user→agent messages too. The equality is what carries the direction.
+
+**(4) Pagination termination couples to a constant in an unrelated package — LATENT, NEW.**
+```go
+if result.NextCursor == "" || len(result.Items) < pageSize { return false }
+```
+`pageSize = 50` is local; whether a full page comes back depends on `clampLimit`, whose bounds (`defaultListLimit = 50`, `maxListLimit = 200`) live in `pkg/store/entadapter/schedule_store.go` — a file with no relationship to messaging. Sound **today** only because `clampLimit(50) == 50`. If `maxListLimit` were ever lowered below 50, every page would be short, the loop would terminate after page one, and the guard would silently fail open on any thread with >50 messages after the target. No test and no comment protects this.
+
+*Fix:* delete the `len(result.Items) < pageSize` clause. `NextCursor` is set **iff** `len(msgs) > limit` (`message_store.go:431-435`), so `NextCursor == ""` already means exactly "no more rows". The clause is redundant *and* is the sole source of the coupling.
+
+### NON-DEFECTS — 3 (checked, not assumed)
+- **Short page preceding more rows** — impossible. `ListMessages` does all filtering in SQL (`query.Where`, incl. visibility with NULL-backfill predicates); no Go-side post-filter. `Limit(limit+1)` then truncate.
+- **Cursor pagination correctness** — keyset on `(created DESC, id DESC)`, cursor predicate mirrors the ordering. Sound.
+- **`After` boundary** — `message.CreatedGT(filter.After)` is strictly-greater, so an agent reply at the *identical* timestamp is excluded. Same-instant tie only; not a practical hole. Noted, not filed.
+
+### Consolidated fix spec (whichever routing is chosen)
+Three edits inside `hasAgentReplyAfter` — drop `Channel`, switch to `SenderID == AgentID`, drop the short-page clause — plus **#1259** for the thread half. Items 1, 3 and 4 are self-contained and independently testable; item 2 is an external dependency.
+
+**Note for whoever implements:** the affinity block has **zero test coverage** on main (§5fg), so this fix must bring its own tests rather than lean on the suite.
+
+### Rules
+**Rule 248.** When one function accumulates a second ledger row, stop treating rows as independent and characterise the whole function once. DEF-33 and DEF-34 were filed separately, months apart in effort, and a single systematic pass over ~30 lines found two more issues and cleared three suspicions.
+
+**Rule 249.** A loop-termination condition that mentions the caller's page-size constant is a cross-package coupling in disguise. It is correct only while a constant the caller does not own keeps its current value. Prefer the store's own "no more rows" signal.
+
+**Rule 250.** Record the non-defects with their evidence. "I checked pagination and it is sound because all filtering is in SQL" prevents the next pass from re-opening it — and distinguishes a checked negative from an unexamined one.
+
+### Ledger
+- **DEF-33** — no longer merely latent-and-parked: now has a **concrete, verified fix** and is folded into the DEF-34 pass. Moved.
+- **DEF-34** — fix spec complete; still needs #1259.
+- **DEF-35 (NEW)** — pagination constant coupling. Latent, no live exploit, fix known, folded into the same pass.
+- **DEF-32** — escalated §5fh; awaiting the identity-linking decision before S4.
+- **DEF-18** unmoved: still no carrier for `pkg/messaging/validate.go`; not to be closed by deleting `projectAgents` (rule 217).
+- Tier 2 DEFERRED (owner-triggered). Tranche H blocked on G-1. DEF-5/6/9/10/11/14/16, D–G held. DEF-17 STRUCK. GATE-1 CLOSED.
