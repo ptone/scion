@@ -1434,6 +1434,80 @@ em10 and every agent I dispatch hereafter.
       benefit. Always print `len(url)` before sending.
 
 
+70. **When the validator accepts more than the generator emits, "it parses" is not "it is canonical"
+    — and any migration keyed on parse success silently skips exactly the rows it exists to fix.**
+    Issued 2026-08-28 01:50Z, from tranche B finding B3.
+
+    - `DMConversationKey` sorts its two tokens and re-renders UUIDs canonically. `ParseDMKey`
+      validates prefix, kind and `uuid.Parse` — and **`uuid.Parse` accepts raw 32-hex, braces, and
+      URN forms**, while nothing at all checks sort order. So the validator's accepted set is a
+      strict *superset* of the generator's output set.
+    - `classifyConversation` used `ParseDMKey succeeds` to mean `already canonical, nothing to do`.
+      Three forms parse and do not round-trip. Each keeps its non-canonical `external_ref` forever,
+      and since runtime lookup derives the *canonical* key, the row goes dark and a duplicate DM is
+      created beside it. **The migration's null hypothesis was its own bug.**
+    - **The general shape: any time a cleanup job asks "is this row already fine?", the predicate
+      must be `regenerate(parse(x)) == x`, not `parse(x) succeeds`.** Round-trip identity is the
+      only honest test of canonicality. Cheap to write, and it is the difference between a migration
+      that converges and one that reports success while leaving the bad rows untouched.
+    - **Caveat I had to attach to the fix, because it cuts against a standing invariant:** the
+      migration is the *one* sanctioned place to rewrite a key. Everywhere else a differing
+      round-trip is an **error, never a rewrite**. Telling em10 "add the round-trip check" without
+      that boundary would have invited normalisation into `ParseDMKey`, which is the DEF-29 mistake
+      wearing a fix's clothing. **A fix direction that could be misapplied one layer up must ship
+      with its own blast radius.**
+
+
+71. **A compare URL is a branch pointer, not a snapshot. I approve a SHA; the user merges whatever
+    HEAD is at open time. Nothing watches the gap.** Issued 2026-08-28 01:47Z. I approved
+    `ca-msg-em6-ci-guard` at `2391c553` and sent the URL; em6 then pushed `25efd47b4` to the same
+    branch. It was a 39-line project log and harmless — **but I only know that because I happened to
+    re-fetch branch tips for an unrelated roster check.** Nothing in the protocol would have told me.
+
+    - **Countermeasure, now standing and broadcast to all managers: once I say a compare URL is out,
+      that branch is FROZEN.** No pushes, not docs, not typos. Changes go to a follow-up branch or
+      the URL gets re-reviewed and re-sent.
+    - **Do not rely on catching it by diffing later** — the window closes when the user clicks, which
+      I do not observe. The control has to be on the manager's side, before the push.
+    - Related to rule 60: another case where a ref I treated as a fixed value is actually a moving
+      one.
+
+72. **A guard conditioned on one code path does not protect the feature; it protects that path — and
+    the next path added is where the bug goes.** Issued 2026-08-28 01:55Z, from tranche B finding B5.
+
+    - `handlers_agent_messaging.go:627` checks DM-key ownership against the *authenticated* identity,
+      and its own comment says the client-supplied `SenderID` "can be spoofed." **The codebase
+      already knew.** But the check is gated on `strings.HasPrefix(ThreadID, "dm:")`, and em10's new
+      dual-write DM branch sits in the `else` — running exactly when that guard does not. It derives
+      the conversation key from the very field the guard exists to distrust.
+    - **The existence of a correct check nearby made the new path look safe.** Anyone reading the
+      file sees spoofing handled. The gap is not in either piece of code; it is in the assumption
+      that a guard's scope equals the feature's scope.
+    - **Detection heuristic: when a new branch is added beside an `if` that performs a security
+      check, the question is not "is the new branch correct" but "does the check still dominate every
+      path that reaches the sink."** Grep for the sink, not for the guard.
+    - This is why B5 got its own isolated commit and its own review round. A security fix buried in a
+      general correctness commit cannot be reviewed as one.
+
+73. **A test that constructs its inputs with a different helper than production uses is not testing
+    production — it is testing a second implementation that happens to live in the test file.**
+    Issued 2026-08-28 01:55Z, from B4.
+
+    - `TestComputeDivergenceMatch_DMAgreement` was green. It built its "new" side with
+      `directMessageExternalRef`, the legacy helper that the branch's *own* `key_consolidation_test.go`
+      asserts is banned from production. Production only ever emits `messages.DMConversationKey`.
+      **No test anywhere paired the two functions that actually meet at runtime**, and that pairing
+      can never match — different arity. Every DM in production would have logged DIVERGENCE.
+    - **This is a harder failure than a missing test (rule 65), because the coverage looks present.**
+      Deleting the fix would not have gone green-to-red here; the suite was fully covering the wrong
+      function pairing. Mutation testing does not catch it. **Only tracing an input back to its
+      production origin catches it.**
+    - **Standing check for any comparison/gate test: for each side of the comparison, name the
+      production call site that produces that value.** If the answer is "a test helper," the test is
+      decorative. Ask it of gate metrics especially — a gate that cannot go green is worse than no
+      gate, because it authorises nothing while looking like diligence.
+
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -5554,3 +5628,58 @@ future URLs: **~850–900 plain characters of body**, no backticks, print `len(u
 **Outstanding queue is unchanged by this:** tranche B review (`ca-msg-em10-trb` @ `ab47047d`/`ab47087d`,
 12 files, 2493 insertions, 0 deletions) still needs a review pass and its own compare URL — and that
 URL must carry title and body from the start. em9 state still unknown since 22:43. Main still red.
+
+### §5bv — TRANCHE B REVIEWED: 14 findings, 6 blocking, 1 security (2026-08-28 01:55Z)
+
+`scion/ca-msg-em10-trb` @ `ab47087d`, three-dot vs `upstream/main` (now `1befe923`; merge base
+`ce9a7993`, one behind — **fine, do not demand a rebase, rule 67**). 12 files, +2493, **0 deletions**.
+5 of the 12 are design-log noise. Reviewed by me (dm_migration) plus two parallel read-only agents
+(divergence; hub handlers). **I independently re-verified every blocking claim before escalating** —
+the two probe files are kept at `/scion-volumes/scratchpad/projects/ca-msg-arch/repro/`.
+
+| ID | Sev | Finding |
+|---|---|---|
+| B1 | BLOCK | `mergeConversation` copies old-row participants onto target without filtering against the target's key — **stranger injected into a DM keyed for two others**. Probe fails. |
+| B2 | BLOCK | Merge soft-deletes the old row **even when message re-stamping failed**; `Run()` returns nil, success counter increments. Data loss. Probe fails. |
+| B3 | BLOCK | Non-canonical-but-parseable keys never re-keyed (rule 70). 3 forms proven. |
+| B4 | BLOCK | **DM divergence gate can never return match** — raw-UUID vs kind-token formats. 100% false positive. Probe fails. Green suite explained by rule 73. |
+| B5 | **BLOCK/SEC** | **Dual-write DM path derives the conversation key from client-supplied `Sender`/`SenderID`.** AC-INGRESS-1 + G-1. 4 links verified by me. Also at `:1045`, `:1168` (the latter mints a user↔user DM between two third parties). |
+| B6 | BLOCK | Participant registration on every resolve **clears `left_at`** — leaving a DM is undone by the next message. |
+| B7 | BLOCK | Nil `ParticipantAdder` panics in an eventbus goroutine (kills process, not a 500). `cs`/`pa` are adjacent same-type params; every call site is `(s.store, s.store)`. |
+| B8–B14 | — | Two key-construction paths; asymmetric participant registration (zero-participant DMs); double-resolve + phantom message_id; inconsistent `deliverToAgent` stamp; `processMentions` has no dual-write; empty-ref migration derives the ACL from the listing index. |
+
+**B10 was a RULING, not a finding.** `conversation.go` says resolve failure is non-fatal;
+`derive_key.go` says parse failure must deny. **Ruled: non-fatal STANDS for dual-write**, because a
+NULL `conversation_id` makes a message invisible to conversation-scoped reads — **fails closed**, and
+refusing writes now would be a self-inflicted outage on the main messaging path. **It becomes
+fail-open the instant `conversation_id` is load-bearing, so the flip to deny is a REQUIRED
+precondition of the S4 read-switch**, recorded as a gate item, and every skip must be counted
+distinguishably (which merges this with B4's granularity work). Told em10 explicitly *not* to make
+derivation failures reject requests now — without the ruling the obvious "fix" was an outage.
+
+**Sequencing given to em10:** B5 alone and isolated, pushed for its own review round (a security fix
+buried in a correctness commit cannot be reviewed as one); then B1/B2/B14; then B6/B7; then the rest.
+Every fix needs a test that fails without it. Invited pushback with evidence.
+
+### §5bw — housekeeping
+
+- **Heartbeat: exactly one is mine** — `ca-msg-impl-heartbeat-v7` `7f4e3aa6`, `13,43 * * * *`,
+  runCount 1. The other 6 schedules belong to other projects. The body still self-labels "v6";
+  cosmetic, left alone.
+- **em6 frozen and re-tasked.** Both its branches are out for merge. Given DEF-26 (test rename,
+  confirmed scope in em6's own words rather than my paraphrase) on a fresh branch from `1befe923`,
+  with a required grep sweep for the old name and the AC-DEF8-1 badge — a rename's failure mode is a
+  dangling reference in a comment, which no compiler catches.
+- **Tranche C numbers CORRECTED — my earlier figures were transposed.** Actual, three-dot vs
+  `1befe923`, excluding `pkg/ent`: **95 adds (44 design-log noise, 51 real code), 79 modified, 0
+  deletions.** Real new code: 30 `pkg/messaging`, 8 `pkg/hub`, 8 `cmd`, 2 `pkg/store`, 2
+  `pkg/messages`, 1 `hack`. **Recomputing was correct** — main moved and the old numbers were both
+  stale and wrong.
+- **Tranche B/C COLLISION FOUND:** em9-unify adds all five of tranche B's files
+  (`divergence.go`, `divergence_test.go`, `dm_migration.go`, `dm_migration_test.go`,
+  `key_consolidation_test.go`) as *new*, plus `hack/check-conversation-upsert-guard.sh` which em6 has
+  already landed. **Tranche C must be specified as excluding anything B or the CI guard delivers**,
+  or C will silently revert B's fixes to em9's older copies. This is rule 31's shape and is the single
+  biggest risk in C.
+- em9 still idle (`25fad0a2`, 3h). Not yet dispatched — C cannot be specified until the exclusion
+  list above is written out file by file.
