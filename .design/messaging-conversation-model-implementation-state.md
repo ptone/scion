@@ -1606,6 +1606,27 @@ em10 and every agent I dispatch hereafter.
       produced a false all-clear on a live security hole. **The probe now carries its own
       positive control.**
 
+78. **A fix applied to every member of a defect class must be tested on every member of that
+    class, including the members that are currently unreachable.**
+    - Issued from the B5/R1 mutation run on `f70b23b2` (§5cd). em10 correctly fixed BOTH fan-outs
+      (`fanOutToProject`, `fanOutGlobal`) — fix the class, not the instance. But only
+      `fanOutToProject` is pinned by a test; reverting the `fanOutGlobal` self-skip alone
+      **survived** the mutation run. 5 of 6 mutants killed.
+    - Reachability is a property of today's call graph, not of the code. `fanOutGlobal` is dead
+      today only because its one publisher can never pass `projectID == ""`. Add a hub-wide
+      broadcast endpoint and the slug-comparison bug reappears with no test failing.
+    - **Relationship to rule 77:** rule 77 is a fix that is too NARROW (a sibling ingress left
+      open). Rule 78 is a fix that is correctly BROAD but whose TESTS are too narrow. Both are
+      found by the same move — enumerate the sink's call sites and account for every one — which
+      is why that enumeration is a review step, not an authoring step.
+    - The rebuttal "it's unreachable, so a test needs HTTP plumbing that doesn't exist" is usually
+      false: call the sink function directly at its own layer. Here `p.fanOutGlobal(ctx, msg)`
+      with a seeded store is a few lines and needs no route at all.
+    - Companion ruling (F2): the mirror-image error is treating a DISPLAY path as if it were an
+      authorization path. Rule 29 scopes "under-granting is recoverable" to AUTHORIZATION only.
+      A slug lookup that fails must fall back to a degraded label, never suppress the
+      notification — failing closed on display loses user-visible information for no safety gain.
+
 
 
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
@@ -6047,3 +6068,79 @@ self-identity check. Not caused by recent authz work — #1337 only added a depr
 
 **Ledger:** B5 still open (R1 + two untested sub-fixes). em6 stalled after parking, re-parked with
 the literal command. em9 has not answered the option-B forced choice. `upstream/main` = `f99de64d`.
+
+---
+
+## §5cd. B5/R1 MUTATION VERIFICATION on `f70b23b2` (ca-msg-em10-trb) — 2026-08-28
+
+Six independent mutations, each reverting ONE sub-fix in isolation, restored between runs
+(`git status --porcelain` empty confirmed after each). Harness: `/tmp/mut6.py`, worktree `/tmp/b5`.
+
+| # | Sub-fix reverted | Site | Expected test to fail | Result |
+|---|---|---|---|---|
+| a | `handleProjectBroadcast` sender override -> conditional | handlers_agent_messaging.go | `TestBroadcast_B5F1a_SenderOverrideStoresAuthIdentity` | **KILLED** (+ R1 also failed) |
+| b | `Broadcasted = true` force removed | handlers_agent_messaging.go | `TestBroadcast_B5F1b_BroadcastedForcedTrueServerSide` | **KILLED** (+ `B5F1` also failed) |
+| c | handler self-skip -> `Sender` slug comparison (both loops) | handlers_agent_messaging.go | `TestBroadcast_B5F1c_SelfSkipUsesAuthNotSender` | **KILLED** (only that test) |
+| R1p | `fanOutToProject` self-skip -> slug comparison | messagebroker.go:~713 | `TestBroadcast_R1_BroadcastingAgentDoesNotReceiveOwnMessage` | **KILLED** |
+| R1g | `fanOutGlobal` self-skip -> slug comparison | messagebroker.go:~736 | (none) | **SURVIVED** |
+| orig | `handleAgentMessage` sender override -> conditional | handlers_agent_messaging.go | `TestAgentMessage_B5_SpoofedSenderDoesNotDeriveConversationKey` | **KILLED** |
+
+5 of 6 killed. The previous round's defect (tests pinned only sub-fix (b)) is fixed:
+(a), (b), (c), (R1p) and (orig) each now have a test that fails when that sub-fix alone is reverted.
+
+### Surviving mutant R1g — reachability analysis
+
+`fanOutGlobal` is reached only via `subscribeGlobalBroadcast` -> `TopicGlobalBroadcast`, published
+only at `PublishBroadcast` when `projectID == ""`. The single caller of `PublishBroadcast` is
+`handlers_agent_messaging.go:1342` inside `handleProjectBroadcast`, where `projectID` comes from the
+project URL path and is therefore never empty. **`fanOutGlobal` is currently unreachable from the
+HTTP surface.** The surviving mutant is latent, not live.
+
+Ruling: **non-blocking, but must be pinned.** em10 changed both fan-outs (correctly — fix the class,
+not the instance). By the standard I set in the previous round, every sub-fix the author chose to make
+needs a test that fails when that sub-fix alone is reverted. The test is cheap here: call
+`p.fanOutGlobal(ctx, msg)` directly at the broker level with a seeded store — no HTTP plumbing,
+no route reachability needed. A hub-wide broadcast endpoint is exactly the kind of thing that gets
+added later, and at that point the slug-comparison bug would reappear with no test failing.
+
+### Cross-tree control (regression vs. pre-existing), repeated
+
+Same self-skip probe, same inputs:
+- bare `f99de64d` (upstream main): `peer=1 self=0`
+- `24b97149` (B5 F1 fix, pre-R1): `peer=1 self=1`  <- regression introduced
+- `f70b23b2` (R1 fix): `peer=1 self=0`  <- restored
+
+### RULE 78 (new)
+
+**"A fix applied to every member of a defect class must be tested on every member of that class,
+including the members that are currently unreachable."** Reachability is a property of today's call
+graph, not of the code. Fixing the class and testing only the reachable instance leaves the untested
+instance as a mutation-silent regression site — and the commit message will read as if the class
+is covered. Corollary to rule 77: rule 77 is about a fix that is too narrow; rule 78 is about a fix
+that is correctly broad but whose *tests* are too narrow. Both are found the same way — enumerate
+the sink's call sites and account for each one.
+
+### F2 ruling (display: `Sender` renders as `agent:<uuid>` in DM notifications)
+
+em10 deferred F2, stating the slug resolution "needs a store lookup on a hot path". That premise is
+wrong for this site. The call is `messagebroker.go:534`:
+
+```
+go p.chatNotifier.NotifyDMReceived(context.Background(), storeMsg.RecipientID, ChatMessageContext{
+    SenderID: storeMsg.SenderID, SenderName: senderName, ...})
+```
+
+It is (1) already dispatched in a goroutine, off the delivery path; (2) already carrying `SenderID`;
+and (3) `NotifyDMReceived` already holds `cn.store store.Store` and already performs
+`IsConversationMuted` + `CreateNotification`, behind two early-return gates (muted, active presence).
+
+**Ruling: do F2, in `NotifyDMReceived`, not in the broker.** Resolve `msg.SenderID` -> slug after the
+muted and presence gates, so the lookup only runs when a notification is actually written. Keep
+display resolution in the notifier; putting it in the broker is the routing/presentation coupling
+that produced this bug in the first place.
+
+**On failure, fall back to the current `TrimPrefix` label — do NOT fail closed.** This is a display
+path, not an authorization path. Rule 29 explicitly scopes "under-granting is recoverable" to
+AUTHORIZATION. Failing closed here means silently dropping a user's DM notification, which is a
+worse outcome than showing a UUID. Still non-blocking for B5.
+
