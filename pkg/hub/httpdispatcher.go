@@ -2312,12 +2312,18 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 	// on the new credential immediately after.
 	_, entitledKeys, resolveErr := d.resolveAgentSecrets(ctx, agent)
 	if resolveErr != nil {
-		if d.debug {
-			d.log.Warn("DispatchAgentResetAuth: failed to resolve secrets for entitlement",
-				"agent_id", agent.ID, "error", resolveErr)
-		}
-		// Continue — entitledKeys stays nil; recordEntitledKeys will not be
-		// called, and the credential row keeps NULL (fail-closed).
+		// Reset-auth is a recovery path: an operator invokes it precisely
+		// when something is wrong. Failing the reset outright would leave
+		// the agent with a revoked or expired token and no way to recover
+		// without a full restart — worse than proceeding with degraded
+		// entitlement. So we continue: the credential row keeps NULL
+		// (entitled_secret_keys never recorded), and the secrets endpoint
+		// will fail closed on fetch ("no entitlement record").
+		d.log.Error("DispatchAgentResetAuth: secret resolution failed; "+
+			"this agent will not be able to fetch secrets until it is restarted",
+			"agent_id", agent.ID,
+			"error", resolveErr,
+		)
 	}
 
 	var token string
