@@ -683,6 +683,36 @@ func (r *CloudRunSandboxRuntime) Name() string { return "cloudrun-sandbox" }
 
 func (r *CloudRunSandboxRuntime) ExecUser() string { return "scion" }
 
+// readAgentInfoCause reads agent-info.json and extracts the detail.message
+// field written by sciontool init on failure. Returns (cause, note) where:
+//   - cause is non-empty when the file is present, valid JSON, and contains
+//     a non-empty detail.message (the structured error from the component
+//     that observed the failure — e.g. "git clone failed (...)").
+//   - note describes why the cause is absent: either because the file does
+//     not exist (sandbox died before statusHandler ran) or because the file
+//     is present but unparseable / has no message.
+//
+// Single read, no retry. The DOA probe already has its own timing; this
+// function adds a read, not a synchronisation point.
+func readAgentInfoCause(path string) (cause, note string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "cause unavailable (agent-info.json absent)"
+	}
+	var info struct {
+		Detail struct {
+			Message string `json:"message"`
+		} `json:"detail"`
+	}
+	if json.Unmarshal(data, &info) != nil {
+		return "", "cause unavailable (agent-info.json malformed)"
+	}
+	if info.Detail.Message == "" {
+		return "", "cause unavailable (agent-info.json has no error message)"
+	}
+	return info.Detail.Message, ""
+}
+
 // Run launches an agent inside a sandbox. See brief §Deliverable 2.
 // waitForSandboxLiveness polls with backoff until probe returns nil or ctx is
 // cancelled. Returns nil on success, ctx.Err() on cancellation, or the last
@@ -809,7 +839,23 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 			return "", ctx.Err()
 		}
 
-		// Read entrypoint diagnostics from the host filesystem.
+		// Read structured diagnostics from agent-info.json on the host
+		// filesystem. The sandbox writes this file to /home/scion/ (the
+		// mount destination); the bind mount makes it visible at
+		// paths.agentHome (the host-side source). When sciontool init
+		// encounters a failure (e.g. git clone), it writes the phase and
+		// a detail.message before exiting — giving us a structured,
+		// cause-specific error that the DOA probe can lead with.
+		//
+		// Three states, handled explicitly:
+		//   1. Present and parseable with detail.message → lead with cause
+		//   2. Absent (file not found) → fallback with "cause unavailable"
+		//   3. Present but malformed (invalid JSON / no message) → fallback
+		// No retry, no wait — single read. If the file is not ready, that
+		// is the absent case and the fallback covers it.
+		causeMsg, causeNote := readAgentInfoCause(filepath.Join(paths.agentHome, "agent-info.json"))
+
+		// Read entrypoint log for additional context.
 		// paths.agentHome is the HOST-SIDE mount source; the sandbox writes
 		// to sandboxAgentHome (/home/scion, the mount destination). The bind
 		// mount makes them the same file. We cannot use `sandbox exec` here
@@ -822,18 +868,31 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 			if len(logStr) > 2000 {
 				logStr = "...(truncated)\n" + logStr[len(logStr)-2000:]
 			}
-			diagInfo += fmt.Sprintf("\nentrypoint log (%s):\n%s", logPath, logStr)
+			diagInfo = fmt.Sprintf("\nentrypoint log (%s):\n%s", logPath, logStr)
 		}
 
 		runtimeLog.Error("sandbox dead on arrival: all liveness probes failed",
-			"name", slug, "agentID", cfg.Name, "error", probeErr, "diagnostics", diagInfo)
+			"name", slug, "agentID", cfg.Name, "error", probeErr,
+			"cause", causeMsg, "causeNote", causeNote, "diagnostics", diagInfo)
 		// Attempt cleanup — sandbox may be in a broken state.
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_, _ = runSimpleCommand(cleanupCtx, r.bin, "delete", "--force", slug)
 		cleanupCancel()
 
-		errMsg := fmt.Sprintf("cloudrun-sandbox: sandbox dead on arrival after run returned rc=0 — "+
-			"all liveness probes failed: %v", probeErr)
+		// Lead with the cause when agent-info.json provided one.
+		// The operator reads left to right and stops — the actionable
+		// sentence must come first, ceremony after.
+		doaDetail := fmt.Sprintf("sandbox dead on arrival — all liveness probes failed: %v", probeErr)
+		var errMsg string
+		if causeMsg != "" {
+			// Cause known: lead with it, ceremony after.
+			errMsg = fmt.Sprintf("cloudrun-sandbox: %s\n(%s)", causeMsg, doaDetail)
+		} else {
+			// Cause unknown: say so explicitly, then the DOA dump.
+			// "cause unavailable" tells the operator we looked and did
+			// not find a structured error — different from an empty cause.
+			errMsg = fmt.Sprintf("cloudrun-sandbox: %s (%s)", causeNote, doaDetail)
+		}
 		if diagInfo != "" {
 			errMsg += diagInfo
 		}

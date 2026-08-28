@@ -288,7 +288,10 @@ func runInit(args []string) int {
 
 		// Update local agent-info.json to error state so local status readers
 		// and the broker heartbeat see the failure and error message.
-		errMsg := fmt.Sprintf("git clone failed: %v", err)
+		// Use err.Error() directly — gitCloneWorkspace / formatCloneError
+		// already include a descriptive prefix ("git clone failed (...)").
+		// Wrapping again would produce "git clone failed: git clone failed".
+		errMsg := err.Error()
 		_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
 		_ = statusHandler.SetMessage(errMsg)
 

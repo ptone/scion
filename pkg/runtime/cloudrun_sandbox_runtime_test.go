@@ -1491,3 +1491,243 @@ func TestWaitForSandboxLiveness_AllFail(t *testing.T) {
 		t.Errorf("waitForSandboxLiveness() = %v, want %v", err, probeErr)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// readAgentInfoCause tests — three rows matching the three states
+// ---------------------------------------------------------------------------
+
+func TestReadAgentInfoCause_PresentAndParseable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent-info.json")
+	data := `{"phase":"error","detail":{"message":"git clone failed (no GITHUB_TOKEN secret configured): fatal: could not resolve host"}}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cause, note := readAgentInfoCause(path)
+	if cause == "" {
+		t.Fatal("expected non-empty cause from valid agent-info.json")
+	}
+	if note != "" {
+		t.Errorf("expected empty note when cause is present, got %q", note)
+	}
+	if !strings.Contains(cause, "git clone failed") {
+		t.Errorf("cause should contain the clone error, got %q", cause)
+	}
+	// Verify there is no stutter — "git clone failed" should appear exactly once.
+	if strings.Count(cause, "git clone failed") != 1 {
+		t.Errorf("'git clone failed' appears %d times in cause (expected 1): %q",
+			strings.Count(cause, "git clone failed"), cause)
+	}
+}
+
+func TestReadAgentInfoCause_Absent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nonexistent", "agent-info.json")
+
+	cause, note := readAgentInfoCause(path)
+	if cause != "" {
+		t.Errorf("expected empty cause for absent file, got %q", cause)
+	}
+	if !strings.Contains(note, "absent") {
+		t.Errorf("note should mention 'absent' for missing file, got %q", note)
+	}
+	// The note must not look like a clean empty cause.
+	if note == "" {
+		t.Fatal("note must be non-empty for absent file — empty reads as success")
+	}
+}
+
+func TestReadAgentInfoCause_Malformed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent-info.json")
+	// Half-written JSON — simulates a process that died mid-write.
+	if err := os.WriteFile(path, []byte(`{"phase":"err`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cause, note := readAgentInfoCause(path)
+	if cause != "" {
+		t.Errorf("expected empty cause for malformed file, got %q", cause)
+	}
+	if !strings.Contains(note, "malformed") {
+		t.Errorf("note should mention 'malformed' for invalid JSON, got %q", note)
+	}
+}
+
+func TestReadAgentInfoCause_NoMessage(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent-info.json")
+	// Valid JSON but no detail.message field.
+	if err := os.WriteFile(path, []byte(`{"phase":"running"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cause, note := readAgentInfoCause(path)
+	if cause != "" {
+		t.Errorf("expected empty cause when detail.message is absent, got %q", cause)
+	}
+	if !strings.Contains(note, "no error message") {
+		t.Errorf("note should explain missing message field, got %q", note)
+	}
+}
+
+// TestCloudRunSandboxRuntime_Run_DOA_WithAgentInfo tests the full DOA error
+// path when agent-info.json is present with a structured cause message.
+// The error should LEAD with the cause, not the DOA ceremony.
+func TestCloudRunSandboxRuntime_Run_DOA_WithAgentInfo(t *testing.T) {
+	tmpDir := t.TempDir()
+	rootDir := filepath.Join(tmpDir, "scion")
+
+	// Mock binary: "run" succeeds, "exec" always fails (sandbox is dead),
+	// "delete" succeeds (cleanup).
+	mockBin := filepath.Join(tmpDir, "sandbox")
+	script := `#!/bin/sh
+case "$1" in
+  run)    echo sandbox-ok; exit 0 ;;
+  exec)   echo "sandbox not running"; exit 1 ;;
+  delete) exit 0 ;;
+  *)      exit 1 ;;
+esac
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	homeDir := filepath.Join(tmpDir, "agent-home")
+	if err := os.MkdirAll(homeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	stateFile := filepath.Join(tmpDir, "state.json")
+	rt := &CloudRunSandboxRuntime{
+		bin:          mockBin,
+		state:        newSandboxStateStore(stateFile),
+		rootDir:      rootDir,
+		watchCancels: make(map[string]context.CancelFunc),
+	}
+
+	cfg := RunConfig{
+		Name:      "clone-fail-agent",
+		HomeDir:   homeDir,
+		Workspace: filepath.Join(tmpDir, "workspace"),
+		Image:     "omni-image",
+		Project:   "my-project",
+		ProjectID: "proj-123",
+		Harness: &mockHarness{
+			command: []string{"claude", "--agent"},
+			env:     map[string]string{},
+		},
+		Labels: map[string]string{"scion.name": "clone-fail-agent"},
+	}
+
+	_ = os.MkdirAll(cfg.Workspace, 0755)
+
+	// Simulate what sciontool init writes on clone failure.
+	// The sandbox writes to /home/scion/agent-info.json (mount destination);
+	// the test places it at the host-side equivalent, which Run() finds via
+	// paths.agentHome = rootDir/agents/<slug>/home.
+	slug := sanitizeSandboxName(cfg.Name)
+	agentHome := filepath.Join(rootDir, "agents", slug, "home")
+	_ = os.MkdirAll(agentHome, 0755)
+	agentInfo := `{"phase":"error","detail":{"message":"git clone failed (no GITHUB_TOKEN secret configured — the repository may require authentication): fatal: unable to access 'https://github.com/org/repo.git/': Could not resolve host: github.com"}}`
+	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), []byte(agentInfo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := rt.Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run() should return error for dead-on-arrival sandbox")
+	}
+
+	errStr := err.Error()
+
+	// The cause must come FIRST — before any DOA ceremony.
+	if !strings.HasPrefix(errStr, "cloudrun-sandbox: git clone failed") {
+		t.Errorf("error should lead with the clone failure cause, got:\n%s", errStr)
+	}
+
+	// The DOA detail must still be present (after the cause).
+	if !strings.Contains(errStr, "sandbox dead on arrival") {
+		t.Errorf("error should still contain DOA detail, got:\n%s", errStr)
+	}
+
+	// The cause should appear before DOA in the string.
+	causeIdx := strings.Index(errStr, "git clone failed")
+	doaIdx := strings.Index(errStr, "sandbox dead on arrival")
+	if causeIdx >= doaIdx {
+		t.Errorf("cause (idx=%d) must appear before DOA ceremony (idx=%d) in error:\n%s",
+			causeIdx, doaIdx, errStr)
+	}
+
+	t.Logf("LEAD LINE: %s", strings.SplitN(errStr, "\n", 2)[0])
+}
+
+// TestCloudRunSandboxRuntime_Run_DOA_NoAgentInfo tests the fallback DOA error
+// when agent-info.json is absent (sandbox died before statusHandler ran).
+func TestCloudRunSandboxRuntime_Run_DOA_NoAgentInfo(t *testing.T) {
+	tmpDir := t.TempDir()
+	rootDir := filepath.Join(tmpDir, "scion")
+
+	mockBin := filepath.Join(tmpDir, "sandbox")
+	script := `#!/bin/sh
+case "$1" in
+  run)    echo sandbox-ok; exit 0 ;;
+  exec)   echo "sandbox not running"; exit 1 ;;
+  delete) exit 0 ;;
+  *)      exit 1 ;;
+esac
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	homeDir := filepath.Join(tmpDir, "agent-home")
+	if err := os.MkdirAll(homeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	stateFile := filepath.Join(tmpDir, "state.json")
+	rt := &CloudRunSandboxRuntime{
+		bin:          mockBin,
+		state:        newSandboxStateStore(stateFile),
+		rootDir:      rootDir,
+		watchCancels: make(map[string]context.CancelFunc),
+	}
+
+	cfg := RunConfig{
+		Name:      "early-death-agent",
+		HomeDir:   homeDir,
+		Workspace: filepath.Join(tmpDir, "workspace"),
+		Image:     "omni-image",
+		Project:   "my-project",
+		ProjectID: "proj-123",
+		Harness: &mockHarness{
+			command: []string{"claude", "--agent"},
+			env:     map[string]string{},
+		},
+		Labels: map[string]string{"scion.name": "early-death-agent"},
+	}
+
+	_ = os.MkdirAll(cfg.Workspace, 0755)
+
+	// No agent-info.json written — sandbox died before init ran.
+
+	_, err := rt.Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run() should return error for dead-on-arrival sandbox")
+	}
+
+	errStr := err.Error()
+
+	// The error should say cause is unavailable, not silently omit it.
+	if !strings.Contains(errStr, "cause unavailable") {
+		t.Errorf("error should say cause is unavailable when agent-info.json is absent, got:\n%s", errStr)
+	}
+
+	// DOA detail must still be present.
+	if !strings.Contains(errStr, "sandbox dead on arrival") {
+		t.Errorf("error should contain DOA detail, got:\n%s", errStr)
+	}
+
+	t.Logf("LEAD LINE: %s", strings.SplitN(errStr, "\n", 2)[0])
+}
