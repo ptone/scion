@@ -302,6 +302,10 @@ export class ScionPageAgentCreate extends LitElement {
       font-size: 0.875rem;
     }
 
+    .error-banner > span {
+      white-space: pre-wrap;
+    }
+
     .error-banner sl-icon {
       flex-shrink: 0;
       margin-top: 0.125rem;
