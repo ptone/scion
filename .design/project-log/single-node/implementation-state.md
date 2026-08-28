@@ -14007,3 +14007,48 @@ The check that caught it was reading **LAST ACTIVITY against the COMPLETED signa
 disagreed. I nearly did not run it — I had already reported "no silent stalls" to the coordinator and
 was treating the roster as settled. **A roster answers "is anyone stuck"; it does not answer "is anyone
 moving that I think has stopped."** Those are different questions and I had only asked the first.
+
+### §35.88 — Task #92 resolves to Shape C. And I destroyed evidence with a stop order.
+
+03:20. Developer replied to both my 03:04 and 03:16 messages. Branch unmoved at `54cc98b`.
+
+**Q1 ANSWERED, AND IT SETTLES §35.86.** *"I read it. I did NOT execute it in a browser."* The
+empty-selection claim — the entire reason I accepted a fix with a property I twice rejected — is a
+four-function code trace: UI sends `profile=''` -> hub `project_settings_handlers.go:533` leaves it
+empty -> broker `handlers.go:2083-2086` falls back to `settings.ActiveProfile` -> `resolveManagerForOpts`
+`:2603` resolves to cloudrun-sandbox. **Rule 19 fired exactly as written and the answer was the one I
+assumed.** Passed to rev2 so it stops trying to extract what the author volunteered, and re-scoped its
+item 1 from *"did they test it"* to *"is the trace right, and which of its two unrun links is weakest."*
+
+**THE DEVELOPER PROPOSED SHAPE B AND SAID IT DOMINATES. IT IS RIGHT THAT B IS NEEDED AND WRONG THAT IT
+DOMINATES.** Its own comparison names the exception without weighting it: **Shape B routes the happy
+path through an error return.** `len(profiles)==0` synthesises a profile named `default` that is not in
+settings; `ResolveRuntime("default")` *fails*; the code falls back to `s.manager`. Correct today. But a
+success path whose control flow is an error branch, and silent the day someone makes that error fatal —
+a reasonable hardening. *"Already relied on elsewhere"* argues the fallback should exist; it does not
+argue it should be the normal path.
+
+**SHAPE C — take both, and they compose better than either.** Template seeded (A) so `default` exists
+with explicit wiring; predicate fixed (B) so `local` and `remote` both drop. Surviving list is **exactly
+one profile, `default`, typed cloudrun-sandbox, explicitly wired.** `autoSelectProfile` fires at length
+1 (B's win); `ResolveRuntime` succeeds (A's win); the `len==0` fallback returns to being a safety net
+rather than the mechanism. **This closes task #93** instead of leaving it open, which was my whole
+objection to A standing alone.
+
+**Not a third reversal — an addition.** A's commit stays, so rev2's in-flight review keeps its value. B
+lands as a second, additive commit **after** the verdict, and rev2 then gets the delta only. Sequencing
+declared non-negotiable to the developer.
+
+**MY ERROR, AND IT COST REAL EVIDENCE.** The developer reported three results it had *measured* by Go
+test — then deleted the test, because my stop order said both *"leave it uncommitted"* and *"DO NOT
+IMPLEMENT IT"* and the second overrode the first. **The best evidence for Shape B is now hearsay, and I
+caused that.** Required its restoration as a committed pin in the B commit.
+
+**Rule 21 (new).** *A STOP ORDER MUST PRESERVE EVIDENCE, NOT DISCARD IT.* "Stop" and "undo" are
+different instructions and an urgent message blurs them. When halting work, say explicitly what to
+**keep**. Work in progress is often the only measurement anyone has made.
+
+**Accepted from the developer:** the antigravity crash is a startup-ordering defect, orthogonal to
+profile selection, out of scope for #92 — reasoning clean, carried separately. And its caveat that
+*"non-local brokers serve only their own type"* is a real invariant assertion behind a confident
+function name; asked for it to be stated in a comment rather than designed around.
