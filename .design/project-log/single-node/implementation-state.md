@@ -15448,3 +15448,100 @@ admin DB API, but it does **not** block the fix: the 502 comes from `FindHarness
 *before* auth resolution, and antigravity drops to a shell. **I accepted this reasoning and flagged in
 the brief that it is reasoned, not measured** — if row 1 goes green and the agent still will not
 usefully start, I want that back even though it is outside the fix.
+
+---
+
+## §35.82 — Fix B withdrawn on measurement. The withdrawal condition worked, and it pointed somewhere none of my five candidates looked
+
+**Rule 36 (new): a default is not a value, it is a value at a precedence.** Dropping the precedence from
+the definition is how a change that alters behaviour gets described as inert. I did exactly that in the
+Fix B brief and the developer caught it.
+
+### The measurement
+
+`sn-harnesscfg-dev` measured all seven rows as real Go tests (14 cases, green,
+`sn-harnesscfg-dev/blast-radius-measurement` @ `dd06037`). **Row 4 moved**, so B is withdrawn without
+being implemented — exactly what the withdrawal condition was for.
+
+The template's `default_harness_config` enters `ResolveHarnessConfigName` at **rung 3**
+(`template-default`), and via the hub at **rung 1** (`CLIFlag`, because the hub stamps it into
+`AppliedConfig.HarnessConfig`). Both beat a broker profile at **rung 6**. So B would have silently
+overridden every workstation user who configured a profile-level harness config.
+
+**The developer's correction, verbatim and accepted:** *"The brief says 'This change is about stamping
+identity, not about changing defaults.' This is incorrect — the name is the same (`antigravity`), but
+the RANK changes from rung 7 (beneath profile) to rung 3/1 (above profile). The rank change IS a default
+change."*
+
+That sentence of mine was doing real work in the brief — it was the argument for why a shared-ground
+edit was safe. It was wrong, and it was wrong in a way that made the change *look* inert by omitting the
+only property that mattered. **This is the second brief today corrected by its executor on a
+load-bearing point** (round 1 of the investigation caught my "one line in the right keyspace" when the
+line was postgres-only). Both corrections came from the "tell me what is wrong in this brief" paragraph.
+
+### Why the withdrawal was worth more than an implementation
+
+Had I skipped the measurement, B is a one-line YAML change that passes review, ships, and degrades
+workstation users **silently** — no error, no warning, just a different harness config than the one
+they configured. Nothing in the diff would have shown it. The rank lives in a different file from the
+value.
+
+### Where the measurement pointed: Fix F
+
+The developer's remediation option (1) — *"the hub stamps only ID/hash without the name"* — sent me back
+to the broker, and there is an option none of A–E covered. **All five of my candidates tried to make the
+HUB supply something. None asked why the BROKER cannot resolve what it already correctly computes.**
+
+`hydrateHarnessConfig` (`handlers.go:992-1024`) contains both halves of the fix, three lines apart:
+
+- `:993` guards the whole function on `HarnessConfigID != "" || HarnessConfigHash != ""` — otherwise
+  return empty, which sends the broker to the on-disk search that 502s.
+- `:998-1005` **already resolves a harness-config by NAME** against the local storage backend:
+  `ref := cfg.HarnessConfigID; if ref == "" { ref = cfg.HarnessConfig }`.
+
+The capability exists. The guard above it makes it unreachable. And the function's own doc says it
+exists *"to make harness-configs usable from a broker that lacks the config on its local filesystem"* —
+a one-sentence description of our defect.
+
+**But the obvious one-line widening does not work,** and noticing that is the difference between a fix
+and a fourth dead end: the hub sends an **empty** name. `antigravity` is invented *later* by
+`resolveHarnessConfigNameForBroker` (`handlers.go:2421-2458`), which **returns a string and never writes
+it back into `cfg`**. At hydration time `cfg.HarnessConfig` is still `""`.
+
+**The defect, finally stated properly:**
+
+> The broker already knows how to resolve a harness-config *name* through its 7-rung ladder, and already
+> knows how to resolve a *ref* against local storage. It never connects the two. Hydration uses the
+> **hub's** name — which is empty — instead of the **ladder's** resolved name.
+
+**Fix F:** hydrate using the ladder's resolved name, store first, disk fallback. It supplies no name,
+changes no rank, adds no rung — it changes only *where an already-resolved name is looked up*. If that
+holds, row 4 is untouched by construction, and F fixes the diagnosis (*resolution moved from disk to
+store*) at the place resolution actually lives.
+
+**This is the third reframing of the same defect today, and each one was better than the last:**
+1. *"The hub does not load the defaults file"* → points at `LoadBootstrapKoanf` → postgres-only. Dead.
+2. *"Hosted mode moved harness-configs from disk to store, so the hub must stamp identity"* → points at
+   the hub supplying a name → moves the rank. Withdrawn.
+3. *"The broker resolves the name correctly and then looks it up in the wrong place"* → points at the
+   broker's own lookup → no rank change at all.
+
+**Each reframing was produced by a measurement that killed the previous one.** None came from thinking
+harder about the same framing. That is the argument for withdrawal conditions over review: a review of
+B would have argued about whether the rank change mattered; the measurement settled it and handed back a
+better question.
+
+### Dispatched, with F treated as my third candidate for being wrong
+
+Round-2 brief to the same warm developer, harness retained. Three preconditions carry F, and
+**precondition 1 is cheap enough to kill it outright**: is `conn.LocalStorage != nil` in single-node
+hosted mode? If nil, the store path is unreachable and both `resolver` fallbacks require an ID. Told to
+message me inside ten minutes on that one rather than completing the rest.
+
+**A rule-19 flag I raised rather than worked around:** the ID/hash guard appears **three times**
+(`handlers.go:509`, `handlers.go:993`, structurally at `start_context.go:478`). A condition written
+three times is usually deliberate. The developer is to find out *why* before widening it, and if there
+is a security or remote-broker reason, quote it — it outranks F.
+
+**New withdrawal condition is row 9** (row 4 re-run under F). If F moves it too, then every available
+fix moves it, the problem is structural, and it escalates to ptone rather than to another round with me.
