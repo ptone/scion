@@ -93,6 +93,18 @@ func TestStripGitCloneCredentials(t *testing.T) {
 			wantCleanURL: "https://github.com/org/repo",
 			wantPassword: "user",
 		},
+		{
+			name:         "ssh scheme — userinfo is a login, not a credential",
+			rawURL:       "ssh://git@github.com/org/repo",
+			wantCleanURL: "ssh://git@github.com/org/repo",
+			wantPassword: "",
+		},
+		{
+			name:         "git scheme — returned unchanged",
+			rawURL:       "git://github.com/org/repo",
+			wantCleanURL: "git://github.com/org/repo",
+			wantPassword: "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -130,5 +142,55 @@ func TestStripGitCloneCredentials_NoCredentialInCleanURL(t *testing.T) {
 		assert.NotEmpty(t, password, "expected a credential to be extracted from %q", rawURL)
 		assert.NotContains(t, cleanURL, "FAKE-KEY-SENTINEL-not-a-real-credential",
 			"credential leaked into clean URL for input %q", rawURL)
+	}
+}
+
+// TestStripGitCloneCredentials_SCPStyleUnchanged pins the pass-through
+// behaviour for scp-style git URLs (git@host:path). These URLs use SSH
+// key authentication — the "git" before @ is a login name, not a
+// credential. url.Parse rejects the colon-separated path as an invalid
+// port, so the function returns the input unchanged via the parse-error
+// path. This test exists because that correct behaviour arises from an
+// error path, not from explicit intent. A future change that "improves"
+// the parsing — tries git.ParseURL, pre-normalises scp syntax, or
+// catches the error and recovers — would silently break SSH cloning for
+// every operator using the most common SSH form. This test must fail
+// first.
+func TestStripGitCloneCredentials_SCPStyleUnchanged(t *testing.T) {
+	scpURLs := []string{
+		"git@github.com:org/repo",
+		"git@github.com:org/repo.git",
+		"deploy@internal.host:team/project",
+	}
+	for _, rawURL := range scpURLs {
+		cleanURL, password := stripGitCloneCredentials(rawURL)
+		assert.Equal(t, rawURL, cleanURL,
+			"scp-style URL must be returned byte-identical")
+		assert.Empty(t, password,
+			"scp-style URL must not extract a credential — "+
+				"'git' is a login name, not a secret; injecting it as "+
+				"GITHUB_TOKEN would poison the gh CLI and GitHub API calls")
+	}
+}
+
+// TestStripGitCloneCredentials_SSHSchemeUnchanged verifies that
+// ssh://git@host/path URLs are returned unchanged with nothing
+// extracted. The "git" in ssh:// userinfo is a login name, not a
+// credential. Stripping it would break the SSH connection, and
+// injecting it as GITHUB_TOKEN would pollute the env with a bogus
+// credential.
+func TestStripGitCloneCredentials_SSHSchemeUnchanged(t *testing.T) {
+	sshURLs := []string{
+		"ssh://git@github.com/org/repo",
+		"ssh://git@github.com/org/repo.git",
+		"ssh://deploy@internal.host/team/project",
+	}
+	for _, rawURL := range sshURLs {
+		cleanURL, password := stripGitCloneCredentials(rawURL)
+		assert.Equal(t, rawURL, cleanURL,
+			"ssh:// URL must be returned byte-identical")
+		assert.Empty(t, password,
+			"ssh:// URL must not extract a credential — "+
+				"userinfo in ssh:// is a login name, not a secret")
 	}
 }

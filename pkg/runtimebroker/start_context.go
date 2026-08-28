@@ -972,6 +972,24 @@ func stripGitCloneCredentials(rawURL string) (cleanURL, password string) {
 	parsed, err := url.Parse(normalized)
 	if err != nil || parsed.Host == "" {
 		// Not a parseable URL — return as-is; nothing to strip.
+		//
+		// scp-style URLs (git@github.com:org/repo) depend on this path:
+		// url.Parse rejects the colon-separated path as an invalid port,
+		// and we return the input unchanged. This is correct — scp-style
+		// URLs use SSH key authentication, not userinfo credentials.
+		// Do not "improve" this parsing to handle the error; the
+		// pass-through IS the correct behaviour for these URLs.
+		return rawURL, ""
+	}
+
+	// Scheme guard: only strip credentials from HTTP(S) URLs.
+	// The property that userinfo means "credential" is specific to
+	// HTTP(S). For ssh://, git://, file://, and any unknown scheme,
+	// userinfo (e.g. "git" in ssh://git@host) is a login name, not a
+	// secret — stripping it would break the connection, and injecting it
+	// as GITHUB_TOKEN would pollute the env with a bogus credential that
+	// poisons the gh CLI, git credential helpers, and GitHub API calls.
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return rawURL, ""
 	}
 
