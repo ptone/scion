@@ -12890,3 +12890,73 @@ would have received a bare "not a defect" and never learned my argument was shor
 
 **No fix, no pin, branch untouched, no Instance created.** The reviewer explicitly declined to
 manufacture a pin, which the brief asked for and which is the right restraint on an open PR.
+
+### §35.62 — #85 shipped a §1 BLOCKER to `main`: the deploy script cannot run on a stock Mac (01:41)
+
+**ptone ran the documented command and got `./scripts/single-node/deploy.sh: line 286: ${scheme,,}: bad
+substitution`.** `${var,,}` is bash **4.0+**; macOS ships **bash 3.2.57**. §1 says *"an operator with a
+GCP project runs one deploy command"* — **on a stock Mac that command dies at line 286.**
+
+**Two sites, both ours, both from #85:** line 286 `${scheme,,}` (`82bc5070`) and line 294 `${host,,}`
+(`eee75e8f`). Swept the whole file for the rest of the class — `,,` `^^` `${v,}` `${v^}`, `declare -A`,
+`local -n`, `mapfile`, `readarray`, `globstar`, `wait -n`, `coproc`, `[[ -v ]]`, `${!a[@]}`, `;;&`,
+`|&`, `printf -v` — **these two are the only hits.** `tr` is already in the frozen set and already used
+five times, so the fix costs no dependency.
+
+**IT WAS ALREADY MERGED.** `GoogleCloudPlatform/scion#1335` merged **01:38:29Z** as `1befe923`. ptone
+hit the error *because* he merged it to try it. **My "do not merge" reached him three minutes late** — I
+read the PR state at 01:34 and acted on it at 01:44 without re-reading. **That is the "`behind` is a
+reading with a shelf life" rule, broken on merge state instead of on a commit count.** Corrected to
+dev2 within three minutes of learning it, before it had touched anything; the fix is now a
+fix-forward on a new branch `scion/bash32-portability` off `1befe923`.
+
+**THE TWO LINES ARE NOT THE DEFECT. THE GATE IS.** Five review rounds, 42 Go tests, 62 shellcheck files
+and a live end-to-end deploy all passed — **because every one of them ran on Linux with bash 5.**
+Nothing in this project can see a bash-3.2 incompatibility. shellcheck cannot help: it has no
+bash-version targeting.
+
+**The gate I proposed, and why I think it is cheap.** All three harness entry points hardcode
+`exec.Command("bash", "-c", …)` (`deploy_script_test.go:89`, `:124`, `:1247`). Resolving that name from
+an env var makes the **existing** suite runnable under any interpreter; then one CI job builds bash
+3.2.57 and runs the same tests under it. **That exercises rather than reads**, which is the project's
+own standing rule. Rejected the cheaper grep-lint as the sole gate: it is a *reading* gate, blind to
+**semantic** differences — e.g. bash 3.2 changed the behaviour of a **quoted** RHS of `=~`, and line
+~298 uses `=~` with `BASH_REMATCH`. Nobody on this project knows whether that line behaves identically
+on 3.2.
+
+**The trap I flagged, which decides whether the gate is real: `bad substitution` is a RUNTIME error.**
+The line must *execute* for 3.2 to complain, so the gate catches exactly what the suite executes and no
+more. Told dev2 to mutate before trusting it — restore both `,,` and run under 3.2 — and that **if it
+comes back GREEN that is the finding of the task**, not a footnote, because the gate would then ship
+looking like protection while protecting nothing. Per-location 2×2, off-diagonal green.
+
+**Explicitly out of scope: a "bash 4 required" version preflight.** Once the script is 3.2-clean that
+check asserts a floor that is not true, and a *refused* deploy on the platform most operators use is not
+better than a working one. §1 says **one** command; "install a newer bash first" is a second one.
+
+### §35.63 — #89: bash 3.2 is one instance of a class nobody has tested
+
+**ptone's laptop is the first macOS this script has ever run on.** Dispatched `sn-adcpreflight-rev2` to
+audit the class in parallel with #88 (`briefs/sn-macos-portability-rev-r1.md`).
+
+**The frozen dependency set is `awk curl gcloud grep mktemp sed cat head tr rm sleep`. Seven of those
+ten differ between GNU and BSD userland.** Top suspect named in the brief: **bare `mktemp` with no
+template** — GNU allows it, BSD's usage line demands one. Then `sed -i`/`-E`/`\+`, `grep -P`/`-o`, BSD
+awk vs gawk, `head -1`, `date -d`, and GNU-only binaries that may have crept in outside the frozen set.
+
+**Two deliberate design choices in that brief.** First, **the reviewer has no macOS, so this is
+knowingly a reading audit and I said so** — every row must be labelled CONFIRMED or CANDIDATE, because
+*a candidate list written in the voice of a measurement is worse than nothing, since it will be
+believed.* Second, and better: **the deliverable ends with a single paste-able diagnostic command for
+ptone** that prints his tool versions and answers the top candidates. **That converts a reading audit
+into a measurement in one round trip** — and I told the reviewer that if it judges the audit not worth
+its cost, it should say so and I will send the one-liner alone, because a real answer from his machine
+beats our best inference.
+
+**Told ptone this directly** rather than letting him discover it serially: *"bash 3.2 is probably not
+the only difference you will hit… I would rather give you one list than have you report five errors
+over an hour."* Also asked him to report any further error immediately — **a real failure from his
+machine outranks our audit.**
+
+**The promise to dev2 was kept and stated, not reversed.** #88 goes ahead of #87 in priority; the
+first-refusal offer on #87 with rev2 as the pair still holds. Said so explicitly in the dispatch.
