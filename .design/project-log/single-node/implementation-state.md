@@ -13985,3 +13985,25 @@ the review verdict, because announcing a fix and then retracting it is the exact
 REASON MUST BE TESTED AT LEAST AS HARD AS THE FIX.* Twice I said "this leaves auto-select silent, so
 no"; the third time I said "the empty state saves it" and dispatched on it. If that sentence is wrong I
 have approved what I twice refused, on an argument nobody ran.
+
+### §35.87 — Near-miss: a COMPLETED signal is not a quiesced agent
+
+03:16. `sn-runtimeprofile-dev` signalled **COMPLETED at 03:04**. At 03:16 `scion list` showed it
+`running`, **LAST ACTIVITY 8 seconds ago**. It had received my 03:04 third-fix-shape message *after*
+pushing `54cc98b`, and was plausibly implementing it — onto a branch `sn-adcpreflight-rev2` had been
+reviewing since 03:11.
+
+**That is the third instance of the branch-moves-under-the-reviewer failure**, and the first one caught
+before it happened. Sent an explicit stop, told it my 03:04 message was **not a work order**, and asked
+for prose instead of code. Then verified: `git ls-remote` still reads `54cc98b`. Target intact.
+
+**Rule 20 (new).** *A COMPLETED SIGNAL IS NOT A QUIESCED AGENT.* Completion reports intent, not
+quiescence — an agent can complete and then act again on a message that arrived after it reported. So a
+message sent to an agent I believe is finished is still a live instruction unless I say otherwise.
+Corollary: **when a message crosses a push in flight, say so explicitly and downgrade it in writing.**
+The sender knows the messages crossed; the recipient only sees an instruction from the architect.
+
+The check that caught it was reading **LAST ACTIVITY against the COMPLETED signal** and noticing they
+disagreed. I nearly did not run it — I had already reported "no silent stalls" to the coordinator and
+was treating the roster as settled. **A roster answers "is anyone stuck"; it does not answer "is anyone
+moving that I think has stopped."** Those are different questions and I had only asked the first.
