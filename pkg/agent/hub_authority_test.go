@@ -24,6 +24,8 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -151,6 +153,65 @@ func TestHubAuthority_ContextFlag(t *testing.T) {
 	ctx = api.ContextWithHubHarnessConfigAuthority(ctx)
 	assert.True(t, api.IsHubHarnessConfigAuthority(ctx),
 		"after setting: flag must be true")
+}
+
+// TestHubAuthority_ProvisionAgent_SuppressesSettings is an integration test
+// that drives ProvisionAgent with settings that carry a default_harness_config,
+// the hub-authority context flag set, and no CLIFlag or template. It verifies
+// that ProvisionAgent reads the flag from context, nils out settings, and
+// returns the "no harness-config resolved" error — NOT an error containing
+// the settings-provided name.
+//
+// This pins the `hcSettings = nil` suppression line in provision.go. Without
+// that line the settings default fires and ProvisionAgent tries (and fails) to
+// find the invented harness-config directory, producing a different error that
+// contains the invented name.
+func TestHubAuthority_ProvisionAgent_SuppressesSettings(t *testing.T) {
+	mockRuntimeForTest(t)
+	tmpDir := t.TempDir()
+
+	// Isolate from real HOME / working directory.
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	// Create a project .scion dir with settings that carry a
+	// default_harness_config. This is the value the broker would invent
+	// if the suppression line were removed.
+	projectDir := filepath.Join(tmpDir, "project")
+	scionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(scionDir, 0755)
+
+	settingsYAML := `schema_version: "1"
+default_harness_config: invented-name
+`
+	_ = os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsYAML), 0644)
+
+	// Create a bare template that does NOT set default_harness_config.
+	// This ensures the template chain loads (ProvisionAgent requires it)
+	// but contributes nothing to harness-config resolution — forcing
+	// the test to depend on whether rung 7 (settings default) fires.
+	tplDir := filepath.Join(scionDir, "templates", "bare-tpl")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{}`), 0644)
+
+	// Hub-authority context: hosted mode, broker must not invent.
+	ctx := api.ContextWithHubHarnessConfigAuthority(context.Background())
+
+	// CLIFlag empty (harnessConfig=""), template has no default_harness_config.
+	// Without suppression: rung 7 fires → "invented-name" → harness-config
+	// dir not found → error containing "invented-name".
+	// With suppression: settings nil → all rungs fail → "no harness-config
+	// resolved" error (the hosted variant).
+	_, _, _, err := ProvisionAgent(ctx, "test-agent", "bare-tpl", "", "", scionDir, "", "", "", "")
+	require.Error(t, err, "ProvisionAgent must fail when hub sent no harness-config and broker is suppressed")
+	assert.Contains(t, err.Error(), "no harness-config resolved",
+		"error must be the resolution failure, not a harness-config-dir-not-found for an invented name")
+	assert.NotContains(t, err.Error(), "invented-name",
+		"the settings-provided name must NOT appear — the broker must not invent it")
 }
 
 // TestHubAuthority_ErrorMessageHostedVsWorkstation verifies that the error

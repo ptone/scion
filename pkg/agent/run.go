@@ -216,6 +216,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// Resolve harness config name using the unified resolution chain.
 	// finalScionCfg acts as both stored config (resume) and template config.
+	//
+	// No hub-authority suppression here: GetAgent (called above) already ran
+	// ProvisionAgent with the suppression. If that succeeded,
+	// finalScionCfg.HarnessConfig is populated and rung 2 (StoredConfig)
+	// fires before rungs 6-7 are reached. If it failed, Start already
+	// returned error at line 172. The settings fallback is unreachable on
+	// the hosted path, so suppressing it here would be dead code.
 	harnessConfigName := ""
 	if hcRes, err := config.ResolveHarnessConfigName(config.HarnessConfigInputs{
 		CLIFlag:      opts.HarnessConfig,

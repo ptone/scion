@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -339,5 +340,46 @@ func TestAgentResponseHarnessConfigRevision(t *testing.T) {
 	})
 	if resp.HarnessConfigRevision != "sha256:deadbeef" {
 		t.Errorf("HarnessConfigRevision lost in response conversion: got %q", resp.HarnessConfigRevision)
+	}
+}
+
+// TestResolveHarnessConfigForEnvGather_HubAuthoritySuppressesSettings is an
+// integration test that drives resolveHarnessConfigForEnvGather with settings
+// that carry a default_harness_config, with HubIsHarnessConfigAuthority set
+// on the request config. It verifies that the method reads the flag, nils out
+// settings, and returns "" (resolution failed) instead of the settings-provided
+// name.
+//
+// This pins the `hcSettings = nil` suppression line in handlers.go. Without
+// that line, rung 7 fires and the method returns the invented name.
+func TestResolveHarnessConfigForEnvGather_HubAuthoritySuppressesSettings(t *testing.T) {
+	srv, _, _ := dispatchTestEnv(t, false)
+
+	// Settings with a default_harness_config — the value the broker would
+	// invent if the suppression line were removed.
+	settings := &config.VersionedSettings{
+		DefaultHarnessConfig: "invented-name",
+	}
+
+	// Without the flag: settings default fires → "invented-name"
+	reqNoFlag := CreateAgentRequest{
+		Name:   "test-agent",
+		Config: &CreateAgentConfig{},
+	}
+	got := srv.resolveHarnessConfigForEnvGather(reqNoFlag, settings)
+	if got != "invented-name" {
+		t.Errorf("without hub authority: expected settings default 'invented-name', got %q", got)
+	}
+
+	// With the flag: settings must be suppressed → "" (resolution fails)
+	reqWithFlag := CreateAgentRequest{
+		Name: "test-agent",
+		Config: &CreateAgentConfig{
+			HubIsHarnessConfigAuthority: true,
+		},
+	}
+	got = srv.resolveHarnessConfigForEnvGather(reqWithFlag, settings)
+	if got != "" {
+		t.Errorf("with hub authority: expected empty (suppressed), got %q — broker invented a name", got)
 	}
 }
