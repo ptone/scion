@@ -14052,3 +14052,50 @@ different instructions and an urgent message blurs them. When halting work, say 
 profile selection, out of scope for #92 — reasoning clean, carried separately. And its caveat that
 *"non-local brokers serve only their own type"* is a real invariant assertion behind a confident
 function name; asked for it to be stated in a comment rather than designed around.
+
+### §35.89 — Task #92 review: REQUEST CHANGES, and my reversal reason survives EXECUTION
+
+03:22. `sn-adcpreflight-rev2` reported on `54cc98b`. Review: `reviews/task92-r1.md`. Verdict accepted
+without re-running any of it, per the process.
+
+**THE REVERSAL HOLDS, AND NOT BY ARGUMENT.** I asked rev2 to judge a code trace and, if cheap, execute
+its weakest link. **It executed both.**
+- Link (b): real `InitMachine` -> real `LoadEffectiveSettings("")` -> `ActiveProfile="default"`,
+  `ResolveRuntime("")=cloudrun-sandbox`. It also settled the fact the developer's disclosure *glossed*:
+  **koanf loads the embedded defaults FIRST and the seed AFTER, so the scalar `active_profile` is
+  OVERWRITTEN while the `profiles` map MERGES.** That asymmetry is the entire reason Shape A works.
+- Link (a): ran `applyProjectDefaults`. Fresh deploy -> `ac.Profile` stays `""`. Only an explicit
+  annotation injects one. **The link I feared most is measured, not structural.**
+
+So §35.86 closes in my favour — but on a mechanism neither the developer nor I had run, and which neither
+of us had named. **I was right for a reason I did not hold.**
+
+**R1, Required: the load-bearing path has no committed regression guard.** All three pins assert either
+the seed *file* (pre-merge) or hand-written inline YAML that never runs `InitMachine`. **The koanf
+overwrite that carries the whole fix — the twice-rejected property — is pinned by nothing.** Works
+today; a merge-order or template change would pass every test and silently re-block §1.
+
+**RULE 21 FIRED TWICE IN ONE HOUR, AND THE SECOND TIME WAS NOT MY DOING.** rev2 established both links
+by probe **and deleted both probes.** Its own blocking finding is that no committed test does what its
+probe just did. **R1 is literally "commit the probe you deleted."** The load-bearing path of this fix
+has now been measured twice, by two agents, with instruments that no longer exist. That is not a
+coincidence — it is what happens when measurement is treated as an act of persuasion rather than an
+artifact.
+
+**Non-blocking, all accepted:** O2 — a `scion.io/active-profile=remote` annotation **pre-empts** the
+empty-profile fallback, and "degrades gracefully" does not save you from a known-but-wrong profile; this
+is a reason for Shape B that neither the developer nor I had. O3 — the InitMachine pin is a *mix* of
+determining and non-determining assertions. O4 — the regression test guards the FILTER, not the SEED,
+and would pass with the fix reverted. O5 — `defaultSandboxBin` duplication acceptable; export the
+constant plus one equality test rather than a new package.
+
+**Delta released to the developer as ONE commit on top of `54cc98b`:** R1 + O3 + O4 + O5 + the test my
+stop order destroyed. **Shape B explicitly withheld** pending ptone.
+
+**O1 filed as task #94** rather than widening the branch: the sandbox-binary-absent fallback is
+reachable, but only as the distinct **cloudrun-instances** tier (`factory.go:96-103`). Pre-existing.
+
+**Asked ptone the one decision that is his** (03:23, Simplified Technical English, single question):
+correct the shared filter — which also changes the multi-node cloudrun tier — or leave the broken
+kubernetes option in the menu. Recommended (a). Also re-raised task #88's upstream PR, and repeated the
+egress retraction I owed him in plain terms.
