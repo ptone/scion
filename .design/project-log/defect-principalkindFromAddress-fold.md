@@ -355,7 +355,8 @@ exploit requires a thread in which ALL agent replies were persisted via
 the verbatim-Sender broker inbound path and none through the canonical
 server-constructed path. No such thread has been demonstrated.
 
-**Channel filter hole (independent of DEF-32, potentially larger).**
+**DEF-34: Asymmetric Channel invariant (independent of DEF-32).**
+
 The function's filter pins `Channel: "web"` (line 1636):
 
     filter := store.MessageFilter{
@@ -364,31 +365,64 @@ The function's filter pins `Channel: "web"` (line 1636):
         After:    after,
     }
 
-An agent reply persisted with any other Channel value is invisible to
-this guard regardless of Sender casing. Two paths can write non-web
-Channel into a web-chat thread:
+The hub enforces Channel on one side of the conversation and the guard
+filters on it as though both sides were enforced:
+
+- **User → agent (handlers_agent_messaging.go:736):** Channel is
+  defaulted to `"web"` when the authenticated user's client type is
+  `"web"`:
+
+      if structuredMsg.Channel == "" {
+          if user := GetUserIdentityFromContext(ctx); user != nil {
+              if au, ok := user.(*AuthenticatedUser); ok && au.ClientType() == "web" {
+                  structuredMsg.Channel = "web"
+              }
+          }
+      }
+
+- **Agent → user (handlers_agent_messaging.go:247):** Channel is
+  `req.Channel` — from the agent runtime's response body, with no
+  defaulting and no validation:
+
+      Channel: req.Channel,
+
+  Furthermore, empty Channel skips channel-registration validation
+  entirely (handlers_agent_messaging.go:207):
+
+      if req.Channel != "" {
+          // ... validate against registered channels ...
+      }
+
+  When `req.Channel` is `""`, the entire validation block is skipped.
+  Empty Channel is a fully supported value that is invisible to the
+  guard.
+
+The defect is the asymmetry: the hub tags the user's message as
+Channel = `"web"` and guarantees nothing about the agent's reply.
+`hasAgentReplyAfter` filters on `Channel = "web"` — a field the hub
+forces for one participant and not the other.
+
+Two paths can write non-web Channel into a web-chat thread:
 
 1. **handleAgentOutboundMessage** (handlers_agent_messaging.go:247):
-   `Channel: req.Channel` — from agent runtime HTTP response body. The
-   hub does not force or default Channel. If the runtime omits the
-   `"channel"` field or sets it to anything other than `"web"`, the reply
-   is persisted with Channel != `"web"` and is invisible to the guard.
+   Agent runtime omits `"channel"` from its response body → Channel =
+   `""` → both validation (line 207) and defaulting are skipped → reply
+   persisted with Channel = `""`, invisible to the guard. No malicious
+   actor required — a runtime that simply omits Channel is sufficient.
 
 2. **handleBrokerInbound** (handlers_broker_inbound.go:258):
-   `Channel: req.Message.Channel` — from broker plugin body. A broker
-   plugin sending an agent reply with Channel = `"slack"` or `"discord"`
-   to the same ThreadID as the web-chat conversation would be invisible
-   to the guard.
+   `Channel: req.Message.Channel` — broker plugin body. An agent reply
+   with Channel = `"slack"` or `"discord"` to the same ThreadID is
+   invisible to the guard.
 
 Practical exploitability depends on whether agent runtimes reliably echo
-`Channel = "web"` on responses to web-chat messages. The hub code does
-not enforce this — `handleAgentOutboundMessage` passes `req.Channel`
-through with no validation or defaulting. No malicious actor is required;
-a runtime that simply omits Channel on its response body is sufficient.
+`Channel = "web"` on responses to web-chat messages — a behaviour the
+hub does not enforce.
 
 *Miss consequence (casing):* Latent fail-open on agent-reply immutability.
-*Miss consequence (channel filter):* Agent-reply immutability bypassed
-when agent replies through non-web channel or runtime omits Channel.
+*Miss consequence (DEF-34, channel asymmetry):* Agent-reply immutability
+bypassed when agent reply Channel != `"web"`, which the hub permits on
+the agent-to-user path.
 
 ### ROUTING sites (5)
 
