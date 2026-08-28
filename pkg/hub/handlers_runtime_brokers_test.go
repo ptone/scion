@@ -167,7 +167,7 @@ func (f *brokerAuthFixture) asAgent(t *testing.T, method, path string, body inte
 	// Mint an agent token.
 	svc := f.srv.GetAgentTokenService()
 	require.NotNil(t, svc)
-	tok, err := svc.GenerateAgentToken(agent.ID, agent.ProjectID,
+	tok, _, err := svc.GenerateAgentToken(agent.ID, agent.ProjectID,
 		[]AgentTokenScope{ScopeProjectRead}, nil)
 	require.NoError(t, err)
 

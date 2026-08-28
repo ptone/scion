@@ -346,7 +346,7 @@ func TestEnvVar_ProjectScope_AgentReadOwnProject(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID,
+	agentToken, _, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID,
 		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
@@ -387,7 +387,7 @@ func TestEnvVar_ProjectScope_AgentOtherProjectDenied(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project1.ID,
+	agentToken, _, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project1.ID,
 		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
@@ -421,7 +421,7 @@ func TestEnvVar_ProjectScope_AgentWriteDenied(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID,
+	agentToken, _, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID,
 		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
@@ -663,7 +663,7 @@ func TestSecret_ProjectScope_AgentReadOwnProject(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
+	agentToken, _, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
@@ -696,7 +696,7 @@ func TestSecret_ProjectScope_AgentWriteDenied(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
+	agentToken, _, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
@@ -1351,7 +1351,7 @@ func TestEnvVar_HubScope_AgentCanRead(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
+	agentToken, _, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}

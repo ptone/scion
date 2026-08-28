@@ -553,7 +553,7 @@ func setupNotificationAgentCallerWithScopes(t *testing.T, srv *Server, s store.S
 
 	tokenSvc := srv.GetAgentTokenService()
 	require.NotNil(t, tokenSvc)
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, projectID, scopes, nil)
+	token, _, err := tokenSvc.GenerateAgentToken(agent.ID, projectID, scopes, nil)
 	require.NoError(t, err)
 
 	return agent, token

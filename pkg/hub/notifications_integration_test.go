@@ -119,7 +119,7 @@ func (env *integrationTestEnv) createAgentWithNotify(t *testing.T, callingAgent 
 	// so seed a user sharing the calling agent's ID.
 	permSeedUser(t, context.Background(), env.store, callingAgent.ID)
 
-	token, err := env.tokenSvc.GenerateAgentToken(callingAgent.ID, env.project.ID, []AgentTokenScope{
+	token, _, err := env.tokenSvc.GenerateAgentToken(callingAgent.ID, env.project.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 		ScopeAgentCreate,
 		ScopeAgentNotify,
@@ -152,7 +152,7 @@ func (env *integrationTestEnv) createAgentWithNotify(t *testing.T, callingAgent 
 func (env *integrationTestEnv) updateStatusViaAPI(t *testing.T, agentID, status, message, taskSummary string) {
 	t.Helper()
 
-	token, err := env.tokenSvc.GenerateAgentToken(agentID, env.project.ID, []AgentTokenScope{
+	token, _, err := env.tokenSvc.GenerateAgentToken(agentID, env.project.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 	}, nil)
 	require.NoError(t, err)
@@ -820,7 +820,7 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 	permSeedUser(t, ctx, env.store, parent.ID)
 
 	// Create sub-agent WITHOUT notify
-	token, err := env.tokenSvc.GenerateAgentToken(parent.ID, env.project.ID, []AgentTokenScope{
+	token, _, err := env.tokenSvc.GenerateAgentToken(parent.ID, env.project.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 		ScopeAgentCreate,
 	}, nil)
