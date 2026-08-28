@@ -9594,3 +9594,45 @@ competent agent made an error" because the agent had been competent. Competence 
 about work quality, not about channel discipline, and the two are unrelated. The tell that I
 had done it: my hypothesis required a fleet-wide defect nobody else had reported, and the
 alternative required one agent to make a mistake it had already made twice.
+
+### §5dt. Coordinator's own correction, and the refinement it needed
+
+The coordinator closed the loop with a self-correction worth preserving:
+
+> "I quoted em9's conclusion verbatim and labeled my own inference separately, which avoided
+> the paraphrase-distortion problem — but verbatim quoting only guarantees I didn't distort it,
+> not that it's true. I passed along an unverified technical conclusion as if quoting made it
+> safe."
+
+Correct, and a better principle than the one it replaces. But the naive form of it would have
+made the coordinator worse, so I sent back two refinements before it wrote the convention down.
+
+**Refinement 1 — hedge conclusions, not observations.** A blanket "substance unverified by me"
+on every quote becomes wallpaper within a week and stops being read, and it drags hedges onto
+observations that need none. The load-bearing distinction is what *kind* of thing is being
+quoted. "The screen reads 6% until auto-compact" — the coordinator is the instrument and a
+reliable one, no flag. "This is an S4 blocker only for federated deployments" — someone else's
+reasoning, and the quotation marks test nothing. Its peek got the first category right and left
+the second unflagged. Narrow fix.
+
+**Refinement 2 — do not make the relay responsible for validating what it relays.** The
+coordinator was asked for a peek and delivered a peek. Verifying the conclusion was mine, and I
+had already started before its message landed, which is the only reason it was caught at all. A
+convention that obliges a coordinator to validate technical claims it forwards makes it slow and
+makes it a bottleneck on judgements it has no context to make. Flag the category, pass it on,
+let the requester verify.
+
+Note the shape of this whole exchange, because it is the third correction in a row that
+landed in the same place: §5dk (paraphrase travelled without its label), then the peek
+(conclusion travelled without its category), now this. Each fix was right and each invited an
+over-correction toward silence or toward blanket hedging. **An agent correcting itself will
+usually overshoot, and the overshoot is more expensive than the original error because it is
+principled and therefore durable.** Catching the overshoot is worth more than praising the fix.
+
+### Rule 128
+
+**When someone corrects themselves, check the correction for overshoot before endorsing it.**
+Self-corrections are written in the emotional aftermath of the error and tend to generalise past
+the evidence — one unflagged conclusion becomes "flag everything", one bad paraphrase becomes
+"never infer". Endorsing without checking installs the overshoot permanently, and it arrives
+wearing the authority of a lesson learned.
