@@ -13943,3 +13943,45 @@ operator-facing profile list is a **different layer the document has never descr
 default is produced there by filtering. So edit 4 is not a correction to §4.3; it is a **new subsection
 about a layer the design omits entirely.** Holding until the delivery route is confirmed, so the doc
 describes what actually shipped.
+
+### §35.86 — Task #92: fix pushed, under review, and one property I twice rejected
+
+`scion/task-92-runtime-profile-fix` @ `54cc98b` on `ptone/scion`. Developer completed 03:04.
+Dispatched `sn-adcpreflight-rev2` to review (brief: `briefs/sn-adcpreflight-rev2-task92.md`).
+
+**Prior art closed.** Stale branch `scion/fix-cloudrun-broker-runtime` @ `0dbad2d7` (July) patched
+`factory.go`'s `case "docker"` gated on `K_SERVICE`. **Current `main` supersedes it** — gates on
+`CLOUD_RUN_INSTANCE` and carries the comment *"CLOUD_RUN_INSTANCE is set on Instances (K_SERVICE is
+NOT)"*. Dead prior art. Verified by reading `origin/main`, not the branch.
+
+**The sharper statement of the root cause.** `GetRuntime` substitutes `docker` -> `cloudrun-sandbox` at
+the **runtime** layer and never writes it back to the **profile** layer. `buildInfoProfiles` then drops
+`local` *because* the declared type and the actual runtime disagree. **The filter discards the one
+profile this broker can serve and keeps the one it cannot.** Not a missing default — two layers
+disagreeing about a substitution only one of them knows about.
+
+**A fix shape I found too late.** `buildInfoProfiles` already ends with
+`if len(profiles) == 0 { return {Name: "default", Type: defaultRuntimeType} }`. **The correct behaviour
+is already in the code**, suppressed only because `remote` survives the filter. Dropping `remote` would
+have needed no delivered file at all — dissolving the delivery-route question entirely. I sent this at
+03:04; **the developer had already pushed.** Crossed in flight. Not wasted: it is the follow-up shape.
+
+**THE PROPERTY I TWICE REJECTED, NOW SHIPPED.** The fix leaves `buildInfoProfiles` returning **two**
+profiles, so `autoSelectProfile` (fires at `length === 1`) stays silent. I rejected two earlier
+proposals for exactly this. My stated reason for accepting the third: the *empty* selection is correct
+here — `Use broker default` resolves via `active_profile: default` to `cloudrun-sandbox`.
+
+**That reason is entirely untested.** Every test on the branch is Go-level; the claim is about the
+browser. I put it at the top of the review brief and told rev2 that falsifying **my reversal** outranks
+any code finding. Recording it here because a reversal that is not written down gets re-litigated.
+
+**Open, and mine to decide:** the UI still OFFERS `remote (kubernetes)` — a non-functional option on
+this tier. An operator who picks it gets a broken agent. Same defect class as the original, lower
+firing probability. The fix is the `isLocalOnlyRuntime` predicate, which also governs the multi-node
+cloudrun tier — so it is **ptone's product decision, not mine.** Not raised to him yet: holding until
+the review verdict, because announcing a fix and then retracting it is the exact failure he named.
+
+**Rule 19 (new).** *A FIX THAT REVERSES A REJECTION MUST CARRY THE REASON FOR THE REVERSAL, AND THE
+REASON MUST BE TESTED AT LEAST AS HARD AS THE FIX.* Twice I said "this leaves auto-select silent, so
+no"; the third time I said "the empty state saves it" and dispatched on it. If that sentence is wrong I
+have approved what I twice refused, on an argument nobody ran.
