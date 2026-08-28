@@ -1884,15 +1884,28 @@ func isAuthError(sanitizedStderr string) bool {
 }
 
 // formatCloneError builds a descriptive error from sanitized git stderr.
-// When no GITHUB_TOKEN is set, the message calls that out specifically.
-// Also includes user-facing guidance from the error classification.
+// The error classifier is evaluated FIRST so that the guidance matches
+// the actual failure (e.g. network vs auth). A missing token is noted
+// only when the classification is auth or when no classification is
+// available (unclassified) — not unconditionally.
 func formatCloneError(sanitizedStderr, token string) error {
 	gitErr := util.ClassifyGitError(sanitizedStderr)
-	if token == "" {
-		return fmt.Errorf("git clone failed (no GITHUB_TOKEN secret configured — the repository may require authentication): %s", sanitizedStderr)
-	}
+
+	// Use the classifier's guidance when available — it matches the
+	// actual failure kind (auth, network, not-found, etc.).
 	if guidance := gitErr.UserGuidance(); guidance != "" {
+		// For auth errors with no token, add the missing-token note so
+		// the operator knows what to configure.
+		if gitErr.Kind == util.GitErrAuth && token == "" {
+			return fmt.Errorf("git clone failed (no GITHUB_TOKEN secret configured — %s): %s", guidance, sanitizedStderr)
+		}
 		return fmt.Errorf("git clone failed (%s): %s", guidance, sanitizedStderr)
+	}
+
+	// Unclassified: mention the missing token since with nothing else
+	// to go on it is worth noting, but do not claim authentication.
+	if token == "" {
+		return fmt.Errorf("git clone failed (unclassified error; no GITHUB_TOKEN secret configured): %s", sanitizedStderr)
 	}
 	return fmt.Errorf("git clone failed (unclassified error): %s", sanitizedStderr)
 }

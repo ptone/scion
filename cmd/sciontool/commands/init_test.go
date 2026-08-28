@@ -688,6 +688,59 @@ func TestFormatCloneError(t *testing.T) {
 			t.Errorf("expected stderr in error, got: %v", err)
 		}
 	})
+
+	// THE DEFECT ROW: DNS failure with no token must NOT blame authentication.
+	// Before this fix, the missing-token check short-circuited ahead of
+	// the classifier, so every clone failure without a token was reported
+	// as probably-authentication — including network errors.
+	t.Run("network error no token must not claim auth", func(t *testing.T) {
+		err := formatCloneError(
+			"fatal: unable to access 'https://github.com/org/repo.git/': Could not resolve host: github.com",
+			"", // no token — the normal case for a public repo
+		)
+		msg := err.Error()
+		// Must NOT mention authentication — the failure is DNS, not auth.
+		if strings.Contains(strings.ToLower(msg), "require authentication") {
+			t.Errorf("network error should not blame authentication, got: %v", err)
+		}
+		// Must contain network-relevant guidance.
+		if !strings.Contains(msg, "network") && !strings.Contains(msg, "Network") {
+			t.Errorf("network error should mention network in guidance, got: %v", err)
+		}
+		// Must preserve the original stderr.
+		if !strings.Contains(msg, "Could not resolve host") {
+			t.Errorf("expected original stderr in error, got: %v", err)
+		}
+		t.Logf("CONFIRMED: DNS failure without token → %v", err)
+	})
+
+	// Auth error with no token: the token note should still appear.
+	t.Run("auth error no token mentions token", func(t *testing.T) {
+		err := formatCloneError("fatal: Authentication failed for 'https://github.com/org/repo.git/'", "")
+		msg := err.Error()
+		if !strings.Contains(msg, "GITHUB_TOKEN") {
+			t.Errorf("auth error with no token should mention GITHUB_TOKEN, got: %v", err)
+		}
+		if !strings.Contains(msg, "fatal: Authentication failed") {
+			t.Errorf("expected original stderr in error, got: %v", err)
+		}
+	})
+
+	// Unclassified error with no token: should note the missing token
+	// without claiming auth.
+	t.Run("unclassified error no token notes token", func(t *testing.T) {
+		err := formatCloneError("fatal: disk full", "")
+		msg := err.Error()
+		if !strings.Contains(msg, "GITHUB_TOKEN") {
+			t.Errorf("unclassified with no token should mention GITHUB_TOKEN, got: %v", err)
+		}
+		if !strings.Contains(msg, "unclassified") {
+			t.Errorf("should say unclassified, got: %v", err)
+		}
+		if strings.Contains(strings.ToLower(msg), "require authentication") {
+			t.Errorf("unclassified error should not claim authentication, got: %v", err)
+		}
+	})
 }
 
 func TestIsClaude(t *testing.T) {
