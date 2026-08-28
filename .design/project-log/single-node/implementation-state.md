@@ -13368,3 +13368,38 @@ a one-command deploy — but I want that decided, not fixed by accident.
 
 Sent ptone the two-line diagnostic (echo the var, re-run the gcloud call **without** the redirect). Not
 on the bash32 branch; that branch stays tight.
+
+### §35.73 — #91's cause measured, and the part of it that is honestly ours (02:19)
+
+**ptone found it in four minutes with the unsuppressed command: gcloud was doing a first-run COMPONENT
+INSTALL for `enterprise-cert-proxy` and prompting on stderr.** Our `2>/dev/null` discarded the prompt.
+After installing the component by hand, the same call ran fine.
+
+**His framing, and it is fair:** *"unrelated to our script — a bit of an edge case — while we can be a
+bit more robust."*
+
+**I agreed with the first half and declined the third, once, then dropped it.** The trigger is gcloud's;
+we neither cause it nor can prevent it. **But the population that hits a first-run component install is
+operators whose gcloud has not yet run this command — which is first-time operators, and that is exactly
+§1's audience.** It is plausibly *more* common on a fresh machine, not less. Logged as a read, not a
+measurement, and explicitly flagged in #91 so nobody deprioritises on the edge-case framing without
+testing it.
+
+**THE PART THAT IS OURS IS NARROW AND IT IS REAL: WE MADE AN UNRELATED EVENT UNDIAGNOSABLE.** gcloud was
+talking to the operator for four minutes and we threw it away. **The rule is stated in this file's own
+text at line 370** — *"never suppress with 2>/dev/null"* — and line 746 breaks it. **A rule written in a
+file that the same file violates is not a rule, it is a comment.**
+
+**#91 filed in two parts, deliberately separated.** Part 1 is the suppression: 746 confirmed harmful,
+719 the same class, and the other six triaged as probably-fine rather than swept — 539/589 are curl
+probes where `000` is a *designed* outcome, and blanket-removing those would be a change of behaviour
+dressed as a cleanup. Part 2 is a **decision I refuse to let happen as a side effect**: should a step
+that can block on a prompt close stdin so it fails fast? An indefinite hang is the worst outcome for a
+one-command deploy and it would hang **forever** under `curl | bash` or in CI — but closing stdin also
+removes a path that works fine for an interactive operator. Candidate resolution: fail fast only when
+stdin is not a TTY. **Decide it; do not fix it by accident.**
+
+**The headline of the whole exchange, and it is the one that matters against §1: THE BASH 3.2 FIX WORKS
+ON THE MACHINE THAT BROKE.** Step 2 sits ~450 lines past line 286. Both bash-4 sites executed under
+3.2.57. #88 is confirmed on hardware, by the maintainer, not by our CI — which is fortunate, because our
+CI for it does not exist yet and the version I specified was the wrong design.
