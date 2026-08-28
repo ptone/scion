@@ -12787,3 +12787,60 @@ rounds apart, and the second concession is the one that produced the scheme guar
 **Nine corrections now, not eight.** The ninth arrived **after** the work was accepted, from an agent
 with nothing left to gain by raising it. That is the strongest single piece of evidence that the loop
 was real rather than performed.
+
+### §35.59 — #85 landed as an open upstream PR; two items on it, one dispatched (01:35)
+
+**`GoogleCloudPlatform/scion#1335` is open.** ptone opened it at **01:09:34Z** — one minute after I
+delivered the compare URL at 01:08. Verified on the API: head `ptone:fix/adc-preflight`, base
+`GoogleCloudPlatform:main`, `mergeable: true`, `merged: false`, `draft: false`, ahead 13 / behind 0.
+**ptone is awake**; reporting direct rather than accumulating in `review-queue.md`.
+
+**Item 1 — the PR body placeholder `Fixes #<issue_number_goes_here>`.** The coordinator flagged it.
+**There is no number to fill in.** Searched upstream issues: `ADC` → 5 hits (lifecycle hooks,
+chownRecursive, ollama, OAuth harness, blank web UI — none related), `preflight` → 1 hit (#870, GKE HA
+GCLB audience), `deploy.sh` → 0, `single-node` → 1 (the same #870). Control-checked that the search API
+was actually answering, because a zero could have been a rate limit. **The correct action is to delete
+the line, not to invent a number** — and given the 100% collision rate in `#1270`–`#1320`, filling it
+with a fork issue number would resolve against the wrong repo. Reported to ptone; only he can edit an
+upstream PR body.
+
+**Item 2 — a Gemini MEDIUM on the `"email"` extraction, dispatched to the reviewer, NOT adjudicated by
+me.** The bot claims `grep '"email"'` at ~393 can false-match `email_verified`, producing a **false
+identity mismatch** — which is the expensive class here, a message asserting a *wrong* cause.
+
+**My prior: the finding is wrong** — the pattern carries the closing quote and `email_verified` has `_`
+in that position. **I did not act on that prior, and I wrote it into the brief so the reviewer could see
+and attack it.** Reading the pattern instead of exercising it is the precise move this task has punished
+four times (r3 `%q`, r4 seam channel, r5 pin location, r5 negative assertion). Brief:
+`briefs/sn-adcpreflight-rev-pr1335.md`.
+
+**The brief adds a question the bot did not ask, and it is the one I actually care about:** the sed is
+`s/.*"email"[[:space:]]*:[[:space:]]*"//` — **`.*` is greedy**, so it anchors on the *last* match. The
+bot reasoned about `grep`; the risk, if any, lives in the `sed`. Also asked: does pretty-printed vs
+single-line JSON change it (grep is line-oriented, sed is not), and does field order matter.
+Scope-locked to this item; **if it is a defect the reviewer reports, it does not fix** — the branch is
+under an open upstream PR and unannounced commits under it cost trust ptone has already extended.
+
+### §35.60 — the parked-agent mechanism works, and the reap answer
+
+**Measured, not assumed:** `scion list` now shows `sn-adcpreflight-dev2` and `sn-adcpreflight-rev2` as
+**`blocked`**, not `stalled`. The coordinator's diagnosis was right and its fix works: parked agents
+call `sciontool status blocked "<reason>"` and sweeps skip them. **This closes the recurring misread**
+logged in §35.58 — `phase: running`, `stalled`, and a bare `continue` all read *whether something is
+happening* as *whether something is owed*.
+
+**Reap decision: keep both.** The coordinator explicitly left it to me. Reasons, in order:
+
+1. **I made a promise at 01:28** — if #87 is dispatched it goes to dev2 first, with rev2 as the pair,
+   and it arrives as a brief with a path, not a "continue". Reaping now would reverse that silently,
+   which is ptone's standing complaint about my communications.
+2. rev2 is **currently dispatched** on the #1335 item above.
+3. #87 remains blocked on the merge, so there is nothing to hand either of them yet.
+
+**And the honest test I ran before answering.** I have argued all night that knowledge lives in
+documents that get read, not in agents — so I audited `briefs/sn-tokenargv-dev-r1.md` for
+stranger-sufficiency first. If it needed dev2's five rounds of context, **the defect would be the brief,
+not a reason to hoard the agent.** It no longer does: history-dependent references (`m5`/`m8`, "the line
+round 3 drew") are replaced with self-contained statements, and the header now declares the standard and
+invites the reader to report any part that fails it. Pushed at `b065ed61`. **So keeping dev2 is about
+the promise and the pairing, not about context I failed to write down.**
