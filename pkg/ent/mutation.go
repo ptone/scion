@@ -4916,22 +4916,24 @@ func (m *AgentMutation) ResetEdge(name string) error {
 // AgentCredentialMutation represents an operation that mutates the AgentCredential nodes in the graph.
 type AgentCredentialMutation struct {
 	config
-	op             Op
-	typ            string
-	id             *uuid.UUID
-	agent_id       *string
-	project_id     *string
-	token_jti_hash *string
-	issued_at      *time.Time
-	expires_at     *time.Time
-	revoked_at     *time.Time
-	revoked_by     *string
-	revoke_reason  *string
-	last_seen_at   *time.Time
-	clearedFields  map[string]struct{}
-	done           bool
-	oldValue       func(context.Context) (*AgentCredential, error)
-	predicates     []predicate.AgentCredential
+	op                         Op
+	typ                        string
+	id                         *uuid.UUID
+	agent_id                   *string
+	project_id                 *string
+	token_jti_hash             *string
+	issued_at                  *time.Time
+	expires_at                 *time.Time
+	revoked_at                 *time.Time
+	revoked_by                 *string
+	revoke_reason              *string
+	last_seen_at               *time.Time
+	entitled_secret_keys       *[]string
+	appendentitled_secret_keys []string
+	clearedFields              map[string]struct{}
+	done                       bool
+	oldValue                   func(context.Context) (*AgentCredential, error)
+	predicates                 []predicate.AgentCredential
 }
 
 var _ ent.Mutation = (*AgentCredentialMutation)(nil)
@@ -5414,6 +5416,71 @@ func (m *AgentCredentialMutation) ResetLastSeenAt() {
 	delete(m.clearedFields, agentcredential.FieldLastSeenAt)
 }
 
+// SetEntitledSecretKeys sets the "entitled_secret_keys" field.
+func (m *AgentCredentialMutation) SetEntitledSecretKeys(s []string) {
+	m.entitled_secret_keys = &s
+	m.appendentitled_secret_keys = nil
+}
+
+// EntitledSecretKeys returns the value of the "entitled_secret_keys" field in the mutation.
+func (m *AgentCredentialMutation) EntitledSecretKeys() (r []string, exists bool) {
+	v := m.entitled_secret_keys
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEntitledSecretKeys returns the old "entitled_secret_keys" field's value of the AgentCredential entity.
+// If the AgentCredential object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentCredentialMutation) OldEntitledSecretKeys(ctx context.Context) (v []string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEntitledSecretKeys is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEntitledSecretKeys requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEntitledSecretKeys: %w", err)
+	}
+	return oldValue.EntitledSecretKeys, nil
+}
+
+// AppendEntitledSecretKeys adds s to the "entitled_secret_keys" field.
+func (m *AgentCredentialMutation) AppendEntitledSecretKeys(s []string) {
+	m.appendentitled_secret_keys = append(m.appendentitled_secret_keys, s...)
+}
+
+// AppendedEntitledSecretKeys returns the list of values that were appended to the "entitled_secret_keys" field in this mutation.
+func (m *AgentCredentialMutation) AppendedEntitledSecretKeys() ([]string, bool) {
+	if len(m.appendentitled_secret_keys) == 0 {
+		return nil, false
+	}
+	return m.appendentitled_secret_keys, true
+}
+
+// ClearEntitledSecretKeys clears the value of the "entitled_secret_keys" field.
+func (m *AgentCredentialMutation) ClearEntitledSecretKeys() {
+	m.entitled_secret_keys = nil
+	m.appendentitled_secret_keys = nil
+	m.clearedFields[agentcredential.FieldEntitledSecretKeys] = struct{}{}
+}
+
+// EntitledSecretKeysCleared returns if the "entitled_secret_keys" field was cleared in this mutation.
+func (m *AgentCredentialMutation) EntitledSecretKeysCleared() bool {
+	_, ok := m.clearedFields[agentcredential.FieldEntitledSecretKeys]
+	return ok
+}
+
+// ResetEntitledSecretKeys resets all changes to the "entitled_secret_keys" field.
+func (m *AgentCredentialMutation) ResetEntitledSecretKeys() {
+	m.entitled_secret_keys = nil
+	m.appendentitled_secret_keys = nil
+	delete(m.clearedFields, agentcredential.FieldEntitledSecretKeys)
+}
+
 // Where appends a list predicates to the AgentCredentialMutation builder.
 func (m *AgentCredentialMutation) Where(ps ...predicate.AgentCredential) {
 	m.predicates = append(m.predicates, ps...)
@@ -5448,7 +5515,7 @@ func (m *AgentCredentialMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentCredentialMutation) Fields() []string {
-	fields := make([]string, 0, 9)
+	fields := make([]string, 0, 10)
 	if m.agent_id != nil {
 		fields = append(fields, agentcredential.FieldAgentID)
 	}
@@ -5476,6 +5543,9 @@ func (m *AgentCredentialMutation) Fields() []string {
 	if m.last_seen_at != nil {
 		fields = append(fields, agentcredential.FieldLastSeenAt)
 	}
+	if m.entitled_secret_keys != nil {
+		fields = append(fields, agentcredential.FieldEntitledSecretKeys)
+	}
 	return fields
 }
 
@@ -5502,6 +5572,8 @@ func (m *AgentCredentialMutation) Field(name string) (ent.Value, bool) {
 		return m.RevokeReason()
 	case agentcredential.FieldLastSeenAt:
 		return m.LastSeenAt()
+	case agentcredential.FieldEntitledSecretKeys:
+		return m.EntitledSecretKeys()
 	}
 	return nil, false
 }
@@ -5529,6 +5601,8 @@ func (m *AgentCredentialMutation) OldField(ctx context.Context, name string) (en
 		return m.OldRevokeReason(ctx)
 	case agentcredential.FieldLastSeenAt:
 		return m.OldLastSeenAt(ctx)
+	case agentcredential.FieldEntitledSecretKeys:
+		return m.OldEntitledSecretKeys(ctx)
 	}
 	return nil, fmt.Errorf("unknown AgentCredential field %s", name)
 }
@@ -5601,6 +5675,13 @@ func (m *AgentCredentialMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetLastSeenAt(v)
 		return nil
+	case agentcredential.FieldEntitledSecretKeys:
+		v, ok := value.([]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEntitledSecretKeys(v)
+		return nil
 	}
 	return fmt.Errorf("unknown AgentCredential field %s", name)
 }
@@ -5643,6 +5724,9 @@ func (m *AgentCredentialMutation) ClearedFields() []string {
 	if m.FieldCleared(agentcredential.FieldLastSeenAt) {
 		fields = append(fields, agentcredential.FieldLastSeenAt)
 	}
+	if m.FieldCleared(agentcredential.FieldEntitledSecretKeys) {
+		fields = append(fields, agentcredential.FieldEntitledSecretKeys)
+	}
 	return fields
 }
 
@@ -5668,6 +5752,9 @@ func (m *AgentCredentialMutation) ClearField(name string) error {
 		return nil
 	case agentcredential.FieldLastSeenAt:
 		m.ClearLastSeenAt()
+		return nil
+	case agentcredential.FieldEntitledSecretKeys:
+		m.ClearEntitledSecretKeys()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentCredential nullable field %s", name)
@@ -5703,6 +5790,9 @@ func (m *AgentCredentialMutation) ResetField(name string) error {
 		return nil
 	case agentcredential.FieldLastSeenAt:
 		m.ResetLastSeenAt()
+		return nil
+	case agentcredential.FieldEntitledSecretKeys:
+		m.ResetEntitledSecretKeys()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentCredential field %s", name)

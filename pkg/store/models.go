@@ -2499,16 +2499,31 @@ const (
 
 // AgentCredential represents a tracked agent JWT token credential.
 type AgentCredential struct {
-	ID           string     `json:"id"`
-	AgentID      string     `json:"agent_id"`
-	ProjectID    string     `json:"project_id"`
-	TokenJTIHash string     `json:"token_jti_hash"`
-	IssuedAt     time.Time  `json:"issued_at"`
-	ExpiresAt    time.Time  `json:"expires_at"`
-	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
-	RevokedBy    *string    `json:"revoked_by,omitempty"`
-	RevokeReason *string    `json:"revoke_reason,omitempty"`
-	LastSeenAt   *time.Time `json:"last_seen_at,omitempty"`
+	ID                 string     `json:"id"`
+	AgentID            string     `json:"agent_id"`
+	ProjectID          string     `json:"project_id"`
+	TokenJTIHash       string     `json:"token_jti_hash"`
+	IssuedAt           time.Time  `json:"issued_at"`
+	ExpiresAt          time.Time  `json:"expires_at"`
+	RevokedAt          *time.Time `json:"revoked_at,omitempty"`
+	RevokedBy          *string    `json:"revoked_by,omitempty"`
+	RevokeReason       *string    `json:"revoke_reason,omitempty"`
+	LastSeenAt         *time.Time `json:"last_seen_at,omitempty"`
+	// EntitledSecretKeys holds the secret key names this credential is entitled
+	// to fetch. The nil/empty distinction is load-bearing:
+	//
+	//   nil  → entitlement was never recorded (bookkeeping bug; fail closed, log loud)
+	//   []   → entitled to zero secrets (valid; agent gets an empty response)
+	//   [k]  → entitled to exactly these keys
+	//
+	// Do NOT add omitempty to the JSON tag. encoding/json omits both nil and
+	// empty slices under omitempty, which collapses "never recorded" into
+	// "entitled to nothing" — a silent security defect.
+	//
+	// Nothing marshals AgentCredential to JSON today (measured 2026-08-28).
+	// If you are adding the first marshal path, this field is why you cannot
+	// use omitempty on the struct or on this field.
+	EntitledSecretKeys []string `json:"entitled_secret_keys"`
 }
 
 // MarshalJSON implements custom marshaling to support legacy groveId field.

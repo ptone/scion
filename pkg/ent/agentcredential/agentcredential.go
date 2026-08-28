@@ -32,6 +32,8 @@ const (
 	FieldRevokeReason = "revoke_reason"
 	// FieldLastSeenAt holds the string denoting the last_seen_at field in the database.
 	FieldLastSeenAt = "last_seen_at"
+	// FieldEntitledSecretKeys holds the string denoting the entitled_secret_keys field in the database.
+	FieldEntitledSecretKeys = "entitled_secret_keys"
 	// Table holds the table name of the agentcredential in the database.
 	Table = "agent_credentials"
 )
@@ -48,6 +50,7 @@ var Columns = []string{
 	FieldRevokedBy,
 	FieldRevokeReason,
 	FieldLastSeenAt,
+	FieldEntitledSecretKeys,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).

@@ -3,6 +3,7 @@
 package ent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -35,8 +36,10 @@ type AgentCredential struct {
 	// RevokeReason holds the value of the "revoke_reason" field.
 	RevokeReason *string `json:"revoke_reason,omitempty"`
 	// LastSeenAt holds the value of the "last_seen_at" field.
-	LastSeenAt   *time.Time `json:"last_seen_at,omitempty"`
-	selectValues sql.SelectValues
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	// EntitledSecretKeys holds the value of the "entitled_secret_keys" field.
+	EntitledSecretKeys []string `json:"entitled_secret_keys,omitempty"`
+	selectValues       sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -44,6 +47,8 @@ func (*AgentCredential) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case agentcredential.FieldEntitledSecretKeys:
+			values[i] = new([]byte)
 		case agentcredential.FieldAgentID, agentcredential.FieldProjectID, agentcredential.FieldTokenJtiHash, agentcredential.FieldRevokedBy, agentcredential.FieldRevokeReason:
 			values[i] = new(sql.NullString)
 		case agentcredential.FieldIssuedAt, agentcredential.FieldExpiresAt, agentcredential.FieldRevokedAt, agentcredential.FieldLastSeenAt:
@@ -129,6 +134,14 @@ func (_m *AgentCredential) assignValues(columns []string, values []any) error {
 				_m.LastSeenAt = new(time.Time)
 				*_m.LastSeenAt = value.Time
 			}
+		case agentcredential.FieldEntitledSecretKeys:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field entitled_secret_keys", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.EntitledSecretKeys); err != nil {
+					return fmt.Errorf("unmarshal field entitled_secret_keys: %w", err)
+				}
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -199,6 +212,9 @@ func (_m *AgentCredential) String() string {
 		builder.WriteString("last_seen_at=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("entitled_secret_keys=")
+	builder.WriteString(fmt.Sprintf("%v", _m.EntitledSecretKeys))
 	builder.WriteByte(')')
 	return builder.String()
 }
