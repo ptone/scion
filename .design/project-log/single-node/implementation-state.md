@@ -12599,3 +12599,75 @@ removes, or cleans up between setup and assertion. A sentinel another test tidie
 that means nothing. **That is the accidental-pass class the reviewer found in m5/m8 and the developer
 found in its own work** — third instance, so it is now a thing to check by default rather than to
 rediscover.
+
+## §35.55 — Round 5: I specified a pin that would have gone green
+
+**00:56, head `600a0f127`.** Verified before reading the report: **ahead 13 / behind 0** vs upstream
+`ce9a7993b`, 4 files, the same four. Matches the developer's report exactly. Report:
+`adc-preflight-r5-dev-report.md`. Sent to the reviewer for the scoped spot-check.
+
+### The finding of all five rounds, and it is a correction to me
+
+My O1 brief said *"add a command-substitution row to the reject table."* **That pin would have passed
+and reported O1 closed.** A table row runs through `runBashFunc` — the **argv** channel, which round 4
+already fixed. The table never calls `seamSetup` and **cannot reach the seam channel at all.** So the
+row would have pinned the already-fixed channel and left O1's actual defect unpinned.
+
+**That is worse than no pin**, because it would have entered the record as closing the thing it did not
+close — the precise failure mode I have spent five rounds hunting, produced by me, in the fix for it.
+
+Its rule, adopted:
+
+> **A pin has a location as well as an assertion, and only the assertion got reviewed.** "Add a row
+> asserting X" is under-specified whenever the table and the defect sit on different channels.
+
+I have written that sentence shape in every brief of this task. It is a sharper form of something I
+thought I already knew — and "thought I already knew" is how the round-2 hole survived too.
+
+The real pin: `TestScriptHostileOverrideValuesArriveAsDataNotCode/{argv_channel,seam_assignment_channel}`,
+named for the property per the reviewer's sentence. Fix is one helper, `seamSetup`, now the single
+place either seam is written. **m15/m16 red by name on the sentinel line ALONE** — under both, the
+validator still rejects the string and the exit premise still holds; what fails is that the file
+exists, proving `$(touch)` ran while bash parsed the prelude. **The string reached bash as code and the
+later rejection was a verdict on a value that had already had its side effect.**
+
+### A second rule, which supersedes an instruction I gave
+
+I told both agents to ensure sentinel **path-uniqueness**. The developer rejected that as the wrong
+safeguard and is right: `NoFileExists` passes when the file was never created **and** when the path was
+never reachable — a typo, a bogus dir — and uniqueness cannot distinguish them. Only the mutation can,
+because under m15/m16 the file **does** exist.
+
+> **A NEGATIVE ASSERTION IS NOT A PIN UNTIL IT HAS BEEN OBSERVED POSITIVE.**
+
+This is the third refinement of the same family: *a pin is not a pin until you have watched it fail*
+(§earlier), *a red mutation is necessary, not sufficient — read WHY* (round 3), and now this. They are
+converging on one idea: **every assertion needs a demonstration that it can distinguish the two worlds
+it claims to distinguish.**
+
+### Two disclosures, both deferred to #87, neither dropped
+
+**(4) `fullGcloudStub` is a THIRD instance of the `%q`-into-double-quotes class.** Left out of scope by
+the developer, disclosed unprompted. **I agree, and the discriminator is the point:** the argument that
+made me take O1 was *"the next hostile row executes and looks like it passed."* `fullGcloudStub` is a
+test-constructed path, can never receive a table row, and **fails loud rather than green.** The
+argument does not transfer. Taking O1 and deferring this is consistent, not inconsistent.
+
+**(5) O2 mislabels the schemeless case** — no `://` means `$scheme` is the whole string, so it reads
+`got 'evil.example'` as if that were a scheme. True, imprecise, **not misleading about cause**, which
+is the line round 3 drew for error text. Costs a branch; deferred.
+
+Both go into the #87 brief, which already opens this file. **Deferring is not dropping only if it is
+written down somewhere that gets read.**
+
+### Environment hazard worth its own note
+
+`vet`/`build` first failed across a dozen **unrelated** packages: the shared `/scion-volumes/gocache`
+was being **pruned by another agent mid-run**. It presents as a broken branch. **Anyone on this hub can
+hit it and misattribute it to their own work.** Workaround: re-run under a private `GOCACHE`.
+
+### Process note on me
+
+Two messages tonight went over the 2000-character cap and reported "delivered" anyway. **I do not know
+whether they truncated**, so I resent the tails rather than assume. `wc -c` before sending is a rule I
+have written down and did not follow.
