@@ -1404,6 +1404,36 @@ em10 and every agent I dispatch hereafter.
       would have shipped.** I should not rely on findings being conveniently ridiculous.
 
 
+69. **When a message exceeds the cap, cut my own words — never the payload.** Issued 2026-08-28
+    01:45Z, after the user twice had to tell me the compare URLs were missing their `title` and
+    `body` params. **The user's protocol is: I send a URL, they open the PR.** That means the
+    encoded title and body ARE the deliverable — they become the PR description. My accompanying
+    prose is packaging.
+
+    - **What I did:** my first DEF-31 attempt included `&title=…&body=…`, came to ~2900 runes, and
+      `scion message` rejected it (printing help rather than sending). Under pressure to fit 2000 I
+      deleted the two parameters and shipped a bare compare link. **I resolved a conflict between
+      the envelope and the payload by discarding the payload**, which is exactly backwards, and the
+      option I never considered — *send the URL alone in one message, my notes in another* — was
+      available the whole time and costs nothing. The final DEF-31 URL fit in 1786 runes with a
+      tighter body and no wrapper text at all.
+    - **The compounding error was silence.** I never said "I dropped the title and body to fit the
+      cap." Had I said it, the correction would have arrived in one round instead of after two
+      defective deliverables. **A degradation I choose and do not announce is indistinguishable to
+      the recipient from a degradation I did not notice.** This is rule 66's shape pointed at
+      myself: I knew the artifact was diminished, the user could only see the artifact.
+    - **Fix the class, not the named instance.** The user named DEF-31; the CI guard URL had the
+      identical defect and they had to spend a second message on it. **When told a deliverable is
+      defective, sweep every outstanding instance of that deliverable before replying** — the
+      report is a sample, not the bug list. Same failure as rule 59's sweep, in the outbound
+      direction.
+    - **Standing budget, so this is arithmetic and not judgement next time:** 2000-rune cap, base
+      compare URL ~110, encoded title ~90 → **~1800 for the encoded body, and URL-encoding roughly
+      doubles prose** (spaces, newlines and backticks all triple). So **~850–900 plain characters of
+      body.** Drop backticks and markdown fences in URL bodies; they inflate 3× for no rendering
+      benefit. Always print `len(url)` before sending.
+
+
 ## 1b. LANDING PLAN — incremental PRs to main (user directive 2026-08-27 18:30Z)
 
 **The integration branch is abandoned as a merge unit.** `scion/messaging-v2` remains the
@@ -5500,3 +5530,27 @@ documents its own blind spots is stronger than one that implies completeness.**
 em9 credited in the commit body. **Two compare URLs delivered this hour** (DEF-31, CI guard); both
 carry the standing note that CI will be red on the pre-existing `TestTemplateResource_UATConfinement`
 failure on main.
+
+### §5bu — compare-URL protocol correction (2026-08-28 01:45Z)
+
+User, twice: *"DEF-31 compare URL had no title or desc in the URL"* and *"same with CI guard compare
+URL - these need to have the title and desc url encoded in the URL"*.
+
+Both URLs resent with `&title=` and `&body=` URL-encoded, sent **alone** with no wrapper prose:
+
+| Deliverable | Branch | Runes |
+|---|---|---|
+| DEF-31 | `scion/ca-msg-em6-def31` @ `8922f590` | 1786 |
+| CI guard | `scion/ca-msg-em6-ci-guard` @ `2391c553` | 1888 |
+
+Both bodies retain the standing note that CI is red on the pre-existing
+`TestTemplateResource_UATConfinement` failure on main.
+
+**Root cause and rule 69 above.** Short version: the encoded title and body are the deliverable —
+they become the PR description under the user's protocol — and when the first attempt blew the
+2000-rune cap I cut them instead of cutting my own commentary, then did not say I had. Budget for
+future URLs: **~850–900 plain characters of body**, no backticks, print `len(url)` before sending.
+
+**Outstanding queue is unchanged by this:** tranche B review (`ca-msg-em10-trb` @ `ab47047d`/`ab47087d`,
+12 files, 2493 insertions, 0 deletions) still needs a review pass and its own compare URL — and that
+URL must carry title and body from the start. em9 state still unknown since 22:43. Main still red.
