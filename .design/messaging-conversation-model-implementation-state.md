@@ -12607,3 +12607,98 @@ evidence.
 - Tranches D–G, DEF-5/6/9/10/11/14/16/17/18 — held behind C.
 - Open with user: DEF-32+DEF-34 routing, #1360 merge, three branch deletions,
   escalation-1 CI.
+
+---
+
+## §5ev — Gate complete and proven; three-dot check stops it shipping
+
+em10 delivered `d670b139c`: file-existence precheck exiting **2**, plus the
+`ci.yml` step. Zero product files in their commits.
+
+### Six-test matrix against clean `upstream/main`
+
+em10 re-ran their own 12 rows after the exit-2 change — right instinct. But they
+re-verified *their* rows and had no way to know about the three properties I had
+proven against `1968fc968`, any of which a new exit path could have silently
+broken. I re-ran all of them:
+
+| # | Test | Want | Got |
+|---|---|---|---|
+| T1 | clean `upstream/main` | 0 | **0** |
+| T2 | delete `chat_v2:1216` | 1 | **1** |
+| T3 | doc-comment reword | 0 + NOTICE | **0 + NOTICE** (rule 191 intact) |
+| T4 | move call out of `handleAgentMessage`, file count unchanged at 5 | 1 | **1** (rule 192 intact) |
+| T5 | rename enclosing function | **1, not 2** | **1** |
+| T6 | delete `handlers_chat_v2.go` | 2 | **2** |
+
+**T5 was the one most at risk.** A rename is where "file missing" and "symbol
+gone" are easiest to conflate; a precheck written carelessly would have returned
+2 and reported an environment failure for what is a genuine violation. It
+returns 1. The `ci.yml` step matches the `check-authz-guards` shape exactly,
+comment and annotation titles included.
+
+Told em10 the generalisable form: **when you add a code path, re-run the rows most
+likely to be *disturbed* by it, not the rows you already own.** That is rule 213.
+
+### The three-dot check earns its keep
+
+Before sizing a compare URL I ran, per heartbeat rule 5:
+
+    git diff --stat upstream/main...scion/ca-msg-em10-tranche-c-measurement
+    15 files changed, 3203 insertions(+), 25 deletions(-)
+
+Merge-base is `31c488018` (#1352). The branch carries em10's **earlier**
+assignment alongside the gate:
+
+- **gate (3)** — `ci.yml`, `Makefile`, `hack/check-security-marker-gates.sh`
+- **docs (2)** — `tranche-c-spec.md`, `tranche-c-measurement.md`
+- **product (5)** — `handlers_agent_messaging.go`, **`handlers_broker_inbound.go`**,
+  **`handlers_chat_v2.go`**, `messagebroker.go`, `notifications.go`
+- **tests (5)** — enumeration and publish-guard suites
+
+**Two of those product files are DEF-32's and DEF-34's.** A compare URL from this
+branch would drag the blocked files along behind a three-file CI guard. The gate
+is landable; *the branch is not*.
+
+Note what did **not** go wrong: em10 honoured "zero product files" exactly, for
+their commits. The contamination is inherited base, the same shape as em9's
+215-file diff in §5es. **Rule 209 said judge a branch by the author's commit
+range — that is right for assessing the agent and wrong for assessing
+shippability.** Both questions must be asked, and they take different
+instruments. Rule 214.
+
+**em10 dispatched** to cut `scion/ca-msg-em10-marker-gate` off `3c7e14e41` with
+the two gate commits cherry-picked, and to **prove** the packaging by pasting a
+verbatim three-dot stat showing exactly three files — not assert it. Told them to
+stop rather than resolve creatively if the pick conflicts, and that their earlier
+product work stays put and lands on its own schedule.
+
+### Rule 213
+
+**After adding a code path, re-test the properties most likely to be disturbed by
+it, not the ones you authored.** A subordinate re-running their own acceptance
+rows proves the change did not break their feature; it says nothing about the
+invariants someone else established.
+
+### Rule 214
+
+**"Whose work is this" and "what would this ship" are different questions needing
+different instruments.** Author commit range answers the first (rule 209);
+`diff main...branch` answers the second. A branch can be blameless in authorship
+and unshippable in content at the same time — and a clean review of the former
+reads as clearance for the latter unless both are run.
+
+### Ledger
+
+- **Marker gate** — implementation COMPLETE and proven by six tests. Now blocked
+  only on repackaging onto a clean branch. **Closest thing to a strike on the
+  board; expect to send a compare URL next cycle.**
+- **DEF-32 / DEF-34** — unchanged, awaiting routing.
+- **DEF-33** — downgraded, latent, no movement, correctly.
+- em10's earlier product work (5 product + 5 test files, merge-base `31c488018`)
+  — **newly visible as an unlanded unit.** Not previously tracked as its own row.
+  Touches the two blocked defect files, so it is behind the routing decision too.
+  Logged now so it is not rediscovered a third time.
+- Tranches D–G, DEF-5/6/9/10/11/14/16/17/18 — held behind C.
+- Open with user: DEF-32+DEF-34 routing, #1360 merge, three branch deletions,
+  escalation-1 CI.
