@@ -12443,3 +12443,53 @@ and filed under documentation.
 `TestScript` is **41/0/0** in the developer's container (no gcloud, so
 `CheckGcloudInstances_FailureMessage` **passes**) and **40/0/1** in the reviewer's (gcloud 582, so it
 **skips**). Same suite, different runner. Neither number is the branch's property.
+
+## §35.51 — I unfroze a branch that was under review, and the fix was to say so fast
+
+**00:20.** The developer pushed `93ae24526` on top of the reviewed `df3b204dd` — the m9 comment block I
+asked for in §5 of the review brief. So the reviewer is reviewing one SHA and the branch head is
+another.
+
+**This is my error and it is worth naming precisely, because I had already decided the opposite.** In
+rounds 2 and 3 I deliberately froze the branch during review so every gate result stayed attributable
+to one SHA. Then in round 4 I dispatched the review **and** sent the developer a work item in the same
+window. The developer did exactly what I asked. A rule I hold only when I remember to hold it is not a
+rule.
+
+**Order of operations, which is the part that generalises:** verify the delta on the API *before*
+telling the reviewer anything about it. Measured: 1 commit, 1 file, `cmd/deploy_script_test.go`,
++13 / −4, **comment text only** — no code, no table row, no assertion. Only then did I send the notice,
+so the reviewer got a measurement and not my reassurance. It chooses whether to re-point to
+`93ae24526` or finish on `df3b204dd` and diff the one commit; both are sound and it reports which.
+
+**One addition to §1 of the round-4 brief, raised unprompted by the developer.** `shellQuote` repaired
+the two `exec.Command` runners that source `deploy.sh`. The third site,
+`EnableIAPPatchBodyViaStubServer`, never sources the script — but it builds its own command string and
+was not touched. The developer asked that the reviewer confirm that judgement **rather than take its
+word**, "since the whole point of the finding is that I was reading a channel nobody had looked at."
+
+That is the correct instinct and it is the round's own lesson applied to the person who found it. My §1
+already asked the general question — "is there any *other* Go→bash or bash→Go boundary in these tests
+with the same lossiness?" — and this names the specific one. Answer by measurement, not by reading.
+The brief on disk now carries an addendum with the new head and this item.
+
+### Tooling trap found while pushing §35.51: a stale remote-tracking ref makes `reset --hard` a rewind
+
+`/tmp/arcpush` had `remote.origin.fetch = +refs/heads/main:refs/remotes/origin/main` **only**. So
+`git fetch origin` never updated `refs/remotes/origin/scion/sn-impl-arch`; that ref was frozen at
+`59a51208`, three commits stale, while the real remote tip was `04f8efeb`.
+
+`git fetch origin && git reset --hard origin/scion/sn-impl-arch` therefore **silently rewound my own
+work branch** and committed on top of the rewind. The push was rejected as non-fast-forward, which is
+the only reason I looked. **Had the branch happened to be fast-forwardable I would have force-nothing
+and lost nothing — but I would also have never learned the ref was lying.**
+
+Nothing was lost: `04f8efeb` was already on the remote. Fixed with
+`git config --add remote.origin.fetch '+refs/heads/scion/sn-impl-arch:refs/remotes/origin/...'`.
+
+**The generalisation, which is this project's standing theme in a new costume:** `origin/<branch>` is
+not a reading of the remote, it is a **cached** reading, and a partial refspec makes the cache
+permanently stale without any warning. `git ls-remote` reads the remote. The rejected push was the
+measurement; the tracking ref was the assumption. Same shape as `behind` having a shelf life
+(§35.49) — and same shape as the reason I verify every developer SHA against the API rather than
+against a local clone.

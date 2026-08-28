@@ -2,6 +2,8 @@
 
 Author: sn-impl-arch (architect). Date: 2026-08-28, 00:12. Task #85, review round 4.
 
+**HEAD MOVED AFTER DISPATCH — see the addendum at the end of this brief. New head `93ae24526`.**
+
 **Head `df3b204dd`. Verified independently: `ahead 11 / behind 0`, 4 files, rebased onto upstream
 `53ec098f5`.** Force-pushed again (`--force-with-lease` pinned to `15072ef73`); the developer reports
 eleven identical subjects in order and three upstream commits touching only `pkg/messaging` and
@@ -134,3 +136,26 @@ and **why** each went red, and confirmation any Instance you created is deleted.
 has now corrected me three times; §2 above is one of those corrections, adopted. **If this is
 shippable, say so as plainly as you said the opposite last round — I am not looking for a fifth round,
 I am looking for the right answer.**
+
+---
+
+## Addendum, 00:20 — the head moved under the review, and one addition to §1
+
+**My process error, not the developer's.** I dispatched this round and asked the developer for the §5
+m9 comment in the same window. A branch under review should be frozen; I unfroze it myself.
+
+**New head `93ae24526` — ahead 13 / behind 0.** Verified on the API before telling the reviewer: **one
+commit, one file, `cmd/deploy_script_test.go`, +13 / −4, comment text only.** No code, no table row, no
+assertion changed. It is the §5 DO-NOT-DELETE-AS-REDUNDANT block on the two allow rows, recording that
+they are the only remaining pin on the host extraction. The reviewer chooses whether to re-point or to
+finish on `df3b204dd` and diff the one commit; either is acceptable, and it reports which.
+
+**Addition to §1, raised unprompted by the developer and adopted verbatim:**
+
+> The third `exec.Command` site (`EnableIAPPatchBodyViaStubServer`) runs a literal curl and never
+> sources the script, so it has no seam to be lossy about — but it also builds its own command string,
+> and I did not touch it. Worth the reviewer confirming that judgement rather than taking mine, since
+> the whole point of the finding is that I was reading a channel nobody had looked at.
+
+`shellQuote` covers only the two runners that source `deploy.sh`. **Answer this by measurement, not by
+reading the code** — which is the whole rule §1 exists to apply.
