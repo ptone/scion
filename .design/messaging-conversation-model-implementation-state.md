@@ -10211,3 +10211,91 @@ rediscover, plus the wrong-instrument warning above with its control.
 - **141.** When an agent has a repeated report-delivery failure, do not send another reminder —
   reshape the task so the deliverable is a committed artifact. A report can be lost to context
   exhaustion; a pushed file cannot.
+
+---
+
+## §5dy — em6 round 3 verified; mutation m5 reopens the hole m4 closed
+
+Date: 2026-08-28 15:52Z. Branch `scion/ca-msg-em6-b2b1b14` @ `ca029a2de`, 8 commits,
+rebased on `upstream/main` `31c488018` (confirmed ancestor).
+
+### 5dy.1 — Accepted outright
+
+**Item 2 (tautology comment)** and **item 3 (DEF-29 in five B14 pinning tests)** both
+land as asked. Each of the five names DEF-29 as open, states the test pins
+current-but-wrong behaviour, and states the expectation inverts on close.
+
+**Rule 31 deletion check (three dots):** 116 deletions localised to exactly three files
+— `conversation_store.go` (-10), `dm_migration.go` (-73), `dm_migration_test.go` (-33).
+No `pkg/ent` churn, no aggregate file touched, nothing on main reverted.
+
+**em6's own caveat is accurate and I confirmed it:** `messages.` appears exactly once as
+code in `conversation_store.go`, at `:526`. Severing the delegation orphans the import,
+so m4 is a build failure unless the import is removed too. em6 volunteered this rather
+than letting the kill stand unqualified — the right instinct, and the distinction
+matters: a build failure is the instrument breaking, not a kill.
+
+### 5dy.2 — MUTATION m5: the tripwire is blind to the likeliest mutation
+
+Authored independently. Worktree `/tmp/em6v` @ `ca029a2de`.
+
+**m5** — keep the call, discard its answer, in `AddParticipant`:
+
+```go
+_ = checkDMParticipantKey(conv, p.PrincipalKind, p.PrincipalID)
+```
+
+```
+go test -tags no_sqlite ./pkg/store/entadapter/...
+  ok  0.010s
+=> m5 SURVIVES. The new enumeration test passes.
+
+go test -run Participant ./pkg/store/entadapter/...
+  FAIL TestAddParticipant_DM_ThirdPartyRejection
+  FAIL TestAddParticipant_DM_EmptyExternalRefRejection_BypassCreate
+  FAIL TestEnsureParticipant_DM_ThirdPartyRejection
+  FAIL TestAddParticipant_DM_SoftRemoveThenSubstitute
+=> killed only by the tests CI does not run.
+```
+
+Invariant D-1 is dead for `AddParticipant` and CI is green. **The hole the tripwire was
+built to cover is reopened by a mutation one character shy of the one it catches.**
+
+The doc comment does name limitations, honestly — but it names *"wrong field order,
+inverted condition"*, i.e. subtle logic bugs inside the predicate. Those are rare and
+review catches them. **"Call present, result discarded" is neither subtle nor rare** —
+it is the ordinary output of silencing a linter, extracting a helper, or making a test
+pass in a hurry, and a call-presence check is structurally blind to it.
+
+**Consistency note:** this is the same shape I reopened #1353 for four hours earlier
+(§5dw.2) — an enumeration guard that inspected the exact function containing the defect
+and passed, because its category stopped one step short of the hazard. Holding em10 to
+that standard and waiving it for em6 would be incoherent, so item 1 goes to a fourth
+round.
+
+**Dispatched:** assert the guard's result is consumed — the call must sit in an
+`if err := ...; err != nil` init position, or at minimum never be assigned to `_`.
+AST-only. Plus a doc-comment correction stating (a) the new boundary still admits
+`if err := ...; err != nil {}` with an empty body, (b) the tightening targets the
+*accidental* case not the adversarial one, because the realistic threat is a 5pm
+refactor rather than an attacker editing the store layer, and (c) **the file's expiry
+condition** — delete it the day the behavioural tests reach CI.
+
+Verification demanded: m4, m5 and the unmutated control all re-run under
+`-tags no_sqlite` and all three quoted. m5 must flip to killed, m4 must stay killed,
+the control must stay green.
+
+### New standing rules
+
+- **142.** Against a call-presence check, the mutation that matters is not removing the
+  call but discarding its result. `_ = guard(...)` is what an ordinary refactor produces;
+  deleting the line is what nothing produces. Always mutate the *consumption* of a
+  guard's result, not only its invocation.
+- **143.** A tripwire built because real coverage is missing manufactures confidence in
+  proportion to how narrow it is. It must name the most probable evasion, not the most
+  interesting one — and it must name its own expiry condition, or it will outlive its
+  justification and be mistaken for coverage.
+- **144.** Apply a standard you have just enforced on one manager to the next delivery
+  that shows the same shape, in the same session, even when the second delivery is
+  otherwise excellent and turned around fast. Waiving it because the agent was
+  cooperative is the charitable prior (rule 127) wearing a different hat.
