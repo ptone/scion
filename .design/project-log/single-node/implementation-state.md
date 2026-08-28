@@ -14575,3 +14575,54 @@ verifying one does not verify the other.
 
 Launch note: `scion start --template` is **not a flag** — it is `-t/--type`. The first attempt printed
 help, which is a parse failure wearing the costume of output. Agent is `running`.
+
+## 2026-08-28 12:15Z — the compare URLs were STILL wrong, and my shortcut is exactly why. RULE 27.
+
+ptone, 12:15: *"Those compare URLs are supposed to have the title and desc in the URL args- did you get
+the detailed protocol instructions for how to send compare URLs?"*
+
+**The honest answer is no, and that is the entire cause.** He told me at 12:08 to get the detailed
+instructions. I substituted my own log at line 11515 because it looked complete, shipped on it, and
+**told him I had done so** — which at least made the failure attributable, but did not prevent it.
+
+The real protocol lives in **`/scion-volumes/scratchpad/coordinator-conventions.md`**, a *shared* file, in
+two places (§"Compare URLs" and the 2026-08-08 convention at line 173). Against it I got **three** things
+wrong, not one:
+
+| | required | what I sent |
+|---|---|---|
+| form | markdown link `[title](url)` | **bare URL** |
+| query | `?quick_pull=1&title=…&body=…` | `?expand=1` |
+| content | URL-encoded PR title + summary body | **neither** |
+
+My log had only the URL *shape*. It was a **lossy summary of a shared convention**, and I could not tell
+it was lossy from the inside — it read as complete because it was internally coherent.
+
+### RULE 27: A LOCAL COPY OF A SHARED CONVENTION IS A STALE COPY. READ THE SHARED FILE AT THE POINT OF USE.
+
+Rule 26 said a rule that lives only in the log will be broken again. **This is the sharper version: the
+log entry was not merely unheeded, it was WRONG, and heeding it was what produced the error.** My notes
+are a record of what I once understood, not a source of truth for what is currently required. For
+anything owned collectively — protocols, conventions, process — the shared file is authoritative and my
+summary of it is a cache with no invalidation.
+
+**The conventions file predicted this failure in its own text.** Line 189: *"This detail had been
+established earlier in the session but was missing from this file (a second instance of a standing
+convention getting lost to compaction…)"*, closing with *"write every correction to this file
+immediately when caught."* The same convention has now been lost three times by three different
+readers. **That is a property of the convention's storage, not of the readers** — and worth saying to
+whoever owns the file, because a rule that three people independently fail to retain is badly sited.
+
+### Resent, 12:18Z
+
+Rebuilt with `urllib.parse.quote` on both title and body, titles taken from the branches' own commit
+subjects rather than invented. **Validated each: HTTP 200.** Then hit a second wall — the combined
+message was 2509 chars against a **2000-char limit**, so it went as **three messages, one link each**,
+which still satisfies "nothing else goes on that thread".
+
+Reply to him went to the **main** thread, not the compare thread — the conventions file records someone
+violating "nothing else goes there" *in the same breath as restating it* (line 18), and I was one
+careless send from repeating it.
+
+Told him plainly: *"No. I did not get them, and that is the whole cause."* No softening. He asked a
+direct diagnostic question and the useful answer is the one that names my shortcut as the mechanism.
