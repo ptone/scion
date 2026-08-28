@@ -8389,3 +8389,90 @@ satisfied by the wrong artifact: ask for *the mutation table*, not for "verifica
 one that says nothing.** The care spent on "X was KEPT" licenses the reader to assume the deletion
 list is empty. When reviewing, diff `^-func Test` explicitly — never infer coverage change from the
 report's additions.
+
+---
+
+## §5df. 2026-08-28 12:12Z — em6 amended and merge-ready; em10 BLOCKED on a false exemption
+
+### em6 — `efb70e04`, cleared, compare URL sent
+
+Amended commit message covers the test deletion and the `ErrAlreadyExists` residual, both as
+specified. **Verified the amend was message-only by comparing trees**, not by reading the diff:
+
+```
+504f30f40^{tree} = 15a8127c6...
+efb70e04^{tree}  = 15a8127c6...   IDENTICAL
+```
+
+That is what makes all mutation and gate verification from §5de transfer to the new SHA without
+re-running it. Full gates re-run anyway: gofmt clean, authz-guards clean, compat-literals clean,
+conversation-upsert-guard clean, build ok, `pkg/messaging` and `pkg/store/entadapter` both `ok`.
+
+**A near-miss on my own gate output:** my backgrounded gate script piped `test-fast` through
+`head -12`, and the visible tail showed only unrelated packages — `messaging` and `entadapter` never
+appeared. I nearly accepted "0 FAILs" as sufficient. It is not: absence of FAIL in a truncated
+stream is not evidence the packages I care about ran. Re-ran those two explicitly. **Truncation
+turns a positive result into an unfalsifiable one.**
+
+Compare URL sent to thread 1532864101909528737, 1972 runes, title and body URL-encoded.
+
+### em10 — `ca52d6f6`, BLOCKED. The enumeration test passes *because* the defect was exempted.
+
+Three commits, +1201/−53. B12 unification and the B11/B13 guards are sound. The AST walker in
+`create_message_enumeration_test.go` is the right instrument. But:
+
+**`notifications.go:createInboxMessage` is on the EXEMPT list, described as "System notification;
+synthetic inbox message, not a conversation participant message." The code contradicts that:**
+
+```go
+Sender:      "agent:" + agent.Slug
+SenderID:    agent.ID
+Recipient:   "user:" + sub.SubscriberID
+RecipientID: sub.SubscriberID
+```
+
+Two fully identified principals, known kinds, real UUIDs — structurally identical to every path em10
+*did* stamp. And `nd.store` is a full `store.Store`, so it already has the resolve dependencies. This
+is "chose not to", not "cannot".
+
+**Severity: this path carries `WAITING_FOR_INPUT`.** After S4 an unstamped message is invisible, so
+the exemption means the user silently stops being told their agents need input — an outage invisible
+from both sides.
+
+**The mechanism is the finding.** The enumeration test is GREEN with the defect intact, because the
+site was moved to the exempt list rather than fixed. An exemption list is load-bearing safety
+equipment: a false entry converts an open defect into a documented one and permanently stops
+reporting it. This is worse than having no enumeration test, because it now carries authority.
+
+I accepted the `broadcastDirect` exemption — one-to-many, no two-party key exists to derive — but
+required the reason be reworded to *deferred pending a group-conversation model* rather than "no
+conversation ownership applies". The first invites revisiting; the second reads as settled.
+
+**Second gap: B11/B13 shipped guards without the enumeration the brief asked for.** 5 sites guarded,
+9 positive/negative tests, but nothing stops a sixth. em10 already built the right tool for B15 and
+did not point it at `PublishUserMessage`.
+
+### NEGATIVE RESULT with its control: notifications.go is NOT an unguarded publish
+
+Having found one problem in `notifications.go`, I suspected `:501`'s publish was also unguarded —
+the B11/B13 pattern in the file em10 never opened. **It is not.** `:495` returns on `CreateMessage`
+failure. Checked before escalating; told em10 explicitly that its unguarded-site hunt would find
+nothing, so the gap is about the ratchet and not a live defect.
+
+Worth noting because the *narrative* was compelling — "same file, two misses, the file nobody
+opened" is a satisfying shape, and it was wrong. Rule 90's enumeration instinct is right; its
+storytelling is not evidence.
+
+### Rule 102 (new)
+
+**An exemption list is the highest-privilege construct in an enumeration test, and the only part of
+it that cannot be verified by running the test.** Every entry must be checked against the code it
+describes, because a false exemption is strictly worse than no test: it makes an open defect look
+adjudicated and silences the alarm permanently. When reviewing an enumeration, read the exempt set
+first and the stamped set second.
+
+### Rule 103 (new)
+
+**Never accept a truncated gate stream as a pass.** `head -N` on test output makes "no FAIL seen"
+unfalsifiable. Either grep for the packages you care about by name and assert they appear, or do not
+truncate. Same class as the `head -5` build-tag trap (rule 95) — a window narrower than the question.
