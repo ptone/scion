@@ -15545,3 +15545,70 @@ is a security or remote-broker reason, quote it — it outranks F.
 
 **New withdrawal condition is row 9** (row 4 re-run under F). If F moves it too, then every available
 fix moves it, the problem is structural, and it escalates to ptone rather than to another round with me.
+
+---
+
+## §35.83 — Three §1 blockers merge; ptone answers task #93; the lab is 41 commits stale and cannot be updated
+
+**14:46-14:48Z — ptone merged #1350, #1351 AND #1352.** Verified independently via `gh pr view`, not
+taken from the relay. Tasks **#88, #86, #92 closed.**
+
+**The coordinator's relay was stale, not wrong:** it reported #1352 as "still green/mergeable, waiting
+on ptone" in a message composed two minutes before #1352 merged at 14:48:30Z. Nobody erred. **A relay
+describes the moment it was written, and merges move faster than messages** — which is the same lesson
+as rule 30 from the other end: verify at the moment you act, not at the moment you were told.
+
+### Task #93 decided: ptone chose (a)
+
+*"option a. remove the kubernetes profile"* (14:50Z). The held brief
+`sn-runtimeprofile-dev-shapeb-HELD.md` was written ahead of this exact answer, so work started
+immediately rather than after I wrote it. **That is the second time pre-writing a held brief paid**, and
+the header warning against premature start did its job — nobody started it in the 11 hours it sat there.
+
+Dispatched as `sn-runtimeprofile-shapeb`, with the authorisation phrase the brief demands, and one
+correction the brief could not have known: **branch from current fork main, not from the task-92 branch**,
+because Shape A is now upstream in #1352.
+
+### Unfroze the deploy.sh batch
+
+Tasks **#87, #90, #91** were frozen behind #88 because all three edit `deploy.sh`. With #1350 merged
+they are free. Dispatched as **one branch, three commits** (`sn-deploysh-batch`) — separate branches
+would conflict on the same file.
+
+Ordered **#87 (token in argv) first** because it is the only one with a security dimension, then **#91**,
+then **#90**. #91 is the highest severity for §1: `2>/dev/null` hides gcloud's interactive *prompt*, so
+the one-command deploy appears to freeze with no error and no next step for the operator.
+
+**I briefed #91 as a class, not an instance** — sweep the file for every stderr-hiding redirect on an
+interactive-capable command. Three times this week I have fixed the instance I tripped over and left the
+class; this is the first time I have written the sweep into the brief up front instead of discovering
+the need afterwards.
+
+### ptone asked whether the lab runs the latest. It does not, and it cannot.
+
+Measured read-only — no restart, because **on this tier a restart is a deletion**:
+
+- `sn-harness-lab` runs `scion-omni:f99a818` = commit `f99a8189`, **2026-08-26 21:00**, which is PR #1310
+  — the *original* tier PR.
+- **`upstream/main` is 41 commits ahead of it.**
+- **The `latest` tag points at the same digest as `f99a818`.** `latest` is two days old. Anyone pulling
+  `latest` gets the stale build — a trap worth its own line, since `latest` is exactly what a reader
+  assumes is current.
+- A third tag, `dev-a9131f1f`, references a commit that is **not on `upstream/main`** and that I cannot
+  identify. I did not use it and I asked ptone what it is.
+
+**I recommended against replacing the lab now**, and the reasoning is the useful part:
+
+1. Of today's merges only **#1352** changes the server binary. #1350 changes `deploy.sh` — a script,
+   not in the image. #1351 changes docs. So a rebuild buys one fix.
+2. **Tasks #37/#48 are still open**, so a fresh instance *still* cannot start an agent from the default
+   path. **A rebuild does not buy him a working lab** — it buys him a newer broken one, at the cost of
+   the state he has.
+
+Better sequence: land #37/#48, build one image, deploy one fresh instance. I offered to rebuild now if
+he wants it anyway and said plainly I will not touch `sn-harness-lab` without his word.
+
+**The generalisable point:** "is it running the latest?" looked like a version check and was actually a
+question about whether an update is *possible*. On a tier where all state is ephemeral, "update" and
+"destroy and recreate" are the same operation, and the answer had to lead with that rather than with the
+digest.
