@@ -9388,3 +9388,209 @@ converted a stalled agent from a coordination annoyance into a race against losi
 that exist nowhere else. When a peek surfaces a compaction warning, the durable copy goes into
 the ledger in the same action — not after the next reply, not after verification. Verification
 can happen to a preserved quote; it cannot happen to a lost one.
+
+## §5dr. DEF-32 cross-check — em9 CONFIRMED on the core, CORRECTED on scope. Two findings.
+
+em9's full report arrived minutes after the peek (§5dq), and the independent read of
+`upstream/main` `19e32902e` landed minutes after that. Two derivations of the same three
+questions, produced without contact. That was the point.
+
+### Where they agree — DEF-32's mechanism is now settled
+
+| Claim | em9 | Independent read |
+|---|---|---|
+| `FederatedUserIdentity` reaches the write path | yes | yes |
+| `FederatedServiceIdentity` does **not** | yes — fails assertion, lacks `DisplayName()`/`Role()` | yes — same two methods, `federation_identity_ext.go:80-95` |
+| Assertion site | `identity.go:242` | `identity.go:237-246`, bare assertion, no UUID check, no store lookup |
+| Middleware | `auth.go:207-227`, `contextWithIdentity` at `:227` | `auth.go:206-238`, same |
+| Identity constructed at | `federation_auth.go:341-353` via `NewFederatedUserIdentity` | same |
+| ID value is non-UUID | `issuerURL + ":" + subject` | same, `federation_identity_ext.go:128` |
+| Federation off by default | yes | yes — `Enabled bool` zero value, `federation_config.go:25` |
+
+Independent agreement on every mechanical step, from two agents that never spoke.
+**The mechanism of DEF-32 is settled and I will stop re-deriving it.**
+
+The cross-check also supplied a proof em9 reached by tracing and did not need to:
+`federation_identity_ext_test.go:24-31` contains compile-time interface assertions, and
+`_ UserIdentity` is asserted **only** for `FederatedUserIdentity`. The negative result is
+pinned by the compiler, not by anyone's reading.
+
+### Disagreement 1 — where the config gate lives. The cross-check is right and it matters.
+
+em9: *"server.go:1421 — FederationAuthenticator is only created when Enabled is true and
+len(TrustedIssuers) > 0."* True, and I read it as a construction-time gate. It is not.
+
+Cross-check: the authenticator is held in an **atomic pointer**, `srv.federationAuth.Store(fa)`
+(`server.go:1405-1434`), injected as `FederationAuth: &srv.federationAuth` (`server.go:1448`),
+**loaded per request** with a nil check (`auth.go:208-217`). Routes are registered
+unconditionally. And it is **hot-reloadable**: federation can be enabled or cleared at runtime
+through operational settings, no restart (`operational_settings.go:1055-1104`).
+
+em9's statement is locally accurate and globally misleading — it describes where the pointer is
+first populated, not where the decision is taken. Neither agent is wrong about a line; the
+cross-check simply looked one hop further.
+
+**This falsifies a claim I made in §5dq one section ago.** I wrote there that DEF-32 "does not
+block the S4-P4 divergence-gate observation on the beta hub, because the beta hub cannot
+produce the input that triggers it." That reasoning assumed the gate was fixed at boot. It is
+not. An operator can turn federation on mid-exercise, and the beta hub would begin producing
+non-UUID identities without a restart. **§5dq's beta-hub immunity argument is WITHDRAWN.**
+Rule 111 — out loud, in the ledger, in the same place a reader would find the claim.
+
+### Disagreement 2 — em9's conclusion is FALSE as written. A second path exists.
+
+em9 concluded: *"Deployments without federation, or with only hub/service_account issuers,
+are not affected."*
+
+The cross-check found a non-federated path to the same defect:
+
+> `extractProxyUser` takes `X-Forwarded-User-Id` **verbatim** into `NewAuthenticatedUser(userID, ...)`
+> with no UUID validation and no store lookup (`auth.go:561-577`), reached at `auth.go:314-317`,
+> gated on `cfg.ProxyAuthenticator == nil && len(trustedNets) > 0 && isTrustedProxy(r, trustedNets)`.
+
+So a deployment with **federation entirely off** and legacy trusted-proxy auth configured
+reaches the identical defect. DEF-32 is not a federation bug. It is a *"any identity source
+that does not provision through `store.User`"* bug, and federation is one of two such sources.
+
+The precision that makes this actionable: the **modern** proxy path is safe. When
+`cfg.ProxyAuthenticator != nil` the request goes through `MakeProxyUserProvisioner` →
+`provisionUser` → a real `store.User.ID` UUID (`auth.go:284`, `auth.go:722-737`,
+`handlers_auth.go:1253-1257`). Only the **legacy** branch — proxy authenticator nil, trusted
+networks configured — passes the header through raw. Two branches of the same feature, one
+provisions and one does not.
+
+Everything else checked clean: `useraccesstoken.go:191`, `web.go:1329`,
+`handlers_broker_inbound.go:146`, `brokerauth.go:911`, `server.go:3003` all carry
+`store.User.ID`; the dev pseudo-user is a well-known UUID (`devauth.go:28-30`); no seed or
+migration writes a `NotificationSubscription`.
+
+### em9's buried lede — the booby trap
+
+Filed by em9 as the third of three "additional path notes", and it is the most consequential
+line in either report:
+
+> `handlers_chat_v2.go:744` — `isDMParticipant(key, user.ID())` compares the non-UUID federated
+> ID against UUIDs in the DM key — always fails, returns Forbidden. **This is accidental, not
+> intentional defense.**
+
+em9 was right to draw that distinction and wrong to bury it. The chat DM path is currently
+safe *by coincidence*. The obvious repair — teaching `isDMParticipant` to tolerate non-UUID
+principals — converts a coincidence into a hole, and it is precisely the read-gate unwrap that
+already stands ruled against: **fix the key at derivation, or the key is not the ACL.**
+Recorded as a booby trap and relayed to em9 in those terms.
+
+The other two notes, for the ledger: chat *thread* paths are unblocked and persist a non-UUID
+`user.ID()` as `SenderID` (`handlers_chat_v2.go:990, 1235, 1294`) — meaning the canonical
+identity column already holds non-UUID values on those deployments; and agent-messaging paths
+(`handlers_agent_messaging.go:517, 534, 557, 1154`) are unblocked, with
+`messages.DMConversationKey("user", senderID, ...)` failing `uuid.Parse` so the DM conversation
+is **silently not created**. That last one fails closed — NULL `conversation_id` — which is the
+safe direction and consistent with the B10 ruling.
+
+### Ledger effect
+
+DEF-32 stays open and stays an S4 blocker. Its scope moves **outward** from where §5dq left it:
+
+- **Not** universal (federation and legacy-proxy are both opt-in).
+- **Not** federation-only, as em9 concluded.
+- **Not** immune on any given hub by virtue of boot config, because federation hot-reloads.
+
+New precondition on the beta exercise, to be raised when the user schedules it and not before:
+*does the beta hub run legacy trusted-proxy auth (`ProxyAuthenticator` nil with trusted networks
+set), and can federation be toggled on it at runtime?* I am not asking now — the exercise is
+unscheduled, the user is holding four open items, and a question they cannot yet act on is
+noise. It goes in the list of things that must be answered before the exercise starts.
+
+### Rule 123
+
+**Cross-check a single-source finding on a security path, and cross-check it against source,
+not against the same agent.** Two independent derivations agreed on eleven mechanical facts and
+disagreed on the two that mattered — the scope of the defect and the location of its gate. The
+agreement is what let me stop re-deriving the mechanism; the disagreement is what stopped me
+shipping a false immunity argument for the beta hub. Neither would have surfaced from asking
+em9 to double-check its own work.
+
+### Rule 124
+
+**"Only created when X" describes where a value is written, not where the decision is taken.**
+Follow the value to its read site before concluding anything is gated. An atomic pointer
+populated at construction and loaded per request looks exactly like a boot-time gate from the
+construction site, and behaves nothing like one. The tell is hot-reload: if any code path can
+re-`Store()` it, the gate is per-request no matter how it is initialised.
+
+### Rule 125
+
+**When an agent files its sharpest finding as an aside, promote it and say that you are
+promoting it.** em9 put the accidental-`isDMParticipant`-defense note third in a trailing list.
+An aside is a claim its author has not weighed; if you silently act on it you inherit an
+unweighed claim, and if you silently ignore it you lose the best thing in the report. Name the
+promotion so the author calibrates what counts as a headline next time.
+
+### §5ds. The stall was never a stall — em9 answered into its own transcript
+
+Appendix to §5dr, because the diagnosis arrived after it was written.
+
+I hypothesised a delivery-or-wake failure (§5dp) and asked the coordinator to test it. It did,
+with evidence rather than inference: my messages appear in em9's `--full` scrollback as
+properly-formatted inbound blocks at multiple timestamps, including the 12:46:45Z probe and the
+13:53:10Z "send it now". **Hypothesis dead.** Withdrawn out loud to the coordinator.
+
+em9 then supplied the real cause unprompted:
+
+> "your earlier messages arrived and I wrote the report in response, but I sent it as inline
+> text in the conversation rather than via `scion message` — same failure mode as the two prior
+> push-without-report incidents. The report existed but was never delivered through the channel
+> you read. My error, not a delivery or wake problem."
+
+**Third occurrence of the same failure.** That it is the third is the finding; a single instance
+is carelessness, three is a structural property of how these agents work.
+
+### What the failure actually is
+
+em9 did not fail to answer. It answered *into its own transcript*, where the answer is visible
+to it and to nobody else. From inside the session there is no perceptual difference between
+"I wrote the report" and "I sent the report" — both leave the same text on the same screen.
+This is why it recurs and why it will not yield to the agent trying harder: there is no signal
+to try harder *about*. The screen looks exactly like success.
+
+Which also explains the peek. The coordinator saw a finished conclusion and an idle prompt and
+read it as "finished and unsent". It was more specific than that: **finished, and believed sent.**
+
+Only a mechanical rule helps: the deliverable is the tool call returning `Delivered`, and the
+prose is scaffolding. Passed to em9 in those terms, and framed to it as a systems problem
+rather than a personal error — an agent that thinks it was merely sloppy will resolve to be
+less sloppy, which is precisely the non-fix.
+
+Passed to the coordinator as a fleet-wide signature to watch for:
+**stalled status + finished-looking screen + unchanged branch + no message.** On that
+combination, peek first. Re-asking costs a full turn and returns a second undelivered report —
+which is exactly what my second request bought.
+
+### My own error, recorded
+
+I reached for an infrastructure explanation before an agent-error one, and I did it because em9
+had been producing good work. That is a real bias with a direction: **competence earns a
+charitable prior, and a charitable prior on a diagnostic question buys the wrong diagnosis.**
+It cost two wasted requests and one escalation to the coordinator on a false premise. The
+correct first hypothesis was the cheapest one to test, not the most flattering one.
+
+Worth noting what saved it: I did not act on the hypothesis, I asked for evidence against it.
+The coordinator's scrollback read settled in one exchange what two rounds of theorising had not.
+
+### Rule 126
+
+**An agent cannot detect that it answered into the void, because from inside its transcript
+the answer is right there.** Never diagnose this class by asking the agent whether it replied —
+it will say yes in good faith. Check the receiving channel, or peek. And when instructing an
+agent whose output must cross a channel boundary, make the boundary crossing the deliverable:
+"send it" is not an instruction an agent can verify it followed; "`scion message` must return
+Delivered" is.
+
+### Rule 127
+
+**A charitable prior is a bias like any other. On diagnostic questions, test the cheap
+hypothesis first, not the flattering one.** I ranked "the infrastructure is broken" above "the
+competent agent made an error" because the agent had been competent. Competence is evidence
+about work quality, not about channel discipline, and the two are unrelated. The tell that I
+had done it: my hypothesis required a fleet-wide defect nobody else had reported, and the
+alternative required one agent to make a mistake it had already made twice.
