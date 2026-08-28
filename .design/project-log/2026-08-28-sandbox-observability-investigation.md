@@ -115,6 +115,28 @@ The filter built by BuildLogFilter (logquery.go:164-240) for /cloud-logs:
 
 **Five-row summary**: Every combination of project ID / cloud_logging / IAM produces an empty Logs tab for dead sandbox agents EXCEPT the one where all three are provided — which deploy.sh does not do.
 
+### 11. PATH A Feasibility — Host Filesystem Read for Dead Sandboxes
+
+**Question**: After sandbox exit, does the agent home persist on the host with .scion-entrypoint.log readable?
+
+**Answer**: YES. The file survives. PATH A is feasible.
+
+- After natural exit: watchSandbox calls state.markStopped (line 1103), state entry persists, host directory untouched
+- After explicit Delete: sandbox delete --force removes gVisor container, state.remove removes entry, but host directory at `/scion/agents/<slug>/home/` still exists
+- DOA handler (line 818) ALREADY reads the file from host filesystem after sandbox death — proves the pattern
+- GetLogs (line 986-989) currently fails because it shells out to tmux capture-pane (needs live sandbox)
+- Broker handler filesystem path (line 1924) fails because ProjectPath is empty (List at line 921-984 doesn't set it)
+- State entry HAS correct AgentHome path (line 853)
+- The #108 defect (stale home survives) is the property that makes PATH A work
+
+### CORRECTION: resolveProjectID() is env-var-only
+
+Earlier report incorrectly stated project ID is detected "from metadata or env." CORRECTED: `logging.resolveProjectID()` (cloud_handler.go:381-388) reads ONLY `SCION_GCP_PROJECT_ID` and `GOOGLE_CLOUD_PROJECT` env vars. No metadata server fallback. The contrast function `hub.ResolveGCPProjectID` (gcp_iam_admin.go:178-187) DOES use `metadata.ProjectIDWithContext` but is NOT called by the logging code. This means logQueryService may be nil on the hosted tier, placing the viewer in broker mode, not cloud-logs mode.
+
+### Logging Black Hole (filed separately)
+
+If CloudHandler is constructed (cloud_logging=true + project ID) but the hub SA lacks roles/logging.logWriter, writes fail, the circuit breaker trips permanently (resilient_cloud_handler.go:324-339), and on Cloud Run GCPHandler was already suppressed at startup (otel.go:108, evaluated once). Result: hub logs go to neither Cloud Logging nor stdout. The circuit opening IS logged to stderr (fmt.Fprintf at line 332, bypasses slog), but the slog.Warn at line 335 is silenced by the same circuit that just opened.
+
 ## Files Referenced
 - `pkg/runtime/docker.go:51-67` — secret injection entry point
 - `pkg/runtime/common.go:42-56,861-929` — telemetry credential and secret serialization
