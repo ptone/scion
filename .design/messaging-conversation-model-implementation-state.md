@@ -9636,3 +9636,129 @@ Self-corrections are written in the emotional aftermath of the error and tend to
 the evidence — one unflagged conclusion becomes "flag everything", one bad paraphrase becomes
 "never infer". Endorsing without checking installs the overshoot permanently, and it arrives
 wearing the authority of a lesson learned.
+
+## §5du. Heartbeat 2026-08-28 14:13 — static sweep. One stale-SHA scare, resolved by positive control.
+
+### Nothing moved
+
+`upstream/main` = `19e32902e` (unchanged). `ca-msg-em6-b6b7b9` = `42abb7dff`,
+`scion/ca-msg-em10-trb` = `822c02e58`, `scion/ca-msg-em9-unify` = `e704b2feb` — all unchanged.
+PR #1349 still `OPEN / UNSTABLE`, not merged. em10's PR not yet opened. Second consecutive
+heartbeat with the critical path parked on the same two user actions.
+
+### em10's taskSummary names a SHA that is not on its branch
+
+Heartbeat item 9 sent me to `scion list --format json`. em10:
+
+> `Tranche B cut, verified, and reported — scion/ca-msg-em10-trb @ 9333f943`
+
+Branch tip is `822c02e58`. `git merge-base --is-ancestor 9333f943 822c02e58` → **NO**. A named
+SHA that is not an ancestor of the branch it claims to describe is the shape of lost work, so
+I chased it rather than assuming staleness.
+
+**First instinct was wrong and worth recording.** I ran `git diff 822c02e58 9333f943` and got
+`134 files changed, 2948 insertions(+), 14802 deletions(-)`, including what looked like the
+wholesale removal of `pkg/messaging/dm_migration.go` (-510) and `dm_migration_test.go` (-935).
+That is the two-dot catastrophe-shaped answer the heartbeat warns about, arriving in a slightly
+new costume: not a stale *base*, but a stale *commit*. `9333f943` is dated 08-27 20:34 and its
+parent chain is tranche A. The "deletions" are simply everything that did not exist yet a day
+ago. Nothing was lost; I had asked the wrong question again.
+
+**The real check, with a positive control (rule 61, heartbeat item 6).** File presence is not
+survival (rule 113), so I counted a load-bearing symbol across all three trees. `9333f943`'s
+own diff against its parent touches exactly two files, and its subject is
+*"Adapt Phase 5 dual-write call sites to kind-qualified DM key API"* — so the load-bearing
+artefact is kind-qualified `ResolveOrCreateDMConversation` calls:
+
+| file | orphan `9333f943` | `upstream/main` | em10 `822c02e58` |
+|---|---|---|---|
+| `handlers_agent_messaging.go` | 4 | **4** | 5 |
+| `messagebroker.go` | 2 | **2** | 2 |
+
+And the kind arguments are visibly on main — `..., "agent", agent.ID, "user", recipientID` at
+`handlers_agent_messaging.go:258`, `authKind, authID, "agent", agent.ID` at `:788` and `:1039`.
+
+**Verdict: `9333f943` is an orphaned pre-squash-merge SHA.** Its substance is on main in full;
+the local commit was orphaned when the tranche squash-merged. em10's summary is stale by a day
+and a tranche. The extra call on em10's branch (5 vs 4) is its new tranche-B work, which is the
+right direction for the count to move.
+
+This is squash-merge blindness from the other end. The documented trap is *"`git cherry` says
+nothing merged, but it did."* This is *"a SHA vanished from history, so something was lost"* —
+same cause, opposite panic. Both dissolve the moment you compare content instead of identity.
+
+### Report-shaped taskSummary — checked, and benign here
+
+em10's summary is written as a report ("cut, verified, and reported"), which per heartbeat
+item 9 is the signature of an agent that believes it reported and did not. In em10's case it
+**did** report: I have its tranche B, reviewed it, and ran independent mutations against it.
+So this is stale belief, not an undelivered report — a distinction worth drawing carefully
+given rule 126 was written one section ago. The signature is a prompt to check, not a verdict.
+em9's summary is empty, which is the failure mode's actual footprint: the agent that did not
+report also did not update its summary.
+
+### Rule 57/58 violated by me, again, on em9
+
+em9 replied "Acknowledged. Parked." Its status reads **`stalled`**, not `blocked`. It
+acknowledged the park without emitting it.
+
+My rule says a park is not a park until the agent is handed the literal
+`sciontool status blocked "..."` string and the result is verified. I told em9 to "park" and
+gave it no command. **I wrote that rule after making this exact mistake once, and have now made
+it a second time.** em6 and em10 both read `blocked`, so theirs took — which is why I did not
+notice; the one agent I parked conversationally rather than mechanically is the one that failed.
+
+Sent em9 the literal command, and told it whose fault it was. Verification deferred to the next
+sweep rather than polled.
+
+Note the pattern this belongs to: em9 wrote a report that never crossed the channel boundary,
+then acknowledged a park that never crossed the status boundary. Both times the state existed
+inside the session and never became observable. Said so to em9 in those terms, because the
+second instance makes the first one legible as a class rather than an incident.
+
+### Peer-wait check (item 3) — deliberately not run
+
+All three managers are blocked, and I can name what each is blocked on without asking:
+em6 on #1349 merging, em10 on its PR being opened, em9 on nothing (parked by me). Every wait
+terminates at the **user**, not at a peer. There is no cycle: a cycle requires at least one
+manager waiting on another manager, and none is.
+
+So I skipped the forced-choice A/B/C probes. Rule 3 exists because an open-ended ping to a
+parked agent reads as permission to resume, and the instrument here would cost three
+resumptions to confirm something branch tips and my own dispatch records already establish.
+Item 9's principle applies to item 3: **asking is the slowest instrument, and it is also the
+only one with side effects.**
+
+### Ledger sweep (item 8)
+
+Nothing struck this sweep, and the reason is singular rather than per-row: **every held row is
+downstream of PR #1349 merging.** B1/B2/B14 + B3 + the six reviewer migration findings consume
+em6's shared D-1 predicate; tranche C re-cut follows those; DEF-5, DEF-6, DEF-9, DEF-10,
+DEF-14, DEF-16, DEF-17/18 and tranches C–G are all downstream of S4, whose preconditions are
+themselves gated on the same merge. One choke point, correctly sequenced, not stalled.
+
+Two heartbeats without movement. Not yet an escalation — the merge is a single user action and
+the ask is already in front of them; a second ask 30 minutes later is nagging. If it is still
+unmerged in three or four sweeps the honest report is not "please merge" but "the entire
+remaining plan is behind one button, here is what is queued behind it."
+
+**Ledger correction:** the heartbeat text still lists DEF-11 among held rows. DEF-11 was struck
+on positive evidence (no `ConversationResult{` literal anywhere in `pkg/hub`; all six live sites
+read `actualRef = convResult.ExternalRef`). The heartbeat is a static template and will keep
+listing it; the ledger here is authoritative.
+
+### Rule 129
+
+**An orphaned SHA is not evidence of lost work, and a diff against one is not the way to find
+out.** A commit that vanished from a branch has three common causes — squash-merge, amend, and
+rebase — and all three preserve content while destroying identity. Compare a load-bearing
+symbol's count across the orphan, main, and the current branch. If the counts reconcile, the
+identity loss is bookkeeping.
+
+### Rule 130
+
+**Any instruction whose compliance you cannot observe must be issued as the literal command
+that makes it observable.** "Park" is unobservable and an agent can honestly believe it
+complied. `sciontool status blocked "..."` is observable in `scion list`. This is the same
+defect as rule 126 in a different channel, and I made it twice against my own written rule —
+which suggests the rule needs to be a habit at dispatch time, not a check at review time.
