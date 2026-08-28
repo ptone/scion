@@ -7906,3 +7906,65 @@ green was minutes from becoming a landing decision. Lead the correction with you
 hand over the command that settles it — a correction that cannot be independently checked is just a
 competing assertion, and the goal is that they stop trusting the wrong number, not that they start
 trusting mine.
+
+---
+
+## §5cz. 2026-08-28 10:39Z — correction confirmed and enlarged; the `head -N` trap is systemic
+
+### auth-refactor-lead confirmed, and found more than I did
+
+Reply: *"You are right, I was wrong. My check used `head -5` which only saw the copyright header —
+the build tag is on line 16. Corrected result: **8 of 11 Phase 2 test files are DARK**."* They added
+two I had not matched: `usermgmt_permission` and `handlers_integ_hooks_authz`.
+
+Reconciling the counts: I found 7 by filename against `upstream/main`, including
+`entadapter/quota_store_test.go` which sits outside `pkg/hub`; they found 8 within their own file
+list. The sets overlap but are not identical and **neither number supersedes the other** — theirs is
+authoritative for their branch, which is the one that matters. No quibble raised; the substance
+agrees and the disagreement is about scope boundaries, not facts.
+
+### The root cause is systemic and this is the part worth keeping
+
+**`head -5` saw only the Apache copyright header. The build tag is on line 16.**
+
+Every Go file in this repo opens with a 14-line Apache licence block, so `//go:build` lands around
+line 15-16 — **below every default `head` window anyone reaches for.** This has now produced a wrong
+answer three times in this project:
+
+1. em9's own inventory cited `authz_agent_baseline_test.go:1` for the tag; it is at line 15. I
+   logged that as a doc nit. **It was not a nit — it was this trap, and I filed it as a typo.**
+2. auth-refactor-lead's `head -5`, which produced a confident "our green is real" on an authz
+   refactor.
+3. My first branch-tip sweep this morning failed the same *shape* of error — asking a question with
+   a window too narrow to contain the answer (`MISSING`, because I dropped the `scion/` prefix).
+
+**The correct instrument is `grep -l no_sqlite` or `git grep -l "go:build !no_sqlite"`, never a
+positional read.** A file's build tag has no fixed line number; anything that assumes one is
+measuring the licence header. This matters directly for option (i): whoever inventories the dark set
+will reach for `head` unless told not to, and a *tuned* `head -20` still breaks the day someone adds
+two lines to the licence block.
+
+**I should have caught this at instance 1.** When em9 cited line 1 and the tag was at line 15, I had
+the whole finding in front of me and recorded a documentation correction. The gap between "your
+citation is off by 14 lines" and "the tool everyone uses to check this cannot see it" is one
+question I did not ask.
+
+### sn-impl-arch closed the loop cleanly
+
+It corrected the record in my favour unprompted: its message to the user had named *me* as the
+intended recipient, which was wrong; the *measured* half of its claim ("not mine", from a 14-file
+check) held while the *inferred* half failed — exactly the split its own labelling had predicted. It
+declined to send the user a second message on a detail already being corrected, citing that its
+traffic runs long.
+
+**No reply sent.** It explicitly closed with "nothing further from me" and flagged its own volume as
+a known problem. An acknowledgement would be the exact noise it just declined to generate. Respecting
+a clean close is worth more than being seen to be gracious.
+
+### Rule 95 (new)
+
+**Never read a file's build tag positionally.** `head -N` measures the licence header in this repo,
+not the constraint. Use `grep -l`. Generalised: when a fact has no fixed location, any
+location-based instrument is measuring something else and will answer confidently. Corollary, and
+the one that cost me: **when someone's citation is off by a fixed offset, ask whether the offset is
+the finding.** A systematically wrong line number is a broken instrument wearing a typo's clothes.
