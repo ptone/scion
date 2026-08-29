@@ -18249,3 +18249,34 @@ Held: DEF-5, DEF-6, DEF-9, DEF-10, DEF-18, DEF-32, DEF-33/35, DEF-34 (blocked on
 DEF-46, DEF-47. Tranche H blocked on the omitempty evasion.
 
 **Tranche C: C1–C7 all merged. Complete.**
+
+### 18:19Z — ptone asked "what is S4?". I had used a stale label.
+
+Checked rather than answering from memory, and the answer was that **the term was mine and it was
+wrong**. Two naming schemes coexist in the corpus:
+
+- `design.md` uses **S3/S4/S5 as review rounds** of the original design ("after S4 round 1",
+  "the S5 survey").
+- `messaging-em9-rederivation.md` uses **tranche letters A–H** for work slices.
+
+And it uses both for the same event in adjacent sentences (line 30): *"Tranche G is the flip and is
+out of scope until C–F have soaked. B10 stands: derivation failures stay non-fatal until the S4
+read-switch."*
+
+**The correct current name is Tranche G** — Phase 7, flipping `conversation_read_switch`.
+Default-off, stays off through C–F, separate decision with its own soak, documented gate is
+non-zero matches on the divergence board.
+
+**Why this matters for DEF-41, stated precisely:** today `conversation_id` is written but never
+read (dual-write only), so the fabricated `"legacy-pending"` is inert. After G it becomes a real
+answer to a real query — and because every affected message carries the *identical* fabricated
+key, they would all collapse into one bogus shared conversation. Not urgent; steadily more
+expensive to unpick as rows accumulate.
+
+**RULE 410.** A stale label survives because it still resolves for the person using it. It fails
+only at the boundary — the first reader who was not present when it was coined. When challenged on
+a term, resolve it against the doc rather than restating it; my own corpus contradicted itself in
+one sentence pair and I would not have found that by recalling.
+
+Offered to sweep S-numbers to tranche letters, flagging that the review-round numbering may be
+worth preserving as history. Awaiting ptone.
