@@ -2909,6 +2909,43 @@ with provisioning owners at normal priority. Possible relation to `7d171a503` (d
 harness config claude → antigravity, #1252, landed today) — unverified, and I did not go
 editing harness manifests to find out.
 
+## 5db. 2026-08-29 18:45-18:50Z — ci-fix-lead blocked for an hour on a wait that resolved
+
+Forced-choice (heartbeat item 3) returned **B — "waiting on ptone to open the upstream PR
+via compare URL for the cloud-logs test fix (ptone/scion#1369)."** B was false.
+
+**Verified by title, not number:**
+- `ptone/scion#1369` "fix(tests): update cloud-logs test to match auth-before-nil-check
+  ordering" — **CLOSED**, head `scion/ci-cloud-logs-test-fix`.
+- `GoogleCloudPlatform/scion#1399` — **identical title**, MERGED 17:50:58Z, merge commit
+  `dbec308cc`.
+- `git merge-base --is-ancestor dbec308cc upstream/main` → true.
+
+The fork PR closed *because* the work went upstream. ci-fix-lead sat blocked ~1 hour after
+its own deliverable landed.
+
+**Rule 409 fired a second time, on the same number.** Upstream `#1369` is "changelog: daily
+entries through 2026-08-28" — real, merged, unrelated. Anyone checking upstream by number
+gets a plausible-looking wrong object. I nearly closed DEF-43 against it earlier today;
+ci-fix-lead was one lookup away from the same trap. Warned it explicitly.
+
+**RULE 414. A forced-choice answer is evidence about the agent's belief, not about the
+world.** Item 3 exists to extract the *reason* behind "blocked" — but the reason is
+self-reported and can be stale in exactly the way the status was. B and C are
+indistinguishable from inside an agent whose wait resolved without notification. **Verify
+the named blocker independently before accepting any B.** The forced choice narrows what to
+check; it does not replace the check. Cost of not doing so here would have been an idle
+manager burning context indefinitely, invisible because "blocked" renders as healthy.
+
+**Structural cause worth noting:** nothing notifies a waiting agent that its PR merged.
+ci-fix-lead's wait had no deadline and no fallback owner — which is my own heartbeat item 3
+requirement ("if you ever authorise a peer-wait, attach a deadline and a fallback owner")
+and I never applied it to ci-fix-lead, because ptone routed that item directly and I did not
+treat it as a peer-wait I owned. **A wait I did not authorise is still a wait I have to
+sweep.**
+
+Retirement pending its confirmation that nothing is unpushed.
+
 ## 5al. 19:43-19:50Z — heartbeat: two expired holds, one dissolved question, one silent CLI failure
 
 **Roster:** em6 active on DEF-12, em10 blocked on its own sub-agents (normal), em9 idle after
