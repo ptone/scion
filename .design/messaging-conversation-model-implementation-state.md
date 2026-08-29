@@ -20901,3 +20901,76 @@ as known-and-accepted. Will not re-raise either way.
   gate-deletion; contrib-repo PAT.
 - `scion/ca-msg-def3750` @ `0a7a12a9b` (green on main, mutation-proven). `scion/ca-msg-def54` @
   `331328fd6`. def3750 holding. `ca-msg-fmt1409b` held as evidence — do NOT retire in a sweep.
+
+---
+
+## 5es — heartbeat sweep: #1409 merged, Tranche D fully landed, heartbeat refreshed (2026-08-29)
+
+### Section boundary: TRANCHE D COMPLETE AND MERGED
+
+**#1409 merged 23:38** → `upstream/main` = **`1a2c1b07d`**. Tranche D is now fully landed across
+#1405, #1406, #1407, #1408, #1409. The gofmt fix routed to `ci-fix-lead` was the last blocker;
+final check state was green on everything but `cla/google` (expected on agent branches, rule 104).
+
+### def3750 rebased onto new main — verified, not taken on report
+
+Dispatched under ptone's standing rebase authorisation. Required `--force-with-lease` rather than
+`--force`, and instructed it to **stop rather than resolve** any conflict, since a conflict would
+mean something had touched its file and I wanted to see that.
+
+Verified independently: tip **`2855ff843`**, **merge-base now equals `1a2c1b07d`**, numstat still
+`424 28`, and the checker file is **byte-identical to the pre-rebase version** — so the rebase
+carried content faithfully rather than quietly resolving something. Checker still green on the new
+main; #1409's RLock guards did not shift what the function-scoped gates see.
+
+- **502.** After a rebase, verify the *content* is unchanged as well as the numstat. A rebase that
+  silently resolves a conflict produces a plausible line count and a different file; comparing the
+  blob against the pre-rebase version is the cheap check that catches it.
+
+### Heartbeat replaced: v11 → v12
+
+v11 had drifted badly — it still named `ce283e688` as main (four merges stale), listed the retired
+`ca-msg-def54` as live, and described DEF-37/50 as unowned. **A stale heartbeat is worse than none:
+it is the first thing a post-compaction me reads, and it presents obsolete state with the authority
+of a briefing.**
+
+Old schedule `f0e68fa9…` deleted; new **`6906202f-905f-4190-b34a-6de53c63c089`**
+(`ca-msg-impl-heartbeat-v12`), same cron `13,43 * * * *`. Verified only one ca-msg heartbeat remains.
+
+v12 carries the refreshed anchors plus the traps learned today: severity is reachability × impact;
+re-derive when challenged; a mutation proves nothing unless proven to have landed; a rule added
+after the mutation suite has no evidence; put gofmt and the landing protocol in every brief; and
+`ca-msg-fmt1409b` is **held as evidence — do not retire in a sweep**.
+
+- **503.** Refresh the durable briefing whenever its anchors move, not when convenient. Every hour
+  a stale heartbeat survives is an hour in which a restart inherits a confident, wrong picture.
+
+### ptone's DEF-57 directive — constraints returned, awaiting decision
+
+He directed removing the `if strings.HasPrefix(Sender, "user:")` skip and always calling
+`authorizeAgentMessage`. Agreed on the smell. Two constraints found in `authorize_message.go`:
+
+1. **The nil check precedes the system-plane check** (line 60 vs line 68). Calling unconditionally
+   with a nil identity would **deny system-plane traffic** — scheduled events and internal hub
+   triggers. Must pass a non-nil identity and let `isSystemPlane` carry the exemption. **Do not fix
+   by moving the nil check below the bypass**; that weakens a guard that is currently correct.
+2. **It is a live behaviour change, not a refactor.** An agent-prefixed sender currently skips and
+   is delivered; unconditionally it reaches the type switch `default` arm and fails closed. Correct
+   per *under-granting is recoverable, over-granting is not* — but it turns a working path into a
+   403 on the strength of our belief that no plugin relays agent-sourced messages.
+
+Recommended **instrument-then-flip** (log the classification non-fatally, watch, then deny), the
+same shape as the B10 ruling. Asked the single question: instrument-then-flip, or flip direct.
+**Not staffing until he answers.**
+
+- **504.** "Remove the conditional and always check" is a behaviour change wherever the conditional
+  was letting something through. Enumerate what currently takes the skipped branch before treating
+  it as a refactor.
+
+### Standing state
+
+- `upstream/main` = `1a2c1b07d`. `scion/ca-msg-def3750` @ `2855ff843` (rebased, green, compare URL
+  live and branch-based so it reflects this tip).
+- Awaiting ptone: DEF-57 approach; compare URL; Tranche E board; gate-deletion; contrib-repo PAT.
+- Live: `ca-msg-def3750` (holding), `ci-fix-lead`, `chat-admin-lead`. `ca-msg-fmt1409b` held as
+  evidence — **do NOT retire**.
