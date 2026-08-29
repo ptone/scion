@@ -19905,3 +19905,66 @@ def42 retired after this.
   reads of field X", ask what else the same setter-under-lock pattern covers before
   closing it — the audit boundary is usually the field name someone happened to
   grep for.
+
+---
+
+## 5ed — 2026-08-29 — DEF-54 scope audit: my error and def54's, both caught
+
+The pre-code scope audit paid for itself immediately. It found an error on each
+side.
+
+**MY ERROR — a count is not a finding.** I told ptone that `s.pluginManager` had
+"14 references across four files, 9 of them in handlers_integrations.go alone," in
+a context that plainly implied those reads were unguarded. **All 9 are already
+RLock-guarded.** I verified the *setters* took the write lock, counted references
+to the field, and inferred a defect without checking whether each read takes the
+lock. That is precisely the pattern-scanning error I had criticised def42 for one
+message earlier — I wrote the criticism and then committed the inverse of it
+inside the same turn. Corrected to ptone within minutes.
+
+**def54's ERROR — audited the wrong base.** It worked from `034cace`, which it
+called `origin/main`. Two faults in one: `origin` is the lagging fork, and
+`034cace` is the commit *before* the DEF-42 merge. So its "FIELD 4: DEF-42
+leftovers" — 12 accesses across `handleAgentOutboundMessage`, `handleBrokerInbound`,
+`handleChatThreads`, `handleChatThreadRoutes`, `ensureProjectGeneralTopic` — is
+exactly the set DEF-42 fixed. It rediscovered merged work as unfixed. Sent back to
+redo on `upstream/main`.
+
+It had a tell and did not act on it: it wrote that DEF-42 both added hoists in
+`handleAgentOutboundMessage` and missed a site in that same function. A merged fix
+that looks half-applied is a base problem, not a fix problem.
+
+**Real DEF-54 scope, verified read-by-read by me on `8f72e7ab7`:**
+
+- `s.channelRegistry` in `handleAgentOutboundMessage` — 3 bare accesses at
+  `:387-388`, check-then-use. The nil-deref panic. Stands as filed.
+- `s.pluginManager` in `getA2ABridgeExternalURL` — 2 bare accesses, check-then-use.
+  One function, not nine.
+- `s.dispatcher` in `handleAgentResetAuth` and `handleAdminResetAuthAll` — 4 bare
+  accesses, check-then-use in both. New; neither def42 nor I had this.
+- `s.attachmentStore` — all 4 reads already guarded. Closes def42's open question.
+
+Out of scope and confirmed already-correct: webChatStore (DEF-42), the
+handlers_integrations.go pluginManager reads, attachmentStore.
+
+**Held for ptone's decision.** def54 found 17 further fields with the
+setter-under-lock shape where every read is bare: `s.events` 99 sites,
+`s.secretBackend` 99, `s.auditLogger` 35, `s.hubID` 34, and smaller. Mostly
+set-once-at-startup so the real risk is low, but technically the same race. It
+correctly reported without claiming them. Scope call is ptone's; my
+recommendation was file separately, do not staff yet.
+
+**Also mine: an over-cap send was rejected.** The correction to ptone measured
+2013 runes and went out anyway, because I put the measurement and the send in one
+command — printing a number does not gate anything. Resent at 1807 with the send
+wrapped in a conditional on the count.
+
+### Rules
+
+- **464.** A reference count is not a defect count. For any "N unguarded reads"
+  claim, the guard must be checked at each site individually; counting occurrences
+  of the field name measures the field's popularity, not its safety.
+- **465.** A merged fix that appears half-applied is evidence about your base, not
+  about the fix. Check what you are standing on before reporting the gap.
+- **466.** Measuring in the same command as the send gates nothing. Wrap the send
+  in a conditional on the measured length, or the number is decoration.
