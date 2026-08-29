@@ -20064,3 +20064,56 @@ naturally contains `@agent` and `@email`.
 - **469.** Absence of the delivery confirmation is the signal, not presence of a
   warning. Check for `Message delivered to agent` on every send; a warning without
   it means the message did not land.
+
+---
+
+## 5eg — 2026-08-29 — d1 exit interview; DEF-55 filed
+
+**DEF-55 — the orphan row DEF-48/DEF-51 did not close.** d1's answer 2 identified
+that a single 30s context spans both the resolve and the send, with no expiry
+check between them. Verified on `ce283e688`: the context is created at
+`cmd/message.go:744`, `ResolveConversation` runs at `:747`, and
+`SendOutboundMessage` at `:786` (email) and `:869` (agent). `grep -c 'ctx.Err()'`
+over the file returns **0**, with `ResolveConversation` at 2 as a control proving
+the search works.
+
+So a slow resolve that consumes the budget leaves the conversation row created and
+the send guaranteed to fail on an expired context — **an orphaned row, which is
+exactly the failure DEF-48 and DEF-51 exist to prevent, reached by timeout instead
+of by validation.** Both hoisted validation above resolve; neither addresses the
+window after resolve succeeds.
+
+Severity is lower than DEF-29's: the row was resolved from a derived key, so it
+has an ACL basis and is merely empty, not keyless. Low probability, needs a ~30s
+resolve. Filed, not staffed.
+
+**Answers 1(a) and 1(b), judged correct and not filed.** d1 flagged that the
+broadcast fan-out (`:608`) and group-send (`:924`) build and send
+`StructuredMessage`s with no `ValidateLegacyMessage` call, and moved past them
+because neither involves a resolve. I checked that judgement against
+`VALIDATION_EXEMPTIONS.md`, whose three exempt emitters are all **server-side**
+(`handlers_chat_v2.go`, `notifications.go`, `server.go`) and do not cover these.
+But the exemption contract governs the hub choke point, and these are **client**
+paths in `cmd/`; the hub validates on receipt regardless. With no resolve there is
+no row to orphan, so the only consequence is that rejection arrives from the hub
+rather than locally — a UX difference, not a hole. d1's reasoning was right.
+
+**Answer 4 — a latent shape worth remembering.** The validator does not check
+sender *format*, only non-emptiness (`validate_compat.go:80`). `MapLegacyEnvelope`
+passes Sender to `buildPrincipalRef` (`envelope_compat.go:150`), which applies a
+heuristic: a string containing a colon is used as-is, otherwise it is **prefixed
+with `system:`**. So a bare `myagent` silently becomes the principal
+`system:myagent`. This is not exploitable today because B5's always-override
+derives sender from the authenticated caller server-side (G-1). It is recorded
+because a silent promotion to a `system:` principal is the kind of thing that
+becomes an escalation the moment any path trusts a client-supplied Sender.
+
+d1 retired after this. Its answer 3 confirmed no other instance of the
+validated-object-built-in-parallel shape in `cmd/`, which was DEF-51's root form.
+
+### Rule
+
+- **470.** Hoisting validation above a row-creating call closes the validation
+  route to an orphan row, not the orphan row itself. Any failure between create
+  and use produces the same artefact — check the whole window, including timeouts
+  and cancellation, not just the check you moved.
