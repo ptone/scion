@@ -14,18 +14,16 @@
 # was rejected: this tranche produced two jobs that reported green
 # because they could not express failure (rules 386/387).
 #
-# EXCLUSIONS: agent-viz is explicitly excluded. It embeds a Vite-built
-# web frontend (go:embed dist/*) whose assets are .gitignored build
-# artifacts. Building them requires Node.js + npm + vite, which makes
-# this job a full-stack build orchestrator rather than a Go module
-# health gate. The correct fix is for agent-viz to have its own CI job
-# or to commit a non-dot-prefixed placeholder (go:embed skips files
-# starting with . or _, so dist/.gitkeep would not satisfy the glob).
-# Until then, it is excluded here
-# with visibility: the exclusion is printed in the discover step and
-# accounted for in the coverage assertion (discovered == tested +
-# explicitly_excluded). A silent skip would be indistinguishable from
-# coverage — the same defect as a hand-listed matrix.
+# EXCLUSIONS: agent-viz is explicitly excluded. It requires a Vite web
+# build (Node.js + npm) to populate internal/server/dist/ for its
+# go:embed directive. That makes it a full-stack build, not a Go-only
+# concern. The correct fix is a separate CI job for agent-viz, or a
+# non-dot-prefixed placeholder in dist/ (go:embed skips dot-prefixed
+# and underscore-prefixed files, so .gitkeep does not work).
+#
+# The exclusion is visible: printed in the discover step, counted in
+# the coverage assertion (tested + excluded == total at unlimited
+# depth). A silent skip would be indistinguishable from coverage.
 #
 # DISCOVERY: The module list is derived by `find`, not hand-listed.
 # If someone adds a new module under extras/, this job picks it up
@@ -65,7 +63,6 @@ jobs:
       matrix: ${{ steps.find.outputs.matrix }}
       tested_count: ${{ steps.find.outputs.tested_count }}
       excluded_count: ${{ steps.find.outputs.excluded_count }}
-      total_count: ${{ steps.find.outputs.total_count }}
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -85,10 +82,11 @@ jobs:
           EXCLUDED_MODULES="extras/agent-viz"
 
           ALL_MODULES=$(find extras -maxdepth 2 -name go.mod -printf '%h\n' | sort)
-          ALL_COUNT=$(echo "$ALL_MODULES" | wc -l)
+          ALL_COUNT=$(printf '%s' "$ALL_MODULES" | grep -c . || true)
 
-          # Filter out excluded modules
-          TESTED_MODULES=$(echo "$ALL_MODULES" | grep -v -F "$EXCLUDED_MODULES" || true)
+          # Filter out excluded modules. -x for exact line match (no prefix
+          # over-matching), -F -f for multi-entry support (one per line).
+          TESTED_MODULES=$(printf '%s\n' "$ALL_MODULES" | grep -v -x -F -f <(printf '%s\n' $EXCLUDED_MODULES) || true)
           TESTED_JSON=$(echo "$TESTED_MODULES" | jq -R -s 'split("\n") | map(select(. != ""))')
           TESTED_COUNT=$(echo "$TESTED_JSON" | jq 'length')
 
@@ -111,21 +109,19 @@ jobs:
           echo ""
           echo "Discovered: $ALL_COUNT total, $TESTED_COUNT to test, $EXCLUDED_COUNT explicitly excluded"
 
-          echo "matrix={\"module\":$TESTED_JSON}" >> "$GITHUB_OUTPUT"
-          echo "tested_count=$TESTED_COUNT" >> "$GITHUB_OUTPUT"
-          echo "excluded_count=$EXCLUDED_COUNT" >> "$GITHUB_OUTPUT"
-          echo "total_count=$ALL_COUNT" >> "$GITHUB_OUTPUT"
-
-      - name: Fail if no modules discovered
-        run: |
-          if [ "${{ steps.find.outputs.total_count }}" -eq 0 ]; then
+          # Fail fast if discovery found nothing — broken find, not empty extras.
+          if [ "$ALL_COUNT" -eq 0 ]; then
             echo "::error::No extras modules discovered. The find command matched nothing — this is a broken discovery, not an empty result."
             exit 1
           fi
-          if [ "${{ steps.find.outputs.tested_count }}" -eq 0 ]; then
-            echo "::error::All discovered modules are excluded. At least one module must be testable."
+          if [ "$TESTED_COUNT" -eq 0 ]; then
+            echo "::error::All $ALL_COUNT discovered modules are excluded. At least one module must be testable."
             exit 1
           fi
+
+          echo "matrix={\"module\":$TESTED_JSON}" >> "$GITHUB_OUTPUT"
+          echo "tested_count=$TESTED_COUNT" >> "$GITHUB_OUTPUT"
+          echo "excluded_count=$EXCLUDED_COUNT" >> "$GITHUB_OUTPUT"
 
   build-and-test:
     name: ${{ matrix.module }}
@@ -154,12 +150,21 @@ jobs:
         working-directory: ${{ matrix.module }}
         run: |
           # Use -count=1 to defeat caching. -v to prove execution.
-          # Capture output and check for actual test runs to guard
-          # against build-tag exclusion or empty packages.
           set -o pipefail
           go test -v -count=1 ./... 2>&1 | tee test-output.txt
           RUN_COUNT=$(grep -cF '=== RUN' test-output.txt || true)
+          TEST_FILES=$(find . -name '*_test.go' | wc -l)
+          echo "Test files found: $TEST_FILES"
           echo "Tests executed: $RUN_COUNT"
+
+          # Guard against build-tag exclusion or empty packages: if test
+          # files exist but nothing ran, the build layout is silently
+          # hiding tests. Modules with genuinely zero test files (e.g.
+          # scion-broker-log) are not penalized.
+          if [ "$TEST_FILES" -gt 0 ] && [ "$RUN_COUNT" -eq 0 ]; then
+            echo "::error::$TEST_FILES test files present but zero tests ran — build tags or package layout are excluding them"
+            exit 1
+          fi
 
       - name: Check go.mod/go.sum freshness
         working-directory: ${{ matrix.module }}
@@ -176,23 +181,32 @@ jobs:
     needs: [discover, build-and-test]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
       - name: Assert coverage
         run: |
           TESTED=${{ needs.discover.outputs.tested_count }}
           EXCLUDED=${{ needs.discover.outputs.excluded_count }}
-          TOTAL=${{ needs.discover.outputs.total_count }}
+
+          # TOTAL is re-derived here from an INDEPENDENT find at unlimited
+          # depth, not from the discover job's -maxdepth 2. This makes the
+          # assertion non-tautological: a module at depth 3+ would be missed
+          # by the matrix but caught here. If the two counts diverge, a
+          # module exists that the matrix cannot see.
+          TOTAL=$(find extras -name go.mod -not -path '*/vendor/*' -printf '%h\n' | wc -l)
 
           echo "=== Coverage Summary ==="
-          echo "  Total discovered: $TOTAL"
-          echo "  Tested (matrix):  $TESTED"
-          echo "  Excluded:         $EXCLUDED"
+          echo "  Total (unlimited depth): $TOTAL"
+          echo "  Tested (matrix):         $TESTED"
+          echo "  Excluded:                $EXCLUDED"
           echo ""
 
-          # Structural assertion: every discovered module was either
-          # tested or explicitly excluded. No silent gaps.
           ACCOUNTED=$((TESTED + EXCLUDED))
           if [ "$ACCOUNTED" -ne "$TOTAL" ]; then
-            echo "::error::Coverage gap: discovered $TOTAL modules but only accounted for $ACCOUNTED (tested=$TESTED + excluded=$EXCLUDED). A module was neither tested nor excluded."
+            echo "::error::Coverage gap: found $TOTAL modules (unlimited depth) but matrix accounted for $ACCOUNTED (tested=$TESTED + excluded=$EXCLUDED). A module exists outside -maxdepth 2 or was neither tested nor excluded."
             exit 1
           fi
 
