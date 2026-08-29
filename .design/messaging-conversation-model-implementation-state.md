@@ -19008,3 +19008,50 @@ I warned it and escalated rather than acting. ci-fix-lead swept too (blocked 2h;
 unmoved, fourth heartbeat — gate-shape change on the authz reachability check,
 needs an owner assigned by ptone per brief item 12. Told ci-fix-lead it exists
 and is not silently theirs.
+
+## 5dl — CORRECTION: the chat-admin-lead escalation was a false alarm (2026-08-29 20:48Z)
+
+Entry 5dk's escalation is **withdrawn**. The work landed: upstream PR #1063,
+Aug 7. Verified by content, not by the agent's word — `SettingsWriteMu` is on
+`upstream/main` in three files (`cmd/server_foreground.go`,
+`pkg/config/integration_config.go`, `pkg/hub/handlers_integrations.go`). The
+branch was deleted after merge, which is normal cleanup.
+
+Three compounding errors, all mine:
+
+1. I tested with `git cat-file -e <sha> && git merge-base --is-ancestor`, and on
+   failure printed `"NOT an ancestor (or object absent locally)"`. **I wrote the
+   ambiguity into my own output string and then read the result as absence.** The
+   object was simply not fetched.
+2. The SHA test was the wrong instrument regardless. The merge was squashed, so
+   the branch commit never lands under its own SHA. **Ancestry checks are blind
+   against squash-merge — this is already a standing rule in these notes and I
+   used the blind test anyway.**
+3. I searched `origin`, the fork. The merge was upstream. Branch absence on the
+   fork after an upstream merge is the expected state.
+
+**Rule 435: a deleted branch is what success looks like.** I treated the normal
+end state of completed work as the signature of its loss. That is a base-rate
+inversion, and the heartbeat's own warning — that a report-shaped taskSummary
+means an agent believes it reported and did not — is what primed me to take the
+alarming branch without first paying for the distinguishing check.
+
+**Rule 436: controls prove the instrument works, not that the reading means what
+you think.** My positive control confirmed `ls-remote` resolves branches that
+exist. It said nothing about whether a missing branch implies missing work. I ran
+the control that was easy and skipped the one that was load-bearing. This is the
+same failure as rule 413 (an anomaly is not thereby the cause) arriving from a
+new direction.
+
+**Rule 437: when the escalation is about possible data loss, the cost of the
+check is always lower than the cost of the alarm.** One content grep —
+`git grep -c SettingsWriteMu upstream/main` — would have closed this before it
+reached anyone. I had the distinctive identifier available in the taskSummary the
+whole time. Escalation speed is a virtue only after the cheap disconfirming test.
+
+Retracted with ptone and closed with chat-admin-lead within four minutes, both
+naming the specific flaw rather than the conclusion. The 12-vs-13 DEF-42
+correction in the same message to ptone stands and was unaffected.
+
+ci-fix-lead answered C: finished, no active work, awaiting ptone direction on
+blocking-vs-advisory and the tag audit. Relayed. Not mine to task.
