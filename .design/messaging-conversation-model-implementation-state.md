@@ -19401,3 +19401,47 @@ fix.
   wrong implementation, not coverage of the defect. Both are worth having and
   they are not interchangeable — count only the red-before-green one as
   discharging the acceptance criterion.
+
+## 5dt — DEF-49 STRUCK; d34 unblocked and re-briefed (2026-08-29)
+
+**DEF-49 merged as #1403.** `upstream/main` = `af8f6c063`. Verified byte-identical
+to what I reviewed: `git diff --stat upstream/main origin/scion/ca-msg-d5` empty,
+positive-controlled against `ca-msg-d51`, which correctly produced output. Exit
+interview sent to D5 before retirement.
+
+**The phantom arrived on schedule, on the branch I had just sent for PR.** The
+control in that same command showed d51 at 4 files / 200 insertions / **515
+deletions**, including `handlers_agent_messaging_test.go` at 431 — because main
+moved to `af8f6c063` while d51 sits on `ddba7d5d1`. Resolved without touching
+the branch:
+
+    three-dot upstream/main...d51  => 2 files, 130/13   (matches D1's report)
+    comm -12 of changed-file lists => EMPTY             (zero overlap)
+
+GitHub's compare is three-dot, so the URL already with ptone renders the correct
+two files. No rebase needed and none requested — with zero file overlap a rebase
+would be churn. Worth recording that the phantom appeared *inside the control
+for a different check*, which is where I was least braced for it.
+
+**d34 was blocked on a resolved blocker.** D3 and D4 were both sequenced after
+D1; D1 landed; nothing in this system notifies a waiting agent. It never
+answered the forced-choice probe — same signature as the original silence (rule
+442) — so I stopped probing and just re-briefed it in full, confirming the
+unblock by content rather than asserting it: `ValidateMessage` has zero
+production callers on main and `ValidateMessageAddressees` has test callers only,
+which are exactly D3's preconditions.
+
+Told d34 explicitly that DEF-37's marker gate is DOCUMENT-ONLY — it is a CI gate
+and not the changing team's call — and gave it the DEF-42 lesson as a
+requirement: red-before-green must be verified under the CI invocation, not
+locally.
+
+**Ledger:** STRUCK adds DEF-49. DEF-42 and DEF-51 are with ptone as compare
+URLs. DEF-52 owned by ci-fix-lead (ct-dev-4, ptone/scion#1372).
+
+### Rule
+
+- **453.** The phantom will surface inside the control for an unrelated check,
+  where it reads as a finding about the thing you were testing. Localise before
+  reacting, even when the alarming number appears in a line you added only as a
+  positive control.
