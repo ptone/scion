@@ -2980,6 +2980,23 @@ message and the failure it prevents is a manager building on numbers that silent
 
 D1 in progress.
 
+**HEARTBEAT v8 → v9** (`7549534e`, cron unchanged `13,43 * * * *`; v8 `bba9dcb2` deleted).
+Created v9 and VERIFIED IT ACTIVE BEFORE deleting v8 — never leave yourself without a
+heartbeat during a swap. Added: rule 412 to item 2 (dispatch is three steps), rule 414 to
+item 3 (verify the named blocker; a forced-choice answer reports belief, not the world) plus
+"a wait you did not authorise is still a wait you must sweep", new item 3b for rule 415
+(lifecycle authority), rule 413 to item 6 (the anomaly you found is not thereby the cause),
+the deleted-assertion successor requirement to item 5b, and a refreshed ledger in item 8.
+
+**RULE 416. A CLI that prints its help text instead of erroring has performed a silent
+no-op.** `scion schedule delete <id> --yes` printed usage and exited without deleting —
+`--yes` is a global flag but not accepted there. The output ends in a normal-looking flag
+list, the exit status is unremarkable, and `schedule list` still showed v8. Same family as
+`gofmt -l` exiting 0 and `go test` printing `ok` for zero matched tests: **the failure
+renders as ordinary output.** Confirm destructive CLI actions by re-querying state, never by
+the absence of an error. Also: pass the FULL UUID; the truncated ID in `schedule list` is a
+display convenience and is not accepted as input.
+
 ## 5al. 19:43-19:50Z — heartbeat: two expired holds, one dissolved question, one silent CLI failure
 
 **Roster:** em6 active on DEF-12, em10 blocked on its own sub-agents (normal), em9 idle after
