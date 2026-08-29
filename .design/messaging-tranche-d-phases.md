@@ -89,7 +89,7 @@ if newMsg.ConversationID == "" {
 The two halves together define the correct shape: neither validate-then-attribute
 nor attribute-then-validate is right on its own.
 
-### Consequence for DEF-49 (recorded here because it constrains that fix)
+### Consequence for DEF-49 (sponsor ruled it into D on 2026-08-29; see §5.1)
 
 `cmd/message.go:715` is the **only** production writer of a caller-supplied
 `conversation_id` on an outbound legacy message, and it is legitimate. So the
@@ -220,8 +220,128 @@ as specified and does not re-scope it. Any deviation is an escalation to me.
 | **D2** | **DEF-48.** Fix `cmd/message.go:715-716` ordering so a failed validation cannot leave an orphaned conversation. Covers D's hunks in `cmd/message.go`. |
 | **D3** | Rewrite `VALIDATION_EXEMPTIONS.md` to the shipped contract, present tense. Resolve `ValidateMessageAddressees` (wire or delete). Note DEF-37's marker gate as still-unimplemented rather than "tracked." |
 | **D4** | Hub integration test for the choke point: prove the `conversation_id` check now fires on a legacy path where it previously could not. |
+| **D5** | **DEF-49.** Authorize caller-supplied `conversation_id` against the authenticated sender at `handlers_agent_messaging.go:888`. Security. See §5.1. |
 
 D1 is the tranche. D1 must be its own PR.
+
+## 5.1 Phase D5 — DEF-49, caller-supplied `conversation_id` is unverified
+
+Sponsor ruled DEF-49 into Tranche D (2026-08-29, *"let's work it into D"*). It gets
+its own phase and its own PR: it is the only security-relevant change in D, and it
+should not be reviewed alongside ordering cleanups.
+
+### The site
+
+`pkg/hub/handlers_agent_messaging.go:888-899`. The handler has two branches. The
+`else` branch — server-side derivation — is careful, and says so:
+
+```go
+// B5 SECURITY: derive sender identity for the conversation key
+// from the authenticated context, never from the message payload.
+authKind, authID := authenticatedSender(ctx)
+```
+
+The `if` branch, immediately above it, accepts an entire conversation identity
+**from the payload** with no reference to the authenticated caller at all. The
+asymmetry is the defect: the code documents the rule and then violates it one
+branch earlier.
+
+### Three distinct facets, all reachable from the same input
+
+1. **Non-membership.** An authenticated agent supplies any conversation UUID and
+   the message is persisted into it. For a `direct` conversation the `external_ref`
+   DM key *is* the ACL, so this writes a message into a DM whose key does not name
+   the sender. This is the **AC-INGRESS-1** violation.
+2. **Non-existence.** When `GetConversation` returns nil or errors, the code sets
+   `lookupFailed = true` and **proceeds anyway** — persisting a message attributed
+   to a conversation that is not in the store.
+3. **Cross-project.** `GetConversation(ctx, id)` takes only an id; it is not
+   project-scoped. `storeMsg.ProjectID` is set from `agent.ProjectID` while the
+   conversation may belong to another project entirely. Project isolation is
+   enforced in `authorize_message.go:186` for *addressees* and has no equivalent
+   here.
+
+### Design
+
+Verify the assertion against the authenticated caller before honouring it. The
+authority differs by conversation kind, and that is not a detail — `direct` rows
+have `ProjectID == nil` (they are global per §2.4.1), so project scoping cannot be
+the universal check.
+
+```
+caller supplied conversation_id
+        │
+        ├─ authenticatedSender(ctx) == ("","")  ──────────────────► DENY (401)
+        │
+        ├─ GetConversation error ────────────────────────────────► DENY (500)
+        ├─ GetConversation nil  ─────────────────────────────────► DENY (400)
+        │
+        ├─ kind == "direct":
+        │     messages.ParseDMKey(conv.ExternalRef)
+        │        ├─ parse error ──────────────────────────────────► DENY (403)
+        │        └─ (authKind,authID) ∈ {(kindA,idA),(kindB,idB)}? ─► allow / DENY (403)
+        │
+        └─ kind == "group":
+              conv.ProjectID != nil && *conv.ProjectID == agent.ProjectID
+                                                        ─────────► allow / DENY (403)
+```
+
+Interface sketch — illustrative, not production:
+
+```go
+// authorizeAssertedConversation reports whether the authenticated caller may
+// attribute a message to the conversation it named. Fails closed on every
+// unresolved case.
+func (s *Server) authorizeAssertedConversation(
+    ctx context.Context, convID string, projectID string,
+) (*store.Conversation, error)
+```
+
+**Use `messages.ParseDMKey`, not `isDMParticipant`.** `isDMParticipant`
+(`handlers_chat_v2.go:3136`) checks **user slots only** — `parts[1] == "user" ||
+parts[3] == "user"` — so it can never match an agent principal and is wrong for
+this path. It also has seven chat-v2 callers depending on its exact semantics and
+is on the prohibition list. **Do not modify it, do not call it, do not generalise
+it.** `messages.ParseDMKey` is the canonical strict parser and is kind-aware.
+
+**Parse failure denies.** No repair, no normalisation, no best-effort. A `direct`
+row whose key will not parse has no usable ACL, and the standing rule is that a
+wrong key is worse than no key.
+
+### Why deny, and not "silently drop the caller's assertion"
+
+Falling back to server-side derivation would be the more conservative-looking
+choice, and it was the first thing I considered. Rejected, because the legitimate
+producer never trips the check.
+
+`cmd/message.go:715` is the **only** production writer of this field, and it only
+does so on the `@agent` reference path — where the conversation was just resolved
+from the sender's own identity, so the sender is a participant by construction.
+`conv:<uuid>` and `#<thread>` are gated at the CLI entry point and never reach it;
+`@<email>` routes through `SendOutboundMessage` with the id in *metadata*, a
+different handler. So a denial here means the assertion was not produced by the
+sanctioned path — exactly the case that should be loud rather than silently
+downgraded. Silent fallback would also mean an attacker learns nothing and the
+operator learns nothing.
+
+**This reasoning is a reading, and readings are what produced the 8-of-8 error
+above. AC-D-9 requires it be proven by execution, not inherited from this
+document.**
+
+### B10 boundary — read this before touching the else branch
+
+B10 stands and is untouched: **derivation** failures remain non-fatal. This phase
+changes only the **assertion** branch. An id the server derived and an id the
+client claimed are different objects under B10, and the distinction is the whole
+justification for denying in one branch while continuing to log-and-proceed in the
+other. Do not "make it consistent."
+
+### Known consequence: the DEF-11 divergence branch becomes unreachable
+
+`lookupFailed` exists solely to feed a `"conv-lookup-failed"` divergence entry.
+Once both lookup-failure cases deny, nothing can set it true, and that entry
+becomes dead code. Either remove it or justify keeping it — do not leave it
+sitting there looking live. This is a deletion and AC-D-7 applies to it.
 
 ### Phase dependencies (revised after the mapper correction)
 
@@ -235,6 +355,9 @@ D1 is the tranche. D1 must be its own PR.
   `ValidateMessage` only becomes callerless once D1 lands. Sequence D3 after D1
   merges, or split the doc half out.
 - **D4 is blocked on D1** — it tests D1's behaviour.
+- **D5 shares a file with D1** (`handlers_agent_messaging.go`) but not a region —
+  D1 edits ~`:311`, D5 edits ~`:888`. Branch from `upstream/main`, rebase before
+  push. Separate agent, separate PR; it is the only security change in D.
 
 ---
 
@@ -265,6 +388,23 @@ D1 is the tranche. D1 must be its own PR.
   time, not inherited from this document.
 - **AC-D-6** — No derivation or resolution failure was converted into a request
   rejection (B10). Reviewer confirms by inspection, not by test pass.
+- **AC-D-8 (D5)** — Three negative tests, one per facet, each shown **red against
+  `upstream/main`** and green after: (a) an authenticated agent attributing to a
+  `direct` conversation whose DM key does not name it is denied; (b) attributing
+  to a nonexistent conversation id is denied; (c) attributing to a conversation in
+  another project is denied. All three are reachable on main today, so unlike
+  AC-D-2 these are genuine positive controls and the before/after evidence is
+  required.
+- **AC-D-9 (D5)** — **The legitimate path still works, proven by execution.** An
+  end-to-end `scion message @agent` send, where the CLI resolves the conversation
+  and supplies the id, must still be accepted. §5.1 argues from reading that the
+  sanctioned producer always satisfies the new check; that argument does not
+  discharge this criterion. Run it.
+- **AC-D-10 (D5)** — `isDMParticipant` is byte-identical to main, and the
+  `handlers_chat_v2.go` diff contains no change to it or its callers.
+- **AC-D-11 (D5)** — The `else` (derivation) branch is unchanged: no derivation or
+  resolution failure was converted into a rejection (B10). Reviewer confirms by
+  reading the diff, not by test pass.
 - **AC-D-7** — Per-file endpoint deletion counts reported before push, with
   line-by-line justification for every deleted assertion. A deleted assertion must
   name its coverage successor by test name, not be justified by a comment.
