@@ -101,7 +101,7 @@ func TestResolveSecrets(t *testing.T) {
 		ProjectID: tid("project-1"),
 	}
 
-	resolved, _, err := dispatcher.resolveAgentSecrets(ctx, agent)
+	resolved, err := dispatcher.resolveAgentSecrets(ctx, agent)
 	if err != nil {
 		t.Fatalf("resolveAgentSecrets failed: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 		ProjectID: tid("project-1"),
 	}
 
-	resolved, _, err := dispatcher.resolveAgentSecrets(ctx, agent)
+	resolved, err := dispatcher.resolveAgentSecrets(ctx, agent)
 	if err != nil {
 		t.Fatalf("resolveAgentSecrets with backend failed: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestResolveSecrets_NoOwner(t *testing.T) {
 		Name: "test-agent",
 	}
 
-	resolved, _, err := dispatcher.resolveAgentSecrets(ctx, agent)
+	resolved, err := dispatcher.resolveAgentSecrets(ctx, agent)
 	if err != nil {
 		t.Fatalf("resolveAgentSecrets failed: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		ProjectID: tid("project-1"),
 	}
 
-	resolved, _, err := dispatcher.resolveAgentSecrets(ctx, agent)
+	resolved, err := dispatcher.resolveAgentSecrets(ctx, agent)
 	if err != nil {
 		t.Fatalf("resolveAgentSecrets failed: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestResolveSecrets_NoBackend(t *testing.T) {
 		ProjectID: tid("project-1"),
 	}
 
-	resolved, _, err := dispatcher.resolveAgentSecrets(ctx, agent)
+	resolved, err := dispatcher.resolveAgentSecrets(ctx, agent)
 	if err != nil {
 		t.Fatalf("resolveAgentSecrets failed: %v", err)
 	}

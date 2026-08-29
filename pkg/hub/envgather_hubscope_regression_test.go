@@ -198,7 +198,7 @@ func TestResolveSecrets_HubScope_AsNeeded_Filtered(t *testing.T) {
 		},
 	})
 
-	resolved, _, err := d.resolveAgentSecrets(ctx, agent)
+	resolved, err := d.resolveAgentSecrets(ctx, agent)
 	if err != nil {
 		t.Fatalf("resolveAgentSecrets: %v", err)
 	}
