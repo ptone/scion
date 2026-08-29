@@ -29,28 +29,20 @@
 # If someone adds a new module under extras/, this job picks it up
 # automatically. If the discovered count is zero, the job fails.
 #
-# TRIGGER: Two variants (pending ptone's final decision):
-#   Variant A: extras/** + root go.mod/go.sum (covers the causal path —
-#              root dep changes can stale broker go.sum)
-#   Variant B: extras/** only (ptone's original preference)
-#   Both variants include an unfiltered push-to-main backstop.
+# TRIGGER: extras/** + root go.mod/go.sum on pull_request. The root
+# go.mod/go.sum paths cover the causal edge — root dep changes can
+# stale broker go.sum without touching any file under extras/.
+# No push-to-main backstop (withdrawn — adds post-merge noise if
+# the PR filter is correct).
 
 name: Extras Modules CI
 
 on:
-  push:
-    branches: [ main ]
-    # Backstop: run unfiltered on push to main so that a root-module
-    # change that stales a broker is caught even if the PR didn't
-    # trigger this job. This is blocking, not continue-on-error.
   pull_request:
     paths:
-      # Variant A (wider, covers causal path):
       - 'extras/**'
       - 'go.mod'
       - 'go.sum'
-      # Variant B (if ptone prefers strict):
-      # - 'extras/**'
 
 permissions:
   contents: read
@@ -94,7 +86,7 @@ jobs:
           echo ""
           echo "=== EXPLICITLY EXCLUDED MODULES ==="
           for excl in $EXCLUDED_MODULES; do
-            if echo "$ALL_MODULES" | grep -qF "$excl"; then
+            if echo "$ALL_MODULES" | grep -qxF "$excl"; then
               echo "  EXCLUDED: $excl (requires non-Go build step)"
               EXCLUDED_COUNT=$((EXCLUDED_COUNT + 1))
             else
