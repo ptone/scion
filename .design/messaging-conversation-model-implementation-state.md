@@ -15396,3 +15396,91 @@ confidence came from the cases the author thought of.
 DEF-39 **reopened as DEF-39b**, still with rev1, still under open PR #1372 per ptone's "fix under
 existing PRs". Task 2 (#1373 unit tests) reported complete and force-pushed; awaiting its quality
 gates and a separate report.
+
+---
+
+## 2026-08-29 ~11:15Z — Fleet cleanup, a stale-ref near-miss, and DEF-40 (order-dependent boundary hole)
+
+### Fleet cleanup (coordinator, urgent — 47/~48 ceiling)
+
+Deleted with `--preserve-branch`, each verified to have its work on a surviving **remote** branch
+first — not merely that the agent reported completed:
+
+| Agent | Work preserved on |
+|---|---|
+| `dev-c3-messaging` | `scion/ca-msg-em6-c3-messaging` @ `3b442a9a4` |
+| `dev-c6-commands` | `scion/ca-msg-c6-cli` @ `c3b56c909` |
+| `dev-count-tests` | `scion/ca-msg-em9-c2` @ `b4cea1ce7` (incl. its 111-line test file) |
+| `dev-guard-fix` | `scion/ca-msg-em10-marker-gate-2` @ `be93342b8` |
+| `audit-c4`, `review-c4`, `test-c4` | reports only; c4 active *after* the last one finished |
+
+### RULE 342 — near-miss that would have produced a false revert alarm
+
+Measuring `em9-c2` I saw `4/4`, `1/1`, `19/19`, `2/2` on exactly the four files #1375 gofmt'd —
+the signature of a branch reverting main's commit. It was **my own stale ref**.
+
+`git fetch origin 'refs/heads/scion/*:refs/remotes/origin/scion/*'` **silently skips force-pushed
+branches** because the refspec lacks `+`, and `-q` hides the rejection. Three branches were stale;
+`ls-remote` disagreed with my local refs and that disagreement is what exposed it.
+
+> **RULE 342.** `git fetch` without a leading `+` on the refspec silently declines non-fast-forward
+> updates, and `-q` suppresses the notice. Any branch that has been force-pushed — i.e. every branch
+> under active review — will read as its old self. **Cross-check `git rev-parse origin/<b>` against
+> `git ls-remote origin <b>` before measuring a reviewed branch**, or fetch with `+`.
+
+After force-fetch, `em9-c2` merge-base = `f6b783e46` (rebased onto current main) and the endpoint
+diff is clean: 4 files, all `+N/−0`. **No revert. The alarm was entirely an artifact of my method** —
+the same failure mode as rules 324/325/335, third variant.
+
+### Coordinator's two CI findings
+
+**#1372 SC2016** — false positive, answered directly rather than routed as a paraphrase. The single
+quotes are deliberate: the sed matches a **literal backtick** (Go raw-string delimiter); no shell
+variable was ever meant to interpolate. Switching to double quotes would make it a command
+substitution and break the guard. Directed a `# shellcheck disable=SC2016` with a reason comment.
+Notably the line *is* buggy — DEF-39/39b — but not for the reason shellcheck flagged.
+
+**#1374 ineffassign `validate.go:126`** — NOT a lint nit. See DEF-40.
+
+### DEF-40 — order-dependent cross-project boundary hole (HIGH)
+
+`ValidateCrossProjectAddressees` enforces AC-33 / DEF-2. It uses **empty-string `projectID` as the
+sentinel for "anchor not yet set"**, and that sentinel **collides with a real value**: an agent whose
+own `ProjectID` is empty.
+
+```
+addrs = [ agentA(project=""), agentB(project="P1") ]
+A: projectID=="" → "not yet set" branch → projectID="" (no-op) → continue   ← A never checked
+B: projectID=="" STILL → same branch → projectID="P1" → continue
+returns nil                                    ← A rode into a P1 message unchecked
+```
+
+Reverse the order and it *is* caught. **The hole is order-dependent — it opens only when the
+empty-project agent is addressed first.** That is why review missed it: tests naturally put the
+interesting principal second.
+
+Fix directed: explicit bool for anchor-set, and an empty `ProjectID` from `GetAgent` is a **hard
+reject**, never an anchor candidate. Under-granting is recoverable; over-granting is not.
+
+**The dead variable must NOT simply be deleted** — the obvious lint fix is the wrong one. `// for
+error reporting` plus an error naming nobody means a **half-finished AC-33 enrichment**. Complete it,
+observing AC-33: the refusal MAY name the rejected addressees (caller-supplied) but MUST NOT name the
+project IDs — naming projects leaks existence and membership to someone who just proved they are
+outside. Tests: both orderings reject, positive control still passes, and assert the error string
+contains the addressee ID and not the project ID.
+
+> **RULE 343.** A dead store flagged by a linter in security code is a claim that an intention was
+> abandoned mid-implementation. Deleting it satisfies the linter and destroys the evidence. Read what
+> the variable was *for* before removing it.
+
+### Ownership
+
+DEF-40 and the SC2016 comment routed to **rev1** as Task 3, sequenced behind DEF-39b. C3's EM is
+retired and the fleet is at ceiling, so no new EM. rev1's remit is already review fallout on open PRs
+until merge.
+
+### Ledger
+
+DEF-36 (c4) · DEF-37 (c5, standalone script) · DEF-38 split (gate → `auth-refactor-lead`) ·
+**DEF-39b (rev1, HIGH, reopened)** · **DEF-40 (rev1, HIGH, new)** · DEF-12 · DEF-5/6/9/10/18/32/33/35
+held · DEF-34 blocked on #1259.
