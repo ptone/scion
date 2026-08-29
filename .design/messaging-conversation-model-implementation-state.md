@@ -16711,3 +16711,74 @@ world cannot move in and the cause was my measurement, not the code (cf. rules 3
 - Retired: `ca-msg-c4`, `ca-msg-rev1`, `ca-msg-c6`. Live: me, `ca-msg-c5`, `dev-hub-handlers`, `coordinator`.
 - C7 gated on C5 landing (fresh agent).
 - Ledger: **DEF-41** held. No strikes this entry.
+
+---
+
+## 13:42Z — C5 COMPARE URL SENT (ptone override: ship for review despite red main). **#1388 LANDED.**
+
+### ptone's ruling
+> "If C5 is intrinsically green - send compare URL to the thread now so it can get other review
+> feedback - CI is being addressed in a different workstream for now"
+
+Correct call and worth internalising: I was holding C5 on a red I had already established was
+**not caused by C5**. Review feedback and CI green are independent resources, and serialising
+them wasted the review latency for nothing. **A blocker that is not yours does not have to be
+your blocker.** I had verified the independence and still gated on it.
+
+### #1388 LANDED — the dropped remediation is DONE
+`03977e41d` — *"ci: add reporting-only full test suite job (#1388)"*. This is exactly the
+reporting-only non-blocking job ptone approved on 2026-08-28 and that had silently never been
+implemented (see 13:08Z entry and rule 374). `ci-fix-lead` executed it within ~35 minutes of the
+corrected escalation. **Rule 374 confirmed in the useful direction:** the gap closed the moment
+the decision acquired a named owner. Disjoint from C5's 16 files — verified with `comm -12`,
+empty intersection.
+
+### Pre-send re-verification (main had moved again; never send a stale URL)
+- main `612e79a45` -> **`03977e41d`**, still RED (same Format Check, offender still unformatted).
+- C5 `da878ac1c` no longer rebased on main tip, but **three-dot renders 16 files / +1686/-185** —
+  identical to the gated measurement, because the merge base is still `612e79a45`. The compare
+  URL is therefore accurate. Endpoint diff read 17 files/-212, which is main's advance, not C5's
+  (rule 335 inverse, third instance this session).
+
+### Delivery: the 2000-char cap bit, and the compare URL is the reason
+First send was **6777 chars, REJECTED**. The URL alone was 5629 — the URL-encoded PR body is the
+dominant term, because `quote()` turns every space into `%20` and every newline into `%0A`,
+roughly **tripling** prose.
+
+#### RULE 378. In a compare URL, the PR description costs ~3x its length and shares one 2000-char budget with the message
+Budget the encoded body FIRST, then write the covering note in what remains. Compressing the body
+to ~600 chars brought the URL to 1435 and the whole message to 1562. Overflow detail goes in a
+SECOND message in the same thread — the PR body must carry only what a reviewer needs before
+reading the diff. Second message also overflowed (2131) and needed a trim: **measure every send,
+every time.** Two rejections in one session on a cap I already knew about.
+
+### What the PR body carries (deliberately, so nothing is misattributed)
+1. **Format Check will be red and it is not this PR** — `handlers_agent_message_mode.go`,
+   unformatted by #1382, whole-tree `gofmt -l .`, file untouched here. Stating this in the body
+   is rule 376 applied prospectively: a whole-tree gate misattributes by construction, so the
+   author has to pre-empt it or every reviewer re-derives it.
+2. **The read-switch is not authoritative** — falls back, cannot fail, flip-to-deny still an open
+   S4 precondition. Written as "NOT COMPLETE BY DESIGN" so nobody reads the merge as closing the
+   read path.
+3. `cla/google` expected to fail (rule 104).
+
+### Reviewer note sent separately — the honest ask
+Flagged `validate_compat.go` as **the highest-value thing to review**: the relaxation lives in a
+function with **8 callers**, so it loosens the empty-Msg rule everywhere, not just for the caller
+that needed it. I checked for downstream `Msg != ""` dependence and found none, and callers that
+never set `Attachments` are unaffected by construction — but I asked for a second opinion rather
+than presenting it as settled.
+
+#### RULE 379. Fixing at the shared layer is usually right and always widens the blast radius
+"Fix it in the validator, not the caller" was my ruling and I stand by it — the alternative left
+a choke point validating a fabricated field. But the correct fix converted a one-caller problem
+into an eight-caller change, and the review request has to say so. When you direct a fix down a
+layer, you own enumerating who else that layer serves.
+
+### State
+- `upstream/main` **`03977e41d` — still RED** (Format Check, #1382). Last green `981d27367`.
+- C5 `da878ac1c` — **gate passed, compare URL sent**, parked pending review feedback.
+- C7 gated on C5 landing (fresh agent).
+- Retired: `ca-msg-c4`, `ca-msg-rev1`, `ca-msg-c6`. Live: me, `ca-msg-c5`, `dev-hub-handlers`,
+  `coordinator`, `ci-fix-lead` (not mine).
+- Ledger: **DEF-41** held. CI tag-exclusion **remediation shipped (#1388)** — inventory pending.
