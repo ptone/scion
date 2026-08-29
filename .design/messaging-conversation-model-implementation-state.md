@@ -19498,3 +19498,42 @@ D5 retired. **Ledger:** nothing added.
   findings were deliberate omissions on scope grounds, and one of them sat on the
   derivation path. "Anything out of scope you noticed?" recovers a different set
   than "anything unreported?" — the first invites the judgement calls back.
+
+## 5dv — Rebase-on-main-movement is standing; my overlap claim was over-broad (2026-08-29)
+
+**Sponsor directive:** "you can always dispatch a rebase on open PRs when Main
+moves." This is now standing. It supersedes my judgement that a rebase with zero
+file overlap is churn — that judgement was wrong on its own terms anyway, see
+below.
+
+**MY ERROR.** I ran `comm -12` on `ca-msg-d51` against main's changed files, got
+an empty result, and then wrote to ptone: *"Same applies to the DEF-42 URL if you
+check that branch locally."* It does not apply. DEF-49 changed
+`pkg/hub/handlers_agent_messaging.go` and DEF-42 edits that same file. One
+branch's overlap result says nothing about another's, and I generalised a
+per-branch measurement across branches without re-running it — the same class of
+error as generalising a count. Corrected to ptone within a minute of the directive
+that prompted the re-check.
+
+The reason it matters: for d51 the endpoint-diff deletions really were pure
+phantom, so "no rebase needed" was harmless. For def42 there is genuine shared
+ground with a merged **security** fix, and a careless rebase there could clobber
+DEF-49's authorization code. My caveat would have told ptone not to worry about
+precisely the branch that warranted it.
+
+**Both rebases dispatched.** d51 briefed as clean (verified zero overlap) with a
+numstat gate of exactly 2 files / 34-13 / 96-0. def42 briefed as NOT clean, with
+four required checks: confirm `CheckDMParticipantKey` and the group-case project
+comparison still present, re-run the `-race` test, re-run numstat against the new
+main and **stop if deletions exceed 12**, and show me any conflict rather than
+resolving it by taking its own side.
+
+Compare URLs point at branches, not SHAs, so both pick up the rebases; no reissue.
+
+### Rules
+
+- **455.** Rebase open PRs whenever main moves. Do not gate it on an overlap check
+  — the check is for deciding how much care the rebase needs, not whether to do it.
+- **456.** An overlap result is a property of one branch against one main. Saying
+  "same applies" to a second branch is an unmeasured claim wearing a measurement's
+  clothes. Re-run it; `comm -12` costs nothing.
