@@ -16270,3 +16270,45 @@ is not proven until main is green. C6 stays until #1381 merges.
 
 ### Open
 - main CI `eb365a9d3` → green?  - #1381 merge  - C5 rebase report  - then C7.
+
+---
+
+## 12:38Z — C5 REBASE VERIFIED @ `5a42fbbdc`; ONE BLOCKER (deleted guard). C4 RETIRED.
+
+### Rebase verified against `eb365a9d3`
+14 files, **+1480/-184**, matches C5's table exactly. Merge-base == `eb365a9d3`.
+- `addConversationIDColumn` → **0 hits branch-wide**. C4's `addTopicConversationID` present.
+- **Both webchannel store files byte-identical to main** (`git diff --quiet` YES/YES).
+The competing-migration risk is genuinely gone, not renamed. That was the likeliest failure of
+this rebase and it did not happen.
+
+### BLOCKER: `TestResolveDMConversation_EmptySenderID` deleted, nothing replaced it
+**Behaviour is fine.** The refactor hoisted the helper's `SenderID == ""` refusal up into both
+callers (`messagebroker.go:468` and `:650`). Empty sender still skips DM resolution. No regression.
+**Coverage is not.** Removed the `msg.SenderID != ""` conjunct from BOTH sites and ran the *entire*
+`pkg/hub` suite under `-tags no_sqlite`: **passes, 8.5s, zero failures.** The guard is unprotected.
+Why it matters: **the DM key IS the ACL.** A DM resolved with an empty sender ID yields a key
+naming the wrong participant set, and a wrong key is worse than no key. The only thing preventing
+it now is a conjunct in an `else if` that a tidy-up could reasonably simplify, all-green.
+Required: guards through `deliverToUser` **and** `deliverToAgent`, each positive-controlled by
+deleting the conjunct and observing FAIL.
+`TestResolveDMConversation_BothPathsAgree` accepted as a genuine loss — it asserted two call paths
+through a helper agreed, and the helper is gone *because* the paths were unified.
+
+### RULE 368. When a refactor relocates a behaviour, its guard must relocate with it
+Deleting a test alongside the helper it was named after is the easiest way to silently un-guard a
+behaviour that actually survived. **The test was named for the helper but was never about the
+helper — it was about the refusal.** A test's name records where the property lived, not what it is.
+
+### RULE 369. "I deleted X because its container disappeared" is not a deletion justification
+For any deleted test the required justification is **where the property is now asserted**, or an
+explicit statement that it no longer is — so the reviewer can decide rather than infer. C5's report
+named the container, not the property.
+
+### C4 RETIRED (`scion delete ca-msg-c4`)
+Held until main CI on `eb365a9d3` came back **success**, not merely until the merge event —
+the merge is not proven until main is green. Now proven, so retired per rule 336.
+
+### State
+main `eb365a9d3` GREEN. #1381 (C6) still OPEN, still disjoint, still valid — awaiting ptone.
+C5 blocked on the guard restoration. C6 retires on #1381 merge. Then C7.
