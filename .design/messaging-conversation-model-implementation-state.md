@@ -15589,3 +15589,94 @@ branch first. Fleet 47 → 41.
 **DEF-39b fix ready, needs new PR** · **DEF-40 (rev1, HIGH, blocker on C5, two forms)** ·
 DEF-36 (c4, reported ✓) · DEF-37 (c5) · DEF-38 gate → landed as #1376 · DEF-12 ·
 DEF-5/6/9/10/18/32/33/35 held · DEF-34 blocked on #1259.
+
+## 2026-08-29 ~11:35Z — Wave 2 verified (C4, C6); DEF-39b/DEF-40 cleanup PR sent; main is RED
+
+### Cleanup branch: `scion/ca-msg-cleanup-1` @ `50e22e13f` — VERIFIED, compare URL sent
+
+Two commits: `c5f8006c2` (DEF-39b guard) + `50e22e13f` (DEF-40 validate.go).
+Endpoint vs `b281eb701`: guard 13/4, guard-test 89/0, validate.go 38/9, validate_test.go 145/5.
+Merge-base == `b281eb701`. `ls-remote` cross-checked against local ref (rule 342).
+
+**The guard file is byte-identical between `d2c7c493e` and `50e22e13f`** — cleanup-1 is a strict
+superset of `scion/fix-conversation-guard-defects`. That branch is ABANDONED; pushing to it
+would create a competing PR for the same fix.
+
+**validate.go 9 deletions reconcile exactly:** 1 dead `projectAgents` var + 1 `if projectID == ""`
++ 3 dead appends + 4 error-return lines. All superseded logic.
+
+**AC-33 holds:** `rejectedAddressees` carries `a.PrincipalID` (caller-supplied), never
+`agent.ProjectID`. Verified by reading the construction, not the report.
+
+#### DEF-39b closed as a CLASS, not two instances (rule 341)
+Re-ran my own repros against the fix, plus the third route neither of us had tested:
+
+| Probe | Route | rc | want |
+|---|---|---|---|
+| A | 20-line cap hides a real `'direct'` literal | 1 | 1 |
+| B | `'group'` leaks in from past the closing backtick | 1 | 1 |
+| C | start anchor `^[^Ii]*INSERT` can't match (`conversationInsert :=`) | 1 | 1 |
+| control | clean tree | 0 | 0 |
+
+Route C is a **false-positive** route, not a bypass: the opening backtick survives, `q` truncates
+there, the `'group'` check then fails. Right direction.
+
+**Residual, recorded not fixed:** check 1 accepts `'group'` anywhere in the bounded statement, so
+a parameterised kind alongside a stray literal (`WHERE kind <> 'group'`) would still exempt.
+Bounded now, contrived, and this guard is defence-in-depth rather than the authority.
+
+#### DEF-40 — and a lesson about weak tests
+I wrote my own repros and ran them **as positive controls against main**:
+
+- `UnplaceableFirstMustNotAnchor` — **passes on BOTH** main and the fix. Not a regression guard:
+  on main the third agent still trips the mismatch. Writing it taught me more than running it.
+- `OrderIndependence` (unplaceable + placed) — FAILS on main, passes on fix. Real guard.
+- `ZeroUUIDMutualAnchor` — FAILS on main, passes on fix. Real guard, and the sibling form I
+  specifically predicted: the zero UUID is non-empty, so two orphaned agents validated each other.
+
+**RULE 346. A test that passes on both sides of the fix is documentation, not a guard.** Every
+regression test must be run against the unfixed code and observed to FAIL. Otherwise you have
+written a test whose only demonstrated property is that it agrees with you. I told rev1 to audit
+its 7 tests on this basis.
+
+### C4 and C6 — both VERIFIED, awaiting ptone's landing decision
+
+- `scion/ca-msg-c4-webchat` @ `17e4d613f` — accepted earlier.
+- `scion/ca-msg-c6-cli` @ `1ba6a1edb` — re-verified after O-1/O-3 fixes.
+  - Endpoint matches all 10 rows. **Deletions still 13** — the fixes added no new removals.
+  - `bcastWake` fully removed: no residue in `cmd/`, no other `"wake"` registration on broadcast.
+  - Flag sets re-checked AFTER the edits: nothing removed from main, only `visibility` added.
+    (Re-checking post-edit is the point — that is exactly when a flag gets dropped by accident.)
+  - `--visibility` validated in both `message.go:117` and `broadcast.go:57`: allowlist with a
+    fail-closed default, first statement in RunE, empty still means unset.
+  - All three gates rc=0; gofmt clean with a positive control.
+
+**C6's O-1 resolution was better than what I asked for.** I said "wire it or drop it". It checked
+whether wake was semantically valid for broadcast at all, found `message` explicitly rejects
+`--wake` with `--broadcast`/`--all`, and removed the flag. An absent flag is honest; a dead one
+is not.
+
+### ESCALATION — main is RED, and nobody owns it
+
+`TestHubTokenCreateHelpUsesRegistryScopes` AND `TestDeleteStopped_RequiresGroveContext` both fail
+on clean `upstream/main`, **including under `-tags no_sqlite`** (the tag CI uses), with no build
+tags excluding them. So `make test-fast` is red on main.
+
+**RULE 347. A red baseline is where real failures hide.** The cost is never the failing tests
+themselves; it is that "pre-existing" becomes an available excuse. Twice this week an agent
+reported a genuine gate failure as pre-existing from a stale baseline (c6 on the marker gates,
+then c6 again under-reporting the ./cmd/ failure set from memory). Both ran in the safe direction.
+Neither will always.
+
+### Fleet
+- `dev-validate` DELETED (`--preserve-branch`). Its work was local-only but independently
+  replicated on cleanup-1, which I verified before deleting.
+- `ca-msg-rev1` reported COMPLETED.
+- Live: `ca-msg-arch` (me), `ca-msg-c4`, `ca-msg-c5`, `ca-msg-c6`.
+
+### Open
+- **ptone: (a) individual compare URLs for C4+C6, or (b) integration branch.** I recommend (a).
+- **C5 still unanswered** on the forced-choice A/B/C. `scion/ca-msg-c5-handlers` == `b281eb701`,
+  nothing committed. C5 blocks C7. DEF-40 was its blocker and is now fixed on cleanup-1.
+- DEF-37 + O-2 (global `--all` fan-out skips `ValidateLegacyMessage`) routed to C5.
+- #1365 still needs closing by ptone.
