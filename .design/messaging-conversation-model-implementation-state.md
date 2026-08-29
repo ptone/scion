@@ -16632,3 +16632,82 @@ conversation-model path I own. Held, not assigned.
 - C7 dispatch still gated on C5 landing (fresh agent — no repurposing, context rot).
 - CI-exclusion thread handed to coordinator; a `ci-fix-lead` slug now appears on the roster. Not mine.
 - Ledger add: **DEF-41**. Struck this session: none (DEF-36 struck at 12:46Z).
+
+---
+
+## 13:26Z — C5 PASSES GATE @ `da878ac1c`. **MAIN IS RED (not ours) — landing held.**
+
+### C5 resubmission verified, not taken on report
+Rebased on `612e79a45` (merge-base == main tip), 12 commits.
+
+| check | result |
+|---|---|
+| numstat re-run independently | **16 files, +1686/-185 — matches C5's table exactly** |
+| B-1 validator fix | present at `validate_compat.go:75` |
+| B-1 positive control (rule 65) | **reverted the fix → attachment-only test FAILED, empty-no-attachments still PASSED** |
+| B-1 tests execute (rule 366) | both show `=== RUN` under `-v` |
+| B-1 tests run in CI (rule 371) | **no `!no_sqlite` tag on `validate_compat_test.go`** |
+| B-2 order | authorize `:1125` **before** validate `:1142`, matching broker_inbound |
+| B-3 | `== 5` at `:1780` |
+| #1382 hunks | intact in both contested files, **no revert** |
+| tests | `pkg/hub`, `pkg/hub/auth`, `pkg/messaging`, `pkg/messages` all green under `-tags no_sqlite` |
+
+The positive control is the one that mattered: it distinguishes "the fix works" from "the test
+agrees with whatever the code does." Both halves came back right — the guard bites when removed,
+and the negative case still fails.
+
+### C5's scoping call on `:3448` was CORRECT, and it reasoned rather than pattern-matched
+I told it to fix the tolerant DM-key parse. There are two `>= 5` sites. C5 fixed only the
+read-switch one and left `:3448`, correctly identifying it as a display-name helper building
+`"DM: <name>"` labels. **That is right, and the opposite would have been a regression:** the
+standing F2/F3 constraint says strictness does NOT transfer to DISPLAY — a failed lookup must
+degrade to a weaker label, never suppress. Told C5 explicitly that had it "fixed" `:3448` to
+match, I would have sent the branch back. An instruction applied past its scope is still a defect.
+
+### **MAIN IS RED AT `612e79a45` — #1382, another team, blocks all 28 open PRs**
+`Build & Test / Format Check` fails. `pkg/hub/handlers_agent_message_mode.go` is not gofmt'd —
+three lines of trailing-comment whitespace alignment in `CascadeResult`, semantically empty.
+`shellcheck` and `golangci-lint` both PASSED; only the Format Check caught it.
+
+**Why it is not contained to its author:** `ci.yml:67` runs `gofmt -l .` over the **whole tree**.
+Every PR that rebases onto current main inherits the failure for a file its author never touched.
+
+#### RULE 376. A whole-tree gate misattributes by construction
+A gate scoped to the repository rather than to the diff reports a failure against whoever next
+opens a PR, not against whoever caused it. That is not a flaw in the gate — whole-tree formatting
+is the right policy — but it means the FIRST response to a formatting/lint red must be "is this
+mine?", tested by running the same gate against main. I nearly logged this as C5's: my initial
+`gofmt -l` run printed a file, and only checking main showed it was pre-existing. Cost: one
+command. Not checking would have cost C5 a false round trip.
+
+#### Ruling: C5 must NOT bundle the gofmt fix
+It would bury another team's breakage inside a 1,686-line messaging change and leave the cause
+unattributed. Escalated to ptone (with remedy) and coordinator (for fleet broadcast + telling
+#1382's team, whose view of the failure is now blind because it is merged).
+
+### Near-miss worth recording: I almost reported "C5 never pushed"
+My first `git fetch origin 'refs/heads/scion/*:...'` returned tip `b661724b0` while C5's report
+claimed `da878ac1`. I was one step from escalating a false process failure. A full fetch showed
+`da878ac1c` pushed at **13:19:24Z** — C5's message and its push raced my fetch by seconds.
+
+#### RULE 377. A fetch is a snapshot, and a report can outrun it
+Before accusing an agent of not pushing, re-fetch. The failure mode is asymmetric: a missed push
+costs a re-ask, a false accusation costs trust and invites the agent to re-push work that was
+already fine. Same class as rule 313 (taskSummary goes stale) — the instrument lags the world.
+
+### Rule 335-inverse, demonstrated again on my own first measurement
+Before the re-fetch, my endpoint numstat against the stale tip read **43 files, +1738/-4645** —
+attributing C6's entire `cmd/` tranche and #1382's entire `web/` tranche to C5 as deletions.
+`comm -12` (rule 356) localised it: only 2 of 16 files genuinely intersected, 16 deletions
+attributable to main's advance. After the correct fetch the same command read 16 files/-185.
+**The -4645 was never real.** Second time in one session that a number moved in a direction the
+world cannot move in and the cause was my measurement, not the code (cf. rules 372/373).
+
+### State
+- `upstream/main` **`612e79a45` — RED (Format Check).** Last green: `981d27367`.
+- C5 `da878ac1c` — **PASSED GATE, landing HELD on main going green.** Parked.
+- Pre-existing failure, not ours, reported to coordinator: `TestDeleteStopped_RequiresGroveContext`
+  in `./cmd` fails under `-tags no_sqlite` **on main** (controlled).
+- Retired: `ca-msg-c4`, `ca-msg-rev1`, `ca-msg-c6`. Live: me, `ca-msg-c5`, `dev-hub-handlers`, `coordinator`.
+- C7 gated on C5 landing (fresh agent).
+- Ledger: **DEF-41** held. No strikes this entry.
