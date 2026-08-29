@@ -17341,3 +17341,66 @@ that order, so later breakage is attributable to one of them.
 ### State
 `upstream/main` `03071382c`. C7 running. Held: DEF-41, DEF-42, DEF-43 (CI-owned, one test, suspected
 flaky on the second), **DEF-44**, **DEF-45**.
+
+---
+
+## 15:33Z — C7's CI recommendation reviewed and **escalated to ptone**. Rules 392-393.
+
+C7 delivered a three-option analysis and **refused Option B (reporting-only) on the record** rather
+than listing it neutrally, citing rules 386/387 back at me. Correct, and the right instinct: an
+options paper that presents a known-bad option evenhandedly is not neutrality, it is abdication.
+
+Endorsed **Option A (blocking)** and escalated. Three corrections first, two of which change the paper.
+
+### RULE 392. The do-nothing option is the one nobody scrutinises — check its rationale hardest
+C7's Option C rested on "the brokers are deployed via Dockerfiles, so the image build is their
+effective CI." Plausible, load-bearing, and **false**:
+
+| broker | Dockerfile | cloudbuild |
+|---|---|---|
+| scion-teams | **NO** | NO |
+| scion-slack | **NO** | NO |
+| scion-telegram | yes | NO |
+| scion-discord | yes | NO |
+| scion-chat-app | yes | yes |
+
+Two of five have no image at all, and **nothing under `.github/` builds any of them.** So Option C was
+not "leave it to their existing pipeline", it was "leave it to nothing" — wearing the costume of a
+considered hand-off. Every other option in an options paper gets argued over; the status quo arrives
+pre-justified because it is already true. **A rationale that exists to justify inaction gets the same
+evidentiary standard as one that justifies action, and usually less scrutiny.**
+
+### RULE 393. A hand-written enumeration is a vacuous pass waiting to happen
+C7's matrix listed the five brokers. There are **ten** `go.mod` files under `extras/`
+(`agent-viz`, `docs-agent`, `fs-watcher-tool`, `scion-a2a-bridge`, `scion-broker-log` are the others).
+A five-entry matrix guards half the surface and **prints green for the whole of it** — and a green
+`extras` job will be read as "extras are covered."
+
+This is R-3 in a new costume, and worth stating as a family: the guard script scanned a glob and a
+broken pattern matched zero files while printing "all gates pass"; here a hardcoded list visits five
+of ten and prints the same reassurance. **Derive the set by discovery (`find extras -maxdepth 2 -name
+go.mod`) and fail if the discovered count is zero.** The recurring defect this tranche is never the
+check itself — it is the *population the check runs over* being silently smaller than advertised.
+
+### Reworked the positive control: assert coverage, not corruption
+C7 proposed appending `INTENTIONALLY_BROKEN` to `scion-discord/go.sum` and asserting the build fails.
+Rejected: it verifies "Go rejects a malformed file", which was never in doubt and is not our failure
+mode, and it hardcodes one module so it proves nothing about the other nine. Replaced with two things:
+- **`go mod tidy` + `git diff --exit-code`** alongside build and test. Its failure output is a concrete
+  diff naming exactly what is stale — *positive evidence rather than silence*. Prefer a check whose
+  failure is informative over one whose pass is merely quiet.
+- **The self-test asserts every discovered module was visited.** The right control is not "can this job
+  detect a broken file" but "did this job look at everything it claims to cover."
+
+### Escalated, with the cost stated plainly
+Told ptone the genuine trade rather than burying it under the mitigation: **a root-module dependency
+change will stale the brokers and block every PR until each is tidied** — a tax on every contributor
+to the root module, mitigated by `make tidy-extras`, not removed. Asked for one of: approve blocking /
+approve reporting-only anyway / defer. C7 drafts but does not commit; brief item 12 stands.
+
+Message hit the 2000-rune cap at 2130 on first send (rule 378 again — I keep under-budgeting these).
+Trimmed to 1917.
+
+### State
+`upstream/main` `03071382c`. C7 continues DEF-44, DEF-45 and docs while the gate decision is out —
+deliberately not blocked on it. Held: DEF-41/42/43/44/45. Status set to `ask_user`.
