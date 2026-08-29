@@ -16409,3 +16409,32 @@ tests genuinely need sqlite, and removing it breaks the `no_sqlite` build for ev
 ### C5 status: COMPLETE pending landing decision
 Rebase clean on `eb365a9d3`, one migration, endpoint 14 files **+1480/-184** verified, both
 webchannel files byte-identical to main, all four guards pass, empty-SenderID property re-guarded.
+
+### 13:05Z — CI test-exclusion escalated to coordinator (ptone-directed), with dispatch authority
+Handed over with full evidence, reproduction commands, and what I had already ruled out so an
+investigator does not redo it: no second workflow/nightly/sqlite job (all five files checked);
+**not uniform** (C4's dualwrite 21 and `validate_test.go` 46 DO run — it tracks the tag file by
+file); exclusion positive-controlled against a probe in an unrelated excluded file
+(`cmd/server_dispatcher_test.go`).
+
+**Reframing I made sure to include:** the Makefile comment reads *"test-fast: Run tests without
+SQLite (lower memory usage)"*. This was a deliberate trade-off for a constrained runner, not an
+oversight. The question is not "who broke CI" but **"was the trade-off ever revisited as pkg/hub
+grew to 145 excluded files."** Framing it as a blunder produces the wrong investigation and
+antagonises whoever made a reasonable call at the time.
+
+**Ordered questions handed to the investigation:**
+1. If a `make test` job were added today, **how many FAIL?** A third of the suite has been
+   unobserved for an unknown period — assume a backlog and measure it before proposing anything.
+   Nobody should promise a green job they have not run.
+2. Wall-clock and peak-memory cost of the full suite on a runner. If the memory constraint still
+   binds, the answer may be a larger-runner job or a nightly, not the PR path.
+3. Is `!no_sqlite` actually required on each of the 185 files, or copied boilerplate? Any file that
+   does not need sqlite is free to reclaim and shrinks the problem before touching CI config.
+4. Which excluded tests are **security guards**? That subset is prioritised regardless.
+
+**Stated prohibition:** do not strip build tags to make tests run. The tag is correct; the remedy
+is a CI job that runs WITH sqlite. Same instruction already given to C5.
+
+Nothing in my tranche is blocked on this. Recorded that several guards built tonight sit in
+excluded files and are therefore local-only protection.
