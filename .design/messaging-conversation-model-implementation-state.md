@@ -16525,3 +16525,110 @@ form so far: I re-derived my own escalation, and got a worse number the second t
 Reported to coordinator and to ptone (including the correction to my own number — a figure I
 gave a human that turned out wrong gets corrected to that human, not just to the record).
 Not taking this into tranche C. Still on the C5 landing gate.
+
+---
+
+## 13:16Z — C6 MERGED & RETIRED. C5 GATED: 3 blockers, all visible only in the merged result.
+
+### main = `612e79a45`. Two commits landed since C5's base `eb365a9d3`:
+- `981d27367` — #1381, **C6 (ours)**. CI green on that commit.
+- `612e79a45` — #1382, **"messaging authorization UI" — ANOTHER TEAM, on OUR surface.**
+
+### C6 verified on main by identifier (rule 61), then retired
+`broadcastListTimeout`, `broadcastMessageTimeout`, `broadcastHubTimeout`,
+`broadcastHubSendTimeout` all present in `cmd/broadcast.go`; both QF1002 tagged switches present
+in `cmd/broadcast_test.go` at :118 and :164. Clean tranche, disjoint from C4 and C5, no overlap
+defects. `scion delete ca-msg-c6` confirmed (roster count 0). Gate was **main CI green**, not
+merely "merged".
+
+### #1382 IS A CROSS-TEAM OVERLAP ON TWO OF C5's FILES
+`comm -12` of (files changed on main since eb365a9d3) x (files changed by C5):
+`pkg/hub/handlers_broker_inbound.go`, `pkg/hub/handlers_chat_v2.go`.
+#1382 enriches the 403 denial payload — `ErrCodeForbidden` -> `ErrCodeMessageDenied` plus
+`{reason: mapReasonToCode(reason), senderMode, recipientMode}` — in both files. It changes the
+**refusal**, not the **decision**.
+
+**Checked for revert first, because that is ptone's standing warning.** After rebasing C5 onto
+`612e79a45` in a throwaway worktree, `mapReasonToCode`/`ErrCodeMessageDenied`/`recipientMode` are
+all still present in both files. **C5 does not revert #1382.** The rebase is textually clean
+(11 commits, exit 0, no conflicts) and the merged tree builds.
+
+**A clean rebase is not a clean merge (rule 363).** The three findings below are all invisible
+from C5's branch by construction, and all three were found by reading the merged result.
+
+### B-1 (BLOCKING) — the forged message body. Wrong layer.
+`handlers_chat_v2.go:1122`: `if msg.Msg == "" && len(msg.Attachments) > 0 { msg.Msg = "[attachment]" }`
+
+- **The forged value travels.** `msg` goes into `dispatchWithBrokerRetry(..., content, false, msg)`
+  at :1233 and builds the mention at :1258. `"[attachment]"` crosses the dispatch boundary and is
+  indistinguishable from a user who typed it.
+- **The validator no longer sees what the pipeline carries.** Persistence/dispatch use `content`
+  (:1057, :1157, :1233, :1274), a *function parameter* (:1029). After the forgery `msg.Msg` is
+  never the real body. AC-8 asked for a choke point; one that validates a fabricated field is not
+  one. **Rule 361.**
+- **It does not compose** — every future attachment-only caller needs the same forgery.
+
+Positive-controlled rather than read off (rule 61). Probe in `pkg/messaging`:
+```
+attachment-only, Msg="" -> "msg field is required"
+no attachments,  Msg="" -> "msg field is required"
+```
+`ValidateLegacyMessage` **cannot distinguish the two cases** — it has `msg.Attachments`
+available (`pkg/messages/types.go:143`) and simply never consults it. Fix is two lines in
+`validate_compat.go:45`: `if msg.Msg == "" && len(msg.Attachments) == 0`. Required BOTH-branch
+test, or it is a narrowed recogniser (rule 367).
+
+### B-2 (BLOCKING) — the two ingress paths now disagree on validate-vs-authorize order
+```
+handlers_chat_v2.go        validate :1127  THEN authorize :1134
+handlers_broker_inbound.go authorize :166  THEN validate :~230
+```
+`authorizeAgentMessage` depends only on `user` and `primaryAgent`, both resolved before either
+step — **nothing forces validate-first**, so this is accident, not design. Today an authenticated
+user who is not authorized to message this agent receives `ValidationError(w, err.Error(), nil)`
+before authorization runs.
+
+#1382 makes the divergence externally observable: the same (unauthorized + malformed) request now
+yields **400 on one path and an enriched 403 disclosing `recipientMode` on the other**. Two
+messaging ingress paths answering one input two ways is the exact incoherence this tranche exists
+to remove. Ruling: **authorize first**, matching broker_inbound.
+
+#### RULE 375. Precedence between two gates is a design decision, and an accident looks identical to a choice
+Validate-then-authorize and authorize-then-validate both compile, both pass their own tests, and
+neither handler is individually wrong. The defect is only visible when the two are compared. When
+a codebase has more than one ingress to the same operation, gate ORDER is part of the contract and
+has to be written down somewhere both authors will read — otherwise each path picks an order from
+whatever was locally convenient, and the divergence surfaces as an externally observable status-code
+difference years later.
+
+### B-3 (BLOCKING, one character) — tolerant DM-key parse on the read-derivation path
+`handlers_chat_v2.go:1779`: `if len(parts) >= 5` on `strings.Split(key, ":")` for
+`dm:<kind>:<id>:<kind>:<id>`. `>=` silently accepts a 7-part key and derives from the first five.
+Standing rule: parse failure denies; **never tolerate or normalise a DM key on the derivation
+path.** Must be `== 5`. Low severity today only because a non-resolving key falls through to the
+old ThreadID filter — but after the S4 read-switch **this parse IS the access path.** One
+character, fix it now.
+
+### N-1 (not blocking; must be stated in the PR description)
+The Phase 8 read-switch is **not authoritative**: on resolve failure it falls back to the old
+`Channel+ThreadID` filter (:1794-1801) and calls `IncFallback()`. Correct for dual-write under the
+B10 ruling, and not a widening — the fallback returns exactly the old path's rows. But **the switch
+can never fail**, so Phase 8 must not be read as complete. The flip-to-deny stays a visible
+precondition of S4.
+
+### DEF-41 (NEW, mine, not C5's) — the validator fabricates input to satisfy itself
+`validate_compat.go:65`: `if newMsg.ConversationID == "" { newMsg.ConversationID = "legacy-pending" }`
+so that `ValidateMessage`'s required-field check passes. Same anti-pattern as B-1, one layer
+deeper and pre-existing: **`ValidateMessage`'s ConversationID requirement is untested via the
+legacy path**, because the legacy path guarantees it can never be empty. Directly on the
+conversation-model path I own. Held, not assigned.
+
+### State
+- `upstream/main` **`612e79a45`** (CI in progress at time of writing; `981d27367` green).
+- C5 `b661724b0` — **returned with 3 blockers**; must rebase onto 612e79a45+, re-run per-file
+  endpoint numstat, and confirm #1382's hunks survive.
+- Retired: `ca-msg-c4`, `ca-msg-rev1`, **`ca-msg-c6`**. Live: me, `ca-msg-c5`, `dev-hub-handlers`,
+  `coordinator`.
+- C7 dispatch still gated on C5 landing (fresh agent — no repurposing, context rot).
+- CI-exclusion thread handed to coordinator; a `ci-fix-lead` slug now appears on the roster. Not mine.
+- Ledger add: **DEF-41**. Struck this session: none (DEF-36 struck at 12:46Z).
