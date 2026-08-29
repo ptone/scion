@@ -17867,3 +17867,57 @@ not after.** Kept the mandatory deletion justification and the positive control;
 thread 1532864101909528737, awaiting ptone to open. **DEF-43 transferred (ct-dev-3 on it, fork issue
 ptone/scion#1368). DEF-44/45 cleared.** Held: DEF-41/42. Tranche C: C1–C6 merged, **C7 is the last**.
 Do not retire C7 until the post-merge gate on main is green.
+
+---
+
+## 2026-08-29 16:43Z — HEARTBEAT v8. Awaiting merge; DEF-41/42 made dispatchable
+
+`upstream/main` still `03071382c`; no PR yet open for `scion/ca-msg-c7-def44` (`402ffb5b6`). Nothing
+to merge-check. Used the window on the ledger instead of re-polling.
+
+### Park emitted and verified (item 4)
+C7 rendered as **stalled**, not blocked. Sent it the literal command with the reason stated:
+**"stalled" is indistinguishable from an agent that died mid-task; "parked" says the same thing about
+activity and a different thing about health.** Told it explicitly not to restart work or write a
+status essay — an open-ended ping to a parked agent reads as permission to resume.
+
+### DEF-41 — still open, verified against the pinned main worktree
+The fabrication survived C5's landing: `validate_compat.go:96` (was :65) still does
+`newMsg.ConversationID = "legacy-pending"` so that `ValidateMessage`'s required-field check passes.
+Unowned. Read from `/tmp/mainref`, not the working tree — the mechanism from rule 402 doing its job on
+its first real use.
+
+### DEF-42 — RE-CHARACTERISED, and the row was pointing at the wrong thing
+I had this filed as "~12 unlocked `s.webChatStore` reads; add locks." Measured precisely on main:
+**13 unguarded reads**, at handlers_agent_messaging.go:194-195, handlers_broker_inbound.go:396/398/404,
+handlers_chat.go:47/76/204/219, handlers_projects_core.go:603/610/623, server.go:2529 — against 41
+that *are* guarded.
+
+Then checked the write side, which is the part that actually decides the fix. There is exactly one
+writer: `SetWebChatStore` (server.go:1996), it **does** take `s.mu.Lock()`, and it is called once
+during startup wiring at cmd/server_foreground.go:609.
+
+So the real defect is not the missing locks. **The codebase asserts both answers at once:** 41 reads
+say the value can change under a live server, 13 say it cannot, and the one writer's own comment
+("Wire into existing broker proxy if already started — startup order varies") says nobody is sure. If
+the write happens-before the first request, the correct fix is deleting 41 RLocks; if it does not, the
+correct fix is adding 13 — and those are opposite patches. Whoever picks this up must answer the
+ordering question first and will otherwise pick a side by coin flip.
+
+**A defect described as "missing X" has quietly assumed the answer to the question it should be
+asking.** The inconsistency is the finding; the count is only its symptom. Row is now dispatchable
+rather than merely held.
+
+### Ledger — why nothing struck this heartbeat
+DEF-41 and DEF-42 have not moved in two heartbeats, and the honest reason is that **neither has an
+owner.** That is precisely how DEF-43 sat: I recorded "CI workstream" and told nobody. These two are
+worse, having no name at all. They are not blocked on analysis any more — both are now specified to
+file:line — they are blocked on someone being asked. I am not opening new work while a merge is
+pending and while the standing instruction is not to repurpose agents across phases, so the right
+move is to put both in front of ptone as part of the C7-landing decision rather than let them
+accumulate silently for a third heartbeat.
+
+### State
+`upstream/main` `03071382c`. `def44` @ `402ffb5b6`, compare URL delivered, awaiting ptone.
+C7 parked. Held with owners needed: **DEF-41**, **DEF-42**. Transferred: DEF-43 (ct-dev-3).
+Cleared: DEF-44, DEF-45. Tranche C: C1–C6 merged; C7 is the last.
