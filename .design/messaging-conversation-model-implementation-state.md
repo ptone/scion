@@ -20227,3 +20227,85 @@ it, while it still has the file loaded**.
   comment-blind fix turns up).
 - Open, unstaffed: DEF-53 (Tranche G precondition), DEF-55, issue #1374.
 - Live: `ca-msg-def54` (amending, then retire), `ci-fix-lead`, `chat-admin-lead`.
+
+---
+
+## 5ei — 2026-08-29 22:55-23:05Z — DEF-54 closed out; DEF-37/50 owned and dispatched
+
+### DEF-54 amended, verified, retired
+
+Tip `465541941a5aa73d4c39c96067e2bed7d11f0475`. **Both amendments verified by content**: the
+probabilistic caveat now appears at two separate line ranges in `field_race_test.go` (63-65
+and 191-193) rather than one plus a cross-reference, and
+`handlers_agent_messaging.go:384` reads
+`cr := s.channelRegistry // DEF-54: snapshot depends on this RLock; do not separate from it.`
+Compare URL is branch-based, so it picked up the amendment without reissue. Agent retired.
+
+### `CleanupResources` enumeration logged to #1374
+
+14 bare check-then-use reads inside the `cleanupOnce.Do` closure; only `controlChannel` is
+snapshotted under RLock. Six pair a **lock-taking setter with a bare read**
+(`notificationDispatcher`, `lifecycleHookEvaluator`, `messageBrokerProxy`, `events`,
+`commandBus`) plus `scheduler`, which is worst because **its write is also unlocked**.
+
+Two caveats I added on top of def54's, so the table is not read as a work queue:
+shutdown-path framing changes the risk profile rather than removing it; and **`cleanupOnce`
+does not help** — it guarantees the shutdown body runs once, but says nothing about a setter
+running concurrently with that one execution. The race is startup-setter against
+shutdown-reader and `Once` does not order those.
+
+### ptone: "you own it" — DEF-37/50 dispatched to `ca-msg-def3750`
+
+### MY ERROR, self-caught before it reached the brief
+
+I listed `/workspace/hack/`, did not find `check-authz-reachability.sh`, and concluded **my
+state doc had been carrying a wrong filename**. It had not. My working tree is a *docs-only
+branch off an older base*; the file exists on `upstream/main` and always did. I was one step
+from briefing an agent with a fabricated correction.
+
+- **475.** A work branch's tree is not a view of main. On a docs-only or long-lived branch,
+  absence of a source file is evidence about your base, not about the repo. Read source with
+  `git show upstream/main:path`, never from the working tree. (Companion to 465.)
+
+### Blast radius measured BEFORE dispatch — it is ZERO
+
+ptone authorised helper agents "if a bunch of red surfaces". I measured instead of assuming.
+Ran the gate on a `/tmp` worktree at `upstream/main`: **all gates pass** (baseline). Then
+probed comment-blindness across all nine required gates (`authorizeAgentMessage`,
+`ValidateLegacyMessage`, `ValidateAttributed` × three handler files): **every one has real
+non-comment occurrences**, code counts 1-3. The fail-closed dispatch scan matches exactly
+three files, all with genuine calls in code. **Zero gates would flip red.**
+
+So the job is bounded, and the helper agents are probably unnecessary. Told the developer
+green is the *expected baseline*, and that **a red on unmodified main more likely means a bug
+in its own checker than a real hole** — it must come to me before "fixing" any handler.
+
+- **476.** Measure the blast radius before dispatching, not after. A commission written
+  against an assumed tail ("if many reds surface") sends the agent looking for reds, which is
+  the exact frame in which a broken checker gets mistaken for a security discovery.
+- **477.** Disclose the crudeness of your own measurement to the agent that will supersede it.
+  I stripped comments by splitting on `//`, which mishandles block comments and markers inside
+  string literals. Told def3750 its AST count wins over mine.
+
+### The bigger finding: the repo already solved this
+
+**`hack/checksecuritymarkergates/main.go` parses Go with `go/ast`** for exact identifier
+matching and function scoping. Its header states outright: *"comments and substrings cannot
+produce false results."* It already implements the three-way severity split
+**REQUIRED / AUDIT / INFORMATIONAL**, where INFORMATIONAL is explicitly doc-comment mentions
+that REPORT but do not FAIL — **precisely the distinction the reachability gate lacks**.
+
+So DEF-50 is *port the weak gate onto a reviewed checker*, not *invent a better regex*. This
+is a materially safer change than what I described to ptone earlier, and it kills the
+allowlist-diff design DEF-37 had proposed (which was itself the comment-blind pattern).
+
+- **478.** Before commissioning a mechanism, search for one the repo already has. Two gates
+  in the same `hack/` directory solving the same recognition problem, one with `go/ast` and
+  one with `grep -q`, is a sign the second was written without reading the first.
+
+### Standing state
+
+- `upstream/main` = `ce283e688`. Live: `ca-msg-def3750` (blocked on empty workspace at
+  dispatch — clone instructions sent), `ci-fix-lead`, `chat-admin-lead`.
+- With ptone: **DEF-54** compare URL, **#1408** gate decision.
+- Open, unstaffed: DEF-53, DEF-55, issue #1374.
