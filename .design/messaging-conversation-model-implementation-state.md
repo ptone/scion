@@ -20842,3 +20842,62 @@ sending def3750 to "fix" something correct.
 - Awaiting ptone: DEF-57; DEF-50/37/56 compare URL; #1409; Tranche E board; gate-deletion; PAT.
 - def3750 holding, told not to start items 1/4; each needs its own mutation when it does.
 - `ca-msg-fmt1409b` held as evidence — do NOT retire in a sweep.
+
+---
+
+## 5er — DEF-57 DOWNGRADED; I escalated impact without reachability (2026-08-29)
+
+ptone pushed back: agents do not use brokers, they message direct; to exploit this you would need
+to be authenticated to Discord, registered to Scion, and so on. *"Could they even craft a raw url
+directly?"* I traced the route instead of defending the escalation. **He is right.**
+
+### The reachability I failed to check
+
+`POST /api/v1/broker/inbound` (`server.go:3823`) sits behind the broker auth middleware, and
+`handleBrokerInbound`'s first act after the method check is:
+
+```go
+broker := GetBrokerIdentityFromContext(r.Context())
+if broker == nil { 401 "broker HMAC authentication required" }
+```
+
+Broker identity is set **only** by the HMAC middleware (`brokerauth.go:969`, `audit.go:601`) and is
+a **separate principal type from agent identity** — an agent token does not produce one. An agent
+hitting that URL raw gets **401 before reaching any flagged code**.
+
+- **499.** Severity is reachability times impact. I reported impact alone. Before escalating a
+  code-shaped finding, trace who can reach the entry point; an unreachable bypass is a design note,
+  not an incident. Read the route registration and its middleware, not just the handler body.
+- **500.** When challenged on a finding, re-derive rather than defend. The challenge is a free
+  hypothesis worth testing — and here it was correct, which cost one trace and would have cost far
+  more as a mis-prioritised work item.
+
+### What actually remains, at its real size
+
+Within the broker trust boundary, **authorization is opt-out by self-declaration**. The handler
+decides whether to authorize by reading `req.Message.Sender` from the request body: a sender
+declaring `user:` is resolved and passed through `authorizeAgentMessage`; anything else skips it.
+**The honest claim is checked and the evasive one is not.**
+
+This matters only to a holder of broker HMAC credentials — today, first-party plugins we trust. It
+is a **property of the trust boundary, not a hole in it**. Relevant only if those credentials are
+issued to something less trusted, or a plugin is compromised; blast radius then is `message_mode`
+bypass for any agent.
+
+- **501.** A conditional guard keyed on an attacker-supplied discriminator inverts its own
+  intent: the compliant caller is inspected and the evasive one waved through. Where a check is
+  gated on self-declared identity, the default branch must be *deny*, not *skip*.
+
+Recommended: downgrade to a filed note with the reachability constraint recorded, do not staff.
+Gates neither Tranche E nor G. Asked ptone the single question — keep in reduced form, or strike
+as known-and-accepted. Will not re-raise either way.
+
+**Items 1, 3 and 4 from the same interview are unaffected** — 3 is fixed and mutation-proven,
+1 and 4 remain valid gate-coverage follow-ups. Only the DEF-57 severity claim was wrong.
+
+### Standing state
+
+- Awaiting ptone: DEF-57 keep-or-strike; DEF-50/37/56 compare URL; #1409; Tranche E board;
+  gate-deletion; contrib-repo PAT.
+- `scion/ca-msg-def3750` @ `0a7a12a9b` (green on main, mutation-proven). `scion/ca-msg-def54` @
+  `331328fd6`. def3750 holding. `ca-msg-fmt1409b` held as evidence — do NOT retire in a sweep.
