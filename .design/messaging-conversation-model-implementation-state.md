@@ -16139,3 +16139,49 @@ rebasing is the operation most likely to silently drop others' commits.
 - C4: tx commit-failure fix, index-existence test, re-baseline to `b7a415575`, **no rebase**.
 - C6: QF1002 → then #1381 is landable.
 - Dispatch C7 after C5 lands. Retire agents on MERGE, not report (rule 336).
+
+### 12:25Z — C5 blocked my file-drop ruling, correctly. MY ERROR.
+I tested for absence by grepping **call sites**. C5's dependency is **structural**: `WebChatStore`
+must *satisfy* `messaging.TopicConversationLookup` for its `WithKeyTopicLookup` /
+`WithTopicLookup` arguments to compile. Go interface satisfaction is implicit — **it leaves no
+call site to grep for.** 10 call sites across 4 handler files fail to build without it.
+
+### RULE 365. An absence check must match the MECHANISM of the dependency
+Grepping for uses cannot detect a compile-time interface requirement. For an interface the only
+sound test is *remove it and build*. Same family as rule 322 (`--diff-filter=A` is not an absence
+test) and rule 350 (the recogniser must be the one the dispatcher uses).
+
+### Rejected C5's counter-proposal (keep implementations, drop migration + field)
+Two defects: (a) merged package would **redeclare** `GetTopicConversationID` on both
+`sqliteWebChatStore` and `pgWebChatStore` — loud, but still a hand-resolved merge, and
+hand-resolving near-identical method bodies is how one side quietly wins; (b) implementations
+querying a possibly-absent column and returning `ErrNotFound` **collapse a schema fault into a
+benign negative answer**. "No conversation for this topic" and "this DB is missing a column" must
+not share a return value — resolution could be silently disabled fleet-wide.
+
+### RULING: order the landings, do not split the file
+**C4 lands FIRST**, then C5 rebases onto main-with-C4 and deletes both store files outright.
+Verified C4 supplies exactly what C5 needs — `GetTopicConversationID` and
+`...IncludingDeleted` on **both** `sqliteWebChatStore` and `pgWebChatStore`, matching signatures —
+and that **no other `WebChatStore` implementors exist in `pkg/hub`** (no test fakes to break).
+Nothing unported, no feature lost, no duplicate declaration, no `ErrNotFound` hack.
+Cost: C5 serialised behind C4. Accepted — both have independent work outstanding.
+C4 told **not to widen scope** (3 files) and that the index-existence test is now load-bearing:
+after C5's competing migration is deleted, C4's is the *only* thing that ever creates
+`idx_webchat_topic_conversation`, with no second implementation to mask a defect.
+
+### C6 COMPLETE @ `b10145741` — #1381 landable pending Build & Test
+QF1002 fixed (tagged `switch r.URL.Path` at both sites, verified). Took the optional nit too:
+the three inline `30*time.Second` Hub-path values are now `broadcastHubTimeout` /
+`broadcastHubSendTimeout`. Endpoint vs `b7a415575` verified **+2455/-13**, matching its report
+exactly; `cmd/message.go -13` is the only deletion row. Merge-base == `b7a415575`.
+Checks: golangci-lint / shellcheck / scan-pr / check-changes **PASS**; Build & Test pending;
+`cla/google` FAILURE expected (rule 104). Report at `c6-final-report.md`.
+**Retire C6 on MERGE, not on report (rule 336).**
+
+### Coordinator adopted the dispatch-time overlap check fleet-wide
+Passing it to the other active EMs (auth-refactor-lead, ma-ui-em, pf-p2-em) — correctly treated as
+a fleet pattern, not a ca-msg one.
+
+### Landing order now fixed
+**C6 (#1381) → C4 (#1380) → C5 → C7.**
