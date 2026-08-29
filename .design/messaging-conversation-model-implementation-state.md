@@ -15484,3 +15484,108 @@ until merge.
 DEF-36 (c4) · DEF-37 (c5, standalone script) · DEF-38 split (gate → `auth-refactor-lead`) ·
 **DEF-39b (rev1, HIGH, reopened)** · **DEF-40 (rev1, HIGH, new)** · DEF-12 · DEF-5/6/9/10/18/32/33/35
 held · DEF-34 blocked on #1259.
+
+---
+
+## 2026-08-29 ~11:16Z — WAVE 1 MERGED. Two HIGH defects shipped. Wave 2 re-based.
+
+### Main moved
+
+`upstream/main` = **`b281eb701`**. Wave 1 squash-merged by ptone:
+
+```
+b281eb701 fix: backfill 'message' action into project member policies (#1377)
+7c85c91a5 fix: update security marker gate for authorizeAgentMessage (#1376)  <- auth-refactor-lead
+f35fa22cc feat(messaging): conversation envelope/delivery/validation/keys  (#1374)  C3
+2762677d7 feat(store): add CountUnbackfilledMessages to MessageStore       (#1373)  C2
+b17d63e28 ci: widen conversation upsert guard for kind='group' (Option C)  (#1372)  C1
+```
+
+### Both open defects SHIPPED — verified present on main
+
+The PRs merged before the fixes landed. `validate.go:120` still has `if projectID == ""`;
+`check-conversation-upsert-guard.sh:184,191` still have the cap and the `p; d` leak.
+
+> **RULE 344.** "Fix it under the open PR" is only safe while the PR stays open, **and I do not
+> control that.** When reporting a defect on an open PR, state explicitly whether the PR must be
+> HELD or may merge with the fix to follow. Do not assume a window that is not yours to hold open.
+
+Coordinator has adopted this and will now ask leads held-vs-merge-with-followup explicitly. Second
+occurrence today, hence a rule rather than a note.
+
+### DEF-39b VERIFIED CLOSED (rev1 `96a0341a4`)
+
+Re-ran **my own** repros rather than accepting the report — cap probe `rc=1`, post-backtick leak
+`rc=1`, clean control still `rc=0`. Fix 1 `p; d`→`q`; Fix 2 rejects a statement with no closing
+backtick in the window (fail-closed on unbounded). 14/14 tests. Coordinator noted this standard —
+re-run the original repro plus a positive control — as what "verified fixed" should mean beyond
+"CI is green".
+
+**Not on main.** #1372 is closed; needs a fresh branch off `b281eb701`.
+
+### DEF-40 — severity settled properly, and it moved the deadline
+
+Coordinator refused to let "no evidence empty ProjectID occurs" stand, correctly. Traced it:
+
+1. **`ValidateCrossProjectAddressees` / `ValidateMessageAddressees` have ZERO production callers.**
+   Every reference outside `validate.go` is in `validate_test.go`.
+2. Ent path: `entAgentToStore` sets `ProjectID: a.ProjectID.String()`; `project_id` is a
+   non-optional UUID. `uuid.UUID{}.String()` = `"00000000-…"`, **never `""`**. The DB path cannot
+   produce the empty string.
+3. The one legitimate `""` is `store.Agent.UnmarshalJSON`'s groveId fallback — a deserialisation
+   path, not a DB read.
+
+So it is latent for a **much better reason than the one I gave**: not "we think it never happens"
+but "the vulnerable function is unreachable from any send path". **My original framing was the
+weaker claim and I was more confident in it than the evidence supported.**
+
+**DEADLINE CHANGE: C5 is the consumer that will wire this.** The moment C5 lands, DEF-40 is live.
+It is therefore a **BLOCKER ON C5**, not cleanup. C5 told not to wire the validator until the fix is
+on main.
+
+**SIBLING CASE FOUND — fix both.** Once wired to the ent store, an unset project reads as the zero
+UUID string, which is **non-empty and therefore a valid anchor** — two agents both carrying a zero
+`project_id` would be judged same-project. The empty string is the string-typed bug; the zero UUID
+is the UUID-typed one. Fixing only the reported form leaves the sibling.
+
+> **RULE 345.** Before closing a sentinel-collision bug, ask what OTHER values can stand in for
+> "unset" and reach the same slot. Empty string, zero UUID, zero time, and "0" are different spellings
+> of the same mistake.
+
+### Wave 2 — all three redirected off the squash-merge hazard
+
+Squash-merge gives merged commits new SHAs, so `git cherry`/patch-id cannot see the cherry-picks as
+applied. Told all three: **do not rebase** — branch fresh from `b281eb701` and cherry-pick only your
+own commits, then *prove* the wave-1 content is absent via endpoint numstat.
+
+| Agent | Drop (now on main) | Keep |
+|---|---|---|
+| c4 | `b45876317` C1, `91eebfd12` C2 | `c601c3386`, `cd834db05` |
+| c5 | `02b5bf06a`, `d74c8369f`, `84a0b8e51` — **all three, entire branch** | nothing committed yet |
+| c6 | `238a882bf`, `a8b716189`, `ea12b72b3`, + `8b0f76ef3` gofmt-on-C3 | `bed04d326`, `e0204cfbe`, `c3b56c909` |
+
+**c4's specific hazard, flagged loudly:** its `b45876317` carries the ORIGINAL C1 guard (50/7) while
+main now has rev1's stricter version. Replaying it silently **reverts a security fix** — the
+file-add-overwriting-a-newer-file shape from the reviewer directive. Also told c4 to re-run the guard
+after rebasing: its `exit 0` was against its own older, laxer guard.
+
+**c5 status unknown** — its branch is C3 cherry-picks only, no handler work committed. Asked a
+forced-choice A/B/C (uncommitted / not started / elsewhere) and to commit-or-stash before any branch
+operation.
+
+### origin LAGS — c4 walked into it
+
+c4 reported "the merge hasn't propagated" because it was reading `origin/main` (ptone's fork).
+Heartbeat item 1 exists for this. Left unchecked it would have branched from `f6b783e46`, re-applied
+C1+C2 over a main that has them, and moved the guard backwards with nothing erroring.
+
+### Fleet cleanup
+
+7 completed sub-agents deleted with `--preserve-branch`, each verified against a surviving remote
+branch first. Fleet 47 → 41.
+
+### Ledger
+
+**DEF-39b fix ready, needs new PR** · **DEF-40 (rev1, HIGH, blocker on C5, two forms)** ·
+DEF-36 (c4, reported ✓) · DEF-37 (c5) · DEF-38 gate → landed as #1376 · DEF-12 ·
+DEF-5/6/9/10/18/32/33/35 held · DEF-34 blocked on #1259.
