@@ -15750,3 +15750,78 @@ Nothing struck this heartbeat, by design: the two ready rows are awaiting a huma
 - ptone: main is RED (two `./cmd/` tests, also red under `-tags no_sqlite`). Unowned.
 - C5: forced choice A/B/C, deadline 13:00Z.
 - #1365 still needs closing by ptone.
+
+## 2026-08-29 ~11:55Z — LANDING DECISION: per-phase PRs. #1379 review feedback triaged.
+
+### ptone's ruling
+> "let's land as per phase PRs. c5-c7"
+
+Option (a). No integration branch. C4 and C6 compare URLs sent to thread `1532864101909528737`.
+C5 and C7 follow the same route. **The integration-branch plan is retired** — update any brief
+text that still assumes a single beta target.
+
+PRs in flight: **#1378** (UAT scope fix, not ours — fixes one of my two red-main tests),
+**#1379** (our cleanup: DEF-39b + DEF-40).
+
+### The "inherited failure" triage was wrong, and the reasoning is the lesson
+
+Coordinator triaged #1379's shellcheck red as "the same pre-existing SC2016 finding as main,
+nothing new to fix." I checked. There are **two** SC2016 sites in the guard on our branch:
+
+```
+192  if ! printf '%s\n' "$stmt" | grep -q '`'; then                       <- HAS a disable
+200  stmt=$(printf '%s\n' "$stmt" | sed '/`/{ s/`.*//; q; }' | head -21)   <- has NONE
+```
+
+rev1 added a directive for the line it *introduced* and left uncovered a line it *edited*
+(`p; d` → `q`). On main the same construct sits at line 191, also uncovered — which is precisely
+why it reads as inherited. Same finding, relocated. One directive clears it.
+
+**RULE 351. "Our branch fails the check main also fails" and "our branch cannot clear that check"
+are different claims, and the first is routinely used to conclude the second.** Once a PR modifies
+the file carrying the finding, *inherited* stops being a sufficient explanation. The correct test
+is whether the finding survives against OUR content — not whether main has it too. This is rule
+347's stale-baseline shape wearing a different hat: third instance today.
+
+### Gemini nil-check on #1379: take it, but the SHAPE is the whole ruling
+
+Finding: `agent.ProjectID` panics if `GetAgent` returns `(nil, nil)`.
+
+Checked the sole production implementor, `entadapter.AgentStore.GetAgent` (agent_store.go:300):
+every path returns either an error with nil, or `entAgentToStore`, which always builds a non-nil
+struct. **No live panic.** Defensive only. Taking it anyway — `AgentProjectLookup` is a two-line
+interface anything can satisfy, and the function still has zero production callers, so its
+implementors are unwritten.
+
+**RULING — the check must DENY:**
+```go
+if agent == nil {
+    return fmt.Errorf("failed to look up agent %q: store returned no agent", a.PrincipalID)
+}
+```
+**NOT `if agent == nil { continue }`.** That is the reflexive way to satisfy a nil-safety note and
+it would silently reintroduce DEF-40 *in the same PR that closes it*: an addressee whose agent
+cannot be resolved would drop out of the cross-project check entirely — the identical failure to
+an unplaceable agent failing to anchor, arriving through a different door.
+
+**RULE 352. When adding a defensive check to a security predicate, the question is never only
+"does this avoid the crash" but "what does the guarded path do when the check fires."** In a
+validator whose job is to REFUSE, `continue` is the fail-open answer and is almost always wrong.
+Fixing a lint is a normal way to reopen a bug you just closed.
+
+Told rev1 to add a `(nil, nil)` stub test and confirm it panics on the unfixed code first
+(rule 346 — a test never seen failing is not a guard).
+
+### Fleet
+- `dev-c6-r1fix` retired (`--preserve-branch`) after verifying its content is in `1ba6a1edb`.
+- `ca-msg-rev1` unparked for the two #1379 fixes.
+- C5 answered **A**: child `dev-hub-handlers` in verification, all 6 subtasks done, branch
+  expected within the hour. Inside the 13:00Z deadline; acknowledged the undeclared-child point.
+
+### Open
+- rev1: two #1379 fixes, then #1379 should go green (shellcheck clean, better than main).
+- C5 branch push by 13:00Z, then C7 dispatch.
+- C4 (#pending) and C6 (#pending) awaiting ptone opening the compare URLs.
+- `TestDeleteStopped_RequiresGroveContext` still red on main, still unowned (#1378 fixes only the
+  other one).
+- #1365 still needs closing by ptone.
