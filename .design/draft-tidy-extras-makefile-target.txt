@@ -1,0 +1,19 @@
+## Proposed addition to Makefile — draft, do not merge yet
+
+# Add to .PHONY line: tidy-extras
+
+# Insert after the fmt targets:
+
+## tidy-extras: Run go mod tidy in every extras/ module (fixes stale go.sum after root dep changes)
+tidy-extras:
+	@echo "Tidying extras modules..."
+	@failed=0; \
+	for moddir in $$(find extras -maxdepth 2 -name go.mod -printf '%h\n' | sort); do \
+		echo "  $$moddir"; \
+		(cd "$$moddir" && go mod tidy) || { echo "  FAILED: $$moddir"; failed=$$((failed + 1)); }; \
+	done; \
+	if [ "$$failed" -gt 0 ]; then \
+		echo "$$failed module(s) failed to tidy."; \
+		exit 1; \
+	fi; \
+	echo "All extras modules tidied."
