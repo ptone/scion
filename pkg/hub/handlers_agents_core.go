@@ -2772,8 +2772,21 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// Compute entitled secret keys from the key listing. Refresh
+	// recomputes rather than copying from the old credential — every
+	// writer uses computeEntitledSecretKeys as the single source of
+	// truth. (#127, R7/R8)
+	entitledKeys, ekErr := computeEntitledSecretKeys(r.Context(), s.secretBackend, s.store, s.authzService, agent)
+	if ekErr != nil {
+		slog.Error("Token refresh: entitled-key listing failed; "+
+			"this agent will not be able to fetch secrets until it is restarted",
+			"agent_id", id, "error", ekErr)
+		// Continue — refresh must not fail due to entitlement bookkeeping.
+		// The credential row keeps NULL (fail-closed on future fetch).
+	}
+
 	agentRole, additionalScopes := agentRoleAndScopes(agent)
-	newToken, _, err := s.GenerateAgentToken(
+	newToken, newJTIHash, err := s.GenerateAgentToken(
 		agent.ID, agent.ProjectID, agentIdent.Ancestry(),
 		agentRole, additionalScopes,
 	)
@@ -2781,6 +2794,14 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to generate refreshed token: "+err.Error(), nil)
 		return
+	}
+
+	// Record entitled keys on the new credential (best-effort).
+	if ekErr == nil && newJTIHash != "" {
+		if recordErr := s.store.UpdateAgentCredentialEntitledKeys(r.Context(), newJTIHash, agent.ID, entitledKeys); recordErr != nil {
+			slog.Warn("Token refresh: failed to record entitled secret keys",
+				"agent_id", id, "error", recordErr)
+		}
 	}
 
 	// Revoke the old credential now that a new token has been issued (best-effort)
