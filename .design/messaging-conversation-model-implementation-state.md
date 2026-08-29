@@ -16047,3 +16047,95 @@ which most was my misattribution rather than the fix.
 Not reporting this to ptone — the resolution was already communicated when I sent the correction,
 and confirmation of an expected green adds nothing actionable (standing directive: section
 boundaries and escalations only, no FYI).
+
+---
+
+## 12:20Z — C5 VERIFIED @ `a18aa777a`; CROSS-PHASE COLLISION FOUND (C4 ↔ C5)
+
+### C5 fixes verified by inspection, not by report (rule 354)
+- **BLOCKER 1 (B11/B13) — CLOSED.** Checked all **five** `PublishUserMessage` sites in
+  `handlers_agent_messaging.go`, not the three C5 named: 371 (early-return on persist error),
+  982 (`persistedMsgID != ""`), 1251 / 1376 (`else` branch of `CreateMessage`), 1793
+  (`persisted` bool). Test names and assertions agree again, and paired
+  `_PublishesOnPersistSuccess` positive controls pin both directions.
+- **BLOCKER 2 (DEF-40) — CLOSED.** Live call at line 675; TODO gone.
+- **FIX 3 (reachability gate) — PARTIAL.** Ran positive controls instead of trusting the pass:
+  - control A (strip authz from `handlers_chat_v2.go`) → rc=1 ✓
+  - control B (**new** dispatching handler file) → **rc=0 ✗**
+  - control C (**new** dispatching func in a covered file) → **rc=0 ✗**
+  Scan is file-level over three hardcoded paths; the invariant is path-level. Asked for glob
+  discovery (`pkg/hub/handlers_*.go`) and a header corrected to describe actual coverage.
+  Explicitly did **not** demand function-level bash analysis.
+
+### RULE 361. A gate that oversells its coverage is worse than a modest one
+The header claimed entry-point granularity the code did not have. The next person trusts the
+comment, not the implementation. When they disagree, fix whichever is cheaper — but never ship
+them disagreeing.
+
+### The collision — a defect that exists ONLY in the merged result
+C4 touches **3 files**; **2** are also touched by C5 (`webchannel_store.go`,
+`webchannel_store_postgres.go`). Additions are byte-identical: same `GetTopicConversationID` /
+`GetTopicConversationIDIncludingDeleted` signatures, same doc comments, same `ConversationID`
+field, same `conversation_id` column.
+
+Migration is the sharp edge. C4 → `addTopicConversationID()`; C5 → `addConversationIDColumn()`.
+**Different function names, so git auto-merges both into `runMigrations()` with NO conflict** —
+but both key on the same marker `"topic_conversation_id"`. First to run marks it done; the second
+returns `nil` early. **C5's does not create the unique index; C4's does.** Merged tree can
+silently skip `CREATE UNIQUE INDEX idx_webchat_topic_conversation`, losing one-topic-per-
+conversation, with green tests and no error.
+
+### RULE 362. Same-purpose migrations that share a completion key are mutually CANCELLING, not mutually conflicting
+The shared key converts a would-be conflict into a silent no-op. Two correct, individually
+idempotent migrations compose into a missing constraint.
+
+### RULE 363. Overlap defects live exclusively in the merged result
+Per-branch verification cannot see them by construction: no textual conflict, both branches green,
+both migrations individually correct. A file touched by two in-flight branches needs review of the
+**merge**, not review of each side.
+
+### RULE 364. Conceptual boundaries do not partition a filesystem
+I scoped C4 and C5 as "webchat" vs "handlers". Two-thirds of C4's surface was contested and
+neither team knew. **Phase boundaries must be declared in files, and the overlap check
+(`comm -12` of changed-file lists) belongs at DISPATCH time, not merge time.** This one is mine.
+
+### Resolution
+C5 drops both store files. C4 owns them; its version is the superset (unique index + DEF-36
+backfill). Verified C5 **never calls** `GetTopicConversationID` → substrate it does not consume,
+so removal costs nothing and creates no ordering dependency. C5 goes 16 → 14 files, overlap → 0.
+C4 additionally to add a test that the index EXISTS post-migration **and rejects a duplicate**,
+positive-controlled by deleting the `CREATE UNIQUE INDEX` line.
+
+### Rule 335 applied to myself before accusing anyone
+Endpoint diff C5 vs `b7a415575` showed `validate_test.go -170`, `test-check-...guard.sh -89`,
+`validate.go -41`, `check-...guard.sh -14` — none reported by C5. All four are **artifacts**:
+`comm -12` of (main since C5's base) × (C5's files) is **EMPTY**, verified with a positive control
+(inputs 5 and 16 files; self-overlap 16) per rule 61. C5 touches zero files main has touched, so a
+merge cannot revert #1379. Told C5 **not** to rebase to make the rows disappear.
+Genuinely C5-authored and unreported: `webchannel_store.go -7` (vanishes with the file drop) and
+`messaging/divergence.go -8` (justification still owed).
+
+### C6 @ `f56d3064e`
+Rebase clean (merge-base == `b7a415575`), endpoint matches its ten rows exactly, deletions 13.
+Per-operation timeouts implemented better than specified (constants :171-172, list :192, send
+deadline created **inside** the goroutine at :218 so each agent gets its own clock). Only
+**QF1002** outstanding: untagged switches at `broadcast_test.go:118,163` — its own new test code.
+Nit (non-blocking): `broadcast.go` ships two timeout idioms, named constants beside inline
+`30*time.Second` at :104/:125/:150.
+
+### Stale-check lesson landed with coordinator
+#1380's shellcheck red is a **cached measurement**, not a live failure — C4 does not touch that
+script at all. Paired form recorded: **a stale GREEN hides a defect that now exists; a stale RED
+shows a defect that no longer does. Both answer a question about a commit that is not in front of
+you.** Corrected the causal claim so "red means rebase" does not become fleet habit — reflexive
+rebasing is the operation most likely to silently drop others' commits.
+
+### Zsh trap
+`git show "$B:hack/..."` — zsh applies the `:h` history modifier to `$B`. **Brace it:
+`"${B}:hack/..."`.**
+
+### Open
+- C5: drop 2 store files, glob the reachability scan, justify `divergence.go -8`.
+- C4: tx commit-failure fix, index-existence test, re-baseline to `b7a415575`, **no rebase**.
+- C6: QF1002 → then #1381 is landable.
+- Dispatch C7 after C5 lands. Retire agents on MERGE, not report (rule 336).
