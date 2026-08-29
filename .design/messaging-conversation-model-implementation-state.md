@@ -19713,3 +19713,79 @@ neither direct nor retire it (rule 415).
 - Unassigned and still needing an owner from ptone: **DEF-50** (gate hardening —
   `hack/check-authz-reachability.sh:47` uses a comment-blind `grep -q`). Brief
   item 12 puts that call with ptone, not with me.
+
+---
+
+## 5ea — 2026-08-29 — d34 exit interview; DEF-53 filed
+
+d34's exit interview produced four answers, all substantive. The out-of-scope
+question (rule 454) again returned the most valuable item.
+
+**Answer 1 checked and sharpened into DEF-53.** d34 said the B10 demoted
+`ValidateAttributed` at `handlers_agent_messaging.go:1030` is currently inert
+because `convResult` cannot carry an empty ConversationID. I suspected this was
+backwards — B10's whole point is that a resolve failure is non-fatal — so I
+verified rather than accepted it.
+
+`ResolveOrCreateConversationByKey` (`pkg/messaging/derive_key.go`) returns **nil**
+on every failure path (`:31`, `:44`, `:54`, `:80`) and non-nil only on success
+(`:38`, `:83`). On success `ConversationID` is a `uuid.UUID`, always 36 chars.
+So d34's conclusion is right: the warn is inert.
+
+But the reason it is inert is the finding:
+
+```go
+if convResult != nil {
+    if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+        s.messageLog.Warn("... (B10 demoted)")
+    }
+}
+```
+
+**The check is guarded by exactly the condition that excludes the failure case it
+was written to detect.** When derivation or resolution fails, `convResult` is nil,
+the guard skips the check entirely, and the message persists with an empty
+ConversationID. The comment above it says "Keep the signal so a Tranche G operator
+can grep for it" — and the signal cannot fire.
+
+The Tranche G danger is concrete. If an implementer flips this warn to a reject
+*in place*, the reject inherits the `convResult != nil` guard and therefore does
+not fire for the nil case, which is the actual failure case. Messages continue to
+persist with an empty ConversationID — a row with no key, which per DEF-29 is a
+row with no ACL basis at all. The flip would look done and would not be.
+
+Filed as **DEF-53**: the B10 read-switch flip must move the `ValidateAttributed`
+call outside the `convResult != nil` guard, not change the log level inside it.
+Not a live defect today — ConversationID is not yet the read authority — so this
+is a Tranche G precondition, not current work.
+
+**Answer 2, logged not filed.** Two sender derivations in `handleAgentMessage`:
+the conversation key uses `authenticatedSender(ctx)` (correct under G-1), while
+`OldRoutingFromMessage` and `CheckConversationConsistency` use
+`structuredMsg.SenderID`, the B5-overridden field. The security-critical path uses
+the right one, so this is not a hole; it is a DRY hazard where a future change to
+one derivation and not the other would desynchronise the key from the divergence
+record. d34 could not construct a case where they differ today, and neither can I.
+
+**Answer 3 accepted.** d34's reading of the reject/warn asymmetry is right and
+better argued than my "both unreachable, Tranche G cleanup" note: the reject path
+is agent-to-user where the agent is the authenticated caller and a 400 is safe to
+surface; the warn path is user-to-agent where a 400 would block delivery over a
+bookkeeping failure the user cannot fix. The asymmetry is intentional. Its
+recommendation — gate the eventual flip behind the Tranche G read-switch rather
+than editing the if-branch — is now DEF-53's required shape.
+
+**Answer 4, DEF-37 marker gate.** d34 judges it worth building at about half a
+day, on the grounds that the exemption contract is invisible to a contributor
+adding a fourth emitter. I agree with the reasoning. One correction to its
+proposed design: it described grepping for `ValidateLegacyMessage` call sites and
+diffing against an allowlist, which is the same comment-blind `grep -q` weakness
+that **DEF-50** exists to fix. DEF-37 and DEF-50 are the same script family and
+should go to one owner together.
+
+### Rule
+
+- **462.** A guard can exclude the case its body was written to catch. When a
+  check is wrapped in a success precondition, verify the failure path still
+  reaches it — and when demoting or promoting such a check later, move it out of
+  the guard rather than changing its severity in place.
