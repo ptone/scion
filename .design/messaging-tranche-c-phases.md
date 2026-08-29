@@ -159,6 +159,26 @@ file counts. Only the size estimates moved.
     so a phase can report green on build, tests and all three guards and still be unformatted. C3
     did exactly that, and main took #1375 to fix the same class on #1371's files. A checklist of
     five checks, none of which looks at formatting, reports green on an unformattable branch.
+12. **You may not re-point a gate your own change made fail.** Standing fleet policy, confirmed by
+    ptone 2026-08-29. Three shapes, three rules:
+    - **Re-point** an existing gate so its failing rows pass → **not yours.** Escalate to me. The
+      change is *reassigned to a different team*, and authorized. Authorization is the consequence
+      of reassignment, not a substitute for it.
+    - **Tighten** a gate to close a hole it already claimed to cover → routine, proceed.
+    - **Add** a new gate → routine, proceed. Prefer a **standalone script** (see
+      `hack/check-conversation-upsert-guard.sh`) over adding rows to an existing gate; different
+      controls should not be bolted together, and separate files do not collide across phases.
+
+    The reason is not process hygiene. **From inside the change that staled a gate, every stale row
+    looks like a false positive.** You are the worst-placed party to judge whether the gate was
+    wrong, and you are the party who benefits from it going green. Asking permission does not fix
+    this if you still draft the replacement rows.
+
+    A gate you are forbidden to fix will stay red for your whole phase. That is expected. Verify
+    against clean main, confirm the failing set matches, and **diff your failing rows against main's
+    on every run — the number that matters is whether the set changed, not whether it is empty.**
+    Six rows failing for one known cause is exactly the situation where a seventh row failing for a
+    real reason gets swept up in the batch.
 
 ---
 
