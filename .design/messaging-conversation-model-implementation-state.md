@@ -14167,3 +14167,43 @@ Fix is one line of intent: assert on **decode**, not encode. POST a body literal
 ### Ledger
 **STRUCK: G-1.** Tranche H is no longer blocked on the fix — it is blocked on strengthening the guard, which is now a one-line change inside H's own slice.
 Tranches C–G sequenced. DEF-12 = Phase 4. Phase 1 approved, compare URL going to ptone.
+
+---
+
+## §5fy — em10 gate rows verified (5/5 non-vacuous). Branch is on a pre-squash base: rebase required.
+
+### The five new rows are real
+Cherry-picked `af183c0b9` onto `a7ac9c489` in `/tmp/gr`. Clean apply, +45/-0, guard exits 0 on the clean tree, **25 total rows**.
+
+Non-vacuity proven **per row, per function** — not by deleting the symbol globally, which would prove only that something fires:
+
+| row | mutation | result |
+|---|---|---|
+| `Broadcasted` in `handleProjectBroadcast` | renamed within function | exit 1, own row fired |
+| `parseDMKeyIDs` in `handleAgentOutboundMessage` | renamed within function (1 occurrence) | exit 1, own row fired |
+| `parseDMKeyIDs` in `handleAgentMessage` | renamed within function (1 occurrence) | exit 1, own row fired |
+| `parseDMKeyIDs` func def | renamed definition | exit 1, own row fired |
+| `isDMParticipant` func def | renamed definition | exit 1, own row fired |
+
+**em10's correction of the audit agent is confirmed.** `parseDMKeyIDs` occurs in **two distinct functions at 1 each**, not twice in one function. My per-function rename found exactly 1 in each — the same measurement, arrived at independently. Their AST claim was right and the earlier audit was wrong.
+
+### The blocker: pre-squash base (my own rule, second time)
+Branch tip `af183c0b9`, **merge-base `42eb91b0f` (#1361), not `a7ac9c489`.** `e28e8c999` is **NOT an ancestor of main** — #1363 landed as a squash, `a7ac9c489`.
+
+Consequence: the branch carries 3 commits not in main, two of which are already-merged #1363 content. Content is fine — main's files vs branch's files differ by exactly +45/-0, so the squash reproduced `e28e8c999` faithfully — but the **three-dot diff reads +125/-7**, and a PR would present #1363's merged work as new. A reviewer would be asked to re-approve what they already approved, buried around the 45 lines that are actually new.
+
+Fix is one command, and I verified it applies cleanly by doing the equivalent cherry-pick:
+```
+git rebase --onto upstream/main e28e8c999 scion/ca-msg-em10-marker-gate-2
+```
+
+**Rule 289.** After a squash merge, the source branch is orphaned from main's history and any further commits on it silently re-present the merged content. Continuing work on a merged branch is never right: cut a fresh branch from main, or rebase `--onto` main. Check `merge-base` against main before building on any branch that has ever been merged.
+**Rule 290.** Content-identical and history-identical are different properties, and a PR displays the second. Verify by comparing *file content* main-vs-branch (`+45/-0` here), then separately check the base — a branch can be perfectly correct in content and still unreviewable.
+
+### zsh bit me in a new way
+`"$AM:handleAgentOutboundMessage"` — zsh applied `:h` as a **history modifier** (dirname), yielding `pkg/hubandleAgentOutboundMessage`. Two mutations silently did nothing and reported `exit=0`, which I would have read as "row is vacuous" had the third not fired correctly and made me look.
+
+**Rule 291.** In zsh, `$VAR:x` may be a modifier, not a literal. Never build a delimited record by concatenating a variable with `:`. And a mutation test that reports "no failure" must first prove the mutation applied — an unapplied mutation and a vacuous guard are indistinguishable from the exit code alone.
+
+### Status
+Rows: **APPROVED on content.** Branch: **blocked on rebase.** Compare URL withheld until the base is `a7ac9c489`. SLICE-PLAN.md corrections (F=8, rows 64/65 → H, review-by-attention section) accepted as reported.
