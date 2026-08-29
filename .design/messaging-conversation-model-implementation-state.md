@@ -14109,3 +14109,61 @@ Both are now ACTIVE, not parked. I am no longer blocked on ptone; I am blocked o
 **Ledger movement this cycle:** tranches C–G unblocked, now sequenced behind Phase 0. **DEF-12 finally has a home** — Phase 4, sourced from messaging-v2, after having no tranche letter in any prior version of the plan. Tranche H unchanged, blocked on G-1. DEF-32 unchanged, blocked on ptone, independent of this work. #1259 unchanged, CONFLICTING, 6 heartbeats, not mine to unblock.
 
 **Open question now owned by me and needing ptone:** the eight raw `INSERT INTO conversations` sites in `pkg/hub/webchannel_store*.go`. Sanctioned §2.6.4 dual-write path, or a violation of the "hub has no raw SQL path" property that #1339 established? Needs a ruling before any slice touches webchannel storage. Not raised yet — holding it until em10's Phase 0 lands, so I can raise it once with the full picture rather than serially (one thing at a time).
+
+---
+
+## §5fx — Phase 0 and Phase 1 both delivered. G-1 STRUCK. A guard I called vacuous was not, and one I'd have passed has a verified evasion.
+
+### em6 / Phase 1 docs slice — VERIFIED, approved for landing
+Branch `scion/ca-msg-em6-docs-slice` @ `380d7adfc`, merge-base `a7ac9c489` (current main, correct).
+
+Verified independently, not taken on report:
+- Set equality: `(v2 ∪ em9) − main` under `.design/project-log/` = **45 wanted, 45 got, zero missing**. The 46th path is em6's own log entry, legitimate.
+- Additive: **zero deletions**. All 45 are new files; none pre-exist on main.
+- Non-docs paths: **none**.
+- Guards from main: all three **exit 0**.
+- `go build ./...`: **exit 0**.
+
+### em6 found a real defect in MY protocol
+I specified extracting main's guards to `/tmp` and running them. That cannot work: every guard script begins `cd "$(dirname "$0")/.."`, so from `/tmp` the repo root resolves to `/`. em6 worked around it by copying into `hack/`.
+
+The workaround is right but under-specified, and the under-specification is dangerous: "copy the guard into hack/" silently becomes self-grading if anyone copies the branch's own copy. **Corrected procedure, git-native and deterministic:**
+```
+git checkout upstream/main -- hack/     # in the slice worktree
+./hack/check-security-marker-gates.sh; ./hack/check-conversation-upsert-guard.sh; ./hack/check-authz-guards.sh
+git checkout HEAD -- hack/              # restore
+```
+Verified working on em6's branch above. Design doc updated.
+
+**Rule 286.** A verification procedure is code and needs the same scepticism. I wrote "extract to /tmp and run" without running it once; the scripts locate their own repo root and the extraction breaks them. Execute the procedure yourself before handing it to anyone.
+
+### em10 / Phase 0 SLICE-PLAN.md — accepted with two corrections
+Table is complete: 37 code/markdown rows (indices 46–82) + 45 docs = 82. Independent count confirms mine.
+
+**Correction 1 — the summary undercounts F.** Message said F=6; the table has **8** rows for Phase 6 (F). The table is right. This is why the stated breakdown summed to 80 against a total of 82.
+
+**Correction 2 — rows 64/65 are misfiled.** `handlers_conversations_resolve.go` and `_test.go` are assigned to **Phase 2 (C)**. They are tranche **H**. Burying a security-critical resolve endpoint inside a 12-file envelope/delivery slice puts it in front of reviewers who are not looking for auth.
+
+### G-1 IS FIXED — ledger was stale, blocker STRUCK
+I have been carrying "tranche H blocked on G-1" for days. **Verified in the code at `47a7c6736`:** the request struct is now `{Reference, ProjectID}` only. Body sender fields are gone; the doc comment cites G-1 by name. Sender identity derives from `agentIdent.ID()` / `user.ID()`. That is exactly the ruling — delete both fields, don't validate them — and em9 implemented it.
+
+Rule 263 again: my verified claim depended on code that then changed, and I never re-probed.
+
+### I called the regression test vacuous. Mutation proved me wrong.
+`TestHandleConversationsResolve_SenderFromAuthContext`. On reading I judged it worthless — part 1 looked tautological (marshal a struct, assert its own JSON lacks fields it doesn't have) and part 2 has an **empty `recover()`** that swallows any panic plus assertions gated on `rr.Code == 400`.
+
+Part 2 is indeed near-worthless. **Part 1 is not, and it carries the test.** Mutation 1 — reintroduce the fields and prefer them over auth context — makes the test **FAIL**. The struct shape *is* the G-1 control: you cannot supply what cannot be parsed, so asserting on shape asserts the property.
+
+I was wrong, and I was wrong in the direction I most need to watch: I reasoned about a test instead of running it, and my reasoning was confident and unidirectional.
+
+### But there is a verified evasion, and it is the likely one
+Mutation 2 — the identical vulnerability with **`,omitempty`** tags — **PASSES**. An empty string is omitted, part 1's `bytes.Contains` never fires, and part 2 catches nothing. `omitempty` is idiomatic Go and is how someone would naturally write it.
+
+Fix is one line of intent: assert on **decode**, not encode. POST a body literally containing `sender_principal_kind` and assert the handler ignores it. Behaviour, not struct shape — robust to tags.
+
+**Rule 287.** Judging a test by reading is a hypothesis; mutation is the experiment. Run it before ruling, in both directions — mine failed the first mutation and passed the second, and I had predicted the opposite.
+**Rule 288.** A guard asserting on serialised *shape* is only as strong as the serialiser's defaults. Struct-tag options silently change what shape-based assertions can see. Assert on the boundary you actually defend: what the handler accepts, not what your own struct emits.
+
+### Ledger
+**STRUCK: G-1.** Tranche H is no longer blocked on the fix — it is blocked on strengthening the guard, which is now a one-line change inside H's own slice.
+Tranches C–G sequenced. DEF-12 = Phase 4. Phase 1 approved, compare URL going to ptone.

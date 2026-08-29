@@ -29,7 +29,7 @@ Three independent failures were measured against `a7ac9c489` in throwaway worktr
 
 - **Not** flipping `conversation_read_switch`. Tranche G is the flip and is out of scope until C–F have soaked. B10 stands: derivation failures stay non-fatal until the S4 read-switch.
 - **Not** resolving DEF-32 federated identity linking. Blocked on a product decision, required before S4, independent of this work.
-- **Not** landing tranche H. Blocked on G-1 (`handlers_conversations_resolve.go` lets the caller choose who they are). The endpoint and its fix ship together or not at all.
+- **Not** landing tranche H in the C–F sequence. **G-1 is FIXED** as of `47a7c6736` — the request struct is `{Reference, ProjectID}` and identity derives from the auth context (verified 2026-08-29). H is now blocked only on strengthening its regression guard, which has a verified `omitempty` evasion; that is a one-line change inside H's own slice.
 - **Not** preserving em9-unify's commit history. We are re-deriving content, not replaying commits.
 - **Not** carrying `cmd/deploy_instance{,_test}.go`. Main deleted both in #1325.
 
@@ -68,10 +68,14 @@ From §5fu: a slice that edits a guard grades itself. Therefore:
 > **Slice verification runs the guard scripts from `origin/main`, not from the slice.**
 
 ```
-git show origin/main:hack/check-conversation-upsert-guard.sh > /tmp/g.sh
-git show origin/main:hack/check-security-marker-gates.sh    > /tmp/m.sh
-# run both against the slice worktree
+git checkout upstream/main -- hack/     # in the slice worktree
+./hack/check-security-marker-gates.sh
+./hack/check-conversation-upsert-guard.sh
+./hack/check-authz-guards.sh
+git checkout HEAD -- hack/              # restore
 ```
+
+**Do not extract the scripts to `/tmp`.** Each begins `cd "$(dirname "$0")/.."`, so outside the repo the root resolves to `/` and the guard silently analyses nothing. Found by em6 on the Phase 1 rehearsal — which is what the rehearsal was for.
 
 A slice that needs a guard relaxed does that in a **standalone PR containing only the guard change and its justification** — never bundled with the code the relaxation permits. Guard changes are reviewed as security changes.
 
