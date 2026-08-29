@@ -19204,3 +19204,54 @@ noticed but unfiled. **Rule 444: retire on evidence, not on inference.** An agen
 whose PRs merged still holds notes that exist nowhere else, and the container is
 unrecoverable. The cost asymmetry is the same one that governs lifecycle
 authority.
+
+## 5dp — DEF-51 filed, out of a retirement interview (2026-08-29 21:08Z)
+
+**D5 rebase verified independently:** tip `e88d88f74`, merge-base == `ddba7d5d1`
+== main, exactly two files, nothing under `cmd/`. Phantom gone.
+
+**The pre-retirement question paid for itself immediately.** Asked D1 for
+anything held only in its head. It surfaced: the `@email` path in
+`sendMessageViaConversation` sends a raw string via `OutboundMessageRequest`, not
+a `StructuredMessage`, so there is no client-side validation — "not a defect
+today since the hub presumably validates on receipt."
+
+I checked the "presumably" rather than filing the note as-is. The hub *does*
+validate: `handleAgentOutboundMessage` runs `ValidateLegacyMessage` at the legacy
+envelope choke point plus inline checks (empty msg, MaxMessageLength, visibility,
+DM key format). D1's caveat was correct and there is no unvalidated path.
+
+**But the consequence one step on is DEF-51.** The @email path does
+`ResolveConversation` (creates the row) and *then* `SendOutboundMessage`, which
+the hub can reject. A server-side rejection after a client-side create orphans
+the row — DEF-48 exactly, on the branch DEF-48 did not close. The merged comment
+reads "no StructuredMessage is constructed, so there is no ValidateLegacyMessage
+to hoist," which is true about the mechanism and irrelevant to the orphan: the
+orphan needs a server rejection after a client create, not a client-side
+validator.
+
+**Rule 445: closing a defect on the path you were looking at does not close it on
+the path that shares the same call order.** DEF-48 was framed by the site that
+raised it (@agent). @email has the identical resolve-then-fail shape and was
+handled in the same commit — the phase touched the code and still left the defect,
+because the fix was specified per-mechanism rather than per-order.
+
+**Rule 446: the exit interview is a defect-discovery instrument, not a formality.**
+I asked out of caution about unrecoverable context and got a live defect. An agent
+that has just finished a file knows things about it that are in no artifact, and
+the only moment that knowledge is cheap to extract is before the container goes.
+
+Assigned to D1 rather than a fresh agent: same file, same defect class, minutes
+after its own merge. That is the case where reuse beats context rot, not an
+instance of it. Retirement deferred.
+
+Brief requires **reachability proof before fix** — construct an input that creates
+a row and then gets rejected (candidate: a message over `MaxMessageLength`, which
+the CLI does not check on that path). If it turns out unreachable I want that
+answer instead of a fix. And the fix must **reuse the choke point** — build a
+StructuredMessage for validation only, validate pre-resolve, discard it — not
+hand-copy a length limit into the CLI. Two copies of a limit that can drift is
+the same mistake I sent back to D5 this tranche; I am not going to accept it
+because it is small.
+
+New branch `scion/ca-msg-d51`; `ca-msg-d2` is merged and must not be reused.
