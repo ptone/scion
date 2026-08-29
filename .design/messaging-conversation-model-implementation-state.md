@@ -14644,3 +14644,78 @@ choke point and converts four ingresses to it.
   how you got there.
 - **320.** When a sponsor rules in your favour, stop arguing and stop enriching. Record the ruling as
   given, note the follow-up you owe, and go quiet.
+
+---
+
+# §7 — WOKEN 2026-08-29 10:01Z. Tranche C dispatched.
+
+ptone: *"the msg auth work just merged to main. start up EMs. brief on the need to sync to upstream
+and adjust our code to any new changes in upstream. let's work on getting c landed in the right
+number of phases."*
+
+## 7.1 Upstream sync result
+
+`upstream/main`: `a7ac9c489` → **`8b09c118f`**, 7 commits.
+
+- `8b09c118f` #1371 — messaging authorization D1–D10. 34 files, +2939/−76. New
+  `pkg/hub/authorize_message.go` (240) + `authorize_message_test.go` (820);
+  `handlers_agent_message_mode.go` (255) + test (706); `message_mode` on the agent record.
+- `71ad85281` #1367 — **our design docs landed.** Item closed.
+- `36225aaae` #1366 — **our gate rows landed.** Item closed.
+- Others: `f04a5a80c` (#127 P5 credential leak), `8fba0171b`, `4f74527c5`, `64e68a963`.
+
+## 7.2 §6.3 re-verification — all five checks executed
+
+1. **`pkg/messaging` untouched by #1371.** `resolve.go` **byte-identical** to pre-pause.
+   `case "group"` still returns nil without consulting participants. **Option C safety argument
+   survives intact.** This was the check §6.3 flagged as decisive, and it passed.
+2. **`hack/check-conversation-upsert-guard.sh` unchanged** — §6.2 spec applies verbatim.
+3. **Prohibition list intact**, occurrence counts *up* not down (authenticatedSender 22,
+   parseDMKeyIDs 20, isDMParticipant 16, validateDefaultAgent 32, ActionAttach 47,
+   EnsureParticipant 55, checkDMParticipantKey 24). `handlers_agent_messaging_test.go` now has
+   **11** Test functions (was 8) — #1371 added, did not remove.
+4. **Manifest re-derived three-dot.** M-ADD 131 raw → **~79 in scope** (50 are
+   `.design/project-log/`, dropped by sponsor; 2 working notes). M-MOD 94 raw → **80 non-ent**,
+   **3,509 added lines** (max across sources).
+5. **Conflict set far smaller than I predicted.** 7 paths collide with #1371; 3 are ent-generated.
+   Real hand-merge set = **4 files**: `handlers_agent_messaging.go`, `handlers_broker_inbound.go`,
+   `handlers_chat_v2.go`, `pkg/store/models.go`. **Zero M-ADD collisions.**
+
+## 7.3 The plan
+
+`/workspace/.design/messaging-tranche-c-phases.md` (mirror:
+`projects/ca-msg-arch/design-tranche-c-phases.md`), pushed at **`26810bd7c`**.
+
+Seven phases: C1 guard / C2 schema+ent+store / C3 messaging lib / C4 webchat dual-write /
+C5 hub handler wiring / C6 CLI contract / C7 brokers+docs.
+Rationale for seven: layer boundaries, dependency chain, and **isolating all four collision files
+into C5** so a conflict there cannot stall the other six. §1 of that doc is the standing sync brief
+and binds every phase — rebase on upstream, three-dot enumeration, **port by hunk never file-copy**,
+additive invariant, prohibition list, drop `newTestStore`, do not carry v2's fanOut hunks,
+run the three guards, tests land with their code.
+
+## 7.4 Dispatched
+
+| Phase | EM | Status |
+|---|---|---|
+| C1 guard (Option C) | ca-msg-em10 | dispatched 10:04Z |
+| C2 schema/ent/store | ca-msg-em9 | dispatched 10:05Z |
+| C3 messaging library | ca-msg-em6 | dispatched 10:05Z |
+
+C4 waits on C1+C2. C5 waits on C3. C6 waits on C3. C7 waits on C5.
+**Asked em6 to empirically test its C2 dependency** rather than assume it — `pkg/messaging` declares
+its own `ResolutionStore` interface (resolve.go:140-142) and may compile independently. Answer
+pending; it determines whether C3 runs parallel to C2 or behind it.
+
+Heartbeat `7f4e3aa6-...` **resumed**, next run 10:13Z.
+
+## 7.5 New rules
+
+- **321.** Predicting a merge will be destructive is not the same as measuring it. I warned three
+  files would be "substantially rewritten"; they gained call sites. Re-measure on wake before
+  re-briefing, or you will propagate your own stale pessimism as fact.
+- **322.** A raw manifest count is not a scope count. 131 M-ADD paths contained 50 the sponsor had
+  already dropped. Compare like with like before reporting a number as growth.
+- **323.** When two workstreams touch the same domain, the useful question is not "do they overlap"
+  but "at which layer." #1371 and tranche C both concern messaging authorization and collide in
+  only four files, because one gates the edge and the other gates the object.
