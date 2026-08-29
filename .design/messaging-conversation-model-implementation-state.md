@@ -14349,3 +14349,50 @@ Skip: the four DEF/unification specs (subordinate, still churning), the announce
 - **304.** The document most recently in your hands is the one you will wrongly nominate. Recency is not relevance — enumerate candidates before proposing one.
 - **305.** A design doc that has doubled since the announcement it grounded is no longer the announced contract. Landing it is a publication event; say what changed.
 - **306.** A doc landing with a section still marked OPEN is honest only if the open decision is named and owned. Here §2.6.3 is the webchannel raw-INSERT ruling under another name.
+
+---
+
+## §5gc — 2026-08-29 02:35-02:48Z — design docs landed as a pair; em10's 43 beats my 38; OQ1 escalated
+
+**ptone ruled:** drop #1365 (project logs), land the design. Then, on being shown that the design cites the findings 20 times by section number: *"1, land with the findings. 2 doc set."*
+
+### Branch `scion/ca-msg-design-docs` @ `1e6b0d2ec` — pushed, compare URL sent
+
++2487/−0, two new files. Additive check clean, three guards from main exit 0, `go build` exit 0, compare `ahead=1 behind=0 files=2`.
+
+**Reference normalisation.** Both docs used scratchpad filenames internally: the design cited `findings.md` ×20, the findings cited `design.md` ×6. Renamed to the `.design` filenames. Three `projects/<other>/design.md` citations left intact as provenance — a lookbehind `(?<![/\w-])` protects them, along with a genuinely different `projects/telegram-channel-debug/findings.md`.
+
+**My sed double-substituted on the first attempt** — the backtick rule produced `messaging-conversation-model-findings.md`, then the bare rule matched `findings.md` inside its own output, yielding `messaging-conversation-model-messaging-conversation-model-findings.md`. Caught by a closure check that verified every referenced `.md` resolves to a file in the slice. Redone as a single non-overlapping pass. **Rule 307.**
+
+### The header claim I nearly shipped false
+
+I wrote "no decision announced in #1264 has been reversed" and then, before committing, checked the 26 deletions in that window. **Two decisions had been reversed, and Discussion #1264 has never been edited (`lastEditedAt: None`):**
+
+1. **Cross-project addressing removed.** #1264 still publicly presents `` `#<space>/<thread>` `` as "a thread in another space"; an earlier draft added `@<project>/<agent>`. Both gone. References never cross a project boundary; a `conv:<id>` from another project is rejected by a permission check at send time. **This is a security boundary, published stale.**
+2. **`scion schedule message`** is no longer a separate verb; #1264 still maps `--in`/`--at` onto it.
+
+Header note rewritten to state both reversals and that the doc is current where they disagree. **Rule 308.**
+
+### em10's M-MOD: 43, and I was wrong twice
+
+em10 reported 43 against my 38 and disputed five paths. **em10 was right on all five; I re-derived independently and got 43.** Both of my exclusion rationales were category errors — "blocked on OQ1" and "Phase 4 scope" are properties of a row, not membership tests.
+
+Two method bugs produced the low count:
+
+1. **Whole-line set matching false-negatives.** I whitespace-stripped the branch's added lines and set-differenced against all of main's lines. Individual Go lines are generic (`if err != nil {`, `return nil, err`, bare braces), so each matched *somewhere* in main's file and the path scored zero unported. Re-testing with **distinctive identifiers** exposed 8 absent idents in `webchannel_store.go` alone, including `GetTopicConversationID`.
+2. **Candidate-set filter discarded one branch's content.** I dropped any path where *either* branch's blob matched main. That is exactly em10's "em9 absorbed, v2 extras" case: `store.go`, `message_store.go` and `server_foreground.go` were lost because em9 matched main while v2 carried `CountUnbackfilledMessages`.
+
+Independent re-derivation over the full candidate set with the identifier method: 45, minus the 31 `newTestStore`-only = **43**. Convergent. em10's 31 NTS and 6 absorbed both confirm. em10 also self-caught two false positives in their own absorbed-check (`grep -qF` on `ci.yml`/`Makefile`; whitespace padding in `models.go`).
+
+### OQ1 escalated — it now blocks C
+
+ptone asked "how is the work on c going?" Answered honestly: **not started, deliberately.** Two of C's rows (`webchannel_store.go` +314, `webchannel_store_postgres.go` +256) add eight raw `INSERT INTO conversations` inside `pkg/hub`, which is exactly what #1339 forbids. That guard landed 2026-08-28, days after em9's base. Same question as the design's still-open §2.6.3. Put to ptone as a forced choice: sanctioned §2.6.4 dual-write (widen the guard) or violation (rewrite through the store layer). **Not guessing this one.**
+
+### New rules
+
+- **307.** Chained `sed` substitutions can match their own output. Any rename pass needs a closure check afterward that every reference resolves; do it in one non-overlapping pass, and protect same-named files belonging to other scopes.
+- **308.** An announcement is a snapshot with no update trigger. Before citing a published discussion as current, check `lastEditedAt` and diff the source doc across the interval — a reversed security decision left public is worse than no announcement.
+- **309.** Set-membership is not a scheduling decision. "Blocked" and "assigned to a later phase" are columns; excluding a blocked row from a manifest is how it becomes a forgotten row.
+- **310.** Line-level matching against a large file is a false-negative generator, because individual lines of real code are generic. Test for *distinctive identifiers*, not whole lines.
+- **311.** A filter that drops a path when one source matches the destination silently discards every other source's unique content. With N sources the test is per-source, and the answer is the maximum.
+- **312.** When a subordinate disputes your number, re-derive by a different method before ruling. Agreeing for the wrong reason is as bad as disagreeing.
