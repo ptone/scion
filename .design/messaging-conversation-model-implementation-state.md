@@ -19445,3 +19445,56 @@ URLs. DEF-52 owned by ci-fix-lead (ct-dev-4, ptone/scion#1372).
   where it reads as a finding about the thing you were testing. Localise before
   reacting, even when the alarming number appears in a line you added only as a
   positive control.
+
+## 5du — D5 exit interview: two findings traced and closed (2026-08-29)
+
+The exit interview paid for itself again. D5 volunteered two out-of-scope
+observations it had decided not to report. Both traced on `af8f6c063`.
+
+**(a) Empty-principal derivation — CLOSED, no defect.** D5 flagged that
+`handleAgentMessage`'s sender-override falls through to `Sender="user:unknown"`,
+`SenderID=""` when neither user nor agent identity is in context, and that on the
+derivation branch those empty strings reach `DeriveConversationKey` untraced.
+This is the shape that matters — a degenerate key on the derivation path is the
+"wrong key is worse than no key" case, since the key IS the ACL. Probed directly:
+
+    both_empty            => dm key: unknown kind "" (must be user or agent)
+    empty_sender          => dm key: unknown kind "" (must be user or agent)
+    empty_id_only         => dm key: invalid UUID for user: invalid UUID length: 0
+
+Case 3 denies at both the kind check and the UUID check. No degenerate key is
+constructible. "Parse failure denies, always" holds here. D5 was right to flag it
+and right that the handler does not assert the invariant locally — it is safe
+because the callee refuses, not because the caller checks.
+
+**(b) storeMsg.ProjectID vs conv.ProjectID — CLOSED as by-design.** D5 noted
+messages are stamped with the recipient agent's project while a direct
+conversation has `ProjectID == nil`. That is not an accident:
+`DeriveConversationKey` documents direct conversations as global per §2.4.1, so
+project-less is the intended model and the message stamp serves listing. Checked
+whether anything couples the two: no site in `pkg/store/` or `pkg/hub/` compares
+message ProjectID against conversation ProjectID (control: `ProjectID ==`
+comparisons exist and hit). Scope of that check named deliberately — it covers Go-level
+comparisons, not hand-written SQL joins.
+
+**(4) was the best answer of the four.** D5 reasoned unprompted to the safe-direction
+conclusion: a whitespace or non-canonical UUID fails both unset checks, then fails
+the `!=` comparison, so the failure mode is false DENIAL, not false grant. It also
+identified the only shape that could invert that (both sides holding the same
+non-canonical semantically-zero value) and closed it on the store validating
+`agent.ProjectID` on write. That is the correct standard: name the input that would
+break it, then show it cannot arrive.
+
+D5 also confirmed my review instruction to call `CheckDMParticipantKey` INSIDE
+`case direct` rather than before the switch was load-bearing — placing it earlier
+would have passed group conversations through a no-op and skipped project scoping
+entirely.
+
+D5 retired. **Ledger:** nothing added.
+
+### Rule
+
+- **454.** Ask the departing agent for what it decided NOT to report. Both of D5's
+  findings were deliberate omissions on scope grounds, and one of them sat on the
+  derivation path. "Anything out of scope you noticed?" recovers a different set
+  than "anything unreported?" — the first invites the judgement calls back.
