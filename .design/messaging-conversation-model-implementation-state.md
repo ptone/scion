@@ -2782,6 +2782,87 @@ there is a reason they kept both that I am not seeing.
    `dm:<userID>+<agentID>` form — **worse than the missing validation, because it will defend the bug
    in review.** nc-arch owns the filing.
 
+## 5cz. 2026-08-29 18:10-18:35Z — TRANCHE D PLANNED. DEF-41 is one half of a pair.
+
+**Tranche C is COMPLETE** (C1-C7 merged, deliverables verified present on main by content).
+ptone asked "so we are ready to proceed to D?", then "Def41 seems worth fixing earlier
+than S", then **"proceed as you planned. just send me properly sized PRs via compare URL."**
+
+**Plan written and pushed:** `.design/messaging-tranche-d-phases.md` @ `042315a67`
+(remote-verified). Cut from `upstream/main` @ `dbec308cc`.
+
+**What reading the actual code changed about DEF-41 — in both directions.**
+
+*Smaller than I had it in the ledger.* `"legacy-pending"` occurs exactly ONCE in the
+tree. It is assigned to `newMsg`, which `MapLegacyEnvelope` freshly built and which is a
+**different type** from the caller's `*messages.StructuredMessage` — so it cannot alias
+back — and the function returns only `error`. Nothing corrupt is persisted. No backfill
+owed. I had let it sit in the ledger sounding like a data defect; it is not one. Said so
+to ptone unprompted.
+
+*Larger than I had it.* `ValidateLegacyMessage` is THE choke point: 8 production call
+sites, and `hack/check-authz-reachability.sh` gates on its presence in three handler
+files. The sentinel exists only so `ValidateMessage`'s `conversation_id is required`
+passes. **So that check is dead on 7 of 8 production paths.** A dead check wearing a live
+check's name — rule 405 in production code rather than in a test gate.
+
+**RULE 411. When a workaround exists to satisfy a check, the check is the thing to
+examine, not the workaround.** DEF-41 was filed for years as "fabricates a sentinel." The
+sentinel is harmless. The finding is what the sentinel is *for*: a required-field
+assertion that has never once fired on a real send. Filing the workaround as the defect
+hid the actual defect behind it.
+
+**The 8th call site is the whole design.** `cmd/message.go:715` sets `ConversationID` from
+`resolveResp`, and `:716` validates. So on the `scion message @agent` reference path the
+check IS live — and resolution can create a conversation row, so a subsequent validation
+failure orphans it. **Filed DEF-48.** Small, non-security, and the exact mirror image of
+DEF-41. Fixing one and leaving the other would be fixing an ordering bug from one side
+only. The pair dictates the design: shape-validate → attribute → attribution-validate.
+
+**Rejected alternative worth recording:** "attribute first, then validate once" has
+precedent on main (that 8th site does it). Rejected anyway — attribution does store I/O
+and creates rows, so it would push unvalidated input to the DB on all 8 paths. DEF-48 is
+the visible symptom of that pattern; generalising it multiplies the bug. Precedent on
+main is not an argument that the precedent is correct.
+
+**The load-bearing risk is the gate, and it goes in D1's own commit.**
+`check-authz-reachability.sh:85-101` watches for `ValidateLegacyMessage` in three files.
+Split the choke point in two and the gate still watches only one half — a handler could
+call the pre-half, skip the post-half, and stay green. Rule 406 exactly. Gate change lands
+**in the same commit as the split**, never after. Flagged per brief item 12: I designed
+it, the manager implements as specified, deviation escalates to me.
+
+**Two things found while sizing, both now in D3:**
+- `VALIDATION_EXEMPTIONS.md` is written in the **future tense about a landed event** —
+  "will be exempt … when C5 lands", "Until C5 lands, these emitters are not on main."
+  C5 landed. The three exemptions are still factually accurate (verified: no
+  `ValidateLegacyMessage` in `notifications.go`, `messagebroker.go`, or the mention
+  fan-out) — only the framing is stale. This is C7's own standard: docs describe the
+  shipped contract, not the design.
+- `ValidateMessageAddressees` has **zero production callers**, while its doc comment says
+  "Callers that have a store and addressees should call this" — implying they do.
+
+**Checked and NOT a hole (rule 404 — enumerated rather than reasoned):** cross-project
+isolation is enforced in *authorization* (`authorize_message.go:186`), not the validator.
+The validator's cross-project check covers the one case authorization cannot see — mention
+fan-out expanding the addressee set after authorization ran on the primary recipient. One
+call site is correct here, not a gap. Rule 29 holds: authorization checks live in
+authorization.
+
+**Also checked, not a gap:** `messagebroker.go:479/:659` set `ConversationID` without
+validating and are absent from the exemption doc. They are delivery-path attribution on
+already-validated messages, not emitters accepting user input.
+
+**AC-D-2 is a positive control and is mandatory.** The test must be shown FAILING against
+main before the fix. The check it exercises is currently unreachable, so "passes" is the
+status quo — a green run does not discharge it. AC-D-3 likewise demands two separate
+gate-red demonstrations, one per half.
+
+**Ledger movement:** DEF-41 → D1 (no longer ownerless; supersedes my "work now or hold
+until G" question to ptone, withdrawn). **DEF-48 NEW** → D2. DEF-37's marker gate noted as
+unimplemented rather than "tracked" → D3. **DEF-42 (`webChatStore` locking) remains the
+one genuinely ownerless item** — `pkg/hub`, not D's surface.
+
 ## 5al. 19:43-19:50Z — heartbeat: two expired holds, one dissolved question, one silent CLI failure
 
 **Roster:** em6 active on DEF-12, em10 blocked on its own sub-agents (normal), em9 idle after
