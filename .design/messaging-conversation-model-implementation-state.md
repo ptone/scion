@@ -17989,3 +17989,61 @@ special — the class is **tools that report the status of the wrapper rather th
 succeeding?* If yes it is a liveness signal, not a result, and needs a positive control — run it
 against input known to produce a hit and confirm it goes red. `skipping` and `passing` both render
 as not-red; that is the same instrument failure as the gate itself (rule 403).
+
+## 2026-08-29 17:19Z — the gate ran, and immediately paid for itself
+
+C7 pushed `57a46ca52` (+7/-4, one file, all 4 deletions named: the jq line, the echo line, and
+two assignments that became `env:` entries). Verified: `Discover` PASS, `zizmor-output` PASS.
+
+**I validated my own checker before trusting its zero.** Wrote a parser for `${{ }}` inside
+`run:` blocks; it reported 0 on the fix. Per rule 405 that empty result is worthless untested, so
+I ran it against `402ffb5b6` — it independently reproduced zizmor's exact `[163, 179, 180]`. Now
+the zero means something.
+
+### The gate's first real run found 9 failures — and vindicated the earlier disclosure
+
+`create downloads dir: mkdir /home/scion: permission denied` — discord 1, telegram 8.
+Source is a **literal**, not `$HOME`: `filepath.Join("/home/scion/.scion/projects", slug,
+"downloads")` at discord `broker.go:2066` / telegram `broker_v2.go:2343`.
+
+`/home/scion` exists and is writable in our agent containers; the runner's user is `runner`.
+**These tests passed locally by accident of container username and had never run in CI.** This is
+exactly the local-vs-gate gap I disclosed an hour ago, now with a price tag: the positive control
+I published in the compare URL named discord and telegram green, measured in the one environment
+that hides the bug. Rule 403 was not academic.
+
+### Two fixes rejected, for the same underlying reason
+
+1. **Skip guard** — the pattern already exists here: `send_test.go` skips 4 tests with
+   "DefaultSearchRoot does not exist on this host", and those 4 skipped silently on this very run.
+2. **"set HOME"** (C7's own option A wording) — would not even work. Branch order at
+   `broker.go:2044-2067` is `downloadsPath` → `projectID != ""` (UserHomeDir) → literal. The
+   failing tests have **empty projectID by construction**, so the HOME branch is never entered.
+   And forcing it would make `EmptyProjectID_LegacyPath` stop exercising the legacy path at all.
+
+**RULE 406.** A test made green by routing around the branch it exists to cover is the skip guard
+in disguise. Before accepting a test fix, ask which branch the test still reaches. "Green" and
+"covering the thing named in the test name" are independent properties.
+
+### The decomposition — 7/2, and only 2 need production edits
+
+Both modules already parse a `downloads_path` config key, and it is the FIRST branch.
+- **(a) 7 telegram non-legacy tests** build through one shared helper `newTestBrokerV2`
+  (`broker_v2_test.go:263`) which already calls `Configure`. Add `downloads_path: t.TempDir()`
+  there: one line, **zero production edits**, fixes 7.
+- **(b) 2 `EmptyProjectID_LegacyPath` tests** must NOT get the override — asserting the fallback
+  is their purpose. Only these justify a production seam (var, default byte-identical).
+
+My first instruction said "extract a var in both modules" wholesale. Reading the branch structure
+made the fix strictly smaller. **Worth noting: I sent the blanket version before reading the
+branch order, and only caught it because C7's reply prompted a second look.**
+
+### Ledger
+
+- **DEF-43 CLOSED from my side** — ci-fix-lead confirms fix reviewed, PR #1369 / issue #1368,
+  awaiting merge. Transfer complete.
+- Inherited `Full Test Suite` relayed to ci-fix-lead per ptone, with the run-level-vs-job-level
+  triage note.
+- **NEW follow-up defect DEF-46**: 4 `send_test.go` tests skip in CI on the missing
+  `/scion-volumes/` root. Explicitly OUT of scope for #1398 — logged, not fixed, to keep the PR
+  landing rather than growing.
