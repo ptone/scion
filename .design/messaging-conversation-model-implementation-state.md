@@ -14207,3 +14207,18 @@ git rebase --onto upstream/main e28e8c999 scion/ca-msg-em10-marker-gate-2
 
 ### Status
 Rows: **APPROVED on content.** Branch: **blocked on rebase.** Compare URL withheld until the base is `a7ac9c489`. SLICE-PLAN.md corrections (F=8, rows 64/65 → H, review-by-attention section) accepted as reported.
+
+### §5fy addendum — rebase verified, compare URL sent
+
+`scion/ca-msg-em10-marker-gate-2` @ **`164ab2224`**. Verified independently, not on report:
+- merge-base = `a7ac9c489` ✓, one commit ahead ✓, three-dot = **+45/-0, 2 files** ✓
+- **Blobs byte-identical to `af183c0b9`** for both files. Since that is the tree I mutation-tested row-by-row, all five non-vacuity proofs transfer whole (rule 275). No re-derivation needed.
+
+Compare URL sent to thread `1532864101909528737`.
+
+**Message rejected once at 2310 runes.** The URL alone was 1843 — encoding roughly triples prose, and a body listing five rows plus rationale does not fit alongside it. I trimmed the *encoded body*, not the covering message, which is the lever that actually matters. Final: URL 1520, message 1757.
+
+I also measured and sent **in the same command**, so the 2310 was printed and the send fired anyway. Measuring is not gating.
+
+**Rule 292.** Compose-measure-send must be three steps, and the send must be in a separate invocation from the measurement. A printed length that nothing branches on is decoration.
+**Rule 293.** When a capped message carries a generated URL, the URL is the budget and the prose is the remainder. Shorten the encoded body first — trimming the covering note reclaims a third as much per word, because the URL body is the part being tripled.
