@@ -15680,3 +15680,73 @@ Neither will always.
   nothing committed. C5 blocks C7. DEF-40 was its blocker and is now fixed on cleanup-1.
 - DEF-37 + O-2 (global `--all` fan-out skips `ValidateLegacyMessage`) routed to C5.
 - #1365 still needs closing by ptone.
+
+## 2026-08-29 ~11:50Z — Heartbeat v8: the C5 "silence" was an unannounced child
+
+`upstream/main` unchanged at `b281eb701`.
+
+### The roster answered a question I was about to ask a human
+
+I had C5 logged as unresponsive on a forced choice, branch == main, nothing committed. Wrong read.
+`scion list --format json` shows **`dev-hub-handlers`, createdBy `ca-msg-c5`, activity=executing**.
+C5 delegated the handler work and parked. Its branch is empty because the *child* holds the work.
+
+**RULE 348. Before chasing an agent for silence, resolve `createdBy` across the whole roster.**
+A parent that delegates and parks is indistinguishable from a stalled parent by branch tip alone,
+and the table view hides both `taskSummary` and the parent link. `scion list --format json` and an
+id→name map answered in one call what a round-trip would have taken twenty minutes to get wrong.
+Heartbeat item 9 is right: asking is the slowest instrument I have.
+
+**RULE 349. An undeclared child is operationally invisible.** I told C5 that a delegation it does
+not announce looks exactly like no progress, and to name any child and its scope in one line.
+Also gave the peer-wait a deadline and fallback (13:00Z, else the handler work is reassigned),
+per heartbeat item 3 — a peer-wait without a deadline is just a stall with better manners.
+
+Roster note: `dev-docs-slice` (completed, 10h) and `dev-phase3-backend` (createdBy `ma-ui-em`) are
+**not mine** — not created by `ca-msg-arch`, so not mine to retire.
+
+### dev-c6-r1fix retired — after verifying the work, not the report
+
+Deleted with `--preserve-branch` only after confirming its content is in `1ba6a1edb`. The
+taskSummary said "parse-failure-denies", and the first thing I found looked like the opposite:
+
+```go
+if ref, err := messaging.ParseReference(recipient); err == nil {
+```
+
+Parse failure falls *through* rather than denying. Reading the whole block showed the construction
+is actually correct: deny fires only when the input is unambiguously *intended* as a conversation
+reference (`conv:`, `#`, `@` prefixes) but fails to parse; anything else legitimately falls through
+to agent-name/user/group paths. Denying on every parse failure would break bare agent names.
+
+Then the check that mattered (rule 341 — enumerate the class): **does the guard's "looks like a
+reference" prefix set exactly mirror the parser's dispatch set?** `resolve.go:69,76,87` dispatches
+on `conv:`, `@`, `#`, all case-sensitive; the CLI guard tests the same three, same sensitivity.
+No divergence. Had they diverged — e.g. parser case-insensitive, guard not — a malformed
+`CONV:<bad>` would have silently become an agent-name lookup.
+
+**RULE 350. When a guard decides "this input was meant to be X", its recogniser must be the same
+recogniser the parser dispatches on.** Two independent spellings of "looks like X" drift, and the
+gap between them is a silent fall-through. Verify the sets match; do not verify each in isolation.
+
+### Ledger sweep
+
+| Row | State this heartbeat |
+|---|---|
+| DEF-39b, DEF-40 | Fix VERIFIED on cleanup-1; compare URL with ptone. **Not struck — retire on merge, not on report (rule 336).** |
+| DEF-36 | C4, reported, awaiting merge with `17e4d613f`. |
+| DEF-37 + O-2 | **Routed to C5 this heartbeat**, together — both are send paths bypassing validation. Standalone script preferred over new gate rows (brief item 12). |
+| DEF-5, 6, 9, 10, 18 | No movement, 2+ heartbeats. Reason: all are post-read-switch concerns; none is reachable until C5/C7 land. Deliberately parked, not forgotten. |
+| DEF-32 | No movement. Needs the `(issuer, subject)→user_id` link table; that is a schema change and wants its own tranche. |
+| DEF-33/35 | No movement, same gating as above. |
+| DEF-34 | Still blocked on #1259, not mine to unblock. |
+| DEF-12 | Phase 4, partial: cursor-based work on main, same-timestamp work NOT. |
+| Tranche H | Still blocked on the `omitempty` evasion in the G-1 regression test. |
+
+Nothing struck this heartbeat, by design: the two ready rows are awaiting a human merge gate.
+
+### Open
+- ptone: C4/C6 landing path (a) individual compare URLs vs (b) integration branch. Recommended (a).
+- ptone: main is RED (two `./cmd/` tests, also red under `-tags no_sqlite`). Unowned.
+- C5: forced choice A/B/C, deadline 13:00Z.
+- #1365 still needs closing by ptone.
