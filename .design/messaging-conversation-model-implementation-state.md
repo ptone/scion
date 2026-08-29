@@ -18606,3 +18606,66 @@ one sentence pair and I would not have found that by recalling.
 
 Offered to sweep S-numbers to tranche letters, flagging that the review-round numbering may be
 worth preserving as history. Awaiting ptone.
+
+### 19:50Z — 5df. Re-measured Tranche D's premise and found my own design doc wrong. Dispatched D2.
+
+Heartbeat sweep found no movement to react to — `upstream/main` still `dbec308cc`, D1 still
+`e86b23fa9`, PR not yet opened, DEF-49 unanswered. Rather than re-park immediately I went back at
+the one claim in the D plan I had never executed against, only read.
+
+**The claim.** `messaging-tranche-d-phases.md` §0 said the `conversation_id is required` check was
+dead on **7 of 8** paths and live on the 8th (`cmd/message.go:716`), because `:715` assigns
+`msg.ConversationID = resolveResp.ConversationID` immediately above it. I built DEF-48 on that,
+and I built a D2-depends-on-D1 sequencing argument on it too: hoisting validation above the
+resolve would supposedly delete the only live instance of the check.
+
+**It is dead on 8 of 8.** `:715` sets the field on the *legacy* `messages.StructuredMessage`.
+`ValidateLegacyMessage` converts via `MapLegacyEnvelope` (`envelope_compat.go:126`) and that mapper
+never reads `old.ConversationID` — the identifier does not occur in the file, and the returned
+`&Message{...}` literal omits the field. The sentinel therefore fires here exactly as everywhere
+else.
+
+**Verified by execution, not by reading.** Probe test in a `/tmp` worktree at `upstream/main`: set
+`ConversationID` on the legacy struct, call `MapLegacyEnvelope`, assert it survives. Result
+`mapped ConversationID = ""` — FAIL. The test compiled and ran, so it was neither tag-excluded nor
+`-run`-mismatched. The negative grep over `envelope_compat.go` was positive-controlled against
+`validate_compat.go` (4 hits), so the zero is a real zero and not a mistyped path.
+
+**What survives and what moves:**
+
+- **DEF-48 survives, on different grounds.** The orphan does not need the ConversationID check to
+  be live. `ResolveConversation` can create a row at `:690`, and *any* live check failing at
+  `:716` — body, sender, metadata size, attachment count — strands it. The defect was real; my
+  stated reason for it was not.
+- **D2 is independent of D1** and can land in either order. Zero file overlap: D1's 8 files do not
+  include `cmd/message.go`. The sequencing constraint I had assumed was an artifact of the error.
+  Dispatched D2 to `ca-msg-d1` on that basis, branched from `upstream/main` directly.
+- **D1 is not falsified.** Checked before assuming so: the 7-of-8 claim appears nowhere in D1's
+  commit messages or code (positive-controlled — `DEF-41|ValidateAttributed` returns 7 hits in the
+  same commit-message corpus). D1's proof-by-enumeration is about the hub handler's two assignment
+  sites and does not touch the mapper. No need to disturb a branch already sent to the sponsor.
+- **New D3 item.** After D1, `ValidateMessage` has *zero* production callers — on main the legacy
+  adapter was its only one, and D1 repoints that at `validateMessageContent`. It stays exported and
+  tested with a doc comment claiming every rule is test-enforced, which now reads as load-bearing
+  when nothing calls it. Same species as `ValidateMessageAddressees`. D3 now resolves two dead
+  exported validators, not one. Explicitly *not* a reason to hold D1: three live checks replacing
+  one neutralised check is strictly better than main.
+- **Constraint recorded for DEF-49.** `cmd/message.go:715` is the only production writer of a
+  caller-supplied `conversation_id`, and it is legitimate. So the DEF-49 fix cannot be "reject
+  caller-supplied conversation_id" — that breaks `scion message @agent`. It has to be an
+  authorization check on whether the sender belongs to the named conversation. Whoever owns DEF-49
+  inherits this.
+- **AC-D-2 formally withdrawn** in the doc (was already withdrawn in practice), **AC-D-3
+  strengthened** to require call-only removal per rule 419.
+
+**RULE 420.** A measurement you took but never executed is a reading, and a reading of a data flow
+stops at the first plausible assignment. `x.Field = v` one line above `Validate(x)` is as strong a
+visual cue as code offers, and it was wrong, because the conversion between those two lines
+silently dropped the field. Assignment adjacency is not dataflow. Where a claim about reachability
+rests on a value surviving a transformation, run the transformation.
+
+**RULE 421.** Correcting a premise obliges re-testing what was *derived* from it, in both
+directions. The error deleted one item (D2's dependency on D1 — a constraint that never existed and
+was costing me serialisation on the sponsor) and added one (the callerless `ValidateMessage`). I
+was inclined to check only whether the correction invalidated work already sent; the more valuable
+half was that it *unblocked* work I had parked.
