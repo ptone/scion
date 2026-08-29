@@ -211,6 +211,47 @@ func TestResolveEffectiveRole_ProjectMaxFull_MemberGetsFull(t *testing.T) {
 	assert.Equal(t, AgentRoleFull, ResolveEffectiveRole(AgentRoleFull, "member", AgentRoleFull))
 }
 
+// TestScopeGuardProxy_DriftDetection pins the biconditional that
+// requireAgentSecretFetchScope relies on: a role receives ScopeAgentSecretFetch
+// if and only if it receives ScopeAgentStatusUpdate. The guard uses
+// ScopeAgentStatusUpdate as a proxy for "would this role receive
+// ScopeAgentSecretFetch" because AgentTokenClaims carries scopes but not the
+// role string (see the comment on requireAgentSecretFetchScope in agenttoken.go).
+//
+// If this test fails, the proxy is giving wrong advice for at least one role.
+// Fix the proxy signal or update the role-to-scope mapping — do not delete
+// this test.
+func TestScopeGuardProxy_DriftDetection(t *testing.T) {
+	allRoles := []AgentRole{
+		AgentRoleNone,
+		AgentRoleReadOnly,
+		AgentRoleBaseline,
+		AgentRoleFull,
+	}
+
+	hasScope := func(scopes []AgentTokenScope, target AgentTokenScope) bool {
+		for _, s := range scopes {
+			if s == target {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, role := range allRoles {
+		scopes := ScopesForRole(role)
+		hasStatusUpdate := hasScope(scopes, ScopeAgentStatusUpdate)
+		hasSecretFetch := hasScope(scopes, ScopeAgentSecretFetch)
+
+		if hasStatusUpdate != hasSecretFetch {
+			t.Errorf("role %q: ScopeAgentStatusUpdate=%v but ScopeAgentSecretFetch=%v — "+
+				"the biconditional used by requireAgentSecretFetchScope is broken; "+
+				"see the comment on that function in agenttoken.go",
+				role, hasStatusUpdate, hasSecretFetch)
+		}
+	}
+}
+
 func TestScopesForRole_RoleNoneMapToNoAuth(t *testing.T) {
 	// role=none produces nil scopes — caller should set NoAuth=true
 	scopes := ScopesForRole(AgentRoleNone)

@@ -326,10 +326,27 @@ func extractAgentToken(r *http.Request) string {
 //     the scope. The agent must be restarted or its token refreshed.
 //   - The token's role would NOT receive the scope. Genuine denial.
 //
-// The check uses ScopeAgentStatusUpdate as the role signal: it is present in
+// WHY THIS IS A PROXY — NOT A DIRECT ROLE CHECK
+//
+// AgentTokenClaims carries Scopes but not the Role string. The role is consumed
+// at mint-time: the caller expands it via ScopesForRole (agenttoken.go:155) and
+// passes the resulting scope slice to GenerateAgentToken. The role string is
+// discarded and never enters the JWT. The guard therefore cannot compare the
+// token's role against the current ScopesForRole table directly.
+//
+// The proxy uses ScopeAgentStatusUpdate as a role signal: it is present in
 // baseline and full (which receive ScopeAgentSecretFetch) and absent in none
-// and readonly (which do not). This avoids a DB lookup and leaks nothing —
-// it only tells the holder facts about its own token. (#127, P2c)
+// and readonly (which do not). This biconditional — a role receives
+// ScopeAgentSecretFetch if and only if it receives ScopeAgentStatusUpdate —
+// is pinned by TestScopeGuardProxy_DriftDetection in agentrole_test.go.
+//
+// WHAT BREAKS IF ScopeAgentStatusUpdate'S ROLE ASSIGNMENT CHANGES
+//
+// If a future change grants ScopeAgentStatusUpdate to a role that does NOT
+// receive ScopeAgentSecretFetch (or vice versa), this guard will give wrong
+// advice to tokens minted under the old table. The drift-detection test will
+// fail in agentrole_test.go — the same file where the scope-to-role mapping
+// is tested, and the file most likely to be open during such a change. (#127, P2c)
 func requireAgentSecretFetchScope() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
