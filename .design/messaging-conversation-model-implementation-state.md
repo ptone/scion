@@ -14008,3 +14008,52 @@ Counts, with positive control: `grep "INSERT INTO conversations" pkg/hub/` retur
 ### Ledger
 Unchanged otherwise. Held: DEF-5, DEF-6, DEF-9 (narrowed), DEF-10 (half-struck), DEF-18 (carrier em9-unify), DEF-32 (blocked on ptone), DEF-33/35 spec complete, DEF-34 blocked on #1259. Tranche H blocked on G-1. Tranches C–G behind em9-unify. STRUCK: DEF-11, DEF-14, DEF-16, DEF-17. GATE-1 CLOSED.
 **#1259 has not moved in 5 heartbeats** — last update 2026-08-27T03:51Z, still CONFLICTING. DEF-34 stays blocked; no action available to me, it is stevegeek's branch.
+
+---
+
+## §5fv — CORRECTION. I said a careless em9-unify merge produces green CI. It does not compile. Twice over.
+
+**Status first: nothing damaged, nothing to recover. Measured in `/tmp/em9an`, a throwaway detached worktree. em9-unify untouched at `47a7c6736`. Main unchanged at `a7ac9c489`. No agent moved this cycle; #1259 still CONFLICTING, unmoved since 2026-08-27T03:51Z (6 heartbeats).**
+
+### The error
+§5fr and my report to ptone said a `-X theirs` merge of em9-unify yields "exit 0, zero conflicts, CI green." The first two are true. **"CI green" was never measured.** I ran the three guard scripts, saw them pass, and wrote "CI green." Guards are one CI step. I never ran `go build`.
+
+### What actually happens
+`go build ./...` on the merged tree **fails, twice, for unrelated reasons.**
+
+**(1) Generated code spliced across two generation runs.**
+```
+pkg/ent/client.go:2622: c.hooks.EntitlementBinding undefined (type *hooks has no field or method EntitlementBinding)
+pkg/ent/client.go:4628: c.hooks.LimitDefinition undefined
+pkg/ent/client.go:8230: c.hooks.UsageReservation undefined
+```
+The `hooks`/`inters` struct definitions came from em9, the methods referencing them came from main. Both sides changed `pkg/ent` (main: 62 files, +47,622/-21,590 since em9's base `6268bac44`) and both changed the SAME four schemas — `conversation.go`, `conversation_participant.go`, `message.go`, `message_addressee.go`. Main additionally changed `entitlementbinding.go`, `limitdefinition.go`, `usagereservation.go`, which em9 has never seen.
+
+`go generate ./pkg/ent/...` repairs this completely — 2 files, +37/-34. **Generated code must be REGENERATED, never merged.**
+
+**(2) Hand-written code spliced across two designs — this one is the real lesson.**
+After repairing ent, the build still fails:
+```
+handlers_agent_messaging.go:258: too many arguments in call to messaging.ResolveOrCreateDMConversation
+  have (ctx, store.Store, store.Store, *slog.Logger, string, string, string, string)
+  want (ctx, messaging.ConversationUpserter, *slog.Logger, string, string, string, string)
+handlers_agent_messaging.go:306: convResult redeclared in this block
+handlers_agent_messaging.go:1500: undefined: authKind / authID
+```
+Git took the **call site from main** (8 args, passing the `ParticipantEnsurer` that B6/B7 added) and the **definition from em9** (7 args, predating it). No conflict was raised, because the two live in different files. Likewise `authKind`/`authID`: B5's `authenticatedSender` derivation was dropped while its consumers were kept.
+
+### What this changes
+The careless-merge outcome is **louder and safer** than I reported — it cannot land, because it cannot build. My "silent revert reporting green" framing was wrong for the fully-careless case.
+
+It is still right for the **semi-careful** case, and that is the one that matters. An engineer resolving 31 honest conflicts by hand fixes the compile errors one at a time, and every fix is a choice between main's version and em9's. The guards are the only thing standing behind those choices — which is exactly why #1363 mattered, and exactly why the upsert guard's self-edit (§5fu) is dangerous. The compiler catches signature drift. It does not catch behavioural drift where the signatures agree.
+
+### Slice-plan mechanics this establishes
+- `pkg/ent` (+22,975/-10,526 on the branch) is **regeneration churn, not authored work** — 45% of the diff. Excluded from every slice; regenerate on main.
+- `.design/project-log` (+3,406) is docs, zero risk, can land first and alone.
+- Authored surface is ~22k lines: `pkg/messaging` +12,894, `pkg/hub` +5,482/-136, `pkg/store` +1,877, `pkg/messages` +403, `cmd/` tests ~1,439.
+
+### Rules
+**Rule 279.** "The guards pass" is not "CI is green," and neither is "it merged cleanly." Build the merged tree before characterising a merge. A clean merge exit describes text, not programs.
+**Rule 280.** Generated code must be regenerated across a merge, never merged. Two generation runs splice into a file that is internally inconsistent and belongs to neither side. `go generate` is the resolution, and the diff it produces is the proof.
+**Rule 281.** Git conflicts are per-file; semantic breakage is per-program. A caller and its callee evolving apart in different files merge silently and always cleanly. The compiler catches this only when the signature changed — when both sides kept the signature and changed the meaning, nothing catches it but a guard or a test.
+**Rule 282.** An error that makes the situation SAFER than reported is still an error, and must be corrected with the same urgency as one that makes it worse. Overstated danger spends the reader's trust just as fast as understated danger.
