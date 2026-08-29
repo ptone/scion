@@ -20790,3 +20790,55 @@ the PR *introduces* the flaw; shipping it would advertise coverage we do not hav
 - Awaiting ptone: DEF-57; DEF-50/37/56 compare URL; #1409; Tranche E board; gate-deletion; PAT.
 - Open, unstaffed: DEF-53, DEF-55, **DEF-57**, DEF-12 (partial), sink-list gap, negative-gate item.
 - `ca-msg-fmt1409b` held as evidence — do NOT retire in a sweep.
+
+---
+
+## 5eq — item-3 fix verified by mutation, not by report (2026-08-29)
+
+`scion/ca-msg-def3750` @ **`0a7a12a9b`**. Delta from `4c7dfe0fe` is **4/4** — the three
+`sendHumanToHuman` sites (`dispatchGated` map 351, Section 5 comment 398, `callerRule` 429) plus
+the desc string. **Zero** remaining `GetUserIdentityFromContext` in the file. gofmt clean. Total
+against main unchanged at **424/28** — an unchanged total is the *corroborating* signal for a
+symbol swap, since it modifies lines rather than adding them.
+
+### Ran the mutation the agent had not run
+
+Its mutation suite **predates this rule**, so the rule shipped with no evidence behind it. Set up
+a detached worktree on unmodified `upstream/main` with the new checker dropped in:
+
+| tree | checker | result |
+|---|---|---|
+| clean main | new | `all gates pass`, exit 0 |
+| `isDMParticipant` call at `handlers_chat_v2.go:798` renamed | **new** | `FAIL [CALLER-SIDE] handleConversationSend … calls sendHumanToHuman but has no isDMParticipant`, **exit 1** |
+| same mutated tree | **pre-fix** (`4c7dfe0fe`) | **`all gates pass`, exit 0** |
+| mutation reverted | new | exit 0 |
+
+**The version I had already approved and sent to ptone stays green on a tree where any
+authenticated user can post into any DM.** The authentication-vs-authorization distinction
+(rule 494) is now demonstrated empirically rather than argued.
+
+- **497.** A rule added after the mutation suite was run is a rule with no evidence behind it.
+  Approving a late-added gate on the strength of the suite that preceded it credits the new rule
+  with testing it never received. Every rule needs its own mutation, including — especially —
+  the one added in response to review.
+
+### My own near-miss, recorded because it nearly inverted the result
+
+The first mutation attempt **failed silently**. `isDMParticipant` appears at seven call sites in
+`handlers_chat_v2.go`; my replace asserted exactly one match, the assert fired, the file was left
+untouched, and the checker then ran **green on an unmutated tree**. Without the count assertion I
+would have recorded "gate does not fire" — concluding a working gate was broken, and very likely
+sending def3750 to "fix" something correct.
+
+- **498.** A negative result from a mutation test is only meaningful if the mutation is proven to
+  have landed. Assert the edit applied before trusting the run. An unapplied mutation and a
+  broken gate produce byte-identical output.
+
+### Standing state
+
+- `scion/ca-msg-def3750` @ `0a7a12a9b`, green on main, mutation-proven. Compare URL already with
+  ptone and **branch-based, so it reflects this commit**; encoded title/body remain accurate.
+- `scion/ca-msg-def54` @ `331328fd6` (gofmt fixed).
+- Awaiting ptone: DEF-57; DEF-50/37/56 compare URL; #1409; Tranche E board; gate-deletion; PAT.
+- def3750 holding, told not to start items 1/4; each needs its own mutation when it does.
+- `ca-msg-fmt1409b` held as evidence — do NOT retire in a sweep.
