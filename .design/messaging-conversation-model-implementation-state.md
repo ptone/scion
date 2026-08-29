@@ -20521,3 +20521,69 @@ Rejected bare allowlist entries for both functions.
   `chat-admin-lead`.
 - Awaiting ptone: Tranche E board decision; gate-deletion decision; #1409.
 - Open, unstaffed: DEF-53, DEF-55, **DEF-56**, DEF-12 (partial), issue #1374.
+
+---
+
+## 5em — wrong-repo provisioning anomaly; fmt1409 retired (2026-08-29)
+
+### What happened
+
+`ca-msg-fmt1409`, dispatched for a one-file gofmt fix, reported as stalled having pushed
+nothing, then reported blocked: its `/workspace` was provisioned against
+**`scion-frontiers/scion-repo-contrib`**, not `ptone/scion`. No refs matching `ca-msg` or
+`def54`, no `pkg/hub/field_race_test.go`. The container was simply the wrong repository.
+
+Same project ID (`1dfdd6c7…`) as `ca-msg-arch` and `ca-msg-def3750`, both of which have correct
+remotes and are working normally. So this is a **per-container provisioning anomaly, not a
+project-wide misconfiguration**.
+
+The agent behaved correctly: checked its remote, established both the refs and the file were
+absent, concluded it was in a different repository, and asked. The available failure modes here
+were much worse — assume the brief was stale and "fix" a similarly-named file, or clone and push
+into an unrelated repo. Credited explicitly on retirement.
+
+- **485.** A wrong-repo container fails safe on read and catastrophically on write. An agent that
+  cannot find its target sees the same evidence whether the brief is stale or the workspace is
+  wrong; only one of those is fixable from inside. Make "report your remote before you touch
+  anything" the first instruction of every dispatch, so the ambiguity is resolved before any
+  branch is created.
+
+Note this is the **inverse** of my own rule-475 error, where I concluded my notes were wrong when
+in fact my tree was a different base. Same evidence shape, opposite correct conclusion. The
+discriminator in both cases is *verify the tree before revising the brief*.
+
+### Measured the fix myself before re-dispatching
+
+Rather than only nudging, I ran the fix to establish ground truth:
+
+- Expected numstat is exactly **`13  13  pkg/hub/field_race_test.go`**, handed to the agent up
+  front so its work can be *verified* rather than trusted, with instructions to stop and report
+  if its number differs (a divergence means we are not looking at the same tree).
+- Change is **pure column alignment** on two blocks of one-line method definitions (`noopChannel`
+  ~line 43, `noopPluginManager` ~line 338) — gofmt realigning the closing-brace column after a
+  longer signature joined each block.
+- Verified **byte-identical after stripping all whitespace**, so zero semantic change. This
+  matters: a formatting commit landing on a security-adjacent race test is exactly the diff a
+  reviewer waves through, and we now know there is nothing hiding in it.
+
+- **486.** Compute a mechanical fix yourself before delegating it. The cost is minutes and it
+  converts the agent's output from something to be trusted into something to be checked.
+
+### Actions
+
+- Reported the anomaly to the **coordinator**, asking (1) whether `scion-repo-contrib` is a
+  fallback when repo provisioning fails — a dangerous default, since a less careful agent could
+  push work into an unrelated repository — and (2) whether the repo can be pinned at create time
+  (`scion create` takes no repo flag; `--project` is not accepted either).
+- Created **`ca-msg-fmt1409b`**; its first instruction is to report `git remote -v` and **stop**,
+  before any work, to establish whether this reproduces. Agent still in phase `created`; the
+  send returns `agent_not_running` (409) until it reaches running.
+- Retired `ca-msg-fmt1409` after the rule-474 out-of-scope question.
+
+### Standing state
+
+- `upstream/main` = `fa7ae1914`. PR **#1409** still red on Build & Test (gofmt), fix pending.
+- Live: `ca-msg-def3750` (AST gates per the 5el ruling), `ca-msg-fmt1409b` (booting),
+  `ci-fix-lead`, `chat-admin-lead`. **Retired: `ca-msg-fmt1409`** (wrong-repo workspace).
+- Awaiting ptone: Tranche E board decision; gate-deletion decision; #1409.
+- Open, unstaffed: DEF-53, DEF-55, DEF-56, DEF-12 (partial), issue #1374.
