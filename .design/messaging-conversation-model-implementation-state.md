@@ -20367,3 +20367,78 @@ forbid cloning into `/workspace` under shared-plain regardless of apparent empti
 - With ptone: **DEF-54** compare URL (no PR opened yet).
 - Live: `ca-msg-def3750` (reading, design due before code), `ci-fix-lead`, `chat-admin-lead`.
 - Open, unstaffed: DEF-53, DEF-55, issue #1374.
+
+---
+
+## 5ek — 2026-08-29 23:06-23:15Z — Tranche E readiness assessed. Board has a precondition.
+
+ptone asked whether we are ready for Tranche E. Answered in two parts. **Checked the plan
+against main rather than answering from the manifest** — which was the right call, because the
+manifest is out of date in one direction and incomplete in another.
+
+### E is SMALLER than the manifest says — the read-switch hunk already landed
+
+The manifest lists a `handlers_chat_v2.go` hunk (+35/-3) carrying the read-switch machinery.
+**It is already on `upstream/main`.** `handleConversationHistory` has the flag-gated block
+calling `ResolveDMConversationForRead` / `ResolveThreadConversationForRead` behind
+`ConversationReadSwitch` (checked at lines 54-72 of the function). All three symbols plus the
+`conversation_read_switch` opsetting exist on main.
+
+Consequence: the largest code hunk in E is done, and **acceptance criterion 2's problem with
+that hunk's 3 deletions is moot** — they are already absorbed.
+
+Genuinely remaining: `admin_messaging_divergence.go`, `admin_messaging_divergence_test.go`,
+`handlers_read_switch_test.go`, and `server.go` +1 for the divergence route. All three files
+confirmed ABSENT on main; the route confirmed absent.
+
+### The read-switch on main is UNTESTED, and G flips it
+
+`handlers_read_switch_test.go` would be the first test of machinery that is already shipped
+(flag-gated OFF). **Tranche G is the flip of exactly that switch.** So today we are planning to
+flip an untested mechanism. That file is cheap, additive, production-code-free, and worth
+landing on its own merit regardless of the board decision. Recommended splitting it out.
+
+- **480.** When a tranche's plan predates several merges, re-derive its contents against main
+  before staffing it. Part of E had landed silently as a dependency of earlier work, and the
+  plan still costed it.
+
+### THE PRECONDITION — divergence is not persisted
+
+**There is no divergence table and no ent schema.** Divergence is a package-level
+`DivergenceCounter` in `pkg/messaging/divergence.go` holding three `atomic.Int64` values
+(matches, mismatches, fallbacks), incremented in-process. Emitters call
+`messaging.DivergenceMetrics.IncFallback()` inline in the handlers.
+
+An admin board over that is:
+- **Per-replica** — under multi-replica Postgres it reports only the serving replica's counts.
+- **Reset on restart** — a deploy silently truncates any soak window, undetectably.
+- **Untimed** — cumulative totals only; "divergence over the last 24h" is unanswerable.
+
+**Why this is load-bearing rather than cosmetic:** the board is the evidence base for the
+Tranche G flip decision. A partial, deploy-truncated, untimed number *looks* authoritative and
+reads as "divergence is low" when it may only mean "this replica restarted an hour ago". Same
+class as the race-detection over-read I guarded against earlier today, except this misread
+decides a data-model cutover.
+
+- **481.** Before building a dashboard, establish what its number will be used to decide. A
+  diagnostic that is merely imprecise is fine; the same imprecision under a go/no-go gate is a
+  defect. Precision requirements come from the decision, not from the metric.
+
+Decision put to ptone: persist divergence (ent schema + migration + hot-path writes), or build
+the cheap board explicitly labelled per-replica/since-boot and give **G its own evidence**
+(most likely an after-the-fact query over persisted messages comparing old and new routing).
+**Recommended the second**, with the caveat that G's evidence must then be decided now rather
+than discovered insufficient at flip time.
+
+### Sequencing departure, disclosed
+
+Plan orders **Phase 4 (DEF-12 backfill)** before E; DEF-12 is only partial (cursor-based work
+on main, same-timestamp work not). But DEF-12 is the `server_backfill*` files and E is the
+divergence board — **no file overlap, no technical dependency**. Told ptone I do not think
+DEF-12 gates E, and flagged explicitly that this departs from the written plan.
+
+### Standing state
+
+- `upstream/main` = `fa7ae1914`. Awaiting ptone: **Tranche E board decision**, DEF-54 PR.
+- Live: `ca-msg-def3750` (DEF-37/50, design due before code), `ci-fix-lead`, `chat-admin-lead`.
+- Open, unstaffed: DEF-53, DEF-55, DEF-12 (partial), issue #1374.
