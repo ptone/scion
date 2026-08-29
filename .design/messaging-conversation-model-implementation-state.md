@@ -17118,3 +17118,66 @@ unmoved and unstaffed — correctly, since every hand is on C5 and C7 is gated b
 - `upstream/main` **`2ce6e1149`**. #1391 @ `3efdc8372`, held on R-9 only, rebase verified clean.
 - ptone asked twice, was given the deferral argument, and chose to **wait** ("doesn't sound like the
   fix is too much"). Report goes out when R-9 is landed and re-verified — not before.
+
+---
+
+## 15:05Z — **#1391 declared READY.** R-9 landed and verified. Rule 387. DEF-43 opened.
+
+C5 pushed `d19a4c025` (rebased on `a9cc229f5`). Verified independently.
+
+### R-9 is correct in the way that mattered
+```go
+if resolvedAgent, lookupErr := s.store.GetAgent(r.Context(), agentID); lookupErr == nil && resolvedAgent != nil {
+    convResult := messaging.ResolveDMConversationForRead(..., "agent", resolvedAgent.ID, ...)
+    if convResult != nil { filter.ConversationID = convResult.ConversationID } else { messaging.DivergenceMetrics.IncFallback() }
+}
+```
+`IncFallback()` now sits **inside** the successful-lookup branch. This was the whole point and the
+easy thing to get wrong: a patch that merely made resolution succeed would have left the failure
+branch still counting a bad client parameter as a migration gap, and would have passed a diff review.
+`filter.AgentID` untouched, as directed.
+
+### Verification (all re-run, nothing accepted on report)
+- **17 files +1778/-185.** Predicted 17/~+1780/-186 *before* C5 measured (rule 381). Off by 2 added,
+  1 deleted. Deletions unchanged at -185 — R-9 was purely additive.
+- Merge-base is `a9cc229f5`, so three-dot is the valid instrument. Overlap with main's six *newer*
+  commits: **empty**. Clean rebase despite main having moved eight commits during the review.
+- R-1..R-8 all survived the rebase: six `s.mu.RLock()` in the two files, `agent.ID` at `:272`,
+  `grep -E` + SELF-TEST at `:147`/`:163`, #1382's `ErrCodeMessageDenied`/`mapReasonToCode` hunks intact.
+- Guard re-verified **by mutation, not by reading** — post-rebase, broken recogniser gives `rc=1` and
+  the self-test failure.
+- Untagged: `ok pkg/hub 319.557s`, `ok pkg/messaging`. gofmt clean, build clean.
+- `gh pr view`: **MERGEABLE**, `d19a4c025`, 17/+1778/-185 — GitHub's numbers match mine exactly.
+
+### RULE 387. When a whole-tree gate first starts telling the truth, its output is backlog, not regression
+`Full Test Suite (reporting only)` is **red on #1391**: `TestHandleAgentCloudLogs_AgentNotFound`.
+First question was rule 376's — *is this mine?* It is not. The same job fails **on main at
+`2ce6e1149`** with that test *and* `TestOutboundMessage_AttachmentsLinkedToMessage`. C5 touches no
+cloud-logs file, and the job is `continue-on-error`.
+
+The trap: `gh run list --branch main` reports **`success`** for every one of those runs, because
+`continue-on-error` keeps a failing job from colouring the run. Asking "is main green?" at run level
+returns yes while a job inside it is red. **The only reliable read is job-level:
+`gh run view <id> --json jobs`.** A run-level query here is a lagging mirror in the sense of
+heartbeat item 1 — it answers plausibly and wrongly.
+
+This job only became honest after **#1392** added `pipefail` (rule 386). Its first two reds are
+therefore *pre-existing breakage becoming visible*, which is exactly what it was built for. The
+failure mode to guard against now is the opposite of complacency: reading newly-surfaced backlog as
+newly-introduced regression and blaming whichever PR happens to be open. **DEF-43** opened for the two
+main failures; owner is the CI workstream (`ct-dev`/`ci-fix-lead`), not this tranche.
+
+Note my local untagged `pkg/hub` run passed **both** tests that fail in CI. Environment-dependent, so
+"green locally" is not a refutation of a CI red — I used main's own job as the control instead, which
+is the only comparison that isolates authorship.
+
+### Could not post the PR review comment
+My token lacks write access to `GoogleCloudPlatform/scion` (`Resource not accessible by personal
+access token`); C5's lacks it too. Drafted the summary — including the explicit statement that R-2
+and R-3 are *broader* than suggested — and offered ptone the text. Non-blocking.
+
+### State
+- **#1391 declared READY to ptone at 15:05.** Awaiting merge.
+- `ca-msg-c5` parked awaiting final word; retire it once #1391 merges, along with child
+  `dev-review-fixes`. **C7 dispatches on a fresh agent** (context rot) after the merge.
+- Strike on merge: DEF-37, O-2. Held: DEF-41, DEF-42, **DEF-43 (new, CI-owned)**.
