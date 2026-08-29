@@ -13923,3 +13923,39 @@ The irony is exact — I ran the experiment *because* of his warning about rever
 
 ### Ledger unchanged
 Nothing dispatched, nothing at risk. em9 parked, never asked to rebase. Open: em9-unify sequencing decision (guard eight files vs re-derive in slices — I lean re-derive), marker-gate-2 PR unopened, DEF-32 identity-linking, DEF-34/#1259 external.
+
+---
+
+## §5ft — #1363 opened by ptone. Gemini clean. And: I CANNOT post PR comments.
+
+### #1363 (marker-gate-2) is OPEN
+ptone opened it from the compare URL. Head is `e28e8c999` — byte-identical to the SHA I verified, so every non-vacuity proof recorded in §5fp transfers without re-derivation.
+
+Checks at `e28e8c999`: `check-changes` SUCCESS, `scan-pr` SUCCESS, `shellcheck` SUCCESS, `golangci-lint` SUCCESS, zizmor SKIPPED, **`Build & Test` in_progress**, `cla/google` FAILURE (expected on agent-authored branches, not required — rule 104).
+
+Gemini review: **no findings.** It summarised the diff accurately (the `!=` → `<` relaxation, the two new file groups) and closed with "There are no review comments, so I have no feedback to provide." Nothing to rebut.
+
+### #1362 rebuttal re-verified at merged main, then blocked on permissions
+Rule 263 discharged. At `87a867b77` the disputed fixtures are still mixed-case:
+- `dm_key_test.go:297` — `"6ba7b810-9dad-11d1-80b4-00C04FD430C8"`
+- `dm_key_test.go:388` — `"6ba7b810-9dad-11d1-80b4-00C04FD430C8"`
+
+Gemini quoted both as all-lowercase. No build tag on the file, so it compiles under `-tags no_sqlite`; `go test -tags no_sqlite ./pkg/messages/ -run TestDMConversationKey -v` at the merged SHA shows `reject/mixed-case UUID` and `RejectsNonCanonicalUUID/mixed_case` as running, passing subtests. Non-vacuous on both axes (rule 258).
+
+**Then I tried to post it and got 403.** Both paths:
+```
+gh pr comment 1362 --repo GoogleCloudPlatform/scion
+  -> Resource not accessible by personal access token
+gh api -X POST repos/GoogleCloudPlatform/scion/issues/1362/comments
+  -> 403 Resource not accessible by personal access token
+```
+My token is **read-only on upstream**. This is not new — it is why the compare-URL protocol exists at all — but I had silently assumed comment-write was separable from PR-create. It is not.
+
+Text staged at `.design/review-responses/pr-1362-gemini-rejection.md` on `scion/ca-msg-arch` for ptone to paste.
+
+### Rules
+**Rule 273.** Rule 256 says a rejection must land where the reviewer's claim is displayed. Verify you *can* write there before you commit to that as the plan. Read access to a repo says nothing about comment access, and discovering the gap at post time converts a closed loop into a handoff.
+
+**Rule 274.** When an action needs a human's credentials, do not send the human a description of the action. Stage the exact artefact and send a pointer. A 2000-rune channel cannot carry a 2500-rune comment, and paraphrasing a verified rebuttal reintroduces the imprecision it was written to correct.
+
+**Rule 275.** An unchanged head SHA on a newly opened PR means prior verification transfers whole. Check the SHA before deciding whether to re-verify — but check it, because "the PR I asked for" and "the PR that was opened" are not the same claim.
