@@ -15228,3 +15228,92 @@ as C3 did.
 ### Ledger
 
 DEF-36 (c4) · DEF-37, DEF-38 (c5) · **DEF-39 (rev1, HIGH)** · DEF-12 (Phase 4) · DEF-5/6/9/10 held.
+
+---
+
+## 2026-08-29 ~10:55Z — Gate-change authority: ruling, delegation, and standing fleet policy
+
+### What happened
+
+c5 was about to unilaterally re-point `hack/check-security-marker-gates.sh` so its six failing rows
+would pass. `coordinator` objected: the gate is a security control shared across the fleet, and c5 is
+the party whose phase depends on it going green. I agreed and proposed a three-way distinction:
+
+| Change shape | Rule |
+|---|---|
+| **Re-point** an existing gate so failing rows pass | needs authorization |
+| **Tighten** a gate to close a hole it already claimed to cover (DEF-39) | routine, proceed |
+| **Add** a new gate (DEF-37) | routine, proceed |
+
+I sent c5 a prepare-but-hold: draft the change with per-row evidence, do not push.
+
+**ptone ruled differently, and better.** The gate-script change goes to `auth-refactor-lead`. c5 is
+not to touch `hack/check-security-marker-gates.sh` or `checksecuritymarkergates/main.go` at all —
+not edit, not stage, not propose. DEF-38 narrows to the messaging handler work. My verified call-site
+inventory (6 in `handlers_agent_messaging.go`, 3 in `handlers_broker_inbound.go`, 2 in
+`handlers_chat_v2.go`) was handed over so they need not re-derive it.
+
+### Why ptone's answer beats mine — RULE 340
+
+**My fix was procedural; his was structural.** Prepare-but-hold still leaves the drafting with the
+team that has the blind spot, and authorization review is a weak filter over a six-row evidence
+table: the reviewer is checking someone else's reasoning about rows only that team examined closely.
+
+> **RULE 340.** The team whose change made a gate fail is structurally the worst-placed to judge
+> whether the gate was wrong, because from inside the change that staled it **every stale row looks
+> like a false positive**. Re-pointing is reassigned, not merely authorized. Authorization is the
+> consequence of reassignment, not the mechanism.
+
+Same shape as the DEF-39 self-critique (rules 338/339): being convinced by tests shaped like your own
+expectations. Here it is being convinced by gate rows shaped like your own change.
+
+### Standing fleet policy
+
+`coordinator` adopted the framing and ptone **confirmed the three-way split as standing fleet policy**,
+recorded in `coordinator-conventions.md` — not just a ruling on this incident.
+
+**Outstanding:** the recorded version is the weaker first draft ("re-pointing needs authorization").
+My refinement crossed with the write-up. I asked for a parenthetical: *re-pointing is done by a team
+other than the one whose change made the gate fail, and is authorized.* Recording only the
+authorization half means a future team asks permission, drafts its own replacement rows, gets a yes,
+and the real failure mode is untouched with the policy fully satisfied.
+
+### The point that must not be lost in the handoff
+
+Passed to `coordinator` for `auth-refactor-lead`, since c5 will no longer do the per-row work:
+
+> **Six rows failing for one known cause is exactly the situation where a seventh row failing for a
+> real reason gets swept up in the batch.** #1371 is a sufficient explanation for gate failure, which
+> makes it an effective cover story for an unrelated one. Justify each row individually — what it
+> asserted before #1371, which `authorizeAgentMessage` call site now provides that protection, why
+> equivalent or stronger — and state explicitly whether any row resisted. A row that does not fit the
+> #1371 story **is the finding**; the other five are bookkeeping.
+
+### Boundary drawn to prevent collision
+
+DEF-37 (new gate for the validation-exemption set) **stays with c5**, but implemented as a
+**standalone script** in the shape of `hack/check-conversation-upsert-guard.sh` — *not* by adding rows
+to `check-security-marker-gates.sh`. Two reasons: those files are now fenced for `auth-refactor-lead`,
+and an exemption gate and an authz marker gate are different controls that should not be bolted
+together. c5 told to stop and ask if a standalone script cannot express DEF-37 rather than reaching
+into fenced files. Flagged to `coordinator`.
+
+### Instruction churn — my cost to own
+
+c5 received three instructions on this inside ten minutes (proceed → prepare-but-hold → drop
+entirely). Acknowledged to c5 directly. Scope is now stable: handler work plus a standalone DEF-37
+script; the authz gate belongs to another team.
+
+### Consequence for c5's phase
+
+`check-security-marker-gates.sh` will **stay red for the whole of c5's phase** and that is expected.
+c5 told to verify against clean main, confirm the failing set matches, and diff its failing rows
+against main's on every run: **the number that matters is whether the set changed, not whether it is
+empty.** A red gate you are forbidden to fix must not stall the phase, but must not mask a new failure
+either.
+
+### Ledger
+
+DEF-36 (c4) · DEF-37 (c5, standalone script) · **DEF-38 split: gate script → `auth-refactor-lead`,
+handlers → c5** · **DEF-39 (rev1, HIGH)** · DEF-12 (Phase 4) · DEF-5/6/9/10/18/32/33/35 held ·
+DEF-34 blocked on #1259.
