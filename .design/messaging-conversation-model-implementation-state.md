@@ -16892,3 +16892,100 @@ not the report thread** — the URL lives there and that is where he will act.
 - `dev-hub-handlers` idle 1h — C5's child, retires when C5 merges. Not reaching past C5 to it.
 - C7 gated on C5 landing (fresh agent, no repurposing).
 - Ledger unchanged: DEF-41 held; the rest gated on C5/C7 landing.
+
+---
+
+## 13:54Z — #1391 OPENED (C5). Review feedback triaged; **NOT ready to merge.** DEF-42. Rules 382-383.
+
+ptone opened C5 as **#1391** @ `4fca83814` and asked: unanswered feedback, or ready?
+Answer: real feedback, 3 must-fix. Checks themselves are fine — Build & Test, golangci-lint,
+shellcheck, scan-pr, check-changes all **pass**; `cla/google` fails as expected (rule 104);
+"Full Test Suite (reporting only)" (#1388's new job) pending.
+
+`gemini-code-assist` left **10 inline comments (2 duplicates)**. I verified each rather than
+forwarding. **Two I escalated in severity above the reviewer's rating** — which is the part of
+triage that matters; passing reviewer comments through unweighted is not triage.
+
+### R-1 (MUST FIX, highest) `handlers_messages.go:264` — raw slug where a canonical UUID is required
+`ResolveDMConversationForRead(..., "agent", agentID, ...)`. `agentID` is the raw handler parameter
+and **can be a slug**; `s.store.GetAgent` accepts either, which is why resolution exists at :193.
+The resolved `agent` is in scope, and **the branch immediately above at :255 already uses
+`agent.ProjectID`** — the same block uses the resolved agent for the thread branch and the raw
+parameter for the DM branch.
+
+Reviewer framed it as "the lookup will fail." The real damage is downstream:
+
+#### RULE 382. A corrupted readiness metric outlives the bug that corrupted it
+The failed lookup falls through to `IncFallback()`. That counter is the evidence we intend to use
+to decide when the S4 read cutover is safe. If it fires for a **code** reason on every
+slug-addressed request, it stops measuring **data** completeness. Two outcomes, both bad: the
+cutover is blocked forever on noise, or someone concludes "fallbacks are normal here" and flips S4
+while real gaps remain. The bug is one argument; the discredited metric is a decision-making
+defect that survives the fix. **When a defect writes to a measurement you plan to make a decision
+from, rank it by the decision, not by the defect.**
+
+Fix: pass `agent.ID`. Required test: a slug-addressed read resolves the SAME conversation as a
+UUID-addressed one.
+
+### R-2 (MUST FIX) `webChatStore` unlocked reads — **FIVE sites, not the one flagged**
+Gemini flagged only `handlers_agent_messaging.go:296`. I enumerated every read of the field in
+`pkg/hub`:
+- **C5's, must fix:** `handlers_agent_messaging.go:296-297, :704-705, :922-923`;
+  `handlers_broker_inbound.go:252-253, :349-350`
+- **Pre-existing, OUT OF SCOPE:** ~12 in `handlers_chat.go`, `handlers_projects_core.go`,
+  `handlers_agent_messaging.go:194`, `handlers_broker_inbound.go:390`, `server.go:2517`
+- `handlers_chat_v2.go` locks **all 33** of its reads; `attachments_agent.go` and
+  `handlers_chat_prefs.go` lock theirs.
+
+**The write is locked:** `SetWebChatStore` at `server.go:1986` takes `s.mu.Lock()`. *Nobody locks a
+write that cannot race* — so the lock on the write is itself the argument that the reads need
+`RLock`. That is a stronger justification than the reviewer's, which asserted the convention
+without evidence.
+
+#### RULE 383. A partial fix positively asserts the unfixed cases are fine
+Fixing only the flagged site is worse than fixing none, because the next reader sees four unlocked
+siblings adjacent to one that was deliberately locked and concludes the difference is intentional.
+When a reviewer flags one instance of a class, enumerate the class before fixing. Corollary for the
+author: when your fix is broader than the suggestion, **say so on the thread** — a reviewer who
+sees only the flagged line changed will reasonably assume you disagreed with the rest.
+
+Told C5 explicitly **not** to touch the pre-existing set: it followed whichever convention was
+local to each file, which is the reasonable thing to have done, and widening the PR into files it
+does not own is the worse error. Logged separately as **DEF-42**.
+
+### R-3 (MUST FIX) `check-authz-reachability.sh:146` — `grep -E`, and "medium portability" understates it
+Rated a portability nit. **I tested the consequence rather than the claim.** I broke the
+alternation so the pattern matched nothing and re-ran the guard:
+```
+guard rc with a non-matching pattern = 0
+check-authz-reachability: all gates pass
+```
+So on any platform where `\|` is not alternation, **our brand-new DEF-37 authorization guard is a
+no-op that reports green.** This is the vacuous-pass failure (rules 367/371) in a guard that is
+itself the deliverable. Honest scoping recorded: **I cannot test BSD grep here, so I accept the
+platform claim from the reviewer; what I verified is the consequence.** That split is worth stating
+rather than blurring — I confirmed the blast radius, not the trigger.
+
+Additional requirement beyond the suggestion: **a self-test that fails if the pattern matches zero
+files across the whole handler set.** A recogniser that matches nothing must be an error, not a pass.
+
+### R-4..R-8 (fix, cheap)
+Nil checks at `handlers_agent_messaging.go:894` (`conv`), `handlers_broker_inbound.go:312` (`u`),
+`divergence.go:296` (`result`/`result1`/`result2` before `.Items`). Duplicate `GetAgent` at
+`:658`/`:682` hoisted, plus a `mentionAgent` nil-check. And `handlers_broker_inbound.go:377` should
+pass `log` not `s.messageLog` — it carries `broker_id`/`plugin_name`, and the calls losing that
+context are the **divergence** logs, i.e. the migration's audit trail. Divergence records that
+cannot be attributed to a broker or plugin are much weaker evidence.
+
+### Instructions to C5 also covered process
+Reply to each Gemini thread as fixed, so the review resolves visibly rather than leaving comments
+dangling. And **state the expected numstat delta before measuring it** (rule 381 applied again).
+
+### DEF-42 (NEW) — `pkg/hub` has two conventions for `s.webChatStore` in one package
+33 locked reads in `handlers_chat_v2.go` vs ~12 unlocked in the older handlers, with a
+lock-protected write. Not C5's to fix. Needs one sweep that picks a convention and applies it.
+
+### State
+- `upstream/main` `77c6aa5e7`. **#1391 OPEN** @ `4fca83814`, MERGEABLE, checks pass, **held on R-1..R-8.**
+- C5 unparked and working the list.
+- Ledger: **DEF-41, DEF-42** held. C7 still gated on C5 landing.
