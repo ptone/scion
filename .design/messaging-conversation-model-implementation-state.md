@@ -13895,3 +13895,31 @@ The earlier advice — "extend the gate to cover `dm_key.go`" — was scoped to 
 
 ### Ledger
 Open: em9-unify BLOCKED (expanded), marker-gate-2 (verified, PR unopened), DEF-32 identity-linking, DEF-34/#1259 (external, stalled 4 heartbeats), DEF-18 (carrier em9-unify), DEF-33/35 spec, DEF-5, DEF-6, DEF-9 (narrowed), DEF-10 (half), Tier 2 DEFERRED, tranche H on G-1, tranches C-G behind em9-unify.
+
+---
+
+## §5fs — ptone read §5fq/§5fr as a report of LOST WORK. It was a forecast. My tense caused that.
+
+He asked: "are you saying you lost work to rebasing on squash merges even after i warned about this?"
+
+**Answer: no. Nothing was lost, nothing rebased, nothing pushed, no branch mutated.** Verified before replying:
+`upstream/main` `87a867b77`, `em9-unify` `47a7c6736`, `marker-gate-2` `e28e8c999`, `tranche-c` `d670b139c` — all unchanged. No experiment worktrees remain. Only doc commits pushed today, all on `scion/ca-msg-arch`.
+
+What I did: throwaway `/tmp` worktree at main, merged em9-unify twice (honest merge to count conflicts, `-X theirs` to simulate careless resolution), ran guards and tests, then aborted, reset, removed the worktree.
+
+### The communication defect
+I wrote a hypothetical in the **present indicative**: "#1362 is ALSO reverted", "the tests are deleted", "CI GOES GREEN". Those are the literal outputs of the experiment, so they felt accurate to write — but present tense about a sandbox reads as past tense about production. Every sentence was true of the scratch tree and every sentence sounded like an incident report. The word "careless" made it worse: it invited the reading that someone had *been* careless.
+
+Compounding it: I opened §5fq with "ESCALATION" and led with consequences before method. A reader hits four lines of damage before learning it happened in `/tmp`.
+
+The irony is exact — I ran the experiment *because* of his warning about reverting work during rebases, and then reported it in a way that suggested I had done the thing he warned against.
+
+### Rules
+**Rule 270.** Report hypotheticals in the conditional and say where they ran, in the first sentence. "A careless merge WOULD drop X, measured in a scratch worktree" costs six words more than "a careless merge drops X" and cannot be misread as an incident. Experimental output is written in the present tense by the tools; converting it to a claim is the writer's job, not a copy-paste.
+
+**Rule 271.** Lead a finding with its status before its severity. State whether anything is damaged, whether anything needs recovery, and where the work was done — then the consequences. Severity-first is correct for real incidents and actively misleading for dry runs, and the reader cannot tell which they are reading until you say.
+
+**Rule 272.** A dry run that models a destructive outcome is a safety measure, and it must be *reported* as one. Otherwise the precaution is indistinguishable from the accident it was run to prevent, and the person who asked for caution learns the opposite of what happened.
+
+### Ledger unchanged
+Nothing dispatched, nothing at risk. em9 parked, never asked to rebase. Open: em9-unify sequencing decision (guard eight files vs re-derive in slices — I lean re-derive), marker-gate-2 PR unopened, DEF-32 identity-linking, DEF-34/#1259 external.
