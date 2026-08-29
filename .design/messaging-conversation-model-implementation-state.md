@@ -18047,3 +18047,39 @@ branch order, and only caught it because C7's reply prompted a second look.**
 - **NEW follow-up defect DEF-46**: 4 `send_test.go` tests skip in CI on the missing
   `/scion-volumes/` root. Explicitly OUT of scope for #1398 — logged, not fixed, to keep the PR
   landing rather than growing.
+
+### 17:29Z — coordinator proposed fixing this in the gate. Declined, with evidence.
+
+Coordinator read the full logs, reached the same symptom, and concluded: *"a CI-runner environment
+issue in your new extras-ci.yml gate, not an actual bug in the module code... worth checking
+whether the new gate sets HOME, runs as a different user, or needs a writable temp dir."*
+
+Declined on three grounds:
+
+1. **HOME is not on the path.** The literal branch is reached only when `hostDir == ""`, which
+   requires `downloadsPath == ""` AND (`projectID == ""` OR `UserHomeDir` errored). `UserHomeDir`
+   succeeds on a runner. **The error string `mkdir /home/scion` is therefore only producible from
+   the literal branch — so all 9 provably took it, by construction, without my needing to read
+   each test.** Exporting HOME in the workflow would leave all 9 failing identically.
+
+2. **The framing is inverted.** The runner — unprivileged user, home not `/home/scion` — is the
+   ordinary case. Our dev container is the anomaly. A test that passes only where one absolute
+   path happens to be writable is broken in the module, not in the gate that revealed it. The gate
+   did not create this failure; it is the first thing that ever executed these tests.
+
+3. **The proposed fix is feasible, which is what makes it dangerous.** Runners have passwordless
+   sudo, so `sudo mkdir -p /home/scion` would green all 9 in a minute — and permanently bake the
+   container's accident into CI, in a gate whose entire justification is catching exactly this.
+
+**RULE 407.** When a new gate's first run goes red, the default hypothesis must be that the gate
+is right. "Configure the environment until the gate stops complaining" converts a detector into a
+rubber stamp, and it is most tempting precisely when the gate has just found something real.
+Corollary: the cheapness of an environment-side fix is evidence about its cost to *ship*, not
+about its correctness.
+
+Conceded the one point where the coordinator is right: whether production should fall back to a
+hardcoded `/home/scion` at all is a real question. It is a behaviour change to shipped brokers and
+does not belong in a CI-gate PR. **Logged as DEF-47**, not actioned.
+
+Asked the coordinator to redirect C7 to me if the HOME suggestion reaches them, since I have
+already ruled against it.
