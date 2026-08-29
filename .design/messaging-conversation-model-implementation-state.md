@@ -17246,3 +17246,35 @@ loudly**.
 ### State
 - `upstream/main` **`03071382c`**. Live: `ca-msg-arch`, `ca-msg-c7` (running, briefed).
 - Outstanding for ptone: **#1365 still needs closing.**
+
+---
+
+## 15:14Z — Heartbeat. DEF-43 narrowed to one test. Rule 389.
+
+Short cycle; nothing else moved. `upstream/main` `03071382c`. `ca-msg-c7` running and executing
+(`lastEvent` 15:12:57), working its baseline confirmation. No peer-waits: C7 is the only manager and
+it is waiting on nobody.
+
+### DEF-43 narrowed — one test, not two
+Post-C5 full-suite job on main (`03071382c`) fails **only** `TestHandleAgentCloudLogs_AgentNotFound`.
+At `2ce6e1149` it failed that **and** `TestOutboundMessage_AttachmentsLinkedToMessage`.
+
+#### RULE 389. Two runs are not a trend, and "it stopped failing" is not "we fixed it"
+The tempting read is that C5 fixed the attachments test — its `linkAttachmentRefs` / W7 work is in
+exactly that area, and #1391's own run showed one failure where main showed two. That is a story, not
+a finding. Two data points from two different commits cannot distinguish **fixed** from **flaky**, and
+this is rule 373's shape again: differencing counts taken under different conditions and reading the
+gap as a cause. An intermittent test that happens to pass twice looks identical to a repaired one, and
+the wrong conclusion is the expensive one — it closes the row and the failure returns next week
+attributed to whoever is unlucky.
+
+Recorded as: **not observed failing in the two most recent runs that include C5; cause unattributed.**
+DEF-43 stays open on the attachments test as *suspected flaky* and open outright on the cloud-logs
+test. Owner remains the CI workstream. If the attachments test stays quiet across the next several
+main runs, that is evidence; two runs is not.
+
+### Ledger sweep
+Nothing struck this cycle — three minutes since DEF-37/O-2 went. DEF-44 is one heartbeat old and
+sits with C7. DEF-41/42 unchanged and deliberately unstaffed until C7 lands; DEF-42 in particular
+must not be folded into an in-flight PR. Long-held rows (DEF-5/6/9/10/18/32/33/35/34/12, tranche H)
+unmoved for the expected reason: every hand is on C7, which is the last phase of the tranche.
