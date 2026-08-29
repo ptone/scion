@@ -18945,3 +18945,66 @@ file and any other owner manufactures a conflict. New AC-D-12/13/14 added.
 
 **Question slot now free.** DEF-42 has been unmoved three heartbeats behind the
 one-at-a-time constraint; it is next.
+
+## 5dk — Heartbeat v9: DEF-42 dispatched, and three false readings in one sweep (2026-08-29 20:47Z)
+
+upstream/main unchanged at `b1cc09ba6`. D2 compare URL still with the sponsor.
+
+**Sponsor ruled (b) on DEF-42: its own agent, in parallel.** Dispatched
+`ca-msg-def42` (create → start → brief at 20:46:00 → activity at 20:46:08, so
+rule 424 is satisfied). Branch `scion/ca-msg-def42`.
+
+**Specifying DEF-42 produced three false readings in a row, all the same shape.**
+Each answered plausibly and each was wrong:
+
+1. I told the sponsor DEF-42 was "a data race, not a logic bug." Then I found no
+   mutex next to the field and nearly retracted it as a nil-guard bug instead.
+   The guard is `s.mu` (server.go:689), fifteen lines away from the field
+   declaration and never mentioned near it. The original framing was right; the
+   near-retraction would have been the error.
+2. My unguarded/guarded classifier used a four-line lookback and flagged
+   `server.go:2408`. It sits inside `StartMessageBroker`, which holds
+   `s.mu.Lock()` fifteen lines above. Go's RWMutex is not reentrant, so a fix
+   there DEADLOCKS. **The ledger's "13 unguarded" was produced by the same
+   flawed method and is wrong; the true count is 12.**
+3. My rewritten per-function checker returned `locks=0` for all thirteen sites —
+   because zsh does not word-split `for x in "file line"`, so every command
+   failed and printed the zero from a failed substitution. A positive control
+   (two known-guarded sites, which must report >=1) caught it.
+
+**Rule 432: a count is not a measurement until the method that produced it has
+been run against a case known to break it.** All three survived because they
+produced a number rather than an error. The positive control is the only thing
+that distinguished "measured zero" from "failed to measure."
+
+**Rule 433: the deadlock site is the one an automated fixer reaches first.** It
+is the most obviously-unguarded-looking read in the file, and it is the one read
+that must not be touched. Named explicitly in the brief with the shape of my own
+mistake, per rule 423.
+
+Also specified: the fix is NOT "wrap each read in RLock" — all five functions
+read the field twice (nil-check, then use), so per-read locking preserves the bug
+as a TOCTOU. One snapshot per function, copying the existing idiom.
+
+**Roster.** D5 executing the five review changes. D34 revived by a forced-choice
+probe (silent 22 min; woke at 20:43:52) — rule 429 again, third occurrence.
+D1 answered C and its park took (`activity='blocked'`, corroborated
+independently: #1401 merged by title, D2 pushed at `dbcd0df0e`).
+
+**Rule 434: check the field exists before reading it.** I concluded D1's park had
+failed from `status=''` — there is no `status` key in `scion list --format json`;
+the field is `activity`. A `.get(k,'')` on an absent key is indistinguishable
+from a real empty value. Same family as the three above.
+
+**ESCALATION — chat-admin-lead may hold the only copy of a fix.** Its taskSummary
+claims "pushed to scion/fix-broker-types-persistence (commit f4053477)". That
+branch does not exist on origin, `f4053477` is not reachable from upstream/main
+and the object is absent from my clone, and no origin branch matches
+"persistence". Controlled against two branches that do resolve. Not my agent, so
+I warned it and escalated rather than acting. ci-fix-lead swept too (blocked 2h;
+#1399 landed as `dbec308cc`).
+
+**Ledger.** DEF-42 moves from ownerless to owned. DEF-50 still deliberately
+unmoved, fourth heartbeat — gate-shape change on the authz reachability check,
+needs an owner assigned by ptone per brief item 12. Told ci-fix-lead it exists
+and is not silently theirs.
