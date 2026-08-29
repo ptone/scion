@@ -20708,7 +20708,11 @@ DEF-56 flagged explicitly as *not* a lint refactor.
 ### Standing state
 
 - `upstream/main` = `fa7ae1914`. `scion/ca-msg-def54` @ `331328fd6` (gofmt fixed, #1409 should go
-  green). `scion/ca-msg-def3750` @ `fc337d6ea`, compare URL with ptone.
+  green). `scion/ca-msg-def3750` @ **`4c7dfe0fec`** — follow-up commit verified +6/-0, comment only,
+  gofmt clean, total vs main 424/28; the glob scope caveat is now written at the site. PR #1375
+  (fork, off-protocol) closed by the agent. **No URL reissue needed — compare URLs are
+  branch-based** and already reflect the new commit; note that the *encoded title and body* do
+  NOT update, so a later commit that changes intent needs a fresh URL.
 - `ca-msg-fmt1409b` **held as evidence** at coordinator's request — do NOT retire in a sweep.
 - Live: `ca-msg-def3750`, `ci-fix-lead`, `chat-admin-lead`.
 - Awaiting ptone: Tranche E board; gate-deletion; #1409; contrib-repo PAT; DEF-50/37/56 PR.
