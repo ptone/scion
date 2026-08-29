@@ -16989,3 +16989,76 @@ lock-protected write. Not C5's to fix. Needs one sweep that picks a convention a
 - `upstream/main` `77c6aa5e7`. **#1391 OPEN** @ `4fca83814`, MERGEABLE, checks pass, **held on R-1..R-8.**
 - C5 unparked and working the list.
 - Ledger: **DEF-41, DEF-42** held. C7 still gated on C5 landing.
+
+---
+
+## 14:14Z — #1391 round 2 verified: R-1..R-8 all genuinely fixed. **R-9 opened, and it is MY error.** Rules 384-385.
+
+C5 returned `3efdc8372` (13 ahead of `77c6aa5e7`) claiming all eight fixed. I re-verified every one
+rather than accepting the table.
+
+### Confirmed fixed
+R-1 `handlers_messages.go:266` → `agent.ID`. R-2 all six `wcs := s.webChatStore` reads in C5's two
+files now sit inside `s.mu.RLock()`/`RUnlock()`, with the ~12 pre-existing ones correctly untouched.
+R-4..R-8 all present at the cited lines. Build clean, gofmt clean (tested output per rule 380).
+
+**R-3 verified by positive control, not by reading it.** Mutated the recogniser to
+`zzzNoSuchSymbolZZZ` and re-ran: **rc=1**, `FAIL [SELF-TEST] dispatch pattern matched zero handler
+files`. The same mutation before the fix printed `all gates pass` and exited 0. The DEF-37 guard can
+now detect its own inertness — the highest-value change in the round, and the one the reviewer rated
+lowest (a "medium portability" nit).
+
+### Rebase risk: none
+Main advanced `77c6aa5e7` → `a9cc229f5` (#1383 sciontool secrets, #1387 sandbox argv redaction).
+Merge-base is still exactly `77c6aa5e7`, so **three-dot is the correct instrument here** — the branch
+is rebased on the base, and the two new main commits are the only skew. `comm -12` of the two
+changed-file lists: **empty**. No overlap, clean rebase.
+
+### RULE 384. A build tag can silently subtract the tests you are trying to confirm
+C5 reported green "under `-tags no_sqlite`". Five of their six test files carry `//go:build
+!no_sqlite`, so **that run measured the suite with their own new tests compiled out.** I ran untagged:
+`ok pkg/hub 324.968s`, `ok pkg/messaging` — genuinely green, a stronger result than C5 had evidence
+for. Then `-v` to prove execution rather than trust `ok`: five `TestValidateLegacyMessage_*` RUN and
+PASS, four `TestHandleBrokerInbound*` PASS. **"The suite passed" and "my tests passed" are different
+claims whenever a tag can exclude the file. Only the second one is evidence, and only `-v` shows it.**
+This is the vacuous-pass family (367/371/380) one layer up: the exclusion mechanism is the build
+system rather than the matcher.
+
+### R-9 (NEW, MUST, small) — `handlers_messages.go:67`, and I caused it
+Same shape R-1 had: `agentID := q.Get("agent")` is client-supplied and may be a slug, passed raw to
+`ResolveDMConversationForRead`, with `IncFallback()` on the miss. Both call sites are new in this PR;
+I flagged one.
+
+**Severity is genuinely lower than R-1.** The legacy filter is `message.AgentIDEQ(filter.AgentID)`
+against a UUID column, so a slug yields nothing on *both* paths — no behavioural divergence. The
+damage is confined to the counter: a malformed client parameter is recorded as a backfill gap. During
+the S4 rollout the fallback rate is the single number we read to decide the cutover is safe, and a
+counter that conflates "not migrated" with "bad request" cannot answer that. Rule 382 again, at lower
+weight. Directed fix: resolve via `GetAgent` first, use `agent.ID`, and on lookup failure skip the
+conversation path **without** counting a fallback. Explicitly told C5 not to touch `filter.AgentID` —
+making slugs newly work on the legacy filter is a behaviour change outside this PR.
+
+### RULE 385. Flagging an instance and enumerating the class are different acts, and the reviewer owes the class
+I wrote rule 383 at C5 this morning — *a partial fix positively asserts the unfixed cases are fine* —
+and then committed the same error in the item I ranked highest. C5 fixed exactly line 266 because
+that is exactly what I asked for. **The author's fix can only be as complete as the finding.** When I
+grep to confirm a defect, the same grep already shows me every sibling; stopping at the first hit is
+a choice to under-report. Told C5 plainly that R-9 is mine, not a miss of theirs — a coordinator who
+launders their own omission into a new work item for the implementer corrupts the record of who
+learned what.
+
+### Numstat reconciliation
+C5: 16 files +1717/-185. Actual three-dot: **17 files +1772/-185.** Difference is exactly
+`.design/project-log/c5-review-fixes.md` (55 lines) — a file C5 committed and then omitted from their
+own count, so the figure they reasoned over was not the figure the PR shows. Kept: 201 project-log
+files already exist on main, so it is established convention, and ptone's "these do not need
+committing" was permissive, not prohibitive. Benign, but recorded — a measurement that does not
+reconcile is worth a line even when the cause turns out to be nothing.
+
+### State
+- `upstream/main` **`a9cc229f5`**. #1391 @ `3efdc8372`, **held on R-9 only**. Everything else verified.
+- Predicted post-R-9 numstat given to C5 *before* they measure (rule 381): 17 files, ~+1780/-186.
+- ptone: "just let me know when mergeable" — no report until R-9 lands and I re-verify. Nothing before
+  that is a section boundary.
+- Roster: `ca-msg-c5` + child `dev-review-fixes` active on R-9. No peer-waits outstanding.
+- Ledger unchanged: DEF-41, DEF-42 held. C7 gated on C5 landing.
