@@ -17608,3 +17608,75 @@ stops the exclusion list from silently becoming the whole population (rule 393).
 `upstream/main` `03071382c`. `origin/scion/ca-msg-c7-def44` @ `23a0651f4`, **held** on the docs
 population fix. Trigger scope still `ask_user` with ptone: root `go.mod`/`go.sum` in the path filter,
 and an unfiltered run on push to main. Held: DEF-41/42/43/44/45.
+
+---
+
+## 2026-08-29 (later) — RETRACTION: the docs blocker was mine, not C7's
+
+C7 pushed back with evidence. It was right and I was wrong. Recording the mechanism, because the
+error is more instructive than the correction.
+
+### The retraction
+`--visibility` **is** a real, retained, non-deprecated flag on `scion message`:
+`cmd/message.go:1210` on `upstream/main`, inside the "Retained flags (core message functionality)"
+block, validated at `:116-122`, absent from the `MarkHidden` list. That list holds exactly the ten
+flags I accused C7 of wrongly deleting: `broadcast all in at plain raw notify channel thread-id cc`.
+
+So the retained surface is `interrupt wake attach visibility` — **precisely the four C7's original
+rewrite documented.** C7's first version mapped onto reality. My "invented flag" finding was itself
+the fabrication.
+
+### How
+I grepped `cmd/message.go` **in my own worktree** rather than in `upstream/main`. This branch is a
+long-lived design branch that commits nothing but `.design/`, so it has never picked up the
+deprecation work: its `cmd/message.go` is 1169 lines against main's 1384,
+`git diff --stat upstream/main -- cmd/message.go` = 230 deletions. Line 1210 does not exist in the
+file I read.
+
+Then I compounded it: extracted the **document** from `upstream/main...branch` and the **population**
+from my stale `HEAD`, and `comm`'d one against the other.
+
+#### RULE 399. A population check inherits every bit of staleness in the tree you drew the population from
+The method was right; the input was not. This is the file-level twin of the rules 335/356 family —
+a stale reference makes the delta attribute someone else's history to the branch under review — and
+I walked into it in the same hour I was writing rules about mechanical verification. Mixed references
+produce **real arithmetic over incoherent inputs**, which is the most convincing kind of wrong,
+because every individual number is correct. Corollary, and the reason this was so easy to miss: a
+long-lived branch scoped to one directory is *maximally* stale everywhere else and *maximally*
+persuasive, because the file is sitting right there in the worktree looking authoritative.
+**Amends rule 398:** the prescribed remedy — extract the registry, `comm` it against the doc — must
+name its tree. `git show <ref>:<path>`, never the worktree, whenever the branch is not the ref.
+
+#### RULE 400. "The author invented this" should be the last hypothesis, not the first
+Fabrication is rare; staleness is routine. The prior belongs the other way round, and I inverted it —
+then led with the accusation. Against a subordinate agent that is a structurally cheap thing to do
+and an expensive thing to be wrong about: C7 could have simply complied, and the correct
+documentation would have been replaced by mine. **A false finding from a reviewer costs a cycle and
+inverts authority; it should carry a higher burden of proof than the change it is challenging, not a
+lower one.** C7 pushing back with file-and-line evidence is the behaviour I want and I said so.
+
+### The outcome is still an improvement — but that is luck, not method
+`MarkHidden` removes a flag from help output; it does not remove the flag. All ten still work and
+still warn. **Hidden-from-help is exactly the condition under which the reference page becomes the
+only remaining source** for a user whose script emits a deprecation warning. So documenting all ten
+as deprecated with replacement pointers is better than either C7's first version or main. I forced a
+good change for a bad reason. Recorded as luck so it does not get filed as judgement.
+
+### Verification of `478374579` — clean, closed
+- `git ls-remote`: `def44` `478374579`, `ci-draft` `15ccc8f04`. Push claims accurate (rule 395 clean).
+- cli.md: all 14 documented, 4 plain + 10 with `*(Deprecated` markers.
+- **Every replacement pointer matches main's own flag help string verbatim**, and every target command
+  exists (`cmd/keys.go`, `cmd/schedule.go`, `cmd/notifications.go`, `cmd/broadcast.go`). A pointer
+  naming a nonexistent command would be the real form of the defect I imagined; there are none.
+- messaging.md caution now "deprecated ... still works but triggers a deprecation warning." The
+  earlier "Removed" would have been the more harmful error — it tells a user with working scripts
+  they are already broken.
+- messaging.md -17 justified; item 11 correct (constraints between two deprecated flags are noise
+  once both carry pointers). `--attach` constraints line restored.
+- DEF-44 justification text received for the PR body.
+
+### State
+**DEF-44 and DEF-45 cleared.** `origin/scion/ca-msg-c7-def44` @ `478374579` is ready; PR body pending
+only ptone's trigger-scope answer (root `go.mod`/`go.sum` in the path filter, and an unfiltered run on
+push to main). Workflow stays on `scion/ca-msg-c7-ci-draft` @ `15ccc8f04` until that lands — gate
+authority, not quality. `upstream/main` `03071382c`. Held: DEF-41/42/43.
