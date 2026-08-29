@@ -16355,3 +16355,57 @@ table stays a listing index, never the access authority.**
 ### Blocking path
 #1381 (C6) → sponsor. C5 → guard restoration → my gate. Then C7 dispatch (fresh agent, not a
 repurposed one — context rot).
+
+---
+
+## 12:52Z — C5 GUARDS ACCEPTED @ `b661724b0`. **ESCALATION: 34% OF TESTS NEVER RUN IN CI.**
+
+### C5's guards verified real
+Re-ran the mutation myself: stripping both conjuncts (`messagebroker.go:468`, `:650`) makes
+`TestEmptySenderID_DeliverToUser_SkipsDMResolution` and `..._DeliverToAgent_...` **FAIL** with an
+explicit SECURITY message naming the bypassed guard; restored, both pass.
+
+**C5 spotted the trap I had not spelled out.** `ResolveOrCreateDMConversation` has its own empty-ID
+check, so the obvious assertion — no `conversation_id` on the persisted message — would have PASSED
+with the messagebroker guard deleted, because defense-in-depth catches it downstream. C5 instead
+asserted the downstream function was never **ENTERED**, via a log spy.
+
+### RULE 370. When a property is protected at two depths, an outer-boundary test cannot distinguish "the outer guard worked" from "the inner guard cleaned up after it"
+Assert on the **path taken**, not only the outcome. Otherwise you ship a test named after a guard
+that cannot detect that guard's removal — the defense-in-depth that makes the system safe is
+exactly what makes the test worthless.
+
+### THE FINDING: CI executes one test command, and it excludes a third of the suite
+`ci.yml:104` → `make test-fast` → `go test -tags no_sqlite ./...`. **Only test invocation in all
+five workflow files** (build-images, build-release, chart-ci, ci, docs). Every file carrying
+`//go:build !no_sqlite` is compiled out.
+
+**Measured on `upstream/main`: 3,540 of 10,269 test functions — 34% — never execute in CI.**
+185 files; **145 of them in `pkg/hub`**. Includes `authorize_test.go` (14) and all 24 in
+`messagebroker_test.go`. Positive-controlled: `go test -tags no_sqlite -run TestEmptySenderID`
+reports `[no tests to run]`, and a probe test from another excluded file behaves identically.
+**Not uniform** — C4's `webchannel_store_dualwrite_test.go` (21) and `pkg/messaging/validate_test.go`
+(46) DO run. Non-uniformity is worse than blanket exclusion: nothing visible from outside tells you
+which guards are load-bearing in CI.
+
+### RULE 371. A guard's coverage is the intersection of what it asserts and what CI executes
+We have been verifying the first and assuming the second all night. `make test-fast` in the
+Makefile and `!no_sqlite` on a test file are each individually reasonable; the gap is the product
+of the two, and it is visible from neither.
+
+### The irony, recorded because it is instructive
+Three lines above the test step, the authz-guard block distinguishes "guard failed" from "guard
+could not run — NOTHING WAS ANALYSED... do not read it as a guard failure." Someone reasoned
+carefully about an unexecuted check, and the very next step silently skips a third of the suite.
+
+### Disposition
+Escalated to ptone. **Not fixing it**: repo-wide rather than tranche-scoped, and re-pointing a CI
+gate is not the changing team's call (brief item 12). Remedy is likely a second job running
+`make test` with sqlite — costs wall time and may surface a backlog of failures accumulated
+unseen, so it is a budgeted decision.
+**C5 told explicitly NOT to strip the tag** to make its own tests run — the tag is correct, the
+tests genuinely need sqlite, and removing it breaks the `no_sqlite` build for everyone.
+
+### C5 status: COMPLETE pending landing decision
+Rebase clean on `eb365a9d3`, one migration, endpoint 14 files **+1480/-184** verified, both
+webchannel files byte-identical to main, all four guards pass, empty-SenderID property re-guarded.
