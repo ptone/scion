@@ -29,11 +29,39 @@ Main moved `a7ac9c489` → `8b09c118f`, seven commits. Three matter to us:
    `handlers_chat_v2.go`, `pkg/store/models.go`.
 5. **Zero M-ADD collisions** — no file is created by both #1371 and our sources.
 
-### Re-derived manifest (three-dot, per rule 294)
+### Re-derived manifest — CORRECTED 10:12Z
 
-- **M-ADD 131 raw → ~79 in scope.** 50 are `.design/project-log/` which the sponsor has **dropped**;
-  `TRANCHE-MANIFEST.md` and `ci-sqlite-gap-inventory.md` are working notes and are also out.
-- **M-MOD 94 raw → 80 non-ent**, totalling **3,509 added lines** (max across the two sources).
+**An earlier revision of this document (M-ADD ~79 / M-MOD 80) was wrong. Do not use those numbers.**
+They were produced with `git diff --diff-filter=A upstream/main...BRANCH`. Under three-dot, status `A`
+means *"added on the branch side since the merge-base"* — **not** *"absent from main."* Main
+independently added many of the same files when tranches A and B landed, so 51 paths that exist on
+main today were misfiled as additions. `pkg/messaging/resolve.go` was among them, which is absurd on
+its face: §0.1 of this document verifies that file is byte-identical to main.
+
+Caught by ca-msg-em6, who measured 13 `pkg/messaging` M-ADD files against my 30 and said so.
+
+**The correct test for M-ADD is existence on main** — `git cat-file -e upstream/main:<path>` — not a
+diff status. Corrected figures:
+
+| Set | Count | Notes |
+|---|---|---|
+| All changed paths (union of both sources, three-dot) | 225 | |
+| **M-ADD — absent from main** | **80 raw → 33 in scope** | 13 `pkg/messaging`, 12 `cmd`, 8 `pkg/hub`. 47 dropped are `.design/project-log/` + 2 working notes. |
+| **M-MOD — exist on main** | **145 raw → 107 non-ent → ~82 in scope** | 38 ent-generated (regenerate, do not merge); 5 project-log dropped; ~20 are `newTestStore`-only and dropped under Ruling A-1. |
+| No-op rows (identical to main on both sources) | **0** | Every M-MOD row carries real content. |
+
+**The shape of the work is the opposite of what the earlier numbers implied: far more modification,
+far less addition.** M-MOD is ported by hunk and is the harder mode. Budget accordingly.
+
+`pkg/hub` alone holds **47 M-MOD rows / 1,996 added lines**, of which 37 are test files and ~20 are
+`newTestStore`-only. The substantive hub set is roughly 27 files, split between C4 (the two
+`webchannel_store` files) and C5 (the rest). **C5 is therefore larger than a first read of §2
+suggests** — its five headline files are the bulk of the lines, but it carries a long tail of small
+test touches. Two of those small rows are prohibition-list items and must not be lost:
+`chat_notifications_test.go` (3 B5 functions) and `route_metadata.go`.
+
+The seven-phase split is unaffected: phase boundaries follow layers and the dependency chain, not
+file counts. Only the size estimates moved.
 
 ---
 
