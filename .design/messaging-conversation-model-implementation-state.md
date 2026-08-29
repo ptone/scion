@@ -18810,3 +18810,77 @@ diff, not between heartbeats.
 anyone, run it on unmodified main in the same container. My standing routing rule
 ("relay CI issues to ci-fix-lead") is a fast path that bypasses the control, and a fast path to an
 escalation is precisely where a false positive gets laundered into someone else's queue.
+
+### 20:25Z — 5di. A bot suggestion landed a dead rejection on the derivation path. Agents idle between steps.
+
+**THE MERGED CHANGE I DID NOT REVIEW.** `origin/scion/ca-msg-d1` moved after merge to
+`c881db655`, authored by Preston Holmes, *"Co-authored-by: gemini-code-assist[bot]"* — a review
+suggestion accepted in the GitHub UI at 20:06, one minute before the merge. It deleted D1's
+explanatory comment at `:947` and put back the very call D1 and I had removed:
+
+```go
+if convResult != nil {
+    if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+        ValidationError(w, err.Error(), nil); return
+    }
+}
+```
+
+It is on `upstream/main` now. I found it only because I noticed a merged branch's tip had moved
+and chased it; nothing routed it to me.
+
+**Re-verified the tautology rather than asserting it from memory.** Every non-nil return of
+`ResolveOrCreateConversationByKey` on current main: the topic-lookup return is guarded by
+`convID != ""`, the upsert return carries `result.ID` (store-minted UUID), and every other path
+returns nil. The caller-supplied branch assigns a non-empty string by construction. So
+`convResult != nil` implies non-empty and **the check cannot fail**. My original analysis holds.
+
+**But the merged form has a property the original did not, and that is the real finding.** D1's
+version was an inert *comment*. This version is an inert **rejection** — `ValidationError` +
+`return` — sitting on the derivation path. **B10 says derivation and resolution failures stay
+non-fatal until Tranche G.** It complies today only because of an invariant maintained two
+packages away in `derive_key.go`, which nothing tests. An ordinary refactor that returns a non-nil
+result with an empty id starts rejecting agent messages and breaks B10 without anyone touching the
+handler or the rule.
+
+Escalated to ptone with three options (leave and document the coupling / demote to a log line /
+fold into D5), leaning demote. **Deliberately did not relitigate the merge** — I lost that call
+and the point is not to re-argue it. The point is that neither the bot nor the reviewer was in a
+position to see the B10 coupling, because it is invisible from the diff.
+
+Warned `ca-msg-d5` immediately: do not remove it, do not mistake it for the DEF-49 fix (non-empty
+is a different question from entitled), and do not assume it filters anything.
+
+**AGENTS IDLE BETWEEN STEPS — twice now.** `ca-msg-d34` received its brief (activity postdated the
+send, verified), worked ~1 minute, then went silent for 8 minutes at "stalled". A forced-choice
+probe with an explicit *"do not restart work, do not write a status essay"* revived it inside 20
+seconds. Same shape as D5's second stall. Distinct from D5's *first* stall, which was a lost
+message (rule 424) — this one had the brief and stopped anyway, having finished a step with
+nothing prompting it onward.
+
+**LEDGER SWEEP.** **DEF-41 STRUCK** (#1401). DEF-48 sent, awaiting PR. DEF-49 in flight (D5).
+DEF-37 marker gate in flight (D3c). **DEF-50** (grep gate is comment-blind) — unmoved two
+heartbeats, deliberately: it is a gate-shape change touching the `authorizeAgentMessage`
+reachability check, and per brief item 12 it is not a changing team's call. Needs its own owner and
+risk pass. **DEF-42** (`webChatStore` locking) — unmoved three heartbeats. Reason on the record:
+I owe ptone this one and have twice had a question already outstanding when the moment came
+(DEF-49, then the B10 options). One-at-a-time is the constraint, not forgetfulness. Raise it the
+moment the B10 question is answered.
+
+**RULE 427.** A merged PR is not necessarily the branch you reviewed. Suggestion-commits accepted
+in the web UI land between your approval and the merge, carry no notification, and are authored by
+the sponsor rather than your manager — so no agent reports them. **After any PR merges, diff what
+landed against what you reviewed.** Here that was the difference between an inert comment and an
+inert rejection.
+
+**RULE 428.** An automated reviewer optimises for local consistency: a validator exists, so call
+it. It cannot see a project rule like B10 that lives in a design doc. The danger is not that its
+suggestion is wrong on its face — this one looks like an obvious improvement, and the comment it
+replaced looks like an excuse — but that **the reasoning it overwrites is exactly the reasoning
+that was not visible in the diff.** Where a comment exists to explain an absence, treat its
+deletion as a change to the contract.
+
+**RULE 429.** Dispatched agents finish a step and stop. Idling is indistinguishable from stalling
+from the outside, and from the inside there is nothing prompting continuation. Briefs must say
+explicitly that all items are to be worked through in one go, stopping only at the phase boundary
+or a real blocker. A probe that revives an agent proves the work was not blocked — only unprompted.
