@@ -20011,3 +20011,56 @@ materially from one set once in `main`.
   states its own numbers are unreliable and names the case that proved it, because
   a table of numbers in a durable issue will be read as findings long after the
   conversation that qualified them is gone.
+
+---
+
+## 5ef — 2026-08-29 — TRANCHE D COMPLETE AND MERGED
+
+ptone merged all pending upstream PRs. `upstream/main` = **`ce283e688`**.
+
+- **#1406** — D3/D4. Verified by content: `ValidateMessage` gone from
+  `validate.go`, `validate_attributed_integration_test.go` present, control symbol
+  `validateMessageContent` returns 1 so the search discriminates. **STRUCK.**
+- **#1407** — DEF-51. Verified by content: `DEF-51` markers present in
+  `cmd/message.go`. **STRUCK.**
+
+Before the merge, #1406's second gofmt round-trip was verified clean: the fix
+commit was `0 1` in each of the two files — exactly one trailing blank line
+removed per file, no additions — and all checks passed except the expected
+`cla/google`.
+
+**TRANCHE D IS COMPLETE.** Every phase merged. Nothing in it is open, blocked, or
+unassigned.
+
+Exit interviews sent to `ca-msg-d1` and `ca-msg-d34` ahead of retirement. d34
+already gave a full one that produced DEF-53, so it got two narrow additions
+rather than a repeat: what about the tooling would have saved it a round-trip, and
+anything out of scope seen after that interview. d1's asks the rule 454 question
+plus three specific to its work — the remaining divergences between the two
+sender paths, whether the "validated object built in parallel rather than derived"
+shape appears elsewhere in `cmd/`, and why both sender shapes pass the validator.
+
+`ca-msg-def54` told main moved twice and to re-verify against `ce283e688`.
+Neither new commit touches `pkg/hub`, so DEF-54's scope is unaffected.
+
+### New failure mode — a bare @token suppresses delivery
+
+d1's exit interview contained the phrase "The @agent path and the @email path".
+`scion message` parsed `@agent` as a **mention**, printed
+`Warning: @agent does not match any agent in this project; skipping mention`, and
+**never printed the delivery confirmation.** The message did not land. Resent with
+the tokens rewritten as `at-agent`/`at-email` and it delivered.
+
+This is nastier than the rune cap. The cap prints CLI help, which is loud. This
+prints a single warning line that reads like a harmless mention notice, while the
+send silently fails — and every message about this project's own subject matter
+naturally contains `@agent` and `@email`.
+
+### Rules
+
+- **468.** A bare `@token` in a `scion message` body is parsed as a mention, and an
+  unmatched mention can suppress delivery entirely. Rewrite `@x` as `at-x` in
+  message bodies. Discussing the messaging system is exactly when this fires.
+- **469.** Absence of the delivery confirmation is the signal, not presence of a
+  warning. Check for `Message delivered to agent` on every send; a warning without
+  it means the message did not land.
