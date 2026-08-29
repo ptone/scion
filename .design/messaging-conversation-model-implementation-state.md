@@ -19537,3 +19537,33 @@ Compare URLs point at branches, not SHAs, so both pick up the rebases; no reissu
 - **456.** An overlap result is a property of one branch against one main. Saying
   "same applies" to a second branch is an unmeasured claim wearing a measurement's
   clothes. Re-run it; `comm -12` costs nothing.
+
+## 5dw — Both open branches rebased onto af8f6c063 and verified (2026-08-29)
+
+**d51** @ `4d32ada90`, merge-base `af8f6c063`, numstat exactly 2 files / 34-13 /
+96-0. DEF-49 untouched *by construction*: the endpoint diff contains only `cmd/`
+files, so `handlers_agent_messaging.go` is byte-identical to main and needs no
+separate check.
+
+**def42** @ merge-base `af8f6c063`, numstat unchanged at 5 files / 12 deletions,
+race test clean at 4.764s. This was the branch sharing ground with DEF-49.
+
+**The verification method matters here.** def42 reported DEF-49 intact by naming
+symbol positions — `CheckDMParticipantKey` at `:946`, group comparison at
+`:956-973`. That is the weaker check: symbol presence can hold while a hunk
+elsewhere in the file was mangled. I diffed the whole shared file against main
+instead, and it contains **only** def42's webChatStore hunk at `:191`. Everything
+else in the file is byte-identical to main, so DEF-49 survives by construction
+rather than by inspection. Its hunk moved `:175` → `:191` because DEF-49 inserted
+lines above — the expected shape of a clean rebase, and a useful positive signal
+that the rebase actually replayed.
+
+Both compare URLs point at branches rather than SHAs and picked the rebases up.
+No reissue.
+
+### Rule
+
+- **457.** To prove a merged change survived a rebase, diff the whole shared file
+  against main and confirm the only hunks present are the branch's own. Checking
+  that the merged symbols are still there tests presence, not integrity — the
+  interesting corruption is a mangled hunk that leaves every symbol in place.
