@@ -19567,3 +19567,107 @@ No reissue.
   against main and confirm the only hunks present are the branch's own. Checking
   that the merged symbols are still there tests presence, not integrity — the
   interesting corruption is a mangled hunk that leaves every symbol in place.
+
+---
+
+## 5dx — 2026-08-29 — Heartbeat sweep, chat-admin-lead closed, DEF-52 scope limit
+
+Roster sweep. Both parks that had silently failed took on re-issue with an
+explicit "run this literal command now, nothing else": `ca-msg-d1` and
+`ca-msg-def42` both `blocked`. `ca-msg-d34` `working`, which is correct — it was
+the only active worker.
+
+chat-admin-lead's report-shaped taskSummary resolved to **A**: its branch
+`scion/fix-broker-types-persistence` merged upstream as **#1063 on Aug 7**, branch
+deleted as normal cleanup. Confirmed by content rather than by its word —
+`SettingsWriteMu` is present on `upstream/main` in `cmd/server_foreground.go`,
+`pkg/config/integration_config.go`, `pkg/hub/handlers_integrations.go`.
+
+I had already established and logged this an hour earlier. Its reply said so:
+"I answered this in my previous message — our messages likely crossed." I spent
+an agent's turn re-deriving a fact that was already in this document. This is the
+second time; rule 435 was written from the first.
+
+It also supplied a genuine scope limit for DEF-52: its fix was a read-modify-write
+TOCTOU on settings.yaml, which `-race` would not have caught. Relayed to
+ci-fix-lead, which added the caveat to the job's `GITHUB_STEP_SUMMARY` output
+(commit `3c6a48d`): the detector instruments shared-memory access in *exercised*
+paths only, does not see file-level TOCTOU, database, or cross-process races, and
+a clean report means no detected data races — not no concurrency bugs. This
+matters because a green nightly is about to become a thing people cite, and it
+will be cited for more than it establishes.
+
+Heartbeat refreshed **v9 → v10** (`ece62718`, `13,43 * * * *`); v9
+(`7549534e-afa2-42eb-8222-9986d67362eb`) deleted. Reason: v9's ledger had gone
+materially stale — it listed DEF-41/48 as in-flight, and DEF-42 as "OWNERLESS AND
+DUE" with a read count of 13 that was no longer right.
+
+### Rule
+
+- **458.** Before spending an agent's turn on a question, search this document.
+  Twice now I have re-investigated a fact I had already established and written
+  down.
+
+---
+
+## 5dy — 2026-08-29 — def42 gofmt; D3/D4 reviewed and returned
+
+**def42 / PR #1405.** Coordinator reported a real gofmt failure. Fixed and
+verified independently at `b7bc3d497`: `gofmt -l pkg/hub/` output empty (checked
+the OUTPUT, not the exit code — rule holds that `gofmt -l` exits 0 either way),
+merge-base still `af8f6c063`, and the fix commit is `1 1` in
+`webchatstore_race_test.go` alone, so no semantic change rode along with the
+whitespace. A comment code block used spaces where gofmt wanted a tab.
+
+**d34 / D3+D4.** Branch `6ddc1e5dc`. Merge-base current, endpoint diff identical
+to three-dot diff, numstat matches its report. Deletion of `ValidateMessage` and
+`ValidateMessageAddressees` verified sound — zero production callers, established
+with a positive control (`ValidateLegacyMessage` returns 9, proving the grep
+works).
+
+I accepted the code deletion and returned the justification. d34 wrote that the
+25 deleted tests were "covered by validateMessageContent (shared core) tested via
+ValidateLegacyMessage path." Tracing all 25 shows that is not what happened:
+
+- **Twelve structural tests** are redundant, but because their real subject was
+  `msg.Validate()`, which has its own direct tests in `envelope_test.go` under
+  near-identical names (`TestValidateMessage_MissingID` →
+  `TestMessageValidate_MissingID`, and so on). Named successors supplied.
+- **Two branches did not survive as covered — they became unreachable.** The
+  `MaxMsgSize` byte check cannot execute: `MaxMessageLength` is 16000 runes,
+  `MaxMsgSize` is 65536 bytes, and 16000 runes is at most 64000 bytes, so the rune
+  check always fires first. The `ReplyToID` empty-string check cannot execute
+  either, because `MapLegacyEnvelope` only takes `&tid` inside a non-empty guard,
+  and with `ValidateMessage` gone `ValidateLegacyMessage` is
+  `validateMessageContent`'s only caller — `ValidateAttributed` takes a bare
+  string and never reaches it.
+
+The deleted byte test is worth recording on its own. Its assertion sat behind
+`if runes <= MaxMessageLength && bytes > MaxMsgSize`, and it built 16385 emoji, so
+the guard evaluated `16385 <= 16000` — false. **The assertion never ran.** The
+test has been inert since it was written, and passing.
+
+Required of d34: doc-only change to `VALIDATION_EXEMPTIONS.md` recording both
+unreachable branches, and stating that the `ReplyToID` one becomes reachable *and
+untested* the moment Tranche G adds a native validation entry point. Neither
+branch is to be deleted — removing a defensive check is a behaviour change and
+outside D3's scope.
+
+D4's build-tag reasoning was correct (CI runs `go test ./...` untagged, so
+`!no_sqlite` files do run; only `make test-fast` excludes them). Required it to
+state that `TestValidateAttributed_LegacyPath_ConversationIDStamped` is green
+before and after — it characterises wiring, it is not defect coverage.
+`TestValidateAttributed_RejectsEmpty` is the load-bearing one.
+
+### Rules
+
+- **459.** A thin wrapper's tests are not the wrapper's. When a wrapper is
+  deleted, the deleted tests' real subject is usually the callee, and the honest
+  successor is the callee's own test named individually — not "covered by the
+  shared core," which is a category claim wearing a citation's clothes.
+- **460.** A test can be inert by arithmetic, not just by build tag or missing
+  flag. An assertion behind an `if` whose condition is unsatisfiable passes
+  forever. Extends 450/451: check that the guard can be true.
+- **461.** Deleting a dead function can convert live branches in a *surviving*
+  callee into dead ones. Reachability is a property of the caller set, so removing
+  a caller silently changes the reachability of code you did not touch.
