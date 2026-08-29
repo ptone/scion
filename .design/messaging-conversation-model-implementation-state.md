@@ -14064,3 +14064,36 @@ Second time this has happened. Composed at 2143, trimmed to 2066, sent, **reject
 The failure mode is that trimming *feels* like it fixed the problem, so the check gets skipped on the second pass. Both times I measured before the first attempt and not before the retry.
 
 **Rule 283.** Re-measure after every edit to a length-capped message, not just before the first send. A trim that lands at 2066 is indistinguishable from one that lands at 1956 until you count, and the rejection is silent-ish — it prints help text, which reads like a usage error rather than a non-delivery.
+
+---
+
+## §5fw — ptone APPROVED re-derivation in slices (01:39Z). Design doc written.
+
+**Decision:** "yes rederive in slices." em9-unify will not be merged. Tranches C–G land as independent additive PRs onto current main.
+
+**Doc:** `/scion-volumes/scratchpad/projects/ca-msg-arch/design-em9-rederivation.md`, mirrored to `.design/messaging-em9-rederivation.md`.
+
+### Design decisions that are load-bearing
+1. **Slices are additive.** A slice may create files freely; on files that already exist on main it may only ADD. Deletions must be named in a `DELETIONS-JUSTIFIED:` block. Mechanically checkable, no false negatives, kills the whole observed failure class.
+2. **`pkg/ent` is regenerated, never ported.** Port the schema, run `go generate`, commit separately.
+3. **Guards are run from `origin/main`, not from the slice** (§5fu). A slice touching `hack/` is rejected and resubmitted standalone.
+4. **Per-file source-of-truth table**, because neither source branch is a superset of the other.
+5. **Forward-only hunk porting** for the six multi-phase files. Never `git checkout <branch> -- <file>`.
+
+### NEW FINDING — the manifest has a structural blind spot
+`(v2 ∪ em9) − main` = **82 paths**: 35 code, 2 root markdown, 45 design-log.
+
+em10's `TRANCHE-MANIFEST.md` is scoped **v2 vs main**, so em9-only files cannot appear in it. Two do exist and are absent from all 529 lines:
+- `pkg/hub/webchannel_store_def27_test.go`
+- `pkg/hub/webchannel_store_unify_test.go`
+
+This is the exact mirror of the `server_backfill*` cluster (4 files, DEF-12): **v2-only, absent from em9-unify entirely.** The manifest flagged it as "highest silent-drop risk" and was right, but for a reason it could not see — the file is not on the integration branch.
+
+**Rule 284.** A manifest scoped to one source branch cannot enumerate a two-source union, and its omissions are invisible from inside it — the blind spot is exactly the other branch's exclusive content. Compute the union directly and use its cardinality as the completeness denominator.
+**Rule 285.** "Branch B is the integration of branch A" is a claim to verify, not a premise. Check both directions: `comm -23` each way. An integration branch that dropped four files did not announce it.
+
+### Corrected figures
+Manifest said 44 design-log files and 77 total against old main; measured now: 45 design-log, 82 total against `a7ac9c489`. My own first pass said 86 — wrong, I estimated instead of counting, then counted. Corrected before the doc shipped (rule 269).
+
+### Next
+Phase 0 groundwork dispatches to em10: re-derive the union, build the file→source→slice table covering all 82, and diff the prohibition list against what the marker gate already enforces mechanically. No production code in Phase 0.
