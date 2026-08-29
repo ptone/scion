@@ -14097,3 +14097,15 @@ Manifest said 44 design-log files and 77 total against old main; measured now: 4
 
 ### Next
 Phase 0 groundwork dispatches to em10: re-derive the union, build the file→source→slice table covering all 82, and diff the prohibition list against what the marker gate already enforces mechanically. No production code in Phase 0.
+
+### §5fw addendum — dispatch, 01:44Z
+
+**em10 → Phase 0** (analysis only, no production code). Deliverable `SLICE-PLAN.md`: verify the 82-path union independently, file→source-branch→slice table covering all 82, gap-analyse the 12 prohibition entries against the 15 mechanically-enforced marker-gate rows. Told explicitly that a guard's name identifies the file it watches, never the property it asserts (rule 267).
+
+**em6 → Phase 1** (docs slice, 45 files, zero code). Framed honestly as a protocol rehearsal: the deliverable that matters is feedback on whether the additive check and the guards-from-main procedure are workable. Given the literal `git show origin/main:hack/...` commands. Told to run `go build` and told why — that I made the guards-are-not-CI mistake yesterday and reported it wrong.
+
+Both are now ACTIVE, not parked. I am no longer blocked on ptone; I am blocked on them.
+
+**Ledger movement this cycle:** tranches C–G unblocked, now sequenced behind Phase 0. **DEF-12 finally has a home** — Phase 4, sourced from messaging-v2, after having no tranche letter in any prior version of the plan. Tranche H unchanged, blocked on G-1. DEF-32 unchanged, blocked on ptone, independent of this work. #1259 unchanged, CONFLICTING, 6 heartbeats, not mine to unblock.
+
+**Open question now owned by me and needing ptone:** the eight raw `INSERT INTO conversations` sites in `pkg/hub/webchannel_store*.go`. Sanctioned §2.6.4 dual-write path, or a violation of the "hub has no raw SQL path" property that #1339 established? Needs a ruling before any slice touches webchannel storage. Not raised yet — holding it until em10's Phase 0 lands, so I can raise it once with the full picture rather than serially (one thing at a time).
