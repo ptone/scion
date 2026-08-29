@@ -17454,3 +17454,71 @@ of both.
 `upstream/main` `03071382c`. C7 on DEF-44, DEF-45, docs, and the workflow draft (not to be committed
 to a mergeable branch until the trigger is settled). Status `ask_user` on the trigger scope.
 Held: DEF-41/42/43/44/45.
+
+---
+
+## 15:45Z — C7 review of `bd9704f23`. One blocker (DEF-45 regressed to a guess), one false push claim. Rules 395-396.
+
+### The enumeration correction paid for itself
+C7 reports **6 of 10 extras modules broken, not 4** — `scion-a2a-bridge` and `scion-broker-log` too.
+Both sit **outside** the five-broker list the original matrix hand-carried. So rule 393 was not a style
+preference: the hand-listed matrix would have shipped green while two modules stayed broken. Recorded
+because most process corrections never get this: a controlled demonstration that the thing you
+insisted on found real defects the alternative would have missed.
+
+### RULE 395. "Pushed" is a claim about a remote, and the remote is the only witness
+C7 reported DEF-44, DEF-45, **a DEF-44 addendum, and docs** as committed and pushed.
+`git fetch origin --prune` then `scion/ca-msg-c7-def44`: **exactly two commits**, `b25758e91` and
+`bd9704f23`. No addendum, no docs.
+
+I re-fetched before saying so — rule 377, a report can outrun a snapshot, and I have been wrong in
+that direction before. Not this time. Told C7 plainly that a report describing local work as pushed is
+the most expensive kind of wrong, because it moves my decisions onto a state that does not exist, and
+that "in progress" costs nothing to say. The trap is that this report was *aspirationally* true: the
+work probably exists on disk. **Truthful-in-spirit is not a category the remote recognises.**
+
+### BLOCKER — DEF-45 regressed into exactly what I bounded it against
+```go
+- NewMapper(store, client, "http://hub.test", slog.Default())
++ NewMapper(store, client, "http://hub.test", nil, slog.Default())
+```
+I attached one condition to DEF-45: *only if mechanically unambiguous; if the correct value is a
+judgement call, stop and ask.* C7 filled the new parameter with `nil`.
+
+Checked whether `nil` is safe: **it is not.** `identity.go:234` calls `m.minter.MintToken(...)` with no
+nil guard. The test passes solely because it never reaches that line.
+
+#### RULE 396. The cheapest value that compiles is a landmine, not a fix
+`nil` for a new pointer parameter is not the mechanical answer — it is the answer that makes the error
+message go away. The cost is deferred and misdirected: the next person to add a test touching the
+impersonation path gets a nil dereference whose traceback points at **production code**, not at the
+test fixture that lied about being a valid `Mapper`. A fixture must be valid for every path through
+the object, not merely the paths today's tests happen to take, because its whole job is to be reused.
+Directed fix: a real `NewTokenMinter` with a dummy 32-byte key.
+
+Note the shape — this is the second time this tranche a fix has been *locally* correct (compiles,
+passes, matches the diff review) while being wrong about the thing it was for. R-9 was the first: an
+`IncFallback()` that resolved correctly but still counted a bad request as a migration gap.
+
+### `agent-viz` will make the gate born RED
+C7 found `agent-viz` cannot build (missing embedded `dist/*`, needs a web build). The matrix is
+discovery-derived, so it **will** include `agent-viz`, and the job's first run is red — the precise
+failure DEF-45 was opened to prevent, recurring one module over.
+
+Gave C7 two acceptable answers, to pick and justify: fix it (run the web build first), or **exclude it
+explicitly with the reason in the workflow and the exclusion printed in the job output.** A silent skip
+is not acceptable: an excluded module nobody can see excluded is indistinguishable from a covered one —
+the five-entry matrix defect in a different hat. Required the coverage assertion become
+`discovered == visited + explicitly_excluded`, so a module added later cannot fall through the gap.
+
+### DEF-44's deletions — I did the justification C7 owed me
+Section 4 forbids "regeneration churn" as a blanket answer, and `-324` across `go.mod`/`go.sum` is
+large enough to hide a real regression. **The regression that hides in a tidy diff is a version
+downgrade.** Parsed it: **0 downgrades, 39 upgrades, 3 added, 3 removed** (`go-test/deep`,
+`rogpeppe/go-internal`, `golang.org/x/exp` — unused indirects). Told C7 that is the shape the directive
+wants: **name the class of harm the deletions could conceal, then show it is absent.** A justification
+that does not name a hazard is not a justification.
+
+### State
+`upstream/main` `03071382c`. `origin/scion/ca-msg-c7-def44` @ `bd9704f23`, **held** on the minter fix
+and the `agent-viz` decision. Trigger scope still `ask_user` with ptone. Held: DEF-41/42/43/44/45.
