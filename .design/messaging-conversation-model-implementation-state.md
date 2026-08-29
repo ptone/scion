@@ -19968,3 +19968,46 @@ wrapped in a conditional on the count.
   about the fix. Check what you are standing on before reporting the gap.
 - **466.** Measuring in the same command as the send gates nothing. Wrap the send
   in a conditional on the measured length, or the number is decoration.
+
+---
+
+## 5ee — 2026-08-29 — #1406 gofmt; Field-6 tail filed as ptone/scion#1374
+
+**PR #1406 (D3/D4) gofmt failure, second in a row.** Verified before dispatching:
+`validate.go` and `validate_test.go` both fail `gofmt -l`; `pkg/hub` is clean. The
+cause is a **deletion artifact** — a trailing blank line at EOF in both files,
+left where the deleted functions used to end. Both gofmt round-trips on this
+project have now been on branches that deleted code, and deleting the last
+function in a file is the highest-risk case. Added a standing instruction to run
+`gofmt -l` over every touched package as the final pre-push step and to read its
+*output*, since the exit code is 0 either way.
+
+**Field 6 resolved by ptone: open an issue for follow-up.** Filed as
+**ptone/scion#1374** on the fork.
+
+Before filing I verified the shape rather than passing def54's numbers through —
+having just been burned by exactly that. `SetAuditLogger` and `SetSecretBackend`
+do take `s.mu.Lock()`, and each field has exactly one write site. So the shape is
+real.
+
+The issue states the counts as **reference counts, not defect counts**, and says
+so explicitly, using the `pluginManager` case as the worked example: 9 references
+reported, all 9 already guarded, one real defect elsewhere. Anyone picking it up
+is told to expect the true count to be a fraction of the table. It also carries
+the check-then-use warning (the serious cases were nil-deref panics, not torn
+reads), the non-reentrant `RWMutex` deadlock trap with its two known sites, the
+advice to route through existing RLock getters, and the note that CI runs no
+`-race` so a regression test there is inert.
+
+Risk assessment recorded as low: most of these fields are set once at startup, so
+the write precedes the readers' existence. The issue directs attention first at
+any field re-settable from a reconnect, reload, or admin path, since those differ
+materially from one set once in `main`.
+
+### Rule
+
+- **467.** When a count you produced turns out to be wrong, do not merely correct
+  it — carry the correction into any artifact built from it. The follow-up issue
+  states its own numbers are unreliable and names the case that proved it, because
+  a table of numbers in a durable issue will be read as findings long after the
+  conversation that qualified them is gone.
