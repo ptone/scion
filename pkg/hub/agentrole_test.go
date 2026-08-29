@@ -34,7 +34,7 @@ func TestScopesForRole_ReadOnly(t *testing.T) {
 
 func TestScopesForRole_Baseline(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleBaseline)
-	require.Len(t, scopes, 5)
+	require.Len(t, scopes, 6)
 
 	// Must include these scopes
 	assert.Contains(t, scopes, ScopeProjectRead)
@@ -42,6 +42,7 @@ func TestScopesForRole_Baseline(t *testing.T) {
 	assert.Contains(t, scopes, ScopeAgentTokenRefresh)
 	assert.Contains(t, scopes, ScopeAgentNotify)
 	assert.Contains(t, scopes, ScopeAgentPortForward)
+	assert.Contains(t, scopes, ScopeAgentSecretFetch)
 
 	// Must NOT include elevated scopes
 	assert.NotContains(t, scopes, ScopeAgentCreate)
@@ -51,7 +52,7 @@ func TestScopesForRole_Baseline(t *testing.T) {
 
 func TestScopesForRole_Full(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleFull)
-	require.Len(t, scopes, 8)
+	require.Len(t, scopes, 9)
 
 	// Must include everything in baseline
 	assert.Contains(t, scopes, ScopeProjectRead)
@@ -59,6 +60,7 @@ func TestScopesForRole_Full(t *testing.T) {
 	assert.Contains(t, scopes, ScopeAgentTokenRefresh)
 	assert.Contains(t, scopes, ScopeAgentNotify)
 	assert.Contains(t, scopes, ScopeAgentPortForward)
+	assert.Contains(t, scopes, ScopeAgentSecretFetch)
 
 	// Plus elevated scopes
 	assert.Contains(t, scopes, ScopeAgentCreate)
@@ -207,6 +209,41 @@ func TestResolveEffectiveRole_ProjectMaxNone(t *testing.T) {
 func TestResolveEffectiveRole_ProjectMaxFull_MemberGetsFull(t *testing.T) {
 	// When project max is full and user is member, member ceiling is full so full is granted.
 	assert.Equal(t, AgentRoleFull, ResolveEffectiveRole(AgentRoleFull, "member", AgentRoleFull))
+}
+
+// TestScopeGuardProxy_DriftDetection pins the biconditional that
+// requireAgentSecretFetchScope relies on: a role receives ScopeAgentSecretFetch
+// if and only if it receives ScopeAgentStatusUpdate. The guard uses
+// ScopeAgentStatusUpdate as a proxy for "would this role receive
+// ScopeAgentSecretFetch" because AgentTokenClaims carries scopes but not the
+// role string (see the comment on requireAgentSecretFetchScope in agenttoken.go).
+//
+// The list is canonical: AllAgentRoles() is the single source of truth for
+// stock roles, and ValidAgentRole is defined in terms of it. A fifth role
+// must be added to AllAgentRoles() to be valid, so this test covers it on
+// the day it is created. Do not delete this test.
+func TestScopeGuardProxy_DriftDetection(t *testing.T) {
+	hasScope := func(scopes []AgentTokenScope, target AgentTokenScope) bool {
+		for _, s := range scopes {
+			if s == target {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, role := range AllAgentRoles() {
+		scopes := ScopesForRole(role)
+		hasStatusUpdate := hasScope(scopes, ScopeAgentStatusUpdate)
+		hasSecretFetch := hasScope(scopes, ScopeAgentSecretFetch)
+
+		if hasStatusUpdate != hasSecretFetch {
+			t.Errorf("role %q: ScopeAgentStatusUpdate=%v but ScopeAgentSecretFetch=%v — "+
+				"the biconditional used by requireAgentSecretFetchScope is broken; "+
+				"see the comment on that function in agenttoken.go",
+				role, hasStatusUpdate, hasSecretFetch)
+		}
+	}
 }
 
 func TestScopesForRole_RoleNoneMapToNoAuth(t *testing.T) {

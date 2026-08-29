@@ -3885,6 +3885,11 @@ func (s *Server) registerRoutes() {
 	// WebSocket control channel endpoint for Runtime Brokers
 	s.mux.HandleFunc("/api/v1/runtime-brokers/connect", s.guarded("/api/v1/runtime-brokers/connect", s.handleRuntimeBrokerConnect))
 
+	// Agent secret fetch endpoint (#127, P2c) — scope guard applied as middleware.
+	// Order: guarded (RouteAgentToken, ensures identity) → scope guard → handler.
+	s.mux.HandleFunc("/api/v1/agent/secrets", s.guarded("/api/v1/agent/secrets",
+		requireAgentSecretFetchScope()(http.HandlerFunc(s.handleAgentSecretFetch)).ServeHTTP))
+
 	// GCP identity endpoints (agent token auth)
 	s.mux.HandleFunc("/api/v1/agent/gcp-token", s.guarded("/api/v1/agent/gcp-token", s.handleAgentGCPToken))
 	s.mux.HandleFunc("/api/v1/agent/gcp-identity-token", s.guarded("/api/v1/agent/gcp-identity-token", s.handleAgentGCPIdentityToken))

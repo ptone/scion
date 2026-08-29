@@ -61,6 +61,12 @@ const (
 	ScopeAgentTokenRefresh AgentTokenScope = "agent:token:refresh"
 	// ScopeAgentPortForward allows the agent to register ports and hold port-forward tunnels.
 	ScopeAgentPortForward AgentTokenScope = "agent:port:forward"
+	// ScopeAgentSecretFetch is a ROLE FILTER, not a capability grant. It keeps
+	// roles that should never reach the secret-fetch endpoint from reaching it.
+	// It says nothing about which keys the holder may fetch — that is gate 1
+	// (the stored entitled-key list), and gate 1 is the enumeration block.
+	// (#127, P2c)
+	ScopeAgentSecretFetch AgentTokenScope = "agent:secret:fetch"
 	// ScopeIdentityToken grants the ability to request OIDC identity tokens.
 	ScopeIdentityToken AgentTokenScope = "agent:identity:token"
 	// ScopeProjectRead grants read access to project resources (agents, templates,
@@ -310,6 +316,66 @@ func extractAgentToken(r *http.Request) string {
 	}
 
 	return parts[1]
+}
+
+// requireAgentSecretFetchScope returns middleware that checks for ScopeAgentSecretFetch
+// with a smart error that distinguishes two denial cases:
+//
+//   - The token's role WOULD receive ScopeAgentSecretFetch under the current
+//     ScopesForRole table, but the token does not carry it. This token predates
+//     the scope. The agent must be restarted or its token refreshed.
+//   - The token's role would NOT receive the scope. Genuine denial.
+//
+// WHY THIS IS A PROXY — NOT A DIRECT ROLE CHECK
+//
+// AgentTokenClaims carries Scopes but not the Role string. The role is consumed
+// at mint-time: the caller expands it via ScopesForRole (agenttoken.go:155) and
+// passes the resulting scope slice to GenerateAgentToken. The role string is
+// discarded and never enters the JWT. The guard therefore cannot compare the
+// token's role against the current ScopesForRole table directly.
+//
+// The proxy uses ScopeAgentStatusUpdate as a role signal: it is present in
+// baseline and full (which receive ScopeAgentSecretFetch) and absent in none
+// and readonly (which do not). This biconditional — a role receives
+// ScopeAgentSecretFetch if and only if it receives ScopeAgentStatusUpdate —
+// is pinned by TestScopeGuardProxy_DriftDetection in agentrole_test.go.
+//
+// WHAT BREAKS IF ScopeAgentStatusUpdate'S ROLE ASSIGNMENT CHANGES
+//
+// If a future change grants ScopeAgentStatusUpdate to a role that does NOT
+// receive ScopeAgentSecretFetch (or vice versa), this guard will give wrong
+// advice to tokens minted under the old table. The drift-detection test will
+// fail in agentrole_test.go — the same file where the scope-to-role mapping
+// is tested, and the file most likely to be open during such a change. (#127, P2c)
+func requireAgentSecretFetchScope() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims := GetAgentFromContext(r.Context())
+			if claims == nil {
+				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+					"agent authentication required", nil)
+				return
+			}
+
+			if !claims.HasScope(ScopeAgentSecretFetch) {
+				// Distinguish pre-existing tokens from genuinely unprivileged ones.
+				// ScopeAgentStatusUpdate is present in baseline and full — the same
+				// roles that now receive ScopeAgentSecretFetch. A token that has the
+				// former but not the latter was minted before the scope existed.
+				if claims.HasScope(ScopeAgentStatusUpdate) {
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						"this token was issued before secret-fetch capability existed; "+
+							"restart the agent or refresh its token to obtain a current token", nil)
+				} else {
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						"insufficient scope for secret fetch", nil)
+				}
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // RequireAgentScope returns a middleware that requires the agent to have a specific scope.
