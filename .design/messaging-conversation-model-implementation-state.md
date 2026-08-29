@@ -17680,3 +17680,59 @@ good change for a bad reason. Recorded as luck so it does not get filed as judge
 only ptone's trigger-scope answer (root `go.mod`/`go.sum` in the path filter, and an unfiltered run on
 push to main). Workflow stays on `scion/ca-msg-c7-ci-draft` @ `15ccc8f04` until that lands — gate
 authority, not quality. `upstream/main` `03071382c`. Held: DEF-41/42/43.
+
+---
+
+## 2026-08-29 — draft workflow review: four checks that cannot fail
+
+C7 stalled idle after "Ready" (nothing half-done; both branches verified on the remote). Used the
+gap to review the draft gate on `scion/ca-msg-c7-ci-draft` @ `15ccc8f04`. Structure is right —
+discovery-derived matrix, exclusion printed, coverage assertion, honest cost note. **All four defects
+are in the checks, not the build steps**, and three are the same species this tranche keeps producing.
+
+**1. The "no modules discovered" guard is unreachable.** `ALL_COUNT=$(echo "$ALL_MODULES" | wc -l)`
+returns **1** on empty input, because `echo ""` emits a newline. Verified. So `total_count -eq 0`
+never fires — the step that exists to catch broken discovery is inert, one workflow over from where
+the `check-authz-reachability.sh` self-test was added for exactly this. Aggravating factor:
+`tested_count` (from `jq length`) *is* correctly 0, so the second guard covers for the first. **A
+broken check hidden behind a working one is how it survives review** — the symptom is absent, so
+nobody looks.
+
+**2. The exclusion filter silently degrades at two entries.** `grep -v -F "$EXCLUDED_MODULES"` treats
+the space-separated list as one fixed string; with two exclusions it matches nothing and excludes
+neither. Verified. It *is* caught — the `for excl in` loop word-splits fine, so EXCLUDED=2 vs
+TESTED=10 trips the coverage assertion — but with a message describing a coverage gap that does not
+exist. **Caught by the wrong assertion is only marginally better than uncaught**: it aims the next
+debugger at the wrong file. Fix: `grep -v -x -F -f <(printf '%s\n' $EXCLUDED_MODULES)`.
+
+**3. `RUN_COUNT` is computed, printed, never asserted.** The comment claims it guards build-tag
+exclusion; the code echoes it. Reporting-only, inside a blocking job (rule 386) — and it is the exact
+defect #1388 existed to fix. Naive `fail if RUN_COUNT==0` is wrong: `scion-broker-log` has **0** test
+files and would be permanently red. Gave the conditional form: **fail only if `*_test.go` files exist
+AND zero tests ran.** Counts for calibration: broker-log 0, docs-agent 1, slack 1, agent-viz 2,
+fs-watcher 5, discord 11, chat-app 12, teams 13, telegram 16, a2a-bridge 19.
+
+#### RULE 401. An assertion whose terms share one source is a restatement, not a check
+`discovered == tested + excluded` reads as the strongest line in the file and is the weakest: TOTAL,
+TESTED and EXCLUDED all derive from the same `find extras -maxdepth 2`. A module the `find` never saw
+is missing from **all three terms**, so the equation still balances — the assertion cannot detect the
+gap it is named after. All 10 modules sit at depth 2 today (unlimited-depth find agrees), so it is
+correct *now*, which is what makes it durable and wrong. Fix: draw TOTAL from an unlimited-depth find
+while the matrix keeps `-maxdepth 2`. **The test of an assertion is whether it can come out false for
+a reason that is not a typo.** Two numbers from one source can only disagree by arithmetic error.
+
+### Trigger — escalated once more, then I stop asking
+Withdrew the unfiltered push-to-main backstop unprompted: it only catches breakage post-merge and
+earns nothing if the path filter is right. That reduces the ask to a single yes/no, which is the form
+ptone asked for. Sharpened the evidence to the causal chain rather than the principle — last three
+commits touching root `go.mod`/`go.sum` and their extras/ file counts: `392e5e146` (Aug 27) **0**,
+`83ee4bd91` (Aug 26) **0**, `7d171a503` (Aug 22) 256. **Two of three would not have fired a strict
+`extras/**` job, and those are precisely the PRs that stale the brokers.** DEF-44 was caused by root
+dependency drift, not by anyone editing extras/ — rule 394 with receipts.
+
+If the answer is no, I ship `extras/**` as approved and log the blind spot as a defect rather than
+hold the tranche. Gate scope is ptone's call, not mine; my job was to make the cost legible once.
+
+### State
+`upstream/main` `03071382c`. `def44` @ `478374579` ready (DEF-44/45 cleared). `ci-draft` @ `15ccc8f04`
+with four fixes dispatched. Held: DEF-41/42/43.
