@@ -19671,3 +19671,45 @@ before and after — it characterises wiring, it is not defect coverage.
 - **461.** Deleting a dead function can convert live branches in a *surviving*
   callee into dead ones. Reachability is a property of the caller set, so removing
   a caller silently changes the reachability of code you did not touch.
+
+---
+
+## 5dz — 2026-08-29 — Tranche D complete; both branches with ptone
+
+**DEF-42 / PR #1405 fully green.** `b7bc3d497`. Every check passes except
+`cla/google`, the expected agent-branch failure (rule 104). `golangci-lint` — the
+job the gofmt failure lived in — passes at 2m25s; `Build & Test` 4m16s;
+`Full Test Suite (reporting only)` 9m3s. Reported ready to merge.
+
+**D3/D4 accepted at `232dff853`.** d34 took the doc correction cleanly: the
+follow-up commit is `23 0` in `VALIDATION_EXEMPTIONS.md` and touches nothing else,
+so the code numstat is unchanged from the reviewed `6ddc1e5dc`. The new section
+states both unreachable branches with their reasons and names the Tranche G
+obligation. Compare URL sent (1980 runes, under cap after four trims).
+
+Endpoint diff at acceptance, merge-base `af8f6c063`, endpoint == three-dot:
+
+```
+170   0   pkg/hub/validate_attributed_integration_test.go
+ 30   7   pkg/messaging/VALIDATION_EXEMPTIONS.md
+  4  36   pkg/messaging/validate.go
+  1 300   pkg/messaging/validate_test.go
+```
+
+**Tranche D is complete.** All phases are either merged or sitting with ptone as
+compare URLs. Nothing in Tranche D is unassigned or in flight.
+
+chat-admin-lead sent a bare "continue"; I told it there is nothing outstanding
+from me, acknowledged that the crossed-messages incident was my error rather than
+its own, and asked it to park. It is a standing owner dispatched by ptone, so I
+neither direct nor retire it (rule 415).
+
+### Standing state
+
+- `upstream/main` = `af8f6c063`.
+- With ptone: DEF-51 (`4d32ada90`), DEF-42 (`#1405`, `b7bc3d497`, green),
+  D3/D4 (`232dff853`), ci-fix-lead's `#1373`.
+- Parked: `ca-msg-d1`, `ca-msg-def42`, `ca-msg-d34`, `chat-admin-lead`.
+- Unassigned and still needing an owner from ptone: **DEF-50** (gate hardening —
+  `hack/check-authz-reachability.sh:47` uses a comment-blind `grep -q`). Brief
+  item 12 puts that call with ptone, not with me.
