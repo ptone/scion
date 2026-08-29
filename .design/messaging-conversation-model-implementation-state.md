@@ -20117,3 +20117,113 @@ validated-object-built-in-parallel shape in `cmd/`, which was DEF-51's root form
   route to an orphan row, not the orphan row itself. Any failure between create
   and use produces the same artefact — check the whole window, including timeouts
   and cancellation, not just the check you moved.
+
+---
+
+## 5eh — 2026-08-29 22:44-22:55Z — Heartbeat v11; DEF-54 pushed and sent; #1408 to ptone
+
+### Heartbeat refreshed v10 → v11
+
+v10 (`ece62718-a282-40c8-a0cf-4921b5d315e5`) deleted, v11 created as
+`f0e68fa9-f782-40b6-ac95-6a3a76c01b66`, same cron `13,43 * * * *`. Roster confirms only
+one `ca-msg` heartbeat remains. Ledger corrected: Tranche D complete; DEF-42/D3-D4/DEF-51
+struck; DEF-53/54/55 and issue #1374 added; agents reduced; rules 459-470 folded in.
+
+### PR #1408 reviewed, three fixes verified, sent to ptone
+
+Reviewed ci-fix-lead's nightly race job. Not blocking — non-gating by construction
+(`continue-on-error`, schedule-triggered), pinned SHAs, `set -o pipefail`. Raised four items;
+three landed in `c76a250` and **I verified each by reading the file at that SHA, not by
+accepting the claim**:
+
+1. **extras/ gap.** A root `go test ./...` never descends into `extras/`, which are separate
+   modules. A clean nightly would be read as "the repo has no data races". Now stated in the
+   summary (line 55). I preferred the caveat to adding modules — cheaper and more honest.
+2. **`grep -A2` on race reports.** Two lines of context against a two-goroutine-stack report
+   shows the header and nothing actionable. Replaced by a pointer to the artifact (line 46).
+   It had been halfway between inline detail and artifact and served neither.
+3. **`RACES=$(grep -c ... || true)`** yields empty, not 0, when the output file is absent, and
+   `[ "" -gt 0 ]` is a syntax error — reachable because the summary step is `if: always()`.
+   Fixed with `${RACES:-0}` (lines 40-41). Colon form, so it handles empty as well as unset.
+4. **Timeout headroom** deferred to first-run observation. Accepted.
+
+Reported to ptone as a **gate addition = brief item 12 = his call**, with a merge
+recommendation. He had only ever seen this as fork-only #1373.
+
+### DEF-54 accepted, pushed, compare URL sent
+
+Tip `108bf86f962bd7638130db432a7be9a6590234d0`, remote-verified by `git ls-remote` rather
+than trusting the report. 5 files, +365/-8, merge-base `ce283e688` (the corrected base).
+
+**I verified the deadlock claim by hand** — the one error class that hangs CI rather than
+failing it. `getA2ABridgeExternalURL` has exactly one caller, `StartBackgroundServices`,
+which takes `s.mu.Lock()` at 3177 and releases at **3181, thirty-five lines above the call at
+3216**. Safe. `GetDispatcher` is already the house pattern at 30+ sites. The 8 deletions are
+four check-then-use pairs replaced by snapshots; zero assertions deleted, so no successor
+naming owed.
+
+### Exit interview — the strongest of the project, and it found a real defect in its own work
+
+**3(a): a caveat that is referenced rather than repeated does not travel.**
+`TestChannelRegistryRace` carries the full probabilistic caveat; `TestDispatcherRace` says
+"see that test's doc comment for details". A reader who opens only the second test never sees
+it. def54 identified this itself and offered to amend. **Authorised** — comment-only, and the
+compare URL is branch-based so it picks up the new commit without reissue.
+
+Also authorised: a line at the piggybacked `channelRegistry` snapshot recording the hazard
+def54 named in its own answer 2(b) — that the snapshot depends on the `webChatStore` RLock
+above it and must not be separated from it. **It had spotted that hazard and left it only in
+its report to me, which is 3(a) one level up.**
+
+Declined its offer on 3(b): adding `recover()` to a test that cannot panic would mislead in
+the other direction. Structural inconsistency that reflects a real difference is correct.
+
+### Feedback against my own briefing, accepted
+
+- **The base error is partly mine.** I told it to branch off `upstream/main` without checking
+  what remotes it actually had. The part that stays with def54 is the *tell*: it wrote that
+  DEF-42 both added hoists in a function and missed a site in that same function — nearly
+  impossible, and it recorded the contradiction without acting on it.
+- **"Per-file endpoint deletion counts" is ambiguous** and the ambiguity is mine. "Endpoint"
+  meant the endpoint *diff mode* (`git diff main branch`) as against three-dot. def54 read it
+  as possibly meaning API endpoints. Internal vocabulary leaked into a brief.
+- It re-confirmed my dispatcher count (4 bare accesses, 2 functions) was right — worth noting
+  after rule 464, since not every count I gave was wrong.
+
+### Issue #1374 extended
+
+Logged def54's out-of-scope find: `StartBackgroundServices` writes `s.scheduler` at ~3193
+having released `s.mu` at 3181, and `s.scheduler` is read from other goroutines
+(`CleanupResources` calls `.Stop()`). **Different shape from the rest of the tail** — an
+unguarded *write* on the startup path, not an unguarded read against a later setter, so the
+reachability argument differs. A reader seeing the zero value gets a nil-deref, not a torn
+value. Flagged as observation-to-verify, consistent with the issue's framing.
+
+Requested before retirement: an enumeration of the `CleanupResources` bare reads def54
+mentioned but did not report (`messageBrokerProxy`, `notificationDispatcher`,
+`lifecycleHookEvaluator`, the three link services, others). Its reason for withholding was
+sound — shutdown path, different risk profile — but **now is the cheapest moment to capture
+it, while it still has the file loaded**.
+
+### Rules
+
+- **471.** A caveat referenced from a second site rather than repeated at it does not reach
+  the reader, because readers arrive at one site, not the set. "See the other test" is not
+  documentation. Repeat the warning wherever it applies.
+- **472.** Vocabulary borrowed from an internal instrument ("endpoint deletion counts") reads
+  as domain vocabulary to a recipient who does not share the instrument. Name the tool.
+- **473.** An agent that reports a hazard to its coordinator and not to the code has recorded
+  it in the one place that will not be read again. Ask where the finding lives after the
+  agent is gone.
+- **474.** Harvest out-of-scope observations *before* retirement, not after. An agent with the
+  file loaded costs a message; the same finding after retirement costs a fresh audit.
+
+### Standing state
+
+- `upstream/main` = `ce283e688`. **DEF-54** with ptone (compare URL sent), amendment in
+  flight. **#1408** with ptone for the gate decision.
+- Needs an owner from ptone: **DEF-37 + DEF-50** — reminder sent this cycle with the two
+  answers spelled out (owner, and the brief-item-12 authorisation to work whatever reds the
+  comment-blind fix turns up).
+- Open, unstaffed: DEF-53 (Tranche G precondition), DEF-55, issue #1374.
+- Live: `ca-msg-def54` (amending, then retire), `ci-fix-lead`, `chat-admin-lead`.
