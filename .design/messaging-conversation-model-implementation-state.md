@@ -18141,3 +18141,55 @@ to fail, diff the failure SET against baseline; never accept "still red for the 
 `mergeable=MERGEABLE`, `mergeStateStatus=UNSTABLE` — only `Full Test Suite` (inherited) and
 `cla/google` (expected, rule 104) are red. Extras gate fully green.
 **Reported to ptone as ready to merge.** No new compare URL needed; PR updates in place.
+
+### 17:44Z heartbeat — sweep while awaiting merge
+
+**Main advanced TWICE more** during/after verification: `03071382c` → `77390f79e` (#1394) →
+`2ce45c139` (#1396). Both web-only. Re-ran `comm -12` of changed-file lists against my branch:
+**empty both times**. The +804/-434 measurement and the green gate result both still stand. Noted
+that neither commit touches `extras/**` or root `go.mod`/`go.sum`, so they correctly do not
+trigger the new gate.
+
+**C7 park VERIFIED** — `activity: blocked`. Command emitted and confirmed, not just written.
+
+**PR #1398** still OPEN, `mergedAt=null`. `mergeStateStatus=UNKNOWN` (GitHub recomputing after
+base moved). Awaiting ptone.
+
+### STRUCK: #1365
+
+Upstream #1365 ("docs: port messaging design logs from em9-unify and messaging-v2") is now
+**CLOSED**. It had been sitting on my list as "needs closing by ptone". Done — removed from open
+items.
+
+### DEF-43 status corrected — and a trap worth naming
+
+I nearly recorded DEF-43 as fully closed. `ci-fix-lead` reported "PR #1369 / fork issue #1368".
+I checked `GoogleCloudPlatform/scion#1369` — it exists, it is MERGED, and it is
+**"changelog: daily entries through 2026-08-28"**. Entirely unrelated.
+
+The real fix is **`ptone/scion#1369`**, which is **still OPEN**. Fork issue #1368 also still OPEN.
+So DEF-43 is *transferred and fixed-in-draft*, **not closed**, and
+`TestHandleAgentCloudLogs_AgentNotFound` still fails on main — consistent with the Full Test Suite
+red I diffed earlier. Corrected the ledger.
+
+**RULE 409.** PR/issue numbers are per-repository, and in a fork workflow both repos have a #N.
+The failure mode is not a 404 — it is a **different, real, plausible-looking PR** that answers the
+question wrongly with full confidence. Always resolve a bare "#N" from another agent against the
+repo that agent was working in, and confirm by TITLE, never by number alone. This is the
+lagging-mirror hazard in a new costume: the wrong source answers every question.
+
+### DEF-41 / DEF-42 — third heartbeat without movement, stated reason
+
+Both remain ownerless. This is deliberate, not drift: raising them now would split ptone's
+attention during a live landing, and I have a concrete trigger — **raise both immediately after
+#1398 merges**. If they are still ownerless one heartbeat after that merge, that IS drift and I
+should escalate them regardless of what else is in flight.
+
+### Open ledger
+
+Held: DEF-5, DEF-6, DEF-9, DEF-10, DEF-18, DEF-32, DEF-33/35, DEF-34 (blocked on #1259), DEF-12
+(Phase 4, partial), **DEF-41**, **DEF-42**, **DEF-46** (4 send_test.go CI skips), **DEF-47**
+(production `/home/scion` fallback). Tranche H blocked on the omitempty evasion.
+**Transferred, fix OPEN not merged: DEF-43** (ptone/scion#1369, issue #1368).
+Cleared: DEF-44, DEF-45. Struck this sweep: **#1365**.
+Tranche C: C1–C6 merged; **C7 ready to merge, verified green**.
