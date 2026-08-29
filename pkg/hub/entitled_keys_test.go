@@ -85,6 +85,8 @@ func (f *fakeSecretBackendForEntitlement) Resolve(_ context.Context, userID, pro
 	// Simulate Resolve's best-effort behavior: list all secrets, but
 	// silently skip any whose key is in dropOnResolve (as if decryption
 	// failed), and exclude internal secrets (matching localbackend.go:173).
+	// Apply DeduplicateByTarget at the end, matching localbackend.go:293
+	// and gcpbackend.go:455.
 	var result []secret.SecretWithValue
 	for _, secrets := range f.store.secrets {
 		for _, s := range secrets {
@@ -95,13 +97,28 @@ func (f *fakeSecretBackendForEntitlement) Resolve(_ context.Context, userID, pro
 			if f.dropOnResolve[s.Key] {
 				continue // simulates decryptRawValue failure
 			}
+			// Default target to key name when empty, matching
+			// localbackend.go:192-195.
+			target := s.Target
+			if target == "" {
+				target = s.Key
+			}
+			secretType := s.SecretType
+			if secretType == "" {
+				secretType = store.SecretTypeEnvironment
+			}
 			result = append(result, secret.SecretWithValue{
-				SecretMeta: secret.SecretMeta{Name: s.Key},
-				Value:      "value-of-" + s.Key,
+				SecretMeta: secret.SecretMeta{
+					Name:       s.Key,
+					Target:     target,
+					SecretType: secretType,
+					Scope:      s.Scope,
+				},
+				Value: "value-of-" + s.Key,
 			})
 		}
 	}
-	return result, nil
+	return secret.DeduplicateByTarget(result), nil
 }
 
 // Unused SecretBackend methods — satisfy the interface.
@@ -387,5 +404,76 @@ func TestComputeEntitledSecretKeys_EqualsResolvedWhenAllSucceed(t *testing.T) {
 	}
 	if resolvedKeySet["INFRA_KEY"] {
 		t.Error("INFRA_KEY (internal) should be excluded from resolved set")
+	}
+}
+
+// TestComputeEntitledSecretKeys_TargetDedupDivergence pins the intentional
+// divergence between entitlement and resolution on target deduplication (R11).
+//
+// Two secrets with different keys but the same injection target (env var
+// name) and same scope: Resolve() applies DeduplicateByTarget, which keeps
+// one and drops the other. Entitlement does NOT apply that filter because
+// target deduplication is an injection-mechanics concern — two env vars
+// colliding on one name — not an authorization decision. The agent is in
+// scope for both keys, and the fetch-by-key channel has no target collision.
+//
+// This divergence is INTENTIONAL. Do not "fix" it by adding target dedup
+// to computeEntitledSecretKeys or by removing it from Resolve().
+func TestComputeEntitledSecretKeys_TargetDedupDivergence(t *testing.T) {
+	fakeStore := &fakeSecretStoreForEntitlement{
+		secrets: map[string][]store.Secret{
+			"project:proj-1": {
+				{
+					Key:        "DB_PASSWORD_V1",
+					SecretType: store.SecretTypeEnvironment,
+					Target:     "DB_PASSWORD", // same target
+					Scope:      store.ScopeProject,
+				},
+				{
+					Key:        "DB_PASSWORD_V2",
+					SecretType: store.SecretTypeEnvironment,
+					Target:     "DB_PASSWORD", // same target — collides with V1
+					Scope:      store.ScopeProject,
+				},
+			},
+		},
+	}
+	backend := &fakeSecretBackendForEntitlement{
+		hubID:         "hub-1",
+		store:         fakeStore,
+		dropOnResolve: map[string]bool{}, // nothing dropped
+	}
+	agent := &store.Agent{
+		ID:        "agent-1",
+		ProjectID: "proj-1",
+	}
+
+	// Entitlement: both keys present (no target dedup).
+	entitledKeys, err := computeEntitledSecretKeys(context.Background(), backend, fakeStore, nil, agent)
+	if err != nil {
+		t.Fatalf("computeEntitledSecretKeys: %v", err)
+	}
+	sort.Strings(entitledKeys)
+	if len(entitledKeys) != 2 {
+		t.Fatalf("expected 2 entitled keys (no target dedup), got %d: %v", len(entitledKeys), entitledKeys)
+	}
+	if entitledKeys[0] != "DB_PASSWORD_V1" || entitledKeys[1] != "DB_PASSWORD_V2" {
+		t.Fatalf("expected [DB_PASSWORD_V1, DB_PASSWORD_V2], got %v", entitledKeys)
+	}
+
+	// Resolution: DeduplicateByTarget keeps only one (same type, same target, same scope).
+	resolved, resolveErr := backend.Resolve(context.Background(), "", "proj-1", "", nil)
+	if resolveErr != nil {
+		t.Fatalf("Resolve: %v", resolveErr)
+	}
+	if len(resolved) != 1 {
+		t.Fatalf("expected 1 resolved secret (target dedup drops one), got %d: %v", len(resolved), resolved)
+	}
+
+	// Verify the surviving secret is one of the two (which one wins depends
+	// on map iteration order, but exactly one must survive).
+	winner := resolved[0].Name
+	if winner != "DB_PASSWORD_V1" && winner != "DB_PASSWORD_V2" {
+		t.Fatalf("expected winner to be DB_PASSWORD_V1 or DB_PASSWORD_V2, got %q", winner)
 	}
 }

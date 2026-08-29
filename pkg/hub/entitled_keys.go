@@ -55,9 +55,17 @@ func computeEntitledSecretKeys(
 
 	// Scope precedence matches Resolve(): runtime_broker < hub < project < user.
 	// We only need the key names, not values, so we use List (metadata only).
-	// A key that appears in multiple scopes is deduplicated — the merged map
-	// mirrors the merge logic in Resolve(), ensuring the entitled set covers
-	// exactly the keys that Resolve() would have considered.
+	// A key that appears in multiple scopes is deduplicated by KEY name.
+	//
+	// This intentionally diverges from Resolve() in one way: Resolve()
+	// applies DeduplicateByTarget after collecting values, which drops a
+	// secret when two different keys map to the same injection target (env
+	// var name). We do NOT apply that filter here. Target deduplication is
+	// an injection-mechanics concern — two secrets colliding on one env var
+	// — not an authorization decision. The agent is in scope for both keys.
+	// A fetch-by-key channel has no target collision, so there is nothing
+	// for target dedup to resolve.
+	// (See TestComputeEntitledSecretKeys_TargetDedupDivergence for the pin.)
 	merged := make(map[string]struct{})
 
 	type scopeEntry struct {
