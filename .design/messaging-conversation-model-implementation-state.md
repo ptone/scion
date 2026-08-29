@@ -19264,3 +19264,61 @@ rejected outright and prints the CLI help, which is easy to skim past as noise
 rather than read as failure. Resent at 1751. Also note the failed send was
 chained with `;` to the park command, so the park executed while the report had
 not been delivered; a park is not a substitute for confirming the message landed.
+
+## 5dq — DEF-51 fix rejected as specified; DEF-42 test is inert in CI (2026-08-29)
+
+**DEF-51 reachability ACCEPTED, fix REJECTED.** D1's trace is correct and I
+re-verified it on upstream/main `ddba7d5d1`: the @email path has no content
+validation, `ResolveConversation` can Create, the send follows, the row orphans.
+
+D1's "no divergence" claim is wrong in **both** directions. `buildStructuredMessage`
+populates Channel/ThreadID/Attachments from CLI flags; the @email
+`OutboundMessageRequest` sets only Recipient/Msg/Type/Urgent/Metadata and DROPS
+the rest. So a throwaway built that way validates a different envelope than the
+one sent. Measured, not reasoned:
+
+    baseline                  => nil
+    threadid_no_channel       => "thread_id requires channel to be set"
+    empty_msg_with_attachment => nil
+
+1. **False rejection.** `--thread-id` without `--channel` works today (dropped
+   before the wire); the fix makes it a hard error on a field with no effect on
+   the send. Both flags are live. Accidental channel/thread omission is the
+   founding case of this project.
+2. **The one that matters.** Empty msg + `--attach` PASSES the validator (its
+   empty-body rule is waived when attachments are present) but the hub's check
+   is unconditional and the path drops attachments — so the client passes, the
+   hub rejects, and the row still orphans. Reachable: `Args` is
+   `MinimumNArgs(1)` and message is `strings.Join(args[1:], " ")`, so an
+   explicit `""` arg gets through.
+
+DEF-51 came out of DEF-48 being specified per-mechanism rather than per-order;
+the proposed fix would have repeated that exact error one level down.
+
+**Required approach:** construct `outMsg` before the resolve, derive the
+StructuredMessage for validation FROM it, validate, then resolve, then set
+`Metadata["conversation_id"]`. The validated envelope must be the sent envelope
+*by construction* — not two envelopes kept in sync by hand.
+
+**DEF-42 code is correct; its test cannot fail in CI.** Numstat matches the
+report exactly (131/12 over 5 files), merge-base == `ddba7d5d1`, and `server.go`
+is absent from the diff so the `:2408` deadlock site is untouched. All 12
+deletions are 1:1 the unguarded reads, replaced with the reference
+snapshot-under-RLock idiom. But `-race` appears NOWHERE in `.github/workflows/`
+or the Makefile (control: `go test` hits 5 lines). Executed on unmodified
+`ddba7d5d1` with the test dropped on top: **passes without `-race`**. The test
+is green in CI with or without the fix.
+
+### Rules
+
+- **448.** My own working tree can be the stale mirror. `/workspace` sits on this
+  branch's base commit, so `pkg/messaging` did not exist in it and every grep
+  answered plausibly about code that landed months ago. "origin lags" applies to
+  the checkout, not only the remote. Control: a symbol known to be on main must hit.
+- **449.** A reused validator validates the envelope it is GIVEN, not the one that
+  will be sent. Reuse is sound only when the validated object is derived from the
+  sent object by construction; parallel envelopes diverge in both directions at once
+  — false rejection AND missed rejection, from the same mismatch.
+- **450.** A test whose value depends on a flag is inert unless CI supplies the
+  flag. "Fails without the fix" is a claim about the author's local invocation.
+  Verify against the command CI actually runs.
