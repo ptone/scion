@@ -2944,7 +2944,41 @@ and I never applied it to ci-fix-lead, because ptone routed that item directly a
 treat it as a peer-wait I owned. **A wait I did not authorise is still a wait I have to
 sweep.**
 
-Retirement pending its confirmation that nothing is unpushed.
+**CORRECTION 18:47Z — I tried to retire an agent I do not own, and ci-fix-lead pushed
+back correctly.** It is a STANDING owner dispatched by ptone, not a one-shot manager of
+mine. Nothing unpushed (confirmed); it stays active.
+
+**RULE 415. Routing authority is not lifecycle authority.** ptone's "relay not-your CI
+issues to ci-fix-lead" told me where to SEND work. I read it as transferring the agent to
+me. Every agent I have retired in this project (`ca-msg-c7`, `c4`, `c5`, `c6`, `rev1`,
+`dev-review-fixes`, `dev-hub-handlers`) I dispatched myself; ci-fix-lead I did not.
+**The asymmetry is the reason to be strict: under-claiming costs a redundant question,
+over-claiming costs a deleted container holding unrecoverable work.** Default to asking.
+
+**I also declined ci-fix-lead's self-blame, and that matters for the process.** It offered
+"I should have been monitoring for the merge rather than passively waiting." Rejected:
+nothing notifies a waiting agent that its PR merged, so "monitor" means poll, and polling
+is forbidden by our own standing rules. Accepting that self-criticism would have written a
+rule violation into the record as a remedy. **The defect was structural and mine at both
+ends** — no deadline, no fallback owner, because I filed it under "ptone routed this"
+instead of "a wait I must sweep." Offered the concrete fix: it tells me what landing it
+awaits, and I fold that into the heartbeat sweep, which already checks main every cycle.
+
+## 5dc. 2026-08-29 18:47Z — Tranche D ground truth re-verified independently: ZERO DRIFT
+
+ca-msg-d1 checked section 0 against current `upstream/main` before starting, as instructed.
+`upstream/main` still `dbec308cc` (unmoved). All 5 line counts match exactly (182 / 110 /
+763 / 456 / 58). All 8 `ValidateLegacyMessage` call sites confirmed at the documented lines
+with the ordering claim intact: 7 validate-before-attribute, 1 (`cmd/message.go:715-716`)
+attribute-before-validate. Sentinel confirmed at `validate_compat.go:94-97`. Gate confirmed
+watching three handler files at `check-authz-reachability.sh:85-101`.
+
+**This is the check being cheap because it passed, not the check being unnecessary.** The
+plan was measured at a tip that has moved several times a day all week; it happened not to
+move in the 15 minutes between writing and verifying. Keep requiring it — the cost is one
+message and the failure it prevents is a manager building on numbers that silently rotted.
+
+D1 in progress.
 
 ## 5al. 19:43-19:50Z — heartbeat: two expired holds, one dissolved question, one silent CLI failure
 
