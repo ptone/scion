@@ -17278,3 +17278,66 @@ Nothing struck this cycle — three minutes since DEF-37/O-2 went. DEF-44 is one
 sits with C7. DEF-41/42 unchanged and deliberately unstaffed until C7 lands; DEF-42 in particular
 must not be folded into an in-flight PR. Long-held rows (DEF-5/6/9/10/18/32/33/35/34/12, tranche H)
 unmoved for the expected reason: every hand is on C7, which is the last phase of the tranche.
+
+---
+
+## 15:23Z — C7 baseline in. **My briefing was partly wrong and C7 caught it.** DEF-45 opened. Rules 390-391.
+
+C7 confirmed the baseline for the four brokers I had not tested, and **corrected me on one**:
+
+| broker | result |
+|---|---|
+| scion-teams | FAILS, missing go.sum (same shape as discord); `go mod tidy` fixes |
+| scion-telegram | FAILS, `go.mod needs tidy`; fixed |
+| scion-slack | FAILS, same; fixed |
+| scion-discord | FAILS (mine); fixed |
+| **scion-chat-app** | **BUILDS FINE** — contradicts my briefing |
+
+After tidy: teams/telegram/slack/discord tests all pass. chat-app has a separate pre-existing compile
+failure in `internal/identity` (wrong arg count to `NewMapper`, from `407a134`, pre-tranche-C).
+
+### RULE 390. A failure you report without having read its error line is a guess
+I told C7 "every broker module fails." For chat-app I had `head -4` of output that was still printing
+`go: downloading ...` and I recorded a failure without ever seeing a terminal error. The downloads
+were simply in flight. The galling part: I had **already** caught this exact hazard an hour earlier —
+"a sandbox build failure is a network claim until proven otherwise" — and then violated it by
+treating in-progress noise as a result. Knowing the rule and applying it are different acts, and
+truncating output is how you arrange not to apply it. Told C7 plainly that it checked and I did not,
+because an EM that is punished for contradicting the brief stops contradicting the brief, and this
+one was right.
+
+### RULE 391. At a two-sided boundary, holding one side still does not exonerate you
+C7's attribution evidence was "`go.mod`/`go.sum` have zero diff between `6268bac4` and HEAD for every
+broker." Good check, **insufficient conclusion.** The broker's `go.sum` must cover the transitive deps
+of the **root** module it `replace`s. Unchanged broker files + a changed root dependency set yields
+exactly this failure *with* a zero diff on the measured side. So "our files did not change" is fully
+consistent with "we broke it" whenever the other side moved.
+
+The proof that settles it is the one I ran: **build the brokers at `6268bac4` itself.** That exercises
+the composed system at a point before tranche C, instead of testing one input for stability. Passed
+this to C7 as a generalisable form — when a defect lives at a boundary, stability of one side is not
+absence of authorship.
+
+### Ruling: fix chat-app's identity compile error. **DEF-45.**
+Not scope creep — a precondition for C7's CI recommendation to be actionable. If we add an `extras/`
+job while a package there cannot compile, **the job is born red**, and a job born red acquires
+`continue-on-error` within a day. That is precisely the failure this tranche has already produced
+twice (rules 386/387). Refusing to fix it would guarantee the recommendation walks into the trap I
+asked C7 to design against.
+
+Conditions attached: own commit, own DEF number, and **only if mechanically unambiguous**. A wrong arg
+count means a signature moved and a call site did not follow; if the correct value is a judgement call
+rather than something the signature and sibling callers make obvious, C7 stops and asks. **Guessing a
+semantic value to clear a compile error is worse than leaving it red, because it then looks fixed.**
+
+### Also flagged to C7
+"ALL PASS across five modules" is the exact shape that hides an empty run — `go test` prints `ok` when
+a build tag excluded the file or `-run` matched nothing. Asked for proof the tests executed.
+
+### Sequencing set
+DEF-44 (tidy ×5) → DEF-45 (identity compile fix) → docs → CI recommendation, as separate commits in
+that order, so later breakage is attributable to one of them.
+
+### State
+`upstream/main` `03071382c`. C7 running. Held: DEF-41, DEF-42, DEF-43 (CI-owned, one test, suspected
+flaky on the second), **DEF-44**, **DEF-45**.
