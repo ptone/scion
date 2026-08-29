@@ -16185,3 +16185,47 @@ a fleet pattern, not a ca-msg one.
 
 ### Landing order now fixed
 **C6 (#1381) → C4 (#1380) → C5 → C7.**
+
+---
+
+## 12:35Z — #1380 AND #1381 BOTH FULLY GREEN AND READY TO MERGE
+
+### C4 @ `12b6a3fe1` — ACCEPTED (verified, not taken on report)
+- Endpoint vs `b7a415575` matches its three rows exactly (331/18, 791/0, 270/13); merge-base ==
+  `b7a415575`, rebase real. **C4/C6 overlap is EMPTY** — merge order between them is free.
+- `backfillTopicConversations`: IIFE + `defer tx.Rollback()` on both stores, `BeginTx(ctx, nil)`,
+  and `hasConversationsTable()` probe sits **before any transaction opens** — U-TX-1 respected
+  (that was the case that would HANG rather than error at `MaxOpenConns=1`).
+- **Re-ran C4's mutation control myself** rather than trusting "mutation-verified": downgrading
+  `CREATE UNIQUE INDEX` → plain index makes BOTH index tests FAIL; restored → pass. Real guard.
+  The duplicate-insert test asserting `UNIQUE constraint failed` proves the constraint *enforces*,
+  not merely *exists*. Index is declared in two places (DDL :437 and migration :1442) — fresh DBs
+  and migrated DBs both covered.
+- **Checked something C4 did not claim: do the tests RUN in CI?** File carries no build tag while
+  the `pkg/hub` convention for sqlite-dependent tests is `//go:build !no_sqlite`, and CI runs
+  `make test-fast` (`-tags no_sqlite`). Ran under that exact tag with `-v`: both execute and pass.
+  No gap — but the concern was worth settling.
+
+### RULE 366. "ok" from `go test` does not mean a test ran
+A filtered-out `-run` pattern also prints `ok`. When the value of a green result depends on the
+test having executed, confirm execution with `-v`, not the package verdict.
+
+### C5's glob fix @ `982679282` — accepted with ONE residual gap
+Control confirmed: new `handlers_*.go` with `dispatchWithBrokerRetry` and no authz now **rc=1**
+(was rc=0). Header corrected to state file-level coverage honestly.
+Its `managedAgentMessage` false-positive call was **CORRECT** — verified the only production
+caller is `handlers_agent_messaging.go:988` (a covered file) and `handleManagedAgentLifecycle` has
+no `"message"` action. But it silenced the FP by **deleting the symbol** from the pattern set,
+where `\.PublishUserMessage` / `\.PublishBroadcast` already use a leading dot to match calls and
+not declarations. Demonstrated the hole: a new `handlers_*.go` calling `s.managedAgentMessage(...)`
+with no authz → **rc=0**. Fix sent: add `\.managedAgentMessage`; verified the dot matches the
+sneak file (1) and the definition file (0).
+
+### RULE 367. Narrowing the recogniser and deleting the target look equally green
+Only one preserves coverage. Removing a watched symbol to clear a finding is the same move as
+loosening an assertion to clear a test — the gate goes quiet either way, and quiet reads as safe.
+
+### Landing state
+**#1381 (C6)** 10 files +2455/-13 · **#1380 (C4)** 3 files +1392/-31 · both green, disjoint,
+reported to ptone for merge. Retire C4 and C6 on MERGE (rule 336).
+Then: C5 rebases onto main-with-C4 and deletes both store files → C7.
