@@ -16438,3 +16438,90 @@ is a CI job that runs WITH sqlite. Same instruction already given to C5.
 
 Nothing in my tranche is blocked on this. Recorded that several guards built tonight sit in
 excluded files and are therefore local-only protection.
+
+> **CORRECTED 13:08Z — the "185" in question 3 above is WRONG. The figure is 228. See next
+> section.** Left in place rather than silently edited, because the error is the lesson.
+
+### 13:08Z — CORRECTION + trend measurement. **MY NUMBER WAS WRONG.** Rules 372–374.
+
+Coordinator replied that this was not a new finding: the same agent slug escalated it on
+2026-08-28 with "219 files / 3,319 functions / 175 pkg/hub files", ptone decided on a
+reporting-only non-blocking job to size the inventory, and it is in
+`coordinator-conventions.md`. Coordinator then verified against current main that **the job was
+never implemented** — only `make test-fast` exists. Its explanation for 219→185 was "the
+codebase growing."
+
+**That explanation is internally inconsistent and I said so:** files DOWN 219→185 while
+functions UP 3,319→3,540. Growth cannot decrease a file count. Two hypotheses: (a) someone
+stripped tags off 34 files — precisely the remedy I had just prohibited; or (b) the two
+measurements are not commensurable. **Hypothesis (b) was correct, and the incommensurable
+measurement was mine.**
+
+#### MY ERROR
+I produced 185 with `grep -rl --include='*_test.go'` over the **/workspace working tree**. That
+tree is my own branch (`scion/ca-msg-arch`), based on an older main. Wrong *population*, not a
+wrong tool. The 3,540 function count in the same escalation *was* computed correctly, by
+iterating `git ls-tree upstream/main` — so I shipped two figures from two different populations
+in one message and then let them be differenced against a third.
+
+#### RULE 372. A working-tree grep on a feature branch is not a measurement of main
+`/workspace` is never the subject. Any number that will be quoted about the codebase must be
+taken from an explicit ref (`git ls-tree <ref>` / `git show <ref>:<path>`). The tell is that the
+figure moved in a direction the world cannot move in.
+
+#### RULE 373. Two counts taken by different methods cannot be differenced
+The subtraction manufactures a trend out of the method gap. Here it produced a *falling* number
+where the truth is *rising* — the sign was inverted, which is the worst possible failure for a
+number whose only job is to indicate direction. Re-measure BOTH endpoints with one method before
+computing any delta, even when one endpoint is someone else's already-published figure.
+
+#### The like-for-like measurement (one method, both endpoints against main)
+main yesterday = `87a867b77` (2026-08-28 19:17:48 -0400); main today = `eb365a9d3`.
+
+```
+tagged test files yesterday: 226
+tagged test files today:     228
+
+files that LOST the tag:   (none)
+files that GAINED the tag: pkg/hub/authorize_message_test.go
+                           pkg/hub/handlers_agent_message_mode_test.go
+
+excluded / total Test funcs, yesterday: 3504 / 10048  (34%)
+excluded / total Test funcs, today:     3540 / 10269  (34%)
+24h delta: excluded +36, total +221  ->  16% of new tests are CI-invisible
+```
+
+#### Three findings
+1. **No tag-stripping has occurred.** `comm -23` of the two file lists is empty. The prohibited
+   remedy has not been applied anywhere. This was the thing worth ruling out first.
+2. **The correct file count is 228 and the direction is UP.** "219→185" was never real. Neither
+   219 nor 185 should be quoted again.
+3. **The exclusion is a bleed rate, not a static backlog.** 16% of every test written in the last
+   day is invisible to CI. Both newly-excluded files are in `pkg/hub`, and one is
+   `pkg/hub/authorize_message_test.go` — **the authorization guard's own test file does not run
+   in CI.** This is the argument for acting now rather than after tranche C: the percentage is
+   flat at 34% only because the whole suite is growing at the same rate the hole is.
+
+#### RULE 374. A decided remediation with no named owner did not happen
+Coordinator's gap finding is more serious than the finding it explains. ptone made a decision on
+2026-08-28; it was recorded in conventions and never executed, and nothing tracked it. It
+surfaced only because **the same agent slug accidentally rediscovered the underlying issue ~24h
+later** — an accident, not a process. Recording a decision is not assigning it. Every decision
+that survives the conversation it was made in needs a named owner at the moment it is made, or
+the record becomes evidence that it was handled.
+
+This is rule 359 ("rules you write for others apply to you within the hour") in its strongest
+form so far: I re-derived my own escalation, and got a worse number the second time.
+
+#### Handover framing given to coordinator
+- Tell the investigator **explicitly** they are resuming a decided-but-dropped thread, or they
+  will re-litigate the decision instead of executing it.
+- First deliverable is the reporting-only job **ptone already approved**, with an owner attached.
+  Do not let inventory-sizing expand into a remediation design.
+- Carry verbatim: **do not strip `!no_sqlite` tags to make tests run.** The tag is correct; the
+  remedy is a CI job that runs WITH sqlite.
+- Give them the 16%-of-new-tests figure specifically. It reframes a backlog as a leak.
+
+Reported to coordinator and to ptone (including the correction to my own number — a figure I
+gave a human that turned out wrong gets corrected to that human, not just to the record).
+Not taking this into tranche C. Still on the C5 landing gate.
