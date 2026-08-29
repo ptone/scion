@@ -17062,3 +17062,59 @@ reconcile is worth a line even when the cause turns out to be nothing.
   that is a section boundary.
 - Roster: `ca-msg-c5` + child `dev-review-fixes` active on R-9. No peer-waits outstanding.
 - Ledger unchanged: DEF-41, DEF-42 held. C7 gated on C5 landing.
+
+---
+
+## 14:45Z — Heartbeat. C5 stalled and was recovered; R-9 still in flight. #1388's job paid off. Rule 386.
+
+### C5 stall — recovered
+`ca-msg-c5` was flagged **stalled mid-Bash at 14:20**, ~1 min after receiving R-9. Container up,
+child `dev-review-fixes` showed `activity=completed` at 14:01 — so R-1..R-8 had finished cleanly and
+the stall landed on *pickup* of the new item, not on unfinished work. That distinction is what made
+the nudge safe: nothing was half-done.
+
+Nudged at 14:20 with the R-9 scope restated verbatim and an explicit **"resuming you, not re-scoping
+you"** (rule 63's hazard — an open-ended ping to a stalled or parked agent reads as licence to
+restart). Re-stated the two things that make R-9 real rather than cosmetic: the `IncFallback()`
+omission on the failure branch *is* the fix, and verification must be **untagged**. Also asked it to
+name any blocker rather than retry silently, since a silent retry loop is what a stall usually is.
+
+Recovery confirmed: `lastActivityEvent` 14:40, `activity=executing`. Branch still `3efdc8372` — 24
+min with no push for a 3-line change is slower than I would like, but the untagged `pkg/hub` suite
+alone is ~325s and a rebase is now required, so it is not yet evidence of a second stall. **Watch
+item: if the tip has not moved by the next heartbeat, that is a real failure, not slowness.**
+
+### Main moved a lot: `77c6aa5e7` → `2ce6e1149`, eight commits
+#1383, #1387, #1384, #1385, #1386, #1389, **#1392, #1393**. Re-ran the overlap check against C5's 17
+files: **empty**. Rebase still clean despite eight commits landing — C5's surface is messaging
+handlers and none of these touch them.
+
+### #1388 is already earning: the CI item can be closed as watched
+Two of those eight are the direct consequence of the reporting-only full-suite job I escalated for:
+- **#1392** — `pipefail` in the test step, because **the job was reporting a real exit code as
+  success.** The step piped output, so the shell returned the *last* command's status, not the test
+  binary's.
+- **#1393** — fixes the failures the job then actually surfaced.
+
+#### RULE 386. A reporting-only job that cannot fail is indistinguishable from one with nothing to report
+#1388 landed a job whose entire purpose was to answer "how many tests fail today?" and for four days
+it answered "none" — not because none failed, but because a pipe swallowed the status. This is the
+vacuous-pass family again (367/371/380/384), and note the shape: **`continue-on-error: true` made the
+job's greenness unremarkable, so nobody looked at it.** A job that is allowed to fail and never does
+deserves *more* suspicion than a blocking one, not less, because no one is watching it. My own
+tracked item was "watch the artifact for its first output" — the correct item was "positive-control
+the job before trusting its first output." I would have read that first green as good news.
+
+Closing my watch item: the answer to "if `make test` ran today, how many FAIL?" is being produced and
+acted on by the CI workstream (`ct-dev`/`ci-fix-lead`), not by me.
+
+### Ledger sweep — nothing struck this heartbeat, and why
+DEF-37 + O-2 strike on C5 merging, which is one item away. DEF-41/DEF-42 are held deliberately:
+DEF-42 (two `s.webChatStore` locking conventions in one package) is a cross-cutting sweep that must
+not be folded into a PR under review. Everything else (DEF-5/6/9/10/18/32/33/35/34/12, tranche H) is
+unmoved and unstaffed — correctly, since every hand is on C5 and C7 is gated behind it.
+
+### State
+- `upstream/main` **`2ce6e1149`**. #1391 @ `3efdc8372`, held on R-9 only, rebase verified clean.
+- ptone asked twice, was given the deferral argument, and chose to **wait** ("doesn't sound like the
+  fix is too much"). Report goes out when R-9 is landed and re-verified — not before.
