@@ -17404,3 +17404,53 @@ Trimmed to 1917.
 ### State
 `upstream/main` `03071382c`. C7 continues DEF-44, DEF-45 and docs while the gate decision is out —
 deliberately not blocked on it. Held: DEF-41/42/43/44/45. Status set to `ask_user`.
+
+---
+
+## 15:37Z — **Gate APPROVED: blocking `extras` job, path-filtered.** One refinement out with ptone. Rule 394.
+
+ptone: *"approve blocking but should only run for PRs that have changes to extras"*.
+
+Approved shape passed to C7: blocking (not `continue-on-error`), path-filtered, matrix **derived by
+discovery** (ten modules, not five), per module `go build` + `go test -count=1` + `go mod tidy` &
+`git diff --exit-code`, plus the coverage assertion.
+
+### RULE 394. A path filter encodes an assumption about where breakage originates
+Pushed back **once**, on evidence rather than preference, because a literal `extras/**` filter would
+not have caught the bug that motivated the whole job:
+
+- The brokers broke on missing `go.sum` entries for `cloud.google.com/go/run/apiv2` and friends —
+  deps of **`pkg/runtime`**, reached through the `replace` onto the root tree.
+- **No file under `extras/` changed.** C7's zero-diff finding proves it directly.
+- So the PR that broke them touched only root code, and an `extras/**` filter would have skipped the
+  job on exactly that PR. *That is how they stayed broken since 27 Aug.*
+
+The general shape is worth more than the instance: **for a module with a `replace` onto its parent
+tree, the dependency edge points the opposite way from the intuitive path filter.** Filters are
+written from "who is editing this code", but breakage arrives from "whose code this depends on".
+Whenever those differ, the filter is wrong by construction and its wrongness is invisible — the job
+simply does not run and reports nothing at all, which reads as absence of a problem.
+
+Proposed, still narrow: `extras/**` **+ root `go.mod`/`go.sum`**. Most PRs touch neither, so the tax
+ptone refused stays refused; a normal code-only PR still skips entirely. Plus the same job
+**unfiltered on push to main** as a backstop for the residual case (a root PR that newly *reaches* an
+existing dep without changing `go.mod`) — cannot block, but bounds discovery to one merge instead of
+weeks. Loud failure, not `continue-on-error`.
+
+Framed to ptone as a yes/no on two additions with an explicit "if you'd rather keep it strictly
+`extras/**`, say so and I'll ship that" — the gate is theirs and the refinement must not read as
+relitigating the decision. Told C7 to draft the wider variant and structure the workflow so the
+trigger block is the only thing that changes, so either answer is a deletion rather than a rewrite.
+**Not waiting on the answer to proceed.**
+
+### Also required of the draft
+The honest cost in the comments, in plain words: when this gate blocks, the remedy is `go mod tidy` in
+the named module, and nobody unfamiliar with the layout will guess that. `make tidy-extras`, referenced
+**from the failure output itself**. A blocking gate whose remedy is not obvious from its failure
+message is how a team learns to route around the gate — which converts a gate into a delay, the worst
+of both.
+
+### State
+`upstream/main` `03071382c`. C7 on DEF-44, DEF-45, docs, and the workflow draft (not to be committed
+to a mergeable branch until the trigger is settled). Status `ask_user` on the trigger scope.
+Held: DEF-41/42/43/44/45.
