@@ -2863,6 +2863,52 @@ until G" question to ptone, withdrawn). **DEF-48 NEW** → D2. DEF-37's marker g
 unimplemented rather than "tracked" → D3. **DEF-42 (`webChatStore` locking) remains the
 one genuinely ownerless item** — `pkg/hub`, not D's surface.
 
+## 5da. 2026-08-29 18:40-18:45Z — MY ERROR: escalated a phantom. Right measurements, wrong cause.
+
+**ca-msg-d1 dispatched, started, and reported STALLED with no output.** I diagnosed it as a
+provisioning failure and escalated to chat-admin-lead. **The cause was mine.** The harness
+does not auto-start a newly dispatched agent — it stays idle until first messaged. I
+created d1, started it, parked myself, and waited for a report it was never going to send.
+My liveness probe is what woke it. It is working now.
+
+**This is in heartbeat item 2, in my own words: "the harness does not auto-start agents: a
+newly dispatched agent stays idle until messaged."** I wrote that rule and walked past it.
+Every previous manager dispatch in this project worked because I happened to message them
+straight away; this is the first time I dispatched and immediately parked.
+
+**RULE 412. Dispatch is not two steps (create, start) but three (create, start, message).
+An agent that has never received a message has never run.** Add the first message to the
+dispatch action itself, not as a follow-up — the follow-up is the step that gets skipped
+when you park in between.
+
+**RULE 413. The only red thing in view is not thereby the cause.** The escalation was not
+built on sloppiness — I had a reproducible error (identical on two starts), a precise
+failing command (`sciontool harness provision`), and two negative controls (`ah-rev`,
+`ci-fix-lead`, zero occurrences each). Every check was sound and the conclusion was still
+wrong, because I never asked the prior question: *is this symptom explained by something I
+did?* Controls establish that an anomaly is real. They say nothing about whether it is
+connected to the symptom you are chasing. Anomaly-real and anomaly-responsible are
+independent, and confirming the first feels exactly like confirming the second.
+
+**The tell I should have caught:** the stall message was `"was working: Agent started"` —
+i.e. it stalled *at* start having produced nothing, which is the signature of an agent that
+never received input, not of one whose credentials failed mid-flight. A credential failure
+would more likely surface as a harness error, not silence.
+
+**Cost:** chat-admin-lead had already relayed the escalation onward before my withdrawal
+landed. Sent a second message asking them to chase the correction so nobody burns time on
+a phantom. Withdrawing promptly was the one part I got right — I had pre-committed in the
+escalation itself to withdraw if the probe answered, which made retraction automatic rather
+than a decision I had to talk myself into. **Pre-committing to the falsifier is worth
+doing precisely because it removes the ego from the retraction.**
+
+**Genuinely open, non-blocking:** the hook failure is real and unexplained. `sciontool
+harness provision --manifest $HOME/.scion/harness/manifest.json` exits 1 on every d1 start;
+two controls show zero. Startup continues past it and d1 functions, so it is noise. Left
+with provisioning owners at normal priority. Possible relation to `7d171a503` (default
+harness config claude → antigravity, #1252, landed today) — unverified, and I did not go
+editing harness manifests to find out.
+
 ## 5al. 19:43-19:50Z — heartbeat: two expired holds, one dissolved question, one silent CLI failure
 
 **Roster:** em6 active on DEF-12, em10 blocked on its own sub-agents (normal), em9 idle after
