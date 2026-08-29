@@ -15049,3 +15049,23 @@ not the primary use case; the value is in the shape.
 
 `ca-msg-arch` (me), `ca-msg-c4`, `ca-msg-c5`, `ca-msg-c6`. em6, em9, em10 all retired on landing
 per rule 331. Heartbeat is `bba9dcb2` (v8), cron `13,43 * * * *`.
+
+---
+
+## 2026-08-29 10:37Z — C1 opened; C2 and C3 sent
+
+ptone opened C1 and clarified the protocol: *"small piles are fine on compare urls. that is why we
+have a dedicated thread for them."* I had been serialising them, which was over-applying the
+one-thing-at-a-time rule — that rule governs **open questions needing a decision**, not artefacts
+delivered to a dedicated channel. **Rule 333: serialisation is a courtesy owed to decisions, not to
+deliverables. A dedicated channel exists precisely so its contents can queue.**
+
+C2 sent (1282 chars encoded). C3 sent (1707) after two trims — first draft 2260, second 2070, both
+over the 2000-rune cap. Encoding roughly triples prose, so a compare-URL body has an effective
+budget of about 600 raw characters once the base URL and title are counted.
+
+**Landing order between C2 and C3 is unconstrained.** They share the `pkg/messaging` directory but
+no file: C2 touches `backfill_test.go`, which C3 explicitly skipped, and C3's 17 files are untouched
+by C2. Either can merge first.
+
+All three wave-1 phases are now with the sponsor. Wave 2 (c4, c5, c6) is in flight.
