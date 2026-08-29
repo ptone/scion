@@ -3058,6 +3058,56 @@ restated by me as a proof-by-enumeration that no path can deliver an empty ID wh
 holds, written into the commit message so the inertness is documented as deliberate rather
 than rediscovered later as a bug. Sentinel deletion and split stay.
 
+## 5de. 2026-08-29 19:10-19:16Z — D1 ACCEPTED and SENT. Two defects filed: DEF-49, DEF-50.
+
+**D1 rework verified** @ `e86b23fa9`. All four false "Now it is live" comments gone from all
+three handler files (grep count 0 in each). Site 2's tautological guard removed with an
+accurate replacement. Commit-message enumeration correct. **Compare URL SENT** to thread
+`1532864101909528737` (1626 chars, title+body URL-encoded, `quick_pull=1`).
+
+**DEF-49 FILED AND ESCALATED — security, Tranche G precondition.** Confirmed D1's report
+independently rather than accepting it: `authorize_message.go` has **zero** ConversationID
+references; all **seven** `isDMParticipant` call sites are in `handlers_chat_v2.go`, none on
+the agent messaging path. So at `handlers_agent_messaging.go:889-897` a caller-supplied
+`conversation_id` from the request body is persisted with no membership check; the
+`GetConversation` lookup sets `lookupFailed` but neither rejects nor clears.
+- **Not impersonation** — B5 holds, sender is still forced from the authenticated caller.
+- **Latent today** — reads filter on conversation_id only when `ConversationReadSwitch()` is
+  on; I read the accessor and it returns false for both a missing settings section and a
+  parse error, so it **fails closed**.
+- **Arms at Tranche G** — the read path resolves the *reader's own* DM conversation and
+  filters on it, so a planted message surfaces inside a DM its sender was never party to.
+  Violates AC-INGRESS-1. **The defect and the feature that exploits it arrive together.**
+- Joins DEF-32 as a G precondition. Asked ptone: fix in D or separate owner.
+
+**DEF-50 FILED — the reachability gate cannot tell prose from code.**
+`check-authz-reachability.sh:47` is `grep -q "$symbol" "$file"` — a bare substring search
+over the whole file. I mutated D1's branch, replacing the real `ValidateAttributed` CALL
+with a different name and leaving comments intact: **gate stayed GREEN.** Deleting all
+occurrences including comments turns it red (exit 1), so the gate detects absence of the
+STRING, not absence of the CALL.
+
+**The two occurrences holding it green were both inside the comment D1 wrote explaining why
+site 2 needs no check — including the line "the file-level gate sees ValidateAttributed from
+site 1." The comment explaining that the gate is satisfied elsewhere is itself what
+satisfied the gate.**
+
+**RULE 419. A grep gate proves a string exists in a file. It does not prove a call exists,
+and prose about the gate satisfies the gate.** To demonstrate such a gate is load-bearing,
+remove ONLY the enforcing construct and leave the prose. Removing the whole block — the
+natural test, and what D1 did — shows the gate notices a missing *block*, which is a weaker
+claim that looks identical.
+
+**Scope of DEF-50 is wider than D1.** The same helper backs the `authorizeAgentMessage` gate
+at line 173 — the one enforcing that no messaging path reaches send without authorization.
+**Deliberately NOT fixed in D1:** making the helper comment-blind could turn several gates
+red at once, and per rule 407 each red would then need investigating as a possible real gap
+rather than tuned away. That is gate-shape change, brief item 12, not the changing team's
+call. Separate item.
+
+**Landed D1 anyway** — the weakness is pre-existing and D1 does not worsen it. Blocking a
+genuine improvement on a defect it inherited would be the wrong trade.
+
 ## 5al. 19:43-19:50Z — heartbeat: two expired holds, one dissolved question, one silent CLI failure
 
 **Roster:** em6 active on DEF-12, em10 blocked on its own sub-agents (normal), em9 idle after
