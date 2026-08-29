@@ -20309,3 +20309,61 @@ allowlist-diff design DEF-37 had proposed (which was itself the comment-blind pa
   dispatch — clone instructions sent), `ci-fix-lead`, `chat-admin-lead`.
 - With ptone: **DEF-54** compare URL, **#1408** gate decision.
 - Open, unstaffed: DEF-53, DEF-55, issue #1374.
+
+---
+
+## 5ej — 2026-08-29 23:03-23:06Z — #1408 MERGED (DEF-52 struck); base moved mid-brief
+
+### DEF-52 STRUCK
+
+**PR #1408 merged at 22:57:23Z** as `fa7ae19141b01e9dd70bc5ebc7a5d61dd03d1314`.
+`upstream/main` = `fa7ae1914`. The nightly race job is live: `go test -race` on a 06:00 cron,
+`continue-on-error`, artifact retained 30 days, with the scope caveat and the root-module-only
+qualifier both present.
+
+Consequence for **DEF-54** (still with ptone, no PR opened yet): its three regression tests
+stop being inert once both land. `TestPluginManagerRace` was `-race`-only and therefore dead
+in CI until this merge. Branch is based on `ce283e688`, one behind, and the delta is CI-only —
+**no rebase needed**, and GitHub's compare is three-dot so the PR renders correctly regardless.
+
+### MY ERROR — a pinned SHA in a brief has a shelf life
+
+I wrote "that SHA must be `ce283e688`" into def3750's setup instructions. #1408 merged about
+four minutes later. The agent cloned, got `fa7ae1914`, and reported a mismatch against an
+expectation that had already expired.
+
+**def3750 handled it correctly and deserves the credit**: it reported the mismatch, named the
+intervening commit, assessed that it touched neither `hack/` nor the handlers, and *proposed*
+staying on true HEAD rather than acting unilaterally. The two other paths available to it were
+both worse — silently resetting backwards to match my number, or stopping dead.
+
+- **479.** A pinned expected SHA in a brief expires in minutes on an active repo. Write
+  "confirm your base and report the SHA", not "the SHA must equal X". An equality check
+  against a stale constant invites the agent to move *backwards* to satisfy it, which is the
+  one outcome worse than being out of date.
+
+Instruction updated: base is `upstream/main` HEAD whatever its SHA, reported in the pre-push
+report so I check the delta myself.
+
+### Design-before-code gate set for def3750
+
+Told it to read three files completely — `check-authz-reachability.sh`,
+`checksecuritymarkergates/main.go`, `check-security-marker-gates.sh` (for how the Go checker
+is driven from a shell wrapper) — and **send me its proposed design before writing code**.
+Agreeing the shape beforehand is cheaper than reviewing a built thing, especially where the
+deliverable is itself a security gate.
+
+### Mount fault escalated
+
+Coordinator confirmed the handling, recorded the pattern in `coordinator-conventions.md`, and
+escalated both platform questions to ptone: whether a container that fails to mount a
+shared-plain workspace should fail loudly at startup rather than present an empty directory
+(empty and unmounted are indistinguishable from inside), and whether standing guidance should
+forbid cloning into `/workspace` under shared-plain regardless of apparent emptiness.
+
+### Standing state
+
+- `upstream/main` = **`fa7ae1914`**. **DEF-52 STRUCK.**
+- With ptone: **DEF-54** compare URL (no PR opened yet).
+- Live: `ca-msg-def3750` (reading, design due before code), `ci-fix-lead`, `chat-admin-lead`.
+- Open, unstaffed: DEF-53, DEF-55, issue #1374.
