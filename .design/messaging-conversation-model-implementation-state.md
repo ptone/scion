@@ -19356,3 +19356,48 @@ led to checking the invocation.
   CI runs and confirm the test can fail under *that*. Build tags and required
   flags both break the link, and both leave a passing test behind — the failure
   mode is silent in the direction that looks like success.
+
+## 5ds — DEF-51 accepted; DEF-42 verified end-to-end; DEF-52 owned (2026-08-29)
+
+**DEF-51 ACCEPTED.** `origin/scion/ca-msg-d51` @ `be2f25098`, merge-base
+`ddba7d5d1`. numstat 34/13 in `cmd/message.go`, 96/0 in
+`cmd/message_convref_test.go` — the 96/**0** matters: D1 appended to #1402's
+test file rather than rewriting it, so nothing that landed there was replaced
+(rule 431). All 13 deletions justified: 6 comment lines plus the 7-line `outMsg`
+literal relocated above the resolve. The deleted comment was DEF-48's
+per-mechanism reasoning, i.e. the exact wrong rule that produced DEF-51.
+
+Verified by execution on unmodified `ddba7d5d1` with D1's test file dropped on
+top: `EmptyMsgBeforeResolve` **FAILS**, `ThreadIDWithoutChannel` passes. No
+build tag on the file and all five pass under `go test -tags no_sqlite ./cmd/`,
+so they run in test-fast and genuinely gate — checked because of rule 451, one
+review after learning it.
+
+Two things I checked that D1 did not report. (a) The probe's `Sender` is the
+bare `SCION_AGENT_NAME`, not the `agent:`-prefixed identity the @agent path
+uses; I ran both shapes through `ValidateLegacyMessage` and both pass, so no
+false rejection. Not a defect, but an unreported divergence. (b)
+`ThreadIDWithoutChannel` is green **both before and after** the fix — it only
+reddens under the `buildStructuredMessage` variant. It is a guard against a
+specific wrong implementation, not a test of the defect, and must not be
+described as covering DEF-51.
+
+**DEF-42 verified end-to-end and compare URL sent.** Final numstat 142/12 over 5
+files, re-run by me. Under `-race`: unfixed main + test => DATA RACE at
+`handlers_chat.go:47`; fixed tip => `ok 4.838s`. The force-push between my two
+runs added 11 lines, all comments, zero deletions — confirmed by filtering
+non-comment changed lines to empty, so the earlier clean result carried rather
+than being assumed to.
+
+**DEF-52 OWNED.** ptone assigned it to ci-fix-lead as a nightly *reporting* job;
+ci-fix-lead dispatched ct-dev-4, fork issue ptone/scion#1372. Briefed with four
+traps: no `no_sqlite` tag, timeout budget, `continue-on-error` making a green
+badge mean nothing, and baseline-inventory-before-regression. Catalogue, do not
+fix.
+
+### Rule
+
+- **452.** A test that is green before and after the fix is a guard against a
+  wrong implementation, not coverage of the defect. Both are worth having and
+  they are not interchangeable — count only the red-before-green one as
+  discharging the acceptance criterion.
