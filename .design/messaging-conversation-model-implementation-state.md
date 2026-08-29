@@ -16782,3 +16782,67 @@ layer, you own enumerating who else that layer serves.
 - Retired: `ca-msg-c4`, `ca-msg-rev1`, `ca-msg-c6`. Live: me, `ca-msg-c5`, `dev-hub-handlers`,
   `coordinator`, `ci-fix-lead` (not mine).
 - Ledger: **DEF-41** held. CI tag-exclusion **remediation shipped (#1388)** — inventory pending.
+
+---
+
+## 13:45Z — HEARTBEAT v8. main GREEN-PATH RESTORED (#1390). C5 told to rebase. **Rule 380.**
+
+### main `03977e41d` -> **`77c6aa5e7`** — *"fix: gofmt formatting in handlers_agent_message_mode.go (#1382) (#1390)"*
+The blocker I escalated at 13:26Z is fixed, ~15 minutes after escalation. Whole-tree `gofmt -l .`
+on main returns empty. CI in progress at time of writing; the specific failing step is resolved.
+
+#### RULE 380. `gofmt -l` exits 0 whether or not it finds anything
+My first check was `gofmt -l /tmp/m.go >/dev/null 2>&1 && echo 'STILL UNFORMATTED'` — which prints
+`STILL UNFORMATTED` **unconditionally**, because the exit status carries no information. It duly
+told me main was still broken after it had been fixed. Caught it only because the answer
+contradicted a commit whose subject said the opposite.
+
+Correct form is to test the OUTPUT, not the status: `out=$(gofmt -l x); [ -z "$out" ]`. Then
+positive-control it (rule 61) — I ran the same check against a deliberately malformed file and
+confirmed it can produce a non-empty result. **An empty result from a tool is worthless until you
+have shown the tool can produce a non-empty one.** This is rule 61 again, and it is the third
+measurement error I have made in one session (cf. 372, 373, and the stale-fetch near-miss at 377).
+The pattern across all four is identical: **I trusted an instrument's output without establishing
+that the instrument was pointed at the right thing or capable of disagreeing with me.**
+
+### C5: "do not rebase" WITHDRAWN
+The instruction was conditional on main being red and I said so when I gave it, but a conditional
+instruction whose condition has expired is just a wrong instruction until it is retracted. Told C5
+to rebase onto `77c6aa5e7`+ and to report: new SHA, re-run numstat (I expect **zero movement** —
+#1390 touches `handlers_agent_message_mode.go`, which is not among C5's 16 files, so any movement
+is information), `gofmt -l .` empty on its own tree, #1382's hunks still intact, suites re-run.
+Explicitly told it to **stop and report on a conflict rather than resolve one**, because I expect
+none and a conflict would therefore be a finding.
+
+Rationale for rebasing before the PR opens rather than after: a branch that is already green when
+it opens gets reviewed; one that opens red gets triaged first.
+
+### #1388's job is live
+`.github/workflows/ci.yml:130` — **"Full Test Suite (reporting only)"**, `continue-on-error: true`,
+uploads artifact `full-test-suite-results`. Currently executing on main for the first time. Its
+first output answers the question I handed to the investigation: *if a `make test` job were added
+today, how many FAIL?* Watch for the artifact; do not draw conclusions before it completes.
+
+### Roster / peer-waits (rule 63)
+| agent | state | assessment |
+|---|---|---|
+| `ca-msg-c5` | blocked 2m | correctly parked; now un-parked by the rebase instruction |
+| `dev-hub-handlers` | completed 1h | **C5's child, not mine.** Finished, idle. Deliberately NOT reaching past C5 to its own child. Retires when C5 merges. Keeping it until then is not cross-phase repurposing — it holds the right context for review feedback on the phase it built. |
+| `ci-fix-lead` | running 29m | not mine; shipped #1388 |
+No circular waits. Nobody is waiting on me.
+
+### Ledger sweep — **no strikes, and the honest reason**
+Heartbeat item 8 says to walk every row expecting to strike one. I cannot, and manufacturing one
+would be worse than reporting none. Every held row (DEF-5, 6, 9, 10, 18, 33/35, 12) is gated on
+**C5/C7 landing**, not on drift or neglect — they are unreachable until the code they concern is
+on main. DEF-32 needs its own tranche (the `(issuer,subject) -> user_id` link table). DEF-34 is
+blocked on #1259, not on me. DEF-37 + O-2 are implemented in C5 and strike when C5 lands. DEF-41
+is one heartbeat old. Tranche H remains blocked on the `omitempty` evasion.
+**The single lever that moves the most rows is landing C5**, which is now waiting on ptone opening
+the PR — not on any agent.
+
+### State
+- `upstream/main` **`77c6aa5e7`**, gofmt clean, CI in progress. Last confirmed green `981d27367`.
+- C5 `da878ac1c` — gate passed, compare URL sent, **rebasing onto 77c6aa5e7**. PR not yet opened.
+- Escalation CLOSED: main-red/gofmt (#1390). Escalation CLOSED: CI tag-exclusion remediation (#1388).
+- C7 gated on C5 landing (fresh agent).
