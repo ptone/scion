@@ -14531,3 +14531,116 @@ Offered to coordinate the file handoff with ma-em directly.
 - **317.** Eight copies of a literal are eight chances for the ninth to differ. When a guard is being
   relaxed for a set of call sites, ask what distinguishes them from the site that has not been written yet
   — and if the answer is a literal, gate on the literal.
+
+---
+
+# §6 — PAUSED BY SPONSOR 2026-08-29 03:02Z. READ THIS SECTION FIRST ON WAKE.
+
+ptone, verbatim: *"ok. your option c, widen narrowly. we will let the chat auth modes go first.
+no need to coordinate. just pause. cancel heartbeats and block. i will wake you after the other
+workstream lands on main."*
+
+## 6.1 State at pause
+
+- **OQ1 is RULED: Option C.** Tranche C is unblocked *in design*, blocked *in sequence*.
+- **auth-refactor (`msg-authz-design-notes.md`, ma-em) goes first** and must land on main before I resume.
+- **Do NOT contact ma-em or the auth-refactor lead.** ptone explicitly withdrew the coordination
+  offer: *"no need to coordinate."* Do not re-open it on wake.
+- **Heartbeat `7f4e3aa6-c224-4394-9809-81e59596d570` (`ca-msg-impl-heartbeat-v7`, cron `13,43 * * * *`)
+  is PAUSED**, verified `status=paused`. Resume with `scion schedule resume <full-uuid>` on wake.
+- Managers **em6, em9, em10 all parked** and verified. No agent is doing work for me.
+- `upstream/main` at pause = **`a7ac9c489`**. `scion/ca-msg-arch` = **`907316f34`** (pushed).
+
+### Near-miss worth remembering (rule 318)
+When cancelling heartbeats I found exactly ONE pending one-shot schedule, `ec76ba59` — *"in 8 minutes"*.
+It was **not mine**. Payload: `{"agentName":"auth-refactor-lead", ...}`. Cancelling the only pending
+item would have decapitated the very workstream ptone had just told me to let run first. My heartbeat
+was a **recurring** schedule in a separate section of `scion schedule list` output. **Left `ec76ba59`
+untouched.**
+
+## 6.2 The Option C specification (implement on wake, do not re-litigate)
+
+Target: `hack/check-conversation-upsert-guard.sh`.
+
+**Change exactly one of the five watched surfaces — surface 4, raw SQL.** Today surface 4 permits
+`INSERT INTO conversations` only under `pkg/store/`. Add a narrow exemption:
+
+> `pkg/hub/webchannel_store.go` and `pkg/hub/webchannel_store_postgres.go` may carry a raw
+> `INSERT INTO conversations` **only when that statement mints `kind='group'`**.
+
+**Unchanged and still fully barred in `pkg/hub`:** surface 1 `UpsertConversationByExternalRef`,
+2a `CreateConversation`, 2b `AddParticipant`, 3 `.Conversation.Create()`. The exemption is for raw
+SQL only. This is the point of C — `AddParticipant` in particular stays watched.
+
+**Implementation note (non-obvious, cost me a read):** the guard is line-oriented, but the `kind`
+literal is **not on the INSERT line**. House style puts the column list on the INSERT line and the
+literal on the next:
+
+```
+`INSERT INTO conversations (id, project_id, kind, surface, external_ref, ...)
+ VALUES (?, ?, 'group', 'native', '', '', ?, 'active', ?, ?)`,
+```
+
+So the exemption test must read the INSERT line **plus a small following window** (`grep -A3` or
+equivalent) and require `'group'` within the statement. A single-line test cannot express Option C.
+Both dialects must pass: sqlite uses `?`, postgres uses `$1..$5` and `NOW()`.
+
+**Header must be amended** to record the exemption, why it exists (atomic topic+conversation
+dual-write inside an explicit `tx`; the store methods take `ctx` not `tx`, so routing through
+`pkg/store` needs a tx-carrying method), and its limitation: **defeated by a non-literal kind.**
+That limitation already falls inside the header's existing LIMITATIONS class — say so, do not
+pretend it is new or that it is covered.
+
+**Acceptance criterion — the negative test is the whole point.** A guard self-test must assert that
+adding a raw `INSERT INTO conversations ... 'direct' ...` to one of the two exempted files **still
+exits 1**. Without that test the exemption is unverified and C buys nothing over Option A. Also
+assert the eight existing `'group'` sites exit 0, and that an `AddParticipant` call added to either
+exempted file still exits 1.
+
+**Follow-up to file, not to do now:** Option B (tx-carrying store method, then move all eight sites
+into `pkg/store`) remains the destination. C is the safe intermediate, not the end state.
+
+## 6.3 What MUST be re-verified on wake — main will have moved a long way
+
+Do not resume from any number recorded above §6. The auth-refactor lands a new `authorizeAgentMessage`
+choke point and converts four ingresses to it.
+
+1. **Re-derive the M-MOD manifest from scratch** against the new main. The current count of **43** is
+   dead the moment auth-refactor lands. **Three-dot (`main...branch`) for file-set enumeration as well
+   as for diffs** — rule 294; two-dot reports main's advances as branch changes.
+2. **Three M-MOD rows are directly in their blast radius**: `handlers_chat_v2.go` (147),
+   `handlers_agent_messaging.go` (204), `messagebroker` (95). Expect these to be substantially
+   rewritten on main. Port by hunk from main's copy — never file-copy (Ruling A-2).
+3. **Re-check THE PROHIBITION LIST against the new main.** auth-refactor may have moved, renamed or
+   absorbed functions on it (`authenticatedSender`, the `ActionAttach` checks, and the B5 test set are
+   the likely movers). A prohibited item that got *renamed* still must not be lost.
+4. **Re-read `checkPostResolutionAuth`.** Their §5 makes DM-participation/topic-read *"necessary but
+   no longer sufficient."* The `case "group"` arm's comment ("authorised by project membership") is
+   the assumption my whole OQ1 analysis rests on. If D2's project-coarse `agent.message` changed what
+   project membership means, **re-verify before implementing C**, because C's safety argument depends
+   on group access never consulting the participant table.
+5. **Re-confirm the eight INSERT sites still number eight** and still all say `'group'`.
+
+## 6.4 Outstanding items carried into the pause
+
+- **Two compare URLs sent, PRs never opened** — design-docs (`scion/ca-msg-design-docs` @ `1e6b0d2ec`)
+  and gate-rows (`scion/ca-msg-em10-marker-gate-2` @ `164ab2224`). Both verified green at the time;
+  **both will need re-verification against the new main before opening.**
+- **#1365 to be closed by ptone** (project logs, superseded).
+- **DEF-36** (new, §5ge): the eight topic mints never populate the participant listing index.
+  Not security. Independent of the C ruling. Still unowned.
+- **DEF-32** identity-linking decision still required before S4, off the C path.
+- Held ledger unchanged: DEF-5, DEF-6, DEF-9, DEF-10, DEF-18, DEF-33/35, DEF-34 (blocked on #1259),
+  DEF-12 → Phase 4. Tranche H blocked on the `omitempty` evasion.
+- **§2.6.3 of the primary design doc is still OPEN** and shipped that way, deliberately (rule 306).
+
+## 6.5 New rules
+
+- **318.** Before cancelling "my" schedules, check ownership field-by-field. Heartbeats live in two
+  different lists (one-shot vs recurring) and the only *pending* item may belong to another agent.
+  A cleanup instruction scoped to yourself is not a licence to cancel the singular thing you find.
+- **319.** A pause instruction is a handoff to your future self with no shared context. Write the
+  ruling, the spec, and the re-verification list *before* signalling blocked — not the narrative of
+  how you got there.
+- **320.** When a sponsor rules in your favour, stop arguing and stop enriching. Record the ruling as
+  given, note the follow-up you owe, and go quiet.
