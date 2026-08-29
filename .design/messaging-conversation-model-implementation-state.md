@@ -14057,3 +14057,10 @@ It is still right for the **semi-careful** case, and that is the one that matter
 **Rule 280.** Generated code must be regenerated across a merge, never merged. Two generation runs splice into a file that is internally inconsistent and belongs to neither side. `go generate` is the resolution, and the diff it produces is the proof.
 **Rule 281.** Git conflicts are per-file; semantic breakage is per-program. A caller and its callee evolving apart in different files merge silently and always cleanly. The compiler catches this only when the signature changed — when both sides kept the signature and changed the meaning, nothing catches it but a guard or a test.
 **Rule 282.** An error that makes the situation SAFER than reported is still an error, and must be corrected with the same urgency as one that makes it worse. Overstated danger spends the reader's trust just as fast as understated danger.
+
+### §5fv addendum — send rejected again at 2066 runes
+Second time this has happened. Composed at 2143, trimmed to 2066, sent, **rejected** — the CLI printed its help text and delivered nothing. Resent at 1956, delivered.
+
+The failure mode is that trimming *feels* like it fixed the problem, so the check gets skipped on the second pass. Both times I measured before the first attempt and not before the retry.
+
+**Rule 283.** Re-measure after every edit to a length-capped message, not just before the first send. A trim that lands at 2066 is indistinguishable from one that lands at 1956 until you count, and the rejection is silent-ish — it prints help text, which reads like a usage error rather than a non-delivery.
