@@ -14425,3 +14425,109 @@ No report sent — not a section boundary, and the standing instruction is escal
 ### New rule
 
 - **313.** `taskSummary` is self-reported prose with no write trigger, so it can overstate progress *or* claim work never started. Prefer observable evidence — file mtime, branch tip, roster `activity` — and when you must ask, use a forced choice and then verify the answer against an artefact.
+
+---
+
+## §5ge — OQ1 investigated to ground truth; my escalation was overstated (2026-08-29 02:47–02:54Z)
+
+ptone: *"i need to understand better the intent of the guard and what this change risks"*, then
+*"also any risk of working on this in parallel with .../auth-refactor/reports/msg-authz-design-notes.md"*.
+
+### What #1339 actually protects
+
+`ef90b53bf` has an **empty commit body** — the script header is the entire rationale.
+Property: *"no conversation row is minted outside `pkg/messaging/` and `pkg/store/`."* Five enumerated
+surfaces: `UpsertConversationByExternalRef`, `CreateConversation`, `AddParticipant`, `.Conversation.Create()`,
+raw `INSERT INTO conversations`. The header is explicitly candid that the guard is textual/line-oriented
+and that a green gate "is not a proof that no mint path exists."
+
+### The eight sites, read (not inferred)
+
+`pkg/hub/webchannel_store.go` @ 740, 960, 1501, 2117 and `webchannel_store_postgres.go` @ 368, 572, 1102, 1600.
+Functions: `CreateTopic`, `EnsureGeneralTopic`, unlinked-topic backfill, `PromoteDMToTopic`.
+**All eight mint an identical shape** — verified by extracting the VALUES clause from all 8:
+
+```
+kind='group', surface='native', external_ref='', parent_ref='', drift_state='active'
+```
+
+**None of the eight writes `conversation_participants`.** Confirmed: zero hits for
+`conversation_participants|AddParticipant|EnsureParticipant` in either file on em9.
+
+### MY ERROR — the escalation implied a live hole; there is none
+
+I escalated OQ1 reasoning from the guard header's closing note ("the default fallback for unknown
+conversation kinds uses `requireParticipant`, making the participant table an ACL"). I did not read the
+gate. `upstream/main:pkg/messaging/resolve.go:225` `checkPostResolutionAuth`:
+
+- `case "direct"` → parses `ExternalRef` as a DM key, fails closed. (DEF-29 lives here.)
+- `case "group"` → **`return nil`**. Comment: *"authorised by project membership … No additional
+  participant check needed — agents must be able to post in rooms they have never spoken in."*
+- `default:` → `requireParticipant`.
+
+So at `kind='group'`: the empty participant set is **not** an open ACL (that arm never consults the
+table), and the empty `external_ref` is **inert** (only the `direct` arm reads it).
+**The eight sites as written are not a security defect.** Corrected to ptone in message 1 of 3.
+
+### The risk that IS real — the ninth site
+
+1. `kind` is a **bare string literal in eight places**. Nothing structural prevents a ninth from writing
+   `'direct'` with `external_ref=''` — literally DEF-29, which main fixed in this same area. The guard is
+   the control that catches that class.
+2. A file-scoped exemption would land in the two largest, most actively-edited files in the change.
+3. Schema drift: the conversations column list is now hand-duplicated 8× across two SQL dialects.
+
+### Option B is more expensive than it looks
+
+All eight sit **inside an explicit `tx`** performing an atomic topic+conversation dual-write
+(INVARIANT U-TX-1). The `pkg/store` conversation methods take a `ctx`, not a `tx`. Routing through the
+store therefore requires a **transaction-carrying variant of the store method** — a store-interface
+change. Per rule 299 that mechanical delta must not ride inside the semantic port.
+
+### Options put to ptone (awaiting ruling)
+
+- **A** — allowlist the two files. Cheap; leaves risks 1–2 live.
+- **B** — store-layer route. Correct destination, needs the tx-carrying method first.
+- **C (recommended)** — permit raw conversation INSERT in those two files **only on lines also carrying
+  `kind='group'`**; keep `AddParticipant`/`CreateConversation` fully barred there. Keeps the DEF-29 class
+  gated, unblocks C, one extra grep. File B as follow-up.
+
+### DEF-36 (NEW ledger row) — topic mints never populate the listing index
+
+Independent of the OQ1 ruling. The participant table is the **listing index** (index-vs-authority split).
+Eight mint paths that never write it can leave topics correctly *accessible* but absent from
+participant-derived *listings*. Not a security bug. Must be tracked whichever option is chosen.
+
+### Parallel-work risk vs `auth-refactor/msg-authz-design-notes.md` (368 lines, FINAL, ma-em implementing)
+
+**Collides:**
+1. **Files.** Their phase 3 converts chat v2 / broadcast / broker inbound to `authorizeAgentMessage` —
+   `handlers_chat_v2.go` (147), `handlers_agent_messaging.go` (204), `messagebroker` (95): three of my
+   heaviest M-MOD rows. Textual conflict near-certain.
+2. **Gate, different layer — the dangerous one.** Their §5: chat v2 DM participation / topic read becomes
+   *"necessary but no longer sufficient."* That is `checkPostResolutionAuth`. Concurrent edits to two
+   authz layers fail by **silent check-drop during merge resolution**, not by conflict marker.
+3. Their D2 makes the user grant project-coarse and drops the `agent.attach` dependency; my `group` arm
+   authorizes by project membership. Not a contradiction, but that comment must be re-read, not assumed.
+
+**Does not collide:** theirs gates the **edge** (who may send to whom); mine gates the **object** (what a
+reference resolves to, and whether the row's ACL basis is well-formed). They compose. No schema overlap —
+`message_mode` on the agent record vs `conversations`/`conversation_participants`.
+
+**Recommendation sent:** sequence, do not parallelize. Their design is ratified, mine has an open
+decision, and my port is by-hunk anyway — rebasing onto their choke point is the cheap direction.
+Offered to coordinate the file handoff with ma-em directly.
+
+### New rules
+
+- **314.** A guard's header can claim a broader property than the code enforces. Before declaring a hole,
+  read the **gate**, not the guard's prose. I escalated OQ1 as a possible security question on the
+  strength of a comment; the actual `case "group"` arm returns nil and never consults the table.
+- **315.** "Route it through the proper layer" is only a call-site swap if the call sites are not inside a
+  transaction. Check tx-scope before costing that option — a `ctx`-taking store method cannot join a
+  caller's `tx`.
+- **316.** Two teams editing two authorization layers in the same files do not get a conflict marker; they
+  get a check silently dropped in a merge resolution. Sequence the work; do not rely on review to catch it.
+- **317.** Eight copies of a literal are eight chances for the ninth to differ. When a guard is being
+  relaxed for a set of call sites, ask what distinguishes them from the site that has not been written yet
+  — and if the answer is a literal, gate on the literal.
