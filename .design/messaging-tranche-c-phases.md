@@ -111,15 +111,26 @@ file counts. Only the size estimates moved.
 
 1. **Rebase on `upstream/main` before you start and before you push.** Never merge main into your
    branch; never push `main`. Be careful not to revert other people's work (standing sponsor order).
-2. **Three-dot for everything** — `main...branch` — for diffs *and* for file-set enumeration.
-   Two-dot reports main's own advances as your changes (rule 294).
+2. **Use the ENDPOINT diff for construction work: `git diff main branch -- <path>`** (rule 324).
+   Three-dot (`main...branch`) answers "what does this PR contain" and is correct only when the
+   branch is *rebased on current main*. Our source branches are not — their merge base is
+   `6268bac4`, which predates tranche A. On a stale base, three-dot compares merge-base→branch and
+   therefore reports **`-0` deletions on nearly every row**, which is how this port read as "safely
+   additive" across two reports and a design doc while actually deleting 4,316 lines. A
+   near-universal `-0` deletion column is a **measurement smell**, not a safety property (rule 325):
+   real ports delete something. Two-dot (`main..branch`) answers a question nobody asked.
+   Likewise, **`--diff-filter=A` under three-dot means "added since merge-base", NOT "absent from
+   main"** — the only correct absence test is `git cat-file -e upstream/main:<path>` (rule 322).
 3. **Port M-MOD by hunk from main's current copy. Never file-copy.** (Ruling A-2.) Our source
    branches predate #1371; copying a file wholesale silently reverts the auth work. A branch that
    predates a fix does not delete it — it simply lacks it, and only the diff against main shows the
    loss (rule 296).
-4. **The additive invariant.** On any file that already exists on main, prefer ADD-only. Verify:
-   `git diff --numstat main...HEAD -- <existing files> | awk '$2 > 0'` — investigate every hit.
-   Deletions are allowed only where you can name the line and justify it.
+4. **The additive invariant, measured at the endpoint.** On any file that already exists on main,
+   prefer ADD-only. Verify with the endpoint diff, never three-dot:
+   `git diff --numstat upstream/main HEAD -- <existing files> | awk '$2 > 0'` — investigate every
+   hit. Deletions are allowed only where you can name the line and justify it. **Every phase reports
+   per-file endpoint deletion counts before pushing, with line-by-line justification for each
+   deletion. A deletion you cannot name is a revert you have not noticed.**
 5. **THE PROHIBITION LIST must survive.** Re-check it against main *as it is now*; #1371 may have
    moved or renamed members. A renamed prohibited item still must not be lost.
 6. **Do not carry `scion/messaging-v2`'s `fanOutToProject`/`fanOutGlobal` hunks** — they predate B5
@@ -208,3 +219,44 @@ removed; a reference omitted no longer silently sends to the wrong place.
 - **Tranche H** remains blocked on the verified `omitempty` evasion in G-1's regression test.
 - **Option B** (tx-carrying store method; move the eight sites into `pkg/store`) is the destination.
   C1 is the safe intermediate, not the end state. File it, do not do it now.
+
+---
+
+## 4. Reviewer directive — catching risky replace actions
+
+Binding on every reviewer of a tranche-C phase branch. CI cannot catch this class; only a reviewer
+can. The failure mode is a **silent revert**: a branch built from a source that predates a fix
+carries an older copy of a file, and overwriting main's newer copy removes the fix. It does not
+appear as a conflict, and in review it does not look like a deletion — it looks like a normal edit.
+
+**1. Measure at the endpoint, not with three-dot.**
+Review the branch with `git diff upstream/main <branch>`. Three-dot (`main...branch`) is correct
+only for a branch rebased on current main; on a stale base it silently reports `-0` deletions
+almost everywhere. If a large port shows a near-universal zero deletion column, **you are holding
+the wrong measurement** — real ports delete something (rules 324/325).
+
+**2. Require the deletion report, and check it against the diff yourself.**
+Each phase must arrive with per-file endpoint deletion counts and a line-by-line justification for
+every deleted line. Re-run the numstat and confirm the counts match the report. A deletion the
+author cannot name is a revert they have not noticed. Reject the branch rather than accept
+"regeneration churn" as a blanket explanation — **localise deletions to specific files first**;
+a new entity fails loudly, a modified aggregate file reverts silently.
+
+**3. A file "add" that overwrites a newer file is the most dangerous shape here.**
+`--diff-filter=A` under three-dot means "added since merge-base", **not** "absent from main". The
+only valid absence test is `git cat-file -e upstream/main:<path>`. Any path the author calls new
+that already exists on main is a wholesale overwrite: it must be ported **by hunk**, never copied
+(Ruling A-2).
+
+**4. Verify the prohibition list survives, by content.**
+Squash-merge blinds ancestry, so `git cherry` and patch-id matching are useless here. Check by
+distinctive identifier: confirm each protected item still appears on the branch at a count no lower
+than main's. Three items are **not** gateable by identifier counting and require review by
+attention: `EnsureParticipant`'s `left_at` preservation, the `direct` non-empty `external_ref`
+predicate, and the P2 commit series.
+
+**5. Security-relevant invariants a reviewer must not let through.**
+Sender identity is always derived from the authenticated caller, never the request body (G-1).
+Self-skip is by `SenderID`, never the display `Sender` label (B5/R1). Parse failure on a DM key
+denies — no fallback, no repair, no "best effort" — because the key *is* the ACL. Under-granting is
+recoverable; over-granting is not.

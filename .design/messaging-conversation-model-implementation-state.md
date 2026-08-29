@@ -14814,3 +14814,83 @@ Doc corrected in two passes: `44d43286c` (bug 1), `592b0457e` (bug 2).
 - **328.** Your own earlier artefact can be more correct than your later one. The construction spec
   written a day earlier survived scrutiny that the fresh re-derivation failed. Recency is not
   authority (cf. rule 304).
+
+---
+
+## 2026-08-29 10:20Z — Heartbeat: C1 ACCEPTED; brief corrected; reviewer directive added
+
+### C1 accepted (first tranche-C phase landed on a branch)
+
+`scion/ca-msg-em10-marker-gate-2` @ `ee952174051f824eb64db91f2c8d55b601569f4a`, based on
+`upstream/main` @ `8b09c118f`. Note the branch name is reused — its previous tip `164ab2224`
+was squash-merged as #1366, so ancestry is blind here (rule 289) and the endpoint diff is the
+only honest measure.
+
+**Verified independently, not accepted on report:**
+
+| Check | Result |
+|---|---|
+| Endpoint diff vs `upstream/main` | `+50/−7` guard script, `+126/−0` new test — **matches em10's report exactly** |
+| Guard on branch | `no violations`, rc=0 |
+| Negative test suite | **6/6 pass**, including 3 rejection controls (rule 61 satisfied) |
+| Files touched outside `hack/` | none |
+
+The implementation is Option C as ruled: the exemption keys on the **literal** `'group'` in a
+3-line window after the INSERT, scoped to the two webchannel paths by exact match. `kind='direct'`
+is rejected; a variable `kind` is rejected; `AddParticipant` and surfaces 1/2a/3 remain fully
+barred in `pkg/hub`. Rule 317 is satisfied — the guard gates on the literal that distinguishes the
+eight known sites from the ninth not yet written. The header documents the textual limitation
+rather than overclaiming, which is what rule 314 asks for.
+
+C4's C1 dependency is **clear**. C4 still waits on C2.
+
+### Standing brief corrected — items 2 and 4
+
+Item 2 said **"Three-dot for everything."** That is the instruction that produced the 4,316-line
+measurement error, sitting in the brief I hand every EM. Replaced with rule 324 (endpoint diff for
+construction work off a stale base), rule 325 (a near-universal `-0` deletion column is a smell),
+and rule 322 (`--diff-filter=A` ≠ absent from main). Item 4's verification command was still
+three-dot; now endpoint, and it carries the per-file deletion-report requirement explicitly.
+
+*This is the second time a doc of mine outlived the ruling that invalidated it.* Cf. rule 328 —
+recency is not authority. **New rule 329: when a ruling invalidates a method, grep your own
+standing instructions for the old method the same hour. A correction that lands only in the
+post-mortem is not a correction; it is a record of one.*
+
+### Reviewer directive (sponsor-directed)
+
+ptone, 10:17Z: *"this can also be a included directive for code reviewers. this will be another
+place to catch risky replace actions."* Added as **§4 of `.design/messaging-tranche-c-phases.md`** —
+five points: endpoint measurement, deletion report checked against the diff, file-"add" overwrite
+as the most dangerous shape, prohibition-list verification by content (cherry/patch-id are blind),
+and the five security invariants a reviewer must not let through. Rationale: CI cannot catch a
+silent revert, because a stale file that lacks a fix is textually valid and conflict-free.
+
+**Not yet done:** proposing the equivalent line for `.github/PULL_REQUEST_TEMPLATE.md` (currently
+5 lines, generic, repo-wide). That template affects every contributor, so it goes to ptone as a
+proposal rather than a unilateral edit.
+
+### Heartbeat replaced: v6 payload → v8
+
+The old schedule `7f4e3aa6` was **named v7 but carried v6 text** — a mismatch that would mislead a
+recovering instance about which rules it holds. There is no `schedule update` subcommand, so:
+created `bba9dcb2-c868-4557-8ffa-1d270a6af6ba` (`ca-msg-impl-heartbeat-v8`, cron `13,43 * * * *`)
+**first**, verified active, then deleted the old. Never uncovered. New §5 carries rule 324/325/322;
+new §5b carries the reviewer directive; §8's held list is refreshed.
+
+### Ledger sweep
+
+- **DEF-26, DEF-31, ci-guard** — confirmed on main by distinctive-identifier content check. Struck.
+- **DEF-12** — resolved to a definite state at last: **partially landed.** `cursor-based` appears on
+  main (4 files) and on `ca-msg-em6-def12` (6); `same-timestamp` is **0 on main, 2 on the branch**.
+  So main has the cursor work and lacks the same-timestamp fix. The branch `74bcb24c9` is hugely
+  stale (380 files, `+39865/−69564` endpoint) and must not be merged as-is — the residual fix is
+  worth porting by hunk, not the branch. Stays held for Phase 4, now with a known remainder rather
+  than an unknown one.
+- No row struck this heartbeat beyond the three above; DEF-5/6/9/10 have not moved in two
+  heartbeats because every EM is on the tranche-C critical path and none of those rows are on it.
+
+### Roster
+
+`ca-msg-em10` **done (C1)**. `ca-msg-em9` (C2) and `ca-msg-em6` (C3) executing; no branches yet,
+dispatched ~10:05Z. C3's stated dependency on C2 was disproved earlier — types only.
