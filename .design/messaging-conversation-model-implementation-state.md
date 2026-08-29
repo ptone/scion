@@ -19322,3 +19322,37 @@ is green in CI with or without the fix.
 - **450.** A test whose value depends on a flag is inert unless CI supplies the
   flag. "Fails without the fix" is a claim about the author's local invocation.
   Verify against the command CI actually runs.
+
+## 5dr — DEF-52 filed; DEF-42 accepted (2026-08-29)
+
+**DEF-52 (NEW, OWNERLESS — escalated to sponsor).** CI passes `-race` nowhere:
+not in `.github/workflows/`, not in the Makefile. Swept and controlled. The
+consequence is repo-wide, not DEF-42-specific: **no concurrency test written in
+this repo can currently fail in CI.** Every green we have read as evidence about
+concurrency has never been that.
+
+Deliberately NOT bundled into DEF-42, and DEF-42 told explicitly not to add a
+job — adding or re-pointing a gate is not the changing team's call (brief item
+12). Escalated to ptone as a decision about OWNER, not about shape. Realistic
+shapes are a separate job, nightly, or `pkg/hub`-only, because the full suite is
+already 30m and `-race` is slow. Nothing is blocked on it.
+
+**DEF-42 ACCEPTED.** Re-verified after the requested change: numstat 142/12 over
+5 files (I re-ran it, matches def42's report), merge-base `ddba7d5d1`,
+`server.go` absent so `:2408` untouched. The test now carries an explicit
+WARNING comment naming the `-race` invocation and stating that CI does not gate
+on it. That is the right resolution: the test keeps its diagnostic value and
+stops implying coverage it does not have.
+
+Sequence that produced the finding: the report said "fails without fix, passes
+with fix." Both halves were true locally and neither was true of the command
+that gates the merge. I only caught it because I checked the build tag, which
+led to checking the invocation.
+
+### Rule
+
+- **451.** A regression test's gate value is a property of the CI invocation, not
+  of the test. Before accepting "fails without the fix," find the exact command
+  CI runs and confirm the test can fail under *that*. Build tags and required
+  flags both break the link, and both leave a passing test behind — the failure
+  mode is silent in the direction that looks like success.
