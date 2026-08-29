@@ -53,6 +53,48 @@ diff status. Corrected figures:
 **The shape of the work is the opposite of what the earlier numbers implied: far more modification,
 far less addition.** M-MOD is ported by hunk and is the harder mode. Budget accordingly.
 
+### SECOND CORRECTION, 10:16Z — use the ENDPOINT diff, not three-dot, for sizing
+
+Three-dot was also the wrong tool for *sizing* this work, and it failed in the most dangerous
+possible direction. `git diff main...branch` compares the **merge-base** to the branch. Our sources
+branch from `6268bac4`, before tranche A. So three-dot reports what the branch did since the stone
+age — including re-adding files main has since acquired — and it reported **`-0` deletions on
+essentially every row.** That is what made the port keep looking safely additive.
+
+`pkg/messaging/resolve_test.go`: three-dot says **+1413/−0**. The endpoint diff says **+19/−24**.
+
+**For a construction job off a stale branch, the right measure is the endpoint tree diff** —
+`git diff upstream/main origin/<branch> -- <path>` — which answers "how do these two trees differ
+right now." Corrected totals over the 107 non-ent candidates:
+
+| Measure | Three-dot (wrong) | Endpoint (correct) |
+|---|---|---|
+| Rows with a real delta | 107 | **96** (11 are already identical to main) |
+| Added lines | 3,509 | **5,287** |
+| **Deleted lines** | **~0** | **4,316** |
+
+**Those 4,316 lines are the silent-revert surface, and the worst rows are prohibition-list items:**
+
+| File | Endpoint | Why it matters |
+|---|---|---|
+| `pkg/hub/handlers_agent_messaging_test.go` | +344 **−761** | the B5 test functions |
+| `pkg/store/entadapter/conversation_store_test.go` | +20 **−657** | |
+| `pkg/hub/handlers_agent_messaging.go` | +274 **−274** | the B5 client-supplied-sender fix lives here |
+| `pkg/messages/dm_key_test.go` | +21 **−154** | DM-key canonicality rejection |
+| `pkg/hub/route_metadata.go` | +18 **−153** | prohibition list |
+| `pkg/hub/chat_notifications_test.go` | +1 **−152** | 3 B5 functions |
+| `hack/check-conversation-upsert-guard.sh` | +27 **−147** | **the guard itself** |
+| `pkg/store/models.go` | +31 **−122** | also a #1371 collision file |
+| `pkg/store/store.go` | +5 **−97** | |
+
+**`hack/check-conversation-upsert-guard.sh` at −147 is the sharpest trap in the tranche.** The source
+branches predate PR#1339 entirely, so their copy is the pre-guard file. Anyone who ports that path
+from a source branch deletes the guard while appearing to "port tranche C." **C1 must be built from
+main's copy and from nothing else.**
+
+**Standing instruction: every phase reports its endpoint deletion count per file before pushing, and
+justifies each one line by line.** A deletion you cannot name is a revert you have not noticed.
+
 `pkg/hub` alone holds **47 M-MOD rows / 1,996 added lines**, of which 37 are test files and ~20 are
 `newTestStore`-only. The substantive hub set is roughly 27 files, split between C4 (the two
 `webchannel_store` files) and C5 (the rest). **C5 is therefore larger than a first read of §2
