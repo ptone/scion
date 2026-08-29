@@ -15159,3 +15159,72 @@ unreported), `ca-msg-c6` (`scion/ca-msg-c6-cli` @ `968244015`, unreported). Both
 exist but neither has reported; not reviewing unreported branches. `scion list --format json`
 returned no `taskSummary` this cycle — the field came back empty for all four agents, so item 9's
 instrument was unavailable and I used branch tips instead.
+
+---
+
+## 2026-08-29 10:52Z — DEF-39: fail-open in the C1 guard, found by probing a review note
+
+`coordinator` relayed Gemini findings on #1372 (C1) and #1373 (C2), both now open upstream.
+
+### DEF-39 (new, HIGH) — the Option C exemption fails open
+
+Gemini reported that the guard mishandles single-line INSERTs. True, and I reproduced it — but it
+fails **closed** (a legitimate single-line `kind='group'` is rejected). Cosmetic.
+
+Probing around it found the real defect. The exemption scans the **3 lines after** the INSERT line
+for the literal `'group'` and never checks that the literal belongs to the statement it matched.
+Constructed and confirmed:
+
+| Case | Result |
+|---|---|
+| A. single-line `kind='group'` | rc=1 — wrongly rejected (**fails closed**, cosmetic) |
+| B. single-line `kind='direct'`, bare word `group` nearby | rc=1 — correctly rejected |
+| C. multi-line `kind='direct'`, quoted `'group'` within next 3 lines | **rc=0 — WRONGLY EXEMPTED** |
+
+C is a fail-open on the one mint the guard most exists to stop: a `direct` conversation in
+`pkg/hub`, whose `external_ref` **is** its ACL. Stated precisely — **this is a hole in a guard, not
+a live vulnerability.** No `kind='direct'` INSERT exists in `pkg/hub` today, so nothing is
+exploitable now; the guard simply would not reliably catch the violation it was built for.
+
+**This is a failure of my acceptance of C1, not only of C1.** I verified 6/6 negative tests
+*including three rejection controls* and treated that as strong evidence — rule 61 satisfied on its
+face. But every one of those controls placed the kind literal in the statement's own VALUES line.
+None used a decoy literal in the window.
+
+**Rule 338: a negative test proves the guard rejects the violations its author imagined. Positive
+controls confirm the test can fail; they do not confirm the test space was well chosen. When
+accepting a guard, ask what shape of violation the tests do NOT construct — and build one.** The
+three controls I leaned on were all the same shape, which is precisely why they agreed.
+
+**Rule 339: a reviewer reporting a fail-closed bug is describing the edge of the logic. Probe the
+same edge in the other direction before accepting the severity offered.** Gemini's cosmetic finding
+and my security finding are the same window logic seen from two sides.
+
+### #1373 (C2) — missing unit tests, confirmed
+
+`CountUnbackfilledMessages` shipped with none. Assigned with specific cases, the load-bearing one
+being that project scoping actually filters: the implementation calls `query.Where(...)` without
+reassigning, which is correct for ent and matches 12 sibling call sites, but breaks silently under
+refactor and the failure mode is a **scope leak counting other projects' rows**. The test must fail
+if the predicate stops applying.
+
+### Ownership
+
+`ca-msg-rev1` started and briefed — owns review responses on **both** PRs until merge, force-pushing
+to the existing branches so the PRs stay open. Told to report Task 1 (the guard) separately rather
+than batching, since it is a security-guard hole under an open PR.
+
+**Rule 336 vindicated twice in one hour.** em10 and em9 were both retired at acceptance, so neither
+PR had an owner when review landed. Retire on merge.
+
+### DEF-38 ownership relayed
+
+Told `coordinator` the marker-gate blocker is owned by c5, not awaiting a decision, and that the six
+failing rows are **stale expectations rather than missing protection** — verified against main.
+Other PRs queued behind those rows should clear when c5 lands. Also corrected an assumption in their
+note: rebasing alone will not clear gofmt fallout for a branch carrying its own unformatted files,
+as C3 did.
+
+### Ledger
+
+DEF-36 (c4) · DEF-37, DEF-38 (c5) · **DEF-39 (rev1, HIGH)** · DEF-12 (Phase 4) · DEF-5/6/9/10 held.
