@@ -14986,3 +14986,66 @@ one-command verification possible at all. Awaiting his call.
 
 Also confirmed: **no PR-template change** — ptone declined, so the reviewer directive stays in the
 phases doc only.
+
+---
+
+## 2026-08-29 10:35Z — C3 fix verified; wave 2 dispatched; C1 sent for PR
+
+### C3 final — `a98231bb`, ACCEPTED
+
+17 files, **+5198 −2**, base is current main, `.design/project-log/c3-messaging-library.md` absent
+(verified with `git cat-file -e`, not by reading the diff). em6 volunteered the +8 discrepancy
+against my predicted +5190 and attributed it correctly to the `VALIDATION_EXEMPTIONS.md` rewording
+before I asked. Deletions unchanged and still localised to the two justified lines.
+
+### C1 sent for upstream PR
+
+ptone: *"if c1 landed is it ready for upstream PR?"* — yes. Compare URL sent to thread
+`1532864101909528737`, 1531 chars encoded, `quick_pull=1`, title and body URL-encoded per protocol.
+C2 and C3 are ready and held back deliberately so the three do not arrive as a pile.
+
+The split strategy is effectively confirmed: C1/C2/C3 land individually now, C4–C7 go to the
+integration branch for the beta hub exercise. The load-bearing reason is not tidiness — landing the
+plumbing keeps every later phase's base current, which is the only thing that makes the
+one-command endpoint verification meaningful.
+
+### Wave 2 dispatched — three fresh EMs, one per phase
+
+`ca-msg-c4` (webchat dual-write), `ca-msg-c5` (handler wiring), `ca-msg-c6` (CLI contract). All
+briefed off the **corrected** standing brief. C5 and C6 both depend only on C3, so they run in
+parallel. C7 waits on C5.
+
+C5 got the sharpest brief: it is the risk concentrate, all four #1371-collision files are in it, and
+its criteria include the prohibition-list counts and the requirement that `authorizeAgentMessage`
+be **called, not bypassed**. DEF-37's marker gate is assigned to it.
+
+### A live specimen of the C6 defect, produced by accident
+
+Sending C6 its brief printed:
+
+```
+Warning: @email does not match any agent in this project; skipping mention
+```
+
+The CLI parsed an at-token in my prose as a mention, failed to resolve it, and continued. The brief
+arrived intact. Then — and this is the part worth keeping — my **addendum quoting that warning
+triggered it again**, because the only at-token in the addendum was inside the quoted warning text.
+The parser does not distinguish an addressee from prose, or from a quoted diagnostic about itself.
+
+Harmless here, but it is precisely the shape the project exists to fix: an addressing decision
+**degraded silently** rather than failing loudly, and the exit code stayed 0.
+
+**Rule 332: a warning on stderr with a success exit code is a silent failure for every caller that
+is not a human reading a terminal. If an addressee was dropped, the drop must be observable in the
+exit status or the structured result — otherwise the contract is "best effort" no matter what the
+docs claim.**
+
+Handed to C6 as evidence with the tension it must resolve deliberately: the caller is owed a loud,
+machine-readable signal about what was dropped, and that signal must not become a probe for what
+exists in projects the caller cannot see. Told it not to over-fit — at-tokens in a prose brief are
+not the primary use case; the value is in the shape.
+
+### Roster
+
+`ca-msg-arch` (me), `ca-msg-c4`, `ca-msg-c5`, `ca-msg-c6`. em6, em9, em10 all retired on landing
+per rule 331. Heartbeat is `bba9dcb2` (v8), cron `13,43 * * * *`.
