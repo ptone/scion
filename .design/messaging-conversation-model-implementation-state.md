@@ -16229,3 +16229,44 @@ loosening an assertion to clear a test — the gate goes quiet either way, and q
 **#1381 (C6)** 10 files +2455/-13 · **#1380 (C4)** 3 files +1392/-31 · both green, disjoint,
 reported to ptone for merge. Retire C4 and C6 on MERGE (rule 336).
 Then: C5 rebases onto main-with-C4 and deletes both store files → C7.
+
+---
+
+## 12:40Z — #1380 (C4) SQUASH-MERGED. main = `eb365a9d3`.
+
+### Verified C4's content is on main by IDENTIFIER, not ancestry (rule 61)
+Squash-merge blinds `git cherry` / patch-id. Content checks against `upstream/main`:
+`idx_webchat_topic_conversation`, `addTopicConversationID`, `backfillTopicConversations`,
+`GetTopicConversationIDIncludingDeleted` — all present on **both** `webchannel_store.go` and
+`webchannel_store_postgres.go`; `webchannel_store_dualwrite_test.go` exists; `defer tx.Rollback`
+present in the backfill loop. The methods C5 needs for interface satisfaction are on main.
+
+### C5 RELEASED to rebase
+Instructed: rebase onto `eb365a9d3`, resolve the two store files **to main's version** (removing
+its changes, not the files), rebuild and confirm all 10 interface-satisfaction errors clear.
+Three checks demanded before it reports:
+1. **`addConversationIDColumn` must return NOTHING** in the rebased tree. If C5's migration
+   survives alongside C4's, the original defect lands after all — and silently, because both key
+   on `"topic_conversation_id"` so the second no-ops and the unique index may never be created.
+2. **Run C4's two index tests on the rebased branch.** They are on main now and serve as the
+   canary for exactly that reintroduction.
+3. Endpoint deletion counts vs `eb365a9d3`; expect 16 → 14 files. The two store files vanishing
+   will read as a large deletion — state it rather than let me discover it.
+Plus: re-run all four guards after the rebase. **A rebase is exactly when a gate's assumptions
+about file contents can quietly stop holding.**
+
+### #1381 (C6) still OPEN, still valid
+`comm -12` of (files main gained since `b7a415575`) × (C6's files) is **EMPTY** — the three
+newly-landed files are all `webchannel_store*`. So #1381's green checks still measure the right
+merge result and need no re-run. `mergeable=MERGEABLE`. Reported to ptone.
+This is the stale-check rule used in the *permissive* direction: a green measured against an older
+main stays valid precisely when the moved content is disjoint. Same test, opposite conclusion.
+
+### Retirement held pending main's CI
+main CI for `eb365a9d3` is **in_progress**. Holding C4's retirement until it goes green rather than
+retiring on the merge event itself — rule 336 says retire on merge rather than on report, but the
+point of that rule is to keep the author reachable if the merge surfaces something, and the merge
+is not proven until main is green. C6 stays until #1381 merges.
+
+### Open
+- main CI `eb365a9d3` → green?  - #1381 merge  - C5 rebase report  - then C7.
