@@ -15069,3 +15069,93 @@ no file: C2 touches `backfill_test.go`, which C3 explicitly skipped, and C3's 17
 by C2. Either can merge first.
 
 All three wave-1 phases are now with the sponsor. Wave 2 (c4, c5, c6) is in flight.
+
+---
+
+## 2026-08-29 10:47Z — Heartbeat v8: C3 gofmt defect; prohibition list corrected
+
+### Main moved: `8b09c118f` → `f6b783e46` (#1375)
+
+`#1375` is **gofmt-only** on #1371's files: `pkg/hub/authz.go`,
+`pkg/hub/handlers_agents_core.go`, `pkg/hub/permissions/registry.go`, `pkg/store/models.go`.
+No overlap with any wave-1 branch (checked by path intersection), so C1/C2/C3 merge cleanly
+despite being one commit behind.
+
+### C3 was not gofmt-clean — caught, fixed, pushed
+
+The existence of #1375 is what prompted the check; I would not otherwise have run it. Four of C3's
+own files failed: `delivery.go`, `envelope.go`, `envelope_compat_test.go`, `envelope_test.go`.
+
+**Rule 334: `go build` and `go test` both pass on unformatted code. A phase can report green on
+build, tests and all three guards and still be unformatted — the checklist that produced that green
+had five checks and not one of them looked at formatting.** Added as item 11 of the standing brief
+and pushed to all three live EMs.
+
+A measurement trap I nearly fell into while diagnosing it: my first gofmt run listed the four
+`pkg/hub`/`pkg/store` files from #1375 as failures on *both* branches. They were not our files —
+they were main's own advances showing up because I diffed against **current** main rather than each
+branch's **actual base**. Same class as rule 324, opposite direction: once main moves ahead, the
+endpoint diff attributes main's changes to your branch. Re-ran against `8b09c118f` and got the true
+answer: C2 clean, C3 four files bad. **Rule 335: the endpoint diff is right for construction only
+against the base you are actually building on. When main advances, rebase before you measure or you
+will investigate someone else's commit.**
+
+Fix verified formatting-only two independent ways: `git diff -w` against the prior tip is empty,
+and endpoint totals are unchanged at `+5198 −2` / 17 files. Build, tests, both guards re-run green.
+Branch now `3b442a9a4`.
+
+ptone's ruling on the handling: *"this can be fixed on the branch while the PR sits open."* Correct,
+and I was wrong to withhold the URL — the fix belonged on the branch in parallel, not ahead of it.
+**Holding a deliverable for a defect that is fixable under an open PR just serialises work that
+does not need to be.**
+
+**Rule 336 — supersedes the retirement clause of rule 331: retire an EM on MERGE, not on report.**
+I deleted em6 the moment C3 was accepted, so when its defect surfaced twenty minutes later there was
+no owner and the gate did the fix. One EM per phase is right; the retirement point was wrong.
+
+### PROHIBITION LIST CORRECTED — `ActionAttach` is stale
+
+`msg-authz-collision-inv` reported that #1371 deliberately replaced the per-ingress `ActionAttach`
+checks with the single `authorizeAgentMessage` choke point, and that this was intentional rather
+than a collision. **Verified directly against main rather than accepted:**
+
+| File | ActionAttach | authorizeAgentMessage |
+|---|---|---|
+| `handlers_agent_messaging.go` | 1 | 6 |
+| `handlers_broker_inbound.go` | 0 | 3 |
+| `handlers_chat_v2.go` | 2 | 2 |
+
+My prohibition list said "all 3 `ActionAttach` checks" must survive. **That is now wrong for the
+messaging handlers, and C5 was actively working from it** — following it literally would have made
+C5 restore a superseded pattern. Corrected in the standing brief and sent to C5 directly.
+
+**Rule 337: a prohibition list is a snapshot of what mattered when it was written. When the code it
+protects is deliberately restructured, the list becomes a set of instructions to undo the
+restructuring. Re-derive it against main after every significant merge — the list is exactly the
+artefact whose staleness is invisible, because every entry still names something real.**
+
+The corrected invariant is a **reachability** property, not a count: *no messaging path may reach
+send without passing `authorizeAgentMessage`.* Neither a green suite nor an identifier tally
+demonstrates it — a path that never calls the choke point produces no failing test and no missing
+identifier. This is why C5 gets attention rather than a numstat.
+
+This also explains the six long-standing `check-security-marker-gates.sh` failures every EM has
+reported as "pre-existing": the gate still expects the old `ActionAttach` rows. **DEF-38 filed**,
+assigned to C5 alongside DEF-37.
+
+### Ledger
+
+- **DEF-37** (validation-exemption marker gate) — open, C5.
+- **DEF-38** (marker gate does not recognise `authorizeAgentMessage`) — **new**, C5. Closes out the
+  "pre-existing failures" every phase has been reporting.
+- **DEF-36** — open, C4. **DEF-12** — Phase 4, partially landed.
+- DEF-5, DEF-6, DEF-9, DEF-10 unmoved for two heartbeats: every EM is on the tranche-C critical
+  path and none of those rows are on it. Stated per the sweep rule rather than silently skipped.
+
+### Roster
+
+`ca-msg-c4` (blocked 8m, no branch yet), `ca-msg-c5` (`scion/ca-msg-c5-handlers` @ `84a0b8e51`,
+unreported), `ca-msg-c6` (`scion/ca-msg-c6-cli` @ `968244015`, unreported). Both wave-2 branches
+exist but neither has reported; not reviewing unreported branches. `scion list --format json`
+returned no `taskSummary` this cycle — the field came back empty for all four agents, so item 9's
+instrument was unavailable and I used branch tips instead.

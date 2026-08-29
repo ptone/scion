@@ -133,6 +133,16 @@ file counts. Only the size estimates moved.
    deletion. A deletion you cannot name is a revert you have not noticed.**
 5. **THE PROHIBITION LIST must survive.** Re-check it against main *as it is now*; #1371 may have
    moved or renamed members. A renamed prohibited item still must not be lost.
+   **CORRECTED 2026-08-29 — `ActionAttach` is no longer a prohibition-list item in the messaging
+   handlers.** #1371 deliberately replaced the per-ingress `ActionAttach` checks with a single
+   choke point, `authorizeAgentMessage`, covering all four ingresses (verified on main:
+   `handlers_agent_messaging.go` 6 call sites, `handlers_broker_inbound.go` 3,
+   `handlers_chat_v2.go` 2). The residual `ActionAttach` occurrences in those files serve
+   non-messaging actions. The invariant is now a **reachability** property, not a count:
+   *no messaging path may reach send without passing `authorizeAgentMessage`.* Neither a green
+   suite nor an identifier tally demonstrates it — a new path that never calls the choke point
+   produces no failing test and no missing identifier. Enumerate ingresses and show the choke
+   point on each path.
 6. **Do not carry `scion/messaging-v2`'s `fanOutToProject`/`fanOutGlobal` hunks** — they predate B5
    and restore slug-based self-skip. Skip the sender by ID, never by the display `Sender` label.
 7. **Drop the `newTestStore` refactor** (Ruling A-1) — a large mechanical delta must not ride inside
@@ -143,6 +153,12 @@ file counts. Only the size estimates moved.
 9. **`make test-fast` is `go test -tags no_sqlite ./...`.** Anything behind `//go:build !no_sqlite`
    is never run by CI — if your phase's coverage lives there, say so explicitly in your report.
 10. **Tests land with the code they test.** There is no test-only phase.
+11. **Run `gofmt` before you push.** `gofmt -l $(git diff --name-only upstream/main HEAD | grep '\.go$')`
+    — any output is a failure. Verify a formatting fix really is one by confirming `git diff -w`
+    against the previous commit is empty. **`go build` and `go test` both pass on unformatted code**,
+    so a phase can report green on build, tests and all three guards and still be unformatted. C3
+    did exactly that, and main took #1375 to fix the same class on #1371's files. A checklist of
+    five checks, none of which looks at formatting, reports green on an unformattable branch.
 
 ---
 
