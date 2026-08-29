@@ -13833,3 +13833,65 @@ Caveat I will not paper over: `-X theirs` is a **proxy for carelessness, not a p
 
 ### Ledger
 Open: **em9-unify BLOCKED** (this entry), marker-gate-2 (verified, PR unopened), DEF-32 identity-linking, DEF-34/#1259 (external, stalled 3 heartbeats), DEF-18 (carrier em9-unify — now behind this blocker), DEF-33/35 spec, DEF-5, DEF-6, DEF-9 (narrowed), DEF-10 (half), Tier 2 DEFERRED, tranche H on G-1, tranches C-G behind em9-unify.
+
+---
+
+## §5fr — CORRECTION AND EXPANSION of §5fq. The gate hole is ~5x larger than I reported, and TWO of three CI guards pass on the careless merge.
+
+Nothing external moved (`upstream/main` `87a867b77`, all tips static, marker-gate-2 still unopened, #1259 CONFLICTING — fourth heartbeat). Awaiting ptone's sequencing decision, so I completed the coverage analysis instead of leaving §5fq's single probe as the finding.
+
+### Two things I told ptone in §5fq were wrong
+**(1) "Six security landings sit between its base and main."** Actual: **44 commits** on main since `6268bac44`. Among them, beyond the six I named: **#1322** (DM key ownership at ingress), **#1331** (conversation model foundation), **#1339** (conversation-upsert CI guard), **#1349** (B6/B7/B9 — D-1 guard, `EnsureParticipant`, nil-pe guard), **#1353** (tranche B conversation stamping), plus the entire P2 permissions series. I counted the PRs I happened to have in my working set and presented that as the drift.
+
+**(2) "The gate does not cover dm_key.go"** — true, but I found that hole by probing the one thing I had just been thinking about, then reported it as though it were *the* hole. It is the third-largest.
+
+### The systematic version — instruction 5's actual test
+Of the **271 files main changed since the merge-base**, **38 still differ from main** after the careless (`-X theirs`) merge. Restricting to non-test production files under `pkg/{hub,messages,messaging,store}` and measuring **lines LOST relative to main**:
+
+| file | lost | guarded? |
+|---|---|---|
+| `pkg/store/entadapter/conversation_store.go` | **-120** | **NO** |
+| `pkg/messaging/conversation.go` | **-64** | **NO** |
+| `pkg/messages/dm_key.go` | **-56** | **NO** (§5fq's finding) |
+| `pkg/hub/handlers_agent_messaging.go` | -52 | yes — gate fires |
+| `pkg/messaging/dm_migration.go` | **-48** | **NO** |
+| `pkg/store/models.go` | **-29** | **NO** |
+| `pkg/messaging/divergence.go` | **-28** | **NO** |
+| `pkg/messages/types.go` | **-17** | **NO** |
+| `pkg/hub/messagebroker.go` | -9 | only with marker-gate-2 |
+| `pkg/hub/handlers_broker_inbound.go` | -8 | only with marker-gate-2 |
+| `pkg/hub/handlers_chat_v2.go` | -7 | yes — gate fires |
+| `pkg/store/store.go` | **-5** | **NO** |
+
+**Guarded: ~76 lines. Unguarded: ~367 lines.** The instrument covers the smaller share, and `dm_key.go` is not the worst case.
+
+### What is actually inside the largest loss
+`conversation_store.go` -120 deletes, by name:
+- **DEF-29's fix** — `if conv.Kind == "direct" && conv.ExternalRef == ""` -> reject, with the comment *"A direct conversation's external_ref IS the access control basis... A keyless direct row has no ACL."* This is a standing invariant I have written rules around.
+- **`checkDMParticipantKey`** — #1360's shared D-1 immutability predicate, the whole point of which was that *"both AddParticipant and EnsureParticipant route through this predicate so the guard cannot diverge across call sites."*
+- **`EnsureParticipant`**'s insert-if-absent semantics (B6 un-leaving fix).
+
+`conversation.go` -64 deletes the **B7 nil-pe guard**, the B6 `left_at` preservation, and the `ParticipantEnsurer` interface.
+
+### The guard result, which is the real headline
+Running all three CI guards on the careless merge:
+- `check-authz-guards` -> **exit 0**
+- `check-conversation-upsert-guard` -> **exit 0**
+- `check-security-marker-gates` -> exit 1
+
+**Two of three pass on a merge that deletes DEF-29's fix and the D-1 shared predicate.**
+
+The upsert guard is **not broken** — I read it rather than assuming. It enforces *"no conversation row may be minted outside the messaging layer"*, a **location** property about call sites. Whether the D-1 predicate or the keyless-direct rejection still exists is orthogonal to it. It passes correctly, for a property that is intact. That is the more unsettling result: a guard can be healthy, correct, and simultaneously irrelevant to the regression in the file it is named after.
+
+### Rules
+**Rule 267.** A guard's name tells you the file it watches, never the property it asserts. Read the property before counting a file as covered — "there is a guard on conversation writes" and "conversation writes are guarded against this regression" are different claims, and the first is what a coverage map will silently record.
+
+**Rule 268.** Finding one instance of a class and reporting it as the finding understates by however many you did not look for. When a probe succeeds, the next step is to enumerate the class mechanically, not to write it up. I found `dm_key.go` because it was the thing I had most recently touched — availability, not analysis.
+
+**Rule 269.** State drift as a measured count, never as the items you can recall. "Six landings" came from my working set; the answer was 44 and one command away.
+
+### Recommendation (revised, supersedes §5fq's)
+The earlier advice — "extend the gate to cover `dm_key.go`" — was scoped to the smaller finding and is now insufficient. The uncovered surface is eight files and the store-layer invariants, not one derivation function. Options are (a) extend guards across all eight before any rebase, which is real work and delays everything, or (b) treat em9-unify as **re-derivable rather than mergeable** — take its intent and rebuild on current main in slices. 168 commits across 44 commits of drift, with ~367 lines of unguarded security surface at stake, is an argument for (b). **Not dispatched. ptone's call.**
+
+### Ledger
+Open: em9-unify BLOCKED (expanded), marker-gate-2 (verified, PR unopened), DEF-32 identity-linking, DEF-34/#1259 (external, stalled 4 heartbeats), DEF-18 (carrier em9-unify), DEF-33/35 spec, DEF-5, DEF-6, DEF-9 (narrowed), DEF-10 (half), Tier 2 DEFERRED, tranche H on G-1, tranches C-G behind em9-unify.
