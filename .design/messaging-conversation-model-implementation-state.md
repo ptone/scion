@@ -15317,3 +15317,82 @@ either.
 DEF-36 (c4) · DEF-37 (c5, standalone script) · **DEF-38 split: gate script → `auth-refactor-lead`,
 handlers → c5** · **DEF-39 (rev1, HIGH)** · DEF-12 (Phase 4) · DEF-5/6/9/10/18/32/33/35 held ·
 DEF-34 blocked on #1259.
+
+---
+
+## 2026-08-29 ~11:10Z — DEF-39b: second fail-open in the same guard, found by probing the fix
+
+### rev1's Task 1 report — verified, then extended
+
+Branch `scion/ca-msg-em10-marker-gate-2` @ `be93342b8`, PR #1372. Base = current `upstream/main`
+(`f6b783e46`), so merge-base equals main and endpoint/three-dot agree — no measurement ambiguity.
+
+Endpoint numstat **verified exactly against the report** (rule 330 satisfied):
+
+```
+83   7   hack/check-conversation-upsert-guard.sh
+184  0   hack/test-check-conversation-upsert-guard.sh
+```
+
+All 7 deletions confirmed comment-only. Cases A/B/C from DEF-39 genuinely fixed. rev1 replaced the
+3-line window with statement-bound extraction through the Go raw-string closing backtick, plus a
+**dual check**: `'group'` must appear AND no conflicting `'(direct|channel|support)'` may appear.
+
+### rev1's self-reported weakness — CORRECT, and I misread it first
+
+rev1 flagged that the bounding sed uses `p; d` (continue) rather than `q` (quit), so lines after the
+closing backtick leak in. I initially read the proposal as `d`→`q`, which would leave `p; q` and
+print the truncated line twice. rev1 meant replacing the **pair** `p; d` with `q`. Verified:
+
+```
+sed '/`/{ s/`.*//; q; }'   →  emits the bounded statement once, stops. Correct.
+```
+
+**I nearly manufactured a criticism out of my own misreading.** Verify the claim before disputing it.
+
+### DEF-39b — the hole rev1's enumeration did not cover
+
+rev1 framed the residual risk as requiring a **variable** kind with no literal. **Falsified.** A
+plain literal `kind='direct'` is still exempted, via the cap rather than the backtick:
+
+`end=$((lineno + 20))` with `head -21` bounds the window. Put a decoy `'group'` inside the window and
+the real `'direct'` beyond it — the statement is truncated before the kind literal is ever read.
+Check 1 passes on the decoy; Check 2 finds no conflict because the conflict was cut off.
+
+Reproduced against `be93342b8`, **both directions**:
+
+| Case | Result |
+|---|---|
+| Decoy `'group'` in window, `'direct'` past the cap | **rc=0 — WRONGLY EXEMPTED** |
+| Same statement, decoy removed | rc=1 — correct, fails closed |
+
+The decoy is doing the work. **Same class as DEF-39** — content outside the true statement scope
+deciding the exemption — reached through a different route.
+
+### Fix directed (not "raise the cap")
+
+Raising the cap moves the boundary; there is always a statement one line longer. The principle:
+**the exemption requires a fully bounded statement.** If no closing backtick is found within the
+window, the statement's kind is unknown, so it must NOT be exempted — fall through to violations.
+The bug is that truncation yields a partial statement which is then treated as complete. Tests
+required for both routes plus a positive control (a legitimate long `kind='group'` statement must
+still pass, so the new fail-closed path is not simply rejecting everything).
+
+### RULE 341
+
+> **RULE 341.** When a guard has been fooled once by out-of-scope content, the *mechanism* is a
+> class, not an instance. Fixing the route that was demonstrated leaves the class open. Enumerate
+> every route into the same shape — for a bounded-extraction guard: the delimiter, the cap, the
+> start anchor — before accepting the fix.
+
+Corollary now standing for rev1's reports: **do not report that the enumerated cases pass. Report
+what shape of violation the tests do NOT construct, and why that shape is believed unreachable.**
+This is rule 338 hitting the same guard twice: first I accepted C1 on 6/6 negative tests whose three
+rejection controls all shared one layout, then rev1 accepted its own fix on A/B/C. Both times the
+confidence came from the cases the author thought of.
+
+### Status
+
+DEF-39 **reopened as DEF-39b**, still with rev1, still under open PR #1372 per ptone's "fix under
+existing PRs". Task 2 (#1373 unit tests) reported complete and force-pushed; awaiting its quality
+gates and a separate report.
