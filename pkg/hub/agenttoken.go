@@ -61,6 +61,12 @@ const (
 	ScopeAgentTokenRefresh AgentTokenScope = "agent:token:refresh"
 	// ScopeAgentPortForward allows the agent to register ports and hold port-forward tunnels.
 	ScopeAgentPortForward AgentTokenScope = "agent:port:forward"
+	// ScopeAgentSecretFetch is a ROLE FILTER, not a capability grant. It keeps
+	// roles that should never reach the secret-fetch endpoint from reaching it.
+	// It says nothing about which keys the holder may fetch — that is gate 1
+	// (the stored entitled-key list), and gate 1 is the enumeration block.
+	// (#127, P2c)
+	ScopeAgentSecretFetch AgentTokenScope = "agent:secret:fetch"
 	// ScopeIdentityToken grants the ability to request OIDC identity tokens.
 	ScopeIdentityToken AgentTokenScope = "agent:identity:token"
 	// ScopeProjectRead grants read access to project resources (agents, templates,
@@ -310,6 +316,49 @@ func extractAgentToken(r *http.Request) string {
 	}
 
 	return parts[1]
+}
+
+// requireAgentSecretFetchScope returns middleware that checks for ScopeAgentSecretFetch
+// with a smart error that distinguishes two denial cases:
+//
+//   - The token's role WOULD receive ScopeAgentSecretFetch under the current
+//     ScopesForRole table, but the token does not carry it. This token predates
+//     the scope. The agent must be restarted or its token refreshed.
+//   - The token's role would NOT receive the scope. Genuine denial.
+//
+// The check uses ScopeAgentStatusUpdate as the role signal: it is present in
+// baseline and full (which receive ScopeAgentSecretFetch) and absent in none
+// and readonly (which do not). This avoids a DB lookup and leaks nothing —
+// it only tells the holder facts about its own token. (#127, P2c)
+func requireAgentSecretFetchScope() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims := GetAgentFromContext(r.Context())
+			if claims == nil {
+				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+					"agent authentication required", nil)
+				return
+			}
+
+			if !claims.HasScope(ScopeAgentSecretFetch) {
+				// Distinguish pre-existing tokens from genuinely unprivileged ones.
+				// ScopeAgentStatusUpdate is present in baseline and full — the same
+				// roles that now receive ScopeAgentSecretFetch. A token that has the
+				// former but not the latter was minted before the scope existed.
+				if claims.HasScope(ScopeAgentStatusUpdate) {
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						"this token was issued before secret-fetch capability existed; "+
+							"restart the agent or refresh its token to obtain a current token", nil)
+				} else {
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						"insufficient scope for secret fetch", nil)
+				}
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // RequireAgentScope returns a middleware that requires the agent to have a specific scope.

@@ -51,6 +51,7 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeAgentTokenRefresh,
 			ScopeAgentNotify,
 			ScopeAgentPortForward,
+			ScopeAgentSecretFetch,
 		}
 	case AgentRoleFull:
 		return []AgentTokenScope{
@@ -62,6 +63,7 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeAgentCreate,
 			ScopeAgentLifecycle,
 			ScopeProjectSecretRead,
+			ScopeAgentSecretFetch,
 		}
 	case "":
 		return ScopesForRole(AgentRoleNone)

@@ -846,6 +846,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// -------------------------------------------------------------------------
 	// Agent token: GCP identity and OIDC
 	// -------------------------------------------------------------------------
+	"/api/v1/agent/secrets": {
+		Pattern: "/api/v1/agent/secrets", RouteID: "agent.secretFetch",
+		Classification: RouteAgentToken,
+	},
 	"/api/v1/agent/gcp-token": {
 		Pattern: "/api/v1/agent/gcp-token", RouteID: "agent.gcpToken",
 		Classification: RouteAgentToken,
