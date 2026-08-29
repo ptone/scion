@@ -2997,6 +2997,67 @@ renders as ordinary output.** Confirm destructive CLI actions by re-querying sta
 the absence of an error. Also: pass the FULL UUID; the truncated ID in `schedule list` is a
 display convenience and is not accepted as input.
 
+## 5dd. 2026-08-29 19:00-19:10Z — D1 HELD. The fix for a dead check is another dead check.
+
+Branch `scion/ca-msg-d1` @ `0ccba95b1`, +215/-25, 8 files. **Compare URL withheld.**
+
+**Verified and accepted:** deletion report exact to the line against `dbec308cc`
+(validate.go -14, validate_compat.go -9, gate -2, zero test deletions). Sentinel gone,
+AC-D-1 clean. `validateMessageContent` extraction correct; `ValidateMessage` retains its
+ConversationID check so native callers stay covered. Gate change in the same commit as the
+split, as specified.
+
+**Rejected: `ValidateAttributed` cannot fail at any of the four wired sites.**
+- Sites 1/3/4 are guarded by `if convResult != nil`. Every non-nil return in
+  `conversation.go` sets `ConversationID` from `conv.ID`/`result.ID`; every error path
+  returns nil. `ent.Conversation.ID` is a `uuid.UUID`, which always renders 36 chars —
+  **even the zero UUID is non-empty.** So `convResult != nil ⟹ ConversationID != ""`
+  unconditionally.
+- Site 2 needs no such argument: it is literally `if x != "" { if x == "" { reject } }`.
+
+**RULE 417. Replacing a dead check with a live-looking dead check is a net regression.**
+Before: the check was dead and looked dead. After: dead, but asserted by the reachability
+gate, covered by a passing test, and described by four comments reading "Now it is live."
+The next person asking "is conversation_id checked?" now gets a green gate and a comment
+saying yes. **Adding surveillance to an inert control converts an absence into a false
+positive.** The false comments are the worst artifact — a wrong comment outlives the review
+that admitted it.
+
+**AC-D-2 was not discharged, and the substitution is the lesson.** D1 supplied
+`TestValidateAttributed_CheckIsLoadBearing`, which calls `ValidateAttributed("")` directly.
+That exercises the function body, not reachability — the only question that mattered. It
+also **cannot be run against main at all** (the function does not exist there; the package
+would not compile), so it cannot be "shown failing against baseline." **RULE 418. A unit
+test of a newly added function can never serve as a positive control for that function's
+necessity.** The baseline is not merely red, it is uncompilable. Any AC demanding
+before/after evidence must name a test that exists on BOTH sides.
+
+**MY ERROR: AC-D-2 was unsatisfiable as written and I did not notice when I wrote it.**
+While B10 holds, attribution failure must stay non-fatal, so `convResult == nil` cannot
+reject; and `convResult != nil` guarantees a non-empty ID. **There is therefore no state in
+which a post-attribution emptiness check can legitimately fire today.** The check is not
+miswired — it is *premature*. It acquires meaning only at Tranche G, when derivation failure
+becomes fatal. I demanded a test for a rejection the design forbids. D1 satisfying it with a
+unit test was the predictable result of an impossible AC.
+
+**Found while tracing — flagged, NOT claimed.** At `handlers_agent_messaging.go:897`,
+`structuredMsg.ConversationID` is **caller-supplied from the request body**, copied to
+`storeMsg.ConversationID`, and wrapped in a synthetic `convResult`. The `GetConversation`
+lookup sets `lookupFailed` on error but does **not** reject and does **not** clear the
+field — it feeds divergence logging only. So an arbitrary non-empty caller-controlled
+conversation id reaches `CreateMessage`. Whether that is exploitable depends on whether
+`authorizeAgentMessage` or an AC-INGRESS-1 check covers this path upstream. **I have not
+checked and did not guess** (rule 413 — the anomaly I found is not thereby a live
+vulnerability). D1 tasked to establish the facts and report; behaviour change forbidden in
+this branch. If uncovered → new defect, probably security, escalated to ptone via me.
+
+**Directed to D1:** (1) delete the four false comments, state accurately that the check is
+structural pre-placement inert under B10 and load-bearing at Tranche G, and fix site 2's
+tautological guard; (2) investigate the `:897` caller-supplied path, report only; (3) AC-D-2
+restated by me as a proof-by-enumeration that no path can deliver an empty ID while B10
+holds, written into the commit message so the inertness is documented as deliberate rather
+than rediscovered later as a bug. Sentinel deletion and split stay.
+
 ## 5al. 19:43-19:50Z — heartbeat: two expired holds, one dissolved question, one silent CLI failure
 
 **Roster:** em6 active on DEF-12, em10 blocked on its own sub-agents (normal), em9 idle after
