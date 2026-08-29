@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -503,6 +504,65 @@ func TestSecretFetch_NoBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// failingListSecretsStore wraps a real store and makes ListSecrets return
+// an error. Everything else delegates to the embedded store. This simulates
+// a backend outage that prevents the entitlement listing from being read
+// while other store operations (GetAgent, GetAgentCredentialByJTIHash, etc.)
+// continue to work.
+type failingListSecretsStore struct {
+	store.Store
+}
+
+func (f *failingListSecretsStore) ListSecrets(_ context.Context, _ store.SecretFilter) ([]store.Secret, error) {
+	return nil, fmt.Errorf("simulated listing backend outage")
+}
+
+// TestSecretFetch_ListingError_ReportsUnavailableNotWithdrawn verifies that
+// when the entitlement listing fails (computeEntitledSecretKeys returns an
+// error), the handler reports "unavailable" (row 2), NOT "access withdrawn"
+// (row 3). A backend outage is transient — nothing was revoked, and telling
+// the operator to refresh the token or re-grant permissions is an instruction
+// in the wrong direction.
+func TestSecretFetch_ListingError_ReportsUnavailableNotWithdrawn(t *testing.T) {
+	srv, s, user, project := setupSecretFetchTestServer(t)
+
+	agentID := tid("agent-fetch-lsterr")
+	createCredTestAgent(t, s, agentID, project.ID, user.ID)
+
+	// Store a secret with an encrypted-looking value. The no-encryption
+	// backend's Resolve() will skip it (can't decrypt), placing the key
+	// in the "entitled but not resolved" branch.
+	createSecretInStore(t, s, "OUTAGE_KEY", store.ScopeProject, project.ID,
+		"enc:v1:this-is-fake-ciphertext")
+
+	token := generateTokenWithEntitledKeys(t, srv, s, agentID, project.ID,
+		[]string{"OUTAGE_KEY"})
+
+	// Swap the server's store to a wrapper that fails ListSecrets.
+	// The secret backend's internal store remains the real one, so
+	// Resolve() succeeds (and skips the unreadable secret as expected).
+	// computeEntitledSecretKeys uses s.store, which is now the wrapper.
+	srv.store = &failingListSecretsStore{Store: s}
+
+	rec := doSecretFetchRequest(t, srv, token, []string{"OUTAGE_KEY"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	resp := parseSecretFetchResponse(t, rec)
+	require.Len(t, resp.Secrets, 1)
+	assert.Equal(t, "OUTAGE_KEY", resp.Secrets[0].Key)
+
+	// Must be unavailable, not withdrawn.
+	assert.Equal(t, secretFetchStatusUnavailable, resp.Secrets[0].Status)
+	assert.Contains(t, resp.Secrets[0].Error, "listing")
+
+	// Must NOT contain words that direct the operator to take a permanent
+	// action based on a transient condition.
+	assert.NotContains(t, resp.Secrets[0].Error, "withdrawn")
+	assert.NotContains(t, resp.Secrets[0].Error, "refresh")
+
+	assert.Empty(t, resp.Secrets[0].Value) // no value leaked
 }
 
 // TestSecretFetch_MethodNotAllowed returns 405 for GET.
