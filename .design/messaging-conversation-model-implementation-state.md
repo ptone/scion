@@ -19152,3 +19152,55 @@ otherwise the reviewer's grep turns an out-of-scope sibling into an apparent mis
 create → start → message → confirm activity *strictly later than* the receipt
 event → and if the next observation is a stall at exactly the receipt timestamp,
 treat the dispatch as failed and re-send.
+
+## 5do — DEF-48 STRUCK. #1402 merged clean; main advancing turned D5's diff into a trap (2026-08-29 21:06Z)
+
+**#1402 merged.** `upstream/main` = **`ddba7d5d1`**. **DEF-48 → STRUCK.** D1's
+ledger is now empty: DEF-41 (#1401) and DEF-48 (#1402) both landed.
+
+**Rule 427 discharged, and this time it came back clean.** `git diff upstream/main
+origin/scion/ca-msg-d2` is empty — what landed is byte-identical to what I
+reviewed at `6a1e5ab03`. No suggestion-commit this time. I controlled the empty
+result against `ca-msg-d5`, which produced output, so the emptiness is a finding
+and not a broken command. Given 5dl, I am not willing to read an empty result as
+evidence again without the control.
+
+**The control is what caught the real problem.** It reported D5 as *4 files,
++517/-181*. D5 is two files. Main had advanced past D5's merge-base, so #1402's
+own changes render as reversions on D5's endpoint diff:
+
+```
+ 15  33  cmd/message.go
+  0  78  cmd/message_convref_test.go        <-- entire new DEF-48 test file
+107  34  pkg/hub/handlers_agent_messaging.go
+395  36  pkg/hub/handlers_agent_messaging_test.go
+```
+
+`comm -12` against the merge-base localises D5's real surface to exactly the two
+`pkg/hub` files. Rule 425 confirmed from the direction that bites hardest.
+
+**Rule 443: the phantom that matters is the one shaped like the regression you
+fear.** A `0/78` on a brand-new test file is indistinguishable at a glance from
+an agent having deleted someone's merged tests — which is precisely the failure
+the sponsor warned about when telling me to be careful about reverting work on
+main during rebases. The stale-base artifact does not produce neutral noise; it
+manufactures the exact signature of the thing under watch.
+
+Sent D5 to rebase on `ddba7d5d1`, with the instruction that if anything under
+`cmd/` survives the rebase it must stop and tell me rather than resolve it —
+a rebase that silently drops merged work is worse than a conflict. The compare
+URL already with the sponsor references the branch name, so it stays valid.
+GitHub's compare is three-dot and merge-base-relative, so the PR would have
+rendered correctly regardless; the rebase is to protect anyone reading the diff
+locally.
+
+Warned `ca-msg-d34` and `ca-msg-def42` of the same artifact pre-emptively, since
+both branched from `b1cc09ba6`. Cheaper than talking each of them out of a
+phantom later.
+
+**D1 pre-retirement.** Asked it to confirm nothing uncommitted/unpushed, and —
+more importantly — to surface any unwritten context: open questions, defects
+noticed but unfiled. **Rule 444: retire on evidence, not on inference.** An agent
+whose PRs merged still holds notes that exist nowhere else, and the container is
+unrecoverable. The cost asymmetry is the same one that governs lifecycle
+authority.
