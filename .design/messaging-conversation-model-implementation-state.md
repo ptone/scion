@@ -19789,3 +19789,56 @@ should go to one owner together.
   check is wrapped in a success precondition, verify the failure path still
   reaches it — and when demoting or promoting such a check later, move it out of
   the guard rather than changing its severity in place.
+
+---
+
+## 5eb — 2026-08-29 — Heartbeat: DEF-42 merged, both branches rebased
+
+**Main moved `af8f6c063` → `8f72e7ab7`.** Two commits: **#1405 (DEF-42)** — ours —
+and #1404 (UAT scope aliases), unrelated.
+
+**DEF-42 verified merged intact**, by content rather than on the merge's word:
+`wcsAffinity` and the RLock hoist present at `handlers_agent_messaging.go:195-198`,
+`webchatstore_race_test.go` present with `TestWebChatStoreRace`. **DEF-42 STRUCK.**
+
+**DEF-49 re-verified in the same shared file.** #1405 modified
+`handlers_agent_messaging.go`, which DEF-49 also modified, so I checked DEF-49
+survived: `CheckDMParticipantKey` at `:946`, `authorizeAgentMessage` at four sites.
+Control symbol returns 0, so the grep discriminates rather than matching
+everything.
+
+**Both open branches sent to rebase** (rule 455 — main moved, so rebase; the
+overlap check decides care, not whether). Per-branch overlap run separately
+(rule 456), `comm -12` against the twelve files main gained:
+
+- `ca-msg-d51` — overlap **empty**.
+- `ca-msg-d34` — overlap **empty**.
+
+Both told to expect a clean rebase, to report tip + merge-base + numstat, to
+compare the numstat against their pre-rebase figures, and to stop rather than push
+if a file they never touched appears or a whole file shows as `0/N` — the phantom
+signature.
+
+**def42 sent an exit interview** ahead of retirement, including the rule 454
+out-of-scope question, plus three specific ones: which webChatStore reads it
+deliberately left alone beyond `server.go:2408`, whether other server-struct fields
+share the unguarded-read-under-mutation shape (is DEF-42 an instance of a pattern
+or a one-off), and whether its test has timing or wall-clock properties a nightly
+`-race` runner would trip over.
+
+**Heartbeat ledger staleness, noted not acted on.** v10 item 8 now has two stale
+rows: DEF-42 is listed "IN PR, verify merge then strike" (merged), and Tranche D
+is listed as remaining with d34 (complete, sitting with ptone). DEF-53 is absent
+entirely. Not refreshing yet — v10 was cut this session, item 0 correctly points
+recovery at this document rather than at itself, and re-cutting the heartbeat every
+cycle is its own churn. Refresh when a third row goes stale.
+
+### Standing state
+
+- `upstream/main` = `8f72e7ab7`.
+- With ptone: **DEF-51** (`ca-msg-d51`, rebasing), **D3/D4** (`ca-msg-d34`,
+  rebasing), ci-fix-lead's **#1373**.
+- Needs an owner from ptone: **DEF-37 + DEF-50**, bundled — same script family,
+  both turn on the comment-blind `grep -q`.
+- **DEF-53** open, Tranche G precondition, no owner needed yet.
+- Parked: `ca-msg-def42` (retiring), `ci-fix-lead`, `chat-admin-lead`.
