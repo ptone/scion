@@ -14894,3 +14894,95 @@ new §5b carries the reviewer directive; §8's held list is refreshed.
 
 `ca-msg-em10` **done (C1)**. `ca-msg-em9` (C2) and `ca-msg-em6` (C3) executing; no branches yet,
 dispatched ~10:05Z. C3's stated dependency on C2 was disproved earlier — types only.
+
+---
+
+## 2026-08-29 10:30Z — C2 and C3 verified; one-EM-per-phase ruling; C4 dispatched
+
+### C2 accepted — `scion/ca-msg-em9-c2` @ `9bf60296`
+
+`+38 −0` across 3 files, one commit, and **`upstream/main` is an ancestor**. That last fact is what
+makes the `−0` trustworthy here rather than a smell (rule 325): on a branch whose base *is* current
+main, zero deletions means literally nothing on main was removed. Same number, opposite meaning,
+depending entirely on the base. Worth stating plainly because the distinction is the whole lesson.
+
+Content reviewed, not just counted:
+- `conversation_id` is `Optional().Nillable()` UUID on main, so `ConversationIDIsNil()` is the
+  correct unbackfilled test. **Interface doc says "empty conversation_id"** — imprecise, a UUID
+  column cannot hold an empty string. Cosmetic; noted, not blocked.
+- `query.Where(...)` without reassignment: I checked ent's generated `Where`, which appends to
+  `_q.predicates` and returns the receiver, so the project scope **is** applied. It also matches
+  the convention already in that file (12 call sites, none reassign). Correct, not a silent
+  scope-drop.
+
+em9 had bounced once for an unreported 646-line project-log file and fixed it in under a minute,
+including confirming the 7 cherry-picked audit commits had zero net code effect. Their own
+diagnosis is the right one and worth preserving: *"I knew the file was there but mentally
+classified it as prior work, not C2 content."*
+
+**Rule 330: the deletion report is not a summary of what you consider relevant — it is an
+assertion about what the reviewer's numstat will show. Anything that makes the two disagree is a
+defect in the report, regardless of the content's innocence.** Bounce on the mismatch, never on
+the content, or you train authors to argue about relevance instead of matching the diff.
+
+### C3 accepted on content — `scion/ca-msg-em6-c3-messaging` @ `5b6d80156`
+
+18 files, `+5278 −2`, base is current main. Guards rc=0, build rc=0, `pkg/messaging` tests ok.
+Prohibition list checked by identifier count, **no regressions**: `authenticatedSender` 2/2,
+`parseDMKeyIDs` 4/4, `isDMParticipant` 3/3, `validateDefaultAgent` 3/3, `ActionAttach` 15/15,
+`EnsureParticipant` 9/9, `checkDMParticipantKey` 2/2, `ParticipantEnsurer` 2/2, `ParticipantAdder` 2/2.
+
+Both deletions justified and verified. I read `derive_key.go`'s single `-` line closely because
+`Surface` sits adjacent to key derivation and **the key is the ACL** — but `cfg.surface` defaults
+to `"native"` before options apply, so no-opt callers are byte-equivalent, and `Surface` is a
+column, not part of `external_ref`. `DeriveConversationKey` itself is untouched: exactly one `-`
+line in the entire file.
+
+The DEF-20 topic-lookup intercept fails closed on every branch — malformed ref, un-backfilled
+topic, and infra error all return nil; only `ErrNotFound` falls through to upsert. That is the B10
+non-fatal contract held correctly: resolve **declines**, it does not mint and does not reject.
+
+Required fix issued: drop `.design/project-log/c3-messaging-library.md` (+88). Second branch today
+bounced for the same ruling. em6 *disclosed* theirs, which em9 did not — but disclosure is not
+exemption.
+
+**DEF-37 filed (new):** `pkg/messaging/VALIDATION_EXEMPTIONS.md` documents three emitters exempt
+from `ValidateLegacyMessage` with no mechanical enforcement. A documented exemption list with no
+gate drifts, and this project has already proven it does not catch that class by reading. Needs a
+marker gate. **C5 scope** (the emitters land there), not C3. Also told em6 to drop the `~line
+number` references — a stale pointer in a security-adjacent doc is worse than none — and to reword
+present-tense claims about code that is not on main yet.
+
+### Sponsor ruling: one EM per phase, retired when the phase lands
+
+ptone, 10:28Z: *"are you repurposing em agents across phases? there is not much value in that and
+can lead to context rot."* He caught this one commit ahead of me — I had just told him I would hand
+C4 to em10.
+
+He is right, and the sharper version is that reuse does not carry *nothing*, it carries the **stale
+half**. em10 (39h uptime) still held my pre-correction three-dot instruction and the old manifest
+sizing, both now wrong. A fresh agent starts from the corrected brief. A reused one starts from the
+corrected brief *plus* several thousand tokens quietly contradicting it, and the contradiction is
+invisible to me.
+
+**Rule 331: a long-lived subordinate is a cache of your own superseded instructions. When you
+correct a standing brief, every agent already holding the old one is now a source of drift, not a
+saving. Retire, do not re-task.**
+
+Exception applied: em9 and em6 keep their own one-file cleanups rather than handing a stranger a
+context-free fix. Retire on *landing*, not on assignment.
+
+Actioned: `ca-msg-em10` deleted. `ca-msg-c4` started (`eng-manager`) and briefed — phase-named from
+here, not numbered by agent generation.
+
+### Landing strategy proposed to ptone
+
+Split rather than one answer: **C1/C2/C3 as individual upstream PRs now** (additive, no runtime
+behaviour change, nothing calls the new paths yet), **C4–C7 held for the integration branch and the
+beta hub exercise** (those change what the system does and want testing as one unit, behind the
+scheduled exercise with the DB snapshot, not in front of it). The load-bearing argument is that
+landing the plumbing early keeps every later phase's base current — which is what makes the cheap
+one-command verification possible at all. Awaiting his call.
+
+Also confirmed: **no PR-template change** — ptone declined, so the reviewer directive stays in the
+phases doc only.
