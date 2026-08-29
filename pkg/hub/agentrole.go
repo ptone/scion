@@ -25,11 +25,19 @@ const (
 	AgentRoleFull     AgentRole = "full"
 )
 
-// ValidAgentRole returns true if r is one of the four stock roles.
+// AllAgentRoles returns every stock role in privilege order (lowest first).
+// ValidAgentRole is defined in terms of this list so the two cannot drift apart.
+// A new role must be added here to be recognized anywhere in the system.
+func AllAgentRoles() []AgentRole {
+	return []AgentRole{AgentRoleNone, AgentRoleReadOnly, AgentRoleBaseline, AgentRoleFull}
+}
+
+// ValidAgentRole returns true if r is one of the stock roles.
 func ValidAgentRole(r AgentRole) bool {
-	switch r {
-	case AgentRoleNone, AgentRoleReadOnly, AgentRoleBaseline, AgentRoleFull:
-		return true
+	for _, v := range AllAgentRoles() {
+		if r == v {
+			return true
+		}
 	}
 	return false
 }
