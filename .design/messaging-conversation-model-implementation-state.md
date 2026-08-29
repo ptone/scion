@@ -13959,3 +13959,52 @@ Text staged at `.design/review-responses/pr-1362-gemini-rejection.md` on `scion/
 **Rule 274.** When an action needs a human's credentials, do not send the human a description of the action. Stage the exact artefact and send a pointer. A 2000-rune channel cannot carry a 2500-rune comment, and paraphrasing a verified rebuttal reintroduces the imprecision it was written to correct.
 
 **Rule 275.** An unchanged head SHA on a newly opened PR means prior verification transfers whole. Check the SHA before deciding whether to re-verify — but check it, because "the PR I asked for" and "the PR that was opened" are not the same claim.
+
+---
+
+## §5fu — 2026-08-29 sweep. #1363 landed. The em9-unify sequencing question is now ANSWERED by evidence: re-derive, do not merge.
+
+**Status first (rule 271): nothing is damaged, nothing needs recovery. Everything below was measured in throwaway `/tmp` worktrees (`/tmp/gcheck`, `/tmp/em9sim`) and describes what a merge WOULD do. No branch was pushed or mutated. em9-unify is untouched at `47a7c6736`.**
+
+### Main moved
+`upstream/main` = **`a7ac9c489`** (was `87a867b77`). Sole new commit: #1363, marker-gate-2, merged 00:28:05Z — two minutes after I reported it green.
+
+### #1363 re-verified at merged main (rule 259, all three axes)
+1. **CI invokes it** — `.github/workflows/ci.yml:113`, direct script call, with the exit-2 branch at `:119` preserved.
+2. **Passes clean** — exit 0 on unmodified `a7ac9c489`.
+3. **Fails on the real threat** — messaging-v2 overlay of the four guarded files → exit 1, **15 rows fire, up from 11**. All four new rows fire with correct counts: `SenderID` x0/3 in `fanOutToProject`, x0/3 in `fanOutGlobal`, x2/4 in `handleBrokerInbound`, `parseDMKeyIDs` x0/1.
+
+### The material change for sequencing
+Against the **old** 11-row gate, a careless em9-unify merge passed the marker gate. Against the **15-row** gate it now **FAILS, exit 1, 5 rows**. A careless merge can no longer land silently. That is a real improvement and it is the direct payoff of #1363.
+
+It is not sufficient. The gate fires on handler files only; the largest losses are elsewhere and remain unwatched.
+
+### Mechanically enumerated net-loss class (rule 268), merged tree vs `a7ac9c489`
+Production: `conversation_store.go` **-108**, `dm_key.go` **-48**, `conversation.go` -9, `store.go` -5, **`hack/check-conversation-upsert-guard.sh` -8**.
+Tests: `conversation_store_test.go` **-637**, `handlers_agent_messaging_test.go` **-415**, `dm_key_test.go` **-133**, `dm_migration_test.go` -40, `messagebroker_test.go` -19, `backfill_test.go` -15.
+
+`dm_key.go` -48 with `dm_key_test.go` -133 is rule 265 in the flesh: the #1362 canonicality enforcement and the tests that detect its removal die in the same merge.
+
+### THE FINDING — the merge edits the ruler (rule 260)
+`check-conversation-upsert-guard.sh` reported **exit 0, "no violations"** on the merged tree. That is not evidence. The merge rewrites the guard's own header and allowlist:
+- **drops `AddParticipant`** from the enumerated minting surface — the participant listing index stops being watched;
+- **adds an explicit allowance** for raw `INSERT INTO conversations` in `pkg/hub/webchannel_store*.go`, described as "the §2.6.4 dual-write mechanism and explicitly allowed";
+- deletes the note that the unknown-kind fallback uses `requireParticipant`, making the participant table an ACL for un-cased kinds.
+
+Control — **main's unweakened guard run against the merged tree: exit 1**, eight raw `INSERT INTO conversations` sites rejected across `pkg/hub/webchannel_store.go` and `webchannel_store_postgres.go`.
+
+Counts, with positive control: `grep "INSERT INTO conversations" pkg/hub/` returns **0 on main, 12 on the merged tree**. The zero is real, not a broken grep.
+
+**This is a reverted tightening, not em9 sloppiness.** Main's version is dated "enumerated 2026-08-27" and landed as **`ef90b53bf` / #1339 on 2026-08-28** — after em9's base `6268bac44`. em9 carries the honest older text. Merging it un-tightens a deliberate later decision, and because the decision and its enforcement live in the same file the merge overwrites, the un-tightening reports green.
+
+### Ruling
+**Re-derive em9-unify on current main in slices. Do not merge it.** Drift is now **45 commits** main-ahead against **124** em9-ahead; the branch is not a feature delta, it is a fork of an older codebase. Guarding eight files first does not fix this, because one of the eight things needing a guard IS a guard.
+
+### Rules
+**Rule 276.** A guard's allowlist is part of the codebase it guards. A merge that touches both is self-certifying. Before believing any guard's green on a merge result, re-run the *destination's* copy of the guard against the merged tree.
+**Rule 277.** When a branch predates a tightening, merging it is a revert even though nobody reverted anything. Date the tightening and compare it to the branch base; "the branch is honest" and "the merge is safe" are unrelated claims.
+**Rule 278.** Expanding a guard changes the answer to questions you already asked. #1363 flipped the careless-merge verdict from silent-pass to loud-fail. Re-run prior merge simulations after any guard lands.
+
+### Ledger
+Unchanged otherwise. Held: DEF-5, DEF-6, DEF-9 (narrowed), DEF-10 (half-struck), DEF-18 (carrier em9-unify), DEF-32 (blocked on ptone), DEF-33/35 spec complete, DEF-34 blocked on #1259. Tranche H blocked on G-1. Tranches C–G behind em9-unify. STRUCK: DEF-11, DEF-14, DEF-16, DEF-17. GATE-1 CLOSED.
+**#1259 has not moved in 5 heartbeats** — last update 2026-08-27T03:51Z, still CONFLICTING. DEF-34 stays blocked; no action available to me, it is stevegeek's branch.
