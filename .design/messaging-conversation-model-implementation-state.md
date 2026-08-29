@@ -20967,6 +20967,27 @@ same shape as the B10 ruling. Asked the single question: instrument-then-flip, o
   was letting something through. Enumerate what currently takes the skipped branch before treating
   it as a refactor.
 
+### Addendum — holding agents must signal blocked, not go quiet
+
+`ca-msg-def3750` surfaced as STALLED at 23:55. Nothing was wrong: it was idle *because I told it to
+hold*. But a deliberately-waiting agent that does not signal is indistinguishable from a dead one,
+and the false stall is recurring noise that makes a real failure harder to notice. Instructed it to
+run `sciontool status blocked` with the reason.
+
+- **505.** When you tell an agent to hold, tell it to signal `blocked` in the same instruction.
+  Otherwise the wait you ordered arrives back at you as an alarm, and repeated false alarms train
+  you to discount the real one.
+
+**Deliberately not retiring it**, despite its work being finished and its exit interview complete.
+Two reasons, the second load-bearing: (1) if CI reds on the gate PR I want its author rather than a
+cold reader; (2) **agent creation in this project is currently unreliable** — two containers lost
+tonight, one booted with no workspace, one never booted. A healthy correctly-provisioned agent is
+temporarily a scarce resource, so standing one down is not obviously reversible.
+
+- **506.** Retirement decisions assume replacement is cheap. When provisioning is degraded that
+  assumption fails, and a live healthy agent should be held past the point where you would normally
+  release it. Re-evaluate the cost of retirement when the infrastructure changes under you.
+
 ### Standing state
 
 - `upstream/main` = `1a2c1b07d`. `scion/ca-msg-def3750` @ `2855ff843` (rebased, green, compare URL
