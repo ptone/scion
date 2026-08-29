@@ -20650,3 +20650,66 @@ than a shared mount.
 - Live: `ca-msg-def3750` (AST gates per 5el ruling), `ci-fix-lead`, `chat-admin-lead`.
 - Awaiting ptone: Tranche E board; gate-deletion; #1409; **contrib-repo PAT decision**.
 - Open, unstaffed: DEF-53, DEF-55, DEF-56, DEF-12 (partial), issue #1374.
+
+---
+
+## 5eo — DEF-50/37/56 verified and sent; #1409 gofmt landed (2026-08-29)
+
+### #1409 unblocked via ci-fix-lead
+
+Routed the gofmt fix to `ci-fix-lead` rather than spend a third container on it. It returned the
+predicted numstat **before** pushing, exactly `13 13 pkg/hub/field_race_test.go`. Verified after
+push: tip `331328fd6`, gofmt clean, and **byte-identical to the pre-fix file with all whitespace
+stripped** — no semantic change rode along. Handing over the expected number in advance turned
+this from trust into verification, at a cost of about two minutes.
+
+### def3750's AST gate work — verified, not accepted on report
+
+Branch `scion/ca-msg-def3750` @ `fc337d6ea`. Checked independently:
+
+- Base `fa7ae19141b` **is** the true merge-base with `upstream/main` — properly rebased, so the
+  compare renders honestly rather than as a phantom-deletion diff (rules 335/425).
+- numstat exactly **418/28**, one file. No handler modified. `check-authz-reachability.sh` retained.
+- `gofmt -l` output empty (read the output, not the exit code).
+- Both new findings confirmed against main: `broadcastDirect` has exactly one caller
+  (`handlers_agent_messaging.go:1665`); `sendHumanToHuman` has exactly one
+  (`handlers_chat_v2.go:1019`) inside `handleConversationSend`, which does
+  `GetUserIdentityFromContext` at 771 and `isDMParticipant` at 798 as claimed.
+- Mutation evidence: renaming the `authorizeAgentMessage` call while leaving comments intact left
+  the OLD script GREEN and turns the NEW checker RED. That is DEF-50 demonstrated, not asserted.
+
+**Credited specifically:** the `minCallers` self-test. A caller-side rule passes *vacuously* the
+day its callee is renamed or moves out of the scanned glob — the gate goes quiet exactly when it
+should shout. def3750 added that check unprompted, mirroring the self-test discipline of the
+script it replaces.
+
+- **490.** Any rule of the form "all X must do Y" needs a companion assertion that X was found at
+  all. Universal quantification over an empty set is true, and a gate that silently quantifies
+  over nothing is worse than no gate, because it reports success.
+
+**Residual accepted, with eyes open:** caller discovery scans only `pkg/hub/handlers_*.go`, so a
+caller outside that glob is invisible. Both real callers are inside it today and `minCallers: 2`
+goes red if one drifts out — guarded, not open. Asked for it to be recorded in a comment (rule 471:
+a caveat must live where the reader arrives).
+
+### Process correction: def3750 opened its own PR
+
+It opened `ptone/scion#1375`. Two faults, neither in the code: **wrong repo** (that is the fork;
+#1405–#1409 all land on `GoogleCloudPlatform/scion`, so a PR against the fork's main merges
+nowhere useful), and **off-protocol** — I send ptone a compare URL and *he* opens the PR. That is
+his gate and it is not mine to route around either. Asked it to close #1375; nothing to redo.
+
+- **491.** State the landing protocol in the dispatch brief, not at review time. An agent that has
+  finished good work will reach for the obvious next step, and "open a PR" is obvious.
+
+Compare URL sent to ptone (thread `1532864101909528737`), title and body URL-encoded, leading with
+DEF-56 flagged explicitly as *not* a lint refactor.
+
+### Standing state
+
+- `upstream/main` = `fa7ae1914`. `scion/ca-msg-def54` @ `331328fd6` (gofmt fixed, #1409 should go
+  green). `scion/ca-msg-def3750` @ `fc337d6ea`, compare URL with ptone.
+- `ca-msg-fmt1409b` **held as evidence** at coordinator's request — do NOT retire in a sweep.
+- Live: `ca-msg-def3750`, `ci-fix-lead`, `chat-admin-lead`.
+- Awaiting ptone: Tranche E board; gate-deletion; #1409; contrib-repo PAT; DEF-50/37/56 PR.
+- Open, unstaffed: DEF-53, DEF-55, DEF-12 (partial), issue #1374.
