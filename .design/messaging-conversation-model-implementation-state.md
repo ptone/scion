@@ -17973,3 +17973,19 @@ closes. Fixing the reported lines is a partial fix; knowing the other occurrence
 saying why* is the fix.
 
 C7 unparked with both fixes specified. Awaiting green.
+
+### 17:15Z — coordinator verified both claims independently; generalised the masking class
+
+Coordinator reproduced the inherited-failure triage exactly (run-level `success`, job-level
+`failure`) and is recording it as a convention. Sent them the generalisation, because `gh` is not
+special — the class is **tools that report the status of the wrapper rather than the work**:
+
+- `gh run list` — run-level success hides a `continue-on-error` job failure; only `--json jobs` sees it.
+- `gofmt -l` — exits 0 whether or not it listed files. Output is the finding; exit code is not.
+- `go test` — prints `ok` when `-run` matches nothing AND when the file is build-tag excluded.
+- piping to `tee`/`tail` — `$?` is the last stage's status. Needs `set -o pipefail`.
+
+**RULE 405.** Test any green indicator with: *can this be green for a reason unrelated to the work
+succeeding?* If yes it is a liveness signal, not a result, and needs a positive control — run it
+against input known to produce a hit and confirm it goes red. `skipping` and `passing` both render
+as not-red; that is the same instrument failure as the gate itself (rule 403).
