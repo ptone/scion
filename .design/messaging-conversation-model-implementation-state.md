@@ -14396,3 +14396,32 @@ ptone asked "how is the work on c going?" Answered honestly: **not started, deli
 - **310.** Line-level matching against a large file is a false-negative generator, because individual lines of real code are generic. Test for *distinctive identifiers*, not whole lines.
 - **311.** A filter that drops a path when one source matches the destination silently discards every other source's unique content. With N sources the test is per-source, and the answer is the maximum.
 - **312.** When a subordinate disputes your number, re-derive by a different method before ruling. Agreeing for the wrong reason is as bad as disagreeing.
+
+---
+
+## §5gd — 2026-08-29 02:46Z — em10 answered A; verified, not accepted
+
+em10 replied `A` to the forced choice: 43-path plan update finished, C specification **not** begun. Verified rather than taken on trust:
+
+- `SLICE-PLAN.md` is now **449 lines** (was 265), mtime **02:45:54Z** — three seconds before the reply.
+- Carries **§4 M-MOD** with a 43-row table, summary totals **3,234 branch additions / 115 deletions / 1,725 revert-surface lines**, and the M-ADD total re-asserted at 82.
+- Rows carry the two status columns I asked for: `READY-P4`, `BLOCKED-OQ1`, plus per-row unported/deletion/revert-surface counts. Row 43 (`pkg/store/store.go`) correctly records "em9 additions absorbed, v2 adds `CountUnbackfilledMessages`" — the exact case my filter lost.
+- Park verified in the roster: `activity=blocked`, `lastSeen 02:46:25Z`.
+
+**All three EMs confirmed blocked:** em10 (4s), em6 (46m, pending dispatch), em9 (5h, superseded).
+
+### taskSummary lies in both directions
+
+em10's `taskSummary` still reads **"Starting tranche C specification"** — work it had not started and has now confirmed it will not start. The heartbeat warns that a taskSummary written like a report means the agent believes it reported and did not. This is the mirror case: a taskSummary written like an *intention* can claim work never begun. It is a free-text field the agent updates at its own discretion, so it is evidence of nothing on its own.
+
+Had I read that summary as state and acted on it, I would have "corrected" an agent that was already compliant, or worse, concluded C was underway. The file mtime and the roster `activity` field are observable; the summary is self-reported prose.
+
+### Position
+
+Everything I can advance without ptone is now done. The critical path is entirely on three ptone decisions: **OQ1** (blocks C), the **design-docs** merge, and the **gate-rows** merge. DEF-32 remains open but is not on the C path. #1259 static for an eighth heartbeat, not mine to unblock.
+
+No report sent — not a section boundary, and the standing instruction is escalations only. OQ1 was already escalated at 02:44Z.
+
+### New rule
+
+- **313.** `taskSummary` is self-reported prose with no write trigger, so it can overstate progress *or* claim work never started. Prefer observable evidence — file mtime, branch tip, roster `activity` — and when you must ask, use a forced choice and then verify the answer against an artefact.
