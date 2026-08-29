@@ -16312,3 +16312,46 @@ the merge is not proven until main is green. Now proven, so retired per rule 336
 ### State
 main `eb365a9d3` GREEN. #1381 (C6) still OPEN, still disjoint, still valid — awaiting ptone.
 C5 blocked on the guard restoration. C6 retires on #1381 merge. Then C7.
+
+---
+
+## 12:46Z — HEARTBEAT v8. main `eb365a9d3` GREEN. **DEF-36 STRUCK.**
+
+### Ledger: DEF-36 CLOSED (landed with #1380)
+Evidence on `upstream/main`, not on a branch: the DEF-36 marker appears at **8 sites** — sqlite
+:734/:961/:1509/:2128 and postgres :363/:571/:1108/:1609 — and the landed
+`backfillTopicConversations` writes **zero** participant rows.
+**Positive-controlled the zero** (rule 61): the `awk` range extracted **91 lines**, the function
+opens and closes correctly, and `INSERT INTO conversations` matches 1. So the 0 for
+`conversation_participants` is a real negative, not an empty-input artifact. Had the awk range
+failed to match, `grep -c` would also have returned 0 and I would have struck the row on nothing.
+Group conversations correctly derive participants from project membership — **the participant
+table stays a listing index, never the access authority.**
+
+### Roster / peer-waits (rule 63) — no circular waits
+- `ca-msg-c5` **executing** on the empty-SenderID guard restoration; tip still `5a42fbbdc`, no push
+  yet, messaged ~6 min ago. Not stalled.
+- `ca-msg-c6` blocked pending **#1381 merge** — waiting on the *sponsor*, not on a peer.
+- `dev-hub-handlers` (C5's child) completed; work lives in C5's unmerged branch, so it stays until
+  C5 merges. C5 owns its retirement.
+- `coordinator` working. Nothing waiting on me.
+
+### Retirements
+- **`ca-msg-rev1` RETIRED** — its deliverable #1379 merged at 12:01 and main has been green
+  through two subsequent merges. Should have gone at the previous heartbeat; caught on sweep.
+- `ca-msg-c4` retired at 12:38 after main CI proved the merge.
+
+### Open ledger (unchanged, with reasons)
+- **DEF-5, DEF-6, DEF-9, DEF-10, DEF-18** — still unreachable until C5 and C7 land. Two heartbeats
+  without movement is expected here, not drift: they are gated on tranche completion, not on work.
+- **DEF-32** — needs the `(issuer, subject) → user_id` link table; wants its own tranche.
+- **DEF-33/35** — held. **DEF-34** — blocked on #1259, external.
+- **DEF-12** — Phase 4, partially landed; cursor-based work on main, same-timestamp work NOT.
+- **DEF-37 / O-2** — with C5; O-2 now carries an enumerated exemption in the reachability gate.
+- **Tranche H** — blocked on the verified `omitempty` evasion in the G-1 regression test.
+- **STRUCK:** DEF-11, DEF-14, DEF-16, DEF-17, DEF-26, DEF-31, DEF-38, DEF-39b, DEF-40, G-1,
+  **DEF-36**. GATE-1 CLOSED. Main-red escalation CLOSED.
+
+### Blocking path
+#1381 (C6) → sponsor. C5 → guard restoration → my gate. Then C7 dispatch (fresh agent, not a
+repurposed one — context rot).
