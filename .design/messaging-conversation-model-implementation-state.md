@@ -17522,3 +17522,89 @@ that does not name a hazard is not a justification.
 ### State
 `upstream/main` `03071382c`. `origin/scion/ca-msg-c7-def44` @ `bd9704f23`, **held** on the minter fix
 and the `agent-viz` decision. Trigger scope still `ask_user` with ptone. Held: DEF-41/42/43/44/45.
+
+---
+
+## 2026-08-29 — C7 `23a0651f4` review: the docs commit is the finding
+
+Verified C7's response to the three-item review. Two of three are clean. The third opened something
+bigger than the item it was attached to.
+
+**DEF-45 minter fix — VERIFIED, CLOSED.** Real `NewTokenMinter(make([]byte, 32))`, `t.Fatalf` on error,
+comment recording why `nil` was wrong. Rule 396 blocker resolved.
+
+**Six commits confirmed on remote** (`b25758e91`, `bd9704f23`, `49de2a3e2`, `1a36ef8fa`, `e3d54a680`,
+`23a0651f4`). The rule-395 gap from the previous round is closed. Branch endpoint: 20 files +524/-422.
+
+### BLOCKER — the docs rewrite deletes documentation for shipped flags and invents one that is not real
+
+I only found this because section 4 forces per-file deletion counts and the docs files carried real
+negatives (`cli.md` -17, `SKILL.md` -20, `messaging.md` -17). Checked the rewritten `scion message`
+section of `cli.md` against the flag registry in `cmd/message.go`.
+
+Shipped: `all at attach broadcast cc channel in interrupt notify plain raw thread-id wake` (13).
+Documented after the rewrite: `attach interrupt wake visibility` (4).
+**Shipped but undocumented: 10.** Tree-wide, `--cc` 9→2, `--notify` 10→8, `--plain` 2→1,
+`--channel` 4→3, `--thread-id` 2→1. `--cc` is gone from the CLI reference entirely.
+
+And `--visibility <string>: Message visibility: normal, verbose, or full` is an **added** line for a
+flag that does not exist on `scion message`. `grep '"visibility"' cmd/` → `hub.go:344`, `:354` only —
+it is a `hub project create` flag. Main's `cli.md` had it only under project create (`:411`). The
+rewrite moved it onto the wrong command *and* gave it invented values.
+
+#### RULE 397. A docs deletion is a positive claim that the feature is absent
+Nobody reads a reference page and infers "there may be more flags they chose not to list." An
+undocumented shipped flag is worse than an undocumented *unshipped* one, because the reader now has
+evidence for a false belief rather than no belief. So the deletion-justification directive applies to
+prose exactly as it applies to code, and **"the section was rewritten" is the docs dialect of
+"regeneration churn."** The measurement that catches it is the same one that caught the go.sum diff:
+enumerate the real population (the flag registry), diff it against what the document claims, and make
+the gap explicit. A rewrite is a deletion plus an addition; only the addition gets reviewed by default.
+
+#### RULE 398. Prose is the one artifact where an invented fact compiles
+`--visibility` on `scion message` passed every gate we have — gofmt, build, test-fast, the reachability
+scan — because none of them read English. Code that names a symbol that does not exist fails to build;
+documentation that names a flag that does not exist ships. This is why doc changes need the
+*population* check and cannot be reviewed by reading the diff for plausibility: plausible is exactly
+what a hallucinated flag is. The check is cheap and mechanical — extract the registry, `comm` it
+against the doc — and it should be the default for any commit touching a reference page.
+
+Note the target: `--channel` and `--thread-id` are the two flags **this project exists to fix.** The
+brief's opening sentence is that they are easy to omit by accident. Thinning their documentation
+mid-remediation is precisely the wrong direction, and it landed inside a PR nominally about `go.sum`.
+
+### Note — the draft workflow is not on the branch, and that is my instruction's fault
+No draft file in `git ls-tree` on the branch; the `.design/` diff vs main is empty. C7 reported
+"Draft updated in `.design/draft-extras-ci-workflow.yml`" — a path in *its* container, which I cannot
+open. This is downstream of my own "do not commit the workflow to a branch I would merge," so it is
+not charged to C7. Directed: push it to `scion/ca-msg-c7-ci-draft`, which I read and never merge.
+
+**"It exists" and "it exists where you can see it" are different claims,** and only the second is
+useful across a container boundary. This is the non-culpable sibling of rule 395 — same symptom, and
+the cause is a review instruction that had no delivery mechanism attached. When I forbid a location I
+must supply the alternative in the same breath.
+
+### Note — the `amend!` commit stores the justification where the merge destroys it
+`23a0651f4` carries the DEF-44 deletion justification as an `amend!`, to fold in "at squash time."
+Squash-merge takes the **PR title and body**; commit messages do not survive. And I compose the PR
+body for the compare URL, so the justification has to reach me as a message. Asked for the text; told
+C7 to leave the branch alone rather than rewrite it. Generally: **the durable record of why a deletion
+was safe must live in the artifact that survives the merge,** and in this repo that is exactly one
+place.
+
+### Note — `.gitkeep` is not a valid `//go:embed dist/*` remedy
+`go:embed` patterns skip names beginning with `.` or `_`, so `dist/.gitkeep` leaves the embed
+unsatisfied. Corrected so it is not recorded as settled advice. Outcome unchanged: excluding
+`agent-viz` remains right.
+
+### Accepted — the agent-viz exclusion
+A Go module health gate is not a full-stack build orchestrator, and a module needing Node and vite
+does not belong in it. C7's visibility guarantees match what I required: reason in the header comment,
+`=== EXPLICITLY EXCLUDED MODULES ===` printed, `discovered == tested + excluded` coverage assertion,
+warning when an excluded module disappears. The coverage assertion is the load-bearing one — it is what
+stops the exclusion list from silently becoming the whole population (rule 393).
+
+### State
+`upstream/main` `03071382c`. `origin/scion/ca-msg-c7-def44` @ `23a0651f4`, **held** on the docs
+population fix. Trigger scope still `ask_user` with ptone: root `go.mod`/`go.sum` in the path filter,
+and an unfiltered run on push to main. Held: DEF-41/42/43/44/45.
