@@ -17736,3 +17736,73 @@ hold the tranche. Gate scope is ptone's call, not mine; my job was to make the c
 ### State
 `upstream/main` `03071382c`. `def44` @ `478374579` ready (DEF-44/45 cleared). `ci-draft` @ `15ccc8f04`
 with four fixes dispatched. Held: DEF-41/42/43.
+
+---
+
+## 2026-08-29 — heartbeat v8 sweep: trigger settled, gate verified by control, DEF-43 handed over
+
+### Trigger DECIDED
+ptone: *"which way do you lean on the yes/no"* → I answered **yes, add root `go.mod`/`go.sum`**, with
+the cost stated plainly rather than sold: it taxes the wrong-feeling person, because a root dep bump
+now gets blocked by broker tidiness its author never thought about. That is nonetheless the *correct*
+person — their change caused the drift and the fix is one command — and the alternative is that the
+drift waits for an unrelated PR to touch extras/ and lands on an author who did not cause it. Which is
+DEF-44's actual story. Named the one thing that would change my mind (frequent dependabot-style bumps
+→ scope root-only changes to the freshness check alone) and gave a default for silence. ptone:
+**"add them. then let's land c7."**
+
+### Gate verified by positive control, not by reading
+C7 fixed all four defects (`d47e9df30`). I re-ran each new assertion against input known to be bad:
+empty → `ALL_COUNT` 0 (and 3 lines → 3); two exclusions both removed while `extras/agent-viz-extra`
+survives an `extras/agent-viz` exclusion; `TEST_FILES=5 / RUN_COUNT=0` trips while `0/0` does not.
+Ran them **in bash**, because the workflow's shell is bash and my local shell is zsh — `printf '%s\n'
+$VAR` word-splits in one and not the other, so a zsh control would have proved nothing about CI.
+C7 also spotted unprompted that re-deriving TOTAL in the coverage job required adding a checkout there.
+
+**One left, and it was mine to have caught:** the `EXCLUDED_COUNT` loop still used substring `grep -qF`
+while I had only asked for `-x` on the *other* grep. Not cosmetic — that loop's else-branch **is** the
+stale-exclusion detector I demanded. Control: with `ALL_MODULES = extras/agent-viz-web` and
+`EXCLUDED_MODULES = extras/agent-viz` (module renamed), `grep -qF` prints "EXCLUDED" and counts 1,
+suppressing the warning; `grep -qxF` prints "WARNING: exclusion not found" and counts 0. So a stale
+exclusion masquerades as a live one and the failure surfaces later as an arithmetic complaint naming
+neither cause. Told C7 this was rule 383 again and that **I** owed the class enumeration when I raised
+defect 2. C7 then swept all four greps in the file and justified the two that correctly lack `-x`.
+
+### A failure I imagined and did not verify — checked before asserting this time
+Worried `make tidy-extras` would die on agent-viz, since `go list ./...` there fails with
+`pattern dist/*: no matching files found`. **It does not:** `go mod tidy -diff` returns rc=0, empty.
+So the remedy covers all 10 modules cleanly though the gate tests 9, and no Makefile exclusion is
+needed. Worth keeping: **`go mod tidy` succeeding is not evidence the module builds** — the two
+commands disagree here. Had I asserted instead of testing, I would have made C7 add a pointless
+exclusion, on the same day I retracted a finding for exactly that failure mode.
+
+Also required the Makefile target land in the **same commit** as the workflow: the gate's error names
+`make tidy-extras`, and a gate pointing at a nonexistent command is the defect I had just praised the
+docs work for avoiding.
+
+### DEF-43 — HANDED OVER (the row moved because I finally told someone)
+Two heartbeats of no movement, and the reason was procedural, not technical: I recorded the owner as
+"CI workstream" and **never messaged them.** `ci-fix-lead` exists and has existed all along.
+**Assigning an owner is not notifying them; a ledger row with an owner and no message is unowned.**
+
+Handed over with what I verified and, deliberately, what I did not. Fails on 3 consecutive main runs
+(`03071382c`, `2ce6e1149`, `ca63095e0`) — a trend, and the only red in the reporting-only job at tip.
+`handlers_logs_test.go:138: status = 404, want 501`. Eliminated: the handler body (handlers_logs.go:100
+returns 501 *before* the `GetAgent` at :109, matching the test's stated assumption), the dispatch
+(handlers_agents_core.go:1856 passes the raw id through), and `handleAgentByID`'s only 404 (:1806,
+empty-id only). **Did not find the source.** Handed over the eliminations rather than a hypothesis
+dressed as a finding. Also flagged that #1393 already tried to clear this batch and this one survived.
+
+Flagged the trap: changing the test to expect 404 is a **contract decision**, not a test fix.
+501-before-lookup discloses nothing; 404-first confirms existence. If the order really changed, the
+test is the alarm and relaxing it ratifies the leak.
+
+### Roster hygiene
+`dev-docs-slice` (idle 14h, `completed`, taskSummary reading like a report) is **createdBy a user, not
+by me or any of my managers** — not my orphan, left alone. My subtree is exactly `ca-msg-arch` →
+`ca-msg-c7`. Also noted my dispatching coordinator is **`chat-admin-lead`**, not `coordinator`.
+
+### State
+`upstream/main` `03071382c`. `def44` @ `478374579` + landing commit in progress. `ci-draft` @
+`a67248073` (done). Awaiting C7's push of `.github/workflows/extras-ci.yml` + Makefile, then I compose
+the compare URL. Held: DEF-41/42. **DEF-43 transferred to ci-fix-lead. DEF-44/45 cleared.**
