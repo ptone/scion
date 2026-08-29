@@ -20442,3 +20442,82 @@ DEF-12 gates E, and flagged explicitly that this departs from the written plan.
 - `upstream/main` = `fa7ae1914`. Awaiting ptone: **Tranche E board decision**, DEF-54 PR.
 - Live: `ca-msg-def3750` (DEF-37/50, design due before code), `ci-fix-lead`, `chat-admin-lead`.
 - Open, unstaffed: DEF-53, DEF-55, DEF-12 (partial), issue #1374.
+
+---
+
+## 5el — DEF-56 filed and escalated; DEF-37/50 trace verified; gate design ruled (2026-08-29)
+
+### DEF-56: the reachability gate has never run
+
+`hack/check-authz-reachability.sh` has **zero** references in `.github/` and **zero** in the
+Makefile. Only mentions on main are two lines in a project-log doc. The other three gates
+(`check-authz-guards`, `check-security-marker-gates`, `check-conversation-upsert-guard`) each
+have two wiring references and genuinely execute in CI.
+
+The script we have been describing as the mechanical enforcement of *"no messaging path may
+reach send without passing `authorizeAgentMessage`"* only runs when a human runs it by hand.
+DEF-50 said the gate cannot tell prose from code. The truth is worse: **it also does not
+execute.** Part of why my earlier mutation experiment stayed green is that nothing was watching.
+
+Fix is already in flight at no extra cost: def3750's port targets `checksecuritymarkergates`,
+which *is* CI-wired, so the port repairs the wiring as a side effect. Instructed def3750 to say
+this explicitly in the PR body — otherwise a reviewer reads it as a lint refactor.
+
+- **482.** A gate's authority comes from its wiring, not its contents. Before trusting any
+  checker, grep for what *invokes* it. An unwired gate is indistinguishable from a passing one,
+  and reads in every status report as coverage. Audit the caller, not the script.
+
+### Gate-deletion escalated, not decided
+
+def3750 proposed deleting the shell script once AST gates cover it. Told it to hold; removing a
+gate is ptone's call under brief item 12. **Recommended**: land AST gates, leave the script, delete
+in a follow-up once equivalence is demonstrated. If the port is subtly narrower and we delete in
+the same PR, coverage is lost silently. A script nobody runs costs nothing for one more PR.
+
+### The two red functions: verified NOT gaps
+
+def3750 returned the call-path trace. I re-verified against `upstream/main` rather than accepting it.
+
+- `handleAgentMessage` — authorized by its **caller**, `handleAgentAction`
+  (`handlers_agents_core.go:2606`), before invocation at 2674. Confirmed verbatim.
+- `handleAgentOutboundMessage` — in the `selfAccess` set (2572-2576), so it skips the
+  `authorizeAgentMessage` block by design. Its own auth is at lines 58-66: `agentIdent` nil check
+  plus `agentIdent.ID() != id` self-only check. `authorizeAgentMessage` takes a `targetAgent`;
+  this is an agent→user path with no target agent. Correct that it does not apply.
+
+**My check found what the trace missed:** `handleAgentMessage` has **two** callers, not one.
+The second is `handlers_projects_core.go:2448`, the project-scoped action router, preceded by
+its **own duplicated** `authorizeAgentMessage` block at 2427. The conclusion survives — but it
+survives because an independently written second block happens to be correct, not because it
+was verified.
+
+- **483.** "Authorized by its caller" is a claim about the caller *set*, and is only as true as
+  the least-examined member. Enumerate callers mechanically before accepting the claim; a trace
+  that names one caller has verified one caller.
+
+### Ruling: exemptions converted to positive gates
+
+Rejected bare allowlist entries for both functions.
+
+1. `handleAgentMessage` — **caller-side rule**: any function whose body calls
+   `s.handleAgentMessage` must also contain `authorizeAgentMessage`. Binds both known callers
+   today and automatically binds a third route the day one is added. A bare allowlist entry
+   would stay green through *both* the deletion of an authz block and the addition of an
+   unauthorized route; the caller-side rule fails on both.
+2. `handleAgentOutboundMessage` — **REQUIRED gate** asserting its self-only check is present,
+   not an exemption. Today the gate would say "excused"; it should say "must contain its
+   self-only check." Deleting that check must go red.
+3. Apply the same treatment to the E1 `fanOutGlobal` exemption if its admin check is nameable.
+
+- **484.** An exemption records that we looked once; a gate records what must remain true.
+  Prefer the gate wherever the thing that makes the path safe can be named. Fall back to an
+  exemption only when safety rests on something the checker cannot see — and say which.
+
+### Standing state
+
+- `upstream/main` = `fa7ae1914`. PR **#1409** still red on Build & Test (gofmt); that is the
+  pre-fix run, `ca-msg-fmt1409` still working and owes a `--numstat` before pushing.
+- Live: `ca-msg-def3750` (implementing the ruled gate design), `ca-msg-fmt1409`, `ci-fix-lead`,
+  `chat-admin-lead`.
+- Awaiting ptone: Tranche E board decision; gate-deletion decision; #1409.
+- Open, unstaffed: DEF-53, DEF-55, **DEF-56**, DEF-12 (partial), issue #1374.
