@@ -15956,3 +15956,85 @@ Also: #1378 fixed `TestHubTokenCreateHelpUsesRegistryScopes`, one of my two red-
 - C4/C6 compare URLs with ptone.
 - C7 dispatch blocked on C5.
 - `TestDeleteStopped_RequiresGroveContext` red on main, unowned.
+
+## 2026-08-29 ~12:10Z — I WAS WRONG ABOUT MAIN. #1379 MERGED. #1380/#1381 dispatched.
+
+### The red on main was SHELLCHECK. Only shellcheck.
+
+`gh run view --json jobs` on main's failing run: golangci-lint SUCCESS, **Build & Test SUCCESS**,
+shellcheck FAILURE. The finding is the SC2016 site in the conversation-upsert guard — the one I
+had already diagnosed in detail while arguing it was fixable in #1379.
+
+**#1379 MERGED 12:01:04Z as `b7a415575`** and carries both suppressions. Main's red is fixed.
+
+### MY ERROR, recorded in full because it is the most useful thing in this entry
+
+I escalated to ptone — twice — that main was red with two failing `./cmd/` tests.
+
+- `TestHubTokenCreateHelpUsesRegistryScopes`: genuinely red. #1378 fixed it. Correct call.
+- `TestDeleteStopped_RequiresGroveContext`: **NOT a CI failure.** It fails in my container because
+  docker is not installed:
+  `"docker ps failed: exec: \"docker\": executable file not found in $PATH" does not contain "not in a scion project"`
+
+I reported my environment as the state of the codebase — the exact mistake I corrected c6 for
+twice within the same hour, complete with the lecture about re-measuring instead of recalling.
+
+**The expensive part was not the wrong test. It was failing to join two facts I already held.**
+For two hours I knew (a) main's CI was red and (b) there was an unsuppressed SC2016 finding on
+main, analysed in detail in a different thread. I attributed main's red to the wrong cause in one
+conversation while diagnosing the right cause in another, and never asked which JOB was failing.
+One command. ptone asking me to escalate is the only reason I looked.
+
+**RULE 357. "Main is red" is not a finding until you name the failing JOB.** `gh run view <id>
+--json jobs` is one call. A failure reproduced locally is evidence about your container until CI
+agrees — my two phantom failures were noise that hid the real one in the same bucket.
+
+**RULE 358. When you are analysing a defect on main, ask whether it explains any open
+"main is broken" report.** Two independent investigations of one root cause is a real cost. The
+symptom and the diagnosis sat in adjacent threads for two hours.
+
+**RULE 359. Rules you write for others apply to you within the hour.** Rules 347 and 351 were
+both mine, both written today, and I violated 347 while enforcing 351. Being the one who wrote
+the rule is not evidence of compliance with it.
+
+### #1380 (C4) dispatched — commit-failure tx leak
+Reviewer framing overstated it: C4 **does** roll back on insert failure, update failure and the
+n==0 concurrent case (verified, lines 59/69/77). **Exactly one path leaks: commit failure**
+(line 81). Told C4 so — it should know I checked rather than forwarding a review unread.
+
+Take the IIFE + `defer tx.Rollback()` anyway: it makes the omission *structurally impossible*
+rather than something the next editor must remember. Four correct manual calls plus one missing
+is the failure shape.
+
+**Severity is U-TX-1 family:** at `MaxOpenConns=1` a leaked tx makes the next `Begin` **HANG**,
+not error. So the real failure is "migration fails, someone retries, retry blocks forever with no
+error" — on an error path nobody watches.
+
+Two corrections to the reviewer's snippet, passed on: keep `BeginTx(ctx, nil)` (the snippet
+regresses to `s.db.Begin()`, dropping cancellation), and under the IIFE the n==0 branch must
+return early **without** committing so the defer discards the orphan row.
+
+### #1381 (C6) dispatched — two nil guards + a timeout, with the timeout fix CHANGED
+Findings 1 and 2 (nil `resolveResp`, nil `resp`) accepted as written. Told C6 explicitly that the
+skip-vs-deny trap from #1379 does **not** apply here — in a CLI there is nothing to skip, only to
+fail — so it takes the straightforward version rather than over-generalising my earlier ruling.
+
+Finding 3 changed. The snippet wraps the whole function in one 30s deadline. I read the code: that
+ctx spans `mgr.List` **and** the concurrent per-agent `mgr.Message` fan-out, so the phases compete
+for one budget. A slow List silently consumes every send's time, and a resulting failure is
+indistinguishable from a genuinely unresponsive agent.
+
+**RULE 360. A timeout is a diagnostic as much as a safety valve — scope it so that when it fires
+you know which operation it was.** One deadline over N operations tells you only that something
+was slow. Directed per-operation deadlines; the fan-out is already concurrent so this costs no
+wall time and every timeout names one agent. Also warned that `--interrupt` does more work, so
+the send deadline must not make it flaky.
+
+### Re-baselining
+Told both C4 and C6 to measure against **`7c03e9dbf`**, not `b281eb701` (rule 335/356).
+
+### Open
+- C5: revert B11/B13, wire DEF-40, fail-close reachability script.
+- C4: #1380 tx fix. C6: #1381 three fixes.
+- Confirm `b7a415575` CI goes green.
+- **STRUCK: DEF-39b, DEF-40 — #1379 merged.** No unowned red test; discard that framing.
