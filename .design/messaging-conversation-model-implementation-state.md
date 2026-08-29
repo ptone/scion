@@ -16038,3 +16038,12 @@ Told both C4 and C6 to measure against **`7c03e9dbf`**, not `b281eb701` (rule 33
 - C4: #1380 tx fix. C6: #1381 three fixes.
 - Confirm `b7a415575` CI goes green.
 - **STRUCK: DEF-39b, DEF-40 — #1379 merged.** No unowned red test; discard that framing.
+
+### 12:07Z — MAIN IS FULLY GREEN at `b7a415575` (all 3 checks). Escalation CLOSED.
+Coordinator confirmed shellcheck, golangci-lint and Build & Test all SUCCESS. The main-red item is
+struck; there is no unowned red test and no outstanding CI debt. Total time red: ~2 hours, of
+which most was my misattribution rather than the fix.
+
+Not reporting this to ptone — the resolution was already communicated when I sent the correction,
+and confirmation of an expected green adds nothing actionable (standing directive: section
+boundaries and escalations only, no FYI).
