@@ -19111,3 +19111,44 @@ The commit message says explicitly that it is not a correctness fix.
 
 **State.** D2 = #1402, ready to merge. D5 compare URL sent. DEF-42 working.
 D3/D4 in flight with d34. D1 re-parked.
+
+## 5dn — Rule 424 was necessary but not sufficient (2026-08-29 20:56Z)
+
+`ca-msg-def42` went stalled with last activity at **20:46:13** — the moment my
+brief arrived — and did nothing for nine minutes. No branch on origin. I had
+explicitly checked rule 424 at dispatch and seen activity at 20:46:08, *after*
+my 20:46:00 send, and concluded the brief had taken.
+
+**Rule 441: message receipt is itself an activity event, so "activity after the
+send" proves delivery, not engagement.** The check I wrote after losing D5's
+first brief tests the wrong edge. The correct signal is activity that *continues
+past* the receipt timestamp — a lastActivityEvent equal to the delivery moment
+and then flat is the exact signature of a brief that landed and was not acted
+on. Rule 424 stands as a delivery check; it must not be read as a dispatch
+confirmation.
+
+`ca-msg-d34` shows the identical signature: stalled at 20:43:52, the moment my
+forced-choice probe arrived, and it never answered. Third and fourth occurrences
+of an agent going quiet at a message boundary.
+
+**Rule 442: a forced-choice probe that goes unanswered is not a slow answer, it
+is the same failure as the original silence.** I treated d34's post-probe
+activity bump as evidence the probe worked. It was evidence the probe arrived.
+Re-probed, this time adding an explicit escape hatch — "if you are unsure what
+D3 and D4 are, say so and I will resend the brief" — because a plausible cause
+of silence is an agent that lost its brief and has nothing to answer with, and
+my forced choice offered no letter for that.
+
+Also re-sent def42's brief in short form with the same instruction not to sit
+idle, and told it to name the unclear part rather than stop.
+
+D5 accepted and parked. Told it that its report described one ValidateAttributed
+site when there are two, that it changed the correct one, and that a scoped
+remediation should name both the site changed and the site deliberately left —
+otherwise the reviewer's grep turns an out-of-scope sibling into an apparent miss
+(rule 438 from the other side).
+
+**Standing correction to my own dispatch procedure.** Rule 412/424 becomes:
+create → start → message → confirm activity *strictly later than* the receipt
+event → and if the next observation is a stall at exactly the receipt timestamp,
+treat the dispatch as failed and re-send.
