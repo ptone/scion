@@ -17181,3 +17181,68 @@ and R-3 are *broader* than suggested — and offered ptone the text. Non-blockin
 - `ca-msg-c5` parked awaiting final word; retire it once #1391 merges, along with child
   `dev-review-fixes`. **C7 dispatches on a fresh agent** (context rot) after the merge.
 - Strike on merge: DEF-37, O-2. Held: DEF-41, DEF-42, **DEF-43 (new, CI-owned)**.
+
+---
+
+## 15:10Z — **C5 MERGED as `03071382c`. Six of seven phases done.** C7 dispatched. DEF-44 opened. Rule 388.
+
+ptone squash-merged #1391. Verified by **distinctive-identifier content check**, not ancestry — squash
+blinds `git cherry` and patch-id (rule 61):
+`SELF-TEST` present, `grep -E -q` present, `resolvedAgent` present, `validate_compat_test.go` present,
+`s.mu.RLock()` counts 4 + 2 in C5's two files. All on `upstream/main`.
+
+Main **Build & Test green** at `03071382c`. Only then retired `ca-msg-c5` and its children
+`dev-review-fixes` and `dev-hub-handlers` — **the author is the cheapest possible fixer of a merge
+that turns out to break main, so retirement waits on the post-merge gate, not on the merge.**
+
+### Ledger
+**STRUCK: DEF-37, O-2.** Held: DEF-41, DEF-42, DEF-43 (CI-owned), **DEF-44 (new)**.
+**Tranche C is C1-C6 complete; C7 is the last phase.**
+
+### C7 dispatched — fresh agent `ca-msg-c7` (context rot; no repurposing)
+Scope per the phase plan: `extras/scion-{teams,telegram,slack,discord,chat-app}`, `docs-site/`,
+`resources/platform_skills/scion-messaging/SKILL.md`. Acceptance: each broker builds and its tests
+pass; **docs describe the shipped contract, not the design.** Flagged to C7 that the second clause is
+the real work — C1-C6 are now facts, so wherever a doc promises what was not shipped, the doc is wrong.
+
+Operational note for next time: `scion create` leaves an agent in phase `created`, and **`scion
+message` to a non-running agent fails 409** — the harness does not auto-start. `scion resume` moves it
+to `running`; then the message lands. `scion start` is create+launch in one, which is what I should
+have used.
+
+### RULE 388. Measure the ground your next agent will stand on before you dispatch them onto it
+I did not hand C7 the scope cold. I measured its starting conditions first, and found three things it
+would otherwise have discovered as apparent self-inflicted damage:
+
+1. **CI does not build `extras/` at all.** Zero occurrences in `.github/workflows/`. Every broker is a
+   separate Go module with a `replace` onto the root tree, so root `go build ./...` never reaches
+   them and `make test-fast` never compiles them. **Nothing has ever guarded these.**
+2. **They are already broken.** At `03071382c` every broker module fails with `missing go.sum entry`
+   for transitive root deps (`cloud.google.com/go/run/apiv2`, `policytroubleshooter`,
+   `resourcemanager`).
+3. **Not ours.** Identical failures at `6268bac4` (2026-08-27), *before* tranche C. And `go mod tidy`
+   fixes it — 9 lines across `go.mod`/`go.sum` in `scion-discord`, after which the build succeeds.
+
+**DEF-44**, assigned to C7 as its first commit, kept separate from any messaging change so that a
+breakage introduced later is attributable. Not cosmetic: the Dockerfiles copy `go.mod`/`go.sum` and
+build **without** tidying, so a stale `go.sum` breaks the image build too.
+
+Two traps I had to avoid in establishing this, both worth recording because a wrong answer here would
+have been reported as a tranche-C regression:
+- **A build failure in a sandbox is a network claim until proven otherwise.** The first output was all
+  `go: downloading`, which looks exactly like a blocked egress. I checked: `proxy.golang.org` returns
+  200. Only then was `missing go.sum entry` a real finding.
+- **Copying a module out of the tree to test it invalidates the test.** My first `go mod tidy` attempt
+  in `/tmp/dtest` failed with `replaced by ../../: open /go.mod: no such file` — I had severed the
+  relative `replace`. The measurement has to happen where the module actually sits.
+
+### Gate change deliberately NOT delegated
+C7 is asked to bring a **recommendation** on whether CI should build `extras/`, not a change. Brief
+item 12 stands: re-pointing or adding a gate is not the changing team's call. Told C7 plainly why the
+obvious "just add a job" is not automatic here — this tranche has now produced two jobs that were
+green because they could not express failure (rules 386/387), so any proposal must say **how it fails
+loudly**.
+
+### State
+- `upstream/main` **`03071382c`**. Live: `ca-msg-arch`, `ca-msg-c7` (running, briefed).
+- Outstanding for ptone: **#1365 still needs closing.**
