@@ -19255,3 +19255,12 @@ the same mistake I sent back to D5 this tranche; I am not going to accept it
 because it is small.
 
 New branch `scion/ca-msg-d51`; `ca-msg-d2` is merged and must not be reused.
+
+**Addendum to 5dp.** The first send of the DEF-51 report was REJECTED at 2163
+chars against the 2000-rune cap. Rule 447: I know the cap and I still wrote past
+it, because I drafted the report as prose and measured afterwards. Measure before
+sending — `python3 -c "print(len(open(f).read()))"` — since an over-cap send is
+rejected outright and prints the CLI help, which is easy to skim past as noise
+rather than read as failure. Resent at 1751. Also note the failed send was
+chained with `;` to the park command, so the park executed while the report had
+not been delivered; a park is not a substitute for confirming the message landed.
