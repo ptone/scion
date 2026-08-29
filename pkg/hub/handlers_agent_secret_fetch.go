@@ -204,6 +204,22 @@ func (s *Server) handleAgentSecretFetch(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// --- Current listing (hoisted, one call per request) ---
+	//
+	// Used to distinguish row 2 (entitled, exists, unreadable) from row 3
+	// (entitled at mint, no longer authorized). Hoisted out of the per-key
+	// loop: the state that triggers the entitled-but-not-resolved branch is
+	// correlated — a backend wobble or key rotation puts many keys into it
+	// at once — so the multi-key case is the common case, not the rare one.
+	currentKeys, listErr := computeEntitledSecretKeys(
+		r.Context(), s.secretBackend, s.store, s.authzService, agent)
+	currentlyListedSet := make(map[string]struct{}, len(currentKeys))
+	if listErr == nil {
+		for _, ck := range currentKeys {
+			currentlyListedSet[ck] = struct{}{}
+		}
+	}
+
 	// --- Produce per-key results ---
 	results := make([]agentSecretResult, 0, len(req.Keys))
 	for _, key := range req.Keys {
@@ -229,25 +245,24 @@ func (s *Server) handleAgentSecretFetch(w http.ResponseWriter, r *http.Request) 
 			// authorized). Distinguish by checking if the key appears in
 			// the listing (what exists) vs. the resolution (what resolved).
 			//
-			// If the key is in the listing but not in the resolution, it
-			// either failed to decrypt (row 2) or was de-scoped/authz-
-			// withdrawn (row 3). We use computeEntitledSecretKeys to check
-			// current listing — if the key is still listed, it's row 2
-			// (exists but value unreadable). If not listed, it's row 3
-			// (access withdrawn).
-			currentlyListed := false
-			currentKeys, listErr := computeEntitledSecretKeys(
-				r.Context(), s.secretBackend, s.store, s.authzService, agent)
-			if listErr == nil {
-				for _, ck := range currentKeys {
-					if ck == key {
-						currentlyListed = true
-						break
-					}
-				}
-			}
-
-			if currentlyListed {
+			// Three sub-cases based on whether the listing itself succeeded:
+			//
+			//   listErr != nil: we cannot distinguish row 2 from row 3.
+			//     Default to the transient reading (row 2 / unavailable).
+			//     Saying "access withdrawn, refresh" when the backend is down
+			//     would issue an instruction in the wrong direction — nothing
+			//     was revoked, and refreshing cannot fix a backend outage.
+			//
+			//   listErr == nil, key in listing: row 2. The secret exists and
+			//     is still authorized, but its value could not be read.
+			//
+			//   listErr == nil, key not in listing: row 3. The secret's scope
+			//     or authorization was withdrawn after this token was minted.
+			if listErr != nil {
+				result.Status = secretFetchStatusUnavailable
+				result.Error = "secret is entitled but its current status could not be determined; " +
+					"the entitlement listing could not be read — this may be a transient backend error"
+			} else if _, listed := currentlyListedSet[key]; listed {
 				// Row 2: in stored list, exists, but value unreadable.
 				result.Status = secretFetchStatusUnavailable
 				result.Error = "secret is entitled but its value could not be read; " +
