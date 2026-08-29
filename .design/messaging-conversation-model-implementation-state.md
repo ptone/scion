@@ -15825,3 +15825,99 @@ Told rev1 to add a `(nil, nil)` stub test and confirm it panics on the unfixed c
 - `TestDeleteStopped_RequiresGroveContext` still red on main, still unowned (#1378 fixes only the
   other one).
 - #1365 still needs closing by ptone.
+
+## 2026-08-29 ~12:00Z — C5 delivered and BLOCKED on a security regression it flagged itself
+
+### `scion/ca-msg-c5-handlers` @ `f04b67545` — 16 files, merge-base `b281eb701`, ls-remote agrees
+
+C5's report is detailed and largely accurate. Deletion accounting across all 16 files, the
+`resolveDMConversation` removal, the unified `DeriveConversationKey` migration and the
+prohibition-list table all hold. **Two blockers and one design pushback.**
+
+### C5 did the right thing and it should be recorded as such
+
+It flagged the B11/B13 change itself, described it accurately, and wrote: *"I did not instruct the
+developer to change this behavior."* It surfaced a finding that made its own branch look worse.
+Had it not, I would have found it in `publish_guard_test.go` and discounted every other line of
+the report. **Self-reported findings against interest are the highest-value signal a manager
+produces** — reinforce them loudly, or they stop coming.
+
+### BLOCKER 1 — B11/B13 publish guard removed on three paths. REVERT.
+
+`handleAgentMessage`, `handleGroupMessage` (both recipient loops), `processMentions`. The deleted
+comment stated the rule outright:
+
+```go
+-		// B11/B13: only publish when persistence succeeded — publishing an
+-		// unpersisted message is not legal.
+-		if persistedMsgID != "" {
+```
+
+It was deleted rather than answered. The rationale — *"C3 dual-write changes, SSE publish fires
+regardless of persistence outcome"* — is a **non-sequitur**: dual-write concerns WHERE a message
+is written, not whether we announce a write that FAILED. Nothing in C3 requires this.
+
+Why it matters beyond a display glitch: the persisted row carries the conversation key, and **the
+key IS the access-control basis**. Publishing without it announces content whose access basis was
+never recorded. Under-granting is recoverable; over-granting is not.
+
+The codebase already has the honest answer — `handlers_agent_messaging.go:989` sets
+`managedStatus = "delivered_not_persisted"`. The established pattern is to TELL the caller, not
+to fake success.
+
+**RULE 353. An inverted guard test is worse than a deleted one.** All three tests are still named
+`..._SkipsPublishOnPersistFailure` and all three now assert publish DOES fire. Deleting a guard
+leaves a hole someone can notice; inverting it leaves a green check named after the property it
+now forbids. Grep finds the guard present and passing. **When a guard test's name and its
+assertion disagree, the name is the specification and the assertion is the bug.**
+
+Authority: this was an explicit security decision on main, so changing it is a gate re-point —
+not the changing team's call (brief item 12). The developer hit a failing test, concluded the test
+was stale, and rewrote it. Textbook.
+
+**RULE 354. A demonstrated security-behaviour change invalidates that source's other
+"cosmetic-only" claims.** So I verified C5's "B5 comments only, behaviour PRESERVED" rather than
+accepting it. It HOLDS — `authenticatedSender` intact at :1806 and now called at the derivation
+point, which strengthens it. I told C5 I checked, and why.
+
+### BLOCKER 2 — DEF-40 TODO at `handlers_agent_messaging.go:655`. Wire it now.
+
+C5 is waiting on the #1379 merge. It does not need to: the cleanup changes only the INTERNALS of
+`ValidateCrossProjectAddressees` — **the signature is unchanged**, so the call site cannot tell
+the difference.
+
+**C5 is the FIRST production caller.** Until it wires the call, AC-33/DEF-2 is unenforced in
+production no matter how correct the function is. **A validated function nobody calls is not a
+control.** Shipping C5 with the TODO would close the phase whose job was to close the boundary,
+with the boundary open.
+
+### DESIGN PUSHBACK — O-2 should FAIL `check-authz-reachability.sh`, not be noticed by it
+
+The new DEF-37 script prints `NOTICE [O-2] handleGlobalBroadcast bypasses authorizeAgentMessage
+and ValidateLegacyMessage` and exits 0. It exists to enforce *no messaging path reaches send
+without passing authorizeAgentMessage*, and it passes while a live violation of exactly that
+invariant is present.
+
+Directed: fail closed with a named exemption list (one entry, reason, date). Same green today,
+but a SECOND bypass fails the build.
+
+**RULE 355. An enumerated exemption catches the next violation; an informational notice does not.**
+That difference is the only property a gate has. Do not let a known gap be encoded as a print
+statement.
+
+### Also raised (no action unless real)
+`TestOutboundMessage_UnknownTypeIsChargedAsAgentTraffic` now expects 400, correctly — but the
+rate-limiter assertions were dropped because the request no longer reaches the limiter. Asked C5
+to confirm validation-before-limiting is not a free-of-charge DoS lane.
+
+### #1379 — rev1's review fixes VERIFIED at `d9cdecd1c`
+- SC2016 disables now at **both** 191 and 200. Branch is shellcheck-clean, better than main.
+- Nil check **DENIES** (`return fmt.Errorf`), not `continue`. Ruling followed exactly.
+- rev1 confirmed the nil test SIGSEGVs on unfixed code before fixing — rule 346 applied correctly.
+- Re-verified myself: guard harness 14/14, guard rc=0 on clean tree, messaging tests pass.
+
+### Open
+- C5: revert B11/B13, wire DEF-40, fail-close the reachability script, re-measure.
+- C7 dispatch blocked on C5.
+- C4/C6 compare URLs with ptone; #1379 updated in place.
+- `TestDeleteStopped_RequiresGroveContext` still red on main, unowned.
