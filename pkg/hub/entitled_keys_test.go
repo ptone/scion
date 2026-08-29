@@ -84,10 +84,14 @@ func (f *fakeSecretBackendForEntitlement) List(_ context.Context, filter secret.
 func (f *fakeSecretBackendForEntitlement) Resolve(_ context.Context, userID, projectID, brokerID string, _ *secret.ResolveOpts) ([]secret.SecretWithValue, error) {
 	// Simulate Resolve's best-effort behavior: list all secrets, but
 	// silently skip any whose key is in dropOnResolve (as if decryption
-	// failed).
+	// failed), and exclude internal secrets (matching localbackend.go:173).
 	var result []secret.SecretWithValue
 	for _, secrets := range f.store.secrets {
 		for _, s := range secrets {
+			// Exclude internal secrets, matching real Resolve() behavior.
+			if s.SecretType == store.SecretTypeInternal {
+				continue
+			}
 			if f.dropOnResolve[s.Key] {
 				continue // simulates decryptRawValue failure
 			}
@@ -305,5 +309,83 @@ func TestComputeEntitledSecretKeys_MultiScope(t *testing.T) {
 		if keys[i] != k {
 			t.Errorf("keys[%d] = %q, want %q", i, keys[i], k)
 		}
+	}
+}
+
+// TestComputeEntitledSecretKeys_EqualsResolvedWhenAllSucceed is the drift
+// test. When every secret resolves cleanly (no decryption failures), the
+// entitled set must EQUAL the set of key names from Resolve() output.
+//
+// This test goes red if the two implementations (computeEntitledSecretKeys
+// and Resolve) part company on scope selection, internal-secret exclusion,
+// or any other filtering rule. It is the only test that detects drift
+// between entitlement and resolution when no failure is involved.
+func TestComputeEntitledSecretKeys_EqualsResolvedWhenAllSucceed(t *testing.T) {
+	fakeStore := &fakeSecretStoreForEntitlement{
+		secrets: map[string][]store.Secret{
+			"hub:hub-1": {
+				{Key: "HUB_KEY", SecretType: store.SecretTypeEnvironment},
+				{Key: "INFRA_KEY", SecretType: store.SecretTypeInternal}, // should be excluded by both
+			},
+			"project:proj-1": {
+				{Key: "PROJECT_KEY", SecretType: store.SecretTypeEnvironment},
+				{Key: "FILE_SECRET", SecretType: "file"},
+			},
+			"user:user-1": {
+				{Key: "USER_KEY", SecretType: store.SecretTypeEnvironment},
+			},
+		},
+	}
+	backend := &fakeSecretBackendForEntitlement{
+		hubID:         "hub-1",
+		store:         fakeStore,
+		dropOnResolve: map[string]bool{}, // nothing dropped — all resolve cleanly
+	}
+	agent := &store.Agent{
+		ID:        "agent-1",
+		ProjectID: "proj-1",
+		OwnerID:   "user-1",
+	}
+
+	// Compute entitled keys from the listing.
+	entitledKeys, err := computeEntitledSecretKeys(context.Background(), backend, fakeStore, nil, agent)
+	if err != nil {
+		t.Fatalf("computeEntitledSecretKeys: %v", err)
+	}
+
+	// Compute keys from Resolve() output (the injection source).
+	resolved, resolveErr := backend.Resolve(context.Background(), agent.OwnerID, agent.ProjectID, "", nil)
+	if resolveErr != nil {
+		t.Fatalf("Resolve: %v", resolveErr)
+	}
+	resolvedKeySet := make(map[string]bool)
+	for _, sv := range resolved {
+		resolvedKeySet[sv.Name] = true
+	}
+	entitledKeySet := make(map[string]bool)
+	for _, k := range entitledKeys {
+		entitledKeySet[k] = true
+	}
+
+	// When every secret resolves cleanly, the two sets must be identical.
+	// If this test goes red, the two implementations have drifted — one
+	// includes or excludes a key the other does not.
+	for k := range entitledKeySet {
+		if !resolvedKeySet[k] {
+			t.Errorf("entitled key %q not in resolved set — listing includes a key resolution excludes", k)
+		}
+	}
+	for k := range resolvedKeySet {
+		if !entitledKeySet[k] {
+			t.Errorf("resolved key %q not in entitled set — resolution includes a key listing excludes", k)
+		}
+	}
+
+	// Also verify INFRA_KEY (internal) was excluded by both.
+	if entitledKeySet["INFRA_KEY"] {
+		t.Error("INFRA_KEY (internal) should be excluded from entitled set")
+	}
+	if resolvedKeySet["INFRA_KEY"] {
+		t.Error("INFRA_KEY (internal) should be excluded from resolved set")
 	}
 }
