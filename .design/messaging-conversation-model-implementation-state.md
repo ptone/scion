@@ -14304,3 +14304,48 @@ Also noted to ptone: `.design/project-log/` holds 201 entries on main and this w
 - **300.** A rehearsal's value is the defect it finds, not the merge it earns. Once it has found the defect, cancelling the merge costs nothing — do not defend the artefact to protect the exercise.
 - **301.** When a reviewer's instruction rests on a premise ("as long as X is true"), verify X before complying. Here X was false: complying without saying so would have left the design unrecorded.
 - **302.** Working notes and design records have different homes. A 14k-line recovery log is not documentation; scale is itself a signal about where a document belongs.
+
+---
+
+## §5gb — 2026-08-29 02:31Z — the original design doc was never committed; my own §5ga proposal was wrong
+
+ptone: *"at the very least beginning we had a design doc that established the conversation as a core concept. we based a github discussion on that. did that get committed?"*
+
+**Answer: no. Nothing did.** All nine `.design/messaging-conversation-model-*.md` docs exist only on `scion/ca-msg-arch`. Main carries none of them.
+
+| doc | lines | on main |
+|---|---:|---|
+| `messaging-conversation-model.md` — *Semantic Contract Refactor* | 2100 | absent |
+| `messaging-conversation-model-implementation-state.md` | 14,306 | absent |
+| `messaging-conversation-model-unification-spec.md` (§2.6.4) | 481 | absent |
+| `messaging-conversation-model-findings.md` — *Problem Inventory* | 366 | absent |
+| `messaging-conversation-model-announcement.md` | 308 | absent |
+| `messaging-em9-rederivation.md` | 281 | absent |
+| def19-spec / tranche-a-recipe / def27 / def12-spec | 117/114/113/91 | absent |
+
+**The chain ptone remembers, confirmed:** `messaging-conversation-model.md` first committed `2b4e9c604` on 2026-08-23; the announcement doc became **Discussion #1264** (ptone, 2026-08-24) — heading matches the discussion title verbatim.
+
+### I corrected myself
+
+In §5ga, twenty minutes earlier, I proposed landing the **281-line re-derivation doc** as "the primary design doc." **That was wrong.** The re-derivation doc is subordinate — it describes only *how to land the code*. The doc that establishes conversation as a core concept, and that grounds #1264, is the 2100-line `messaging-conversation-model.md`. I had answered ptone's premise-check correctly ("no primary design doc on main") and then named the wrong document as the remedy.
+
+Root cause: I reached for the doc that was top-of-context (I had just amended it) rather than the doc that answered the question. **Recency is not relevance.**
+
+### Drift caveat raised to ptone
+
+- Announcement doc since posting: **+16/−1**. #1264 still reads accurately.
+- Core doc since the discussion: **1056 → 2100 lines, +1070/−26.** It has absorbed resolved Q1/Q2 and sections for DEF-6/7/9/11/12/13/15/16.
+
+So committing the current doc publishes a contract **materially ahead of what the discussion describes**. Flagged rather than silently landed. Also flagged that §2.6.3 (`Conversation` and `webchat_topic` as parallel constructs) is still marked **OPEN**, and is the same underlying question as the webchannel raw-`INSERT` ruling I still owe ptone — a doc that lands with an OPEN section pointing at an unmade decision is honest only if the decision is named.
+
+### Proposed commit set (awaiting ptone)
+
+Land: `messaging-conversation-model.md` (2100), `messaging-conversation-model-findings.md` (366), `messaging-em9-rederivation.md` (281).
+Skip: the four DEF/unification specs (subordinate, still churning), the announcement (#1264 is public), the 14,306-line state doc.
+
+### New rules
+
+- **303.** Answering "is the premise true?" is not the same as answering "what fixes it." Verify the remedy names the right artefact, not merely a real one.
+- **304.** The document most recently in your hands is the one you will wrongly nominate. Recency is not relevance — enumerate candidates before proposing one.
+- **305.** A design doc that has doubled since the announcement it grounded is no longer the announced contract. Landing it is a publication event; say what changed.
+- **306.** A doc landing with a section still marked OPEN is honest only if the open decision is named and owned. Here §2.6.3 is the webchannel raw-INSERT ruling under another name.
