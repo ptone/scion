@@ -20717,3 +20717,76 @@ DEF-56 flagged explicitly as *not* a lint refactor.
 - Live: `ca-msg-def3750`, `ci-fix-lead`, `chat-admin-lead`.
 - Awaiting ptone: Tranche E board; gate-deletion; #1409; contrib-repo PAT; DEF-50/37/56 PR.
 - Open, unstaffed: DEF-53, DEF-55, DEF-12 (partial), issue #1374.
+
+---
+
+## 5ep — four findings from one exit-interview question (2026-08-29)
+
+`ca-msg-def3750`, asked *"what bothered you that you did not report?"*, returned four items. I
+verified all four against `upstream/main`. **Every one holds.** This is the highest-yield single
+question asked on this project.
+
+### DEF-57 (ESCALATED) — agent-to-agent broker messages bypass authorization
+
+`handlers_broker_inbound.go`: the authorization block is wrapped in
+`if strings.HasPrefix(req.Message.Sender, "user:")`. Only **user** senders are authorized. The
+`else` covers both system-plane messages (exempt by design) **and agent senders (not exempt)**.
+An agent sending via broker bypasses `message_mode` checks — none, branch isolation, cross-project.
+Direct API authorizes; broker does not.
+
+Documented in-code, verbatim: *"Agent-to-agent via broker: documented as a known gap for
+follow-up … constructing an AgentIdentity from the broker request is non-trivial."*
+
+- **492.** A comment saying "known gap" is not a tracked defect. It is invisible to every list,
+  review and sweep, and its existence makes each subsequent reader assume someone else owns it.
+  Untracked-but-documented is the most durable way to lose a security finding.
+- **493.** Transport authentication is not message authorization. HMAC establishes *that the
+  broker is the broker*; it says nothing about whether that sender may reach that recipient.
+  Whenever a bypass is justified by a trust mechanism, check the mechanism answers the question
+  actually being asked.
+
+Not proposing a fix — the hard part (constructing an `AgentIdentity` from a broker request) is a
+design pass, not a bolt-on.
+
+### Item 3 (FIX IN-PR) — def3750 found a defect in its own shipped gate
+
+Its `sendHumanToHuman` caller-side rule required `GetUserIdentityFromContext` — **authentication**
+("is there a user?"), not **authorization** ("may this user post here?"). Remove `isDMParticipant`
+from `handleConversationSend` and the gate stays green while any authenticated user can post into
+any DM. Verified: `isDMParticipant` is at `handlers_chat_v2.go:798` inside the `isDM` branch, but
+the check is function-scoped containment so it matches regardless of branch.
+
+Directed: change `requiredSymbol` to `isDMParticipant` and fix the rule description. In-PR because
+the PR *introduces* the flaw; shipping it would advertise coverage we do not have.
+
+- **494.** A gate that asserts authentication where authorization is required is worse than no
+  gate: it converts an unguarded path into one that reports as guarded.
+- **495.** The exit-interview question must be asked *after* approval, not before. This agent had
+  its work verified, approved and sent, and only then reported a defect in it. Approval is exactly
+  when the incentive to stay quiet peaks.
+
+### Items 1 and 4 (FILED, follow-up)
+
+1. **Sink list incomplete** — `PublishMessage` is omitted, but is a genuine dispatch sink at
+   `handlers_agent_messaging.go:1676`. Not currently exploitable (`handleProjectBroadcast` has
+   `authorizeAgentMessage`), but a new function dispatching via `PublishMessage` is invisible to
+   the fail-closed scan. **Instructed: measure blast radius and report before changing the list**
+   (rule 476) — adding a sink can redden the whole handler surface.
+2. **Fragile method-name invariant** — `handleProjectBroadcast` iterates authorized agents and
+   calls `proxy.PublishMessage` per agent precisely *because* `PublishBroadcast` fans out to all
+   subscribers, bypassing the per-recipient filter. A **one-word change** silently bypasses
+   authorization for every recipient. Correct today, unenforced.
+   Expressible as a **negative gate**: assert `PublishBroadcast` is not *called* in that function.
+   Clean under AST — the string appears in the comment at 1669 and identifier matching ignores it.
+   **A regex gate could not have done this safely**, which is a concrete argument for the port.
+
+- **496.** Where correctness rests on choosing one method over a near-identical sibling, the
+  invariant is one keystroke from silent violation. Prefer a negative gate; a comment explaining
+  *why* the other method is wrong protects only readers who already stopped to read.
+
+### Standing state
+
+- Awaiting def3750: item-3 numstat before push. Items 1/4 deferred, agent told not to start them.
+- Awaiting ptone: DEF-57; DEF-50/37/56 compare URL; #1409; Tranche E board; gate-deletion; PAT.
+- Open, unstaffed: DEF-53, DEF-55, **DEF-57**, DEF-12 (partial), sink-list gap, negative-gate item.
+- `ca-msg-fmt1409b` held as evidence — do NOT retire in a sweep.
