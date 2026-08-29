@@ -18669,3 +18669,72 @@ directions. The error deleted one item (D2's dependency on D1 — a constraint t
 was costing me serialisation on the sponsor) and added one (the callerless `ValidateMessage`). I
 was inclined to check only whether the correction invalidated work already sent; the more valuable
 half was that it *unblocked* work I had parked.
+
+### 20:00Z — 5dg. ptone ruled DEF-49 into Tranche D. Designed D5 and dispatched a fresh agent.
+
+Sponsor reply: *"let's work it into D"*. So DEF-49 becomes **phase D5**, its own PR, its own
+agent — it is the only security change in the tranche and should not be reviewed alongside
+ordering cleanups. Fresh agent `ca-msg-d5` rather than reusing `ca-msg-d1`, which is mid-D2;
+ptone's standing view is that repurposing EM agents across phases buys little and risks context
+rot. Dispatched in three steps per rule 412 — create, start, **message** — not two.
+
+**Designed against the code, not from the escalation summary.** Reading the site properly turned
+one facet into three, all reachable from the same input:
+
+1. **Non-membership** — the AC-INGRESS-1 violation I had already escalated.
+2. **Non-existence** — `lookupFailed` is set when `GetConversation` returns nil or errors, and the
+   code *proceeds*, persisting a message attributed to a conversation not in the store. I had not
+   noticed this; I had read the branch as only mis-attributing to real conversations.
+3. **Cross-project** — `GetConversation(ctx, id)` takes only an id and is not project-scoped,
+   while `storeMsg.ProjectID` comes from `agent.ProjectID`. Project isolation exists for
+   *addressees* at `authorize_message.go:186` and has no equivalent here.
+
+**The authority differs by kind, and that is load-bearing.** `store.Conversation.ProjectID` is
+`*string`, **nil for direct conversations** — they are global per §2.4.1. So project scoping cannot
+be the universal check. `direct` is authorised by DM-key membership, `group` by project match.
+A single uniform check would have been wrong, and I would have specified one had I not looked at
+the model.
+
+**`isDMParticipant` is the wrong tool and I nearly specified it.** It checks *user slots only*
+(`parts[1]=="user" || parts[3]=="user"`), so it can never match an agent principal — and the
+DEF-49 path is the agent messaging path. It would have failed closed on every legitimate agent
+send. `messages.ParseDMKey` is the canonical strict parser and is kind-aware. Told D5 explicitly
+not to use, modify, or generalise `isDMParticipant`, and made byte-identity an acceptance
+criterion (AC-D-10), since "generalise the existing helper" is the obvious move for an
+implementer who has not read the prohibition list.
+
+**Chose deny over silent fallback, and recorded why.** Falling back to server-side derivation
+looks more conservative. Rejected because the legitimate producer never trips the check:
+`cmd/message.go:715` is the only production writer of this field and only on the `@agent` path,
+where the conversation was resolved from the sender's own identity, so membership holds by
+construction. `conv:` and `#thread` are gated at the CLI entry point; `@email` goes through a
+different handler. A denial therefore means the assertion did not come from the sanctioned path,
+which should be loud.
+
+**But that is a reading, and I flagged it as one.** AC-D-9 requires the legitimate path be proven
+by execution, and I told D5 in as many words that I made exactly this class of error in this
+tranche this week. The mapper error and this argument have the same shape: a confident claim about
+what flows through a call boundary, derived by eye.
+
+**B10 boundary stated explicitly** so it is not "tidied": an id the server *derived* and an id the
+client *claimed* are different objects. The else branch stays non-fatal; only the assertion branch
+denies. Without that sentence the natural instinct is to make both branches behave alike.
+
+**Flagged the dead code the fix creates.** Once both lookup-failure cases deny, nothing can set
+`lookupFailed`, and the DEF-11 `"conv-lookup-failed"` divergence entry becomes unreachable. Told
+D5 to remove or justify it under AC-D-7. Same species as the callerless `ValidateMessage` that D1
+leaves behind — a fix that neutralises a branch and walks away from it.
+
+Design committed and pushed (`b5bf914ce`) before dispatch, so D5 implements from the doc rather
+than from a message.
+
+**RULE 422.** Escalating a defect and specifying its fix are different depths of reading. The
+escalation only needs the defect to be real; the spec needs every branch the fix will touch. Both
+of the things that changed the design here — the second and third facets, and `ProjectID` being
+nil for direct rows — were sitting in code I had already "reviewed" well enough to escalate from.
+Re-read at spec time; do not promote an escalation straight into a work order.
+
+**RULE 423.** When a nearby helper looks like the obvious implementation of a check, name it in
+the spec as forbidden and say why. `isDMParticipant` would have been reached for by any competent
+implementer, is subtly wrong here (user slots only), and is on the prohibition list. A constraint
+that only exists in my head is not a constraint on the agent doing the work.
