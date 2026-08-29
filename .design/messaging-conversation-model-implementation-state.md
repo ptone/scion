@@ -14278,3 +14278,29 @@ Deletion profile, encouragingly: **`handlers_agent_messaging.go` is +281/−0** 
 - **297.** When a subordinate's deliverable is complete and still insufficient, check your own instruction before reviewing their work.
 - **298.** Before specifying a slice, confirm its files compile against the destination — a slice of tests whose subject was never ported is not a slice.
 - **299.** A large mechanical delta (one signature, N files) inside a semantic port is not part of the port. Separate it or drop it; it cannot be reviewed as either.
+
+---
+
+## §5ga — 2026-08-29 02:27Z — ptone: #1365 is project-log only, probably drop it
+
+ptone opened the Phase 1 docs slice as **PR #1365** and asked whether it is just project log files, noting those need not be committed "as long as the primary overall design doc [is] in .design."
+
+**Verified:** #1365 is 46 files, all under `.design/project-log/`, +3384/−0. Pure log.
+
+**Dependency check — dropping is free.** Nothing outside `.design/` references those paths (only 4 other project-log entries and my own two docs mention the directory at all). Only 2 of the 46 are cited by name in the design or state docs. No code, no docs-site page, no later tranche depends on them.
+
+**The rehearsal value is already banked.** Phase 1's stated purpose was to exercise the pipeline — additive check, main's-guards check, CI — on zero-risk content. It did that and found the `/tmp` guard-extraction bug (guards `cd "$(dirname "$0")/.."`, so from `/tmp` the root resolves to `/` and they analyse nothing while exiting 0). That correction now protects every code slice. **The slice paid for itself before merge; merging was never where its value was.** Closing it loses nothing.
+
+**Correction I sent back on the premise.** There is no primary design doc for this work in `.design` on main. Nearest are `hosted/hub-messaging.md`, `message-cmd.md`, `messages-evolution.md` — all predate S4. My docs live only on `scion/ca-msg-arch`. So closing #1365 with nothing else landing leaves the conversation model with **no record in the repo at all**.
+
+**Proposed:** land exactly one doc — the 281-line `messaging-em9-rederivation.md`. Explicitly *not* the implementation-state doc (14,280 lines of working recovery notes; stays in scratchpad). Awaiting ptone.
+
+Also noted to ptone: `.design/project-log/` holds 201 entries on main and this workstream already landed one via #1339, so the convention exists. I read the instruction as "stop adding more," not "those were wrong," and asked for the stronger reading if that's what was meant. Either way **future slices carry no project logs** — this shrinks M-ADD from 82 by the 45 ported logs, leaving ~37 code/markdown paths.
+
+**Not yet told em6** its slice is being closed — ptone hasn't confirmed, and em6 is parked. No action until the answer lands.
+
+### New rules
+
+- **300.** A rehearsal's value is the defect it finds, not the merge it earns. Once it has found the defect, cancelling the merge costs nothing — do not defend the artefact to protect the exercise.
+- **301.** When a reviewer's instruction rests on a premise ("as long as X is true"), verify X before complying. Here X was false: complying without saying so would have left the design unrecorded.
+- **302.** Working notes and design records have different homes. A 14k-line recovery log is not documentation; scale is itself a signal about where a document belongs.
