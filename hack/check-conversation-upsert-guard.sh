@@ -188,6 +188,7 @@ if [[ -s "$tmp" ]]; then
       # Check for closing backtick — if absent, statement exceeds the
       # 20-line window and we cannot verify its kind. Refuse to exempt
       # (fail-closed).
+      # shellcheck disable=SC2016  # backtick is a literal match target (Go raw string delimiter)
       if ! printf '%s\n' "$stmt" | grep -q '`'; then
         violations="${violations}${match}"$'\n'
         continue
