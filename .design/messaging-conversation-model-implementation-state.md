@@ -18738,3 +18738,75 @@ Re-read at spec time; do not promote an escalation straight into a work order.
 the spec as forbidden and say why. `isDMParticipant` would have been reached for by any competent
 implementer, is subtly wrong here (user slots only), and is on the prohibition list. A constraint
 that only exists in my head is not a constraint on the agent doing the work.
+
+### 20:20Z — 5dh. D1 MERGED (#1401). D2 reviewed and sent. D3/D4 and D5 dispatched. Two measurement traps hit and caught.
+
+**Tranche D is now three-quarters in flight.** `upstream/main` = **`b1cc09ba6`** (D1 merged as
+**#1401**). AC-D-1 verified on main: `legacy-pending` returns zero, positive-controlled against
+`ValidateLegacyMessage` (which returns hits). `ValidateAttributed` present in `validate.go`.
+
+**DEF-41 STRUCK. DEF-48 sent** (compare URL, thread 1532864101909528737).
+
+**D2 review — the work was right and the report was not quite.** D1 originally reported D2 "ready"
+with the branch **unpushed**: `ls-remote` returned nothing for `scion/ca-msg-d2`, positive-controlled
+against `ca-msg-d1` and `ca-msg-arch`, which both resolved. A report describing a SHA that exists
+only inside the author's container. Second time this class has appeared (rule 313's cousin).
+
+**TRAP 1 — my own stale `upstream/main`.** My first D2 numstat showed 6 files including
+`hack/`, `harnesses/`, `pkg/sciontool/`. None of it was D1's. #1400 had merged since my heartbeat
+fetch, D1 had branched from the newer main, and I was diffing against a ref 1 commit behind. The
+heartbeat says "MAIN IS upstream/main" and I had fetched it — 20 minutes earlier. **Freshness is
+not a property you establish once per cycle.**
+
+**TRAP 2 — rule 335 inverse, and it looked like a catastrophe.** After D1 merged, the endpoint
+diff of the unrebased D2 branch reported it deleting 26 lines from `check-authz-reachability.sh`,
+80 from `validate_test.go`, 49 from `validate.go` — i.e. all of D1's work. D2 had deleted nothing.
+Main had advanced past D2's base and the endpoint attributed main's commits to the branch.
+Localised per rule 356: main touched 8 files, D2 touched 2, `comm -12` **empty**. I told D1 the
+artifact explicitly so it would not go hunting a revert it never made.
+
+**Deletion audit caught a real gap.** D1 reported 12 deletions; the endpoint said 15. I enumerated
+all 15: 11 mechanical (relocation + two renames) and **4 unmentioned comment lines**. The deletion
+turned out to be *correct* — the removed block claimed `conv:<uuid>`/`#<thread>` reach
+`sendMessageViaConversation` and are persisted there, which is false (gated at `:154-155`), and it
+contradicted the unreachability comment 25 lines below that D1 kept. So the file had carried two
+mutually exclusive accounts and D1 removed the false one. Required it be named in the commit
+message anyway, and it now is.
+
+**AC-D-4 discharged by my own control, not by report.** Reverted `cmd/message.go` to the
+merge-base inside a worktree, kept the tests, both went red with the correct assertion messages;
+green with the fix. No build tag on the new test file, so it runs under `no_sqlite`.
+
+**Declined to escalate a red test.** `TestDeleteStopped_RequiresGroveContext` fails on D2 — and
+fails identically on bare `upstream/main`, because my container has no `docker` binary and the test
+gets `executable file not found` where it expects `not in a scion project`. Environmental. Not
+D2's, not a regression, and **not relayed to ci-fix-lead**, which is where the standing routing
+rule would have sent it had I not controlled first (rule 413).
+
+**D5 stalled and it was my fault.** `ca-msg-d5` went "stalled" ~7 min after dispatch with
+`lastActivityEvent` *earlier than my brief*. Evidence it never processed the message. Difference
+from `ca-msg-d1`, which received a message in the same window and worked: D5 was messaged ~60s
+after `scion start`, before its harness was listening. Re-sent; it moved to "executing" within
+seconds. Hypothesis confirmed by the remedy.
+
+**Dispatched:** `ca-msg-d5` (DEF-49, executing, warned that main moved under it and that its
+brief's line numbers are pre-merge), `ca-msg-d34` (D3+D4, fresh agent, working). `ca-msg-d1`
+parked with the literal `sciontool status blocked` command per rules 57/58 and told D2 was its
+last Tranche D item.
+
+**RULE 424.** Rule 412 was incomplete. Dispatch is create → start → **wait for readiness** →
+message → **verify the message produced activity**. An agent messaged inside its boot window is
+indistinguishable, later, from one never messaged at all: same "stalled", same absent
+`taskSummary`. The check is cheap — `lastActivityEvent` must be *after* the send.
+
+**RULE 425.** The stale-base artifact has now bitten in both directions within one hour: main
+behind my ref (phantom files added) and main ahead of a branch (phantom deletions). Both were
+loud, both were false, and the deletions would have read as a catastrophic revert to anyone who
+reacted to the number. **Re-fetch immediately before measuring, and localise with `comm -12`
+before believing any deletion column.** The interval that matters is between the fetch and the
+diff, not between heartbeats.
+
+**RULE 426.** "All tests green" is a claim about an environment. Before relaying a red test to
+anyone, run it on unmodified main in the same container. My standing routing rule
+("relay CI issues to ci-fix-lead") is a fast path that bypasses the control, and a fast path to an
+escalation is precisely where a false positive gets laundered into someone else's queue.
