@@ -218,15 +218,61 @@ func TestResolveEffectiveRole_ProjectMaxFull_MemberGetsFull(t *testing.T) {
 // ScopeAgentSecretFetch" because AgentTokenClaims carries scopes but not the
 // role string (see the comment on requireAgentSecretFetchScope in agenttoken.go).
 //
-// If this test fails, the proxy is giving wrong advice for at least one role.
-// Fix the proxy signal or update the role-to-scope mapping — do not delete
-// this test.
+// If this test fails, either:
+//   - A new role was added and the biconditional must be verified for it (add
+//     the role to allRoles below and check its scope assignments).
+//   - An existing role's scope assignment changed and the proxy is now giving
+//     wrong advice. Fix the proxy signal or update the role-to-scope mapping.
+//
+// Do not delete this test.
 func TestScopeGuardProxy_DriftDetection(t *testing.T) {
+	// There is no canonical AllRoles() function or slice in the codebase;
+	// ValidAgentRole is a switch statement. This list must be kept in sync
+	// manually. The length assertion below is the tripwire: if a fifth role
+	// is added to ValidAgentRole without being added here, the test fails
+	// with an actionable message.
 	allRoles := []AgentRole{
 		AgentRoleNone,
 		AgentRoleReadOnly,
 		AgentRoleBaseline,
 		AgentRoleFull,
+	}
+
+	// Tripwire: if a new role constant is added to ValidAgentRole, this
+	// assertion forces the author to add it to allRoles above and verify
+	// the biconditional still holds.
+	const knownRoleCount = 4
+	if len(allRoles) != knownRoleCount {
+		t.Fatalf("allRoles has %d entries but knownRoleCount is %d — update both together",
+			len(allRoles), knownRoleCount)
+	}
+	for _, role := range allRoles {
+		if !ValidAgentRole(role) {
+			t.Fatalf("allRoles contains %q which ValidAgentRole rejects — the list is wrong", role)
+		}
+	}
+	// Verify no unlisted role sneaks past: if somebody adds a fifth valid
+	// role but does not touch this test, the count check above won't catch
+	// it (we can't enumerate what we don't know). As a second line of
+	// defense, assert that exactly knownRoleCount roles pass ValidAgentRole
+	// out of a broader set that includes plausible names a new role might use.
+	candidates := []AgentRole{
+		AgentRoleNone, AgentRoleReadOnly, AgentRoleBaseline, AgentRoleFull,
+		"admin", "superuser", "operator", "viewer", "editor", "restricted",
+		"elevated", "minimal", "standard", "custom", "service", "system",
+	}
+	validCount := 0
+	for _, c := range candidates {
+		if ValidAgentRole(c) {
+			validCount++
+		}
+	}
+	if validCount != knownRoleCount {
+		t.Fatalf("ValidAgentRole accepts %d roles but we expected %d — "+
+			"a new role was added; add it to allRoles above and verify the "+
+			"ScopeAgentStatusUpdate/ScopeAgentSecretFetch biconditional for it "+
+			"(see requireAgentSecretFetchScope in agenttoken.go)",
+			validCount, knownRoleCount)
 	}
 
 	hasScope := func(scopes []AgentTokenScope, target AgentTokenScope) bool {
