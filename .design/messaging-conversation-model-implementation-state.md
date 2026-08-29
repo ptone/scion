@@ -19055,3 +19055,59 @@ correction in the same message to ptone stands and was unaffected.
 
 ci-fix-lead answered C: finished, no active work, awaiting ptone direction on
 blocking-vs-advisory and the tag audit. Relayed. Not mine to task.
+
+## 5dm — D5 accepted, D2 ready, and a reviewer finding that was right for the wrong reason (2026-08-29 20:52Z)
+
+**D5 revision `9318e0ab1`** (rebased on `b1cc09ba6`). All five changes applied.
+Verified independently, not accepted:
+- numstat matches exactly: handler +107/-34, test +395/-36.
+- AC-D-13 ✓ — `git grep -c ParseDMKey` in the handler returns 0; delegates to
+  `messages.CheckDMParticipantKey`.
+- AC-D-14 ✓ — unset guard correct, and the trailing `*conv.ProjectID` deref is
+  safe because `convProjUnset` short-circuits the nil case via Go's `||`.
+- AC-D-12 ✓ — for the right site (see below).
+- AC-D-10 ✓ — two files only.
+- Successor test `TestDEF49_DivergenceMismatch_AuthorizedButWrongAgent` present;
+  the repurposed GenuineDisagreement test is gone.
+
+**There are TWO `ValidateAttributed` sites, and I nearly filed the wrong one as a
+miss.** D5's report said "removed ValidationError and return" as though there
+were one. Grep found `:311` still rejecting. Before escalating I diffed
+`c881db655` itself: it touched exactly one hunk, in `handleAgentMessage`. The
+`:311` site is D1's "site 1" in `handleAgentOutboundMessage`, deliberate,
+commented as inert-now-load-bearing-at-Tranche-G, and reviewed as part of #1401.
+D5 demoted the correct site.
+
+**Rule 438: before reporting a fix incomplete, diff the commit the fix was scoped
+to.** The scope of a remediation is defined by the commit that caused it, not by
+the symbol it touches. A symbol grep finds siblings that were never in scope, and
+they look exactly like misses.
+
+Residual: two identical tautologies now behave differently (reject at `:311`, log
+at `:1030`). Both unreachable, so today's behavioural difference is zero. Flagged
+to the sponsor as a Tranche G cleanup rather than churning a security PR over
+symmetry. Notably, this asymmetry is what the bot was "fixing" — rule 428 was
+right about the motive and still wrong about the merit.
+
+**#1402 (D2) reviewer finding: correct observation, wrong reasoning.** The
+coordinator reported `cmd/message.go:705` as a DEF-48 gap because the @email
+precondition runs after `resolveSenderIdentity`. I traced both functions before
+relaying: DEF-48's harm is an orphaned row, that comes from `ResolveConversation`
+creating one, and both checks already sat above it. `resolveSenderIdentity` only
+calls `Auth().Me()` — read-only. So no gap. What remained was one wasted round
+trip in a human shell before a failure knowable from `os.Getenv`.
+
+**Rule 439: "X runs after Y" and "X runs after the risk" are different claims,
+and reviewers conflate them.** The coordinator agreed on re-reading and withdrew
+the DEF-48 label. Getting the label withdrawn mattered as much as the fix: had it
+stood, the ledger would carry a false record that D2 shipped a DEF-48 gap, and
+the next reader would hunt an orphaning path that never existed.
+
+I had D1 hoist it anyway (`6a1e5ab03`, 12/11, no assertions deleted). Not because
+it was a defect, but because a competent reviewer inferred a gating relationship
+from the ordering. **Rule 440: code that invites a wrong inference is worth
+reordering even when it is correct** — the misreading is a cost, and it recurs.
+The commit message says explicitly that it is not a correctness fix.
+
+**State.** D2 = #1402, ready to merge. D5 compare URL sent. DEF-42 working.
+D3/D4 in flight with d34. D1 re-parked.
