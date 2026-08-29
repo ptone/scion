@@ -20587,3 +20587,66 @@ Rather than only nudging, I ran the fix to establish ground truth:
   `ci-fix-lead`, `chat-admin-lead`. **Retired: `ca-msg-fmt1409`** (wrong-repo workspace).
 - Awaiting ptone: Tranche E board decision; gate-deletion decision; #1409.
 - Open, unstaffed: DEF-53, DEF-55, DEF-56, DEF-12 (partial), issue #1374.
+
+---
+
+## 5en — 5em RETRACTED; real finding is a shared cleartext PAT (2026-08-29)
+
+### Retraction
+
+**The wrong-repo diagnosis in 5em was mine and it was wrong.** `scion-repo-contrib` is not a
+foreign tenant's repository and `ca-msg-fmt1409` was not provisioned against someone else's tree.
+
+`/scion-volumes/contrib-repo` is a **normal shared volume mounted in my own container too**,
+alongside `gocache` and `scratchpad`. It holds `LICENSE`, `README.md`, `docs/`, `skills/`,
+`templates/`, `coordinator-learnings.md` — the shared practice repo.
+
+What actually happened: fmt1409's `/workspace` **was not provisioned**. It oriented on the only
+git repo visible to it — the shared contrib mount — and reported that as its remote. This is the
+coordinator's **previously-known empty-workspace issue**, one more symptom, not a new class.
+
+**How close this came to landing as a false alarm.** I relayed my unverified inference to the
+coordinator. The coordinator independently found the repo 404s to its token, reasonably read
+that as evidence of a foreign tenant, and was escalating to ptone as "provisioned against another
+tenant's live repo" — a genuine-sounding security incident. I caught it and retracted in time.
+It 404s because it is **private and the access lives in the mount**, not in anyone's token.
+
+- **487.** Private-and-inaccessible-to-me is not evidence of belonging-to-someone-else. Absence of
+  access is the weakest possible signal of ownership; check whether the thing is mounted in your
+  own container before inferring provenance.
+- **488.** An unverified inference gains severity at every hop. The agent reported only what it
+  saw; I added "wrong repo"; the coordinator added "another tenant". Each step was reasonable
+  given its input, and the result was a false security incident two hops from clean data.
+  **Relay observations, label inferences as inferences, and finish verifying before handing off.**
+
+This is the same error I have been warning others about — an absence is not a finding (rule 464)
+— committed by me, in the same session in which I issued the warning.
+
+### The real finding: shared cleartext credential
+
+`/scion-volumes/contrib-repo`'s git remote embeds a **fine-grained GitHub PAT in cleartext**:
+
+```
+origin  https://x-access-token:github_pat_11AAAJ7DI0…@github.com/scion-frontiers/scion-repo-contrib.git
+```
+
+Readable by any agent with the mount via `git -C /scion-volumes/contrib-repo remote -v`, and
+usable to push. Long-lived, shared across containers, in a world-readable git config. **Nothing
+has to go wrong for this to be exposed — it is exposed now, to every agent in the project.**
+
+Reported to ptone directly (not only via the coordinator, so it does not depend on one hop).
+Recommendation put to him: if agents only read the contrib repo, drop the token and mount
+read-only; if something must push, use a short-lived credential scoped to that one agent rather
+than a shared mount.
+
+- **489.** Audit the credentials on every shared mount. A volume provided for convenience inherits
+  the trust boundary of its *widest* consumer, not its intended one.
+
+### Standing state
+
+- `upstream/main` = `fa7ae1914`. PR **#1409** still red on gofmt; fix measured (`13 13`), unstaffed.
+- `ca-msg-fmt1409b` stuck in phase `created` for several minutes — `agent_not_running` (409) on
+  every send. Possibly the same provisioning fault; watching.
+- Live: `ca-msg-def3750` (AST gates per 5el ruling), `ci-fix-lead`, `chat-admin-lead`.
+- Awaiting ptone: Tranche E board; gate-deletion; #1409; **contrib-repo PAT decision**.
+- Open, unstaffed: DEF-53, DEF-55, DEF-56, DEF-12 (partial), issue #1374.
