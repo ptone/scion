@@ -336,6 +336,47 @@ client claimed are different objects under B10, and the distinction is the whole
 justification for denying in one branch while continuing to log-and-proceed in the
 other. Do not "make it consistent."
 
+### The merged bot suggestion — SPONSOR RULING: demote (2026-08-29)
+
+Commit `c881db655` landed on `upstream/main` between D1's approval and #1401's
+merge. It was a `gemini-code-assist[bot]` suggestion accepted in the web UI, so
+no agent reported it and no review covered it. It **replaced D1's explanatory
+comment** with an actual rejection on the derivation path:
+
+```go
+if convResult != nil {
+    if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+        ValidationError(w, err.Error(), nil)
+        return
+    }
+}
+```
+
+Two separate facts about it:
+
+1. **It is unreachable today.** Every non-nil return of
+   `ResolveOrCreateConversationByKey` either passes through a `convID != ""`
+   guard (topic lookup) or carries a freshly minted UUID (`result.ID`); all
+   other paths return nil. Verified by enumeration, not by reading.
+2. **It is a latent B10 violation.** The comment it replaced existed precisely
+   to explain why no check belonged there. B10 says a *derivation* failure must
+   not reject the request — that flip is a required precondition of the Tranche
+   G read-switch, not something to land early and by accident. The reachability
+   argument in (1) is an invariant held two packages away and untested, so the
+   only thing standing between this code and a live B10 violation is a property
+   nobody is asserting. This is rule 428: where a comment exists to explain an
+   absence, deleting it is a change to the contract.
+
+**Sponsor ruled option (b): demote to a log line.** Keep the signal, drop the
+rejection. The check becomes a canary that tells an operator the invariant broke
+without converting a derivation failure into a client-visible 4xx. If the log
+ever fires, that is the evidence Tranche G needs in order to flip the switch
+deliberately.
+
+Assigned to **D5**, which owns `handlers_agent_messaging.go` in this tranche;
+the site sits ~50 lines below D5's edits and giving it to anyone else would
+manufacture a conflict. This is not a relitigation of the merge.
+
 ### Known consequence: the DEF-11 divergence branch becomes unreachable
 
 `lookupFailed` exists solely to feed a `"conv-lookup-failed"` divergence entry.
@@ -405,6 +446,19 @@ sitting there looking live. This is a deletion and AC-D-7 applies to it.
 - **AC-D-11 (D5)** — The `else` (derivation) branch is unchanged: no derivation or
   resolution failure was converted into a rejection (B10). Reviewer confirms by
   reading the diff, not by test pass.
+- **AC-D-12 (D5)** — The `ValidateAttributed` block from `c881db655` no longer
+  writes a response or returns. It logs and falls through. Verified by grepping
+  the diff for the removal of `ValidationError` and `return` from that block,
+  and by confirming no test asserts a 4xx from a derivation-path attribution
+  failure. The log line must name the conversation id and be at Warn or above,
+  so that a Tranche G operator can find it.
+- **AC-D-13 (D5)** — The DM membership check calls
+  `messages.CheckDMParticipantKey` rather than re-implementing `ParseDMKey` plus
+  a slot comparison. Verified by `git grep -c "ParseDMKey" pkg/hub/` returning
+  no new occurrences in `handlers_agent_messaging.go`.
+- **AC-D-14 (D5)** — The group-case project comparison denies when either side's
+  project id is unset (empty or zero UUID), with a test covering both pairings.
+  Two unset ids must not compare equal into an authorization pass.
 - **AC-D-7** — Per-file endpoint deletion counts reported before push, with
   line-by-line justification for every deleted assertion. A deleted assertion must
   name its coverage successor by test name, not be justified by a comment.

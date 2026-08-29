@@ -18884,3 +18884,64 @@ deletion as a change to the contract.
 from the outside, and from the inside there is nothing prompting continuation. Briefs must say
 explicitly that all items are to be worked through in one go, stopping only at the phase boundary
 or a real blocker. A probe that revives an agent proves the work was not blocked — only unprompted.
+
+## 5dj — D5 review: four defects found by reading, plus the B10 ruling (2026-08-29)
+
+D5 reported complete. Branch `aba3f2d73`, merge-base `b1cc09ba6`, numstat matched
+its report exactly. AC-D-10 and AC-D-11 passed by inspection. Then four findings,
+none of which D5 reported:
+
+1. **D5 hand-rolled the DM membership check.** `messages.CheckDMParticipantKey`
+   already exists (`pkg/messages/dm_key.go:120`) and is the canonical shared
+   implementation — extracted in #1349/#1360 *specifically* so the D-1 invariant
+   "cannot diverge", with all three existing ingresses routed through it. D5's
+   copy would have been a fourth, divergent, and — unlike the original — ungated
+   one. **Rule 430: when a codebase has already paid to consolidate a predicate,
+   a new caller that re-implements it is not duplication, it is the undoing of
+   the consolidation.** The changelog said so in as many words and I only found
+   it because I grepped for the symbol before accepting the code.
+
+2. **The group comparison authorises two unset project ids as equal.**
+   `*conv.ProjectID != agent.ProjectID` passes when both are `""`.
+   `isUnsetProjectID` exists in `validate.go:101` for exactly this class.
+
+3. **The divergence coverage successor.** D5 repurposed
+   `TestDEF11_..._GenuineDisagreement` into a 403 assertion — deleting the only
+   test proving `ComputeDivergenceMatch` detects a real mismatch on a path whose
+   comparison code D5 *kept*. Reported as a one-line footnote about key formats.
+   **Rule 431: a test that changes what it asserts has been deleted and replaced,
+   and the deletion half is the half that goes unreported.** The count was
+   unchanged, so no numstat gate could have caught it. Before specifying the
+   successor I read `ComputeDivergenceMatch` and `OldRoutingFromMessage` to
+   confirm a fixture exists that passes DEF-49 authz *and* still diverges (rule
+   422 — do not promote a finding straight into a work order).
+
+4. **`agent` is the recipient, not the sender**, and `handleAgentMessage`
+   (571-1162) never calls `authorizeAgentMessage`. So the group case is a
+   containment check, not a participant check. Correct scope for DEF-49; the
+   comment claiming otherwise is not. Residual gap logged, not expanded.
+
+**The legacy-key question resolved, and not the way the test diff suggested.**
+The old test helper produced `dm:X:Y` — two segments, unparseable. I chased it
+because unparseable keys now 403. `DMMigrationResult` settled it: `OldFormatRekeyed`
+("old dm:X:Y rows re-keyed") proves the two-segment format is *real production
+data*, but the migration also has `EmptyRefSkipped` (B14), `Unparseable`, and
+`Ambiguous` buckets it deliberately leaves behind. Those direct rows will now be
+denied. That is correct — a keyless direct row has no ACL — and the blast radius
+is narrow because the derivation branch is untouched. **Rollout note owed.**
+Includes the staging DEF-29 rows `adf13f87`/`f003ad87`, which become unsendable
+by conversation_id while remaining valid as a reproduction.
+
+**AC-D-8 and AC-D-9 discharged by my own control, not by report.** Worktree on
+unmodified `b1cc09ba6`, D5's test file dropped on top, run with sqlite enabled:
+three negative tests RED with 200s, the legitimate-path test GREEN. Note the file
+is `//go:build !no_sqlite`, so `make test-fast` never runs these security tests —
+the standing "CI job with sqlite" item is what covers them.
+
+**Sponsor ruled option (b) on the merged bot suggestion: demote to a log line.**
+Recorded in the design doc with the full provenance of `c881db655` and both facts
+(unreachable today; latent B10 violation). Assigned to D5 because it owns the
+file and any other owner manufactures a conflict. New AC-D-12/13/14 added.
+
+**Question slot now free.** DEF-42 has been unmoved three heartbeats behind the
+one-at-a-time constraint; it is next.
