@@ -16846,3 +16846,49 @@ the PR — not on any agent.
 - C5 `da878ac1c` — gate passed, compare URL sent, **rebasing onto 77c6aa5e7**. PR not yet opened.
 - Escalation CLOSED: main-red/gofmt (#1390). Escalation CLOSED: CI tag-exclusion remediation (#1388).
 - C7 gated on C5 landing (fresh agent).
+
+---
+
+## 13:47Z — C5 REBASE VERIFIED @ `4fca83814`. Branch is green-capable. Waiting on ptone only.
+
+### Verified independently (rule: never take a rebase on report)
+| check | expected | actual |
+|---|---|---|
+| merge-base == main tip `77c6aa5e7` | YES | **YES** |
+| numstat vs main | 16 files, +1686/-185 | **16 files, +1686/-185 — zero movement** |
+| `gofmt -l .` on branch tree | empty | **empty** |
+| #1382 hunks, chat_v2 / broker_inbound | 4 / 3 | **4 / 3 — intact across a THIRD rebase** |
+| B-1 validator fix | present | `len(msg.Attachments) == 0` present |
+| B-1 forgery removed | absent | **absent** |
+| B-2 order | authz before validate | authz `:1125`, validate `:1142` |
+| B-3 | `== 5` | `:1780` |
+| suites | green | `pkg/hub`, `pkg/messaging` green under `-tags no_sqlite` |
+
+**The zero-movement prediction was the point.** I told C5 in advance that I expected the numstat
+to be unchanged, and why: #1390 touches `handlers_agent_message_mode.go`, which is not among C5's
+16 files. Stating the expected value before the measurement converts the check from "does this
+number look plausible" into a falsifiable prediction — a moved number would have been a finding
+rather than something to rationalise. Cheap, and it is the difference between verifying and
+glancing.
+
+#### RULE 381. State the expected value BEFORE asking for a measurement
+A number you receive without a prior expectation gets rationalised; a number you predicted gets
+tested. This is the counter to the failure mode I hit three times today (rules 372, 373, 380),
+where I accepted an instrument's output because I had no prior belief for it to contradict. The
+stale-fetch near-miss (rule 377) was caught by exactly this mechanism — the reported SHA
+contradicted what I expected to see — and the broken `gofmt -l` check likewise, because its answer
+contradicted #1390's commit subject.
+
+### Compare URL needs no reissue
+It targets the branch by name, so it resolves to the new tip. Told ptone explicitly that no new
+URL is coming, because a silent tip change under a previously-sent URL is the kind of thing that
+makes a reviewer wonder whether they are looking at what was gated. **Sent to the compare thread,
+not the report thread** — the URL lives there and that is where he will act.
+
+### State
+- `upstream/main` `77c6aa5e7`, gofmt clean, CI in progress.
+- C5 **`4fca83814`** — gate passed, rebased, green-capable, parked. **Blocked only on ptone opening
+  the PR.** Nothing is waiting on me.
+- `dev-hub-handlers` idle 1h — C5's child, retires when C5 merges. Not reaching past C5 to it.
+- C7 gated on C5 landing (fresh agent, no repurposing).
+- Ledger unchanged: DEF-41 held; the rest gated on C5/C7 landing.
