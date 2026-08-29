@@ -14222,3 +14222,59 @@ I also measured and sent **in the same command**, so the 2310 was printed and th
 
 **Rule 292.** Compose-measure-send must be three steps, and the send must be in a separate invocation from the measurement. A printed length that nothing branches on is decoration.
 **Rule 293.** When a capped message carries a generated URL, the URL is the budget and the prose is the remainder. Shorten the encoded body first — trimming the covering note reclaims a third as much per word, because the URL body is the part being tripled.
+
+---
+
+## §5fz — 2026-08-29 — M-MOD: the slice plan enumerates only half the delta (ARCHITECT DEFECT)
+
+**Heartbeat sweep first.** `upstream/main` unchanged at `a7ac9c489`. Both compare URLs verified clean on GitHub's own compare API: gate-rows `status=ahead ahead=1 behind=0`, 2 files, `+12/+33` = +45/−0, matching local verification exactly — no residue from the squash-merged #1363 despite the branch-name reuse. Docs slice `ahead=2 behind=0`, 46 files. Neither opened as a PR yet. #1259 static for a seventh heartbeat. Ledger unchanged, nothing strikeable.
+
+**Then, using the wait to pre-draft the tranche C spec, I found a defect in my own design.**
+
+### What happened
+
+Tranche C is specified as 10 new files, two of which are `pkg/hub/webchannel_store_{def27,unify}_test.go`. I checked whether those tests compile against main's `webchannel_store.go` and found that em9 modifies that file (+314/−18) — and that it appears nowhere in em10's 82-path manifest.
+
+Design Phase 0 said: re-derive `(v2 ∪ em9) − main` (82 paths), *"covering all 82."* That set is **added files only**. But Phases 2/3/6 of the same document call for work on files that exist on main, and §"Hunk-level porting for modified files" names six of them explicitly. **Phase 0's scope statement contradicted the phases beneath it.** em10 executed my instruction correctly. The instruction was wrong.
+
+### Measurement error en route (worth recording)
+
+My first measurement used two-dot `git diff main <branch>` and reported `D = 98` deletions on both branches. em9 deleted nothing; main *added* 98 files after the merge-base. Two-dot reports main's own advances as branch changes. Re-measured three-dot from `6268bac44`: `D = 0` on both. **Rule 264 applies to file-set enumeration, not just to reading PR diffs** — I know the rule and still reached for the wrong command first.
+
+### Result
+
+| Set | Count | Disposition |
+|---|---:|---|
+| M-ADD (absent from main) | 82 | em10's manifest — **complete, no gap** |
+| added-since-base but main already has (P2, #1339) | 27 | nothing to port |
+| modified, main already absorbed | 6 | nothing to port |
+| modified, only the `newTestStore(t, …)` signature churn | 31 | **DROPPED** (ruling A-1) |
+| **M-MOD (substantive unported)** | **38 / ~1100 lines** | **was missing from the plan** |
+
+M-MOD contains `cmd/message.go` (+207/−13): the S4 conversation-reference parsing and the deprecation of `--channel` / `--thread-id`. **That is the originating brief.** Main still registers both flags bare at `cmd/message.go:1020-21`. The plan as approved would have landed the messaging library with nothing calling it.
+
+### The finding that makes the additive guard load-bearing
+
+All 8 B5 test functions present on main are **absent from em9's `handlers_agent_messaging_test.go`** — em9's base predates B5 (#1343), so it never had them. Nothing on the branch deleted them; the branch's own three-dot diff looks innocent.
+
+> **Copying a branch file over main's is a silent revert even when the branch shows no deletion.**
+
+Only the diff *against main* exposes it — which is precisely what the additive-only guard measures. This upgrades that guard from hygiene to the design's primary control.
+
+Deletion profile, encouragingly: **`handlers_agent_messaging.go` is +281/−0** — the highest-risk prohibition-list file is purely additive. Most of M-MOD is 0–4 deletions. Genuine `DELETIONS-JUSTIFIED:` needed on four paths only: `cmd/message.go` (−13, the intended flag rewrite), `cli.md` (−17), `SKILL.md` (−15), and `handlers_agent_messaging_test.go` (−12, `chatSendLimiter` assertions — review by attention, not gateable).
+
+### Actions
+
+- Design doc amended: Phase 0 now specifies **two manifests (M-ADD / M-MOD)**; **Addendum A** added with rulings A-1 (drop `newTestStore`) and A-2 (M-MOD ported by hunk, never by file copy) and a revised tranche assignment.
+- **No tranche may be dispatched until `SLICE-PLAN.md` carries both manifests.** Owner: em10, on unpark. This is now the gating item ahead of tranche C, alongside the two pending merges.
+- Phase 1 (shipped) and the gate-rows slice are unaffected — both M-ADD only; their verification stands.
+- Not escalated to ptone: it blocks nothing on their side, changes none of the four open asks, and C was already gated behind the two merges. Folds into the next section-boundary report.
+
+### New rules
+
+- **294.** A path-set derived with two-dot diff includes the *other* side's advances. Rule 264 governs file-set enumeration as much as diff reading; a nonzero deletion count against a branch that deleted nothing is the tell.
+- **295.** "Files absent from main" and "work absent from main" are different sets. A manifest built from `--diff-filter=A` silently scopes out every modification, and modifications are where the wiring lives.
+- **296.** A branch that predates a fix does not *delete* that fix — it simply lacks it. Its own diff is clean. Only the diff against the destination shows the loss, so wholesale file copy from an old branch is a revert with no deletion to review.
+- **297.** When a subordinate's deliverable is complete and still insufficient, check your own instruction before reviewing their work.
+- **298.** Before specifying a slice, confirm its files compile against the destination — a slice of tests whose subject was never ported is not a slice.
+- **299.** A large mechanical delta (one signature, N files) inside a semantic port is not part of the port. Separate it or drop it; it cannot be reviewed as either.

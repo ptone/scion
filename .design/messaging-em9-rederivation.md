@@ -164,7 +164,11 @@ Rollback is per-slice: each PR is revertible without touching its neighbours, be
 
 ## Implementation Phases
 
-**Phase 0 — Slice-plan groundwork (me + em10).** Re-derive `(v2 ∪ em9) − main` mechanically (82 paths as of `a7ac9c489`); produce the file → source-branch → slice table, covering all 82; diff the prohibition list against what the marker gate already enforces and specify gate rows for the gap. No production code. Output: `SLICE-PLAN.md`.
+**Phase 0 — Slice-plan groundwork (me + em10).** Re-derive the delta mechanically in **two manifests, not one** (see Addendum A — the original single-manifest instruction was wrong):
+- **M-ADD**: `(v2 ∪ em9) − main`, the paths absent from main — 82 as of `a7ac9c489`. *Delivered.*
+- **M-MOD**: paths present on main that either branch also changed and whose change main has not absorbed — **38 substantive paths, ~1100 lines**. *Outstanding.*
+
+Produce a file → source-branch → slice table covering both; diff the prohibition list against what the marker gate already enforces and specify gate rows for the gap. No production code. Output: `SLICE-PLAN.md`.
 
 **Phase 1 — Docs slice.** `.design/project-log/**` from both branches, 45 files, zero code. Lands first as a low-risk exercise of the whole pipeline: additive check, main's-guards check, CI.
 
@@ -199,3 +203,79 @@ Per slice, all must hold before I take it as a merge candidate:
 9. **Empty diff over recently-changed files.** For the files main changed most recently, `git diff main...slice -- <those files>` is empty or additive-only. This is the only reliable proof a prior tranche survived (rule 31).
 
 For the sequence as a whole: after the final slice, `git diff main...em9-unify` restricted to authored (non-`pkg/ent`, non-docs) paths should contain nothing we intended to keep. Whatever remains is either deliberately dropped or a miss — and must be enumerated either way.
+
+---
+
+## Addendum A — the modified-path manifest (M-MOD)
+
+*Added 2026-08-29 by ca-msg-arch. Corrects a defect in this document's own Phase 0.*
+
+### The defect
+
+Phase 0 as originally written said: *"Re-derive `(v2 ∪ em9) − main` mechanically (82 paths); produce the file → source-branch → slice table, **covering all 82**."* That set contains only files **absent from main** — i.e. added files. But Phases 2, 3 and 6 of this same document call for work on files that **do** exist on main ("13 extras adapter modifications", "hunk-level work in `handlers_broker_inbound.go`", "D's hunks in `cmd/message.go`"). Phase 0's scope statement was therefore inconsistent with the phases beneath it.
+
+em10 executed the instruction faithfully and delivered a correct, complete 82-path manifest. The instruction was the error. **This is an architect defect, not an EM defect.**
+
+Left uncorrected, the sequence would land the new messaging library and never wire it to the CLI or the brokers — the S4 conversation-reference parsing in `cmd/message.go` and the `--channel` / `--thread-id` deprecation, which are the originating brief, are in M-MOD and appear nowhere in the current plan.
+
+### Measurement (three-dot, merge-base `6268bac44`, against `upstream/main` = `a7ac9c489`)
+
+Two-dot `git diff main <branch>` is wrong here: it reports main's own advances as branch changes (it showed a spurious `D = 98`). All figures below are three-dot.
+
+| Set | Count | Disposition |
+|---|---:|---|
+| M-ADD — absent from main | 82 | manifested by em10; **complete, no gap** |
+| added-since-merge-base but main already has them (P2 series, #1339) | 27 | nothing to port; correctly excluded |
+| modified, main already absorbed the change | 6 | nothing to port |
+| modified, delta is *only* `newTestStore(":memory:")` → `newTestStore(t, ":memory:")` | 31 | **DROP — see ruling below** |
+| **M-MOD — modified, substantive unported content** | **38** | **missing from the plan** |
+
+### Ruling A-1 — drop the `newTestStore` refactor
+
+31 of the 69 unported paths differ from main by nothing but a test-helper signature change. It is incidental hygiene from the old branches, unrelated to the messaging contract, and it cannot be done additively (it rewrites existing lines in ~31 files). Carrying it would force a 31-file `DELETIONS-JUSTIFIED:` block whose review value is nil and whose revert risk is not.
+
+**Dropped from the re-derivation.** If wanted, it lands later as its own mechanical PR, reviewed as a refactor rather than smuggled through a messaging slice.
+
+### Ruling A-2 — M-MOD files are ported by hunk, never by file copy
+
+This restates §"Hunk-level porting for modified files" above, which already had the principle right but named only six files by inspection. The measured scope is **38**. What follows is the evidence for why that section is load-bearing rather than advisory — it is the single most dangerous thing in the remaining sequence.
+
+All 8 B5 test functions that exist on main — `TestAgentMessage_B5_SpoofedSenderDoesNotDeriveConversationKey`, `TestBroadcast_B5F1_*`, `TestBroadcast_R1_*`, `TestBroker_R2_*`, `TestBroker_R3b_*` and the rest — are **absent from em9's copy of `handlers_agent_messaging_test.go`**, because em9's base predates B5 (#1343). Nothing on the branch deleted them; the branch simply never had them.
+
+The consequence: **copying a branch file over main's is a silent revert even though the branch shows no deletion.** A three-dot diff of the branch looks innocent. Only the diff *against main* exposes the loss — which is exactly what the additive-only guard measures, and is why that guard is the load-bearing control of this design rather than a formality.
+
+Therefore, for every path in M-MOD:
+1. **Main's file is authoritative.** Start from main's copy, never the branch's.
+2. Extract the branch's *added* lines only: `git diff -U0 <merge-base> <branch> -- <path>`.
+3. Apply those hunks onto main's copy by hand, reconciling against what main has since changed.
+4. `git diff --numstat main...slice -- <path>` must show `0` deletions, or carry a per-file `DELETIONS-JUSTIFIED:` block.
+
+For M-ADD paths (absent from main) wholesale copy remains correct and safe. The two manifests have **different porting procedures**; conflating them is how B5 gets reverted.
+
+### Deletion profile of M-MOD
+
+Measured on em9, excluding `newTestStore` churn:
+
+- **`pkg/hub/handlers_agent_messaging.go`: +281 / −0.** The highest-risk file on the prohibition list is *purely additive*. The invariant holds natively — no justification block needed.
+- 0–4 deletions: the great majority, including every `extras/**` broker adapter.
+- Genuine `DELETIONS-JUSTIFIED:` required on four paths only:
+  - `cmd/message.go` (−13) — the flag surface is deliberately rewritten: `--broadcast`, `--all`, `--in`, `--at`, `--plain`, `--raw`, `--attach`, `--notify`, `--channel`, `--thread-id`, `--cc` move to a hidden/deprecated registration block. **This is the brief, not collateral.** Deprecated flags must still function and warn.
+  - `docs-site/src/content/docs/reference/cli.md` (−17), `resources/platform_skills/scion-messaging/SKILL.md` (−15) — prose rewrites.
+  - `pkg/hub/handlers_agent_messaging_test.go` (−12) — touches `chatSendLimiter` bucket assertions. **Review by attention.** Not gateable by ident counting; the prohibition list already flags B5 coverage here.
+
+### Revised tranche assignment for M-MOD
+
+| Tranche | Paths | Content |
+|---|---:|---|
+| C (broker edge) | 20 | `handlers_broker_inbound{,_test}.go`, `messagebroker{,_test}.go`, `pkg/hubclient/{messages,agents}.go`, and the 5 `extras/**` adapters + tests |
+| C/D (hub handlers) | 7 | `handlers_agent_messaging{,_test}.go`, `handlers_messages.go`, `handlers_chat_v2.go`, `attachments_agent_test.go`, `route_metadata.go`, `teststore_test.go` |
+| D + F (CLI) | 1 | `cmd/message.go` — split by hunk across both tranches as the phases already specify |
+| B′ (docs, modified) | 4 | `messaging.md`, `cli.md`, `glossary.md`, `SKILL.md`. Distinct from the shipped Phase 1 slice, which was *new* docs only |
+| — (config/store tail) | 6 | `operational_settings.go`, `opsettings/{registry,sections,opsettings_test}.go`, `server.go`, `route_classification_test.go` |
+
+### Consequences for the sequence
+
+- Tranche C as currently specified (10 new files) is **incomplete**; it would ship envelope and delivery with no caller. C must carry its M-MOD rows or the slice is untestable end-to-end.
+- Phase 1 (docs, shipped) and the gate-rows slice are **unaffected** — both are M-ADD only and their verification stands.
+- Acceptance criterion 9 already covers this case and needs no change.
+- **No tranche may be dispatched until `SLICE-PLAN.md` carries both manifests.** Owner: em10, on unpark.
