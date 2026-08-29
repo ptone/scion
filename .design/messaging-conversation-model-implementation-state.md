@@ -17806,3 +17806,64 @@ by me or any of my managers** — not my orphan, left alone. My subtree is exact
 `upstream/main` `03071382c`. `def44` @ `478374579` + landing commit in progress. `ci-draft` @
 `a67248073` (done). Awaiting C7's push of `.github/workflows/extras-ci.yml` + Makefile, then I compose
 the compare URL. Held: DEF-41/42. **DEF-43 transferred to ci-fix-lead. DEF-44/45 cleared.**
+
+---
+
+## 2026-08-29 — C7 LANDED (compare URL sent). And I made the same error twice in one day
+
+### THE REPEAT — and why the answer is a mechanism, not another rule
+`ci-fix-lead` replied to my DEF-43 handoff saying the 404 is correct and #1393 moved the nil check
+after the agent lookup. I had told them the opposite and listed the handler body as an **eliminated
+path**. Checked properly: on `upstream/main`, `handleAgentCloudLogs` does `GetAgent` at
+handlers_logs.go:103 and the 501 at :121. **Lookup first. They were right.**
+
+Cause: I read `pkg/hub/handlers_logs.go` **out of my own working tree** — the identical mistake I
+retracted publicly ~90 minutes earlier and wrote rules 399/400 about. The file is 637 lines on both
+sides and 54 lines differ, so nothing looked wrong.
+
+I also had the security argument backwards. I warned that expecting 404 would "ratify an existence
+leak." For a *nonexistent* agent the 404 discloses nothing, while looking up first is what protects
+the Cloud Logging **config state** from a caller with no read access. Their ordering is the stronger
+one. Told them to have ct-dev-3 ignore my warning — a wrong argument from outside their workstream
+should not cost them a correct fix.
+
+#### RULE 402. When a rule fails to prevent its own violation, write a mechanism instead
+Rules 399 and 400 existed, were fresh, were mine, and did not fire. Writing 403 would be the same
+medicine at a higher dose. So: **`git worktree add --detach /tmp/mainref upstream/main`** — a clean
+pinned checkout — and all source reads come from there. The stale tree is now unreachable rather than
+merely forbidden. Note what makes this class so durable: a long-lived branch scoped to one directory
+is stale everywhere else *and* the file sits in the worktree looking authoritative, so the error costs
+nothing to make and produces confident, specific, wrong claims. Intention is not a control for a
+failure whose whole signature is that it feels correct.
+
+Second-order damage worth noting: my false "eliminated paths" would have *cost* ci-fix-lead time,
+because eliminations are the part of a handoff people trust without re-checking. **A wrong negative
+result is more expensive than a wrong positive one** — a bad hypothesis gets tested, a bad elimination
+gets skipped.
+
+### C7 landed — verified independently
+`402ffb5b6`, 8 commits. Re-ran the endpoint numstat myself per directive 5b: **22 files, +759/-420,
+matching C7's report row for row.** Also verified, rather than accepted:
+- workflow + `make tidy-extras` in the **same commit** (the gate's error names the target)
+- trigger is exactly `pull_request` on `extras/**`, `go.mod`, `go.sum`; no push-to-main
+- zero `DRAFT`/`Variant` remnants
+- YAML parses (no pyyaml available, so validated with a throwaway Go program against the repo's own
+  `gopkg.in/yaml.v3`) — 3 jobs: discover, build-and-test, coverage
+- `.PHONY` includes `tidy-extras`; `make -n tidy-extras` expands correctly in a branch worktree
+
+C7's positive control, in the PR body: 6 modules fail `go build` at `03071382c`; all 9 gated modules
+build and pass on the branch (discord 415 tests, telegram 612, teams 246, slack 41).
+
+### Compare URL — the 2000-rune cap applies to the URL thread too
+First attempt was **5629 chars and rejected**: the URL alone was 5140. URL-encoding inflates a body by
+~1.6x, so the *effective* PR-description budget is about **1150 raw chars**, not the several thousand
+a PR body can normally hold. Iterated down through five drafts. Highest-leverage cut was dropping
+markdown backticks — each encodes to 3 chars, so a heavily-formatted body pays a large hidden tax.
+Sent at 1986. **Record for next time: budget the PR body against the message cap before writing it,
+not after.** Kept the mandatory deletion justification and the positive control; cut the design notes.
+
+### State
+`upstream/main` `03071382c`. `origin/scion/ca-msg-c7-def44` @ `402ffb5b6` — compare URL delivered to
+thread 1532864101909528737, awaiting ptone to open. **DEF-43 transferred (ct-dev-3 on it, fork issue
+ptone/scion#1368). DEF-44/45 cleared.** Held: DEF-41/42. Tranche C: C1–C6 merged, **C7 is the last**.
+Do not retire C7 until the post-merge gate on main is green.
