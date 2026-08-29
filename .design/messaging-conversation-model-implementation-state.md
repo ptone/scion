@@ -19842,3 +19842,66 @@ cycle is its own churn. Refresh when a third row goes stale.
   both turn on the comment-blind `grep -q`.
 - **DEF-53** open, Tranche G precondition, no owner needed yet.
 - Parked: `ca-msg-def42` (retiring), `ci-fix-lead`, `chat-admin-lead`.
+
+---
+
+## 5ec — 2026-08-29 — def42 exit interview; DEF-54 filed (DEF-42 is a pattern)
+
+def42's exit interview answered all four questions cleanly, and answer 3 is the
+reason the rule 454 question keeps earning its place: **DEF-42 was one instance of
+a pattern, not a one-off.** I verified its claims on main rather than filing on
+its word, and it was understated.
+
+**Confirmed.** Both setters write under the full write lock —
+`SetChannelRegistry` (`server.go:1973`) and `SetPluginManager` (`server.go:2070`),
+both `s.mu.Lock()`. Their corresponding reads are bare.
+
+- `s.channelRegistry` — 4 references, 2 of them reads in
+  `handlers_agent_messaging.go`.
+- `s.pluginManager` — 14 references across four files: 9 in
+  `handlers_integrations.go`, 3 in `server.go`, 1 each in
+  `handlers_teams_manifest.go` and `update_completion.go`. def42 said "five sites
+  in handlers_integrations.go"; the real count there is 9.
+- Control: `s.webChatStore` returns 48 references post-DEF-42, so the search
+  discriminates.
+
+**The channelRegistry site is worse than a data race.** It is a check-then-use
+across three separate bare reads:
+
+```go
+if s.channelRegistry != nil && s.channelRegistry.Len() > 0 {
+    s.channelRegistry.Dispatch(ctx, structuredMsg)
+}
+```
+
+A concurrent `SetChannelRegistry(nil)` between the nil check and `Dispatch` is a
+nil-deref panic, not merely a torn read. And it sits **three lines below DEF-42's
+own RLock hoist in the same function** — the fix landed directly above the next
+instance of the bug it was fixing.
+
+Filed as **DEF-54**. Dispatching its own agent, following the DEF-42 precedent
+where ptone chose option B (parallel agent) for exactly this shape of work.
+
+**Line-number drift worth noting.** My notes said `StartMessageBroker` was at
+`server.go:2408`; def42 said `2529`; it is actually at `2513` on current main.
+Three different numbers for one function across a few hours. Line numbers in this
+document are a convenience, never an identifier — the prohibition list is keyed on
+symbols for this reason, and DEF-54's brief must name the function, not the line.
+
+**Answers 1, 2, 4.** (1) `handlers_chat_prefs.go:55` and `attachments_agent.go:144`
+were already guarded; `handlers_chat_v2.go` has ~40 reads that def42 pattern-scanned
+rather than individually audited — worth a note for DEF-54's owner, since a
+pattern scan is how the 9-vs-5 undercount happened. (2) Nothing left deliberately
+unguarded beyond the `StartMessageBroker` site, which already holds the write lock
+and would deadlock. (4) Its race test is 8 goroutines x 200 iterations, ~5s under
+`-race`, no sleeps or timing windows — nothing a nightly would trip over.
+
+def42 retired after this.
+
+### Rule
+
+- **463.** A fix that lands next to an unfixed instance of the same bug is the
+  normal case, not a surprise. When a defect is characterised as "N unguarded
+  reads of field X", ask what else the same setter-under-lock pattern covers before
+  closing it — the audit boundary is usually the field name someone happened to
+  grep for.
