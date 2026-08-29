@@ -15921,3 +15921,38 @@ to confirm validation-before-limiting is not a free-of-charge DoS lane.
 - C7 dispatch blocked on C5.
 - C4/C6 compare URLs with ptone; #1379 updated in place.
 - `TestDeleteStopped_RequiresGroveContext` still red on main, unowned.
+
+## 2026-08-29 ~12:05Z — #1379 cleared to land. main moved to `7c03e9dbf`.
+
+### #1379 GREEN at `d9cdecd1c`
+`Build & Test`, `check-changes`, `scan-pr`, `golangci-lint`, `shellcheck` all SUCCESS.
+Only `cla/google` FAILURE — expected on agent-authored branches (rule 104). Told ptone: ready.
+
+**The shellcheck check passing is the proof my correction was right.** Had we accepted
+"same finding as main, therefore not ours", #1379 would carry a permanent red for no reason.
+Rule 351 earned its keep within thirty minutes of being written.
+
+### main advanced: `b281eb701` → `7c03e9dbf` (#1378 merged 11:49:48Z)
+
+**This is the rule-335 trap.** Main is now AHEAD of C4, C5, C6 and #1379, so
+`git diff upstream/main <branch>` would start attributing **main's** commits to the branch.
+All prior endpoint measurements were taken against `b281eb701` while it WAS main, so they remain
+valid — but **every future measurement must use `7c03e9dbf`.** Told C5 to re-measure; must
+remember to re-baseline C4/C6 if either is re-reported.
+
+Checked for collisions rather than assuming: #1378 touched **only** `cmd/hub_token_test.go`, and
+comm against all four branches shows **zero file overlap**. No rebases needed.
+
+**RULE 356. When main moves under in-flight branches, the first question is not "do they still
+merge" but "does the moved content touch the same files."** A clean merge with overlapping files
+is where a silent semantic revert lives; non-overlapping files make the merge genuinely safe.
+`comm -12` of the two name-only lists answers it in one command.
+
+Also: #1378 fixed `TestHubTokenCreateHelpUsesRegistryScopes`, one of my two red-main tests.
+**`TestDeleteStopped_RequiresGroveContext` is still red and still unowned** — re-raised to ptone.
+
+### Open
+- C5: revert B11/B13, wire DEF-40, fail-close reachability script, re-measure vs `7c03e9dbf`.
+- C4/C6 compare URLs with ptone.
+- C7 dispatch blocked on C5.
+- `TestDeleteStopped_RequiresGroveContext` red on main, unowned.
