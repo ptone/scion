@@ -34,7 +34,7 @@ func TestScopesForRole_ReadOnly(t *testing.T) {
 
 func TestScopesForRole_Baseline(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleBaseline)
-	require.Len(t, scopes, 5)
+	require.Len(t, scopes, 6)
 
 	// Must include these scopes
 	assert.Contains(t, scopes, ScopeProjectRead)
@@ -42,6 +42,7 @@ func TestScopesForRole_Baseline(t *testing.T) {
 	assert.Contains(t, scopes, ScopeAgentTokenRefresh)
 	assert.Contains(t, scopes, ScopeAgentNotify)
 	assert.Contains(t, scopes, ScopeAgentPortForward)
+	assert.Contains(t, scopes, ScopeAgentSecretFetch)
 
 	// Must NOT include elevated scopes
 	assert.NotContains(t, scopes, ScopeAgentCreate)
@@ -51,7 +52,7 @@ func TestScopesForRole_Baseline(t *testing.T) {
 
 func TestScopesForRole_Full(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleFull)
-	require.Len(t, scopes, 8)
+	require.Len(t, scopes, 9)
 
 	// Must include everything in baseline
 	assert.Contains(t, scopes, ScopeProjectRead)
@@ -59,6 +60,7 @@ func TestScopesForRole_Full(t *testing.T) {
 	assert.Contains(t, scopes, ScopeAgentTokenRefresh)
 	assert.Contains(t, scopes, ScopeAgentNotify)
 	assert.Contains(t, scopes, ScopeAgentPortForward)
+	assert.Contains(t, scopes, ScopeAgentSecretFetch)
 
 	// Plus elevated scopes
 	assert.Contains(t, scopes, ScopeAgentCreate)
