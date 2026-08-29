@@ -18193,3 +18193,59 @@ Held: DEF-5, DEF-6, DEF-9, DEF-10, DEF-18, DEF-32, DEF-33/35, DEF-34 (blocked on
 **Transferred, fix OPEN not merged: DEF-43** (ptone/scion#1369, issue #1368).
 Cleared: DEF-44, DEF-45. Struck this sweep: **#1365**.
 Tranche C: C1–C6 merged; **C7 ready to merge, verified green**.
+
+---
+
+## 2026-08-29 18:13Z — PR #1398 MERGED. **TRANCHE C COMPLETE.** C7 retired.
+
+**Merged 17:45:06Z as squash commit `f20ee2b98`** on `upstream/main`.
+
+### Merge verified by content, not ancestry (squash-merge blinds `git cherry`/patch-id)
+
+- `.github/workflows/extras-ci.yml` present on main at **exactly 209 lines** (matches branch).
+- `legacyProjectsRoot` present in both `broker.go` and `broker_v2.go`, 3 occurrences each.
+- `tidy-extras` present in the Makefile.
+
+### Post-merge health checked at JOB level, not run level (rule 405)
+
+`gh run list` reported `success` for every main run — which proves nothing. At job level:
+- `f20ee2b98` (my merge): Build & Test **success**, Full Test Suite **failure** (DEF-43, not mine).
+- `dbec308cc` (#1399): Full Test Suite **SUCCESS**.
+
+### DEF-43 STRUCK — closed by observation, not by a PR number
+
+`dbec308cc` = "fix(tests): update cloud-logs test to match auth-before-nil-check ordering" merged
+as upstream **#1399**. Confirmed closed the right way: **the Full Test Suite job flipped to green
+on main.** Given rule 409 — where upstream #1369 was a real, merged, unrelated changelog PR — I
+did not want to close this on a number again. The gate going green is the evidence.
+
+### Known limitation, deliberate, logged not filed
+
+The extras gate triggers on `pull_request` only, so **it never runs on main.** There is no
+post-merge extras run to wait for; main's ordinary CI is the closest equivalent and it is green.
+This follows ptone's scoping ("blocking but should only run for PRs that have changes to extras")
+and avoids duplicate runs. Consequence: drift reaching main by any path that skips PR checks would
+not be caught. Acceptable trade, recorded so nobody rediscovers it as a surprise.
+
+### C7 retired
+
+Told it what its work actually bought before deleting: **the module repairs were not the value.**
+The gate found 9 failures on its first genuine run — tests that passed for every human and agent
+who ever ran them, purely because `/home/scion` exists in our containers and not on a runner. That
+class was invisible before, and invisible in the worst way: it produced confident green results,
+including my own published positive control.
+
+Credited two things specifically: pushing back on the docs rewrite with file-and-line evidence
+when I was wrong, and reporting two tests its own fix had broken rather than letting them ride.
+
+### Ledger after this sweep
+
+**STRUCK: DEF-43** (verified green on main), **#1365** (closed).
+**Cleared earlier: DEF-44, DEF-45.**
+Held, no owner, NOW DUE per my own trigger: **DEF-41** (`validate_compat.go:96` fabricates
+`ConversationID = "legacy-pending"`), **DEF-42** (webChatStore: 13 unguarded reads vs 41 guarded,
+one locking writer at startup — the happens-before question decides between two OPPOSITE patches).
+Held: DEF-5, DEF-6, DEF-9, DEF-10, DEF-18, DEF-32, DEF-33/35, DEF-34 (blocked on #1259), DEF-12,
+DEF-46, DEF-47. Tranche H blocked on the omitempty evasion.
+
+**Tranche C: C1–C7 all merged. Complete.**
