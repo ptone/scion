@@ -18083,3 +18083,61 @@ does not belong in a CI-gate PR. **Logged as DEF-47**, not actioned.
 
 Asked the coordinator to redirect C7 to me if the HOME suggestion reaches them, since I have
 already ruled against it.
+
+## 2026-08-29 17:38Z — C7 GREEN. Verified independently. PR #1398 ready to merge.
+
+Branch `3464a351d` (11 commits). CI run 33265897084: **all 11 extras jobs success**, including
+**"Verify all modules were tested" which ACTUALLY EXECUTED** rather than skipping — the specific
+evidence I demanded under rule 403. Coverage printed real values: TOTAL=10 (independent
+unlimited-depth find), TESTED=9, EXCLUDED=1, ACCOUNTED=10. The `env:` refactor did not silently
+empty TESTED/EXCLUDED into zeros.
+
+### What I verified rather than accepted
+
+1. **Numstat re-run myself** — matches C7's report row for row.
+2. **Production change is minimal and safe**: literal → `var legacyProjectsRoot`, default string
+   **byte-identical**, in both modules. Nothing else touched.
+3. **An assertion was DELETED, not re-pointed** — `assert.Contains(agentPath, "/workspace/downloads/")`
+   in `PhotoPicksLargest`, replaced with a comment. Investigated rather than waved through.
+   `agentPath` has 3 branches (`downloadsPath` → sharedDir → `/workspace/downloads`), so the helper
+   override genuinely made it false. **Verified each branch still has a dedicated asserting test**:
+   override→`ConfiguredDownloadsPathAgentPath:3010`, sharedDir→`SharedDirPath:3042`,
+   legacy→`EmptyProjectID_LegacyPath:3086`. Deletion loses no branch coverage. **But C7 justified it
+   with a comment rather than by naming the coverage successor — that is the standard.**
+4. **Closed the vacuous-test class by enumeration, not reasoning.** C7 found 2 tests broken by its
+   own fix (`SharedDirPath`, `PhotoMessageNotDropped`) — but those announced themselves by FAILING.
+   The dangerous ones pass. Enumerated all 20 path-shape assertions: every one either sets its own
+   `customDir`, clears `downloadsPath`, or asserts filename only. **No test asserts a path shape
+   while silently inheriting the helper's override.** Class closed.
+5. **Security test unchanged** — `AudioTitlePathTraversal` asserts filename sanitisation, which is
+   independent of base dir. Diff does not touch its assertions.
+
+### Main advanced mid-verification — checked for rule 335 contamination
+
+`upstream/main` moved `03071382c` → `77390f79e` (#1394, web view-permissions modal) while I was
+measuring. Endpoint diff was therefore suspect. Recomputed from merge-base: **identical**, because
+`comm -12` of the two changed-file lists is **empty** — no overlap. Benign, but verified.
+
+### Endpoint diff reconciled to the line
+
+26 files **+804/-434**. Earlier at `402ffb5b6` it was 22 files +759/-420 (my record was exact).
+The 3-addition gap that did not reconcile at first: the workflow file is **new**, so from
+merge-base its `env:` refactor counts as net **+3 additions / 0 deletions** (209 vs 206 lines),
+not the +7/-4 of the commit-to-commit diff. 759+3+42 = 804 ✓. 420+0+14 = 434 ✓. **No unexplained
+deletions.**
+
+### No new failures hidden inside a known-red job
+
+An already-failing job can mask a new failure. Extracted `--- FAIL:` sets from both the PR's
+Full Test Suite and main's, `comm -23`: **empty**, and both inputs non-empty (1 each), so the
+empty result is meaningful. PR introduces zero new test failures.
+`TestHandleAgentCloudLogs_AgentNotFound` is identical on both — ci-fix-lead's, fixed in PR #1369.
+
+**RULE 408.** A red job masks new failures as effectively as a green one. When a check is expected
+to fail, diff the failure SET against baseline; never accept "still red for the known reason".
+
+### Status
+
+`mergeable=MERGEABLE`, `mergeStateStatus=UNSTABLE` — only `Full Test Suite` (inherited) and
+`cla/google` (expected, rule 104) are red. Extras gate fully green.
+**Reported to ptone as ready to merge.** No new compare URL needed; PR updates in place.
