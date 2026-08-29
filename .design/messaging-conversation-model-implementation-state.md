@@ -14719,3 +14719,98 @@ Heartbeat `7f4e3aa6-...` **resumed**, next run 10:13Z.
 - **323.** When two workstreams touch the same domain, the useful question is not "do they overlap"
   but "at which layer." #1371 and tranche C both concern messaging authorization and collide in
   only four files, because one gates the edge and the other gates the object.
+
+---
+
+## §7.6 — TWO MANIFEST METHOD BUGS, both mine, found 10:08–10:20Z
+
+em6 answered the C3 compile question (**not blocked on C2** — verified empirically on a throwaway
+branch from `8b09c118f`: `go build`, `go vet`, `go test -tags no_sqlite` all exit 0; `pkg/messaging`
+declares its own `ResolutionStore` at resolve.go:134 and the only store import is `store.Agent`,
+already on main). They also reported **13** `pkg/messaging` M-ADD files against my **30**. They were
+right. Re-deriving per rule 312 exposed two compounding bugs.
+
+### Bug 1 — `--diff-filter=A` under three-dot is not "absent from main"
+
+Three-dot status `A` means *added since the merge-base*. Our sources branch from `6268bac4`, before
+tranche A, so every file main acquired via tranches A/B was re-reported as an addition. **51 paths
+misfiled.** It placed `pkg/messaging/resolve.go` in the "absent from main" column — a file I had
+verified byte-identical to main minutes earlier, which should have been an immediate tell.
+
+**Correct test is existence:** `git cat-file -e upstream/main:<path>`.
+Corrected: **225 changed paths → 80 M-ADD raw → 33 in scope** (13 messaging, 12 cmd, 8 hub);
+**145 M-MOD raw → 107 non-ent → 96 with a real delta** (11 already identical to main).
+
+### Bug 2 — three-dot is the wrong tool for SIZING a construction job (the serious one)
+
+`git diff main...branch` compares **merge-base → branch**, not main → branch. On these stale sources
+it reported **`-0` deletions on essentially every row.** That single artifact is why the port kept
+reading as "safely additive" to me across two reports and one design doc.
+
+`pkg/messaging/resolve_test.go`: three-dot **+1413/−0**; endpoint **+19/−24**. Both trees hold 45
+test functions; the sole difference is DEF-26's rename
+(`TestAC_DEF8_1_ConvergenceTwoPathsSameConversation` → `TestResolve_SamePathIdempotency_AgentDM`).
+
+**Correct measure: `git diff --numstat upstream/main origin/<branch> -- <path>`.**
+
+| | three-dot | endpoint |
+|---|---|---|
+| added | 3,509 | **5,287** |
+| **deleted** | **~0** | **4,316** |
+
+### The deletion surface — worst rows, and they are prohibition-list items
+
+| File | Endpoint | Risk |
+|---|---|---|
+| `pkg/hub/handlers_agent_messaging_test.go` | +344 −761 | B5 test functions |
+| `pkg/store/entadapter/conversation_store_test.go` | +20 −657 | |
+| `pkg/messaging/dm_migration_test.go` | +265 −305 | tranche B |
+| `pkg/hub/handlers_agent_messaging.go` | +274 −274 | B5 fix lives here |
+| `pkg/messages/dm_key_test.go` | +21 −154 | DM-key canonicality |
+| `pkg/hub/route_metadata.go` | +18 −153 | prohibition list |
+| `pkg/hub/chat_notifications_test.go` | +1 −152 | 3 B5 functions |
+| `hack/check-conversation-upsert-guard.sh` | +27 **−147** | **the guard itself** |
+| `pkg/store/models.go` | +31 −122 | also #1371 collision |
+| `pkg/store/store.go` | +5 −97 | |
+
+**The guard row is the sharpest trap in the tranche.** Sources predate #1339; their copy is the
+pre-guard file. Porting that path from a source branch deletes the guard and shows no deletion in
+review. **em10 instructed: build C1 from main's copy only, never consult the sources for that file.**
+
+Ratios like `+5/−97` and `+20/−657` mean *main is far ahead*, not *we have content to add*. em9
+instructed to treat any large port into those files as suspect until they can name what it adds.
+
+### The construction spec was right; my re-derivation was not
+
+`.design/tranche-c-construction-spec.md` (mine, 2026-08-28) excludes 7 files as
+"already delivered by work in flight, em9's copies are OLDER." Three-dot made those look like
+**4,250 lines of dropped content** — which would have made exclusion a grave error. Endpoint proves
+the spec correct: `key_consolidation_test.go` is *identical* to main; `resolve_test.go` differs by
+one renamed function. **em6's exclusions stand, and the spec's own note predicted exactly this
+shape:** *"an 'add' that overwrites a newer file is the most dangerous shape here because it does
+not look like a revert in review."*
+
+### Standing requirement added to every phase
+
+**Report per-file endpoint deletion counts before pushing, with line-by-line justification for each
+deletion.** A deletion you cannot name is a revert you have not noticed.
+
+Doc corrected in two passes: `44d43286c` (bug 1), `592b0457e` (bug 2).
+
+### New rules
+
+- **324.** Three-dot is right for reviewing a PR based on main and **wrong for a construction job off
+  a stale branch**. When the branch's merge-base is ancient, use the **endpoint** diff
+  `git diff main branch -- path`. Three-dot's `-0` deletion column on a stale branch is an artifact,
+  not a safety property — and it is the most reassuring wrong answer available.
+- **325.** A near-universal `-0` deletion column across a large port is not good news; it is a
+  measurement smell. Real ports delete something.
+- **326.** Two derived numbers that disagree with a fact you already established (resolve.go is
+  byte-identical to main, yet appears in the "absent from main" set) means the derivation is wrong,
+  not the fact. Reconcile immediately instead of carrying both.
+- **327.** When a subordinate's count differs from yours, re-derive before replying — and when they
+  are right, say so plainly and name what their catch protected. em6's 13-vs-30 prevented a
+  4,316-line deletion surface from being briefed as "safely additive."
+- **328.** Your own earlier artefact can be more correct than your later one. The construction spec
+  written a day earlier survived scrutiny that the fresh re-derivation failed. Recency is not
+  authority (cf. rule 304).
