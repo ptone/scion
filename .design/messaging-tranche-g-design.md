@@ -312,9 +312,33 @@ absent from every brief I wrote before today.
 
 ## 8. Open questions
 
-- **OQ-1 (ptone).** Is the test VM's database a copy of production data, or synthetic? G1's buckets
-  are only meaningful against realistic data. A synthetic VM with zero federated users would show
-  green on the gate that matters most and prove nothing.
+- **OQ-1 — RESOLVED (ptone, 19:55Z).** *"test VM is production data on an integration instance.
+  dedicated for such testing. federated chat has not been something that has had real usage. so we
+  can track the improvements for after this main chat refactor lands."*
+
+  Production data on a dedicated integration instance. G1's buckets will be meaningful.
+
+  **This changes the meaning of the `non-UUID principal` bucket, and strengthens the gate rather
+  than relaxing it.** I had scoped that bucket as *a known gap we accept and count* — federated
+  users exist, cannot be attributed, so measure them and block. If federated chat has had no real
+  usage, the expected count is ~zero, and a non-zero count therefore is **not** the known gap. It
+  is something we have not identified: most likely slug-form principal IDs
+  (`notifications.go:497-501` names slugs alongside federated identities), possibly something
+  else.
+
+  A bucket expected to be zero is a far better gate than one expected to be small, because any
+  non-zero value is a finding rather than a magnitude to argue about. G1's enumeration must
+  therefore print the offending principal IDs, so the distinction between "federated" and
+  "something we did not predict" is visible in the output and does not require a follow-up
+  investigation to recover.
+
+  **Rule 679: when a population you expected to be tolerable turns out to be empty, the check on
+  it becomes more valuable, not less.** The instinct is to relax a gate guarding an empty set. The
+  opposite is right: an empty expectation converts a counting gate into an existence gate, and
+  existence gates are the strongest kind.
+
+  **DEF-32 is explicitly deferred by ptone to after this refactor lands.** It stays a non-goal of G
+  and is now a scheduled follow-up rather than an open question.
 - **OQ-2 (ptone / web).** G3 makes unresolved-conversation return a typed error rather than an
   empty list. The web client must render that as a distinguishable state. If not, the alternative
   is empty-plus-loud-counter, which I like less for the reasons in §4.3.
