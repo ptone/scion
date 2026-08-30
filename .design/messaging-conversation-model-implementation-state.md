@@ -25309,3 +25309,47 @@ Escalating a divergence on an authorization-adjacent path was correct regardless
 **OQ-3 is provisionally resolved and stays open pending the positive control.** If the control
 passes, no G precondition is added. If it fails, the drift question is *unanswered* rather than
 answered clean, and G1 gains a dependency I do not currently have scoped.
+
+### 5hr addendum — positive control PASSED; drift zero is verified; G1 dispatched
+
+`ca-msg-inv4`, 19:34Z: re-ran the identical method against `f3a54512`. **`backfill.go` is flagged**
+— 43 lines changed, absent at `66b5cab7f` where the file is byte-identical to v2. It would have
+been classified BEHIND-BEHAVIOURAL. **The zero at `66b5cab7f` is verified, not merely unfalsified.**
+
+The investigator volunteered the right caveat unprompted: the method works here because DEF-81
+manifests as *structural* difference — different calls, different data flow. It would be weaker
+against a behavioural difference living inside a shared dependency, or a single-operator change in
+common code. That is a real bound on the result and I am recording it as a bound, not discounting
+it. **OQ-3 resolves. No new G precondition.**
+
+Worth stating what the control actually bought. Before it, "0 BEHIND-BEHAVIOURAL" and "the method
+cannot see BEHIND-BEHAVIOURAL" were indistinguishable from where I sat, and both would have read as
+a clean report. The control cost one message and about two minutes of investigator time, and it
+converted an assertion into evidence. **Rule 677: the cheapest experiment in any audit is running
+the method against a case you already know the answer to.** It is cheap precisely because you are
+not learning about the system — you are learning about the instrument.
+
+`ca-msg-inv4` retired with `--preserve-branch`.
+
+### Integration branch cut
+
+**`scion/tranche-g`** created on `origin` at `66b5cab7f`, currently identical to `main`. Phases land
+here, not on `main`. It reaches `main` only after ptone's test-VM validation. This is the structure
+ptone asked for at 19:10Z and the reason G5 (coherence pass) exists at all.
+
+### `ca-msg-g1` dispatched
+
+Brief at `briefs/ca-msg-g1.md`. Builds `scion server attribution-report` — the instrument that
+answers "if the switch were flipped right now, what would disappear?"
+
+**One design refinement made while writing the brief, and it is not cosmetic.** The design called
+the second bucket `federated`. The brief renames it **`non-UUID principal`**, because that is the
+property actually detectable in the data: `uuid.Parse` failing on a principal ID. Federated
+identities land there — but so do slugs, per `notifications.go:497-501`'s own comment. Naming a
+bucket for a suspected cause rather than its measured predicate means the count silently means
+something narrower than its label, and someone eventually reads the label instead of the code.
+**Rule 678: name a measurement after what it measures, not after what you think is causing it.**
+
+Dispatched via the new `DISPATCH-PROCEDURE.md`, including the unconditional `scion message <name>
+"1"` after start. **No trust-dialog stall this time** — first dispatch since rule 674 that did not
+need a diagnosis. Confirmed executing by `scion look`, not by heartbeat.
