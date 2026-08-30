@@ -23432,3 +23432,60 @@ filter. A truncation that removes the one failing line looks exactly like a clea
 
 Cross-run: 341.132s (e1a, uncached) vs 344.216s (e1b2). Independent agreement — still only a
 plausibility check on duration, never on verdict.
+
+---
+
+### 5gh — DEF-70 upgraded. The coverage hole may be codebase-wide, and it reports GREEN.
+
+Asked `ca-msg-e1b2` to read the two tests it had *inferred* covered its route. Neither does:
+
+- **`TestRouteGuardsDenyUnauthorized`** (route_classification_test.go:320) — **hardcoded** list of
+  representative routes. Tests one `RouteHubAdmin` route (`/api/v1/admin/allow-list`). Not ours.
+- **`TestHubAdminRoutesRejectScopedAdminUAT`** (:403) — **registry-driven**: `allHubAdminRoutes()`
+  walks `routePermissionClassifications` for the `hub-admin:` prefix, so it *does* collect our route.
+  Then **line 417 skips it**:
+
+```go
+if meta, ok := routeMetadataTable[route]; ok && meta.Permission != "" {
+    t.Skipf("skipping permission-based route %s ... tested in TestRouteGuardOpsPermissions with a full server")
+}
+```
+
+**NO LIVE EXPOSURE.** Registration at server.go:3857 is `s.guarded("/api/v1/admin/messaging/divergence", s.handleAdminMessagingDivergence)`;
+classification `RouteHubAdmin`; permission `hub.diagnostics.read`; routeGuard applies the hub-admin +
+permission check at route_metadata.go:966-990. The endpoint **is protected**. The gap is in test
+coverage, not in the running system. Keep that distinction intact in any relay — this is not a
+vulnerability and must not be escalated as one.
+
+**Why the skip is worse than an absent test.** Read the predicate: the test walks the registry —
+which is exactly what makes it *look* exhaustive and future-proof — and then drops every route **that
+has a permission set**. The exclusion criterion is inverse to the property under test: the more
+specifically a route is secured, the more certainly it is excluded from the test that checks
+security. And a skipped subtest is not a failure. CI shows a registry-driven hub-admin authz test
+passing. The skip delegates its obligation to another test **by name, in a comment**, with nothing
+enforcing that the recipient exists, is registry-driven, or includes the skipped route.
+
+**Rule 586.** A `t.Skipf` inside a registry-driven test silently converts a completeness guarantee
+into nothing, while still rendering green. Registry-driven enumeration and per-item skipping compose
+into something strictly more misleading than a hardcoded list, because the hardcoded list at least
+*looks* incomplete.
+
+**Rule 587.** When a test hands its obligation to another test by name in a comment, that handoff is
+unenforced. Verify the named recipient exists and actually covers the delegated items — a comment is
+not a dependency.
+
+**THE OPEN QUESTION, and it is not about our PR.** Is `TestRouteGuardOpsPermissions`
+(`routeguard_settings_test.go`) registry-driven or hardcoded? Asked e1b2; report-only, no fixes.
+
+- Registry-driven and it picks us up -> handoff is real, skip is sound, **DEF-70 closes as covered**.
+- **Hardcoded** -> every permission-bearing `RouteHubAdmin` route added since that list was written
+  is authz-untested; the registry-driven test skips them all *by construction*; the whole
+  arrangement reports green. That is a **codebase-wide** gap, not ours, and it would be the most
+  significant thing found tonight. Also asked for the counts: permission-bearing hub-admin routes in
+  the registry vs. routes named in the list. The ratio is the finding.
+
+Either answer is worth the ten minutes. Retire e1b2 only after it lands.
+
+**Rule 588.** "It is safe" and "it is tested" are different claims. A correctly-wrapped route with a
+real permission establishes the first and says nothing about the second. e1b2 kept them apart under
+pressure to let the first stand in for the second; that is what surfaced this.
