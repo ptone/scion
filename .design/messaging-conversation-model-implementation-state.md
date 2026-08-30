@@ -21344,3 +21344,53 @@ answer, so refreshing them is free at sweep time and expensive at any other time
 amend, and I pointed the entry at fact F-D so the next reader gets the cleanup framing before the
 code. Replaced the stale DEF-57 line in open-defects with **DEF-58** (the broker-identity negative
 gate), which is the real residue of this change.
+
+### 5fc. DEF-57 amended, compare URL issued, exit interview ruled (2026-08-30)
+
+**Branch `scion/ca-msg-def57` @ `5ca20c5c21af693a2dad2539b19ed6bf1cd4ca25`**, base `1a2c1b07d`,
+25/27 handler + 221/32 tests. Verified the amend by reading `61464558e..5ca20c5c2` directly: two
+lines, the `senderEmail` → `senderRef` rename, nothing else. gofmt clean, tests green.
+
+**Compare URL sent** to thread 1532864101909528737, framed as cleanup per ptone's rescope — the
+body leads with the two false comments and the two investigations they cost, not with
+authorization.
+
+**Cap lesson, new and specific: URL-encoding roughly doubles the body, and the 2000-rune Discord
+cap applies to the encoded URL, not the prose.** Three trims to land it — 3841 → 2432 → 2210 →
+1864. The first attempt also failed in a confusing way (the CLI printed flag help rather than a
+length error), so the failure did not announce its own cause. **Budget ~900 raw characters of body
+for a compare URL and measure the encoded length before sending, not the text.**
+
+**Exit interview produced two findings. Ruled separately.**
+
+*Finding 1 — the deny response reports `senderMode: senderIdentity.Type()`, i.e. "broker", which
+describes how we denied rather than who sent. **Declined.*** Live behaviour is unchanged (`user:`
+senders still yield "user"); only the unreachable branch differs. The fix would add a
+prefix-derivation helper to a zero-traffic path inside a commit whose thesis is that this handler
+carried too much speculative machinery.
+
+The asymmetry is worth keeping, because it is the rule that resolves this whole episode:
+**declining to ADD code to an unreachable path is cheap and reversible; declining to REMOVE
+misleading code from one is what cost two investigations.** Deletions clear a bar additions do not.
+
+*Finding 2 — the DM ownership check compares `dmUserID` against an empty `req.Message.SenderID`
+for non-user senders. **Accepted, folded into DEF-58.*** def3750 reasoned it correctly end to end,
+including that it fails in the safe direction and that the safety is *accidental*. That
+distinction is the finding. "Correct because an unrelated upstream check happens to return first"
+is precisely the shape that survives a refactor and then stops holding.
+
+**DEF-58 is now two views of one invariant:** (a) negative gate asserting `brokerIdentityImpl`
+satisfies neither `UserIdentity` nor `AgentIdentity`; (b) document what happens when `SenderID`
+was not cached, so the empty-string comparison is intentional rather than incidental. Filed, not
+staffed; not reopening an approved branch for a comment.
+
+**The pattern I fed back to def3750, because it explains both halves of its work on this task.**
+Its two findings and its over-built system-plane classifier come from the *same* instinct — reading
+the code as it will be read later rather than as it runs today. That instinct produced the best
+and the worst of this change. The discriminator is one grep: *before building for a scenario, ask
+whether anything can produce it.* It did that for finding 2 and reported instead of building; it
+skipped it for the classifier and built for a population that cannot arrive. Same for my own
+escalation. **The failure was never the imagination — it was not spending the grep.**
+
+**def3750 held, not retired** (rule 506). Provisioning has been unreliable tonight and it has two
+branches sitting in compare URLs; if ptone returns changes on either, it holds the context.
