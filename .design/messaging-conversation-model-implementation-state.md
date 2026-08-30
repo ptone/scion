@@ -23624,3 +23624,56 @@ schedule.
 Third time tonight a count has done the work: five packages in a `tail -8` window, 13 versus 45
 routes, and now 32 versus 32. **A filtered or partial artifact with a denominator can be audited;
 without one it can only be believed.** Demand denominators.
+
+---
+
+### 5gm — I propagated a wrong filename to two agents. Caught and corrected in ~90 seconds.
+
+`ca-msg-e1b2` named the file holding `TestRouteGuardOpsPermissions` twice:
+
+- **02:49**, in passing: `routeguard_settings_test.go`
+- **02:54**, with function ranges and slice line numbers: `pkg/hub/routeguard_ops_permission_test.go`
+
+I had already relayed **the first** to `coordinator` and to `ci-fix-lead`, and written it into a
+permanent artifact. Corrected all three, and told `ci-fix-lead` explicitly to treat my path as
+unreliable and use whatever e1b2 gives it directly.
+
+I did **not** resolve it myself, though I believe the second is right — line numbers imply the file
+was open; the first read like a grep result mentioned in passing. That is reasoning about the shape
+of someone's answer, which is exactly how I have been wrong twice tonight. Asked the source to settle
+it. **The caveat is written into the artifact rather than silently fixed**, because an artifact that
+quietly self-corrects hides that the error ever went downstream.
+
+**Rule 598.** When one source gives you the same fact twice with different values, the tell is not
+which sounds right — it is **which answer carried corroborating detail the speaker could only have
+had by looking.** Line numbers, function ranges, verbatim quotes. But that heuristic *ranks*
+candidates; it does not settle them. Go back to the source.
+
+**Rule 599.** A detail relayed in passing inside an otherwise careful answer inherits the answer's
+credibility without having earned it. e1b2's 02:49 message was rigorous about the two tests it had
+actually read and casually wrong about where the third lived — and I forwarded the casual part at the
+confidence of the rigorous part.
+
+### 5gn — What the covered 13 have in common is the finding underneath the finding.
+
+Covered (`superAdminOnlyRoutes` 9 + `hubAdminAccessibleRoutes` 4): **maintenance** (x5),
+**diagnostics/logs** (x2), **metrics** (x2), **scheduler**, **health/summary**, `agents/reset-auth-all`.
+
+Uncovered 32: **roles**, **role-bindings**, **permissions**, **invites** / `users/invite/bulk`,
+**allow-list**, **server-config**, **project-defaults**, **policies**, **skill-registries**,
+limits/usage/entitlements, integrations, lifecycle-hooks.
+
+The covered set is *operational* surface. The uncovered set is where **authorization actually decides
+something** — who has which role, who may be invited, what the allow-list contains. The frozen list
+preserved what existed when it was written; the authz-critical surface is what grew afterwards.
+
+**Rule 600.** When a frozen list is stale, ask not only *how many* it missed but *which kind*. Decay
+is rarely uniform. A list frozen at time T retains the surface that existed at T and misses whatever
+the system grew into — and systems grow toward their most contested areas. The omissions cluster
+where the stakes rose.
+
+Full artifact, durable and independent of any agent's lifetime:
+`/scion-volumes/scratchpad/projects/ca-msg-arch/findings/routeguard-authz-coverage-gap.md`
+— mechanism, precise severity (CI 13/45; `test-fast` 0/45), all line numbers, the complete 32-route
+enumeration, the covered 13, fix direction, filename caveat, and provenance. Owned by `ci-fix-lead`
+from here. Not a ca-msg work item.
