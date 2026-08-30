@@ -22828,3 +22828,110 @@ escalations absent active breakage. DEF-64 stays filed and unfixed pending his c
 
 Told him all of the above in one short message rather than going silent, because a hold is when a
 coordinator most needs to say what is still moving.
+
+---
+
+### 5fx — inv2's exit debrief reframes DEF-64 from a defect into a class
+
+Four items, all real. The first changes how I have been modelling this whole tranche.
+
+#### 1. DEF-64 is not one missing guard. It is a pattern, and the site list may be incomplete.
+
+inv2's read: **the read-switch blocks were written by someone solving a routing problem, not an
+access-control problem** — and the evidence is the shape of the comments, not the code.
+
+- `:270` carries a careful R-1 note about ID correctness ("Use agent.ID (UUID) not agentID (raw
+  handler param, may be a slug)"). Real thought about *what* is looked up, total silence about
+  *who is asking*.
+- `:261`'s `agent.ProjectID != ""` reads as an access guard at a glance and is a **data
+  requirement** — `ResolveThreadConversationForRead` needs a project ID to build the key.
+- The same absence at both sites. `handlers_messages.go:70` guards on
+  `ConversationReadSwitch() && agentID != ""` — again a data guard, not an authz guard.
+- Blocks added incrementally, per handler, with **no cross-cutting question of which callers each
+  should apply to.**
+
+**I have been treating my enumerated site list (S1/S2/S3) as complete because I enumerated it, not
+because anyone verified it was exhaustive.** inv2 asked directly whether other read-switch sites
+exist with the same pattern. I do not know.
+
+**Rule 557.** A site list you assembled while investigating something else is a sample, not an
+enumeration. It contains the sites that were in your path, and its completeness is an assumption
+you never made explicitly enough to doubt.
+
+**Rule 558.** When a defect's cause is "the author was solving a different problem," expect the
+defect wherever that author worked. The unit of recurrence is the mental model, not the function.
+
+**QUEUED, NOT STAFFED — first item when the hold lifts.** Enumerate every `ConversationReadSwitch()`
+call site and check each for the same authz-blindness. Recorded as a **class-level gap**, not a
+follow-up task, so it is not picked up as a tidy-up and closed cheap. This is a Tranche G
+precondition alongside DEF-64 itself: fixing three sites is worthless if there is a fourth.
+
+Deliberately not escalated to ptone. He is on hold and nothing is actively breaking — the switch is
+off. It is not urgent; it is important, which is a different queue.
+
+#### 2. The channel paradox — the QA-visible symptom
+
+`channel` is applied at `:239-241`, before the read-switch block. The DM branch at `:268` fires only
+when `channel == "web" || channel == ""`. So:
+
+| Manager query | Filter | Sees |
+|---|---|---|
+| `?channel=slack` | `{AgentID, Channel: slack}` | correct, broad |
+| no channel param | `{AgentID, ConversationID: <own DM>}` | only their own DM |
+
+**A manager who applies no channel filter sees fewer messages than one who filters to a specific
+channel.** Adding a filter appears to *widen* the result. Same root cause as DEF-64, but this is how
+a human actually encounters it — going into the acceptance criteria in inv2's words.
+
+**Rule 559.** Ask an investigator how a human would first notice the defect. The mechanism tells you
+what to fix; the symptom tells you what to write in the acceptance criteria, and they are rarely
+the same sentence.
+
+#### 3. DEF-65 (new) — explicit `thread_id` silently becomes DM-scoped for project-less agents
+
+`:261` guards `threadID != "" && agent.ProjectID != ""`. An agent with no project fails the guard
+and falls through to `:268`'s `else if channel == "web" || channel == ""`, which catches it. **A
+request carrying an explicit `thread_id` is silently answered as a DM query.** Rare, but it violates
+the request's stated semantics without any signal. Filed, not staffed.
+
+#### 4. Thread-scoping for managers is ACCIDENTAL — the open product question is closed
+
+inv2's three-part argument, which I accept:
+
+1. the handler's own doc comment (`:170-175`) says managers "see all messages", with no carve-out
+2. no test exists for manager + `thread_id`
+3. the structure is identical to the DM branch — resolve, set `ConversationID`, no authz check —
+   and there is no comment acknowledging a deviation from the documented promise
+
+If it were intentional, the deviation from "see all messages" would be commented. **The fix restores
+"see all messages" for managers on both branches.** 5fw's open product question is closed.
+
+**Rule 560.** A documented promise plus an undocumented deviation is evidence of an accident, not of
+an unstated intention. Intentional exceptions to a written contract get written down; that is what
+makes them intentional.
+
+#### Epistemics, unprompted and correct
+
+inv2 stated that "no `canManage` guard" is **positive verification of absence**, not
+found-no-evidence-against — and justified it: every line from 215 to 259 read, path linear, no early
+return, no conditional, no middleware exiting for managers. That is the difference between a claim I
+can build a Tranche G decision on and one I would have to re-verify. It also spot-checked my
+"handleMessages is closed" directive instead of propagating it, and confirmed `RecipientID` at
+`:46-48` independently.
+
+**Rule 561.** Handing down settled facts saves re-derivation and transmits your errors at full
+confidence. State the standing exception explicitly: if a settled fact smells wrong, check it and
+say so.
+
+#### On brief quality
+
+inv2 reported the exact line numbers helped materially — "in a 300-line file it is the difference
+between reading the right block and an adjacent one" — with the caveat that stale numbers would have
+cost it time. Keep giving exact ranges; keep marking them as of-a-commit.
+
+`ca-msg-inv2` retired, delete executed and confirmed.
+
+#### Hold status unchanged
+
+Still blocked per ptone 02:25:45Z. Nothing above is staffed. Two agents finishing to their own
+branches; no PRs.
