@@ -23489,3 +23489,53 @@ Either answer is worth the ten minutes. Retire e1b2 only after it lands.
 **Rule 588.** "It is safe" and "it is tested" are different claims. A correctly-wrapped route with a
 real permission establishes the first and says nothing about the second. e1b2 kept them apart under
 pressure to let the first stand in for the second; that is what surfaced this.
+
+---
+
+### 5gi — CONFIRMED: 32 of 45 permission-bearing RouteHubAdmin routes are authz-untested, and CI is green about it.
+
+`TestRouteGuardOpsPermissions` (`routeguard_settings_test.go`) is a **hardcoded list** — two literal
+slices at :88-103 (`superAdminOnlyRoutes`, 9) and :106-116 (`hubAdminAccessibleRoutes`, 4). **13
+routes.** Frozen at the original PR-A4 conversion. `routeMetadataTable` holds **45** permission-bearing
+`RouteHubAdmin` routes. **32 have no authz test.**
+
+The mechanism is the unenforced handoff, exactly as predicted in 5gh:
+
+1. `TestHubAdminRoutesRejectScopedAdminUAT` walks the registry — looks exhaustive — then **skips**
+   every route with a non-empty `Permission` (:417), citing `TestRouteGuardOpsPermissions` in a
+   comment.
+2. `TestRouteGuardOpsPermissions` is hardcoded at 13 and never received them.
+3. Both tests pass. Nothing reports a gap.
+
+The 32 are not obscure. Among them: `/api/v1/admin/allow-list`, `/api/v1/admin/server-config`,
+`/api/v1/admin/roles`, `/api/v1/admin/role-bindings`, `/api/v1/admin/permissions`,
+`/api/v1/admin/invites`, `/api/v1/admin/users/invite/bulk`, `/api/v1/admin/limits`,
+`/api/v1/admin/lifecycle-hooks`, `/api/v1/admin/integrations`, `/api/v1/policies`,
+`/api/v1/skill-registries`, and ours.
+
+Compounding: `routeguard_settings_test.go` carries `//go:build !no_sqlite` (:15). So even the 13
+covered routes are **not exercised by `make test-fast`**.
+
+**NOT LIVE EXPOSURE. State this first in every relay.** All 45 routes are wrapped in `guarded()`;
+`routeGuard` enforces the permission check at runtime (route_metadata.go:966-990). Production is
+protected. This is a test-coverage gap. Mis-transmitted as a vulnerability it will cause a panic
+response to a non-emergency, and burn the credibility needed for the real fix.
+
+**Does not break ptone's hold** — the bar I set myself is *active breakage*, and there is none.
+Relayed to the coordinator for routing to `ci-fix-lead`. Queued for ptone when the hold lifts.
+
+**Rule 589.** A skip predicate that selects on a *security attribute* inverts coverage against the
+thing being secured. Here "has a Permission set" was the exclusion criterion — so the more
+specifically a route is protected, the more certainly it goes untested. Read every skip condition as
+a filter and ask what population it removes.
+
+**Rule 590.** Ratios, not instances. "My endpoint lacks a test" is a chore; "13 of 45, and the
+mechanism guarantees the 32 stay uncovered as the codebase grows" is a finding. Whenever a gap has a
+denominator, get it — the denominator is what makes it actionable and what makes it believed.
+
+**Rule 591.** Frozen lists rot silently in the direction of growth. A hardcoded enumeration of a set
+that new code adds to is not merely incomplete — its coverage *fraction falls monotonically* with
+every commit, and nothing in the system reports the decay.
+
+This came from an exit-interview question, then a follow-up to an answer that was honestly marked
+"inferred, not read." Had I accepted e1b2's original "covered indirectly," none of it surfaces.
