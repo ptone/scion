@@ -25531,3 +25531,97 @@ folder-trust `message "1"` step. No stall.
   "keep moving" directive is in force. Rule, record the ruling and its basis, and
   make the consequence observable — do not let a question you already asked
   become a stall you chose.
+
+---
+
+## 5hu — G3 reviewed: a visibility WIDENING at S3, reported to me as a skip
+
+Branch `scion/ca-msg-g3` at `9c35f096b`. Re-derived numstat: `errors.go` 14/0,
+`handlers_chat_v2.go` 19/9, `handlers_messages.go` 26/3,
+`handlers_read_switch_test.go` **264/144**.
+
+**The deletion check came back clean, and it was the first thing I ran.** 144
+removed lines in a test file is the risky-replace pattern. Diffed the test
+function lists: 23 before, 27 after, exactly one removed —
+`TestReadSwitch_S3_FlagOn_Manager_NoDM_RetainsVisibility`, replaced by
+`..._Returns409`. Read the removed body: it pinned the *fallback* behaviour
+(nil resolution → `IncFallback()` → legacy filter → visibility retained). G3
+removes the fallback, so the test was asserting a contract that no longer
+exists. Correct replacement, not a gate weakened for green. Said so to g3
+explicitly — a review that only names faults teaches people to hide the diffs
+that look like faults.
+
+`IncFallback` now appears in non-test `pkg/hub` code only inside a comment.
+Fallback removal is real.
+
+### The finding: S3 replaces the filter, sites 1 and 2 intersect it
+
+Sites 1 and 2 (`handlers_messages.go`) do `filter.ConversationID = ...` —
+additive. Channel and agent constraints survive; the conversation scope
+*narrows* the result. Safe.
+
+S3 (`handlers_chat_v2.go`) does `filter = store.MessageFilter{ConversationID:
+...}` — a **replacement**. The switch-off branch of the same `if` sets
+`Channel: "web", ThreadID: key`. So flipping the switch **silently drops the
+`Channel: "web"` constraint**, and any row sharing that `conversation_id` from
+Discord, telegram or any other surface becomes visible in the web thread view.
+
+g3's hidden-list item 5 describes this region as non-web channels being
+*skipped*. At S2 that is accurate. At S3 it is inverted: nothing is skipped,
+the constraint is discarded, and the result set gets **wider**.
+
+This is the direction that does not come back. A manager shown too few messages
+is next week's bug; a user shown messages from a surface they were never on is a
+disclosure. Ruled: carry `Channel: "web"` into the switch-on filter at S3 by
+default. g3 may argue the widening is correct, but only with evidence and a test
+enumerating which rows change visibility. Right now it is neither deliberate nor
+covered.
+
+### G3-e: the un-switched paths must be countable
+
+Items 2, 3, 4 and the S2 half of 5 are one shape: switch ON, request reaches a
+read site, conversation scoping silently not applied — slug in `?agent=`, agent
+not found, `wcs == nil`, non-web channel at S2. Not fixing those (R-9 discipline
+is right, and they are out of scope). Requiring they be **counted**, with a
+reason label, on a **new** counter — explicitly not `IncFallback`, which R-9
+reserves for migration gaps and which would be corrupted by mixing in bad
+references.
+
+Rationale: without it, the VM run cannot separate "the switch worked" from "the
+switch never applied to this traffic." Those two produce identical clean
+results, and we would read the second as the first and flip.
+
+### My OQ-2 ruling half-failed, and the half that failed is the half I argued
+
+g3 verified the client: a 409 on the chat history path hits
+`fetchHistoryV2`'s generic error branch — logged, no banner, **empty panel**.
+Confirmed independently that no `.ts` handles `conversation_not_resolved`.
+
+I chose a typed error over an empty list because "an empty list is
+indistinguishable from *you have no messages*." At the transport and log layer
+that holds — greppable, distinct from 500, no proxy retry. At the user layer it
+does not: the user sees the same empty panel either way. The operator benefit is
+real; the user-facing benefit I led the argument with is currently zero. The
+ruling still stands, because the operator half is what gates the flip, but the
+justification was oversold and the UI work is now filed rather than assumed.
+
+DEF-64 manager narrowing accepted as pinned-not-fixed: write path, and it errs
+toward showing too little.
+
+**Rules generated:**
+
+- **687** — Adding a filter constrains; replacing a filter can widen. When a
+  feature flag swaps one filter for another rather than adding to it, diff the
+  two *shapes*, not just the new one. The dropped predicate is invisible in the
+  added line.
+- **688** — An agent's hidden-list can be directionally inverted and still point
+  at the right code. Treat each item as a coordinate, not a conclusion: go read
+  the site. The most valuable finding in this review came from an item whose
+  label was the opposite of the defect.
+- **689** — Say so when a large deletion turns out to be correct. A reviewer who
+  only ever surfaces faults trains authors to avoid diffs that *look* like
+  faults, which is how a necessary test replacement becomes a quietly abandoned
+  one.
+- **690** — When your own ruling's stated rationale turns out to hold at one
+  layer and not the layer you argued, record that. A ruling that survives on a
+  different justification than the one you gave is a ruling nobody can audit.
