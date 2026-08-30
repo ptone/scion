@@ -24439,3 +24439,61 @@ true.** The check I built to protect the agent from a stale fact caught my own f
 
 **The trust-dialog half of §5he stands unchanged and is unaffected** — that was directly observed
 via `scion look`, not inferred. Rules 641 and 642 hold.
+
+### 5hf — Phase 4 port structurally verified at `519bc5a7`; gates outstanding (2026-08-30 18:01Z)
+
+p4a reported 5 files, 1123/0, `go build ./...` exit 0. **Re-derived rather than accepted** — matches
+exactly:
+
+```
+268  0  cmd/server_backfill.go
+423  0  cmd/server_backfill_test.go
+286  0  cmd/server_backfill_volume_test.go
+ 23  0  cmd/server_foreground.go
+123  0  cmd/server_foreground_backfill_test.go
+```
+
+- **Base is current.** `merge-base(upstream/main, p4a) == f3a54512 == upstream/main` tip. No stale
+  base — the failure that caught PR A last tranche.
+- **Hunk discipline held.** `cmd/server_foreground.go` is **+23/−0**, exactly the two intended hunks:
+  `maybeWarnUnbackfilledMessages` and its one call site in `initStore`. This was the single
+  file where a wholesale v2 copy would have reverted months of main. It didn't.
+- **Dry-run is structural, not documentary.** `--execute` defaults `false`; `DryRun: !backfillExecute`.
+- **No auto-run at startup.** `grep runServerBackfill|BackfillService` against `server_foreground.go`
+  on the branch returns nothing. Detection only, honouring DEF-12 §5.
+
+#### A defect I did not file, because I checked first
+
+I was ready to raise that `maybeWarnUnbackfilledMessages` runs a `COUNT` on every boot under a 5s
+timeout, so on the largest instances the count would time out and log a generic failure — **the
+detection failing precisely on the population that most needs it**, the same shape as DEF-80. It
+would have been a good-sounding defect.
+
+`pkg/ent/schema/message.go:111` already indexes `conversation_id`, so the `IS NULL` count is
+index-assisted. **Not a defect.** Told p4a it was considered and cleared, rather than staying silent
+— §5gg's rule 625: an unraised negative result is indistinguishable from an unnoticed one.
+
+**Rule 646: a defect whose shape matches one you just found is the one to verify hardest.** I had
+DEF-80 fresh — a check that fails open exactly where it matters most — and pattern-matched the next
+thing I saw onto it. Recent findings prime the eye. The resemblance is what made it feel confirmed,
+and the resemblance is worth nothing on its own.
+
+#### Cosmetic, not filed
+
+The call site sits *before* `s.Ping(ctx)` in `initStore`, so an unreachable DB logs
+"Failed to check for unbackfilled messages" ahead of the real ping error. Matches v2. Noise on an
+already-failing path; not worth a round trip.
+
+#### My own error this round
+
+First numstat attempt returned *"fatal: no merge base"* — alarming, and entirely self-inflicted: I
+ran `git fetch origin <branch>` and `git fetch upstream` in one command, and the second clobbered
+`FETCH_HEAD` before I read it. **Rule 647: `FETCH_HEAD` is a single global slot — never read it
+after a second fetch.** Fetch into a named remote-tracking ref. Nearly reported a fabricated
+catastrophe about a developer's branch on the strength of my own shell error.
+
+#### Outstanding before this is a merge candidate
+
+`go test ./cmd/...`, `go test ./pkg/messaging/...`, `golangci-lint run ./cmd/...`, the three guards
+from main — and **AC-12-7**, the induced failure: break the detection count and show AC-12-1's
+positive case going red. Structure verified is not behaviour verified.
