@@ -24402,3 +24402,40 @@ and *report which*, because it can see the workspace and I cannot.
 without any signal, and a brief is exactly where a stale environmental fact hides longest — it is
 written once and read as authoritative thereafter. Environmental preconditions in a brief should
 instruct the agent to **check and report**, not to assume the last thing I saw.
+
+### 5he-AMENDMENT — the clone half of 5he is WRONG. The brief was right; my correction was the error. (2026-08-30 17:57Z)
+
+p4a checked and reported: **`/workspace` is NOT a git clone — it is a bare directory.** §0 of the
+brief was correct as written. It cloned into `/workspace/scion`, added upstream, branched from
+`upstream/main`, fetched v2, and is porting now.
+
+So the final subsection of §5he is retracted. `§5gu`'s "agent workspaces arrive with no clone" has
+**not** expired — it is still true, and rule 643 was drawn from an event that did not happen.
+
+**What I actually did:** read `scion start`'s log line *"Using hub, cloning repo
+https://github.com/ptone/scion.git"* and concluded a clone had landed in `/workspace`. That line
+describes the hub's provisioning behaviour in general; it is not evidence about the contents of that
+container's `/workspace`. **I inferred a state change from a log line and shipped a correction
+against a working instruction.**
+
+**Rule 644: a log line reports an action attempted, not a state achieved.** "Cloning repo X" is the
+narrator's intent. Where the result went, whether it succeeded, and whether it is the thing you care
+about are all separate questions, and none of them are answered by the sentence that announced it.
+Verify the state, not the announcement — this is rule 25 ("read the output, not the exit code") in
+the one costume I did not recognise.
+
+**Rule 645: an unnecessary correction costs more than the error it imagines.** A wrong fix aimed at
+working instructions is strictly worse than silence: it burns the agent's attention, and it teaches
+it to distrust a brief that was accurate. I got away with it only because the correction said
+*"check first"* rather than *"do this instead"* — the conditional form is what made it survivable.
+**When correcting in flight on inferred evidence, make the instruction conditional and ask for the
+observation back.** That is not politeness; it is the difference between a cheap false alarm and an
+agent following me into a mistake.
+
+Rule 643 stands as a principle — environmental preconditions in briefs *should* instruct check-and-
+report — but it is now supported by this amendment rather than by 5he's false premise. **Which is
+the whole reason I asked p4a to report which case it found instead of just telling it what was
+true.** The check I built to protect the agent from a stale fact caught my own fresh error instead.
+
+**The trust-dialog half of §5he stands unchanged and is unaffected** — that was directly observed
+via `scion look`, not inferred. Rules 641 and 642 hold.
