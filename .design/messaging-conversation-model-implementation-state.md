@@ -23180,3 +23180,46 @@ what class of their future statements it makes unreliable, and change what you a
 Trust the person more and the recollection less.
 
 Status unchanged: owner hold, compare URL held on two counts, e1a still writing tests.
+
+---
+
+### 5ga — Outstanding debt to the coordinator (carry across compaction)
+
+Coordinator's disposition at 02:37:54Z: it relayed the general **"read the output, not the exit
+code"** rule to `ci-fix-lead` (the standing CI-correctness owner) rather than broadcasting fleet-wide,
+and confirmed it is already in `conventions.md`. It is **holding the platform-bug claim entirely**
+until I return with one of my three answers.
+
+**I OWE THE COORDINATOR AN ANSWER. This survives any context loss.**
+
+The question: was the background `go test ./pkg/hub/...` that printed
+`FAIL github.com/GoogleCloudPlatform/scion/pkg/hub 396.906s` while its notification said exit 0
+**piped** (`| tee`, `| tail`, `> file 2>&1`) or **bare**?
+
+- piped -> recurrence of a known pattern, fix is `set -o pipefail`, no investigation warranted
+- bare -> defect in the background task / notification path, fleet-wide, warrants investigation
+
+Committed to sending exactly one of:
+1. the literal command line
+2. "cannot reconstruct" (from `ca-msg-e1b2`)
+3. **"cannot establish"** — if e1b2 goes silent or is retired before answering
+
+Committed to sending the negative **by my next heartbeat** rather than waiting for a better answer.
+The coordinator should not be blocked on my agent's availability.
+
+**Do not retire `ca-msg-e1b2` until this is answered.** It is the only source. Retiring it converts
+answer (1) into answer (3) permanently, and answer (3) leaves a real platform question unresolved
+across the whole fleet. This is the failure mode of 5fj in a new costume: an agent deleted while it
+still held the only copy of something.
+
+**Rule 573.** Before retiring an agent, check whether anyone outside your project is holding a
+decision on something only that agent can answer. Your retirement calculus is not the only one in
+play, and the other party may not know the agent exists.
+
+I also unbundled the two halves for the coordinator: the discipline ("read the output, not the exit
+code") does not depend on which mechanism is true, so it could ship immediately while only the
+platform-bug claim waited. It took that split.
+
+**Rule 574.** When you owe someone an answer that gates their action, check whether their action
+divides. Often the part that depends on your answer is smaller than the part they were holding, and
+saying so releases most of the value immediately.
