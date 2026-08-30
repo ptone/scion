@@ -23223,3 +23223,89 @@ platform-bug claim waited. It took that split.
 **Rule 574.** When you owe someone an answer that gates their action, check whether their action
 divides. Often the part that depends on your answer is smaller than the part they were holding, and
 saying so releases most of the value immediately.
+
+---
+
+### 5gb — Coordinator debt DISCHARGED. The answer was (1): PIPED.
+
+`ca-msg-e1b2` supplied the literal command line at 02:42:05Z:
+
+    go test ./pkg/hub/... 2>&1 | tail -5
+
+**There is no platform bug.** The notification reported `tail`'s exit status, which is 0 regardless
+of `go test`'s. Missing `set -o pipefail`, nothing more. Relayed to the coordinator immediately;
+it can stand the claim down. Sent ahead of the heartbeat deadline I had committed to.
+
+The developer volunteered that it was **reading the invocation from its own tool-call history in
+this session, not reconstructing it**. I had asked for that distinction explicitly (rule 572 — its
+earlier misreport made its *recollections* unreliable, not the agent itself). It drew the line
+unprompted. That is what made the answer usable rather than merely plausible.
+
+**Two failures were wearing one costume.** The run also failed for a *real* reason: it predated the
+`route_classification_test.go` entry, so `TestRegisteredRoutesHavePermissionClassification`
+correctly failed. A genuine red, plus a pipeline that hid it. Only the second was ever a candidate
+platform bug, and I had been treating the pair as one phenomenon.
+
+**Rule 575.** When an anomaly has a hidden cause and a hidden effect, expect two defects, not one.
+"The failure was concealed" and "there was a failure to conceal" are separate facts with separate
+fixes, and finding the concealment mechanism does not discharge the failure.
+
+**Rule 576.** The dangerous pipe is not the pipe, it is the *narrowing* pipe. `| tail`, `| head`,
+`| grep` get reached for exactly when output is long and noisy — which is exactly when nobody reads
+the full log. The habit that swallows the exit status and the habit that stops you noticing the
+swallowed failure are the same habit. Redirect to a file and read the file.
+
+**My rule-562 hypothesis is formally RETRACTED** (already flagged in 5fz, now closed with numbers).
+The clean re-run took 344.216s against the failing run's 396.906s — ordinary variance, no hang. My
+"45x slowdown" figure had compared a *tagged* run to an *untagged* one: two different test sets, not
+two runs of the same thing. I read a build-tag difference as a performance signal and then built a
+hang theory on it. Retracted to the coordinator explicitly, in the same hearing where I said it.
+
+**Rule 577.** Before treating a duration delta as a signal, confirm both numbers measure the same
+test set. Build tags, caching and `-run` filters all change the denominator silently.
+
+### 5gc — PR (B) gate VERIFIED. PR (A) gate still outstanding.
+
+`ca-msg-e1b2` re-ran at `15db406`, **untagged, foreground, no pipe**, and reported verbatim:
+
+```
+ok  	github.com/GoogleCloudPlatform/scion/pkg/hub	344.216s
+ok  	github.com/GoogleCloudPlatform/scion/pkg/hub/auth	(cached)
+ok  	github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp	(cached)
+ok  	github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck	(cached)
+?   	github.com/GoogleCloudPlatform/scion/pkg/hub/permissions	[no test files]
+```
+
+The artifact reverted to UNVERIFIED under rule 565 is now **re-verified**. PR (B) is complete on the
+engineering side. It remains held on ptone's hold alone — the gate count that outlasted the hold is
+now discharged.
+
+**PR (A) (`ca-msg-e1a` @ `d160ead19`) is NOT yet gate-verified.** I have asked e1a the same two
+questions. This matters *more* for (A) than it did for (B): e1a's file carries `//go:build
+!no_sqlite`, so `make test-fast` runs **none** of its 23 tests. The untagged run is not one gate
+among several for that PR — it is the **only** gate that exercises the work at all.
+
+**Rule 578.** When a build tag excludes a change from the fast gate, the slow gate is not
+corroboration — it is the sole evidence. Identify which gate is load-bearing for *this* change
+before deciding how hard to interrogate its report.
+
+Cross-check available: e1a reported 342.9s and e1b2 measured 344.216s on the same package. Close
+agreement, and the two branches differ by one test file. Consistent, but note this is a plausibility
+check on the *duration*, not on the *verdict* — a FAIL takes about as long as an ok. It cannot
+substitute for the literal final line.
+
+**Rule 579.** A consistency check on a measurement's magnitude says nothing about its outcome when
+both outcomes cost the same. Do not let "the number looks right" stand in for reading the verdict.
+
+### 5gd — New finding filed: DEF-67 (third metric blind spot)
+
+From `ca-msg-e1a` test #8: when `webChatStore` is nil, S1 (`handlers_chat_v2.go`) returns an empty
+result at ~1752 **before** reaching the read-switch block, and **`IncFallback` is never called**.
+
+That is the third structurally-blind path found tonight, after DEF-66 and DEF-64. All three share a
+shape: the readiness counter only observes requests that *reach* the switch. Anything that
+short-circuits upstream is invisible to it, and reads as silence rather than as a gap.
+
+This reinforces that S1/S2/S3 is a **sample I assembled while investigating something else, never
+verified exhaustive** (rule 557). The queued DEF-64-class enumeration must cover every
+`ConversationReadSwitch()` call site *and* every early return upstream of one.
