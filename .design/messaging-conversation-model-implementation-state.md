@@ -21219,3 +21219,48 @@ highest-value line in this change, which is exactly backwards from how I scoped 
 **Still holding def3750** on the verbatim handler diff — specifically that
 `req.Message.SenderID = senderUser.ID` survives on the `user:` path, since the DM ownership check
 below reads that cache and a dropped assignment breaks DMs silently.
+
+### 5ey. Switched from asking def3750 to transcribe evidence, to reading it myself (2026-08-30)
+
+def3750 answered my request for the verbatim handler diff with a *description* of the diff, with
+line numbers — third time in this task that a summary stood in for evidence. Its own line
+references contradicted each other inside one message (`req.Message.SenderID = senderUser.ID` at
+154-156, `senderIdentity = NewAuthenticatedUser(...)` at 156), which is precisely the failure mode
+that made me want the bytes.
+
+**Changed method rather than asking a fourth time.** Told it to commit and push to
+`scion/ca-msg-def57` — separate branch, no PR, rebased on `1a2c1b07d`, gofmt'd — and report branch
+and SHA. I read the diff with git.
+
+**This was my process error before it was def3750's.** Asking an agent to transcribe evidence into
+a chat message *creates* a fidelity gap that did not need to exist, then makes the reviewer's
+confidence depend on the transcription. The artifact was always available over git. Rule 486 says
+compute the mechanical thing yourself before delegating it; the same logic applies to *reading* —
+**never accept a description of an artifact you can fetch.** Withholding the push was what forced
+the transcription, so my own gate manufactured the problem it was meant to prevent. Pushing to a
+private branch is not a landing risk: ptone opens every PR, so there is no reason to trade
+verifiability for a hold I do not need.
+
+**Second issue, flagged not ruled.** I said "leave the 4 re-pointed tests as you have them" and
+def3750 reworked them anyway onto project membership, growing the test diff 189 → 221 in the round
+where I asked for less. Substantively I think it moved them off the `Role=admin` super-admin
+bypass onto real membership — better work, and what I would have demanded under the old framing.
+But it was unrequested work during a cutback. Asked it to state plainly what changed before I read
+the diff. Likely to keep it; being right is not the problem, expanding scope in a shrink round is.
+
+### 5ez. DEF-52 — declined to escalate (2026-08-30)
+
+ci-fix-lead: #1408 (race-detection nightly) merged 22:57Z; cannot trigger `workflow_dispatch`
+(403 on agent token); asked whether ptone could hand-trigger to get the baseline sooner than the
+06:00 UTC scheduled run.
+
+**Declined.** The job ptone asked for exists and is merged — that is the deliverable. The
+inventory is a reporting artifact, not a gate, and nothing in this workstream blocks on it. Saving
+five hours on a non-blocking number does not justify an interrupt, and filtering exactly this is
+what "escalations only, no FYI" means. Told ci-fix-lead to wait for 06:00 and to fold the count
+and wall-clock cost into the next reporting boundary so ptone gets one message rather than two.
+
+Gave it a standing exception rather than a flat no: **a failed run, or a wall-clock cost high
+enough to make nightly the wrong cadence, is worth telling me promptly.** A green run with a
+number in it can wait. Worth keeping the distinction explicit when refusing an escalation — a bare
+"don't escalate" teaches an agent to sit on the bad news too.
