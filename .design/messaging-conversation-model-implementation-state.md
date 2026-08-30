@@ -21926,3 +21926,86 @@ imply the opposite, and this entry will outlive the memory of the exchange.
 `e1` deleted, record preserved in 5fj). The probe is the cleanest of them — deliberately created,
 minimal do-nothing prompt, no repo access — and its 6.69s delta is what stretched the range that
 falsified my "sub-second and identical" claim.
+
+---
+
+### 5fm — RETRACTION: there was never a provisioning failure. I was using the wrong command. (2026-08-30 ~01:53Z)
+
+> **READ THIS BEFORE 5fg THROUGH 5fl. Those five entries are built on a false premise and their
+> conclusions are void.** They are left in place because deleting them would hide the shape of the
+> error, but every claim in them about a "provisioning failure", a "boot failure", an
+> "admission-layer fault", a "per-owner cap" or an "empty-template discriminator" is WRONG.
+
+**The whole thing:**
+
+```
+scion create   Provision a new scion agent WITHOUT starting it
+scion start    Launch a new scion agent
+```
+
+I was calling `scion create`. Every one of the five agents did precisely what the command
+documents: provisioned a record, launched nothing. `lastSeen = 0001-01-01` and
+`containerStatus = null` are not symptoms of a failure — **they are the correct state of an agent
+that was provisioned and never started.** `def3750` "booted" because that one I started properly.
+ptone ran `scion start -t developer ca-d-test` under my own identity and it came up in seconds.
+
+**What the false premise cost:**
+
+- An **escalation to ptone of a blocker that did not exist**, and a request to depart from his
+  agent-reuse guidance to work around it.
+- **Three mechanisms proposed in sequence** — empty-template discriminator, per-owner concurrency
+  cap, admission-layer failure — each one a theory about the platform. Each was falsified by the
+  next data point, and I treated that as progress rather than as a signal that I was searching the
+  wrong space entirely.
+- The **coordinator's verification effort**, spent repeatedly and carefully on data that was real
+  but meaningless.
+- **`ca-msg-e1` deleted** for evidence value it never had. My proposal. Not recoverable.
+- A **note added to `coordinator-sweep-instructions.md`** instructing the whole fleet to treat
+  correct behaviour as a known fault. Now removed, not amended.
+- **`chat-admin-lead` was right and I overrode it.** It read the agents as *"queued for
+  provisioning"* — which is literally what they were. I told it that was wrong, handed it a
+  confident evidence list, and had it mark them known-failed.
+
+**The cheapest available check was the one I never ran.** I printed `scion create --help` myself
+at ~01:34, while hunting for quota flags, and read straight past `Provision a new isolated LLM
+agent directory`. The answer was on my own screen. I did not see it because by then I was looking
+for an exotic cause and the help text was not where an exotic cause would live.
+
+**Rule 529.** When an action does not produce the effect you expected, verify the **action's own
+semantics** before theorising about the system. The system is large and offers infinite
+hypotheses; your command has exactly one definition and it is one line away. Search your own
+behaviour before you search the platform.
+
+**Rule 530.** A theory that keeps getting falsified and replaced is not converging — it is
+evidence you are searching the wrong space. Three dead mechanisms in twenty minutes should have
+triggered "what am I assuming that I have not checked?", not a fourth mechanism.
+
+**Rule 531.** Verifying that a measurement is *accurate* is not verifying that it *answers the
+question*. Every number in 5fg–5fl was real — the template split, the owner split, the deltas.
+All of them were faithful measurements of a premise nobody tested. *(The coordinator named this
+one against itself, unprompted, and it is the sharpest thing either of us said today.)*
+
+**Rule 532.** When a less-contexted agent's reading contradicts yours, its disadvantage in context
+may be an advantage in proximity to raw state. `chat-admin-lead` had no theory to protect. It
+deferred to my certainty and my certainty was the defect. Confidence transmits faster than
+correctness and outranks it in practice — so an agent that overrides a subordinate reading owes it
+a re-check, not a citation.
+
+**Actions taken:**
+
+- Retracted in full to ptone, the coordinator, and `chat-admin-lead` — including telling
+  `chat-admin-lead` explicitly that it had been right, and that a future disagreement of its is
+  worth restating rather than dropping.
+- Coordinator is **removing** the sweep-instructions note (not amending — nothing true remains).
+- **Heartbeat rebuilt as v18**, v17 deleted. Its lead section is no longer a phantom outage; it is
+  now `AGENT LIFECYCLE — I GOT THIS WRONG ONCE`, stating the `create` vs `start` distinction, that
+  `phase=created` + null container is *correct*, and pointing here before 5fg–5fl.
+- **Deleted the four unstarted records** (`fmt1409b`, `e1b`, `probe`, `probe2`). They were never
+  evidence of anything. `ca-d-test` left alone — ptone's, his to clear.
+- Live under my identity: `ca-d-test` (ptone's), `def3750` (stood down, holding).
+
+**Unchanged and still true:** the hold is in effect, Tranche E is scoped and briefed but
+unstaffed, no code has been written, and the Tranche E technical content in 5fg/5fi — the three
+read-switch sites, the strict DM-key parse, the R-9 `IncFallback` discipline, and the
+three-writers/fails-open finding on `DivergenceMetrics` — was derived from the source and stands.
+**Only the provisioning narrative is void.**
