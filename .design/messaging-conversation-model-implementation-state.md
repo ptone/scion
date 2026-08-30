@@ -24240,3 +24240,40 @@ directly and told it is wanted.
 **Brief fixes for next time, both from lint1:** say "lint the PACKAGE, never a single file" — a
 single-file `golangci-lint` run emits typecheck noise that reads like real findings; and state
 explicitly where to `cd` after cloning, or an agent may run git against the wrong repository.
+
+### 5hc — "Is there a Tranche F?" Yes, and it landed nine days ago under another name (2026-08-30 17:37Z)
+
+ptone asked whether a Tranche F exists. It does — **Phase 6, the CLI slice** — and it is **already
+on `upstream/main`**, merged as **#1381 @ `981d27367`** on 2026-08-29, *ahead of* Tranche E.
+
+Verified rather than recalled. All 8 F code files from TRANCHE-MANIFEST Table 1 are present on
+`upstream/main`, all added by that single commit:
+`cmd/broadcast.go`, `cmd/broadcast_test.go`, `cmd/keys.go`, `cmd/keys_test.go`,
+`cmd/message_deprecation_test.go`, `cmd/doc_syntax_test.go`, `cmd/message_help_test.go`,
+`cmd/message_convref_test.go`. Table 2's `cmd/message.go` hunks are there too (+228/-13), plus an
+unmanifested `pkg/hubclient/messages.go` (+26, the `ResolveConversation` client method).
+
+**The finding is the label, not the content.** #1381's title reads *"(tranche C6)"*. F's content
+shipped inside a C-series PR, and **no entry in this document ever said "F is done"** — I had to
+reconstruct it from `--diff-filter=A` against the manifest. This is precisely the hazard §5dw.4
+raised on 2026-08-28: *"tranche F content sitting inside tranche C's count with neither tranche
+naming it."* The audit called the risk and the risk then materialised — the content landed safely,
+but the **tracking** did not follow it across the label boundary.
+
+**Rule 639: a tranche is closed by its manifest, not by its label.** When work ships under a
+different letter than it was planned under, the plan's row stays open forever and the only thing
+that closes it is someone re-deriving the file list. Landed-but-unmarked is indistinguishable from
+never-started at a glance, and the cheap failure is re-dispatching work that already exists.
+
+**DEF-25 confirmed resolved, and resolved the right way.** Zero `grove-` literals remain in
+`cmd/message_deprecation_test.go` on main, and `hack/check-project-compat-literals.sh` still
+allowlists only `^cmd/message_test.go$`. The fixtures were renamed; the allowlist was **not**
+extended — as directed in §5aw. An intentless allowlist entry would have made the next real one
+harder to see, and none was added.
+
+**Landing sequence now, corrected:** Phases 1–3 (docs, C, D) landed; Phase 4 (DEF-12 backfill) is
+the `server_backfill*` cluster, still the declared silent-drop risk and **still unlanded**;
+Phase 5 (E) landed 2026-08-30 as #1424/#1425; **Phase 6 (F) landed 2026-08-29 as #1381**, out of
+order. Phase 7 (G, the read-switch flip) is unscoped and unstaffed. H stays blocked on G-1.
+
+So the only pre-G item outstanding is **Phase 4**, not F.
