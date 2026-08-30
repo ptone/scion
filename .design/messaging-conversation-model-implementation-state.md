@@ -24637,3 +24637,77 @@ The cursor is base64 of `(created, id)` and the query tiebreaks with `IDLT` on e
 (`message_store.go:405-411`). That is exactly the capability `CreatedGT` lacked. p4a's diagnosis was
 right about the mechanism, not merely the failure — told them so, since a correct mechanism-level
 diagnosis is what made a 3-hunk ruling safe to give quickly.
+
+### 5hi — Phase 4 final report verified. Rule 258 was WRONG, and the truth is worse. (2026-08-30 18:16Z)
+
+p4a delivered. Re-derived rather than accepted — numstat matches exactly, base == `upstream/main`
+tip `f3a54512`, `head=c041f2c4`:
+
+```
+268   0  cmd/server_backfill.go
+452   0  cmd/server_backfill_test.go
+286   0  cmd/server_backfill_volume_test.go
+ 23   0  cmd/server_foreground.go
+123   0  cmd/server_foreground_backfill_test.go
+ 18  25  pkg/messaging/backfill.go        DELETIONS-JUSTIFIED
+163  43  pkg/messaging/backfill_test.go   DELETIONS-JUSTIFIED
+```
+
+Both §5hh rulings honoured: `EnsureParticipant` mock **retained** (`backfill_test.go:306`), and
+`TestBackfill_UnrecognizedCheckpointServiceLayer` shows the assertion **re-aimed, not deleted**.
+All gates exit 0; AC-12-7 induced failure shown; DEF-81 proven in both directions.
+
+#### Rule 258 is WRONG. Correcting it.
+
+I have operated all project long on: *"CI runs `go test -tags no_sqlite ./...` and anything behind
+that tag is never executed."* I checked `.github/workflows/ci.yml` today and that is false.
+
+`ci.yml:148` runs `go test -count=1 -timeout 30m ./...` **with** sqlite. But that job is
+`test-full-suite`, titled *"Full Test Suite (reporting only)"* and marked
+**`continue-on-error: true`**. It executes and **cannot fail the build**; output goes to an uploaded
+artifact.
+
+**Rule 258, restated: sqlite-tagged tests DO run in CI, and CANNOT block a merge.** The operative
+property was never execution — it was authority. And the true state is *worse* than my wrong
+version: a test that never runs is visibly absent, while one that runs advisory-only **looks
+covered**. Every mental model I built on 258 needs re-reading against "non-blocking", not "absent".
+
+**Rule 651: for any gate, establish whether it can fail the build — not merely whether it runs.**
+`continue-on-error: true` is one line, invisible in the run list, and converts a gate into a report.
+Green CI with an advisory job silently red is indistinguishable at a glance from green CI.
+
+#### The exclusion, now correctly characterised
+
+`cmd/server_backfill_test.go` is `//go:build !no_sqlite` and holds **all 8 CLI-level tests** —
+AC-12-2, 12-3, 12-4, 12-5, the pre-upgrade rejection, and the flag wiring. All advisory-lane.
+
+Blocking-lane coverage is `cmd/server_foreground_backfill_test.go` (AC-12-1, AC-12-7) and
+`pkg/messaging/backfill_test.go` — which **does** carry `TestBackfill_SameTimestampMessages`, so
+**DEF-81's regression guard is in the blocking lane.** That was the one I most needed to be safe.
+
+**p4a flagged the volume test and missed this.** The volume test is opt-in (`volume_test`) and
+obviously excluded; this one is excluded *by default*. **Rule 652: the exclusion you notice is the
+one that announced itself.** Opt-in exclusions are self-documenting; default exclusions are the
+expensive ones, and they are invisible precisely because nobody chose them.
+
+#### The one thing I required, and the line I did not cross
+
+Most dangerous regression here is `--execute` defaulting true — an operator previewing would mutate.
+Its only guard sits in the advisory lane. Required: a **sqlite-free, untagged** companion asserting
+the cobra flag default (`Lookup("execute").DefValue == "false"`) and `DryRun == !backfillExecute`.
+
+Explicitly told p4a **not** to touch the existing tags. `TestBackfillDefaultIsDryRun_FlagWiring`
+genuinely needs sqlite — it opens a store and verifies rows unstamped. The standing constraint is
+that stripping `!no_sqlite` to make a test run is forbidden; **adding a test that never needed
+sqlite is a different act.** Relocating a test that needs the tag would be evasion; writing one that
+does not is coverage.
+
+#### Filed, not fixed
+
+- **DEF-82** — no multi-project backfill coverage. The CLI iterates all projects; every test uses
+  one. A bug in `mergeBackfillResult` or project pagination would silently skip projects — the
+  DEF-81 family. p4a found this themselves. Filing rather than growing a branch that has already
+  expanded twice.
+- **CI gap inventory** gets the tag finding plus p4a's points 1, 2, 4, 6 (no populated-DB
+  integration; mock cursor leniency; no end-to-end startup-warning wiring test; 2 pre-existing
+  `pkg/messaging` lint issues — `isValidDMKind`, `validEventMessage` unused, both on main already).
