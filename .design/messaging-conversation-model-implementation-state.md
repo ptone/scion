@@ -21827,3 +21827,58 @@ sending its own correction, but the false statement was mine, in my message, in 
 correction that arrives via someone else reads as being caught rather than owning it — and he
 now has two agents' claims about the same object, so the one who got it wrong should be the one
 to say which is current.
+
+---
+
+### 5fk — Probe fails too; timing claim corrected; heartbeat v17 (2026-08-30 ~01:45Z)
+
+**ptone tested provisioning from my environment and it worked for him**, then asked me to try
+again. Created `ca-msg-probe` (`-t developer`, do-nothing prompt) at 01:43:15Z. **Still dead** at
+01:44:51Z — 96s, `phase=created`, `lastSeen` zero, no container. Owner 51faee80 is now **1-for-5**.
+
+Concurrent other-owner boots, all `running`:
+
+```
+sa-inv                   01:39:53      admin-ui-exposure-owner  01:40:46
+exposure-inv             01:42:13      scheduler-authz-owner    01:38:09
+```
+
+`exposure-inv` was created **one minute before** my probe and came up. The fleet is healthy; the
+failure is scoped to my creating identity and is live right now, not a past window.
+
+**Corrected an over-precise claim of my own.** I told ptone the failure fires "within one second
+of creation, identical across all three". The coordinator checked and I confirmed:
+
+| agent | updated − created |
+|---|---|
+| fmt1409b | 0.86s |
+| e1b | 4.27s |
+| probe | 6.69s |
+
+**Single-digit seconds, not sub-second, and not identical.** I had generalised from the one
+sample I happened to compute (`e1`, 0.855s) to all of them, then reported it as a shared
+signature. The surviving claim is narrower and still useful: each records one state change a few
+seconds after creation and then freezes permanently — admission, not a hung boot.
+
+Also caught a caveat on my own metric before it misled anyone: for *running* agents `updated`
+tracks heartbeat, so `def3750` shows 9937s. The delta is a boot signal **only for agents that
+never boot**. Handing someone a metric without its domain of validity is how the next reader
+computes it for a healthy agent and concludes something absurd.
+
+**Rule 526.** Generalising a measurement from one sample to a set you did not measure is not a
+finding, it is an assumption wearing a number. Precision is a claim like any other — "0.855s
+across all three" asserts three measurements and I had one.
+
+**Rule 527.** Ship a derived metric with its domain of validity attached. A number that means
+one thing for failed objects and something unrelated for healthy ones will be recomputed by
+someone who does not know that.
+
+**Heartbeat refreshed to v17**, v16 deleted (`02c48e92`). v16 was four entries stale (claimed 5fe,
+actual 5fj) and listed Tranche E as awaiting a decision ptone had already made. Rule 509 again —
+this is the second consecutive sweep where the briefing drifted. v17 leads with the **active
+hold** as the dominant fact, records the provisioning failure with its evidence and its *unknown*
+mechanism, carries the three held agents by name, and adds the traps earned this segment (526,
+527, plus re-query-before-reporting-a-delegated-negative and establish-what-already-fired).
+
+Held and untouched: `fmt1409b`, `e1b`, `probe`. Offered ptone the choice of retiring the probe or
+keeping it as a third sample rather than deciding for him — it is his debugging session now.
