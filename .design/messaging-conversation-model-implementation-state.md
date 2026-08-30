@@ -24950,7 +24950,7 @@ rather than trusting memory, even after recording it."*
 
 A protocol that a well-intentioned agent — including the agent that *owns* it — gets wrong
 repeatedly is not a memory problem, and writing it down a fifth time does not fix it. So it is now
-executable: **`/scion-volumes/scratchpad/projects/ca-msg-arch/compare-link.py`**. It builds the
+executable: **`/scion-volumes/scratchpad/projects/ca-msg-arch/compare-link.py`** [**PATH DEAD — superseded by 5ho addendum 2; sole copy is `/scion-volumes/scratchpad/tools/compare-link.py`**]. It builds the
 message and refuses to emit anything that violates rules 1–3, plus the 2000-rune server cap.
 
 Validated in both directions before being trusted: fed the exact message I sent for Phase 4, it
@@ -25020,7 +25020,7 @@ work is fine, which is precisely the belief the procedure exists to test.
 carries the full five-rule protocol so the tool is its own documentation — a convention doc that
 points at a file which does not restate the convention decays the moment the pointer rots.
 
-Left the project-dir copy in place at `.design/messaging-compare-link.py`; the canonical one is
+~~Left the project-dir copy in place at `.design/messaging-compare-link.py`~~ [**REVERSED by 5ho addendum 2 — both mirrors deleted**]; the canonical one is
 now the `tools/` copy and the coordinator owns the reference to it.
 
 ### 5ho addendum — accepted as canonical
