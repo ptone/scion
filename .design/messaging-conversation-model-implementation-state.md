@@ -22144,3 +22144,60 @@ Its proposal was grounded, not invented — `hub.diagnostics.read` is a real reg
 loads can publish `matches + mismatches != total` (**a board whose arithmetic visibly fails
 destroys trust in every other field**); "since boot" is unusable without an uptime; "per-replica"
 does not say which replica; and `total` excluding fallbacks is a misreadable name.
+
+---
+
+### 5fp — Role correction from the owner: coordinators dispatch, they do not verify
+
+**Owner, verbatim (02:02:32Z):** *"reminder as a coordinator you dispatch investigators,
+developers, reviewers. you do not do the work."*
+
+Accurate. Across this segment I personally read `agent_store.go` and `group_store.go` (to confirm
+DEF-59), `divergence.go` (to count writers to `DivergenceMetrics`), and `server.go`,
+`handlers_health.go` and `permissions/registry.go` (to check `hub.diagnostics.read`,
+`s.startTime` and `HubID()` existed before approving e1b2's proposal). Every one of those was
+investigator work. I did it because briefing it out felt slower than doing it.
+
+**Why that reasoning is wrong, beyond role hygiene:**
+
+1. It does not scale. My context is the bottleneck, and I spent it on lookups.
+2. It makes my verification the single point of failure. Nobody checks the checker. Contrast 5fm,
+   where my unverified premise survived precisely because I was the one holding it.
+3. The finding ends up in my context instead of in a written report. DEF-59 is only durable
+   because e1a independently re-derived it and wrote it down — not because I read the source.
+4. It is the same failure shape as 5fm from the other end. There I *acted* without verifying the
+   semantics of my own tool; here I *verified* work that was not mine to verify. Both are the
+   coordinator substituting its own hands for the system's.
+
+**Rule 536.** A coordinator who verifies claims personally has not eliminated the risk of a bad
+claim — it has concentrated that risk in the one agent nobody audits.
+
+**Rule 537.** "Briefing it out is slower than doing it" is true per-item and false in aggregate.
+The dispatch cost is paid once; the context cost compounds for the rest of the engagement.
+
+**Changed, effective immediately:**
+
+| Work | Before | Now |
+|---|---|---|
+| Reachability of DEF-59 | I would grep it | `ca-msg-inv1` dispatched |
+| Verifying a developer's source claim | I read the file | Investigator, or the developer's own test as evidence |
+| Reading pushed diffs | I read them | Reviewer agent |
+| Approving plans, ruling on gates, boundaries, what ships | mine | **still mine** |
+
+The last row is the line. Judgement and authority stay with me; verification does not.
+
+**Actions taken:**
+- `ca-msg-inv1` started (investigator) — brief at `/scion-volumes/scratchpad/briefs/ca-msg-inv1.md`.
+  Question: does any client pass an agent *slug* to `GET /api/v1/messages?agent=`? Brief follows
+  535 — it states the settled facts and the boundaries, names the search surface as
+  *non-exhaustive*, and explicitly permits "undetermined" as an answer.
+- `ca-msg-e1a` given the go on its 19-test plan, and told to **stop** chasing the slug-reachability
+  question. Reachability changes DEF-59's severity, not whether the pinning test is correct, so it
+  was never on e1a's critical path.
+- Tranche E review will be dispatched to a reviewer when e1a and e1b2 push. I will not read the
+  diffs.
+
+**Not changed:** the per-file endpoint deletion-count discipline still applies before every push,
+and I still re-run the numstat. That is a gate I own, not a verification I am doing on someone
+else's behalf — but it is the closest call in this list, and worth revisiting if it starts eating
+context.
