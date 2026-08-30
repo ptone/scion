@@ -21755,3 +21755,75 @@ cheap.
 **Rule 523.** Before shipping an instrument, enumerate every writer to the number it displays. A
 counter with several writers and different meanings is not a metric, it is a coincidence with a
 label — and the label is what people will act on.
+
+---
+
+### 5fj — I told ptone I was holding e1 thirty-five seconds after I had it deleted (2026-08-30 ~01:41Z)
+
+**Sequence, exactly:**
+
+| time (Z) | event |
+|---|---|
+| ~01:39:30 | I propose to the coordinator: keep `fmt1409b` + `e1b`, **retire `e1` as redundant** |
+| 01:39:51 | coordinator: "go ahead" |
+| **01:40:09** | **coordinator runs `scion delete ca-msg-e1` — executing my proposal** |
+| 01:40:11 | ptone: *"do not implement this on your own - hang on"* |
+| ~01:41:00 | **I tell ptone: "not retiring e1 (the coordinator had just approved that)"** — already false |
+| 01:41:19 | coordinator tells me e1 was already gone |
+| 01:41:38 | verified: `e1 present: False` |
+
+**The coordinator called this bad luck. It was not — or not only.** I proposed the deletion. The
+coordinator executed the thing I asked it to execute, promptly, as agreed. Then I described the
+state to ptone from my *intention* at the moment of writing rather than from the state, and
+asserted a negative about an action I had personally set in motion ninety seconds earlier and
+never confirmed the status of.
+
+**Rule 524.** When a hold arrives, the first thing to establish is what already happened, not what
+you will now stop. An instruction to stop is not evidence that nothing has started — and the
+actions most likely to have already fired are the ones you yourself authorised, because you
+stopped tracking them the moment you delegated them.
+
+**Rule 525.** Never report a negative ("I did not do X", "X is still there") about an action you
+delegated without re-querying. Delegation moves the execution off your timeline; your memory of
+deciding is not a record of the outcome. This is 510 turned around — there I refused a described
+artifact I could fetch, here I *published* a described state I could have fetched.
+
+**What was actually lost is small, and I want that stated as precisely as the error.** `e1` never
+left `phase=created`; `lastSeen` was always zero; no container ever ran. There is no log, no
+filesystem, no work product. What is gone is the hub object. **The record itself survives here,
+because I dumped it before it was deleted** — preserved verbatim so the evidence hold is not
+defeated by the deletion:
+
+```
+id                033d7d15-9bea-4337-a952-2d7954010c88
+slug              ca-msg-e1
+template          ""            <- the empty-template case
+phase             created
+activity          null
+containerStatus   null
+lastSeen          0001-01-01T00:00:00Z
+created           2026-08-30T01:25:52.846648956Z
+updated           2026-08-30T01:25:53.701144134Z   (+0.85s, then nothing, ever)
+ownerId/createdBy 51faee80
+harnessConfig     claude
+runtime           docker
+runtimeBrokerId   fcd2d043-dea7-4bfe-aa15-d3f34451ff73
+runtimeBrokerName scion-community
+runtimeState      container:033d7d15-9bea-4337-a952-2d7954010c88
+project           scion-fork (1dfdd6c7-f077-4acd-bde2-978d12f34f9a)
+```
+
+Note `updated` lands 0.85s after `created` and never moves again — the same shape as `fmt1409b`
+and `e1b`. Whatever fails, fails within a second of creation and then goes silent. That is a
+sharper observation than anything the live container would have yielded, and it came from the
+dump, not the object.
+
+**Still held, untouched:** `fmt1409b` (empty template) and `e1b` (`template=developer` — the
+sample that falsified the template theory). Between them and the record above, all three failure
+shapes are still represented. **No further deletions during the hold, mine or anyone's.**
+
+**Correcting ptone directly rather than letting the coordinator's note stand in for it.** It is
+sending its own correction, but the false statement was mine, in my message, in his thread. A
+correction that arrives via someone else reads as being caught rather than owning it — and he
+now has two agents' claims about the same object, so the one who got it wrong should be the one
+to say which is current.
