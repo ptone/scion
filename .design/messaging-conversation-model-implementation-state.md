@@ -25353,3 +25353,93 @@ something narrower than its label, and someone eventually reads the label instea
 Dispatched via the new `DISPATCH-PROCEDURE.md`, including the unconditional `scion message <name>
 "1"` after start. **No trust-dialog stall this time** — first dispatch since rule 674 that did not
 need a diagnosis. Confirmed executing by `scion look`, not by heartbeat.
+
+---
+
+## 5hs — G1 verified; two self-reported "caveats" reclassified as defects
+
+**Independent verification (standing rule: re-derive the numstat myself).**
+Fetched `scion/ca-msg-g1` at `af8641f09`. `git diff --numstat
+refs/remotes/origin/scion/tranche-g...refs/remotes/origin/scion/ca-msg-g1`:
+
+| file | add | del |
+|---|---|---|
+| `cmd/server_attribution_report.go` | 375 | 0 |
+| `cmd/server_attribution_report_test.go` | 439 | 0 |
+
+Matches the report exactly. Zero deletions. `merge-base --is-ancestor` confirms
+the branch is based on `scion/tranche-g`, not on a stale main.
+
+Guards 1 and 2 carry real mutate/fail/revert/pass proofs. Guard 3 does not —
+see G1-c below.
+
+**The finding.** g1's "what a green result would still hide" list had five
+items. It presented all five uniformly as caveats. Items 3 and 4 are not
+caveats; they are defects in the instrument, and they are the same defect
+twice — *the report's numbers are reconciled against nothing*.
+
+Verified rather than assumed:
+- `pkg/messaging/backfill.go:127` skips `msg.Broadcasted`.
+- `cmd/server_attribution_report.go` contains **zero** occurrences of
+  `Broadcast` (grep -c = 0).
+
+So an unattributed broadcast row is counted in `backfillable` — a bucket whose
+name is a promise that backfill will fix it. Backfill will never touch it.
+
+**Why that is disqualifying and not cosmetic.** The operator runs backfill,
+re-runs the report, and `backfillable` is still non-zero. They cannot separate
+"backfill failed" from "these are broadcasts backfill does not process."
+The report loses its stopping condition, and a go/no-go instrument with no
+stopping condition cannot produce a go/no-go.
+
+**Rulings issued to g1:**
+
+- **G1-a** — split broadcast into its own bucket, named for what it measures
+  (rule 678), counted as BLOCKING. The blocking status must be *argued*: g1
+  claims a NULL-`conversation_id` broadcast disappears under the read switch,
+  which I have not verified. It must check the three read-switch sites
+  (`handlers_messages.go:70-78`, `:259-280`,
+  `handlers_chat_v2.go:1782-1817`) and report the finding. Default to blocking
+  while unverified — an over-strict gate costs one conversation, an
+  under-strict one costs messages. This is "under-granting is recoverable;
+  over-granting is not" applied to a gate rather than to an ACL.
+- **G1-b** — on the all-projects run only, call
+  `CountUnbackfilledMessages(ctx, "")` and compare to the report's own total.
+  Disagreement prints RECONCILIATION MISMATCH with both numbers and the delta,
+  and blocks. The report must **not** attempt to locate or repair the delta.
+  Empty-projectID-counts-all is already covered by
+  `TestCountUnbackfilledMessages_EmptyProjectIDCountsAll`
+  (`pkg/store/entadapter/message_store_test.go:281`), so the fix stands on
+  tested behaviour and costs a few lines.
+- **G1-c** — `TestAttributionReport_UsesProductionDerivation` asserts the
+  source text contains a string. g1's own justification ("would fail both this
+  guard and compilation") concedes the compiler does the work. Harmless, but
+  it is decoration, not a guard. Add a behavioural one: a table of `KeyInputs`
+  where production derivation is known to fail, asserted to land in
+  `unresolvable`, plus a success case asserted to land in `backfillable`, with
+  a mutation proof.
+
+Items 1, 2 and 5 accepted as documented caveats. 5 (non-transactional scan) is
+acceptable because the VM will be quiesced; 1 and 2 are pathological.
+
+**Note on agent lifecycle.** g1 keeps this work rather than a fresh agent.
+This is iteration inside one phase on gaps the agent itself surfaced, not
+repurposing across phases, so the context-rot concern does not apply.
+
+**Rules generated:**
+
+- **680** — An instrument that cannot observe a population must at least be
+  able to detect that the population exists. A blind spot whose size you can
+  measure is not a blind spot; it is a number. Prefer a cheap reconciliation
+  against an independent count over an expensive attempt to enumerate.
+- **681** — A bucket name is a promise about a remedy. If running the remedy
+  does not empty the bucket, the bucket is misnamed, and the report built on
+  it has no stopping condition.
+- **682** — When a competent agent volunteers a list of limitations, that list
+  is evidence and not a disposition. It arrives flattened — real defects
+  presented in the same register as pathological edge cases — because the
+  author is enumerating, not triaging. Triage it yourself; the honesty of the
+  disclosure is not a reason to accept its severity ranking.
+- **683** — A guard whose author justifies it by saying the compiler would
+  catch the same thing has told you the guard is decoration. Keep it if it is
+  free, but do not count it.
