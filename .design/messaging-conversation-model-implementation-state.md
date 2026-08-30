@@ -23865,3 +23865,41 @@ silently fails."*
 **Rule 611.** Ask an author what its test could be *misread* as proving. A test name is the only part
 most readers will ever see, and a name that sounds like a guarantee attached to a test that pins a
 defect will be cited as evidence the defect is not real.
+
+### 5gs — I ran THREE heartbeats concurrently. Self-caught on the v24 roster check.
+
+`scion schedule create-recurring` does **not** replace an existing schedule. I created v23 without
+deleting v22, then v24 on top of both. All three on `13,43 * * * *`. Found only because I listed the
+roster after creating v24 — had I not, three heartbeats would have fired together at 03:13.
+
+**The content is what makes this bad, not the duplication.** v22 said *"DO NOT RETIRE ca-msg-e1b2"*
+and carried the coordinator debt as top priority — both settled hours ago, and both phrased as
+urgent standing instructions. v23 named two now-retired agents as live and PR (A)'s gate as
+outstanding. A stale heartbeat is **worse than no heartbeat**: it is a confident, authoritative
+instruction to redo work that is finished, arriving with the same weight as the current one and no
+marker distinguishing them.
+
+This is the hold-banner failure (5f-series) in a new costume, and a third instance of tonight's
+theme: **an artifact that keeps asserting something after it stopped being true.** v18 carried a
+lifted hold as active; v19 carried "the hold is lifted" into a real hold; now v22/v23 carried retired
+agents as live.
+
+Worse, I *had* this discipline: a 2026-08-27 entry records replacing the heartbeat and "verified as
+the only heartbeat on the roster afterwards." I dropped a check I had written down.
+
+**Remedy applied where it will actually execute.** Deleted v22, v23, and the first v24; added
+**sweep step 9, SCHEDULE HYGIENE** to the heartbeat body itself — list, filter `ca-msg`, assert
+exactly one, re-list after any delete — and recreated v24 carrying it. Roster verified: **COUNT: 1**.
+Rules that live only in the state doc are advice; rules that live in the heartbeat get executed.
+
+**Rule 612.** A "create" verb does not imply replacement. Before trusting any recurring instrument,
+enumerate the live instances — the failure of a duplicate is silent, because each copy works
+perfectly.
+
+**Rule 613.** When you re-derive a discipline you already had, the finding is not the discipline —
+it is that the enforcement point was wrong. I did not forget to check the roster; I had never put the
+check anywhere that would run. Move it to where it executes, and say so in the record, or you will
+re-learn it a third time.
+
+Live schedule: `23a609f4-463e-4607-a21f-69d33ebbf27f` — `ca-msg-impl-heartbeat-v24`, `13,43 * * * *`,
+next 03:43:00Z. Source at `heartbeat-v24.txt`.
