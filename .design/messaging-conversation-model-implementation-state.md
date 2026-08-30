@@ -24351,3 +24351,54 @@ directive: **landing an entry point is reversible; running a backfill through it
 is mine to land, the execution is his to schedule. Where a task mixes the two, dispatch the
 reversible half and name the other as withheld — do not treat the task as blocked, and do not treat
 approval of the code as approval of the run.
+
+### 5he — the "stall" was a trust dialog. Nine minutes, one keystroke. (2026-08-30 17:55Z)
+
+`ca-msg-p4a` fired a STALLED signal nine minutes after start. Container up, heartbeats landing every
+30s on schedule, `phase=running` — and **not one instruction executed.**
+
+`scion look` showed it parked on Claude Code's folder-trust dialog:
+*"Accessing workspace: /workspace — Quick safety check: is this a project you created or one you
+trust?"*
+
+**`--dangerously-skip-permissions` does not suppress this.** It is a separate gate keyed on the
+absence of a trust record for the cwd. The harness was invoked with the flag and stopped anyway.
+
+Remedy: `scion message ca-msg-p4a "1"` selected "Yes, I trust this folder"; the confirm landed and
+it proceeded to read the brief. Seconds, once diagnosed.
+
+**Rule 641: heartbeats prove the supervisor is alive, never the supervised.** Every health signal
+here was green — container, phase, 30-second heartbeats — because every one of them is emitted by
+`sciontool`, not by the harness. A liveness signal from the wrapper cannot detect a wedged payload,
+and I read "running + heartbeating" as "working" for nine minutes.
+
+**Rule 642: for a stuck agent, look at its screen before theorising about its lifecycle.** In §5fg I
+reasoned about provisioning outages from `phase` and `activity` columns alone and never ran
+`scion look`. That is the cheap discriminator and I did not own it. One command separated "the fleet
+is down" from "it is waiting for a keypress."
+
+**I did NOT retro-fit this onto §5fg's failures.** `ca-msg-e1` and `ca-msg-fmt1409b` sat at
+`phase=created` with no activity; this one reached `running`. Different signature, plausibly a
+different fault. Relayed to the coordinator explicitly as *hypothesis, not finding* — the temptation
+to close two old mysteries with one new answer is exactly how a wrong cause gets recorded as
+history. One correlate offered, also unconfirmed: this is the first agent I have dispatched where
+`scion start` cloned into `/workspace`; if the dialog triggers on a non-empty cwd, that dates it.
+
+Real fix is provisioning-side — pre-seed the trust record — and belongs to the coordinator, who has
+it now.
+
+#### And the clone assumption in my brief was already stale
+
+`scion start` logged *"Using hub, cloning repo https://github.com/ptone/scion.git"*. My §0 setup
+block, written from the §5gu finding that agent workspaces arrive with **no clone at all**, tells
+p4a to clone into `/workspace/scion` — which would nest a second clone inside an existing one.
+
+Messaged the correction to p4a directly rather than only fixing the template: **rule 628 —
+repairing the next brief does not repair the one in flight.** Told it to detect which case it is in
+and *report which*, because it can see the workspace and I cannot.
+
+**Rule 643: a fact learned about the environment expires; the brief that encodes it does not.**
+§5gu's "workspaces have no clone" was true when observed and is the reason §0 exists. It went stale
+without any signal, and a brief is exactly where a stale environmental fact hides longest — it is
+written once and read as authoritative thereafter. Environmental preconditions in a brief should
+instruct the agent to **check and report**, not to assume the last thing I saw.
