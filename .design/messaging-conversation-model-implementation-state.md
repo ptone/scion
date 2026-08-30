@@ -24497,3 +24497,79 @@ catastrophe about a developer's branch on the strength of my own shell error.
 `go test ./cmd/...`, `go test ./pkg/messaging/...`, `golangci-lint run ./cmd/...`, the three guards
 from main — and **AC-12-7**, the induced failure: break the detection count and show AC-12-1's
 positive case going red. Structure verified is not behaviour verified.
+
+### 5hg — DEF-81: main's backfill resume silently drops rows. Ruled option A. (2026-08-30 18:04Z)
+
+p4a raised a blocker: main's `pkg/messaging/backfill.go` carries a **pre-fix** checkpoint mechanism;
+v2 fixed it to cursor-based resume, and the ported same-timestamp test correctly fails against main.
+Offered me (A) port the 3-hunk fix, or (B) skip the test.
+
+**Verified before ruling, and it is worse than p4a characterised it.**
+
+Main (`backfill.go:104-112`):
+```go
+cpMsg, err := s.msgStore.GetMessage(ctx, cfg.Checkpoint)
+filter.After = cpMsg.CreatedAt
+```
+v2:
+```go
+cursor := cfg.Checkpoint  // empty = start; cursor string = resume
+```
+
+`entadapter/message_store.go:387` implements `After` as `message.CreatedGT(filter.After)` —
+**strictly greater than.** So resuming from checkpoint M **skips every message sharing M's exact
+`created` timestamp, M included.** Those rows keep a NULL `conversation_id` permanently and the run
+reports success.
+
+**Silent, permanent row loss on a migration path — reachable only via resume, which is the feature
+you use precisely on the largest migrations.** Timestamp collisions are routine: bulk insert,
+broadcast fan-out, any burst. It also defeats AC-12-5 invisibly: the criterion demands a partial
+backfill be *reported*, and this one reports success.
+
+Latent today only because **nothing calls the service — that is DEF-12 itself.** Shipping the entry
+point is what makes it reachable. The fix must land with it, not after.
+
+**Ruled A**, with conditions: separate revertible commit; exactly the 3 named hunks and a full-file
+diff to prove nothing else rode along; `DELETIONS-JUSTIFIED:` since this breaks the zero-deletion
+invariant; the same-timestamp test shown **failing against main and passing with the fix**; key
+derivation untouched and nothing normalised; and a check that the operator-visible `LastCheckpoint`
+is still a valid resume token now that it moves per-page rather than per-message — *a checkpoint
+correct internally but wrong on stdout is the same bug wearing a hat*.
+
+**Rejected B outright.** Skipping the failing test is making a gate pass by weakening the gate, and
+I would have refused it had the bug been benign. Here it would have shipped a data-loss path with
+its only witness deleted.
+
+#### My brief carried a stale non-goal, and the developer was right to push
+
+The brief said *"Do not modify backfill.go's algorithm — it is reviewed and it is not what is
+broken."* That came from DEF-12 §5, written against **v2's already-fixed copy**. Main has the
+pre-fix version, so the sentence was true of the file I was thinking of and false of the file in
+front of the developer.
+
+**Rule 648: a non-goal inherits the branch it was written against.** "X is already correct" is a
+claim about a specific tree, and it silently expires when the work moves to a different one. Every
+"don't touch X, it's fine" in a brief needs re-verifying against the actual base, because the
+sentence gives no hint that it was ever branch-relative. Same family as 643, sharper cause: not that
+the world changed, but that the *base* did.
+
+Second time today a subagent's pushback beat my written instruction (§5he-AMENDMENT was p4a
+disproving my correction). Both times the recovery came from having asked for the observation back
+rather than compliance.
+
+#### The wider question this opens — and it is not small
+
+**Main's copy of a `pkg/messaging` file was behind v2.** The entire tranche plan is built on main
+having absorbed the earlier fixes, with v2 as the source for what is *missing*, not for what is
+*stale*. This is one confirmed instance of the second category, and I have no measure of how wide it
+is.
+
+If more than this file is pre-fix on main, it changes what the **Tranche G go/no-go stands on** —
+the read-switch decision assumes the production derivation and consistency paths are the fixed ones.
+Asked p4a to flag anything else that looks pre-fix; that is opportunistic, not a survey. **A proper
+audit of "which `pkg/messaging` files on main are behind v2" is now a Tranche G precondition**,
+alongside DEF-32, the B10 flip-to-deny, and the DEF-79 production-path trace.
+
+Raised to ptone as a safety notice with the operational consequence stated plainly: **do not run a
+resumed backfill against real data until this lands.** Not a block on him — the fix is dispatched —
+but he has a snapshot exercise scheduled and needed to know before it, not after.
