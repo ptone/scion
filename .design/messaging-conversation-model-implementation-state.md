@@ -25139,3 +25139,32 @@ him rather than letting it pass unremarked** — an architect who quietly starts
 because each individual edit was small is how the role erodes. Asked him to tell me if he wants
 dispatch even for mechanical fixes. Until he answers, mechanical-and-CI-verified is my line, and
 anything requiring judgement goes to a developer.
+
+### 5hp addendum — #1426 fully green; "pass" on a continue-on-error job verified, not assumed
+
+After `21b0ac198`:
+
+| check | result |
+|---|---|
+| Build & Test (blocking) | **pass**, 4m13s |
+| golangci-lint | pass |
+| Full Test Suite (reporting only) | **pass**, 9m13s |
+| shellcheck / scan-pr / check-changes | pass |
+| Lint 405 Allow header | fail — reporting-only, 272 pre-existing, no HTTP handlers in this PR |
+| cla/google | fail — ptone's |
+
+**The full-suite "pass" needed checking before it could be believed.** That job is
+`continue-on-error: true`, and at job level that flag makes the *job* report `success` even when
+its steps fail — so the green badge on the one lane that actually runs the 8 sqlite CLI tests is
+exactly the badge least entitled to be taken at face value. I queried the step conclusions
+directly: `"Run full test suite (with SQLite)"` → `"success"`. Real pass. The tagged CLI tests
+executed and succeeded in CI.
+
+**Rule 669: on a `continue-on-error` job, a green job badge is not evidence — read the step
+conclusions.** This is rule 651 arriving with the opposite sign. There I established that a job
+which *runs* cannot necessarily *fail the build*; here the same flag means a job which *reports
+success* did not necessarily *succeed*. One flag, two silent misreadings, in opposite directions,
+and I have now made both. The general form: **a mechanism that suppresses failure signals
+corrupts the success signal too, because it makes the two indistinguishable from outside.**
+
+Phase 4 is merge-ready from my side. Merging is ptone's gate.
