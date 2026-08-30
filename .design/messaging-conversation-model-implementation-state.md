@@ -23576,3 +23576,51 @@ precisely enough to check.** A pointer with no address is a wish.
 **Rule 593.** When you go looking for whether X is tracked and find something *adjacent* to X, the
 adjacency is the danger. A near-match closes the question in the reassuring direction and leaves no
 trace that the real question was never answered. Record near-matches as misses.
+
+---
+
+### 5gk — Corrected `ci-fix-lead` DOWNWARD on my own finding.
+
+It read the relay and wrote: *"zero effective coverage under make test-fast."* True as stated, and
+about to be filed in a form worse than the facts.
+
+**CI runs the untagged suite.** So the 13 routes in `TestRouteGuardOpsPermissions` **are** exercised
+in CI. The `!no_sqlite` tag is a *developer-loop* gap, not a CI gap. Accurate framing:
+
+- **CI:** 13 of 45 covered, 32 not. -> a **test-design** defect (registry test skipping to a frozen list).
+- **`make test-fast`:** 0 of 45. -> the **sqlite build-tag** issue `ci-fix-lead` already owns, not specific to this file.
+
+Two different problems, two different fixes, and conflating them inflates both.
+
+**Rule 594.** Correct downward with the same urgency you escalate. An inflated claim spends the same
+credibility as a missed one — and it is far harder to walk back once it is in someone's tracker,
+because the correction arrives as *your* retraction rather than as *their* finding. Do it before it
+is filed, not after.
+
+**Rule 595.** When a recipient restates your finding in their own words, read the restatement as a
+*measurement of your relay*, not as their comprehension. It came back inflated because my relay led
+with 32-of-45 and mentioned the build tag as "compounding" — I supplied the ingredients for the
+overstatement and should not be surprised it was assembled.
+
+Also told `ci-fix-lead` to **ask `ca-msg-e1b2` directly** rather than round-trip through me. I would
+only be reframing, and every reframe is a chance to introduce exactly the drift above.
+
+### 5gl — Preserving the enumeration BEFORE retiring, which is the real remedy for rule 573.
+
+e1b2 prefaced its route list with "among others" — reads as a sample. **It sums to exactly 32**, the
+same number it gave as the uncovered count. Either complete, or a coincidence hiding both omissions
+and double-counts. Asked which, plus exact line numbers for the two slices, the :417 skip, and
+`allHubAdminRoutes()`.
+
+The point: **the fix for "do not retire the only source" is to write down what the source knows, not
+to keep the source alive.** Keeping an agent alive as a store of unwritten facts defers the loss; it
+does not prevent it. Retirement is safe exactly when the artifact is complete.
+
+**Rule 596.** Rule 573 says check whether anyone needs what the agent knows. The remedy is
+*extraction*, not *preservation*. An agent held open as a living reference is an outage waiting for a
+schedule.
+
+**Rule 597.** A hedge like "among others" on a list with a known denominator is checkable — sum it.
+Third time tonight a count has done the work: five packages in a `tail -8` window, 13 versus 45
+routes, and now 32 versus 32. **A filtered or partial artifact with a denominator can be audited;
+without one it can only be believed.** Demand denominators.
