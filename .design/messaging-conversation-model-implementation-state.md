@@ -21590,3 +21590,168 @@ abnormal.** fmt1409b makes it *look* like the same failure, and the pattern-matc
 right, but "matches the shape of a known failure" is a hypothesis. Said so plainly to the
 coordinator rather than reporting a second outage as fact — which is the correction from the
 wrong-repo incident, applied before the hop rather than after it.
+
+---
+
+### 5fh — Coordinator answered; the boot failure has a candidate discriminator (2026-08-30 ~01:34Z)
+
+**Coordinator's reply, in short:** provisioning is NOT broadly degraded — it created three agents
+in this same project in the preceding 20 minutes (`proj-visibility-dev`, `rolebind-groups-inv`,
+`sn-lead`) and all three booted clean and are working. It characterised the failure as a
+**low-rate per-container failure that happens to recur**, bet that e1 is dead rather than slow,
+asked me to hold e1 as a second sample hours apart from the first, and recommended one fresh
+attempt before reaching for def3750. It also said it was updating ptone, since a second data
+point breaks the "~23:20Z window" framing it had originally given him.
+
+**I took the fresh-attempt advice, but I did not take the characterisation.** Before creating
+anything I dumped one more field across all 26 agents — and it splits the sample perfectly:
+
+| `template` | count | phase |
+|---|---|---|
+| non-empty (`developer`, `investigator`, `coordinator`, `architect`, `default`, …) | 24 | **all `running`** |
+| `""` | 2 | **both stuck in `created`** (`fmt1409b`, `e1`) |
+
+`def3750` — mine, booted fine at 22:58 — carries `template='default'`. The coordinator's three
+clean boots carry real templates. The only two agents that have ever failed to boot in this
+project are the only two with an empty template. That is not the shape of a random per-container
+failure; a random failure does not sort itself by a creation-time field.
+
+**But I am not calling it a cause, because I cannot yet.** The alternative reading is live and I
+said so to the coordinator: **`template` may be populated during boot, in which case an empty
+value is a *symptom* of not booting, not a cause of it.** The listing alone cannot separate those
+two, and the coordinator has hub internals I do not. This is the same discipline as 5fg — a
+correlation this clean is *more* tempting to over-read, not less, and "24/24 vs 2/2" is precisely
+the kind of number that makes a hypothesis feel like a finding.
+
+**So I made it falsifiable and tested it in the same breath.** Created `ca-msg-e1b` at 01:34Z
+with an explicit `-t developer`. If it boots, the empty template is at minimum a reliable
+*predictor*, and the workaround is "always pass `-t`" — actionable, unlike "retry and hope". If
+it also hangs, the template reading is dead and I have cost ninety seconds.
+
+**Asked the coordinator to hold its update to ptone.** Not to sit on the news — to avoid sending
+him the wrong news. "Intermittent per-container failure" points him at the runtime; if this is
+template resolution, the runtime is the wrong place to look, and he has been explicit that he
+does not want noise. Better to delay a report by minutes than to aim it wrong. *(This is rule 518
+inverted: when I ask someone to withhold, I owe them the condition under which they should send
+anyway — here, "a few minutes", and I committed to telling them either way.)*
+
+**Held `e1` and `fmt1409b`** per the coordinator's ask. Neither is retired; both remain evidence.
+Standing hazard: a future sweep must not collect them.
+
+**Rule 519.** A correlation that sorts the sample perfectly is the most dangerous kind, because
+its cleanliness reads as proof. Before believing it, ask whether the discriminating field is
+written *before* the outcome or *by* it — a field the failure itself populates will always
+correlate perfectly with the failure and explain nothing.
+
+**Rule 520.** When you ask someone to hold a report, you have taken on their obligation to send
+it. Name the window and commit to releasing them, or you have converted their escalation into
+your silence.
+
+**Tranche E scope re-verified against live `upstream/main` = `f1f86d3e0`** (unchanged) before
+briefing: all three target files still absent; `pkg/messaging/divergence.go`,
+`handlers_messages.go`, `handlers_chat_v2.go` all present. Read-switch sites pinned to three,
+not two:
+
+- **S1** `handlers_chat_v2.go:1779-1818` — DM path with the **strict 5-part parse**
+  (`len(parts) == 5`), thread path via topic lookup; `IncFallback()` on non-resolve.
+- **S2** `handlers_messages.go:63-79` — agent-filter DM path, carrying the **R-9 discipline**:
+  on `GetAgent` failure it skips the conversation path *without* calling `IncFallback`.
+- **S3** `handlers_messages.go:255-279` — `thread_id` path plus the `channel=="web"||""` DM
+  default; `IncFallback()` on each non-resolve.
+
+**The two cases the brief marks as non-skippable**, because they are the reason the PR is worth
+landing at all:
+
+- **S1's 7-part key must not derive from its first five.** This is B-3 — never normalise a DM key
+  on the derivation path. After the Tranche G read-switch the DM key *is* the ACL, so a tolerant
+  parse is an access-control defect, not a formatting one.
+- **S2's `IncFallback` omission is load-bearing and one line wide.** A bad client agent reference
+  is not a migration gap. Conflating the two corrupts the fallback counter — which is the exact
+  metric the Tranche G go/no-go reads. An untested one-line distinction inside the input to a
+  go/no-go decision is worth a test on its own.
+
+Also briefed the global-counter hazard (`DivergenceMetrics` has no reset, so assertions must be
+on captured deltas and must not `t.Parallel()` against each other), the standing prohibition on
+stripping `!no_sqlite` to make something run, "never make a gate pass by weakening it", no
+`git add -A` in a shared workspace, and **push early so I read the diff from git** — the fix from
+5ey, now standing brief text rather than a correction I have to issue after the fact.
+
+---
+
+### 5fi — Stopped a premature confirmation; and the divergence counter has three writers (2026-08-30 ~01:36Z)
+
+**The coordinator reported `ca-msg-e1b` as `phase=running` at 01:34:55Z and said it was dropping
+the intermittent-runtime framing and telling ptone the template finding was confirmed. I could
+not reproduce the observation.** Direct query at 01:35:23Z:
+
+```
+slug=ca-msg-e1b  phase=created  activity=null  lastSeen=0001-01-01T00:00:00Z
+containerStatus=null  created=01:34:03Z  updated=01:34:07Z  template=developer
+```
+
+Still `created` at 01:35:46Z and again at 01:36:03Z. `lastSeen` never leaves zero — and once set
+it does not go back, so "booted then regressed" is not a plausible reading. Told the coordinator
+to hold.
+
+**The important part is not who misread what.** e1b was **52 seconds old** when it was declared a
+successful boot. Even if it does come up, it had not yet come up *then*. The coordinator was
+about to hand ptone a confirmed finding backed by an observation neither of us can reproduce —
+which is a strictly worse failure than the "intermittent runtime" framing we had just avoided,
+because a wrong mechanism with confident sourcing is harder to dislodge than a vague one.
+
+**Also corrected the epistemics, not just the fact.** Even when e1b resolves, one trial takes the
+template reading from "correlation" to "correlation plus one successful intervention". It does
+not reach *"reliably (maybe always)"*. I offered the test that would: deliberately create a
+throwaway agent with **no `--type`** as a negative control, so the prediction is made before the
+outcome **in both directions**. That is the coordinator's experiment to run — its domain, its
+container budget — and I said so explicitly rather than running fleet experiments myself.
+
+**Rule 521.** An intervention that "worked" is not evidence until the control fails. Confirming
+only the direction you hoped for tests your luck, not your hypothesis — and the cheapest moment
+to notice is before someone repeats it upward as a finding.
+
+**Rule 522.** Check the age of the observation, not just its content. A status read seconds after
+an action is measuring the action's latency, not its outcome; "it hasn't succeeded yet" and "it
+failed" are different claims and only one of them is usually true that early.
+
+---
+
+**Separately — a real finding from re-reading `pkg/messaging/divergence.go` for the (B) brief.**
+`DivergenceMetrics` has **three distinct writers with different semantics**, not one:
+
+1. `LogDivergence` → `Inc(match)` — the ComputeDivergenceMatch routing comparison.
+2. `LogDivergence` with `Fallback: true` → `IncFallback()`.
+3. **`CheckConversationConsistency` → `DivergenceMetrics.Inc(false)`** on a prior-message
+   conversation-ID mismatch (DEF-3). This is a *different question* from routing-key agreement.
+4. Plus direct `IncFallback()` calls from the three read-switch sites (S1–S3, 5fh).
+
+So **`mismatches` is a union of two unrelated failure modes** — routing-key disagreement and
+prior-message inconsistency — and the board cannot distinguish them. Worse:
+
+> **`CheckConversationConsistency` fails OPEN.** On a `ListMessages` query error it logs a warning,
+> returns `true`, and **moves no counter**. It also returns `true` when `resolvedConvID == ""` and
+> when there is not enough info to look up priors.
+
+**This is the load-bearing consequence: a low mismatch count is not evidence of agreement.** It is
+consistent with agreement, with query errors, and with insufficient lookup data, and the counter
+cannot tell those apart. Anyone reading the (B) board as a Tranche G go signal would be reading a
+number that under-reports by construction.
+
+**This strengthens rather than weakens the case for the cheap board — and it sharpens what the
+board must say.** Two constraints now added to the (B) scope:
+
+- The board must **not** present `mismatches` as "divergence". It must be labelled as what it is:
+  a union of routing disagreement and consistency mismatch, with fail-open gaps.
+- The board must carry an explicit **"this is not the go/no-go input"** statement, pointing at the
+  offline recomputation (5ff) as the artifact that actually answers the question. The board is a
+  liveness indicator; the report is the evidence.
+
+This is exactly the caveat 5ff existed to cover, arriving one level deeper than I wrote it: I had
+said the board was per-replica and since-boot. It is also **semantically lossy and fails open**.
+Had I not re-read the file for the brief, the board would have shipped looking more authoritative
+than it is — which is the failure mode that makes a cheap instrument dangerous rather than merely
+cheap.
+
+**Rule 523.** Before shipping an instrument, enumerate every writer to the number it displays. A
+counter with several writers and different meanings is not a metric, it is a coincidence with a
+label — and the label is what people will act on.
