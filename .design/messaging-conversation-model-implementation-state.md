@@ -22287,3 +22287,87 @@ resolve it against a guessed namespace. A wrong resolution here is a cross-tenan
 evidence is inv1's; the two objections are judgement applied to its report. That is the split I
 committed to. Worth recording that catching (b) required *no* verification — only knowing what
 `GetAgentBySlug`'s signature implies, which is design knowledge, not lookup.
+
+---
+
+### 5fr — DEF-59: no project in scope (confirmed), and I overstated the hazard
+
+`ca-msg-inv1` answered both follow-ups at 02:10:11Z.
+
+#### (a) No test exists for the slug path
+
+No test anywhere exercises the `agent` query parameter of `GET /api/v1/messages` with a non-UUID
+value. `handlers_messages_test.go` covers only `GET /api/v1/agents/{id}/messages`, and every
+`ListMessages` call across `handlers_agent_messaging_test.go`, `messagebroker_test.go`,
+`validate_attributed_integration_test.go`, `broker_authz_test.go` and `message_store_test.go`
+passes `agent.ID` (a UUID). Nothing asserts empty *or* non-empty for a slug.
+
+The empty-result claim therefore remains **inferred, unconfirmed**. The absence of the test is
+itself the explanation for the bug's survival.
+
+Routed the confirmation to `ca-msg-e1a` — it is already writing the flag-ON slug case in
+`handlers_read_switch_test.go`, so the flag-OFF sibling costs one fixture. Specified the control
+explicitly: create the agent, create a message to the caller from it, assert the **UUID** filter
+returns it, then assert the **slug** filter returns nothing. *A test that only asserts "empty"
+proves nothing — empty is also what an empty store returns.* Told e1a to push back if this is more
+than a small addition, and to report immediately if it comes out green.
+
+**Rule 541.** A test asserting absence is worthless without a positive control in the same fixture.
+"Nothing came back" is the same observation as "nothing was there."
+
+#### (b) No project in scope — confirmed
+
+`/api/v1/messages` is registered at `server.go:3880` as a top-level route, not nested under
+`/api/v1/projects/{pid}/`. In `handlers_messages.go:32-79` the project is an **optional** query
+param (`q.Get("project")`, :52-54), and the CLI — the only known sender of `agent` — has no
+`--project` flag and never sets it (`cmd/messages.go:92-95`). Every sibling that calls
+`GetAgentBySlug` receives `projectID` from the URL path.
+
+So the slug-first/UUID-fallback pattern genuinely cannot be transplanted. Rules 539 and 540 hold.
+
+#### (c) RETRACTION IN PART — my cross-tenant claim was overstated
+
+I told inv1 that a wrongly-resolved slug "hands the caller another tenant's messages." inv1's own
+evidence undercuts that: `RecipientID: user.ID()` is set **unconditionally** from the auth context
+before any optional filter is applied.
+
+If that holds, a slug resolved against the wrong project produces
+`RecipientID=caller AND AgentID=<wrong agent>` — messages the caller may already see, filtered by
+the wrong agent. **A wrong answer, not a privilege escalation.**
+
+What actually survives:
+
+| Claimed | Survives? |
+|---|---|
+| Cross-tenant read of another tenant's messages | **No** — RecipientID already scopes to the caller |
+| Wrong / silently-empty results | Yes |
+| Weak existence oracle (successful resolve implies the slug exists somewhere) | Yes, minor |
+| S4 readiness metric gap (no `IncFallback`) | Yes — the original defect, unchanged |
+
+DEF-59 is downgraded from a security defect to a correctness defect **provisionally**, pending (d).
+
+**Rule 542.** Reaching for the worst case is not rigour if you did not check whether an existing
+filter already contains it. I demanded observation over inference from inv1 in the same breath as
+asserting an unchecked worst case myself.
+
+**Rule 543.** The asymmetry that makes over-granting unrecoverable does not license overstating a
+hazard. An inflated severity claim spends the same credibility as a missed one, and it misdirects
+staffing toward the wrong tier of fix.
+
+#### (d) The one open question, now aimed at my own error
+
+Sent back to inv1: is `RecipientID` truly unconditional on **every** path through `handleMessages`,
+and through `handleAgentMessages` (~:199, same `GetAgent`-only defect)? Any branch, parameter, or
+elevated case that omits, widens, or overrides it brings the cross-tenant claim back and returns
+DEF-59 to the security tier. Asked for cited lines *and* for what made it confident there is no
+fourth path.
+
+`ca-msg-inv1` is **held, not finished** — told so explicitly, with a stated window (~1 hour) and a
+commitment to release it. (5fj: when you hold someone, you have taken on their obligation to
+report; name the window.)
+
+#### Not yet escalated to the owner
+
+Two facts are missing before this is worth the owner's attention: whether the CLI is broken today
+(e1a), and whether the recipient filter is unconditional (inv1). Escalating now would mean
+presenting a severity I have already had to revise once tonight.
