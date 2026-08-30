@@ -25692,3 +25692,81 @@ announce-yourself instrumentation, not a defect in the work.
 - **693** — When an agent declines work as out of scope and is right, check
   whether the scope was wrong. g4's item 5 was correctly outside my brief and
   should have been inside it; the cost of extending was one field.
+
+---
+
+## 5hw — G4 landed; G3-d correct; a wrong-answer path found at S3
+
+### G4 accepted and merged
+
+`scion/ca-msg-g4` at `41b179c85`. Re-derived numstat: **+393/-0 across 9 files,
+zero deletions everywhere**. The coverage-boundary comment names all six untraced
+paths *with the reason each differs* — authorization dispatch, identity
+extraction, separate handler, short-circuit before agent load, broker-dispatch
+bypass. That comment outlives the test.
+
+`scion/tranche-g` fast-forwarded `58b08d743` → `41b179c85`. Verified as a true
+fast-forward first. G4 retired clean, no argument required — worth recording,
+because most of this project's phases have needed one.
+
+### G3-d verified
+
+`Channel: "web"` now survives the flip at the chat-history endpoint, carrying a
+comment with the rationale, and `TestG3_D_ChannelConstraintPreserved` proves the
+discord row is invisible. Re-checked the removed-test-function set after the
+second commit: still exactly one, 33 present. No coverage quietly dropped in a
+follow-up commit — worth re-running, because the first commit's deletion audit
+does not cover the second.
+
+The `SwitchBypassMetrics` counter is correctly separated from
+`DivergenceMetrics`, five labels, delta-based tests.
+
+### G3-f: the second inverted hidden-list item, and this one is a wrong answer
+
+g3's item 4 claimed that a thread query on a project-less agent "would count as
+`non_web_channel` incorrectly." I traced the branch at
+`handlers_messages.go:289-320` for `threadID="t"`, `agent.ProjectID=""`,
+`channel="web"`:
+
+- `threadID != "" && agent.ProjectID != ""` → false.
+- `else if channel == "web" || channel == ""` → **true**.
+
+It takes the **DM branch**. The `else` is unreachable unless the channel is
+already non-web, so the label is accurate wherever it fires — the reported defect
+does not exist. The actual behaviour is worse: **a caller who asked for thread
+messages is served DM-scoped messages, HTTP 200, no signal.**
+
+Not a wrong count. A wrong answer that looks like a right one — the precise class
+this tranche exists to eliminate, and unlike the S3 widening, untested.
+
+Ruled: make `threadID` the discriminator so a thread request can never be
+answered by the DM path, and return **409 with a distinct code** when
+`ProjectID` is empty — not a bypass counter. The caller named a thread; serving
+different data than was requested is the thing being eliminated.
+
+**The line I drew explicitly for g3:** incorrect data gets fixed now, incomplete
+diagnostics get tracked. Its item 3 (topic-lookup and conversation-lookup
+failures sharing one 409) tells the operator *less* than it could but nothing
+false — accepted. G3-f tells the caller something *false* — fixed.
+
+**This is the second time g3's hidden-list pointed at the right code with the
+wrong diagnosis**, and both times the truth was more serious than the report.
+Rule 688 is holding up: treat those items as coordinates, not conclusions. The
+list remains the most valuable artifact these agents produce — its value is in
+where it points, not what it concludes, and an agent that stops writing them
+because the conclusions get corrected is a worse outcome than wrong conclusions.
+Told g3 so directly.
+
+**Rules generated:**
+
+- **694** — Re-run the deletion audit on every commit, not on the branch's first.
+  A clean first-commit audit says nothing about what the follow-up removed, and
+  the follow-up is where the pressure to make something pass lives.
+- **695** — When triaging a self-reported list, separate *false output* from
+  *thin output* and say which you are doing. Wrong data is fixed now; missing
+  diagnostics are tracked. Without the distinction, agents cannot predict which
+  of their disclosures will cost them another round.
+- **696** — An `else if` chain whose earlier condition is a conjunction can route
+  a request to a semantically different branch when only one conjunct fails.
+  Discriminate on the *subject* of the request (here, `threadID`) before
+  qualifying on what is needed to satisfy it.
