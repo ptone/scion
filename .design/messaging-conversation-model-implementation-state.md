@@ -21469,3 +21469,84 @@ the contrib-repo PAT remain open but block nothing.
 **Heartbeat v16** (`02c48e92-e488-46b3-8627-f08fa4fba131`); v15 deleted. Main anchor moved to
 `f1f86d3e0`, the merged-PR list extended, and the awaiting-ptone section rewritten so the Tranche E
 board is explicitly marked as **the blocking decision** rather than one bullet among four.
+
+### 5ff. DESIGN — Tranche G's evidence base (owed by the cheap-board decision) (2026-08-30)
+
+ptone: *"go with the cheap board for E"*. My recommendation carried a caveat I now have to pay:
+**if the board is cheap, G's evidence has to be decided now rather than discovered insufficient at
+flip time.** This section is that decision. It is design only; nothing here is staffed yet.
+
+#### Why the board cannot be G's evidence
+
+`DivergenceMetrics` is a package-level `DivergenceCounter` — three `atomic.Int64` values
+(`matches`, `mismatches`, `fallbacks`) with no timestamp, no reset, no persistence. A board over
+it is per-replica, since-boot and untimed. Those are acceptable properties for a *diagnostic* and
+disqualifying for a *go/no-go gate*, which is rule 481: precision requirements come from the
+decision, not from the metric. Three specific failures if we let it gate G:
+
+1. **A deploy silently truncates the soak window** and the board cannot tell you it happened —
+   low numbers read identically to "we restarted an hour ago".
+2. **Under multi-replica Postgres it reports one replica**, so the denominator is unknown.
+3. **It only ever sees live sends.** Backfilled and historical rows are invisible to it, which is
+   precisely the population the read switch will be wrong about first (DEF-8, DEF-12).
+
+#### The proposal: an offline recomputation over persisted messages
+
+A read-only job that iterates persisted messages over an explicit window and, for each, computes
+**both** the legacy routing key and the read-switch routing key, then reports agreement. It does
+not read the counter and does not depend on any process having been up.
+
+```
+sciontool messaging divergence-report \
+    --since 2026-08-01 --until 2026-08-30 \
+    [--project <id>] [--limit N] [--examples 20] [--format json]
+
+  → scanned            N
+    agree              N
+    disagree           N   (by reason: dm-key-mismatch, thread-key-mismatch,
+                            old-resolves-new-does-not, new-resolves-old-does-not,
+                            neither-resolves)
+    unresolvable       N   (rows the NEW path cannot key at all — DEF-29 shape)
+    examples           [{message_id, old_key, new_key, reason}, ...]
+```
+
+**Properties that make it a gate rather than a dashboard:** it is *replayable* (same input, same
+answer, so a disputed result can be re-run), *windowed* (the denominator is stated, not implied),
+*replica-independent*, *survives restarts*, and it **covers historical rows the live counter never
+sees**. It also runs against a DB snapshot, which matters because ptone has said the beta
+exercise may restore from one.
+
+#### Load-bearing constraints
+
+- **READ-ONLY, and enforced, not merely intended.** No writes, no repair, no "while we are here"
+  backfill. A reporting job that mutates is how a diagnostic becomes an incident. This should be
+  asserted by a test that runs the report against a store and diffs row counts and checksums.
+- **It must not import the live counter.** If it shares state with `DivergenceMetrics` it inherits
+  every property we just rejected. Separate code path, separate test.
+- **Reuse the *production* key derivation functions, never a reimplementation.** A report that
+  computes keys its own way measures the report, not the system. This is the same principle as the
+  golden vectors being a security control.
+- **Do not normalise on the comparison path.** A key that round-trips differently is a
+  *disagreement to report*, not something to repair before counting. Normalising here would hide
+  exactly the DEF-29-shaped rows the report exists to find.
+- **Examples must carry IDs and keys, never message content.** The report will be pasted into
+  Discord.
+- **`unresolvable` is a separate bucket from `disagree`.** Collapsing them lets a population of
+  un-keyable rows read as ordinary mismatch noise; they are the rows that have no ACL at all and
+  they need their own number.
+
+#### What this does NOT decide
+
+The **threshold**. This design produces a trustworthy number; it does not say what number permits
+the flip. That is ptone's call and it should be made *after* the first report is in hand, not
+guessed now — a threshold chosen before seeing the distribution is a number invented to be met.
+Flagging it as an open question rather than quietly assuming zero, because the historical rows
+(DEF-8) will almost certainly produce a non-zero floor that is a known defect rather than a
+surprise.
+
+#### Sequencing
+
+This is **Tranche G's precondition, not Tranche E work.** E stays exactly as ptone scoped it:
+cheap board, labelled. This report is a separate, later, standalone piece with no file overlap
+with E. Recording it now so the cheap-board decision is not silently a decision to have no
+evidence.
