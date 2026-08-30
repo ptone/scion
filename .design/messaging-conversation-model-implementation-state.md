@@ -21048,3 +21048,32 @@ it manufactures a false block.
 
 **Parked.** Awaiting def3750 (DEF-57 numstat + four deliverables) and ptone (DEF-50/37/56 compare
 URL, Tranche E divergence-board decision, `check-authz-reachability.sh` deletion, contrib-repo PAT).
+
+### 5eu. Sweep 00:13 — no movement, heartbeat anchors refreshed again (2026-08-30)
+
+**Sweep result: nothing actionable.**
+- `upstream/main` still `1a2c1b07d`. Main has not moved since #1409, so no rebases dispatched.
+- `ca-msg-def3750` phase `running`, activity `executing` — on DEF-57. No new branch on origin yet,
+  which is what "executing" should look like this soon after dispatch. Not nudged; a nudge before
+  the estimate is meddling, and ptone's reporting discipline forbids the FYI it would generate.
+- `ca-msg-fmt1409b` still phase `created`, still held as evidence. Not retired.
+- `origin/scion/ca-msg-arch` = `2e20a9a2b`, matches local.
+
+**Heartbeat rotated again, v13 → v13b** (`b5c92e84-f376-487e-904a-ddb0d8bdcfa3`; v13
+`7f2dc959-…` deleted). Three anchors were stale *within one firing* of being written:
+
+1. Header still read `HEARTBEAT v12` — I edited the body when rotating and never the title.
+2. `Entries run to 5er` — actually 5et.
+3. The `ca-msg-def3750` line still described it as working DEF-37/50/56 with a rebase pending.
+   It is on DEF-57 now, on a separate branch, and the 37/50/56 branch is finished and parked in
+   a compare URL.
+
+The lesson is narrower than rule 503 and worth separating from it: **the anchors most likely to be
+stale are the ones that were true when you wrote them.** v12→v13 was itself a staleness fix, and I
+introduced three new stale lines in the act of making it, because I edited the two lines I was
+thinking about and left the rest. A refresh has to re-read every anchor against live state, not
+just patch the one that prompted the refresh. Cheapest enforcement: the sweep already queries
+main, the agent list, and the remote — diff those three answers against what the briefing claims
+before doing anything else with them.
+
+**Re-parked.** Blockers unchanged from 5et.
