@@ -22456,3 +22456,117 @@ agent holds it.
 
 If e1a's test contradicts the inferred empty-result chain, the correct move is a **fresh**
 investigator briefed with this entry, not a resurrection.
+
+---
+
+### 5ft — Tranche E (B) pushed and under review; inv1's exit interview yields three defects
+
+#### PR (B) — divergence board, pushed
+
+`ca-msg-e1b2` reported complete at 02:14:44Z. Branch `scion/ca-msg-e1b2` @ `99b3d1b`, confirmed on
+remote by `git ls-remote`.
+
+**Numstat re-run by me against `upstream/main` (three-dot), not the developer's `origin/main`** —
+origin lags, so its merge-base is older and its numbers answer a different question. Mine matched
+its report exactly:
+
+```
+103  0  pkg/hub/admin_messaging_divergence.go
+175  0  pkg/hub/admin_messaging_divergence_test.go
+  1  0  pkg/hub/route_classification_test.go
+  5  0  pkg/hub/route_metadata.go
+  1  0  pkg/hub/server.go
+                              deleted lines: 0
+```
+
+Zero deletions. This is the gate I kept for myself under 5fp, and it is the one that serves ptone's
+standing "do not revert other work on main" directive.
+
+`ca-msg-rev-e1b2` (code-reviewer) dispatched for the diff **content**. I did not read it. Review
+priorities, in order: (1) the five caveats must be machine-readable fields asserted **by name** —
+a test that checks "some caveats exist" is not enforcement; (2) **the `routePermissionClassifications`
+row** — a permission-table row added to satisfy a coverage test is exactly where an over-permissive
+classification hides inside a one-line diff that reads as boilerplate; (3) read-only enforced in the
+handler, and no lock taken on the counter (a lock there would sit on the write path of every
+message that logs a divergence); (4) no out-of-bounds edits to `divergence.go` or the three sites;
+(5) no message content in the response. Told it to say "checked, nothing found" per item, so I can
+distinguish clean from unexamined.
+
+#### `ca-msg-inv1` exit interview — three findings, none of which any brief asked for
+
+The question is "what bothered you that you did not report." It has now produced DEF-53/54/55, the
+`handleMessages`/`handleAgentMessages` asymmetry, and these.
+
+**DEF-61 — `filter.AgentID` stays raw after resolution. A trap laid for whoever fixes DEF-59.**
+`handlers_messages.go:57` sets `filter.AgentID = agentID` from raw input. The Phase 8 block at
+:70-78 resolves the agent and uses `resolvedAgent.ID` for the *conversation* lookup — but never
+updates `filter.AgentID`. The store still compares the raw string at
+`entadapter/message_store.go:310`. **Adding slug resolution to the lookup block does not fix the
+query.** The two are independent, and the natural fix touches only one.
+
+`handleAgentMessages:270-271` already carries an R-1 comment warning of exactly this
+("Use agent.ID (UUID) not agentID (raw handler param, may be a slug)"). Someone understood the trap
+in one handler and did not carry it across. This goes into the fix brief as a named hazard.
+
+It also **strengthens 59a**: it is precisely the mechanism by which a slug reaches a UUID column.
+
+**Rule 545.** When a defect has two independent causes on the same request path, fixing the one the
+comment talks about produces a change that looks correct, tests as correct in the resolver, and
+still returns the wrong answer.
+
+**DEF-62 — same filter struct, two failure modes for the same class of bad input.**
+`message_store.go:303` runs `filter.ProjectID` through `parseUUID()` — a slug hard-errors.
+`:310` compares `filter.AgentID` raw — a slug silently returns nothing.
+
+inv1 filed this as a debuggability annoyance. It is worth more than that: **it is precedent in the
+same file for the cheapest correct fix to 59a.** Make the agent filter reject a non-UUID the way
+the project filter already does, and 59a converts from silent-empty to a loud error — matching
+`handleAgentMessages`, and requiring **none** of the project-scoping decision that has 59a stuck.
+
+That reframes the design. The scoping question ("how do we resolve a slug with no project in
+scope?") was the wrong question to be stuck on. The right first move is to stop lying about the
+result; whether to *support* slugs is a separate, later, optional decision that needs `--project`.
+
+**Rule 546.** When a design question stalls, check whether the honest failure is available. Making
+a broken path fail loudly is almost always cheaper than making it work, and it is a prerequisite
+for making it work safely.
+
+**DEF-63 — the divergence metric may be unable to distinguish a fix from a regression. POSSIBLE
+TRANCHE G BLOCKER. Under investigation, not yet filed as fact.**
+
+`handleMessages` scopes by `RecipientID` — messages *to* the caller, directional.
+`handleAgentMessages` non-manager path scopes by `ParticipantID` — sent **and** received.
+
+If the conversation-model read path returns both sides of a DM where the legacy `RecipientID`
+filter returned one, then legacy returns 3 and conversation returns 6, and
+`CheckConversationConsistency` records a **mismatch** — while nothing is broken. The conversation
+model is right and legacy was partial.
+
+The metric then cannot separate "migration bug" from "we fixed something," and both resolutions are
+bad: block the read-switch on a number that will never reach zero, or decide mismatches are benign
+and quiet the check until it stops catching the real defects it exists for.
+
+Extended inv1 to establish the factual half only: does the conversation path actually return a
+different set, in which direction, and — the question that may dissolve it — **do `ConversationID`
+and `RecipientID` compose when both are set on the same `MessageFilter`?** The Phase 8 block adds
+`ConversationID` to a filter that already carries `RecipientID`. If those AND, the asymmetry is
+neutralised and DEF-63 is a non-issue. Told it "undetermined plus the experiment that would settle
+it" is an acceptable answer.
+
+**Rule 547.** A correctness metric that cannot distinguish an improvement from a regression is not
+merely imprecise — it is an instrument that will be tuned until it is silent, because every
+explanation for its noise is locally reasonable.
+
+#### Process note
+
+I extended inv1 three times after telling it twice it was done. I named that to it rather than
+dressing each extension as a small addendum. The alternative — briefing a fresh agent onto its own
+hunch cold — costs more and loses the notes that produced the hunch. This is continuation within a
+phase, not repurposing across phases, which is the thing ptone warned produces context rot.
+
+Also recorded against myself: at 02:13Z I wrote "ca-msg-inv1 retired" into 5fs **before running the
+delete**. The delete had not happened; the exit interview had not happened either. Caught it on the
+next sweep. Added to the heartbeat: *execute the delete, do not write "retired" before running it.*
+
+**Rule 548.** Writing an action into the record before performing it converts the record from
+evidence into intention. The log is only worth reading if it lags reality rather than leading it.
