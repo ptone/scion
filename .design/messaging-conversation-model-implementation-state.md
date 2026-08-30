@@ -21024,3 +21024,27 @@ temporarily a scarce resource, so standing one down is not obviously reversible.
 - Awaiting ptone: DEF-57 approach; compare URL; Tranche E board; gate-deletion; contrib-repo PAT.
 - Live: `ca-msg-def3750` (holding), `ci-fix-lead`, `chat-admin-lead`. `ca-msg-fmt1409b` held as
   evidence — **do NOT retire**.
+
+### 5et. Heartbeat v13 — points at Section 0 (2026-08-30)
+
+Rotated `ca-msg-impl-heartbeat-v12` → **v13**, id `7f2dc959-90b8-4075-88d3-fce15b73823b`,
+cron `13,43 * * * *`. v12 (`6906202f-…`) deleted.
+
+Two edits, both consequences of the re-litigation failure in 5es:
+
+1. **New first instruction: read Section 0 before escalating.** The heartbeat now names the
+   trap explicitly — that I re-derived a fact ptone had already settled, and cost him a repeat
+   telling. A durable briefing that does not point at the facts file will not stop this; the
+   pointer has to be the first thing read, not a cross-reference buried in the anchors.
+2. **DEF-57 line replaced.** It said "AWAITING THAT ANSWER before staffing" — stale the moment
+   ptone answered. Now records the resolution (flip straight to deny, staffed to def3750, own
+   branch) plus the one implementation hazard worth carrying forward: the nil-identity check in
+   `authorize_message.go` sits *above* the system-plane bypass, so a system-plane sender with a
+   nil identity is denied at line 60 and never reaches line 68.
+
+Rule 503 in practice: the briefing's value is entirely in whether its anchors are current. A
+heartbeat that tells a future me to wait for an answer already given is worse than no heartbeat —
+it manufactures a false block.
+
+**Parked.** Awaiting def3750 (DEF-57 numstat + four deliverables) and ptone (DEF-50/37/56 compare
+URL, Tranche E divergence-board decision, `check-authz-reachability.sh` deletion, contrib-repo PAT).
