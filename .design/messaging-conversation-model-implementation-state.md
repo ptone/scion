@@ -22009,3 +22009,57 @@ unstaffed, no code has been written, and the Tranche E technical content in 5fg/
 read-switch sites, the strict DM-key parse, the R-9 `IncFallback` discipline, and the
 three-writers/fails-open finding on `DivergenceMetrics` — was derived from the source and stands.
 **Only the provisioning narrative is void.**
+
+---
+
+### 5fn — Tranche E staffed; two more of my own process errors found in the skill (2026-08-30 ~01:56Z)
+
+ptone lifted the hold: *"please start tranche E"*. Both agents came up **`Phase: running`
+immediately**, first attempt — the cleanest possible confirmation of 5fm.
+
+| agent | PR | scope |
+|---|---|---|
+| `ca-msg-e1a` | (A) | `pkg/hub/handlers_read_switch_test.go`, test-only |
+| `ca-msg-e1b2` | (B) | `admin_messaging_divergence.go` + test + one route line |
+
+**I re-read `scion-agent-manage` before dispatching, as promised, and it cost me two more
+admissions rather than none.**
+
+1. **The skill never documents `scion create` at all.** Every example is `scion start`. `create`
+   was not something I misread out of the skill — it was something I reached for on my own and
+   never checked. That is worse than misreading a document, and it is the honest version.
+
+2. **"Write the brief to a shared scratchpad file and pass the filepath — do not inline a long
+   brief into the creation command."** I had been inlining 3–4KB briefs into the start command
+   every time. Now written to `/scion-volumes/scratchpad/briefs/ca-msg-e1a.md` and
+   `ca-msg-e1b2.md`, with the skill's own structure: Task / Context / Boundaries / Deliverable /
+   Reporting.
+
+The skill also specifies that briefs name **who to ask directly** rather than routing decisions
+through an intermediary. Both briefs now say: report to `ca-msg-arch`, ask it when blocked, do not
+route through anyone else.
+
+**Rule 533.** Re-reading a reference after an error is not a penance, it is a search — and it
+should be expected to find *more* than the one thing you went in for. If it finds exactly the
+error you already knew about, you skimmed it looking for absolution instead of reading it.
+
+**Brief content that changed on re-derivation, not just reformatting.** The (B) brief now makes
+the counter's unreliability the load-bearing requirement rather than a caveat: the response must
+carry, **as machine-readable fields and not as comments**, that the numbers are per-replica and
+since-boot, that `mismatches` is a union of routing disagreement and prior-message inconsistency,
+that `CheckConversationConsistency` **fails open** so the count under-reports by construction, and
+an explicit statement that **this board is not the Tranche G go/no-go input** — pointing at the
+5ff offline report instead. Read-only-ness must be enforced by a test, not by intent.
+
+Without that, the cheap board ships looking authoritative, and the first person to read a low
+mismatch count as "no divergence" would be reading a number that cannot mean that. A cheap
+instrument is only cheap if it is honest about its own resolution.
+
+**`ca-msg-def3750` released**, not repurposed — provisioning works, so ptone's context-rot
+guidance applies again with full force and the earlier justification for reusing it has
+evaporated. Exit interview sent with the three standing questions, including *"where was I wrong
+in how I directed you"*; it names my own known errors (three demands to transcribe a diff instead
+of reading a push; the commit-message reframe after ptone corrected my security read) so the
+question is not rhetorical. Will not retire it until it answers.
+
+`ca-d-test` left alone — ptone's, his to clear.
