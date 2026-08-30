@@ -24910,3 +24910,65 @@ importance, and it is exactly the proxy an agent's memory defaults to.
 Only *landing links* move to the dedicated thread. Status reports, section boundaries, and
 escalations continue on `1541161053118005308`. This is inference, not instruction — I have asked
 the coordinator to confirm it explicitly rather than let it harden by repetition.
+
+---
+
+## 5hn — Compare-URL protocol, confirmed spec, and a checker (supersedes 5hm's TODO)
+
+Coordinator, 2026-08-30T18:33Z. **Dedicated compare-link thread: `1532864101909528737`.**
+The 5hm TODO is now filled.
+
+### The spec, verbatim in effect
+
+1. **Markdown link, never a bare URL:** `[<PR title>](<compare url>)`
+2. **URL form:**
+   `https://github.com/<upstream-owner>/<repo>/compare/main...<fork-owner>:<repo>:<branch>?quick_pull=1&title=<encoded>&body=<encoded>`
+   — `quick_pull=1`, **not** `expand=1`. Both args URL-encoded (`urllib.parse.quote`).
+3. **The link and nothing else.** No prose, no trailer, no label, no acknowledgment. Every time.
+4. Status / escalation / discussion stays on `1541161053118005308`. **Only the landing link moves.**
+   (My 5hm inference was correct, and is now confirmed rather than assumed.)
+5. **I open nothing.** ptone clicks through under his own GitHub session.
+
+### Scale of the miss
+
+I did not get the destination wrong. I got **four of the five rules wrong**: wrong thread, bare
+URL instead of a markdown link, `expand=1` instead of `quick_pull=1`, and a prose trailer
+alongside the link. My 5hm entry framed this as a single missing field in an otherwise sound
+protocol. That framing was self-flattering and false — what I held was a partial reconstruction
+that happened to produce a *clickable* artifact, and clickability is not conformance.
+
+**Rule 660: an output that works is not evidence that the procedure was followed.** The Phase 4
+link would have opened a correctly pre-filled PR form. Every one of the four violations was
+invisible from the result, which is exactly why six compactions never surfaced them.
+
+### Why recording the spec is not the fix
+
+The coordinator's own words: this protocol *"has been mis-followed and corrected multiple times
+this session (bare URLs, missing quick_pull args, wrong thread, extra prose alongside the link —
+including by me once) — worth double-checking your own message against this spec before sending
+rather than trusting memory, even after recording it."*
+
+A protocol that a well-intentioned agent — including the agent that *owns* it — gets wrong
+repeatedly is not a memory problem, and writing it down a fifth time does not fix it. So it is now
+executable: **`/scion-volumes/scratchpad/projects/ca-msg-arch/compare-link.py`**. It builds the
+message and refuses to emit anything that violates rules 1–3, plus the 2000-rune server cap.
+
+Validated in both directions before being trusted: fed the exact message I sent for Phase 4, it
+reports all four real violations; fed a conforming message, it emits it. **A checker that has
+never rejected anything is not known to check.**
+
+**Rule 661: when an instruction has been mis-followed by several independent, competent parties,
+the defect is in the instruction's format, not in the followers.** Move it from prose to a gate.
+Prose is checked by whoever remembers to check it; a gate is checked by everyone, always, without
+intending to.
+
+### Phase 4 specifically: not re-sending
+
+ptone said *"i'll take it here this time."* He accepted the link where it landed. `expand=1` and
+`quick_pull=1` both pre-fill the form, so the artifact he holds is functional. Re-sending a
+conforming copy to `1532864101909528737` would put **two landing links for one branch** in front
+of him and create a question about which to click. Correcting the record is worth less than the
+ambiguity costs. The spec applies from the next landing link forward.
+
+**Every future landing link goes through `compare-link.py`. Do not hand-assemble the message,
+including when it seems obvious, and including when memory feels certain.**
