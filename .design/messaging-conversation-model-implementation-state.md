@@ -21427,3 +21427,45 @@ rather than a restatement of a step already completed.
 **def3750's line rewritten to WORK DONE and held rather than retired.** Recording the reason
 again because it cuts against the default: retirement assumes replacement is cheap, and tonight it
 is not. It has context on both open PRs, and the cost of keeping it parked is zero.
+
+### 5fe. #1410 and #1411 merged — section closed (2026-08-30)
+
+ptone squash-merged both. **`upstream/main` = `f1f86d3e0`.**
+
+**Verified by content, not ancestry** (squash-merge blinds `--is-ancestor` and `git cherry`):
+`handlers_broker_inbound.go` has `senderIdentity = broker` and **zero** occurrences of "known gap
+for follow-up"; `UnmappedExternalSenderDenied` is present; `hack/checksecuritymarkergates/main.go`
+carries the `callerRule` struct and the `isDMParticipant` rule.
+
+**The cross-PR interaction, which nothing else would have caught.** #1410 and #1411 were both cut
+from `1a2c1b07d`, so **#1411's CI ran before #1410's gate existed** — the new caller-side rules
+never saw that change, and #1410's CI never saw #1411's. Both were green; the *pair* was never
+tested. Ran the gate against merged main myself: passes, exit 0.
+
+Generalising, because this is structural rather than a one-off: **two PRs cut from the same parent
+can each be green while the merged result is untested, and the risk is highest exactly when one of
+them adds a gate.** GitHub's required-checks model does not close this unless branches must be
+up-to-date before merging. Cheap mitigation for us: after any merge that lands a *gate*, run that
+gate against merged main once. Took me ten seconds.
+
+**A near-miss worth recording, because it would have been my fourth false escalation tonight.** My
+first wiring check grepped for `checksecuritymarkergates` in the Makefile and workflows and
+returned **nothing** — the exact signature of DEF-56, an unwired gate. I very nearly reported it.
+The grep was wrong: CI invokes the *wrapper*, `hack/check-security-marker-gates.sh`
+(`.github/workflows/ci.yml:113`, `Makefile:186` under `ci`). The gate is properly wired.
+
+Rule 490 exists for this and I only just applied it in time. Sharpening it into something I can
+actually execute: **a zero-result grep is a claim about my query before it is a claim about the
+codebase.** Before treating absence as evidence, re-run the search for something I am *certain*
+exists — here, searching the wrapper's name instead of the directory's would have returned six
+hits immediately. Absence of evidence is only evidence of absence once the instrument is
+calibrated.
+
+**Reported the section closed** and made the Tranche E divergence board the single ask, restating
+the recommendation (cheap board, G evidence separate) so it can be answered yes or no. That is the
+one decision gating the next block of work; DEF-58, the `check-authz-reachability.sh` deletion and
+the contrib-repo PAT remain open but block nothing.
+
+**Heartbeat v16** (`02c48e92-e488-46b3-8627-f08fa4fba131`); v15 deleted. Main anchor moved to
+`f1f86d3e0`, the merged-PR list extended, and the awaiting-ptone section rewritten so the Tranche E
+board is explicitly marked as **the blocking decision** rather than one bullet among four.
