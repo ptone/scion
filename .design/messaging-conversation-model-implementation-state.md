@@ -27,6 +27,13 @@
 - **F-B. `/api/v1/broker/inbound` is not agent-reachable.** It requires broker HMAC; broker
   identity is set only by the HMAC middleware and an agent token does not produce one.
 - **F-C. `cla/google` is an expected FAILURE on agent-authored branches.** Never a blocker.
+- **F-D. The broker inbound path's partial checks are NOT a security surface.** They are
+  misleading code — tech debt. The brokers filter unregistered senders **client-side**
+  (`discord/broker.go:1312`, `telegram/broker_v2.go:1963`), so no unlinked sender reaches the hub,
+  and no broker emits a system-plane sender. The in-code comments claiming "system-plane (D8)" and
+  "known gap for follow-up" describe **behaviour that does not occur**. They have already cost two
+  agents a full investigation each. **Do not open a third. If you are reading those comments and
+  reaching for a security finding, stop.** *(Settled by ptone 2026-08-30.)*
 
 **Why this section exists.** I had F-A's *supporting reasoning* recorded — that the non-`user:`
 branches are HMAC-trusted infrastructure by design — and had even written *"recorded so the next
@@ -21169,3 +21176,46 @@ search.
 Also worth separating: I was right that a comment describing a branch's population is a checkable
 claim. I then made the same class of error I was criticising — I wrote a replacement description
 of that population without checking it either.
+
+### 5ex. DEF-57 rescoped from security fix to cleanup (2026-08-30)
+
+ptone: *"So what this shows is misleading code, by putting partial checks in the broker path that
+are not relevant, this is just tech-debt that needs cleanup, not extra security strengthening - it
+has twice distracted agents on this workstream."*
+
+Correct, and it is the frame I kept failing to reach on my own. Recorded as **F-D** in Section 0.
+
+**The distraction vector was the comments, literally.** `handlers_broker_inbound.go` labels its
+else-branch "System/infrastructure senders … are system-plane messages (D8)" and "Agent-to-agent
+via broker: documented as a known gap for follow-up". Neither describes anything that occurs.
+def3750 chased the first and built a system-plane classifier for a population that cannot arrive;
+I chased the second and escalated an authz hole that the brokers already close client-side. Two
+agents, two full investigations, nothing at the bottom of either.
+
+**Rescoped deliverable.** Code change stands — a partial check that authorizes `user:` senders and
+waves the rest through is precisely what *reads* as a gap, so making it total is the cleanup. What
+changed is everything around it: test surface cut (def3750's +189 lines reduced to one case plus
+the existing agent-denied test), all "defense in depth" commentary dropped, the two false comments
+replaced with a plain description, and the commit reframed as `refactor` rather than a fix. DEF-57
+struck as a security defect and re-filed as cleanup so it stops being counted as a finding.
+
+**I withdrew my own Role=admin and non-admin-coverage questions.** Both were reasonable under a
+security framing and are not worth the churn under a cleanup framing. Kept only the DM-ownership
+check on the diff, which is a genuine correctness risk independent of framing.
+
+**The lesson, and it is not the one I logged in 5ew.** In 5ew I concluded my failure was *scope of
+search* — that I stopped at the edge of `pkg/hub`. True but shallow. The deeper failure is that I
+**took the code's comments as evidence about the world.** "Known gap for follow-up" is an
+assertion by a past author, with unknown basis, that I treated as a finding needing escalation
+rather than as a claim needing verification. Same for "system-plane (D8)". I have a rule that a
+comment saying "known gap" is not a tracked defect (492) — I applied it as *file a ticket* when
+the right application was *check whether the gap exists*.
+
+And the compounding effect is worth naming: **wrong comments do not just mislead once.** They sit
+there generating investigations indefinitely, one per agent who reads them carefully. The two
+comments cost more engineering time than every real defect in Tranche D. Deleting them is the
+highest-value line in this change, which is exactly backwards from how I scoped the work.
+
+**Still holding def3750** on the verbatim handler diff — specifically that
+`req.Message.SenderID = senderUser.ID` survives on the `user:` path, since the DM ownership check
+below reads that cache and a dropped assignment breaks DMs silently.
