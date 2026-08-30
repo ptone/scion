@@ -21077,3 +21077,50 @@ main, the agent list, and the remote — diff those three answers against what t
 before doing anything else with them.
 
 **Re-parked.** Blockers unchanged from 5et.
+
+### 5ev. DEF-57 review — cut back the implementation, found the real blast radius (2026-08-30)
+
+def3750 reported the flip ready (31/27 handler, 134/4 test). Reviewed before allowing a push.
+Two of its three moves were right; the third was a gate change and I declined it.
+
+**KEPT.** Broker identity as the non-nil `Identity`, denial via the `authorizeAgentMessage` type
+switch default (`Type()=="broker"` matches no case). That is the correct mechanism.
+
+**DECLINED — the system-plane classifier.** def3750 derived `isSystemPlane` from
+`req.Message.Sender` matching `scheduler`/`system`/`hub-internal`. Two independent reasons:
+
+1. *It matches nothing.* I enumerated every `Sender` value the five broker implementations can
+   emit: `discord:<username>` or `user:<email>` (broker.go:1304-1309); `telegram:<username>` /
+   `telegram:unknown` or `user:<email>` (telegram.go:674-689, broker_v2.go:2530); slack, teams and
+   refbroker construct no inbound sender of their own. No broker emits a bare `system`. The two
+   `Sender:"system"` sites in-tree (handlers_agent_messaging.go:1777, messagebroker.go:824) are
+   in-process constructions that never make an HTTP round trip through the endpoint.
+2. *It activates a dormant bypass, keyed on a body field.* On main `isSystemPlane` is a hardcoded
+   `false` at both call sites (handlers_agents_core.go:2598, handlers_projects_core.go:2434).
+   **Nothing in the codebase has ever passed `true`; the D8 bypass at authorize_message.go:68 is
+   dead code.** The change would have made broker inbound the first caller to fire it, on a
+   discriminator the caller supplies. Brief item 12: not the changing team's call.
+
+**DECLINED — the 4 re-pointed tests.** def3750 changed 4 existing tests from `agent:` senders to
+`system` so they would stay green. Re-pointing a fixture onto a value that evades the gate is the
+soft form of weakening the gate, and here it is *what manufactured the need for the classifier*.
+Told to use a resolving `user:` sender or keep the agent sender and assert the new 403.
+
+**THE ACTUAL FINDING, which is bigger than DEF-57 was.** The else-branch this change removes is
+commented as system-plane. It is not. Its live population is **unlinked Discord and Telegram
+users — humans with no Scion account — reaching agents with no authorization check at all.**
+DEF-57 was filed as a dead-code tidy-up and downgraded on reachability. It is in fact an open
+authz hole on the most externally-exposed surface we have. Escalated to ptone with one decision:
+flat 403, or a distinct reason code so brokers can render "link your Scion account". Cheap now,
+awkward later.
+
+Two lessons worth keeping apart. First: **a comment describing a branch's population is a claim,
+and claims about populations are checkable.** Nobody had enumerated what actually lands in that
+else. The word "system-plane" in the comment is what kept it downgraded — including by me.
+Second, and the one that stings: **I downgraded DEF-57 on reachability and was right about the
+threat model, but reachability analysis answers "can an attacker get here", not "who is already
+here". I never asked the second question.** The endpoint is HMAC-gated and not agent-reachable,
+all true — and entirely beside the point, because the traffic already flowing through it was
+unauthorized.
+
+**Nothing pushed.** Awaiting def3750's cut-back numstat and ptone's 403 decision.
