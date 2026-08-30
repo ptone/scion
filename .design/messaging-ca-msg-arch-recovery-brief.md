@@ -120,3 +120,72 @@ investigating something else** — never verified exhaustive. Tranche G precondi
   `/workspace`; use `git worktree` in `/tmp`.
 - Rule 415: I may retire `ca-msg-*` agents I dispatched. I may NOT retire `ci-fix-lead`,
   `chat-admin-lead`, `coordinator`, or ptone's `ca-d-test` (stalled BY DESIGN — leave it alone).
+
+---
+
+## RESOLVED 2026-08-30 12:11Z — git push outage (kept for its lessons, NOT an active problem)
+
+**DO NOT ACT ON THIS SECTION AS A LIVE INCIDENT.** Pushes work. `0da2811ba` is on
+`origin/scion/ca-msg-arch`, ls-remote verified. Nothing of mine is unpushed. History follows.
+
+```
+remote: Invalid username or token. Password authentication is not supported for Git operations.
+fatal: Authentication failed for 'https://github.com/ptone/scion.git/'
+```
+
+**Reads work, writes fail.** Confirmed **fleet-wide** by `coordinator`, which found the same failure
+in its own credential config (`GITHUB_TOKEN` used directly as the push password, same token `gh` uses
+for reads). It had already escalated the token failure to ptone twice before it began showing up in
+`git push`. **NOT MINE TO FIX. DO NOT INVESTIGATE MY OWN CREDENTIAL** — coordinator said so
+explicitly. It is folding this into its next ptone update.
+
+**Resolution:** ptone rotated the token at ~11:28Z. I was omitted from coordinator's hand-built
+relay list, so I kept retrying the DEAD token for ~40min and reported it as evidence the outage was
+narrower than fleet-wide. It wasn't. **If a push ever fails again, FIRST re-read the token** —
+`export GITHUB_TOKEN=$(cat /scion-volumes/scratchpad/transition-github-token.txt)` as the literal
+first line of the push command (it does not persist across commands) — before theorising.
+
+### State at the time of the outage
+
+- ~~Everything through `38282f64`~~ — superseded: **`0da2811ba` is pushed and verified.**
+- ~~One unpushed local commit `0da2811ba`~~ — **PUSHED 12:11Z.** Originally: — this recovery brief, docs only. **Its content is not
+  at risk**: this scratchpad copy is the authoritative one and outlives the container. Push
+  `0da2811ba` when auth is restored; if it is gone, re-copy this file to
+  `/workspace/.design/messaging-ca-msg-arch-recovery-brief.md` and commit.
+- Both Tranche E branches were pushed and verified BEFORE their authors were retired —
+  `scion/ca-msg-e1a` @ `5f95371d1`, `scion/ca-msg-e1b2` @ `15db406`. **Nothing is stranded.**
+
+### Possible cause — UNCONFIRMED, and the seam matters
+
+`coordinator`'s hypothesis, explicitly marked by it as plausible-but-unverified: I raised a
+**cleartext PAT on the contrib-repo shared mount** as a security concern; `coordinator` recommended
+**rotating** it hours ago; if ptone acted on that, this outage is the direct and foreseeable side
+effect. **Nobody has confirmed that is what happened.** Do not repeat it as established.
+
+**Rule 614.** A credential rotation is an availability event, not only a security one. If you raise a
+secret-exposure finding, the remediation you are implicitly asking for will break every consumer of
+that secret — so name the consumers and the sequencing *in the same message as the finding*. I
+flagged the exposure and said nothing about what depended on it.
+
+**Rule 615.** When the fix for a problem you reported causes an outage, that is still the right
+trade — a leaked credential is worse than a few hours of no pushes. Record it as a **sequencing**
+failure, not as a reason to hesitate next time. The lesson is "warn the dependents," never "raise it
+more quietly."
+
+**Rule 616.** Duplicate durable artifacts across independent failure domains *before* you need them.
+This brief survived a push outage only because it was written to a shared volume in the same action
+that committed it to git — not by foresight about tokens, just by not trusting one channel.
+
+**Rule 617.** When your observation contradicts the shared model, check whether you are missing an
+update everyone else received before concluding the model is wrong. I had the rarer *state*, not the
+better *evidence*. A lone dissenting data point is more often a stale observer than a broken
+consensus — and I built three theories on a fact I simply did not have, nearly persuading coordinator
+to retract a correct escalation.
+
+**Rule 618.** A fleet-wide announcement sent to a hand-assembled recipient list will miss someone,
+and the one it misses becomes the fleet's source of phantom incident reports. Enumerate recipients
+from `scion list` at send time. Coordinator has adopted this.
+
+**Rule 619.** When an incident is resolved, go back and mark the incident note resolved *at the point
+where a future reader enters it* — the heading, not a footnote. A stale ACTIVE-INCIDENT banner in a
+recovery brief is worse than no note at all, because it will be believed.
