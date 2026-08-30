@@ -21394,3 +21394,36 @@ escalation. **The failure was never the imagination — it was not spending the 
 
 **def3750 held, not retired** (rule 506). Provisioning has been unreliable tonight and it has two
 branches sitting in compare URLs; if ptone returns changes on either, it holds the context.
+
+### 5fd. Both PRs open and green — reported ready to merge (2026-08-30)
+
+ptone opened both compare URLs while I was parked:
+
+- **PR #1410** — DEF-50/37/56 AST authz gates. Head `2855ff843`, +424/-28, one file.
+- **PR #1411** — DEF-57 broker inbound cleanup. Head `5ca20c5c2`, +246/-59, two files.
+
+Both `MERGEABLE`, both based on current main (`1a2c1b07d`, unmoved), no rebase needed. Every check
+green on both — Build & Test, full test suite, golangci-lint, shellcheck, scan-pr, check-changes.
+Only red is `cla/google`, the expected agent-branch failure (rule 104). `mergeStateStatus` reads
+`UNSTABLE` on both, which is that CLA failure and nothing else.
+
+**Re-derived the diff sizes from my own numstats rather than reading them off the PR**, and they
+reconcile exactly: #1411's +246/-59 is 25+221 and 27+32 from the two files I measured directly.
+Cheap check, and it is the one that would catch a branch having moved between my review and the
+PR being opened.
+
+**Reported ready to merge** per ptone's standing instruction. Kept the message to the merge
+decision plus the three items still open with him (Tranche E board, `check-authz-reachability.sh`
+deletion, contrib-repo PAT), and asked for a nod on **DEF-58** rather than staffing it — it is a
+gate, so brief item 12 puts it outside my authority even though I wrote the probe myself.
+
+**Heartbeat v14 → v15** (`45458b95` deleted). Anchors refreshed against the sweep results as
+usual; the meaningful change is that the awaiting-ptone section no longer says "compare URL" for
+either item. Those two lines had been true for less than half an hour. The entry is now the PR
+numbers and heads, with the standing instruction that if main moves before they land I dispatch
+rebases with `--force-with-lease` — which is the thing a future me would actually need to act on,
+rather than a restatement of a step already completed.
+
+**def3750's line rewritten to WORK DONE and held rather than retired.** Recording the reason
+again because it cuts against the default: retirement assumes replacement is cheap, and tonight it
+is not. It has context on both open PRs, and the cost of keeping it parked is zero.
