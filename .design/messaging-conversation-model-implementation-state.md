@@ -25907,3 +25907,47 @@ writing safe ones, and safe ones would have found neither defect.
 **Rule 701** — Scale the gate to the change. A comment-only edit does not need
 the full suite; requiring it teaches the author that the gate list is theatre,
 and the next time they skip something it will not be the cheap one.
+
+---
+
+## 5hz — G3 landed; only G2 outstanding
+
+Verified the fix commit `8dafd1c79` in isolation with
+`git diff 7b169cdb1..<head>`: a single character, `threadID=""` →
+`threadID!=""`, nothing else rode along. Checking the *delta of the follow-up
+commit* rather than re-reviewing the branch is the cheap version of rule 694 —
+a trivial fix is exactly when an unrelated change is least likely to be noticed.
+
+`scion/tranche-g` fast-forwarded `41b179c85` → `8dafd1c79`. Verified as a true
+fast-forward first. `ca-msg-g3` retired with `--preserve-branch`.
+
+### Tranche G status
+
+| phase | state | landed at |
+|---|---|---|
+| G1 attribution report | **landed** | `58b08d743` |
+| G4 standing gates | **landed** | `41b179c85` |
+| G3 read-switch fallback removal | **landed** | `8dafd1c79` |
+| G2 B10 flip-to-deny | outstanding — write-deny switch + denial counters + rebase | — |
+
+What G3 shipped: fallback removed and replaced by a typed 409; `Channel: "web"`
+preserved so the flip cannot widen visibility; five labelled bypass counters
+making un-switched traffic measurable on the VM; and a thread request that can no
+longer be answered with DM data.
+
+**Three of those four originated in g3's own hidden-lists**, not in my brief. My
+briefs specified the first one. The instrument I was most sceptical of — a
+free-text list of self-reported limitations, with a diagnosis that was inverted
+twice — produced the majority of the phase's value. Recorded because it argues
+against my instinct to replace such lists with structured checklists: a checklist
+would have collected answers to my questions, and every one of these came from a
+question I did not know to ask.
+
+**Remaining gate before the tranche is deployable:** G2 must add
+`ConversationWriteDenySwitch` (default off), count its denials, and rebase onto
+`8dafd1c79`. Until then the branch cannot be deployed without the deploy itself
+constituting the write-path flip (5hx).
+
+**Rule 702** — When a follow-up commit is trivial, diff the follow-up rather than
+the branch. Triviality is when scope creep travels unexamined, because the
+reviewer has already decided the change is safe before looking at it.
