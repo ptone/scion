@@ -23309,3 +23309,126 @@ short-circuits upstream is invisible to it, and reads as silence rather than as 
 This reinforces that S1/S2/S3 is a **sample I assembled while investigating something else, never
 verified exhaustive** (rule 557). The queued DEF-64-class enumeration must cover every
 `ConversationReadSwitch()` call site *and* every early return upstream of one.
+
+---
+
+### 5ge — `ca-msg-e1b2` exit interview. Five findings, three of them mine to own.
+
+The interview again out-produced the brief. Filing:
+
+**DEF-68 — `divergenceCaveats` is a package-level `var`, not a const, and is runtime-mutable.**
+`divergenceCaveats.NotGoNoGo = ""` compiles, and silently empties that field for every subsequent
+request process-wide. The caveat-presence test cannot catch it: the test runs before any such
+mutation. This is not a cosmetic concern — **the caveat text IS the product** (rule 551). The board
+exists to say "this number is not your go/no-go." A board that has been quietly stripped of that
+sentence is worse than no board, because it looks authoritative. e1b2 matched the existing codebase
+pattern (`defaultMaintenanceMessage`), which was the right default; the reason it does not hold here
+is that no other such var is load-bearing for a *safety claim*. Fix is a function returning a fresh
+struct, one allocation per request, on an admin diagnostic endpoint. Trivially affordable.
+
+**Rule 580.** "I followed the existing pattern" is a good defence only where the new site carries no
+obligation the old sites lacked. A pattern's safety is a property of its *uses*, not of its shape.
+
+**DEF-69 — the caveat test decodes into `map[string]string`, and I proposed the change that breaks
+it.** Works today because every caveat value is a string. Add a boolean alongside the prose — which
+is **exactly what I suggested** — and the unmarshal silently drops the key, so the test fails with
+"caveats missing required key" rather than anything pointing at a type. The next developer chases a
+missing field that is present. One-line fix (`map[string]interface{}`). Note the shape of this: my
+own design suggestion was a live trap laid for whoever implements it, and only the outgoing
+developer's fragility audit surfaced it.
+
+**Rule 581.** When you propose an extension, ask whether the *tests* of the thing you are extending
+can represent it. A test that cannot express the new case does not fail honestly — it fails as a
+different bug.
+
+**DEF-70 — PR (B)'s tests bypass the mux.** They call `srv.handleAdminMessagingDivergence(rr, req)`
+directly. So: a typo in the `server.go` registration path is not caught, and — the part that matters
+— **the `guarded()` wrapper's `RouteHubAdmin` check is not exercised for this endpoint.** e1b2 was
+straight about the epistemic status: it *inferred* that `TestRouteGuardsDenyUnauthorized` and
+`TestHubAdminRoutesRejectScopedAdminUAT` cover its route generically, from the route classification;
+it did not read those test functions. That is an inference about an authorization control on an
+admin endpoint. A path typo fails safe (404). A missing guard fails **open**. Asked e1b2 to close it
+before retirement rather than carry it as an assumption.
+
+**Rule 582.** A handler-level test proves the handler. It says nothing about whether the router
+reaches it, or what wraps it on the way. For anything behind an authz wrapper, the wrapper is part
+of the unit.
+
+**Two more, recorded but not defects of ours:**
+
+- `route_metadata.go` ~946-990: the `RoutePolicy` branch relies **entirely** on handler-level authz,
+  with no guard enforcement — documented and intentional, but it means a policy handler that forgets
+  its own check is silently open. Outside this project. Not active breakage, so it does not break
+  ptone's hold. **Queued for relay, not escalated.**
+- `s.startTime` is read without `s.mu` (matching `handlers_health.go:87`). Technically a race
+  against a restart. Pre-existing, not introduced. Note only.
+
+**OPERATIONAL FINDING — this one explains my own error, and probably others':**
+the full untagged `pkg/hub` suite takes **5-7 minutes**; the `no_sqlite` run of the *same package*
+takes **~8 seconds**. Nothing warns you. A harness with a default 2-minute timeout kills the full
+run, and **the kill presents as a hang.** That is precisely the misreading I made — I saw a duration
+gap between two different test sets and theorised a hang. The trap is built into the ergonomics.
+Relaying to the coordinator: this is fleet-wide, cheap to document, and currently written nowhere.
+
+Also from e1b2: `-parallel N` at package level will flake any test touching the global
+`DivergenceMetrics`; it did not survey which *other* pkg/hub tests share that exposure. And it saw
+**no flakes** across three full runs — while noting three runs cannot surface a low-frequency one.
+That last sentence is the reason I trust the rest of the report.
+
+**Rule 583.** An agent that volunteers the limit of its own evidence has told you how to price
+everything else it said. Weight the report up, not down.
+
+---
+
+### 5gf — PR (A) gate VERIFIED. Both Tranche E PRs are now engineering-complete.
+
+`ca-msg-e1a` at `d160ead19`, foreground, **`-count=1` (uncached throughout)**, verbatim:
+
+```
+ok  	github.com/GoogleCloudPlatform/scion/pkg/hub	341.132s
+ok  	github.com/GoogleCloudPlatform/scion/pkg/hub/auth	12.417s
+ok  	github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp	0.652s
+ok  	github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck	0.004s
+?   	github.com/GoogleCloudPlatform/scion/pkg/hub/permissions	[no test files]
+```
+
+Plus a targeted `-run TestReadSwitch` run: 23 `--- PASS`, zero `--- FAIL`.
+
+**Both PRs are now held on ptone's owner hold ALONE.** No engineering gate remains open on either.
+
+### 5gg — I had the pipefail rule wrong, and the developer corrected it.
+
+I asked e1a whether its run was piped. It was — `2>&1 | tail -8`. It then explained why that does
+not impeach the result: **it asserted on the TEXT, not the exit code.** The `ok` token is emitted by
+the test runner and appears only for a passing package; a failure prints `FAIL`. The pipe cost it a
+reliable exit status it never consulted.
+
+That is correct, and my rule was mis-stated. **The hazard is not piping. The hazard is consulting
+the exit code OF a pipeline.** e1b2 and e1a ran the same pipe shape and reached opposite-quality
+conclusions; the discriminating variable was *which artifact each one read*, not the pipeline.
+
+**Rule 576 is REPLACED (was: "the dangerous pipe is the narrowing pipe"):**
+
+**Rule 576'.** A pipeline destroys the exit status, not the output. Piping is safe when you assert
+on the text and unsafe the moment you assert on `$?`. Ask what artifact the claim rests on before
+asking how the command was shaped. The narrowing habit still matters — but only because it is
+correlated with not reading, not because narrowing is itself the fault.
+
+I have now been wrong twice in one night about the *mechanism* behind this incident (first the hang
+hypothesis, now the pipe framing) while being right that the report needed challenging. Worth
+separating: the instinct to demand the literal output was sound and produced two verified gates and
+a stood-down fleet investigation. My explanations of *why* were the unreliable part.
+
+**Rule 584.** Being right that something needs checking does not make your theory of it right. Keep
+the demand and hold the explanation loosely — they fail independently.
+
+**The output was self-validating and e1a did not claim this.** `./pkg/hub/...` has five packages and
+all five appear inside a `tail -8` window. Had the window truncated a summary line we could not know
+whether the missing package said `ok` or `FAIL`. The count closing exactly is what makes this tail
+window sound rather than merely probably-sound.
+
+**Rule 585.** When output is filtered, check whether the *expected number of records* survived the
+filter. A truncation that removes the one failing line looks exactly like a clean run.
+
+Cross-run: 341.132s (e1a, uncached) vs 344.216s (e1b2). Independent agreement — still only a
+plausibility check on duration, never on verdict.
