@@ -21317,3 +21317,30 @@ quiet peaks and it has produced three defects plus a flaw in def3750's own gate 
 not satisfy `UserIdentity` or `AgentIdentity`. The probe I wrote by hand is the test; it should
 live in the tree rather than in my shell history. Cheap, and it pins the invariant this change now
 rests on.
+
+### 5fb. Sweep 00:43 — nothing moved; heartbeat v14 (2026-08-30)
+
+- `upstream/main` still `1a2c1b07d`. No rebases.
+- `scion/ca-msg-def57` still `61464558e` — the amend is not pushed. def3750 is `executing`, ~12
+  minutes in. **Not nudged.** The rename is one line; what it is almost certainly spending the
+  time on is the exit-interview answer, which is the part with the yield. Nudging now would
+  pressure exactly the deliverable I most want unhurried.
+- `ca-msg-arch` local == remote == `9d32a13bb`. `fmt1409b` still `created`, still held.
+
+**Heartbeat v13 → v14** (`45458b95-d203-4a05-ba73-8e92de8302ce`; v13b `b5c92e84` deleted). Applied
+the 5eu discipline properly this time — rewrote *every* anchor against the live query results
+instead of patching only the line that prompted the rotation. Five were stale after 30 minutes:
+entry pointer (5et → 5fa), def3750's agent line (one branch → two, with the verification state on
+each), the awaiting-ptone DEF-57 line (still described the pre-rescope framing), the open-defects
+DEF-57 entry (still described it as downgraded and unstaffed), and the title version.
+
+That is a 30-minute half-life on a briefing whose whole purpose is surviving a context boundary.
+Worth stating plainly: **on a fast-moving workstream the briefing is not a document, it is a
+cache, and it needs invalidating on every write.** The sweep already fetches main, lists agents
+and reads the remote — the anchors that go stale are precisely the ones those three queries
+answer, so refreshing them is free at sweep time and expensive at any other time.
+
+**Added to the awaiting list rather than dropped:** DEF-57's compare URL is now pending only the
+amend, and I pointed the entry at fact F-D so the next reader gets the cleanup framing before the
+code. Replaced the stale DEF-57 line in open-defects with **DEF-58** (the broker-identity negative
+gate), which is the real residue of this change.
