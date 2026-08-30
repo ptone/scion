@@ -24972,3 +24972,53 @@ ambiguity costs. The spec applies from the next landing link forward.
 
 **Every future landing link goes through `compare-link.py`. Do not hand-assemble the message,
 including when it seems obvious, and including when memory feels certain.**
+
+---
+
+## 5ho — Checker hoisted to shared tooling; self-verifying because nobody reviews it
+
+Coordinator, 18:35Z: agreed on not re-sending Phase 4, and asked for the checker at
+**`/scion-volumes/scratchpad/tools/compare-link.py`** — a shared, discoverable location any agent
+can find — to be referenced from `coordinator-conventions.md` as the standard way to build landing
+links. Done.
+
+### The line that changed the design
+
+> *"I'm not going to review the script's internals myself — you validated it both directions,
+> that's enough for me to trust the artifact exists and works as claimed."*
+
+Reasonable, and I would have said the same. But it changes the artifact's risk profile completely.
+In my project directory this was a personal aid: if it was subtly wrong, I was the only casualty
+and I would notice. Referenced from the conventions doc it becomes **infrastructure that every
+agent trusts and no one inspects** — and my both-directions validation is a claim in a chat
+message, which is the weakest possible place to put a guarantee that others will rely on.
+
+**Rule 662: promoting a tool from personal to shared changes what it must prove.** A private tool
+needs to work; a shared, unreviewed tool needs to demonstrate that it works, on demand, to someone
+who was not present for the original validation.
+
+So the shared copy carries **`--self-test`**, which re-derives the both-directions evidence rather
+than asserting it: six cases — one conforming message that must pass clean, and five violations
+(bare URL, `expand=1`, prose trailer, missing pre-fill args, over-cap) that must each be caught by
+name. Any agent can run it in a second, and must run it after anyone edits the file.
+
+### The self-test is itself proven non-vacuous
+
+I held p4a to mutate/fail/revert/pass and rejected its first attempt as a tautology (5hj). The
+same standard applies to me, and it is worth more here because there is no reviewer at all:
+deleted the `expand=1` predicate from `validate()`, ran `--self-test` → the `expand=1` case
+**FAILED**, exit 1; restored → exit 0. The self-test detects the removal of the check it covers.
+
+**Rule 663: a standard you enforce on the agents you dispatch, and exempt yourself from, is not a
+standard — it is a management style.** The exemption is always available because you know your own
+work is fine, which is precisely the belief the procedure exists to test.
+
+### Also generalised for shared use
+
+`--fork` / `--upstream` / `--repo` overrides, defaulting to `GoogleCloudPlatform` / `ptone` /
+`scion`. Encoding happens inside `build()` so a caller cannot route around it, and the docstring
+carries the full five-rule protocol so the tool is its own documentation — a convention doc that
+points at a file which does not restate the convention decays the moment the pointer rots.
+
+Left the project-dir copy in place at `.design/messaging-compare-link.py`; the canonical one is
+now the `tools/` copy and the coordinator owns the reference to it.
