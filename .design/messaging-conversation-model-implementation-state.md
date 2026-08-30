@@ -25625,3 +25625,70 @@ toward showing too little.
 - **690** — When your own ruling's stated rationale turns out to hold at one
   layer and not the layer you argued, record that. A ruling that survives on a
   different justification than the one you gave is a ruling nobody can audit.
+
+---
+
+## 5hv — G4 reviewed and accepted pending two disclosure additions
+
+Branch `scion/ca-msg-g4` at `cb55f8ea4`. Re-derived numstat: +364/-0 across 9
+files, **zero deletions** in every file.
+
+**Proofs arrived in a follow-up message, not the first report.** My first read
+flagged their absence as the blocking defect; they landed seconds later. Both are
+real and I checked the artifacts, not just the narration:
+
+- **AC-G4-1** — adding `Email()/DisplayName()/Role()` to `brokerIdentityImpl`
+  makes `TestBrokerIdentityImpl_MustNotSatisfyUserIdentity` fail with an explicit
+  DEF-58 violation message. Reverted, passes.
+- **AC-G4-2** — removing one `RecordStep` gives `got 11 steps, want 12`. The test
+  asserts **length and exact order**, so an instrumented step inserted *or*
+  removed fails it. That meets the brief.
+
+**A mistake I made and caught before acting on it.** `brokeridentity.go` showed
++16/-0, so I read the tail of the file and found `GetBrokerIdentityFromContext`
+with a fallback branch that type-asserts the *generic* identity key to
+`BrokerIdentity` — which, in a phase whose entire purpose is preventing broker
+identity from being confused with user identity, looked like a serious new
+confusion path. It is not new. It is pre-existing, present in `tranche-g`, and
+used at ~25 call sites. I had read the end of a file and treated it as the diff.
+The actual 16 lines are a comment block.
+
+**Rule 691: a file tail is not a diff.** When numstat says a file changed, diff
+that file. Reading the neighbourhood and inferring the change will eventually
+manufacture a finding out of code that was already there — and a fabricated
+security finding costs more credibility than a missed one.
+
+**Quality of what landed.** The DEF-58 comment names the failure modes it
+prevents (a zero-value participant deriving a ghost conversation; a sender
+receiving its own broadcast) and names the tests that pin them. The divergence
+caveat cites `divergence.go:312` and states plainly that a clean board means the
+board cannot see the history, not that the history is clean. Both are the
+non-vacuous version.
+
+### Two additions required, both about making blindness visible
+
+- **G4-d** — the path trace covers **one of six** paths (user→agent DM via the
+  project-scoped route). Untraced: agent-scoped route, agent→agent,
+  broker-inbound, group fan-out, managed-agent. Not requiring the other five —
+  real scope, and the branch needs to land. Requiring the boundary be *named* in
+  a comment beside `expectedPathSteps`. A green `TestDEF79_ProductionPathTrace`
+  otherwise reads as "the production path is pinned" when five sixths are not —
+  which is precisely the divergence-board failure mode being fixed one file over.
+- **G4-e** — extending my own G4-c scope to add the 50/25-row sampling windows to
+  the caveat list. g4 correctly noted this was outside the brief; it is the same
+  defect class and nearly free with the struct already open.
+
+Declined to require g4's items 2 and 4: Go cannot express negative interface
+satisfaction at compile time, so runtime reflect in CI is correct as built; and
+reordering code without touching `RecordStep` calls is an inherent limit of any
+announce-yourself instrumentation, not a defect in the work.
+
+**Rules generated:**
+
+- **691** — A file tail is not a diff. (Above.)
+- **692** — A test's coverage boundary must be written down next to the test. An
+  undocumented boundary gets trusted for coverage it does not have, and the
+  larger and greener the test, the more confidently it is misread.
+- **693** — When an agent declines work as out of scope and is right, check
+  whether the scope was wrong. g4's item 5 was correctly outside my brief and
+  should have been inside it; the cost of extending was one field.
