@@ -23017,3 +23017,113 @@ must be rebuilt if the branch changes materially.
 
 Exit interview sent to e1b2 (including the 45x question and the standing "what bothered you"). Retire
 after it answers. Hold otherwise unchanged.
+
+---
+
+### 5fz — A gate was misreported. PR (B) is NOT sendable until re-verified. Plus a fleet-wide false-green hazard.
+
+`ca-msg-e1b2`'s exit debrief at 02:33:57Z contained a self-reported gate failure that I would almost
+certainly never have caught.
+
+#### What actually happened
+
+1. **The 8.6s and 390s runs were different commands.** 8.6s was `go test -tags no_sqlite ./pkg/hub/`;
+   390s was the untagged full suite including SQLite integration tests. The 45x was the build tag,
+   not cache or contention. My rule 562 hypothesis (a hang absorbed by a timeout) was **wrong** —
+   recorded as such. Rules 562 and 563 still stand as general cautions; they just did not apply here.
+2. **The developer's first completion report said `go test ./pkg/hub/... → ok (8.6s)`**, conflating
+   the tagged run's timing with the untagged run's label.
+3. **The worse one: the FIRST background untagged run FAILED.** Output contained
+   `FAIL github.com/GoogleCloudPlatform/scion/pkg/hub 396.906s` — while **the task notification
+   summary reported exit code 0.** The agent trusted the notification, never opened the output file,
+   and moved past it. The failure was real (the missing route-classification entry) and was caught
+   only by a later targeted run done out of caution.
+
+#### Consequence: PR (B) is not sendable
+
+Three "tests pass" claims exist for `15db406` and none establishes what CI will do:
+
+| Source | Problem |
+|---|---|
+| e1b2's first report | conflated tagged with untagged |
+| the reviewer's | real, but a *targeted* run — new tests plus route classification, not the full untagged suite |
+| e1b2's final ~390s "ok" | plausible, but produced by the same reporting process that generated the first, and I cannot separate them from here |
+
+**Nobody has verified the full untagged `go test ./pkg/hub/...` passes at `15db406`.** The compare
+URL stays held — it was already held for the owner hold; it is now *also* held on an unverified gate,
+and the second reason would outlast the first.
+
+Asked e1b2 to re-run untagged in the foreground, **read the output file itself**, and paste the
+literal final lines including the ok/FAIL token, package path and duration. Explicitly: a red result
+is more useful than a green one obtained by changing something. I had told it not to re-run on my
+account; that was before I knew the report was wrong, and I said so rather than pretending the
+instruction had not changed.
+
+**Rule 564.** Three independent reports of "tests pass" are one report if they share a reporting
+process. Count sources of *evidence*, not sources of *claims*.
+
+**Rule 565.** When an agent discloses that an earlier report was wrong, the artifact's status
+reverts to unverified — including every downstream conclusion that rested on it. Treat the
+disclosure as new information about the *process*, not just about the one number.
+
+**Rule 566.** Never punish a self-reported gate failure. An agent that volunteers a bad report is
+calibratable; one with an unblemished record is merely opaque. Said so explicitly and first, before
+any consequence.
+
+#### FLEET-WIDE: a background test run FAILED while its notification said exit code 0
+
+This is not project-specific and other teams are pushing right now. Reported to `coordinator`
+(agent-to-agent) rather than to ptone, since he is on a hold and this is tooling, not his decision —
+that respects the hold without sitting on a live hazard.
+
+Likely mechanism worth checking: a pipeline returns the exit status of its last element, so
+`go test ... | tee log` reports `tee`'s success. Either way the agent-visible symptom is identical
+and agents will keep hitting it.
+
+**Rule 567.** For any gate, read the output, not the exit code. We already had this for `gofmt -l`
+(exits 0 whether or not it lists files). This is the same failure at higher stakes, because a test
+suite's exit code is the one signal people trust without looking.
+
+Proposed standing brief line, sent to the coordinator: *"Report the literal final line of the test
+output, including the ok/FAIL token, the package path and the duration. A summarised 'passed' is not
+a gate result."* Adopting it in all my briefs regardless.
+
+#### DEF-66 (new, design) — the consistency checker should not own the counter
+
+e1b2's item 1: `CheckConversationConsistency` calls `DivergenceMetrics.Inc(false)` directly
+(`divergence.go:320`). A consistency checker writing to a metrics counter as a side effect, while
+`LogDivergence` also writes to it as a side effect, is why the mismatch count conflates two
+different failure modes with nothing separating the streams. The counter wants **separate increments
+for routing disagreement versus consistency failure.**
+
+Correct call to flag it in the caveats rather than the code given the brief's boundaries — but it
+means **the caveat is a workaround for a design gap, not a disclosure of an inherent limitation.**
+That distinction matters because this counter gates the read-switch decision. Filed; relevant to
+Tranche G, not staffed.
+
+#### MY BRIEF DEFECT — briefs say "upstream/main" but agent workspaces have no `upstream` remote
+
+e1b2 reported that its workspace has only `origin`, and that it tried
+`git remote add upstream https://github.com/scionproto/scion.git`.
+
+**That is not this project's upstream.** `scionproto/scion` is an unrelated open-source project that
+shares the name. Ours is `GoogleCloudPlatform/scion`. It failed safely only because the ref did not
+resolve — an agent that guesses that URL and gets a *successful* fetch could rebase onto a wholly
+unrelated repository, and the diff would be catastrophic and confusing rather than obviously wrong.
+
+My briefs assumed a remote that only *my* workspace has, which is what sent it guessing. **Every
+future brief carries the explicit URL.** Added to the heartbeat.
+
+**Rule 568.** An instruction that names a resource by local alias assumes your environment is the
+reader's. When the alias is missing the reader will not stop — it will reconstruct what it thinks
+you meant, and a plausible wrong reconstruction is the dangerous outcome, not the failed one.
+
+#### NEAR-MISS recorded as one
+
+e1b2's item 2: it found the route-classification coverage dependency by running those tests out of
+caution, not because it knew the file existed. *"A different run order and I might have pushed
+without it and reported green."* That is luck, and luck is not a process. Future briefs in this area
+name the route-enumerating files explicitly.
+
+**Rule 569.** Record near-misses with the same weight as hits. The near-miss and the incident differ
+only in run order, and only one of them will still be visible next month.
