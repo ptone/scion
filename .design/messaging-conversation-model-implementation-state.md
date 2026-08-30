@@ -21550,3 +21550,43 @@ This is **Tranche G's precondition, not Tranche E work.** E stays exactly as pto
 cheap board, labelled. This report is a separate, later, standalone piece with no file overlap
 with E. Recording it now so the cheap-board decision is not silently a decision to have no
 evidence.
+
+### 5fg. Tranche E unblocked, but the agent will not boot (2026-08-30)
+
+ptone: *"go with the cheap board for E"*. Unblocked.
+
+**Re-derived E against current main before staffing** (rule 480 — 5ek assessed it at `fa7ae1914`
+and main has moved three times since, now `f1f86d3e0`). Scope holds, with one expansion:
+
+- `admin_messaging_divergence.go`, `admin_messaging_divergence_test.go`,
+  `handlers_read_switch_test.go` — all three still **absent** on main. Route still absent.
+- **The read-switch machinery is in TWO handler files, not one.** 5ek recorded only
+  `handlers_chat_v2.go:1779-1797`; there is a second live site in `handlers_messages.go`
+  (:63-72 and :255). So `handlers_read_switch_test.go` has to cover both, and the earlier note
+  understated it. **This is exactly what rule 480 is for, and it caught something on the second
+  application** — the re-derivation is not ceremony.
+- `DivergenceCounter` API confirmed: `Inc(bool)`, `Matches()`, `Mismatches()`, `Total()`,
+  `IncFallback()`, `Fallbacks()`. No timestamp, no reset, no persistence — as assessed.
+- Admin routes to mirror: `server.go:3829-3833`, `s.mux.HandleFunc(path, s.guarded(path, handler))`.
+
+**Planned split** (two properly-sized PRs, per ptone's standing instruction): (A)
+`handlers_read_switch_test.go` alone — production-code-free, tests machinery that is *already
+shipped and untested*, worth landing on its own merit; (B) the cheap board — handler, test, one
+route line, explicitly labelled per-replica and since-boot.
+
+**BLOCKED ON PROVISIONING.** Created `ca-msg-e1` at 01:31Z; four minutes later still
+`phase=created, activity=None`. Identical signature to `ca-msg-fmt1409b`, which never booted and
+is still in `created` hours on. Two stuck agents in this project, same failure.
+
+**Did not reach for the fallback.** `ca-msg-def3750` is alive, idle and merged out, but ptone has
+specifically warned against repurposing agents across phases because of context rot. Using it is a
+real option and I will take it if provisioning stays down, but taking it *silently* would convert
+his guidance into a thing I quietly overrode when it got inconvenient. Asked the coordinator
+instead — it owns provisioning, it has the boot-time baseline I lack, and it was already tracking
+this failure.
+
+Worth separating two things I nearly conflated: **I do not actually know that four minutes is
+abnormal.** fmt1409b makes it *look* like the same failure, and the pattern-match is probably
+right, but "matches the shape of a known failure" is a hypothesis. Said so plainly to the
+coordinator rather than reporting a second outage as fact — which is the correction from the
+wrong-repo incident, applied before the hop rather than after it.
