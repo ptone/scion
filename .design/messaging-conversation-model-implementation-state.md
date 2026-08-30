@@ -23903,3 +23903,123 @@ re-learn it a third time.
 
 Live schedule: `23a609f4-463e-4607-a21f-69d33ebbf27f` — `ca-msg-impl-heartbeat-v24`, `13,43 * * * *`,
 next 03:43:00Z. Source at `heartbeat-v24.txt`.
+
+### 5gt — DEF-74 filed: the DEF-64 pins test the admin-bypass path, and my precondition cannot tell
+
+`ca-msg-e2rb`, establishing the post-#1414 access posture for the Branch A fixture, reported that
+the dev user obtains `ActionManage` **via the admin bypass** (`authz.go:490-495`, `DevUser.Role()`
+returns `admin`), not via project membership or agent ownership.
+
+Its operational conclusion is correct and I approved it: deleting `Visibility` is safe, the field
+was already dead (corroborated by #1414's own commit title, "eradicate DEAD project visibility
+field"), and the new no-policy default is strictly MORE restrictive than `private`, so the change
+errs safe.
+
+**But it exposes a defect in a control I designed and then overstated to ptone.**
+
+The precondition at `handlers_read_switch_test.go:~881` asserts
+`CheckAccess(devUser, agentResource(agent), ActionManage).Allowed`. I described this in the PR A
+body as ensuring "an unrelated authz change fails the precondition instead of silently testing a
+non-manager path." **Admin satisfies that check unconditionally.** For an admin dev user the control
+can essentially never fire. It does guard against the path becoming *unreachable*; it cannot detect
+the caller being *unrepresentative*. Those are different guarantees and I conflated them.
+
+**DEF-74 (filed, not staffed).** The DEF-64 pins exercise the admin-bypass authorization path only.
+There is no coverage of membership-derived `manage`. The `canManage` precondition cannot surface
+this because admin satisfies it by construction.
+
+Why it is not cosmetic: DEF-64's real victims are managers whose `manage` comes from membership.
+The eventual DEF-64 fix is *an authz guard on exactly this path*, and a guard may well behave
+differently for admin-bypass versus membership-derived manage. The pins would stay green either way.
+
+Explicitly NOT fixed here. Adding a membership-based fixture is a Tranche G scoping decision and
+ptone's call; e2rb was told to file it, not solve it.
+
+**Rule 620.** A precondition that a privileged test principal satisfies by construction is not a
+control. Before trusting one, name the concrete change that would make it fail — if the honest
+answer requires removing the privilege itself, the control is decorative. This is rule 604 (verify a
+control by its failure mode) applied to my own work, six days after I wrote it for someone else's.
+
+**Rule 621.** When a subagent's routine finding contradicts a claim you already shipped upward,
+the claim is the thing to correct first. I had told ptone this precondition was stronger than it is;
+that correction is owed regardless of whether DEF-74 ever gets staffed.
+
+### 5gu — e2rb exit interview: DEF-74 rescoped, three new unknowns, and two brief defects that are mine
+
+**DEF-74 rescoped, adopting e2rb's wording over my own.** I had it as "no coverage of
+membership-derived manage." That understates it. Correct scope:
+
+> DEF-64 pins exercise admin-bypass only. **The DEF-64 FIX must be validated with a
+> membership-derived manage caller, not merely against the existing pins.**
+
+The difference is load-bearing. Mine describes a coverage hole; e2rb's describes a **trap**: the fix
+will add an authz guard on the read-switch path, and if that guard distinguishes admin-bypass from
+membership-derived manage, the existing pins pass while the guard is wrong for members. The tests
+cannot detect a fix that works for admins and silently fails for everyone else.
+
+**Rule 622.** State a coverage gap as what it will let through, not as what is missing. "We lack X
+coverage" invites a shrug; "a fix that is wrong in way Y will pass" is actionable and survives
+being skim-read by whoever eventually does the work.
+
+**Broadened from (a):** the admin-only exposure is not confined to `canManage`. **Every** test in
+`handlers_read_switch_test.go` runs as the admin dev user via `doRequest()`. Any #1414 behaviour
+change affecting non-admin users in these handler paths is invisible to the whole file.
+
+**Two unknowns logged, neither checked, neither blocking:**
+- (b) No one verified individual tests are not silently `t.Skip()`-ing. The build tag guarantees they
+  compile into the binary, not that they execute.
+- (c) Unknown whether other pkg/hub files write `messaging.DivergenceMetrics` concurrently.
+
+**Both brief defects are mine, and both are the same defect.** My brief said "your workspace only
+has `origin`" — asserting a clone existed. **There was no clone.** e2rb burned several minutes
+searching four directories before cloning. I also never specified authentication; it found the PAT
+by *guessing from a file listing*. A differently-named file and it would have been hard-blocked.
+
+**Rule 623.** A brief that describes the state of a resource presumes the resource. I wrote a
+careful warning about which remote `origin` pointed at, which silently asserted that `origin`
+existed. Briefs must state provisioning (clone this URL to here) and credentials explicitly, before
+any refinement about their contents.
+
+**Rule 624.** I pointed at the right file and the wrong layer: I warned about the `canManage`
+assertion and never considered the branch might not COMPILE. Naming the likely failure primes the
+agent to look one layer too deep. Sequence the check — does it build, then does it pass — rather
+than only naming the interesting risk.
+
+**Stall explained, and it was not the work:** e2rb was searching for the repo, then running 5.5-min
+gates. My brief sized the work correctly *given a clone*. It correctly notes it should have
+announced "cloning, back in a few minutes" — but the trigger was my omission, not its silence.
+
+### 5gv — Tranche E delivered and closed. Branch B placement verified negative.
+
+**Final state, both SHAs verified by me against the remote, not taken from the agent's report:**
+
+| PR | Branch | SHA | numstat | gate |
+|---|---|---|---|---|
+| A | `scion/ca-msg-e1a` | `a31dff2b4` | 1017 / 0 | `ok .../pkg/hub 336.093s` |
+| B | `scion/ca-msg-e1b2` | `26d1a174` | 291 / 0 | `ok .../pkg/hub 332.998s` |
+
+Both rebased onto main @ `8d8bef705`. Both compare URLs delivered to thread 1532864101909528737.
+PR A's body now carries the DEF-74 limitation in full — the overstated version never shipped only
+because the URL was still held when the finding landed.
+
+**Branch B server.go placement: VERIFIED CORRECT.** B's route sits at line 3866 in the same admin
+diagnostics cluster as pre-rebase (between `health/summary` and `metrics/`). #1414's server.go hunk
+is 8 lines at ~1370 inside `New()` — different function, ~2500 lines distant. `route_metadata.go`
+and `guarded()` untouched by `ec1869a8`. #1414's policy narrowing hit project and agent resource
+types only; `hub.diagnostics.read` is hub-scoped and still served by `hub-member-read-hub`. Not an
+orphan.
+
+**Rule 625.** A verification that returns negative is not a wasted verification, and the person who
+raised it must be told so explicitly — otherwise the lesson they take is "do not raise it next
+time." e2rb raised this against its own completed work, after reporting it green.
+
+**Rule 626.** Git's clean-merge signal answers "did the text collide", never "is the line still in
+the right place." For any hunk landing in a file the base branch also modified, placement is a
+separate question requiring a human-legible answer: which block, which neighbours, which wrapper.
+
+`ca-msg-e2rb` retired 15:42Z with `--preserve-branch`, after both branch SHAs were confirmed on the
+remote. **No live `ca-msg-*` agents.**
+
+**Still owed by ptone:** DEF-64 (enumerate / fix three known sites / queue for G) and DEF-58
+(gate+comment / comment only / drop). DEF-74 filed, not staffed. Unknowns (b) silent `t.Skip()` and
+(c) cross-file `DivergenceMetrics` writers logged, not chased.
