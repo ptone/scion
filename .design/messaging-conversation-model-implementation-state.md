@@ -22727,3 +22727,104 @@ wrong outside the diff, and where my brief pointed it wrong. Retire after it ans
 **Rule 553.** "I found no evidence against it" and "I verified it" are different findings that
 render identically in a clean report. Ask a reviewer to separate them, or the report's confidence
 is uniform where the underlying evidence is not.
+
+---
+
+### 5fw — DEF-64 CONFIRMED: the read-switch silently narrows a manager's view. Tranche G blocker.
+
+`ca-msg-inv2` confirmed at 02:24:02Z. Not hypothetical. Research doc at
+`/scion-volumes/scratchpad/projects/ca-msg-inv2/research.md`.
+
+**Mechanism.** The S3 read-switch block (`handlers_messages.go:259-279`) has **no `canManage`
+guard** — its outer condition tests only `ConversationReadSwitch()`. With the switch ON, a manager
+calling `GET /agents/{id}/messages` with no `thread_id` and channel `web` or empty (the default)
+has `ResolveDMConversationForRead` resolve *their own DM with the agent*, which is then ANDed into a
+filter that was deliberately unscoped:
+
+```
+manager, switch OFF   {AgentID}                                   -> all messages on the agent
+manager, switch ON    {AgentID, ConversationID: <manager's DM>}   -> only their private DM
+```
+
+Strictly narrower, exactly as inv1 proved for `handleMessages` — and here strictly-narrower **is**
+the defect, because the filter was unscoped on purpose (`:231-236`, comment at `:228-230`). Rule 549
+in practice: the mechanism carried across sites, the verdict did not.
+
+**Three aggravating properties:**
+
+1. **Invisible to the divergence metric.** `IncFallback` fires only on *nil* resolution. Here
+   resolution **succeeds** and narrows wrongly. No fallback, no mismatch, no signal of any kind.
+   The instrument that gates the read-switch is blind to this specific failure.
+2. **Intermittent by caller.** It only bites managers who already have a DM with that agent.
+   Managers who never chatted get nil resolution and fall back to correct behaviour — so a fresh
+   test account, which is what anyone smoke-testing would use, shows nothing wrong.
+3. No test covers manager + switch ON at all.
+
+**Thread branch:** same structural shape, no `canManage` guard, but requires an explicit
+`thread_id`. Opt-in narrowing rather than silent default narrowing. Needs a product decision on
+whether thread-scoping is even desired for managers — filed, not answered.
+
+**Rule 554.** A defect that behaves correctly for anyone who has never used the feature will
+survive every smoke test, because the accounts used for testing are the accounts with no history.
+Intermittent-by-caller is worse than intermittent-by-timing: it correlates with exactly the users
+who matter and exactly against the testers who would catch it.
+
+**Rule 555.** When a safety instrument's trigger is "the lookup failed," it cannot see failures
+where the lookup succeeded and returned the wrong thing. Enumerate the failure modes an instrument
+is *structurally* incapable of detecting before treating its silence as evidence.
+
+**Escalated to ptone** at 02:24Z with the beta-exercise implication stated: flipping the switch
+during that exercise loses manager visibility silently while the new board reads green. Nothing is
+broken today — the switch is off — so this is a Tranche G precondition, not a live incident.
+Recommended plan: file, pin with tests, fix as part of G prep. One decision left to him: fix now or
+queue for G.
+
+`ca-msg-e1a` briefed for two pins: manager **with** an existing DM (pins the narrowing) and manager
+**without** one (pins the intermittency). The second is the control — without it the first cannot
+distinguish "the switch narrows managers" from "this fixture had no other messages." Rule 541 again;
+this is the third time tonight it has been the deciding detail.
+
+#### Reviewer exit debrief — six items, two with signal
+
+`ca-msg-rev-e1b2` separated "no evidence against it" from "verified" **unprompted and by item**,
+which is exactly what 5fv's rule 553 asks for.
+
+- **Item 3, routeGuard authz not verified end-to-end.** It confirmed the metadata matches existing
+  diagnostics/logs routes and that `routeGuard` dispatches to `Decide`, but could not verify the
+  policy engine's role bindings enforce `hub.diagnostics.read` at runtime. **Accepted, not
+  staffed** — the board exposes a hub ID, timestamps, counters and caveat strings, no message
+  content, so an over-grant leaks counters. Recorded explicitly that this is a blast-radius
+  judgement, **not a general precedent**: the identical gap on a route returning message bodies
+  would be staffed immediately.
+- **Item 2, global-counter test fragility.** A future `t.Parallel()` would break the tests silently
+  and look like flake. Folded a comment requirement into e1b2's current round — stating the
+  *reason*, not just the prohibition, because a bare "do not add t.Parallel()" gets deleted by the
+  next person who cannot see why it is there (rule 534).
+- **Item 5, `MethodNotAllowed` omits the RFC 9110 §15.5.6 `Allow` header.** Shared helper, so
+  repo-wide from one fix. Relayed to `small-issues-lead`; not mine.
+- Items 4 and 6 accepted as scoped out.
+
+Reviewer retired, delete executed and confirmed.
+
+**Rule 556.** Accepting an unverified item because its blast radius is small is a sound ruling and a
+dangerous precedent. Record the blast-radius reasoning alongside the acceptance, or the acceptance
+is what gets cited next time and the reasoning is not.
+
+#### Owner hold at 02:25:45Z
+
+ptone: *"ok. hang tight. block until i get back to you. it may be a while."*
+
+**Established what had already fired before announcing what I would stop** (the 5fj lesson, applied
+correctly this time):
+
+| Already in flight | Disposition |
+|---|---|
+| `ca-msg-e1a` — 22 tests incl. two DEF-64 pins | let finish; pushes to its own branch only |
+| `ca-msg-e1b2` — caveat reword + comment | let finish; pushes to its own branch only |
+| `ca-msg-inv2` — exit interview sent | close out and retire |
+
+Neither developer opens a PR; nothing crosses ptone's gate. **Stopped:** new staffing, compare URLs,
+escalations absent active breakage. DEF-64 stays filed and unfixed pending his call.
+
+Told him all of the above in one short message rather than going silent, because a hold is when a
+coordinator most needs to say what is still moving.
