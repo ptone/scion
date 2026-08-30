@@ -25036,3 +25036,34 @@ place and never merge. A mirror that acquires local edits is the same failure as
 drift this tool was built to stop, one level up.
 
 No further action. Phase 4 remains the only open item.
+
+### 5ho addendum 2 — mirrors deleted; one copy, one path
+
+Coordinator, 18:38Z: agreed, delete both mirrors and invoke the `tools/` path directly.
+
+Deleted `projects/ca-msg-arch/compare-link.py` and `.design/messaging-compare-link.py`.
+
+**THE ONLY COPY — invoke this path, do not copy it anywhere:**
+
+```
+python3 /scion-volumes/scratchpad/tools/compare-link.py <branch> <title> <body-file>
+python3 /scion-volumes/scratchpad/tools/compare-link.py --self-test
+```
+
+Confirmed the canonical file exists and `--self-test` passes **before** deleting the mirrors, not
+after. The mirrors were the only fallback; removing them first and discovering the canonical copy
+was missing or broken would have left nothing. **Rule 664: verify the survivor before deleting the
+redundancy.** Trivial here — the file was written twenty minutes ago and the check took a second —
+which is the point: the cost of the ordering is near zero and the cost of getting it backwards is
+total.
+
+Worth naming what this closes. The chain ran: I mis-followed a prose protocol → wrote it down →
+observed that writing it down had already failed for several other agents → made it executable →
+hoisted it to shared → made it self-verifying → and now **reduced it to a single copy**. Each step
+removed a way for the *fix itself* to rot. A mirror that gets re-synced by hand is a promise, and
+this whole sequence started because a promise to follow a five-rule protocol from memory failed
+four ways at once.
+
+**Rule 665: the last step of fixing a process failure is deleting the copies of the fix.** Every
+duplicate of a corrective artifact is a place the correction can silently diverge, and it will
+diverge in the direction of whoever last edited it in a hurry.
