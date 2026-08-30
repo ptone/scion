@@ -23772,3 +23772,31 @@ reviewed and to a design I had written. The exit interview keeps out-producing t
 versus confirm by running?" — asked at exit, when the agent has nothing left to defend. It has now
 produced DEF-53/54/55, DEF-68/69/70, DEF-71/72/73 and the 32-of-45 authz gap. Budget for the exit
 interview as deliverable work, not as a courtesy.
+
+### 5gq — Both compare URLs pre-built and HELD. Report drafted and HELD.
+
+Ready to send the moment ptone lifts the hold; **sending any of these now would break it.**
+
+| artifact | path | runes | margin to the 2000 cap |
+|---|---|---|---|
+| PR (A) compare URL | `compare-url-prA.txt` | 1743 | 257 |
+| PR (B) compare URL | `compare-url-prB.txt` | 1426 | 574 |
+| Tranche E report | `pending-report-tranche-E.txt` | 1576 | 424 |
+
+First build of PR (A)'s URL came out at **1969** — under the cap and far too close to it. URL-encoding
+roughly doubles the body, so a 1250-character description became a 1969-rune message; trimming the
+body to 1058 brought it to 1743. Discord's 2000-rune limit is **server-enforced**, so the failure is
+a rejected send, not a truncated one.
+
+**Rule 607.** Leave margin on a hard limit you cannot see enforced locally. "Under the cap" and "safely
+under the cap" differ by whether a later edit can be made without recomputing. I have appended one
+clarifying sentence to a message more than once tonight; at 1969 that habit silently becomes a failed
+send.
+
+Both URLs target **branch names**, not SHAs (`main...ptone:scion:scion/ca-msg-e1a` and `...-e1b2`), so
+they stay correct as long as the branches exist. `ca-msg-e1b2`'s branch was preserved at `15db406` and
+verified on the remote **before** its agent was deleted, so PR (B)'s URL survives that retirement.
+
+**Rule 608.** A URL that names a branch outlives the agent that pushed it; one that names a workspace
+or a SHA reachable only from a deleted container does not. Check which kind you built before retiring
+the author.
