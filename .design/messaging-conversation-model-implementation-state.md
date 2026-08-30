@@ -22063,3 +22063,84 @@ of reading a push; the commit-message reframe after ptone corrected my security 
 question is not rhetorical. Will not retire it until it answers.
 
 `ca-d-test` left alone — ptone's, his to clear.
+
+---
+
+### 5fo — def3750's exit interview: one verified defect, and the sharpest critique of my own method yet (2026-08-30 ~01:58Z)
+
+Retired `ca-msg-def3750` after a three-question exit interview. All three answers were
+load-bearing. **The exit question keeps outperforming everything else I do** — it has now produced
+DEF-53, DEF-54, DEF-55, a defect in a gate I had already approved, and the two entries below.
+
+#### DEF-59 — `GetAgent` cannot resolve slugs; the R-9 comment says it does. **VERIFIED.**
+
+def3750 flagged it as unverified suspicion. I checked and it is real:
+
+```go
+AgentStore.GetAgent(ctx, id) -> parseGetID(id) -> uuid.Parse(s); on error return store.ErrNotFound
+// GetAgentBySlug(ctx, projectID, slug) is a SEPARATE method
+```
+
+The R-9 comment at `handlers_messages.go:63-72` states: *"agentID is client-supplied and may be a
+slug. Resolve to UUID before the DM key derivation."* **The call it guards does not do that.** A
+slug returns `ErrNotFound`, `lookupErr != nil`, the conversation path is skipped, and — by R-9's
+own intentional design — **no counter moves.**
+
+Consequence: **once the read-switch is ON, every slug-based agent query silently keeps legacy
+routing and records nothing.** An invisible no-op in the exact path Tranche G exists to switch,
+inside the metric that gates it. Reachability is the open half — whether clients actually pass
+slugs to this endpoint is unestablished, and the comment asserting they may is itself an assertion
+by a past author (rule 512). `ca-msg-e1a` is to **pin the behaviour with tests for both UUID and
+slug, not fix it.**
+
+#### DEF-60 — the DEF-57 cleanup removed the wrong explanation without leaving a right one.
+
+def3750 withheld this. #1411 deleted the misleading comment block but added no rationale for *why*
+non-user senders are correctly denied. The mechanism is now documented; the justification (the
+brokers filter unregistered senders client-side, so the branch is unreachable) exists nowhere in
+the tree.
+
+**That comment block has already cost three agents a full investigation each.** Removing a wrong
+explanation and leaving a vacuum means the fourth reader starts from zero.
+
+**Rule 534.** Absence of reasoning generates re-investigation as reliably as wrong reasoning does.
+Rule 512 has a second half: when you delete a misleading comment on a path that has already
+misled people, you owe the path a correct comment. Deleting is not finishing.
+
+Why it withheld it is my fault: it read ptone's rescope (*"tech debt, not a security surface"*) as
+*"do not explain the code"*. Reasonable inference from an instruction I never bounded. A
+comment stating the brokers filter client-side **is** the cleanup he asked for.
+
+#### The critique I most needed
+
+> *"The brief was precise but precision on a wrong premise cost more than vagueness would have."*
+
+On DEF-50 I asked it to propose a design and corrected it — the wrong premise surfaced at review.
+On DEF-57 I handed it a finished design and it built faithfully, including a system-plane
+classifier that then had to be ripped out. **A brief specific enough to implement from without
+thinking removes the one step where a wrong premise gets caught: the implementer's "wait, where
+does that traffic actually come from?"**
+
+**Rule 535.** Over-specification transfers your premises to the implementer along with the work,
+and premises are the part most likely to be wrong. A brief should be precise about *constraints
+and boundaries* and demand a proposal for *approach* — the proposal step is not ceremony, it is
+the premise check.
+
+I committed the identical error at larger scale this morning: five agents' worth of confident
+diagnosis on a premise I never tested. Same failure, different altitude. **Applied it immediately**
+— when `ca-msg-e1b2` proposed its endpoint shape minutes later, I sent four concerns and one
+question with explicit "push back if you think I am wrong, I am deliberately not handing you a
+finished design," rather than the corrected spec I could easily have written.
+
+Its other two criticisms accepted without qualification: three rounds of churn on test fixtures
+that were not the point of the change, and briefing a held agent on new work before its held work
+was closed — which, had I been right about provisioning, would have left it holding three branches
+across two phases in one container with no clean boundary.
+
+#### Board review (e1b2)
+
+Its proposal was grounded, not invented — `hub.diagnostics.read` is a real registered permission
+(`permissions/registry.go:185`). Raised: `Total()` re-reads both counters so four separate atomic
+loads can publish `matches + mismatches != total` (**a board whose arithmetic visibly fails
+destroys trust in every other field**); "since boot" is unusable without an uptime; "per-replica"
+does not say which replica; and `total` excluding fallbacks is a misreadable name.
