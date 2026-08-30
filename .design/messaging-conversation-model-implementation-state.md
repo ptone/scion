@@ -22656,3 +22656,74 @@ failure-mode asymmetry, DEF-61 (`filter.AgentID` stays raw), DEF-62 (the `parseU
 unstuck the 59a design), the disproof of my own cross-tenant claim, and this handoff. **Four of the
 six were things no brief asked for**, and all six came from either the exit-interview question or a
 follow-up to it.
+
+---
+
+### 5fv — Tranche E (B) reviewed: APPROVE, with one FYI overruled
+
+`ca-msg-rev-e1b2` reported at 02:22:20Z. Risk LOW, no Critical or Required findings. Full review at
+`/scion-volumes/scratchpad/findings/ca-msg-e1b2-divergence-board-review.md`.
+
+Checked clean, item by item against the brief's priorities:
+
+| # | Priority | Result |
+|---|---|---|
+| 1 | Caveats machine-readable and test-enforced | All five present as named struct fields with JSON tags; test decodes to a raw map and asserts **each key by name** plus non-empty. Dropping any caveat turns the test red. |
+| 2 | Route classification not over-permissive | `RouteHubAdmin` + `hub.diagnostics.read` — **identical to the existing diagnostics/logs routes.** |
+| 3 | Read-only real, no lock on the counter | Handler-level method check; three `atomic.Int64.Load()` calls, no mutex, no mutation. |
+| 4 | No out-of-bounds edits | `divergence.go`, `handlers_chat_v2.go`, `handlers_messages.go` untouched; `server.go` exactly one route line; 0 deletions. |
+| 5 | No message content | `hub_id`, timestamps, int64 counters, caveat strings only. |
+
+Gates: `go vet ./pkg/hub/...` pass, tests pass, `gofmt` clean.
+
+The per-item reporting is what made the clean result usable. "Checked, nothing found" on each
+priority is a different claim from silence, and only the first one is evidence.
+
+#### The FYI I overruled
+
+The reviewer flagged that the `counter_snapshot` caveat says the values come "from one snapshot,"
+noted it was defensible, and logged it as FYI with no action needed. Sent back to `ca-msg-e1b2` as
+a required change.
+
+They are not one snapshot. Three independent `atomic.Int64.Load()` calls mean a message can be
+counted between the first read and the third, so the three numbers need not correspond to any
+instant that ever existed, and **any ratio derived from them is approximate.**
+
+Why this is not a nitpick: every other field on this board is a number. This field exists to tell
+the reader what the numbers cannot do. A caveat that overstates the instrument's coherence is worse
+than a missing one — it converts an unknown into a false assurance, in the one place the reader has
+been told to trust. And the board's entire reason for carrying five caveats is that someone will
+read exactly these strings while deciding whether to flip the read-switch. "One snapshot" tells
+them a derived ratio is exact.
+
+Explicitly told e1b2 **not** to fix it by locking. A lock there would sit on the write path of
+every message that logs a divergence — a real production cost to tidy a diagnostic. The
+implementation is right; the wording is wrong.
+
+**Rule 551.** On an instrument, the caveat text is the product, not the packaging. Hold it to a
+higher accuracy standard than ordinary prose, because it is the only field a reader consults
+specifically to calibrate how much weight the other fields can bear.
+
+**Rule 552.** A reviewer's severity calibration is inherited from the codebase at large, not from
+the specific thing being built. When a project has a locally elevated standard, the reviewer cannot
+know it — put it in the brief, and treat a downgraded FYI as calibration data rather than a miss.
+My brief listed the five caveats as required fields but never said their *wording* was load-bearing.
+That gap was mine.
+
+#### Sixth caveat property, not required and not added
+
+Snapshot-coherence is a sixth property I never specified; I required per-replica, since-boot,
+mismatch-composition, fails-open, and not-go-no-go. The reviewer surfaced it anyway while
+downgrading it. Recording that the reworded `counter_snapshot` field now carries it, so a future
+reader does not count five and think one is missing.
+
+#### Exit interview sent
+
+Asked the reviewer the standing question, framed for review work specifically: what it considered
+raising and decided against, what it marked clean on absence-of-evidence versus positive
+verification ("could not falsify" and "checked, nothing found" are different states), what looked
+wrong outside the diff, and where my brief pointed it wrong. Retire after it answers.
+
+**Rule 553.** "I found no evidence against it" and "I verified it" are different findings that
+render identically in a clean report. Ask a reviewer to separate them, or the report's confidence
+is uniform where the underlying evidence is not.
