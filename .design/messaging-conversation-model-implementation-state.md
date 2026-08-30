@@ -25229,3 +25229,83 @@ defects quietly becoming nobody's. **Rule 671: "final" is a claim about a backlo
 branch — before accepting it, name what it leaves behind and make someone agree to that.**
 
 Not blocking on the answer; the audit runs regardless.
+
+---
+
+## 5hr — Tranche G design drafted; drift audit returns zero, positive control dispatched
+
+Design at `projects/ca-msg-arch/design-tranche-g.md`, mirrored to
+`.design/messaging-tranche-g-design.md`, pushed `8d1097488`. Base `main` @ `66b5cab7f`.
+
+Scope ruling (ptone, 19:13Z): *"i meant g more than final. something to test the behavior. but we
+can review deferred items to include in the beta test."* **G is the read switch. Not final.** The
+eleven held-ledger defects are a separate beta-inclusion review, not folded in and not dropped —
+which is the outcome rule 671 was asking for.
+
+### The correction the design leads with
+
+Recorded in full in the doc §0 and summarised here because it invalidates a year of my own
+shorthand. **No authorization path reads a message's `conversation_id`.** `isDMParticipant`
+(`handlers_chat_v2.go:3146`) parses the caller-supplied URL key and performs no database access;
+seven call sites, all gates. Where a conversation is consulted for access
+(`handlers_agent_messaging.go:901`, `resolve.go:219`) the authority is `conv.ExternalRef` — the DM
+key — and the conversation ID is a lookup handle.
+
+The read switch is **visibility**, not authorization. Rule 672 covers it: verify what a switch
+switches before designing the gate around it. I carried the wrong model on the strength of the name
+and would have gated for over-permission when the actual risk is disappearance.
+
+### The finding that drives the design
+
+**Federated principals cannot be attributed at all.** No `(issuer, subject)` link table exists
+across all 59 Ent schemas. A federated identity is `issuerURL + ":" + subject`
+(`federation_identity_ext.go:131-132`) — not a UUID — and DM key derivation requires UUIDs on both
+sides. `notifications.go:497-501` already skips them. Every federated message is therefore a
+**permanently unattributed row**, invisible once the switch flips, and **backfill cannot repair it
+because the information is not in the database.**
+
+Ruled: G must NOT attribute them. A synthetic UUID mints a key not derivable from the authenticated
+identity, and a wrong key is worse than no key. G counts them in a bucket distinct from
+`unresolvable` and blocks the flip when non-zero. DEF-32 keeps the repair.
+
+### `ca-msg-inv4`: 0 BEHIND-BEHAVIOURAL — and why I did not accept it
+
+~50 PORTED-FAITHFUL, 3 BEHIND-BENIGN, **0 BEHIND-BEHAVIOURAL**, 7 DIVERGED, 2 SUPERSEDED. Drift is
+overwhelmingly *main-ahead*. The investigator's self-assessment was unusually good, naming
+semantic-drift-without-textual-drift and integration-level emergence as what a clean file-level
+result still hides.
+
+**But the zero is the answer I wanted, which makes it the one to distrust.** The audit ran against
+`66b5cab7f` — which *includes* #1426. DEF-81 was the one confirmed member of the class being
+hunted, and it had been repaired hours earlier. **The instrument was pointed at a world with the
+only known instance already removed from it, and reported none.** That is not a verified zero, it
+is an unfalsified one.
+
+Dispatched a positive control: re-run the identical method against **`f3a54512`**, the commit
+immediately before #1426. If it flags `backfill.go` BEHIND-BEHAVIOURAL, the zero is evidence. If it
+does not, the method is blind to the class and the zero means nothing. Explicitly told the
+investigator that a miss is a **successful** outcome for the task, and explicitly forbade tuning
+the method to find `backfill.go`.
+
+**Rule 675: a negative result is only as good as the last time the method produced a positive
+one.** This is the same standard I applied to `compare-link.py` (a checker that has never rejected
+anything is not known to check) and to p4a's vacuous test — and I nearly failed to apply it here,
+because a clean audit is pleasant and a self-aware caveats section reads like rigour. **Rule 676:
+an investigator's honest account of its own limits is not a substitute for testing those limits.**
+inv4 named integration-level blindness as a hazard; naming it is not measuring it.
+
+### Rulings issued to inv4, no action
+
+Its two `SECURITY — ARCHITECT DECISION REQUIRED` flags — the B14/empty-ref divergence and v2's
+missing B1 D-1 participant guard during merges — are both **v2 behind main**. We port nothing on
+those paths, so there is nothing to carry and nothing to decide. Same for v2's `dm_migration.go`
+missing B2 atomicity, which it called its worst finding: real, and in the direction that costs us
+nothing. Recorded as **ruled no-port** so they are not re-opened.
+
+Escalating a divergence on an authorization-adjacent path was correct regardless of direction.
+
+### Consequence for the design
+
+**OQ-3 is provisionally resolved and stays open pending the positive control.** If the control
+passes, no G precondition is added. If it fails, the drift question is *unanswered* rather than
+answered clean, and G1 gains a dependency I do not currently have scoped.
