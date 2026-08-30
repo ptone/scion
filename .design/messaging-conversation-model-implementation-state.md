@@ -25951,3 +25951,67 @@ constituting the write-path flip (5hx).
 **Rule 702** — When a follow-up commit is trivial, diff the follow-up rather than
 the branch. Triviality is when scope creep travels unexamined, because the
 reviewer has already decided the change is safe before looking at it.
+
+---
+
+## 5ia — Tranche G complete; landing link sent
+
+`scion/tranche-g` at `59e6e3d22`. Against `upstream/main`: **32 files, 3522
+insertions, 446 deletions.**
+
+| phase | landed |
+|---|---|
+| G1 attribution report | `58b08d743` |
+| G4 standing gates | `41b179c85` |
+| G3 read-switch fallback removal | `8dafd1c79` |
+| G2 write-path flip-to-deny | `59e6e3d22` |
+
+### The rebase verification, which was the real risk
+
+G2 rebased across G3. Both had edited `handlers_chat_v2.go`. Verified before
+merging, in three commands rather than by re-reading the branch:
+
+- `git diff --numstat tranche-g...ca-msg-g2 -- handlers_messages.go
+  handlers_read_switch_test.go errors.go` → **zero output**. G3's read path
+  untouched.
+- The switch-ON filter still reads `Channel: "web"` alongside `ConversationID`.
+  This was the single line most likely to vanish in that conflict, and losing it
+  would have silently reintroduced the visibility widening — the most serious
+  defect found in the tranche, reintroduced by a merge rather than a decision.
+- Zero test functions removed across all seven touched test files, re-derived
+  against the new base. A pre-rebase audit does not survive a rebase.
+
+g2's own report listed its diff hunks by line number and named what it had *not*
+touched. That is the right shape for reporting a risky rebase: it converted my
+review from re-reading a 1252-line diff into checking three claims. Told it so.
+
+### What shipped
+
+Observability first, enforcement second — and enforcement inert on arrival:
+
+- **G1** answers "what disappears if we flip?" against real data, with blocking
+  buckets and a reconciliation line that fires when the report's own total
+  disagrees with a global count.
+- **G3** removes the read fallback, returns a typed 409, preserves the channel
+  constraint, and adds five labelled bypass counters so un-switched traffic is
+  measurable rather than invisible.
+- **G2** denies on derivation failure behind `ConversationWriteDenySwitch`
+  (default OFF, failing to OFF on all three paths), with 25 labelled denial
+  counters, both exceptions preserved.
+- **G4** pins DEF-58 negatively, converts the DEF-79 path trace from prose into a
+  test, and makes the divergence board declare its own blindness.
+
+**Deploy is inert.** Sequence: deploy → write-deny ON → backfill → G1 clean →
+read switch ON. Every step reversible by ops toggle, no redeploy.
+
+Landing link sent to the dedicated thread `1532864101909528737` — built with
+`compare-link.py` (self-test passed, 6/6), 1386 runes, link and nothing else. I
+opened nothing.
+
+All four phase agents retired with `--preserve-branch`.
+
+**Rule 703** — A rebase across another agent's landed work needs its own
+verification pass, and the reporting agent should name what it did *not* touch.
+"I rebased and gates are green" is compatible with having silently reverted a
+predicate; green gates do not test the thing you removed if you also removed
+the test's reason to care.
