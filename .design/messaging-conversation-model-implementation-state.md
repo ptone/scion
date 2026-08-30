@@ -24277,3 +24277,77 @@ Phase 5 (E) landed 2026-08-30 as #1424/#1425; **Phase 6 (F) landed 2026-08-29 as
 order. Phase 7 (G, the read-switch flip) is unscoped and unstaffed. H stays blocked on G-1.
 
 So the only pre-G item outstanding is **Phase 4**, not F.
+
+### 5hd — Phase 4 goes first, and the reason is worse than ordering. DEF-80 filed. (2026-08-30 17:44Z)
+
+ptone: *"seems like phase 4 should be first."* Agreed, and on investigating **the case is stronger
+than sequencing** — Phase 4's absence is currently *corrupting the measurement Tranche G depends on*.
+
+#### The finding — an unbackfilled instance reports a clean divergence board *because* it is unbackfilled
+
+`pkg/messaging/divergence.go:311`, `CheckConversationConsistency`:
+
+```go
+if msg.ConversationID != "" && msg.ConversationID != resolvedConvID {
+    ... DivergenceMetrics.Inc(false); return false
+}
+```
+
+Prior messages with an **empty** `conversation_id` are skipped, and the function then returns `true`
+— counted as a **match**. Backfill is precisely what populates `conversation_id`. So on any instance
+with real history the consistency check compares against *nothing* and silently scores agreement.
+
+**The board reads cleanest exactly where it knows least.** And it moves the wrong way: running the
+backfill will make the numbers look *worse*, because for the first time the check will have data to
+disagree with. Anyone watching the board rise after Phase 4 must not read that as a regression — it
+is the metric starting to work.
+
+**Rule 640: a fail-open check on missing data does not measure the system, it measures the coverage
+of its own inputs.** Ask of every "clean" metric what fraction of its population it actually
+examined. Zero mismatches over zero comparisons is indistinguishable from zero mismatches over all
+of them, and only one of those is good news.
+
+#### DEF-80 — the board's caveat block does not disclose this
+
+`admin_messaging_divergence.go` already carries a `ConsistencyCheckFailsOpen` caveat, and it is
+good, but it enumerates *ListMessages query errors*, *empty resolved conversation IDs*, and
+*insufficient lookup data*. The **empty prior-message `conversation_id`** path is a fourth
+fail-open and is **not named** — and on a legacy instance it is by far the largest of the four.
+The `NotGoNoGo` caveat blunts the consequence but does not state the mechanism.
+
+DEF-80: add the unbackfilled-history fail-open to the caveat block. Cheap, additive, no behaviour
+change. Not staffed; folds into the next board touch.
+
+I take some credit off here: I designed those caveats and enumerated three fail-open paths while
+missing the one that dominates in production. Enumerating *some* of a class reads as enumerating
+*all* of it, which is worse than enumerating none — §5gy's rule 635 in a new costume.
+
+#### Scope, verified rather than assumed — the port is smaller than the manifest says
+
+The manifest calls this a 4-file cluster plus 2 unclaimed store hunks. **The store half already
+landed on main:** `CountUnbackfilledMessages` is present in `pkg/store/store.go:1337` and
+`entadapter/message_store.go`, with a signature **identical** to v2's. So Phase 4 is:
+
+- 4 new `cmd/server_backfill*` files (~1100 lines), absent from main — verified by `ls-tree`;
+- 2 hunks into `cmd/server_foreground.go`: `maybeWarnUnbackfilledMessages` + its call site.
+
+`cmd/server_foreground.go` is a **port-by-hunk, never file-copy** file (Ruling A-2). Copying v2's
+version would revert months of main.
+
+**DEF-12 §4's open question is closed by the source branch, not by me.** The spec left command
+placement unsettled; v2 answered it — `scion server backfill`, dry-run by default, `--execute` to
+apply, attached to the existing `server` noun alongside the `maybeMigrateLegacySQLite` prior art in
+that same file. The developer confirms the group still exists rather than re-litigating it.
+
+#### Dispatched, with the irreversible half withheld
+
+`ca-msg-p4a` created and started. The brief carries AC-12-1..5 and AC-12-7, and a **hard
+prohibition on running the backfill against any populated, shared or staging database** — fixtures
+only. **AC-12-6 (run against a real corpus) is explicitly NOT dispatched**; it is ptone's scheduled
+snapshot-and-restore exercise.
+
+That split is the whole reason this is dispatchable under the standing "keep forward progress"
+directive: **landing an entry point is reversible; running a backfill through it is not.** The code
+is mine to land, the execution is his to schedule. Where a task mixes the two, dispatch the
+reversible half and name the other as withheld — do not treat the task as blocked, and do not treat
+approval of the code as approval of the run.
