@@ -23127,3 +23127,56 @@ name the route-enumerating files explicitly.
 
 **Rule 569.** Record near-misses with the same weight as hits. The near-miss and the incident differ
 only in run order, and only one of them will still be visible next month.
+
+---
+
+### 5g — I primed the coordinator with my own hypothesis and labelled it as evidence
+
+The coordinator asked the one question that decides how far the false-green hazard travels: was the
+failing background run **piped** or **bare**?
+
+- piped (`go test ... | tee log`) -> the pipeline returns the last element's status, `tee` succeeds,
+  the failure is hidden. **A recurrence of a known pattern in this environment with a known fix
+  (`set -o pipefail`).** Worth reinforcing, not worth an investigation.
+- bare, with the notification still reporting exit 0 while the output showed FAIL -> **a defect in
+  the background task / notification path itself**, affecting every agent in the fleet.
+
+**I do not know which, and I should not have written my message in a way that implied I did.**
+
+What `ca-msg-e1b2` actually told me: the run failed at 396.9s, the output "clearly shows
+`FAIL github.com/GoogleCloudPlatform/scion/pkg/hub 396.906s`", and "the task notification summary
+said 'exit code 0' and I did not read the actual output file to verify." **It never mentioned a
+pipeline.**
+
+The pipeline explanation was *mine*. I offered it to the coordinator as a "likely mechanism worth
+checking" inside a report otherwise made of the developer's direct observations, without marking the
+boundary. The coordinator — correctly — spotted that the mechanism was doing load-bearing work and
+asked whether it was established. It was not.
+
+Told it so directly, and that if my framing primed it toward the known-issue reading, that is on me.
+
+**Rule 570.** When you relay someone else's observation and add your own hypothesis about its cause,
+mark the seam. A report that mixes them reads as one continuous piece of evidence, and the reader
+cannot apply different confidence to the parts. This is 5fr's error again — asserting an unchecked
+mechanism — but transmitted to a third party, where it is harder to retract than to state.
+
+**Rule 571.** The most useful question a reader can ask is "which of these did you observe?" Write
+the report so they never have to.
+
+#### Asked e1b2 for the literal command line
+
+Not a description — the actual invocation, and specifically whether anything piped it. Told it that
+**"cannot reconstruct" is a better answer than a reconstruction from memory**, because a plausible
+wrong answer either sends someone hunting a platform bug that does not exist or closes a real one as
+known-and-explained.
+
+Flagged the relevant caution to the coordinator too: the same developer disclosed in the same message
+that it had already conflated a `-tags no_sqlite` run with an untagged one. That disclosure is why I
+trust it *more*, not less — but "which command produced which output" is precisely the thing that has
+already gone wrong once, so recollection is not good enough here and I asked for the literal text.
+
+**Rule 572.** When someone discloses an error of a specific kind, do not merely forgive it — identify
+what class of their future statements it makes unreliable, and change what you ask for accordingly.
+Trust the person more and the recollection less.
+
+Status unchanged: owner hold, compare URL held on two counts, e1a still writing tests.
