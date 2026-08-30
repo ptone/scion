@@ -22371,3 +22371,88 @@ report; name the window.)
 Two facts are missing before this is worth the owner's attention: whether the CLI is broken today
 (e1a), and whether the recipient filter is unconditional (inv1). Escalating now would mean
 presenting a severity I have already had to revise once tonight.
+
+---
+
+### 5fs — DEF-59 settled as a correctness defect; the security question is CLOSED
+
+`ca-msg-inv1` closed the recipient-scoping question at 02:13:09Z. My partial retraction in 5fr(c)
+**holds**. Recording the evidence in full, because the agent that produced it is being retired and
+this must not survive only in my context.
+
+#### `handleMessages` (:30-98) — `RecipientID` is unconditional
+
+`filter := store.MessageFilter{RecipientID: user.ID()}` at :47, in the struct literal, never
+reassigned. One code path after the method check (:33-36) and auth check (:38-42). Every subsequent
+mutation is additive and touches a different field:
+
+| Lines | Adds | Touches `RecipientID`? |
+|---|---|---|
+| :49-51 | `OnlyUnread` | no |
+| :52-54 | `ProjectID` | no |
+| :55-58 | `AgentID` | no |
+| :59-61 | `Type` | no |
+| :70-78 | `ConversationID` (Phase 8 block) | no |
+| :91 | passed to `ListMessages` | — |
+
+No admin override, no elevated branch. `filter` is local and never escapes. The `guarded` wrapper
+(`route_metadata.go:934-942`) gates on authentication only — it injects no filter bypass. At the
+store layer (`entadapter/message_store.go:312-313`) `RecipientID` becomes an unconditional
+`WHERE recipient_id = ?` when non-empty, and `user.ID()` is always non-empty past the auth check.
+
+**No cross-tenant read is possible. The downgrade stands.**
+
+#### `handleAgentMessages` (:176-288) — different model, also safe, and it fails *loudly*
+
+This handler sets no `RecipientID`. It scopes conditionally at :231-236:
+
+- managers (`canManage.Allowed`): `filter = {AgentID: agentID}` — unscoped by user, **by design**
+  (comment at :228-230); they see all messages on the agent
+- non-managers: `filter.ParticipantID = user.ID()` added
+
+The unscoped manager filter is not reachable with a slug: `GetAgent(ctx, agentID)` at :199
+hard-fails (`uuid.Parse` -> `ErrNotFound`), the handler writes the error and returns at :201.
+Filter construction at :231 is never reached. The unscoped path runs only after (a) successful
+resolution to a real agent UUID and (b) verified manage access on that specific agent.
+
+#### The asymmetry worth keeping
+
+The two handlers fail *differently* on the same defect:
+
+| Handler | Slug behaviour | Visibility |
+|---|---|---|
+| `handleMessages` | silent empty result | **invisible** — looks like "no messages" |
+| `handleAgentMessages` | hard 404 | loud |
+
+`handleAgentMessages` is arguably fine. It is inconsistent with the five sibling handlers that do
+accept slugs, but it fails closed and says so. `handleMessages` is the real defect precisely
+*because* its failure is indistinguishable from the legitimate empty answer.
+
+**Rule 544.** Two sites with the identical root cause are not the same defect. Rank by how the
+failure presents, not by what causes it — the one that mimics a valid answer is the dangerous one.
+
+#### DEF-59 final shape
+
+| Sub | Description | Tier | Status |
+|---|---|---|---|
+| 59a | `handleMessages` silently returns empty for a slug, which the CLI's own help invites | correctness, user-facing | awaiting e1a's observation |
+| 59b | no `IncFallback` when `GetAgent` fails -> slug requests invisible to the S4 readiness metric | **Tranche G precondition** | open, unstaffed |
+| 59c | `handleAgentMessages` 404s on a slug; inconsistent with 5 sibling handlers | cosmetic | note only, not staffing |
+
+**Security tier: CLOSED. Not a cross-tenant read.** Recorded so no future reader re-opens it — and
+so that my own overstatement in 5fr does not get re-derived from the record as if it were live.
+
+**59b is the one that still blocks.** It was the original defect and it is untouched by any of
+tonight's revisions: with the read-switch ON, slug-valued requests take legacy routing and increment
+nothing, so they are absent from the very metric that would gate the switch. The metric does not
+merely undercount — it undercounts *silently and in the safe-looking direction.*
+
+#### `ca-msg-inv1` retired
+
+Released as promised (5fj: name the window, then honour it). Investigation-only, no branch, nothing
+to push. Its full evidence is transcribed above rather than left in its context — which is 5fp's
+third point applied to myself: the finding is durable because it is written down, not because an
+agent holds it.
+
+If e1a's test contradicts the inferred empty-result chain, the correct move is a **fresh**
+investigator briefed with this entry, not a resurrection.
