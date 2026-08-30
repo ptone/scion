@@ -23728,3 +23728,47 @@ DEF-68, DEF-69, DEF-70 from its own fragility audit; and the 32-of-45 authz cove
 tracked item under `ci-fix-lead`.
 
 **LIVE ca-msg AGENTS: `ca-msg-e1a` only.**
+
+---
+
+### 5gp — DEF-71 closed. PR (A) final at `5f95371d1`. Numstat re-verified by me.
+
+`ca-msg-e1a` added the `canManage` positive control to tests #22/#23 and pushed.
+
+My own gate, re-run against `upstream/main` (`f1f86d3e0`, unchanged) with a three-dot diff:
+
+```
+1018	0	pkg/hub/handlers_read_switch_test.go
+A	pkg/hub/handlers_read_switch_test.go
+added: 1018  deleted: 0
+```
+
+Three commits (`aa71b9fba`, `d160ead19`, `5f95371d1`). Remote HEAD `5f95371d1`. Test-only, no
+production change. Full untagged suite green, all five packages, 336.074s, literal output read.
+
+**Asked for the literal assertion lines before retiring.** The entire value of a positive control is
+that it *fails* when the precondition stops holding; a control that cannot fail is precisely the
+defect it was added to prevent. Specifically checking it asserts on `Allowed == true` rather than
+merely that `CheckAccess` returned without error — those differ, and only one is a control.
+
+**Rule 604.** Verify a control by its failure mode, not its presence. "There is an assertion there"
+and "that assertion can fail" are different facts, and only the second is worth anything. This is
+rule 541 turned on the control itself.
+
+**Why DEF-71 mattered more than it looked.** Tests #22/#23 are the *entire* evidentiary basis for
+DEF-64, a Tranche G blocker awaiting ptone. Without the control, an unrelated change to admin role
+resolution would have converted both into non-manager tests that kept passing. The defect they pin
+would then look **refuted by a green suite** — a false negative arguing *against* a real problem,
+which is the worst failure available to a test.
+
+**Rule 605.** Rank a missing positive control by what a false green would *claim*. A test that would
+wrongly report "no bug here" on a known live defect is in a different class from one that would
+merely stop checking. Ask what the silence would be read as asserting.
+
+Found by the developer, unprompted, while being asked to *summarise its own work* — in a file I had
+reviewed and to a design I had written. The exit interview keeps out-producing the brief.
+
+**Rule 606.** The highest-yield question in this project has been "what did you conclude from reading
+versus confirm by running?" — asked at exit, when the agent has nothing left to defend. It has now
+produced DEF-53/54/55, DEF-68/69/70, DEF-71/72/73 and the 32-of-45 authz gap. Budget for the exit
+interview as deliverable work, not as a courtesy.
