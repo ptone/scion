@@ -22201,3 +22201,89 @@ The last row is the line. Judgement and authority stay with me; verification doe
 and I still re-run the numstat. That is a gate I own, not a verification I am doing on someone
 else's behalf — but it is the closest call in this list, and worth revisiting if it starts eating
 context.
+
+---
+
+### 5fq — DEF-59 reachability: ANSWERED (reachable), and the fix is not the one it looks like
+
+`ca-msg-inv1` reported at 02:07:55Z. Verdict **REACHABLE**, well evidenced.
+
+**The path.** The sole client passing an `agent` query parameter to `GET /api/v1/messages` is the
+CLI:
+
+| Site | Content |
+|---|---|
+| `cmd/messages.go:73` | `StringVar(&messagesAgent, "agent", "", "Filter by agent name or ID")` |
+| `cmd/messages.go:45` | help text shows `--agent <name>` |
+| `cmd/messages.go:92-94` | raw flag value -> `ListMessagesOptions{AgentID: messagesAgent}` |
+| `pkg/hubclient/messages.go:147` | `query.Set("agent", opts.AgentID)` — verbatim, no resolution |
+
+The CLI's own help text *invites* a slug. Nothing on the client path resolves it. The web UI is not
+implicated — `web/src/components/shared/inbox-tray.ts:118` only calls `?unread=true`.
+
+**The R-9 comment is aspirational, confirmed.** `handlers_messages.go:66-67` claims the slug is
+resolved; line 71 calls `GetAgent` (UUID-only). `GetAgentBySlug` is never called on this path.
+
+**`handleMessages` and `handleAgentMessages` are the outliers.** The slug-first/UUID-fallback
+pattern is established at `handlers_projects_core.go:2219-2224` and `:2251`,
+`handlers_logs.go:619-637`, `handlers_agents_core.go:1732`, `handlers_chat_v2.go:692`. Two messaging
+handlers (`:71`, `:199`) do not follow it.
+
+**Metric impact, unchanged from the original filing:** slug + read-switch ON -> `GetAgent` fails ->
+inner block skipped -> **no `IncFallback()` by R-9 design** -> legacy routing, invisible to the S4
+readiness metric.
+
+#### Where I did not accept the report
+
+**(a) The user-facing claim is inferred, not observed.** inv1's section 5 argues that slug queries
+return empty *today, flag off*, because `message_store.go:310` filters `message.AgentIDEQ(filter.AgentID)`
+against a column that only ever receives `agent.ID` (`handlers_agent_messaging.go:249`, `:891`,
+`:1312`). The chain is plausible. But it was derived, not run.
+
+This is load-bearing for triage, not for correctness:
+- metric corruption behind an OFF flag -> Tranche G debt, staffed with Tranche G
+- `scion messages --agent <name>` silently returning nothing today -> **live user-facing bug**,
+  escalate immediately
+
+I am not escalating to the owner on a derivation. Sent back to inv1 with a read-only confirmation
+route: find an existing test exercising the `agent` parameter with a non-UUID value, and report what
+it asserts. All three outcomes are informative, including "no such test exists" — which would
+explain how a user-facing bug survived.
+
+**Rule 538.** An inference that would change the severity tier must be confirmed before it is
+escalated at the higher tier. Reporting a derived fact at observed-fact confidence is how a
+coordinator launders its own reasoning into someone else's decision.
+
+**(b) inv1's scope recommendation is wrong. This is the important part.**
+
+It recommended "S-tier, no design needed — copy the sibling slug-first/UUID-fallback pattern."
+But every sibling it cites is on a **project-scoped route**: `getProjectAgent`,
+`updateProjectAgent`, `resolveProjectAgent`. `GetAgentBySlug(ctx, projectID, slug)` takes a
+projectID because **a slug is only unique within a project**.
+
+`GET /api/v1/messages?agent=<slug>` is not obviously project-scoped. If there is no project in
+scope at the lookup, then "resolve the slug" has no well-defined answer — two projects may both
+have an agent named `builder`, and choosing wrong returns **another tenant's messages**. That is a
+cross-tenant read: a different and much worse class of defect than the metric gap inv1 was sent to
+size.
+
+So DEF-59 is not S-tier-by-pattern-copy. It needs a scoping decision first, and that decision is
+mine. Asked inv1 to establish only the fact: does `handleMessages` have a project in scope at line
+71 — from the route, the authenticated principal, or a required parameter — and is
+`/api/v1/messages` global or per-project? Explicitly told it not to propose a fix.
+
+**Rule 539.** "Follow the established pattern" is only sound when the new site shares the
+precondition the pattern depends on. A pattern lifted across a scope boundary carries the shape of
+the old site's safety without the substance.
+
+**Rule 540.** When a lookup key is unique only within a namespace, resolving it on an endpoint that
+does not carry that namespace is not a lookup — it is a guess with an authorization consequence.
+
+**Standing constraint reaffirmed:** under-granting is recoverable, over-granting is not. If the
+honest answer is "no project in scope," the fix is to reject the slug with a clear error, not to
+resolve it against a guessed namespace. A wrong resolution here is a cross-tenant read.
+
+**Process note (5fp holding).** I did not open a single source file to reach any of this. The
+evidence is inv1's; the two objections are judgement applied to its report. That is the split I
+committed to. Worth recording that catching (b) required *no* verification — only knowing what
+`GetAgentBySlug`'s signature implies, which is design knowledge, not lookup.
