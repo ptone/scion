@@ -23800,3 +23800,68 @@ verified on the remote **before** its agent was deleted, so PR (B)'s URL survive
 **Rule 608.** A URL that names a branch outlives the agent that pushed it; one that names a workspace
 or a SHA reachable only from a deleted container does not. Check which kind you built before retiring
 the author.
+
+---
+
+### 5gr — DEF-71 VERIFIED CLOSED. `ca-msg-e1a` RETIRED. TRANCHE E COMPLETE.
+
+The literal lines (handlers_read_switch_test.go:876-885):
+
+```go
+manageDecision := srv.authzService.CheckAccess(context.Background(), devUser, agentResource(agent), ActionManage)
+if !manageDecision.Allowed {
+    t.Fatalf("precondition failed: dev user does not have manage on agent — "+
+        "this test requires a manager caller to exercise DEF-64 (reason: %s)", manageDecision.Reason)
+}
+```
+
+Asserts `!manageDecision.Allowed` — **the grant, not the absence of an error.** A real control; it
+can fail. Rule 604 satisfied. Carrying `manageDecision.Reason` into the message is beyond what I
+asked: whoever trips this in two months learns *why* manage was denied, not merely that it was.
+
+**Rule 609.** A precondition assertion should report the *reason* the precondition failed, not just
+that it did. A control fires years after it is written, to someone with none of the context — the
+failure message is the entire handoff.
+
+**Retirement executed in the same order as e1b2's:** exit interview -> follow-up closed -> branch
+verified on the remote (`git ls-remote` -> `5f95371d1`) -> `scion delete ca-msg-e1a --preserve-branch
+--yes` -> *"Agent 'ca-msg-e1a' deleted via Hub."*
+
+**NO LIVE `ca-msg-*` AGENTS. I am the only one.**
+
+## TRANCHE E — FINAL STATE
+
+| | branch @ HEAD | numstat (re-verified by me vs `upstream/main` f1f86d3e0) | gate (literal, untagged) |
+|---|---|---|---|
+| **(A)** | `scion/ca-msg-e1a` @ `5f95371d1` | 1018 added, 0 deleted, 1 file added, 3 commits | `ok .../pkg/hub 336.074s`, all 5 pkgs |
+| **(B)** | `scion/ca-msg-e1b2` @ `15db406` | 291 added, 0 deleted, reviewed APPROVE | `ok .../pkg/hub 344.216s`, all 5 pkgs |
+
+Both test/diagnostic only. **No engineering gate open on either. Held solely by ptone's owner hold.**
+Compare URLs and the section report pre-built and held (5gq).
+
+**Defects filed during Tranche E that outlive it:** DEF-67 (S1 nil `webChatStore` returns empty before
+the read-switch, no `IncFallback`), DEF-68 (`divergenceCaveats` runtime-mutable), DEF-69 (caveat test
+drops non-string values — triggered by my own proposed boolean), DEF-70 (mux bypass; escalated into
+the 32-of-45 authz gap, now `ci-fix-lead`'s), DEF-71 (**CLOSED**), DEF-72 (dual-outcome assertion on
+the 5-part DM key parse — the most security-load-bearing assertion in PR (A) is the one that cannot
+fail), DEF-73 (`IncFallback` fires for non-migration reasons).
+
+**DEF-73 changes the Tranche G argument and should not be lost.** Three paths found where
+`IncFallback` fails to fire, and two where it fires for reasons unrelated to a migration gap. The
+divergence counter therefore has **blind spots AND false positives** — it cannot be trusted in either
+direction. That retires the last case for reading it as a go/no-go and confirms the decision must come
+from the offline report (5ff). I had been hunting only undercounts; e1a supplied the other half.
+
+**Rule 610.** When auditing an instrument, look for false positives with the same energy as blind
+spots. An undercount and an overcount are equally disqualifying, but only the undercount feels like a
+safety problem, so the overcount goes unexamined — and a metric with both is not merely imprecise, it
+is uninterpretable.
+
+**e1a's misreading note, kept verbatim because it belongs in the defect record:** *"#14 pins the
+implementation behaviour, not the contract — the CLI help says 'name or ID', so someone reading the
+test name concludes we tested it and it works as designed, when in fact we tested it and found it
+silently fails."*
+
+**Rule 611.** Ask an author what its test could be *misread* as proving. A test name is the only part
+most readers will ever see, and a name that sounds like a guarantee attached to a test that pins a
+defect will be cited as evidence the defect is not real.
