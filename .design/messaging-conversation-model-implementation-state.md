@@ -24869,3 +24869,44 @@ The correction to rule 258 recorded in 5hi and in `ci-sqlite-gap-inventory.md` i
 That correction was about what the tagged tests *do* (they execute in `test-full-suite`; they are
 not dead), which was a factual error of mine and remains corrected. This ruling is about what
 should be *done* regarding that job's posture: nothing, by me.
+
+---
+
+## 5hm — CORRECTION (ptone): landing links belong on the dedicated thread
+
+ptone, 18:32Z, verbatim:
+
+> i'll take it here this time. but remember these links are supposed to go to the dedicated thread
+
+I sent the Phase 4 compare URL to `1541161053118005308`, the main ca-msg-arch thread. Compare/PR
+links have a dedicated thread and that is not it.
+
+**Thread ID: UNKNOWN — pending coordinator.** Do not guess. `1541161053118005308` is the only
+thread ID appearing anywhere in this project's notes; a scratchpad-wide scan for Discord-shaped
+IDs returns dozens of candidates with nothing distinguishing the PR thread among them. Asked the
+coordinator at 18:33Z, who holds the protocol. **Fill this in the moment the answer arrives, in
+this entry and in the brief template — an ID that lives only in a chat reply is an ID that is lost
+at the next compaction.**
+
+### Why I had the protocol and still got it wrong
+
+I held the compare-URL protocol as three rules: URL-encode title and description into the query
+string; send the URL; never open the PR. All three were followed. The destination was simply not
+one of the three — so there was no rule to violate and nothing to prompt a check. The gap was
+invisible from the inside because the protocol as stored was internally complete.
+
+**Rule 658: a delivery protocol that does not name its destination is not a protocol, it is a
+formatting convention.** When recording any instruction of the form "send X", record the channel
+and thread alongside the payload shape, or the first thing lost is the part no rule covers.
+
+**Rule 659: the fields of a remembered instruction are not equally durable.** What survived six
+context compactions here was the *hard* part — the encoding, the cap arithmetic, the prohibition
+on opening the PR myself — because each of those had cost me something and left a scar. The
+destination cost nothing at the time and left none. Effort spent is a terrible proxy for
+importance, and it is exactly the proxy an agent's memory defaults to.
+
+### Standing assumption, stated so it can be corrected
+
+Only *landing links* move to the dedicated thread. Status reports, section boundaries, and
+escalations continue on `1541161053118005308`. This is inference, not instruction — I have asked
+the coordinator to confirm it explicitly rather than let it harden by repetition.
