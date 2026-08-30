@@ -21882,3 +21882,47 @@ mechanism, carries the three held agents by name, and adds the traps earned this
 
 Held and untouched: `fmt1409b`, `e1b`, `probe`. Offered ptone the choice of retiring the probe or
 keeping it as a third sample rather than deciding for him — it is his debugging session now.
+
+---
+
+### 5fl — The dead agents read as healthy to anyone outside this thread (2026-08-30 ~01:49Z)
+
+`chat-admin-lead` flagged `ca-msg-probe` in its sweep and described my three `created`-phase
+agents as **"likely queued for provisioning, all nominal."** The coordinator caught it and told me
+before it propagated.
+
+**This is the important failure mode of the whole episode, and it is not chat-admin-lead's fault.**
+Three agents sitting in `phase=created` are *indistinguishable* from three agents mid-boot to
+anyone who has not been in this thread for the last thirty minutes. The benign reading is the
+natural one. Every sweep that touches the fleet will reach it, independently, until told
+otherwise. The distinguishing evidence is not in the phase field — it is in `lastSeen` being
+`0001-01-01`, `containerStatus` being null, and the frozen `updated` delta, none of which a
+routine sweep has reason to inspect.
+
+**Rule 528.** A failure that presents as a normal transient state will be re-diagnosed as benign
+by every fresh observer, forever, and each one will report reassurance. Broadcasting the context
+is not courtesy; it is the only thing that stops a known-bad state from being laundered into
+"nominal" by someone acting in good faith. *(This is 512 — wrong comments generate one
+investigation per careful reader — with the sign flipped: a misleading STATE generates one false
+all-clear per careful reader.)*
+
+Messaged `chat-admin-lead` directly with the evidence, an explicit "do not retire these three",
+and a specific ask: drop them from sweep output or mark them known-failed-and-held. Also told it
+**not to propose a third mechanism** — two have already been falsified and a sweep agent with
+partial context is exactly where a third would come from. Cannot retire it and would not want to
+(ptone's standing owner, rule 415); it needed context, not removal.
+
+Asked the coordinator to fold the same line into its own sweep output, since I can only reach the
+agents I know are looking.
+
+**Confirmed `ca-msg-probe`'s provenance to the coordinator**, which asked rather than assumed —
+correctly, because the surface reading is bad: an agent created at 01:43:15Z, *after* a hold
+issued at 01:40:11Z. It was created **at ptone's direct request** (01:42:59Z, same thread, asking
+me to try again after he tested provisioning from my environment). Authorised by the person who
+issued the hold, not an override of it. Logging the distinction because the timestamps alone
+imply the opposite, and this entry will outlive the memory of the exchange.
+
+**Evidence inventory now: 5 failures, 4 surviving samples** (`fmt1409b`, `e1b`, `probe` held;
+`e1` deleted, record preserved in 5fj). The probe is the cleanest of them — deliberately created,
+minimal do-nothing prompt, no repo access — and its 6.69s delta is what stretched the range that
+falsified my "sub-second and identical" claim.
