@@ -14,6 +14,35 @@
 
 ---
 
+## 0. ESTABLISHED FACTS — settled by the owner, do NOT re-derive
+
+> Facts stated by ptone as domain owner, not inferred by me. Each cost him a telling. If a
+> finding appears to contradict one of these, the finding is wrong until proven otherwise —
+> check here **before** escalating anything that depends on it.
+
+- **F-A. Agents do not round-trip through an external broker.** `scion message` sends via a
+  direct path. Therefore the agent-sender branch of `handleBrokerInbound` is **dead code, not a
+  live path**, and denying it breaks nothing. *(Settled 2026-08-30. I re-litigated this after it
+  had already been established, which is how it came to be written here.)*
+- **F-B. `/api/v1/broker/inbound` is not agent-reachable.** It requires broker HMAC; broker
+  identity is set only by the HMAC middleware and an agent token does not produce one.
+- **F-C. `cla/google` is an expected FAILURE on agent-authored branches.** Never a blocker.
+
+**Why this section exists.** I had F-A's *supporting reasoning* recorded — that the non-`user:`
+branches are HMAC-trusted infrastructure by design — and had even written *"recorded so the next
+reviewer does not re-derive this."* What I never recorded was **the conclusion itself**. So the
+reasoning survived and the conclusion did not, and I spent one of ptone's evenings re-deriving a
+fact he had already given me.
+
+- **507.** Record conclusions, not only the reasoning that produced them. Reasoning is what you
+  needed at the time; the conclusion is what your successor needs. A note that preserves only the
+  derivation guarantees the derivation will be run again.
+- **508.** Facts supplied by the domain owner belong in a section of their own, above the working
+  log. Buried in a dated entry, an owner-supplied fact is indistinguishable from your own
+  inference — and yours is the one you will feel entitled to re-examine.
+
+---
+
 ## 1. Standing contract — rules that do not change
 
 1. **I do not implement.** I am the architect. I spawn engineering managers, review what
