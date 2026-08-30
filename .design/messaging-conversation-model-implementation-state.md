@@ -24573,3 +24573,67 @@ alongside DEF-32, the B10 flip-to-deny, and the DEF-79 production-path trace.
 Raised to ptone as a safety notice with the operational consequence stated plainly: **do not run a
 resumed backfill against real data until this lands.** Not a block on him — the fix is dispatched —
 but he has a snapshot exercise scheduled and needed to know before it, not after.
+
+### 5hh — DEF-81 follow-on: approved in part. The mock removal does not ride. (2026-08-30 18:10Z)
+
+p4a: the DEF-81 fix mechanically breaks 3 tests in `pkg/messaging/backfill_test.go` (all encode
+message-ID checkpoint semantics). v2 has rewritten them plus 2 additions, **and also** removes an
+`EnsureParticipant` mock method and swaps an import. Asked to port the file.
+
+**This is the scope-creep shape: fix → breaks tests → replace the test file.** "The tests were
+wrong" is what it always sounds like, and here it is *partly* true, which is the dangerous version.
+
+#### Approved: the 3 rewrites + 2 additions, BY HUNK
+
+The tests encode the old semantics. When semantics change, their tests must change. Legitimate.
+
+#### Rejected: the `EnsureParticipant` mock removal
+
+**Go does not require unused methods to be deleted.** Nothing about the checkpoint fix forces this,
+so it is v2-era drift riding an approved change — and Ruling A-2 is explicit that M-MOD files are
+ported by hunk, never by file copy.
+
+It also matters *what* it is. `EnsureParticipant` is on the prohibition list (with `left_at`
+preservation); `mockConversationStore` implements it at `backfill_test.go:306` to satisfy
+`ParticipantEnsurer` (`conversation.go:66`). Reducing a mock's capability on a prohibition-list
+surface is precisely the quiet subtraction the list exists to catch.
+
+**Rule 649: the compiler is the arbiter of what a change "requires".** If the build succeeds without
+it, it is not a consequence of the fix — it is an opinion travelling under the fix's authority.
+Applied to the import swap too: allowed *only* where the compiler forces it, and explicitly "do not
+tidy."
+
+#### The part I nearly let through
+
+p4a's justification for rewriting `TestBackfill_CheckpointNotFound` was that under cursor semantics
+*"the service no longer validates the checkpoint format."* Reasonable-sounding, and it would have
+retired a test that asserts a bad checkpoint fails.
+
+**Checked. Validation is not lost, it MOVED.** `entadapter/message_store.go:401-404` calls
+`decodeCursor` and returns `invalid cursor: %w`; backfill wraps it as "listing messages". A
+malformed checkpoint still fails closed and loudly in production.
+
+So the property — *a bad checkpoint errors rather than silently succeeding* — remains true and must
+remain asserted. Directed: restore the assertion, pointed at the store's validation.
+
+**Rule 650: "that concern moved elsewhere" is a reason to re-aim a test, never to delete it.**
+Responsibility migrating between layers changes *where* you assert, not *whether*. A test deleted on
+those grounds leaves the property covered nowhere, and the deletion reads as justified forever after.
+
+Flagged the second-order trap explicitly: if the mock `msgStore` ignores `opts.Cursor`, it cannot
+produce the error, the assertion becomes untestable, and coverage **vanishes while the suite stays
+green**. Told p4a to report which case it is and declare the gap rather than paper it — §5gz's
+assertion-strength problem, one layer down in the fixture.
+
+#### Added: an upgrade-path test
+
+An operator who saved a pre-upgrade checkpoint (a message ID) and passes it post-upgrade must get a
+loud `invalid cursor`, **not** a silent restart-from-zero and **not** a silent no-op. The token
+format changes under operators' feet; that transition deserves a pin, and it fails closed today.
+
+#### Confirming the fix at mechanism level, not just symptom
+
+The cursor is base64 of `(created, id)` and the query tiebreaks with `IDLT` on equal timestamps
+(`message_store.go:405-411`). That is exactly the capability `CreatedGT` lacked. p4a's diagnosis was
+right about the mechanism, not merely the failure — told them so, since a correct mechanism-level
+diagnosis is what made a 3-hunk ruling safe to give quickly.
