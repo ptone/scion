@@ -21264,3 +21264,56 @@ Gave it a standing exception rather than a flat no: **a failed run, or a wall-cl
 enough to make nightly the wrong cadence, is worth telling me promptly.** A green run with a
 number in it can wait. Worth keeping the distinction explicit when refusing an escalation — a bare
 "don't escalate" teaches an agent to sit on the bad news too.
+
+### 5fa. DEF-57 cleanup verified independently — approved pending one amend (2026-08-30)
+
+Branch `scion/ca-msg-def57` @ `61464558e079a693f4c68c8c55dffc1e70dc26ae`, base exactly
+`1a2c1b07d`, one commit, `refactor(hub): authorize all broker inbound senders uniformly`.
+Numstat 25/27 handler, 221/32 tests — matches def3750's report.
+
+Reading the diff from git instead of from chat worked exactly as intended: **all three of its
+claims held in the bytes**, and I could confirm them in seconds rather than negotiating over a
+transcription. `req.Message.SenderID = senderUser.ID` survives on the `user:` path; the deny
+returns before the ownership check; `NewAuthenticatedUser` goes to `authorizeAgentMessage` on the
+user path with `broker` assigned only in the else. Both false comments deleted, replacements
+accurate. **No deleted assertions in the test diff** — the only removals are `Sender` fixture
+values. gofmt clean. Full `pkg/hub` green in 320s, not just the broker tests.
+
+**The check def3750 did not make, and the one that matters most.** Its design denies non-user
+senders because `Type()=="broker"` reaches the type-switch default. But `authorizeAgentMessage`
+runs two type assertions *before* that switch — `senderIdentity.(AgentIdentity)` for the
+self-message branch and `senderIdentity.(UserIdentity)` for the super-admin bypass. If
+`brokerIdentityImpl` satisfied either by accident, the deny would never be reached. Probed it with
+a throwaway compile-time test: it satisfies neither (`AgentIdentity` needs
+ProjectID/Scopes/HasScope/Ancestry/OriginUserID/TokenID; `UserIdentity` needs
+Email/DisplayName/Role; broker has only ID/Type/BrokerID).
+
+**So the deny is structural, not incidental — but it is load-bearing and undeclared.** Adding an
+`Email()` method to broker identity for logging would silently open the super-admin branch. Told
+def3750 so it lands in the reviewer's head; the durable fix is a negative gate, noted below.
+
+**My mutation, sharper than def3750's.** It deleted the call; I mutated the *decision* —
+`senderIdentity = broker` replaced with an admin `AuthenticatedUser`. Asserted the anchor matched
+exactly once before writing and grepped the mutant afterwards to prove it landed (rule 498, the
+near-miss that nearly cost me a false conclusion last time). Both deny tests went RED. Restored,
+zero residue, green again.
+
+**Approved pending one amend:** the test-local `senderEmail := "user:" + user.Email` holds a
+prefixed sender reference, not an email. In a commit that exists *because* a name and two comments
+described something other than what they held, shipping a fresh instance of the same defect is not
+acceptable — even at one line, even in a test.
+
+**Kept the unrequested membership rework.** Moving the 4 re-pointed tests off the `Role=admin`
+super-admin bypass onto real project membership is better than what I asked for. The process note
+stands and I gave it plainly: when a rescope lands mid-turn, say the reworked-but-unrequested part
+is in flight and let me rule, rather than applying the cutback on top and reporting only the
+total. **I nearly held good work over a growth number I had misread as churn** — which is the
+symmetric failure to the one I keep making, and worth recording as such.
+
+**Exit interview issued after approval**, per the timing rule — that is when the incentive to stay
+quiet peaks and it has produced three defects plus a flaw in def3750's own gate on this workstream.
+
+**New follow-up, filed not staffed: DEF-58** — negative gate asserting `brokerIdentityImpl` does
+not satisfy `UserIdentity` or `AgentIdentity`. The probe I wrote by hand is the test; it should
+live in the tree rather than in my shell history. Cheap, and it pins the invariant this change now
+rests on.
