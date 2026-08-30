@@ -25443,3 +25443,91 @@ repurposing across phases, so the context-rot concern does not apply.
 - **683** — A guard whose author justifies it by saying the compiler would
   catch the same thing has told you the guard is decoration. Keep it if it is
   free, but do not count it.
+
+---
+
+## 5ht — G1 accepted; tranche-g advanced; G2/G3/G4 dispatched in parallel
+
+**G1 revision verified independently.** Branch `scion/ca-msg-g1` at `58b08d743`.
+Re-derived numstat: `server_attribution_report.go` 437/0,
+`server_attribution_report_test.go` 677/0. Zero deletions.
+
+Checks I ran rather than accepted:
+
+- **The reconciliation could have been born broken.** If
+  `CountUnbackfilledMessages` excluded broadcasts — plausible, since it exists to
+  give backfill a progress metric and backfill skips them — then G1-b would
+  produce a permanent false mismatch and the operator would learn to ignore the
+  loudest line in the report. Read `message_store.go:511`: it counts
+  `message.ConversationIDIsNil()` with no broadcast predicate. Sound. This is the
+  same failure class as G1-a, one layer down, and it was worth the one command.
+- **g1's second gate list silently dropped two scripts** its first list had:
+  `check-security-marker-gates.sh` and `check-authz-reachability.sh`. Ran both
+  myself against the branch: **both PASS**. A reporting omission, not a
+  regression — but the omission is the point (rule 684).
+- Broadcast bucket present at `:76-85, :262-267, :384-386`, blocking, named
+  `unattributed — broadcast`, separate from unresolvable. Reconciliation at
+  `:171-202`, all-projects only.
+- G1-c behavioural guard has a real mutate/fail/revert/pass proof: ignoring
+  `deriveErr` moved 4 rows into backfillable and 0 into unresolvable. Non-vacuous.
+
+**Accepted with one noted, unfixed imperfection.** Broadcast is classified before
+the UUID check, so a broadcast row that *also* carries a non-UUID principal is
+counted as broadcast and its principal is not enumerated in the DEF-32 list. Both
+buckets block, so the go/no-go verdict is unaffected; only the diagnostic
+enumeration is incomplete. Filed, not fixed — the flip decision is correct either
+way and forward progress is the standing instruction.
+
+**`scion/tranche-g` fast-forwarded** `66b5cab7f` → `58b08d743`. Verified as a true
+fast-forward with `merge-base --is-ancestor` first. This is integration inside my
+own tranche branch, not a crossing of ptone's merge gate, which is `main`.
+
+**OQ-2 ruled by me, not escalated further.** The question — typed error vs empty
+list for unresolvable conversations, and who owns the UI — has been open with
+ptone without an answer. The standing directive is explicit: *"ship with it, i
+just want to keep forward progress and only block on me for severe or
+irreversible decisions."* A handler's status code is neither severe nor
+irreversible, and the branch's entire purpose is to observe this behaviour on the
+test VM. **Ruling: typed error (`409`/`503` with a machine-readable code), not an
+empty list.** An empty list is indistinguishable from "you have no messages" —
+the exact silent-wrong-result class DEF-81 belonged to. G3 is instructed to add
+no UI shim and to report what the web client actually does when it receives the
+error; that observation is a deliverable, not a bug to pre-empt.
+
+**Dispatched in parallel** (briefs in `/scion-volumes/scratchpad/briefs/`):
+
+| agent | scope | owns |
+|---|---|---|
+| `ca-msg-g2` | B10 flip-to-deny, write path | `pkg/messaging` producers, `pkg/hub` write consumers |
+| `ca-msg-g3` | read-switch fallback removal | the 3 read sites + the 5-part-key silent nil |
+| `ca-msg-g4` | standing gates | DEF-58 negative gate, DEF-79 path test, DEF-80 caveat |
+
+Parallel rather than serial because G4 is fully disjoint and G2/G3 overlap only in
+`handlers_chat_v2.go` at ~1178-1416 versus ~1782-1817 — roughly 600 lines apart.
+Each brief names the other's regions as off-limits and forbids self-initiated
+merges; G3 rebases on my instruction once G2 lands. A rebase conflict is
+recoverable; a serialised tranche costs days.
+
+Both G2 and G3 carry the exception list explicitly, because the failure mode here
+is a mechanical sweep: `conversation.go:163` (EnsureParticipant — a listing
+concern, denying converts a cosmetic gap into an outage) and `notifications.go:499`
+(federated subscriber — denying stops federated notifications entirely). Each must
+carry a comment stating *why* it is exempt; "intentional" alone gets deleted by the
+next reader.
+
+All three verified executing via `scion look` after the unconditional
+folder-trust `message "1"` step. No stall.
+
+**Rules generated:**
+
+- **684** — A gate list that shrinks between two reports by the same author is a
+  reporting defect until proven a regression, and it is cheap to tell which.
+  Re-run the dropped items yourself; do not ask, and do not assume either answer.
+- **685** — When you add a cross-check, verify the thing you are checking against
+  measures what its name implies. A reconciliation against a subtly-scoped
+  counter is worse than none: it fires constantly, and the team learns to ignore
+  the loudest line in the report.
+- **686** — An unanswered escalation is itself an answer once a standing
+  "keep moving" directive is in force. Rule, record the ruling and its basis, and
+  make the consequence observable — do not let a question you already asked
+  become a stall you chose.
