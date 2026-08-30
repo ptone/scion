@@ -24063,3 +24063,180 @@ I asked rather than acted, and the answer took one line. Cheap.
 native-chat angle will look obvious in hindsight and I will be tempted to remember it as mine; it
 was not, and the reason it matters is that it reveals I had been framing a product-surface problem
 as a handler-layer one.
+
+### 5gx — DEF-75: an empty branch was the outline of an assertion nobody wrote
+
+`ca-msg-lint1`, diagnosing SA9003 at `handlers_read_switch_test.go:340`, found:
+
+```go
+if rec.Code == http.StatusOK {
+    // 200 = legacy fallback, 400 = rejected before read-switch
+}
+```
+with the real assertion at `:351` being `delta != 0 && delta != 1`.
+
+It proposed deleting the block and concluded "no missing assertion." **The proposal is right and the
+conclusion is wrong**, and its own evidence shows it. That assertion fires only when delta is
+neither 0 nor 1 — it **accepts both outcomes unconditionally**. The comment says the response code
+determines which delta is correct; nothing verifies the correspondence. A 200 with delta 0 — the
+legacy path silently failing to count — passes today.
+
+The empty block is `if rec.Code == http.StatusOK`. That is precisely where "then delta must be 1"
+belongs. It is not a documentary block that happens to be empty; it is an assertion the author
+sketched and never wrote.
+
+**DEF-75 (filed, not staffed).** *The delta assertion at `handlers_read_switch_test.go:351` accepts
+both 0 and 1 regardless of response code, so the code-to-delta correspondence documented in the
+adjacent comment is unverified.*
+
+**Approved: delete the 5 lines, do NOT add the assertion.** Reasons, in order: it is already under
+review on an open PR, and `ca-msg-inv3` may force a larger correction to this same file within the
+hour (it is checking whether the DEF-64 pins enable the switch at all). One considered change beats
+two churns of a PR ptone is watching.
+
+**Rule 629.** An empty branch is a claim about where an assertion *would* go. Before deleting one,
+compare what the surrounding comment PROMISES against what the code CHECKS — the gap between them is
+the finding, and the lint error is only what made you look.
+
+**Rule 630.** When a subagent proposes the right action for a too-generous reason, approve the action
+and correct the reason. Letting the justification stand ratifies "nothing to see here" and the
+finding dies with the ticket. Two of today's three most useful findings (DEF-74, DEF-75) came from
+disputing a subagent's reasoning while accepting its recommendation.
+
+### 5gy — inv3 audit complete. Denominator 3/3. Native chat DISCONFIRMED. DEF-76 filed.
+
+`/scion-volumes/scratchpad/projects/ca-msg-inv3/research.md`.
+
+**3 call sites total — my S1/S2/S3 sample was exhaustive.** Correct, but not validated: I assembled
+it while chasing something else. Being right does not retroactively make it a method. The audit is
+what makes it a fact, and rule 557 stands unchanged.
+
+| site | verdict |
+|---|---|
+| S3 `handlers_messages.go:255-279` | **AFFECTED** — DEF-64 |
+| S2 `handlers_messages.go:70` | benign for authz, **silently lossy** — DEF-76 |
+| S1 `handlers_chat_v2.go` | clean |
+
+**ptone's native-chat hypothesis: DISCONFIRMED.** Native chat v2 reads through **S1**, which is
+clean. It does not touch S3. DEF-64 stays a `pkg/hub` handler problem and does not reframe Tranche
+G. A negative worth the cost — the alternative answer would have enlarged the tranche substantially.
+Also: the inbox tray (`web/src/components/shared/inbox-tray.ts:118`) hits S2 without an `agent`
+param, so the read-switch block is inert there. Not affected.
+
+**DEF-76 (filed, not staffed) — the one I nearly let through as "benign".** At S2 the `RecipientID`
+filter prevents any cross-user leak, so there is no authorization defect. But the narrowing can
+**silently drop messages that exist outside the DM conversation model.** That is not a security bug;
+it is potential user-visible message loss the moment the read-switch is flipped, with no error and
+no counter — the divergence metric cannot see a successful-but-narrowing resolution (same blindness
+as DEF-64). **This belongs in the Tranche G go/no-go, not in the defect backlog.**
+
+**Rule 631.** "Benign" is always benign *with respect to a specific property*. S2 is benign for
+authorization and lossy for completeness. A one-word verdict inherits whichever property the
+investigation happened to be about — read the sentence after the verdict, because that is where the
+other property is usually sitting.
+
+**Rule 632.** A finding filed under the heading of the investigation that produced it gets triaged
+by that heading. DEF-76 surfaced in an authorization audit, is not an authorization defect, and
+would have been sorted into the authz backlog and deprioritised. Re-file cross-cutting findings
+under the decision they actually affect.
+
+### 5gz — assertion-strength audit of PR A: 13 hard / 9 fragile / 1 soft. The 22:1 asymmetry is exact.
+
+| strength | count | meaning |
+|---|---|---|
+| HARD | 13 | genuine gates, fail if behaviour changes |
+| FRAGILE | 9 | assert `delta==0` after `enableReadSwitch` |
+| SOFT | 1 | `t.Log` only — test #22, the DEF-64 pin |
+
+**22 tests assert correct behaviour with `t.Errorf`. The one test asserting a known defect uses
+`t.Log`.** The prediction was structural, not lucky: asserting that a bug IS present feels like
+writing a wrong test, so it gets softened. Expect this signature wherever characterisation tests
+sit beside conventional ones.
+
+**DEF-77 (filed, not staffed) — the FRAGILE nine.** `delta==0` is indistinguishable between
+"switch ON and resolved" and "switch OFF". Those 9 tests therefore depend on `enableReadSwitch`
+continuing to work, and would **silently green-out** if enablement degraded. The six `delta==1`
+tests (#3, 7, 11, 18, 20, 23) would catch such a degradation, but only on their own paths.
+
+**Cheap structural remedy to propose with the fix, NOT to build unilaterally:** one canary that
+asserts `ConversationReadSwitch()` is actually true immediately after `enableReadSwitch()`. A single
+hard gate then protects all nine fragile tests, because enablement failure becomes a loud failure in
+one place rather than nine silent passes. This is a new assertion, so it needs ptone.
+
+**Rule 633.** A test asserting the ABSENCE of an effect (`delta==0`) cannot distinguish "the
+mechanism ran and produced nothing" from "the mechanism never ran". Any suite built on negative
+assertions needs at least one positive control on the same mechanism, or the whole suite can pass
+while the mechanism is dead.
+
+**Rule 634.** Grade a suite by the strength of its assertions before quoting its size. "23 tests"
+and "13 hard gates, 9 conditional, 1 inert" describe the same file and support completely different
+decisions. I quoted the former to ptone twice.
+
+### 5ha — inv3 exit: DEF-78 (REST/SSE divergence), and I over-firmed DEF-76 to ptone
+
+**DEF-78 (filed, not staffed) — the finding the sample would have hidden.** `handleAgentMessagesStream`
+serves the same endpoint pattern as S3 but has **NO read-switch block at all**. So with the switch
+ON, the REST path narrows and the SSE path does not: **two clients on the same endpoint see
+different message sets.** inv3 found it by reading past line 288, not from my brief.
+
+This is the exact failure mode rule 557 warns about, and it survived my sample *because* my sample
+was exhaustive for `ConversationReadSwitch()` call sites. The correct denominator for "sites that
+call the switch" was 3. The relevant denominator for "handlers whose behaviour the switch changes"
+is 4 — the fourth matters precisely because it does NOT call it.
+
+**Rule 635.** An enumeration of call sites cannot find the place where the call is MISSING. When a
+flag changes behaviour, enumerate the surface the flag is supposed to govern, then check which
+members implement it — the absentees are invisible to a grep for the flag.
+
+**Correction owed: I over-firmed DEF-76 to ptone.** I told him the S2 narrowing means "users could
+quietly stop seeing their own messages." inv3, unprompted, named this as the thing it is least
+confident about: the loss is **inferred from filter structure** (`ConversationID` is an AND
+predicate), **not observed**. Whether messages lacking `ConversationID` actually exist depends on
+the dual-write migration state, **which nobody checked**.
+
+So DEF-76 is a confirmed structural possibility and an unconfirmed event. I wrote rule 631 about
+reading the sentence after the verdict, then within minutes shipped that finding upward with the
+hedge sanded off.
+
+**Rule 636.** Relaying a subagent's finding upward strips its uncertainty unless you carry the
+hedge verbatim. Summarising is compression, and confidence qualifiers are the first thing
+compression drops. If the finding is worth escalating, the hedge is worth escalating with it.
+
+`ca-msg-inv3` retired after this interview. It also confirmed the mid-task redirect was well-timed:
+the enumeration was already complete, so the redirect cost nothing and produced the `t.Log` finding.
+
+### 5hb — PR A revision pushed (6fc1bb2b). DEF-79 filed: the pin may be holding something else.
+
+`origin/scion/ca-msg-e1a` @ **`6fc1bb2b`**, verified by me. 1023/0, `ok pkg/hub 339.256s`, lint clean,
+canary passed. Contents: SA9003 deletion, DEF-64 characterisation assertion, enablement canary.
+
+**Two real results, not formalities.** The canary passing rules out "nine tests green on dead
+enablement." And the DEF-64 assertion PASSING means the defect is empirically present in a test that
+fails the moment it is fixed — an hour ago that test could not fail at all.
+
+**DEF-79 (filed, not staffed) — `ca-msg-lint1`'s own answer to "what would a green hide".** The
+characterisation test pins `found==false`. Nobody traced the production path to confirm the DM-key
+narrowing is the ONLY mechanism that can produce `found==false`. If a second cause exists — an authz
+filter, a pagination default, a store-layer ordering issue — then fixing the `canManage` guard would
+leave the test green, and **the pin would silently decouple from the defect it names.**
+
+Partial mitigation, which the agent supplied itself: the NoDM control proves the same fixture IS
+visible with no DM present, so any spurious invisibility must be DM-conditional. That narrows the
+risk substantially without closing it.
+
+**Not merge-blocking.** The test is strictly better than the `t.Log` it replaces, and its message
+already hedges with "may be FIXED". Under ptone's standing directive (block only on severe or
+irreversible) this is filed, not fixed. **Tranche G must trace the path before relying on the flip.**
+
+**Rule 637.** A characterisation test pins an OBSERVATION, not a CAUSE. It is only a reliable signal
+for the named defect if the observed state has exactly one possible cause — which is a claim about
+production code, and must be verified there, never inferred from the test passing.
+
+**Rule 638.** Ask every agent what a green result would hide, as its own question, before retiring
+it. DEF-79 is the third finding today produced by that question alone (after DEF-74 and inv3's
+`t.Log` catch). Agents will not volunteer the weakness in work they just finished unless asked
+directly and told it is wanted.
+
+**Brief fixes for next time, both from lint1:** say "lint the PACKAGE, never a single file" — a
+single-file `golangci-lint` run emits typecheck noise that reads like real findings; and state
+explicitly where to `cd` after cloning, or an agent may run git against the wrong repository.
