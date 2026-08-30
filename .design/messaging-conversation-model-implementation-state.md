@@ -25168,3 +25168,64 @@ and I have now made both. The general form: **a mechanism that suppresses failur
 corrupts the success signal too, because it makes the two indistinguishable from outside.**
 
 Phase 4 is merge-ready from my side. Merging is ptone's gate.
+
+---
+
+## 5hq — Phase 4 MERGED (#1426 → `66b5cab7f`); final tranche authorised
+
+ptone merged #1426 at 19:03:23Z. Merge commit **`66b5cab7f`** on `GoogleCloudPlatform/scion` `main`.
+**DEF-12 and DEF-81 are closed.** `main` now has a reachable backfill entry point and a resume path
+that does not silently drop same-timestamp rows.
+
+Then, 19:10Z: *"we are ready to build the final tranche on a banch i can deploy to a test branch"*
+— corrected 19:10:47Z to *"'deploy to test vm' not branch. but i think you get the idea."*
+
+### What the correction changes about the design
+
+Every tranche so far has been per-phase branches, each landing on `main` independently through its
+own PR. The final tranche is different: **one integration branch that must be coherent and
+deployable at the point ptone takes it to a test VM.** Phases accumulate on it; it reaches `main`
+only after VM validation.
+
+This inverts a working assumption. Per-phase-to-`main` means each phase must be independently
+safe on `main` — which is why interim tranches were allowed to carry tracked drift from final
+behaviour. An integration branch destined for a VM must instead be **coherent as a whole at a
+single moment**, and partial states on it are acceptable in a way they never were on `main`, while
+the endpoint is held to a higher bar than any individual phase has been.
+
+**Rule 670: "deployable" is a property of a branch at an instant, not of the commits on it.**
+The sequencing freedom this buys is real and I should use it — phases on the integration branch do
+not each need to be independently shippable — but it comes with an obligation I have not had
+before: something must establish that the branch is coherent *at the moment it is handed over*,
+and no individual phase's gates can establish that.
+
+### Dispatched immediately: `ca-msg-inv4`, drift audit
+
+Brief at `briefs/ca-msg-inv4.md`. Read-only enumeration of every file where `main` is behind
+`scion/messaging-v2`, bucketed PORTED-FAITHFUL / BEHIND-BENIGN / **BEHIND-BEHAVIOURAL** / DIVERGED
+/ SUPERSEDED.
+
+Rationale: DEF-81 was not a bug someone wrote. It was a fix that **already existed on v2 and was
+not carried across** — the port was assumed faithful and was not. I will not build the final
+tranche on a base whose fidelity I have only assumed. Dispatched before resolving scope because
+the audit is required under every scoping outcome, so it costs nothing to start it first.
+
+Brief carries the standing prohibitions: no fixes during the audit (a fix destroys the audit's
+value as a fidelity measure), B5-superseded `fanOutToProject`/`fanOutGlobal` must be classified
+SUPERSEDED and never recommended for port, and anything touching authorization or DM key
+derivation is labelled `SECURITY — ARCHITECT DECISION REQUIRED` for me to rule on. Required
+report line: **"what a clean result here would still hide."**
+
+### Escalated to ptone: does "final" absorb the held ledger?
+
+The one genuinely load-bearing scoping question, asked alone. Tranche G as scoped is the
+read-switch (B10 flip-to-deny precondition, DEF-32, DEF-58 negative gate, DEF-79 trace). Held
+separately: **DEF-5, 6, 9, 10, 18, 32, 33/35, 34, 46, 47** — earmarked for a Tranche H that is
+itself blocked on the `omitempty` evasion, with DEF-34 blocked on #1259.
+
+If G is final, those eleven either come in or are consciously dropped. **The failure mode I am
+guarding against is stranding them silently** — shipping G, the project ending, and eleven filed
+defects quietly becoming nobody's. **Rule 671: "final" is a claim about a backlog, not about a
+branch — before accepting it, name what it leaves behind and make someone agree to that.**
+
+Not blocking on the answer; the audit runs regardless.
