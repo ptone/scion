@@ -21124,3 +21124,48 @@ all true — and entirely beside the point, because the traffic already flowing 
 unauthorized.
 
 **Nothing pushed.** Awaiting def3750's cut-back numstat and ptone's 403 decision.
+
+### 5ew. 5ev's headline finding RETRACTED — the guard is client-side (2026-08-30)
+
+ptone: *"in discord - when an unlinked sender tries to send a message to an agent, they get an
+error - so some other path must be blocking that."* He is right. Traced it:
+
+- `extras/scion-discord/internal/discord/broker.go:1312` — `else if mapping == nil`, replies
+  "Please use `/scion register` first to interact with agents.", **returns**. Never reaches the hub.
+- `extras/scion-telegram/internal/telegram/broker_v2.go:1963-1972` — same guard, same shape,
+  "Please /register first to use this bot."
+- `extras/scion-telegram/internal/telegram/telegram.go:674-689` (v1) has **no** guard — but
+  `NewTelegramBroker` has no caller anywhere in the tree. Dead code. Not a gap.
+
+**So 5ev's headline was wrong.** No unlinked sender reaches broker inbound. The 403-UX question I
+escalated is moot and has been withdrawn.
+
+**What survives, stated at its true size:** the filtering is client-side, in the broker repos, and
+the hub trusts brokers to have done it. The flip is still correct — as defense in depth, asserting
+the property hub-side so it stops depending on client cooperation. Retained def3750's test #4
+(`discord:someuser` → 403) precisely because its value is that it holds regardless of broker
+behaviour. Told def3750: **code unchanged, commit message changed** — the "unlinked users reach
+agents unauthorized" framing must not ship.
+
+**Corollary, and it is ptone's original point returning intact:** no broker emits a bare
+`system`/`scheduler`/`hub-internal`, and no unlinked sender arrives. The else-branch's live
+population is empty *in both directions*. The flip has zero blast radius. That is exactly what he
+said before I started investigating.
+
+**The pattern, now three for three, and I am naming it as a pattern rather than logging a third
+one-off.** DEF-57 over-escalation (impact without reachability), the wrong-repo false incident
+(inference relayed as observation), and now this. The common failure is not carelessness — each
+individual step was checked. It is **scope of search**: I treat "I cannot see a guard" as "there
+is no guard", and I only look inside `pkg/hub`, because that is the code I have been living in for
+this project. The guard was two repos over, in a client I had already opened *for a different
+question* — I read `broker.go:1304` to enumerate Sender values and did not read eight lines down.
+
+The corrective is mechanical, not attitudinal: **before escalating that a server-side branch is
+unguarded, trace to the actual process entry point that produces the input.** For an HTTP handler
+that means the client that builds the request, not the first line of the handler. If the entry
+point is outside the repo I am reading, that is a reason to look harder, not a boundary on the
+search.
+
+Also worth separating: I was right that a comment describing a branch's population is a checkable
+claim. I then made the same class of error I was criticising — I wrote a replacement description
+of that population without checking it either.
