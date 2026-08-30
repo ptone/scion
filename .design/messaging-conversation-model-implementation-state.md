@@ -24771,3 +24771,101 @@ Required non-vacuity proof before push: flip the production line to `DryRun: bac
 the test **failing**, revert, show it passing — the same treatment AC-12-7 got. **A test added to
 close a coverage gap must itself be proven to close it**, or I have replaced an unguarded property
 with an unguarded property plus a false record that it is guarded.
+
+---
+
+## 5hk — Phase 4 verified at `10af0c40` and delivered (compare URL sent)
+
+Phase 4 (`scion/ca-msg-p4a`) is engineering-complete. Head `10af0c40`, base `f3a54512`
+(= `upstream/main` at time of verification). Numstat re-derived by me, matching p4a's report:
+
+```
+274   0  cmd/server_backfill.go
+ 62   0  cmd/server_backfill_safety_test.go
+452   0  cmd/server_backfill_test.go
+286   0  cmd/server_backfill_volume_test.go
+ 23   0  cmd/server_foreground.go
+123   0  cmd/server_foreground_backfill_test.go
+ 18  25  pkg/messaging/backfill.go        DELETIONS-JUSTIFIED
+163  43  pkg/messaging/backfill_test.go   DELETIONS-JUSTIFIED
+```
+
+8 files, 1421/68. **Zero deletions on every `cmd/` file.** All gates exit 0 (build, `./cmd/...`,
+`./pkg/messaging/...`, lint, all three guard scripts taken from main).
+
+### Resolution of the vacuous-test defect (5hj)
+
+The fix was an extraction, not a stronger assertion — the right shape. `cmd/server_backfill.go:78-84`:
+
+```go
+// backfillConfigFromFlags builds the BackfillConfig from command flags.
+// Extracted so the dry-run default is assertable without a database.
+func backfillConfigFromFlags() messaging.BackfillConfig {
+	return messaging.BackfillConfig{
+		DryRun:     !backfillExecute,
+		BatchSize:  backfillBatchSize,
+		Checkpoint: backfillCheckpoint,
+	}
+}
+```
+
+`DryRun: !backfillExecute` now appears **exactly once in the repository**, at `:80`, and the sole
+call site is `:122` (`cfg := backfillConfigFromFlags()`). `TestBackfillDryRunDerivation` in
+`cmd/server_backfill_safety_test.go` calls the production function rather than restating its
+expression, so it is no longer satisfiable by a tautology. Non-vacuity proven by
+mutate/fail/revert/pass, as required.
+
+The distinction that made this fixable: the test could not observe the derivation because the
+derivation had no name. **Rule 655: a property that cannot be named cannot be asserted — when a
+test can only restate the code, the defect is usually in the code's factoring, not the test's.**
+This is the constructive form of rules 653/654, both of which diagnosed the same event.
+
+### Delivery
+
+Compare URL sent to ptone on thread `1541161053118005308` at 18:29Z. Title
+`fix(messaging): backfill entry point (DEF-12) + resume data-loss fix (DEF-81)`; body carries the
+two defects, the DELETIONS-JUSTIFIED accounting, the gate results, and the deliberate gaps.
+Message 1986 runes — six iterations to fit under the 2000-rune server cap, because URL-encoding
+roughly doubles the body. **Rule 656: when a channel has a hard size cap, budget the payload
+before writing it, not after** — the fixed overhead here (base URL + encoded title) is ~210 chars,
+so the raw body ceiling is ~700, and every draft above that was wasted work.
+
+PR opening is ptone's gate. I do not open it.
+
+---
+
+## 5hl — RULING (ptone): the `test-full-suite` reporting-only concern is out of scope
+
+ptone, 18:26Z, verbatim:
+
+> the reporting only aspect of that CI was to understand the impact first. it has run and there
+> were almost no issues. and those found have been addressed. so consider these concerns out of
+> your scope.
+
+**Effect.** The `continue-on-error: true` on `test-full-suite` (`.github/workflows/ci.yml:123-158`)
+is a deliberate, temporary posture with a stated purpose that has now been served. It is not a
+gap in my inventory and I stop treating it as one. The item "flagged to ptone, his call: dropping
+`continue-on-error`" is **closed, not deferred**. It is not `ci-fix-lead`'s to chase on my
+prompting either.
+
+**What survives the ruling.** Rule 651 stands on its own terms — establishing whether a gate *can
+fail the build*, not merely whether it runs, was the right question and it is what turned up my
+own three-month error in rule 258. What does not survive is the inference I drew from the answer.
+I read `continue-on-error` as an oversight to be corrected. It was an instrument, chosen
+knowingly, to measure blast radius before arming the gate. **Rule 657: a gate that is deliberately
+unarmed is a measurement, not a defect — before proposing to arm one, establish whether someone
+disarmed it on purpose and whether that purpose is spent.** The observable evidence was identical
+in both readings; only the intent differed, and intent is not in the YAML.
+
+**Consequence for Phase 4.** None to the code. The routing decision it drove — putting DEF-81's
+same-timestamp regression guard and the dry-run safety guard in the **untagged, blocking** lane
+rather than behind `!no_sqlite` — was correct on independent grounds and stays. A guard on a
+data-loss path and a guard on an irreversible-write default belong in the lane that can fail the
+build regardless of what the other lane's posture happens to be this month. But I removed the
+CI-lane framing from the compare-URL body before sending: it was my reasoning, not the reviewer's
+concern, and stating it would have imported a closed question into an open PR.
+
+The correction to rule 258 recorded in 5hi and in `ci-sqlite-gap-inventory.md` is **unaffected**.
+That correction was about what the tagged tests *do* (they execute in `test-full-suite`; they are
+not dead), which was a factual error of mine and remains corrected. This ruling is about what
+should be *done* regarding that job's posture: nothing, by me.

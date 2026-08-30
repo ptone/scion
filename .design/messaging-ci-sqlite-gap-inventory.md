@@ -449,3 +449,20 @@ previously read as "untested" is more likely "tested, reported, and ignorable."
 Sanctioned remedy for the rest remains a CI job that runs WITH sqlite **and can fail** — i.e.
 dropping `continue-on-error` from `test-full-suite`, which is `ci-fix-lead`'s call, not mine. Noting
 it here so the option is on the record rather than rediscovered.
+
+---
+
+## CLOSED BY RULING — 2026-08-30
+
+ptone, verbatim:
+
+> the reporting only aspect of that CI was to understand the impact first. it has run and there
+> were almost no issues. and those found have been addressed. so consider these concerns out of
+> your scope.
+
+The `continue-on-error: true` on `test-full-suite` was a deliberate measurement posture, adopted
+to size the blast radius before arming the job. That purpose is served. **Do not re-raise it.**
+
+This closes the *posture* question only. The factual correction above — that `!no_sqlite`-tagged
+tests DO execute in `test-full-suite`, and that the original premise of this document was false —
+stands unchanged and remains the operative fact for anyone reading this file.
