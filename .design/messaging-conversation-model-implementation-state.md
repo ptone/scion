@@ -24023,3 +24023,43 @@ remote. **No live `ca-msg-*` agents.**
 **Still owed by ptone:** DEF-64 (enumerate / fix three known sites / queue for G) and DEF-58
 (gate+comment / comment only / drop). DEF-74 filed, not staffed. Unknowns (b) silent `t.Skip()` and
 (c) cross-file `DivergenceMetrics` writers logged, not chased.
+
+### 5gw — ptone's rulings: DEF-64 audit-only (modified A), DEF-58 option A accepted
+
+**DEF-64 — RULING: modified option A. Audit, NO CHANGES.** ptone: "def-64 sounds like it might be
+related to our native chat system. let's go with a modified option A and just dispatch an
+investigator to do a more complete audit. not changes."
+
+Two things in that ruling, and the second is his, not mine:
+1. Audit only. No fix, no guard, no test change. Scope of the eventual fix is decided *after* the
+   denominator exists, not before.
+2. **Native chat is in scope as a first-class question.** His suspicion, not a finding of mine. The
+   brief asks whether native chat reads through these same paths or its own, and to audit its own
+   the same way if separate. I would not have scoped it that wide unprompted — worth noting, because
+   the read-switch work has been framed as a `pkg/hub` handler concern throughout, and he is
+   treating it as a product-surface concern.
+
+Dispatched **`ca-msg-inv3`** 15:44Z. Read-only, deliverable
+`/scion-volumes/scratchpad/projects/ca-msg-inv3/research.md`.
+
+Brief corrections applied from 5gu, both of which were my defects last time:
+- **Explicit clone instructions and the upstream URL**, rather than describing the state of a remote
+  that did not exist.
+- **Explicit auth**: the token path, with the note that the export must lead each command.
+Also carried forward: demand the denominator (rule 590); treat my S1/S2/S3 list as a sample not an
+enumeration (rule 557); require a statement of what was NOT checked; require DEF-74 testability per
+site; announce long-running work or be flagged stalled.
+
+**DEF-58 — RULING: option A accepted** ("happy with your option A if not too late"). It is not too
+late: nothing was ever written, and option A was always "fold into the next Tranche G branch". So
+both halves are now a **Tranche G requirement**, not a filed-and-unstaffed item:
+(a) negative gate asserting `brokerIdentityImpl` satisfies neither `UserIdentity` nor
+`AgentIdentity`; (b) a comment recording that the empty-`SenderID` comparison is intentional.
+
+Note this was a **gate addition**, which under my own brief item 12 is not the changing team's call.
+I asked rather than acted, and the answer took one line. Cheap.
+
+**Rule 627.** When a decision-maker adds scope you did not propose, record that it was theirs. The
+native-chat angle will look obvious in hindsight and I will be tempted to remember it as mine; it
+was not, and the reason it matters is that it reveals I had been framing a product-surface problem
+as a handler-layer one.
