@@ -25770,3 +25770,88 @@ Told g3 so directly.
   a request to a semantically different branch when only one conjunct fails.
   Discriminate on the *subject* of the request (here, `threadID`) before
   qualifying on what is needed to satisfy it.
+
+---
+
+## 5hx — G2 reviewed: an unconditional flip would have made the deploy the decision
+
+Branch `scion/ca-msg-g2` at `72f553db5`, based on `58b08d743` (pre-G4 — rebase
+required). 15 files, 917 insertions, **305 deletions**.
+
+**Deletion audit first, across all six touched test files.** Zero test functions
+removed. The 305 deletions are in-place rewrites. On a phase this size that was
+the single thing most likely to hide a weakened gate, and it came back clean.
+
+`DeriveConversationKey` is untouched, as instructed. The changes are to
+`ResolveOrCreateConversationByKey`, whose signature moves from
+`*ConversationResult` to `(*ConversationResult, error)` — log-and-return-nil
+converted into propagated errors carrying `external_ref`, `kind` and the wrapped
+cause. No normalisation, no repair, no best-effort introduced anywhere on the
+derivation path. Both exceptions carry reason-giving comments and dedicated
+tests (`TestG2_AC3_EnsureParticipantFailurePermitsSend`,
+`TestG2_AC3_NilParticipantEnsurerPermitsSend`, plus the federated-subscriber
+coverage).
+
+### The finding: no flag, anywhere
+
+Grepped the denial path for any operational-settings gate. There is none. **The
+flip is unconditional.**
+
+g2's own item 1 is what makes that disqualifying: this branch deploys to a test
+VM carrying **production data** where backfill has not run. The moment it
+deploys, every write into an unbackfilled topic fails. Nobody decides that — the
+deploy decides it.
+
+And it inverts the tranche's logic. G1 exists to answer *"what breaks if we
+flip?"* against real data. If deploying has already flipped the write path, the
+report measures a decision taken before the evidence existed. We would be running
+the experiment after acting on its result.
+
+**This is a defect in my brief.** I gave g3 AC-G3-3 — switch off, behaviour
+byte-for-byte unchanged — and gave g2 no equivalent. g2 built exactly what I
+specified. Said so plainly in the ruling; a brief's omissions are the author's,
+and an agent that gets blamed for them starts padding scope defensively.
+
+**Ruled:** `ConversationWriteDenySwitch`, default off, mirroring
+`ConversationReadSwitch` at `operational_settings.go:1168-1186` and
+`opsettings/sections.go:126-128`. **Two switches, not one.** Coupling forces a
+single large irreversible step; separated, they give the sequence the tranche was
+designed around — deploy (inert) → write-deny on → backfill history → G1 clean →
+read switch on. Each step reversible by an ops toggle with no redeploy. Added
+AC-G2-6 mirroring AC-G3-3.
+
+**G2-g:** count the denials. Items 3 and 4 describe denials invisible to the
+client — group-message per-recipient failures surfacing only in a `results`
+array, and broker-side denials occurring after the sender already got a 201. Both
+architecturally correct; both unmeasurable. Same argument as G3-e: on the VM we
+must distinguish "on and nothing failing" from "on and failures landing somewhere
+we are not looking." A separate counter beside `SwitchBypassMetrics`, not merged
+with it — different questions.
+
+**Accepted:** item 6 (non-UUID fixtures replaced with `tid()` UUIDs and keys
+built via `messages.DMConversationKey()`). Verified it cost no coverage — the
+acceptance file still pins denial for invalid kinds, malformed DM keys, empty
+thread and project IDs, and upsert failures. The fixtures moved toward production
+reality without unpinning the denial path.
+
+### The hang resolved itself, and the brief caused it
+
+The earlier stall was a false positive on liveness but a true signal of trouble:
+g2 sat on `TaskOutput` for ~1h against a lane that runs in 364s. The suite had in
+fact completed. **My brief named the gate list but never its expected duration**,
+so g2 had no basis to judge an hour as abnormal. Told it the number.
+
+**Rules generated:**
+
+- **697** — A behaviour change that ships unconditionally makes deployment the
+  decision. If a phase exists to be *observed* before it is *chosen*, it needs a
+  switch defaulting to inert, or the branch cannot be deployed without committing.
+- **698** — Do not couple two switches that gate different failure domains. Each
+  coupling converts two reversible steps into one irreversible one, and the
+  sequence you can no longer take is exactly the cautious one.
+- **699** — Evidence gathered after the action it was meant to inform is not
+  evidence. Check that the phase ordering you designed survives the deployment
+  mechanics you did not.
+- **700** — Tell agents the expected duration of every long gate. Without a
+  baseline, "still running" and "hung" are indistinguishable, and the agent will
+  wait rather than escalate — correctly, given what you told it.
