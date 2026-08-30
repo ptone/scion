@@ -25855,3 +25855,55 @@ so g2 had no basis to judge an hour as abnormal. Told it the number.
 - **700** — Tell agents the expected duration of every long gate. Without a
   baseline, "still running" and "hung" are indistinguishable, and the agent will
   wait rather than escalate — correctly, given what you told it.
+
+---
+
+## 5hy — G3 verified complete pending a one-character comment fix
+
+`scion/ca-msg-g3`, three commits, correctly rebased onto `41b179c85`. Re-derived
+numstat: `errors.go` 22/0, `handlers_chat_v2.go` 29/9, `handlers_messages.go`
+67/9, `handlers_read_switch_test.go` 585/137, `divergence.go` 60/0. Removed test
+functions across all three commits: **exactly one**, the same
+`RetainsVisibility` → `Returns409` replacement audited in 5hu. 35 test functions
+present, up from 23.
+
+**G3-f is correct, and the interesting part is a detail g3 found on its own.**
+The guard is:
+
+```go
+if agent.ProjectID == "" || agent.ProjectID == uuid.Nil.String() {
+```
+
+The ent store **never returns an empty string** for `ProjectID`; a project-less
+agent carries `uuid.Nil`. The obvious `== ""` check would have compiled, read
+correctly, passed against a hand-built fixture, and caught **zero** real cases.
+g3 went to the store rather than trusting the type. That is the difference
+between a fix and the appearance of one, and it is worth recording as the good
+kind of finding — nothing in my ruling would have caught it, because I specified
+the *shape* of the fix and the shape was right.
+
+Its item 4 follows honestly from this: the empty-string branch is untested
+because no non-ent store exists in the harness. Defensive, correct to keep.
+
+**One defect, in the comment above the guard:** it reads `threadID=""` where the
+bug required `threadID != ""`. With an empty threadID the DM branch is correct
+behaviour. As written the comment describes the guard firing in a case that was
+never wrong, so the next reader cannot reconstruct why the guard exists. On a
+subtle routing bug the comment is load-bearing — this is the same standard I
+applied to G4's DEF-58 marker and to G2's two exception comments, and it would be
+inconsistent to waive it here because the fix is one character.
+
+Told g3 to skip the sqlite lane for a comment-only change and run build/vet/gofmt
+instead. Demanding ten minutes of CI for a character is how gate lists get
+resented and then quietly skipped.
+
+**Closing note to g3, recorded because it is a management judgement.** Both of
+its hidden-lists pointed at the two most serious findings in this phase — the S3
+channel widening and the DM misroute — and both times the stated diagnosis was
+inverted. I told it explicitly that the pointing is the valuable part and to keep
+writing them unchanged. An agent that concludes its lists are a liability starts
+writing safe ones, and safe ones would have found neither defect.
+
+**Rule 701** — Scale the gate to the change. A comment-only edit does not need
+the full suite; requiring it teaches the author that the gate list is theatre,
+and the next time they skip something it will not be the cheap one.
