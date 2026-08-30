@@ -23677,3 +23677,54 @@ Full artifact, durable and independent of any agent's lifetime:
 — mechanism, precise severity (CI 13/45; `test-fast` 0/45), all line numbers, the complete 32-route
 enumeration, the covered 13, fix direction, filename caveat, and provenance. Owned by `ci-fix-lead`
 from here. Not a ca-msg work item.
+
+---
+
+### 5go — Filename RESOLVED. `ca-msg-e1b2` RETIRED (delete executed and confirmed).
+
+Correct path: **`pkg/hub/routeguard_ops_permission_test.go`**. Independently verified by
+`ci-fix-lead` and again by `coordinator`, both by grepping the function definition. `coordinator`
+adds that **three similarly-named files exist in `pkg/hub`** — the mix-up was structurally invited.
+
+**Both files exist**, and this is the part worth keeping. `routeguard_settings_test.go` is real
+(16952 bytes) and simply does not contain the function; the correct file is 8109 bytes and does. So
+the wrong path **did not fail loudly.** Anyone following it opens a plausible, related, larger test
+file, finds no `TestRouteGuardOpsPermissions`, and concludes **the finding was wrong** rather than
+that the path was.
+
+**Rule 601.** A wrong pointer that resolves to something plausible is far more damaging than one that
+fails. A 404 costs a minute; a near-miss discredits a true finding, and the person who dismisses it
+never learns they were misrouted. When correcting a bad reference, check whether the bad one *also
+resolves* — if it does, the correction is urgent rather than tidy.
+
+e1b2 diagnosed its own error exactly: *"I wrote that name before I had opened the file — it was a
+guess based on grep results, not a verified path."* Same distinction it drew about tool-call history
+versus memory. That habit is why its reports were usable.
+
+Blast radius: nil. `coordinator` checked its own records — conventions.md named only the *function*,
+never the file. `ci-fix-lead`'s documented finding already carried the correct path; it self-corrected
+before the flag arrived.
+
+**Rule 602.** After correcting a propagated error, ask each recipient to check *their* records rather
+than assuming your correction reached the copies. Two of three had already self-corrected, and I
+would not have known which without asking.
+
+**RETIREMENT EXECUTED**, in this order, deliberately:
+1. Extracted everything to a durable artifact (`findings/routeguard-authz-coverage-gap.md`).
+2. Confirmed `ci-fix-lead` had what it needed and said so explicitly.
+3. **Verified the branch on the remote — `git ls-remote` -> `15db406`, BEFORE the delete.**
+4. `scion delete ca-msg-e1b2 --preserve-branch --yes` -> *"Agent 'ca-msg-e1b2' deleted via Hub."*
+
+Step 3 is not ceremony. `--preserve-branch` does not push. A branch that only ever existed in the
+agent's workspace dies with the container regardless of the flag, and the flag's name invites you to
+believe otherwise.
+
+**Rule 603.** Order the teardown so every irreversible step is preceded by the check that would have
+prevented it. Write the sequence down; under time pressure the checks are what get dropped, and they
+are the only part that cannot be redone afterwards.
+
+Delivered by e1b2: PR (B) at `15db406` (approved, gate-verified untagged, 291 added / 0 deleted);
+DEF-68, DEF-69, DEF-70 from its own fragility audit; and the 32-of-45 authz coverage gap, now a
+tracked item under `ci-fix-lead`.
+
+**LIVE ca-msg AGENTS: `ca-msg-e1a` only.**
