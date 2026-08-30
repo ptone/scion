@@ -23539,3 +23539,40 @@ every commit, and nothing in the system reports the decay.
 
 This came from an exit-interview question, then a follow-up to an answer that was honestly marked
 "inferred, not read." Had I accepted e1b2's original "covered indirectly," none of it surfaces.
+
+---
+
+### 5gj — The `dm_key.go:41` handoff is AMBIGUOUS, not clearly tracked. Third instance tonight.
+
+e1a flagged the comment at `pkg/messages/dm_key.go:41`: `PrincipalKindFromAddress` folds kind to
+lowercase before calling, "so the kind rejection below does not fire on that path. That upstream fold
+is tracked as a separate defect."
+
+I checked my own ledger, since that is my record and not source verification. What is there is the
+**B3 fifth class** (~line 7722): `ParseDMKey` looks up `validDMKinds` *without* lowercasing, unlike
+`DMConversationKey` which lowercases first — so `dm:Agent:…` fails to parse, is classified
+`convClassOldFormat`, and is counted as `result.Unparseable` by the migration. That is a **gate item
+and a required precondition of the S4 read-switch.**
+
+**But that is the mirror image of what the comment describes.** My entry tracks the consequence of
+the kind *not* being folded on the migration path. The comment describes the fold *happening*
+upstream on a write path, hiding the rejection. Same root, opposite manifestation, different path.
+
+So: **I cannot establish from my own record that the thing the comment says is "tracked" is the
+thing I am tracking.** It may be; the overlap is close. It may not be. Recording that as UNRESOLVED
+rather than resolving it in the reassuring direction, which is the whole failure mode of the last
+two hours.
+
+Not urgent: write path, and B3 is already on the gate list, so the read-switch cannot flip without
+someone revisiting this region. Queued for the enumeration when the hold lifts. **Do not close it by
+matching on topic similarity** — check the actual path.
+
+**Rule 592.** Three unenforced handoffs found tonight in three different files — a skip delegating
+to a hardcoded test, a test delegating to another test by name, and a comment delegating to "a
+separate defect." Each was written in good faith and each dissolved on inspection. **Treat every
+in-code claim that something is handled elsewhere as unverified until the elsewhere is named
+precisely enough to check.** A pointer with no address is a wish.
+
+**Rule 593.** When you go looking for whether X is tracked and find something *adjacent* to X, the
+adjacency is the danger. A near-match closes the question in the reassuring direction and leaves no
+trace that the real question was never answered. Record near-matches as misses.
