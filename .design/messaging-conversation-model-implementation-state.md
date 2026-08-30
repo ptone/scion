@@ -22570,3 +22570,89 @@ next sweep. Added to the heartbeat: *execute the delete, do not write "retired" 
 
 **Rule 548.** Writing an action into the record before performing it converts the record from
 evidence into intention. The log is only worth reading if it lags reality rather than leading it.
+
+---
+
+### 5fu — DEF-63 CLOSED for `handleMessages`; reopened in a worse shape on the manager path
+
+#### DEF-63 dissolved where it was raised
+
+`ca-msg-inv1` traced it end to end at 02:19:39Z. The hunch was wrong, and the mechanism is clean.
+
+**Ent ANDs everything.** Each `query.Where()` appends to `_q.predicates`
+(`pkg/ent/message_query.go`); the generated SQL ANDs the accumulated set. No OR, no replacement, no
+special case when several filter fields are set. Store lines: `:310` AgentID, `:312-313`
+RecipientID, `:339-344` ConversationID — independent, all ANDed.
+
+So for `handleMessages`:
+
+```
+legacy   WHERE recipient_id = :user AND agent_id = :agent
+phase 8  WHERE recipient_id = :user AND agent_id = :agent AND conversation_id = :conv
+```
+
+Phase 8 is **strictly narrower** — always a subset, never a superset.
+
+The symmetric-expansion scenario cannot occur, and the reason is worth keeping: a DM conversation
+contains both directions, but `agent->user` rows have `recipient_id = user_id` (match) while
+`user->agent` rows have `recipient_id = agent_id` (no match). **The `RecipientID` constraint kills
+the symmetry before conversation membership can widen anything.**
+
+The only divergence this path can produce is *fewer* rows, from un-backfilled or drifted
+`conversation_id` values. That is detectable, directional, and fixed by completing the backfill. It
+cannot manufacture false mismatches from correct data.
+
+**DEF-63 is CLOSED for `handleMessages`. Do not re-open it.** Rule 547 stands as a general caution
+but does not apply to this path.
+
+#### The tail inv1 handed off, which is the same hazard in a worse place
+
+inv1's closing parenthetical: it did not extend the analysis to `handleAgentMessages`'s **manager**
+path, where there is no `RecipientID` and no `ParticipantID`, and Phase 8 adds a DM-scoped
+`ConversationID` to an otherwise all-messages filter.
+
+Apply inv1's own mechanism there and the result inverts. Manager filter is `{AgentID: agentID}` —
+deliberately unscoped (`:231-236`, by design, comment at `:228-230`). If the S3 DM-default branch
+(`:255-279`) is reachable with `canManage == true`, the filter becomes
+`{AgentID: agentID, ConversationID: <DM between the agent and this manager>}`.
+
+Strictly narrower, exactly as inv1 proved — but here "narrower" is the failure. **A manager who
+could see every message on an agent would see only their own private DM with it.** No error, just
+fewer rows.
+
+And the metric consequence returns in the form DEF-63 was originally feared to take: legacy returns
+everything, conversation returns one DM. A large mismatch — a *correct* signal about a *real*
+regression, but potentially loud enough to swamp the backfill-gap signal the metric exists to show.
+
+**This is a hypothesis. It rests on the S3 branch being reachable with `canManage == true`, which
+nobody has checked.** `ca-msg-inv2` dispatched to establish only that, briefed with inv1's settled
+facts so it does not re-derive them, and told that "not reachable, and here is the guard" is an
+equally good outcome. Asked for the **mechanism**, not the conclusion — a mechanism survives the
+next refactor.
+
+Deliberately **not** churning `ca-msg-e1a` with a manager-path pinning test yet. Its S3 cases do not
+distinguish manager from non-manager, which is a real gap, but adding scope on a hypothesis is the
+churn def3750 called out. Establish the fact, then decide.
+
+**Rule 549.** The same proof can license opposite conclusions at two sites. inv1's "strictly
+narrower, therefore safe" is sound only where the pre-existing filter was already correctly scoped.
+Where the filter was deliberately *unscoped*, strictly-narrower is precisely the defect. Carry the
+mechanism across sites, never the verdict.
+
+**Rule 550.** A well-scoped investigator ends its report by naming what it did not look at. Treat
+that sentence as the highest-value line in the document — it is the only part written with full
+knowledge of the search and no obligation to have finished it.
+
+#### `ca-msg-inv1` retired
+
+Delete executed and confirmed (`Agent 'ca-msg-inv1' deleted via Hub`) — this time before writing it
+down, per rule 548. Not extended a fourth time despite the temptation: I had told it twice that it
+was done, and a commitment revised whenever convenient is not a commitment. The cost of a fresh
+agent re-reading a brief is small; the cost of agents learning that my stated boundaries are
+provisional is not.
+
+Its output tonight: the DEF-59 reachability chain, the `handleMessages`/`handleAgentMessages`
+failure-mode asymmetry, DEF-61 (`filter.AgentID` stays raw), DEF-62 (the `parseUUID` precedent that
+unstuck the 59a design), the disproof of my own cross-tenant claim, and this handoff. **Four of the
+six were things no brief asked for**, and all six came from either the exit-interview question or a
+follow-up to it.
