@@ -22935,3 +22935,85 @@ cost it time. Keep giving exact ranges; keep marking them as of-a-commit.
 
 Still blocked per ptone 02:25:45Z. Nothing above is staffed. Two agents finishing to their own
 branches; no PRs.
+
+---
+
+### 5fy — Tranche E PR (B) COMPLETE. Compare URL built and HELD under the owner hold.
+
+`ca-msg-e1b2` pushed the review round at 02:32:03Z. `scion/ca-msg-e1b2` @ **`15db406`**.
+
+**Numstat re-verified by me against `upstream/main`** (the developer's was against `origin/main`,
+which lags — its merge-base is older and it answers a different question):
+
+```
+A  104  0  pkg/hub/admin_messaging_divergence.go
+A  180  0  pkg/hub/admin_messaging_divergence_test.go
+M    1  0  pkg/hub/route_classification_test.go
+M    5  0  pkg/hub/route_metadata.go
+M    1  0  pkg/hub/server.go
+              TOTAL added 291, deleted 0
+```
+
+Zero deletions, two files added, three modified. Matches its report exactly. Remote HEAD confirmed
+by `git ls-remote`.
+
+**The reworded caveat exceeded the instruction.** I asked only that it stop implying atomicity. It
+also disclosed that `comparisons` is derived from the same two independent reads — arithmetically
+consistent without being a true snapshot. That is precisely what a reader computing a rate needs,
+and I had not thought to ask for it.
+
+Final text: *"All counters are read independently via separate atomic loads and may not correspond
+to a single instant. comparisons is computed as matches + mismatches from those independent reads,
+so the triple is arithmetically consistent but not a true snapshot. Ratios derived from these
+values (e.g. mismatch rate, fallback percentage) are approximate."*
+
+Plus a file-level comment on the test file explaining **why** `t.Parallel()` must not be added
+(package-global counter, concurrent tests would observe each other's writes) — the reason, not just
+the prohibition, so the next reader does not delete it for being unexplained (rule 534).
+
+#### Unexplained: `go test ./pkg/hub/...` went 8.6s -> 390s
+
+Same package, two-string diff, **45x**. Benign explanations exist (cold shared Go build cache;
+contention with the other agents on this host). One non-benign explanation also fits: **a test that
+intermittently blocks rather than fails.** This codebase has a known hazard of exactly that shape —
+touching the ambient pool at `MaxOpenConns=1` **hangs** instead of erroring (INVARIANT U-TX-1), and
+a hang presents as a slow suite, never a red one.
+
+Asked e1b2 whether it was slow overall or stalled on one package/test, and told it explicitly that
+"I did not look and cannot reconstruct it" is an acceptable answer — in which case I record this as
+**unexplained, not resolved.** Told it not to re-run on my account; the project is on hold.
+
+**Rule 562.** A large unexplained change in test duration is a finding. Green plus slow is the
+signature of a hang absorbed by a retry or a timeout, and it is the only failure mode that gets
+quieter as it gets worse.
+
+**Rule 563.** Record "unexplained" as its own state. Folding it into "passed" because the exit code
+was zero is how a latent hang becomes a flake and then becomes normal.
+
+#### Compare URL — BUILT AND HELD, NOT SENT
+
+Ready to send the moment ptone lifts the hold. Sending it now would ask him to act while he is away.
+
+Stored at `/tmp/compare_b.txt`; 1426 runes encoded, under the 2000 cap. Reproduce with:
+
+```
+base:  https://github.com/GoogleCloudPlatform/scion/compare/main...ptone:scion:scion/ca-msg-e1b2
+title: hub: add read-only messaging divergence board (admin diagnostics)
+body:  route + permission; five caveats asserted by name; caveats load-bearing (three writers,
+       fails open, independent atomic loads); read-only at handler, no lock on the counter;
+       291 added 0 deleted; independently reviewed APPROVE risk LOW
+```
+
+Goes to thread **1532864101909528737** (compare URLs), not the reports thread. Branch-based, so it
+picks up new commits automatically — **but the URL-encoded title and body do not update**, so it
+must be rebuilt if the branch changes materially.
+
+#### Status of Tranche E
+
+| PR | Branch | State |
+|---|---|---|
+| (A) read-switch tests | `scion/ca-msg-e1a` | in progress — 22 tests incl. two DEF-64 pins |
+| (B) divergence board | `scion/ca-msg-e1b2` @ `15db406` | **done, reviewed APPROVE, compare URL held** |
+
+Exit interview sent to e1b2 (including the 45x question and the standing "what bothered you"). Retire
+after it answers. Hold otherwise unchanged.
