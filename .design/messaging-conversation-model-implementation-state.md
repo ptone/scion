@@ -24711,3 +24711,63 @@ does not is coverage.
 - **CI gap inventory** gets the tag finding plus p4a's points 1, 2, 4, 6 (no populated-DB
   integration; mock cursor leniency; no end-to-end startup-warning wiring test; 2 pre-existing
   `pkg/messaging` lint issues — `isValidDMKind`, `validEventMessage` unused, both on main already).
+
+### 5hj — I specified a test that could only be satisfied by a tautology (2026-08-30 18:21Z)
+
+p4a added `cmd/server_backfill_safety_test.go` (64 lines, no build tag, blocking lane) as directed.
+Re-verified at `6be7ff0f`: numstat clean, 8 files, base still `f3a54512`.
+
+**Test 1, `TestBackfillExecuteFlagDefaultIsFalse`, is genuine.** It reads
+`serverBackfillCmd.Flags().Lookup("execute").DefValue` off the real cobra registration and fails if
+the default flips. Fatals if the flag is missing rather than skipping. Good.
+
+**Test 2, `TestBackfillDryRunDerivation`, is VACUOUS.**
+
+```go
+backfillExecute = false
+dryRun := !backfillExecute   // recomputed in the test
+if !dryRun { t.Fatal(...) }
+```
+
+It never references production code. It re-implements the derivation locally and asserts its own
+expression — `!false == true`. Change `server_backfill.go:113` to `DryRun: backfillExecute` and it
+stays green forever. **It proves that Go's `!` operator works.**
+
+And its doc comment states: *"A wiring bug that sets DryRun = backfillExecute … would make the
+default perform mutations"* — naming exactly the bug it cannot detect. DEF-77's pattern again: **a
+comment asserting coverage the code does not provide is worse than no test, because it stops the
+next reader looking.**
+
+#### This one is mine
+
+I wrote the instruction: *"assert the cobra flag default … and that `DryRun` is derived as
+`!backfillExecute`."* p4a implemented my words precisely. **The words were satisfiable by a
+tautology and I did not notice while writing them.** Said so plainly rather than filing it as a
+developer error — three of today's five findings came from subagents pushing back, and that only
+keeps happening if the cost of pushing back stays low.
+
+**Rule 653: a test specification that names an expression rather than a behaviour can be satisfied
+by restating the expression.** "Assert `DryRun == !backfillExecute`" invites the test to compute
+`!backfillExecute` itself. The specification must name the *production symbol* whose output is
+being read — "assert that the config **`runServerBackfill` actually builds`** has `DryRun` true by
+default." Behaviour, and whose behaviour.
+
+**Rule 654: when a test recomputes its expected value with the same logic it is checking, it can
+only test the language.** This is a mechanical tell, cheap to apply at review, and it is the
+sharpest single filter for vacuity I have found. Worth applying to every assertion I have approved
+this tranche.
+
+#### Directed remedy — extract, do not assert harder
+
+The property is untestable without a store only because the derivation sits inside
+`runServerBackfill` after the store opens. Directed: extract `backfillConfigFromFlags()` and have
+`runServerBackfill` call it, so there is **exactly one derivation** and the test reads the real one.
+Then assert `backfillConfigFromFlags().DryRun` for both flag states.
+
+**Untestability is usually a structural fact, not a budget problem.** The honest fix was a
+three-line production extraction, not a cleverer test.
+
+Required non-vacuity proof before push: flip the production line to `DryRun: backfillExecute`, show
+the test **failing**, revert, show it passing — the same treatment AC-12-7 got. **A test added to
+close a coverage gap must itself be proven to close it**, or I have replaced an unguarded property
+with an unguarded property plus a false record that it is guarded.
