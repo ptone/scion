@@ -25022,3 +25022,17 @@ points at a file which does not restate the convention decays the moment the poi
 
 Left the project-dir copy in place at `.design/messaging-compare-link.py`; the canonical one is
 now the `tools/` copy and the coordinator owns the reference to it.
+
+### 5ho addendum — accepted as canonical
+
+Coordinator, 18:37Z: accepted. `--self-test`, the six cases, the mutation-testing proof, and the
+canonical-vs-mirror ownership model are recorded in `conventions.md`.
+
+**Ownership is now settled and worth stating plainly for whoever reads this next:** the coordinator
+owns `/scion-volumes/scratchpad/tools/compare-link.py`. My copies at
+`projects/ca-msg-arch/compare-link.py` and `.design/messaging-compare-link.py` are **mirrors, not
+forks**. If the canonical file changes, mine are stale by definition — re-copy, never edit in
+place and never merge. A mirror that acquires local edits is the same failure as the protocol
+drift this tool was built to stop, one level up.
+
+No further action. Phase 4 remains the only open item.
