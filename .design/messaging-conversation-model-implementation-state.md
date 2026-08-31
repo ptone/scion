@@ -28928,3 +28928,61 @@ whether it is stable.
 
 **Status: exactly one command outstanding, runnable from where he is.** It gates
 both the gteam tag flip and the fleet-wide `default-allow-ssh` direction.
+
+---
+
+### 5jn — IAP confirmed working; 40% of SSH connections to gteam rejected pre-auth, measured
+
+Two results from ptone.
+
+**IAP works for him.** The gating precondition from §5jl is discharged: the deny rule
+is survivable, and the fleet-wide question ("is IAP a substitute for the humans?")
+now has an affirmative answer from the only human who needs it.
+
+**His second result he misread, and the misreading was load-bearing.** From a shell
+on scion-community, `--internal-ip` gave `connect to host 10.128.0.56 port 22:
+Connection refused`, which he read as *"it required ssh key or PW access which is
+not setup."*
+
+Connection refused is a TCP-layer rejection. It precedes any key exchange. An SSH
+key failure reads `Permission denied (publickey)` and arrives after a successful
+connection. Independently: instance-investigator has been SSHing into gteam all
+week, so key access demonstrably exists.
+
+**I measured instead of arguing.** 40 connects to `10.128.0.56:22` from this
+container:
+
+```
+ 24  OPEN  SSH-2.0-OpenSSH_8.9p1 Ubuntu-3
+ 16  OPEN  Exceeded MaxStartups
+  0  refused
+```
+
+**40% rejected pre-auth.** sshd accepts, writes `Exceeded MaxStartups`, hangs up.
+His refusal is the same condition one layer down: under burst the listen backlog
+fills and the kernel answers with an RST.
+
+Note that my §5jl probe — three connects, all OPEN — said the path was fine. It was
+not wrong, it was underpowered. **Rule 826: a single successful probe measures
+availability, not reliability. If the failure you are chasing is intermittent, one
+sample cannot see it; sample until the distribution appears.** I published "the
+internal path is proven" off three connects and would have been embarrassed by the
+fourth.
+
+**The consequence is larger than the defect.** Every VM operation in this project has
+been intermittently failing for days and we have been absorbing it as bad luck —
+retry, shrug, continue. It was measurable the whole time. The scanner load is not a
+security finding sitting alongside the work; it is the cause of the friction *in* the
+work.
+
+**Rule 827: recurring friction that everyone routes around is an unfiled defect.**
+The tell is that no one reports it, because each instance is individually small.
+
+Reframed for ptone accordingly: the firewall change is not hygiene preceding the real
+task, it is the fix for what has been blocking the real task. Recommended proceeding
+with both inert creates and the tag flip, with IAP as an independent way in.
+
+**Acceptance criterion set, not left implicit:** after the tag lands I re-run the same
+40-probe. Success is 40 clean banners, zero MaxStartups. A non-zero rate means
+something other than scanners is loading sshd and we look again rather than declaring
+victory.
