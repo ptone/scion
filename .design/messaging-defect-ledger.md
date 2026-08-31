@@ -109,21 +109,23 @@ rather than re-deriving it.
 | DEF-90 | `default-allow-ssh` exposes tcp:22 to `0.0.0.0/0` on ALL default-network instances — gteam remediated, fleet open [^6] | OPEN | 28900 | 28640 |
 
 | DEF-91 | Agent SSH keys accumulate unboundedly in GCE **project** metadata — availability, not security [^7] | FILED-NOT-STAFFED | 29020 | 28960 |
+| DEF-92 | Messaging switch getters swallow a malformed `messaging` doc silently — fail-closed but undiagnosable [^8] | FILED-NOT-STAFFED | §5kc | §5kc |
+| DEF-93 | Full `pkg/hub` suite runs at/near the 300s suite-level timeout — the next change to touch it eats the failure [^9] | OPEN | §5kc | §5kc |
 
 ## Counts by status
 
 | Status | Count |
 |---|---|
 | CLOSED | 47 |
-| OPEN | 22 |
-| FILED-NOT-STAFFED | 22 |
+| OPEN | 23 |
+| FILED-NOT-STAFFED | 23 |
 | DEFERRED | 0 |
 | UNKNOWN | 0 |
-| **Total** | **91** |
+| **Total** | **93** |
 
 ## DEF-NN ids mentioned but never defined
 
-None. All 91 ids (DEF-1 through DEF-91) have definitions in the journal.
+None. All 93 ids (DEF-1 through DEF-93) have definitions in the journal.
 
 ## Notes and edge cases
 
@@ -154,3 +156,7 @@ None. All 91 ids (DEF-1 through DEF-91) have definitions in the journal.
 **Downgraded 2026-08-31 by ptone's judgment, and I agree I overstated it (journal §5jv).** ptone: *"I'm not too worried about the ssh key debris in deleted investigator agent containers."* He is right. The private halves live in container filesystems that no longer exist; for a key to matter someone needs the private half, and "we cannot prove a negative about deleted disks" is true of nearly everything and is not a finding by itself. The security framing is withdrawn.
 
 **What survives is an availability item with a slow fuse.** The metadata entries only grow: every new agent container that runs `gcloud compute ssh` adds one, nothing removes them, and project metadata has a hard size limit. The realistic failure is that some future agent's key push fails and SSH stops working for new containers — at a moment when nobody connects the outage to key debris. Cheap fix whenever convenient: `--ssh-key-expire-after` in whatever provisions the agents, so keys age out rather than accumulate. Not urgent.
+
+[^8]: **DEF-92** (FILED-NOT-STAFFED, filed 2026-08-31 during the ca-msg-h2 review, journal §5kc): `OperationalSettings.ConversationReadSwitch()` and `ConversationWriteDenySwitch()` (`pkg/hub/operational_settings.go`, ~lines 1175-1215) both do `if err := json.Unmarshal(state.Value, &ms); err != nil { return false }` with **no log line**. The behaviour is correct — fail-closed, per the standing rule that an unreadable setting must never enable a behaviour — and h2 added tests that pin it. The defect is that it is fail-*silent*: a malformed `messaging` row makes `GET /api/v1/admin/messaging` report both switches OFF, which is indistinguishable from the switches genuinely being OFF, and nothing anywhere says the row could not be parsed. Severity is low because the only sanctioned write path is `Update`, which validates against the opsettings registry, so a malformed doc can realistically only arrive by direct DB edit or a future schema change. Deliberately **not** folded into h2: these getters are pre-existing on `tranche-g`, h2 did not touch them, and they are called per-request, so any logging needs to be rate-limited or moved to `Refresh` rather than dropped in the hot path. The fix belongs at parse-time in `Refresh`, not at read-time in the getter.
+
+[^9]: **DEF-93** (OPEN, filed 2026-08-31, journal §5kc): the full `pkg/hub` package test suite runs long enough to collide with the 300s suite-level timeout. Surfaced when ca-msg-h2 reported a failure in `TestQuotaConcurrency_100Creates_Limit10` and offered "pre-existing flaky" as the cause. That hypothesis had a cheap experiment attached (Rule 848): the named test was run three times on base and three times on h2's branch and **passed all six times**, in 0.27-0.38s. The real event was the *package* hitting 301s against a 300s cap, with the timeout landing on whichever test happened to be running. Filing this separately rather than attaching it to h2 because it is not h2's regression to own and, left unfiled, it will keep landing on whoever changes `pkg/hub` next — with a misleading symptom each time. **Correct fix is to find and bound the slow tests, not to raise the timeout**; raising the cap is weakening a gate. Wall-clock measurements on base vs branch recorded in journal §5kc.

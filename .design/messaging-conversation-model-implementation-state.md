@@ -29596,3 +29596,80 @@ investigates properly or defends.
 **Rule 848: "pre-existing flaky" is a hypothesis with a cheap experiment attached.
 Run it — especially when the failure mode is one your change could plausibly
 produce.** The claim is most likely to be wrong exactly when it is most convenient.
+
+### §5kc — h2 reviewed and accepted; DEF-92 and DEF-93 filed; ptone pre-authorizes the switch flip
+
+**h2's branch `6ac1a50e` is accepted.** I verified every claim independently rather
+than reading its report, per Rule 846 and the standing "re-run the numstat myself"
+constraint:
+
+- numstat matches h2's report exactly — `16/10 cmd/server_foreground.go`,
+  `27/0 pkg/hub/admin_messaging_test.go`, `3/2 pkg/hub/operational_settings.go`,
+  `81/0 pkg/hub/operational_settings_test.go`
+- `gofmt -l ./cmd ./pkg/hub` clean (gofmt ignores build tags, so this is in the
+  gate list every time)
+- `go build ./...` clean, `go vet ./cmd/... ./pkg/hub/...` clean
+- all 7 new tests pass in 0.211s
+- `server.go` is untouched, so `StartMessageBroker` / `StartNotificationDispatcher` /
+  `SetWebChatStore` locking is unchanged — this was a hard constraint in the brief
+  because those three already hold `s.mu.Lock()` and an RLock there deadlocks
+
+The substantive change is what the brief asked for. The postgres gate at
+`cmd/server_foreground.go:1912` is gone; `initOperationalSettings` is now called on
+every driver, and a boot-time error is `slog.Error`'d and swallowed rather than
+returned. This is legitimate because the callee was already driver-agnostic —
+`locker, hasLocker := s.(store.AdvisoryLocker)` with an explicit non-locker branch,
+and `entadapter/locking.go:132` returns `(true, noop, nil)` on non-postgres by
+design. The gate was protecting nothing.
+
+Why this was the actual blocker on manual testing: without `OperationalSettings`,
+`handlePutMessaging` returns **501** on SQLite. gteam is SQLite. So before h2, the
+switches were not merely off — they were unflippable on the box we intend to test on.
+
+**DEF-92 filed (FILED-NOT-STAFFED).** `ConversationReadSwitch()` and
+`ConversationWriteDenySwitch()` both swallow a `json.Unmarshal` error and return
+`false` with no log line. Fail-closed and correct — an unreadable setting must never
+enable a behaviour — and h2's tests pin exactly that. The defect is that it is
+fail-*silent*: a malformed `messaging` row is indistinguishable from the switches
+being off, in the admin GET and everywhere else. I deliberately did **not** fold this
+into h2. Those getters are pre-existing on `tranche-g`, h2 did not touch them, and
+they are called per-request, so the fix belongs at parse time in `Refresh`, not in
+the hot-path getter. Widening a branch to cover an adjacent pre-existing flaw is how
+a reviewable diff becomes an unreviewable one.
+
+**DEF-93 filed (OPEN).** h2's reported test failure resolved to the full `pkg/hub`
+package running 301s against a 300s suite-level cap, with the timeout landing on
+whichever test happened to be executing — `TestQuotaConcurrency_100Creates_Limit10`
+passed 3/3 on base and 3/3 on branch, 0.27-0.38s. I am filing the suite duration as
+its own defect rather than closing the question with h2, because an unfiled
+301-vs-300 boundary keeps landing on whoever changes `pkg/hub` next and presents a
+different misleading symptom each time. **The fix is bounding the slow tests, not
+raising the cap** — raising the cap is weakening a gate, which is on the standing
+prohibition list. Wall-clock runs on base and branch are in flight; numbers to
+follow.
+
+I told h2 to stand down on the timing runs, since I already had both worktrees built
+and started them myself. Duplicated measurement is not corroboration when both runs
+use the same method on the same host.
+
+**ptone pre-authorized the switch flip**, unprompted and ahead of my asking:
+
+> *"I pre-authorize the flip - I want to simulate the more atomic (all switches
+> flipped) upgrade path we will end up with for users - I'm looking for aggressive
+> testing here, not super cautious, that is why we have test instances"*
+
+This removes the last item from my escalation list for Tranche G — flipping the read
+switch was on it explicitly. Both switches, together, no staging. I noted back that
+the ordering is unchanged (the flip is meaningless until h1 and h2 land and gteam is
+rebuilt), and gave him the three things I expect the flip to surface so he does not
+spend testing time re-finding them: **DEF-64** (read switch narrows the manager view
+— known, pinned by test, not fixed, and a genuine Tranche G blocker), the **UI 409
+gap** (`chat-thread.ts` `fetchHistoryV2` has no `conversation_not_resolved` handler,
+so an unresolvable thread renders as an empty panel rather than an error — a blank
+thread is probably this, not data loss), and **DEF-89** if h1 has not landed yet.
+Anything outside those three I will treat as a genuine find.
+
+Rule 849: **when a principal pre-authorizes a decision you were holding, hand back
+the list of failures you already expect from it.** Pre-authorization removes your
+gate, not your knowledge. A tester who rediscovers three defects you had already
+filed has spent their time confirming your ledger instead of extending it.
