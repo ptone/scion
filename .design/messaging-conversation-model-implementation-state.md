@@ -29275,3 +29275,50 @@ Also credited instance-investigator explicitly: DEF-91 surfaced because it answe
 question 3 thoroughly rather than minimally. I asked whether a gcloud-managed key
 existed; it went and looked at what was in project metadata. Nothing in my question
 asked for that.
+
+---
+
+### 5ju — my IAP command was wrong; corrected to a conditioned project-level binding
+
+The command I gave in §5jt failed:
+
+```
+HTTPError 400: Role roles/iap.tunnelResourceAccessor is not supported for this resource.
+```
+
+**I relayed an unverified command to the principal.** The IAP tunnel is a distinct
+resource — `projects/N/iap_tunnel/zones/Z/instances/I` — not the compute instance, so
+`gcloud compute instances add-iam-policy-binding` cannot carry that role. I had a
+confident recollection that the instance-scoped form was documented, and I acted on
+the recollection.
+
+Checked the docs after the failure. Google offers only a console click-path or a raw
+`setIamPolicy` curl for the instance-scoped binding. What is properly supported from
+gcloud is a **project-level binding with an IAM condition**:
+
+```
+gcloud projects add-iam-policy-binding deploy-demo-test \
+  --member="serviceAccount:scion-integration-sa@deploy-demo-test.iam.gserviceaccount.com" \
+  --role="roles/iap.tunnelResourceAccessor" \
+  --condition='title=gteam-ssh-only,expression=destination.ip == "10.128.0.56" && destination.port == 22'
+```
+
+`destination.ip` and `destination.port` are the documented condition attributes for
+IAP TCP forwarding. Same effective scope as the instance binding I wanted: IAP to
+gteam's SSH port and nothing else.
+
+**Rule 837: relaying a command to a principal is executing it. The verification bar
+is the same whether your hands are on the keyboard or theirs.** I have spent this
+session insisting on measurement over inference and then handed over a command I had
+not checked, because it was mine and it sounded right. The cost landed on him.
+
+Worth noting what did *not* go wrong: the failure was loud, immediate, and changed
+nothing. That is luck about which command I got wrong, not a property of my process.
+A wrong `remove-iam-policy-binding` or a wrong `--source-ranges` would have been
+just as unverified and considerably less forgiving.
+
+Two caveats given with the correction rather than discovered later, per Rule 836:
+the condition pins an IP, so recreating gteam with a different internal address
+silently stops the binding matching and returns `4033`; and removal needs the
+identical `--condition` string, because the condition is part of the binding's
+identity.
