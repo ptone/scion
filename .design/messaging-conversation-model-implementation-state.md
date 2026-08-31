@@ -28547,3 +28547,65 @@ is correct only at one instant will be read later as a steady state.
 the code pass and the behaviour is absent. `CreateTopic`'s dual-write is right,
 transactional, and covered; nothing calls it with the field set. Coverage of a
 branch is not evidence that production takes it.
+
+### 5jh — SSH throttle diagnosed (benign); DEF-90 exposed port 22; serial-console password held
+
+instance-investigator returned the full four-item answer. Verified the runbook
+edit by reading lines 156-186 rather than accepting the report.
+
+**Mechanism, not symptom:** sshd `MaxStartups` at default `10:30:100`, saturated
+by continuous external brute-force scanning. 36 concurrent connections when
+measured; throttle cycling every 1-38s; one cycle dropped 26 connections in 38s.
+No fail2ban, no iptables rule, no GCP firewall restriction on 22.
+
+**Window:** not a cooldown — continuous churn. Connections succeed when they land
+in a gap. **Self-infliction:** partial; our rapid retries add to the
+unauthenticated slot count. Fix is backoff, 30-60s, 2-3 minute budget. Accepted
+as the benign answer I told them was acceptable.
+
+**Alternatives:** IAP returns `4033: not authorized`. Serial console works and
+bypasses sshd entirely — but needs a local password on `scion`, which is unset.
+Runbook section is accurate and correctly hedged.
+
+**I held their recommendation to set that password.** Two reasons, one of which
+may invert it:
+
+1. **If sshd accepts password auth, this hands the scanners a target.** They have
+   just measured continuous brute-force against a host with no fail2ban and no
+   source restriction. Those attempts fail because there is nothing to guess.
+   Requested `sudo sshd -T | grep -iE "passwordauthentication|..."` — the
+   *effective* config, since GCP images set this in ways a `sshd_config` grep
+   misses. Facts before the credential.
+2. **Custody.** A recovery credential must be retrievable by a human mid-outage
+   and by nothing else. The obvious location is the scratchpad — a shared volume
+   every agent reads and any transcript captures. That is **DEF-87** exactly. I
+   am not closing an access gap by opening a disclosure one.
+
+Asked for their view on 2 rather than imposing mine; they know the box.
+
+**DEF-90 (new).** Port 22 on a host holding production data is internet-exposed
+and under continuous brute-force, with no fail2ban, no alerting, and no source
+restriction. Not exploited; the posture holds only because password auth is
+presumably off — one config drift from mattering. instance-investigator scoped
+it as infrastructure outside the runbook, which was right for them and wrong as
+a resting place, so I escalated it rather than leaving it as context in a
+rollback document. Raised to ptone with the custody question as the decision;
+DEF-87 named alongside it since they are the same failure in two costumes.
+
+**Rule 811.** A fix that improves our access improves everyone's. Before adding
+a credential for operational convenience, ask what else can reach it — here, the
+proposal would have created a guessable secret on a host we had *just finished
+measuring* under continuous guessing.
+
+**Rule 812.** A secret's storage location is part of the proposal, not an
+implementation detail deferred to whoever executes it. "Set a password" without
+"and it lives here" is half a design, and the missing half is the dangerous one.
+
+**Rule 813.** Read the effective configuration, not the config file. `sshd -T`
+over `grep sshd_config`: the file shows what someone wrote, the daemon shows
+what is true.
+
+**Rule 814.** When an investigator correctly scopes a finding out of their
+deliverable, that finding still needs somewhere to go. "Outside the runbook's
+scope" is a statement about the document, not about the risk; left there it
+becomes background colour in an operations note.
