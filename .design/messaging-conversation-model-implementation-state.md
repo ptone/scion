@@ -29136,3 +29136,42 @@ automation, and any move leaving IAP as the sole route needs a role grant first.
 **Held the `default-allow-ssh` recommendation from §5jp pending that answer.** I had
 already sent it; I told him I am holding it rather than letting a live recommendation
 sit under an open question.
+
+---
+
+### 5jr — ptone applies the fleet edit without waiting; I agreed and named the one range it misses
+
+ptone: *"actually - I can update the firewall rule - and if that blocks out instance-investigator, can always revert - I'm updating now."*
+
+Endorsed rather than resisted. He is present, it is one command, the revert is the
+same command with `0.0.0.0/0`, and it is a GCP API call so a lockout is undoable
+from outside. Serialising a reversible change behind an agent's reply would have
+been caution costing more than it buys. This is the standing directive working as
+intended — forward progress, block only on severe or irreversible.
+
+**I also told him the thing my own §5jq hold had over-weighted:** instance-investigator
+is the least likely thing to break. It reaches gteam over the internal path from a
+container on scion-community, and `10.128.0.0/9` keeps that open whatever credential
+it uses. The auth question matters for whether IAP is available to it as a
+*fallback*, not for whether it works today. I had let an open question block a
+recommendation it did not actually gate.
+
+**Rule 833: check whether an open question gates the decision or only gates your
+confidence.** I held the fleet recommendation in §5jq for an answer that would not
+have changed it.
+
+**The one range the new source set misses:** GKE pods at `10.95.128.0/17`, which is
+*outside* `10.128.0.0/9` — the /9 begins at 10.128. Nodes sit inside the /9 and pods
+normally SNAT to the node address for egress, so I expect nothing. But it is the
+single range in the listing the new allow does not cover, and naming it now is
+cheaper than it surfacing later as a mystery. Also flagged that he has proven IAP
+against gteam only, while the edit adds `35.235.240.0/20` untagged and should make
+IAP work on instances lacking the `scion-hub` tag — an improvement worth
+spot-checking on one non-gteam box.
+
+Pre/post baseline from this container, 15 connects each: gteam 15/15 clean,
+scion-community 15/15 clean. Will re-run on his confirmation.
+
+Told him plainly: if either degrades I report immediately rather than retrying
+around it. That is the same instruction I gave instance-investigator, and it is the
+behaviour §5jn showed we had all been failing at for days.
