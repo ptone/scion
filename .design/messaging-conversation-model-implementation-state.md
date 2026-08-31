@@ -28741,3 +28741,51 @@ the difference, or you are relying on nobody remembering.
 behaviour to reinforce out loud. The failure mode I care about is an
 investigator defending a prior report; making the correction cheap is how it
 stays cheap.
+
+---
+
+### 5jj — defect ledger cross-checked; three stale rows, one extraction error, two new ids
+
+`ca-msg-ledger` delivered `DEFECTS.md`: 90 ids after my reconciliation, every id
+1..90 accounted for, zero UNKNOWN. Format `| ID | Summary | Status | Last mention |
+Anchor |`. I cross-checked it against my own held record rather than accepting it,
+and the check paid for itself three times.
+
+**DEF-12 — extraction error, corrected to CLOSED.** The journal says plainly at
+line 25177, "DEF-12 and DEF-81 are closed." The extraction took DEF-81 out of that
+sentence and missed DEF-12, then drew DEF-12's summary from line 20471 — five
+thousand lines earlier, when it was genuinely partial — because a *later* mention
+at 26055 discusses it in the present tense as a step in the activation sequence.
+
+The general fault is worth naming: **last mention is not last status.** A defect
+that gets referenced after it closes looks alive to a recency heuristic. Any future
+refresh must look for an explicit closure statement first and only fall back to
+recency. Recorded in the file itself so the next pass inherits it.
+
+**DEF-58 — ledger right, I was wrong. Left OPEN.** I had it CLOSED. It is closed on
+`tranche-g` at `41b179c85`, which is not on main. The brief's rule — closed on one
+branch but live elsewhere is OPEN — is the conservative reading and it is correct.
+My record was branch-local and I did not notice. Deferring to the ledger.
+
+That is the second time this session a derived artifact has beaten my recollection.
+The pattern is the same both times: I remember the moment work *landed* and lose
+track of *where* it landed.
+
+**DEF-83 — stale, corrected to CLOSED.** Extraction was accurate when it ran; ptone
+merged #1437 while it was in flight (§5jf).
+
+**DEF-89 and DEF-90 added.** Both filed after the sweep started, so the true total
+was never 88.
+
+**The header now says what the file is for.** Three rows were stale on delivery, not
+because the extraction was careless but because the journal kept moving under it.
+Rule 798 said a journal is not a tracker; this is the corollary — a tracker
+re-derived on demand is just a journal with extra steps. The file now states that
+a state change edits the row here in the same commit as the journal entry
+explaining it. Maintained forward, not re-extracted.
+
+`ca-msg-ledger` made no commits, by design — the brief asked for one file and it
+wrote one file, then flagged five discomforts rather than silently resolving them.
+Four of the five I upheld. Retiring it.
+
+**Counts after reconciliation:** CLOSED 47, OPEN 22, FILED-NOT-STAFFED 21, total 90.
