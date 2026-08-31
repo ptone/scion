@@ -28840,3 +28840,51 @@ a CI runner today.
 whether the box was special or merely observed.** I found this on gteam because
 gteam is where I had a journal open. Nothing about the finding was gteam-specific,
 and I filed it as though it were.
+
+---
+
+### 5jl — internal path proven by test; ptone is external, which changes who the deny rule costs
+
+ptone: *"so while you are running on scion-community - I am not, I'm on an external
+workstation."*
+
+**I had treated `scion-community` as the VM I run on.** He described it as a second
+example after I asked for "this VM"; I read an example as an answer and built the
+next two messages on it. Nothing downstream broke, because the allow range I chose
+is a /9 and covers any host in the VPC — but that is luck absorbing an error, not
+the error not happening.
+
+**Rule 823: when you ask for X and receive something adjacent to X, you have not
+received X.** The failure is quiet because the adjacent thing is usually usable.
+
+**I stopped assuming and tested, which I could have done at any point.** From inside
+my container: `10.128.0.56:22 OPEN`, `10.128.0.56:8080 OPEN`, `10.138.0.2:22 OPEN`.
+The container is `172.17.0.54` on a docker bridge, so it egresses NAT'd behind its
+host's `10.x`, inside `default-allow-internal`'s /9. Cross-region works too. The
+internal path is now proven from the place that has to use it, and I no longer need
+to know which host I am on.
+
+That test was three lines of python and available from the first minute. I spent two
+messages reasoning about VPC ranges to establish something I could have measured.
+**Rule 824: if you are on the machine, measure. Reasoning about reachability from a
+firewall listing is inference; a TCP connect is evidence.**
+
+**The finding that actually matters: the deny rule costs him, not me.** I had
+implicitly assumed he reached gteam the way I do. He does not. Denying external
+tcp:22 protects the box and preserves my access while removing his. That is a
+different decision from the one I put to him, and it is his to make.
+
+New precondition before tagging: **IAP must be proven working for ptone**, not for a
+service account. Firewall already permits it (`allow-iap-ssh` → tag `scion-hub`,
+which gteam carries) and his own troubleshoot reported user permissions clean, so I
+expect it to work — but §5jk's Rule 821 cuts both ways, and expecting is not knowing.
+
+**It also answers the fleet question I raised in §5jk unprompted.** I asked whether
+anyone reaches these boxes over external SSH. The answer is: he does. So deleting
+`default-allow-ssh` project-wide is viable only if IAP substitutes for the humans —
+which the same single command establishes. One test now decides both the gteam flip
+and the fleet-wide direction.
+
+Noted and set aside: his `--troubleshoot` run selected his IPv6 source against an
+instance with no external IPv6 and aborted the connectivity test before running it.
+A gcloud artifact. Not evidence about the VM, and not to be cited as any.
