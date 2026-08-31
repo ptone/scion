@@ -28986,3 +28986,46 @@ with both inert creates and the tag flip, with IAP as an independent way in.
 40-probe. Success is 40 clean banners, zero MaxStartups. A non-zero rate means
 something other than scanners is loading sshd and we look again rather than declaring
 victory.
+
+---
+
+### 5jo — acceptance probe 40/0; withheld the conclusion the probe cannot support
+
+ptone: *"OK - I think have flipped the tags on gteam"*.
+
+Re-ran the §5jn probe unchanged. **40 clean banners, zero MaxStartups**, against
+24/16 before. Hub still answering on 8080, so nothing collateral.
+
+That is the acceptance criterion I set in §5jn, met exactly. I did not report it as
+proof.
+
+**The probe cannot distinguish the fix working from the scanners pausing.** It only
+observes the internal path, and the internal path was never the one under change.
+A 40% intermittent failure driven by external load can go quiet on its own for
+several minutes; my sample window is under a minute. Meeting a criterion I wrote is
+not the same as the criterion being sufficient, and I wrote this one before I
+understood that the deny rule's effect is only visible from outside.
+
+**Rule 828: an acceptance test that observes only the unchanged side of a change
+cannot attribute the improvement to the change.** Set the criterion where the
+mechanism acts, not where the symptom is convenient to read.
+
+Asked for three discriminating checks instead of declaring done:
+
+1. `describe` the tags. I want `https-server`, `scion-hub`, **and**
+   `ssh-no-internet`. `add-tags` appends, so this should be fine — but a replace
+   rather than an append silently drops `https-server` and the hub loses 443. That
+   failure would surface via a user, not via any alarm we have. **Rule 829: when a
+   command mutates a list, verify the elements you did not intend to touch.**
+2. External SSH from his workstation must now hang and time out. A banner means the
+   tag isn't in force and the 40/0 was luck.
+3. IAP must still work *after* the flip. The deny sits at 1000, equal to
+   `allow-iap-ssh`, and GCP resolves deny over allow at equal priority — which is
+   precisely why the IAP range went into the 900 allow in §5jk. The reasoning should
+   hold. It is also exactly the class of reasoning that should be checked rather
+   than trusted, because if it is wrong we have removed the recovery path in the
+   same action that removed the primary one.
+
+On 2 hanging and 3 answering, I close DEF-90 for gteam and write up the fleet-wide
+`default-allow-ssh` decision, which §5jn already answered in principle: IAP is a
+working substitute for the one human who needs external access.
