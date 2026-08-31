@@ -27847,3 +27847,65 @@ question open at a time, and the go-ahead is what released it.
 **Rule 781** — Re-resolve a SHA from the remote at the moment you authorize it,
 never from your own notes. Review and approval are separated by however long the
 human takes, and the branch does not know that.
+
+## 5iy — deploy succeeded; the verification nearly reported it as a failure
+
+`6f6228f6` is running on scion-gteam. Step 7, verbatim:
+
+```
+healthz            6f6228f6 healthy
+InvocationID       edd742fdfa6942a2b511afd327deae5a
+  SUCCESS          "Message broker spoke added: name=web ..."  present 09:05:42
+  FAILURE          "failed to initialize webchat store"        absent
+conversations      46   (7 existing + 39 backfilled)
+containers         28
+
+webchat_migrations
+  topic_conversation_id         2026-08-31T09:05:42.601702229Z
+  topic_conversation_backfill   2026-08-31T09:05:42.689707543Z
+```
+
+Web chat is back. The 88ms between the two migration timestamps is the backfill
+of 39 rows.
+
+**The important finding is instance-investigator's timing note.** Their first
+step 7 run — immediately after `sleep 10` — returned `conversations=7` and
+**both** greps NOT FOUND. The spoke registered at 09:05:42, eleven seconds after
+service start at 09:05:31. The check raced the migration.
+
+An operator following the runbook literally would have seen expected-46-got-7
+with no success line and concluded the migration failed. The runbook instructs
+them to halt and report, so the outcome is safe — but a working deploy would
+plausibly have been rolled back.
+
+And note the shape: the runbook asserts *exactly one* of the two lines must
+appear. During the window **zero** appeared. That state is undefined in the
+document, and undefined states are resolved by whoever is reading at 3am. Rule
+774 anticipated both-match; the miss was neither-match.
+
+**Rejected the obvious fix.** `sleep 15` is the same race with a wider margin and
+loses on a slower day or a larger backfill. Specified a poll to a terminal
+condition — 2-second interval, 60-second budget, break on either line — with the
+third state named explicitly: *neither line present means still running, not
+failed*, and exhausting the budget is its own distinct failure. The
+`conversations` count moves below the poll, because it is meaningless until the
+success line appears.
+
+**Held the pointer.** Their report was minutes old, and web chat is now serving
+live traffic on a code path that has never run in production on this box. A hub
+that comes up and then dies does so in the minutes after, not the seconds.
+Requested `NRestarts` and `ActiveEnterTimestamp` alongside a fresh healthz and
+count — a non-zero `NRestarts` would mean the healthy reading is a snapshot of a
+crash loop.
+
+**Rule 782** — A fixed sleep before a check is a race you have chosen to lose
+occasionally. Poll for the terminal condition and give the timeout its own
+distinct failure meaning.
+
+**Rule 783** — When a procedure says "exactly one of these will be true,"
+enumerate what to do when none of them is. The not-yet state is the common case
+during startup and the one most likely to be misread as failure.
+
+**Rule 784** — Liveness confirmed once is not liveness. Before recording a
+deployment as verified, read the restart counter — a healthy response is
+indistinguishable from one sampled between crashes.
