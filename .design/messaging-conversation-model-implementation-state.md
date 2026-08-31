@@ -28888,3 +28888,43 @@ and the fleet-wide direction.
 Noted and set aside: his `--troubleshoot` run selected his IPv6 source against an
 instance with no external IPv6 and aborted the connectivity test before running it.
 A gcloud artifact. Not evidence about the VM, and not to be cited as any.
+
+---
+
+### 5jm — host confirmed as scion-community; IAP misread corrected
+
+ptone: *"so - you DO run on scion-community - I confirm that."* My original inference
+was correct. §5jl's Rule 823 still stands: I had no basis for it at the time, and
+being right by luck is not a method. The TCP-connect test remains the reason the
+plan is sound, not the confirmation.
+
+**He then declined the IAP command on a misreading I need to correct rather than
+work around:** *"I can't run the command you asked which assumes it is run on the
+scion-community host system."*
+
+It assumes the opposite. `--tunnel-through-iap` is the *external* path — gcloud
+opens a tunnel to Google's IAP service, which reaches the VM from `35.235.240.0/20`
+(an inside-GCP source) while the operator connects to IAP from anywhere on the
+internet. It exists precisely to reach a VM with no external SSH. It is the thing
+that makes the deny rule survivable for him.
+
+The command that did require VPC presence was `--internal-ip`, and that is already
+discharged — I proved the path with a TCP connect from this container in §5jl, so
+he never needs to run it.
+
+**Rule 825: when a principal declines a step for a stated reason, check the reason
+before accepting the decline.** The easy move was to treat his constraint as real
+and go looking for another path — and I would have spent the next hour designing
+around a restriction that does not exist. A decline carries a claim inside it, and
+the claim is checkable.
+
+I also pre-branched the failure modes rather than waiting to be surprised: a
+`4033` means he needs `roles/iap.tunnelResourceAccessor`, which is a grant he can
+make himself; a timeout or refusal means something else is wrong and we stop. And
+if IAP proves genuinely unavailable, the fallback is not to abandon the fix but to
+narrow `default-allow-ssh`'s source from `0.0.0.0/0` to his corporate egress CIDR —
+less clean, still removes the scanners. That needs his IPv4 egress range and
+whether it is stable.
+
+**Status: exactly one command outstanding, runnable from where he is.** It gates
+both the gteam tag flip and the fleet-wide `default-allow-ssh` direction.
