@@ -26233,3 +26233,87 @@ revoke.
 **Rule 712** — Prefer append over force-push once a ref is a deployment source,
 and say which one you are doing. The distinction is invisible in "I pushed" and
 is the whole difference between a valid and an invalidated rollback.
+
+---
+
+## 5ie — DEF-83: webchat store dead on the VM, and it is my defect
+
+### I routed a bug away from myself and was wrong
+
+Told instance-investigator the webchat init failure "belongs to whoever owns
+#1380, not to me and not to you." Then checked my own records: **#1380 is
+tranche C4 of this project.** I dispatched it to em10, reviewed it, and recorded
+it squash-merging as `eb365a9d3` in entry at line 16597.
+
+The reasoning was individually sound and collectively wrong. I asked "is this
+Tranche G?", correctly answered no, and let that become "not mine." The commit
+was absent from my 32-file diff because it merged a week earlier — absence from
+a diff is evidence about a *tranche*, not about *ownership*. Corrected to both
+instance-investigator and ptone, attributed to me, unhedged.
+
+### The defect (DEF-83)
+
+`cmd/server_foreground.go:596-610` puts the whole web-spoke registration inside
+the `else` of `webStore.Init()`. On failure the store stays nil, so
+`/api/v1/chat/threads` returns `{"threads":[]}` with a **200** — no
+notifications, no mark-as-read, no reply affinity, no activity tracking. Empty
+UI, no error. A warning in the log and a silent outage in behaviour.
+
+Cause: the create-tables DDL block creates a unique index on `conversation_id`,
+but the migration that *adds* the column runs later. On a pre-existing DB
+`CREATE TABLE IF NOT EXISTS` no-ops, the index fails, Init returns before
+migrations, and `addTopicConversationID` is never reached. Same bug duplicated
+in **both** stores: `webchannel_store.go:438` (SQLite) and
+`webchannel_store_postgres.go:91`.
+
+instance-investigator's evidence closed it: ten columns and no
+`conversation_id`; migrations recorded stop at `thread_id_index` (2026-08-24)
+with `topic_conversation_id` absent; no `idx_webchat_topic_conversation`. Table
+created 2026-08-17, #1380 merged Aug 29 — so **the pre-existing-DB case is the
+normal upgrade path, not an edge case.** Every deployment predating #1380 has
+this now.
+
+Dispatched `ca-msg-c4fix`. Told it the fix must be *self-applying* (the
+migration was never recorded, so it runs on first good Init) and to assert the
+migration is **recorded** afterwards, not merely applied — an unrecorded
+migration re-runs every startup.
+
+Told instance-investigator **not** to hand-add the column: it would silence Init
+while leaving the migration unrecorded, destroying the only live reproduction.
+
+### Backend correction, and my SQL was wrong
+
+The hub is **SQLite**, not Postgres — instance-investigator told me Postgres
+pre-deploy and corrected it after. The activation SQL I gave ptone used
+`gen_random_uuid()` and `now()`, neither of which exists in SQLite. It would
+error rather than damage, but I told him it was the procedure. Corrected, and
+told him not to hand-write a replacement — that the correct SQL differs per
+backend is now a second argument for G5's endpoint.
+
+My no-migration guarantee survives: Tranche G has zero migration files, so it
+holds on either backend.
+
+### Maintenance-repo mechanism does not work for a fork-only branch
+
+Self-rebuild does `git reset --hard origin/scion/tranche-g`, and `origin` is
+GoogleCloudPlatform. The branch exists only on `ptone`. So rebuilds abort. The
+drift hazard I flagged is therefore not live — **by accident, and I refused to
+let that be recorded as a mitigation.** But it also means ptone's literal
+request, tranche G *as the maintenance repo*, is half unmet: the env var is set
+and inert. Escalated as a gap in his ask; declined to patch maintenance
+machinery from inside a messaging tranche.
+
+**Rule 713** — "Not this tranche" is not "not mine." Absence from your current
+diff dates a commit; it does not assign it. Before routing a defect away, check
+your own project history for the PR number, not just your working tree.
+
+**Rule 714** — A failed initialisation that logs `Warning:` and skips a
+registration block is an outage, not a warning. Grade init failures by what the
+`else` branch contains, not by the log level the author chose.
+
+**Rule 715** — When a broken production state is the only live reproduction of a
+defect, say so explicitly and forbid the tempting manual repair. Operators fix
+things; that is their job, and it is exactly how the fixture disappears.
+
+**Rule 716** — An accidental protection is not a mitigation. Record it as luck,
+and keep the original hazard open.
