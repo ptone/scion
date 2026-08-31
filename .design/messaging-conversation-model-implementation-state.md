@@ -26479,3 +26479,93 @@ works because X," treat X as an undocumented invariant and file it immediately.
 The finding has a short half-life: it lives in one agent's head at the moment of
 testing, and the next person to touch the code will have a good reason for the
 change that breaks it.
+
+---
+
+## 5ih — DEF-83 reviewed: right fix, one quiet defect
+
+`ca-msg-c4fix` reported all four gates green (`pkg/hub` 356.8s, in baseline).
+The reported numstat was `0 3` / `0 3` on the two store files plus a new
+532-line, 8-function test file. I re-derived all of it rather than accepting
+the report.
+
+### The fix
+
+Both stores dropped the same 3-line block from their CREATE-TABLE DDL:
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_conversation
+    ON webchat_topic (conversation_id) WHERE conversation_id IS NOT NULL;
+```
+
+`conversation_id TEXT` stays in the CREATE TABLE. `addTopicConversationID`
+becomes sole owner of the index.
+
+This is correct and matches the traced defect: on a pre-#1380 database
+`CREATE TABLE IF NOT EXISTS` is a no-op, so the table still lacks the column,
+and the DDL's index then fails — because migrations run *after* create-tables.
+`Init()` returns, the `else` branch is skipped, the webchat spoke is never
+registered and the store stays nil. Rule 714.
+
+### What I actually checked
+
+The report's own summary named the risk without flagging it: the removed index
+was **UNIQUE**. Removing a unique index is not a performance question, it is a
+constraint question. Had the migration's index been non-unique, this change
+would have repaired upgrades while silently dropping "one topic per
+conversation" on every fresh install — and no test would have failed, because
+nothing tests for the *absence* of duplicates you never created.
+
+Verified byte-identical in both stores: same name, same `UNIQUE`, same
+`WHERE conversation_id IS NOT NULL` partial predicate. Nothing lost.
+
+Second silent-loss path: if fresh installs bulk-marked migrations complete on
+the assumption the DDL was authoritative, the migration would skip and the index
+would never exist. Grepped every `markMigrationCompleted` call in both files —
+each migration marks only itself, only after its own work. Fresh DB runs
+`topic_conversation_id` for real. Closed.
+
+Deletion audit trivially clean: no tracked test file was modified, so zero
+removed by construction. Confirmed via `git status --porcelain`, not asserted.
+
+### The defect I sent back
+
+`webchannel_store_c4fix_test.go` carries **no build tag**. Convention in
+`pkg/hub` is `//go:build !no_sqlite` at line 15; every sibling sqlite test file
+has it.
+
+It does not break the build — I checked `go vet -tags no_sqlite` (exit 0). The
+consequence is quieter. `race-detection.yml` runs
+`go test -race -tags no_sqlite ./pkg/hub/...` and prints *"Tests behind
+//go:build !no_sqlite were NOT included in this run."* I confirmed the new tests
+both compile **and run** under that tag:
+
+```
+go test -tags no_sqlite -run TestC4Fix_SQLite_FreshDB ./pkg/hub/
+ok  github.com/GoogleCloudPlatform/scion/pkg/hub  0.121s
+```
+
+So the job's own summary becomes false on landing, and sqlite work begins
+executing inside a run that declares it excludes sqlite. `continue-on-error:
+true` keeps the blast radius small; a CI job that lies about its scope is still
+worth one line to fix.
+
+Told them explicitly this is **adding** a tag, never stripping one — the
+standing prohibition runs the other way and I did not want it misread. Also told
+them not to re-run the 356s suite for a build-tag line, but to check whether any
+job runs Postgres tests *with* `-tags no_sqlite` before accepting that the four
+DSN-gated Postgres tests get excluded too.
+
+**Rule 724** — When a diff removes an index, establish whether it was UNIQUE
+before asking whether it was redundant. A dropped unique index is a dropped
+constraint; it fails open, on fresh installs only, and no existing test detects
+it because the violating rows do not exist yet.
+
+**Rule 725** — A new test file with no build tag is not neutral. It silently
+opts into every tagged CI job. Check what the tag *excludes* you from, and
+whether a job's declared scope becomes a lie when you join it.
+
+**Rule 726** — When correcting an agent toward a rule that superficially
+resembles one it was told to obey in the opposite direction, say so in the
+correction. "Add this tag" reads as "weaken the gate" to an agent holding
+"never strip build tags."
