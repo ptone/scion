@@ -27720,3 +27720,57 @@ go/no-go, which is the only outstanding gate.
 right thing" is weak; "the unscoped query found seven wrong things" is what
 establishes the scoping was load-bearing. Ask for the negative case explicitly,
 because an agent verifying its own fix will naturally only run the positive.
+
+## 5iv — `main` is broken for every pre-existing deployment; DEF-83 dispatched there
+
+With the deploy procedure closed and nothing to do but wait on ptone, I checked
+whether DEF-83 reaches `main` or only tranche-g. It reaches main, and main is
+worse off than I assumed.
+
+**Verified, not inferred.** Cherry-picked `fdef77b60` onto `main` (`9f66cd55`) in
+a throwaway worktree: **no conflicts**, three files. Main's DDL block carries the
+identical `CREATE UNIQUE INDEX ... ON webchat_topic (conversation_id)`, and main
+already contains **both** `addTopicConversationID()` and
+`backfillTopicConversations()`.
+
+So the fix is safe on main for exactly the reason it was safe on tranche-g
+(Rule 724): the migration recreates the index byte-identically after the
+`ALTER TABLE`, so no fresh install loses the UNIQUE constraint.
+
+**Proved the failure on unfixed main** by reverting only the two store files and
+keeping the test:
+
+```
+--- FAIL: TestC4Fix_SQLite_PreExistingDB (0.00s)
+        webchat store: create tables: no such column: conversation_id
+--- FAIL: TestC4Fix_SQLite_PreExistingDB_Idempotent (0.00s)
+        webchat store: create tables: no such column: conversation_id
+```
+
+All four `TestC4Fix_SQLite_*` pass with the fix.
+
+**What this means.** Any hub on main with a database predating the
+`conversation_id` column fails `Init()`, and per `server_foreground.go:599` that
+is a *warning* — the hub starts, reports healthy, and has no web chat. Operators
+see a working hub with a silently missing feature and no error surfaced anywhere
+they would look. This is not an internal-branch problem waiting on tranche-g to
+merge; it is live on main now.
+
+Dispatched **`ca-msg-d83main`** with the brief at
+`/scion-volumes/scratchpad/briefs/ca-msg-d83main.md`: cherry-pick, reproduce the
+before-fix failure themselves, six gates including a lint baseline whose
+merge-base they must paste, push to `scion/def83-main`, no PR. The brief leads
+with the repo trap and states the index-removal prohibition with its reasoning,
+since bots have asked for that removal nine times on the sibling PR.
+
+Holding this from ptone until the branch is ready rather than interrupting the
+backfill decision — one open question at a time. It goes out with the compare
+link as a section boundary.
+
+**Rule 777** — When a fix is landed on a working branch, establish separately
+whether the defect exists on the mainline. A branch fix silently redefines the
+bug as "handled," and the mainline copy inherits none of that attention.
+
+**Rule 778** — Idle time waiting on a human decision is the right moment to check
+the things that are nobody's current task. The alternative is that they surface
+later, during work that has a deadline.
