@@ -27047,3 +27047,74 @@ modes remain after the repair, because those are the ones that ship.
 
 **Rule 745** — A defect found in code you already reviewed and landed is a
 finding about your review, not just the code. Record the gap, not only the fix.
+
+### 5in addendum — the rollback path does not exist
+
+Asked instance-investigator what the rebuild executor does on a failed build.
+The answer was better than the question, and checking it made the picture worse.
+
+**Their analysis** (`maintenance_executors.go:283-357`): steps 1-5 (fetch,
+checkout, reset, `make web`, `go build`) all **fail safe** — the loop returns on
+first error, the live binary is untouched, the service keeps running. Step 6,
+`sudo install` over `/usr/local/bin/scion`, is the **point of no return**. Step 7
+is `systemctl restart` via `cmd.Start()`, fire-and-forget, because SIGTERM would
+kill the executor before `Run()` returned. So nothing observes whether the new
+binary actually starts.
+
+They then argued for a post-install `scion version` pre-flight and immediately
+conceded it **would not have caught the nil deref** — that panic compiles,
+starts, serves healthz, and fires days later on a specific path. An analysis
+that survives its own conclusion.
+
+**What I found checking it.** `grep -rn "rollback" --include='*.go' pkg/ cmd/`
+returns **one** hit, an unrelated SQLite journal comment. **There is no stash
+logic anywhere.** The executor stashes nothing before overwriting. So
+`/usr/local/bin/scion.rollback-1a2c1b07` was made by a human, once, by hand.
+
+**And it is the wrong version.** `1a2c1b07` is #1409, an ancestor of what is
+running and **32 commits behind** `17376c05d`. The only fast recovery from a
+startup panic currently lands the box on a version nobody chose, discarding this
+deployment and everything between. **No stash of the running binary exists.**
+
+### I over-claimed in 5ig
+
+I argued the rebuild button *becomes a recovery tool* once `deploy/gteam` records
+a verified state. True for a hub that runs but misbehaves. **False for a hub that
+will not start** — the button is served by the process that died. The recovery
+story needs a path independent of the hub being alive, and today that path is SSH
+plus a 32-commit-stale binary.
+
+Corrected to instance-investigator explicitly rather than quietly narrowing the
+claim. Their step-7 analysis is what exposed it.
+
+**Required before any real deploy:** `sudo cp /usr/local/bin/scion
+/usr/local/bin/scion.known-good-17376c05`, verified by size and by executing
+`version`. Plus a recovery runbook written as literal commands, on the
+assumption the admin UI is unreachable — because by then it is. Told them to
+leave `scion.rollback-1a2c1b07` alone; not ours to delete.
+
+**DEF-85** (latent) — `RebuildServerExecutor` overwrites the live binary with no
+stash and no post-install verification, then restarts fire-and-forget. Compiles-
+but-won't-start leaves the service down with no automatic recovery.
+
+**DEF-86** (design limitation) — the rebuild control is served by the process it
+restarts, so it cannot recover the failure it most needs to. Recorded so nobody
+else reasons as I did.
+
+Both credited to instance-investigator.
+
+**Rule 746** — "Fails safe" must be established per step, not per operation. This
+rebuild is safe through five steps and unrecoverable at the sixth; calling the
+whole thing safe or unsafe would both have been wrong.
+
+**Rule 747** — Verify that a recovery artifact exists *and* what version it holds.
+A rollback binary of the wrong build is worse than none, because its presence
+stops anyone asking the question.
+
+**Rule 748** — A control that manages a process cannot be that process's recovery
+mechanism. Any recovery story routed through the thing being recovered is not a
+recovery story.
+
+**Rule 749** — When a specialist's analysis undercuts a claim you made earlier,
+say so in the reply to them, naming the earlier claim. Silently narrowing it
+leaves them believing the original.
