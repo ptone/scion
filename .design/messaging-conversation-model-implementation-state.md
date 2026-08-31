@@ -30017,3 +30017,60 @@ atomically — *"I'm looking for aggressive testing here, not super cautious, th
 have test instances"* — so this is one PUT, not a staged rollout. The baseline is not
 caution; it is the only chance to measure the pre-flip state, and once the read switch is
 ON that state is unrecoverable.
+
+---
+
+## §5kh — both switches ON; the baseline that measured nothing; DEF-98 re-measured
+
+The atomic flip landed. One PUT to `/api/v1/admin/messaging` with both
+`conversation_read_switch` and `conversation_write_deny_switch` true; the response echoed
+both true, a follow-up GET confirmed, and it took effect **in-process with no restart**.
+`hub_settings` went 21 → 22 with a new `messaging` row, `origin='managed'`. healthz still
+`93916ca2 healthy`, zero restarts. No ERROR, no messaging errors, no settings errors.
+
+**I was wrong about the baseline, in an instructive way.** I ordered a divergence report
+captured before the flip on the reasoning that *"once the read switch is ON that state is
+unrecoverable."* It returned `matches: 0, mismatches: 0, comparisons: 0, fallbacks: 0`.
+The report counts live dual-read comparisons, and those only accumulate **once the read
+switch is on**. There was no pre-flip state; the counter I was preserving could not have
+held anything.
+
+**Rule 864: a baseline is only a baseline if the quantity it measures can be non-zero
+before the change. A counter that only accumulates under the condition you are about to
+create measures nothing beforehand — capturing it is theatre, and worse, it manufactures
+false confidence that a before/after comparison exists.** The correct move was to
+recognise the divergence report as a *post*-flip instrument and schedule it after QA
+traffic. It cost one GET, so the error was cheap, but I told ptone about it rather than
+let the zeros sit in the record looking like a clean baseline.
+
+**DEF-98 re-measured after the coordinator reported it "still failing."** Two corrections
+were needed. First, the coordinator's premise: *"your fix attempt from sha=6ac1a50e didn't
+resolve it."* No fix was attempted. `6ac1a50e` is h2's settings-init commit and has nothing
+to do with lint. "The fix failed" and "there was no fix" point at opposite next actions,
+so the distinction is not pedantry.
+
+Second, I had previously called this rename drift from inference. Now measured:
+golangci-lint runs `--new-from-merge-base=origin/main`, so it typechecks the *merge*. main
+defines `createProjectMembersGroup` at `handlers_projects_core.go:788`; tranche-g carries
+`createProjectMembersGroupAndPolicy` in **86 occurrences across 30 files**, its own
+definition included. main has zero of the old name. Signatures are otherwise identical
+(`ctx, project, callerUserID ...string`). The merge takes main's renamed definition and
+tranche-g's call sites, and nothing resolves. Textbook Rule 856.
+
+**I kept the deferral but replaced my reason for it.** The old reason was vague. The real
+one: gteam was rebuilt from `93916ca2` minutes earlier and ptone's manual QA starts now. A
+rebase pulls in *everything* main has moved since the branch point, swapping code out from
+under the tester mid-session. The rename is mechanical; the rest of main's movement is not.
+
+**The cost of that deferral, stated rather than glossed:** a typecheck failure suppresses
+every other golangci-lint finding, so tranche-g currently has *no* lint signal at all.
+That is a blind spot, not a cosmetic red, and the rebase is what closes it. Accepting a
+red is only legitimate if you can say what it is hiding.
+
+When dispatched, the rebase brief must carry the caution explicitly: rename tranche-g's 86
+call sites *forward*. Reverting main's rename to make the merge quiet is the failure mode
+ptone warned about by name.
+
+Also relayed to the coordinator as not-ours: "Lint 405 Allow header (reporting only)" is
+red on **268 bare `MethodNotAllowed(w)` calls** repo-wide and pre-existing — the check
+itself cites PR #1413. Not tranche-g's, and reporting-only.
