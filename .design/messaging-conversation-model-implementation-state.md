@@ -29420,3 +29420,55 @@ that, because I am the one holding both threads.
 
 Offered them one at a time per his standing instruction, and told him he need not
 answer both now.
+
+---
+
+### 5jy — ptone: the items lacked recommendations. Corrected, then approved; h1/h2 dispatched
+
+ptone: *"The two items are lacking a recommended course of action - it is hard to
+judge them as briefly stated here most recently."*
+
+He is right, and the criticism is sharper than it first reads. I had been carrying
+both items as **open questions** for so long that when I finally resurfaced them in
+§5jx I restated the questions rather than converting them into proposals. A
+coordinator who hands a principal a decision without a recommendation has moved the
+work, not done it.
+
+**Rule 840: an escalation without a recommendation is an interruption. If you have
+enough context to raise it, you have enough to propose an answer — and if you truly
+do not, say what you would need.**
+
+Wrote up DEF-89 with a recommendation, a rejected alternative, the risk, and
+reversibility. He approved both before I sent the second: *"seems like we should
+proceed with both - get those deployed... I'm eager to start exercising the model
+there."*
+
+**Dispatched `ca-msg-h1` (DEF-89) and `ca-msg-h2` (fail-soft opsettings)**, parallel
+because the file sets are disjoint. Briefs written as designs rather than one-liners
+— his judgeability point applies to agents at least as much as to him.
+
+**h1's load-bearing constraint** is not the transaction, it is the key: the live
+write must reuse whatever `external_ref` derivation the **backfill** uses. If they
+differ for the same topic we get divergent rows and the read switch becomes wrong in
+a new way. Told it to report rather than choose if they do not already share a
+function — choosing is my call, not a developer's.
+
+**h2's is scope discipline:** reachability only. Not flipping either switch, not
+changing defaults, not touching read-switch handler logic. Fail-closed proven for all
+four degenerate inputs.
+
+**One decision I made without asking and flagged as such:** both branch from
+`origin/scion/tranche-g`, not `main`. tranche-g is what is built and running on
+gteam, so main-based work would not deploy there without dragging the unmerged
+tranche along. The cost is more drift and DEF-58 staying open on the branch rule. I
+offered him the alternative — merge tranche-g first, rebase onto it, cleaner but
+slower — rather than presenting the choice as already made.
+
+**Rule 841: when you take a decision that was arguably the principal's, say that you
+took it and what the alternative costs.** Silence converts a judgement call into an
+assumption they never got to examine.
+
+Also answered his QA point substantively rather than agreeing: h1 landing first is
+what makes the coming defects *informative*. Without it the backfill keeps decaying
+underneath him and every 409 is ambiguous between a real bug and a topic that
+predates the fix.
