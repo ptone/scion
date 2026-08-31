@@ -28478,3 +28478,72 @@ and stops has described the risk without addressing it.
 **Rule 807.** An empty result from a query is not evidence until you have
 confirmed the query asked what you meant. A misplaced flag turned a real diff
 into a silent no-op that happened to agree with my hypothesis.
+
+### 5jg — DEF-89: new topics create no conversation; the backfill decays. My "one line" answer was wrong.
+
+ptone: "if I go and use webchat on gteam, am I exercising the new conversation
+datamodel or not?"
+
+**No — old model on both sides.** Verified by reading, not recalled:
+
+- **Read.** `handlers_chat_v2.go:1845` gates conversation-based filtering on
+  `ConversationReadSwitch()`. OFF → `store.MessageFilter{Channel: "web",
+  ThreadID: key}` (`:1891`). Legacy.
+- **Write.** `handleTopicCreate` builds `WebChatTopic` at
+  `handlers_chat_v2.go:460-471` with **no `ConversationID`**, then calls
+  `CreateTopic` at `:473`. In `webchannel_store.go:688`, empty `ConversationID`
+  takes the legacy branch: plain INSERT, `conversation_id` NULL. The atomic
+  topic+conversation dual-write at `:705-740` is correct and unreachable from
+  this path.
+
+Confirmed sole caller repo-wide: `grep -rn "\.CreateTopic(" --include="*.go" .`
+excluding tests and the store itself returns exactly one hit. The only other
+non-test `ConversationID:` assignments are a read `MessageFilter` (`:1879`) and
+a structured-message field (`handlers_agent_messaging.go:1015`) — neither links
+a topic. There is no dual-write switch: `MessagingSettings`
+(`pkg/config/opsettings/sections.go:128`) has exactly two fields.
+`shouldDualWrite` is `hasConversationsTable()`, a capability check, not a policy
+gate.
+
+**DEF-89 (new, and the most consequential open item).** The 39-row backfill was a
+one-time catch-up against topics alive at 09:05. Nothing maintains the
+invariant. Every topic created from now on has `conversation_id` NULL, so
+`webchat_topic` grows while `conversations` does not — the 46/39 floors recorded
+in the runbook will diverge by construction. When the read switch is flipped,
+those topics hit `ResolveThreadConversationForRead` (read-only, `conversation.go:282`,
+returns nil when absent) and get a 409 `conversation_not_resolved`, which the UI
+renders as an empty panel because no `.ts` handles that code.
+
+**The self-inflicted part: using gteam to test makes it worse.** ptone exercising
+webchat to evaluate the new model generates precisely the rows that cannot
+participate in it.
+
+**I owe a correction and made it.** In 5je I told him "the blocker is one line"
+— the postgres gate on operational settings. That is the blocker for *flipping
+the switch*. It is not the blocker for *exercising the model*, and I presented
+it as if it were. I had traced the switch's reachability and stopped there,
+without asking what the switch would reveal once reachable. Sequencing now
+stated to him:
+
+1. wire topic creation to create its conversation (dual-write exists, is
+   transactional, needs the handler to resolve-or-create and pass the ID);
+2. *then* make the switch flippable on SQLite.
+
+Doing 2 first yields a switch that turns web chat off. Told him I want to scope
+1 before dispatching — chiefly whether new topics get a conversation
+unconditionally or only under some enablement — rather than guess.
+
+**Rule 808.** Establishing that a control is reachable is not establishing that
+the system behind it is exercised. I answered "can the switch be flipped" and
+let it stand as an answer to "is the new model live," which was the question
+actually being asked.
+
+**Rule 809.** A one-time backfill without a maintaining write path is a
+decaying artifact, not a migration. Record such a backfill with the write path
+that sustains it, or with an explicit note that none exists — a row count that
+is correct only at one instant will be read later as a steady state.
+
+**Rule 810.** When correct code is unreachable from its only caller, tests over
+the code pass and the behaviour is absent. `CreateTopic`'s dual-write is right,
+transactional, and covered; nothing calls it with the field set. Coverage of a
+branch is not evidence that production takes it.
