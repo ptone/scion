@@ -26440,3 +26440,42 @@ someone to press a button.
 **Rule 722** — When you create infrastructure ahead of a decision, state its
 inertness in the same message. A new branch named `deploy/*` reads as a deploy
 to anyone who did not create it.
+
+### 5ig addendum — read-only check returned a latent hazard
+
+instance-investigator verified `origin/deploy/gteam` against a fresh non-shallow
+clone of the fork, running the actual three-step rebuild sequence:
+`fetch origin` → `checkout deploy/gteam` → `reset --hard origin/deploy/gteam`,
+landing on `17376c05d`. No ref ambiguity — no `deploy` branch exists to collide
+with the multi-segment name. Ephemeral clone, already cleaned up; nothing on the
+VM touched.
+
+They returned something I did not ask for and that matters more than the answer
+did:
+
+> `git fetch origin <branch>` (single branch) does NOT create a remote tracking
+> ref — it only updates `FETCH_HEAD`. The rebuild code uses `git fetch origin`
+> (all refs), which DOES.
+
+So the machinery works today **by a property nobody chose**. `origin/deploy/gteam`
+resolves in step three only because step one happens to fetch everything. That
+is the classic shape of an accidental protection (Rule 716): the plan is sound,
+and it is sound for a reason not written down anywhere near the code that
+depends on it.
+
+The obvious future edit — make the fetch branch-specific, it is faster and looks
+tighter — silently breaks `reset --hard origin/<branch>` for **every** branch
+deploy, not just ours. It would fail at reset with a bad-revision error after
+checkout has already moved HEAD, i.e. mid-rebuild.
+
+**Filed DEF-84** (latent, unstaffed): `pkg/hub/maintenance_executors.go` relies
+on `git fetch origin` fetching all refs for `origin/<branch>` to resolve at the
+reset step. Fix is a one-line comment at the fetch site naming the dependency;
+the hazard is not the current code, it is the plausible optimisation of it.
+Not blocking (d), not blocking the go-ahead.
+
+**Rule 723** — When a specialist returns an unasked-for "by the way, this only
+works because X," treat X as an undocumented invariant and file it immediately.
+The finding has a short half-life: it lives in one agent's head at the moment of
+testing, and the next person to touch the code will have a good reason for the
+change that breaks it.
