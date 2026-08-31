@@ -27958,3 +27958,50 @@ relevance is known.
 **Rule 786** — A verified baseline that will legitimately grow must be recorded
 as a floor, not a value. A future operator comparing against a fixed number reads
 normal growth as corruption.
+
+### 5iz addendum — updating the pointers made the reasoning wrong
+
+Step 9 done: `scion.known-good-6f6228f6` created and verified, the two retained
+artifacts documented with reasons, `hub.db.rehearsal-20260831T0210` deleted,
+header and baselines moved to the new SHA with `conversations=46` and
+`webchat_topic=39` recorded as **floors**.
+
+Read the whole file again rather than only the changed lines, and the DB-restore
+section is now actively wrong — made wrong by the update that was supposed to
+bring the document current.
+
+Lines 205-221 still argue that binary-only rollback is preferable because the
+rollback target "carries the DDL ordering bug (DEF-83)," and warn that restoring
+the DB "re-introduces DEF-83." All true when the target was `17376c05`. **The
+target is now `6f6228f6`, which contains the fix.**
+
+And the consequence is worse than a stale warning. `webchat_migrations` lives
+inside the database. The snapshot predates those rows, so restoring it under
+`6f6228f6` means the migration is seen as unrecorded, the column is re-added, and
+**all 39 conversations are re-created.** An operator restoring the DB to undo the
+backfill watches it undo nothing.
+
+| Binary | DB | Result |
+|---|---|---|
+| `6f6228f6` | current | deployed state, normal |
+| `6f6228f6` | restored | migration re-runs, 39 rows return — restore is a no-op |
+| `17376c05` | current | web chat works, rows remain |
+| `17376c05` | restored | true pre-deploy state: 7 conversations, web chat down |
+
+**Undoing the backfill now requires both** the snapshot and
+`scion.known-good-17376c05`. That combination does put web chat back down, which
+is the pre-deploy state correctly reproduced rather than a new fault. This is
+also the concrete reason the old stash had to be retained, which I argued for on
+general grounds and which turns out to be load-bearing.
+
+Asked for the section rewritten around the table, the DEF-83 warning deleted, and
+the no-op row stated explicitly.
+
+**Rule 787** — Updating a document's pointers does not update its reasoning. SHAs,
+paths and baselines are easy to sweep; the prose explaining why a step is safe
+stays silently scoped to the state it was written in, and that prose is what an
+operator reads before deciding.
+
+**Rule 788** — When migration bookkeeping lives inside the data being restored,
+a data rollback is also a bookkeeping rollback, and the migration re-runs. Check
+where the ledger lives before describing a snapshot as an undo.
