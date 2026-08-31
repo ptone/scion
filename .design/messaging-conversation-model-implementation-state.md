@@ -27688,3 +27688,35 @@ distinguish anything.
 **Rule 775** — Prove a diagnostic command discriminates by running it *now*,
 while the system is in the known-bad state. A command that cannot tell today's
 failure from tomorrow's success is discoverable today, for free.
+
+### 5iu addendum 2 — scoping proven on the box, deploy procedure closed
+
+instance-investigator ran the discrimination test I asked for, against the live
+service in its known-bad state:
+
+```
+InvocationID              ad3e48811807484bb5893f8868421998
+invocation-scoped query   22,227 lines, current start only
+  failure strings         1  (the expected DEF-83 Init() error)
+  success strings         0  (correct — web spoke is not registered)
+control: -b               7 stale failure matches across restarts this boot
+```
+
+The control is the result that matters. **Seven** pre-existing matches for the
+FAILURE string in the window the runbook was about to read. Had we deployed
+against `-b`, the check would have reported failure on a successful migration,
+and the runbook instructs the operator to halt and advance nothing on that
+signal — so a good deploy would have been treated as a bad one and possibly
+rolled back.
+
+Runbook step 6 now captures the invocation ID after start, writes one capture to
+`/tmp/deploy-run.log`, greps it twice, and carries a comment explaining why `-b`
+must not be used. The `--since` fallback is documented but unnecessary.
+
+**Deploy procedure is closed.** Everything now waits on ptone's backfill
+go/no-go, which is the only outstanding gate.
+
+**Rule 776** — A discrimination test needs a control. "The scoped query found the
+right thing" is weak; "the unscoped query found seven wrong things" is what
+establishes the scoping was load-bearing. Ask for the negative case explicitly,
+because an agent verifying its own fix will naturally only run the positive.
