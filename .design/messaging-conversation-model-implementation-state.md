@@ -29472,3 +29472,42 @@ Also answered his QA point substantively rather than agreeing: h1 landing first 
 what makes the coming defects *informative*. Without it the backfill keeps decaying
 underneath him and every 409 is ambiguous between a real bug and a topic that
 predates the fix.
+
+---
+
+### 5jz — tranche-g confirmed as the QA branch; merge gates stated rather than asked
+
+ptone: *"on tranche-g branch - that was correct - we are trying to use that as our
+testing and QA branch before merging to main."*
+
+The §5jy decision stands. More usefully, this makes explicit something I had been
+treating as ambiguous: **who advances tranche-g.**
+
+Rather than asking, I stated my understanding for correction: I advance tranche-g by
+merging accepted work after review — which is what I already did for G1 through G4 —
+and ptone merges tranche-g to main. h1 and h2 come to me, I land them on tranche-g,
+gteam rebuilds from it, QA runs there, main sees the result only when he is
+satisfied.
+
+**Rule 842: when you have acted under an unstated assumption and it turns out to be
+right, state it anyway.** Being right is not the same as being agreed with, and the
+next time the assumption applies I would still be guessing. Stating it for correction
+costs one paragraph and converts a habit into a rule.
+
+Two consequences named while the frame is fresh:
+
+**DEF-58 stays OPEN for a better reason than caution.** The ledger rule — closed on
+one branch but live elsewhere is open — read as conservatism when I first deferred to
+it in the §5jj cross-check. With tranche-g explicitly a staging branch, it is simply
+accurate: the G4 negative gate protects gteam and does not protect main, and will
+keep not protecting it until the merge. The rule did not change; my confidence in it
+did.
+
+**Drift becomes a managed cost rather than an accident.** tranche-g will fall behind
+main as main moves — main has already taken #1439, #1441, #1442 since the tranche
+was cut. I will dispatch rebases onto upstream main as it moves, under ptone's
+standing permission, so the eventual merge is small rather than one large
+reconciliation. Offered him the alternative of batching them.
+
+**Rule 843: an integration branch with a QA purpose has a drift budget. Decide who
+pays it and when, at the moment the branch is declared, not at the merge.**
