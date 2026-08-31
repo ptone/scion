@@ -26949,3 +26949,101 @@ is the mechanism working. Record it as such, or the next one gets skipped.
 **Rule 741** — Compose the rollback before the change, not during the incident.
 Require it as a deliverable of the preparation step, and require the
 before-measurement that makes the after-measurement meaningful.
+
+---
+
+## 5in — CI caught a panic in my own tranche; deploy retracted
+
+ptone opened PR #1432 as a **draft** at 01:33Z (`scion/tranche-g` → `main`,
+`36b5a7aa`). Not mine, and merging remains his gate. Its CI ran checks my local
+gates do not, and found a defect I was ten minutes from deploying.
+
+### P0 — guaranteed nil pointer panic
+
+`pkg/hub/handlers_broker_inbound.go:272`:
+
+```go
+if convErr != nil {
+    if s.writeDenyEnabled() { ...; return }
+    log.Warn("...write-deny OFF, continuing")   // convResult nil, falls through
+} else {
+    req.Message.Metadata["conversation_id"] = convResult.ConversationID  // safe
+}
+log.Info("Resolved conversation for broker inbound",
+    "conversation_id", convResult.ConversationID)   // ← PANIC
+```
+
+Verified every error return in `ResolveOrCreateConversationByKey`
+(`pkg/messaging/derive_key.go`) is `return nil, err` — lines 154, 165, 172, 193.
+So `convResult` **is** nil whenever `convErr != nil`, and the trailing `log.Info`
+outside the if/else dereferences it.
+
+**Write-deny is OFF by default and OFF in production.** The fail-open path — the
+one whose entire purpose is to log and continue — crashes.
+
+This is G2's write-deny work. **Mine.** Rule 713 applied without needing to be
+reminded this time.
+
+**The interaction with the VM is the instructive part.** One resolver error is
+`topic has no conversation_id yet` (`derive_key.go:165`) — precisely the state of
+all 39 webchat topics on scion-gteam, because the backfill has never run. So a
+broker inbound message against any of them panics.
+
+But the startup backfill would stamp all 39, and *that* error would largely stop
+firing. **The crash would plausibly not appear in a smoke test while remaining
+live for every other resolver failure** — upsert failure, malformed ref, lookup
+infrastructure error. The likely outcome of shipping was a clean-looking deploy
+and a panic days later on an unwatched path.
+
+### Other findings
+
+- **4 × errcheck** in `webchannel_store_c4fix_test.go` (159, 203, 224, 251) —
+  golangci-lint, currently red.
+- **Unbounded `NonUUIDExamples`** in `cmd/server_attribution_report.go` (~289,
+  ~372). `UnresolvableExamples` is capped; this is not. OOM risk on a large DB.
+- **Bare `MethodNotAllowed(w)`** in G5's `admin_messaging.go` — 405 lint,
+  reporting-only, missing `Allow` header. Ours.
+
+### The bot trap
+
+Six of the nine inline comments are **wrong**, all the same misreading: that
+`idx_webchat_topic_conversation` was *removed from the schema*, so assertions
+about it should be deleted. It was **moved** to the migration, not removed. The
+assertions pass; the suite is green.
+
+Those assertions are the regression protection for the **UNIQUE** constraint I
+specifically identified as the risk in 5ih. A naive agent working the PR comment
+list would delete exactly the coverage guarding the hazard I flagged. The brief
+for `ca-msg-g6` leads with this and forbids touching them without messaging me.
+
+This is the "risky replace actions" class ptone told me to build into reviewer
+directives, arriving from an automated reviewer rather than a human one.
+
+### My gate gap
+
+I gated on gofmt, build, vet, tests. **`golangci-lint` was never in my list**,
+and CI runs `--new-from-merge-base=origin/main`. Four real violations sat in
+work I had already reviewed and landed. Added to the standing gate list.
+
+Retracted the deploy recommendation to ptone; stood instance-investigator down.
+Box untouched at `17376c05d`. Dispatched `ca-msg-g6`.
+
+Also asked instance-investigator, read-only and unhurried, what the rebuild
+executor does when a **build fails** — does it leave the old binary running, or
+stop the service first and leave the box down? Better learned from the source
+than from a real deploy.
+
+**Rule 742** — Your gate list is a claim about what you have checked. Diff it
+against what CI actually runs, on the actual base, before treating green as
+green. Mine was missing the linter that found a panic.
+
+**Rule 743** — An automated reviewer's confident, uniform, repeated suggestion is
+more dangerous than a wrong human one: it arrives six times in identical
+language and reads as consensus. Six identical comments are one opinion.
+
+**Rule 744** — When a bug's most visible trigger is also the thing your migration
+repairs, the migration hides the bug rather than fixing it. Ask which failure
+modes remain after the repair, because those are the ones that ship.
+
+**Rule 745** — A defect found in code you already reviewed and landed is a
+finding about your review, not just the code. Record the gap, not only the fix.
