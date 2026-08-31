@@ -29228,3 +29228,50 @@ and nobody owns.** I had used this access all week without once asking what it w
 `4033` for `scion-integration-sa`, so the agents have exactly one route in and no
 fallback. A `roles/iap.tunnelResourceAccessor` grant is small and would give them a
 second. His call whether it is worth doing before beta.
+
+---
+
+### 5jt — IAP grant scoped to the instance, with an explicit statement of what it does not buy
+
+ptone asked for the command. Gave the **instance-scoped** form rather than the
+project-scoped one:
+
+```
+gcloud compute instances add-iam-policy-binding scion-gteam \
+  --zone=us-central1-a --project=deploy-demo-test \
+  --member="serviceAccount:scion-integration-sa@deploy-demo-test.iam.gserviceaccount.com" \
+  --role="roles/iap.tunnelResourceAccessor"
+```
+
+gteam is the box the agents need. The project-wide form exists and is one line
+shorter; I named it and said I would only reach for it if the agents turn out to
+need several instances. The standing principle applies unchanged — under-granting is
+recoverable, over-granting is not — and it applies to infrastructure IAM as readily
+as to conversation participants.
+
+**Told him the verification must run as the service account, not as him.** As him it
+already worked, so it would prove nothing. That is the same error shape as §5jk's
+serial-console confusion: exercising a capability adjacent to the one in question and
+reading the result as evidence. Dispatched instance-investigator to run it under its
+own identity, with a 60s wait for IAM propagation before reporting, and an explicit
+instruction not to loop or work around a refusal — a `4033` is information I want,
+not an obstacle.
+
+**Stated plainly what the grant does not buy.** It gives the agents a second
+*transport*, not a second *credential* — IAP still authenticates with the same
+project-metadata SSH key. So it covers a network fault or a future firewall change
+and does nothing for the DEF-91 failure mode where the keys are wiped or blocked.
+Worth having; not a general fallback.
+
+That is §5js's Rule 834 applied forward rather than in hindsight. I got "two
+independent routes" wrong once today by not naming the dimension. Naming it before
+the change lands is cheaper than correcting the runbook after.
+
+**Rule 836: when you propose a mitigation, state the failure modes it does not
+cover. A mitigation described only by what it fixes will be remembered as covering
+everything.**
+
+Also credited instance-investigator explicitly: DEF-91 surfaced because it answered
+question 3 thoroughly rather than minimally. I asked whether a gcloud-managed key
+existed; it went and looked at what was in project metadata. Nothing in my question
+asked for that.
