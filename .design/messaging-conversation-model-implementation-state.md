@@ -27457,3 +27457,73 @@ only when relied upon.
 Having named DEF-86, I should have swept for other procedures routed through the
 component they act on, rather than waiting for the next instance to present
 itself.
+
+## 5is — G6 reviewed and landed; `scion/tranche-g` = `6f6228f6`
+
+`ca-msg-g6` reported all four fixes green. Verified independently rather than on
+the report (Rule 727), and everything it claimed held.
+
+**Base.** `6f6228f68` is a single commit whose parent is `36b5a7aab`, the
+tranche-g tip. Fast-forward confirmed by `merge-base --is-ancestor` against a
+freshly fetched ref, not a local mirror.
+
+**Numstat** reproduced exactly:
+
+```
+10  5  cmd/server_attribution_report.go
+ 1  1  pkg/hub/admin_messaging.go
+ 1  1  pkg/hub/admin_messaging_divergence.go
+ 3  3  pkg/hub/handlers_broker_inbound.go
+98  0  pkg/hub/handlers_broker_inbound_test.go
+ 9  9  pkg/hub/webchannel_store_c4fix_test.go
+```
+
+`admin_messaging_divergence.go` was not in my brief. It is the same bare
+`MethodNotAllowed(w)` defect, found by g6 while fixing the one I named. In scope
+by class, one line, correct.
+
+**P0 fix is the right shape.** The `log.Info` moved *inside* the `else`. Not
+nil-guarded and left outside, which would have preserved a log line that lies
+about having resolved a conversation.
+
+**Proved the test is a real regression guard.** Not by accepting the pasted
+output: built a worktree at the base, copied only the new test file over, ran it.
+
+```
+--- FAIL: TestHandleBrokerInbound_ConvResolutionFailure_WriteDenyOff (0.11s)
+    Panic value: runtime error: invalid memory address or nil pointer dereference
+WARN conversation resolution failed (write-deny OFF, continuing)
+     error="malformed thread: ref (external_ref=\"thread:bad\", parts=2)"
+```
+
+Fails on base, passes on fix. The test also asserts `writeDenyEnabled()` is false
+as an explicit precondition, so it breaks loudly if the default ever flips, and
+asserts 503 to prove the handler *continued to dispatch* rather than merely not
+panicking. Not-panicking alone would have been satisfied by an early return.
+
+**Deletion audit, run myself.** `comm -23` on both touched test files: empty.
+`idx_webchat_topic_conversation` assertion counts identical across base and fix
+(12 in `webchannel_store_c4fix_test.go`, 2 in `webchannel_store_dualwrite_test.go`).
+All six bot suggestions correctly ignored.
+
+**Build tag checked** — `handlers_broker_inbound_test.go` carries
+`//go:build !no_sqlite` at line 15, and `go vet -tags no_sqlite ./pkg/hub/`
+exits 0. I initially read only the license header and thought the tag was
+missing; `testServer` lives in `handlers_test.go` which is `!no_sqlite`, so an
+untagged file would not have compiled. Checked before raising it.
+
+**Gates re-run by me, not relayed:** gofmt clean, build clean, vet clean, vet
+`-tags no_sqlite` clean, `golangci-lint --new-from-merge-base=9f66cd55` → 0
+issues, and `go test ./pkg/hub/... -count=1` → **EXIT=0**, `pkg/hub` at 451.7s.
+The merge-base SHA matches g6's report and resolves as a real ancestor, so the
+lint baseline was genuine this time.
+
+**Landed** by fast-forward. `scion/tranche-g` = `6f6228f68`, verified by re-fetch.
+
+**Rule 765** — A regression test must be shown to fail against the unfixed code
+by running it there. Pasted failure output proves the author once saw a failure,
+not that this test detects this defect.
+
+**Rule 766** — For a panic fix, assert the behaviour that should follow the panic
+point, not merely absence of panic. An early return satisfies "does not panic"
+while silently deleting the path.
