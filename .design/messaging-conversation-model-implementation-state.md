@@ -28005,3 +28005,81 @@ operator reads before deciding.
 **Rule 788** — When migration bookkeeping lives inside the data being restored,
 a data rollback is also a bookkeeping rollback, and the migration re-runs. Check
 where the ledger lives before describing a snapshot as an undo.
+
+### 5ja — DB-restore rewrite verified; WAL sidecar defect found in the restore commands
+
+instance-investigator rewrote the DB-restore section per 5iz. Verified by reading
+`/scion-volumes/scratchpad/runbooks/gteam-rollback.md` directly rather than
+accepting the report. All four corrections present and correct:
+
+- DEF-83 warning deleted, along with all reasoning scoped to `17376c05` as the
+  rollback target.
+- Four-row binary×DB interaction table present verbatim (lines 217-222).
+- Procedure now requires BOTH `hub.db.pre-6f6228f6` AND
+  `scion.known-good-17376c05`; verification expects `17376c05`,
+  `conversations=7`, web chat down.
+- "Updating a document's pointers does not update its reasoning" placed as the
+  section's second paragraph (line 213), where the next editor of the header
+  will encounter it.
+- mtime staleness warning retained.
+
+**But the rewrite exposed a defect I had not been looking for.** I asked for the
+*reasoning* to be corrected and then verified only the reasoning. Reading the
+commands underneath it (lines 241-245), the restore is:
+
+```
+sudo systemctl stop scion-hub
+sudo -u scion cp /home/scion/.scion/hub.db.pre-6f6228f6 /home/scion/.scion/hub.db
+sudo cp /usr/local/bin/scion.known-good-17376c05 /usr/local/bin/scion
+sudo systemctl start scion-hub
+```
+
+This restores one file of a three-file database. `hub.db-wal` (4.0 MB) and
+`hub.db-shm` (32 KB) are live on the box and are left in place.
+
+The failure is conditional on how the hub stopped:
+
+- **Clean stop** — SQLite checkpoints and unlinks the WAL on last-connection
+  close. The copy is safe. This is what a rehearsal on a healthy box exercises.
+- **Crash / SIGKILL** — the WAL survives holding post-snapshot writes. On
+  startup SQLite replays valid frames against the restored file, yielding
+  post-snapshot writes on top of a pre-snapshot database: neither state, and
+  possibly not a consistent one.
+
+The second case is the one the section exists to serve. A DB restore is reached
+for when something has already gone wrong, and "something went wrong" correlates
+strongly with the process not having exited cleanly. **The procedure is correct
+exactly when you don't need it.**
+
+Fix sent: `rm -f hub.db-wal hub.db-shm` between the stop and the copy, plus a
+`PRAGMA integrity_check` before starting the service. Three constraints stated:
+`rm` must precede `cp` (afterwards a stale WAL is indistinguishable from one the
+copy provoked); the deletion discards writes and must be documented as a data
+decision rather than as cleanup; the integrity check is cheap and this is the
+site where starting on a bad DB costs most.
+
+Also asked for a sweep for other `hub.db` copy/move sites (Rule 764). The deploy
+snapshot at step 4 is already correct — `wal_checkpoint(TRUNCATE)` with the
+service stopped, WAL-is-0-bytes verified before `cp`. That is the same hazard
+handled properly in the other direction, which is why I did not generalise from
+it: I had recorded the write-side rule and never derived its mirror.
+
+Explicit scope note to instance-investigator: document change only, do not
+execute. The procedure is not currently running and there is nothing to fix on
+the live box.
+
+**Rule 789.** A backup rule and a restore rule are different rules. Rule 763
+("`cp` backs up SQLite only when nothing has it open") governs producing the
+artifact; it says nothing about consuming it. For any multi-file store, restoring
+requires removing the files you are *not* copying — otherwise the survivors are
+interpreted as belonging to the file you restored.
+
+**Rule 790.** When a recovery procedure's correctness depends on how the system
+stopped, check it against the ungraceful stop. Recovery paths are exercised in
+rehearsal after a clean shutdown and in production after a crash; a step that
+passes rehearsal is evidence about the wrong case.
+
+**Rule 791.** Verifying the change you asked for is not verifying the section.
+I scoped my re-read to the prose I had requested and missed a defect four lines
+below it that had been there the whole time. A correction is an occasion to read
+the whole unit, not the diff.
