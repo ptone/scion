@@ -27309,3 +27309,55 @@ the case where they did not.
 document, specify the step that produces it. Otherwise the procedure is a
 dependency on institutional memory wearing the costume of a runbook, and it fails
 in exactly the conditions it exists for.
+
+## 5iq — the deploy IS the backfill, and a queued agent nearly executed it
+
+Runbook finalised and verified: pre-deploy checklist sits above the recovery
+procedure with the DB snapshot, the stash-vs-healthz comparison, and the
+baselines queries written out as literal `sqlite3` commands. Structure is
+Baselines → Pre-deploy → Recovery → DB-restore warning → Context.
+
+Then instance-investigator closed with:
+
+> Will run the full pre-deploy checklist + deploy sequence when the nil deref
+> fix is ready.
+
+**Stopped it.** Three gates stand between g6's fix and a deploy and they had
+collapsed all three into one.
+
+1. **A fix SHA is not a reviewed SHA.** g6 pushes to its own branch; the SHA it
+   reports is a proposal until I have the before-fix failure output, the per-file
+   numstat, proof no test functions were deleted, and a resolved lint baseline.
+2. **Review does not authorize deploy.** A SHA appearing on `scion/tranche-g` is
+   not the message that releases the box.
+3. **The deploy IS the backfill.** `backfillTopicConversations()` runs inside
+   `Init()`. Starting the service creates the 39 rows. There is no later
+   "run the backfill" step to decide about — the decision is consumed by the act
+   of starting the binary.
+
+Point 3 is the one that matters. ptone has not ruled on the backfill; it is his
+call and it is the only genuinely irreversible step in the sequence. The binary
+swaps back in thirty seconds. The rows do not un-create without the snapshot.
+
+The hazard was never a wrong decision. It was an **unmade** decision being
+executed as a side effect of routine work, with no moment at which either of us
+would have observed that a decision had occurred.
+
+Told them the pre-deploy checklist is safe to run now and asked them to — all
+three items are reversible and all three stale-date while we wait. The deploy
+sequence waits on an explicit message from me naming a SHA; a fix notification
+arriving from g6 directly is not that message. Requested an ack.
+
+**Rule 757** — When a migration runs inside service startup, deployment and
+migration are the same act. Any approval gate on the migration must therefore be
+enforced on the deploy, because there is no later point at which the migration
+can be independently declined.
+
+**Rule 758** — An agent that has finished its assigned work and knows what comes
+next will queue itself to do it. Standing prohibitions must be restated as the
+moment of execution approaches; a constraint issued at dispatch is not load-
+bearing at the point where it finally binds.
+
+**Rule 759** — The dangerous decisions are not the contested ones. They are the
+ones nobody registers as decisions, because they arrive as a side effect of a
+step that was already agreed.
