@@ -27233,3 +27233,54 @@ selected against their having it.
 the container. Anything a future operator must follow goes to a durable path
 before the agent that produced it is retired, and the pointer goes in the state
 doc. A recovery artifact with no instructions is the same failure as no artifact.
+
+## 5ip — the lint gate was pointed at the wrong repository
+
+Caught `ca-msg-g6` mid-run executing
+
+```
+golangci-lint run --new-from-merge-base=origin/main
+```
+
+in `/scion-volumes/contrib-repo`, where `origin/main` resolves to
+
+```
+6743482b docs: add multi-repo credentials section to github-auth-fallback skill (#37)
+```
+
+That is **scion-frontiers/scion-repo-contrib** — unrelated history, not our
+codebase. Our main is on the `ptone` remote. There is no common ancestor, so the
+merge-base is failing or degenerate, and **"no findings" from a broken baseline
+is indistinguishable from "no findings" from a clean tree.**
+
+This is Rule 728 (`origin` is a convention, not an identity) recurring in a place
+I did not anticipate. I warned g6 about the *push* step specifically and thought
+the trap was closed. It was not: the same ambiguity reaches every command that
+names a remote, and I had enumerated one of them.
+
+Corrected invocation given: fetch ptone main explicitly, lint against
+`FETCH_HEAD`, and **prove the merge-base resolved to a real SHA** before
+believing the result. Required in the report — the exit code alone is not
+evidence.
+
+This is the gate that caught four errcheck violations my own review missed
+(5il), so it is the one where a silent disarm costs most.
+
+**Rule 754** — When a hazard comes from an ambient property of the environment
+rather than from one command, warning about the instance you noticed does not
+close it. Enumerate every command that touches the property, or state the
+property itself and make the agent check each use.
+
+**Rule 755** — A gate whose baseline cannot be resolved reports clean. Any gate
+computed relative to a reference must prove the reference resolved, separately
+from reporting its findings. Exit 0 from a gate that never ran is the most
+expensive kind of green.
+
+### Incidental finding — credential in a shared volume
+
+`git remote -v` in `/scion-volumes/contrib-repo` prints a `github_pat_` token
+embedded in the `origin` URL, readable by every agent with access to the shared
+volume, and it will appear in any transcript that runs that command. Pre-existing
+provisioning, not introduced by this work, and plausibly intentional. Filed as
+**DEF-87**, not escalated as urgent; to be mentioned to ptone at the next section
+boundary rather than interrupting the fix.
