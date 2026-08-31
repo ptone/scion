@@ -28135,3 +28135,58 @@ not only in finding recurrences — it is in learning whether the defect is
 systemic or local. Empty here meant the codebase was already correct, which
 relocated the problem from "we have a bad habit" to "one hand-written document
 drifted from the code," and those call for different responses.
+
+### 5jb — runbook closed; Tranche G operational work complete
+
+Line 243 rewritten to describe the sidecars without counting them. Verified by
+reading 240-259: prose and command now agree, and they agree in a form that
+cannot drift apart again when the list changes.
+
+**The rollback runbook is closed.** Final state of the DB-restore section: the
+binary×DB interaction table, the both-artifacts requirement, the mtime staleness
+check, sidecar removal before the copy with the product's own list cited,
+integrity check gating the service start, and verification expectations stated
+as values rather than as "check X".
+
+The section took four corrections after I first called it done:
+1. reasoning still scoped to the superseded rollback target (5iz, Rule 787)
+2. WAL sidecars not removed on restore (5ja, Rules 789-791)
+3. `-journal` missing from my own fix (5ja addendum, Rules 792-793)
+4. prose file-count contradicting the command it introduced
+
+Each was found by re-reading the whole section rather than the diff, and each
+was invisible from the change that caused it. Number 4 is the diagnostic one:
+instance-investigator's edits were correct and precisely scoped every time. The
+document states the same fact twice — once in prose, once in commands — so every
+change has two sites and only one is the one being edited. I flagged this to
+them as a property of the document, not of their work, since they will be the
+next to touch it.
+
+**Rule 794.** When a document expresses the same fact in two registers (prose and
+executable commands), every edit has a second site that will not appear in the
+diff. Prefer the form that cannot go stale: describe a list, do not count it;
+name a pointer, do not restate its value. Where duplication is unavoidable, say
+so in the document so the next editor knows to look.
+
+**Rule 795.** "I am done with this section" is a prediction, not a finding, and I
+made it wrongly three times in a row. Each retraction was cheap because nothing
+was executing. The habit worth keeping is the re-read; the habit worth dropping
+is announcing closure before the re-read.
+
+---
+
+## Tranche G operational state — CLOSED
+
+- `scion/tranche-g` = `6f6228f6`; `deploy/gteam` = same, fast-forward verified.
+- VM running `6f6228f6`, `NRestarts=0`, web chat restored, `conversations=46`,
+  28 containers, both migrations recorded.
+- Both messaging switches remain **OFF**. Flipping either is a separate,
+  unasked decision.
+- Recovery artifacts: `scion.known-good-6f6228f6` (current target),
+  `scion.known-good-17376c05` + `hub.db.pre-6f6228f6` (paired, the only route
+  back from the backfill), `scion.rollback-1a2c1b07` (not ours, do not delete).
+- Runbook: `/scion-volumes/scratchpad/runbooks/gteam-rollback.md`, durable and
+  verified.
+
+Outstanding and not mine to close: DEF-83-on-`main` (`scion/def83-main`,
+`b3a070b3`) awaits ptone's merge; link delivered to thread 1532864101909528737.
