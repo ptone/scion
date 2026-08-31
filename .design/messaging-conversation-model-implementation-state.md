@@ -26082,3 +26082,79 @@ instance-investigator for `/healthz` `scionVersion`, and for confirmation that
 the maintenance branch resolves against the `ptone` remote rather than upstream
 — a self-rebuild pointed at the wrong remote fails only when someone triggers
 it under pressure.
+
+---
+
+## 5ic — Deploy landed; the toggle does not exist
+
+`17376c05d` live on scion-gteam. instance-investigator verified properly: exec'd
+into 3 containers and confirmed each sees `scionVersion: 17376c05`, watched
+broker reconnection in the journal rather than trusting `/healthz`, 5 brokers /
+27 agents / 28 containers. Rollback artifacts staged and verified. No switches
+flipped, no backfill.
+
+### The finding: there is no way to flip the switch
+
+ptone asked how to activate. I went to write the procedure and there isn't one.
+
+- `messaging` is **not in `opsettings.Registry`** and has no koanf paths
+- `ClassifyKeys` therefore cannot map any key to it, so
+  `PUT /admin/server-config` rejects it 422 as unclassified
+- `MessagingSettings` has exactly **two readers** in the tree
+  (`operational_settings.go:1175,1198`) and **no writer anywhere**
+- no dedicated endpoint, unlike `maintenance`, which is the existing template
+  for a DB-only section: registered with `KoanfPaths: nil` + its own handler
+- no admin UI reference, no `.ts` reference
+
+Only mechanism is direct SQL into `hub_settings`. It does work without a
+restart: `Refresh` caches `row.Section` verbatim for every row except `_meta`,
+independent of Registry membership, and `runPollBackstop` ticks at 60s ±10s
+jitter. So ~70s to take effect, same to revert.
+
+**I had been saying "reversible by an ops toggle, no redeploy" — repeatedly,
+including on the landing link.** The "no redeploy" half is true. The "toggle"
+half I never checked. Corrected to ptone in the same message that answered his
+question, and attributed to me rather than left as a discovered curiosity.
+
+Gap is pre-existing, not mine: `ConversationReadSwitch` (Phase 8) has the same
+problem and has never been flippable. My G2 switch inherited the pattern.
+Offered to spec a small admin surface before the beta exercise.
+
+### The webchat warning was not ours, and not even this deploy's
+
+instance-investigator flagged `failed to initialize webchat store: create
+tables: no such column: conversation_id` and hypothesised Tranche G. Traced:
+`git log -S'conversation_id' -- pkg/hub/webchannel_store_postgres.go` →
+`eb365a9d3` (#1380, tranche C4), and `merge-base --is-ancestor eb365a9d3
+1a2c1b07d` → **YES**. Pre-existing on the build they were already running. That
+file is not in my 32-file diff at all.
+
+Declined to let it be closed as harmless. Real ordering defect: the
+create-tables DDL block (line 91) creates an index on `conversation_id`, but the
+migration that *adds* the column is `addTopicConversationID` (line 1032), run at
+line 183 — after create-tables at line 159. Fresh DB works; pre-existing DB
+no-ops the CREATE TABLE, the index fails, init returns early, and the migration
+that would fix it is never reached. Fails identically on every restart.
+
+Also flagged: the error text `SQL logic error` is SQLite phrasing, the file is
+`_postgres.go`, and it uses `ADD COLUMN IF NOT EXISTS` which SQLite does not
+support — while the hub is supposedly on Postgres. Either a separate SQLite
+webchat store or something pointed at the wrong backend. Asked them to
+determine which, and to route the whole thing to #1380's owner, not to me.
+
+**Rule 707** — Verify the control surface exists before promising the control.
+"Reversible by an ops toggle" is a claim about a UI, not about the code, and I
+asserted it four times off the existence of a boolean in a settings struct. A
+flag that can be *read* by config is not the same as a flag that can be *set*.
+The reader existing proves nothing about the writer.
+
+**Rule 708** — When the operator hands you a plausible hypothesis that blames
+your work, check it anyway and check it hard. Agreeing is not the risk;
+accepting the framing is. Here the true answer ("predates your previous build")
+was two commands away and stronger than the one on offer, and stopping at
+"not Tranche G" would have left a real init failure filed as expected noise.
+
+**Rule 709** — An error whose *dialect* contradicts the deployment (SQLite
+phrasing from a `_postgres.go` file on a Postgres hub) is a finding in its own
+right, separate from the error itself. Read the message's form, not only its
+content.
