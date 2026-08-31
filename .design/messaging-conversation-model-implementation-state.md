@@ -27812,3 +27812,38 @@ at the worst time.
 **Rule 780** — A cap on an encoded artifact is not a cap on what you wrote.
 Budget for the transformation, and let the tool refuse — hand-assembly would
 have produced a link that silently truncated.
+
+## 5ix — deploy authorized: `6f6228f6` to scion-gteam
+
+ptone: "go". The backfill decision is made.
+
+**Re-verified the SHA against the remote before naming it.** `scion/tranche-g`
+tip is still `6f6228f68eba8284135c628ce59ab4f9c098c740` — unchanged since my
+review, so the thing I authorized is the thing I checked. `deploy/gteam` still
+`17376c05d`, untouched. Six hours passed between review and go-ahead; a tip that
+moved in that window would have been invisible if I had reused the SHA from my
+own notes.
+
+Authorized steps 1-8 of the manual SSH procedure with an explicit **stop at 8**.
+instance-investigator does not advance `deploy/gteam` and does not refresh the
+stash. I move the pointer, and only after seeing step 7 output — the pointer
+records what is verified running, and I am the one who must be able to say I
+verified it (Rule 721).
+
+Named the two failure modes I most want reported immediately:
+
+- **Healthy hub, spoke line absent** — the migration failed silently. Looks like
+  success on every surface except the one that matters.
+- **`conversations` neither 7 nor 46** — partial backfill. Resumable, but I want
+  the number before anything restarts.
+
+Told them not to roll back on their own judgement unless the hub is actually
+down, and that rushing buys nothing when the rollback is a 30-second binary swap.
+
+Reported to ptone on the main thread, folding in the main-branch DEF-83 finding
+now that the backfill question is closed — it had been held back to keep one
+question open at a time, and the go-ahead is what released it.
+
+**Rule 781** — Re-resolve a SHA from the remote at the moment you authorize it,
+never from your own notes. Review and approval are separated by however long the
+human takes, and the branch does not know that.
