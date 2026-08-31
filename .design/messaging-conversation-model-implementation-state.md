@@ -28673,3 +28673,71 @@ decision, and an escalation from the plan.
 I asked for `sshd -T` expecting it to confirm a hazard; it refuted one. The
 value of demanding the effective config is only realised if you let it change
 your mind in both directions.
+
+### 5ji — the serial fallback does not exist; proposed removing the need for it instead
+
+instance-investigator overturned their own finding. `enable-oslogin` unset at
+instance and project level; `AuthorizedKeysCommand` none; SSH uses traditional
+`ssh-keys` metadata. `serial-port-enable` unset at both levels. The earlier
+success was `get-serial-port-output` — a read-only boot-log API that works
+regardless of whether the interactive console is enabled.
+
+**So the fallback is not unproven (5jh addendum, Rule 815). It is absent.** I had
+found the right gap and still understated it: I assumed the capability existed
+and only its interactive use was untested. Runbook corrected and verified by
+reading lines 154-186 — "NOT CURRENTLY AVAILABLE" with both missing pieces
+named, and the context line now reads "SSH is the only access path."
+
+**Owned to them and to ptone:** I relayed "serial console: available" upward
+without asking which operation had been exercised. They reported what they
+tested; I promoted it to a capability. That is my error, not theirs.
+
+**The architectural move: remove the need for recovery rather than build a path
+to it.** Current code (`cmd/server_foreground.go:1915`):
+
+```go
+if strings.EqualFold(cfg.Database.Driver, "postgres") {
+    if err := initOperationalSettings(...); err != nil {
+        return nil, fmt.Errorf("operational settings init: %w", err)  // aborts boot
+    }
+}
+```
+
+For postgres that is right — operational settings are load-bearing there. For
+the SQLite opt-in it need not be: log loudly and continue with settings absent.
+Absent settings is *already* a fully-defined state — `GetOperationalSettings()`
+returns nil, both switches read OFF, fail-closed, which is exactly today's
+behaviour on that box. So the worst case of a botched deploy becomes "switches
+still unavailable" rather than "hub down," and it composes with the existing
+fail-closed design instead of fighting it.
+
+This converts the deploy we were bracing for from a startup-risk deploy into an
+ordinary one, and demotes the serial console from a prerequisite to a thing
+worth doing on its merits.
+
+**Stated the caveat rather than hiding it:** this is the same non-fatal-failure
+pattern I criticised in the webchat store this morning. The difference is
+watchedness — the deploy already greps the startup log for a specific line, and
+this gets the same treatment. Told instance-investigator their verification will
+now need a fourth outcome: settings failed to initialise and the hub came up
+anyway. Non-fatal is acceptable; non-fatal and unwatched produced DEF-83.
+
+Left with ptone, neither blocking: whether to enable serial console at all
+(`serial-port-enable=true` + Secret Manager password), and DEF-90 — restricting
+port 22 or adding fail2ban fixes the SSH unreliability at its cause rather than
+routing around it.
+
+**Rule 818.** Prefer making a change unable to fail dangerously over building a
+recovery path for when it does. Recovery paths need their own maintenance,
+testing, and credentials; a bounded failure mode needs none. Reach for the
+fallback only once the blast radius cannot be reduced further.
+
+**Rule 819.** A pattern is not good or bad in itself — non-fatal failure was the
+defect in DEF-83 and is the mitigation here. What changed is whether anything
+watches. When reusing a pattern you have previously criticised, say so and name
+the difference, or you are relying on nobody remembering.
+
+**Rule 820.** When an agent overturns their own earlier finding, that is the
+behaviour to reinforce out loud. The failure mode I care about is an
+investigator defending a prior report; making the correction cheap is how it
+stays cheap.
