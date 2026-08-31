@@ -28266,3 +28266,70 @@ UI was not part of what "the pattern" named, so it was silently out of scope.
 produces a complete record of what happened and no answer to what is still open.
 Both are needed; neither substitutes. The derived view should have been
 maintained from the start, not extracted at the end under a direct question.
+
+### 5jd — postgres conversion proposed; driver contradiction + migrator does not carry web chat
+
+ptone: "lets use instance-investigator to get gteam VM in a testable state - it
+uses postgres and migrations should be automatic on install/upgrade."
+
+Two problems, raised before any action.
+
+**1. "It uses postgres" contradicts our own evidence.** Throughout the deploy we
+queried `/home/scion/.scion/hub.db` with the `sqlite3` CLI and got real row
+counts — `conversations=46` came from there. `journal_mode = wal`, live
+`hub.db-wal` and `hub.db-shm`. A postgres-backed hub does not have that file.
+
+The sentence has two readings: present-tense assertion about gteam, or intent
+("get it into a testable state, which means postgres"). The second is coherent
+with "get in a testable state" and with the switches being postgres-gated. I did
+not pick one. Dispatched instance-investigator for READ-ONLY ground truth:
+startup `Database: <driver> (<url>)` line scoped to the current invocation, the
+config stanza from the unit's actual ExecStart (not an assumed path), whether any
+postgres exists on the box (`docker ps -a`, `ss -lntp | grep 5432`), environment
+overrides (`SCION_SERVER_*` can beat config), and whether any postgres DB was
+ever populated. Required all five answered including explicit negatives. Stated
+plainly that no conversion is authorized.
+
+**2. The built-in migrator would silently destroy web chat.** This is the
+blocker. `scion server migrate` (`cmd/server_migrate.go`) calls
+`entc.MigrateData`, which moves **ent entities**. Web chat is not ent-managed:
+`webchannel_store.go` creates 11 tables in raw DDL — `webchat_topic`,
+`webchat_thread`, `webchat_message_ext`, `webchat_attachment`, `webchat_dm`,
+`webchat_read_state`, `webchat_conversation_context`, `webchat_message_attachment`,
+`webchat_thread_prefs`, `webchat_user_prefs`, `webchat_migrations`.
+`grep -rn webchat pkg/ent/entc/` returns nothing.
+
+`conversations` *is* an ent schema (`pkg/ent/schema/conversation.go`), so it
+would cross. The topics would not. On first postgres start `Init()` creates the
+webchat tables empty and records `topic_conversation_backfill` as complete
+against zero rows. End state: 46 conversations with no topics referencing them,
+and the web chat this deploy just restored is empty — **and it would present as a
+successful migration.** Same silent-success shape as the migration-inside-startup
+problem from 5jc, one layer down.
+
+Presented two options without choosing: hand-write the 11-table transfer, or
+accept the loss and treat gteam as fresh postgres. ptone called this production
+data on an integration instance; that is squarely "irreversible" under my
+escalation threshold.
+
+One mitigating fact, verified and reported: `--drop-source` is opt-in
+(`migrateDropSource`) and the source is opened via `entc.OpenSQLiteReadOnly`, so
+the SQLite file survives a conversion by default. `dropSQLiteFile` at
+`server_migrate.go:147` runs only behind that flag — which is also where the
+four-suffix sidecar list I cited in 5ja lives.
+
+**Rule 799.** When a principal asserts a fact about system state that
+contradicts your evidence, do not correct and do not comply — establish ground
+truth first and say you are doing so. The assertion may be intent phrased as
+fact, and acting on either reading without checking is how a mistaken premise
+becomes an executed plan.
+
+**Rule 800.** A data migration tool covers the schemas its framework manages.
+Anything created by raw DDL alongside them is invisible to it, and its absence
+produces empty tables rather than an error. Before trusting any migrator, list
+what it enumerates and diff that against what the application actually creates.
+
+**Rule 801.** "Migrations are automatic" is a statement about schema, not about
+data. Automatic schema creation on a fresh backend is exactly what makes the
+data loss silent: the tables exist, the app starts clean, and the missing rows
+look like an empty deployment.
