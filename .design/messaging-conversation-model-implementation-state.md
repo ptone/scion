@@ -26317,3 +26317,59 @@ things; that is their job, and it is exactly how the fixture disappears.
 
 **Rule 716** — An accidental protection is not a mitigation. Record it as luck,
 and keep the original hazard open.
+
+---
+
+## 5if — Checked a relay instruction before relaying it; premise was wrong
+
+ptone asked me to tell instance-investigator that the hub.env maintenance
+settings "support origin and branch — so we can point it to our working
+tranche-g branch." Verified before passing it on. They do not.
+
+What exists is `SCION_MAINTENANCE_REPO_PATH` (also accepting `path@branch`) and
+`SCION_MAINTENANCE_REPO_BRANCH` — **path and branch**. `MaintenanceConfig`
+(`pkg/hub/server.go:287-305`) has no remote field, and `origin` is a hardcoded
+literal at **six** sites in the rebuild path: `maintenance_executors.go:289,
+292, 386, 389, 1034, 1063`. Nothing repoints it.
+
+Went back to ptone with three options rather than relaying an instruction that
+would fail on the box:
+
+- **(a)** repoint `origin` on the VM to the fork — works, but changes what
+  `origin` means on a shared machine for every other consumer
+- **(b)** second checkout whose `origin` *is* the fork, selected via
+  `SCION_MAINTENANCE_REPO_PATH=/home/scion/scion-tranche-g@scion/tranche-g` —
+  recommended; uses only what exists, leaves the main checkout alone, reverts by
+  editing one env var
+- **(c)** add a configurable remote to `MaintenanceConfig` — the real fix, but
+  maintenance machinery, not messaging, and not the same night we changed the
+  binary
+
+### The point that mattered more than the correction
+
+**Making the rebuild button work deletes the accident that is protecting us.**
+Today it aborts on the unresolvable `origin/scion/tranche-g` (5ie, rule 716).
+Once it resolves, the sequence is `git reset --hard origin/<branch>` — the
+branch **tip**, never a pinned SHA. And `scion/tranche-g` is actively moving,
+with G5 and c4fix both landing shortly.
+
+So the request, granted as stated, converts a dormant hazard into a live one.
+Recommended: set (b) up so the machinery is ready, do not use it while the
+branch moves, keep deploying by explicit SHA. Told instance-investigator the
+same and explicitly invited them to contradict my option list — particularly if
+there is a way to make the rebuild pin a SHA rather than track a tip. They know
+that machinery better than I do and I would rather be corrected than deferred
+to.
+
+**Rule 717** — Verify a relay before relaying it. Passing on a principal's
+factual claim puts your credibility behind it, and the agent receiving it has no
+way to know you did not check. "ptone says X" lands as "X."
+
+**Rule 718** — When told to enable a mechanism, ask what currently-broken thing
+is silently acting as a safety interlock. Fixing the break can be the whole
+risk, and the request will not mention it because the requester does not know
+the interlock exists.
+
+**Rule 719** — When you hand a specialist your option list, say plainly that you
+want it contradicted. A list from the coordinator reads as a decision already
+made, and the specialist's better fourth option goes unspoken.
