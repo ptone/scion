@@ -28609,3 +28609,67 @@ what is true.
 deliverable, that finding still needs somewhere to go. "Outside the runbook's
 scope" is a statement about the document, not about the risk; left there it
 becomes background colour in an operations note.
+
+### 5jh addendum — password risk inverted by evidence; serial fallback unproven for its actual purpose
+
+instance-investigator returned item 1 verbatim:
+
+```
+permitrootlogin without-password
+passwordauthentication no
+kbdinteractiveauthentication no
+```
+
+**My first objection is dead, and correctly so.** A local password on `scion` is
+not internet-reachable; the brute-force traffic cannot use it. It is usable only
+via serial console, which GCP IAM gates. This is exactly why Rule 813 said to
+read the effective config: had I reasoned from the risk I imagined rather than
+the daemon's actual state, I would have blocked a safe change on a hazard that
+does not exist.
+
+**Their custody answer is better than mine would have been.** GCP Secret Manager
+in `deploy-demo-test`, same pattern as the signing keys, runbook carries the
+secret *name* and never the value, retrieval by
+`gcloud secrets versions access latest --secret=... --project=...`. Retrieval
+requires IAM, not SSH — available precisely when SSH is not. Accepted. It does
+not reproduce DEF-87.
+
+**But I held the change anyway, on a third ground neither of us had stated.**
+What was tested was `gcloud compute connect-to-serial-port` dry-run and *reading
+serial output*. Reading output needs no credential. Recovery needs an
+**interactive session** that can execute `systemctl stop scion-hub`. Those are
+different capabilities behind different gates, and the demonstrated one is the
+one we do not need. The fallback is unproven for its actual purpose, and the
+moment we would find out is mid-outage with SSH refusing.
+
+Sequenced two steps and told them the order matters:
+
+1. **Check whether OS Login already grants interactive serial access.** If
+   `gcloud compute ssh` runs through OS Login, the account may already work on
+   the serial console. If so: no password, no secret, no decision from ptone.
+   Strictly the best outcome, costs one check.
+2. **Only if 1 comes back short**, and only after ptone rules: set the password,
+   store in Secret Manager, then **prove the path end-to-end while SSH still
+   works** — connect, authenticate, run `systemctl is-active scion-hub`, confirm
+   output returns.
+
+Told ptone the security half resolved itself, the custody half has a good
+answer, and I may withdraw the question entirely — nothing needed from him
+unless OS Login comes back short. Re-pointed him at DEF-89 as the item actually
+standing between him and a testable gteam.
+
+**Rule 815.** Verifying a capability adjacent to the one you need is not
+verification. Reading serial output and holding an interactive serial session
+differ in credential, gate, and failure mode; the first passing says nothing
+about the second. Name the exact operation the recovery requires and test that
+operation.
+
+**Rule 816.** Before authorising a new credential, check whether an existing
+identity already grants the access. The cheapest secret is the one not created:
+an OS Login check costs a minute and may remove a credential, a storage
+decision, and an escalation from the plan.
+
+**Rule 817.** When evidence dissolves your objection, say so plainly and drop it.
+I asked for `sshd -T` expecting it to confirm a hazard; it refuted one. The
+value of demanding the effective config is only realised if you let it change
+your mind in both directions.
