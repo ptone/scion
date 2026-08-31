@@ -27642,3 +27642,49 @@ detecting it.
 are the same state, no before/after comparison distinguishes success from a
 no-op. The verification must read the thing that changed, not the thing that
 works.
+
+### 5iu addendum — the replacement check was pre-satisfied by history
+
+Step 6 was rewritten to grep the two diagnostic strings, exactly as I asked. The
+replacement is also broken, in the same class as the check it replaced.
+
+```
+sudo journalctl -u scion-hub -b --no-pager | grep "failed to initialize webchat store"
+```
+
+`-b` means **since boot**, not since this start of the service. The box has not
+rebooted, and the hub has been running with broken web chat for its entire
+current boot. **That string is already in the journal** from every previous
+start. The FAILURE grep matches on a perfectly successful deploy. If the service
+ever started cleanly earlier in the boot, the SUCCESS grep matches too — both
+fire, which the runbook asserts is impossible.
+
+I specified those greps and did not think about the buffer they read. The signals
+were right; the window was not. A correct predicate over the wrong interval is
+still a broken check, and I introduced it while fixing a broken check.
+
+Replacement scopes to the current systemd invocation:
+
+```bash
+INV=$(systemctl show -p InvocationID --value scion-hub)
+sudo journalctl -u scion-hub _SYSTEMD_INVOCATION_ID="$INV" --no-pager > /tmp/deploy-run.log
+```
+
+with a `--since "$START"` fallback, one capture to a file and two greps against
+it so the two reads cannot see different windows. Asked them to confirm which
+form works **against the currently running service, before deploy day** — if the
+invocation-scoped query returns only the current run and not the older failures,
+the scoping is proven on the machine it will be used on.
+
+**Rule 773** — A log-based check has two halves, the pattern and the window.
+Getting the pattern from the source code is half the work; the window has to be
+established separately, and a window that includes prior runs makes any
+historical failure permanent.
+
+**Rule 774** — When a check is supposed to yield exactly one of two outcomes, ask
+what happens if both match. If the answer is possible, the check does not
+distinguish anything.
+
+**Rule 775** — Prove a diagnostic command discriminates by running it *now*,
+while the system is in the known-bad state. A command that cannot tell today's
+failure from tomorrow's success is discoverable today, for free.
