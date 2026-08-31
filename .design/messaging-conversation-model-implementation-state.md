@@ -27583,3 +27583,62 @@ the same exception.
 **Rule 769** — Every step that transforms a recovery artifact needs a check that
 the transformation occurred. `wal_checkpoint(TRUNCATE)` that silently no-ops
 produces a snapshot that looks identical and is incomplete.
+
+## 5iu — a healthy hub is not evidence the migration ran
+
+Runbook picked up all three corrections: build-before-stop, detached checkout
+with the pointer advanced only at step 9, WAL-zero and `integrity_check` stops.
+Then I read the new deploy section against the code and found the verification
+is unsound.
+
+**The backfill is silent.** `backfillTopicConversations()` emits no log output —
+not per topic, not on completion. It returns an error or nil. Step 6 instructed
+the operator to "Ctrl-C once backfill is confirmed complete," which cannot be
+followed, because nothing is ever printed.
+
+**And Init failure is non-fatal.** `cmd/server_foreground.go:599`:
+
+```go
+if err := webStore.Init(); err != nil {
+    log.Printf("Warning: failed to initialize webchat store: %v", err)
+} else {
+    ...
+    log.Printf("Message broker spoke added: name=web channel_id=web observer=true")
+}
+```
+
+The hub starts, reports **healthy**, and has no web chat. A completely failed
+migration is indistinguishable from a completely successful one at the healthz
+level — and it is also precisely the state the box is in today. So the runbook's
+`healthz → healthy` check, the single most prominent verification in the deploy
+section, confirms nothing about the thing we are deploying.
+
+Gave them the two greppable signals, exactly one of which must appear:
+
+```
+"Message broker spoke added: name=web"      → Init succeeded
+"failed to initialize webchat store"        → Init failed, hub healthy anyway
+```
+
+and required step 7 to state that healthy-plus-missing-spoke means failure, stop,
+report. `conversations = 46` remains the only positive confirmation that rows
+were created.
+
+Also flagged `git fetch origin` in step 1 — third time `origin` has been a hazard
+in this project — and a `sqlite3` call in step 7 missing the `sudo -u scion`
+every other DB command in the file carries.
+
+**Rule 770** — Before accepting a verification step, find the code that produces
+the signal it reads. A check for output that is never emitted, and a check whose
+green state is reachable by the failure being verified against, are both worse
+than no check: they consume the operator's attention and return a false negative.
+
+**Rule 771** — Establish whether a migration's failure is fatal before designing
+its verification. A non-fatal migration inside a healthy startup requires a
+signal specific to the migration; liveness checks are structurally incapable of
+detecting it.
+
+**Rule 772** — When the pre-deploy broken state and the post-deploy failure state
+are the same state, no before/after comparison distinguishes success from a
+no-op. The verification must read the thing that changed, not the thing that
+works.
