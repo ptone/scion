@@ -29954,3 +29954,66 @@ not fixing it — but the reason I gave was invented, and I said so.
 Rule 862: **the severity of an untested surface depends on who runs it, and that is a
 deployment fact, not a code fact.** I could size DEF-99 precisely from the tree and could
 not size its urgency at all. Queued for ptone rather than guessed.
+
+---
+
+## §5kg — gteam rebuilt on tranche-g `93916ca20`; the prediction held exactly
+
+`scion/tranche-g` fast-forwarded to `93916ca205200a75e7862380d45aef5c6a8cfcb8`, carrying
+h2's fail-soft `initOperationalSettings` and both halves of h1's DEF-89 fix. I verified
+h1's second push independently before merging rather than accepting its report: numstat
+matched exactly (`11/1` webchannel_store.go, `107/32` the dualwrite test, `20/14`
+webchannel_store_postgres.go), all three demanded comments were present in the Postgres
+diff, and a fresh worktree gave clean `gofmt -l .`, `go build`, `go vet`, and green
+targeted tests in 0.192s.
+
+instance-investigator then deployed to gteam. The part worth recording is not that it
+worked; it is that **the deploy carried a falsifiable prediction and the prediction was
+exact.** Before the flip I had h2 write down precisely what first boot would do to
+`hub_settings`: `BackfillOrigin` rewrites the `origin` column on 5 of the 7 existing rows
+('seeded'→'managed'), `syncHubSettings` inserts the 13 registry sections that have
+non-nil KoanfPaths, a `_meta` sentinel appears, and the two `updated_by='seed'` rows are
+read but not written. 7 + 13 + 1 = 21.
+
+Measured: 21 rows. The five predicted to flip to `managed` flipped. The two predicted to
+stay `seeded` stayed. The 14 new rows were exactly the 13 registry sections plus `_meta`.
+Zero deviations. `messaging` and `maintenance` are correctly absent — those are the two
+registry sections with nil KoanfPaths, which is why `syncHubSettings` iterates 13 and not
+15.
+
+This is the discipline that Rule 861 was written for and it is worth naming as its own
+rule. h2's original claim was that gteam's `hub_settings` was empty, which was false — it
+had 7 rows, four of them migration markers. Had I accepted that, the deploy would still
+have succeeded, and I would have had no way to tell a correct deploy from a lucky one.
+Replacing the false premise with a live read-only query did not just fix the premise; it
+converted the deploy from an act of faith into a measurement with a pass/fail answer.
+
+**Rule 863: a deploy should carry a prediction specific enough to be wrong. "It should be
+fine" is not a prediction. Row counts and per-row state transitions are.**
+
+Step 6 mattered as much as step 5, and for the reason Rule 851 anticipated: h2's change is
+*fail-soft*, so an init failure on gteam would log an ERROR and boot anyway, and the box
+would look identical to one where the branch had landed and simply not helped. No
+"Operational settings init failed" line appeared, and one INFO confirmed all 20 sections
+loaded from the DB. The feature landed; it did not merely fail quietly.
+
+Two new WARN lines appeared that had never been emitted on this box before —
+`SCION_SERVER_AUTH_AUTHORIZEDDOMAINS` and `SCION_SERVER_HUB_ADMINEMAILS` should carry the
+`SCION_SEED_*` prefix. Not a defect, but new output is new surface: `LogDeprecatedServerEnv`
+had never executed here, because the whole init path was gated behind postgres.
+
+Snapshot `/home/scion/hub.db.pre-93916ca2` (141,082,624 bytes, `integrity_check: ok`) was
+taken via the `.backup` API — not `cp`, because the DB is `journal_mode=wal` and a copied
+file without its WAL is a torn restore point. Retention held: `scion.known-good-6f6228f6`,
+the paired `scion.known-good-17376c05` + `hub.db.pre-6f6228f6`, and the not-ours
+`scion.rollback-1a2c1b07` are all untouched.
+
+h1 and h2 retired. Their work is merged and independently verified; keeping them alive
+across a phase boundary buys nothing and costs context rot.
+
+The switch flip is dispatched as a separate step, with a divergence-report baseline
+captured while both switches still read OFF. ptone pre-authorized both switches
+atomically — *"I'm looking for aggressive testing here, not super cautious, that is why we
+have test instances"* — so this is one PUT, not a staged rollout. The baseline is not
+caution; it is the only chance to measure the pre-flip state, and once the read switch is
+ON that state is unrecoverable.
