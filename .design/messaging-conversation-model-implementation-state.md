@@ -29673,3 +29673,58 @@ Rule 849: **when a principal pre-authorizes a decision you were holding, hand ba
 the list of failures you already expect from it.** Pre-authorization removes your
 gate, not your knowledge. A tester who rediscovers three defects you had already
 filed has spent their time confirming your ledger instead of extending it.
+
+### §5kd — two briefing errors of my own, caught within an hour of each other
+
+Recording these while fresh, ahead of the results they interrupted.
+
+**First: I briefed h2 on the symptom, not on the change.** The `ca-msg-h2.md` brief
+framed removing the postgres gate as "the messaging switches become reachable on
+SQLite." That is the *motivation*. The *change* is that `initOperationalSettings` now
+executes on SQLite, and reading it again after I had already accepted and merged the
+diff, it does three things that have never run on gteam: `syncHubSettings` writes to
+the DB on **every** boot, `Refresh` reads it back, and `ApplySnapshot` +
+`ApplyMaintenanceFromSnapshot` apply the merged result to the live server. Two
+consequences I did not put in the brief and should have:
+
+1. If the settings table or `_meta` row is missing on a SQLite schema, `syncHubSettings`
+   or `Refresh` errors, h2's own fail-soft catches it, and we land back at
+   `OperationalSettings == nil` and a 501 from `PUT /api/v1/admin/messaging` — the exact
+   condition the branch exists to remove, now failing *quietly* instead of loudly.
+   **The fail-soft I asked for can mask the failure of the thing I asked it to fix.**
+   No unit test can see this; only a real boot can.
+2. Layer-1 settings on SQLite now resolve through the DB-merged snapshot rather than
+   the legacy `reloadSettings` file path. Any key where those two disagree is a
+   behaviour change on gteam with nothing to do with messaging.
+
+I merged to `tranche-g` *before* noticing. That is recoverable — `tranche-g` is the QA
+branch, it carries a drift budget by ptone's explicit allowance, and merging is not
+deploying — but the **gteam rebuild is now gated on a scratch-DB boot smoke test**,
+which I have sent to h2. I am not un-merging; I am withholding the deploy.
+
+Rule 850: **a brief that states the motivation instead of the change under-specifies
+the blast radius.** "The switches become reachable" and "an initialisation path that
+has never executed on this database now runs on every boot" describe the same diff.
+Only the second one tells the implementer, or the reviewer, what to go and test.
+
+Rule 851: **when you add a fail-soft, ask what it makes silent.** Converting an abort
+into a logged error is only an improvement if the resulting degraded state is
+distinguishable from success. Here the degraded state — no OperationalSettings — is
+byte-identical to the pre-change behaviour, so on gteam a silent init failure would
+look exactly like the branch having been deployed and simply not helping.
+
+**Second: I told an agent to "boot the hub" and it stalled.** h2 went to `stalled` five
+minutes into a Bash call. A hub boot does not exit; if it ran in the foreground the
+call blocks forever. That is an instruction defect, not an agent defect — I named an
+action whose normal completion condition is "never." Corrected by sending the shape:
+background the process, capture to a log file, poll healthz with a **bounded** retry,
+kill by PID, and treat "healthz never came up in 30s" as a reportable result rather
+than a reason to wait longer.
+
+Rule 852: **never instruct an agent to run a process that does not terminate without
+also specifying how it ends.** Backgrounding, the success probe, the bound on that
+probe, and the kill are all part of the instruction. Omitting them does not make the
+agent improvise — it makes the agent hang.
+
+These two share a root. Both are cases of my writing down what I wanted to be true
+rather than what the machine would actually do.
