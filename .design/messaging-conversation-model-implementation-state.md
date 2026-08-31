@@ -28789,3 +28789,54 @@ wrote one file, then flagged five discomforts rather than silently resolving the
 Four of the five I upheld. Retiring it.
 
 **Counts after reconciliation:** CLOSED 47, OPEN 22, FILED-NOT-STAFFED 21, total 90.
+
+---
+
+### 5jk — firewall listing read; DEF-90 is project-level, not instance-level
+
+ptone ran the read-only listing. Three findings, two of which simplify the fix and
+one of which enlarges the defect.
+
+**The internal path already exists.** `default-allow-internal` permits all TCP from
+`10.128.0.0/9` at priority 65534, with no target tags. gteam is `10.128.0.56`;
+the peer is `10.138.0.2`. Both inside. I had been planning to *build* an internal
+allow rule; it has been there the whole time, and `default-allow-ssh` was only
+making it look unnecessary. It also dissolves a question I was about to ask —
+whether `scion-community` is the VM I run on — because a /9 covers either answer.
+
+**IAP is already permitted by firewall.** `allow-iap-ssh` allows `35.235.240.0/20`
+on tcp:22 to target tag `scion-hub`, and gteam carries `scion-hub`. The
+`4033: not authorized` that made me write off IAP was **IAM, not firewall.**
+
+That is the second time in this VM work that I read an authorization failure as an
+absence of capability. The first was the serial console. **Rule 821: a permission
+error tells you the door is locked, not that there is no door.** Firewall and IAM
+fail in ways that look alike from the client, and only one of them is expensive to
+change. Check which layer refused before concluding the path does not exist.
+
+**The priority interaction that would have broken IAP.** GCP resolves deny over
+allow at equal priority. `allow-iap-ssh` sits at 1000. A deny at 1000 would have
+silently taken out the IAP path — the one recovery route that does not depend on
+the path we are removing. The allow therefore sits at 900 and carries
+`35.235.240.0/20` itself rather than relying on the existing rule. Caught by
+reading the priorities before writing the commands, which is the only reason
+it was caught at all.
+
+**DEF-90 was filed at the wrong scope.** `default-allow-ssh` is `0.0.0.0/0` tcp:22
+at 65534 **with no target tags**, so it applies to every instance on `default` —
+at least fifteen scion hubs plus the GKE node pool. The brute-force traffic is not
+arriving at gteam; it is arriving at all of them, and gteam is merely where we
+happened to be reading the journal. Reclassified project-level.
+
+I deliberately did **not** widen the fix. One instance is the right size to prove a
+deny rule on. But I raised the fleet question now rather than after, because if the
+answer is "delete `default-allow-ssh`" — defensible, since internal and IAP already
+cover the legitimate paths — then the tag work is scaffolding rather than the fix,
+and he should know that before we build it. That needs an input I cannot get from
+the firewall listing: whether anyone reaches these boxes over SSH from a laptop or
+a CI runner today.
+
+**Rule 822: when you find a misconfiguration on the box you were debugging, check
+whether the box was special or merely observed.** I found this on gteam because
+gteam is where I had a journal open. Nothing about the finding was gteam-specific,
+and I filed it as though it were.

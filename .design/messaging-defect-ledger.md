@@ -106,7 +106,7 @@ rather than re-deriving it.
 | DEF-87 | `github_pat_` credential in contrib-repo origin URL | FILED-NOT-STAFFED | 27285 | 27285 |
 | DEF-88 | Pre-deploy snapshot incompatible with deploy mechanism — resolved via manual SSH | CLOSED | 27531 | 27429 |
 | DEF-89 | New webchat topics are created with no `conversation_id`; backfill decays [^5] | FILED-NOT-STAFFED | 28560 | 28560 |
-| DEF-90 | scion-gteam port 22 internet-exposed; continuous external brute-force [^6] | OPEN | 28640 | 28640 |
+| DEF-90 | `default-allow-ssh` exposes tcp:22 to `0.0.0.0/0` on ALL default-network instances [^6] | OPEN | 28790 | 28640 |
 
 ## Counts by status
 
@@ -135,7 +135,7 @@ None. All 90 ids (DEF-1 through DEF-90) have definitions in the journal.
 
 [^5]: **DEF-89** (FILED-NOT-STAFFED, filed after extraction began): `handlers_chat_v2.go:460-473` builds `WebChatTopic` with no `ConversationID`, so `CreateTopic`'s atomic dual-write branch — which is correct, transactional and tested — is unreachable from its only caller. Every new topic is therefore created with no conversation row. The consequence is that the one-time backfill is a decaying artifact: coverage falls as new topics accumulate, and flipping the read switch would 409 exactly the newest, most-used threads. Scoping decision (whether new topics get a conversation unconditionally) is with ptone.
 
-[^6]: **DEF-90** (OPEN, filed after extraction began): scion-gteam has port 22 open to `0.0.0.0/0` with no fail2ban, no iptables rule and no GCP firewall restriction. Observed: 36 concurrent inbound SSH connections from external scanning ranges, saturating sshd's default `MaxStartups 10:30:100` and causing the intermittent connection failures that have been slowing every VM operation. Reachability is established by the inbound traffic itself, not by an outbound probe. Fix in progress with ptone: a tag-scoped allow/deny rule pair, where adding the tag is the switch and removing it is the rollback.
+[^6]: **DEF-90** (OPEN, filed after extraction began): scion-gteam has port 22 open to `0.0.0.0/0` with no fail2ban, no iptables rule and no GCP firewall restriction. Observed: 36 concurrent inbound SSH connections from external scanning ranges, saturating sshd's default `MaxStartups 10:30:100` and causing the intermittent connection failures that have been slowing every VM operation. Reachability is established by the inbound traffic itself, not by an outbound probe. **Rescoped 2026-08-31 (journal §5jk): this is project-level, not instance-level.** The exposing rule is `default-allow-ssh` — `0.0.0.0/0` on tcp:22, priority 65534, **with no target tags** — so it applies to every instance on the `default` network: at least fifteen scion hubs plus the GKE node pool. gteam is not special; it is merely the box we had a journal open on. Fix in progress with ptone is deliberately gteam-only for now (a tag-scoped allow/deny pair at priorities 900/1000, where adding the tag is the switch and removing it is the rollback), because one instance is the right size to prove a deny rule on. The fleet-wide decision — tag everything, or delete `default-allow-ssh` outright since `default-allow-internal` and `allow-iap-ssh` already cover the legitimate paths — is open and needs input the firewall listing cannot give: whether anyone reaches these boxes over SSH from a laptop or CI runner today. Note also that IAP is already permitted by firewall for tag `scion-hub`; the `4033` we hit was IAM, not firewall.
 
 ### Additional observations
 
