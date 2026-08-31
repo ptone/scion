@@ -29371,3 +29371,52 @@ account is still a bounded grant and the firewall is doing the heavy lifting. **
 want it because the runbook should say the true thing, not because the outcome is
 alarming.** A verification request lands differently when the requester has said what
 they will do with either answer.
+
+---
+
+### 5jx — IAP verified under the agent identity, condition confirmed; SSH work closed
+
+instance-investigator's tunnel test returned `scion-gteam` on the first attempt after
+propagation, and the policy readback resolved §5jw's ambiguity:
+
+```
+gteam-ssh-only   destination.ip == "10.128.0.56" && destination.port == 22
+```
+
+ptone applied the conditioned form. Scoped to one IP and one port. The readback was
+worth asking for: the tunnel succeeding was consistent with either form, and without
+it the runbook would have recorded an intention rather than a fact.
+
+**Runbook updated** with both routes now available to the agents, the condition text
+verbatim, and the IP-pinning caveat stated as a diagnostic: if gteam is ever recreated
+with a different internal address the binding silently stops matching and returns
+`4033`, so check the condition before concluding the role was lost. Also carried
+forward the removal note — `remove-iam-policy-binding` needs the identical
+`--condition` string, because the condition is part of the binding's identity.
+
+I kept the "two transports, one credential" statement in place rather than letting
+the second route soften it. Adding a route does not make the credential redundant,
+and this is the moment the distinction is most likely to be forgotten.
+
+**SSH work closed.** gteam internet-facing SSH removed (12,332 preauth failures/hour
+→ 0, hub untouched); `default-allow-ssh` narrowed fleet-wide; DEF-90 closable on
+ptone's sign-off; DEF-91 downgraded on his call.
+
+**Pivoted back and said so explicitly.** This entire detour was in service of one
+question of his — whether using webchat on gteam exercises the new conversation
+datamodel — and the answer is still no, gated on two decisions sent before the
+detour and never answered:
+
+1. the fail-soft `initOperationalSettings` change (one line; without it the messaging
+   switches are unreachable on SQLite)
+2. DEF-89 scoping (new webchat topics get no conversation row, so the backfill decays
+   and a read-switch flip would 409 the newest threads)
+
+**Rule 839: when an urgent detour closes, restate the question it interrupted.** An
+infrastructure fix produces a satisfying sense of completion that has nothing to do
+with the original objective. Two hours of firewall work and the thing ptone actually
+asked for is exactly as far away as it was — and only I am in a position to notice
+that, because I am the one holding both threads.
+
+Offered them one at a time per his standing instruction, and told him he need not
+answer both now.
