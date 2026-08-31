@@ -26569,3 +26569,69 @@ whether a job's declared scope becomes a lie when you join it.
 resembles one it was told to obey in the opposite direction, say so in the
 correction. "Add this tag" reads as "weaken the gate" to an agent holding
 "never strip build tags."
+
+---
+
+## 5ii — DEF-83 landed on tranche-g; "pushed" meant a different repository
+
+`ca-msg-c4fix` applied the build tag and reported success. Both the correction
+and the report were right in substance; the push was not where it said.
+
+### Verified before landing
+
+- `//go:build !no_sqlite` at line 15, blank line either side, before
+  `package hub`. Matches sibling convention.
+- `go test -tags no_sqlite -list TestC4Fix` → **zero** matches;
+  `go test -list TestC4Fix` → **all 8**. The intended split, confirmed by
+  execution rather than by reading the tag.
+- gofmt clean; `go vet` clean under both tag sets.
+- Numstat matches the report exactly: `0 3` / `0 3` / `534 0`.
+- Clean fast-forward, single commit, no merge.
+
+Their CI survey held up: only `race-detection.yml` uses the tag and no job runs
+Postgres tests with it, so one tagged file is correct and splitting would have
+been churn. They checked before concluding.
+
+**Landed:** `17376c05..fdef77b6` on `ptone/scion` `refs/heads/scion/tranche-g`.
+Plain fast-forward, no force (Rule 712). `deploy/gteam` deliberately left at
+`17376c05d` — tranche-g moving does not move the deploy pointer, which is the
+entire point of 5ig.
+
+### The finding
+
+The report said *"Pushed branch `ca-msg-c4fix` to origin."* In
+`/scion-volumes/contrib-repo`, `origin` is **scion-frontiers/scion-repo-contrib**
+— a different repository. The fork is the `ptone` remote. The commit went to the
+contrib repo under a branch name; `scion/tranche-g` was untouched until I pushed
+it.
+
+Nothing was overwritten and the commit was based on the correct parent, so the
+recovery was a one-line fast-forward. The cost of not checking would have been
+much larger than the cost of the mistake: I would have marked DEF-83 closed and
+told ptone the VM blocker was cleared, while the fix sat in a repo nobody
+deploys from. The next signal that anything was wrong would have been a deploy
+that still had broken web chat.
+
+Told them to check `git remote -v` in unfamiliar clones, and to report pushes as
+*remote + full ref* rather than "to origin" — the long form is self-checking,
+because writing it out is usually when you notice it is wrong.
+
+**Rule 727** — Verify the ref, not the report, before treating work as landed.
+`git ls-remote` the destination. An agent saying "pushed" is a claim about
+intent; the remote ref is the fact.
+
+**Rule 728** — `origin` is a convention, not an identity. In any workspace with
+more than one remote, require reports to name the remote and full ref
+explicitly. "Pushed to origin" is unverifiable by the reader and unfalsifiable
+by the writer.
+
+**Rule 729** — Grade a mistake by what it would have cost undetected, not by
+what it cost. A misdirected push that fast-forwards cleanly is trivial to fix
+and would have produced a false "defect closed" reported upward to the operator.
+Those are the ones to write down.
+
+### Still open
+
+DEF-83 must also reach `main`. The DDL/migration ordering bug predates tranche-g
+and affects every deployment since #1380; it should not land only on a feature
+branch. Tracking separately — not riding in on this one.
