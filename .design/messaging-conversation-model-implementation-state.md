@@ -27527,3 +27527,59 @@ not that this test detects this defect.
 **Rule 766** — For a panic fix, assert the behaviour that should follow the panic
 point, not merely absence of panic. An early return satisfies "does not panic"
 while silently deleting the path.
+
+## 5it — DEF-88 resolved: manual SSH deploy, and the sequence had the build inside the outage
+
+instance-investigator answered all three. `journal_mode = wal`; `hub.db-wal` is
+**4.0 MB** and `hub.db-shm` 32 KB, both with live mtimes — so a plain `cp` of the
+open database would have captured a torn state, exactly the hazard.
+
+**Deploy path: manual SSH install, not the rebuild button.** Their reasoning is
+sound and better than mine: (a) the snapshot needs a quiescent DB; (b) *this*
+deploy runs a data migration and the executor is fire-and-forget, so nobody
+would be watching the backfill output; (c) DEF-85/86 still stand. They added
+`PRAGMA wal_checkpoint(TRUNCATE)` before the copy, which folds the WAL into the
+main file so the snapshot is one self-contained artifact rather than three files
+that can be copied inconsistently. Correct.
+
+Three corrections to their written sequence.
+
+**1. The build was inside the outage window.** Their steps were stop → checkpoint
+→ snapshot → *build* → stage → install. The service is down for the entire
+compile — minutes on this box, described as "one continuous window" as though it
+were short. Worse: **if the build fails, the service is already stopped**, and we
+are down for a reason unrelated to the deploy. Reordered to build and stage
+first, while the hub is still serving, then stop → checkpoint → snapshot →
+install → start. Downtime drops to seconds and the snapshot stays adjacent to
+the install. Both properties improve; nothing trades off.
+
+**2. Their step 4 contradicted their own runbook.** It said "deploy/gteam must be
+advanced to `<SHA>` first," while the runbook's Context section says the pointer
+"advances only after a manual deploy has been verified running." The runbook is
+right — Rule 721. Advancing first means a failed deploy leaves the pointer naming
+a SHA that has never run, and the next consumer of that pointer, including the
+rebuild button, gets a bad binary. Build from a detached checkout; advance at the
+end.
+
+**3. No verification that the checkpoint happened.** Required `ls -l hub.db-wal`
+expecting 0 bytes after TRUNCATE, and `PRAGMA integrity_check` on the copy
+expecting `ok`. A snapshot nobody integrity-checked is one whose validity you
+discover during recovery.
+
+Their read on what notices the 39 rows matches the code: agent containers go
+through the broker and never read `conversations`; web chat starts returning
+threaded results instead of empty, which is the fix; the admin UI list grows.
+Nothing breaks.
+
+**Rule 767** — Keep irreversible-adjacent preparation out of the outage window,
+but also keep *failable* work out of it. A step that can fail before the point of
+no return should run while the system is still up, so its failure costs nothing.
+
+**Rule 768** — When an agent's procedure contradicts a document that agent wrote,
+quote both to them. The contradiction is evidence the principle was recorded but
+not internalised, and pointing at the principle alone invites them to re-derive
+the same exception.
+
+**Rule 769** — Every step that transforms a recovery artifact needs a check that
+the transformation occurred. `wal_checkpoint(TRUNCATE)` that silently no-ops
+produces a snapshot that looks identical and is incomplete.
