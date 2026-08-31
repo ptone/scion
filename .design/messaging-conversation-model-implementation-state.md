@@ -27361,3 +27361,46 @@ bearing at the point where it finally binds.
 **Rule 759** — The dangerous decisions are not the contested ones. They are the
 ones nobody registers as decisions, because they arrive as a side effect of a
 step that was already agreed.
+
+### 5iq addendum — the rehearsal snapshot is a data-loss hazard
+
+instance-investigator acked all three gates cleanly and ran the pre-deploy
+checklist I asked for. Results: stash and healthz both report `17376c05`, and
+every baseline is unchanged (7 / 39 / 3 migrations / 28 containers). No drift.
+
+But item 1 produced `hub.db.pre-deploy-checklist-20260831`, and that file is
+now the most dangerous object on the box.
+
+**Name mismatch.** The recovery procedure restores `hub.db.pre-<SHA>`. An
+operator following the runbook during an outage looks for a file that is not
+there and concludes no snapshot exists.
+
+**Decay.** A snapshot's value is inversely proportional to its age. The deploy
+may be days out; 28 containers keep writing throughout. Restoring this file
+during a rollback silently discards everything written after 02:10 today. The
+failure shape is an operator under pressure seeing a plausible `hub.db.pre-*`
+file, restoring it, recovering the hub, and losing a day of conversation without
+ever learning they did. **That is worse than having no snapshot** — no snapshot
+forces the question; a stale one answers it wrongly.
+
+Asked for: rename to `hub.db.rehearsal-<timestamp>` so nothing restores it by
+reflex (keep the file, disk is cheap); a line in the DB-restore block requiring
+the operator to check mtime against the deploy time; and the real snapshot
+retaken as the **last step before install**, adjacent to the deploy rather than
+separate from it.
+
+**This was my sequencing error, and I said so.** I told them to run the whole
+checklist now because "all three items are reversible." Reversibility was the
+wrong axis — item 1 is perfectly reversible and still wrong to run early,
+because its output is a time-sensitive artifact whose usefulness expires. Items
+2 and 3 are idempotent observations and were right to run.
+
+**Rule 760** — Classify a preparatory step by whether its output expires, not by
+whether it is reversible. A reversible step that produces a decaying artifact is
+not safe to run early; running it early manufactures a stale object that later
+gets trusted.
+
+**Rule 761** — A stale backup is worse than no backup. Absence forces the
+question at recovery time; a plausible-looking wrong answer suppresses it. Name
+recovery artifacts so their scope and age are legible from the filename alone,
+because that is all a stressed operator will read.
