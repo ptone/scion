@@ -27909,3 +27909,52 @@ during startup and the one most likely to be misread as failure.
 **Rule 784** — Liveness confirmed once is not liveness. Before recording a
 deployment as verified, read the restart counter — a healthy response is
 indistinguishable from one sampled between crashes.
+
+## 5iz — verified running; `deploy/gteam` advanced to `6f6228f6`
+
+```
+NRestarts             0
+ActiveEnterTimestamp  Mon 2026-08-31 09:05:31 UTC
+healthz               6f6228f6 healthy
+conversations         46
+```
+
+`NRestarts=0` with continuous uptime is the reading that makes "verified running"
+a statement about the process rather than about one lucky sample.
+
+**Pointer advanced.** `deploy/gteam` = `6f6228f68eba8284135c628ce59ab4f9c098c740`,
+fast-forward from `17376c05d`, ancestry checked before the push and the result
+re-fetched after it. Web chat has been restored on the box for the first time
+since DEF-83 was introduced.
+
+Step 9 authorized: stash refreshed to `scion.known-good-6f6228f6`, runbook header
+and baselines updated. Told them 46 is the new **floor**, not a fixed
+expectation — web chat is live again and topics will be created, so a future
+operator comparing against 46 must not read growth as corruption.
+
+**Retention decisions, made explicitly rather than by drift:**
+
+- `scion.known-good-17376c05` — **keep.** It is the only route back to a
+  pre-backfill binary if something surfaces in the next few days.
+- `hub.db.pre-6f6228f6` — **keep.** The only way back from the 39 rows.
+- `hub.db.rehearsal-20260831T0210` — **delete.** Seven hours stale and now
+  actively harmful: it pre-dates the migration, so restoring it would drop the
+  `conversation_id` column and return the box to the DEF-83 crash. It existed to
+  prove the procedure; the procedure has since run for real.
+
+Reported to ptone with the numbers and, deliberately, with the near-miss: the
+first verification reported a clean failure signal that was wrong. Reporting a
+successful deploy without the thing that nearly broke it would have been a
+report about the outcome rather than about the system.
+
+Both switches remain **OFF**. This deploy created data and repaired `Init()`; no
+read path changed behaviour. Flipping either remains a separate ask.
+
+**Rule 785** — Decide the fate of each recovery artifact when its deployment
+completes, and say which are kept, which are deleted, and why. Artifacts left
+undecided become the next stale rollback binary; this is the moment their
+relevance is known.
+
+**Rule 786** — A verified baseline that will legitimately grow must be recorded
+as a floor, not a value. A future operator comparing against a fixed number reads
+normal growth as corruption.
