@@ -28190,3 +28190,79 @@ is announcing closure before the re-read.
 
 Outstanding and not mine to close: DEF-83-on-`main` (`scion/def83-main`,
 `b3a070b3`) awaits ptone's merge; link delivered to thread 1532864101909528737.
+
+### 5jc — the switches are unreachable on the test VM; no defect ledger exists
+
+ptone asked two questions: why he sees no switch or UI in the maintenance
+section or server config, and whether remaining defects are tracked in a file.
+Both answers are no, and the first one retracts something I told him an hour ago.
+
+**1. No UI, and no reachable control on SQLite.**
+
+The switches are API-only: `GET/PUT /api/v1/admin/messaging` (`server.go:3880`),
+admin-gated, DB-only, no `settings.yaml` representation. `admin_messaging.go:29`
+states the intent: "The section follows the maintenance pattern: DB-only, no
+settings.yaml representation, with a dedicated admin API endpoint." That copied
+maintenance's *backend* pattern only — maintenance also has
+`web/src/components/pages/admin-maintenance.ts`. Messaging has no frontend at
+all; `grep -rn "admin/messaging" web/src/` returns nothing.
+
+The load-bearing finding is underneath that. `initOperationalSettings` is gated
+on postgres at `cmd/server_foreground.go:1915`:
+
+```go
+if strings.EqualFold(cfg.Database.Driver, "postgres") {
+    if err := initOperationalSettings(...); err != nil { ... }
+}
+```
+
+In SQLite mode it is never called, so `operationalSettings` is never stored and
+`GetOperationalSettings()` returns nil (`server.go:2154`). On the test VM, which
+is SQLite:
+
+- `handlePutMessaging` hits its nil guard and returns **501 not_implemented**.
+- `handleGetMessaging` returns compiled defaults, both OFF — accurate today but
+  structurally unable to report anything else.
+- `writeDenyEnabled()` (`server.go:2159`) is hardwired false.
+
+**I closed the previous section by telling ptone the read-switch flip was "the
+next decision available to you." It is not available on the instance we just
+deployed to.** I offered a decision without checking that its control was
+reachable. Owned to him in plain terms.
+
+Downstream consequence, flagged to him and awaiting confirmation that the beta
+hub is postgres: **the switch flip cannot be rehearsed anywhere before beta.**
+The test VM is the only pre-beta instance and it structurally cannot exercise
+the control. That is a rollout gap, not a defect in the code.
+
+**2. No defect ledger exists.** 88 distinct ids, 1704 mentions, all in prose
+inside this 28,192-line journal. That is an archive, not a tracker: it answers
+"what happened," not "what is still open." Fair hit.
+
+Dispatched `ca-msg-ledger` to extract `DEFECTS.md` — id, one-line summary,
+status, last mention, anchor. Brief at
+`/scion-volumes/scratchpad/briefs/ca-msg-ledger.md`. Framed as extraction, not
+investigation, with the closure asymmetry stated as the governing rule: a defect
+wrongly OPEN costs ten minutes, a defect wrongly CLOSED ships. `CLOSED` requires
+the journal to say landed/merged/verified — a written fix, a passing test, or a
+pushed branch is not closure. Required `UNKNOWN` rows to quote their most recent
+mention verbatim, and required every id 1..88 to be accounted for including ones
+never defined. Told the agent I hold independent status knowledge and will
+cross-check, and that a flagged disagreement is useful where a papered-over one
+is the failure mode. No commit, no push, review first.
+
+**Rule 796.** Before offering someone a decision, verify the control that
+executes it is reachable on the system they would execute it against. A switch
+that exists in the code, has an endpoint, and is covered by tests can still be
+unreachable in the deployed configuration. "Implemented" and "operable here" are
+different claims.
+
+**Rule 797.** A feature that copies another feature's backend pattern has not
+copied its operator surface. `admin_messaging.go` says it follows the
+maintenance pattern and does — for storage, gating, and API shape. Maintenance's
+UI was not part of what "the pattern" named, so it was silently out of scope.
+
+**Rule 798.** A journal is not a tracker. Appending faithfully for 28,000 lines
+produces a complete record of what happened and no answer to what is still open.
+Both are needed; neither substitutes. The derived view should have been
+maintained from the start, not extracted at the end under a direct question.
