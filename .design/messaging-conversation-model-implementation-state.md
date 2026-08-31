@@ -29511,3 +29511,42 @@ reconciliation. Offered him the alternative of batching them.
 
 **Rule 843: an integration branch with a QA purpose has a drift budget. Decide who
 pays it and when, at the moment the branch is declared, not at the merge.**
+
+---
+
+### 5ka — ptone clarifies no main merge until testing; the likely cause was my own wording
+
+ptone: *"just to clarify - I am not merging to main until testing is completed."*
+
+Nothing in my §5jz message proposed otherwise, which is the tell. A principal
+clarifying a boundary you did not cross usually means **your wording put the boundary
+in doubt**, and the useful response is to find the wording rather than restate
+agreement.
+
+It was "I'll dispatch rebases onto upstream main when it moves." That reads as
+movement toward main. It is the opposite: a rebase pulls main's commits **into**
+tranche-g and puts nothing of ours into main. Said so plainly, and restated the
+standing constraint in the strongest form available — nothing I do moves main; I do
+not open PRs, do not push to main, and the only thing that lands tranche-g there is
+him doing it after testing.
+
+**Rule 844: when a principal restates a rule you were already following, treat it as
+evidence your language was ambiguous, not that they misunderstood.** Correcting the
+phrasing is cheap; leaving it means the same alarm fires again later, and next time
+it may fire when they are not watching closely enough to raise it.
+
+I also gave the actual reason I want rebases, rather than leaving it as process
+preference: gteam should be tested against something close to what main will look
+like when it receives it. A branch that drifts far behind gets QA'd on a code shape
+that no longer exists, and the merge afterwards becomes where surprises appear —
+**after** testing rather than during it, which is the specific thing his sequencing
+is designed to prevent.
+
+And offered the genuine alternative rather than defending mine: freeze the branch for
+the duration. That gives a stable QA target at the cost of a larger reconciliation at
+the end. Both are defensible; it is his to pick.
+
+**Rule 845: when you argue for a practice, argue from the failure it prevents, not
+from the practice being standard.** "We should rebase regularly" invites agreement
+without understanding. "Otherwise you QA a shape that no longer exists" can be
+disagreed with on the merits — which is what makes it useful to him.
