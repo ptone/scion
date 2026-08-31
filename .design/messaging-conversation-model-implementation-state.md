@@ -26635,3 +26635,70 @@ Those are the ones to write down.
 DEF-83 must also reach `main`. The DDL/migration ordering bug predates tranche-g
 and affects every deployment since #1380; it should not land only on a feature
 branch. Tracking separately — not riding in on this one.
+
+---
+
+## 5ij — Go-ahead given; the interlock comes out
+
+ptone, verbatim: *"The instance-investigator can do everything needed on the VM
+to get this done."* Authorisation for the second checkout and the hub.env
+change. Option (d) as instance-investigator designed it, with the
+verified-not-intended refinement from 5ig.
+
+Dispatched with attribution (Rule 711 — said who authorised it, quoted).
+
+### What was authorised
+
+1. Non-shallow clone of ptone/scion at `/home/scion/scion-tranche-g`,
+   `origin` = the fork. Non-shallow because the rebuild does `git fetch origin`
+   and needs real refs (DEF-84).
+2. `SCION_MAINTENANCE_REPO_PATH=/home/scion/scion-tranche-g@deploy/gteam`.
+3. `/home/scion/scion` untouched — the revert path is one env var.
+
+### The part that actually matters
+
+**The broken rebuild button has been functioning as a safety interlock.** It
+aborts today because the checkout's `origin` cannot reach what it is asked for.
+Wiring the second checkout removes that. Afterwards the button is *live*: a
+press performs a real rebuild and service restart on a box carrying production
+data.
+
+The branch plumbing is bookkeeping. Re-arming a control that has been
+safe-by-failure is the change with teeth, and it is invisible in the diff —
+there is no diff. Named it explicitly to both ptone and
+instance-investigator rather than letting it be discovered by a press. Rule 718,
+paid forward.
+
+Soft landing by construction: `deploy/gteam` is at `17376c05d`, the SHA already
+running, so the first state the button can reach is the state the box is in. A
+press immediately after wiring is a no-op rebuild.
+
+### Constraints issued
+
+- **Do not advance `deploy/gteam`** — mine to move, only after a manual deploy
+  is verified running. A deploy pointer nobody has watched run is the design
+  failing.
+- **Do not press the button.** Wire, confirm the config is read, report. The
+  first validation press gets sequenced deliberately, not as a side effect of an
+  agent checking its own work.
+- **Announce a restart-to-load-config as distinct from a maintenance rebuild.**
+  Two different events; they must not blur in the logs.
+- Report what the hub logs say about the maintenance config *on startup* —
+  confirmation the path and branch were read, not merely written to a file
+  (Rule 706 generalised: verify the process ingested the config, not that the
+  file contains it).
+
+### Next
+
+`fdef77b6` (DEF-83) is the first real deploy candidate — it should restore web
+chat on that box. Sequence unchanged: hand over SHA → manual deploy → verify →
+*then* fast-forward `deploy/gteam`.
+
+**Rule 730** — When a control has been failing safe, wiring it up is a change to
+the safety posture even though no code changed. Announce the re-arming to
+everyone with access to the control, not just to whoever asked for the wiring.
+The diff is empty; the risk is not.
+
+**Rule 731** — Sequence the first use of a newly-armed control yourself. "Verify
+your work" is an implicit licence to press it, and the first press of a live
+deploy control should never be a side effect of testing whether it is live.
