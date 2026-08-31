@@ -26891,3 +26891,61 @@ less, precisely because the first went well.
 **Rule 738** — Escalate with a number, not a question. "Should I run a backfill?"
 puts the work on the operator; "this creates N rows, here is my recommendation"
 puts it back where it belongs. Get the count first.
+
+### 5il addendum — the numbers, and why I reversed toward proceeding
+
+instance-investigator returned all four, read-only:
+
+1. **SQLite**, `/home/scion/.scion/hub.db`. Settled; `sqliteWebChatStore` is the
+   live path.
+2. **`conversations` and `conversation_participants` both exist.**
+   `hasConversationsTable()` returns true — **the backfill will not
+   short-circuit.**
+3. **39 rows.** 39 non-deleted topics, zero soft-deleted. 39 inserts, 39
+   updates.
+4. `webchat_migrations` = `thread_id_backfill`, `thread_id_index`,
+   `wave1_seed`. **Neither** `topic_conversation_id` **nor**
+   `topic_conversation_backfill` recorded.
+
+Answer four was the one with teeth and it came back clean. The database is
+internally consistent with the bug: column absent, migrations never attempted,
+nothing falsely marked complete. The failure mode I feared — a completion marker
+without the schema behind it — is not present. The DEF-83 reproduction also
+remains intact, because they read rather than repaired (Rule 715 held).
+
+### Reversed toward proceeding, and the reason is the driver
+
+I escalated on "a backfill with no undo short of hand-deleting rows." That is
+true of Postgres. It is **not** true of SQLite, where the snapshot is a file
+copy: `cp hub.db hub.db.pre-36b5a7aa` is an exact rollback of all 39 rows and
+everything else besides. Paired with the rebuild button verified minutes
+earlier — which restores the *binary* from `deploy/gteam` = `17376c05d` — there
+is a tested path back to both old code and old data.
+
+So the escalation was right and the answer changed once the facts arrived. That
+is the escalation working, not a false alarm.
+
+**Recommended to ptone:** snapshot, manual deploy, verify, *then* fast-forward
+`deploy/gteam`. Two caveats on the record: restoring the DB file discards
+everything since the snapshot, not merely the backfill — with 27 active agents a
+five-minute rollback is cheap and an hour-later rollback is not; and there is
+**no privilege change**, because the 39 rows are `kind='group'` with empty
+`external_ref`, where access derives from project membership rather than the
+row. Checked specifically because an empty `external_ref` on a `direct` row
+would be DEF-29.
+
+Primed instance-investigator with the sequence and two preparatory asks: write
+the rollback commands down *before* step one, and take a pre-deploy count of
+`conversations` so "39 new rows" is measured rather than assumed.
+
+**Rule 739** — The reversibility of a data change is a property of the storage
+engine, not of the change. The same 39-row backfill is a one-line file copy to
+undo on SQLite and a hand-reconstruction on Postgres. Establish the driver
+before grading the risk.
+
+**Rule 740** — An escalation that resolves to "proceed" is not a false alarm. It
+is the mechanism working. Record it as such, or the next one gets skipped.
+
+**Rule 741** — Compose the rollback before the change, not during the incident.
+Require it as a deliverable of the preparation step, and require the
+before-measurement that makes the after-measurement meaningful.
