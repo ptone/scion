@@ -28083,3 +28083,55 @@ passes rehearsal is evidence about the wrong case.
 I scoped my re-read to the prose I had requested and missed a defect four lines
 below it that had been there the whole time. A correction is an occasion to read
 the whole unit, not the diff.
+
+### 5ja addendum — sweep closed against the codebase; `-journal` missing from my own fix
+
+instance-investigator applied the WAL fix. Verified by reading lines 229-263:
+`rm` precedes `cp`, the comment frames the deletion as a data decision, the
+`PRAGMA integrity_check` gates the service start. Their third-site check found
+no other copy/move site in the runbook — deploy step 4 (correct already) and the
+restore (now fixed) are the only two.
+
+That check was scoped to the document. I extended it to the codebase and to the
+other runbooks. Results:
+
+- `/scion-volumes/scratchpad/runbooks/` contains exactly one file. No other
+  runbook mentions `hub.db`.
+- No Go code copies or renames the hub database. Nothing in `pkg/` or `cmd/`
+  does backup-by-copy.
+- **Two Go sites already encode the sidecar rule**, and both get it right:
+  - `cmd/server_migrate.go:212-220` — `dropSQLiteFile()`, suffixes
+    `{"", "-wal", "-shm", "-journal"}`, called at `:147` before a migration.
+  - `pkg/ent/entc/migrate_alpha.go:725` — same loop, `{"", "-wal", "-shm"}`.
+
+**The sweep inverted the expected result.** Rule 764 predicts a structural defect
+recurs elsewhere in a different costume. It did not: the product never had this
+defect. The runbook was the sole outlier, and it was written by hand against a
+mental model of the box rather than against code that had already solved the
+problem. The recurrence hypothesis was right to test and wrong on the facts.
+
+**And the sweep caught my own fix.** I specified two files, `-wal` and `-shm`.
+The code's list is four; `-journal` is the rollback journal used in the non-WAL
+journal modes. The box is `journal_mode = wal` so it should not exist — but
+"should not exist" is precisely the assumption a recovery procedure must not
+rest on, and `rm -f` on an absent file is free. Sent the addition with a note to
+comment it, or the next reader will check the box, find no such file, and delete
+the line.
+
+Owned to instance-investigator directly: I derived the file list from what I knew
+was on the instance instead of from what the product does about it. One grep
+before sending would have made the fix right the first time. This is the same
+error as 5ja itself — reasoning from the instance in front of me rather than from
+the source — recurring within a single exchange.
+
+**Rule 792.** Before writing an operational step that manipulates a system's own
+data files, grep the codebase for how the product does it. Shipped code that
+performs the same operation is a specification, and it is more complete than
+what you can observe on one healthy instance. Observation shows you the files
+that exist; the code shows you the files that can exist.
+
+**Rule 793.** A sweep can come back empty and still pay for itself. The value is
+not only in finding recurrences — it is in learning whether the defect is
+systemic or local. Empty here meant the codebase was already correct, which
+relocated the problem from "we have a bad habit" to "one hand-written document
+drifted from the code," and those call for different responses.
