@@ -26702,3 +26702,105 @@ The diff is empty; the risk is not.
 **Rule 731** — Sequence the first use of a newly-armed control yourself. "Verify
 your work" is an implicit licence to press it, and the first press of a live
 deploy control should never be a side effect of testing whether it is live.
+
+---
+
+## 5ik — G5 landed; VM wired; my own stale-ref error
+
+`scion/tranche-g` is now `36b5a7aa`: DEF-83 (`fdef77b6`) plus the G5 admin API.
+`deploy/gteam` deliberately still `17376c05d`.
+
+### G5 reviewed — the write path exists
+
+Verified independently rather than on report:
+
+- **Fail-closed on all four paths.** Absent row, empty row, malformed JSON, nil
+  pointer — all return false. Four `Get*` tests cover exactly those. The
+  standing constraint holds: an unreadable setting must never enable a
+  behaviour.
+- **`TestMessagingNotSeeded`** is the test I would have demanded had it been
+  missing. Registering a section in `opsettings.Registry` is the one part of
+  this change that touches every existing deployment, and `KoanfPaths: nil` is
+  the sole thing preventing a seeded row. Now enforced, not assumed.
+- Deletion audit clean by `comm` against base. The `-2` in `opsettings_test.go`
+  is a reflow of the expected-section list; every prior entry survives.
+- gofmt clean; vet clean under default **and** `no_sqlite`; targeted tests green
+  under both. No build tag needed on `admin_messaging_test.go` — it uses a fake
+  store and never touches sqlite, so it correctly runs in both tag sets.
+
+**Read-back staleness, checked and clear.** `handlePutMessaging` reads the
+switches back immediately after `ops.Update`. `Update` writes the local cache
+synchronously (`operational_settings.go:469-478`) before returning, then
+publishes for peers and self-applies. So the response reflects applied state
+rather than the 60s-poll-stale value. Had it not, the endpoint would have lied
+about every write.
+
+**Two judgement calls endorsed:** gating the whole route (including GET) on
+`hub.messaging.update` where `project-defaults` uses `.read` — stricter, correct
+direction, under-granting is recoverable; and the redundant `Validate` in the
+handler, which converts a schema violation from 500 into 400-with-errors.
+
+**Brief gap, mine:** the three undocumented requirements G5 hit — route
+classification map, `permissions.Registry` entry with `Enforcement` refs,
+`scopedAdminUATRouteRequest` PUT case — belong in every future admin-endpoint
+brief.
+
+### My error
+
+First push of G5 was rejected. I had checked its base with
+`git merge-base --is-ancestor refs/remotes/ptone/scion/tranche-g ...` and got
+YES — but I had landed `fdef77b6` by pushing to a URL, which does **not** update
+the local remote-tracking ref. I validated against a stale mirror and concluded
+fast-forwardable when it was not.
+
+Caught only because the remote refused. Rebased onto `fdef77b6`: zero file
+overlap, numstat byte-identical pre- and post-rebase, gates re-run on the
+rebased commit. `16a0a970` → `36b5a7aa`.
+
+Exactly the failure Rule 727 names, committed by me one exchange after writing
+it. I verified c4fix's ref against the remote and then trusted a cached ref for
+G5's.
+
+### VM wired — and a save
+
+instance-investigator wired option (d) and caught a defect neither of us
+planned for. `server_foreground.go:2896-2897` applies
+`SCION_MAINTENANCE_REPO_BRANCH` **after** parsing `@branch` out of
+`SCION_MAINTENANCE_REPO_PATH`. With the pre-existing
+`SCION_MAINTENANCE_REPO_BRANCH=scion/tranche-g` left in place, the config would
+have resolved to `RepoPath=/home/scion/scion-tranche-g`,
+`RepoBranch=scion/tranche-g` — **new repo, old branch**.
+
+No error, no warning, everything looking correct, and the button pointed at the
+moving development branch. That is precisely the failure (d) exists to prevent,
+and I pushed to `scion/tranche-g` twice within twenty minutes of it being wired.
+They removed the line.
+
+They also refused a verification claim I would have accepted: the systemd env
+dump proves the process *loaded the string*, not that the parse produced the two
+intended values. Those are different claims. The parsed values only appear in
+the DEBUG line at `admin_maintenance.go:277-278`, on first rebuild.
+
+**Smoke test approved and sequenced**, with conditions: confirm DEBUG is
+actually enabled first (at INFO the press proves the machinery works but yields
+no proof of parsed values — the one thing we are pressing for), announce before
+pressing, capture `repo_path` and `branch` verbatim, stop rather than adjust if
+they are wrong, and confirm `scionVersion` is still `17376c05` afterwards.
+
+**Rule 732** — Pushing by URL does not update remote-tracking refs. Any
+ancestry check after such a push is reading a stale mirror. Fetch the ref you
+are about to compare against, in the same command, every time.
+
+**Rule 733** — "The process loaded the config" and "the process parsed the
+config into the values you intended" are different claims. Env dumps and file
+contents prove the first. Only the code's own report of its parsed state proves
+the second.
+
+**Rule 734** — When two config inputs can set the same field, establish the
+precedence order before setting either. Last-writer-wins between an inline
+`@suffix` and a dedicated variable is invisible in both the config file and the
+logs.
+
+**Rule 735** — Before relying on a DEBUG-level line as your verification
+evidence, confirm the effective log level emits it. Otherwise the test consumes
+its one cheap opportunity and returns nothing.
