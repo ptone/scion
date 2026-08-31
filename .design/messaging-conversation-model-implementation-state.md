@@ -28398,3 +28398,83 @@ this case.
 default is a test-environment need funded by a production behavior change.
 Prefer the opt-in even when the default change looks harmless, because the
 blast radii are not comparable.
+
+### 5jf — PR #1437 verified and convergent; DEF-83 closed on main; SSH recovery path is unproven
+
+ptone merged https://github.com/GoogleCloudPlatform/scion/pull/1437 to main and
+asked whether it helps gteam.
+
+**Answer: no change to gteam, but it closes the convergence risk.** gteam already
+carries the fix — `6f6228f6` this morning *was* DEF-83 being fixed; the restored
+web chat and the 39 backfill rows are that fix executing. #1437 lands the same
+defect on mainline.
+
+`0d26527ab fix(webchat): remove DDL-block index on conversation_id that breaks
+pre-existing DBs (#1437)`, co-authored by **cr-dev-a** — not our
+`ca-msg-d83main`. A different agent reached the same fix independently.
+`scion/def83-main` no longer resolves on ptone's fork, so that branch is
+superseded; told him to drop it from his queue.
+
+**Rule 779 applied and the news is good.**
+`git diff --stat 0d26527ab 6f6228f6 -- pkg/hub/webchannel_store.go
+pkg/hub/webchannel_store_postgres.go` returns **empty**. Main and tranche-g are
+byte-identical in both files. The DDL region was where I expected a merge
+conflict when tranche-g lands; there will not be one.
+
+(Note on method: my first attempt at that diff put `--stat` after `--`, so git
+read it as a pathspec and printed nothing. Empty output from a diff means
+"identical" *or* "you asked about no files." I re-ran it with the flag in the
+right place before believing it. A silent empty result deserves the same
+suspicion as a silent success.)
+
+**#1437 verified, not assumed.** It deletes a `CREATE UNIQUE INDEX` line, which
+runs directly at the standing prohibition against anything quietly dropping
+`idx_webchat_topic_conversation` — the constraint preventing one topic from
+claiming two conversations. The specific hazard: `conversation_id` is now in the
+initial `CREATE TABLE`, so on a fresh DB the column exists and the migration
+that creates the index might be skipped or might fail. Checked both drivers:
+
+- SQLite (`addTopicConversationID`): `ALTER TABLE ADD COLUMN` errors with
+  "duplicate column", tolerated by `strings.Contains(err.Error(), "duplicate
+  column")`, then `CREATE UNIQUE INDEX IF NOT EXISTS` runs unconditionally.
+- Postgres twin: native `ADD COLUMN IF NOT EXISTS`, no string matching.
+
+Index present on fresh and pre-existing DBs, both drivers. The fix is correct.
+Worth noting the SQLite path depends on an error-string match; it is right for
+modernc sqlite today, and it is the kind of thing that breaks silently on a
+driver change. Not filing it — the postgres twin does it properly and the
+exposure is one line.
+
+**The real finding this round is operational.** instance-investigator was
+rate-limited out of SSH on all four attempts. Harmless today: nothing was in
+flight, the question was moot, and they fell back to the public healthz URL. But
+the plan we just agreed has this shape:
+
+1. the next change touches hub startup;
+2. if it is wrong, the hub does not start;
+3. DEF-86 — the rebuild button is served by the hub, so it cannot recover that;
+4. therefore SSH is the recovery path, and the runbook says so in as many words:
+   "SSH is the only path in."
+
+A recovery path that intermittently refuses connections is not a recovery path,
+and the moment we would find out is the moment we could least afford to. Tasked
+them to establish the mechanism (OS Login/IAP quota, `MaxStartups`, fail2ban,
+API quota — not the symptom), the window and whether it is a cooldown or a
+bucket, whether our own rapid retries are self-inflicting it, and whether a
+second access path exists that does not share the failure mode. Told them
+plainly that "short cooldown from rapid retries" is a fine answer and I am not
+looking to escalate — I am looking to know. Result goes into the runbook's
+recovery section. No deploy pending; take the time.
+
+**Rule 805.** A recovery path must be exercised on the schedule of the thing it
+recovers, not on the schedule of convenience. SSH worked every time we used it
+for routine work, so it read as reliable; its first failure arrived while it was
+also the only fallback for a class of outage we are about to make more likely.
+
+**Rule 806.** "X is the only path in" is a sentence that obliges you to say what
+happens when X is unavailable. A document that names a single point of failure
+and stops has described the risk without addressing it.
+
+**Rule 807.** An empty result from a query is not evidence until you have
+confirmed the query asked what you meant. A misplaced flag turned a real diff
+into a silent no-op that happened to agree with my hypothesis.
