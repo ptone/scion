@@ -29550,3 +29550,49 @@ the end. Both are defensible; it is his to pick.
 from the practice being standard.** "We should rebase regularly" invites agreement
 without understanding. "Otherwise you QA a shape that no longer exists" can be
 disagreed with on the merits — which is what makes it useful to him.
+
+---
+
+### 5kb — h2 reports done; branch not where it says it is, and its flaky-test claim is unaccepted
+
+h2 reported `6ac1a50e` pushed to `origin/scion/ca-msg-h2`, base `ptone/scion/tranche-g`,
+all gates green. Two problems, neither of which is the code.
+
+**The branch is not on ptone/scion.** `git ls-remote` shows no `scion/ca-msg-h2`. The
+only matching ref is `refs/heads/scion/tranche-g` at `6f6228f6`. Its workspace
+`origin` is almost certainly `scion-frontiers/scion-repo-contrib` — the same trap
+recorded in DEF-87, where the contrib repo carries two remotes and `origin` is not
+ours. Sent the working push form and told it to verify with `ls-remote` afterwards.
+
+**Rule 846: "pushed" is a claim about a remote, and the agent reporting it is the one
+least able to check. Verify the ref exists before reviewing the diff.** A push to the
+wrong remote succeeds loudly and looks identical to a correct one.
+
+**I also caught a stale ref of my own.** My local `origin/scion/tranche-g` sat at
+`36b5a7aa` while the true head is `6f6228f6`. I dispatched both agents in §5jy
+telling them to base on `origin/scion/tranche-g` — so I may have pointed them at a
+stale base with my own instruction. Warned h1 pre-emptively and asked both for their
+base SHA. Pleasingly, `6f6228f6` is also the deployed binary SHA on gteam, so
+tranche-g head and the running build are the same thing.
+
+**Rule 847: a ref name is not a commit. When you instruct someone to base on a
+branch, give the SHA or tell them to fetch first.**
+
+**I did not accept the flaky-test claim.** h2 reported
+`TestQuotaConcurrency_100Creates_Limit10` timing out as "pre-existing flaky,
+untouched by this change." That may well be true. It is also exactly the shape a real
+regression from *this specific change* would take: h2 makes OperationalSettings
+initialise on SQLite where it previously did not, which adds DB work at startup, and
+at `MaxOpenConns=1` the failure mode of extra contention is a **hang, not an error**.
+A concurrency test that times out right after we add startup DB work on SQLite is the
+single most suspicious result it could have returned.
+
+Asked for the discriminating experiment: run that one test on the clean base, several
+times per side, and report both. Told it explicitly not to skip, not to raise the
+timeout, not to mark it flaky — and framed it as the failure mode matching the change
+rather than as doubt about its work, because the distinction matters for whether it
+investigates properly or defends.
+
+**Rule 848: "pre-existing flaky" is a hypothesis with a cheap experiment attached.
+Run it — especially when the failure mode is one your change could plausibly
+produce.** The claim is most likely to be wrong exactly when it is most convenient.
