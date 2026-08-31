@@ -29175,3 +29175,56 @@ scion-community 15/15 clean. Will re-run on his confirmation.
 Told him plainly: if either degrades I report immediately rather than retrying
 around it. That is the same instruction I gave instance-investigator, and it is the
 behaviour §5jn showed we had all been failing at for days.
+
+---
+
+### 5js — inside-the-box confirmation; credential established; DEF-91 filed
+
+instance-investigator returned both reports. Two findings and one new defect.
+
+**The firewall change is confirmed at the cause, not the symptom.** Hour before vs
+after 13:00Z, from the sshd journal: preauth failures **12,332 → 0**; MaxStartups
+throttle events **76 → 0**. One throttle window (12:43–12:58) dropped 455
+connections on its own. Four logins total since 13:00 — ptone once via IAP, the
+agent three times. §5jp's worry that the traffic might still be arriving and merely
+dropped elsewhere is answered: it is not arriving.
+
+Hub untouched: active, healthz `6f6228f6 healthy`, NRestarts 0, 28 containers,
+ActiveEnterTimestamp unchanged.
+
+**The credential question from §5jq is closed, and my hypothesis was right.** Project
+-level metadata SSH key, no OS Login, no passwords. The journal shows
+`Accepted publickey for ptone from 35.235.244.32` and `Accepted publickey for scion
+from 10.138.0.2`, plain usernames rather than the `sa_<numeric>` form OS Login
+produces. instance-investigator's own OS Login profile exists and is unused.
+
+**The correction that matters more than the confirmation:** §5jp's runbook called
+these "two independent routes." They are independent in *transport* and identical in
+*credential*. Delete or block the metadata keys and both fail together. I wrote
+"two routes" and meant redundancy; a reader would too. Fixed in the runbook with the
+consequence spelled out — do not treat one as the fallback for the other against a
+credential fault, only against a network fault.
+
+**Rule 834: "independent" needs a dimension. Two paths that differ in one layer and
+share another are redundant only against failures in the layer they differ in.**
+
+**DEF-91 filed.** `gcloud compute ssh` pushes its generated public key into
+**project** metadata on first use. Every agent container that ever ran it left one
+behind, all under username `scion`, and nothing prunes them: **40+ `scion:ssh-rsa`
+entries**. Project keys apply to every instance not setting `block-project-ssh-keys`,
+and the login lands uid 1002 in `google-sudoers` — passwordless root on every box in
+the project. No expiry, because gcloud sets none unless asked.
+
+The private halves are in deleted containers, which is probably fine. The defect is
+not that we think they leaked; it is that **there is no inventory and no rotation, so
+if one had leaked we would have no way to know.** Same class as DEF-87: a credential
+accumulating silently as a side effect of ordinary tooling.
+
+**Rule 835: tooling that provisions credentials as a convenience will not deprovision
+them. Any "it just works" access path has a credential behind it that someone created
+and nobody owns.** I had used this access all week without once asking what it was.
+
+**Raised one operational consequence to ptone now rather than filing it:** IAP is
+`4033` for `scion-integration-sa`, so the agents have exactly one route in and no
+fallback. A `roles/iap.tunnelResourceAccessor` grant is small and would give them a
+second. His call whether it is worth doing before beta.

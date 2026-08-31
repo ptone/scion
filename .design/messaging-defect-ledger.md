@@ -108,20 +108,22 @@ rather than re-deriving it.
 | DEF-89 | New webchat topics are created with no `conversation_id`; backfill decays [^5] | FILED-NOT-STAFFED | 28560 | 28560 |
 | DEF-90 | `default-allow-ssh` exposes tcp:22 to `0.0.0.0/0` on ALL default-network instances — gteam remediated, fleet open [^6] | OPEN | 28900 | 28640 |
 
+| DEF-91 | 40+ orphaned agent SSH public keys accumulated in GCE **project** metadata [^7] | OPEN | 28960 | 28960 |
+
 ## Counts by status
 
 | Status | Count |
 |---|---|
 | CLOSED | 47 |
-| OPEN | 22 |
+| OPEN | 23 |
 | FILED-NOT-STAFFED | 21 |
 | DEFERRED | 0 |
 | UNKNOWN | 0 |
-| **Total** | **90** |
+| **Total** | **91** |
 
 ## DEF-NN ids mentioned but never defined
 
-None. All 90 ids (DEF-1 through DEF-90) have definitions in the journal.
+None. All 91 ids (DEF-1 through DEF-91) have definitions in the journal.
 
 ## Notes and edge cases
 
@@ -146,3 +148,5 @@ None. All 90 ids (DEF-1 through DEF-90) have definitions in the journal.
 - **DEF-12** (CLOSED — reclassified by ca-msg-arch after extraction): This was an extraction error, and an instructive one. The journal states plainly at line 25177, "**DEF-12 and DEF-81 are closed.**" The extraction picked up DEF-81 from that sentence but not DEF-12, because a *later* mention (line 26055) discusses DEF-12 in the present tense as part of the activation sequence. The summary text was then taken from line 20471, which predates closure by five thousand lines. **Last mention is not last status.** Any future refresh of this ledger should search for an explicit closure statement before falling back to the most recent mention.
 
 - **Anchor precision**: Anchors represent the first substantive mention found in the journal. For defects first listed in status tables (e.g., Section 3 or §5de), the anchor may point to the table row rather than a full prose definition.
+
+[^7]: **DEF-91** (OPEN, filed 2026-08-31, journal §5js): `gcloud compute ssh` generates a keypair on first use and pushes the public half into **project-level** GCE metadata. Every agent container that has ever run it has left one behind, all under the same local username `scion`, and nothing prunes them. instance-investigator counted **40+ `scion:ssh-rsa` entries**. Project metadata keys apply to every instance in the project that does not set `block-project-ssh-keys`, and the resulting login lands as uid 1002 in group `google-sudoers` — passwordless root on every box. The private halves live in containers that have since been deleted, but nothing guarantees they were only there. There is no inventory, no expiry (gcloud sets none unless `--ssh-key-expire-after` is passed), and no rotation. Not exploited as far as we know; the defect is that we could not tell if it had been. Related to but distinct from DEF-87 (`github_pat_` in contrib-repo remote URL): same class — a credential accumulating silently as a side effect of ordinary tooling.
