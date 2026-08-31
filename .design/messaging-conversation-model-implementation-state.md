@@ -28333,3 +28333,68 @@ what it enumerates and diff that against what the application actually creates.
 data. Automatic schema creation on a fresh backend is exactly what makes the
 data loss silent: the tables exist, the app starts clean, and the missing rows
 look like an empty deployment.
+
+### 5je — driver question resolved (SQLite); the switch gate is one line and the stack beneath it is SQLite-safe
+
+ptone: "No - it is sqlite - I'm talking about the upgrade UX - when the new
+binary is built - it should auto-run any migrations, in either DB flavor."
+
+**The conversion premise is dead.** No postgres migration, no 11-table transfer
+problem. 5jd's blocker was real code analysis applied to a plan that was never
+proposed — I resolved an ambiguity by investigating the wrong branch of it. The
+finding itself stands and is worth keeping (the migrator genuinely does not carry
+the webchat tables), but it was an answer to a question nobody asked. Rule 799
+got me to stop before acting, which was right; it did not stop me from spending
+the investigation on the reading I found alarming rather than the one that was
+also available.
+
+**His actual point is about upgrade UX, and the system already satisfies it.**
+Migrations run inside service startup, so every restart path — including the
+admin rebuild button — runs them, in both flavors: `webchannel_store.go` and
+`webchannel_store_postgres.go` are DDL twins and `Init()` runs whichever applies.
+The 39-row backfill during this deploy is the proof.
+
+The gap is not execution, it is reporting: `Init()` failure is logged and
+swallowed at `server_foreground.go:598`, the hub starts healthy, and the upgrade
+reports success with web chat absent. Restated to him as the thing DEF-83 looked
+like while it was live.
+
+**The real blocker for "testable state" is one line.** `initOperationalSettings`
+is gated on postgres at `server_foreground.go:1915`. Everything beneath is
+already driver-agnostic — established by reading, not assumption:
+
+- `cmd/server_foreground.go:1209` — `entadapter.NewCompositeStore(entClient)` is
+  used for both drivers, so the SQLite store satisfies `store.HubSettingStore`.
+- `pkg/ent/schema/hubsetting.go:77` — `hub_settings` is an ent schema, created on
+  SQLite by AutoMigrate.
+- `pkg/store/entadapter/locking.go:145` — `TryAdvisoryLock` is capability-detected
+  and its non-postgres branch returns `(true, noopRelease, nil)`, documented:
+  "the single-writer model already guarantees the work runs on one process at a
+  time." `initOperationalSettings` also has an explicit non-locker fallback
+  (`server_foreground.go:1963`).
+
+The function was written driver-agnostic. Only its caller refuses.
+
+**Design position taken, not escalated as a block.** Removing the gate outright
+would move every SQLite install from file-based to DB-backed settings and start
+`syncHubSettings` seeding on each boot — a user-visible change to every
+workstation, to enable a test on one VM. Recommended an opt-in flag instead:
+gteam sets it, workstations untouched, reversible by unsetting. Told him I am
+proceeding that way unless he wants the gate simply removed. Under his standing
+directive this is mine to decide; it is reversible and narrow.
+
+**Rule 802.** When a sentence has two readings and one is alarming, the alarming
+one gets investigated first and hardest. Budget a cheap check of the benign
+reading before committing to the expensive one — here, one question to ptone
+would have cost a minute and saved an entire analysis.
+
+**Rule 803.** A capability gate in the caller is not evidence the callee needs
+it. Read down the stack before accepting that a feature is unavailable on a
+backend: this one was gated at the top while every layer below it had already
+been made driver-agnostic, including an explicit documented fallback for exactly
+this case.
+
+**Rule 804.** Enabling a capability for one instance by changing a global
+default is a test-environment need funded by a production behavior change.
+Prefer the opt-in even when the default change looks harmless, because the
+blast radii are not comparable.
