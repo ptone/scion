@@ -26804,3 +26804,90 @@ logs.
 **Rule 735** — Before relying on a DEBUG-level line as your verification
 evidence, confirm the effective log level emits it. Otherwise the test consumes
 its one cheap opportunity and returns nothing.
+
+---
+
+## 5il — Smoke test passed; deploy HELD on an unannounced backfill
+
+### Smoke test: all five conditions met
+
+instance-investigator pressed the rebuild button. Executor log, verbatim:
+
+```json
+{"level":"DEBUG","msg":"Resolved rebuild-server executor",
+ "repo_path":"/home/scion/scion-tranche-g","branch":"deploy/gteam",
+ "binary_dest":"/usr/local/bin/scion","service_name":"scion-hub"}
+```
+
+The `@branch` parse produced the two intended values, and this is the parsed
+config as the executor received it — not an inference from the env dump (Rule
+733 satisfied by the evidence it demanded). `scionVersion` still `17376c05`,
+60s build, healthy restart, 28 containers, brokers reconnected.
+
+The button fetched from the fork, checked out `deploy/gteam`, reset to
+`origin/deploy/gteam`, built, installed, restarted. **The recovery path is now
+exercised rather than assumed**, which was the entire point of making the first
+press a no-op.
+
+### Then I stopped the real deploy
+
+I have been calling `36b5a7aa` "the DEF-83 fix, restores web chat" — to
+instance-investigator, to ptone, and in 5ii and 5ik. Re-read what it does on
+first boot. That description is incomplete in the way that matters.
+
+Fixing `Init()` does not merely let initialisation finish. It lets it **continue
+past the failure point to two steps that have never executed on that box**:
+
+1. `addTopicConversationID` — `ALTER TABLE` + unique index.
+2. `backfillTopicConversations` — for **every** non-deleted `webchat_topic`,
+   `INSERT` a `conversations` row with a fresh UUID and stamp it onto the topic.
+
+Step 2 is a data backfill against production data. Idempotent, per-topic
+transactional, no double-writes — and it creates rows that did not exist, with
+no undo short of hand-deletion.
+
+**The broken `Init()` has been an interlock on that backfill since #1380.** The
+identical shape as the broken rebuild button being an interlock on deploys. I
+removed one interlock today; removing the second in the same hour without
+telling the operator what it does would have been indefensible.
+
+Escalated to ptone. His standing threshold names backfills explicitly, and I
+wrote that threshold partly to catch exactly this.
+
+Not applicable, checked: DEF-29 concerns `direct` rows whose `external_ref` is
+the ACL. These are `kind='group'`, where participants derive from project
+membership and the participant table is a listing index, never the authority
+(DEF-36, stated in the code). The empty `external_ref` is correct here. OQ-4
+(groups pass `CheckDMParticipantKey` unconditionally) is pre-existing and
+unchanged by this.
+
+### Read-only facts requested before recommending
+
+1. Driver actually live — SQLite or Postgres. Separate backfill implementations,
+   and instance-investigator self-corrected on this once already.
+2. Does a `conversations` table exist? If not, `hasConversationsTable()`
+   short-circuits, the backfill marks itself complete writing nothing, and the
+   whole concern is moot.
+3. `COUNT(*) FROM webchat_topic WHERE conversation_id IS NULL AND deleted_at IS
+   NULL` — the exact number of rows to be created.
+4. Contents of `webchat_migrations`.
+
+Number four is the one with teeth: if `topic_conversation_backfill` is already
+marked complete on a database whose column does not exist, that is a worse
+problem than the one I am holding for, and better found now.
+
+Explicitly forbade adding columns, creating tables, or hand-running migrations
+(Rule 715 — the broken state is still the only live reproduction).
+
+**Rule 736** — A bug fix that unblocks a failing initialisation path inherits
+everything downstream of the failure point. Grade the fix by what now *runs*,
+not by what stops erroring. "Restores web chat" and "runs a schema migration and
+a data backfill on production data" were the same commit.
+
+**Rule 737** — Removing two safety interlocks in the same session is a pattern,
+not two incidents. The second one deserves more scrutiny than the first, not
+less, precisely because the first went well.
+
+**Rule 738** — Escalate with a number, not a question. "Should I run a backfill?"
+puts the work on the operator; "this creates N rows, here is my recommendation"
+puts it back where it belongs. Get the count first.
