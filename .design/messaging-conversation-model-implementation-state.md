@@ -27284,3 +27284,28 @@ volume, and it will appear in any transcript that runs that command. Pre-existin
 provisioning, not introduced by this work, and plausibly intentional. Filed as
 **DEF-87**, not escalated as urgent; to be mentioned to ptone at the next section
 boundary rather than interrupting the fix.
+
+### 5ip addendum — runbook durable at a known path
+
+`/scion-volumes/scratchpad/runbooks/gteam-rollback.md` — verified by reading it,
+not by accepting the report. Dated 2026-08-31, pinned to `17376c05d`, carries the
+baselines table (7 / 39 / 46 / 28 containers, 3 recorded migrations whose names
+match the code), expected values on both verification steps, an explicit
+`ROLLBACK FAILED` branch pointing at `journalctl`, the demoted DB-restore block
+with the DEF-83 warning, and DEF-85/86 as closing context so the next reader
+understands why the binary swap is the only path.
+
+**Remaining gap, requested:** the DB-restore block references
+`hub.db.pre-<SHA>`, and nothing anywhere says to create it. The recovery
+procedure depends on an artifact produced by an undocumented step — the same
+shape as the problem this runbook was written to solve, pointed the other way.
+Asked for a pre-deploy checklist: snapshot the DB, **confirm the stash version
+equals the running version**, record the baselines. The middle item is the check
+that would have caught `rollback-1a2c1b07` being 32 commits stale, and it is two
+commands. Step 6 tells a future operator to refresh the stash; that item catches
+the case where they did not.
+
+**Rule 756** — A recovery procedure that consumes an artifact must, in the same
+document, specify the step that produces it. Otherwise the procedure is a
+dependency on institutional memory wearing the costume of a runbook, and it fails
+in exactly the conditions it exists for.
