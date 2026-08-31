@@ -26158,3 +26158,78 @@ was two commands away and stronger than the one on offer, and stopping at
 phrasing from a `_postgres.go` file on a Postgres hub) is a finding in its own
 right, separate from the error itself. Read the message's form, not only its
 content.
+
+---
+
+## 5id — G5 dispatched (admin surface); freeze lifted with notice; switch walkthrough
+
+ptone approved building the missing admin surface **and pushing it to
+`scion/tranche-g`**. That directly contradicts the freeze I committed to in 5ib,
+so it had to be handled explicitly rather than quietly.
+
+### Freeze lift, done as promised
+
+Told instance-investigator *before* the ref moves, not after. Two properties
+that make this move safer than the last one:
+
+- **Append, not force-push.** `17376c05d` stays an ancestor; their deployed
+  binary and rollback artifacts stay valid. The earlier rebase rewrote the ref
+  out from under a SHA, which is the dangerous shape.
+- **Developer works on `ca-msg-g5`, not on `tranche-g`.** The ref moves exactly
+  once, at a moment I pick, after review — same as G1-G4.
+
+Re-flagged the live hazard: a self-rebuild between now and my announcement pulls
+a tip neither of us has verified on that box. Asked whether they can pin the
+deployment to a SHA rather than a branch name, and pointed the maintenance
+branch question back at them.
+
+### G5 brief
+
+Registry entry for `messaging` with `KoanfPaths: nil` + dedicated GET/PUT, per
+the `maintenance` precedent. I pre-checked the seeding hazard myself —
+`syncHubSettings` (`cmd/server_foreground.go:2023-2026`) does
+`if len(sec.KoanfPaths) == 0 { continue }`, so registering does **not** write a
+row at startup — and then told the developer to confirm it independently and
+pin it with a test, because a seeded `messaging` row would be a behaviour change
+on every existing deployment.
+
+Constraints: defaults unchanged (absent/empty/malformed all → OFF), readers
+untouched, presence-aware partial update so setting one switch cannot clear the
+other, audit fields populated. Gate list carries **expected durations** (rule
+700) and pre-declares the docker-less `TestDeleteStopped_RequiresGroveContext`
+failure so it is not rediscovered as a blocker. UI is a clearly separable
+stretch with an explicit "stop and tell me" trigger.
+
+### The walkthrough, and the answer I gave
+
+ptone asked whether the switches are long-term or transitional. Answer: both
+scaffolding, but they retire *differently*, and conflating them would be the
+mistake.
+
+- **Read switch — purely transitional.** Selects old locate-by-filter vs new
+  locate-by-`conversation_id`. Once backfill is clean the old path is dead code:
+  delete switch, delete fallback.
+- **Write-deny — not a choice between implementations at all.** It selects
+  fail-closed vs fail-silently. Fail closed is the correct *permanent*
+  behaviour, so the end state is not "leave it on" but **delete the switch and
+  make denial unconditional.** A ratchet, not a setting.
+
+Recommended booking a **deletion milestone** alongside the activation milestone,
+and said plainly that the admin surface I just dispatched is a temporary control
+for a temporary mechanism that should be deleted with them.
+
+**Rule 710** — A feature flag over a security property is a supported,
+documented way to reintroduce the bug. Classify every switch at creation time as
+*transitional* (collapses to the new path) or *ratchet* (collapses to
+unconditional), and book its deletion in the same breath as its activation.
+Otherwise "temporary" switches become load-bearing and nobody remembers which
+position is correct.
+
+**Rule 711** — When an instruction contradicts a commitment you made to another
+agent, surface the contradiction to them before acting on it, and say who
+authorised the change. The commitment was mine to make and not mine to silently
+revoke.
+
+**Rule 712** — Prefer append over force-push once a ref is a deployment source,
+and say which one you are doing. The distinction is invisible in "I pushed" and
+is the whole difference between a valid and an invalidated rollback.
