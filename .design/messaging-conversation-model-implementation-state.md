@@ -29029,3 +29029,59 @@ Asked for three discriminating checks instead of declaring done:
 On 2 hanging and 3 answering, I close DEF-90 for gteam and write up the fleet-wide
 `default-allow-ssh` decision, which §5jn already answered in principle: IAP is a
 working substitute for the one human who needs external access.
+
+---
+
+### 5jp — gteam SSH restriction verified three ways; runbook rewritten; fleet advice reversed
+
+All three §5jo checks came back clean:
+
+- tags: `https-server,scion-hub,ssh-no-internet` — the append preserved both
+  pre-existing tags, so the hub keeps 443
+- external SSH from ptone's workstation: `Operation timed out`
+- IAP after the flip: returns `scion-gteam`
+
+The deny is in force, the recovery path survived it, and nothing collateral moved.
+Attribution is now established — the improvement can be tied to the change, which
+§5jo's Rule 828 said the internal probe alone could not do — so I re-ran at 100
+attempts instead of 40: **100 of 100 clean banners**, against 24/16 of 40 before.
+
+**Runbook rewritten, not patched.** The entire "Getting SSH access" section was
+built around the throttle: retry with 30-60s backoff, budget 2-3 minutes, serial
+console as the absent fallback, "SSH is the only access path and has no fallback."
+Every sentence of that is now wrong, and wrong in the direction that wastes an
+operator's time during an incident. It now carries the two routes, the rule table
+and priority reasoning, the `remove-tags` rollback (a GCP API call, so a lockout is
+undoable without SSH), and an explicit note that `Connection refused` and
+`Exceeded MaxStartups` are pre-auth and are not credential problems — ptone made
+exactly that misread in §5jn and the next operator would too.
+
+Rule 794 earned its keep again: three sites stated the throttle, and the two outside
+the section I rewrote (the time-to-recovery estimate, the known-limitations list)
+would have survived a section-level edit. I grepped for `MaxStartups` afterwards
+rather than trusting the edit.
+
+**Dispatched instance-investigator** to confirm from the sshd journal that scanner
+traffic has stopped *arriving*, not merely stopped succeeding. My evidence is
+entirely external and consists of an absence; the journal is the inside view of the
+cause. Told it not to change anything, and to report immediately rather than work
+around it if its own SSH degrades.
+
+**I reversed my fleet advice and said so explicitly.** In §5jk I told ptone not to
+touch `default-allow-ssh`. I now recommend editing it — narrowing `--source-ranges`
+to `10.128.0.0/9,35.235.240.0/20` — as one command covering the whole fleet with no
+tagging, reversible by the same command. It also fixes a gap: `allow-iap-ssh` is
+tag-scoped to `scion-hub`, so IAP silently does not work on instances without it.
+
+**Rule 830: when you reverse advice, state the reversal and what changed, not just
+the new position.** My original objection was blast radius under no evidence and no
+proven fallback. Both conditions lifted — we have IAP working, the VPC path proven,
+and the mechanism observed on a live box. The advice did not change because I
+changed my mind; it changed because the evidence did, and the principal needs to be
+able to tell those apart.
+
+**One unknown I cannot close and did not paper over:** whether any CI runner or
+deploy automation SSHes into these boxes from outside GCP. Only ptone can answer. If
+yes, the fleet edit breaks it and the tag approach is the safer path for the rest.
+
+DEF-90 stays OPEN — gteam is remediated, the fleet is not.
