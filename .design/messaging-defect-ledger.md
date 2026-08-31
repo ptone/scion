@@ -108,15 +108,15 @@ rather than re-deriving it.
 | DEF-89 | New webchat topics are created with no `conversation_id`; backfill decays [^5] | FILED-NOT-STAFFED | 28560 | 28560 |
 | DEF-90 | `default-allow-ssh` exposes tcp:22 to `0.0.0.0/0` on ALL default-network instances — gteam remediated, fleet open [^6] | OPEN | 28900 | 28640 |
 
-| DEF-91 | 40+ orphaned agent SSH public keys accumulated in GCE **project** metadata [^7] | OPEN | 28960 | 28960 |
+| DEF-91 | Agent SSH keys accumulate unboundedly in GCE **project** metadata — availability, not security [^7] | FILED-NOT-STAFFED | 29020 | 28960 |
 
 ## Counts by status
 
 | Status | Count |
 |---|---|
 | CLOSED | 47 |
-| OPEN | 23 |
-| FILED-NOT-STAFFED | 21 |
+| OPEN | 22 |
+| FILED-NOT-STAFFED | 22 |
 | DEFERRED | 0 |
 | UNKNOWN | 0 |
 | **Total** | **91** |
@@ -150,3 +150,7 @@ None. All 91 ids (DEF-1 through DEF-91) have definitions in the journal.
 - **Anchor precision**: Anchors represent the first substantive mention found in the journal. For defects first listed in status tables (e.g., Section 3 or §5de), the anchor may point to the table row rather than a full prose definition.
 
 [^7]: **DEF-91** (OPEN, filed 2026-08-31, journal §5js): `gcloud compute ssh` generates a keypair on first use and pushes the public half into **project-level** GCE metadata. Every agent container that has ever run it has left one behind, all under the same local username `scion`, and nothing prunes them. instance-investigator counted **40+ `scion:ssh-rsa` entries**. Project metadata keys apply to every instance in the project that does not set `block-project-ssh-keys`, and the resulting login lands as uid 1002 in group `google-sudoers` — passwordless root on every box. The private halves live in containers that have since been deleted, but nothing guarantees they were only there. There is no inventory, no expiry (gcloud sets none unless `--ssh-key-expire-after` is passed), and no rotation. Not exploited as far as we know; the defect is that we could not tell if it had been. Related to but distinct from DEF-87 (`github_pat_` in contrib-repo remote URL): same class — a credential accumulating silently as a side effect of ordinary tooling.
+
+**Downgraded 2026-08-31 by ptone's judgment, and I agree I overstated it (journal §5jv).** ptone: *"I'm not too worried about the ssh key debris in deleted investigator agent containers."* He is right. The private halves live in container filesystems that no longer exist; for a key to matter someone needs the private half, and "we cannot prove a negative about deleted disks" is true of nearly everything and is not a finding by itself. The security framing is withdrawn.
+
+**What survives is an availability item with a slow fuse.** The metadata entries only grow: every new agent container that runs `gcloud compute ssh` adds one, nothing removes them, and project metadata has a hard size limit. The realistic failure is that some future agent's key push fails and SSH stops working for new containers — at a moment when nobody connects the outage to key debris. Cheap fix whenever convenient: `--ssh-key-expire-after` in whatever provisions the agents, so keys age out rather than accumulate. Not urgent.

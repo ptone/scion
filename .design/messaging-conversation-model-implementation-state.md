@@ -29322,3 +29322,52 @@ the condition pins an IP, so recreating gteam with a different internal address
 silently stops the binding matching and returns `4033`; and removal needs the
 identical `--condition` string, because the condition is part of the binding's
 identity.
+
+---
+
+### 5jv — DEF-91 downgraded on ptone's judgment; I had overstated it
+
+ptone: *"FWIW - I'm not too worried about the ssh key debris in deleted investigator
+agent containers."*
+
+He is right and I dropped the security framing rather than defending it. The private
+halves live in container filesystems that no longer exist. For a key to matter
+someone needs the private half, and *"we cannot prove a negative about deleted
+disks"* is true of nearly everything and is not a finding on its own. I had
+constructed a threat out of an absence of evidence and dressed it in the language of
+DEF-87, which is a genuinely exposed live credential and not the same thing at all.
+
+**Rule 838: "we cannot rule it out" is not a severity. If the finding survives only
+as an unfalsifiable possibility, it is not a security finding — say what would have
+to be true for it to bite, and check whether that is plausible.**
+
+**What survives is real but mundane, and more likely to actually happen.** The
+metadata entries only grow: every new agent container that runs `gcloud compute ssh`
+adds one, nothing removes them, and project metadata has a hard size limit. The
+realistic failure is a future key push failing and SSH breaking for new containers —
+at a moment when nobody connects an outage to key debris. Reframed as an availability
+item with a slow fuse, downgraded to FILED-NOT-STAFFED, ptone's call recorded in the
+row. Cheap fix when convenient: `--ssh-key-expire-after` in whatever provisions the
+agents.
+
+Ledger: CLOSED 47, OPEN 22, FILED-NOT-STAFFED 22, total 91.
+
+### 5jw — IAP binding applied; verifying the form, not just the effect
+
+ptone: *"project-level binding ran without error"*.
+
+Ambiguous in a way worth resolving rather than assuming: it does not say whether the
+IAM **condition** took. An unconditioned binding also runs clean, and if the tunnel
+test then succeeds, success looks identical under both forms. §5jo's lesson again —
+an observation that both hypotheses predict does not discriminate between them.
+
+Asked for a policy readback showing `bindings.condition.expression`, from ptone and
+from instance-investigator in parallel, since the agent may lack the IAM read
+permission. Told it explicitly to report a refusal rather than route around one.
+
+Also told ptone the stakes, so the readback does not read as an accusation: if the
+condition did not take, an unconditioned `tunnelResourceAccessor` on one service
+account is still a bounded grant and the firewall is doing the heavy lifting. **I
+want it because the runbook should say the true thing, not because the outcome is
+alarming.** A verification request lands differently when the requester has said what
+they will do with either answer.
