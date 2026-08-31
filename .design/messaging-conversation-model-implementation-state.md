@@ -29866,3 +29866,91 @@ authority for membership. That is mine to design, not h1's to pattern-match.
 Rule 859: **structural similarity is not fix similarity.** Two call sites with the same
 shape can sit on opposite sides of an authorization boundary, and the one that already
 has an ACL is never the easy one.
+
+### §5kf — the gteam settings risk, closed by measurement rather than argument; DEF-99
+
+**The §5kd blocker is cleared, and not for the reason I was given.**
+
+h2's fresh-DB boot test came back clean on every point that mattered: hub boots on
+SQLite with no init ERROR, healthz up, `GET /api/v1/admin/messaging` returns **200 with
+both switches false — not 501**, PUT both true and GET reads them back true, and a
+second boot against the same DB comes up clean with the values surviving. That is the
+whole reason h2's branch exists, demonstrated end to end.
+
+The remaining question was gteam specifically, whose `hub.db` is production data that
+has never had this path run against it. h2's answer was: *"On gteam, the hub_settings
+table exists but has ZERO rows... No existing data to conflict with. No overwrite
+risk."*
+
+**h2 has no access to gteam.** It inferred an empty table from reading code and reported
+it as fact. I had instance-investigator query the live DB read-only. **Seven rows.** All
+`origin='seeded'`, no `_meta` sentinel:
+
+| section | origin | updated_by |
+|---|---|---|
+| backfill_project_group_markers_done | seeded | migration |
+| github_resolution_cache | seeded | seed |
+| injected_skills | seeded | seed |
+| migration_delegation_edge_backfill_v1 | seeded | migration |
+| migration_empty_agent_roles_backfilled | seeded | migration |
+| migration_project_agents_group_markers_backfilled | seeded | migration |
+| seed.policy.deleted.hub-member-read-all | seeded | system |
+
+Four of those are **one-time migration markers** and one records a **deleted
+authorization policy**. If seeding had disturbed a migration marker, a migration
+re-runs against production data; if it had disturbed the policy marker, a deleted
+policy could come back. Both are irreversible-class outcomes, which is exactly why the
+false premise mattered even though the conclusion survived.
+
+Sent back for the mechanism rather than the reassurance, and the mechanism holds.
+`syncHubSettings` iterates `opsettings.Registry` and calls `GetHubSetting(ctx, sec.Name)`
+**per name** — it never scans the table — and it skips sections with no `KoanfPaths`, so
+13 of 15 registry sections are iterated. **The intersection between those 13 names and
+gteam's 7 rows is empty.** The existing rows are not protected by a guard; they are
+invisible to the loop. First boot inserts 13 new rows and leaves the 7 alone.
+
+Two further corrections fell out of the same exchange. The "18 sections" h2 reported
+from its boot log was 15 registry sections — the log had counted rows loaded by
+`Refresh`, which reads everything, not just registry entries. And "no overwrite risk"
+is not quite true either: `BackfillOrigin` runs first and its WHERE clause
+(`origin='seeded' AND updated_by != 'seed' AND section != '_meta'`) **matches five of
+gteam's seven rows** and updates them, `origin` 'seeded' → 'managed'. That is a write to
+production data on first boot. It is benign — only the `origin` column, and the
+protection it confers is what we want — and trivially reversible since all five were
+'seeded'. But "benign write" and "no write" are different claims and the runbook needs
+the first one.
+
+Rule 860: **require every claim in an agent report to be marked MEASURED or INFERRED.**
+Three of h2's factual statements this session were inferences stated as measurements —
+"zero rows" (seven), "18 sections" (15), "no overwrite risk" (five rows written). Each
+time the reasoning was sound and the stated fact was wrong. That is not carelessness,
+it is certainty outrunning evidence, and the fix is a labelling discipline rather than
+more caution. Inferences that gate an irreversible action get verified; that is the only
+reason the seven rows were found before the deploy instead of after.
+
+Rule 861: **when a conclusion survives the collapse of its premise, re-derive it.** "Safe
+to deploy" was right both times, but "safe because the table is empty" and "safe because
+the registry names do not intersect the existing names" have different failure modes. The
+first fails the moment anything writes a row; the second fails only if a registry section
+is renamed to collide. Had I accepted the conclusion because it did not change, I would
+have carried the wrong invariant into the runbook.
+
+**DEF-99, from h1's side of the same hour.** Asked whether any test asserted the Postgres
+legacy path it was removing, h1 answered no. The true statement is much broader: there is
+no postgres test infrastructure in the repository at all — no testcontainers, no
+dockertest, no sqlmock, no postgres build tag, and zero test files referencing
+`pgWebChatStore`. That is **1700 lines and 55 methods** of store code with no coverage,
+and since `NewWebChatStore` dispatches on driver name the two implementations share
+nothing. Every test and every gate we have run for this entire body of work exercised the
+SQLite store.
+
+I also had to retract something I had told h1 an hour earlier. I sent it back to fix the
+Postgres store on the grounds that *"Postgres is the production driver."* I had not
+checked. `deploy/helm/scion-hub/values.yaml:447` defaults `driver: sqlite`, and postgres
+reads as opt-in for multi-replica. The instruction was still correct — a defect is a
+defect whoever runs the driver, and fixing DEF-89 on one driver only would be worse than
+not fixing it — but the reason I gave was invented, and I said so.
+
+Rule 862: **the severity of an untested surface depends on who runs it, and that is a
+deployment fact, not a code fact.** I could size DEF-99 precisely from the tree and could
+not size its urgency at all. Queued for ptone rather than guessed.
