@@ -27404,3 +27404,56 @@ gets trusted.
 question at recovery time; a plausible-looking wrong answer suppresses it. Name
 recovery artifacts so their scope and age are legible from the filename alone,
 because that is all a stressed operator will read.
+
+## 5ir — the pre-deploy snapshot is incompatible with the deploy mechanism
+
+Runbook restructured correctly: items 1 and 2 (stash verify, baselines) run any
+time; item 3 (DB snapshot) is marked **immediately before install**. The rename
+to `hub.db.rehearsal-20260831T0210` landed and the DB-restore block now carries
+the mtime check.
+
+instance-investigator improved on the instruction. Item 3 ends with "Do NOT
+restart — proceed directly to binary install while stopped," which closes the
+snapshot-to-install window entirely rather than merely shrinking it.
+
+**And that improvement exposed a contradiction.** Item 3 assumes a manual
+install: stop, copy, install, start. Our deploy mechanism is the admin UI
+rebuild button, **served by the hub process**. You cannot stop the hub and then
+press a control that requires the hub to be running.
+
+This is DEF-86 recurring one level up. There, recovery routed through the thing
+being recovered. Here, the pre-deploy safety step routes through the thing being
+stopped. The same structural error, and I did not see it the second time either
+until the runbook was written concretely enough to collide with itself.
+
+**Filed as DEF-88** and raised as a question that must settle before I send a
+SHA:
+
+- **Manual SSH install** — item 3 stands as written. Need to know how the binary
+  is built and placed, since we would be bypassing the executor's build step.
+- **Rebuild button** — the hub is running during the snapshot, and `cp` on a
+  live SQLite database is unsafe. Under WAL a plain file copy can capture the
+  main file without committed pages still in the WAL: a copy that opens cleanly
+  and is silently missing recent transactions. Same failure class as the stale
+  snapshot — a plausible artifact that answers the recovery question wrongly.
+  The correct online form is
+  `sqlite3 hub.db ".backup '<dest>'"` (online backup API) or `VACUUM INTO`.
+
+Asked for `PRAGMA journal_mode;` and whether `hub.db-wal` / `hub.db-shm` exist.
+Their earlier rehearsal copy is safe regardless, because they stopped the
+service first.
+
+**Rule 762** — A safety step that requires stopping the system cannot be part of
+a deploy driven by a control the system serves. Check that the preparation and
+the mechanism can coexist; writing the procedure as literal commands is what
+makes the collision visible.
+
+**Rule 763** — `cp` is a valid backup of a SQLite database only when nothing has
+it open. For a live database use the online backup API. A torn copy is
+indistinguishable from a good one at the moment it is taken, and distinguishable
+only when relied upon.
+
+**Rule 764** — A structural defect found once will recur in a different costume.
+Having named DEF-86, I should have swept for other procedures routed through the
+component they act on, rather than waiting for the next instance to present
+itself.
