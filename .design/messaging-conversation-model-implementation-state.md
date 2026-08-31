@@ -29728,3 +29728,141 @@ agent improvise — it makes the agent hang.
 
 These two share a root. Both are cases of my writing down what I wanted to be true
 rather than what the machine would actually do.
+
+### §5ke — chasing one wrong number into four defects, and an incident of my own making
+
+This entry covers a single hour in which correcting a small error I had made exposed
+three larger things, none of which I was looking for.
+
+**Start: DEF-93's mechanism was wrong.** I filed it as "the suite is at the 300s
+suite-level timeout." There is no 300s gate. Not in the Makefile, not in any workflow;
+Go's own default is 600s. Both agents had self-imposed 300s on their own invocations
+and then read the kill as a test failure, each naming whichever test the axe landed on
+— h2 blamed `TestQuotaConcurrency_100Creates_Limit10`, h1 blamed a `TelegramLinkService`
+goroutine. Neither was at fault. **I accepted h2's "300s cap" framing and repeated it
+into the ledger without checking that the cap existed.** The measurement itself is now
+solid and corroborated across two independent runners: h2 got 344.8s base / 351.8s
+branch, I got 346.5s branch from my own worktree. ~7s delta, noise, branch exonerated.
+
+Rule 853: **when an agent hands you a number and a mechanism, the number and the
+mechanism need separate verification.** h2's timing was right and its explanation was
+wrong, and I propagated the wrong half because it arrived attached to the right half.
+
+**Then: why doesn't CI hit this?** Because CI's blocking job runs `make test-fast` =
+`go test -tags no_sqlite ./...`, which compiles out every `!no_sqlite` file. Chasing
+that produced **DEF-94**: the job that *does* run the SQLite half is
+`Full Test Suite (reporting only)`, carrying `continue-on-error: true`. Measured
+scope — **3074 of 4187 test functions in `pkg/hub`, 73%**, live behind `!no_sqlite`,
+including `authorize_test.go`, `authz_bypass_agents_test.go`, `authz_project_owner_test.go`,
+`authz_candelegate_test.go`, `audit_authz_test.go`, `delegation_ceiling_test.go`. The
+entire behavioural authorization suite sits behind a job that cannot fail a build.
+
+I nearly escalated this two sizes too large. My first conclusion was "the authz tests
+never run in CI," which would have been alarming and false. I checked before sending,
+found `ci.yml:148`, and then pulled the actual artifact: every `pkg/hub` line reads
+`ok`. The tests run, they pass, and they cannot block. That is a real structural defect
+and a much smaller one than the sentence I almost sent.
+
+Rule 854: **size a finding by pulling the artifact, not by reading the config.** The
+workflow file told me a job existed and was non-blocking. Only the uploaded output told
+me what it currently says. The gap between those two is the difference between a latent
+gap and an active fire, and it is one command.
+
+**And in the artifact, DEF-95.** `internal/fixturegen.TestFixtureCoverage` has been red
+on `main` for at least three consecutive runs — `33395284766`, `33385514197`,
+`33384065369` — all three reporting overall conclusion **success**. Cause is small:
+`access_constraints` was added with no fixture row, so the test sees 59 tables where it
+asserts exactly 58. Routed to `ci-fix-lead`. The failure is not the interesting part.
+**It was invisible.** The run list is green, the job summary is green, the PR checks are
+green; it exists only inside a downloadable artifact with 14-day retention. This is the
+concrete instance that makes DEF-94 worth fixing rather than noting: a non-blocking gate
+does not degrade into a warning, it degrades into silence. DEF-95 blocks DEF-94's second
+step — you cannot flip `continue-on-error` to `false` while the job is red.
+
+**DEF-98, from the same thread.** The coordinator reported PR #1432 failing
+`golangci-lint`. It is not h2's change: `main` renamed `createProjectMembersGroupAndPolicy`
+to `createProjectMembersGroup`, and `tranche-g` still calls the old name. Each branch
+compiles alone. CI lints the **merge commit**, and only the merged state is broken —
+which is exactly why my local `build` / `vet` / `gofmt` gates on the branch were clean
+and told me nothing.
+
+Rule 856: **a branch that passes every local gate can still produce a merge commit that
+does not compile.** Local gates test the branch; CI tests the merge. When they disagree,
+the disagreement is the finding. Recommendation to ptone, since this is his merge: do
+**not** rebase yet — rebasing moves the SHA out from under the binary gteam is about to
+be tested on. Freeze `tranche-g` through QA, rebase before merge. Blocks merging, not
+testing.
+
+**DEF-97 — my own incident, and the worst of the four.** h1 answered my question about
+its confused "before h2 was stripped" remark with: `SCION_WORKSPACE_MODE=shared-plain`,
+toplevel `/scion-volumes/contrib-repo`, checked out on **`scion/ca-msg-h2`**, with
+`M pkg/hub/webchannel_store_postgres.go` — h1's uncommitted Postgres fix — sitting in
+h2's tree. **I dispatched two implementation agents into one working tree.** One
+`git checkout` from h2 and h1's work was gone silently.
+
+This is documented behaviour in CLAUDE.md that I did not read before assuming isolation.
+Contained without loss: froze h2 on all git operations (acknowledged), had h1 export to
+`/tmp/h1-pg-fix.patch` — a patch file, deliberately not `git stash`, because the stash is
+shared too and h2 could have popped it — then move to a private `git worktree` at
+`/tmp/h1-tree`. All four steps reported clean.
+
+Two things worth keeping. First, the residual: **worktrees isolate HEAD and index but
+share refs**, so never-force-push and never-touch-another-agent's-branch still bind.
+Second, and more useful: I had already seen this. h1's "before h2 was stripped" was
+flagged by me as a wrong belief about branch state and I asked about it mainly to correct
+it. It was not a wrong belief — h1 was accurately reporting the shared tree's HEAD. The
+incident was legible in a throwaway sentence an hour before I understood it.
+
+Rule 855: **a nonsense sentence in a status report is evidence about the environment, not
+about the reporter.** Chase it before correcting it. An agent describing something
+impossible is usually describing something real that you believe is impossible.
+
+Rule 857: **check `SCION_WORKSPACE_MODE` before dispatching parallel implementation
+agents, and put the worktree in the brief.** Isolation is not the default and assuming it
+costs nothing to check.
+
+**Alongside all of this, h2 cleared the gteam risk from §5kd.** Fresh-DB SQLite boot: no
+init ERROR, healthz up, 18 sections seeded, `GET /api/v1/admin/messaging` returns **200
+with both switches false — not 501**; PUT both true, GET reads back true; second boot on
+the same DB comes up clean and the values survive. On an existing populated DB,
+`syncHubSettings` is per-section: absent row inserts, `origin='managed'` rows are skipped
+entirely, `origin='seeded'` rows update only on semantic difference, and `BackfillOrigin`
+runs first and marks manually-set rows `managed`. gteam's `hub_settings` is empty today
+because the postgres gate meant the path never ran, so first boot is all INSERT with
+nothing to conflict with. One real behaviour change, flagged not fixed: on config reload
+SQLite now goes through `handlePutServerConfigDB` (full snapshot) instead of
+`reloadSettings`/`BuildLayer1SnapshotFromFile` (~7 fields). By design, within ptone's
+stated drift budget, and identical in value for a DB seeded from the same `settings.yaml`.
+**The §5kd blocker is cleared and the gteam rebuild is no longer gated on it.**
+
+**h1: DEF-89 is half-fixed, and h1 found more of it than I did.** Its SQLite change is
+right — U-TX-1 respected (`hasConversationsTable()` before `BeginTx`), tests use
+`MaxOpenConns(1)` *and* a 5s context timeout, and I verified rather than accepted the
+`external_ref` claim: the dual-write branch and `backfillTopicConversations` both hardcode
+`kind='group', surface='native', external_ref='', parent_ref=''`. Identical, so h1 chose
+nothing, which is what the brief demanded. I also confirmed these tests compile and run
+under `-tags no_sqlite`, so DEF-94 does not hide them.
+
+But **`pgWebChatStore.CreateTopic` has the identical bug and h1 had not touched it.**
+gteam is SQLite so our testing would have looked fine while the production driver kept
+decaying. Sent it back to extend the fix. Then, when I asked it to confirm my list of
+four hardcoded group-conversation inserts was complete, it named **four more** in
+`webchannel_store_postgres.go` — eight sites, not four. I had asserted my list was
+probably complete; it was half.
+
+Rule 858: **ask the agent to falsify your inventory, not to confirm it.** "Confirm these
+are the only ones, or name the ones I missed" got me four sites that "does this look
+right?" would not have.
+
+Filed **DEF-96** for `PromoteDM`, and explicitly blocked h1 from fixing it. h1 was right
+that it is the same *shape* and I was wrong to have implied it would be the same *fix*.
+`CreateTopic` mints a conversation where none existed; `PromoteDM` promotes a DM that
+already has a `direct` conversation whose `external_ref` is the DM key — and the key is
+the ACL. Minting a `group` conversation with `external_ref=''` beside it decides who can
+read the promoted history, which is a conversation-kind transition with an ACL
+consequence, against INVARIANT D-1 and the rule that a DM `Conversation` is never the
+authority for membership. That is mine to design, not h1's to pattern-match.
+
+Rule 859: **structural similarity is not fix similarity.** Two call sites with the same
+shape can sit on opposite sides of an authorization boundary, and the one that already
+has an ACL is never the easy one.
