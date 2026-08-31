@@ -159,21 +159,38 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// scope=mine: projects the current user owns
+	// scope=mine: projects the current user owns or is a member of
 	// scope=shared: projects where the user is a member/admin but not the owner
 	// mine=true (legacy): projects the user owns or is a member of
+	//
+	// All scopes merge two membership sources:
+	//   1. Legacy group memberships (resolveUserProjectIDs)
+	//   2. Project-scoped RoleBindings (resolveUserRBProjectIDs)
 	switch query.Get("scope") {
 	case "mine":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			// Legacy ownership (Project.OwnerID) combined with
+			// RoleBinding-based and group-based membership.
 			filter.OwnerID = userIdent.ID()
+			memberIDs := mergeProjectIDs(
+				s.resolveUserProjectIDs(ctx, userIdent.ID()),
+				s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
+			)
+			if len(memberIDs) > 0 {
+				filter.MemberOrOwnerIDs = memberIDs
+			}
 		}
 	case "shared":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
-				filter.MemberProjectIDs = projectIDs
+			memberIDs := mergeProjectIDs(
+				s.resolveUserProjectIDs(ctx, userIdent.ID()),
+				s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
+			)
+			if len(memberIDs) > 0 {
+				filter.MemberProjectIDs = memberIDs
 				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
-				// User has no group memberships — return empty result
+				// User has no memberships — return empty result
 				filter.MemberProjectIDs = []string{"__none__"}
 			}
 		}
@@ -182,8 +199,12 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		if query.Get("mine") == "true" {
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 				filter.OwnerID = userIdent.ID()
-				if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
-					filter.MemberOrOwnerIDs = projectIDs
+				memberIDs := mergeProjectIDs(
+					s.resolveUserProjectIDs(ctx, userIdent.ID()),
+					s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
+				)
+				if len(memberIDs) > 0 {
+					filter.MemberOrOwnerIDs = memberIDs
 				}
 			}
 		}
@@ -285,6 +306,12 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	// SECURITY-GATE: CheckAccess — verify project.create permission.
+	// The resource is hub-scoped because the project does not exist yet.
+	if !s.authorize(w, r, Resource{Type: "project"}, ActionCreate) {
+		return
+	}
 
 	var req CreateProjectRequest
 	if err := readJSON(r, &req); err != nil {
@@ -1296,6 +1323,13 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SECURITY-GATE: CheckAccess — verify project.create permission.
+	// Register may find an existing project or create a new one; either way
+	// the caller must be allowed to provision projects at hub scope.
+	if !s.authorize(w, r, Resource{Type: "project"}, ActionCreate) {
+		return
+	}
+
 	ctx := r.Context()
 
 	var req RegisterProjectRequest
@@ -1720,6 +1754,19 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 
 	// Parse project ID to extract UUID (supports {uuid}__{slug} format)
 	projectID := resolveProjectID(projectIDRaw)
+
+	// Check for nested /members path (PM1: project-scoped members API)
+	if strings.HasPrefix(subPath, "members") {
+		memberPath := strings.TrimPrefix(subPath, "members")
+		memberPath = strings.TrimPrefix(memberPath, "/")
+		memberPath = strings.TrimSuffix(memberPath, "/")
+		if memberPath == "" {
+			s.handleProjectMembers(w, r, projectID)
+		} else {
+			s.handleProjectMemberByID(w, r, projectID, memberPath)
+		}
+		return
+	}
 
 	// Check for nested /agents path
 	if strings.HasPrefix(subPath, "agents") {

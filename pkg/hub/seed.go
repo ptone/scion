@@ -111,7 +111,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubMember,
 			Description: "Hub member with read access to directory resources and project creation",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    2,
 			Permissions: hubMemberPermissionIDs(),
 		},
 		{
@@ -120,7 +120,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubViewer,
 			Description: "Hub viewer with read-only access to directory resources",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    2,
 			Permissions: hubViewerPermissionIDs(),
 		},
 
@@ -215,8 +215,11 @@ func hubMemberPermissionIDs() []string {
 		"quota.read",
 		// Role definitions (read-only)
 		"role.read",
-		// Role bindings (read-only)
-		"role_binding.read",
+		// S1 fix: role_binding.read REMOVED. Hub members no longer need
+		// system-scoped role_binding.read because the project members UI
+		// uses the project-scoped /api/v1/projects/{id}/members endpoint,
+		// which authorizes via project.read instead. Leaving role_binding.read
+		// here let any hub member enumerate all role bindings hub-wide.
 		// Hub metadata (read-only)
 		"hub.settings.read",
 		// Project creation — hub members may create projects
@@ -248,7 +251,7 @@ func hubViewerPermissionIDs() []string {
 		"skill.list",
 		"quota.read",
 		"role.read",
-		"role_binding.read",
+		// S1 fix: role_binding.read REMOVED — same rationale as hub-member.
 		"hub.settings.read",
 	}
 }
@@ -870,12 +873,21 @@ func agentRolePermissionIDs(role AgentRole) []string {
 }
 
 // BackfillRoleBindings creates role bindings from existing User.Role values and
-// project group memberships. It is idempotent (skips if binding already exists)
-// and called from the startup/migration path.
+// project ownership. It is idempotent (skips if binding already exists) and
+// called from the startup/migration path.
 func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 	// Backfill system role bindings from User.Role
 	if err := backfillUserRoleBindings(ctx, s); err != nil {
 		return fmt.Errorf("backfill user role bindings: %w", err)
+	}
+
+	// Backfill project-owner role bindings from Project.CreatedBy.
+	// Pre-existing projects (created before project-scoped RoleBindings were
+	// introduced) have a legacy CreatedBy/OwnerID but no project-owner
+	// RoleBinding. This causes the project members view to show "no members"
+	// and the "my projects" filter to miss RoleBinding-based membership.
+	if err := backfillProjectOwnerRoleBindings(ctx, s); err != nil {
+		return fmt.Errorf("backfill project owner role bindings: %w", err)
 	}
 
 	return nil
@@ -941,6 +953,68 @@ func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
 
 	if created > 0 {
 		slog.Info("backfilled user role bindings", "created", created)
+	}
+	return nil
+}
+
+// backfillProjectOwnerRoleBindings creates project-scoped project-owner role
+// bindings from legacy Project.CreatedBy values. Pre-existing projects
+// (created before the RoleBinding-based membership model) have a CreatedBy
+// user but no corresponding project-owner RoleBinding, which causes the
+// project members view to show "no members". This function is idempotent:
+// it skips projects that already have the binding.
+func backfillProjectOwnerRoleBindings(ctx context.Context, s store.Store) error {
+	ownerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	if err != nil {
+		slog.Warn("project-owner role definition not found during backfill; skipping", "error", err)
+		return nil // not fatal — role definitions may not be seeded yet
+	}
+
+	var cursor string
+	var created int
+	for {
+		projects, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
+			Limit:          200,
+			Cursor:         cursor,
+			SkipTotalCount: true,
+		})
+		if err != nil {
+			return fmt.Errorf("list projects for owner backfill: %w", err)
+		}
+
+		for i := range projects.Items {
+			p := &projects.Items[i]
+			if p.CreatedBy == "" {
+				continue
+			}
+
+			_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: ownerRoleDef.ID,
+				PrincipalType:    store.RoleBindingPrincipalUser,
+				PrincipalID:      p.CreatedBy,
+				ScopeType:        store.RoleScopeProject,
+				ScopeID:          p.ID,
+				CreatedBy:        "system-backfill",
+			})
+			if err != nil {
+				if errors.Is(err, store.ErrAlreadyExists) {
+					continue // already has binding — idempotent
+				}
+				slog.Warn("failed to create project-owner role binding during backfill",
+					"project_id", p.ID, "user_id", p.CreatedBy, "error", err)
+				continue
+			}
+			created++
+		}
+
+		if projects.NextCursor == "" {
+			break
+		}
+		cursor = projects.NextCursor
+	}
+
+	if created > 0 {
+		slog.Info("backfilled project-owner role bindings", "created", created)
 	}
 	return nil
 }
