@@ -27118,3 +27118,82 @@ recovery story.
 **Rule 749** — When a specialist's analysis undercuts a claim you made earlier,
 say so in the reply to them, naming the earlier claim. Silently narrowing it
 leaves them believing the original.
+
+---
+
+## 5io — Known-good stash landed; the runbook's DB step is inverted
+
+instance-investigator delivered the stash, the runbook, and pre-deploy baselines.
+
+```
+/usr/local/bin/scion.known-good-17376c05   209,235,183 bytes
+  scion dev (commit 17376c05) — executes
+scion.rollback-1a2c1b07                    left alone
+```
+
+Baselines: `conversations` = **7**, non-deleted `webchat_topic` = **39**,
+expected post-backfill = **46**, `webchat_migrations` = 3 recorded (none
+conversation-related). That last line is the one that matters: neither
+`topic_conversation_id` nor `topic_conversation_backfill` has run on the VM.
+
+### The stash needs no independent validation
+
+They flagged 209MB vs the old rollback's 309MB and reached for "different Go
+version or build flags." Probably right, but it is a fact about
+`rollback-1a2c1b07`, not about the new stash. The new stash is a **copy of the
+installed binary the live process is running** — not a rebuild. It is
+self-validating in the strongest available sense: it is what is serving now.
+
+### The runbook's optional DB restore is backwards for this deploy
+
+The runbook offers `cp hub.db.pre-<SHA> hub.db` between steps 1 and 2 as the
+"full data rollback." **For this specific deploy that step is a hazard, not extra
+safety**, and I verified why rather than assuming it.
+
+`17376c05` still carries the DEF-83 defect: the schema block at
+`webchannel_store.go:437` unconditionally issues
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_conversation
+    ON webchat_topic (conversation_id) WHERE conversation_id IS NOT NULL;
+```
+
+On a pre-existing DB the column does not exist, the block fails, `Init()`
+returns early, and `addTopicConversationID()` — the migration that would have
+created the column — is never reached. That is today's VM: web chat down.
+
+So the ordering inverts on rollback:
+
+| Rollback variant | Resulting state |
+|---|---|
+| Binary only | column present → DDL block succeeds → **web chat works** |
+| Binary + DB restore | column gone → DDL fails again → **web chat down** |
+
+**Binary-only rollback is strictly better than the current production state.**
+Restoring the DB alongside it returns the box to exactly today's breakage and
+discards the schema repair. The DB restore is a *data-corruption* recovery step
+only, and must be labelled as such — never as the more thorough option.
+
+### The backfill is resumable; partial failure does not poison the guard
+
+Checked because a half-run backfill plus a recorded guard would strand rows
+permanently. It does not. `markMigrationCompleted("topic_conversation_backfill")`
+is called only after the whole loop succeeds, and the driving query filters
+`WHERE conversation_id IS NULL AND deleted_at IS NULL`. Fail at topic 20 of 39
+and the guard stays unrecorded; the next start resumes on the remaining 19.
+`topic_conversation_id` is recorded separately, so the schema step surviving a
+failed backfill is correct, not a gap.
+
+This is the resumability I would otherwise have had to ask for. Recording it so
+it is not re-derived, and so anyone tempted to "clean up" the guard understands
+what the two-migration split buys.
+
+**Rule 750** — Before endorsing a rollback that pairs a binary revert with a data
+revert, check whether the old binary tolerates the *new* schema. If it does, the
+data revert is optional; if the old binary is the one the migration was fixing,
+the data revert re-breaks it. Rollback steps are not independently composable.
+
+**Rule 751** — A stash is only known-good relative to a deployment pointer. The
+moment `deploy/gteam` advances, `known-good-17376c05` becomes the next
+`rollback-1a2c1b07`. Refreshing the stash belongs in the deploy sequence, not in
+someone's memory.
