@@ -26373,3 +26373,70 @@ the interlock exists.
 **Rule 719** — When you hand a specialist your option list, say plainly that you
 want it contradicted. A list from the coordinator reads as a decision already
 made, and the specialist's better fourth option goes unspoken.
+
+---
+
+## 5ig — Asked to be contradicted, was, and adopted it
+
+instance-investigator answered the invitation in 5if with option **(d)**: a
+dedicated `deploy/gteam` branch on the fork, tracked via
+`SCION_MAINTENANCE_REPO_PATH=/home/scion/scion-tranche-g@deploy/gteam`.
+`scion/tranche-g` stays the development branch; `deploy/gteam` moves only when
+someone deliberately moves it.
+
+It is strictly better than my (b) and the reason is worth keeping: **my option
+made the button work and then asked people to remember not to press it. Theirs
+makes carefulness unnecessary.** A convention humans must honour, replaced by a
+property of the branch. Withdrew (b), adopted (d), credited them to ptone by
+name.
+
+They also closed the SHA-pinning question properly rather than accepting my
+framing: four call sites, and the API's `params["branch"]` override still gets
+`origin/` prepended, so passing a SHA yields `git reset --hard origin/<SHA>`
+which does not resolve. A stable branch is the only pin the machinery offers.
+
+### My refinement
+
+Make `deploy/gteam` mean **"verified running on this box"**, not "intended for
+this box" — advance it *after* a successful manual deploy, never before.
+
+As written, (d) is a forward-deploy tool: the branch holds code believed good,
+and the button risks being the first thing to run it. Refined, it holds code
+already watched running on that hardware, and the button becomes a **recovery**
+tool — pressing it can only return the box to a state it has previously reached
+successfully. Side benefit: a rollback target that is a git ref rather than a
+stashed binary, surviving disk cleanup and legible to whoever did not do the
+deploy.
+
+The coordination step they identified does not disappear; it moves to the end.
+
+### Created the branch, inert
+
+Pushed `deploy/gteam` = `17376c05dffc2dd86a6dbb66c467ca2785d3d1af` on
+ptone/scion — the SHA running and verified on the box. **Nothing operational
+changed:** no env var touched, the VM's `origin` is still GoogleCloudPlatform,
+the rebuild still aborts. A bookmark.
+
+Did it now because a known-good branch is only worth having if it records a
+known-good state from day one, and today we have one. Told both ptone and
+instance-investigator explicitly that it is inert, so neither reads branch
+creation as deployment.
+
+Env var and second checkout remain ptone's call — his machinery, his repo
+layout. instance-investigator told to change nothing until he answers, and given
+one cheap read-only task meanwhile: confirm a fork-origin checkout resolves
+`origin/deploy/gteam` cleanly, so a yes does not turn into a surprise.
+
+**Rule 720** — Prefer the design that makes carefulness unnecessary over the one
+that requires it. "Works, but do not press it yet" is a control that fails the
+first time someone is tired or new. If you catch yourself pairing a mechanism
+with a behavioural warning, the warning is the design smell.
+
+**Rule 721** — A deployment pointer should record what has been *verified*, not
+what is *intended*. Advanced after verification it is a recovery tool and a
+rollback target; advanced before, it is an unreviewed forward deploy waiting for
+someone to press a button.
+
+**Rule 722** — When you create infrastructure ahead of a decision, state its
+inertness in the same message. A new branch named `deploy/*` reads as a deploy
+to anyone who did not create it.
