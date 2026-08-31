@@ -29085,3 +29085,54 @@ deploy automation SSHes into these boxes from outside GCP. Only ptone can answer
 yes, the fleet edit breaks it and the tag approach is the safer path for the rest.
 
 DEF-90 stays OPEN — gteam is remediated, the fleet is not.
+
+---
+
+### 5jq — ptone catches a gap: we never established how instance-investigator authenticates
+
+ptone: *"I think we should double check with instance investigator that they use the
+IAP login path - my guess is yes, or os-login at least, as their are no ssh keys or
+PW set is my understanding."*
+
+He is right that it is unestablished, and I should have noticed. I spent this whole
+sequence reasoning carefully about **transport** — which source ranges reach port 22
+— and never once asked what **credential** gets past sshd once the packet arrives.
+Those are independent, and I had been treating "instance-investigator has been
+SSHing in all week" as a single fact when it is two.
+
+**Rule 831: reachability and authentication are separate questions, and evidence
+about one is not evidence about the other.** "It has been getting in" answers
+neither on its own; it only tells you that some pairing worked.
+
+Asked instance-investigator five specific questions rather than "how do you log in":
+the verbatim command form (and whether it carries `--internal-ip`,
+`--tunnel-through-iap`, or neither), its gcloud principal, whether
+`~/.ssh/google_compute_engine` exists in its container, the project-level
+`enable-oslogin` value, and an explicit IAP test under its own identity — which we
+have never run. The `4033` in §5jk was a service account, but not necessarily *that*
+service account.
+
+**My hypothesis is a third answer neither of us named.** `gcloud compute ssh`
+generates a keypair on first use and pushes the public half into project or instance
+metadata. That is a metadata SSH key: no OS Login, no password, and consistent with
+`enable-oslogin` reading unset. If so, ptone's "no SSH keys are set" is nearly right
+— none were set *by hand*, and gcloud set one on our behalf.
+
+**This exposes a real defect in the runbook I rewrote forty minutes ago.** §5jp names
+two routes and says nothing about which credential each requires. Two operators
+could follow the same instruction and get different outcomes, and that discovery
+would happen during an incident. Not fixing it until the answer is in — a guess
+written confidently into a recovery document is worse than the current silence.
+
+**Rule 832: a procedure that names a path must name the credential that path needs.**
+Transport-only instructions read as complete and are not.
+
+Practically the firewall work is unaffected: metadata keys and IAP both traverse the
+ranges we left open, so anything working an hour ago works now, and my probe confirms
+the transport independently of credential. What it may change is the fleet edit — if
+instance-investigator gets `4033`, IAP substitutes for ptone but not for our
+automation, and any move leaving IAP as the sole route needs a role grant first.
+
+**Held the `default-allow-ssh` recommendation from §5jp pending that answer.** I had
+already sent it; I told him I am holding it rather than letting a live recommendation
+sit under an open question.
