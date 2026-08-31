@@ -27197,3 +27197,39 @@ the data revert re-breaks it. Rollback steps are not independently composable.
 moment `deploy/gteam` advances, `known-good-17376c05` becomes the next
 `rollback-1a2c1b07`. Refreshing the stash belongs in the deploy sequence, not in
 someone's memory.
+
+### 5io addendum — runbook corrected, two follow-ups
+
+instance-investigator accepted all three points and reissued the runbook: retry
+loop on the healthz check, stash-refresh as step 6, and the DB restore demoted to
+a separate block with an explicit "this re-introduces DEF-83" warning.
+
+Two things back on the corrected version.
+
+**The edit silently dropped an expected value.** The original step 5 carried
+`# Expected: 28` against the container count; the rewrite kept the command and
+lost the comment. A verification step with no expected value is not a
+verification step — it prints a number to someone who is reading it because
+production is down at an hour they did not choose and who has never seen the
+baseline. `27` and `28` are indistinguishable to that reader. Same gap on the
+healthz check, which prints version and status but never states the expected
+pair, and whose retry loop falls through silently after six attempts with
+"Attempt 6: not ready yet" as the last line — that reads as progress, not
+failure.
+
+**The runbook needs to outlive its author.** It existed only in two agent
+messages. When the container is deleted the runbook goes with it and the stash on
+the box becomes an artifact nobody has instructions for — the
+`rollback-1a2c1b07` problem recurring one level up. Asked for it at
+`/scion-volumes/scratchpad/runbooks/gteam-rollback.md`, dated, naming the SHA it
+is valid for, with the baselines table included.
+
+**Rule 752** — A verification step that prints a value without stating the
+expected value is not a verification step. Runbooks are read by people who lack
+the context that made the number meaningful to the author, under conditions that
+selected against their having it.
+
+**Rule 753** — Operational knowledge held only in an agent's messages dies with
+the container. Anything a future operator must follow goes to a durable path
+before the agent that produced it is retired, and the pointer goes in the state
+doc. A recovery artifact with no instructions is the same failure as no artifact.
