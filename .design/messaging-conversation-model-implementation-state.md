@@ -26015,3 +26015,70 @@ verification pass, and the reporting agent should name what it did *not* touch.
 "I rebased and gates are green" is compatible with having silently reverted a
 predicate; green gates do not test the thing you removed if you also removed
 the test's reason to care.
+
+---
+
+## 5ib — Tranche G to the scion-gteam test VM
+
+ptone asked me to work with `instance-investigator` to install tranche G as the
+maintenance repo on scion-gteam. They own the instance, I own the payload.
+
+### Rebased before handing it over
+
+`scion/tranche-g` was 3 behind `upstream/main`. Rebased `66b5cab7f` →
+`9f66cd551`, new tip **`17376c05d`**. Conflict-free, but verified anyway:
+
+- diff vs `upstream/main` identical in shape to pre-rebase diff vs old
+  merge-base — same 32 files, same `+3522/-446`
+- zero overlap between my 32 files and the 19 files in the 3 picked-up commits
+- `upstream/main` is an ancestor
+- deletion audit **re-run post-rebase**: zero test functions removed, 12 files
+
+Gates on the exact deployed SHA: gofmt/build/vet clean, `pkg/messaging` pass,
+`pkg/hub` pass at **349s** (inside the 339–364s baseline, so it ran fully rather
+than exiting early — the duration is the evidence, not the "ok"). One failure,
+`TestDeleteStopped_RequiresGroveContext`, no docker in my container; confirmed
+not mine via `git log -S` across the 13 commits and absence from the 32-file
+diff. Reported the raw number to instance-investigator rather than "all green."
+
+### The finding: this is not a 13-commit deploy
+
+VM was on `1a2c1b07d`; my base is `9f66cd551`. **19 upstream commits between
+them, every one touching `pkg/hub` or `pkg/messaging`.** Three are
+access-control changes: #1414 membership-based Policy access control, #1415
+scheduler authz owner, #1411 uniform broker inbound sender authorization.
+
+My "install is inert" guarantee covers **my 13 commits**. I have not reviewed
+those three and refused to let the inertness claim be laundered onto them.
+
+Not a blocker, and going forward is *required* rather than incidental: #1426
+adds the backfill entry point (DEF-12), and backfill is step 3 of activation.
+Pinning back to `1a2c1b07` would ship a tranche whose activation path does not
+exist. So: forward, with the blast radius stated as 32 commits and the authz
+three named to their own owners.
+
+### Branch freeze
+
+Step 5 points `SCION_MAINTENANCE_REPO_BRANCH` at `scion/tranche-g`, so the
+hub's self-rebuild now resolves whatever that ref points to. I had been
+force-pushing it freely — did so an hour ago. Committed to freezing it from
+deploy onward; further work goes on new branches with explicit SHA handoff.
+
+**Rule 704** — Pointing a deployment channel at a branch converts that branch
+from a work surface into a release artifact. Freeze it at that moment, and say
+so out loud, or a rebase done for unrelated reasons becomes an unrequested
+deploy. This is the same defect shape as an unconditional flip (rule 697):
+deployment becoming the decision, arriving through the release channel instead
+of the code.
+
+**Rule 705** — When your change is carried in on top of N commits of other
+people's work, state the true blast radius to the operator and name the owners
+of the parts you cannot vouch for. Otherwise your narrow guarantee gets read as
+covering the whole deploy, and you become the default suspect for regressions
+you did not write — which also means the real owner never gets called.
+
+**Rule 706** — Verify the deployed artifact reports the SHA you built. Asked
+instance-investigator for `/healthz` `scionVersion`, and for confirmation that
+the maintenance branch resolves against the `ptone` remote rather than upstream
+— a self-rebuild pointed at the wrong remote fails only when someone triggers
+it under pressure.
