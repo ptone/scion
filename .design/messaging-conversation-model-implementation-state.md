@@ -30484,3 +30484,104 @@ not a style preference, it is what makes the negative result admissible.**
 whether a type has production callers, the package qualifier is part of the pattern —
 `DeliveryState` found four packages, `messaging.Message{` found none, and only the second
 number was the answer.**
+
+---
+
+## §5ko — DEF-100 fixed, reviewed, merged to tranche-g
+
+**Commit `85f25c1a1`** "fix(messaging): add topic-lookup intercept to read-path resolver
+(DEF-100)", by `ca-msg-h3`. Merged to `scion/tranche-g` by fast-forward
+(`93916ca20..85f25c1a1`); remote tranche-g was verified unmoved at `93916ca2` immediately
+before the push, and verified at `85f25c1a1` immediately after.
+
+### Numstat, re-run by me
+
+```
+  2   1  pkg/hub/handlers_chat_v2.go
+  5   1  pkg/hub/handlers_messages.go
+442   0  pkg/hub/handlers_read_switch_def100_test.go
+ 21  11  pkg/hub/handlers_read_switch_test.go
+ 68   1  pkg/messaging/conversation.go
+202   0  pkg/messaging/conversation_test.go
+```
+
+Single commit, descendant of tranche-g, no rebase needed. **740 of the 809 added lines are
+tests.** The production change is 75 lines across three files.
+
+### The fix
+
+`ResolveThreadConversationForRead` grows a functional option `WithReadTopicLookup`. When a
+`TopicConversationLookup` is supplied and the derived key is a `group` with a `thread:`
+prefix, it resolves through `GetTopicConversationIDIncludingDeleted` **before** trying
+`GetConversationByExternalRef`. Four outcomes, all explicit:
+
+- `convID != ""` → resolved, return it.
+- `convID == ""`, no error → topic exists but is not backfilled → return nil (fail closed).
+- error that is not `store.ErrNotFound` → infrastructure failure → **do not fall through**,
+  return nil. This is the right call: falling through on an infra error would turn a
+  transient DB problem into a wrong answer.
+- `store.ErrNotFound` → not a native topic → fall through to the external_ref lookup.
+
+This is the same intercept the write path already had at `derive_key.go:131`, so read and
+write now share one resolution rule. That was the recommendation in §5kl and it is what
+landed.
+
+Both call sites pass the lookup: `handlers_chat_v2.go:1868` (already had `wcs` in hand) and
+`handlers_messages.go:305-309` (guards on `s.webChatStore != nil` and passes a variadic
+slice). The bare `s.webChatStore` read without RLock matches the established pattern at 20+
+other sites in `pkg/hub`; not a new race.
+
+**Fall-through correctness checked at the source, not assumed.** Both implementations —
+`webchannel_store.go:1398` (sqlite) and `webchannel_store_postgres.go:1002` (pg) — wrap
+`sql.ErrNoRows` as `%w` of `store.ErrNotFound`, and the caller uses `errors.Is`. The
+non-native path (T4) therefore actually reaches the external_ref lookup.
+
+### The 11 deleted test lines — checked, they strengthen the gate
+
+Standing caution about risky replace actions applies to test deletions too, so I read them.
+The deletions replace two `rsWebChatStore` stubs that returned `"", nil` unconditionally.
+Under the new code `"", nil` means "topic exists, not yet backfilled" — so left as stubs
+they would have made every fixture look like an un-backfilled topic and produced a
+false-red or a false-green depending on the test. h3 replaced them with real map lookups
+that return `store.ErrNotFound` when absent, and `GetTopicConversationID` additionally
+honours `DeletedAt`. The other hunk reorders `seedConversation` before the topic fixture so
+the topic can carry a real `ConversationID`. Both changes make the fake behave like the
+store. No assertion was removed.
+
+### Rule 868 was actually satisfied, which I did not expect
+
+The new `handlers_read_switch_def100_test.go` opens by naming the exact gap:
+
+> A test that seeds its own conversation row with a well-formed external_ref (like the
+> pre-DEF-100 tests) cannot detect the mismatch that caused every native web thread to
+> return 409.
+
+T1, T2, T3 and T5 obtain their fixture from the **production writer** (`CreateTopic`), which
+is what writes `external_ref=''`. T5 specifically covers `handlers_messages.go`, the site
+that had no topic lookup at all and could not be fixed at the call site. T4 covers the
+non-native fall-through. This is the producer-derived fixture Rule 868 asked for, and it is
+the first test in the refactor that would have caught DEF-100.
+
+### Gates, all run by me on the merged tree in a throwaway `/tmp` worktree
+
+| Gate | Result |
+|---|---|
+| `gofmt -l .` | clean (empty) |
+| `go build ./...` | rc=0 |
+| `go vet ./pkg/hub/... ./pkg/messaging/...` | rc=0 |
+| `go test ./pkg/messaging/...` | ok 0.011s |
+| `go test ./pkg/hub/...` | ok **358.466s**, `HUB_RC=0`; auth 12.417s, githubapp 0.589s, imagecheck 0.004s |
+
+Worktree removed and pruned afterward.
+
+### Deploy dispatched
+
+Requested from `instance-investigator` with a written prediction, per Rule 863: the restart
+changes no `hub_settings` rows, both switches read true without re-flipping, and a
+previously-409 topic returns 200. Instructed to stop and report if any of the three is
+false. Snapshot `/home/scion/hub.db.pre-85f25c1a` via the sqlite `.backup` API required
+before anything else, with the full retention list restated so nothing paired gets pruned.
+
+**Not yet reported to ptone.** He asked to be told when the fix is *deployed*, not when it
+is merged. Merged is not deployed and web chat on gteam is still broken until the
+instance-investigator confirms.
