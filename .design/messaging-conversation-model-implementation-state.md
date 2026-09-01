@@ -30842,3 +30842,71 @@ a factor of three, and the understatement was not visible without measuring.**
 Both findings, the withdrawal, and the recommended order. Told him Phase 9 needs three
 decisions from him and offered to raise them one at a time on his signal rather than
 front-loading them.
+
+---
+
+## §5ks — PR #1432 is CONFLICTING. One file, one hunk, additive/additive.
+
+Coordinator's repo sweep reported "only 6 of 12 checks, Build & Test not running, possible
+draft state or workflow trigger issue." Measured rather than accepted.
+
+### The CI report was a non-finding
+
+`isDraft: true`, set by **ptone himself** at `2026-08-31T01:33:51Z` (`convert_to_draft`
+event). 38 hours old and entirely consistent with *"I am not merging to main until testing
+is completed."* The reduced check set is the expected consequence: `check-changes` passed,
+the four zizmor jobs report `skipping` (path filter behaving normally). No trigger issue.
+
+Told the coordinator not to reopen on check-count alone: **a check count is only an anomaly
+if you know what it should be for the PR's current state, and for a draft it should be
+lower.** Same class of error as the ~24.5h lint-red age flag — measuring a number without
+establishing what the number ought to be.
+
+### What actually changed, which the sweep missed
+
+`mergeable` went `MERGEABLE` → **`CONFLICTING`**, `mergeStateStatus` `UNSTABLE` → **`DIRTY`**.
+Upstream main is 17 commits past the merge base (`9f66cd551`); tranche-g is 20 ahead. Main
+head `0188a9341`.
+
+Ran the merge in a throwaway `/tmp` worktree. **Exactly one conflicted file, one hunk:
+`pkg/hub/errors.go`.** Both sides appended new `ErrCode*` constants to the same `const`
+block:
+
+- ours (3): `ErrCodeConversationNotResolved`, `ErrCodeInvalidDMKey`,
+  `ErrCodeThreadProjectRequired`
+- theirs (11): `ErrCodeStaleAuthorizationPreview`,
+  `ErrCodeInsufficientRelaxationAuthority`, `ErrCodeMutationPermissionLost`,
+  `ErrCodeSecurityReviewRequired`, `ErrCodeResolutionFailed`, `ErrCodeSubjectNotFound`,
+  `ErrCodeScopeNotFound`, `ErrCodeScopeMismatch`, `ErrCodePermissionRegistryChanged`,
+  `ErrCodeRevisionConflict`, `ErrCodeRecoveryDisabledImmutable`
+
+Checked mechanically, not by eye: **zero overlapping identifiers**, and no non-const,
+non-comment lines anywhere inside the conflict markers. Correct resolution is keep both.
+Merge aborted, worktree removed, nothing committed.
+
+### Why I wrote the resolution down before anyone asked
+
+This is the exact shape that produces a silent revert. A single `<<<<<<<` inside a `const`
+block, both sides plausible in isolation, and "take ours" produces a file that compiles,
+passes our tests, and has quietly deleted 11 constants belonging to landed B5/B7 work. The
+loss would not surface until something on main referenced one of them.
+
+So the instruction is on the record with the coordinator ahead of the event: whoever
+resolves this keeps **both** blocks, and review confirms **all 14** constants survive. That
+is ptone's standing caution about not reverting other work on main, applied to a specific
+predicted failure rather than restated as a principle.
+
+**Rule 879: an additive/additive conflict is the most dangerous kind to delegate, because
+every wrong resolution still compiles. Record the required resolution and the expected
+symbol count before handing it to anyone.**
+
+### Not resolving it
+
+ptone deferred the tranche-g/main reconciliation with *"leave as is for now."* Per Rule 865
+the trigger is QA completing, not main moving — and QA went live on gteam only today. Main
+moving is new information but it does not satisfy the stated condition, and the conflict is
+one trivial hunk that will not rot. Told the coordinator I will do the merge myself when
+ptone clears it rather than dispatch it.
+
+Also noted for the record: `cla/google` reports fail. Believed pre-existing and
+identity-related. Flagged, not chased.
