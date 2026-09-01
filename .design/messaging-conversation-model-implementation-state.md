@@ -30371,3 +30371,116 @@ agents whose prompts parse the legacy field names. Not proposing to staff it mid
 **Rule 871: when a principal asks whether they should be seeing a field, check whether the
 producer is wired at all before explaining the field. "Not yet implemented" and "implemented
 but unreachable" look identical from the outside and lead to different work.**
+
+---
+
+## §5kn — Phase inventory: phases 6 and 7 measured, doc assembled
+
+**Doc:** `/scion-volumes/scratchpad/projects/ca-msg-arch/PHASE-INVENTORY.md`, mirrored to
+`/workspace/.design/messaging-phase-inventory.md`, commit `3e0330373`, pushed to
+`scion/ca-msg-arch`.
+
+### The cwd-drift correction
+
+My previous `git grep ... refs/tmp/tg -- '*.go'` calls were returning nothing for patterns
+that certainly exist. `pwd` had drifted to `/workspace/.design` from an earlier `cd`, so the
+`'*.go'` pathspec resolved against a directory containing only markdown. Every "not found"
+in that batch was an artefact. Re-ran everything with an explicit `cd /workspace` first.
+
+**This is the second time cwd drift has produced a false negative.** The standing fix is
+`git -C /workspace`, and I did not apply it. Rule 872 below.
+
+### Phase 7 — DONE, and better than I expected
+
+`pkg/messaging/validate_compat.go:29` `ValidateLegacyMessage` is a real choke point with
+**10 non-test call sites** (MEASURED): `cmd/broadcast.go:108`; `cmd/message.go` 561, 638,
+703, 734; `pkg/hub/handlers_agent_messaging.go` 275, 663;
+`pkg/hub/handlers_broker_inbound.go:226`; `pkg/hub/handlers_chat_v2.go:1142`.
+
+It does legacy-specific checks (closed type enum, `thread_id` requires `channel`, channel
+charset/length, metadata limits, body-or-attachments, sender required) and then converts via
+`MapLegacyEnvelope` and runs the *new* validators.
+
+**The part I had not registered:** it is enforced by a build gate.
+`hack/checksecuritymarkergates/main.go:527` walks every function containing a
+server-generated message constructor and fails with `FAIL [DEF-37]` unless that function
+calls `ValidateLegacyMessage` or appears on an explicit exempt list with a written
+justification (`pkg/messaging/VALIDATION_EXEMPTIONS.md`). It also flags stale exemptions.
+The choke point cannot silently regress. That is exactly the property the design asked for,
+and it is the only phase in the refactor with a machine-enforced invariant.
+
+DEF-41 (skipping `ValidateAttributed`) is a documented deferral in-source at
+`validate_compat.go:92-94`, not a gap: attribution has not run at validation time.
+
+### Phase 6 — PARTIAL, and this inverts how I had been describing it
+
+`pkg/messaging/envelope.go` defines the full new type system — `MessageKind`, `TextIntent`,
+`EventType`, `PrincipalRef`, `AddressedVia`, `DeliveryState`, `Visibility`, `EventBody`,
+`AttachmentRef`, `Message`, `Addressee`, each with a `Validate`.
+
+MEASURED, searching all `*.go` on tranche-g excluding `pkg/messaging/` and `_test`:
+
+```
+messaging.Message{  -> NONE
+MessageKind         -> NONE
+TextIntent          -> NONE
+AddressedVia        -> NONE
+```
+
+(`DeliveryState` and `PrincipalRef` do have hits, but they are unrelated same-named types in
+`pkg/store` and `pkg/hub/authz.go`. Counting them would have been the Rule 866 error again —
+a name match is not a reference.)
+
+So the new envelope is reachable in production, but only internally and only as a
+throwaway: `ValidateLegacyMessage` converts a legacy `StructuredMessage` into a
+`*messaging.Message`, validates it, and discards it. **Phase 6 shipped a validation
+vocabulary, not a wire format.** Nothing is stored in the new shape and nothing is delivered
+in it.
+
+This matters for sequencing: "finish Phase 6" is not separable work. On the outbound side it
+*is* Phase 9. On the inbound side it is Phases 10/11. There is no Phase 6 task to staff.
+
+### Phase 5 — dual-write is not switch-gated
+
+MEASURED: `pkg/config/opsettings/sections.go:128-131` — the `MessagingSettings` struct has
+exactly two fields, `ConversationReadSwitch` and `ConversationWriteDenySwitch`. There is no
+dual-write switch. The write path stamps `conversation_id` unconditionally. I had been
+loosely calling this "the dual-write switch" in conversation; it does not exist, and the
+thing I flipped alongside the read switch was the G2 write-deny switch.
+
+### Phases 1-4, 8, 9, 13
+
+Confirmed as previously journalled. Phase 2's surface measured at 15 methods on
+`store.go:1611` `ConversationStore` plus `SetMessageConversationID:1332`. Phase 13 restated
+as strictly downstream of Phase 9: `thread_id` is currently the *only* routing information an
+agent receives, so dropping it before `DeliveryEnvelope.conversation` is live and exercised
+would leave agents with no routing information at all. There is no ordering in which 13
+lands first.
+
+### Three open design questions recorded against Phase 9
+
+Not yet raised — they go to the principal serially, and DEF-100 has priority.
+
+- **Q1 cutover granularity** — hub-wide vs per-agent vs harness-config. Per-agent means
+  maintaining both formatters indefinitely.
+- **Q2 prompts that parse legacy field names** — we have no inventory of which agent
+  instructions say "the message will have a `thread_id`". Options: dual-key window, hard
+  cutover with reactive fixes, or inventory first.
+- **Q3 does `ConversationInfo.Participants` go on the wire** — for a `group` it is a
+  membership disclosure to every recipient. Under "under-granting is recoverable,
+  over-granting is not" the default is omit unless there is a named consumer.
+
+### Status of the two dispatched agents
+
+`ca-msg-inv` running (phases 10/11/12). `ca-msg-h3` reported STALLED-was-working with the
+text "Ready"; pinged for branch/SHA/numstat/gate results and told to stop rather than start
+new work.
+
+**Rule 872: a "not found" from a path-scoped search is only evidence if the search root was
+asserted in the same command. Bare `git grep` inherits a cwd that drifts; `git -C <root>` is
+not a style preference, it is what makes the negative result admissible.**
+
+**Rule 873: a same-named symbol in another package is not a reference. When measuring
+whether a type has production callers, the package qualifier is part of the pattern —
+`DeliveryState` found four packages, `messaging.Message{` found none, and only the second
+number was the answer.**
