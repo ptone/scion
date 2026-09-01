@@ -30739,3 +30739,106 @@ deploy used the `.backup` API against a running hub, which is also correct. No d
 
 `85f25c1a` deployed and healthy, both switches on, DEF-100 closed, rollback chain complete
 and now documented by absolute path. ptone corrected and unblocked.
+
+---
+
+## §5kr — Phase inventory complete. Phases 10/11/12 measured by me; two findings change the plan.
+
+`ca-msg-inv` stalled for ~35 minutes and ignored two status checks, the second of which
+asked only for a partial answer with unanswered questions marked. Retired it and did the
+work myself. It is grep-and-read evidence gathering for my own design document, so it is
+inside my remit; I would not have taken back an implementation task this way.
+
+**Rule 877: a dispatched agent that has ignored an explicit request for a partial answer is
+not slow, it is unavailable. Waiting past that point is a choice to be blocked, and it
+needs the same expiry test as any other deferral (Rule 865).**
+
+Doc: `PHASE-INVENTORY.md`, mirrored to `/workspace/.design/messaging-phase-inventory.md`,
+commit `184adc5b1`, pushed.
+
+### Phase 10 — PARTIAL
+
+Done: `scion broadcast` and `scion keys` exist as real commands with test files; 10 flags
+carry deprecation warnings with named replacements (`cmd/message.go:1254-1263`); the
+`conv:`/`@`/`#` grammar parses via `messaging.ParseReference` at `cmd/message.go:150`; and
+parse-failure-denies is honoured — a malformed reference is a hard error and does not fall
+through to the legacy path.
+
+Not done: **`conv:<id>` and `#<thread>` are explicitly refused** at `cmd/message.go:154`
+with *"not yet supported in the CLI; use @<agent-name>"*. The in-source reason is sound —
+they resolve but delivery routing does not exist, so accepting them would silently drop the
+message. Refusing is correct. But only one of three reference forms works.
+
+**`messaging.Resolve` has ZERO non-test callers.** `ParseReference` has exactly one. So the
+resolution *grammar* is reachable and the resolution *engine* — `checkPostResolutionAuth`,
+`requireParticipant` — is not. Phase 3's authorization machinery is in the same dark state
+as Phase 9. I have left Phase 3 marked DONE because the write-side sink is heavily used,
+and noted the split explicitly rather than downgrading a phase on a partial reading.
+
+**The AC-15a violation is concrete and it is in our own help text.** `--channel` and
+`--thread-id` are deprecated with *"use conversation references instead."* The reference
+that replaces `--thread-id` is `#<thread>`, which the same binary rejects. Phase 13's
+precondition is "every replacement named in a deprecation warning has shipped and been
+exercised." It fails today, on a string we ship.
+
+### Phase 11 — PARTIAL, and this is the finding that matters most
+
+Inbound is built and surface-aware: `handlers_broker_inbound.go:242` passes
+`WithSurface(req.Surface)` into key derivation, `:256` resolves,
+`messagebroker.go:472/672` handle threads.
+
+**Outbound does not use conversations at all.** `FanOutEventBus.Publish`
+(`pkg/eventbus/fanout.go:70`) takes a `*messages.StructuredMessage` and selects the spoke
+by matching `msg.Channel` against each bus's `ChannelID` (falling back to `Name`), failing
+with `no broker registered for channel %q`. `conversation.surface` appears nowhere in the
+fan-out path.
+
+**So `channel` is the outbound routing key for every external surface.** Phase 13 drops
+`channel`. Doing that before `fanout.go` routes on `surface` would not degrade delivery to
+Discord/Slack/Telegram/Teams — it would end it.
+
+This is **new work not represented in the 13-phase plan**. Recorded as Phase 11b. It has to
+follow Phase 9, because `Publish` must first accept something that carries a conversation.
+
+I found this only because I asked the question in the outbound direction. The brief I wrote
+for `ca-msg-inv` asked "is spoke selection driven by `conversation.surface`?" — the right
+question — and the first grep I ran answered the inbound half and looked like a yes.
+`req.Surface` feeding *into* key derivation is not `conversation.surface` driving delivery.
+**Rule 878: "is X wired to Y" has a direction. Confirming the direction you happened to
+grep is not confirming the one you asked about.**
+
+### Phase 12 — PARTIAL, and my flagged risk was wrong
+
+I had called the agent skill the highest-risk item on the theory that a skill documenting
+an unreachable envelope would actively mislead every agent. **It does not.**
+`resources/platform_skills/scion-messaging/SKILL.md` (171 lines) documents the legacy
+envelope — the one agents actually receive — marks `conv:<uuid>` as *"Not yet supported —
+currently errors"* (matching `cmd/message.go` exactly), points `--channel`/`--thread-id` at
+`@` addressing, which works, and tells agents to keep discriminating on `type`. It is more
+accurate than the CLI's own flag help. Withdrawn.
+
+One line does overstate. Line 130: *"New fields such as `conversation_id` may appear in
+message metadata."* Nothing is delivered. "May appear" is soft enough to defend and firm
+enough to mislead — and it is what generated ptone's question. One-line fix.
+
+Genuinely missing: **zero glossary entries.** Neither `GLOSSARY.md` nor
+`docs-site/src/content/docs/glossary.md` defines Conversation, external_ref, Addressee,
+Participant or Surface; the only hits are the web-chat visibility filter label and
+"harness conversation". Given that `external_ref` *is* the ACL for a direct conversation,
+its absence from the glossary is a real gap. No user-facing docs-site page either — only
+`docs/messaging-authorization.md`, which is internal.
+
+### Phase 13 now has three independent blockers
+
+1. Phase 9 unwired — `thread_id` is the only routing info an agent receives.
+2. `channel` is the outbound routing key — Phase 11b.
+3. A shipped deprecation names a replacement the binary rejects — Phase 10.
+
+Two of the three were found today. **The plan understated Phase 13's precondition chain by
+a factor of three, and the understatement was not visible without measuring.**
+
+### Reported to ptone
+
+Both findings, the withdrawal, and the recommended order. Told him Phase 9 needs three
+decisions from him and offered to raise them one at a time on his signal rather than
+front-loading them.
