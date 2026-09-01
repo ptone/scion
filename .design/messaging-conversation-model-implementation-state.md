@@ -30170,3 +30170,19 @@ The full `pkg/hub` suite against the merged tree is still running. Its value did
 disappear with the decision — it is advance validation of a merge we will certainly do
 later, and cheap to let finish. Result to be recorded here, then the throwaway worktree
 comes out per Rule 4.
+
+**Merged-tree suite result (advance validation, recorded before teardown).**
+`go test ./pkg/hub/ -count=1` against tranche-g merged with main: **ok, 361.1s, exit 0.**
+Note this ran *without* `-tags no_sqlite`, so it is the full sqlite-inclusive suite — i.e.
+broader than CI's blocking gate, which runs `make test-fast` and skips roughly 73% of
+`pkg/hub` (DEF-94). Combined with `go build ./...` clean, `golangci-lint` 0 issues, and the
+targeted read-switch/DM-key/authz run, the eventual merge with main's authz refactor is
+pre-validated as far as automated checks can take it.
+
+Precision about what that does **not** cover, so the number is not read as more than it
+is: the run was `./pkg/hub/`, not `./...`. `TestFixtureCoverage` (DEF-95) reports "no tests
+to run" in `pkg/hub` — it lives elsewhere and was never in scope here. Nothing in this run
+speaks to DEF-95, and I am not claiming it does. It also says nothing about `pgWebChatStore`
+(DEF-99), which has no tests anywhere to run.
+
+Throwaway worktree `/tmp/lintwt` removed per Rule 4.
