@@ -30137,3 +30137,36 @@ it also decides how ptone spends his day. Recommendation given: merge before he 
 redeploy gteam, QA the merged result — because most of Tranche G *is* authorization
 behaviour, and QA against the pre-refactor branch validates a combination that will never
 ship. Alternative stated with its cost rather than left implicit.
+
+---
+
+## §5kj — ptone: "leave as is for now"
+
+Recommendation declined. No merge, no rebase, no redeploy; gteam stays on `93916ca2` and
+QA runs against the pre-refactor branch. PR #1432 stays red on golangci-lint, knowingly.
+
+Recording the reasoning I *don't* get to apply, because it was sound and still lost, and
+the record is worth more than my being right: main's authz foundation refactor is under
+our feet, most of Tranche G is authorization behaviour, and QA on the pre-merge branch
+validates a combination that will never ship. Against that, ptone has a working box with
+both switches on and an eagerness to start exercising it, and every hour spent perfecting
+the substrate is an hour not spent finding the defects he actually wants. He has said
+repeatedly that he expects to hit defects and wants to start hitting them. Deferring the
+merge trades some rework risk for immediate signal. That is a coherent trade and it is his
+to make.
+
+What makes leaving the red legitimate rather than negligent is the measurement from §5ki:
+the fix is one identified line and, with it applied, the linter reports **0 issues**. An
+accepted red is a red whose contents you know. I would not have been comfortable leaving
+it on yesterday's characterisation, which was a guess.
+
+Told the coordinator to stop treating `93916ca2` as a stale-red to chase, and gave it the
+one-line reply to use if its sweep flags 1432 again. **The merge is sequenced, not
+cancelled. The trigger to revisit is QA completing — not a timer**, which is the mistake
+Rule 865 was written about, inverted: a deferral needs an expiry *condition*, and "17
+hours have passed" is not one.
+
+The full `pkg/hub` suite against the merged tree is still running. Its value did not
+disappear with the decision — it is advance validation of a merge we will certainly do
+later, and cheap to let finish. Result to be recorded here, then the throwaway worktree
+comes out per Rule 4.
