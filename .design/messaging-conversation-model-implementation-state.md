@@ -30074,3 +30074,66 @@ ptone warned about by name.
 Also relayed to the coordinator as not-ours: "Lint 405 Allow header (reporting only)" is
 red on **268 bare `MethodNotAllowed(w)` calls** repo-wide and pre-existing — the check
 itself cites PR #1413. Not tranche-g's, and reporting-only.
+
+---
+
+## §5ki — the deferral outlived its reason; three of my own claims falsified
+
+The coordinator asked whether 17h of a red PR meant it was time to rebase. Answering it
+properly falsified three things I had said, and turned up something considerably more
+important than the lint failure.
+
+**QA never started.** I measured instead of assuming: gteam's divergence report still
+reads `comparisons=0, matches=0, mismatches=0, fallbacks=0` after 17 hours, uptime
+16h48m, zero restarts, zero ERROR lines, both switches still ON in the DB. My entire
+deferral rationale was *"a rebase would swap code out from under the tester mid-session."*
+There was no session. **Rule 865: a deferral is a decision with an expiry, and the
+condition that justified it has to be re-checked, not remembered.** I held a red for 17
+hours on a rationale that had stopped being true — possibly from the moment I wrote it.
+
+**The fix is one line, not 86.** I told the coordinator "a mechanical rename of 86 call
+sites across 30 files." That counted the old name on tranche-g *in isolation*. But the
+failure lives in the merge, and in the merged tree git has already resolved 85 of the 86,
+because main's rename commit touched the same files. Exactly one survives —
+`handlers_broker_inbound_test.go:659` — which is precisely the one site CI reported.
+
+That is the galling part. **Rule 866: when the failure is in the merge, measure the merge.
+Counting occurrences on the branch answers a different question than "what does the fix
+cost."** I had written Rule 856 (*local gates test the branch, CI tests the merge*) the day
+before, then immediately went and measured the branch. CI had told me the whole truth in
+one line and I inflated it twelvefold.
+
+**The blind spot was hiding nothing.** I had said the typecheck failure suppresses all
+other golangci-lint output and called it *"a blind spot, not a cosmetic red."* I have now
+tested that claim: throwaway worktree, merge main into tranche-g, apply the one-line
+rename, `golangci-lint run --new-from-merge-base=origin/main` → **0 issues, exit 0.**
+Asserting the responsible default was right; leaving it unmeasured for 17h was not.
+
+**What actually matters, found while measuring the above.** Main has moved **13 commits,
+191 files, ~29,800 insertions, ~8,900 deletions** since our branch point, including
+`a61cddd63` — an authorization foundation refactor to a RoleBinding-only model with
+AccessConstraints. It rewrites `authz.go` (792/699), rewrites `seed.go` (602/809), adds
+`authz_kernel.go` and a large golden-test suite. That is directly beneath Tranche G's
+messaging authorization.
+
+Signs are reassuring and I took care not to overstate them: the merge is conflict-free,
+`go build ./...` passes, the targeted ReadSwitch/DMKey/AuthorizeAgentMessage/Conversation
+tests pass in 10.4s, and every prohibition-list symbol survives at tranche-g's count or
+higher (`authorizeAgentMessage` 101, `parseDMKeyIDs` 20, `checkDMParticipantKey` 24,
+`EnsureParticipant` 67).
+
+I chased one apparent silent drop and it was **unfounded** — worth recording, because the
+instinct to alarm was strong. `isDMParticipant` counted 20 on main and 19 in the merge,
+and the missing one was in *our* read-switch pinning test, a file both sides modified.
+Direct inspection showed git had resolved it correctly hunk-by-hunk: it kept main's new
+`OwnerID: DevUserID` owner-bypass adaptation **and** tranche-g's G3 removal of the legacy
+fallback. Merged file has 4 `OwnerID` occurrences against main's 2 and tranche-g's 3 —
+strictly more than either side, which is what a correct merge of two additive changes
+looks like. Symbol counts are a way to find questions, not to answer them.
+
+**Escalated rather than dispatched.** Rebases are normally mine to call. This one is a
+merge with an authorization refactor, and authorization is on the short list I block on;
+it also decides how ptone spends his day. Recommendation given: merge before he tests,
+redeploy gteam, QA the merged result — because most of Tranche G *is* authorization
+behaviour, and QA against the pre-refactor branch validates a combination that will never
+ship. Alternative stated with its cost rather than left implicit.
