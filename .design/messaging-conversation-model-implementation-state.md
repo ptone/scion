@@ -30253,3 +30253,67 @@ brief anyone — the diagnosis is currently read from source, and Rule 860 says 
 INFERRED until measured. I also asked ptone whether he wants the read switch left ON while
 this is fixed or turned OFF to unblock his testing; that is his call, not mine, because it
 trades his QA throughput against how much more the switch will surface.
+
+---
+
+## §5kl — the two rows that falsified my fix; DEF-100 is a read-path defect
+
+instance-investigator's live query confirmed the prediction and then broke my
+recommendation, which is the best possible outcome from a measurement.
+
+Confirmed (MEASURED): group conversations on gteam split **40 empty external_ref / 2
+non-empty**. ptone's topic `815deddb` links to conversation `dbd35ed2`, correctly
+populated, `external_ref=''`. The oldest backfilled topic — created 2026-08-17 — is
+identical. New rows and backfilled rows behave the same, and the read switch is inert for
+all 40. h1's DEF-89 fix worked exactly as intended: the conversation *is* created and *is*
+linked. The failure is purely that nothing can find it.
+
+**The 2 exceptions are the whole story.** They read `thread:<projectID>:<threadID>` —
+precisely the format the read path derives. Had I stopped at "95% confirms my claim" I
+would have shipped the wrong fix. Instead I went looking for the writer that produces them.
+
+It is `ResolveOrCreateConversationByKey` (`derive_key.go:131`), and it carries an explicit
+**topic-lookup intercept**: for `kind=="group"` with a `thread:` prefix it resolves through
+`GetTopicConversationIDIncludingDeleted` and returns the topic's `conversation_id`
+*without* minting an external_ref-keyed row. The in-tree comment calls it *"the sink-level
+guard that prevents all paths from minting shadow conversations for native topics that
+already have a conversation."* The two non-empty rows are its fall-through case —
+non-native surfaces, one of them a Discord snowflake, which are supposed to carry a real
+external_ref.
+
+So the reading inverts. **The 8 writers are conforming to the design; the read path is the
+defect.** For native topics the `webchat_topic` row is deliberately the authority, and the
+empty `external_ref` is intentional rather than an oversight.
+`ResolveThreadConversationForRead` never implemented the matching intercept — and in
+`handlers_chat_v2.go` it is *holding* `topic.ConversationID` at the moment it discards it
+for a lookup that was never designed to succeed.
+
+**I withdrew fix #2 to ptone in the same message that confirmed the diagnosis.** Writing
+derived refs at all 8 sites plus a migration would contradict an explicit design rule and
+buy a migration for nothing. Calling it "the correct end state" an hour earlier was wrong,
+and wrong in a specific, repeatable way: I read the writers without reading the resolver
+they were written against.
+
+**Rule 869: before calling a writer defective, find the reader it was designed for. A
+value that looks wrong in isolation may be load-bearing for a resolution path you have not
+read yet.**
+
+**Rule 870: when a measurement confirms your claim with exceptions, the exceptions are the
+finding. "95% confirms me" is the point at which to start investigating, not stop.** Rule
+858 told me to ask agents to falsify my inventory; this is the same discipline applied to a
+result that mostly agreed with me.
+
+Note that Rule 867 still stands and still applies — h1's comment justified `external_ref=''`
+by consistency with `backfillTopicConversations`, and that remains a non-justification. It
+happened to land on a value the design wanted, for a reason the comment did not state. A
+correct value defended by a wrong argument is not a passed review.
+
+Recommended fix, sent: move the topic-lookup intercept into
+`ResolveThreadConversationForRead` so the read and write paths share one resolution rule.
+It repairs both affected read sites at once — including `handlers_messages.go:306`, which
+performs no topic lookup at all today and therefore cannot be fixed at its call site. No
+migration, no DM-path change; the DM branch must stay untouched because there
+`external_ref` IS the ACL (DEF-29).
+
+Awaiting ptone's go-ahead before staffing. Also still unanswered from earlier: whether he
+wants the read switch left ON while this is fixed.
