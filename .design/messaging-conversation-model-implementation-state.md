@@ -30585,3 +30585,69 @@ before anything else, with the full retention list restated so nothing paired ge
 **Not yet reported to ptone.** He asked to be told when the fix is *deployed*, not when it
 is merged. Merged is not deployed and web chat on gteam is still broken until the
 instance-investigator confirms.
+
+---
+
+## §5kp — DEF-100 deployed to gteam, CLOSED. Two follow-ups opened by the deploy report.
+
+`instance-investigator` deployed `85f25c1a` to `scion-gteam`. **All three predictions
+confirmed**, which is the outcome Rule 863 exists to make meaningful:
+
+1. Restart changed no rows in `hub_settings` — count steady.
+2. Both switches read true without re-flipping —
+   `{"conversation_read_switch":true,"conversation_write_deny_switch":true}`.
+3. The previously-409 topic returns **200**.
+
+Acceptance check used ptone's own topic `815deddb-491f-4a8a-a5bb-e2610f058c57` in
+`color-demo`, agent `7ad8aadc` (scope5, the topic's default agent), against
+`GET /api/v1/agents/{agentId}/messages?threadId={topicId}` — deliberately the
+`handlers_messages.go` site, which is the one that had no topic lookup at all and could not
+be fixed at its call site. Testing the harder of the two sites was the right choice.
+
+healthz `85f25c1a healthy`. connectedBrokers 5 / activeAgents 27 / projects 39, all
+unchanged. New known-good binary `/home/scion/scion.known-good-93916ca2` (209,248,926
+bytes) taken before the swap. **DEF-100 CLOSED.** ptone notified and unblocked.
+
+### Follow-up 1 — three retention artifacts are absent from the VM
+
+Reported missing: `scion.known-good-6f6228f6`, `scion.known-good-17376c05`,
+`hub.db.pre-6f6228f6`. Absent *before* today's deploy, so this deploy did not cause it.
+
+The loss that matters is the **pair**: `hub.db.pre-6f6228f6` + `scion.known-good-17376c05`
+were together the only way to rewind gteam past the conversation backfill. Separately they
+are near-useless. Everything forward of that — `hub.db.pre-93916ca2`,
+`hub.db.pre-85f25c1a`, `scion.known-good-93916ca2` — is intact, so we can still undo any
+recent deploy; we can no longer undo the backfill.
+
+Not recording it as a confirmed loss yet. Asked for a whole-filesystem search
+(`/root`, `/var/tmp`, `/opt`, attached disks) with a full listing of every
+`scion.known-good-*` and `hub.db.pre-*` on the box, and told the investigator to say so
+plainly if they are genuinely gone. **I would rather record a real loss than infer one from
+a search that only looked in `/home/scion`.** If confirmed, the honest consequence is that
+"restore to pre-backfill" leaves the plan and the beta exercise inherits a one-way step it
+did not have yesterday.
+
+### Follow-up 2 — the two snapshots are byte-identical in size, and that needs a hash
+
+`hub.db.pre-85f25c1a` is 141,082,624 bytes. `hub.db.pre-93916ca2` is **also** 141,082,624
+bytes — the same to the byte, taken more than a day apart on a hub serving 27 agents
+continuously.
+
+Equal *size* is entirely plausible: SQLite reuses free pages, so page count can hold steady
+under heavy churn. Equal *content* is not, and would mean the newer `.backup` did not
+capture the live DB — i.e. we think we have a restore point for today and we actually have
+yesterday's. Requested `sha256sum` of both plus full-ISO mtimes, ahead of the other two
+questions, with instructions to stop and escalate if the hashes match.
+
+**Rule 874: two artifacts with identical byte sizes are a question, not a coincidence, when
+the thing they snapshot was known to be changing between them. Size is cheap to compare and
+proves nothing; the hash is the measurement.** This is the §5kl pattern again — the
+exception in the measurement is the finding — arriving as an equality rather than a
+difference.
+
+### Follow-up 3 — `hub_settings` is 22 rows, my baseline was 21
+
+Unchanged across this restart, so it does not affect the prediction, but the table grew by
+one row since §5kj. Asked for the sorted list of section/key names only — **explicitly not
+the `value` column**, which may carry credentials — to identify the new key. Drift I can
+explain is fine; drift I merely tolerate is how a baseline stops being a baseline.

@@ -117,7 +117,7 @@ rather than re-deriving it.
 | DEF-97 | Two implementation agents dispatched into one `shared-plain` working tree — near-loss of uncommitted work [^13] | CLOSED | §5ke | §5ke |
 | DEF-98 | `tranche-g` calls `createProjectMembersGroupAndPolicy`; `main` renamed it — PR #1432's merge commit does not compile [^14] | OPEN | §5ke | §5ke |
 | DEF-99 | `pgWebChatStore` — 1700 lines, 55 methods — has **zero** test coverage; no postgres test harness exists in the repo [^15] | OPEN | §5kf | §5kf |
-| DEF-100 | Thread conversations are written with `external_ref=''` but read via derived `thread:<projectID>:<threadID>` — no group thread resolves with the read-switch ON [^16] | **FIXED — merged to tranche-g `85f25c1a1`, awaiting gteam deploy** | §5ko | §5kk |
+| DEF-100 | Thread conversations are written with `external_ref=''` but read via derived `thread:<projectID>:<threadID>` — no group thread resolves with the read-switch ON [^16] | **CLOSED** — merged `85f25c1a1`, deployed to gteam, acceptance check 200 (was 409) | §5kp | §5kk |
 | DEF-101 | New `DeliveryEnvelope` (conversation object on the receive side) is complete with a legacy adapter but has **zero** production callers — delivery still uses the legacy formatter [^17] | FILED-NOT-STAFFED | §5km | §5km |
 
 ## Counts by status
