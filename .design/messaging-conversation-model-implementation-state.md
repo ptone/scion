@@ -30186,3 +30186,70 @@ speaks to DEF-95, and I am not claiming it does. It also says nothing about `pgW
 (DEF-99), which has no tests anywhere to run.
 
 Throwaway worktree `/tmp/lintwt` removed per Rule 4.
+
+---
+
+## §5kk — DEF-100: the write side and the read side never agreed on the key
+
+First defect from real QA, and the test instance earned its keep in about ten minutes of
+ptone's time. He created a web thread on gteam and got 409
+`conversation_not_resolved`; he could then set a default agent and send a message, which
+reached the agent carrying channel+thread and **no conversation ID**, and never rendered
+in the UI.
+
+Two symptoms, one cause, and it is not subtle once seen:
+
+- **Write.** `CreateTopic` inserts `INSERT INTO conversations (... external_ref, parent_ref
+  ...) VALUES (..., '', '', ...)`. A hardcoded empty `external_ref`. All **8**
+  group-conversation INSERT sites do this, on both stores, `backfillTopicConversations`
+  included.
+- **Read.** With the switch ON, `ResolveThreadConversationForRead` calls
+  `DeriveConversationKey({ThreadID, ProjectID})`, which for a non-DM thread returns
+  `thread:<projectID>:<threadID>`, and then `GetConversationByExternalRef(ctx, "native",
+  extRef)`.
+
+An empty stored ref cannot match a derived one. So `convResult` is nil and
+`handlers_chat_v2.go:1886` returns the 409. **The conversation row exists and is correctly
+linked from `webchat_topic.conversation_id`. It is simply unreachable by the only lookup
+the read path performs.** The second symptom is the same cause seen from the other end: the
+message persists with channel+thread and no `conversation_id`, the read filter is now
+`conversation_id`-only, so nothing renders — while agent delivery works fine, because that
+path never consults `conversations`.
+
+Because the backfill writes `''` too, this should affect **every** pre-existing thread, not
+just new ones. I gave that to ptone as a falsifiable prediction rather than a claim, and
+asked him to open an old thread. If it 409s, the read switch is non-functional for group
+conversations in general.
+
+**This is my review miss, and the mechanism is worth keeping.** h1's DEF-89 diff carried
+the comment *"The external_ref derivation (empty string) matches backfillTopicConversations"*
+and I read that as a consistency argument and accepted it. Consistency with the backfill
+was precisely the wrong test: satisfying it guaranteed the new rows would be exactly as
+unresolvable as the old ones. I checked the writer against another writer and never once
+asked whether the reader could find either.
+
+**Rule 867: when a write-side comment justifies a value by consistency with another
+writer, that is not a justification — check it against the reader.**
+
+The test gap is the same shape. No test exercises create-topic → read-with-switch-ON end
+to end. The read-switch tests seed conversations directly with well-formed external_refs,
+so they never observe what `CreateTopic` actually writes, and they were green throughout —
+as were `go build`, `go vet`, `gofmt`, the 361s full `pkg/hub` suite, and golangci-lint.
+Every gate we own passed over a defect that makes the headline feature inoperative.
+
+**Rule 868: a test that seeds its own fixtures cannot detect a producer/consumer key
+mismatch; at least one test must obtain its fixture from the production writer.**
+
+Two candidate fixes, probably both. (1) Immediate: `handlers_chat_v2.go` already calls
+`GetTopic` and is holding `topic.ConversationID` when it throws it away in favour of the
+external_ref lookup — use it. Code-only, no migration. Safe for **groups** specifically,
+because group access is project membership; the DM branch must not be touched, since there
+`external_ref` IS the ACL (DEF-29). (2) End state: write the derived
+`thread:<projectID>:<topicID>` at all 8 sites, plus a migration for existing rows, which
+restores `external_ref` as the stable conversation identity rather than leaving it vestigial.
+
+Not staffed yet. instance-investigator is confirming the empty external_refs live before I
+brief anyone — the diagnosis is currently read from source, and Rule 860 says that is
+INFERRED until measured. I also asked ptone whether he wants the read switch left ON while
+this is fixed or turned OFF to unblock his testing; that is his call, not mine, because it
+trades his QA throughput against how much more the switch will surface.
