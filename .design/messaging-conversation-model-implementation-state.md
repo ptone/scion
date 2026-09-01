@@ -30317,3 +30317,57 @@ migration, no DM-path change; the DM branch must stay untouched because there
 
 Awaiting ptone's go-ahead before staffing. Also still unanswered from earlier: whether he
 wants the read switch left ON while this is fixed.
+
+---
+
+## §5km — prediction confirmed; DEF-100 staffed; DEF-101 filed (the receive side is dark)
+
+ptone confirmed older threads fail identically. That closes the last INFERRED line in the
+DEF-100 diagnosis: the defect is universal across new and backfilled native topics, exactly
+as predicted from the empty `external_ref` in `backfillTopicConversations`. Read switch
+stays ON at his instruction — he wants to keep surfacing things, which is the whole point
+of the test instance.
+
+**DEF-100 staffed as `ca-msg-h3`**, a fresh agent rather than a revived one. The brief
+carries: the corrected diagnosis (writers conform, read path is the defect), the
+instruction to challenge it if contrary evidence appears, the fix location
+(`ResolveThreadConversationForRead`, not either call site, because
+`handlers_messages.go:306` has no topic lookup to fix locally), and the hard constraints —
+no DM-path change, no touching the 8 INSERT sites, no weakening a gate, and keep the G3
+no-fallback contract, since the job is to make resolution succeed where it should rather
+than to restore a silent fallback. Workspace-mode check is in the brief per Rule 857.
+
+The test requirement is the part I weighted most, and it is Rule 868 written as an
+instruction: **the new test must obtain its fixture from the production writer** — create
+the topic through the real `CreateTopic`, then read it back with the switch ON. The
+existing read-switch tests seed conversations directly with well-formed external_refs,
+which is precisely why they were green over a defect that makes the feature inoperative.
+
+**DEF-101 filed, from ptone's question rather than from a failure.** He asked whether he
+should expect a conversation id in the agent-facing metadata. Answering it properly turned
+up something worth tracking: there are two delivery envelopes, and the new one is dark.
+
+Production delivers the legacy `deliveryMessage` — `timestamp, sender, msg, type, channel,
+thread_id, ...` — which has no conversation field by construction. The replacement,
+`DeliveryEnvelope` (`pkg/messaging/delivery.go:37`), does not carry a conversation *id*; it
+carries a conversation *object*: `{id, kind, surface, name, participants}`, alongside
+`from`, `to[]`, `kind`, `intent`, `event`, `visibility`, `reply_to`. A transition adapter
+`FormatLegacyAsNewDelivery` already exists, complete with a stub synthesiser for messages
+predating the conversation model.
+
+**MEASURED: that adapter has zero non-test callers**, and `FormatNewDelivery`'s only caller
+is the adapter. Production still calls `messages.FormatForDelivery` at three sites
+(`server_dispatcher.go` ×2, `runtimebroker/handlers.go`). So the receive-side interface —
+the second of the two interfaces in the original brief, *`scion message` for sending,
+structured messages for receiving* — is written, tested, and wired to nothing.
+
+I told ptone plainly that what he saw is expected and **not** a symptom of DEF-100, and
+that the read-switch fix will not change the envelope. Conflating the two would have been
+easy and would have cost a wasted test cycle. Wiring the new envelope is a tranche of its
+own: it is a visible behaviour change for every agent on the hub, and the open question is
+whether the cutover is hub-wide, per-agent, or harness-config driven — plus what happens to
+agents whose prompts parse the legacy field names. Not proposing to staff it mid-QA.
+
+**Rule 871: when a principal asks whether they should be seeing a field, check whether the
+producer is wired at all before explaining the field. "Not yet implemented" and "implemented
+but unreachable" look identical from the outside and lead to different work.**
