@@ -6,8 +6,8 @@ get the entire refactor done and tested, not just to some hybrid state."
 **Source of truth for the plan:** `/workspace/.design/messaging-conversation-model.md:1671`
 (the 13-phase table).
 
-**Branch measured:** `refs/tmp/tg` (= `scion/tranche-g` at time of writing).
-**Deployed on gteam:** `93916ca2` — tranche-g as of the last deploy.
+**Branch measured:** `scion/tranche-g` @ `85f25c1a1`.
+**Deployed on gteam:** `85f25c1a` — tranche-g head. Verified healthy, both switches ON.
 
 **Evidence tags:** MEASURED = I ran the command and read the output.
 INFERRED = reasoned from adjacent evidence, not directly observed.
@@ -28,15 +28,18 @@ Phase 9 is the case that makes this test matter.
 | 5 | Dual-write | **DONE** | — |
 | 6 | Envelope | **PARTIAL** — types live, but only as a validation intermediate | — |
 | 7 | Validation choke point | **DONE** — and gated | DEF-41 (documented deferral, not a gap) |
-| 8 | Read switch | **DONE, DEFECTIVE IN PRODUCTION** | **DEF-100** (in flight, `ca-msg-h3`) |
+| 8 | Read switch | **DONE** | DEF-100 fixed, deployed, CLOSED |
 | 9 | Delivery formatter | **BUILT, ZERO PRODUCTION CALLERS** | **DEF-101** |
-| 10 | CLI split | *pending `ca-msg-inv`* | |
-| 11 | Broker edge | *pending `ca-msg-inv`* | |
-| 12 | Docs | *pending `ca-msg-inv`* | |
+| 10 | CLI split | **PARTIAL** — `conv:` and `#` refused; `Resolve` has no prod callers | DEF-5, DEF-7 (**AC-15a violation**) |
+| 11 | Broker edge | **PARTIAL** — inbound resolves; **outbound routes on `channel`, not `surface`** | new: Phase 11b |
+| 12 | Docs | **PARTIAL** — skill accurate; **zero glossary entries**, no docs-site page | — |
 | 13 | Removal | **NOT STARTED** — irreversible, gated on beta | precondition chain below |
 
-**The hybrid state is phases 6, 9, and 13.** Everything else is either finished or has a
-named fix already moving.
+**The hybrid state is phases 6, 9, 10, 11, 12 and 13.** Phases 1-5, 7 and 8 are finished.
+
+**One item is missing from the 13-phase plan entirely.** Outbound delivery to external
+surfaces routes on the legacy `channel` field, not on `conversation.surface`. Phase 13
+cannot drop `channel` until that is rebuilt. See Phase 11 below; I am calling it 11b.
 
 ---
 
@@ -83,10 +86,13 @@ opt-in and this is not on the critical path to beta.
   `resolveAgentDM` / `resolveEmailDM` / `resolveThread` / `resolveConvByID` and the
   post-resolution authorization hook `checkPostResolutionAuth:219`.
 
-**Caveat carried into Phase 10:** `ParseReference` and `Resolve` are the *grammar* half
-of the CLI split. Whether they have non-test callers today is the exact question
-`ca-msg-inv` is answering. If they don't, Phase 3's authorization machinery is built but
-unexercised, and the same "zero production callers" finding as Phase 9 applies.
+**Caveat, now measured (see Phase 10):** `ParseReference` has exactly one non-test
+caller, `cmd/message.go:150`. **`Resolve` has none.** So the resolution *grammar* is
+reachable in production but the resolution *engine* — including `checkPostResolutionAuth`
+and `requireParticipant` — is not. Phase 3's authorization machinery is in the same
+built-but-dark state as Phase 9. I am leaving Phase 3 marked DONE because the write-side
+sink `ResolveOrCreateConversationByKey` is heavily used; the dark half is the CLI-facing
+`Resolve` entry point, which is Phase 10's to wire.
 
 ---
 
@@ -195,7 +201,8 @@ time the attribution layer has not run yet. Noted in-source at
 `handlers_chat_v2.go:1810`, `handlers_chat_v2.go:1845`, `handlers_messages.go:76`,
 `handlers_messages.go:287`. It is ON on gteam and has been for the whole test window.
 
-**DEF-100** — with the switch ON, opening any web-chat thread returns HTTP 409
+**DEF-100 — FIXED and CLOSED** (`85f25c1a1`, deployed, previously-409 topic now 200).
+The defect was: with the switch ON, opening any web-chat thread returned HTTP 409
 `conversation_not_resolved`. Root cause: `ResolveThreadConversationForRead`
 (`pkg/messaging/conversation.go:282`) derives a `thread:<project>:<thread>` key and
 looks it up by `external_ref`, but native topic conversations are written with
@@ -203,12 +210,12 @@ looks it up by `external_ref`, but native topic conversations are written with
 `conversation_id`, not through the derived key. The reader was built against a key the
 writer never writes.
 
-Fix in flight with `ca-msg-h3`. The fix must live inside
-`ResolveThreadConversationForRead`, not at the call sites, because read site #2
-(`handlers_messages.go:306`) has no topic handle to fix it with.
+The fix put the write path's topic-lookup intercept inside
+`ResolveThreadConversationForRead` itself (behind a `WithReadTopicLookup` option), rather
+than at the call sites — necessary because read site #2 (`handlers_messages.go`) has no
+topic handle to fix it with. Read and write now share one resolution rule.
 
-**Until this lands, gteam web chat is unusable with the switch on.** Nothing downstream
-of Phase 8 can be tested.
+gteam web chat is working and QA is live.
 
 ---
 
@@ -240,19 +247,128 @@ It wants its own test cycle, and the open design questions are real (see below).
 
 ---
 
-## Phases 10 / 11 / 12
+## Phase 10 — CLI split
 
-*Pending `ca-msg-inv`. Questions dispatched:*
+**PARTIAL.** MEASURED (by me, after `ca-msg-inv` stalled and was retired).
 
-- **10 (CLI split):** is the conversation a required positional on `scion message`? Do
-  `ParseReference`/`Resolve` have non-test callers? Do `scion broadcast` / `scion keys`
-  exist as planned? How many flags survive? Is the `conv:` / `@` / `#` grammar
-  parseable today?
-- **11 (Broker edge):** which plugin inbound paths resolve a conversation? Is spoke
-  selection driven by `conversation.surface`?
-- **12 (Docs):** GLOSSARY entries; docs-site page; **and specifically whether the agent
-  skill documents the legacy or the new envelope.** A skill that documents an envelope
-  agents do not receive is worse than no skill.
+**Done:**
+
+- `scion broadcast` and `scion keys` exist as real separate commands —
+  `cmd/broadcast.go`, `cmd/keys.go`, each with a test file.
+- **8 flags carry deprecation warnings with named replacements**
+  (`cmd/message.go:1254-1263`): `--broadcast`, `--all`, `--in`, `--at`, `--plain`,
+  `--raw`, `--notify`, `--cc`, plus `--channel` and `--thread-id`.
+- The `conv:` / `@` / `#` grammar **parses**. `messaging.ParseReference` is wired at
+  `cmd/message.go:150` — one non-test caller, but a real one, on the primary send path.
+- Parse-failure-denies is honoured: a malformed `conv:` / `#` / `@` is a hard error and
+  does **not** fall through to the legacy path (`cmd/message.go:158-165`).
+
+**Not done, and the gap is sharper than "unfinished":**
+
+- **`conv:<id>` and `#<thread>` are explicitly refused** at `cmd/message.go:154-156`:
+  > `conversation reference %q is not yet supported in the CLI; use @<agent-name> to
+  > message an agent`
+
+  The in-source reason is honest — they resolve, but delivery routing does not exist, so
+  accepting them would silently drop the message. Refusing is the right call. But it
+  means only **one of three** reference forms works.
+- **`messaging.Resolve` has ZERO non-test callers.** The resolution engine and its
+  authorization hooks — `checkPostResolutionAuth`, `requireParticipant` — are built and
+  unexercised in production. Phase 3's security machinery is in the same state Phase 9 is
+  in.
+
+**This produces a concrete AC-15a violation, and it is in the CLI's own help text.**
+`--channel` and `--thread-id` are deprecated with the message *"use conversation
+references instead."* The conversation reference that replaces `--thread-id` is
+`#<thread>` — which the same binary refuses. **We are telling users to migrate to a form
+we reject.** Phase 13's precondition is "every replacement named in a deprecation warning
+has shipped and been exercised"; this fails it outright. Tracked as DEF-5 and DEF-7.
+
+Worth noting: the agent skill is **more accurate than the flag help**. It tells agents to
+prefer `@` addressing, which works. The flag help says "conversation references," which is
+partly false. Fixing the flag strings is a one-line-per-flag change.
+
+---
+
+## Phase 11 — Broker edge
+
+**PARTIAL — and this section contains the most load-bearing finding in the inventory.**
+MEASURED.
+
+**Inbound works.** Broker inbound resolves conversations and is surface-aware:
+
+- `pkg/hub/handlers_broker_inbound.go:242` passes `messaging.WithSurface(req.Surface)`
+  into key derivation; `:256` calls `ResolveOrCreateConversationByKey`; `:365` handles
+  the thread case.
+- `pkg/hub/messagebroker.go:472` and `:672` resolve thread conversations.
+- `pkg/hub/handlers_agent_messaging.go` 309, 741, 1052 likewise.
+
+So `surface → conversation` is built. **The reverse is not.**
+
+**Outbound spoke selection is driven by `msg.Channel`, not by `conversation.surface`.**
+`FanOutEventBus.Publish` (`pkg/eventbus/fanout.go:70`) takes a
+`*messages.StructuredMessage` — the *legacy* envelope — and selects the target spoke by
+matching `msg.Channel` against each bus's `ChannelID` (falling back to `Name`):
+
+```go
+channelKey := buses[i].ChannelID
+if channelKey == "" { channelKey = buses[i].Name }
+if channelKey == msg.Channel { target = &buses[i] }
+```
+
+With `no broker registered for channel %q` as the failure. There is no reference to
+`conversation.surface` anywhere in the fan-out path.
+
+**Consequence, and it changes the Phase 13 plan:** `channel` is not merely a field we
+deliver to agents. **It is the outbound routing key for every external surface** —
+Discord, Slack, Telegram, Teams. Dropping `channel` in Phase 13 without first making
+`conversation.surface` the routing key in `fanout.go` would not degrade delivery, it
+would end it for all non-native surfaces.
+
+This is a larger dependency than the `thread_id` one I flagged earlier, and it is
+**new work not represented in the 13-phase plan.** Call it Phase 11b: make the fan-out
+bus select on `conversation.surface`, which first requires `Publish` to take something
+that carries a conversation.
+
+---
+
+## Phase 12 — Docs
+
+**PARTIAL.** MEASURED.
+
+**The agent skill is accurate and current — my concern was unfounded.**
+`resources/platform_skills/scion-messaging/SKILL.md` (171 lines) documents the legacy
+envelope, which is the one agents actually receive, and it is honest about the
+transition:
+
+- `conv:<uuid>` is documented as **"Not yet supported — currently errors"** (line 32) —
+  which exactly matches `cmd/message.go`.
+- `--channel` / `--thread-id` are marked deprecated and point at `@` addressing (lines
+  62-63) — the form that actually works.
+- Line 130 tells agents to keep discriminating on the `type` field during the transition.
+
+I had flagged this as the highest-risk item in Phase 12 on the theory that a skill
+documenting an unreachable envelope would be actively misleading. It does not; it
+documents the reachable one. **Withdrawn.**
+
+**One inaccuracy, and it is the one that generated the principal's question.** Line 130:
+> New fields such as `conversation_id` may appear in message metadata but are not yet
+> required for correct agent behavior.
+
+They do not appear at all — DEF-101. "May appear" is soft enough to be defensible and
+firm enough to mislead. One-line correction: say plainly that no conversation field is
+delivered today.
+
+**Not done:**
+
+- **Zero glossary entries for the conversation model.** Neither `GLOSSARY.md` nor
+  `docs-site/src/content/docs/glossary.md` defines Conversation, external_ref, Addressee,
+  Participant, or Surface. The only matches are incidental — the web-chat visibility
+  filter labelled "Conversation", and "harness conversation" under Suspend/Resume. Given
+  that `external_ref` **is** the ACL for a direct conversation, its absence from the
+  glossary is a real gap.
+- **No user-facing docs-site page for the conversation model.** The only messaging doc
+  outside `.design/` is `docs/messaging-authorization.md`, which is internal.
 
 ---
 
@@ -267,26 +383,55 @@ Drops `channel`, `thread_id`, `recipient*`, and the old type enum. Design doc ma
 2. **every replacement named in a deprecation warning has shipped and been exercised**
    (AC-15a).
 
-Precondition 2 is not close. Phase 9 is unwired, and `thread_id` is currently the *only*
-routing information an agent receives — removing it before `DeliveryEnvelope.conversation`
-is live and exercised would leave agents with no routing information at all.
+Precondition 2 is not close, and there are now **three** independent reasons, two of them
+found after this document was first written:
 
-**Phase 13 is strictly downstream of Phase 9.** There is no ordering in which it lands
-first.
+1. **Phase 9 is unwired.** `thread_id` is currently the only routing information an agent
+   receives. Removing it before `DeliveryEnvelope.conversation` is live and exercised
+   leaves agents with no routing information at all.
+2. **`channel` is the outbound routing key** (Phase 11). `FanOutEventBus.Publish` selects
+   the delivery spoke by matching `msg.Channel`. Dropping `channel` before
+   `conversation.surface` replaces it in `fanout.go` ends delivery to every external
+   surface. This is Phase 11b and it is not in the plan.
+3. **A deprecation warning already names a replacement that does not work** (Phase 10).
+   `--thread-id` says "use conversation references instead"; the replacing form
+   `#<thread>` is refused by the same binary. AC-15a fails on the CLI's own help text.
+
+**Phase 13 is strictly downstream of Phases 9, 10 and 11b.** There is no ordering in
+which it lands first.
 
 ---
 
 ## Recommended order
 
-1. **DEF-100** (in flight) — unblocks all gteam testing. Nothing else can be tested until
-   this ships.
-2. **Phases 10 / 11 / 12 triage** — as soon as `ca-msg-inv` reports; these may be
-   cheaper than they look, and Phase 12's skill-doc question affects every agent
-   immediately.
-3. **Phase 9 / DEF-101** — its own tranche, its own test cycle. Completes Phase 6 as a
-   side effect on the outbound side.
-4. **Beta exercise** — the scheduled, DB-snapshotted run.
-5. **Phase 13** — only after 3 and 4, and only as a deliberate irreversible step.
+0. **DEF-100 — DONE.** Merged `85f25c1a1`, deployed to gteam, acceptance check 200.
+   gteam QA is unblocked and running.
+
+1. **Cheap truth-in-labelling fixes, now.** Two one-line-class changes that stop us
+   misinforming people while the rest lands:
+   - the `--channel` / `--thread-id` deprecation strings, which currently name a form the
+     binary refuses;
+   - `SKILL.md` line 130, which says a conversation field "may appear" when none is
+     delivered. This is what generated the principal's question.
+   Neither is gated on anything. Both reduce the blast radius of the hybrid state.
+
+2. **Glossary entries** (Phase 12). Small, unblocked, and `external_ref` in particular
+   deserves a definition given that it *is* the ACL for a direct conversation.
+
+3. **Phase 9 / DEF-101** — its own tranche, its own test cycle. Completes Phase 6 on the
+   outbound side. Three open design questions below must be answered first.
+
+4. **Phase 11b** — make the fan-out bus route on `conversation.surface`. Sequenced after
+   9 because `Publish` must first take something that carries a conversation. This is the
+   piece that is missing from the plan; without it Phase 13 is unreachable.
+
+5. **Phase 10 completion** — implement delivery routing for `conv:<id>` and `#<thread>`
+   so the refusals at `cmd/message.go:154` can be removed, and wire `messaging.Resolve`
+   so its authorization hooks are actually exercised.
+
+6. **Beta exercise** — the scheduled, DB-snapshotted run.
+
+7. **Phase 13** — only after 3, 4, 5 and 6, and only as a deliberate irreversible step.
 
 ---
 
