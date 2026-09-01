@@ -30651,3 +30651,91 @@ Unchanged across this restart, so it does not affect the prediction, but the tab
 one row since §5kj. Asked for the sorted list of section/key names only — **explicitly not
 the `value` column**, which may carry credentials — to identify the new key. Drift I can
 explain is fine; drift I merely tolerate is how a baseline stops being a baseline.
+
+---
+
+## §5kq — All three follow-ups resolved. The retention alarm was mine, and it was wrong.
+
+### Retention — nothing is missing. My keep-list had guessed directories.
+
+Complete verified inventory, now written into
+`/scion-volumes/scratchpad/runbooks/gteam-rollback.md` as a table of absolute paths:
+
+| Path | Size | Created |
+|---|---|---|
+| `/usr/local/bin/scion.known-good-17376c05` | 209,235,183 | 2026-08-31 01:57 |
+| `/home/scion/.scion/hub.db.pre-6f6228f6` | 141,082,624 | 2026-08-31 09:05 |
+| `/usr/local/bin/scion.known-good-6f6228f6` | 209,250,718 | 2026-08-31 09:12 |
+| `/home/scion/hub.db.pre-93916ca2` | 141,082,624 | 2026-08-31 14:40 |
+| `/home/scion/hub.db.pre-85f25c1a` | 141,082,624 | 2026-09-01 14:51 |
+| `/home/scion/scion.known-good-93916ca2` | 209,248,926 | 2026-09-01 14:53 |
+| `/home/scion/.scion/snapshots/pre-tranche-A/hub.db` | 141,082,624 | 2026-08-27 19:28 |
+| `/usr/local/bin/scion.rollback-1a2c1b07` | 308,994,281 | 2026-08-31 00:32 (not ours) |
+
+**The pair is intact.** `scion.known-good-17376c05` + `hub.db.pre-6f6228f6` — the only
+route back past the conversation backfill — both present. There is also a
+`pre-tranche-A` snapshot from 2026-08-27 that was not on my list at all.
+
+**The failure was mine, not the investigator's.** My deploy brief listed all eight
+artifacts by filename under `/home/scion/`. Three of them are not there: the binaries are
+in `/usr/local/bin/` and `hub.db.pre-6f6228f6` is in `/home/scion/.scion/`. The search
+followed my paths and correctly reported nothing at those paths. I then relayed an absence
+to ptone.
+
+The aggravating detail: **the correct absolute paths were already in the rollback runbook,
+a document I wrote.** I restated them from memory instead of opening the file. There was no
+new information to gather — only a file to read.
+
+Two things limited the damage and both were deliberate: I caveated the escalation to ptone
+as "being double-checked before I call it a real loss," and I asked for a whole-filesystem
+search rather than accepting the first answer. The correction cost one message. Had I
+reported it as settled, the beta plan would have been rewritten around a capability we
+still have.
+
+**Rule 875: an "absent" result from another agent is a fact about the search, not about the
+disk. Before relaying an absence, check the search covered the right place — and if you
+supplied the place, check that first.**
+
+**Rule 876: when a durable document already records a fact, restating it from memory is not
+faster, it is a fresh chance to be wrong. Read the runbook you wrote.**
+
+### Snapshot integrity — genuine. Equal size, different content.
+
+```
+c5879b92...  hub.db.pre-93916ca2   2026-08-31 14:40:45
+40503003...  hub.db.pre-85f25c1a   2026-09-01 14:51:44
+```
+
+Both 141,082,624 bytes; hashes differ. SQLite page reuse under steady load, exactly the
+benign explanation. Today's restore point is real. **Four separate DB snapshots on that box
+now share the identical byte size**, so I have written into the runbook: never distinguish
+these files by size, use the hash or the mtime. Rule 874 survives as the reason the check
+was worth running — it cost one command and would have caught a fake restore point.
+
+### `hub_settings` 21 → 22 — fully explained.
+
+The new section is `messaging`, created by my own switch flip via
+`PUT /api/v1/admin/messaging` (origin=managed, updated_by=instance-investigator@scion). The
+21-row figure was the post-deploy/pre-flip state; the flip added the row. No unexplained
+drift. Section names only were reported — the `value` column was not dumped, as instructed.
+
+Full section list, for the record: `_meta`, `access`, `agent_defaults`,
+`auto_expose_ports`, `backfill_project_group_markers_done`, `endpoints`, `federation`,
+`github_app`, `github_resolution_cache`, `harness_configs`, `injected_skills`, `lifecycle`,
+`messaging`, `migration_delegation_edge_backfill_v1`,
+`migration_empty_agent_roles_backfilled`, `migration_project_agents_group_markers_backfilled`,
+`notifications`, `profiles`, `project_defaults`, `runtimes`,
+`seed.policy.deleted.hub-member-read-all`, `telemetry`.
+
+### Runbook `cp` checked and cleared
+
+While in the runbook I re-read the snapshot step against the standing "never `cp` a WAL-mode
+DB" constraint. Step 4 stops the service, runs `PRAGMA wal_checkpoint(TRUNCATE)`, verifies
+the WAL file is 0 bytes and refuses to proceed otherwise, *then* copies. That is a safe
+copy and not a violation — the constraint is about copying a DB with a live WAL. Today's
+deploy used the `.backup` API against a running hub, which is also correct. No defect.
+
+### Net state of gteam
+
+`85f25c1a` deployed and healthy, both switches on, DEF-100 closed, rollback chain complete
+and now documented by absolute path. ptone corrected and unblocked.
