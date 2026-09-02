@@ -253,8 +253,8 @@ dual-key window.
 | `broadcasted` | **DROPPED, superseded by `conversation.kind`** — see §4.4.1 | a hub-side routing/authorization input, fully consumed before rendering |
 | `attachments` | `attachments` | paths, unchanged |
 | `metadata.system_category` | `event.type` | `envelope_compat.go:88`, reverse map at `:411` |
-| `metadata.mention_source` | `Addressee.AddressedVia = "body-mention"` — **in the model, not on the wire** | see OQ-1 |
-| `metadata.mention_position` | **DROPPED** | no equivalent |
+| `metadata.mention_source` | `Addressee.AddressedVia = "body-mention"` — in the model, not on the wire, **but see §4.4.2 before removing it** | OQ-1 |
+| `metadata.mention_position` | **DROPPED** | no equivalent, and no consumer |
 | — | `reply_to` | new, and currently mis-sourced — §4.5 |
 
 Three of these were listed as "mapped" in earlier notes and are not. **`urgent` and
@@ -308,11 +308,46 @@ exactly the unmigrated legacy rows, so the migration tranche (§7) closes the ga
 does, the gap is real. This is the second place DEF-102's correctness depends on the migration
 tranche actually shipping.
 
-`mention_source` **does** have a home — `AddressedVia` on `Addressee`, values
-`explicit`/`body-mention`/`default-agent`/`direct` — but `FormatNewDelivery` flattens
-addressees to `env.To = append(env.To, a.PrincipalKind+":"+a.PrincipalID)`, discarding
-`AddressedVia`. So the information survives in the model and dies at the wire. That is a
-one-field decision, not a redesign. **OQ-1.**
+#### 4.4.2 `mention_source` and `AddressedVia` (closes OQ-1)
+
+**`to` stays `[]string`. No schema change.** `AddressedVia` stays model-internal. I was about
+to escalate this and should not have: **ptone already ruled on it on 2026-08-24**, recorded in
+the plan of record at `.design/messaging-conversation-model.md:1626-1628`:
+
+> *"The `mention` type is removed from the taxonomy; `metadata.mention_source` is removed. Any
+> 'your mentions' view queries `message_addressees WHERE via = 'body-mention'` rather than
+> counting message rows."*
+
+The ruling names the replacement mechanism explicitly, so `to` does not need to carry `via`.
+Confirmed that the mechanism is real: `message_addressees.via` is a persisted enum column with
+exactly the four expected values (`pkg/store/models.go:1845`,
+`pkg/ent/messageaddressee/messageaddressee.go:24,:84`).
+
+Separately confirmed that `mention_source` has **no reader anywhere** — every hit in Go, TS and
+docs is a writer (`handlers_chat_v2.go:1067`, `messages/types.go:264`, the `format.go:35-36`
+allowlist, the `envelope_compat.go:358` reverse map). Agents are never told it exists; it is
+absent from `SKILL.md`. So no consumer breaks. `mention_position` likewise.
+
+**But there is a sequencing constraint, and it is the reason this section exists.** The
+replacement table is **empty in production**. `AddAddressee`
+(`entadapter/conversation_store.go:796`) is the only writer of `message_addressees` — there is
+no raw-SQL path — and it has **no production caller**: the identifier appears in the store
+interface, the implementation, and tests, nowhere else. `MessageAddressee.Create()` appears
+exactly once in the tree, inside that method.
+
+So removing `mention_source` today would not relocate body-mention provenance; it would
+**delete** it and point at an empty table. The ruling is right about the end state and silent
+about the ordering, because when it was written the writer was presumed to exist.
+
+**Constraint for Phase 9c: `mention_source` and `mention_position` may not be removed until
+addressee persistence has a production writer.** That is Phase 10 work, not Phase 9. Until
+then they stay in the allowlist, unread and harmless. Removing them is a two-line change
+whenever the writer lands, so deferring costs nothing and removing early is unrecoverable for
+any message written in the interval.
+
+`FormatNewDelivery` flattening addressees to
+`env.To = append(env.To, a.PrincipalKind+":"+a.PrincipalID)` is therefore **correct as
+written** and needs no change.
 
 ### 4.5 Render from the persisted message, not from `StructuredMessage`
 
@@ -624,16 +659,47 @@ the shipping version, because G2 depends on it.
 An idempotent, startup-run migration that touches DM ACLs is a higher-risk object than
 anything in Phase 9. It should get its own design.
 
+### 7.1 The pattern behind this — five built-but-dark components
+
+`DMMigrationService` is not an isolated oversight. Counting what this refactor has built and
+not wired:
+
+| Component | State | Found while |
+|---|---|---|
+| Phase 9 delivery formatter (`FormatNewDelivery`) | no production caller | designing Phase 9 |
+| `messaging.Resolve` | no production caller | earlier phase |
+| Phase 6 envelope types | no production caller | earlier phase |
+| `DMMigrationService` | no caller anywhere | tracing "migrations auto-run" |
+| **Addressee persistence** (`AddAddressee`) | no production caller; `message_addressees` is empty | closing OQ-1 |
+
+Every one passes its tests. The model layer of this refactor has been built out ahead of its
+writers, and each time the gap surfaced it surfaced by accident — while chasing an unrelated
+question — never from a test or a gate.
+
+**This should change how the remaining phases are gated.** A phase is not complete when its
+tests pass; it is complete when a production path reaches it. I would like each remaining
+phase to state, in its acceptance criteria, the production call site that exercises the code
+it adds — and for a phase that deliberately lands dark ahead of its caller, to say so
+explicitly and name the phase that lights it up. That is a cheap gate and it only adds
+coverage.
+
+The immediate consequence is the §4.4.2 constraint: `mention_source` cannot be removed until
+addressee persistence has a writer, because the replacement query returns nothing today.
+
 ---
 
 ## 8. Open questions
 
-**OQ-1 (blocks 9c).** `AddressedVia` is computed and then discarded at the wire, because
-`FormatNewDelivery` flattens addressees to bare principal ref strings. Does `to` become
-`[]{ref, via}` objects, or does `AddressedVia` stay model-internal and `mention_source` be
-recorded as a deliberate removal? Cost of the object form is a schema change to `to` that
-Phase 13 cannot easily undo. I will identify the consumer of `mention_source` before asking
-anyone to decide. `mention_position` has no home either way.
+**OQ-1 — CLOSED, see §4.4.2. It was never open.** ptone ruled on 2026-08-24
+(`.design/messaging-conversation-model.md:1626-1628`) that `mention_source` is removed and
+mention views query `message_addressees WHERE via = 'body-mention'`. `to` stays `[]string`;
+`AddressedVia` stays model-internal; `FormatNewDelivery` needs no change.
+
+*Correction on the record.* I raised this as an open question and said I would identify the
+consumer before asking anyone to decide. The decision had already been made, in the plan of
+record, in a section headed **RESOLVED**, eight days earlier. The measurement I did do found
+something the ruling could not have known: the replacement table has no production writer, so
+**removal must wait for Phase 10**. That constraint is the only genuinely new content here.
 
 **OQ-1b — CLOSED by measurement, see §4.4.1.** Restore `urgent` as one boolean; drop
 `broadcasted`, superseded by `conversation.kind`. **Neither is a behaviour change** — the
