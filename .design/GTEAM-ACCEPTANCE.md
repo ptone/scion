@@ -88,6 +88,39 @@ correct in every unit test. Design §4.8 corrected: the permanent residual is no
 per project rather than tallied from `BackfillResult`. instance-investigator asked for the
 per-cause breakdown to close the 24 exactly.
 
+## 1.6 M9 landed — G-4 must be re-run on the redeploy
+
+`scion/tranche-g` advanced `cbd4f8b6a` → **`5ca3e4026`** (M9, 2026-09-02). G-1 through G-3,
+G-5 and G-6 are unaffected and stand as recorded. **G-4 was passed against the pre-M9
+report and must be re-run**, because M9 deliberately changes what boot prints.
+
+The 24 is closed and needs no further investigation:
+
+```
+non-broadcast in active projects = 19,083 - 990 broadcast = 18,093
+   6,476 attributed | 20 skipped w/ conv_id | 11,597 row errors = 18,093
+row_errors (11,597) = derive_failures (11,593) + non-derive (4)
+reachable  (12,583) = 990 broadcast + 11,593
+gap 24 = 20 (skipped, already had a conversation_id) + 4 (Inferred stamps)
+```
+
+**Post-M9 expectation for G-4:**
+
+| Line | Level | Expected |
+|---|---|---|
+| `unreachable` | INFO | ≈ 5,637, unchanged |
+| `permanent` | INFO | ≈ 12,583 — the population that used to be the WARN |
+| `actionable` | WARN | **absent** (fires only when > 0, and must reach 0 *without* the clamp) |
+| post-derivation failures | WARN | fires only if > 0, and carries **no remedy string** |
+
+Per-project lines now carry `inferred` and the per-cause `derive_*` breakdown.
+
+**The check that matters:** `actionable` must reach zero by arithmetic, not by clamping.
+If the WARN still prints 12,583, M9 has not taken effect. If it prints a small non-zero
+number, that is real drift since the pass and should be reported rather than annotated.
+No line anywhere in the report may advertise `scion server backfill --execute` (DEF-111,
+which M9 re-introduced once and now has two source-scan gates forbidding).
+
 ---
 
 ## 2. Preconditions

@@ -33504,3 +33504,44 @@ Nit, non-blocking: the source scan fails with `"-1" is not greater than "0"` whe
 **Rule 1016** — restate the hazard before accepting a gate for it. "Identity might not hold" and "the wrong variable might be logged in the identity's field" need completely different gates, and only the second was ever the real risk here.
 
 **Rule 1017** — a mutation that fails to build has tested nothing. My first attempt at H did not compile because the refactor had removed `reachable` from scope; the fix is to construct the compiling equivalent, not to record a red.
+
+## §5na — M9 gate C rework `5ca3e4026`: accepted and merged to `scion/tranche-g`
+
+Verified by mutating the branch. `scion/tranche-g` fast-forwarded `cbd4f8b6a..5ca3e4026` (3 commits, no merge commit).
+
+**Item C now discharged.** `TestM9_GateC_PerProjectIdentityFromLog` runs the real boot hook, parses the emitted per-project log lines, and asserts both identities per project. The gteam conflation mutation
+
+```go
+deriveCount := len(result.Errors)   // was: sumDeriveFailures(result.DeriveFailures)
+```
+
+now goes **red on `project=1b1250eb` only** — the other 14 M9 tests stay green. Tight blast radius. The fixture carries its own shape guards (`derive_failures > 0`, `row_errors > derive_failures`, `inferred > 0`), so it fails loudly if reshaped into something the mutation cannot reach.
+
+**Nit fixed.** All three source scans now name the missing symbol and say what to do (`"was it renamed or moved? Update the scan target"`).
+
+**Baselines, re-run by me on the branch:** default and `-tags no_sqlite` both show only `TestDeleteStopped_RequiresGroveContext` (docker absent). Identical in both configs.
+
+**Numstat re-run by me vs `cbd4f8b6a`** — all six files under `cmd/`, nothing in `pkg/`, so no exposure to the revert hazard:
+
+```
+  17    16  cmd/boot_backfill_test.go
+ 195    26  cmd/boot_data_migrations.go
+  53    48  cmd/boot_data_migrations_test.go
+ 433     0  cmd/boot_m9_nosqlite_test.go      (new)
+1188     0  cmd/boot_m9_test.go               (new)
+  34     0  cmd/migration_markers.go
+```
+
+**Three existing gates re-pointed — checked, not waved through.** `TestBootBackfill_ReachableWarnFires`, `TestBootDataMigrations_ReachableWarnFires` and `TestResidualReport_SteadyStateReachableWarn` asserted that the WARN *fires*. M9's specified behaviour is that it must not fire for permanently-unattributable rows, so each was renamed and each removed `Contains(WARN)` replaced by **two** assertions: `Contains("Permanently unattributable messages in listed projects")` plus `NotContains("Messages remain unattributed in listed projects")`. Strictly stronger, and the `NotContains` is the regression guard against the pre-M9 behaviour. Re-pointing a gate is normally my escalation trigger; this one is the approved §4.8 design's direct consequence and adds coverage rather than removing it, so it was accepted without escalation and is recorded here instead.
+
+### My own outstanding requirement was unsatisfiable — withdrawn
+
+I had required ca-mig-9 to prove the fixture reproduced gteam's invisibility: *"with +4 inferred in one project and −4 post-derivation errors spread across others, a test that aggregates first passes."* I found only descriptive comments, so I tested it empirically — patched an aggregate probe into gate C, applied the conflation mutation, and the **probe failed too**.
+
+That is not a fixture defect. It is a property of the mutation. `residuals := len(result.Errors)` and the `BackfillResult` invariant gives `len(Errors) = derive + write + res`, so under the mutation the per-project error on **both** identities is exactly `write + res`, which is **always ≥ 0**. A sum of non-negative terms is zero only when every term is zero — and in that case the per-project assertion passes too. **For this mutation, aggregate and per-project detection are exactly equivalent.** No fixture can make aggregation blind to it.
+
+Rule 1010 still stands: it was derived from *production data*, where the +4/−4 cancellation was real. The per-project structure remains correct and is strictly stronger in general. It simply cannot be demonstrated using this particular mutation, and demanding that ca-mig-9 demonstrate it would have sent them after an impossible construction.
+
+**Rule 1018** — before requiring an agent to demonstrate a property by construction, check the construction exists. I specified a cancelling fixture for a mutation whose error term is provably non-negative. A monotone defect cannot be hidden by summation, and one line of algebra over the invariant I had already written down would have shown it before the requirement went out.
+
+**Rule 1019** — "the weaker gate would also have caught this" is evidence about the *mutation*, not about the gate. Establish whether a mutation can discriminate between two gate designs before using it to judge one.
