@@ -186,6 +186,27 @@ history on the live QA instance is unattributed**, so the backfill has effective
 run anywhere. And **23% of the backlog is permanently unreachable**, which is what turns
 §4.6 from tidiness into a requirement.
 
+### F10 — A B14-enforcing no-op is named after the behaviour B14 forbids (DEF-113)
+
+`stepMergeOrRekeyEmptyRef` (`pkg/messaging/dm_migration.go:108`) takes a context, a
+conversation and a dry-run flag, **discards all three**, and increments
+`EmptyRefSkipped`. Its comment correctly states the B14 ruling. The behaviour is right.
+
+The name is not, and neither is the result struct: `EmptyRefMerged` and `EmptyRefRekeyed`
+are declared, documented as "step 3a" outcomes, and **can never be non-zero**. A reader
+of `DMMigrationResult` — including anyone reviewing an auto-run report — would reasonably
+conclude that empty-ref rows are sometimes merged or re-keyed.
+
+This is filed as **DEF-113** and treated as security-relevant rather than cosmetic,
+because the failure mode is a future editor "implementing the missing behaviour" that the
+name and the counters both advertise. Doing so would fabricate an ACL from the participant
+index, which is precisely the inversion of authority B14 exists to prevent. The comment is
+the only thing holding the line, and comments do not survive refactors as reliably as
+names do.
+
+Not a blocker for auto-run. It becomes more urgent *because* of auto-run: the counters
+move from a CLI report a human reads once to a boot-log line emitted forever.
+
 ---
 
 ## 4. Proposed Design
@@ -494,12 +515,21 @@ decide. No action is required for this design to land — §4.6 reports them sta
 the question should not sit unasked, because "permanent expected warning" is a state that
 degrades over time as people stop reading it.
 
-**OQ-5.** The DM migration will re-key `f003ad87`, the live old-format row. That row is
-under a standing do-not-delete order as the only live DEF-29 reproduction. Re-keying is
-not deletion and is the correct repair, but it *destroys the reproduction*. Confirm
-whether to preserve it — this is the one place where the design does something
-irreversible to a row someone asked to keep. Cheapest resolution: capture the row's
-current `external_ref` in the defect record before the migration first runs anywhere.
+**OQ-5 — narrowed after checking the code.** The two preserved staging rows are affected
+differently, and the distinction matters:
+
+- `adf13f87` (keyless, the DEF-29 reproduction) is **not touched**. Verified in the code,
+  not taken from the survey: `stepMergeOrRekeyEmptyRef` discards all its parameters and
+  does nothing but increment `EmptyRefSkipped`, enforcing B14. The DEF-29 reproduction
+  survives auto-run intact.
+- `f003ad87` (old-format key) **is** re-keyed. That is the correct repair — the row
+  currently denies its own participants — but it consumes the only live old-format
+  reproduction, which is a *different* artefact from the DEF-29 one.
+
+So the question is much smaller than first written: capture `f003ad87`'s current
+`external_ref` in the defect record before the migration first runs anywhere, and the
+loss is bounded to a live reproduction of a defect we are deliberately fixing. Recording
+it rather than acting silently, because it is a row under an explicit preservation order.
 
 ---
 
@@ -527,6 +557,11 @@ Commit-sized, in order. Each is independently reviewable.
 - **M7 — DEF-112 hardening** (optional). Make the counter and the skip guard share one
   predicate. OQ-4 resolved this as latent, so M7 is droppable if the tranche runs long;
   it is listed last for that reason.
+- **M8 — DEF-113 rename** (§3 F10). Rename `stepMergeOrRekeyEmptyRef` to
+  `stepSkipEmptyRef`, delete the unreachable `EmptyRefMerged` and `EmptyRefRekeyed`
+  counters, and keep the B14 comment. Pure rename plus dead-field deletion, no behaviour
+  change. **Not droppable** — unlike M7 this guards a security invariant against a
+  plausible future edit, and it gets cheaper the sooner it lands.
 
 M1–M2 can proceed immediately. M5 is blocked on OQ-1's measurement. M6 depends on M5 for
 the reachable count it reports.
@@ -570,6 +605,10 @@ A reviewer or QA agent should verify:
    `scion server backfill --execute`. The specific failure to test for is the orphan
    being counted in the actionable bucket — that is the bug that makes the warning
    permanent.
-10. **Build tags.** Any new test needing sqlite carries `//go:build !no_sqlite`, and the
+10. **B14 still holds after auto-run.** Seed a keyless `direct` row. After the boot hook
+    runs, the row is unchanged — still keyless, no participants invented from the listing
+    index — and is reported as skipped. This is the assertion that would catch someone
+    implementing the behaviour DEF-113's stale name advertises.
+11. **Build tags.** Any new test needing sqlite carries `//go:build !no_sqlite`, and the
     author confirms whether the blocking `make test-fast` gate can see the new tests. Per
     DEF-94's per-change form, a green gate that compiles the new tests out says nothing.

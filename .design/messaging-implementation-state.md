@@ -32759,3 +32759,43 @@ the developer will edit; `git merge-base --is-ancestor` answers it in one call.
 **Rule 961** — when filing a latent defect, check whether an unrelated live defect has
 removed the symptom that would reveal it. Two defects can be individually minor and
 jointly undetectable, and that combination is worth more than either entry alone.
+
+### §5lv — DEF-113, and the two staging rows are affected differently
+
+Found by disbelieving the survey rather than by reading new code. `MIGRATION-SURVEY.md`
+says empty-ref direct rows are left untouched per B14; the function is called
+`stepMergeOrRekeyEmptyRef` and `DMMigrationResult` declares `EmptyRefMerged` and
+`EmptyRefRekeyed`. A name and two counters cannot describe behaviour the prose says does
+not occur, so one of them was wrong.
+
+The prose was right. `pkg/messaging/dm_migration.go:108` binds all three parameters to
+`_` and does nothing but `result.EmptyRefSkipped++`, with a correct and complete B14
+comment. The two merge/rekey counters are structurally unreachable.
+
+Filed as **DEF-113**, security-relevant rather than cosmetic, because of the edit the
+naming invites: implementing "the unimplemented branch" means deriving a direct
+conversation's key from its participant index, which is the exact inversion of authority
+B14 forbids — the listing index becoming the source of membership rather than its
+consequence. A comment is currently the only thing holding that line. Scheduled as phase
+M8 and marked **not droppable**, unlike the DEF-112 hardening: the fix is a rename plus
+two field deletions, and the asymmetry between that cost and that failure mode is the
+whole argument.
+
+**This also corrected the design's own OQ-5.** I had written that the DM migration would
+destroy the DEF-29 reproduction, which is wrong, and I would not have caught it without
+reading the step body. The two preserved staging rows are affected differently:
+`adf13f87` is keyless and is **not touched** — the DEF-29 reproduction survives auto-run
+intact — while `f003ad87` carries an old-format key and **is** re-keyed, which is the
+correct repair of a row that currently denies its own participants. The artefact at risk
+is a live old-format reproduction, not the DEF-29 one. Capturing `f003ad87`'s current
+`external_ref` before any migration run bounds the loss.
+
+The generalisable part is the ordering. The survey was accurate about behaviour and wrong
+about nothing, yet building on it alone would have carried `MergeOrRekey` into the
+design's vocabulary and into the acceptance criteria, where it would have described a
+step that does the opposite of its name. An accurate summary of code can still transmit
+the code's misleading names. → Rule 962.
+
+**Rule 962** — a correct summary is not a substitute for the source when the source's
+names are wrong; summaries preserve behaviour but inherit vocabulary, and a misleading
+name is a defect that propagates through every document that trusts it.
