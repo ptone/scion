@@ -33092,3 +33092,25 @@ The behaviour is correct and fail-closed — participants are not rebuilt for a 
 **And the two open data defects collapse into one principal.** `b53249ea` — ptone's own user ID — accounts for both our only old-format conversation and DEF-121's newline corruption. 1,359 messages reference it; 6 distinct thread_ids, 5 clean and 1 corrupted. The detail that settles DEF-121 is one the investigator volunteered unprompted: **the corrupted thread_id has 5 messages, and 4 of them carry the clean form.** Same thread, same principal, same ingestion path, one bad write. A systematic corruption would have mangled all five. So DEF-121 is a single event, not a class — which is the opposite of the conclusion its worst case implied, and it materially de-risks the length-preserving-corruption worry. It does not eliminate it, and the read-only scan is still worth doing, but it is no longer the shape of thing that would block a cutover.
 
 **Rule 979** — when a search fails to find something the counters insist exists, suspect the instrument before widening the search. An unattributable count in a corpus of eight is not a hard search problem; it is evidence that the thing doing the counting is not the thing doing the reporting.
+
+---
+
+### §5mh — The residual is test debris, and it should be kept on purpose (2026-09-02)
+
+`unparseable=1` is `764af9a2`, the envelope-test scratch conversation. Both principals are absent: agent `991ad46e` (the scratch agent the investigator created and deleted during delivery verification) and user `a0000000` (the synthetic principal from a minted JWT). Neither was ever a persistent entity. All five real DMs verify on both sides.
+
+So the DM key migration's complete residual on gteam is:
+
+| Row | Condition | Status |
+|---|---|---|
+| `f003ad87` | old-format, one phantom principal | permanent, correct refusal |
+| `adf13f87` | empty-ref, keyless | intentional, B14 |
+| `764af9a2` | well-formed key, both principals deleted | our own test artefact |
+
+**Zero genuine faults.** That is a good cutover story and I want it stated with its caveat attached, because the caveat is the load-bearing half: **AC-4 has still never executed against production data.** `rekeyed=0` is not evidence the repair works; it is evidence there was nothing here to repair. The one old-format row is unrepairable by construction, since `da7cf1ab` no longer exists in any table. A green live run and an untested repair path look identical from the outside, and only one of them is reassuring.
+
+**Decision: `764af9a2` stays, and stops being debris.** I had already ruled the scratch conversation could remain, casually, as harmless leftovers. It has since turned out to be the only live reproduction of DEF-125's exact condition — a structurally valid DM key naming principals that no longer exist. That is the same role `adf13f87` plays for DEF-29, and it arrived the same way: as a by-product nobody designed. Recording it as a fixture with a stated purpose, so the next person tidying test residue has a reason not to. Retaining it costs a permanent `unparseable=1` in every fresh measurement, which is a fair price for keeping the condition reproducible — and once DEF-125 splits the counter, that count will land in a bucket that names it honestly.
+
+Adding it to the protected list alongside `adf13f87` and `f003ad87`: **none of the three may be deleted during fixture cleanup.** Each is the only live instance of a distinct refusal class.
+
+**Rule 980** — an accident that reproduces a defect is a fixture, and the moment you notice that, write down why it exists. Debris and fixtures are indistinguishable on inspection; the only difference is a recorded reason, and without one the useful ones get cleaned up first precisely because they look pointless.
