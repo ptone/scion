@@ -33114,3 +33114,21 @@ So the DM key migration's complete residual on gteam is:
 Adding it to the protected list alongside `adf13f87` and `f003ad87`: **none of the three may be deleted during fixture cleanup.** Each is the only live instance of a distinct refusal class.
 
 **Rule 980** — an accident that reproduces a defect is a fixture, and the moment you notice that, write down why it exists. Debris and fixtures are indistinguishable on inspection; the only difference is a recorded reason, and without one the useful ones get cleaned up first precisely because they look pointless.
+
+---
+
+### §5mi — M5 reviewed: the hook can still refuse to boot (2026-09-02)
+
+M5 at `4da916cac`. Five mutations held: removing the `ListProjects` return, reintroducing superseded M-1 per-project, forcing `saveBackfillProgress` to write a fresh map (INVARIANT M-2 is genuinely enforced), and deleting the warning call. No switch; the budget is a package var, not a flag. Baseline clean.
+
+**The agent modified two of M4's tests, and I checked that specifically, because editing an existing test to make it pass is where gates get quietly weakened.** These did not. The rewritten tests still fail when I delete the warning call, so intent survived. The diagnosis was correct and interesting on its own: those M4 tests seeded messages carrying a ThreadID, which the *newly added* backfill now attributes — so no unattributed message remained and the warning fell silent. **The tests did not break; their precondition expired when a second migration joined the hook.** That is a real hazard of building a pipeline one stage at a time, and the agent reported it rather than silently patching, which is what I want.
+
+**REQUIRED: there is no panic containment anywhere in the hook.** No `recover()` in `runBootDataMigrations`, none at the `:1218` call site, and `runWithAdvisoryLock` has an early `fn()` path that returns before its deferred release. A panic in any migration propagates and kills the process during boot.
+
+That is exactly the outcome alternative **A2 was rejected for**. The whole design rests on *a data migration degrades history, it never refuses to boot* — and after M5 the hook is roughly a thousand lines of migration code that auto-runs unconditionally on every upgrading hub, with no switch to disable it. An unrecovered panic there does not degrade history; it bricks the upgrade until someone rolls back a binary. Of every failure mode in this design, it is the worst, and it is currently unguarded.
+
+The agent's own mutation 2 demonstrated it without either of us intending to: removing a `continue` produced a nil deref on `result`. That path is one edit from live code.
+
+**And `TestBootDataMigrations_NeverBlocksBoot` looks like it covers this.** Its comment reads *"A panic is the only failure mode"* — exactly right — and then it induces a cancelled context, which produces clean errors and cannot reach a panic. The test asserts the correct property on a path incapable of exhibiting it. **This is the third instance of one shape in two days**: AC-2b's cancelled context that also disabled the observation, DEF-125's counter that made its own row unfindable, and now an assertion whose inducement cannot produce the condition it guards. In all three the author identified the right property and reached for the cheapest way to trigger it, and the cheapest trigger was the one that could not exercise the path.
+
+**Rule 981** — a comment naming the failure mode a test guards is a claim to verify, not a reassurance to accept. `NotPanics` around code that cannot panic passes forever and reads, to every future maintainer, as coverage.
