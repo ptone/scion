@@ -31413,3 +31413,344 @@ runtime broker has no store and the message broker proxy does.**
 **Rule 895: a glossary built from the vocabulary a refactor introduces will miss the terms the
 refactor overloaded. The dangerous words are the ones that were already there and quietly
 gained a second referent.**
+
+---
+
+## §5lc — OQ-2 taken to ground: the switch questions, answered by reading the write path
+
+ptone: `lets "take OQ-1b and the two switch-consolidation questions to ground"`. Split two
+ways — investigator `ca-msg-oq1b` on the `urgent`/`broadcasted` question, me on the switch
+questions, because those are design judgment about fail-closed semantics rather than a survey.
+
+**Where I started, and why it was the wrong end.** My instinct was to inspect the *stored*
+state: how many hubs have a `messaging` row, what is in it, what would a migration have to
+rewrite. That framing produced my recorded lean — *"new key, migration, since 9a is already a
+schema change"* — which had the right conclusion under wrong reasoning, and would have shipped
+a migration nobody needed.
+
+The question only resolved when I read the **write path** instead. Four findings, each of
+which changed an answer:
+
+1. `opsettings.Validate` is called at `operational_settings.go:461`, `admin_messaging.go:125`
+   and `admin_settings_db.go:574` — **all write paths**. `Refresh` (`:204-243`) copies
+   `row.Value` into the cache without parsing. So `"additionalProperties": false` on the
+   `messaging` schema (`registry.go:326`) never sees a stored document. Stale keys can be
+   deleted from the schema without orphaning any row. *I had assumed `additionalProperties:
+   false` made stale keys a migration problem. It makes them a non-problem.*
+
+2. `handlePutMessaging` rebuilds the section document from the Go struct rather than patching
+   the stored JSON. Stale keys therefore **self-clean on the first write after upgrade**. The
+   migration I was going to specify has no work to do.
+
+3. The decisive one, and the one I had not looked for. `admin_messaging.go:85-90` seeds *both*
+   pointers from the current getters before applying the partial update, so both are non-nil
+   at `json.Marshal` and **the persisted document always carries both keys explicitly**. An
+   operator who enabled only the read switch also wrote `"conversation_write_deny_switch":
+   false`. Explicit values beat compiled defaults. So reusing either key leaves such a hub OFF
+   after upgrade — exactly the outcome ptone's single-cutover directive forbids. This, not
+   "the name would lie", is the argument against reuse.
+
+4. `DeleteSection` already exists at `:507`, which is the correct primitive for the
+   explicit-null reset once the default is ON. The two hardcoded `f := false` resets at
+   `admin_messaging.go:100,:108` are comments-as-code that say "the compiled default is false";
+   they become lies at cutover and would silently pin the switch OFF for anyone who used the
+   reset.
+
+**Rule 896: to predict what a stored document will contain, read the code that writes it, not
+a sample of the documents. The sample shows you what operators did; the writer shows you what
+they could not avoid doing. Point 3 is invisible in every row on gteam and determined the
+answer.**
+
+**Rule 897: a schema constraint is only as strong as the path it is enforced on. Before
+treating `additionalProperties: false` — or any validation — as a migration obligation,
+find its call sites and check whether the read path is among them.**
+
+**OQ-2b, and the finding that promoted a defect.** The three switch getters
+(`ConversationReadSwitch` :1172, `ConversationWriteDenySwitch` :1195, `ProjectDefaultScratchpad`
+:1149) are the *same function* with a different constant. Section-absent, malformed-JSON and
+field-omitted all return that one constant. `ProjectDefaultScratchpad` looked like a clean
+precedent for default-ON — it is documented as one — but copying it copies the collapse:
+flipping the default to `true` makes an unparseable settings document **enable** the new
+behaviour.
+
+So default-ON and fail-closed are not both expressible in the current shape. That makes
+**DEF-92 a Phase 9a blocker**, promoted today from FILED-NOT-STAFFED. The fix is the one I
+already scoped for it — parse at `Refresh`, record `Malformed` on `sectionState`, log once —
+and it needs no redesign; the requirement simply arrived and made an existing shape
+load-bearing.
+
+**Rule 898: an in-tree precedent proves a behaviour is reachable, not that its implementation
+is reusable. `ProjectDefaultScratchpad` demonstrates default-ON works; it also demonstrates
+the exact shape that makes default-ON unsafe. Read what a precedent costs, not just that it
+exists.**
+
+**Rule 899: when a low-severity defect turns out to sit under a new requirement, promote it
+and say why — but record that the defect did not change. Severity is a property of the
+defect's context, and a re-rating with no new evidence about the defect itself is a change in
+what depends on it. Conflating the two makes the ledger unreadable later.**
+
+**A framing correction worth keeping.** For the write-*deny* half, "fail closed" reads
+backwards: OFF *permits* legacy writes. The standing rule is not "deny everything when a
+setting is unreadable" — it is **fall back to the behaviour of the version before the feature
+existed**. OFF is that behaviour, so malformed → OFF is right for both halves. The tension was
+in the word, not the design, but it would have generated a real argument in review.
+
+**Rule 900: "fail closed" is not self-defining for a switch whose OFF state is permissive.
+State the fallback as a version ("behave as the release before this feature"), not as a
+posture ("deny"), or the rule will be read backwards by whoever implements the permissive
+half.**
+
+**A test that would have passed while the feature failed.** AC-9-7 as originally written
+required the switch to be OFF for an absent row. That is correct for a default-off switch and
+is precisely the behaviour the cutover directive forbids. Had 9a been staffed against the
+unrevised criteria, the suite would have gone green on a hub that never cut over. Revised, and
+added **AC-9-7a** — a hub carrying only the two stale keys, both `false`, must reach ON with
+no migration — as the test that specifically catches key reuse.
+
+**Rule 901: when a requirement inverts a default, grep the acceptance criteria for the old
+default before writing any code. An AC written under the previous default does not fail
+loudly; it passes, and certifies the opposite of what is now wanted.**
+
+**gteam is not a valid test of this.** Both switches are explicitly `true` there, so under key
+reuse gteam would have cut over correctly and concealed the bug entirely. Recorded in §6.
+The property needs a hub with an explicit `false`, or no row at all.
+
+**Rule 902: a staging instance configured into the desired end state cannot test whether you
+arrive at that end state. Check what the fixture already has set before treating it as
+evidence for a default.**
+
+Design updated: §4.6 rewritten with §4.6.1 (new key, no migration), §4.6.2 (three-way split),
+§4.6.3 (the two consequences); §6 Phase 9a rescoped off migration and onto the schema edit;
+§8 OQ-2 marked CLOSED with the lean correction on the record; §9 split step 2 into 9a(i)
+DEF-92 and 9a(ii) consolidation so the safe half reviews independently; AC-9-7 revised and
+AC-9-7a–d added.
+
+**Still open: OQ-1b.** `ca-msg-oq1b` running.
+
+---
+
+## §5ld — OQ-1b: I measured it myself after the investigator stalled, and my premise was wrong
+
+`ca-msg-oq1b` stalled 15 minutes in, having produced no artifact. I had already asked it for a
+partial and been ignored, so per Rule 877 it was unavailable rather than slow. I did the survey
+myself. It took about ten minutes, which is worth recording: the dispatch was probably the
+wrong call for a question this size.
+
+**The premise I had been carrying was false.** §4.4 said `urgent` *"changes how a harness
+interrupts an agent"* and OQ-1b called its loss *"a behaviour change and not merely a schema
+one"* and *"the item in the design most likely to be discovered late by a user rather than by
+a test."* All three claims are wrong. Following the chain hop by hop:
+
+```
+cmd/message.go:519         msg.Urgent = msgInterrupt
+hub/server.go:2960         structuredMsg.Urgent = payload.Interrupt
+broker_routing.go:148      dispatchWithBrokerRetry(..., urgent bool, ...)
+hub/server.go:380          DispatchAgentMessage(..., interrupt bool, ...)
+broker_http_transport.go   MessageAgent(..., interrupt bool, ...) → reqBody["interrupt"]
+runtimebroker/handlers.go  mgr.Message(ctx, id, projectID, deliveryText, req.Interrupt)
+```
+
+`Urgent` **is** the interrupt — the same value, renamed at the interface boundary. And it
+reaches the harness as a **separate argument beside `deliveryText`**. Nothing reads interrupt
+out of the rendered text, so no change to the envelope can affect it. Dropping `urgent` from
+the envelope costs an agent the ability to see *why* it was interrupted. That is real, and it
+is worth one boolean, and it is not remotely what I said it was.
+
+**Rule 903: a field that is both persisted on a message and passed as a dispatch argument is
+two mechanisms sharing a name. Before claiming that removing it from the payload changes
+behaviour, check whether the behaviour is driven by the argument. `urgent` and `interrupt` are
+the same value with different names at different hops, and I spent two phases believing the
+envelope carried it.**
+
+**Rule 904: the strongest evidence that a payload cannot affect a behaviour is a call site
+where the payload and the behaviour's control are sibling arguments. Find that line and cite
+it; it settles the question in a way that surveying readers of the field never will.**
+
+`broadcasted` went the other way and came out cleaner than expected. Every read
+(`messagebroker.go:464,:664`, `handlers_broker_inbound.go:354`, `backfill.go:127`,
+`handlers_agent_messaging.go:1648`) is hub-side routing or authorization, all of it complete
+before rendering. Nothing consumes it as delivery content. `conversation.kind` supersedes it
+and is **more** trustworthy: `Broadcasted` is client-settable, which is exactly why B5 had to
+force it `true` server-side, whereas `kind` derives from a persisted row.
+
+**Rule 905: when a legacy field had to be forcibly overridden server-side for security, the
+model field that replaces it should be checked for whether it is derived rather than declared.
+If it is, say so — replacing a client-settable flag with a row-derived one is a security
+improvement and it will otherwise be reviewed as a neutral rename.**
+
+Caveat found while writing it up: under DEF-102's omit-never-synthesise rule, a message with no
+resolvable conversation has no `conversation` key, hence no `kind`, so for those messages the
+group/direct distinction is genuinely absent rather than relocated. Those are the unmigrated
+legacy rows. **This is the second place DEF-102's correctness depends on the migration tranche
+(§7) shipping** — the first was fabricated conversation IDs. Two dependencies on a tranche that
+does not exist yet is enough to stop treating it as adjacent work.
+
+**Rule 906: "we omit rather than fabricate" is only safe where the omitted thing is
+recoverable. Each time you apply it, name what fills the gap. When the same unbuilt tranche
+fills the gap twice, it has become a dependency and should be scheduled, not noted.**
+
+**On the inflated framing.** Both my errors this session ran the same direction: OQ-2's lean
+was right-conclusion-wrong-reason, and OQ-1b's premise overstated the stakes. An overstatement
+is not harmless in a design doc — "most likely to be discovered late by a user" is exactly the
+phrase that gets a question escalated to ptone. I nearly spent his attention on a
+non-behavioural one-field decision.
+
+**Rule 907: check the severity claims in a design doc against evidence with the same rigour as
+the technical claims. Severity language determines what gets escalated, so an unmeasured
+"this is the risky one" spends someone else's attention. It is a claim, not colour.**
+
+Design updated: §4.4 table rows rewritten; new §4.4.1 with the full chain and both rulings;
+§8 OQ-1b marked CLOSED with the correction on the record; §9 step 10 split so the one-field
+`urgent` change does not wait on OQ-1; AC-9-10a/b/c added, including a negative test pinning
+the interrupt's independence from the envelope and a reviewer check that B5's forcing is
+untouched.
+
+Retiring `ca-msg-oq1b`. If its report arrives before that lands, it is a cross-check only.
+
+---
+
+## §5le — OQ-1 was answered eight days ago, and measuring it anyway found the real problem
+
+ptone: *"Nope - lets keep it going - we can continue to do QA work on gteam for the UX post
+cutover - then test an actual fresh cutover on a different test instance."* Two fixtures, not
+one; gteam stays as-is. Recorded in §6. Phase 9a staffed (`ca-msg-9a`, fresh agent per the
+no-repurposing directive), migration survey dispatched (`ca-msg-mig`).
+
+Then I took OQ-1 — whether `to` becomes `[]{ref, via}` objects — off the open list. I had
+written that I would *"identify the consumer of `mention_source` before asking anyone to
+decide."*
+
+**There was nobody to ask. ptone decided it on 2026-08-24.**
+`.design/messaging-conversation-model.md:1626-1628`, in a heading that reads
+**"Q1 — ... RESOLVED"**: the `mention` type is removed, `metadata.mention_source` is removed,
+and mention views query `message_addressees WHERE via = 'body-mention'`. I carried it forward
+as open across at least two phases and was preparing to spend his attention on it again.
+
+**Rule 908: before escalating a design question, grep the plan of record for its subject. A
+question that survives a phase boundary in your own notes has not necessarily survived in the
+project's — resolved decisions do not propagate backwards into the working list that quoted
+them while they were open.**
+
+This is Rule 884 (a question carried across phases decays) with the decay mechanism named: the
+premise did not rot, the *status* did. §5kx's version of 884 had me re-deriving premises. It
+should also have had me re-checking whether the question still existed.
+
+**Measuring it anyway paid, which is the part worth keeping.** The ruling names
+`message_addressees WHERE via = 'body-mention'` as the replacement for `mention_source`. That
+table is **empty in production**. `AddAddressee` (`entadapter/conversation_store.go:796`) is
+the sole writer — `MessageAddressee.Create()` appears exactly once in the tree, inside it, and
+there is no raw-SQL path — and it has no production caller: interface, implementation, tests,
+nothing else. So removing `mention_source` in Phase 9c would not relocate body-mention
+provenance, it would delete it and point at an empty table.
+
+Constraint added to §4.4.2: `mention_source`/`mention_position` stay until addressee
+persistence has a writer (Phase 10). They are unread today, so leaving them costs nothing;
+removing them early is unrecoverable for every message written in the interval.
+
+**Rule 909: when a ruling replaces mechanism A with mechanism B, verify B is populated, not
+merely that B exists. A schema, a store method and a passing test establish that B *can* hold
+the data. Only a production writer establishes that it *does*. The ruling is about the end
+state and is silent on ordering, because when it was written the writer was presumed.**
+
+**Rule 910: an obsolete field is safe to leave and dangerous to remove, when its replacement
+is not yet populated. Removal reads as tidying and is the irreversible half of the pair.
+Default to deferring it to the phase that lands the writer.**
+
+**The fifth dark component, and I am done treating these as coincidences.** The tally is now:
+the Phase 9 formatter, `messaging.Resolve`, the Phase 6 envelope types, `DMMigrationService`,
+and addressee persistence. All test-covered, none reached by production. Every one surfaced
+while chasing something else — never from a gate.
+
+**Rule 911: when the same class of defect has surfaced five times and never once from a test,
+stop filing instances and change the gate. Rule 882 said the completion test is a production
+caller; it stayed a private heuristic of mine for four discoveries. Written into acceptance
+criteria it would have caught all five.**
+
+Added §7.1 proposing exactly that: every remaining phase names, in its ACs, the production
+call site that exercises what it adds — and a phase that deliberately lands dark ahead of its
+caller says so and names the phase that lights it up. Only adds coverage, so it is inside my
+discretion to require, and I am requiring it.
+
+**On the shape of today's four corrections.** OQ-2's lean: right conclusion, wrong reason.
+OQ-1b: overstated severity. OQ-1: escalating a closed question. The gteam fixture: an invalid
+test I proposed myself. Every one was a failure to check my own prior work against evidence
+before acting on it, and every one was caught by measuring rather than by reasoning. The
+measurements were cheap — minutes each. The reasoning was free and wrong four times out of
+four.
+
+**Rule 912: your own earlier notes are the least-audited source in the project. External code
+gets re-read; a claim you wrote yourself gets quoted forward. Re-measure anything of your own
+that a decision now rests on, especially when it is phrased confidently.**
+
+---
+
+## §5lf — the migration survey came back, and the pattern it recommends copying has a defect
+
+`ca-msg-mig` delivered `MIGRATION-SURVEY.md` (22KB) and then stalled. The note is good and I am
+keeping it. Headline findings, all of which I re-verified rather than took on trust:
+
+- **A once-only mechanism already exists.** `webchat_migrations` (`name TEXT PRIMARY KEY`,
+  `completed_at`), created by both SQLite and Postgres `Init()` DDL
+  (`webchannel_store.go:464`, `webchannel_store_postgres.go:117`), with
+  `migrationCompleted`/`markMigrationCompleted` helpers. Four named migrations use it. This is
+  the hook point for the auto-run tranche — I do not have to invent one.
+- **An advisory-lock helper already exists too.** `runWithAdvisoryLock`
+  (`server_foreground.go:1280`) with typed keys in `pkg/store/concurrency.go:43`, already used
+  for schema migration, bundled resources and storage migration.
+- Ent `AutoMigrate` runs first, under `pg_advisory_lock(LockSchemaMigration)`. The webchat data
+  migrations run **later and outside it**, inside `webStore.Init()`.
+- `BackfillService` and `DMMigrationService` have **no marker at all** — they would rescan
+  everything on every boot. O(total messages) and O(direct conversations) respectively.
+- A fourth unwired migration: `MigrateGroveToProjectData`
+  (`pkg/ent/entc/migrate_grove_to_project.go:43`), zero production callers.
+- On DM-key safety the news is good: a wrong key from `DMMigrationService` would need a UUID
+  collision across two tables, and the merge path has an explicit abort guard. Partial failure
+  is **under**-migration, not **mis**-migration. That is the property I most needed.
+
+**Where I disagreed with the survey, and it mattered.** It described the concurrent-replica
+double-mark as *"benign because the per-row WHERE guards prevent duplicate work"* and concluded
+the marker is *"a performance optimization, not a correctness gate."* The first half is right.
+The conclusion is wrong, and I only found out by reading the insert:
+
+`markMigrationCompleted` is a bare `INSERT` against a `TEXT PRIMARY KEY`, with no
+`ON CONFLICT DO NOTHING`. The sequence is check → work → mark with no lock. Two replicas can
+both pass the check, both do the work harmlessly — and the loser takes a **primary-key unique
+violation**, which propagates up and fails `Init()`. At `server_foreground.go:597` a failed
+`Init()` is a `log.Printf` warning and an `else` branch skipped: no web spoke, no
+`SetWebChatStore`, no attachment store, for that replica's entire lifetime, with no retry.
+Filed as **DEF-104**. Invisible on gteam because SQLite is single-node.
+
+**Rule 913: "the data is safe" and "the operation succeeds" are different claims. When a survey
+establishes the first, do not let it stand in for the second — read what the caller does with
+the error. Here the write that could not corrupt anything was the write whose failure took down
+a subsystem.**
+
+**Rule 914: a marker or bookkeeping write is part of the operation's success path, not
+metadata about it. Any argument that a marker is "just an optimisation" has to survive the
+question "what happens when writing it fails?"**
+
+**The reason this is more than a filed defect.** I had dispatched the survey specifically to
+find a pattern to copy for the auto-run tranche, and the survey's bottom line was that
+auto-run is viable if I add markers and locks. It is — but the exemplar I was about to copy
+swallows a migration failure into an unstructured warning and continues. That posture is
+defensible for a chat rail. It is not defensible for a migration that repairs DM keys, where
+the keys **are** the ACL and a hub that quietly failed to repair them looks identical to one
+that had nothing to repair.
+
+**Rule 915: when you commission a survey to find a pattern worth copying, audit the pattern's
+failure posture before its success path. The success path is what the survey will describe,
+because it is what the code is written to do; the failure posture is inherited silently and is
+usually the part that does not transfer.**
+
+**Rule 916: failure posture is a property of the data being migrated, not of the migration
+mechanism. "Log and continue" and "refuse to serve" are both correct choices for the same code
+depending on whether the rows it failed to touch carry access control. The auto-run design must
+state its posture per migration and justify it, not pick one for the tranche.**
+
+Also worth recording: the survey's own framing invited the error. It answered "is it safe under
+multiple replicas?" — a question about data — when what I needed was "what happens under
+multiple replicas?" I wrote that brief. **Rule 917: ask investigators what happens, not whether
+something is safe. "Safe" invites a verdict; "what happens" returns a trace, and the verdict is
+mine to draw.**
+
+Retiring `ca-msg-mig`. The survey stands; DEF-104 is the amendment.
