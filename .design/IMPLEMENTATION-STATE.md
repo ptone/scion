@@ -33476,3 +33476,31 @@ Mutations I ran so ca-mig-9 need not repeat them: widening the clamp to swallow 
 **Rule 1013** — deleting a string is not a durable fix; it is a one-time edit that the next phase re-adds. When a phase's job is removing something, the same phase must add the gate forbidding its return. DEF-111's remedy string has now been introduced twice.
 
 **Rule 1014** — when a doc comment names an example, read the example, not the category. `WriteFailures` was documented as "errors after key derivation, e.g. participant validation" and I took the bucket as transient while the example given was deterministic.
+
+## §5mz — M9 rework `c02ad4240`: seven of eight verified, item C demonstrably not discharged
+
+Verified by mutating the branch, not by reading the table.
+
+**Holds up:**
+- **A/G** — remedy string gone; re-adding it reddens both scans, and they run under `no_sqlite` so the blocking gate finally sees real M9 coverage.
+- **Rule 998** — renamed `reportResidualUnattributed` in source (compiling). Both scans failed loudly rather than passing vacuously.
+- **H** — compiling variant (capture `reachable` from `computeResidualBuckets`, log it in place of `actionable`) goes red, and **only gate 2 fails**. Tight blast radius. `computeResidualBuckets(total, unreachable, permanent) -> (reachable, preClamp, actionable)` is the right shape; gate 1 calls it rather than keeping a second copy.
+- **F** — untagged file genuinely runs under `-tags no_sqlite`; 4 test functions incl. a gteam-shaped case.
+
+**Item C fails.** The identity gates are table-driven over `BackfillResult` structs the test constructs, so they verify arithmetic over numbers the author wrote down. Mutation — the exact gteam defect:
+
+```go
+deriveCount := len(result.Errors)   // was: sumDeriveFailures(result.DeriveFailures)
+```
+
+Compiles. **Entire M9 suite passes; full `./cmd` passes** (only the known docker-absent `TestDeleteStopped_RequiresGroveContext`, identically with and without). The gate written to catch this specific defect does not catch it.
+
+The hazard was never the arithmetic — nobody gets `a + b + c` wrong. The hazard is **which variable reaches which log field**, and a synthetic-struct test cannot observe that. Required: assert both identities against a **real** boot-hook run, per project, parsed from emitted log lines, with a fixture containing both cancelling populations (one project with `Inferred > 0`, others with post-derivation failures) and a self-check that aggregating the fixture makes it pass.
+
+Nit, non-blocking: the source scan fails with `"-1" is not greater than "0"` when its target is missing. Fails, per Rule 998, but should name the function.
+
+**Rule 1015** — a table-driven test over structs the test builds verifies the author's arithmetic, never the production wiring. When the hazard is *which value is passed where*, the fixture must come from the production path, not from a literal.
+
+**Rule 1016** — restate the hazard before accepting a gate for it. "Identity might not hold" and "the wrong variable might be logged in the identity's field" need completely different gates, and only the second was ever the real risk here.
+
+**Rule 1017** — a mutation that fails to build has tested nothing. My first attempt at H did not compile because the refactor had removed `reachable` from scope; the fix is to construct the compiling equivalent, not to record a red.
