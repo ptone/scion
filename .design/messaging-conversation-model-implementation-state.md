@@ -32143,3 +32143,73 @@ referent fails to exist.**
 Also required one shared rendering helper for all five sites. Five sites each constructing
 `ConversationInfo` and calling `FormatNewDelivery` is five things that drift; sites supply
 inputs and receive text, and none knows the envelope's shape.
+
+### §5lm — Scheduling and scope rulings, 2026-09-02
+
+Prompted by ptone: *"i really want to get to a point where i can concurrence testing on the true
+end state of the design in gteam instance."* Four rulings, all mine under the standing "ship with
+it, keep forward progress" directive.
+
+**1. Phase 9b consolidated into one agent.** Design steps 4, 5 and 6 (9b(i), 9b(ii), 9b(iii)) all
+meet at `MessageRequest.DeliveryText`. They were scoped as separable; they are not, in practice —
+`ca-msg-9b` confirms steps 4 and 6 were already in the working set it opened for step 5, and that
+Option C collapses carry and render into a single stamp. Splitting them across agents bought no
+parallelism and risked a conflict on the one struct all three touch. `ca-msg-9b` now owns all
+three, as three separate commits on `scion/ca-msg-9b`. Estimate impact reported as +30%.
+
+**2. `handlers_agent_messaging.go` is not off-limits — prohibition over-read.** `ca-msg-9b`
+reported that 3 of 5 send paths (`handleAgentMessage`, `broadcastDirect`, `processMentions`) live
+in that file and "cannot stamp DeliveryText at the call site", proposing to let them fall back to
+`FormatForDelivery`.
+
+This was a misreading, and an expensive one. The prohibition list names **symbols and the invariant
+they serve**, never files. Its content is authorization: `authenticatedSender`, `parseDMKeyIDs`,
+`CheckDMParticipantKey`, `authorizeAgentMessage`, the server-side `Broadcasted = true` forcing at
+:1648, the B5 overrides at :1021-1025. The invariant is reachability — no messaging path may reach
+send without passing `authorizeAgentMessage`. Stamping a rendered delivery string engages none of
+it.
+
+Had the reading stood, 9b would have converted 2 of 5 send paths and shipped looking complete,
+while the majority of live gteam traffic continued through the legacy renderer. That is the hybrid
+state ptone has twice rejected, and it would have made the QA fixture actively misleading.
+
+Guardrails issued for that file: additive only; no edits to lines carrying prohibited symbols
+(escalate instead); stamp strictly after authorization succeeds and never on a path reachable when
+it failed; the change isolated in its own commit so the authorization control flow can be diffed
+for zero change; `Broadcasted` untouched.
+
+**Note the shape of the error.** A safety rule stated as a list of symbols was applied as a
+perimeter around a file. The conservative misreading was not free — it silently converted a scope
+decision into a correctness gap, and it arrived phrased as a constraint I had imposed. Restating
+the prohibition's *scope* alongside its contents is the durable fix.
+
+**3. Three questions outstanding to `ca-msg-9b`**, two of which are design, not permission:
+   - Is the persisted row available at the stamp point on each of the three fan-out paths? If
+     dispatch precedes persist on any of them, that is an ordering constraint to rule on, not to
+     stamp through.
+   - Is delivery text identical per recipient on fan-out, or does mention handling make it
+     per-recipient? Per-recipient moves where the stamp belongs.
+   - Its claim that step 6's hubclient path is vacuous (CLI→hub, not hub→broker) is asserted
+     against the design and was not accepted on a one-line reason. Call path required; the design
+     gets amended only against proof.
+
+**4. Fresh-cutover fixture: Option 3.** Second hub process on gteam against a copy of
+`hub.db.pre-45c440bd`, distinct port and DB. Decided by the data fact, not the cost: the snapshot
+carries 12 real users' email addresses and 24,717 real messages, and Options 1 and 2 both copy that
+onto a machine that does not hold it today. Option 3 moves nothing and exercises the same
+in-process settings-load path.
+
+Hazard the investigator did not flag, now a hard precondition: the two processes are isolated at
+the DB and the port but **not at Docker**. gteam runs live agent containers, and a test hub that
+starts a reconciler or reaper would act on them using a DB that knows nothing about them — a
+machine-global side effect that deleting a temp DB file does not undo. The investigator must
+enumerate the subsystems started, prove Docker is untouched, and report its full port bindings for
+approval before the first run. If those subsystems cannot be disabled it must stop and fall back to
+a paid isolated option, not start and observe. The exercise yields to gteam on any conflict.
+
+**5. Migration auto-run design deferred** behind 9b and 9c. It serves the upgrade path for hubs not
+yet cut over; gteam already is, so it does not gate the testing now on the critical path. Facts
+gathered are preserved in `MIGRATION-SURVEY.md` §Addendum rather than held in context — next free
+advisory lock key is `0x5C100014`, `runWithAdvisoryLock` no-ops on SQLite, the `webchat_migrations`
+marker is check-then-act and hand-written per dialect (DEF-104), and
+`maybeWarnUnbackfilledMessages` is both the model for the hook and the prose the hook obsoletes.
