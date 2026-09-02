@@ -33599,3 +33599,42 @@ Six, and the gate passes. The gate walking precisely this path is blind to it, b
 **Rule 1021** — when adding an accumulator beside an existing one, apply the new guard to the neighbour or state why it does not need it. Adjacency is where this class of defect survives: the reviewer's eye reads the new lines and treats the old ones as background.
 
 **Reporting nit, no code impact:** instance-investigator's table is headed "20 of 39" but lists 22 rows. The 22 rows are right — they sum to 12,583 exactly. The prose count is wrong.
+
+## §5nc — M9a `bc3005784`: carry-forward fixed and verified; one residual case found by probing
+
+Verified by mutating the branch, not by reading the report.
+
+**The fix is right.** `resuming := len(marker.ProjectsDone) > 0`, one decision point, all three accumulators (`totalResiduals`, `permanentResidual`, `transientFailures`) reset on a fresh pass. The M9 pair additionally require `PermanentResidual != nil`.
+
+| Mutation | Result |
+|---|---|
+| **M1** (theirs, re-run by me) — restore unconditional carry-forward | red on exactly G1 and G2; blast radius 2 |
+| **M4** (mine) — `resuming := false`, always reset | red on `TestBootBackfill_Resumption_MonotonicProgress` |
+
+M4 matters more than M1: it proves the *opposite* direction is gated, so the fix cannot be made too aggressive without something noticing. I ran it because a reset fix's characteristic failure is over-resetting, and nothing in the brief's own mutation list would have caught that.
+
+**G2 is well built.** It parses `total_residuals` from the summary line and `row_errors` from the per-project lines — both out of real emitted log — asserts the identity, *and* pins absolute values (3, 3). The identity alone would pass if both sides drifted together; the absolute assertions close that. This is the aggregate-equals-sum-of-partitions direction Rule 1020 named as missing.
+
+Numstat matches their report exactly. Both tag configs clean (only docker-absent `TestDeleteStopped`).
+
+### The residual case: a pre-M9 marker that is mid-pass, not completed
+
+The pre-M9 detection fires only on `CompletedAt != nil`. A marker with `CompletedAt == nil`, `ProjectsDone` non-empty, `PermanentResidual == nil` therefore **resumes**, and the already-done projects' permanent residual is never measured. Reachable whenever a pre-M9 build exhausted its budget mid-pass and the hub was then upgraded.
+
+Probed on their branch — two projects, one derive-refused message each, project 0 already done:
+
+```
+PROBE: true still-NULL rows=2   marker.PermanentResidual=1   marker.Residuals=2
+INFO  "Permanently unattributable messages in listed projects" permanent=1
+WARN  "Messages remain unattributed in listed projects" count=1
+```
+
+Both rows are permanently underivable; neither is actionable. **The report warns about one actionable message that no operator action can ever clear** — DEF-111's exact shape, and the exact defect this milestone exists to remove, surviving in the mid-pass variant of the path M9a just fixed. `total_residuals=2` is correct, so this is not the carry-forward bug returning; it is the neighbouring accumulator having no way to recover unmeasured history.
+
+**Fix dispatched:** promote a pre-M9 mid-pass marker to a fresh pass (clear `ProjectsDone`, reset accumulators, re-run all). Idempotent and cheap — a full gteam pass is ~37s against a 10-minute budget. Explicitly forbade defaulting or inferring `PermanentResidual`: the already-done projects' count is unknowable without re-measuring, and inventing it is how a wrong number enters the report wearing a right-looking label.
+
+Not escalated: over-warning rather than under-warning, nothing irreversible, and unreachable in the shipped single-cutover path (a hub from a released version has no marker at all).
+
+**Rule 1022** — when a fix adds a "resume or reset" predicate, enumerate the *marker shapes* that can reach it, not just the code paths. Here two shapes share one predicate — completed-pre-M9 and mid-pass-pre-M9 — and only the first was considered. The second is rarer, which is exactly why it survived review.
+
+**Rule 1023** — mutate a fix in the direction of its own over-application. A reset fix fails characteristically by resetting too much, and the author's mutation list will naturally only contain the under-application they were asked to fix.
