@@ -34214,3 +34214,91 @@ real write-denial). End state is zero switches, behaviour unconditional,
 branches deleted. Sequenced **after** gteam acceptance and **before** the
 fresh-cutover test, since a fresh cutover should exercise the collapsed
 code rather than the gated code.
+
+---
+
+## §5nn — The "old envelope form" report resolved: right report, wrong scope, twice
+
+**Date:** 2026-09-02. **Measured at:** gteam, hub at `43be4baad` (tranche-g + DEF-126).
+
+ptone reported, for the third time in this thread, that Discord messages arrive
+"in the old envelope form", this time with a specific URL:
+`https://gteam.projects.scion-ai.dev/agents/c9c1123b-78b8-4125-9b78-88ff53d2d80e`.
+
+I asked instance-investigator for four facts rather than reasoning further, having
+already been wrong once this day by reasoning from a plausible gate (§5nk, Rule 1047).
+All four came back.
+
+| # | Question | Answer |
+|---|----------|--------|
+| M1 | What does the agent actually receive? | `timestamp, from, to, kind, intent, msg`, BEGIN/END delimiters present. **New format.** No `sender`/`type`/`channel`/`thread_id`. |
+| M2 | What field names does the API return? | `agentId, channel, conversationId, createdAt, dispatchState, groveId, id, msg, projectId, read, recipient, recipientId, sender, senderId, type, visibility`. **Old vocabulary.** |
+| M3 | HTTP status of that call for ptone? | **200**, 10 messages, conversation `f92dc5cf`, zero Discord messages. test-admin gets 409. |
+| M4 | Does `c9c1123b` differ from `smith`? | **It is `smith`.** Same container `color-demo--smith`. No differential exists. |
+
+### The resolution
+
+The delivery envelope is new and has been measured new twice, independently. What
+ptone is looking at is the **database-backed REST DTO rendered by the web UI agent
+detail page**, which was never migrated and still speaks `sender`/`recipient`/`type`/
+`channel`. Filed as **DEF-133**.
+
+**His report was accurate on all three occasions. My scoping was wrong on all three.**
+I read "envelope" as the agent-facing delivery envelope — the thing this project
+renamed — and each time answered a question about that surface. He was describing
+what was on his screen. Rule 1048 said the unexamined variable is usually which
+system the user was looking at; I wrote that rule after the first occurrence and
+then failed to apply it to the second.
+
+The temptation was to close this as "not the envelope, out of scope". I am filing it
+instead, because the brief is *one clear, crisp, coherent semantic contract*, and a
+hub whose API says `sender` while its envelope says `from` does not have one. Which
+surface is nominally in scope is a project-management fact, not a coherence fact.
+
+### DEF-128 is not firing for ptone
+
+M3 settles a live worry: he gets **200, not 409**, so the Cloud Logging fallback path
+is not engaged on his account. The defect remains real and remains worth fixing —
+`ca-msg-fix2` is reworking it — but he has not been exposed to it, and the empty
+panel he saw earlier has a different cause.
+
+### The finding that matters more than the formatting — DEF-134
+
+Agent `smith` holds **45 messages across 7 conversations**. Two of them are DMs with
+ptone: `f92dc5cf` (gmail identity, 10 messages) and `b2fd01b6` (google.com identity,
+7 messages, **holding all the Discord traffic**). The web UI shows only the
+conversation matching the authenticated login, with no indication the others exist.
+
+So the agent detail page can show a populated, plausible, correct-looking conversation
+that does not contain the messages the user just sent, and report no error. That is
+strictly worse than an empty panel: an empty panel is a question, a populated wrong
+panel is an answer.
+
+Root cause is DEF-126's, one layer up: nothing in the model knows two principals are
+one person. The fix is constrained hard by the standing rule that over-granting is not
+recoverable — **merging the conversations, or showing one identity's DMs to a session
+authenticated as the other, is a disclosure and not a UX improvement.** DEF-32's
+`(issuer, subject) → user_id` link table is the only sanctioned route to asserting
+sameness. The minimum safe increment is a disclosure-free existence signal, not a merge.
+
+### Correction propagated
+
+§5nm recorded ptone concluding that Discord had acquired a *new* switch and asking for
+consolidation. He reached that conclusion from my wrong answer in §5nk. It has not:
+`conversation_envelope_switch` was already in the consolidated set, and gteam is
+**already all-switches-on**. The correction was sent to him explicitly, not merely
+recorded here — **Rule 1051**: a wrong diagnosis becomes a premise the principal
+reasons from, so the correction has to reach the decisions it already influenced,
+not just the original claim.
+
+### Carried forward
+
+- **DEF-133** — API DTO vocabulary. Needs scoping: dual-emit-then-drop versus hard
+  rename per the Q2 hard-cutover ruling. Has external consumers (`web/src/`, API clients),
+  so this is a compatibility decision, not a mechanical rename.
+- **DEF-134** — dual-identity conversation split. Not staffed. Blocked on DEF-32 for
+  any real fix; the existence-signal increment is independently shippable.
+- **Open caveat** — M3 was measured as the gmail identity; ptone said he was on
+  google.com. The split holds either way; which conversation his browser rendered is
+  indicative pending his confirmation. Third recurrence of the Rule 1033/1034
+  identity-assumption trap.
