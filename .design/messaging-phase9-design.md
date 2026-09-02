@@ -571,6 +571,18 @@ key reuse gteam would have cut over correctly and hidden the bug. **gteam is not
 of the cutover-by-default property** — that property must be tested against a hub whose
 `messaging` row records an explicit `false`, or against no row at all.
 
+**Ruling (ptone, 2026-09-02).** The two properties get two fixtures rather than one:
+
+| Property under test | Fixture |
+|---|---|
+| End-state behaviour and UX after cutover | **gteam**, continuing as-is |
+| A genuine fresh cutover from a pre-refactor state | **a separate test instance**, to be stood up |
+
+gteam is not retired or reset for this. It stays in its already-cut-over state and keeps
+exercising the end state, which is the thing it is good at. The cutover transition itself is
+tested elsewhere. Standing up that second instance is a prerequisite for AC-9-7a being
+verifiable outside unit tests; the unit tests do not depend on it and 9a is not blocked.
+
 **Phase 9b — render at the hub.** `DeliveryText` on `MessageRequest`; hub-side rendering;
 broker prefers it. Legacy path still present and still reachable when the switch is off.
 
