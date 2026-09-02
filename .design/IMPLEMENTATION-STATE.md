@@ -33225,3 +33225,25 @@ So the acceptance criterion I gave M7 is behavioural rather than structural: **a
 **Rule 989** — a load-bearing invariant that spans two files is protected by whichever of them is edited *second*, and prose in the first file does not travel to that edit. If breaking it requires touching only the file without the comment, the comment is decorative.
 
 **Rule 990** — when reviewing a mutation someone else ran, check its blast radius, not just that it was caught. If several tests catch it, it is too coarse to certify any one of them; demand the narrowest mutation that isolates the defect to a single gate.
+
+### §5mo — M8 merged (`tranche-g` = `a666c7408`), and parallel dispatch shares a working tree (2026-09-02)
+
+M8 at `a666c7408`. Rename plus dead-field deletion, verified behaviour-preserving by reading the whole production diff: two field declarations gone, one call site and one definition renamed, two comments reworded. Nothing else. `stepMergeOrRekeyEmptyRef` and both dead counters return zero grep hits repo-wide.
+
+**The signature is intact** — still `_ context.Context, _ *store.Conversation, _ bool, result *DMMigrationResult`. This was the point of the phase. The old name advertised two operations B14 forbids, and the all-underscore parameter list is what makes the function structurally unable to perform them; a future edit that wants to "fix" empty-ref rows must first widen the signature, which is a visible reviewable act rather than a line added inside an existing body.
+
+**I wrote my own B14 mutation rather than trusting theirs** — widened the signature, listed participants, derived a key, wrote it back. It compiled, ran, and was caught by exactly the four tests they named. The guarantee is genuinely gated; there is no gap. Baselines clean in both configurations.
+
+**The real finding of this round is operational: `ca-mig-7` and `ca-mig-8` share one working tree.** ca-mig-8 reported a `cmd` build failure caused by ca-mig-7's *uncommitted* edits. I dispatched them in parallel on disjoint files believing they had isolated clones. Disjoint *files* does not mean disjoint *filesystem*, and I never checked which one I had.
+
+Nothing was damaged, for exactly one reason: both briefs carry "never `git add -A`, stage named files only." ca-mig-8's commit came out clean — two files, no trace of the other agent's work — and ca-mig-7 confirmed four modified files, all in scope, no commits yet. A rule I had been carrying as tidiness turned out to be the only thing standing between me and two branches silently containing each other's half-finished work.
+
+The subtler damage is to evidence rather than code. **A baseline run in a shared tree is not a property of the commit under review.** ca-mig-8's `cmd` build failure was real, reproducible, and had nothing to do with its change; in my own clean worktree that package builds and only the known docker test fails. An agent that trusted its own baseline here would have reported a defect that does not exist, or worse, "fixed" a file outside its scope to make the build go green — which is the shared-tree form of weakening a gate. I told both agents to report dirty baselines honestly rather than chase or repair interference.
+
+**Rule 991** — before dispatching agents in parallel, establish whether they share a filesystem. Partitioning the work by file protects against merge conflicts; it does nothing about a shared working tree, where the hazard is uncommitted state leaking into someone else's build and test evidence.
+
+**Rule 992** — in a shared tree, a test baseline is evidence about the directory, not about the commit. Verify every reported baseline in an isolated checkout before accepting or acting on it, in both directions: interference invents failures that are not there and can equally mask ones that are.
+
+**Rule 993** — "stage only named files" is not hygiene, it is the containment boundary for concurrent agents. It is the cheapest instruction in a brief and the one whose absence is discovered last, because a contaminated commit looks exactly like a correct one until someone diffs it against what the agent said it changed.
+
+`ca-mig-8` retired. `ca-mig-7` (M7) still in flight; its branch is based on `d10ba2ace`, so it now needs a merge rather than a fast-forward — trivial, since M8 touched only `pkg/messaging/dm_migration*.go` and M7 touches `cmd/boot_data_migrations*.go` and `pkg/store/*`.
