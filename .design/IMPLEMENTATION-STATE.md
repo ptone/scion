@@ -34546,3 +34546,99 @@ each case the work was complete and the branch was fine. **Treating "stalled" as
 "incomplete" would have cost a re-dispatch every time**; the correct response is to
 review the branch. Both have been sent rework and told to say so if they are short on
 context rather than let the work sit.
+
+---
+
+## §5nr — Both branches merged; tranche-g at `0cff20a2b`; gteam deploy requested
+
+**Date:** 2026-09-02.
+
+| step | commit |
+|---|---|
+| base | `43be4baad` |
+| + `ca-msg-fix2` (DEF-127/127a/128a/128b) | `8f65e4657` |
+| + `ca-msg-fix3` (DEF-135) | **`0cff20a2b`** |
+
+Both merged only after independent mutation review. Combined suite
+(`pkg/hub` + `pkg/messaging` + `pkg/store`) green, exit 0, 8 packages — **fix2 and
+fix3 had never been run together before that**, and testing the merge rather than
+the branches is the only place that would have surfaced an interaction.
+
+### fix2 — round 2 accepted
+
+Test-only, 136 lines. Both mutations now caught: MUT-A by
+`TestDEF128b_MutA_AgentNonUser_FailClosed`, MUT-B by `TestDEF128b_MutB_DenialAuditLog`.
+
+The MUT-A test is honest in a way worth noting: it documents that its 403-vs-501
+discrimination depends on `logQueryService` being nil in the fixture. I checked
+whether that makes it fragile — it does not, because it asserts *strictly* 403, so
+any other outcome fails. But the test defends the symptom (403 here) rather than the
+property (no unscoped query is ever built). Accepted; recorded.
+
+### The deletion audit caught the thing it exists to catch
+
+Line-by-line review of every deletion in fix2's non-test files surfaced
+`- if !s.authorize(w, r, agentResource(agent), ActionRead) {`. **An authorization call
+removed is exactly the class ptone asked reviewers to watch for.**
+
+The replacement gates on *manage OR read* where base required *read*. That widens —
+unless manage implies read. I went looking for the implication and **could not find
+one**: no hierarchy in `authz_service.go`, nothing in the registry. What I did find
+is the identical pattern, with the identical "manage implies read" comment, already
+in production at `handlers_messages.go:237-243`.
+
+So fix2 mirrored established practice rather than inventing an assumption, and the
+merge does not change the assumption's truth value. Accepted on that basis and filed
+as **DEF-136** — because *consistent with* is not *verified*, and the premise is now
+load-bearing at two sites instead of one. **"Pre-existing" is precisely the reasoning
+that let it reach the second site**, so the filing matters more than the acceptance.
+
+Checking fix2's site against its neighbour also turned up **DEF-137**: the sibling at
+`handlers_messages.go:243` denies with no `logAuthzDenial` — the same gap I had just
+sent fix2 back to fix, two hundred lines away. Reviewing a fix against its sibling
+was worth more here than reviewing it against the diff.
+
+Also verified `LogQueryOptions` went 12 → 13 fields with all originals surviving; the
+apparent deletions were gofmt realignment from the longer `ParticipantID` name. Same
+count-the-survivors check as PR #1432.
+
+### fix3 — rework accepted
+
+F3 and F2 both fixed and correctly placed (broadcast nil-out after precedence, before
+validation and render; `ValidateAttributed` moved onto `effectiveConv`).
+
+**The decisive check was re-running my own probe** — the one that caught F3 — against
+the rework. It passes. Verifying with the checker's own instrument rather than the
+implementer's new test is the difference between confirming a fix and confirming a
+claim.
+
+Mutations, all reproduced by me: revert-the-hoist → AC-1/2/3/identity; precedence
+inversion → AC-4; broadcast stamp → the new `with_surface_and_external_ref` subtest.
+MUT-4 (F2) **not caught** — fix3 reported this themselves with correct reasoning, and
+it is accepted as untestable, filed at [^60]. An agent volunteering its own uncaught
+mutation is the behaviour the discipline was built to produce.
+
+Changelog tripwire present and correctly framed; AC-5's stream-of-consciousness
+comments reduced to eight accurate lines.
+
+### Environmental hazard worth remembering
+
+Mid-review, `go test` began failing with `open /scion-volumes/gocache/...: no such
+file or directory` while `go build` still succeeded. **Not a code error — the shared
+Go build cache is on a shared volume and another agent was clearing it underneath
+me.** Diagnosed by the shape of the error (missing cache entries, not compile errors)
+and worked around with a private `GOCACHE=/tmp/gocache-arch`. Had I read "FAIL
+[build failed]" as fix2's doing, I would have sent back a rework for a defect that
+did not exist. **A build failure on a shared volume is an environment claim before it
+is a code claim.**
+
+### Status
+
+Deploy requested from instance-investigator: rebuild gteam at `0cff20a2b`, restart
+hub and Discord plugin, then verify that the delivered envelope's `conversation` id
+**equals** the persisted row's `conversation_id` — equality, not mere presence, is
+AC-9. Both `ca-msg-fix2` and `ca-msg-fix3` retired.
+
+Not reporting to ptone until the deploy verification returns; his standing
+instruction is section boundaries and escalations only, and "merged" is not the
+boundary he is waiting on — "you can re-test" is.
