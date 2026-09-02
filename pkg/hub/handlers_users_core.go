@@ -168,31 +168,44 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	if updates.DisplayName != "" {
-		user.DisplayName = updates.DisplayName
-	}
-	previousRole := user.Role
-	if updates.Role != "" {
-		user.Role = updates.Role
-	}
-	if updates.Status != "" {
-		user.Status = updates.Status
-	}
-	if updates.Preferences != nil {
-		user.Preferences = updates.Preferences
-	}
-
 	// Wrap User.Role update + binding sync in a single transaction so
 	// a partial failure (e.g., binding sync fails after User.Role is
 	// written) never leaves inconsistent authority state. C-1 fix.
-	roleChanged := updates.Role != "" && updates.Role != previousRole
+	//
+	// R2-REQ-3: The user is re-read inside the transaction to capture
+	// the actual current role after any concurrent transaction commits.
+	// This prevents TOCTOU races where two concurrent requests both read
+	// the same oldRole and both try to delete the same binding.
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
-		if txErr := tx.UpdateUser(ctx, user); txErr != nil {
+		// Re-read user inside transaction for serialization correctness.
+		txUser, txErr := tx.GetUser(ctx, id)
+		if txErr != nil {
 			return txErr
 		}
-		if roleChanged {
-			return s.syncUserRoleBindings(ctx, tx, user.ID, previousRole, updates.Role)
+
+		previousRole := txUser.Role
+		if updates.DisplayName != "" {
+			txUser.DisplayName = updates.DisplayName
 		}
+		if updates.Role != "" {
+			txUser.Role = updates.Role
+		}
+		if updates.Status != "" {
+			txUser.Status = updates.Status
+		}
+		if updates.Preferences != nil {
+			txUser.Preferences = updates.Preferences
+		}
+
+		if txErr := tx.UpdateUser(ctx, txUser); txErr != nil {
+			return txErr
+		}
+		roleChanged := updates.Role != "" && updates.Role != previousRole
+		if roleChanged {
+			return s.syncUserRoleBindings(ctx, tx, txUser.ID, previousRole, updates.Role)
+		}
+		// Update the outer user pointer for the response.
+		*user = *txUser
 		return nil
 	})
 	if err != nil {
@@ -225,7 +238,6 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// syncUserRoleBindings reconciles system-scoped role bindings when a user's
 // syncUserRoleBindings synchronizes system-scope role bindings when a user's
 // role changes. It operates within the caller's transaction (tx) so that the
 // User.Role update and binding mutations are atomic — a partial failure rolls
@@ -248,9 +260,18 @@ func (s *Server) syncUserRoleBindings(ctx context.Context, tx store.Store, userI
 			return fmt.Errorf("lookup old role definition %q: %w", oldRoleName, err)
 		}
 
+		// R2-REQ-3: Acquire a serialization lock on the role definition row
+		// BEFORE counting or mutating bindings. On PostgreSQL this is
+		// SELECT ... FOR UPDATE, preventing concurrent demotions from both
+		// seeing the pre-delete count (write-skew prevention). On SQLite
+		// the database-level write lock provides the same guarantee.
+		if lockErr := tx.LockSystemRoleSync(ctx, oldRD.ID); lockErr != nil {
+			return fmt.Errorf("lock system role sync for %q: %w", oldRoleName, lockErr)
+		}
+
 		// R-1: Last-super-admin guard — refuse demotion if this is the last
-		// super-admin binding. Count is evaluated within the transaction to
-		// prevent concurrent demotions from both succeeding.
+		// super-admin binding. The lock above serializes concurrent callers
+		// so the count is stable within this transaction.
 		if oldRoleName == store.SystemRoleSuperAdmin {
 			count, countErr := tx.CountRoleBindingsFiltered(ctx, store.RoleBindingFilter{
 				RoleDefinitionID: oldRD.ID,

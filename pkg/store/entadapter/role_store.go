@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 
+	"entgo.io/ent/dialect"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -347,6 +348,36 @@ func (r *RoleStore) CountRoleBindingsFiltered(ctx context.Context, filter store.
 	return r.client.RoleBinding.Query().
 		Where(roleBindingFilterPredicates(filter)...).
 		Count(ctx)
+}
+
+// LockSystemRoleSync acquires a serialization lock for system-scope role
+// binding mutations by executing SELECT ... FOR UPDATE on the target role
+// definition row. On PostgreSQL this prevents concurrent transactions from
+// racing on count-then-delete patterns (write-skew prevention). On SQLite
+// this is a plain read (SQLite serializes writes at the database level).
+func (r *RoleStore) LockSystemRoleSync(ctx context.Context, roleDefinitionID string) error {
+	uid, err := uuid.Parse(roleDefinitionID)
+	if err != nil {
+		return fmt.Errorf("lock system role sync: invalid role definition ID: %w", err)
+	}
+
+	q := r.client.RoleDefinition.Query().Where(roledefinition.IDEQ(uid))
+
+	// ForUpdate is only meaningful on PostgreSQL; the SQLite driver silently
+	// ignores the clause and the database-level write lock provides the same
+	// ordering guarantee.
+	if r.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+
+	exists, err := q.Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("lock system role sync: %w", mapError(err))
+	}
+	if !exists {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // GetRoleBinding retrieves a role binding by ID.

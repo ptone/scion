@@ -79,6 +79,11 @@ type AuthConfig struct {
 	// UserStore enables per-request user-status checks (e.g. suspension
 	// enforcement) for self-contained credentials like JWTs that do not
 	// themselves hit the database.
+	//
+	// MUST be set in production. When nil, suspension checks are skipped
+	// on JWT, legacy proxy, and federation auth paths — a security gap.
+	// The nil guard is only acceptable during unit tests or startup
+	// initialization where the store is not yet available.
 	UserStore store.UserStore
 	// Debug enables verbose logging
 	Debug bool
@@ -228,6 +233,35 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid federation token", nil)
 					return
 				}
+
+				// Item-4 (F-1 fix): For federated human users, check suspension
+				// status in the local store. Service identities (machines) skip
+				// this check — they have no local user record.
+				if fedUser, ok := identity.(*FederatedUserIdentity); ok && cfg.UserStore != nil {
+					email := fedUser.Email()
+					if email != "" {
+						u, uErr := cfg.UserStore.GetUserByEmail(ctx, email)
+						if uErr != nil {
+							if !errors.Is(uErr, store.ErrNotFound) {
+								// Store error — fail closed.
+								log.Error("Federation auth: store error during suspension check",
+									"email", email, "error", uErr)
+								writeError(w, http.StatusServiceUnavailable, "store_error",
+									"unable to verify user status", nil)
+								return
+							}
+							// ErrNotFound: no local user for this email — allow through.
+							// Federation tokens may represent users not yet provisioned locally.
+						} else if u.Status == store.UserStatusSuspended {
+							log.Warn("Federation auth rejected: user is suspended",
+								"email", email, "user_id", u.ID)
+							writeError(w, http.StatusForbidden, "user_suspended",
+								"access denied: user account is suspended", nil)
+							return
+						}
+					}
+				}
+
 				ctx = contextWithIdentity(ctx, identity)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
 				ctx = contextWithAuthType(ctx, AuthTypeFederation)

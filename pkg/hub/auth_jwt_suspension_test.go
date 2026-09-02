@@ -19,9 +19,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 )
 
 // F-REV-04: Direct regression test for the JWT suspension store-failure path.
@@ -32,16 +36,24 @@ import (
 // The fix returns 503 on non-ErrNotFound store errors. This test proves that
 // behavior.
 
-// stubUserStore implements the subset of store.UserStore needed by the JWT
-// auth middleware. It returns a configurable error from GetUser.
+// stubUserStore implements the subset of store.UserStore needed by the auth
+// middleware. It returns configurable responses from GetUser and GetUserByEmail.
 type stubUserStore struct {
 	store.UserStore
-	getUser func(ctx context.Context, id string) (*store.User, error)
+	getUser        func(ctx context.Context, id string) (*store.User, error)
+	getUserByEmail func(ctx context.Context, email string) (*store.User, error)
 }
 
 func (s *stubUserStore) GetUser(ctx context.Context, id string) (*store.User, error) {
 	if s.getUser != nil {
 		return s.getUser(ctx, id)
+	}
+	return nil, store.ErrNotFound
+}
+
+func (s *stubUserStore) GetUserByEmail(ctx context.Context, email string) (*store.User, error) {
+	if s.getUserByEmail != nil {
+		return s.getUserByEmail(ctx, email)
 	}
 	return nil, store.ErrNotFound
 }
@@ -376,5 +388,241 @@ func TestJWTAuth_NoUserStore_PassesThrough(t *testing.T) {
 	}
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 when no UserStore, got %d", rec.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Item-4 / F-1: Federation suspension tests
+// ---------------------------------------------------------------------------
+
+// setupFederationUserAuth creates a FederationAuthenticator configured with
+// issuer_type=user and returns the helpers needed to sign tokens and build
+// the AuthConfig. The returned token has email=feduser@example.com.
+func setupFederationUserAuth(t *testing.T) (token string, fedAuthPtr *atomic.Pointer[FederationAuthenticator]) {
+	t.Helper()
+
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	issuer := jwksSrv.URL
+
+	fedCfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuer,
+				JWKSURL:          jwksSrv.URL,
+				ExpectedAudience: "test-audience",
+				IssuerType:       "user",
+			},
+		},
+	}
+
+	auth := newTestAuthenticatorWithConfig(t, fedCfg, "test-audience")
+
+	fedPtr := &atomic.Pointer[FederationAuthenticator]{}
+	fedPtr.Store(auth)
+
+	now := time.Now()
+	claims := federationClaims{
+		Claims: jwt.Claims{
+			Issuer:    issuer,
+			Subject:   "fed-user-sub-1",
+			Audience:  jwt.Audience{"test-audience"},
+			IssuedAt:  jwt.NewNumericDate(now.Add(-1 * time.Minute)),
+			Expiry:    jwt.NewNumericDate(now.Add(5 * time.Minute)),
+			NotBefore: jwt.NewNumericDate(now.Add(-1 * time.Minute)),
+		},
+		Email: "feduser@example.com",
+		Name:  "Fed User",
+	}
+	tok := signGenericToken(t, privKey, kid, claims)
+	return tok, fedPtr
+}
+
+// TestFederationAuth_SuspendedUser_Returns403 verifies that a federated user
+// whose local account is suspended is rejected with 403 "user_suspended".
+func TestFederationAuth_SuspendedUser_Returns403(t *testing.T) {
+	token, fedPtr := setupFederationUserAuth(t)
+
+	cfg := AuthConfig{
+		Mode:           "production",
+		FederationAuth: fedPtr,
+		UserStore: &stubUserStore{
+			getUserByEmail: func(_ context.Context, email string) (*store.User, error) {
+				if email == "feduser@example.com" {
+					return &store.User{
+						ID:     "fed-user-local-1",
+						Email:  "feduser@example.com",
+						Status: store.UserStatusSuspended,
+					}, nil
+				}
+				return nil, store.ErrNotFound
+			},
+		},
+		Debug: false,
+	}
+
+	middleware := UnifiedAuthMiddleware(cfg)
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler must not be reached for suspended federated user")
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req.Header.Set(FederationTokenHeader, token)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for suspended federated user, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestFederationAuth_StoreError_Returns503 verifies that a store error during
+// the federation suspension check returns 503 (fail closed).
+func TestFederationAuth_StoreError_Returns503(t *testing.T) {
+	token, fedPtr := setupFederationUserAuth(t)
+
+	cfg := AuthConfig{
+		Mode:           "production",
+		FederationAuth: fedPtr,
+		UserStore: &stubUserStore{
+			getUserByEmail: func(_ context.Context, _ string) (*store.User, error) {
+				return nil, errors.New("database connection lost")
+			},
+		},
+		Debug: false,
+	}
+
+	middleware := UnifiedAuthMiddleware(cfg)
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler must not be reached on store error for federated user")
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req.Header.Set(FederationTokenHeader, token)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 on store error for federated user, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestFederationAuth_ActiveUser_PassesThrough verifies that a federated user
+// with an active local account passes through to the handler.
+func TestFederationAuth_ActiveUser_PassesThrough(t *testing.T) {
+	token, fedPtr := setupFederationUserAuth(t)
+
+	cfg := AuthConfig{
+		Mode:           "production",
+		FederationAuth: fedPtr,
+		UserStore: &stubUserStore{
+			getUserByEmail: func(_ context.Context, email string) (*store.User, error) {
+				if email == "feduser@example.com" {
+					return &store.User{
+						ID:     "fed-user-local-1",
+						Email:  "feduser@example.com",
+						Status: store.UserStatusActive,
+					}, nil
+				}
+				return nil, store.ErrNotFound
+			},
+		},
+		Debug: false,
+	}
+
+	middleware := UnifiedAuthMiddleware(cfg)
+	var handlerReached bool
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerReached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req.Header.Set(FederationTokenHeader, token)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for active federated user, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !handlerReached {
+		t.Error("expected handler to be reached for active federated user")
+	}
+}
+
+// TestFederationAuth_NoLocalUser_PassesThrough verifies that a federated user
+// with no local account (ErrNotFound) is allowed through — federation tokens
+// may represent users not yet provisioned locally.
+func TestFederationAuth_NoLocalUser_PassesThrough(t *testing.T) {
+	token, fedPtr := setupFederationUserAuth(t)
+
+	cfg := AuthConfig{
+		Mode:           "production",
+		FederationAuth: fedPtr,
+		UserStore: &stubUserStore{
+			getUserByEmail: func(_ context.Context, _ string) (*store.User, error) {
+				return nil, store.ErrNotFound
+			},
+		},
+		Debug: false,
+	}
+
+	middleware := UnifiedAuthMiddleware(cfg)
+	var handlerReached bool
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerReached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req.Header.Set(FederationTokenHeader, token)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for unprovisioned federated user, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !handlerReached {
+		t.Error("expected handler to be reached for unprovisioned federated user")
+	}
+}
+
+// TestFederationAuth_NoUserStore_PassesThrough verifies that when UserStore is
+// nil (startup/test scenario), the federation path still authenticates without
+// a suspension check.
+func TestFederationAuth_NoUserStore_PassesThrough(t *testing.T) {
+	token, fedPtr := setupFederationUserAuth(t)
+
+	cfg := AuthConfig{
+		Mode:           "production",
+		FederationAuth: fedPtr,
+		UserStore:      nil,
+		Debug:          false,
+	}
+
+	middleware := UnifiedAuthMiddleware(cfg)
+	var handlerReached bool
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerReached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req.Header.Set(FederationTokenHeader, token)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for federation with no UserStore, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !handlerReached {
+		t.Error("expected handler to be reached with no UserStore configured")
 	}
 }

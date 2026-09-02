@@ -1804,6 +1804,16 @@ type RoleStore interface {
 	// the given filter.
 	CountRoleBindingsFiltered(ctx context.Context, filter RoleBindingFilter) (int, error)
 
+	// LockSystemRoleSync acquires a serialization lock for system-scope role
+	// binding mutations. On PostgreSQL this executes SELECT ... FOR UPDATE on
+	// the target role definition row, preventing concurrent transactions from
+	// racing on count-then-delete patterns (write-skew prevention). On SQLite
+	// this is a plain read (SQLite serializes writes at the database level).
+	//
+	// Must be called inside a transaction (WithTx) before any binding count
+	// or mutation for the target role definition.
+	LockSystemRoleSync(ctx context.Context, roleDefinitionID string) error
+
 	// GetProjectMembership returns the project membership for a user in a project.
 	// Returns ErrNotFound if the user is not a member of the project.
 	GetProjectMembership(ctx context.Context, projectID, userID string) (*ProjectMembership, error)

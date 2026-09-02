@@ -1511,12 +1511,14 @@ func TestRolesAPI_ListRoleBindings_IncludeGroupDerived_ExpandsGroups(t *testing.
 	for _, item := range resp.Items {
 		if item.RoleDefinitionID == directRole.ID && item.PrincipalType == "user" {
 			foundDirect = true
-			assert.Empty(t, item.Source, "direct bindings should have empty source")
+			assert.Equal(t, "direct", item.Source, "direct bindings should have source 'direct'")
 		}
 		if item.RoleDefinitionID == role.ID && item.PrincipalType == "group" {
 			foundGroupDerived = true
-			assert.Equal(t, "igd-test-group", item.Source,
-				"group-derived binding should have source = group slug")
+			assert.Equal(t, "group", item.Source,
+				"group-derived binding should have source 'group'")
+			assert.Equal(t, "igd-test-group", item.SourceGroupSlug,
+				"group-derived binding should carry source group slug")
 		}
 	}
 	assert.True(t, foundDirect, "direct user binding should be in response")
@@ -1533,6 +1535,113 @@ func TestRolesAPI_ListRoleBindings_IncludeGroupDerived_ExpandsGroups(t *testing.
 	for _, item := range resp2.Items {
 		if item.RoleDefinitionID == role.ID && item.PrincipalType == "group" {
 			t.Fatal("group-derived binding should NOT appear without includeGroupDerived=true")
+		}
+	}
+}
+
+// TestRolesAPI_ListRoleBindings_ScopeOnlyGroupDerived_ExpandsGroups tests
+// the frontend's actual query pattern: scopeType=project&scopeId=X&includeGroupDerived=true
+// without principalType or principalId. This is the R2-REQ-1 fix for the
+// project-members-editor page.
+func TestRolesAPI_ListRoleBindings_ScopeOnlyGroupDerived_ExpandsGroups(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	projectID := tid("scope-exp-proj")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:   projectID,
+		Name: "Scope Expand Project",
+		Slug: "scope-expand-proj",
+	}))
+
+	// Create a user and a group, then add the user as a group member.
+	userID := tid("scope-exp-user")
+	groupID := tid("scope-exp-group")
+	seedRolesTestUser(t, s, userID, "scope-exp-user@test.local")
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: groupID, Slug: "scope-exp-grp", Name: "Scope Expand Group",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    groupID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   userID,
+		Role:       "member",
+	}))
+
+	// Create a project-scoped role and assign it to the group.
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "scope-exp-custom",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read"},
+	})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "group",
+		PrincipalID:      groupID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Also create a direct user binding for the project.
+	directRole := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "scope-exp-direct",
+		ScopeType:   "project",
+		Permissions: []string{"project.read"},
+	})
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: directRole.ID,
+		PrincipalType:    "user",
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Query with scopeType=project&scopeId=X&includeGroupDerived=true
+	// (the exact frontend pattern from project-members-editor).
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?scopeType=project&scopeId="+projectID+"&includeGroupDerived=true", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// Should include the direct user binding + expanded group-derived binding.
+	var foundDirect, foundDerived bool
+	for _, item := range resp.Items {
+		if item.RoleDefinitionID == directRole.ID && item.PrincipalType == "user" && item.PrincipalID == userID {
+			foundDirect = true
+			assert.Equal(t, "direct", item.Source, "direct binding should have source 'direct'")
+		}
+		// The expanded binding should show principalType=user, principalId=userID
+		// with source=group and group provenance fields.
+		if item.RoleDefinitionID == role.ID && item.PrincipalType == "user" && item.PrincipalID == userID {
+			foundDerived = true
+			assert.Equal(t, "group", item.Source, "derived binding should have source 'group'")
+			assert.Equal(t, "scope-exp-grp", item.SourceGroupSlug,
+				"derived binding should carry source group slug")
+			assert.Equal(t, groupID, item.SourceGroupID,
+				"derived binding should carry source group ID")
+		}
+	}
+	assert.True(t, foundDirect, "direct user binding should be in scope-filtered response")
+	assert.True(t, foundDerived, "group-derived expanded binding should appear for scope-only includeGroupDerived query")
+
+	// Without includeGroupDerived, only the direct and the group bindings
+	// themselves (not expanded) should appear.
+	rec2 := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?scopeType=project&scopeId="+projectID, nil)
+	require.Equal(t, http.StatusOK, rec2.Code)
+
+	var resp2 listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp2))
+
+	for _, item := range resp2.Items {
+		if item.RoleDefinitionID == role.ID && item.PrincipalType == "user" && item.PrincipalID == userID {
+			t.Fatal("group-derived expanded binding should NOT appear without includeGroupDerived=true")
 		}
 	}
 }
@@ -1585,7 +1694,7 @@ func TestRolesAPI_ListRoleBindings_RoleNameEnrichment(t *testing.T) {
 		"response should include human-readable roleName")
 }
 
-func TestRolesAPI_ListRoleBindings_SourceFieldOmitted(t *testing.T) {
+func TestRolesAPI_ListRoleBindings_SourceFieldDirect(t *testing.T) {
 	srv, s := testServer(t)
 
 	userID := tid("source-direct-user")
@@ -1604,10 +1713,9 @@ func TestRolesAPI_ListRoleBindings_SourceFieldOmitted(t *testing.T) {
 	var resp listRoleBindingsResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	require.Len(t, resp.Items, 1)
-	// R-4: source is omitted until group-derived provenance is implemented.
-	// The frontend defaults to "unknown" for empty values.
-	assert.Empty(t, resp.Items[0].Source,
-		"source should be empty until provenance is implemented")
+	// R2-REQ-2: source must be "direct" for non-group-derived bindings.
+	assert.Equal(t, "direct", resp.Items[0].Source,
+		"direct bindings must have source='direct'")
 }
 
 func TestRolesAPI_ListRoleBindings_TotalCountReflectsFilter(t *testing.T) {
@@ -1669,7 +1777,7 @@ func TestRolesAPI_ListBindingsForUser_IncludesRoleName(t *testing.T) {
 		if item.RoleDefinitionID == role.ID {
 			found = true
 			assert.Equal(t, "user-bindings-rn-role", item.RoleName)
-			assert.Empty(t, item.Source, "source should be empty until provenance is implemented")
+			assert.Equal(t, "direct", item.Source, "direct bindings should have source='direct'")
 		}
 	}
 	assert.True(t, found, "binding with our role should be in user bindings")
