@@ -1,9 +1,14 @@
 # Fresh-Cutover Test Plan — Second Instance
 
 **Target:** `scion/tranche-g` @ `98543da921ebd1ee6bae6b1abc4ca00a9d35b327`
-**Status:** DRAFT. Blocked on one fact from instance-investigator (§2.1) and on G-7 signing
+**Status:** REVISED 2026-09-02. The original load-bearing assumption was falsified by
+measurement (§2.1) and the approach changed as a result — see §1. Still gated on G-7 signing
 off (ptone's ruling: *"fresh cutover only happens after all other acceptance testing on
 gteam is done"*).
+
+**Recommended next action:** staff the F-1 … F-7 fixture classes (§1.3, §4.1) as permanent
+test coverage. That work is unblocked now, does not need an instance, and is the durable
+half of this plan.
 
 ---
 
@@ -41,28 +46,97 @@ hazard is in the ordering of two migrations, not in either one.
 
 ---
 
-## 1. The fixture paradox, and how it resolves
+## 1. The fixture problem — assumption falsified, approach revised
 
 The repair path (design AC-4) needs an old-format `dm:<uuidA>:<uuidB>` row **whose two
 principals are a live user and a live agent**, so `isDMParticipant` can be asserted to deny
 before the migration and grant after.
 
-Neither obvious instance can provide one:
+The first draft of this plan assumed `hub.db.pre-e132380f` held such rows. **It does not.**
+Measured 2026-09-02 (sha256 `58b6b240…`, 141,082,624 bytes), the snapshot's entire `direct`
+population is seven conversations:
 
-| Candidate | Why it fails |
-|---|---|
-| gteam | Repairable population was consumed when the DM key migration ran at `e132380f`. Its one remaining old-format row, `f003ad87`, names `da7cf1ab`, which exists nowhere. Unrepairable by construction. |
-| A brand-new instance | No message history at all. Nothing to migrate, nothing to repair, and no backfill population either. A "cutover" over an empty DB proves only that the code does not crash. |
+| Class | Count | Migration path |
+|---|---|---|
+| New-format `dm:agent:<uuid>:user:<uuid>` | 5 | step 2, participant rebuild — key untouched |
+| Empty `external_ref` | 1 | step 3a, skip (B14 ruling) |
+| Old-format `dm:<uuidA>:<uuidB>` | 1 | step 3b — but **unrepairable** |
 
-**Resolution: the fresh-cutover instance must be seeded from a pre-migration snapshot.**
+The single old-format row is `dm:b53249ea…:da7cf1ab…`. `b53249ea` resolves to a user
+(ptone). `da7cf1ab` resolves to nothing — not a user, not an agent. `resolveKind()` returns
+`("", false)`, the row counts as `Ambiguous`, and it is correctly left alone.
 
-The candidate is the retention snapshot **`hub.db.pre-e132380f`** — taken before the DM key
-migration ran, so the repairable population should still be intact, and the backfill and M9
-markers should be absent entirely. That makes it a genuine "user on an old release" starting
-state rather than a synthetic one.
+**Repairable rows in the pre-migration snapshot: zero.**
 
-This is the whole plan's load-bearing assumption. It is verified in §2.1 before anything is
-provisioned.
+### 1.1 A correction to the record
+
+I had been asserting — in `GTEAM-ACCEPTANCE.md` and in the first draft of this plan — that
+gteam's repairable population was *consumed* when the migration ran at `e132380f`. **That is
+false.** The population was never non-zero. The pre-migration snapshot has exactly the same
+single unrepairable orphan as the post-migration state.
+
+The conclusion I drew was right; the mechanism I gave for it was wrong, and the difference
+matters. "Consumed" implies the repair path ran and we merely missed watching it. The truth
+is stronger and worse:
+
+> **Step 3b — the old-format rekey — has never executed against real data anywhere.** Not on
+> gteam before the migration, not after, not on any instance we hold. Its only coverage in
+> existence is unit tests and golden vectors.
+
+### 1.2 Why that inverts the risk, rather than dissolving it
+
+The tempting reading is that a path with zero live population is not worth testing. The
+opposite is true, and it is the reason this section exists.
+
+The repair path will never fire on *our* instances. It exists for hubs whose data we have
+never seen and cannot sample — older deployments with real old-format history, upgrading
+unattended, in a single boot, with no operator watching, **rewriting ACLs**. Under ptone's
+single-cutover directive there is no switch to hold it back and no dry-run gate to catch it.
+
+So the population being zero here does not lower the stakes. It removes our only opportunity
+to observe the path empirically, and leaves an unattended ACL rewrite covered by unit tests
+alone. That is the gap to close, and a live instance was never going to close it anyway.
+
+### 1.3 Revised approach: constructed adversarial population on the snapshot base
+
+The snapshot remains the right **base** — it is genuinely pre-migration (no `_migrations`
+section at all) and, per OQ-A below, schema-identical to `98543da92`. What it lacks is a
+population, so we add one.
+
+Enumerate the classes the migration must discriminate between, and construct a row for each
+from **real** principals drawn from the snapshot itself:
+
+| # | Constructed row | Required outcome |
+|---|---|---|
+| F-1 | old-format, both resolve (user + agent) | rekey; grant both; deny third party |
+| F-2 | old-format, both resolve, reversed lexical order | rekey to identical canonical key as F-1's ordering rule dictates |
+| F-3 | old-format, one resolves, one orphan | **no rekey** — the real `da7cf1ab` class |
+| F-4 | old-format, neither resolves | **no rekey** |
+| F-5 | old-format, both resolve to the *same* principal | **no rekey** — degenerate, must not produce a self-DM ACL |
+| F-6 | empty `external_ref` | skip, stay keyless (B14) |
+| F-7 | already new-format | participant rebuild only, key byte-identical after |
+
+This is stronger than the live-population test it replaces, not weaker. A live instance would
+have handed us whichever classes it happened to contain — here that was one class, the
+unrepairable one. The constructed set covers the discriminations exhaustively, and the ones
+that must **not** repair (F-3, F-4, F-5) are the security-relevant half.
+
+Each row needs at least one message so the backfill has something to attribute; without that
+the ordering checks in §3 are vacuous.
+
+### 1.4 Constraints on building the fixture
+
+- **No production code may gain the ability to emit an old-format key.** The fixture is built
+  by direct SQL against a throwaway copy. Adding a helper that writes the legacy format —
+  even a test-only one exported from production packages — would create exactly the hazard
+  the derivation rules exist to prevent.
+- **Do not derive the old format by running production functions in reverse.** Pattern it on
+  the one real specimen above, and read the ordering rule out of the migration's *parser*,
+  not out of a single data point. One specimen (`b53249ea` < `da7cf1ab`, ascending) is
+  consistent with a sort rule but does not establish one.
+- **Never point a write at the retention snapshot.** Copy first; the snapshot is read-only
+  forever.
+- Real principal UUIDs, synthetic message content. Report keys and IDs, never bodies.
 
 ---
 
@@ -89,18 +163,20 @@ provisioned.
 - **P-4.** `hub.db.pre-e132380f` **copied** to the new instance. The retention snapshot
   itself is never the working file and is never opened writable.
 
-### 2.1 BLOCKING — verify the fixture before provisioning anything
+### 2.1 RESOLVED — the blocking check ran, and failed
 
-Asked of instance-investigator 2026-09-02. Read-only, on a copy.
+Asked of instance-investigator 2026-09-02, read-only on a copy. Answers:
 
-1. `hub.db.pre-e132380f` still exists; record its sha256.
-2. **The repairable count:** how many old-format `dm:<uuidA>:<uuidB>` rows it contains whose
-   **both** principals resolve to a live user and a live agent *in that same snapshot*.
-3. Confirm it is genuinely pre-migration: DM key, backfill and M9 markers all absent.
+1. Exists. sha256 `58b6b24087678c29ddb2ded510150e8252b09c93bf1804596219adfe8bfef9e9`,
+   141,082,624 bytes.
+2. **Repairable count: zero.** See §1.
+3. Genuinely pre-migration — the `_migrations` section does not exist in `hub_settings` at
+   all, versus the live DB which has it.
 
-**If (2) is zero, this plan does not work** and the fixture must be constructed instead —
-which is a materially different and weaker test, because a hand-built row proves the code
-handles a row we designed for it. Better to learn that now than after provisioning.
+(2) falsified the plan's load-bearing assumption and forced the revision in §1.3. This is the
+check working: it cost one query and saved provisioning an instance to discover the fixture
+was empty. Keep this shape — state the assumption, make it falsifiable, test it *before*
+committing resources.
 
 ---
 
@@ -132,10 +208,15 @@ from the code — read it out of the emitted log of this run.
 This is C-1's consequence and the number that proves it. The `permanent` bucket must **not**
 include the rows repaired in step 1.
 
-Concretely: record the repairable count from §2.1 as `R`. After the run, `permanent` must be
-smaller than it would be if those rows had been refused. Compute the counterfactual
-explicitly and state both numbers. If `permanent` is `R` higher than expected, the ordering
-failed silently and this check is the only thing that will catch it.
+Let `R` = the number of constructed rows in classes F-1, F-2 (those that *must* rekey), and
+`M` = the messages seeded into them. After the run, all `M` must be attributed and none may
+appear in `permanent`. State the counterfactual explicitly: had the ordering been wrong,
+`permanent` would be exactly `M` higher and no error would have been raised.
+
+**This check is the reason the constructed population is mandatory rather than a nicety.**
+On the unmodified snapshot `R` is zero, so C-1 and C-2 are both vacuous — every key is
+already new-format and the ordering cannot matter. A cutover run over the bare snapshot
+would look completely clean while proving nothing about the hazard in §0.1.
 
 ### C-3 — Single boot, all switches default ON
 
@@ -170,14 +251,13 @@ Boot 2 must skip both migrations and report identical counts. Boot 3 likewise.
 
 The item gteam could not carry.
 
-**Before the boot**, from the copied DB, read-only, pick at least three repairable rows and
-record for each: the conversation ID, the `external_ref`, and both principal IDs. Keys and
-IDs only — **never message content**.
+**Before the boot**, record for every constructed row F-1 … F-7: the conversation ID, the
+`external_ref`, and both principal IDs. Keys and IDs only — **never message content**.
 
-**Assert before:** `isDMParticipant` denies for both named principals. It must deny, because
-the key is old-format and unparseable.
+**Assert before:** `isDMParticipant` denies for both named principals on every old-format
+row. It must deny, because the key is old-format and unparseable.
 
-**Assert after:** it grants for both named principals — and, separately:
+**Assert after, for F-1 and F-2 only:** it grants for both named principals — and, separately:
 
 **Assert the over-granting direction.** For each repaired row, a principal *not* named in
 the key must still be denied. This is the check that matters most and the one easiest to
@@ -187,13 +267,42 @@ broadly passes that test.
 > **Under-granting is recoverable; over-granting is not.** A wrong key is worse than no key,
 > since the key IS the ACL.
 
-**Unrepairable rows must remain unrepaired.** Any row whose principals do not both resolve
-must come out of the migration untouched and still denied. Fail-closed is the correct
-outcome, not a defect to be fixed on the spot.
+**Unrepairable rows must remain unrepaired — F-3, F-4, F-5.** Each must come out of the
+migration byte-identical and still denied, and must be counted as `Ambiguous` rather than
+`OldFormatRekeyed`. Fail-closed is the correct outcome here, not a defect to be fixed on the
+spot. F-5 (both principals identical) deserves particular attention: it is the one class
+where a naive "both sides resolved, proceed" check would succeed and produce a self-DM ACL.
+
+**F-7 must come out byte-identical too.** A new-format key that the migration rewrites — even
+to an equivalent value — means the rekey path is reachable from rows that do not need it,
+which is the same failure as over-granting wearing a different hat.
 
 Note the standing exception: the migration is the **one sanctioned place** where a DM key may
 be rewritten. Nothing this test finds may be used to justify normalising a key anywhere on
 the derivation path.
+
+---
+
+### 4.1 The F-classes belong in the test suite, not only on the VM
+
+The obvious challenge to §1.3 is: if the population is constructed anyway, why does this need
+a VM at all? Why is it not a Go integration test?
+
+Largely, it is — and it should be. **F-1 … F-7 should land as permanent test coverage
+regardless of whether the VM run ever happens.** They are cheap, they are deterministic, they
+encode the discriminations the repair path must make, and unlike a VM exercise they keep
+protecting the path after this tranche closes. If only one of the two ever gets built, build
+these.
+
+What the VM run adds on top, and cannot be had from a Go test:
+
+- the real boot path, real binary, real systemd unit — not a test harness calling the hook
+- **scale**: 141 MB, 39 projects, 12,583 reachable messages, against the 10-minute budget
+- the genuine single-cutover sequence with no operator action between migrations
+
+So: not either/or. The F-classes are the durable artifact and should be staffed first; the VM
+run is the scale-and-realism check layered over them. Sequencing them that way also means a
+VM run that goes wrong has a passing local suite to bisect against.
 
 ---
 
@@ -209,15 +318,24 @@ Carried forward from `GTEAM-ACCEPTANCE.md` §4, unchanged:
 **Gap D — AC-3, resumption** may be *accidentally* closed here if C-4's budget is exhausted.
 If that happens, say so explicitly rather than leaving it implied.
 
+**Gap A is closed by construction, never by observation.** Worth stating plainly so nobody
+later reads the acceptance record as stronger than it is: no instance in our possession has
+ever contained a repairable old-format row, so the rekey path's behaviour on *organically
+produced* data has never been observed and now never will be. Every assurance we have about
+it rests on rows we built to specification. That is a real residual, it is not closeable with
+the assets available, and the mitigation is breadth of enumerated classes (§1.3) rather than
+depth of live exercise.
+
 ---
 
 ## 6. Open questions
 
-- **OQ-A.** Is `hub.db.pre-e132380f` recent enough to restore under `98543da92` at all? It
-  predates several tranches. If schema migrations between then and now are themselves part
-  of the boot path, this test also exercises those — which is *more* realistic, but widens
-  the blast radius of a failure and makes attribution harder. **Needs a ruling before
-  provisioning.**
+- **OQ-A. RESOLVED — no obstacle.** Full schema diff between the snapshot and the live DB
+  running `98543da92`: **zero differences**. Same 71 tables, same index set, same column
+  counts on every key table. The gap between pre-`e132380f` and `98543da92` is data-only —
+  the `_migrations` marker and the rows the migration touched — not structural. Restoring
+  the snapshot will not drag in unrelated schema auto-migrations, so a failure during the
+  run is attributable to the messaging migrations rather than to incidental schema drift.
 - **OQ-B.** Should the second instance keep its data after the test, as a standing
   pre-migration fixture for future tranches? Cheap to keep, expensive to reconstruct.
 - **OQ-C.** OQ-6 (purging gteam's 5,637 orphans) is irreversible and ptone's. It is
