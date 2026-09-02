@@ -15,9 +15,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -149,18 +152,30 @@ func (s *Server) handleAdminRoleByID(w http.ResponseWriter, r *http.Request) {
 
 // handleAdminRoleBindings handles GET (list) and POST (create) on
 // /api/v1/admin/role-bindings.
-// Authorization: route guard checks role_binding.read for GET.
-// POST requires role_binding.create via inline Decide.
+//
+// Authorization is scope-aware:
+//
+//   - GET requires role_binding.read at hub scope (inline check —
+//     the route guard is RouteAuthenticated, not RouteHubAdmin, because
+//     POST needs scope-dependent auth).
+//
+//   - POST for project-scoped built-in roles defers authorization to
+//     ProjectMembershipService, which checks project.manage + the
+//     governance matrix. This allows project owners (who lack hub-level
+//     role_binding.create) to manage their project's membership.
+//
+//   - POST for system-scoped or custom-role requests requires
+//     role_binding.create at hub scope (super-admin / hub-admin only).
 func (s *Server) handleAdminRoleBindings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.listRoleBindings(w, r)
-	case http.MethodPost:
-		user, ok := s.requireWritePermissionForRoleBinding(w, r, "role_binding.create", "create")
-		if !ok {
+		// Inline authorization: role_binding.read at hub scope.
+		if !s.authorize(w, r, Resource{Type: "role_binding", ID: "hub"}, ActionRead) {
 			return
 		}
-		s.createRoleBinding(w, r, user)
+		s.listRoleBindings(w, r)
+	case http.MethodPost:
+		s.createRoleBindingScopeAware(w, r)
 	default:
 		MethodNotAllowed(w)
 	}
@@ -894,6 +909,84 @@ func (s *Server) buildRoleNameCache(ctx context.Context, bindings []*store.RoleB
 		}
 	}
 	return cache, nil
+}
+
+// createRoleBindingScopeAware is the POST entry point for
+// /api/v1/admin/role-bindings. It peeks at the request body to determine
+// the scope and applies scope-appropriate authorization:
+//
+//   - Project-scoped requests for built-in project roles skip the hub-level
+//     role_binding.create check. Authorization is delegated to
+//     ProjectMembershipService which checks project.manage and the governance
+//     matrix. This allows project owners (who lack hub-level role_binding.create)
+//     to manage their project's membership through the admin API.
+//
+//   - System-scoped requests (or custom project roles that bypass the membership
+//     service) require role_binding.create at hub scope — same as before.
+func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Request) {
+	// Read body so we can peek at scope and replay for createRoleBinding.
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		BadRequest(w, "failed to read request body")
+		return
+	}
+	_ = r.Body.Close()
+
+	// Lightweight peek: unmarshal just enough to know scope + role.
+	var peek struct {
+		ScopeType        string `json:"scopeType"`
+		RoleDefinitionID string `json:"roleDefinitionId"`
+	}
+	if err := json.Unmarshal(bodyBytes, &peek); err != nil {
+		BadRequest(w, "invalid request body: "+err.Error())
+		return
+	}
+
+	// Determine whether this is a project-scoped request for a built-in role
+	// that the membership service handles. If so, the membership service
+	// provides its own authorization — no hub-level gate needed.
+	projectScopeHandledByMembership := false
+	if peek.ScopeType == store.RoleScopeProject && peek.RoleDefinitionID != "" {
+		rd, rdErr := s.store.GetRoleDefinition(r.Context(), peek.RoleDefinitionID)
+		if rdErr == nil && validProjectRoles[rd.Name] {
+			projectScopeHandledByMembership = true
+		}
+		// If role lookup fails or role is custom, fall through to hub-level auth.
+	}
+
+	// Extract identity (required for both paths).
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
+		return
+	}
+	user, ok := identity.(UserIdentity)
+	if !ok {
+		Forbidden(w)
+		return
+	}
+
+	if !projectScopeHandledByMembership {
+		// System-scope or custom project-role: require hub-level
+		// role_binding.create permission (super-admin / hub-admin only).
+		if s.authzService != nil {
+			decision := s.authzService.Decide(r.Context(), AuthzRequest{
+				Principal:  principalContextForIdentity(user),
+				Credential: credentialContextForIdentity(user),
+				Resource:   Resource{Type: "role_binding", ID: "hub"},
+				Action:     Action("create"),
+				Permission: "role_binding.create",
+			})
+			if !decision.Allowed {
+				Forbidden(w)
+				return
+			}
+		}
+	}
+
+	// Replay the body so createRoleBinding can parse it normally.
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	s.createRoleBinding(w, r, user)
 }
 
 func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user UserIdentity) {
